@@ -1,10 +1,22 @@
+use core::ffi::CStr;
+
 use limine::{
     BaseRevision,
     framebuffer::Framebuffer,
-    request::{FramebufferRequest, RequestsEndMarker, RequestsStartMarker},
+    request::{
+        DeviceTreeBlobRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest,
+        MemoryMapRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest, StackSizeRequest,
+    },
+    response::MemoryMapResponse,
 };
+use spin::{Mutex, Once};
+use x86_64::{VirtAddr, structures::paging::OffsetPageTable};
 
-use crate::main;
+use crate::{
+    main,
+    memory::mapper::{active_level_4_table, MemoryManager},
+    serial, serial_println,
+};
 
 /// Sets the base revision to the latest revision supported by the crate.
 /// See specification for further info.
@@ -18,7 +30,34 @@ pub static BASE_REVISION: BaseRevision = BaseRevision::new();
 #[unsafe(link_section = ".requests")]
 pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
-/// Define the stand and end markers for Limine requests.
+#[used]
+#[unsafe(link_section = ".requests")]
+pub static MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
+
+// Request the higher-half direct mapping
+#[used]
+#[unsafe(link_section = ".requests")]
+pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+pub static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(16 * 1024);
+
+// Request the RSDP address
+#[used]
+#[unsafe(link_section = ".requests")]
+static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
+
+// Request the executable address
+#[used]
+#[unsafe(link_section = ".requests")]
+static EXECUTABLE_CMDLINE_REQUEST: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static DEVICE_TREE_BLOB_REQUEST: DeviceTreeBlobRequest = DeviceTreeBlobRequest::new();
+
+/// Define the start and end markers for Limine requests.
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
 static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
@@ -26,8 +65,21 @@ static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 #[unsafe(link_section = ".requests_end_marker")]
 static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
+#[expect(unused)]
 pub struct BootInfo {
     pub framebuffer: Framebuffer<'static>,
+    pub memory_map: &'static MemoryMapResponse,
+    pub physical_memory_offset: VirtAddr,
+    pub memory_manager: Mutex<MemoryManager>,
+    pub rdsp: usize,
+    pub cmdline: &'static CStr,
+    pub device_tree_blob: Option<usize>,
+}
+
+pub static BOOT_INFO: Once<BootInfo> = Once::new();
+
+pub fn boot_info() -> &'static BootInfo {
+    unsafe { BOOT_INFO.get().unwrap_unchecked() }
 }
 
 #[unsafe(no_mangle)]
@@ -36,6 +88,9 @@ unsafe extern "C" fn kmain() -> ! {
     // removed by the linker.
     assert!(BASE_REVISION.is_supported());
 
+    // Early init serial in case we panic on expects.
+    serial::init();
+
     let framebuffer = FRAMEBUFFER_REQUEST
         .get_response()
         .expect("need a framebuffer")
@@ -43,7 +98,43 @@ unsafe extern "C" fn kmain() -> ! {
         .next()
         .expect("need a framebuffer");
 
-    let boot_info = BootInfo { framebuffer };
+    let memory_map = MEMORY_MAP_REQUEST
+        .get_response()
+        .expect("need the memory map");
 
-    main(boot_info)
+    let physical_memory_offset = HHDM_REQUEST
+        .get_response()
+        .expect("need higher half mapping")
+        .offset();
+
+    let rdsp = RSDP_REQUEST.get_response().unwrap().address();
+
+    let _stack_size = STACK_SIZE_REQUEST.get_response().expect("need size");
+
+    let cmdline = EXECUTABLE_CMDLINE_REQUEST.get_response().unwrap().cmdline();
+
+    let device_tree_blob: Option<usize> = DEVICE_TREE_BLOB_REQUEST
+        .get_response()
+        .map(|x| x.dtb_ptr().addr());
+
+    let physical_memory_offset = VirtAddr::new(physical_memory_offset);
+
+    serial_println!("physical_memory_offset: {physical_memory_offset:p}");
+
+    let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };
+    let kernel_page_table = unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };
+
+    let boot_info = BootInfo {
+        framebuffer,
+        memory_map,
+        physical_memory_offset,
+        memory_manager: Mutex::new(MemoryManager::new(kernel_page_table)),
+        rdsp,
+        cmdline,
+        device_tree_blob,
+    };
+
+    BOOT_INFO.call_once(|| boot_info);
+
+    main()
 }

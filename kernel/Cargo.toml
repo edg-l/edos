@@ -7,6 +7,32 @@ edition = "2024"
 limine = "0.5"
 spin = "0.10.0"
 x86_64 = "0.15.2"
+uart_16550 = { version = "0.4.0", features = ["nightly"] }
+x2apic = "0.5.0"
+acpi = { version = "6.0.1" }
+noto-sans-mono-bitmap = { version = "0.3.1", features = [
+    "bold",
+    "size_24",
+    "size_32",
+] }
+linked_list_allocator = "0.10.5"
+pc-keyboard = "0.8.0"
+crossbeam-queue = { version = "0.3.12", default-features = false, features = [
+    "alloc",
+    "nightly",
+] }
+thiserror = { version = "2.0.16", default-features = false }
+bytemuck = { version = "1.23.2", features = [
+    "latest_stable_rust",
+    "extern_crate_alloc",
+    "nightly_portable_simd",
+    "nightly_stdsimd",
+    "nightly_docs",
+] }
+
+slotmap = { version = "1.0.7", default-features = false }
+slab = { version = "0.4.11", default-features = false }
+elf = { version = "0.8.0", default-features = false, features = ["alloc"] }
 
 [profile.dev]
 opt-level = 1
