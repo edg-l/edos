@@ -99,6 +99,7 @@ dependencies = [
  "linked_list_allocator",
  "noto-sans-mono-bitmap",
  "pc-keyboard",
+ "pic8259",
  "slab",
  "slotmap",
  "spin",
@@ -174,6 +175,15 @@ checksum = "c4325c6aa3cca3373503b1527e75756f9fbfe5fd76be4b4c8a143ee47430b8e0"
 dependencies = [
  "bit_field",
  "bitflags 2.9.1",
+]
+
+[[package]]
+name = "pic8259"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62d9a86c292b165f757e47e7fd66855def189b2564609bc4203727b27c33db22"
+dependencies = [
+ "x86_64",
 ]
 
 [[package]]

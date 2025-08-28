@@ -9,7 +9,7 @@ use x86_64::{
     structures::paging::{FrameAllocator, PhysFrame, Size4KiB},
 };
 
-use crate::{memory::get_virt_addr, serial_println};
+use crate::memory::get_virt_addr;
 
 static FRAME_ALLOCATOR: Once<Mutex<BitmapFrameAllocator>> = Once::new();
 
@@ -31,7 +31,7 @@ pub fn init_frame_allocator(memory_regions: &'static MemoryMapResponse) {
     // Create and initialize the allocator
     let mut allocator = BitmapFrameAllocator::new(memory_regions, bitmap_storage);
 
-    // Mark bitmap storage frames as allocated (no heap allocation here)
+    // Mark bitmap storage frames as allocated
     let frame_count = storage_size.div_ceil(4096); // Round up to frames
     for i in 0..frame_count {
         let frame_addr = storage_start_addr + (i * 4096) as u64;
@@ -359,24 +359,20 @@ impl BitmapFrameAllocator {
 
 /// Calculate the range of frames managed by this allocator
 fn calculate_frame_range(memory_regions: &MemoryMapResponse) -> (PhysFrame, usize) {
-    let mut min_addr = u64::MAX;
-    let mut max_addr = 0u64;
+    let usable_regions = memory_regions
+        .entries()
+        .iter()
+        .filter(|r| r.entry_type == EntryType::USABLE);
 
-    for region in memory_regions.entries() {
-        if region.entry_type == EntryType::USABLE {
-            min_addr = min_addr.min(region.base);
-            max_addr = max_addr.max(region.base + region.length);
-        }
-    }
+    let min_addr = usable_regions
+        .clone()
+        .map(|r| r.base)
+        .min()
+        .expect("No usable memory regions found");
+    let max_addr = usable_regions.map(|r| r.base + r.length).max().unwrap();
 
-    if min_addr == u64::MAX {
-        serial_println!("ALLOC: No usable memory regions found");
-        panic!("No usable memory regions found");
-    }
-
-    // Align to frame boundaries
     let start_frame = PhysFrame::containing_address(PhysAddr::new(min_addr));
-    let end_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(max_addr - 1));
+    let end_frame: PhysFrame<Size4KiB> = PhysFrame::containing_address(PhysAddr::new(max_addr - 1));
     let frame_count =
         (end_frame.start_address().as_u64() - start_frame.start_address().as_u64()) / 4096 + 1;
 

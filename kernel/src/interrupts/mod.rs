@@ -1,13 +1,8 @@
 use crate::interrupts::idt::IDT;
 
 pub mod idt;
-pub mod apic;
 
 pub const APIC_OFFSET: u8 = 32;
-
-pub fn init_idt() {
-    IDT.load();
-}
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -21,14 +16,11 @@ pub enum InterruptIndex {
 }
 
 impl InterruptIndex {
-    fn as_u8(self) -> u8 {
+    pub fn as_u8(self) -> u8 {
         self as u8
     }
 }
 
-// TODO: Disable PIC on bios
-
-
 pub fn init() {
-
+    IDT.load();
 }

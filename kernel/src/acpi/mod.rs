@@ -50,7 +50,6 @@ pub fn acpi_madt() -> PhysicalMapping<AcpiHandler, Madt> {
     table
 }
 
-
 pub fn processor_info() -> &'static ProcessorInfo {
     PROCESSOR_INFO.get().unwrap()
 }

@@ -3,7 +3,10 @@
 use linked_list_allocator::LockedHeap;
 use x86_64::structures::paging::PageTableFlags;
 
-use crate::{memory::{mapper::memory_mapper, KERNEL_HEAP, KERNEL_HEAP_SIZE}, serial_println};
+use crate::{
+    memory::{KERNEL_HEAP, KERNEL_HEAP_SIZE, mapper::memory_mapper},
+    serial_println,
+};
 
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();

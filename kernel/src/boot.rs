@@ -14,7 +14,7 @@ use x86_64::{VirtAddr, structures::paging::OffsetPageTable};
 
 use crate::{
     main,
-    memory::mapper::{active_level_4_table, MemoryManager},
+    memory::mapper::{MemoryManager, active_level_4_table},
     serial, serial_println,
 };
 

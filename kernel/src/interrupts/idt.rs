@@ -1,17 +1,15 @@
-use core::fmt::Write;
 use spin::Lazy;
 use x86_64::{
     PrivilegeLevel,
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
 };
 
+#[allow(unused)]
 pub const PS2_DATA_PORT: u16 = 0x60;
 #[allow(unused)]
 pub const PS2_COMMAND_PORT: u16 = 0x64;
 
-use crate::{
-    gdt, interrupts::{apic::get_lapic, InterruptIndex}, serial_println
-};
+use crate::{apic::LAPIC, gdt, interrupts::InterruptIndex, serial_println};
 
 pub static IDT: spin::Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     let mut idt = InterruptDescriptorTable::new();
@@ -52,23 +50,18 @@ extern "x86-interrupt" fn general_protection_fault_handler(
             "EXCEPTION: general_protection_fault (segfault?) in RING 3: (error: {error_code})\n{stack_frame:#?}",
         );
 
-        unsafe { get_lapic().end_of_interrupt() };
-
+        unsafe { LAPIC.write().end_of_interrupt() };
     }
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    serial_println!(
-        "EXCEPTION: invalid_opcode CHECK\n{stack_frame:#?}"
-    );
-      unsafe { get_lapic().end_of_interrupt() };
+    serial_println!("EXCEPTION: invalid_opcode CHECK\n{stack_frame:#?}");
+    unsafe { LAPIC.write().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn alignment_check_handler(stack_frame: InterruptStackFrame, value: u64) {
-    serial_println!(
-        "EXCEPTION: ALIGNMENT CHECK: ({value})\n{stack_frame:#?}"
-    );
-      unsafe { get_lapic().end_of_interrupt() };
+    serial_println!("EXCEPTION: ALIGNMENT CHECK: ({value})\n{stack_frame:#?}");
+    unsafe { LAPIC.write().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn double_fault_handler(
@@ -81,10 +74,15 @@ extern "x86-interrupt" fn double_fault_handler(
     );
 }
 
+extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    //serial_println!("timer interrupt");
+    unsafe { LAPIC.write().end_of_interrupt() };
+}
+
 // Timer interrupt handler for preemptive multitasking
 // We need naked assembly to save/restore all registers properly
 #[unsafe(naked)]
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn _timer_interrupt_handler_cswitch(_stack_frame: InterruptStackFrame) {
     core::arch::naked_asm!(
         // Save all registers first
         "push rax",
@@ -146,40 +144,28 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 }
 
 // Called from naked assembly with pointer to saved registers
-extern "C" fn timer_context_switch_handler(saved_registers: *mut u64) {
+#[expect(unused)]
+extern "C" fn timer_context_switch_handler(_saved_registers: *mut u64) {
     // Acknowledge interrupt first to prevent stacking
-    unsafe { get_lapic().end_of_interrupt() };
-
+    unsafe { LAPIC.write().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    use x86_64::instructions::port::Port;
-
-    let mut port = Port::new(PS2_DATA_PORT);
-
-    let scancode: u8 = unsafe { port.read() };
-
-    unsafe { get_lapic().end_of_interrupt() };
+    unsafe { LAPIC.write().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    use x86_64::instructions::port::Port;
-
-    let mut port = Port::new(PS2_DATA_PORT);
-
-    let packet: u8 = unsafe { port.read() };
-
-    unsafe { get_lapic().end_of_interrupt() };
+    unsafe { LAPIC.write().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn apic_error_interrupt_handler(_stack_frame: InterruptStackFrame) {
     serial_println!("apic error");
-    unsafe { get_lapic().end_of_interrupt() };
+    unsafe { LAPIC.write().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {
     serial_println!("spurious");
-    unsafe { get_lapic().end_of_interrupt() };
+    unsafe { LAPIC.write().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn page_fault_handler(
@@ -235,9 +221,6 @@ fn decode_page_fault_error(error_code: PageFaultErrorCode) -> &'static str {
     }
 }
 
-extern "x86-interrupt" fn ahci_interrupt_handler(_stack_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn ahci_interrupt_handler(_stack_frame: InterruptStackFrame) {}
 
-}
-
-extern "x86-interrupt" fn device_not_available_handler(_stack_frame: InterruptStackFrame) {
-}
+extern "x86-interrupt" fn device_not_available_handler(_stack_frame: InterruptStackFrame) {}

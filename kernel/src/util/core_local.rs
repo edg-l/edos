@@ -33,13 +33,21 @@ impl<T> CoreLocal<T> {
 
     pub fn read(&self) -> Ref<'_, T> {
         let core_id = current_core_id();
-        self.ensure_initialized()[core_id].call_once(|| RefCell::new((self.init)())).borrow()
+        self.ensure_initialized()[core_id]
+            .call_once(|| RefCell::new((self.init)()))
+            .borrow()
     }
 
     pub fn write(&self) -> RefMut<'_, T> {
         let core_id = current_core_id();
-        self.ensure_initialized()[core_id].call_once(|| RefCell::new((self.init)())).borrow_mut()
+        self.ensure_initialized()[core_id]
+            .call_once(|| RefCell::new((self.init)()))
+            .borrow_mut()
     }
 }
 
 unsafe impl<T> Sync for CoreLocal<T> {}
+
+pub fn current_core_id() -> usize {
+    0
+}
