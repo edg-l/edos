@@ -1,9 +1,7 @@
-use acpi::platform::InterruptModel;
-use spin::{Mutex, Once};
 use x2apic::{ioapic::{IoApic, IrqFlags, IrqMode, RedirectionTableEntry}, lapic::{xapic_base, LocalApic, LocalApicBuilder}};
 use x86_64::{structures::paging::{mapper::MapToError, Size4KiB}, PhysAddr};
 
-use crate::{acpi::{acpi_madt, acpi_tables, apic_info, processor_info}, interrupts::InterruptIndex, memory::mapper::get_virt_addr};
+use crate::{acpi::{acpi_madt, apic_info, processor_info}, interrupts::InterruptIndex, memory::get_virt_addr};
 
 
 // TODO: refactor for more lapics?

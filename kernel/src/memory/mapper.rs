@@ -26,11 +26,6 @@ pub unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static
     unsafe { &mut *page_table_ptr }
 }
 
-/// Get the virtual address from the given physical address
-pub fn get_virt_addr(phys: PhysAddr) -> VirtAddr {
-    boot_info().physical_memory_offset + phys.as_u64()
-}
-
 pub fn memory_mapper() -> MutexGuard<'static, MemoryManager> {
     boot_info().memory_manager.lock()
 }

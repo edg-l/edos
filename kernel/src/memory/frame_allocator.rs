@@ -9,10 +9,11 @@ use x86_64::{
     structures::paging::{FrameAllocator, PhysFrame, Size4KiB},
 };
 
-use crate::{memory::mapper::get_virt_addr, serial_println};
+use crate::{memory::get_virt_addr, serial_println};
 
 static FRAME_ALLOCATOR: Once<Mutex<BitmapFrameAllocator>> = Once::new();
 
+#[must_use]
 pub fn frame_allocator() -> MutexGuard<'static, BitmapFrameAllocator> {
     FRAME_ALLOCATOR.get().unwrap().lock()
 }
@@ -20,7 +21,7 @@ pub fn frame_allocator() -> MutexGuard<'static, BitmapFrameAllocator> {
 /// Initialize the frame allocator using bootloader memory for bitmap storage
 pub fn init_frame_allocator(memory_regions: &'static MemoryMapResponse) {
     // Calculate required bitmap size
-    let required_size = BitmapFrameAllocator::calculate_bitmap_size(memory_regions);
+    let required_size = calculate_bitmap_size(memory_regions);
 
     // Find a suitable region for the bitmap
     let (bitmap_storage, storage_start_addr, storage_size) =
@@ -134,7 +135,7 @@ impl BitmapFrameAllocator {
         memory_regions: &'static MemoryMapResponse,
         bitmap_storage: &'static mut [u8],
     ) -> Self {
-        let (start_frame, frame_count) = Self::calculate_frame_range(memory_regions);
+        let (start_frame, frame_count) = calculate_frame_range(memory_regions);
 
         // Calculate required bitmap size (1 bit per frame)
         let required_bytes = frame_count.div_ceil(8);
@@ -156,32 +157,6 @@ impl BitmapFrameAllocator {
         allocator.mark_non_usable_frames(memory_regions);
 
         allocator
-    }
-
-    /// Calculate the range of frames managed by this allocator
-    fn calculate_frame_range(memory_regions: &MemoryMapResponse) -> (PhysFrame, usize) {
-        let mut min_addr = u64::MAX;
-        let mut max_addr = 0u64;
-
-        for region in memory_regions.entries() {
-            if region.entry_type == EntryType::USABLE {
-                min_addr = min_addr.min(region.base);
-                max_addr = max_addr.max(region.base + region.length);
-            }
-        }
-
-        if min_addr == u64::MAX {
-            serial_println!("ALLOC: No usable memory regions found");
-            panic!("No usable memory regions found");
-        }
-
-        // Align to frame boundaries
-        let start_frame = PhysFrame::containing_address(PhysAddr::new(min_addr));
-        let end_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(max_addr - 1));
-        let frame_count =
-            (end_frame.start_address().as_u64() - start_frame.start_address().as_u64()) / 4096 + 1;
-
-        (start_frame, frame_count as usize)
     }
 
     /// Mark non-usable frames as allocated in the bitmap
@@ -380,20 +355,37 @@ impl BitmapFrameAllocator {
             free_frames: self.frame_count - allocated_frames,
         }
     }
+}
 
-    /// Calculate required bitmap size for given memory regions
-    ///
-    /// # Arguments
-    ///
-    /// * `memory_regions` - Memory regions to calculate for
-    ///
-    /// # Returns
-    ///
-    /// Returns the number of bytes needed for the bitmap
-    pub fn calculate_bitmap_size(memory_regions: &MemoryMapResponse) -> usize {
-        let (_, frame_count) = Self::calculate_frame_range(memory_regions);
-        frame_count.div_ceil(8) // Round up to nearest byte
+/// Calculate the range of frames managed by this allocator
+fn calculate_frame_range(memory_regions: &MemoryMapResponse) -> (PhysFrame, usize) {
+    let mut min_addr = u64::MAX;
+    let mut max_addr = 0u64;
+
+    for region in memory_regions.entries() {
+        if region.entry_type == EntryType::USABLE {
+            min_addr = min_addr.min(region.base);
+            max_addr = max_addr.max(region.base + region.length);
+        }
     }
+
+    if min_addr == u64::MAX {
+        serial_println!("ALLOC: No usable memory regions found");
+        panic!("No usable memory regions found");
+    }
+
+    // Align to frame boundaries
+    let start_frame = PhysFrame::containing_address(PhysAddr::new(min_addr));
+    let end_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(max_addr - 1));
+    let frame_count =
+        (end_frame.start_address().as_u64() - start_frame.start_address().as_u64()) / 4096 + 1;
+
+    (start_frame, frame_count as usize)
+}
+
+pub fn calculate_bitmap_size(memory_regions: &MemoryMapResponse) -> usize {
+    let (_, frame_count) = calculate_frame_range(memory_regions);
+    frame_count.div_ceil(8) // Round up to nearest byte
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
