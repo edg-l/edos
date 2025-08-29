@@ -17,12 +17,15 @@ pub static IDT: spin::Lazy<InterruptDescriptorTable> = Lazy::new(|| {
         idt.double_fault
             .set_handler_fn(double_fault_handler)
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
+        idt.page_fault
+            .set_handler_fn(page_fault_handler)
+            .set_stack_index(gdt::PAGE_FAULT_IST_INDEX);
     }
     idt.alignment_check.set_handler_fn(alignment_check_handler);
     idt.general_protection_fault
         .set_handler_fn(general_protection_fault_handler);
     idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
-    idt.page_fault.set_handler_fn(page_fault_handler);
+
     idt.device_not_available
         .set_handler_fn(device_not_available_handler);
     idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
@@ -68,6 +71,7 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) -> ! {
+    serial_println!("double fault");
     panic!(
         "EXCEPTION: DOUBLE FAULT: ({error_code})\n{:#?}",
         stack_frame
@@ -188,6 +192,12 @@ extern "x86-interrupt" fn page_fault_handler(
             "Page fault, address = {:p}, error = {error_desc:?}",
             address.as_ptr::<u8>()
         );
+        let stack_ptr = stack_frame.stack_pointer.as_u64();
+        let fault_addr = address.as_u64();
+        if fault_addr < stack_ptr && (stack_ptr - fault_addr) < 8192 {
+            panic!("Stack overflow detected at {:#x}", fault_addr);
+        }
+
         panic!("EXCEPTION: PAGE FAULT IN RING 0");
     } else {
         let address = Cr2::read().unwrap();

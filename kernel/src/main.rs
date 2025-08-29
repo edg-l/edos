@@ -1,17 +1,16 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
-#![feature(custom_test_frameworks)]
-#![test_runner(crate::testing::test_runner)]
-#![reexport_test_harness_main = "test_main"]
 
-use x86_64::instructions::hlt;
+use core::arch::asm;
+
+use x86_64::{VirtAddr, instructions::hlt};
 
 use crate::{
     acpi::{acpi_madt, init_acpi},
     allocator::init_heap,
     boot::boot_info,
-    memory::frame_allocator::init_frame_allocator,
+    memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
 };
 
 mod acpi;
@@ -23,8 +22,6 @@ mod interrupts;
 mod memory;
 mod serial;
 mod util;
-#[cfg(test)]
-pub mod test_framework;
 
 extern crate alloc;
 
@@ -32,6 +29,23 @@ fn init() {
     let info = boot_info();
     serial_println!("Initializing frame allocator");
     init_frame_allocator(info.memory_map);
+
+    {
+        // Setup a kernel stack guard
+        let current_sp: u64;
+        unsafe {
+            asm!("mov {}, rsp", out(reg) current_sp);
+        }
+
+        let stack_bottom = (current_sp & !0xfff) - (16 * 1024); // we requested 16kb stack
+        let guard_page = stack_bottom - 4096; // Page just below stack
+
+        // Unmap the guard page
+        memory_mapper()
+            .unmap_memory(VirtAddr::new(guard_page), 4095)
+            .unwrap();
+    }
+
     serial_println!("Initializing heap");
     init_heap();
     serial_println!("Initializing acpi tables");
@@ -48,9 +62,6 @@ fn init() {
 fn main() -> ! {
     serial_println!("Booting...");
     init();
-
-    #[cfg(test)]
-    test_main();
 
     let madt = acpi_madt();
     serial_println!(

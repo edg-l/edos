@@ -12,28 +12,48 @@ use x86_64::{
     },
 };
 
-use crate::memory::mapper::align_stack_pointer;
+use crate::{memory::mapper::align_stack_pointer, serial_println};
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
+pub const PAGE_FAULT_IST_INDEX: u16 = 1;
 pub const RING3_STACK_PST_INDEX: u16 = 0;
 
 pub static TSS: spin::Lazy<TaskStateSegment> = Lazy::new(|| {
     let mut tss = TaskStateSegment::new();
 
-    let double_fault_stack_end = {
-        let layout = Layout::from_size_align(4096 * 4, 4096).unwrap();
+    let page_fault_stack_end = {
+        let layout = Layout::from_size_align(4096, 4096).unwrap();
         let stack_start = unsafe { alloc(layout) };
 
         if stack_start.is_null() {
             handle_alloc_error(layout)
         }
 
+        serial_println!("Created page fault stack at : {:p}", unsafe {
+            stack_start.byte_add(layout.size())
+        });
+
+        VirtAddr::from_ptr(unsafe { stack_start.byte_add(layout.size()) })
+    };
+
+    let double_fault_stack_end = {
+        let layout = Layout::from_size_align(4096, 4096).unwrap();
+        let stack_start = unsafe { alloc(layout) };
+
+        if stack_start.is_null() {
+            handle_alloc_error(layout)
+        }
+
+        serial_println!("Created double fault stack at : {:p}", unsafe {
+            stack_start.byte_add(layout.size())
+        });
+
         VirtAddr::from_ptr(unsafe { stack_start.byte_add(layout.size()) })
     };
 
     // Stack used in user space.
     let ring3_pst_stack_end = {
-        let layout = Layout::from_size_align(4096 * 4, 4096).unwrap();
+        let layout = Layout::from_size_align(4096, 4096).unwrap();
         let stack_start = unsafe { alloc(layout) };
 
         if stack_start.is_null() {
@@ -44,6 +64,7 @@ pub static TSS: spin::Lazy<TaskStateSegment> = Lazy::new(|| {
     };
 
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = double_fault_stack_end;
+    tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = page_fault_stack_end;
     tss.privilege_stack_table[RING3_STACK_PST_INDEX as usize] = ring3_pst_stack_end;
 
     tss
@@ -87,13 +108,4 @@ pub fn init() {
         SS::set_reg(GDT.1.data_selector);
         load_tss(GDT.1.tss_selector);
     }
-}
-
-/// TLS (Thread-Local Storage) support using MSR approach
-
-/// Set the FS base address using model-specific register (MSR)
-/// This is an alternative to modifying GDT entries
-pub unsafe fn set_fs_base_msr(base_addr: u64) {
-    use x86_64::registers::model_specific::FsBase;
-    FsBase::write(VirtAddr::new(base_addr));
 }
