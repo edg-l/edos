@@ -1,6 +1,6 @@
 use spin::Lazy;
 use x86_64::{
-    PrivilegeLevel,
+    PrivilegeLevel, VirtAddr,
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
 };
 
@@ -20,6 +20,7 @@ use crate::{
         },
     },
     serial_println,
+    thread::context::timer_interrupt_handler,
 };
 
 pub static IDT: spin::Lazy<InterruptDescriptorTable> = Lazy::new(|| {
@@ -39,7 +40,10 @@ pub static IDT: spin::Lazy<InterruptDescriptorTable> = Lazy::new(|| {
 
     idt.device_not_available
         .set_handler_fn(device_not_available_handler);
-    idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
+    unsafe {
+        idt[InterruptIndex::Timer.as_u8()]
+            .set_handler_addr(VirtAddr::new(timer_interrupt_handler as *mut u8 as u64))
+    };
     idt[InterruptIndex::Error.as_u8()].set_handler_fn(apic_error_interrupt_handler);
     idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
     idt[InterruptIndex::Mouse.as_u8()].set_handler_fn(mouse_interrupt_handler);
@@ -87,11 +91,6 @@ extern "x86-interrupt" fn double_fault_handler(
         "EXCEPTION: DOUBLE FAULT: ({error_code})\n{:#?}",
         stack_frame
     );
-}
-
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    //serial_println!("timer interrupt");
-    unsafe { LAPIC.write().end_of_interrupt() };
 }
 
 // Timer interrupt handler for preemptive multitasking

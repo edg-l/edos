@@ -9,6 +9,7 @@ use x86_64::{VirtAddr, instructions::hlt};
 use crate::{
     acpi::{acpi_madt, init_acpi},
     allocator::init_heap,
+    apic::LAPIC,
     boot::boot_info,
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
     timer::{get_timer_calibration, init_boot_time, uptime_us},
@@ -22,6 +23,7 @@ mod gdt;
 mod interrupts;
 mod memory;
 mod serial;
+mod thread;
 mod timer;
 mod util;
 
@@ -95,10 +97,22 @@ fn main() -> ! {
         };
     }
 
+    {
+        unsafe {
+            let mut lapic = LAPIC.write();
+            let timer = get_timer_calibration();
+            lapic.set_timer_mode(x2apic::lapic::TimerMode::Periodic);
+            lapic.set_timer_divide(x2apic::lapic::TimerDivide::Div1);
+            lapic.set_timer_initial(timer.ticks_per_microsecond as u32 * 1000_000);
+            lapic.enable_timer();
+        }
+    }
+
     x86_64::instructions::interrupts::enable_and_hlt();
 
     loop {
         hlt();
+        serial_println!("hi from halt");
     }
 }
 

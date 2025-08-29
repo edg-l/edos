@@ -2,6 +2,7 @@ use core::fmt;
 
 use spin::{Once, mutex::Mutex};
 use uart_16550::SerialPort;
+use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::timer::uptime_us;
 
@@ -28,16 +29,18 @@ macro_rules! serial_println {
 
 #[doc(hidden)]
 pub fn _serial_print(args: fmt::Arguments) {
-    use core::fmt::Write;
-    let uptime_us = uptime_us();
-    let secs = uptime_us / 1_000_000;
-    let us = uptime_us % 1_000_000;
-    unsafe {
-        SERIAL_DBG
-            .get()
-            .unwrap_unchecked()
-            .lock()
-            .write_fmt(format_args!("[{secs}.{us:06}] {args}"))
-            .unwrap();
-    }
+    without_interrupts(|| {
+        use core::fmt::Write;
+        let uptime_us = uptime_us();
+        let secs = uptime_us / 1_000_000;
+        let us = uptime_us % 1_000_000;
+        unsafe {
+            SERIAL_DBG
+                .get()
+                .unwrap_unchecked()
+                .lock()
+                .write_fmt(format_args!("[{secs}.{us:06}] {args}"))
+                .unwrap();
+        }
+    })
 }

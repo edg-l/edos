@@ -13,7 +13,7 @@ impl TimerCalibration {
     /// Calibrate APIC timer frequency using PIT as reference
     pub fn calibrate_apic_timer() -> TimerCalibration {
         const PIT_FREQUENCY: u64 = 1193182; // Hz
-        const CALIBRATION_MS: u64 = 10; // Calibrate for 10ms
+        const CALIBRATION_MS: u64 = 35; // Calibrate for 35ms
         const PIT_TICKS_FOR_CALIBRATION: u16 = (PIT_FREQUENCY * CALIBRATION_MS / 1000) as u16;
 
         serial_println!("Calibrating APIC timer frequency...");
@@ -46,8 +46,8 @@ impl TimerCalibration {
         let time_elapsed_us = CALIBRATION_MS * 1000; // microseconds
 
         // APIC frequency = ticks_elapsed / time_elapsed_seconds
-        let apic_frequency_hz = (apic_ticks_elapsed as u64 * 1_000_000) / time_elapsed_us;
-        let tsc_frequency_hz = (tsc_ticks_elapsed * 1_000_000) / time_elapsed_us;
+        let apic_frequency_hz = (apic_ticks_elapsed as u64 * 1_000) / (time_elapsed_us / 1000);
+        let tsc_frequency_hz = (tsc_ticks_elapsed * 1_000) / (time_elapsed_us / 1000);
         let ticks_per_microsecond = apic_ticks_elapsed as u64 / time_elapsed_us;
 
         serial_println!("APIC Timer Calibration Results:");
@@ -72,6 +72,7 @@ impl TimerCalibration {
         }
     }
 
+    #[inline(always)]
     unsafe fn setup_pit_oneshot(ticks: u16) {
         unsafe {
             // PIT Command: Channel 0, Lo/Hi byte, Mode 0 (interrupt on terminal count), Binary
@@ -83,6 +84,7 @@ impl TimerCalibration {
         }
     }
 
+    #[inline(always)]
     fn wait_for_pit_completion() {
         // Poll PIT status until count reaches zero
         loop {
