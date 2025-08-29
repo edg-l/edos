@@ -27,8 +27,8 @@ pub static TSS: spin::Lazy<TaskStateSegment> = Lazy::new(|| {
         if stack_start.is_null() {
             handle_alloc_error(layout)
         }
-        let stack_top = VirtAddr::from_ptr(unsafe { stack_start.byte_add(layout.size()) });
-        stack_top
+
+        VirtAddr::from_ptr(unsafe { stack_start.byte_add(layout.size()) })
     };
 
     // Stack used in user space.

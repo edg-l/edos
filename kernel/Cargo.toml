@@ -3,6 +3,10 @@ name = "edos-kernel"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+test = []
+
 [dependencies]
 limine = "0.5"
 spin = "0.10.0"

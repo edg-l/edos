@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![feature(custom_test_frameworks)]
+#![test_runner(crate::testing::test_runner)]
+#![reexport_test_harness_main = "test_main"]
 
 use x86_64::instructions::hlt;
 
@@ -20,6 +23,8 @@ mod interrupts;
 mod memory;
 mod serial;
 mod util;
+#[cfg(test)]
+pub mod test_framework;
 
 extern crate alloc;
 
@@ -43,6 +48,9 @@ fn init() {
 fn main() -> ! {
     serial_println!("Booting...");
     init();
+
+    #[cfg(test)]
+    test_main();
 
     let madt = acpi_madt();
     serial_println!(

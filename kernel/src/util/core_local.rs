@@ -5,7 +5,7 @@ use core::cell::{Ref, RefCell, RefMut};
 use alloc::{boxed::Box, vec::Vec};
 use spin::Once;
 
-use crate::acpi::number_of_cores;
+use crate::{acpi::number_of_cores, apic::current_apic_id};
 
 pub struct CoreLocal<T> {
     inner: Once<Box<[Once<RefCell<T>>]>>,
@@ -32,14 +32,14 @@ impl<T> CoreLocal<T> {
     }
 
     pub fn read(&self) -> Ref<'_, T> {
-        let core_id = current_core_id();
+        let core_id = current_apic_id() as usize;
         self.ensure_initialized()[core_id]
             .call_once(|| RefCell::new((self.init)()))
             .borrow()
     }
 
     pub fn write(&self) -> RefMut<'_, T> {
-        let core_id = current_core_id();
+        let core_id = current_apic_id() as usize;
         self.ensure_initialized()[core_id]
             .call_once(|| RefCell::new((self.init)()))
             .borrow_mut()
@@ -47,7 +47,3 @@ impl<T> CoreLocal<T> {
 }
 
 unsafe impl<T> Sync for CoreLocal<T> {}
-
-pub fn current_core_id() -> usize {
-    0
-}

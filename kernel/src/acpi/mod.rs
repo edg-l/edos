@@ -46,8 +46,7 @@ pub fn acpi_tables() -> &'static AcpiTables<AcpiHandler> {
 pub fn acpi_madt() -> PhysicalMapping<AcpiHandler, Madt> {
     let tables = acpi_tables();
 
-    let table = tables.find_table::<Madt>().expect("edos needs a MADT");
-    table
+    tables.find_table::<Madt>().expect("edos needs a MADT")
 }
 
 pub fn processor_info() -> &'static ProcessorInfo {
@@ -58,8 +57,9 @@ pub fn apic_info() -> &'static Apic {
     APIC_INFO.get().unwrap()
 }
 
+static NUMBER_OF_CORES: Once<usize> = Once::new();
+
 // one for now since i dont init more
 pub fn number_of_cores() -> usize {
-    1
-    //1 + processor_info().application_processors.len()
+    *NUMBER_OF_CORES.call_once(|| 1 + processor_info().application_processors.len())
 }
