@@ -1,6 +1,7 @@
 use crate::interrupts::idt::IDT;
 
 pub mod idt;
+pub mod io;
 
 pub const APIC_OFFSET: u8 = 32;
 

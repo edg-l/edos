@@ -9,7 +9,18 @@ pub const PS2_DATA_PORT: u16 = 0x60;
 #[allow(unused)]
 pub const PS2_COMMAND_PORT: u16 = 0x64;
 
-use crate::{apic::LAPIC, gdt, interrupts::InterruptIndex, serial_println};
+use crate::{
+    apic::LAPIC,
+    gdt,
+    interrupts::{
+        InterruptIndex,
+        io::{
+            ahci_interrupt_handler, device_not_available_handler, keyboard_interrupt_handler,
+            mouse_interrupt_handler,
+        },
+    },
+    serial_println,
+};
 
 pub static IDT: spin::Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     let mut idt = InterruptDescriptorTable::new();
@@ -154,14 +165,6 @@ extern "C" fn timer_context_switch_handler(_saved_registers: *mut u64) {
     unsafe { LAPIC.write().end_of_interrupt() };
 }
 
-extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    unsafe { LAPIC.write().end_of_interrupt() };
-}
-
-extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    unsafe { LAPIC.write().end_of_interrupt() };
-}
-
 extern "x86-interrupt" fn apic_error_interrupt_handler(_stack_frame: InterruptStackFrame) {
     serial_println!("apic error");
     unsafe { LAPIC.write().end_of_interrupt() };
@@ -230,7 +233,3 @@ fn decode_page_fault_error(error_code: PageFaultErrorCode) -> &'static str {
         (true, true, false) => "Kernel write to protected page",
     }
 }
-
-extern "x86-interrupt" fn ahci_interrupt_handler(_stack_frame: InterruptStackFrame) {}
-
-extern "x86-interrupt" fn device_not_available_handler(_stack_frame: InterruptStackFrame) {}

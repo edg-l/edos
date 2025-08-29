@@ -9,7 +9,6 @@ pub struct TimerCalibration {
     pub tsc_frequency_hz: u64,
 }
 
-
 impl TimerCalibration {
     /// Calibrate APIC timer frequency using PIT as reference
     pub fn calibrate_apic_timer() -> TimerCalibration {
@@ -113,7 +112,6 @@ pub fn get_timer_calibration() -> &'static TimerCalibration {
 }
 
 use core::time::Duration;
-
 
 /// Boot time reference point
 static BOOT_TIME: spin::Once<Instant> = spin::Once::new();
