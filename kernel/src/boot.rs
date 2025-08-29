@@ -15,7 +15,7 @@ use x86_64::{VirtAddr, structures::paging::OffsetPageTable};
 use crate::{
     main,
     memory::mapper::{MemoryManager, active_level_4_table},
-    serial, serial_println,
+    serial,
 };
 
 /// Sets the base revision to the latest revision supported by the crate.
@@ -118,8 +118,6 @@ unsafe extern "C" fn kmain() -> ! {
         .map(|x| x.dtb_ptr().addr());
 
     let physical_memory_offset = VirtAddr::new(physical_memory_offset);
-
-    serial_println!("physical_memory_offset: {physical_memory_offset:p}");
 
     let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };
     let kernel_page_table = unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };

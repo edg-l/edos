@@ -11,6 +11,7 @@ use crate::{
     allocator::init_heap,
     boot::boot_info,
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
+    timer::{get_timer_calibration, init_boot_time, uptime_us},
 };
 
 mod acpi;
@@ -21,6 +22,7 @@ mod gdt;
 mod interrupts;
 mod memory;
 mod serial;
+mod timer;
 mod util;
 
 extern crate alloc;
@@ -56,6 +58,8 @@ fn init() {
     interrupts::init();
     serial_println!("Initializing apic");
     apic::init();
+    get_timer_calibration();
+    init_boot_time();
     serial_println!("Init done");
 }
 
@@ -71,6 +75,10 @@ fn main() -> ! {
 
     let info = boot_info();
     serial_println!("Physical offset at {:p}", info.physical_memory_offset);
+
+    let uptime = uptime_us();
+
+    serial_println!("Uptime us: {uptime}");
 
     for i in 0..100_u64 {
         // Calculate the pixel offset using the framebuffer information we obtained above.

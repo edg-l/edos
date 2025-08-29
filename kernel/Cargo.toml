@@ -38,6 +38,7 @@ pic8259 = "0.11.0"
 slotmap = { version = "1.0.7", default-features = false }
 slab = { version = "0.4.11", default-features = false }
 elf = { version = "0.8.0", default-features = false, features = ["alloc"] }
+raw-cpuid = "11.5.0"
 
 [profile.dev]
 opt-level = 1
