@@ -1,1 +1,98 @@
+use core::sync::atomic::AtomicU64;
+
+use x86_64::VirtAddr;
+
+use crate::thread::{
+    context::CpuContext,
+    util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
+};
+
 pub mod context;
+pub mod interrupt;
+pub mod scheduler;
+pub mod util;
+
+#[derive(Debug, Clone)]
+pub struct KernelThread {
+    pub id: u64,
+    /// Saved to free it in case the thread exits.
+    pub initial_stack_top: u64,
+    pub context: CpuContext,
+    pub state: ThreadState,
+    // no need for another page table for kthreads.
+    // no need for tss kernel stack
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ThreadState {
+    Ready,
+    Waiting,
+    Exited(i32),
+}
+
+impl KernelThread {
+    pub fn new(entry_point: fn() -> !) -> Self {
+        let stack_top = kthread_stack_alloc();
+        let context = CpuContext::new_kernel_thread(entry_point as *const u8 as u64, stack_top);
+
+        static KTHREAD_NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+        let id = KTHREAD_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+        KernelThread {
+            id,
+            initial_stack_top: stack_top,
+            context,
+            state: ThreadState::Ready,
+        }
+    }
+
+    pub fn free(&self) {
+        kthread_stack_free(self.initial_stack_top);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UserThread {
+    pub id: u64,
+    /// Saved to free it in case the thread exits.
+    pub initial_stack_top: u64,
+    pub context: CpuContext,
+    pub state: ThreadState,
+    /// Physical addr
+    pub cr3: u64,
+    pub initial_kernel_stack_top: u64,
+    pub kernel_stack_top: u64,
+}
+
+impl UserThread {
+    /// Must provide entry point and cr3 page table.
+    ///
+    /// TODO: also handle arguments.
+    pub fn new(entry_point: fn() -> !, cr3: u64) -> Self {
+        let kernel_stack_top = kthread_stack_alloc();
+        let stack_top = thread_stack_alloc();
+        let context = CpuContext::new_kernel_thread(entry_point as *const u8 as u64, stack_top);
+
+        static THREAD_NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+        let id = THREAD_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+        UserThread {
+            id,
+            initial_stack_top: stack_top,
+            context,
+            state: ThreadState::Ready,
+            kernel_stack_top,
+            initial_kernel_stack_top: kernel_stack_top,
+            cr3,
+        }
+    }
+
+    pub fn free(&self) {
+        // todo: memory cleanup
+        // todo: cleanup page table and switch to kernel
+        thread_stack_free(self.initial_stack_top);
+        kthread_stack_free(self.initial_kernel_stack_top);
+    }
+}

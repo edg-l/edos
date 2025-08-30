@@ -2,17 +2,20 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
-use core::arch::asm;
+use core::{alloc::Layout, arch::asm};
 
-use x86_64::{VirtAddr, instructions::hlt};
+use alloc::alloc::alloc;
+use x86_64::{VirtAddr, instructions::hlt, registers::control::Cr3};
 
 use crate::{
     acpi::{acpi_madt, init_acpi},
     allocator::init_heap,
-    apic::{get_lapic},
+    apic::get_lapic,
     boot::boot_info,
-    memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
+    memory::{frame_allocator::init_frame_allocator, get_virt_addr, mapper::memory_mapper},
+    thread::{KernelThread, scheduler::Scheduler, util::queue_spawn_kthread},
     timer::{get_timer_calibration, init_boot_time, uptime_us},
+    util::per_cpu::get_percpu_data,
 };
 
 mod acpi;
@@ -108,11 +111,25 @@ fn main() -> ! {
         }
     }
 
+    // Init scheduler
+    let ptr = unsafe { alloc(Layout::new::<Scheduler>()).cast::<Scheduler>() };
+    unsafe { ptr.write(Scheduler::default()) };
+    let cr3 = Cr3::read();
+    unsafe {
+        (*ptr).kernel_cr3 = cr3.0.start_address().as_u64();
+        (*ptr).kernel_cr3_flags = cr3.1.bits();
+    }
+    get_percpu_data().scheduler = ptr;
+
+    queue_spawn_kthread(KernelThread::new(my_kthread));
+    queue_spawn_kthread(KernelThread::new(my_kthread2));
+    queue_spawn_kthread(KernelThread::new(my_kthread3));
+
     x86_64::instructions::interrupts::enable_and_hlt();
 
     loop {
         hlt();
-        serial_println!("hi from halt");
+        serial_println!("hi from main halt");
     }
 }
 
@@ -121,6 +138,31 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     serial_println!("KERNEL PANIC:");
     serial_println!("{info:#?}");
     loop {
+        hlt();
+    }
+}
+
+fn my_kthread() -> ! {
+    loop {
+        serial_println!("hi from kthread");
+        hlt();
+    }
+}
+
+fn my_kthread2() -> ! {
+    let mut counter = 200;
+    loop {
+        serial_println!("hi from kthread2, {counter}");
+        counter += 2;
+        hlt();
+    }
+}
+
+fn my_kthread3() -> ! {
+    let mut counter = 0;
+    loop {
+        serial_println!("hi from kthread3, {counter}");
+        counter += 1;
         hlt();
     }
 }

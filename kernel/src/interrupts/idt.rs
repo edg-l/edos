@@ -10,12 +10,17 @@ pub const PS2_DATA_PORT: u16 = 0x60;
 pub const PS2_COMMAND_PORT: u16 = 0x64;
 
 use crate::{
-    apic::get_lapic, gdt, interrupts::{
+    apic::get_lapic,
+    gdt,
+    interrupts::{
+        InterruptIndex,
         io::{
             ahci_interrupt_handler, device_not_available_handler, keyboard_interrupt_handler,
             mouse_interrupt_handler,
-        }, InterruptIndex
-    }, serial_println, thread::context::timer_interrupt_handler
+        },
+    },
+    serial_println,
+    thread::interrupt::timer_interrupt_handler,
 };
 
 pub static IDT: spin::Lazy<InterruptDescriptorTable> = Lazy::new(|| {

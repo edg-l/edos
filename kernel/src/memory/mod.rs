@@ -8,12 +8,17 @@ pub mod mapper;
 pub const KERNEL_HEAP: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_0000_0000);
 pub const KERNEL_HEAP_SIZE: u64 = 1024 * 1024 * 128; // 128 mb
 
-#[expect(unused)]
-pub const TEMP_MAPPINGS_START: VirtAddr = VirtAddr::new_truncate(0xFFFF_FFFE_0000_0000);
+// After heap
+pub const ACPI_MAPPINGS: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_0800_0000);
+// Assuming 1mb for acpi
+pub const APIC_BASE: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_0900_0000);
+pub const IOAPIC_BASE: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_0910_0000);
 
-pub const ACPI_MAPPINGS: VirtAddr = VirtAddr::new_truncate(0xFFFF_FFF0_0000_0000);
-pub const APIC_BASE: VirtAddr = VirtAddr::new_truncate(0xFFFF_FFF1_0000_0000);
-pub const IOAPIC_BASE: VirtAddr = VirtAddr::new_truncate(0xFFFF_FFF2_0000_0000);
+pub const KTHREAD_STACK_FIRST: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_1000_0000);
+pub const KTHREAD_STACK_SIZE: u64 = 4096 * 2;
+
+pub const USER_STACK_FIRST: VirtAddr = VirtAddr::new_truncate(0xFFFF_C920_0000_0000);
+pub const USER_STACK_SIZE: u64 = 4096 * 2;
 
 /// Stack alignment requirement for FPU/SSE instructions (16 bytes)
 pub const STACK_ALIGNMENT: u64 = 16;

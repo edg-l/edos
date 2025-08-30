@@ -59,7 +59,6 @@ pub fn apic_info() -> &'static Apic {
 
 static NUMBER_OF_CORES: Once<usize> = Once::new();
 
-
 pub fn number_of_cores() -> usize {
     *NUMBER_OF_CORES.call_once(|| 1 + processor_info().application_processors.len())
 }
