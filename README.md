@@ -1,6 +1,5 @@
-# Limine Rust Template
+# edos
 
-This repository will demonstrate how to set up a basic kernel in Rust using Limine.
 
 ## How to use this?
 
