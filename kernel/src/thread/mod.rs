@@ -1,7 +1,5 @@
 use core::sync::atomic::AtomicU64;
 
-use x86_64::VirtAddr;
-
 use crate::thread::{
     context::CpuContext,
     util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
@@ -11,10 +9,23 @@ pub mod context;
 pub mod interrupt;
 pub mod scheduler;
 pub mod util;
+pub mod signal;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ThreadId {
+    id: u64,
+    kernel: bool,
+}
+
+impl ThreadId {
+    pub fn new(id: u64, kernel: bool) -> Self {
+        Self { id, kernel }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct KernelThread {
-    pub id: u64,
+    pub id: ThreadId,
     /// Saved to free it in case the thread exits.
     pub initial_stack_top: u64,
     pub context: CpuContext,
@@ -40,7 +51,7 @@ impl KernelThread {
         let id = KTHREAD_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
         KernelThread {
-            id,
+            id: ThreadId::new(id, true),
             initial_stack_top: stack_top,
             context,
             state: ThreadState::Ready,
@@ -54,7 +65,7 @@ impl KernelThread {
 
 #[derive(Debug, Clone)]
 pub struct UserThread {
-    pub id: u64,
+    pub id: ThreadId,
     /// Saved to free it in case the thread exits.
     pub initial_stack_top: u64,
     pub context: CpuContext,
@@ -79,7 +90,7 @@ impl UserThread {
         let id = THREAD_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
         UserThread {
-            id,
+            id: ThreadId::new(id, false),
             initial_stack_top: stack_top,
             context,
             state: ThreadState::Ready,

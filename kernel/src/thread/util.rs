@@ -1,14 +1,24 @@
 use core::sync::atomic::AtomicU64;
 
 use crossbeam_queue::SegQueue;
-use x86_64::{VirtAddr, structures::paging::PageTableFlags};
+use x86_64::{
+    VirtAddr,
+    instructions::{hlt, interrupts::enable_and_hlt},
+    structures::paging::PageTableFlags,
+};
 
 use crate::{
+    apic::get_lapic,
+    interrupts::InterruptIndex,
     memory::{
         KTHREAD_STACK_FIRST, KTHREAD_STACK_SIZE, USER_STACK_FIRST, USER_STACK_SIZE,
         mapper::memory_mapper,
     },
-    thread::KernelThread,
+    thread::{
+        KernelThread,
+        scheduler::sched,
+        signal::{Signal, send_signal},
+    },
     util::per_cpu::get_percpu_data,
 };
 
@@ -54,6 +64,15 @@ pub fn queue_spawn_kthread(thread: KernelThread) {
             .kthread_spawn_queue
             .push(thread)
     };
+}
+
+/// Exits a kthread.
+pub fn kthread_exit(code: i32) -> ! {
+    send_signal(Signal::Exit(code));
+
+    loop {
+        hlt();
+    }
 }
 
 static THREAD_FREED_STACKS: SegQueue<u64> = SegQueue::new();

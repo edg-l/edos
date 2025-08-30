@@ -13,7 +13,7 @@ use crate::{
     apic::get_lapic,
     boot::boot_info,
     memory::{frame_allocator::init_frame_allocator, get_virt_addr, mapper::memory_mapper},
-    thread::{KernelThread, scheduler::Scheduler, util::queue_spawn_kthread},
+    thread::{scheduler::Scheduler, util::{kthread_exit, queue_spawn_kthread}, KernelThread},
     timer::{get_timer_calibration, init_boot_time, uptime_us},
     util::per_cpu::get_percpu_data,
 };
@@ -153,6 +153,10 @@ fn my_kthread2() -> ! {
     let mut counter = 200;
     loop {
         serial_println!("hi from kthread2, {counter}");
+        if counter > 206 {
+            serial_println!("exiting!");
+            kthread_exit(1);
+        }
         counter += 2;
         hlt();
     }
