@@ -3,12 +3,16 @@ pub mod init;
 pub use init::init;
 use x2apic::lapic::LocalApic;
 
-use crate::{apic::init::enable_apic, memory::APIC_BASE, util::core_local::CoreLocal};
+use crate::{util::per_cpu::get_percpu_data};
 
-/// The current core local apic.
-pub static LAPIC: CoreLocal<LocalApic> = CoreLocal::new(|| unsafe { enable_apic() });
 
 pub fn current_apic_id() -> u32 {
-    let apic_id_reg = APIC_BASE.as_u64() + 0x20;
-    unsafe { core::ptr::read_volatile(apic_id_reg as *const u32) >> 24 }
+    unsafe { (*get_percpu_data().lapic).id() }
+}
+
+// Get the lapic
+pub fn get_lapic() -> &'static mut LocalApic {
+    unsafe {
+        get_percpu_data().lapic.as_mut().unwrap_unchecked()
+    }
 }

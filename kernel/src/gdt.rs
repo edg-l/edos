@@ -12,13 +12,13 @@ use x86_64::{
     },
 };
 
-use crate::{memory::mapper::align_stack_pointer, serial_println};
+use crate::{memory::mapper::align_stack_pointer, serial_println, util::per_cpu::get_percpu_data};
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 pub const PAGE_FAULT_IST_INDEX: u16 = 1;
 pub const RING3_STACK_PST_INDEX: u16 = 0;
 
-pub static TSS: spin::Lazy<TaskStateSegment> = Lazy::new(|| {
+fn init_tss() {
     let mut tss = TaskStateSegment::new();
 
     let page_fault_stack_end = {
@@ -67,8 +67,9 @@ pub static TSS: spin::Lazy<TaskStateSegment> = Lazy::new(|| {
     tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = page_fault_stack_end;
     tss.privilege_stack_table[RING3_STACK_PST_INDEX as usize] = ring3_pst_stack_end;
 
-    tss
-});
+    let pcpu = get_percpu_data();
+    pcpu.tss = tss;
+}
 
 pub static GDT: spin::Lazy<(GlobalDescriptorTable, GdtSelectors)> = Lazy::new(|| {
     let mut gdt = GlobalDescriptorTable::new();
@@ -77,7 +78,9 @@ pub static GDT: spin::Lazy<(GlobalDescriptorTable, GdtSelectors)> = Lazy::new(||
     let data_selector = gdt.append(Descriptor::kernel_data_segment());
     let user_data_selector = gdt.append(Descriptor::user_data_segment());
     let user_code_selector = gdt.append(Descriptor::user_code_segment());
-    let tss_selector = gdt.append(Descriptor::tss_segment(&TSS));
+    init_tss();
+    let tss_ref = &raw const get_percpu_data().tss;
+    let tss_selector = gdt.append(unsafe { Descriptor::tss_segment_unchecked(tss_ref) });
 
     (
         gdt,

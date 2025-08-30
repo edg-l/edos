@@ -21,15 +21,11 @@ pub struct CpuContext {
     pub rax: u64,
 
     // Interrupt frame (pushed by CPU automatically)
-    pub rip: u64,
-    pub cs: u64,
-    pub rflags: u64,
-    pub rsp: u64,
-    pub ss: u64,
+    pub interrupt_stack_frame: InterruptStackFrameValue,
 }
 
 impl CpuContext {
-    pub const fn new() -> Self {
+    pub const fn new(interrupt_stack_frame: InterruptStackFrameValue) -> Self {
         CpuContext {
             r15: 0,
             r14: 0,
@@ -46,23 +42,19 @@ impl CpuContext {
             rdx: 0,
             rcx: 0,
             rax: 0,
-            rip: 0,
-            cs: 0,
-            rflags: 0,
-            rsp: 0,
-            ss: 0,
+            interrupt_stack_frame,
         }
     }
 
     #[inline]
     pub fn is_from_userspace(&self) -> bool {
         // Check if CS register has RPL (Ring Privilege Level) of 3
-        (self.cs & 0x3) == 3
+        self.interrupt_stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3
     }
 
     #[inline]
     pub fn is_from_kernel(&self) -> bool {
-        (self.cs & 0x3) == 0
+        self.interrupt_stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0
     }
 }
 
@@ -70,18 +62,29 @@ impl CpuContext {
 
 use core::arch::naked_asm;
 
-use crate::{apic::LAPIC, gdt::GDT, serial_println};
+use x86_64::{
+    PrivilegeLevel, VirtAddr, registers::rflags::RFlags, structures::idt::InterruptStackFrameValue,
+};
+
+use crate::{ apic::get_lapic, gdt::GDT, serial_println};
 
 // This function will be called from assembly with pointer to saved context
 #[unsafe(no_mangle)]
 pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
     unsafe {
-        LAPIC.write().end_of_interrupt();
+        get_lapic().end_of_interrupt();
 
         let ctx = &mut *context;
 
         // Your scheduling logic here
         // Example: just print some info and return same context
+
+        // TODO: pick next task
+        //  Each task needs its own kernel stack. Your current TSS has one shared kernel stack - you'll need to allocate a kernel stack per task and update RSP0 on context switches.
+        // Without updating RSP0, all tasks would share the same kernel stack, causing corruption when multiple tasks enter kernel mode.
+        // TSS.write().privilege_stack_table[0] = x;
+
+        serial_println!("Ctx: {:#?}", ctx);
 
         if ctx.is_from_userspace() {
             // Handle userspace -> kernel transition
@@ -170,24 +173,24 @@ pub unsafe extern "C" fn timer_interrupt_handler() {
 impl CpuContext {
     /// Initialize a context for a new kernel thread
     pub fn new_kernel_thread(entry_point: u64, stack_top: u64) -> Self {
-        let mut ctx = Self::new();
-        ctx.rip = entry_point;
-        ctx.rsp = stack_top;
-        ctx.cs = GDT.1.code_selector.0 as u64; // Kernel code segment (adjust for your GDT)
-        ctx.ss = GDT.1.data_selector.0 as u64; // Kernel data segment (adjust for your GDT)
-        ctx.rflags = 0x200; // Enable interrupts
-        ctx
+        Self::new(InterruptStackFrameValue::new(
+            VirtAddr::new(entry_point),
+            GDT.1.code_selector,
+            RFlags::INTERRUPT_FLAG,
+            VirtAddr::new(stack_top),
+            GDT.1.data_selector,
+        ))
     }
 
     /// Initialize a context for a new user thread
     pub fn new_user_thread(entry_point: u64, stack_top: u64) -> Self {
-        let mut ctx = Self::new();
-        ctx.rip = entry_point;
-        ctx.rsp = stack_top;
-        ctx.cs = GDT.1.user_code_selector.0 as u64; // User code segment (0x20 | 3 for ring 3)
-        ctx.ss = GDT.1.user_data_selector.0 as u64; // User data segment (0x18 | 3 for ring 3)
-        ctx.rflags = 0x200; // Enable interrupts
-        ctx
+        Self::new(InterruptStackFrameValue::new(
+            VirtAddr::new(entry_point),
+            GDT.1.user_code_selector,
+            RFlags::INTERRUPT_FLAG,
+            VirtAddr::new(stack_top),
+            GDT.1.user_data_selector,
+        ))
     }
 
     /// Switch from current context to this context

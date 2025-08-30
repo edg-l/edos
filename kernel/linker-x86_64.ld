@@ -46,6 +46,17 @@ SECTIONS
         KEEP(*(.requests_end_marker))
     } :data
 
+    /* Per-CPU data section */
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
+    __percpu_start = .;
+    .percpu : {
+        *(.percpu .percpu.*)
+    } :data
+    __percpu_end = .;
+    __percpu_size = __percpu_end - __percpu_start;
+    /* Reserve space for each CPU (assuming max 64 CPUs) */
+    . = __percpu_start + (__percpu_size * 64);
+
     /* NOTE: .bss needs to be the last thing mapped to :data, otherwise lots of */
     /* unnecessary zeros will be written to the binary. */
     /* If you need, for example, .init_array and .fini_array, those should be placed */

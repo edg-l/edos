@@ -1,6 +1,6 @@
 use x86_64::instructions::port::Port;
 
-use crate::{apic::LAPIC, serial_println};
+use crate::{apic::get_lapic, serial_println};
 
 #[allow(unused)]
 pub struct TimerCalibration {
@@ -27,7 +27,7 @@ impl TimerCalibration {
         let apic_start_count = 0xFFFFFFFF;
         let tsc_start = unsafe { core::arch::x86_64::_rdtsc() };
         unsafe {
-            let mut lapic = LAPIC.write();
+            let lapic = get_lapic();
             lapic.set_timer_mode(x2apic::lapic::TimerMode::OneShot);
             lapic.set_timer_divide(x2apic::lapic::TimerDivide::Div1); // No division for calibration
             lapic.set_timer_initial(apic_start_count);
@@ -37,7 +37,7 @@ impl TimerCalibration {
         Self::wait_for_pit_completion();
 
         // 4. Read APIC timer current count
-        let apic_end_count = unsafe { LAPIC.write().timer_current() };
+        let apic_end_count = unsafe { get_lapic().timer_current() };
         let tsc_end = unsafe { core::arch::x86_64::_rdtsc() };
 
         // 5. Calculate APIC frequency

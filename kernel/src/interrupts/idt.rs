@@ -10,17 +10,12 @@ pub const PS2_DATA_PORT: u16 = 0x60;
 pub const PS2_COMMAND_PORT: u16 = 0x64;
 
 use crate::{
-    apic::LAPIC,
-    gdt,
-    interrupts::{
-        InterruptIndex,
+    apic::get_lapic, gdt, interrupts::{
         io::{
             ahci_interrupt_handler, device_not_available_handler, keyboard_interrupt_handler,
             mouse_interrupt_handler,
-        },
-    },
-    serial_println,
-    thread::context::timer_interrupt_handler,
+        }, InterruptIndex
+    }, serial_println, thread::context::timer_interrupt_handler
 };
 
 pub static IDT: spin::Lazy<InterruptDescriptorTable> = Lazy::new(|| {
@@ -68,18 +63,18 @@ extern "x86-interrupt" fn general_protection_fault_handler(
             "EXCEPTION: general_protection_fault (segfault?) in RING 3: (error: {error_code})\n{stack_frame:#?}",
         );
 
-        unsafe { LAPIC.write().end_of_interrupt() };
+        unsafe { get_lapic().end_of_interrupt() };
     }
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     serial_println!("EXCEPTION: invalid_opcode CHECK\n{stack_frame:#?}");
-    unsafe { LAPIC.write().end_of_interrupt() };
+    unsafe { get_lapic().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn alignment_check_handler(stack_frame: InterruptStackFrame, value: u64) {
     serial_println!("EXCEPTION: ALIGNMENT CHECK: ({value})\n{stack_frame:#?}");
-    unsafe { LAPIC.write().end_of_interrupt() };
+    unsafe { get_lapic().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn double_fault_handler(
@@ -161,17 +156,17 @@ extern "x86-interrupt" fn _timer_interrupt_handler_cswitch(_stack_frame: Interru
 #[expect(unused)]
 extern "C" fn timer_context_switch_handler(_saved_registers: *mut u64) {
     // Acknowledge interrupt first to prevent stacking
-    unsafe { LAPIC.write().end_of_interrupt() };
+    unsafe { get_lapic().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn apic_error_interrupt_handler(_stack_frame: InterruptStackFrame) {
     serial_println!("apic error");
-    unsafe { LAPIC.write().end_of_interrupt() };
+    unsafe { get_lapic().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {
     serial_println!("spurious");
-    unsafe { LAPIC.write().end_of_interrupt() };
+    unsafe { get_lapic().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn page_fault_handler(

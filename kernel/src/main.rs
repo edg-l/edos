@@ -9,7 +9,7 @@ use x86_64::{VirtAddr, instructions::hlt};
 use crate::{
     acpi::{acpi_madt, init_acpi},
     allocator::init_heap,
-    apic::LAPIC,
+    apic::{get_lapic},
     boot::boot_info,
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
     timer::{get_timer_calibration, init_boot_time, uptime_us},
@@ -99,11 +99,11 @@ fn main() -> ! {
 
     {
         unsafe {
-            let mut lapic = LAPIC.write();
+            let lapic = get_lapic();
             let timer = get_timer_calibration();
             lapic.set_timer_mode(x2apic::lapic::TimerMode::Periodic);
             lapic.set_timer_divide(x2apic::lapic::TimerDivide::Div1);
-            lapic.set_timer_initial(timer.ticks_per_microsecond as u32 * 1000_000);
+            lapic.set_timer_initial(timer.ticks_per_microsecond as u32 * 1_000_000);
             lapic.enable_timer();
         }
     }

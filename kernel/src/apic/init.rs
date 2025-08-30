@@ -1,5 +1,6 @@
 use core::sync::atomic::AtomicU64;
 
+use alloc::boxed::Box;
 use x2apic::{
     ioapic::{IoApic, IrqFlags, IrqMode, RedirectionTableEntry},
     lapic::{LocalApic, LocalApicBuilder},
@@ -11,10 +12,11 @@ use x86_64::{
 
 use crate::{
     acpi::{acpi_madt, apic_info},
-    apic::{LAPIC, current_apic_id},
+    apic::current_apic_id,
     interrupts::InterruptIndex,
     memory::{APIC_BASE, IOAPIC_BASE, mapper::memory_mapper},
     serial_println,
+    util::per_cpu::get_percpu_data,
 };
 
 pub fn init() {
@@ -37,9 +39,6 @@ pub fn init() {
             .unwrap();
     }
 
-    let id = current_apic_id();
-    serial_println!("Current LAPIC id: {}", id);
-
     let apic_info = apic_info();
 
     if apic_info.also_has_legacy_pics {
@@ -53,13 +52,15 @@ pub fn init() {
 
     unsafe {
         serial_println!("Enabling apic");
-        LAPIC.read(); // reading enables it.
+        enable_lapic();
+        let id = current_apic_id();
+        serial_println!("Current LAPIC id: {}", id);
         serial_println!("Enabling io apic");
         enable_io_apic(apic_info, id).expect("failed to set up io apic");
     }
 }
 
-pub(super) unsafe fn enable_apic() -> LocalApic {
+pub(super) unsafe fn enable_lapic() {
     let mut lapic = LocalApicBuilder::new()
         .timer_vector(InterruptIndex::Timer as usize)
         .error_vector(InterruptIndex::Error as usize)
@@ -72,7 +73,8 @@ pub(super) unsafe fn enable_apic() -> LocalApic {
         lapic.enable();
     }
 
-    lapic
+    let pcpu = get_percpu_data();
+    pcpu.lapic = Box::into_raw(Box::new(lapic));
 }
 
 /// # Safety
