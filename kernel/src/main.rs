@@ -62,6 +62,9 @@ fn init() {
     interrupts::init();
     serial_println!("Initializing apic");
     apic::init();
+    serial_println!("Initializing hpet");
+    drivers::hpet::driver::init();
+    serial_println!("Calibrating timer");
     get_timer_calibration();
     init_boot_time();
     serial_println!("Init done");

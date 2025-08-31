@@ -7,10 +7,10 @@ use crate::thread::{
 
 pub mod context;
 pub mod interrupt;
-pub mod scheduler;
-pub mod util;
-pub mod signal;
 pub mod paging;
+pub mod scheduler;
+pub mod signal;
+pub mod util;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ThreadId {

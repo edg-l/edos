@@ -3,8 +3,8 @@ use x86_64::{
     PhysAddr, VirtAddr,
     structures::paging::{
         FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags,
-        PhysFrame, Size4KiB,
-        mapper::{FlagUpdateError, MapToError, UnmapError},
+        PhysFrame, Size4KiB, Translate,
+        mapper::{FlagUpdateError, MapToError, TranslateResult, UnmapError},
         page::PageRangeInclusive,
     },
 };
@@ -134,7 +134,8 @@ impl MemoryManager {
                     frame,
                     PageTableFlags::PRESENT | flags,
                     &mut *frame_allocator,
-                )?
+                )
+                .expect("failed to map")
                 .flush()
         };
 
@@ -170,6 +171,15 @@ impl MemoryManager {
         }
 
         Ok(offset)
+    }
+
+    /// Return the frame that the given virtual address is mapped to and the offset within that frame.
+    ///
+    /// If the given address has a valid mapping, the mapped frame and the offset within that frame is returned. Otherwise an error value is returned.
+    ///
+    /// This function works with huge pages of all sizes.
+    fn translate(&self, addr: VirtAddr) -> TranslateResult {
+        self.mapper.translate(addr)
     }
 }
 

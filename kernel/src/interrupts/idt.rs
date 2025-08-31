@@ -4,15 +4,16 @@ use x86_64::{
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
 };
 
-
-
 use crate::{
-    apic::get_lapic, drivers::keyboard::keyboard_interrupt_handler, gdt, interrupts::{
-        io::{
-            ahci_interrupt_handler, device_not_available_handler,
-            mouse_interrupt_handler,
-        }, InterruptIndex
-    }, serial_println, thread::interrupt::timer_interrupt_handler
+    apic::get_lapic,
+    drivers::keyboard::keyboard_interrupt_handler,
+    gdt,
+    interrupts::{
+        InterruptIndex,
+        io::{ahci_interrupt_handler, device_not_available_handler, mouse_interrupt_handler},
+    },
+    serial_println,
+    thread::interrupt::timer_interrupt_handler,
 };
 
 pub static IDT: spin::Lazy<InterruptDescriptorTable> = Lazy::new(|| {
@@ -176,7 +177,7 @@ extern "x86-interrupt" fn page_fault_handler(
 
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0 {
         let address = Cr2::read().unwrap();
-        serial_println!("EXCEPTION: PAGE FAULT in Ring3");
+        serial_println!("EXCEPTION: PAGE FAULT in Ring 0");
         serial_println!("Accessed Address: {address:?}");
         serial_println!("Error Code: {error_code:?}");
         serial_println!("{stack_frame:#?}");

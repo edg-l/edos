@@ -34,9 +34,7 @@ pub unsafe fn deallocate_lower_half(pml4: &mut PageTable) {
 
         // Get PDPT and recurse
         let pdpt_frame = pml4_entry.frame().unwrap();
-        let pdpt = unsafe {
-            &mut *get_virt_addr(pdpt_frame.start_address()).as_mut_ptr()
-        };
+        let pdpt = unsafe { &mut *get_virt_addr(pdpt_frame.start_address()).as_mut_ptr() };
 
         unsafe { deallocate_pdpt(pdpt) };
 

@@ -2,6 +2,8 @@ use x86_64::instructions::port::Port;
 
 use crate::{apic::get_lapic, serial_println};
 
+// TODO: Fallback to pit if HPET not found.
+
 #[allow(unused)]
 pub struct TimerCalibration {
     pub apic_frequency_hz: u64,
@@ -113,7 +115,7 @@ pub fn get_timer_calibration() -> &'static TimerCalibration {
     TIMER_CALIBRATION.call_once(TimerCalibration::calibrate_apic_timer)
 }
 
-use core::time::Duration;
+pub use crate::drivers::hpet::instant::HpetInstant as Instant;
 
 /// Boot time reference point
 static BOOT_TIME: spin::Once<Instant> = spin::Once::new();
@@ -129,28 +131,5 @@ pub fn uptime_us() -> u64 {
         boot_instant.elapsed().as_micros() as u64
     } else {
         0
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Instant {
-    tsc: u64,
-}
-
-impl Instant {
-    pub fn now() -> Self {
-        Self {
-            tsc: unsafe { core::arch::x86_64::_rdtsc() },
-        }
-    }
-
-    pub fn elapsed(self) -> Duration {
-        let current_tsc = unsafe { core::arch::x86_64::_rdtsc() };
-        let elapsed_tsc = current_tsc - self.tsc;
-
-        // Convert TSC cycles to microseconds using calibrated frequency
-        let calibration = get_timer_calibration();
-        let elapsed_us = (elapsed_tsc * 1_000_000) / calibration.tsc_frequency_hz;
-        Duration::from_micros(elapsed_us)
     }
 }
