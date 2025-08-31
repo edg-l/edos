@@ -10,6 +10,7 @@ pub mod interrupt;
 pub mod scheduler;
 pub mod util;
 pub mod signal;
+pub mod paging;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ThreadId {
