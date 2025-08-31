@@ -30,9 +30,7 @@ pub unsafe extern "C" fn timer_interrupt_handler() {
         "mov rdi, rsp",
 
         // Ensure stack is 16-byte aligned before call
-        // The push operations above pushed 15 registers (8 bytes each = 120 bytes)
-        // CPU pushed 5 values (40 bytes)
-        // Total: 160 bytes, which is divisible by 16, so we're aligned
+        "and rsp, -16",
 
         // Clear direction flag as per x86-64 ABI
         "cld",

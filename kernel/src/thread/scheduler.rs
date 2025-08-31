@@ -125,6 +125,11 @@ impl Scheduler {
             self.thread_queue.push(kthread.id);
             self.kthreads.insert(kthread.id.id, kthread);
         }
+
+        while let Some(thread) = self.thread_spawn_queue.pop() {
+            self.thread_queue.push(thread.id);
+            self.threads.insert(thread.id.id, thread);
+        }
     }
 
     /// Processes the signal queue
