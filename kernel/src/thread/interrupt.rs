@@ -29,7 +29,12 @@ pub unsafe extern "C" fn timer_interrupt_handler() {
         // Pass it as first argument to timer_schedule
         "mov rdi, rsp",
 
+        // The push operations above pushed 15 registers (8 bytes each = 120 bytes)
+        // CPU pushed 5 values (40 bytes)
+        // Total: 160 bytes, which is divisible by 16, we may be aligned but initial rsp might not
+
         // Ensure stack is 16-byte aligned before call
+        "sub rsp, 8",
         "and rsp, -16",
 
         // Clear direction flag as per x86-64 ABI
