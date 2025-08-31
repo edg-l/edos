@@ -55,15 +55,10 @@ pub fn kthread_stack_free(stack_top: u64) {
     KTHREAD_FREED_STACKS.push(stack_bottom);
 }
 
-pub fn queue_spawn_kthread(thread: KernelThread) {
-    unsafe {
-        get_percpu_data()
-            .scheduler
-            .as_mut()
-            .unwrap_unchecked()
-            .kthread_spawn_queue
-            .push(thread)
-    };
+pub fn queue_spawn_kthread(entry: fn() -> !) {
+    let thread = KernelThread::new(entry);
+
+    sched().kthread_spawn_queue.push(thread);
 }
 
 /// Exits a kthread.
@@ -114,12 +109,5 @@ pub fn thread_stack_free(stack_top: u64) {
 }
 
 pub fn queue_spawn_thread(thread: KernelThread) {
-    unsafe {
-        get_percpu_data()
-            .scheduler
-            .as_mut()
-            .unwrap_unchecked()
-            .kthread_spawn_queue
-            .push(thread)
-    };
+    sched().kthread_spawn_queue.push(thread);
 }

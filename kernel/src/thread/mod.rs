@@ -84,7 +84,7 @@ impl UserThread {
     pub fn new(entry_point: fn() -> !, cr3: u64) -> Self {
         let kernel_stack_top = kthread_stack_alloc();
         let stack_top = thread_stack_alloc();
-        let context = CpuContext::new_kernel_thread(entry_point as *const u8 as u64, stack_top);
+        let context = CpuContext::new_user_thread(entry_point as *const u8 as u64, stack_top);
 
         static THREAD_NEXT_ID: AtomicU64 = AtomicU64::new(0);
 

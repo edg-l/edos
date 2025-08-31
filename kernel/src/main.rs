@@ -2,26 +2,25 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
-use core::{alloc::Layout, arch::asm};
+use core::arch::asm;
 
-use alloc::alloc::alloc;
-use x86_64::{VirtAddr, instructions::hlt, registers::control::Cr3};
+use x86_64::{VirtAddr, instructions::hlt};
 
 use crate::{
     acpi::{acpi_madt, init_acpi},
     allocator::init_heap,
     apic::get_lapic,
     boot::boot_info,
-    memory::{frame_allocator::init_frame_allocator, get_virt_addr, mapper::memory_mapper},
-    thread::{scheduler::Scheduler, util::{kthread_exit, queue_spawn_kthread}, KernelThread},
+    memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
+    thread::util::queue_spawn_kthread,
     timer::{get_timer_calibration, init_boot_time, uptime_us},
-    util::per_cpu::get_percpu_data,
 };
 
 mod acpi;
 mod allocator;
 mod apic;
 mod boot;
+mod drivers;
 mod gdt;
 mod interrupts;
 mod memory;
@@ -85,6 +84,12 @@ fn main() -> ! {
 
     serial_println!("Uptime us: {uptime}");
 
+    // Init scheduler
+    thread::scheduler::init();
+    drivers::init_drivers();
+
+    queue_spawn_kthread(thread_counter);
+
     for i in 0..100_u64 {
         // Calculate the pixel offset using the framebuffer information we obtained above.
         // We skip `i` scanlines (pitch is provided in bytes) and add `i * 4` to skip `i` pixels forward.
@@ -100,6 +105,7 @@ fn main() -> ! {
         };
     }
 
+    // Enable apic timer, every 1 second
     {
         unsafe {
             let lapic = get_lapic();
@@ -110,20 +116,6 @@ fn main() -> ! {
             lapic.enable_timer();
         }
     }
-
-    // Init scheduler
-    let ptr = unsafe { alloc(Layout::new::<Scheduler>()).cast::<Scheduler>() };
-    unsafe { ptr.write(Scheduler::default()) };
-    let cr3 = Cr3::read();
-    unsafe {
-        (*ptr).kernel_cr3 = cr3.0.start_address().as_u64();
-        (*ptr).kernel_cr3_flags = cr3.1.bits();
-    }
-    get_percpu_data().scheduler = ptr;
-
-    queue_spawn_kthread(KernelThread::new(my_kthread));
-    queue_spawn_kthread(KernelThread::new(my_kthread2));
-    queue_spawn_kthread(KernelThread::new(my_kthread3));
 
     x86_64::instructions::interrupts::enable_and_hlt();
 
@@ -142,27 +134,7 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     }
 }
 
-fn my_kthread() -> ! {
-    loop {
-        serial_println!("hi from kthread");
-        hlt();
-    }
-}
-
-fn my_kthread2() -> ! {
-    let mut counter = 200;
-    loop {
-        serial_println!("hi from kthread2, {counter}");
-        if counter > 206 {
-            serial_println!("exiting!");
-            kthread_exit(1);
-        }
-        counter += 2;
-        hlt();
-    }
-}
-
-fn my_kthread3() -> ! {
+fn thread_counter() -> ! {
     let mut counter = 0;
     loop {
         serial_println!("hi from kthread3, {counter}");

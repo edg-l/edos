@@ -1,3 +1,5 @@
+use core::alloc::Layout;
+
 use alloc::collections::btree_map::BTreeMap;
 use crossbeam_queue::SegQueue;
 use x86_64::{
@@ -27,6 +29,17 @@ pub struct Scheduler {
     pub kernel_cr3: u64,
     pub kernel_cr3_flags: u64,
     pub signal_queue: SegQueue<(ThreadId, Signal)>,
+}
+
+pub fn init() {
+    let ptr = unsafe { alloc::alloc::alloc(Layout::new::<Scheduler>()).cast::<Scheduler>() };
+    unsafe { ptr.write(Scheduler::default()) };
+    let cr3 = Cr3::read();
+    unsafe {
+        (*ptr).kernel_cr3 = cr3.0.start_address().as_u64();
+        (*ptr).kernel_cr3_flags = cr3.1.bits();
+    }
+    get_percpu_data().scheduler = ptr;
 }
 
 pub fn sched() -> &'static mut Scheduler {
