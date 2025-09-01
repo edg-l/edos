@@ -2,7 +2,7 @@ use raw_cpuid::CpuId;
 use x2apic::lapic::LocalApic;
 use x86_64::structures::tss::TaskStateSegment;
 
-use crate::thread::scheduler::Scheduler;
+use crate::{serial_println, thread::scheduler::Scheduler};
 
 /// Per cpu data
 ///

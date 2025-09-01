@@ -28,6 +28,7 @@ mod serial;
 mod thread;
 mod timer;
 mod util;
+mod test;
 
 extern crate alloc;
 
@@ -91,7 +92,8 @@ fn main() -> ! {
     thread::scheduler::init();
     drivers::init_drivers();
 
-    queue_spawn_kthread(thread_counter);
+    queue_spawn_kthread(test::thread_1);
+    queue_spawn_kthread(test::thread_2);
 
     for i in 0..100_u64 {
         // Calculate the pixel offset using the framebuffer information we obtained above.
@@ -133,15 +135,6 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     serial_println!("KERNEL PANIC:");
     serial_println!("{info:#?}");
     loop {
-        hlt();
-    }
-}
-
-fn thread_counter() -> ! {
-    let mut counter = 0;
-    loop {
-        serial_println!("hi from kthread3, {counter}");
-        counter += 1;
         hlt();
     }
 }

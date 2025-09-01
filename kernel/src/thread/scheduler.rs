@@ -203,31 +203,40 @@ impl Scheduler {
 
     /// Current thread id.
     pub fn current_id(&self) -> ThreadId {
-        self.current_thread_id.expect("should have a id")
+        without_interrupts(|| self.current_thread_id.expect("should have a id"))
     }
 
     /// Wake the given thread
     pub fn thread_wake(&mut self, id: ThreadId) {
-        if id.kernel {
-            if let Some(thread) = self.kthreads.get_mut(&id.id) {
+        without_interrupts(|| {
+            if id.kernel {
+                if let Some(thread) = self.kthreads.get_mut(&id.id)
+                    && thread.state != ThreadState::Ready
+                {
+                    thread.state = ThreadState::Ready;
+                    self.thread_queue.push(id);
+                }
+            } else if let Some(thread) = self.threads.get_mut(&id.id)
+                && thread.state != ThreadState::Ready
+            {
                 thread.state = ThreadState::Ready;
+                self.thread_queue.push(id);
             }
-        } else if let Some(thread) = self.threads.get_mut(&id.id) {
-            thread.state = ThreadState::Ready
-        }
-        self.thread_queue.push(id);
+        })
     }
 
     /// Wait the given thread for a maximum of the given timeout.
     pub fn thread_wait(&mut self, id: ThreadId, timeout: Duration) {
-        let now = Instant::now();
-        if id.kernel {
-            if let Some(thread) = self.kthreads.get_mut(&id.id) {
+        without_interrupts(|| {
+            let now = Instant::now();
+            if id.kernel {
+                if let Some(thread) = self.kthreads.get_mut(&id.id) {
+                    thread.state = ThreadState::WaitTimeout((now, timeout))
+                }
+            } else if let Some(thread) = self.threads.get_mut(&id.id) {
                 thread.state = ThreadState::WaitTimeout((now, timeout))
             }
-        } else if let Some(thread) = self.threads.get_mut(&id.id) {
-            thread.state = ThreadState::WaitTimeout((now, timeout))
-        }
+        })
     }
 
     /// Cooperatively yield.

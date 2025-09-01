@@ -11,5 +11,10 @@ pub fn current_apic_id() -> u32 {
 
 // Get the lapic
 pub fn get_lapic() -> &'static mut LocalApic {
-    unsafe { get_percpu_data().lapic.as_mut().unwrap_unchecked() }
+    unsafe {
+        if !get_percpu_data().lapic.is_aligned() {
+            panic!("get_lapic ptr is not aligned: {:?}", get_percpu_data().lapic);
+        }
+    }
+    unsafe { get_percpu_data().lapic.as_mut().expect("should unwrap lapic") }
 }

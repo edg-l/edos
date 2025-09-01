@@ -3,7 +3,7 @@ use core::sync::atomic::AtomicU64;
 use alloc::boxed::Box;
 use x2apic::{
     ioapic::{IoApic, IrqFlags, IrqMode, RedirectionTableEntry},
-    lapic::{LocalApic, LocalApicBuilder},
+    lapic::{xapic_base, LocalApic, LocalApicBuilder},
 };
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -21,6 +21,10 @@ use crate::{
 
 pub fn init() {
     let local_apic_address = acpi_madt().get().local_apic_address;
+
+    let base = unsafe { xapic_base() };
+
+    serial_println!("madt base: 0x{:x}, xapic base: 0x{:x}", local_apic_address, base);
 
     // Map the APIC base
     {
