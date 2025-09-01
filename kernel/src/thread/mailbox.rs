@@ -18,7 +18,7 @@ use crate::{
 // Encapsulate better
 
 #[derive(Debug)]
-/// A mailmox for sending requests with the type T and getting responses with the type R.
+/// A mailbox for sending requests with the type T and getting responses with the type R.
 pub struct Mailbox<T, R> {
     pub queue: SegQueue<Request<T, R>>,
     pub owner: ThreadId,
