@@ -1,19 +1,22 @@
-use core::alloc::Layout;
+use core::{alloc::Layout, time::Duration};
 
 use alloc::collections::btree_map::BTreeMap;
 use crossbeam_queue::SegQueue;
 use x86_64::{
     PhysAddr, VirtAddr,
+    instructions::{hlt, interrupts::without_interrupts},
     registers::control::{Cr3, Cr3Flags},
     structures::paging::PhysFrame,
 };
 
 use crate::{
     apic::get_lapic,
+    interrupts::InterruptIndex,
     serial_println,
     thread::{
         KernelThread, ThreadId, ThreadState, UserThread, context::CpuContext, signal::Signal,
     },
+    timer::Instant,
     util::per_cpu::get_percpu_data,
 };
 
@@ -64,6 +67,8 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
         sched.process_spawn_queue();
         sched.process_signal_queue();
 
+        let now = Instant::now();
+
         if let Some(current_id) = sched.current_thread_id {
             if current_id.kernel {
                 // coming from kernel task
@@ -78,6 +83,12 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                             serial_println!("KThread {current_id:?} exited {code}");
                             kthread.free();
                             // TODO: signal and remove
+                        }
+                        ThreadState::WaitTimeout((start, timeout)) => {
+                            if now.duration_since(start) >= timeout {
+                                kthread.state = ThreadState::Ready;
+                                sched.thread_queue.push(current_id);
+                            }
                         }
                     }
                 }
@@ -94,6 +105,12 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                             serial_println!("Thread {current_id:?} exited {code}");
                             thread.free();
                             // TODO: signal and remove
+                        }
+                        ThreadState::WaitTimeout((start, timeout)) => {
+                            if now.duration_since(start) >= timeout {
+                                thread.state = ThreadState::Ready;
+                                sched.thread_queue.push(current_id);
+                            }
                         }
                     }
                 }
@@ -132,6 +149,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
     }
 }
 
+#[expect(unused)]
 impl Scheduler {
     pub fn process_spawn_queue(&mut self) {
         while let Some(kthread) = self.kthread_spawn_queue.pop() {
@@ -162,6 +180,7 @@ impl Scheduler {
         }
     }
 
+    /// Schedules the next thread id, updating current_thread_id.
     fn schedule_next(&mut self) -> bool {
         while let Some(id) = self.thread_queue.pop() {
             if id.kernel {
@@ -182,7 +201,44 @@ impl Scheduler {
         false
     }
 
+    /// Current thread id.
     pub fn current_id(&self) -> ThreadId {
-        self.current_thread_id.unwrap()
+        self.current_thread_id.expect("should have a id")
+    }
+
+    /// Wake the given thread
+    pub fn thread_wake(&mut self, id: ThreadId) {
+        if id.kernel {
+            if let Some(thread) = self.kthreads.get_mut(&id.id) {
+                thread.state = ThreadState::Ready;
+            }
+        } else if let Some(thread) = self.threads.get_mut(&id.id) {
+            thread.state = ThreadState::Ready
+        }
+        self.thread_queue.push(id);
+    }
+
+    /// Wait the given thread for a maximum of the given timeout.
+    pub fn thread_wait(&mut self, id: ThreadId, timeout: Duration) {
+        let now = Instant::now();
+        if id.kernel {
+            if let Some(thread) = self.kthreads.get_mut(&id.id) {
+                thread.state = ThreadState::WaitTimeout((now, timeout))
+            }
+        } else if let Some(thread) = self.threads.get_mut(&id.id) {
+            thread.state = ThreadState::WaitTimeout((now, timeout))
+        }
+    }
+
+    /// Cooperatively yield.
+    pub fn thread_yield(&self) {
+        without_interrupts(|| {
+            let lapic = get_lapic();
+            unsafe {
+                lapic.send_ipi_self(InterruptIndex::Timer as u8);
+            }
+        });
+
+        hlt();
     }
 }

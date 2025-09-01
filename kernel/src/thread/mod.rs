@@ -1,9 +1,9 @@
-use core::sync::atomic::AtomicU64;
+use core::{sync::atomic::AtomicU64, time::Duration};
 
-use crate::thread::{
+use crate::{thread::{
     context::CpuContext,
     util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
-};
+}, timer::Instant};
 
 pub mod context;
 pub mod interrupt;
@@ -11,6 +11,8 @@ pub mod paging;
 pub mod scheduler;
 pub mod signal;
 pub mod util;
+pub mod mailbox;
+pub mod subscriber;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ThreadId {
@@ -24,7 +26,7 @@ impl ThreadId {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct KernelThread {
     pub id: ThreadId,
     /// Saved to free it in case the thread exits.
@@ -35,10 +37,11 @@ pub struct KernelThread {
     // no need for tss kernel stack
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub enum ThreadState {
     Ready,
     Waiting,
+    WaitTimeout((Instant, Duration)),
     Exited(i32),
 }
 

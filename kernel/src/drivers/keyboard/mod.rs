@@ -1,5 +1,6 @@
-use crossbeam_queue::SegQueue;
+use crossbeam_queue::{ArrayQueue, SegQueue};
 use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
+use spin::Once;
 use x86_64::{
     instructions::{hlt, interrupts::without_interrupts, port::Port},
     structures::idt::InterruptStackFrame,
@@ -7,7 +8,8 @@ use x86_64::{
 
 use crate::{apic::get_lapic, serial_println};
 
-static SCANCODE_QUEUE: SegQueue<u8> = SegQueue::new();
+static SCANCODE_QUEUE: Once<ArrayQueue<u8>> = Once::new();
+const QUEUE_SIZE: usize = 2048;
 
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
@@ -15,7 +17,9 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
     let mut port = Port::new(0x60);
 
     let scancode: u8 = unsafe { port.read() };
-    SCANCODE_QUEUE.push(scancode);
+
+    let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
+    queue.force_push(scancode);
 
     unsafe { get_lapic().end_of_interrupt() };
 }
@@ -31,8 +35,10 @@ pub fn driver_main() -> ! {
         HandleControl::Ignore,
     );
 
+    let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
+
     loop {
-        while let Some(scancode) = SCANCODE_QUEUE.pop() {
+        while let Some(scancode) = queue.pop() {
             if let Ok(Some(event)) = keyboard.add_byte(scancode)
                 && let Some(key_event) = keyboard.process_keyevent(event)
             {
