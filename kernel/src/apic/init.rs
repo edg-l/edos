@@ -1,48 +1,24 @@
-use core::sync::atomic::AtomicU64;
-
-use alloc::boxed::Box;
 use x2apic::{
     ioapic::{IoApic, IrqFlags, IrqMode, RedirectionTableEntry},
-    lapic::{xapic_base, LocalApic, LocalApicBuilder},
+    lapic::LocalApicBuilder,
 };
 use x86_64::{
-    PhysAddr, VirtAddr,
-    structures::paging::{PageTableFlags, Size4KiB, mapper::MapToError},
+    PhysAddr,
+    structures::paging::{
+        PageTableFlags, Size4KiB,
+        mapper::{MapToError, TranslateResult},
+    },
 };
 
 use crate::{
-    acpi::{acpi_madt, apic_info},
-    apic::current_apic_id,
+    acpi::apic_info,
+    apic::get_lapic,
     interrupts::InterruptIndex,
-    memory::{APIC_BASE, IOAPIC_BASE, mapper::memory_mapper},
+    memory::{get_virt_addr, mapper::memory_mapper},
     serial_println,
-    util::per_cpu::get_percpu_data,
 };
 
 pub fn init() {
-    let local_apic_address = acpi_madt().get().local_apic_address;
-
-    let base = unsafe { xapic_base() };
-
-    serial_println!("madt base: 0x{:x}, xapic base: 0x{:x}", local_apic_address, base);
-
-    // Map the APIC base
-    {
-        let mut mapper = memory_mapper();
-        mapper
-            .map_address(
-                APIC_BASE,
-                PhysAddr::new(local_apic_address as u64),
-                PageTableFlags::PRESENT
-                    | PageTableFlags::WRITABLE
-                    | PageTableFlags::NO_CACHE
-                    | PageTableFlags::WRITE_THROUGH
-                    | PageTableFlags::NO_EXECUTE
-                    | PageTableFlags::GLOBAL,
-            )
-            .unwrap();
-    }
-
     let apic_info = apic_info();
 
     if apic_info.also_has_legacy_pics {
@@ -57,10 +33,8 @@ pub fn init() {
     unsafe {
         serial_println!("Enabling apic");
         enable_lapic();
-        let id = current_apic_id();
-        serial_println!("Current LAPIC id: {}", id);
         serial_println!("Enabling io apic");
-        enable_io_apic(apic_info, id).expect("failed to set up io apic");
+        enable_io_apic(apic_info).expect("failed to set up io apic");
     }
 }
 
@@ -69,27 +43,20 @@ pub(super) unsafe fn enable_lapic() {
         .timer_vector(InterruptIndex::Timer as usize)
         .error_vector(InterruptIndex::Error as usize)
         .spurious_vector(InterruptIndex::Spurious as usize)
-        .set_xapic_base(APIC_BASE.as_u64())
         .build()
         .unwrap_or_else(|err| panic!("{}", err));
 
     unsafe {
         lapic.enable();
     }
-
-    let pcpu = get_percpu_data();
-    pcpu.lapic = Box::into_raw(Box::new(lapic));
 }
 
 /// # Safety
 /// Should only be called once.
 unsafe fn enable_io_apic(
     info: &acpi::platform::interrupt::Apic,
-    lapic_id: u32,
 ) -> Result<(), MapToError<Size4KiB>> {
-    static IOAPIC_BASE_CURRENT: AtomicU64 = AtomicU64::new(IOAPIC_BASE.as_u64());
-    let mut mapper = memory_mapper();
-
+    let lapic_id = unsafe { get_lapic().id() };
     serial_println!("I/O apics {:#?}", info.io_apics);
 
     #[allow(clippy::never_loop)]
@@ -98,23 +65,41 @@ unsafe fn enable_io_apic(
         unsafe {
             let apic_physical_address = PhysAddr::new(io_apic_info.address as u64);
 
-            let ioapic_virt_addr =
-                IOAPIC_BASE_CURRENT.fetch_add(4096, core::sync::atomic::Ordering::Relaxed);
+            let ioapic_virt_addr = get_virt_addr(apic_physical_address);
 
-            mapper
-                .map_address(
-                    VirtAddr::new_truncate(ioapic_virt_addr),
-                    apic_physical_address,
-                    PageTableFlags::PRESENT
-                        | PageTableFlags::WRITABLE
-                        | PageTableFlags::NO_CACHE
-                        | PageTableFlags::WRITE_THROUGH
-                        | PageTableFlags::NO_EXECUTE
-                        | PageTableFlags::GLOBAL,
-                )
-                .unwrap();
+            {
+                let mut mapper = memory_mapper();
+                match mapper.translate(ioapic_virt_addr) {
+                    TranslateResult::Mapped {
+                        frame,
+                        offset,
+                        flags,
+                    } => {
+                        serial_println!("lapic already mapped: {frame:?} {offset} {flags:?}");
+                    }
+                    TranslateResult::NotMapped => {
+                        serial_println!("I/O APIC not mapped, mapping");
+                        if mapper
+                            .map_address(
+                                ioapic_virt_addr,
+                                apic_physical_address,
+                                PageTableFlags::PRESENT
+                                    | PageTableFlags::WRITABLE
+                                    | PageTableFlags::NO_CACHE
+                                    | PageTableFlags::GLOBAL,
+                            )
+                            .is_err()
+                        {
+                            serial_println!("failed to map I/O APIC, already mapped");
+                        }
+                    }
+                    TranslateResult::InvalidFrameAddress(_) => {
+                        unreachable!()
+                    }
+                }
+            }
 
-            let mut ioapic = IoApic::new(ioapic_virt_addr);
+            let mut ioapic = IoApic::new(ioapic_virt_addr.as_u64());
 
             ioapic.init(io_apic_info.global_system_interrupt_base as u8);
 

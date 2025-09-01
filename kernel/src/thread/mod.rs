@@ -1,18 +1,21 @@
 use core::{sync::atomic::AtomicU64, time::Duration};
 
-use crate::{thread::{
-    context::CpuContext,
-    util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
-}, timer::Instant};
+use crate::{
+    thread::{
+        context::CpuContext,
+        util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
+    },
+    timer::Instant,
+};
 
 pub mod context;
 pub mod interrupt;
+pub mod mailbox;
 pub mod paging;
 pub mod scheduler;
 pub mod signal;
-pub mod util;
-pub mod mailbox;
 pub mod subscriber;
+pub mod util;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ThreadId {

@@ -16,6 +16,7 @@ use crate::{
     main,
     memory::mapper::{MemoryManager, active_level_4_table},
     serial,
+    util::per_cpu::init_this_cpu_percpu,
 };
 
 /// Sets the base revision to the latest revision supported by the crate.
@@ -121,6 +122,8 @@ unsafe extern "C" fn kmain() -> ! {
 
     let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };
     let kernel_page_table = unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };
+
+    unsafe { init_this_cpu_percpu() };
 
     let boot_info = BootInfo {
         framebuffer,

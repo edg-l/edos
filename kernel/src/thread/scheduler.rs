@@ -74,7 +74,6 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                 // coming from kernel task
                 if let Some(kthread) = sched.kthreads.get_mut(&current_id.id) {
                     kthread.context = (*context).clone();
-                    serial_println!("Context switch from kernel");
 
                     match kthread.state {
                         ThreadState::Ready => sched.thread_queue.push(current_id),
@@ -120,7 +119,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
         sched.schedule_next();
 
         if let Some(current_id) = sched.current_thread_id {
-            serial_println!("Next id {:#?}", current_id);
+            // serial_println!("Next id {:?}", current_id);
 
             if current_id.kernel {
                 if let Some(kthread) = sched.kthreads.get(&current_id.id) {
@@ -242,7 +241,7 @@ impl Scheduler {
     /// Cooperatively yield.
     pub fn thread_yield(&self) {
         without_interrupts(|| {
-            let lapic = get_lapic();
+            let mut lapic = get_lapic();
             unsafe {
                 lapic.send_ipi_self(InterruptIndex::Timer as u8);
             }

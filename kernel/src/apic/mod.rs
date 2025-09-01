@@ -1,20 +1,16 @@
 pub mod init;
 
 pub use init::init;
-use x2apic::lapic::LocalApic;
+use x2apic::lapic::{LocalApic, LocalApicBuilder};
 
-use crate::util::per_cpu::get_percpu_data;
-
-pub fn current_apic_id() -> u32 {
-    unsafe { (*get_percpu_data().lapic).id() }
-}
+use crate::interrupts::InterruptIndex;
 
 // Get the lapic
-pub fn get_lapic() -> &'static mut LocalApic {
-    unsafe {
-        if !get_percpu_data().lapic.is_aligned() {
-            panic!("get_lapic ptr is not aligned: {:?}", get_percpu_data().lapic);
-        }
-    }
-    unsafe { get_percpu_data().lapic.as_mut().expect("should unwrap lapic") }
+pub fn get_lapic() -> LocalApic {
+    LocalApicBuilder::new()
+        .timer_vector(InterruptIndex::Timer as usize)
+        .error_vector(InterruptIndex::Error as usize)
+        .spurious_vector(InterruptIndex::Spurious as usize)
+        .build()
+        .unwrap()
 }

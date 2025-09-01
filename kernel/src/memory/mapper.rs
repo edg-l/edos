@@ -178,7 +178,7 @@ impl MemoryManager {
     /// If the given address has a valid mapping, the mapped frame and the offset within that frame is returned. Otherwise an error value is returned.
     ///
     /// This function works with huge pages of all sizes.
-    fn translate(&self, addr: VirtAddr) -> TranslateResult {
+    pub fn translate(&self, addr: VirtAddr) -> TranslateResult {
         self.mapper.translate(addr)
     }
 }

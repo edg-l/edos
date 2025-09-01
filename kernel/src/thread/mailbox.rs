@@ -48,14 +48,16 @@ impl<T, R> Mailbox<T, R> {
     /// Send a request, returning a Response that can be waited for values.
     pub fn send(&self, request: T) -> Arc<Response<R>> {
         without_interrupts(|| {
+            let sender = sched().current_id();
             let response = Arc::new(Response {
                 fulfilled: AtomicBool::new(false),
                 taken: AtomicBool::new(false),
                 value: UnsafeCell::new(MaybeUninit::uninit()),
+                thread: sender,
             });
 
             self.queue.push(Request {
-                sender: sched().current_id(),
+                sender,
                 request,
                 response: response.clone(),
             });
@@ -71,6 +73,8 @@ pub struct Response<R> {
     /// Whether the response is fulfilled.
     fulfilled: AtomicBool,
     taken: AtomicBool,
+    // Thread to wake on response.
+    thread: ThreadId,
     value: UnsafeCell<MaybeUninit<R>>,
 }
 
@@ -86,13 +90,16 @@ pub enum ResponseResult<R> {
 
 impl<R> Response<R> {
     pub fn answer(&self, value: R) {
-        unsafe { self.value.get().write(MaybeUninit::new(value)) };
-        self.fulfilled.store(true, Ordering::Release);
+        without_interrupts(|| {
+            unsafe { self.value.get().write(MaybeUninit::new(value)) };
+            self.fulfilled.store(true, Ordering::Release);
+            let sched = sched();
+            sched.thread_wake(self.thread);
+        })
     }
 
     // If this method is called after having received a value (Some), it will return None forever.
     pub fn try_receive(&self) -> Option<R> {
-        serial_println!("Response::try_receive: called");
         if !self.fulfilled.load(Ordering::Acquire) {
             return None;
         }
@@ -112,17 +119,13 @@ impl<R> Response<R> {
             return ResponseResult::Value(value);
         }
 
-        serial_println!("Response::receive_timeout: about to wait");
-
         // Mark thread as waiting and yield
         let sched = sched();
         let thread_id = sched.current_id();
         // Mark ourselves as waiting.
         sched.thread_wait(thread_id, timeout);
-        serial_println!("Response::receive_timeout: marked as waiting, yielding");
         // Yield to scheduler.
         sched.thread_yield();
-        serial_println!("Response::receive_timeout: done yielding");
 
         // Try again after wakeup
         if let Some(msg) = self.try_receive() {

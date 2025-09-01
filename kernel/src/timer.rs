@@ -29,7 +29,7 @@ impl TimerCalibration {
         let apic_start_count = 0xFFFFFFFF;
         let tsc_start = unsafe { core::arch::x86_64::_rdtsc() };
         unsafe {
-            let lapic = get_lapic();
+            let mut lapic = get_lapic();
             lapic.set_timer_mode(x2apic::lapic::TimerMode::OneShot);
             lapic.set_timer_divide(x2apic::lapic::TimerDivide::Div1); // No division for calibration
             lapic.set_timer_initial(apic_start_count);

@@ -50,10 +50,10 @@ pub fn thread_2() -> ! {
     loop {
         serial_println!("thread_2: sending request with counter {counter}");
         let res = mailbox.send(counter);
-         serial_println!("thread_2: request sent");
+        serial_println!("thread_2: request sent");
         counter += 1;
-         serial_println!("thread_2: receiving.");
+        serial_println!("thread_2: waiting to receive (4s timeout)...");
         let value = res.receive_timeout(Duration::from_secs(4));
-        serial_println!("thread_2: got value: {value:?}");
+        serial_println!("thread_2: received, got value: {value:?}");
     }
 }

@@ -11,8 +11,6 @@ pub const KERNEL_HEAP_SIZE: u64 = 1024 * 1024 * 128; // 128 mb
 // After heap
 pub const ACPI_MAPPINGS: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_0800_0000);
 // Assuming 1mb for acpi
-pub const APIC_BASE: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_0900_0000);
-pub const IOAPIC_BASE: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_0910_0000);
 
 pub const KTHREAD_STACK_FIRST: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_1000_0000);
 pub const KTHREAD_STACK_SIZE: u64 = 4096 * 2;

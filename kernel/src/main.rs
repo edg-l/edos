@@ -25,10 +25,10 @@ mod gdt;
 mod interrupts;
 mod memory;
 mod serial;
+mod test;
 mod thread;
 mod timer;
 mod util;
-mod test;
 
 extern crate alloc;
 
@@ -113,7 +113,7 @@ fn main() -> ! {
     // Enable apic timer, every 1 second
     {
         unsafe {
-            let lapic = get_lapic();
+            let mut lapic = get_lapic();
             let timer = get_timer_calibration();
             lapic.set_timer_mode(x2apic::lapic::TimerMode::Periodic);
             lapic.set_timer_divide(x2apic::lapic::TimerDivide::Div1);

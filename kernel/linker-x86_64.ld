@@ -46,16 +46,21 @@ SECTIONS
         KEEP(*(.requests_end_marker))
     } :data
 
-    /* Per-CPU data section */
-    . = ALIGN(CONSTANT(MAXPAGESIZE));
-    __percpu_start = .;
-    .percpu : {
-        *(.percpu .percpu.*)
+    /* One object-sized template */
+    .percpu_tpl : ALIGN(64) {
+    __percpu_tpl_start = .;
+    KEEP(*(.percpu.tpl))        /* place PERCPU_TEMPLATE here */
+    __percpu_tpl_end = .;
     } :data
+
+    /* Reserve array of slots (no file data), aligned */
+    .percpu (NOLOAD) : ALIGN(64) {
+    __percpu_start = .;
+    /* stride = aligned size of template */
+    __percpu_stride = ALIGN(__percpu_tpl_end - __percpu_tpl_start, 64);
+    . = . + (__percpu_stride * 64);
     __percpu_end = .;
-    __percpu_size = __percpu_end - __percpu_start;
-    /* Reserve space for each CPU (assuming max 64 CPUs) */
-    . = __percpu_start + (__percpu_size * 64);
+    } :data
 
     /* NOTE: .bss needs to be the last thing mapped to :data, otherwise lots of */
     /* unnecessary zeros will be written to the binary. */
