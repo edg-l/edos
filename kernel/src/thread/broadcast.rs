@@ -37,12 +37,13 @@ impl<T: Clone> Broadcast<T> {
     /// Broadcasts a message to all subscribers. Waking the threads.
     pub fn broadcast(&self, value: T) {
         let subs = self.subscribers.read();
-
-        for receiver in subs.values() {
+        let sched = sched();
+        for (tid, receiver) in subs.iter() {
             if receiver.queue.len() > self.bound {
                 receiver.queue.pop();
             }
             receiver.queue.push(value.clone());
+            sched.thread_wake(*tid);
         }
     }
 }
