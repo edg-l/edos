@@ -1,8 +1,13 @@
 use alloc::vec;
 use alloc::vec::Vec;
+use spin::Once;
 use x86_64::instructions::hlt;
 
-use crate::boot::{BOOT_INFO, boot_info};
+pub mod api;
+
+use crate::{
+    boot::boot_info, graphics::api::{Request, Response, ScreenInfo, REQUESTS}, thread::{mailbox::Mailbox, scheduler::sched}
+};
 
 pub struct DoubleBuffer {
     back_buffer: Vec<u32>,
@@ -45,16 +50,35 @@ impl DoubleBuffer {
     }
 }
 
+
+
+
+
 pub fn render_thread() -> ! {
+    let requests = REQUESTS.call_once(|| Mailbox::new(sched().current_id()));
+
     let mut display = DoubleBuffer::new();
 
     for i in 0..100_u64 {
         display.set_pixel(i as usize, i as usize, 0xFFFFFFFF);
     }
 
-    display.present();
-
     loop {
+        while let Some(request) = requests.pop_request() {
+            match request.message {
+                Request::ScreenInfo => {
+                    let info = ScreenInfo {
+                        height: display.height,
+                        width: display.width,
+                    };
+                    request.answer(Response::ScreenInfo(info));
+                }
+                Request::Render => {
+                    display.present();
+                    request.answer(Response::Rendered);
+                }
+            }
+        }
         hlt();
     }
 }
