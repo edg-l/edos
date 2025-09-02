@@ -2,14 +2,14 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
-use core::arch::asm;
+use core::{arch::asm, time::Duration};
 
 use x86_64::{VirtAddr, instructions::hlt};
 
 use crate::{
     acpi::{acpi_madt, init_acpi},
     allocator::init_heap,
-    apic::get_lapic,
+    apic::{get_lapic, set_apic_timer_and_enable},
     boot::boot_info,
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
     thread::util::queue_spawn_kthread,
@@ -22,6 +22,7 @@ mod apic;
 mod boot;
 mod drivers;
 mod gdt;
+mod graphics;
 mod interrupts;
 mod memory;
 mod serial;
@@ -95,39 +96,15 @@ fn main() -> ! {
     queue_spawn_kthread(test::thread_1);
     queue_spawn_kthread(test::thread_2);
     queue_spawn_kthread(test::thread_kb_listener);
-
-    for i in 0..100_u64 {
-        // Calculate the pixel offset using the framebuffer information we obtained above.
-        // We skip `i` scanlines (pitch is provided in bytes) and add `i * 4` to skip `i` pixels forward.
-        let pixel_offset = i * info.framebuffer.pitch() + i * 4;
-
-        // Write 0xFFFFFFFF to the provided pixel offset to fill it white.
-        unsafe {
-            info.framebuffer
-                .addr()
-                .add(pixel_offset as usize)
-                .cast::<u32>()
-                .write(0xFFFFFFFF)
-        };
-    }
+    queue_spawn_kthread(graphics::render_thread);
 
     // Enable apic timer, every 1 second
-    {
-        unsafe {
-            let mut lapic = get_lapic();
-            let timer = get_timer_calibration();
-            lapic.set_timer_mode(x2apic::lapic::TimerMode::Periodic);
-            lapic.set_timer_divide(x2apic::lapic::TimerDivide::Div1);
-            lapic.set_timer_initial(timer.ticks_per_microsecond as u32 * 10_000);
-            lapic.enable_timer();
-        }
-    }
+    set_apic_timer_and_enable(Duration::from_millis(10));
 
     x86_64::instructions::interrupts::enable_and_hlt();
 
     loop {
         hlt();
-        serial_println!("hi from main halt");
     }
 }
 

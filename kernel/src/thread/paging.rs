@@ -15,7 +15,7 @@ pub unsafe fn allocate_process_pml4(kernel_pml4: &PageTable) -> PhysFrame {
     // Zero the entire table
     pml4.zero();
 
-    // Copy kernel mappings (higher half: indices 256-511)
+    // Copy higher kernel half mappings
     for i in 256..512 {
         pml4[i] = kernel_pml4[i].clone();
     }
