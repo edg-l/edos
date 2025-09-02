@@ -10,7 +10,10 @@ use crossbeam_queue::SegQueue;
 use thiserror::Error;
 use x86_64::instructions::interrupts::without_interrupts;
 
-use crate::{serial_println, thread::{scheduler::sched, ThreadId}};
+use crate::{
+    serial_println,
+    thread::{ThreadId, scheduler::sched},
+};
 
 // TODO: maybe make a sender struct so others dont have access to the queue
 // Encapsulate better
@@ -130,7 +133,6 @@ impl<R> Response<R> {
 
         // Wait with timeout
         sched().thread_wait_timeout(timeout);
-
 
         // Try again after wakeup
         if let Some(msg) = self.try_receive() {

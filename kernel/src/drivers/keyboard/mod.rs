@@ -6,7 +6,9 @@ use x86_64::{
     structures::idt::InterruptStackFrame,
 };
 
-use crate::{apic::get_lapic, serial_println};
+use crate::{apic::get_lapic, serial_println, thread::broadcast::Broadcast};
+
+pub static KEYBOARD_BROADCAST: Broadcast<DecodedKey> = Broadcast::new(1024);
 
 static SCANCODE_QUEUE: Once<ArrayQueue<u8>> = Once::new();
 const QUEUE_SIZE: usize = 2048;
@@ -42,6 +44,7 @@ pub fn driver_main() -> ! {
             if let Ok(Some(event)) = keyboard.add_byte(scancode)
                 && let Some(key_event) = keyboard.process_keyevent(event)
             {
+                KEYBOARD_BROADCAST.broadcast(key_event);
                 match key_event {
                     DecodedKey::RawKey(key_code) => {
                         serial_println!("kb: {key_code:?}")

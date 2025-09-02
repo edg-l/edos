@@ -5,6 +5,7 @@ use spin::Once;
 use x86_64::instructions::hlt;
 
 use crate::{
+    drivers::keyboard::KEYBOARD_BROADCAST,
     serial_println,
     thread::{mailbox::Mailbox, scheduler::sched},
 };
@@ -57,5 +58,17 @@ pub fn thread_2() -> ! {
         serial_println!("thread_2: received, got value: {value:?}");
 
         sched().thread_sleep(Duration::from_secs(1));
+    }
+}
+
+pub fn thread_kb_listener() -> ! {
+    let rx = KEYBOARD_BROADCAST.subscribe();
+
+    loop {
+        let key = rx.recv_timeout(Duration::from_secs(4));
+
+        if let Ok(key) = key {
+            serial_println!("Got key: {:?}", key);
+        }
     }
 }

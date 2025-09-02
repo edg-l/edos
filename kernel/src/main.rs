@@ -94,6 +94,7 @@ fn main() -> ! {
 
     queue_spawn_kthread(test::thread_1);
     queue_spawn_kthread(test::thread_2);
+    queue_spawn_kthread(test::thread_kb_listener);
 
     for i in 0..100_u64 {
         // Calculate the pixel offset using the framebuffer information we obtained above.
