@@ -19,7 +19,7 @@ pub fn thread_1() -> ! {
     let mut counter = 0;
     loop {
         // save all incoming requests
-        while let Some(req) = mailbox.queue.pop() {
+        while let Some(req) = mailbox.pop_request() {
             serial_println!("thread_1: got request");
             requests.push_back(req);
         }
@@ -27,7 +27,7 @@ pub fn thread_1() -> ! {
         // in a more realistic scenario maybe we would use a btree and have to wait for some interrutps, here we can process directly.
         while let Some(request) = requests.pop_front() {
             serial_println!("thread_1: answering request");
-            request.response.answer(counter);
+            request.answer(counter);
             serial_println!("thread_1: done answering");
             counter += 1;
         }
@@ -55,5 +55,7 @@ pub fn thread_2() -> ! {
         serial_println!("thread_2: waiting to receive (4s timeout)...");
         let value = res.receive_timeout(Duration::from_secs(4));
         serial_println!("thread_2: received, got value: {value:?}");
+
+        sched().thread_sleep(Duration::from_secs(1));
     }
 }

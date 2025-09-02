@@ -7,12 +7,10 @@ use core::{
 
 use alloc::sync::Arc;
 use crossbeam_queue::SegQueue;
+use thiserror::Error;
 use x86_64::instructions::interrupts::without_interrupts;
 
-use crate::{
-    serial_println,
-    thread::{ThreadId, scheduler::sched},
-};
+use crate::{serial_println, thread::{scheduler::sched, ThreadId}};
 
 // TODO: maybe make a sender struct so others dont have access to the queue
 // Encapsulate better
@@ -20,21 +18,21 @@ use crate::{
 #[derive(Debug)]
 /// A mailbox for sending requests with the type T and getting responses with the type R.
 pub struct Mailbox<T, R> {
-    pub queue: SegQueue<Request<T, R>>,
-    pub owner: ThreadId,
+    queue: SegQueue<Request<T, R>>,
+    owner: ThreadId,
 }
 
 #[derive(Debug)]
 /// The message info.
 pub struct Request<T, R> {
     /// The sender thread
-    pub sender: ThreadId,
+    sender: ThreadId,
     /// The response given when the message was sent.
     ///
     /// Saved so we can place the value in the response when the message is processed.
-    pub response: Arc<Response<R>>,
+    response: Arc<Response<R>>,
     /// The message
-    pub request: T,
+    pub message: T,
 }
 
 impl<T, R> Mailbox<T, R> {
@@ -58,12 +56,27 @@ impl<T, R> Mailbox<T, R> {
 
             self.queue.push(Request {
                 sender,
-                request,
+                message: request,
                 response: response.clone(),
             });
 
             sched().thread_wake(self.owner);
             response
+        })
+    }
+
+    pub fn pop_request(&self) -> Option<Request<T, R>> {
+        self.queue.pop()
+    }
+}
+
+impl<T, R> Request<T, R> {
+    pub fn answer(&self, value: R) {
+        without_interrupts(|| {
+            unsafe { self.response.value.get().write(MaybeUninit::new(value)) };
+            self.response.fulfilled.store(true, Ordering::Release);
+            let sched = sched();
+            sched.thread_wake(self.response.thread);
         })
     }
 }
@@ -81,23 +94,15 @@ pub struct Response<R> {
 unsafe impl<R: Send> Send for Response<R> {}
 unsafe impl<R: Send> Sync for Response<R> {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ResponseResult<R> {
-    Value(R),
+#[derive(Debug, Error)]
+pub enum ReceiveError {
+    #[error("timeout")]
     Timeout,
-    AlreadyClaimed,
+    #[error("this response was already received")]
+    AlreadyReceived,
 }
 
 impl<R> Response<R> {
-    pub fn answer(&self, value: R) {
-        without_interrupts(|| {
-            unsafe { self.value.get().write(MaybeUninit::new(value)) };
-            self.fulfilled.store(true, Ordering::Release);
-            let sched = sched();
-            sched.thread_wake(self.thread);
-        })
-    }
-
     // If this method is called after having received a value (Some), it will return None forever.
     pub fn try_receive(&self) -> Option<R> {
         if !self.fulfilled.load(Ordering::Acquire) {
@@ -113,25 +118,25 @@ impl<R> Response<R> {
     }
 
     /// Try to receive the result within the given timeout.
-    pub fn receive_timeout(&self, timeout: Duration) -> ResponseResult<R> {
+    pub fn receive_timeout(&self, timeout: Duration) -> Result<R, ReceiveError> {
         // Try immediate receive
         if let Some(value) = self.try_receive() {
-            return ResponseResult::Value(value);
+            return Ok(value);
         }
 
-        // Mark thread as waiting and yield
-        let sched = sched();
-        let thread_id = sched.current_id();
-        // Mark ourselves as waiting.
-        sched.thread_wait(thread_id, timeout);
-        // Yield to scheduler.
-        sched.thread_yield();
+        if self.taken.load(Ordering::Acquire) {
+            return Err(ReceiveError::AlreadyReceived);
+        }
+
+        // Wait with timeout
+        sched().thread_wait_timeout(timeout);
+
 
         // Try again after wakeup
         if let Some(msg) = self.try_receive() {
-            ResponseResult::Value(msg)
+            Ok(msg)
         } else {
-            ResponseResult::Timeout
+            Err(ReceiveError::Timeout)
         }
     }
 }

@@ -8,13 +8,13 @@ use crate::{
     timer::Instant,
 };
 
+pub mod broadcast;
 pub mod context;
 pub mod interrupt;
 pub mod mailbox;
 pub mod paging;
 pub mod scheduler;
 pub mod signal;
-pub mod subscriber;
 pub mod util;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

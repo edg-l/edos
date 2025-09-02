@@ -67,51 +67,20 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
         sched.process_spawn_queue();
         sched.process_signal_queue();
 
-        let now = Instant::now();
-
+        // Push current thread to queue, it's state will be processed then.
         if let Some(current_id) = sched.current_thread_id {
             if current_id.kernel {
                 // coming from kernel task
                 if let Some(kthread) = sched.kthreads.get_mut(&current_id.id) {
                     kthread.context = (*context).clone();
-
-                    match kthread.state {
-                        ThreadState::Ready => sched.thread_queue.push(current_id),
-                        ThreadState::Waiting => {}
-                        ThreadState::Exited(code) => {
-                            serial_println!("KThread {current_id:?} exited {code}");
-                            kthread.free();
-                            // TODO: signal and remove
-                        }
-                        ThreadState::WaitTimeout((start, timeout)) => {
-                            if now.duration_since(start) >= timeout {
-                                kthread.state = ThreadState::Ready;
-                                sched.thread_queue.push(current_id);
-                            }
-                        }
-                    }
+                    sched.thread_queue.push(current_id);
                 }
             } else {
                 // coming from user
                 if let Some(thread) = sched.threads.get_mut(&current_id.id) {
                     thread.context = (*context).clone();
                     serial_println!("Context switch from user");
-
-                    match thread.state {
-                        ThreadState::Ready => sched.thread_queue.push(current_id),
-                        ThreadState::Waiting => {}
-                        ThreadState::Exited(code) => {
-                            serial_println!("Thread {current_id:?} exited {code}");
-                            thread.free();
-                            // TODO: signal and remove
-                        }
-                        ThreadState::WaitTimeout((start, timeout)) => {
-                            if now.duration_since(start) >= timeout {
-                                thread.state = ThreadState::Ready;
-                                sched.thread_queue.push(current_id);
-                            }
-                        }
-                    }
+                    sched.thread_queue.push(current_id);
                 }
             }
         }
@@ -181,17 +150,48 @@ impl Scheduler {
 
     /// Schedules the next thread id, updating current_thread_id.
     fn schedule_next(&mut self) -> bool {
+        let now = Instant::now();
         while let Some(id) = self.thread_queue.pop() {
             if id.kernel {
-                if let Some(thread) = self.kthreads.get(&id.id)
-                    && thread.state == ThreadState::Ready
-                {
+                if let Some(thread) = self.kthreads.get_mut(&id.id) {
+                    match thread.state {
+                        ThreadState::Ready => {}
+                        ThreadState::Waiting => continue,
+                        ThreadState::WaitTimeout((start, timeout)) => {
+                            if now.duration_since(start) >= timeout {
+                                thread.state = ThreadState::Ready;
+                            } else {
+                                self.thread_queue.push(id);
+                                continue;
+                            }
+                        }
+                        ThreadState::Exited(code) => {
+                            serial_println!("KThread {id:?} exited {code}");
+                            thread.free();
+                            continue;
+                        }
+                    }
                     self.current_thread_id = Some(id);
                     return true;
                 }
-            } else if let Some(thread) = self.threads.get(&id.id)
-                && thread.state == ThreadState::Ready
-            {
+            } else if let Some(thread) = self.threads.get_mut(&id.id) {
+                match thread.state {
+                    ThreadState::Ready => {}
+                    ThreadState::Waiting => continue,
+                    ThreadState::WaitTimeout((start, timeout)) => {
+                        if now.duration_since(start) >= timeout {
+                            thread.state = ThreadState::Ready;
+                        } else {
+                            self.thread_queue.push(id);
+                            continue;
+                        }
+                    }
+                    ThreadState::Exited(code) => {
+                        serial_println!("Thread {id:?} exited {code}");
+                        thread.free();
+                        continue;
+                    }
+                }
                 self.current_thread_id = Some(id);
                 return true;
             }
@@ -224,8 +224,8 @@ impl Scheduler {
         })
     }
 
-    /// Wait the given thread for a maximum of the given timeout.
-    pub fn thread_wait(&mut self, id: ThreadId, timeout: Duration) {
+    /// Sets the given thread as waiting for a maximum of the given timeout.
+    pub fn thread_set_wait_timeout(&mut self, id: ThreadId, timeout: Duration) {
         without_interrupts(|| {
             let now = Instant::now();
             if id.kernel {
@@ -236,6 +236,32 @@ impl Scheduler {
                 thread.state = ThreadState::WaitTimeout((now, timeout))
             }
         })
+    }
+
+    /// The caller thread gets put in a wait (and yields execution) until timeout or another thread wakes it.
+    pub fn thread_wait_timeout(&mut self, timeout: Duration) {
+        without_interrupts(|| {
+            let now = Instant::now();
+            let id = self.current_id();
+            if id.kernel {
+                if let Some(thread) = self.kthreads.get_mut(&id.id) {
+                    thread.state = ThreadState::WaitTimeout((now, timeout))
+                }
+            } else if let Some(thread) = self.threads.get_mut(&id.id) {
+                thread.state = ThreadState::WaitTimeout((now, timeout))
+            }
+            let mut lapic = get_lapic();
+            unsafe {
+                lapic.send_ipi_self(InterruptIndex::Timer as u8);
+            }
+        });
+        hlt();
+    }
+
+    /// The caller thread sleeps for the given duration.
+    #[inline]
+    pub fn thread_sleep(&mut self, duration: Duration) {
+        self.thread_wait_timeout(duration);
     }
 
     /// Cooperatively yield.

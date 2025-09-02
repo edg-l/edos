@@ -117,7 +117,7 @@ fn main() -> ! {
             let timer = get_timer_calibration();
             lapic.set_timer_mode(x2apic::lapic::TimerMode::Periodic);
             lapic.set_timer_divide(x2apic::lapic::TimerDivide::Div1);
-            lapic.set_timer_initial(timer.ticks_per_microsecond as u32 * 1_000_000);
+            lapic.set_timer_initial(timer.ticks_per_microsecond as u32 * 10_000);
             lapic.enable_timer();
         }
     }
