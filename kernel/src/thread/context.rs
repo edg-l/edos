@@ -1,3 +1,5 @@
+#![expect(unused)]
+
 use x86_64::{
     PrivilegeLevel, VirtAddr, registers::rflags::RFlags, structures::idt::InterruptStackFrameValue,
 };

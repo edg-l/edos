@@ -1,3 +1,5 @@
+#![expect(unused)]
+
 use acpi::{
     AcpiTables, PhysicalMapping,
     platform::{InterruptModel, ProcessorInfo, interrupt::Apic},
