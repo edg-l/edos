@@ -9,10 +9,10 @@ use x86_64::{VirtAddr, instructions::hlt};
 use crate::{
     acpi::{acpi_madt, init_acpi},
     allocator::init_heap,
-    apic::{get_lapic, set_apic_timer_and_enable},
+    apic::set_apic_timer_and_enable,
     boot::boot_info,
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
-    thread::util::queue_spawn_kthread,
+    thread::util::queue_spawn_kthread_named,
     timer::{get_timer_calibration, init_boot_time, uptime_us},
 };
 
@@ -35,7 +35,7 @@ extern crate alloc;
 
 fn init() {
     let info = boot_info();
-    serial_println!("Initializing frame allocator");
+    println!("Initializing frame allocator");
     init_frame_allocator(info.memory_map);
 
     {
@@ -54,49 +54,49 @@ fn init() {
             .unwrap();
     }
 
-    serial_println!("Initializing heap");
+    println!("Initializing heap");
     init_heap();
-    serial_println!("Initializing acpi tables");
+    println!("Initializing acpi tables");
     init_acpi();
-    serial_println!("Initializing gdt");
+    println!("Initializing gdt");
     gdt::init();
-    serial_println!("Initializing idt");
+    println!("Initializing idt");
     interrupts::init();
-    serial_println!("Initializing apic");
+    println!("Initializing apic");
     apic::init();
-    serial_println!("Initializing hpet");
+    println!("Initializing hpet");
     drivers::hpet::driver::init();
-    serial_println!("Calibrating timer");
+    println!("Calibrating timer");
     get_timer_calibration();
     init_boot_time();
-    serial_println!("Init done");
+    println!("Init done");
 }
 
 fn main() -> ! {
-    serial_println!("Booting...");
+    println!("Booting...");
     init();
 
     let madt = acpi_madt();
-    serial_println!(
+    println!(
         "Found MADT:\n{:p}",
         madt.get().local_apic_address as *mut u8
     );
 
     let info = boot_info();
-    serial_println!("Physical offset at {:p}", info.physical_memory_offset);
+    println!("Physical offset at {:p}", info.physical_memory_offset);
 
     let uptime = uptime_us();
 
-    serial_println!("Uptime us: {uptime}");
+    println!("Uptime us: {uptime}");
 
     // Init scheduler
     thread::scheduler::init();
     drivers::init_drivers();
 
-    queue_spawn_kthread(test::thread_1);
-    queue_spawn_kthread(test::thread_2);
-    queue_spawn_kthread(test::thread_kb_listener);
-    queue_spawn_kthread(graphics::render_thread);
+    queue_spawn_kthread_named("mb-receiver", test::thread_1);
+    queue_spawn_kthread_named("mb-sender", test::thread_2);
+    queue_spawn_kthread_named("keyboard-listener", test::thread_kb_listener);
+    queue_spawn_kthread_named("render", graphics::render_thread);
 
     // Enable apic timer, every 1 second
     set_apic_timer_and_enable(Duration::from_millis(10));
@@ -110,8 +110,8 @@ fn main() -> ! {
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    serial_println!("KERNEL PANIC:");
-    serial_println!("{info:#?}");
+    println!("KERNEL PANIC:");
+    println!("{info:#?}");
     loop {
         hlt();
     }

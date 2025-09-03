@@ -4,7 +4,7 @@ use spin::{Once, mutex::Mutex};
 use uart_16550::SerialPort;
 use x86_64::instructions::interrupts::without_interrupts;
 
-use crate::timer::uptime_us;
+use crate::{thread::scheduler::sched, timer::uptime_us, util::per_cpu::get_percpu_data};
 
 static SERIAL_DBG: Once<Mutex<SerialPort>> = Once::new();
 
@@ -17,14 +17,14 @@ pub fn init() {
 }
 
 #[macro_export]
-macro_rules! serial_print {
+macro_rules! print {
     ($($arg:tt)*) => ($crate::serial::_serial_print(format_args!($($arg)*)));
 }
 
 #[macro_export]
-macro_rules! serial_println {
+macro_rules! println {
     () => ($crate::print!("\n"));
-    ($($arg:tt)*) => ($crate::serial_print!("{}\n", format_args!($($arg)*)));
+    ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
 #[doc(hidden)]
@@ -34,12 +34,34 @@ pub fn _serial_print(args: fmt::Arguments) {
         let uptime_us = uptime_us();
         let secs = uptime_us / 1_000_000;
         let us = uptime_us % 1_000_000;
+
+        if let Some(sched) = unsafe { get_percpu_data().scheduler.as_mut() }
+            && let Some(tid) = sched.current_id_opt()
+        {
+            unsafe {
+                SERIAL_DBG
+                    .get()
+                    .unwrap_unchecked()
+                    .lock()
+                    .write_fmt(format_args!(
+                        "[{secs}.{us:06}] <{}:{}> {args}",
+                        tid.name
+                            .as_ref()
+                            .map(|x| x.as_str())
+                            .unwrap_or_else(|| "unk"),
+                        tid.id
+                    ))
+                    .unwrap();
+            }
+            return;
+        };
+
         unsafe {
             SERIAL_DBG
                 .get()
                 .unwrap_unchecked()
                 .lock()
-                .write_fmt(format_args!("[{secs}.{us:06}] {args}"))
+                .write_fmt(format_args!("[{secs}.{us:06}] <main> {args}"))
                 .unwrap();
         }
     })

@@ -5,7 +5,7 @@ use x86_64::structures::paging::PageTableFlags;
 
 use crate::{
     memory::{KERNEL_HEAP, KERNEL_HEAP_SIZE, mapper::memory_mapper},
-    serial_println,
+    println,
 };
 
 #[global_allocator]
@@ -21,7 +21,7 @@ pub fn init_heap() {
         .map_memory(heap_start, KERNEL_HEAP_SIZE, PageTableFlags::WRITABLE)
         .expect("failed to map heap");
 
-    serial_println!("Mapped kernel heap at {:p}-{:p}", heap_end, heap_end);
+    println!("Mapped kernel heap at {:p}-{:p}", heap_end, heap_end);
 
     unsafe {
         ALLOCATOR

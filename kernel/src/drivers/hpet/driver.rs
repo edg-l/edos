@@ -9,7 +9,7 @@ use crate::{
     acpi::acpi_tables,
     drivers::hpet::instant::HpetTimer,
     memory::{get_virt_addr, mapper::memory_mapper},
-    serial_println,
+    println,
 };
 
 const HPET_GENERAL_CAPS: usize = 0x00;
@@ -25,7 +25,7 @@ pub fn init() {
 
     match result {
         Ok(hpet_info) => {
-            serial_println!("HPET base addr at 0x{:x}", hpet_info.base_address);
+            println!("HPET base addr at 0x{:x}", hpet_info.base_address);
             let hpet_base = PhysAddr::new(hpet_info.base_address as u64);
             // HPET is mapped by limine.
             let virt_hpet = get_virt_addr(hpet_base);
@@ -38,10 +38,10 @@ pub fn init() {
                     offset,
                     flags,
                 } => {
-                    serial_println!("already mapped: {frame:?} {offset} {flags:?}");
+                    println!("already mapped: {frame:?} {offset} {flags:?}");
                 }
                 TranslateResult::NotMapped => {
-                    serial_println!("HPET not mapped, mapping");
+                    println!("HPET not mapped, mapping");
                     if mapper
                         .map_address(
                             virt_hpet,
@@ -52,14 +52,14 @@ pub fn init() {
                         )
                         .is_err()
                     {
-                        serial_println!("failed to map hpet, already mapped");
+                        println!("failed to map hpet, already mapped");
                     }
                 }
                 TranslateResult::InvalidFrameAddress(_) => {
                     unreachable!()
                 }
             }
-            serial_println!("HPET virt base addr at 0x{:x}", virt_hpet);
+            println!("HPET virt base addr at 0x{:x}", virt_hpet);
 
             HPET.call_once(|| {
                 let mut timer = HpetTimer {
@@ -78,7 +78,7 @@ pub fn init() {
             });
         }
         Err(err) => {
-            serial_println!("Couldn't find HPET: {err:#?}");
+            println!("Couldn't find HPET: {err:#?}");
         }
     }
 }

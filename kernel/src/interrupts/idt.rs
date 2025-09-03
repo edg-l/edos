@@ -12,7 +12,7 @@ use crate::{
         InterruptIndex,
         io::{ahci_interrupt_handler, device_not_available_handler, mouse_interrupt_handler},
     },
-    serial_println,
+    println,
     thread::interrupt::timer_interrupt_handler,
 };
 
@@ -54,10 +54,10 @@ extern "x86-interrupt" fn general_protection_fault_handler(
             "EXCEPTION: general_protection_fault (segfault?) CHECK: (error: {error_code})\n{stack_frame:#?}"
         );
     } else {
-        serial_println!(
+        println!(
             "EXCEPTION: general_protection_fault (segfault?) in RING 3 CHECK: (error: {error_code})\n{stack_frame:#?}",
         );
-        serial_println!(
+        println!(
             "EXCEPTION: general_protection_fault (segfault?) in RING 3: (error: {error_code})\n{stack_frame:#?}",
         );
 
@@ -66,12 +66,12 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    serial_println!("EXCEPTION: invalid_opcode CHECK\n{stack_frame:#?}");
+    println!("EXCEPTION: invalid_opcode CHECK\n{stack_frame:#?}");
     unsafe { get_lapic().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn alignment_check_handler(stack_frame: InterruptStackFrame, value: u64) {
-    serial_println!("EXCEPTION: ALIGNMENT CHECK: ({value})\n{stack_frame:#?}");
+    println!("EXCEPTION: ALIGNMENT CHECK: ({value})\n{stack_frame:#?}");
     unsafe { get_lapic().end_of_interrupt() };
 }
 
@@ -79,7 +79,7 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) -> ! {
-    serial_println!("double fault");
+    println!("double fault");
     panic!(
         "EXCEPTION: DOUBLE FAULT: ({error_code})\n{:#?}",
         stack_frame
@@ -158,12 +158,12 @@ extern "C" fn timer_context_switch_handler(_saved_registers: *mut u64) {
 }
 
 extern "x86-interrupt" fn apic_error_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    serial_println!("apic error");
+    println!("apic error");
     unsafe { get_lapic().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    serial_println!("spurious");
+    println!("spurious");
     unsafe { get_lapic().end_of_interrupt() };
 }
 
@@ -177,13 +177,13 @@ extern "x86-interrupt" fn page_fault_handler(
 
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0 {
         let address = Cr2::read().unwrap();
-        serial_println!("EXCEPTION: PAGE FAULT in Ring 0");
-        serial_println!("Accessed Address: {address:?}");
-        serial_println!("Error Code: {error_code:?}");
-        serial_println!("{stack_frame:#?}");
-        serial_println!("Fault Type: {error_desc}",);
+        println!("EXCEPTION: PAGE FAULT in Ring 0");
+        println!("Accessed Address: {address:?}");
+        println!("Error Code: {error_code:?}");
+        println!("{stack_frame:#?}");
+        println!("Fault Type: {error_desc}",);
 
-        serial_println!(
+        println!(
             "Page fault, address = {:p}, error = {error_desc:?}",
             address.as_ptr::<u8>()
         );
@@ -196,13 +196,13 @@ extern "x86-interrupt" fn page_fault_handler(
         panic!("EXCEPTION: PAGE FAULT IN RING 0");
     } else {
         let address = Cr2::read().unwrap();
-        serial_println!("EXCEPTION: PAGE FAULT in Ring3");
-        serial_println!("Accessed Address: {address:?}");
-        serial_println!("Error Code: {error_code:?}");
-        serial_println!("{stack_frame:#?}");
-        serial_println!("Fault Type: {error_desc}");
+        println!("EXCEPTION: PAGE FAULT in Ring3");
+        println!("Accessed Address: {address:?}");
+        println!("Error Code: {error_code:?}");
+        println!("{stack_frame:#?}");
+        println!("Fault Type: {error_desc}");
 
-        serial_println!(
+        println!(
             "Page fault, address = {:p}, error = {error_desc:?}",
             address.as_ptr::<u8>()
         );

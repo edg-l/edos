@@ -1,5 +1,7 @@
 use core::{sync::atomic::AtomicU64, time::Duration};
 
+use alloc::{string::String, sync::Arc};
+
 use crate::{
     thread::{
         context::CpuContext,
@@ -17,15 +19,28 @@ pub mod scheduler;
 pub mod signal;
 pub mod util;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ThreadId {
-    id: u64,
-    kernel: bool,
+    pub id: u64,
+    pub name: Option<Arc<String>>,
+    pub kernel: bool,
 }
 
 impl ThreadId {
     pub fn new(id: u64, kernel: bool) -> Self {
-        Self { id, kernel }
+        Self {
+            id,
+            kernel,
+            name: None,
+        }
+    }
+
+    pub fn new_named(id: u64, kernel: bool, name: String) -> Self {
+        Self {
+            id,
+            kernel,
+            name: Some(name.into()),
+        }
     }
 }
 
@@ -49,7 +64,7 @@ pub enum ThreadState {
 }
 
 impl KernelThread {
-    pub fn new(entry_point: fn() -> !) -> Self {
+    pub fn new(name: Option<String>, entry_point: fn() -> !) -> Self {
         let stack_top = kthread_stack_alloc();
         let context = CpuContext::new_kernel_thread(entry_point as *const u8 as u64, stack_top);
 
@@ -58,7 +73,11 @@ impl KernelThread {
         let id = KTHREAD_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
         KernelThread {
-            id: ThreadId::new(id, true),
+            id: ThreadId {
+                id,
+                kernel: true,
+                name: name.map(Arc::new),
+            },
             initial_stack_top: stack_top,
             context,
             state: ThreadState::Ready,

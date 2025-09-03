@@ -6,7 +6,7 @@ use x86_64::{
     structures::idt::InterruptStackFrame,
 };
 
-use crate::{apic::get_lapic, serial_println, thread::broadcast::Broadcast};
+use crate::{apic::get_lapic, println, thread::broadcast::Broadcast};
 
 pub static KEYBOARD_BROADCAST: Broadcast<DecodedKey> = Broadcast::new(1024);
 
@@ -47,10 +47,10 @@ pub fn driver_main() -> ! {
                 KEYBOARD_BROADCAST.broadcast(key_event);
                 match key_event {
                     DecodedKey::RawKey(key_code) => {
-                        serial_println!("kb: {key_code:?}")
+                        println!("kb: {key_code:?}")
                     }
                     DecodedKey::Unicode(c) => {
-                        serial_println!("kb: {c}");
+                        println!("kb: {c}");
                     }
                 }
             }

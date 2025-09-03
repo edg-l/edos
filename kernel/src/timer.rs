@@ -1,6 +1,6 @@
 use x86_64::instructions::port::Port;
 
-use crate::{apic::get_lapic, serial_println};
+use crate::{apic::get_lapic, println};
 
 // TODO: Fallback to pit if HPET not found.
 
@@ -18,7 +18,7 @@ impl TimerCalibration {
         const CALIBRATION_MS: u64 = 35; // Calibrate for 35ms
         const PIT_TICKS_FOR_CALIBRATION: u16 = (PIT_FREQUENCY * CALIBRATION_MS / 1000) as u16;
 
-        serial_println!("Calibrating APIC timer frequency...");
+        println!("Calibrating APIC timer frequency...");
 
         // 1. Setup PIT for one-shot mode
         unsafe {
@@ -52,20 +52,20 @@ impl TimerCalibration {
         let tsc_frequency_hz = (tsc_ticks_elapsed * 1_000) / (time_elapsed_us / 1000);
         let ticks_per_microsecond = apic_ticks_elapsed as u64 / time_elapsed_us;
 
-        serial_println!("APIC Timer Calibration Results:");
-        serial_println!("  Calibration time: {}ms", CALIBRATION_MS);
-        serial_println!("  APIC ticks elapsed: {}", apic_ticks_elapsed);
-        serial_println!(
+        println!("APIC Timer Calibration Results:");
+        println!("  Calibration time: {}ms", CALIBRATION_MS);
+        println!("  APIC ticks elapsed: {}", apic_ticks_elapsed);
+        println!(
             "  APIC frequency: {} Hz ({}) MHz",
             apic_frequency_hz,
             apic_frequency_hz / 1_000_000
         );
-        serial_println!(
+        println!(
             "  TSC frequency: {} Hz ({:.2}) GHz",
             tsc_frequency_hz,
             tsc_frequency_hz as f64 / 1_000_000_000.0
         );
-        serial_println!("  Ticks per microsecond: {}", ticks_per_microsecond);
+        println!("  Ticks per microsecond: {}", ticks_per_microsecond);
 
         TimerCalibration {
             apic_frequency_hz,

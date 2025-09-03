@@ -12,7 +12,7 @@ use x86_64::{
 use crate::{
     apic::get_lapic,
     interrupts::InterruptIndex,
-    serial_println,
+    println,
     thread::{
         KernelThread, ThreadId, ThreadState, UserThread, context::CpuContext, signal::Signal,
     },
@@ -68,7 +68,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
         sched.process_signal_queue();
 
         // Push current thread to queue, it's state will be processed then.
-        if let Some(current_id) = sched.current_thread_id {
+        if let Some(current_id) = sched.current_thread_id.clone() {
             if current_id.kernel {
                 // coming from kernel task
                 if let Some(kthread) = sched.kthreads.get_mut(&current_id.id) {
@@ -79,7 +79,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                 // coming from user
                 if let Some(thread) = sched.threads.get_mut(&current_id.id) {
                     thread.context = (*context).clone();
-                    serial_println!("Context switch from user");
+                    println!("Context switch from user");
                     sched.thread_queue.push(current_id);
                 }
             }
@@ -87,7 +87,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
 
         sched.schedule_next();
 
-        if let Some(current_id) = sched.current_thread_id {
+        if let Some(current_id) = sched.current_thread_id.clone() {
             // serial_println!("Next id {:?}", current_id);
 
             if current_id.kernel {
@@ -121,12 +121,12 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
 impl Scheduler {
     pub fn process_spawn_queue(&mut self) {
         while let Some(kthread) = self.kthread_spawn_queue.pop() {
-            self.thread_queue.push(kthread.id);
+            self.thread_queue.push(kthread.id.clone());
             self.kthreads.insert(kthread.id.id, kthread);
         }
 
         while let Some(thread) = self.thread_spawn_queue.pop() {
-            self.thread_queue.push(thread.id);
+            self.thread_queue.push(thread.id.clone());
             self.threads.insert(thread.id.id, thread);
         }
     }
@@ -166,7 +166,7 @@ impl Scheduler {
                             }
                         }
                         ThreadState::Exited(code) => {
-                            serial_println!("KThread {id:?} exited {code}");
+                            println!("KThread {id:?} exited {code}");
                             thread.free();
                             continue;
                         }
@@ -187,7 +187,7 @@ impl Scheduler {
                         }
                     }
                     ThreadState::Exited(code) => {
-                        serial_println!("Thread {id:?} exited {code}");
+                        println!("Thread {id:?} exited {code}");
                         thread.free();
                         continue;
                     }
@@ -202,7 +202,11 @@ impl Scheduler {
 
     /// Current thread id.
     pub fn current_id(&self) -> ThreadId {
-        without_interrupts(|| self.current_thread_id.expect("should have a id"))
+        without_interrupts(|| self.current_thread_id.clone().expect("should have a id"))
+    }
+
+    pub fn current_id_opt(&self) -> Option<ThreadId> {
+        without_interrupts(|| self.current_thread_id.clone())
     }
 
     /// Wake the given thread

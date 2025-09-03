@@ -5,7 +5,7 @@ use acpi::{
 };
 use spin::Once;
 
-use crate::{acpi::handler::AcpiHandler, boot::boot_info, serial_println};
+use crate::{acpi::handler::AcpiHandler, boot::boot_info, println};
 
 mod handler;
 
@@ -23,7 +23,7 @@ pub fn init_acpi() {
         }
     });
 
-    serial_println!("Acpi tables initialized");
+    println!("Acpi tables initialized");
 
     let (interrupt_model, processor_info) =
         InterruptModel::new(acpi_tables()).expect("interrupt model");

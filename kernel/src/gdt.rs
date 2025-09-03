@@ -12,7 +12,7 @@ use x86_64::{
     },
 };
 
-use crate::{memory::mapper::align_stack_pointer, serial_println, util::per_cpu::get_percpu_data};
+use crate::{memory::mapper::align_stack_pointer, println, util::per_cpu::get_percpu_data};
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 pub const PAGE_FAULT_IST_INDEX: u16 = 1;
@@ -29,7 +29,7 @@ fn init_tss() {
             handle_alloc_error(layout)
         }
 
-        serial_println!("Created page fault stack at : {:p}", unsafe {
+        println!("Created page fault stack at : {:p}", unsafe {
             stack_start.byte_add(layout.size())
         });
 
@@ -44,7 +44,7 @@ fn init_tss() {
             handle_alloc_error(layout)
         }
 
-        serial_println!("Created double fault stack at : {:p}", unsafe {
+        println!("Created double fault stack at : {:p}", unsafe {
             stack_start.byte_add(layout.size())
         });
 

@@ -15,14 +15,14 @@ use crate::{
     apic::get_lapic,
     interrupts::InterruptIndex,
     memory::{get_virt_addr, mapper::memory_mapper},
-    serial_println,
+    println,
 };
 
 pub fn init() {
     let apic_info = apic_info();
 
     if apic_info.also_has_legacy_pics {
-        serial_println!("need to disable old pic");
+        println!("need to disable old pic");
         unsafe {
             let mut p = pic8259::ChainedPics::new(32, 64);
             p.initialize();
@@ -31,9 +31,9 @@ pub fn init() {
     }
 
     unsafe {
-        serial_println!("Enabling apic");
+        println!("Enabling apic");
         enable_lapic();
-        serial_println!("Enabling io apic");
+        println!("Enabling io apic");
         enable_io_apic(apic_info).expect("failed to set up io apic");
     }
 }
@@ -57,11 +57,11 @@ unsafe fn enable_io_apic(
     info: &acpi::platform::interrupt::Apic,
 ) -> Result<(), MapToError<Size4KiB>> {
     let lapic_id = unsafe { get_lapic().id() };
-    serial_println!("I/O apics {:#?}", info.io_apics);
+    println!("I/O apics {:#?}", info.io_apics);
 
     #[allow(clippy::never_loop)]
     for io_apic_info in info.io_apics.iter() {
-        serial_println!("Initializing i/o apic with id: {}", io_apic_info.id);
+        println!("Initializing i/o apic with id: {}", io_apic_info.id);
         unsafe {
             let apic_physical_address = PhysAddr::new(io_apic_info.address as u64);
 
@@ -75,10 +75,10 @@ unsafe fn enable_io_apic(
                         offset,
                         flags,
                     } => {
-                        serial_println!("lapic already mapped: {frame:?} {offset} {flags:?}");
+                        println!("lapic already mapped: {frame:?} {offset} {flags:?}");
                     }
                     TranslateResult::NotMapped => {
-                        serial_println!("I/O APIC not mapped, mapping");
+                        println!("I/O APIC not mapped, mapping");
                         if mapper
                             .map_address(
                                 ioapic_virt_addr,
@@ -90,7 +90,7 @@ unsafe fn enable_io_apic(
                             )
                             .is_err()
                         {
-                            serial_println!("failed to map I/O APIC, already mapped");
+                            println!("failed to map I/O APIC, already mapped");
                         }
                     }
                     TranslateResult::InvalidFrameAddress(_) => {

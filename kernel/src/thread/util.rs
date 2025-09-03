@@ -1,5 +1,6 @@
 use core::sync::atomic::AtomicU64;
 
+use alloc::string::ToString;
 use crossbeam_queue::SegQueue;
 use x86_64::{
     VirtAddr,
@@ -56,7 +57,13 @@ pub fn kthread_stack_free(stack_top: u64) {
 }
 
 pub fn queue_spawn_kthread(entry: fn() -> !) {
-    let thread = KernelThread::new(entry);
+    let thread = KernelThread::new(None, entry);
+
+    sched().kthread_spawn_queue.push(thread);
+}
+
+pub fn queue_spawn_kthread_named(name: &str, entry: fn() -> !) {
+    let thread = KernelThread::new(Some(name.to_string()), entry);
 
     sched().kthread_spawn_queue.push(thread);
 }

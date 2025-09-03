@@ -11,7 +11,7 @@ use thiserror::Error;
 use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{
-    serial_println,
+    println,
     thread::{ThreadId, scheduler::sched},
 };
 
@@ -54,7 +54,7 @@ impl<T, R> Mailbox<T, R> {
                 fulfilled: AtomicBool::new(false),
                 taken: AtomicBool::new(false),
                 value: UnsafeCell::new(MaybeUninit::uninit()),
-                thread: sender,
+                thread: sender.clone(),
             });
 
             self.queue.push(Request {
@@ -63,7 +63,7 @@ impl<T, R> Mailbox<T, R> {
                 response: response.clone(),
             });
 
-            sched().thread_wake(self.owner);
+            sched().thread_wake(self.owner.clone());
             response
         })
     }
@@ -79,7 +79,7 @@ impl<T, R> Request<T, R> {
             unsafe { self.response.value.get().write(MaybeUninit::new(value)) };
             self.response.fulfilled.store(true, Ordering::Release);
             let sched = sched();
-            sched.thread_wake(self.response.thread);
+            sched.thread_wake(self.response.thread.clone());
         })
     }
 }

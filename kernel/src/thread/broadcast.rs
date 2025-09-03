@@ -43,7 +43,7 @@ impl<T: Clone> Broadcast<T> {
                 receiver.queue.pop();
             }
             receiver.queue.push(value.clone());
-            sched.thread_wake(*tid);
+            sched.thread_wake(tid.clone());
         }
     }
 }

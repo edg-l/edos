@@ -1,12 +1,13 @@
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::Once;
 use x86_64::instructions::hlt;
 
 pub mod api;
 
 use crate::{
-    boot::boot_info, graphics::api::{Request, Response, ScreenInfo, REQUESTS}, thread::{mailbox::Mailbox, scheduler::sched}
+    boot::boot_info,
+    graphics::api::{REQUESTS, Request, Response, ScreenInfo},
+    thread::{mailbox::Mailbox, scheduler::sched},
 };
 
 pub struct DoubleBuffer {
@@ -49,10 +50,6 @@ impl DoubleBuffer {
         }
     }
 }
-
-
-
-
 
 pub fn render_thread() -> ! {
     let requests = REQUESTS.call_once(|| Mailbox::new(sched().current_id()));
