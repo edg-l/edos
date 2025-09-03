@@ -1,4 +1,4 @@
-use crossbeam_queue::{ArrayQueue, SegQueue};
+use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
 use spin::Once;
 use x86_64::{

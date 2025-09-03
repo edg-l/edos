@@ -1,5 +1,3 @@
-#![expect(unused)]
-
 use core::{ops::Add, time::Duration};
 
 use x86_64::VirtAddr;

@@ -1,7 +1,7 @@
 use acpi::HpetInfo;
 use spin::Once;
 use x86_64::{
-    PhysAddr, VirtAddr,
+    PhysAddr,
     structures::paging::{PageTableFlags, Translate, mapper::TranslateResult},
 };
 

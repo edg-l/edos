@@ -1,4 +1,4 @@
-use crate::thread::util::{queue_spawn_kthread, queue_spawn_kthread_named};
+use crate::thread::util::queue_spawn_kthread_named;
 
 pub mod hpet;
 pub mod keyboard;

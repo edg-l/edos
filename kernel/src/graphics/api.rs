@@ -1,3 +1,5 @@
+#![expect(unused)]
+
 use core::time::Duration;
 
 use spin::Once;
