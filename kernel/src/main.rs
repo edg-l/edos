@@ -96,7 +96,7 @@ fn main() -> ! {
     queue_spawn_kthread_named("mb-receiver", test::thread_1);
     queue_spawn_kthread_named("mb-sender", test::thread_2);
     queue_spawn_kthread_named("keyboard-listener", test::thread_kb_listener);
-    queue_spawn_kthread_named("render", graphics::render_thread);
+    queue_spawn_kthread_named("draw", test::draw);
 
     // Enable apic timer, every 1 second
     set_apic_timer_and_enable(Duration::from_millis(10));

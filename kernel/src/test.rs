@@ -6,6 +6,10 @@ use x86_64::instructions::hlt;
 
 use crate::{
     drivers::keyboard::KEYBOARD_BROADCAST,
+    graphics::{
+        api::{draw_line, draw_rect, render, screen_info},
+        colors,
+    },
     println,
     thread::{mailbox::Mailbox, scheduler::sched},
 };
@@ -70,5 +74,22 @@ pub fn thread_kb_listener() -> ! {
         if let Ok(key) = key {
             println!("Got key: {:?}", key);
         }
+    }
+}
+
+pub fn draw() -> ! {
+    println!("initializing");
+
+    let info = screen_info();
+    println!("Got screen info: {:?}", info);
+    let mut x1 = 0;
+    let mut y1 = 0;
+    let mut x2 = 300;
+    let mut y2 = 300;
+    loop {
+        draw_rect(x1, y1, x2, y2, colors::ORANGE);
+        render();
+
+        sched().thread_wait_timeout(Duration::from_millis(100));
     }
 }
