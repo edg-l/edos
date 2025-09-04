@@ -12,7 +12,10 @@ use crate::{
     apic::set_apic_timer_and_enable,
     boot::boot_info,
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
-    thread::{user::UserThread, util::{queue_spawn_kthread_named, queue_spawn_thread}},
+    thread::{
+        user::UserThread,
+        util::{queue_spawn_kthread_named, queue_spawn_thread},
+    },
     timer::{get_timer_calibration, init_boot_time, uptime_us},
 };
 
@@ -27,11 +30,11 @@ mod interrupts;
 mod loader;
 mod memory;
 mod serial;
+mod syscalls;
 mod test;
 mod thread;
 mod timer;
 mod util;
-mod syscalls;
 
 extern crate alloc;
 
@@ -112,9 +115,7 @@ fn main() -> ! {
     }
 }
 
-
 pub const MINIMAL_ELF_PROGRAM: &[u8] = include_bytes!("../../programs/exit42");
-
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {

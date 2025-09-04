@@ -69,7 +69,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
 
         // Push current thread to queue, it's state will be processed then.
         if let Some(current_id) = sched.current_thread_id.clone() {
-             sched.current_thread_id = None;
+            sched.current_thread_id = None;
             if current_id.kernel {
                 // coming from kernel task
                 if let Some(kthread) = sched.kthreads.get_mut(&current_id.id) {
@@ -151,7 +151,7 @@ impl Scheduler {
     /// Schedules the next thread id, updating current_thread_id.
     fn schedule_next(&mut self) -> bool {
         let now = Instant::now();
-          self.current_thread_id = None;
+        self.current_thread_id = None;
         while let Some(id) = self.thread_queue.pop() {
             if id.kernel {
                 if let Some(thread) = self.kthreads.get_mut(&id.id) {

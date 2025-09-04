@@ -1,12 +1,19 @@
-use core::arch::{asm, naked_asm};
-
-use x86_64::{
-    instructions::interrupts::enable_and_hlt, registers::{
-        control::{Efer, EferFlags}, model_specific::{GsBase, KernelGsBase, LStar, SFMask, Star}, rflags::RFlags
-    }, VirtAddr
+use core::{
+    arch::{asm, naked_asm},
+    hint::black_box,
 };
 
-use crate::{gdt::GDT, println, thread::scheduler::sched, util::per_cpu::get_percpu_data};
+use x86_64::{
+    VirtAddr,
+    instructions::interrupts::enable_and_hlt,
+    registers::{
+        control::{Efer, EferFlags},
+        model_specific::{GsBase, KernelGsBase, LStar, SFMask, Star},
+        rflags::RFlags,
+    },
+};
+
+use crate::{gdt::GDT, print, println, thread::scheduler::sched, util::per_cpu::get_percpu_data};
 
 unsafe fn setup_gs_base() {
     let percpu = get_percpu_data();
@@ -168,6 +175,41 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     // Beware with some sched() calls, they call hlt which might hang if we don't have interrupts enabled.
 
     match ctx.rax {
+        1 => {
+            // sys_write
+            let fd = ctx.rdi;
+            let buffer_ptr = ctx.rsi as *const u8;
+            let count = ctx.rdx as usize;
+
+            println!(
+                "Syscall: sys_write(fd={}, buf={:p}, count={})",
+                fd, buffer_ptr, count
+            );
+
+            if count == 0 {
+                ctx.rax = 0;
+                return;
+            }
+
+            // Read from user buffer
+            let buffer = unsafe { core::slice::from_raw_parts(buffer_ptr, count) };
+
+            // Convert to string (handle invalid UTF-8 gracefully)
+            match core::str::from_utf8(buffer) {
+                Ok(s) => {
+                    println!("{}", s); // Use print! instead of println! to not add extra newline
+                    ctx.rax = count as u64; // Return bytes written
+                }
+                Err(_) => {
+                    // If not valid UTF-8, print as hex dump
+                    println!(
+                        "sys_write: Non-UTF8 data: {:02x?}",
+                        &buffer[..count.min(64)]
+                    );
+                    ctx.rax = count as u64;
+                }
+            }
+        }
         60 => {
             sched().thread_exit(ctx.rdi as i32);
 

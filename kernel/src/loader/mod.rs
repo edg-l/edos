@@ -8,10 +8,13 @@ use x86_64::{
 };
 
 use crate::{
-    boot::boot_info, memory::mapper::{active_level_4_table, get_level_4_table, MemoryManager}, print, println, thread::{
+    boot::boot_info,
+    memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
+    print, println,
+    thread::{
         paging::allocate_process_pml4,
         user::{MemoryRegion, MemoryRegionType},
-    }
+    },
 };
 
 #[derive(Debug, Clone)]

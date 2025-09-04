@@ -6,10 +6,14 @@ use x86_64::{VirtAddr, instructions::hlt, structures::paging::PageTableFlags};
 
 use crate::{
     memory::{
-        mapper::{memory_mapper, MemoryManager}, KTHREAD_STACK_FIRST, KTHREAD_STACK_SIZE, USER_STACK_SIZE, USER_STACK_TOP
+        KTHREAD_STACK_FIRST, KTHREAD_STACK_SIZE, USER_STACK_SIZE, USER_STACK_TOP,
+        mapper::{MemoryManager, memory_mapper},
     },
     thread::{
-        scheduler::sched, signal::{send_signal, Signal}, user::UserThread, KernelThread
+        KernelThread,
+        scheduler::sched,
+        signal::{Signal, send_signal},
+        user::UserThread,
     },
 };
 
@@ -72,7 +76,6 @@ pub fn kthread_exit(code: i32) -> ! {
 /// Note: When used in a iretq, the stack must be 8 byte aligned as to emulate a call.
 /// Thus called must decrement the stack top by 8 bytes.
 pub fn thread_stack_alloc(manager: &mut MemoryManager) -> u64 {
-
     let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
 
     manager
