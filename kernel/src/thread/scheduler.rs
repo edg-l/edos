@@ -26,7 +26,7 @@ pub struct Scheduler {
     pub kthread_spawn_queue: SegQueue<KernelThread>,
     kthreads: BTreeMap<u64, KernelThread>,
     pub thread_spawn_queue: SegQueue<UserThread>,
-    threads: BTreeMap<u64, UserThread>,
+    pub threads: BTreeMap<u64, UserThread>,
     current_thread_id: Option<ThreadId>,
     /// Physical addr
     pub kernel_cr3: u64,
@@ -204,6 +204,18 @@ impl Scheduler {
     /// Current thread id.
     pub fn current_id(&self) -> ThreadId {
         without_interrupts(|| self.current_thread_id.clone().expect("should have a id"))
+    }
+
+    /// Mostly called from syscalls
+    pub fn current_thread(&self) -> &UserThread {
+        let id = self.current_id();
+        self.threads.get(&id.id).unwrap()
+    }
+
+    /// Mostly called from syscalls
+    pub fn current_thread_mut(&mut self) -> &mut UserThread {
+        let id = self.current_id();
+        self.threads.get_mut(&id.id).unwrap()
     }
 
     pub fn current_id_opt(&self) -> Option<ThreadId> {

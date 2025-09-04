@@ -1,6 +1,6 @@
 use core::sync::atomic::AtomicU64;
 
-use alloc::vec::Vec;
+use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 use x86_64::{
     VirtAddr,
     registers::control::{Cr3, Cr3Flags},
@@ -8,16 +8,9 @@ use x86_64::{
 };
 
 use crate::{
-    boot::boot_info,
-    loader::{ElfLoadError, load_elf},
-    memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
-    println,
-    thread::{
-        ThreadId, ThreadState,
-        context::CpuContext,
-        paging::allocate_process_pml4,
-        util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
-    },
+    boot::boot_info, loader::{load_elf, ElfLoadError}, memory::mapper::{active_level_4_table, get_level_4_table, MemoryManager}, println, syscalls::Errno, thread::{
+        context::CpuContext, paging::allocate_process_pml4, util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free}, ThreadId, ThreadState
+    }
 };
 
 #[derive(Debug)]
@@ -33,6 +26,10 @@ pub struct UserThread {
     pub kernel_stack_top: u64,
     pub memory_manager: MemoryManager,
     pub memory_regions: Vec<MemoryRegion>,
+    // For mmap
+    pub memory_mappings: BTreeMap<VirtAddr, MemoryMapping>,
+    pub next_mmap_addr: VirtAddr,
+    pub errno: Errno,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +45,18 @@ pub struct MemoryRegion {
 pub enum MemoryRegionType {
     Code,
     Data,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryMapping {
+    pub size: u64,
+    pub flags: PageTableFlags,
+    pub mapping_type: MappingType, // Anonymous, File, etc.
+}
+
+#[derive(Debug, Clone)]
+pub enum MappingType {
+    Anonymous,
 }
 
 impl UserThread {
@@ -97,6 +106,9 @@ impl UserThread {
             cr3: (page, kernel_pml4.1),
             memory_manager: process_memory_manager,
             memory_regions: load_info.memory_regions,
+            memory_mappings: BTreeMap::new(),
+            next_mmap_addr: VirtAddr::new(load_info.heap_break),
+            errno: Errno::Clear,
         };
 
         println!("Created user thread: {:#?}", thread.initial_stack_top);

@@ -48,7 +48,7 @@ pub fn _serial_print(args: fmt::Arguments) {
                         tid.name
                             .as_ref()
                             .map(|x| x.as_str())
-                            .unwrap_or_else(|| "unk"),
+                            .unwrap_or_else(|| if tid.kernel { "unk0" } else { "unk3" }),
                         tid.id
                     ))
                     .unwrap();

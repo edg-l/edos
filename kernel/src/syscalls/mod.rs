@@ -13,7 +13,19 @@ use x86_64::{
     },
 };
 
-use crate::{gdt::GDT, print, println, thread::scheduler::sched, util::per_cpu::get_percpu_data};
+use crate::{
+    gdt::GDT,
+    println,
+    syscalls::{
+        io::sys_write,
+        memory::{sys_mmap, sys_munmap},
+    },
+    thread::scheduler::sched,
+    util::per_cpu::get_percpu_data,
+};
+
+pub mod io;
+pub mod memory;
 
 unsafe fn setup_gs_base() {
     let percpu = get_percpu_data();
@@ -169,56 +181,66 @@ pub struct SyscallContext {
     pub rflags: u64, // User RFLAGS
 }
 
+const SYS_WRITE: u64 = 1;
+const SYS_MMAP: u64 = 9;
+const SYS_MUNMAP: u64 = 11;
+const SYS_EXIT: u64 = 60;
+const SYS_ERRNO: u64 = 0x400;
+
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
 
     // Beware with some sched() calls, they call hlt which might hang if we don't have interrupts enabled.
 
     match ctx.rax {
-        1 => {
-            // sys_write
+        SYS_WRITE => {
             let fd = ctx.rdi;
             let buffer_ptr = ctx.rsi as *const u8;
             let count = ctx.rdx as usize;
-
-            println!(
-                "Syscall: sys_write(fd={}, buf={:p}, count={})",
-                fd, buffer_ptr, count
-            );
-
-            if count == 0 {
-                ctx.rax = 0;
-                return;
-            }
-
-            // Read from user buffer
-            let buffer = unsafe { core::slice::from_raw_parts(buffer_ptr, count) };
-
-            // Convert to string (handle invalid UTF-8 gracefully)
-            match core::str::from_utf8(buffer) {
-                Ok(s) => {
-                    println!("{}", s); // Use print! instead of println! to not add extra newline
-                    ctx.rax = count as u64; // Return bytes written
-                }
-                Err(_) => {
-                    // If not valid UTF-8, print as hex dump
-                    println!(
-                        "sys_write: Non-UTF8 data: {:02x?}",
-                        &buffer[..count.min(64)]
-                    );
-                    ctx.rax = count as u64;
-                }
-            }
+            ctx.rax = sys_write(fd, buffer_ptr, count);
         }
-        60 => {
+        SYS_MMAP => {
+            let addr = ctx.rdi;
+            let length = ctx.rsi;
+            let prot = ctx.rdx as u32;
+            let flags = ctx.r10 as u32;
+
+            ctx.rax = sys_mmap(addr, length, prot, flags);
+        }
+        SYS_MUNMAP => {
+            let addr = ctx.rdi;
+            let length = ctx.rsi;
+
+            ctx.rax = sys_munmap(addr, length) as u64;
+        }
+        SYS_EXIT => {
             sched().thread_exit(ctx.rdi as i32);
 
             loop {
                 enable_and_hlt();
             }
         }
+        SYS_ERRNO => {
+            ctx.rax = sys_errno();
+        }
         _ => {
             ctx.rax = !0u64;
         }
     }
+}
+
+pub fn sys_errno() -> u64 {
+    let sched = sched();
+    let current_id = sched.current_id();
+    let thread = sched.threads.get(&current_id.id).unwrap();
+    thread.errno as u64
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(clippy::upper_case_acronyms)]
+pub enum Errno {
+    Clear,
+    EINVAL,
+    ENOMEM,
+    EFAULT,
 }
