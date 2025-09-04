@@ -10,7 +10,11 @@ use limine::{
     response::MemoryMapResponse,
 };
 use spin::{Mutex, Once};
-use x86_64::{VirtAddr, structures::paging::OffsetPageTable};
+use x86_64::{
+    VirtAddr,
+    registers::control::{Cr3, Cr3Flags},
+    structures::paging::{OffsetPageTable, PhysFrame},
+};
 
 use crate::{
     main,
@@ -75,6 +79,7 @@ pub struct BootInfo {
     pub rdsp: usize,
     pub cmdline: &'static CStr,
     pub device_tree_blob: Option<usize>,
+    pub cr3: (PhysFrame, Cr3Flags),
 }
 
 pub static BOOT_INFO: Once<BootInfo> = Once::new();
@@ -120,6 +125,7 @@ unsafe extern "C" fn kmain() -> ! {
 
     let physical_memory_offset = VirtAddr::new(physical_memory_offset);
 
+    let cr3 = Cr3::read();
     let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };
     let kernel_page_table = unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };
 
@@ -133,6 +139,7 @@ unsafe extern "C" fn kmain() -> ! {
         rdsp,
         cmdline,
         device_tree_blob,
+        cr3,
     };
 
     BOOT_INFO.call_once(|| boot_info);

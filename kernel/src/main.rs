@@ -24,6 +24,7 @@ mod drivers;
 mod gdt;
 mod graphics;
 mod interrupts;
+mod loader;
 mod memory;
 mod serial;
 mod test;

@@ -1,6 +1,7 @@
 use spin::MutexGuard;
 use x86_64::{
     PhysAddr, VirtAddr,
+    registers::control::Cr3Flags,
     structures::paging::{
         FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags,
         PhysFrame, Size4KiB, Translate,
@@ -20,6 +21,16 @@ pub unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static
     let (level_4_table_frame, _) = Cr3::read();
 
     let phys = level_4_table_frame.start_address();
+    let virt = physical_memory_offset + phys.as_u64();
+    let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
+
+    unsafe { &mut *page_table_ptr }
+}
+
+pub unsafe fn get_level_4_table(cr3: (PhysFrame, Cr3Flags)) -> &'static mut PageTable {
+    let physical_memory_offset = boot_info().physical_memory_offset;
+
+    let phys = cr3.0.start_address();
     let virt = physical_memory_offset + phys.as_u64();
     let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
 

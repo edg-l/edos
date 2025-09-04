@@ -5,7 +5,7 @@ use alloc::{string::String, sync::Arc};
 use crate::{
     thread::{
         context::CpuContext,
-        util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
+        util::{kthread_stack_alloc, kthread_stack_free},
     },
     timer::Instant,
 };
@@ -17,6 +17,7 @@ pub mod mailbox;
 pub mod paging;
 pub mod scheduler;
 pub mod signal;
+pub mod user;
 pub mod util;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -86,50 +87,5 @@ impl KernelThread {
 
     pub fn free(&self) {
         kthread_stack_free(self.initial_stack_top);
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct UserThread {
-    pub id: ThreadId,
-    /// Saved to free it in case the thread exits.
-    pub initial_stack_top: u64,
-    pub context: CpuContext,
-    pub state: ThreadState,
-    /// Physical addr
-    pub cr3: u64,
-    pub initial_kernel_stack_top: u64,
-    pub kernel_stack_top: u64,
-}
-
-impl UserThread {
-    /// Must provide entry point and cr3 page table.
-    ///
-    /// TODO: also handle arguments.
-    pub fn new(entry_point: fn() -> !, cr3: u64) -> Self {
-        let kernel_stack_top = kthread_stack_alloc();
-        let stack_top = thread_stack_alloc();
-        let context = CpuContext::new_user_thread(entry_point as *const u8 as u64, stack_top);
-
-        static THREAD_NEXT_ID: AtomicU64 = AtomicU64::new(0);
-
-        let id = THREAD_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-
-        UserThread {
-            id: ThreadId::new(id, false),
-            initial_stack_top: stack_top,
-            context,
-            state: ThreadState::Ready,
-            kernel_stack_top,
-            initial_kernel_stack_top: kernel_stack_top,
-            cr3,
-        }
-    }
-
-    pub fn free(&self) {
-        // todo: memory cleanup
-        // todo: cleanup page table and switch to kernel
-        thread_stack_free(self.initial_stack_top);
-        kthread_stack_free(self.initial_kernel_stack_top);
     }
 }

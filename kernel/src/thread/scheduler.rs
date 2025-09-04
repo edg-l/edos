@@ -3,10 +3,9 @@ use core::{alloc::Layout, time::Duration};
 use alloc::collections::btree_map::BTreeMap;
 use crossbeam_queue::SegQueue;
 use x86_64::{
-    PhysAddr, VirtAddr,
+    VirtAddr,
     instructions::{hlt, interrupts::without_interrupts},
-    registers::control::{Cr3, Cr3Flags},
-    structures::paging::PhysFrame,
+    registers::control::Cr3,
 };
 
 use crate::{
@@ -14,7 +13,7 @@ use crate::{
     interrupts::InterruptIndex,
     println,
     thread::{
-        KernelThread, ThreadId, ThreadState, UserThread, context::CpuContext, signal::Signal,
+        KernelThread, ThreadId, ThreadState, context::CpuContext, signal::Signal, user::UserThread,
     },
     timer::Instant,
     util::per_cpu::get_percpu_data,
@@ -102,10 +101,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                 // Set RSP0
                 cpu.tss.privilege_stack_table[0] = VirtAddr::new(thread.kernel_stack_top);
                 // Set page table
-                Cr3::write(
-                    PhysFrame::containing_address(PhysAddr::new(thread.cr3)),
-                    Cr3Flags::from_bits_truncate(sched.kernel_cr3_flags),
-                );
+                Cr3::write(thread.cr3.0, thread.cr3.1);
 
                 return context;
             }
