@@ -77,7 +77,7 @@ impl UserThread {
 
         let load_info = load_elf(elf_data, &mut process_memory_manager)?;
 
-        // Use process page to set mappings
+        // Back to kernel page
         unsafe { Cr3::write(kernel_pml4.0, kernel_pml4.1) };
 
         let context = CpuContext::new_user_thread(load_info.entry_point.as_u64(), stack_top);
