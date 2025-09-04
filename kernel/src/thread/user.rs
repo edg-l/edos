@@ -8,9 +8,16 @@ use x86_64::{
 };
 
 use crate::{
-    boot::boot_info, loader::{load_elf, ElfLoadError}, memory::mapper::{active_level_4_table, get_level_4_table, MemoryManager}, println, thread::{
-        context::CpuContext, paging::allocate_process_pml4, util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free}, ThreadId, ThreadState
-    }
+    boot::boot_info,
+    loader::{ElfLoadError, load_elf},
+    memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
+    println,
+    thread::{
+        ThreadId, ThreadState,
+        context::CpuContext,
+        paging::allocate_process_pml4,
+        util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
+    },
 };
 
 #[derive(Debug)]
@@ -67,7 +74,7 @@ impl UserThread {
 
         let mut process_memory_manager = MemoryManager::new(table);
 
-        let stack_top = thread_stack_alloc();
+        let stack_top = thread_stack_alloc(&mut process_memory_manager);
 
         let load_info = load_elf(elf_data, &mut process_memory_manager)?;
 
@@ -97,10 +104,10 @@ impl UserThread {
         Ok(thread)
     }
 
-    pub fn free(&self) {
+    pub fn free(&mut self) {
         // todo: memory cleanup
         // todo: cleanup page table and switch to kernel
-        thread_stack_free(self.initial_stack_top);
+        thread_stack_free(&mut self.memory_manager, self.initial_stack_top);
         kthread_stack_free(self.initial_kernel_stack_top);
     }
 }

@@ -6,7 +6,7 @@ use x86_64::{VirtAddr, instructions::hlt, structures::paging::PageTableFlags};
 
 use crate::{
     memory::{
-        mapper::memory_mapper, KTHREAD_STACK_FIRST, KTHREAD_STACK_SIZE, USER_STACK_FIRST, USER_STACK_SIZE
+        mapper::{memory_mapper, MemoryManager}, KTHREAD_STACK_FIRST, KTHREAD_STACK_SIZE, USER_STACK_SIZE, USER_STACK_TOP
     },
     thread::{
         scheduler::sched, signal::{send_signal, Signal}, user::UserThread, KernelThread
@@ -67,28 +67,17 @@ pub fn kthread_exit(code: i32) -> ! {
     }
 }
 
-static THREAD_FREED_STACKS: SegQueue<u64> = SegQueue::new();
-static THREAD_NEXT_STACK: AtomicU64 = AtomicU64::new(USER_STACK_FIRST.as_u64());
-
 /// Returns the stack top of a kthread or a kernel stack for a user process.
 ///
 /// Note: When used in a iretq, the stack must be 8 byte aligned as to emulate a call.
 /// Thus called must decrement the stack top by 8 bytes.
-pub fn thread_stack_alloc() -> u64 {
-    if let Some(freed) = THREAD_FREED_STACKS.pop() {
-        return freed;
-    }
+pub fn thread_stack_alloc(manager: &mut MemoryManager) -> u64 {
 
-    let stack_bottom = THREAD_NEXT_STACK.fetch_add(
-        USER_STACK_FIRST.as_u64(),
-        core::sync::atomic::Ordering::Relaxed,
-    );
+    let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
 
-    let mut mapper = memory_mapper();
-
-    mapper
+    manager
         .map_memory(
-            VirtAddr::new(stack_bottom),
+            stack_bottom,
             USER_STACK_SIZE,
             PageTableFlags::PRESENT
                 | PageTableFlags::WRITABLE
@@ -97,12 +86,12 @@ pub fn thread_stack_alloc() -> u64 {
         )
         .expect("failed to map kstack");
 
-    stack_bottom + USER_STACK_SIZE
+    USER_STACK_TOP.as_u64()
 }
 
-pub fn thread_stack_free(stack_top: u64) {
-    let stack_bottom = stack_top - USER_STACK_SIZE;
-    THREAD_FREED_STACKS.push(stack_bottom);
+pub fn thread_stack_free(manager: &mut MemoryManager, stack_top: u64) {
+    let stack_bottom = VirtAddr::new(stack_top - USER_STACK_SIZE);
+    manager.unmap_memory(stack_bottom, USER_STACK_SIZE);
 }
 
 pub fn queue_spawn_thread(thread: UserThread) {

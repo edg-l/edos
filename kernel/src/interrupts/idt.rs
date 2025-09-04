@@ -67,6 +67,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     println!("EXCEPTION: invalid_opcode CHECK\n{stack_frame:#?}");
+    panic!();
     unsafe { get_lapic().end_of_interrupt() };
 }
 
