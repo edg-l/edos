@@ -12,7 +12,7 @@ use crate::{
     apic::set_apic_timer_and_enable,
     boot::boot_info,
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
-    thread::util::queue_spawn_kthread_named,
+    thread::{user::UserThread, util::{queue_spawn_kthread_named, queue_spawn_thread}},
     timer::{get_timer_calibration, init_boot_time, uptime_us},
 };
 
@@ -31,6 +31,7 @@ mod test;
 mod thread;
 mod timer;
 mod util;
+mod syscalls;
 
 extern crate alloc;
 
@@ -70,6 +71,7 @@ fn init() {
     println!("Calibrating timer");
     get_timer_calibration();
     init_boot_time();
+    unsafe { syscalls::setup_syscall() };
     println!("Init done");
 }
 
@@ -98,6 +100,7 @@ fn main() -> ! {
     queue_spawn_kthread_named("mb-sender", test::thread_2);
     queue_spawn_kthread_named("keyboard-listener", test::thread_kb_listener);
     queue_spawn_kthread_named("draw", test::draw);
+    queue_spawn_thread(UserThread::new(MINIMAL_ELF_PROGRAM).unwrap());
 
     // Enable apic timer, every 1 second
     set_apic_timer_and_enable(Duration::from_millis(10));
@@ -108,6 +111,10 @@ fn main() -> ! {
         hlt();
     }
 }
+
+
+pub const MINIMAL_ELF_PROGRAM: &[u8] = include_bytes!("../../programs/exit42");
+
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {

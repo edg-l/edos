@@ -12,6 +12,7 @@ use crate::{
     apic::get_lapic,
     interrupts::InterruptIndex,
     println,
+    syscalls::set_gs_kernel_stack,
     thread::{
         KernelThread, ThreadId, ThreadState, context::CpuContext, signal::Signal, user::UserThread,
     },
@@ -102,6 +103,8 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                 cpu.tss.privilege_stack_table[0] = VirtAddr::new(thread.kernel_stack_top);
                 // Set page table
                 Cr3::write(thread.cr3.0, thread.cr3.1);
+                // set kernel gs stack
+                set_gs_kernel_stack(thread.kernel_stack_top);
 
                 return context;
             }
@@ -236,6 +239,25 @@ impl Scheduler {
                 thread.state = ThreadState::WaitTimeout((now, timeout))
             }
         })
+    }
+
+    // Does not halt.
+    pub fn thread_exit(&mut self, code: i32) {
+        without_interrupts(|| {
+            let id = self.current_id();
+            println!("called exit with {code}");
+            if id.kernel {
+                if let Some(thread) = self.kthreads.get_mut(&id.id) {
+                    thread.state = ThreadState::Exited(code)
+                }
+            } else if let Some(thread) = self.threads.get_mut(&id.id) {
+                thread.state = ThreadState::Exited(code)
+            }
+            let mut lapic = get_lapic();
+            unsafe {
+                lapic.send_ipi_self(InterruptIndex::Timer as u8);
+            }
+        });
     }
 
     /// The caller thread gets put in a wait (and yields execution) until timeout or another thread wakes it.

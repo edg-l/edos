@@ -8,6 +8,8 @@ use crate::thread::scheduler::Scheduler;
 /// Note: try to keep it small.
 #[repr(C, align(64))]
 pub struct PerCpuData {
+    user_rsp: u64,   // Offset 0 - save user stack
+    kernel_rsp: u64, // Offset 8 - kernel stack for syscalls
     pub tss: TaskStateSegment,
     pub scheduler: *mut Scheduler,
 }
@@ -15,6 +17,8 @@ pub struct PerCpuData {
 #[used]
 #[unsafe(link_section = ".percpu.tpl")]
 static mut PERCPU_TEMPLATE: PerCpuData = PerCpuData {
+    user_rsp: 0,
+    kernel_rsp: 0,
     tss: TaskStateSegment::new(),
     scheduler: core::ptr::null_mut(),
 };

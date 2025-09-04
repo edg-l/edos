@@ -206,6 +206,7 @@ extern "x86-interrupt" fn page_fault_handler(
             "Page fault, address = {:p}, error = {error_desc:?}",
             address.as_ptr::<u8>()
         );
+        panic!()
     }
 }
 

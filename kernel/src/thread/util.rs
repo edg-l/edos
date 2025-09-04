@@ -6,13 +6,10 @@ use x86_64::{VirtAddr, instructions::hlt, structures::paging::PageTableFlags};
 
 use crate::{
     memory::{
-        KTHREAD_STACK_FIRST, KTHREAD_STACK_SIZE, USER_STACK_FIRST, USER_STACK_SIZE,
-        mapper::memory_mapper,
+        mapper::memory_mapper, KTHREAD_STACK_FIRST, KTHREAD_STACK_SIZE, USER_STACK_FIRST, USER_STACK_SIZE
     },
     thread::{
-        KernelThread,
-        scheduler::sched,
-        signal::{Signal, send_signal},
+        scheduler::sched, signal::{send_signal, Signal}, user::UserThread, KernelThread
     },
 };
 
@@ -108,6 +105,6 @@ pub fn thread_stack_free(stack_top: u64) {
     THREAD_FREED_STACKS.push(stack_bottom);
 }
 
-pub fn queue_spawn_thread(thread: KernelThread) {
-    sched().kthread_spawn_queue.push(thread);
+pub fn queue_spawn_thread(thread: UserThread) {
+    sched().thread_spawn_queue.push(thread);
 }

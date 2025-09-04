@@ -8,15 +8,9 @@ use x86_64::{
 };
 
 use crate::{
-    boot::boot_info,
-    loader::{ElfLoadError, load_elf},
-    memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
-    thread::{
-        ThreadId, ThreadState,
-        context::CpuContext,
-        paging::allocate_process_pml4,
-        util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
-    },
+    boot::boot_info, loader::{load_elf, ElfLoadError}, memory::mapper::{active_level_4_table, get_level_4_table, MemoryManager}, println, thread::{
+        context::CpuContext, paging::allocate_process_pml4, util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free}, ThreadId, ThreadState
+    }
 };
 
 #[derive(Debug)]
@@ -86,7 +80,7 @@ impl UserThread {
 
         let id = THREAD_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
-        Ok(UserThread {
+        let thread = UserThread {
             id: ThreadId::new(id, false),
             initial_stack_top: stack_top,
             context,
@@ -96,7 +90,11 @@ impl UserThread {
             cr3: (page, kernel_pml4.1),
             memory_manager: process_memory_manager,
             memory_regions: load_info.memory_regions,
-        })
+        };
+
+        println!("Created user thread: {:#?}", thread.initial_stack_top);
+
+        Ok(thread)
     }
 
     pub fn free(&self) {
