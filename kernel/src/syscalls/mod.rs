@@ -186,7 +186,7 @@ const SYS_MMAP: u64 = 9;
 const SYS_MUNMAP: u64 = 11;
 const SYS_EXIT: u64 = 60;
 const SYS_ERRNO: u64 = 0x400;
-const SYS_GETPID: u64 = 39;     // get process ID
+const SYS_GETPID: u64 = 39; // get process ID
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };

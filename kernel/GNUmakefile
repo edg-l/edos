@@ -42,3 +42,8 @@ clean:
 
 .PHONY: distclean
 distclean: clean
+
+
+.PHONY: fmt
+fmt:
+	cargo fmt

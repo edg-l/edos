@@ -257,3 +257,8 @@ clean:
 distclean: clean
 	$(MAKE) -C kernel distclean
 	rm -rf limine ovmf
+
+
+.PHONY: fmt
+fmt:
+	$(MAKE) -C kernel fmt
