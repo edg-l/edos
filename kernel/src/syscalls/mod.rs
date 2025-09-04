@@ -1,12 +1,9 @@
 use core::arch::{asm, naked_asm};
 
 use x86_64::{
-    VirtAddr,
-    instructions::interrupts::enable_and_hlt,
-    registers::{
-        model_specific::{GsBase, KernelGsBase, LStar, SFMask, Star},
-        rflags::RFlags,
-    },
+    instructions::interrupts::enable_and_hlt, registers::{
+        control::{Efer, EferFlags}, model_specific::{GsBase, KernelGsBase, LStar, SFMask, Star}, rflags::RFlags
+    }, VirtAddr
 };
 
 use crate::{gdt::GDT, println, thread::scheduler::sched, util::per_cpu::get_percpu_data};
@@ -55,6 +52,12 @@ pub unsafe fn setup_syscall() {
 
     // SFMASK: flags to clear on syscall (clear interrupt flag for atomic entry)
     SFMask::write(RFlags::INTERRUPT_FLAG);
+
+    let mut efer = Efer::read();
+    efer |= EferFlags::SYSTEM_CALL_EXTENSIONS;
+    unsafe { Efer::write(efer) };
+
+    println!("SYSCALL/SYSRET enabled");
 }
 
 #[allow(unused)]

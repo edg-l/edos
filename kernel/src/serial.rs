@@ -61,7 +61,7 @@ pub fn _serial_print(args: fmt::Arguments) {
                 .get()
                 .unwrap_unchecked()
                 .lock()
-                .write_fmt(format_args!("[{secs}.{us:06}] <main> {args}"))
+                .write_fmt(format_args!("[{secs}.{us:06}] <main/sched> {args}"))
                 .unwrap();
         }
     })

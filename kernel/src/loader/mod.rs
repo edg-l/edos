@@ -8,13 +8,10 @@ use x86_64::{
 };
 
 use crate::{
-    boot::boot_info,
-    memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
-    println,
-    thread::{
+    boot::boot_info, memory::mapper::{active_level_4_table, get_level_4_table, MemoryManager}, print, println, thread::{
         paging::allocate_process_pml4,
         user::{MemoryRegion, MemoryRegionType},
-    },
+    }
 };
 
 #[derive(Debug, Clone)]
@@ -146,11 +143,7 @@ pub fn load_elf(
                 // copy data
                 unsafe {
                     let dest = vaddr.as_u64() as *mut u8;
-                    core::ptr::copy_nonoverlapping(
-                        segment_data.as_ptr(),
-                        dest,
-                        segment_data.len(),
-                    );
+                    core::ptr::copy_nonoverlapping(segment_data.as_ptr(), dest, segment_data.len());
                 }
             }
 
@@ -239,32 +232,6 @@ pub fn load_elf(
         }
     }
 
-    if let Ok(Some(init_array)) = elf_file.section_header_by_name(".init_array") {
-        println!("WARNING, .init_array FOUND, UNSUPPORTED YET!");
-        let init_funcs = elf_file.section_data(&init_array)?;
-        let func_count = init_funcs.0.len() / 8;
-
-        for i in 0..func_count {
-            let func_ptr_offset = i * 8;
-            let func_ptr = u64::from_le_bytes([
-                init_funcs.0[func_ptr_offset],
-                init_funcs.0[func_ptr_offset + 1],
-                init_funcs.0[func_ptr_offset + 2],
-                init_funcs.0[func_ptr_offset + 3],
-                init_funcs.0[func_ptr_offset + 4],
-                init_funcs.0[func_ptr_offset + 5],
-                init_funcs.0[func_ptr_offset + 6],
-                init_funcs.0[func_ptr_offset + 7],
-            ]);
-
-            if func_ptr != 0 {
-                let actual_func = base_addr.as_u64() + func_ptr;
-                println!("ELF: Constructor function at 0x{:x}", actual_func);
-                // You could store these to call before main()
-            }
-        }
-    }
-
     // TODO: same for .fini_array destructors
 
     // Set proper page flags.
@@ -305,6 +272,8 @@ pub fn load_elf(
     }
 
     let actual_entry = VirtAddr::new(load_base.as_u64() + header.e_entry);
+
+    println!("ELF: entry {actual_entry:p}");
 
     Ok(LoadedInfo {
         entry_point: actual_entry,
