@@ -12,7 +12,6 @@ use crate::{
     thread::{
         KernelThread,
         scheduler::sched,
-        signal::{Signal, send_signal},
         user::UserThread,
     },
 };
@@ -64,7 +63,7 @@ pub fn queue_spawn_kthread_named(name: &str, entry: fn() -> !) {
 
 /// Exits a kthread.
 pub fn kthread_exit(code: i32) -> ! {
-    send_signal(Signal::Exit(code));
+    sched().thread_exit(code);
 
     loop {
         hlt();
@@ -94,7 +93,7 @@ pub fn thread_stack_alloc(manager: &mut MemoryManager) -> u64 {
 
 pub fn thread_stack_free(manager: &mut MemoryManager, stack_top: u64) {
     let stack_bottom = VirtAddr::new(stack_top - USER_STACK_SIZE);
-    manager.unmap_memory(stack_bottom, USER_STACK_SIZE);
+    manager.unmap_memory(stack_bottom, USER_STACK_SIZE).ok();
 }
 
 pub fn queue_spawn_thread(thread: UserThread) {

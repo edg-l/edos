@@ -3,3 +3,4 @@
 *.iso
 *.hdd
 *.log
+target/

@@ -16,7 +16,6 @@ pub mod interrupt;
 pub mod mailbox;
 pub mod paging;
 pub mod scheduler;
-pub mod signal;
 pub mod user;
 pub mod util;
 

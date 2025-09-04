@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = ["elibc"]
+
+[profile.release]
+panic = 'abort'
+
+[profile.dev]
+panic = 'abort'

@@ -14,7 +14,7 @@ use crate::{
     println,
     syscalls::set_gs_kernel_stack,
     thread::{
-        KernelThread, ThreadId, ThreadState, context::CpuContext, signal::Signal, user::UserThread,
+        KernelThread, ThreadId, ThreadState, context::CpuContext, user::UserThread,
     },
     timer::Instant,
     util::per_cpu::get_percpu_data,
@@ -31,7 +31,6 @@ pub struct Scheduler {
     /// Physical addr
     pub kernel_cr3: u64,
     pub kernel_cr3_flags: u64,
-    pub signal_queue: SegQueue<(ThreadId, Signal)>,
 }
 
 pub fn init() {
@@ -65,7 +64,6 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
         let cpu = get_percpu_data();
         let sched = cpu.scheduler.as_mut().unwrap_unchecked();
         sched.process_spawn_queue();
-        sched.process_signal_queue();
 
         // Push current thread to queue, it's state will be processed then.
         if let Some(current_id) = sched.current_thread_id.clone() {
@@ -128,23 +126,6 @@ impl Scheduler {
         while let Some(thread) = self.thread_spawn_queue.pop() {
             self.thread_queue.push(thread.id.clone());
             self.threads.insert(thread.id.id, thread);
-        }
-    }
-
-    /// Processes the signal queue
-    pub fn process_signal_queue(&mut self) {
-        while let Some((id, signal)) = self.signal_queue.pop() {
-            if id.kernel {
-                if let Some(kthread) = self.kthreads.get_mut(&id.id) {
-                    match signal {
-                        Signal::Exit(code) => kthread.state = ThreadState::Exited(code),
-                    }
-                }
-            } else if let Some(thread) = self.threads.get_mut(&id.id) {
-                match signal {
-                    Signal::Exit(code) => thread.state = ThreadState::Exited(code),
-                }
-            }
         }
     }
 
