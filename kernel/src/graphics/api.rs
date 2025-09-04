@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use spin::Once;
 use x86_64::instructions::hlt;
 
-use crate::thread::mailbox::Mailbox;
+use crate::{graphics::colors, thread::mailbox::Mailbox};
 
 pub(super) static REQUESTS: Once<Mailbox<Request, Response>> = Once::new();
 

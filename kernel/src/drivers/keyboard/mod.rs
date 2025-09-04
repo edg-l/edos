@@ -6,7 +6,7 @@ use x86_64::{
     structures::idt::InterruptStackFrame,
 };
 
-use crate::{apic::get_lapic, println, thread::broadcast::Broadcast};
+use crate::{apic::get_lapic, println, thread::{broadcast::Broadcast, scheduler::sched}};
 
 pub static KEYBOARD_BROADCAST: Broadcast<DecodedKey> = Broadcast::new(1024);
 
@@ -55,7 +55,7 @@ pub fn driver_main() -> ! {
                 }
             }
         }
-        hlt();
+        sched().thread_yield();
     }
 }
 
