@@ -1,12 +1,13 @@
 use alloc::vec;
 use alloc::vec::Vec;
-use x86_64::instructions::hlt;
 
 pub mod api;
 pub mod colors;
 
 use crate::{
-    boot::boot_info, graphics::api::{DrawRequest, Request, Response, ScreenInfo, REQUESTS}, println, thread::{mailbox::Mailbox, scheduler::sched}
+    boot::boot_info,
+    graphics::api::{DrawRequest, REQUESTS, Request, Response, ScreenInfo},
+    thread::{mailbox::Mailbox, scheduler::sched},
 };
 
 pub struct DoubleBuffer {

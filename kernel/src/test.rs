@@ -2,17 +2,15 @@ use core::time::Duration;
 
 use alloc::collections::vec_deque::VecDeque;
 use spin::Once;
-use x86_64::instructions::hlt;
 
 use crate::{
     drivers::keyboard::KEYBOARD_BROADCAST,
     graphics::{
-        api::{draw_line, draw_rect, render, screen_info},
-        colors::{self, hsl_to_rgb},
+        api::{draw_rect, render, screen_info},
+        colors::hsl_to_rgb,
     },
     println,
     thread::{mailbox::Mailbox, scheduler::sched},
-    timer::Instant,
 };
 
 static MAILBOX1: Once<Mailbox<u64, u64>> = Once::new();

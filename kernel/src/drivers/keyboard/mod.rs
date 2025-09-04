@@ -2,11 +2,15 @@ use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
 use spin::Once;
 use x86_64::{
-    instructions::{hlt, interrupts::without_interrupts, port::Port},
+    instructions::{interrupts::without_interrupts, port::Port},
     structures::idt::InterruptStackFrame,
 };
 
-use crate::{apic::get_lapic, println, thread::{broadcast::Broadcast, scheduler::sched}};
+use crate::{
+    apic::get_lapic,
+    println,
+    thread::{broadcast::Broadcast, scheduler::sched},
+};
 
 pub static KEYBOARD_BROADCAST: Broadcast<DecodedKey> = Broadcast::new(1024);
 

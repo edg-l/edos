@@ -10,10 +10,7 @@ use crossbeam_queue::SegQueue;
 use thiserror::Error;
 use x86_64::instructions::interrupts::without_interrupts;
 
-use crate::{
-    println,
-    thread::{ThreadId, scheduler::sched},
-};
+use crate::thread::{ThreadId, scheduler::sched};
 
 // TODO: maybe make a sender struct so others dont have access to the queue
 // Encapsulate better

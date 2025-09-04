@@ -2,15 +2,9 @@ use core::sync::atomic::AtomicU64;
 
 use alloc::string::ToString;
 use crossbeam_queue::SegQueue;
-use x86_64::{
-    VirtAddr,
-    instructions::{hlt, interrupts::enable_and_hlt},
-    structures::paging::PageTableFlags,
-};
+use x86_64::{VirtAddr, instructions::hlt, structures::paging::PageTableFlags};
 
 use crate::{
-    apic::get_lapic,
-    interrupts::InterruptIndex,
     memory::{
         KTHREAD_STACK_FIRST, KTHREAD_STACK_SIZE, USER_STACK_FIRST, USER_STACK_SIZE,
         mapper::memory_mapper,
@@ -20,7 +14,6 @@ use crate::{
         scheduler::sched,
         signal::{Signal, send_signal},
     },
-    util::per_cpu::get_percpu_data,
 };
 
 static KTHREAD_FREED_STACKS: SegQueue<u64> = SegQueue::new();

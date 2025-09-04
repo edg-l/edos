@@ -94,7 +94,6 @@ pub static GDT: spin::Lazy<(GlobalDescriptorTable, GdtSelectors)> = Lazy::new(||
     )
 });
 
-
 #[derive(Debug, Clone, Copy)]
 pub struct GdtSelectors {
     pub code_selector: SegmentSelector,
