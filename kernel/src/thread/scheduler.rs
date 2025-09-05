@@ -66,7 +66,6 @@ pub fn thread_cleaner() -> ! {
         for thread in sched.threads.values_mut() {
             if let ThreadState::Exited(code) = thread.state {
                 println!("Thread {} exited {code}", thread.id);
-                //thread.free();
                 to_remove.push(thread.id.clone());
             }
         }
@@ -83,13 +82,15 @@ pub fn thread_cleaner() -> ! {
         for thread in sched.kthreads.values_mut() {
             if let ThreadState::Exited(code) = thread.state {
                 println!("KThread {} exited {code}", thread.id);
-                thread.free();
                 to_remove.push(thread.id.clone());
             }
         }
 
         for t in &to_remove {
-            sched.kthreads.remove(&t.id);
+            let t = sched.kthreads.remove(&t.id);
+            if let Some(t) = t {
+                t.free();
+            }
         }
 
         to_remove.clear();

@@ -13,7 +13,9 @@ pub const ACPI_MAPPINGS: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_0800_0000
 // Assuming 1mb for acpi
 
 pub const KTHREAD_STACK_FIRST: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_1000_0000);
-pub const KTHREAD_STACK_SIZE: u64 = 4096 * 2; // TODO: investigate why 8kb isnt enough. btree seems an issue
+
+// Remember Debug rust builds take a lot of stack
+pub const KTHREAD_STACK_SIZE: u64 = 4096 * 2;
 /// Size of stack region including guard page (total allocation per thread)
 pub const KTHREAD_STACK_REGION_SIZE: u64 = KTHREAD_STACK_SIZE + 4096;
 
