@@ -16,6 +16,7 @@ pub const SYS_MMAP: u64 = 9;
 pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
+pub const SYS_ERRNO: u64 = 0x400;
 
 // Type-safe wrappers
 pub fn sys_write(fd: u64, buf: *const u8, count: usize) -> isize {
@@ -36,6 +37,19 @@ pub fn sys_munmap(addr: *mut u8, length: u64) -> i32 {
 
 pub fn sys_getpid() -> u64 {
     unsafe { syscall0(SYS_GETPID) }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(clippy::upper_case_acronyms)]
+pub enum Errno {
+    Clear,
+    EINVAL,
+    ENOMEM,
+    EFAULT,
+}
+
+pub fn sys_errno() -> u64 {
+    unsafe { syscall0(SYS_ERRNO) }
 }
 
 pub fn sys_exit(code: i32) -> ! {

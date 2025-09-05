@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["elibc"]
+members = ["elibc", "terminal"]
 
 [profile.release]
 panic = 'abort'
