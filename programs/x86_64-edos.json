@@ -6,7 +6,7 @@
   "target-pointer-width": 64,
   "target-c-int-width": 32,
   "crt-objects-fallback": "false",
-  "features": "+mmx,+sse,+sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-avx,-avx2,-soft-float",
+  "features": "+mmx,+sse,+sse2,+sse3,+ssse3,+sse4.1,+sse4.2,-avx,-avx2,-soft-float",
   "os": "edos",
   "env": "edos",
   "vendor": "unknown",
