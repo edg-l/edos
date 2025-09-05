@@ -1,10 +1,13 @@
-use core::{alloc::Layout, time::Duration};
+use core::{alloc::Layout, arch::asm, time::Duration};
 
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 use crossbeam_queue::SegQueue;
 use x86_64::{
     VirtAddr,
-    instructions::{hlt, interrupts::without_interrupts},
+    instructions::{
+        hlt,
+        interrupts::{disable, enable, without_interrupts},
+    },
     registers::control::Cr3,
 };
 
@@ -51,46 +54,47 @@ pub fn init() {
 
 pub fn thread_cleaner() -> ! {
     let mut to_remove = Vec::with_capacity(4);
+
     loop {
-        without_interrupts(|| {
-            let sched = sched();
+        disable();
+        let sched = sched();
 
-            let kernelcr3 = boot_info().cr3;
+        let kernelcr3 = boot_info().cr3;
 
-            unsafe { Cr3::write(kernelcr3.0, kernelcr3.1) };
+        unsafe { Cr3::write(kernelcr3.0, kernelcr3.1) };
 
-            for thread in sched.threads.values_mut() {
-                if let ThreadState::Exited(code) = thread.state {
-                    println!("Thread {} exited {code}", thread.id);
-                    //thread.free();
-                    to_remove.push(thread.id.clone());
-                }
+        for thread in sched.threads.values_mut() {
+            if let ThreadState::Exited(code) = thread.state {
+                println!("Thread {} exited {code}", thread.id);
+                //thread.free();
+                to_remove.push(thread.id.clone());
             }
+        }
 
-            for t in &to_remove {
-                let t = sched.threads.remove(&t.id); // causes problems, removing this line doesnt page fault
-                if let Some(mut t) = t {
-                    t.free();
-                }
+        for t in &to_remove {
+            let t = sched.threads.remove(&t.id); // causes problems, removing this line doesnt page fault
+            if let Some(mut t) = t {
+                t.free();
             }
+        }
 
-            to_remove.clear();
+        to_remove.clear();
 
-            for thread in sched.kthreads.values_mut() {
-                if let ThreadState::Exited(code) = thread.state {
-                    println!("KThread {} exited {code}", thread.id);
-                    thread.free();
-                    to_remove.push(thread.id.clone());
-                }
+        for thread in sched.kthreads.values_mut() {
+            if let ThreadState::Exited(code) = thread.state {
+                println!("KThread {} exited {code}", thread.id);
+                thread.free();
+                to_remove.push(thread.id.clone());
             }
+        }
 
-            for t in &to_remove {
-                sched.kthreads.remove(&t.id);
-            }
+        for t in &to_remove {
+            sched.kthreads.remove(&t.id);
+        }
 
-            to_remove.clear();
-        });
-        sched().thread_yield();
+        to_remove.clear();
+        enable();
+        sched.thread_yield();
     }
 }
 

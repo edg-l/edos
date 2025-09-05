@@ -29,19 +29,36 @@ pub static IDT: spin::Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt.alignment_check.set_handler_fn(alignment_check_handler);
     idt.general_protection_fault
         .set_handler_fn(general_protection_fault_handler);
-    idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
 
-    idt.device_not_available
-        .set_handler_fn(device_not_available_handler);
     unsafe {
+        idt.invalid_opcode
+            .set_handler_fn(invalid_opcode_handler)
+            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
+
+        idt.device_not_available
+            .set_handler_fn(device_not_available_handler)
+            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
         idt[InterruptIndex::Timer.as_u8()]
             .set_handler_addr(VirtAddr::new(timer_interrupt_handler as *mut u8 as u64))
+            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
+
+        idt[InterruptIndex::Error.as_u8()]
+            .set_handler_fn(apic_error_interrupt_handler)
+            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
+        idt[InterruptIndex::Keyboard.as_u8()]
+            .set_handler_fn(keyboard_interrupt_handler)
+            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
+        idt[InterruptIndex::Mouse.as_u8()]
+            .set_handler_fn(mouse_interrupt_handler)
+            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
+        idt[InterruptIndex::Ahci.as_u8()]
+            .set_handler_fn(ahci_interrupt_handler)
+            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
+        idt[InterruptIndex::Spurious.as_u8()]
+            .set_handler_fn(spurious_interrupt_handler)
+            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
     };
-    idt[InterruptIndex::Error.as_u8()].set_handler_fn(apic_error_interrupt_handler);
-    idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
-    idt[InterruptIndex::Mouse.as_u8()].set_handler_fn(mouse_interrupt_handler);
-    idt[InterruptIndex::Ahci.as_u8()].set_handler_fn(ahci_interrupt_handler);
-    idt[InterruptIndex::Spurious.as_u8()].set_handler_fn(spurious_interrupt_handler);
+
     idt
 });
 
