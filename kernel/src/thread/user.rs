@@ -8,17 +8,9 @@ use x86_64::{
 };
 
 use crate::{
-    boot::boot_info,
-    loader::{ElfLoadError, load_elf},
-    memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
-    println,
-    syscalls::Errno,
-    thread::{
-        ThreadId, ThreadState,
-        context::CpuContext,
-        paging::allocate_process_pml4,
-        util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
-    },
+    boot::boot_info, drivers::fpu::FpuState, loader::{load_elf, ElfLoadError}, memory::mapper::{active_level_4_table, get_level_4_table, MemoryManager}, println, syscalls::Errno, thread::{
+        context::CpuContext, paging::allocate_process_pml4, util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free}, ThreadId, ThreadState
+    }
 };
 
 #[derive(Debug)]
@@ -38,6 +30,9 @@ pub struct UserThread {
     pub memory_mappings: BTreeMap<VirtAddr, MemoryMapping>,
     pub next_mmap_addr: VirtAddr,
     pub errno: Errno,
+    // Whether the fpu has been initialized for this thread.
+    pub fpu_init: bool,
+    pub fpu: FpuState,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +112,8 @@ impl UserThread {
             memory_mappings: BTreeMap::new(),
             next_mmap_addr: VirtAddr::new(load_info.heap_break),
             errno: Errno::Clear,
+            fpu_init: false,
+            fpu: FpuState::default(),
         };
 
         println!("Created user thread: {:#?}", thread.initial_stack_top);

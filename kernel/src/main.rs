@@ -115,7 +115,7 @@ fn main() -> ! {
     }
 }
 
-pub const MINIMAL_ELF_PROGRAM: &[u8] = include_bytes!("../../programs/test_mmap");
+pub const MINIMAL_ELF_PROGRAM: &[u8] = include_bytes!("../../programs/out/terminal");
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {

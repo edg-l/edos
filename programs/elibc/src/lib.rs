@@ -108,6 +108,21 @@ pub const PROT_EXEC: u32 = 0x4;
 pub const MAP_PRIVATE: u32 = 0x02;
 pub const MAP_ANONYMOUS: u32 = 0x20;
 
+unsafe extern "C" {
+    fn main() -> i32;
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _start() -> ! {
+    // Initialize the heap allocator by triggering first allocation
+    allocator::ALLOCATOR.lock();
+
+    // Call user's main function
+    let code = unsafe { main() };
+
+    sys_exit(code);
+}
+
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     println!("{info}");

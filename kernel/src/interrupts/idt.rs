@@ -9,11 +9,10 @@ use crate::{
     drivers::keyboard::keyboard_interrupt_handler,
     gdt,
     interrupts::{
-        InterruptIndex,
-        io::{ahci_interrupt_handler, device_not_available_handler, mouse_interrupt_handler},
+        io::{ahci_interrupt_handler, device_not_available_handler, mouse_interrupt_handler}, InterruptIndex
     },
     println,
-    thread::interrupt::timer_interrupt_handler,
+    thread::{interrupt::timer_interrupt_handler, scheduler::sched},
 };
 
 pub static IDT: spin::Lazy<InterruptDescriptorTable> = Lazy::new(|| {
@@ -50,18 +49,34 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     error_code: u64,
 ) {
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0 {
-        panic!(
-            "EXCEPTION: general_protection_fault (segfault?) CHECK: (error: {error_code})\n{stack_frame:#?}"
-        );
-    } else {
-        println!(
-            "EXCEPTION: general_protection_fault (segfault?) in RING 3 CHECK: (error: {error_code})\n{stack_frame:#?}",
-        );
-        println!(
-            "EXCEPTION: general_protection_fault (segfault?) in RING 3: (error: {error_code})\n{stack_frame:#?}",
-        );
+        println!("GPF Error code: 0x{:x}", error_code);
+        println!("Selector index: {}", (error_code >> 3) & 0x1FFF);
+        println!("Table: {}", if error_code & 4 != 0 { "LDT" } else { "GDT" });
+        println!("External: {}", error_code & 1 != 0);
+        println!("Stack frame: {:#?}", stack_frame);
 
-        unsafe { get_lapic().end_of_interrupt() };
+        // Print current thread info
+        let sched = sched();
+        if let Some(current_id) = sched.current_id_opt() {
+            println!("Current thread: {:?}", current_id);
+        }
+
+        panic!("General Protection Fault");
+    } else {
+        println!("GPF Error code: 0x{:x}", error_code);
+        println!("Selector index: {}", (error_code >> 3) & 0x1FFF);
+        println!("Table: {}", if error_code & 4 != 0 { "LDT" } else { "GDT" });
+        println!("External: {}", error_code & 1 != 0);
+        println!("Stack frame: {:#?}", stack_frame);
+
+        // Print current thread info
+        let sched = sched();
+        if let Some(current_id) = sched.current_id_opt() {
+            println!("Current thread: {:?}", current_id);
+        }
+
+        // todo: remove
+        panic!("General Protection Fault");
     }
 }
 

@@ -10,6 +10,7 @@ use x86_64::{
 
 use crate::{
     apic::get_lapic,
+    drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
     interrupts::InterruptIndex,
     println,
     syscalls::set_gs_kernel_stack,
@@ -76,6 +77,14 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                 // coming from user
                 if let Some(thread) = sched.threads.get_mut(&current_id.id) {
                     thread.context = (*context).clone();
+
+                    if !thread.fpu_init {
+                        init_fpu_state(&mut thread.fpu);
+                        thread.fpu_init = true;
+                    } else {
+                        save_fpu_state(&mut thread.fpu);
+                    }
+
                     println!("Context switch from user");
                     sched.thread_queue.push(current_id);
                 }
@@ -96,6 +105,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
             } else if let Some(thread) = sched.threads.get(&current_id.id) {
                 // Going to user space.
                 *context = thread.context.clone();
+                restore_fpu_state(&thread.fpu);
                 // Set RSP0
                 cpu.tss.privilege_stack_table[0] = VirtAddr::new(thread.kernel_stack_top);
                 // Set page table
