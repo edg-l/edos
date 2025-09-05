@@ -1,6 +1,6 @@
 use core::{alloc::Layout, time::Duration};
 
-use alloc::collections::btree_map::BTreeMap;
+use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 use crossbeam_queue::SegQueue;
 use x86_64::{
     VirtAddr,
@@ -14,7 +14,10 @@ use crate::{
     interrupts::InterruptIndex,
     println,
     syscalls::set_gs_kernel_stack,
-    thread::{KernelThread, ThreadId, ThreadState, context::CpuContext, user::UserThread},
+    thread::{
+        KernelThread, ThreadId, ThreadState, context::CpuContext, user::UserThread,
+        util::queue_spawn_kthread_named,
+    },
     timer::Instant,
     util::per_cpu::get_percpu_data,
 };
@@ -41,6 +44,46 @@ pub fn init() {
         (*ptr).kernel_cr3_flags = cr3.1.bits();
     }
     get_percpu_data().scheduler = ptr;
+
+    queue_spawn_kthread_named("tcleaner", thread_cleaner);
+}
+
+pub fn thread_cleaner() -> ! {
+    let mut to_remove = Vec::with_capacity(4);
+    loop {
+        without_interrupts(|| {
+            let sched = sched();
+
+            for thread in sched.threads.values_mut() {
+                if let ThreadState::Exited(code) = thread.state {
+                    println!("Thread {} exited {code}", thread.id);
+                    //thread.free();
+                    to_remove.push(thread.id.clone());
+                }
+            }
+
+            for t in &to_remove {
+                //sched.threads.remove(&t.id);
+            }
+
+            to_remove.clear();
+
+            for thread in sched.kthreads.values_mut() {
+                if let ThreadState::Exited(code) = thread.state {
+                    println!("KThread {} exited {code}", thread.id);
+                    thread.free();
+                    to_remove.push(thread.id.clone());
+                }
+            }
+
+            for t in &to_remove {
+                sched.kthreads.remove(&t.id);
+            }
+
+            to_remove.clear();
+        });
+        sched().thread_yield();
+    }
 }
 
 pub fn sched() -> &'static mut Scheduler {
@@ -165,8 +208,6 @@ impl Scheduler {
                             }
                         }
                         ThreadState::Exited(code) => {
-                            println!("KThread {id} exited {code}");
-                            thread.free();
                             continue;
                         }
                     }
@@ -186,8 +227,6 @@ impl Scheduler {
                         }
                     }
                     ThreadState::Exited(code) => {
-                        println!("Thread {id} exited {code}");
-                        thread.free();
                         continue;
                     }
                 }
