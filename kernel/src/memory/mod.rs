@@ -13,7 +13,7 @@ pub const ACPI_MAPPINGS: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_0800_0000
 // Assuming 1mb for acpi
 
 pub const KTHREAD_STACK_FIRST: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_1000_0000);
-pub const KTHREAD_STACK_SIZE: u64 = 4096 * 2;
+pub const KTHREAD_STACK_SIZE: u64 = 4096 * 8;
 
 pub const USER_STACK_TOP: VirtAddr = VirtAddr::new_truncate(0x0000_7000_0000_0000);
 pub const USER_STACK_SIZE: u64 = 4096 * 2;

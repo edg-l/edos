@@ -146,17 +146,7 @@ impl UserThread {
         thread_stack_free(&mut self.memory_manager, self.initial_stack_top);
         kthread_stack_free(self.initial_kernel_stack_top);
 
-        let kernelcr3 = boot_info().cr3;
-
-        println!("switching page");
-
-       unsafe { Cr3::write(kernelcr3.0, kernelcr3.1) };
-
-            println!("switching page done");
-
         // clean up all page tables in the lower half of the address space
-        //self.memory_manager.clean_lower_half();
-
-            println!("cleaned");
+        self.memory_manager.clean_lower_half();
     }
 }

@@ -57,8 +57,6 @@ pub fn thread_cleaner() -> ! {
 
             let kernelcr3 = boot_info().cr3;
 
-            println!("switching page");
-
             unsafe { Cr3::write(kernelcr3.0, kernelcr3.1) };
 
             for thread in sched.threads.values_mut() {
@@ -72,7 +70,7 @@ pub fn thread_cleaner() -> ! {
             for t in &to_remove {
                 let t = sched.threads.remove(&t.id); // causes problems, removing this line doesnt page fault
                 if let Some(mut t) = t {
-                    //t.free();
+                    t.free();
                 }
             }
 
