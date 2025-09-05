@@ -105,7 +105,10 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
             } else if let Some(thread) = sched.threads.get_mut(&current_id.id) {
                 // Going to user space.
                 // Set page table
-                Cr3::write(thread.cr3.0, thread.cr3.1);
+                if Cr3::read().0.start_address() != thread.cr3.0.start_address() {
+                    Cr3::write(thread.cr3.0, thread.cr3.1);
+                }
+
                 *context = thread.context.clone();
                 if !thread.fpu_init {
                     init_fpu_state(&mut thread.fpu);
@@ -162,7 +165,7 @@ impl Scheduler {
                             }
                         }
                         ThreadState::Exited(code) => {
-                            println!("KThread {id:?} exited {code}");
+                            println!("KThread {id} exited {code}");
                             thread.free();
                             continue;
                         }
@@ -183,7 +186,7 @@ impl Scheduler {
                         }
                     }
                     ThreadState::Exited(code) => {
-                        println!("Thread {id:?} exited {code}");
+                        println!("Thread {id} exited {code}");
                         thread.free();
                         continue;
                     }

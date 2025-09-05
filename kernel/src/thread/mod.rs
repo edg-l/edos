@@ -1,4 +1,4 @@
-use core::{sync::atomic::AtomicU64, time::Duration};
+use core::{fmt::Display, sync::atomic::AtomicU64, time::Duration};
 
 use alloc::{string::String, sync::Arc};
 
@@ -40,6 +40,16 @@ impl ThreadId {
             id,
             kernel,
             name: Some(name.into()),
+        }
+    }
+}
+
+impl Display for ThreadId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.kernel {
+            write!(f, "KID({})", self.id)
+        } else {
+            write!(f, "PID({})", self.id)
         }
     }
 }

@@ -5,7 +5,7 @@ use x86_64::{
     structures::paging::{
         FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags,
         PhysFrame, Size4KiB, Translate,
-        mapper::{FlagUpdateError, MapToError, TranslateResult, UnmapError},
+        mapper::{CleanUp, FlagUpdateError, MapToError, TranslateResult, UnmapError},
         page::PageRangeInclusive,
     },
 };
@@ -191,6 +191,18 @@ impl MemoryManager {
     /// This function works with huge pages of all sizes.
     pub fn translate(&self, addr: VirtAddr) -> TranslateResult {
         self.mapper.translate(addr)
+    }
+
+    pub fn clean_lower_half(&mut self) {
+        let lower_half = Page::range_inclusive(
+            Page::containing_address(VirtAddr::new(0)),
+            Page::containing_address(VirtAddr::new(0x0000_7fff_ffff_ffff)),
+        );
+
+        unsafe {
+            self.mapper
+                .clean_up_addr_range(lower_half, &mut *frame_allocator())
+        };
     }
 }
 

@@ -4,7 +4,7 @@ use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 use x86_64::{
     VirtAddr,
     registers::control::{Cr3, Cr3Flags},
-    structures::paging::{OffsetPageTable, PageTableFlags, PhysFrame},
+    structures::paging::{OffsetPageTable, Page, PageTableFlags, PhysFrame, mapper::CleanUp},
 };
 
 use crate::{
@@ -96,20 +96,20 @@ impl UserThread {
         let mut process_memory_manager = MemoryManager::new(table);
 
         // call align
-        let stack_top = thread_stack_alloc(&mut process_memory_manager) - 8;
+        let stack_top = thread_stack_alloc(&mut process_memory_manager);
+        let stack_top_call_aligned = stack_top - 8;
 
         let load_info = load_elf(elf_data, &mut process_memory_manager)?;
 
         // Back to kernel page
         unsafe { Cr3::write(kernel_pml4.0, kernel_pml4.1) };
 
-        let context = CpuContext::new_user_thread(load_info.entry_point.as_u64(), stack_top);
+        let context =
+            CpuContext::new_user_thread(load_info.entry_point.as_u64(), stack_top_call_aligned);
 
         static THREAD_NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
         let id = THREAD_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-
-        println!("User stack top: 0x{stack_top:x}");
 
         let thread = UserThread {
             id: ThreadId::new(id, false),
@@ -128,15 +128,12 @@ impl UserThread {
             fpu: FpuState::default(),
         };
 
-        println!("Created user thread: {:#?}", thread.initial_stack_top);
-
         Ok(thread)
     }
 
+    /// Cleans thread resources and switches to kernel page
     pub fn free(&mut self) {
-        // todo: memory cleanup
-        // todo: cleanup page table and switch to kernel
-
+        println!("Cleaning up thread resources");
         // Unmap all memory mappings
         for (&addr, mapping) in &self.memory_mappings {
             let _ = self.memory_manager.unmap_memory(addr, mapping.size);
@@ -148,5 +145,12 @@ impl UserThread {
 
         thread_stack_free(&mut self.memory_manager, self.initial_stack_top);
         kthread_stack_free(self.initial_kernel_stack_top);
+
+        // clean up all page tables in the lower half of the address space
+        self.memory_manager.clean_lower_half();
+
+        let kernelcr3 = boot_info().cr3;
+
+        unsafe { Cr3::write(kernelcr3.0, kernelcr3.1) };
     }
 }

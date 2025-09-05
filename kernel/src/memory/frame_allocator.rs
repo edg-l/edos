@@ -6,7 +6,7 @@ use limine::{memory_map::EntryType, response::MemoryMapResponse};
 use spin::{Mutex, MutexGuard, Once};
 use x86_64::{
     PhysAddr,
-    structures::paging::{FrameAllocator, PhysFrame, Size4KiB},
+    structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB},
 };
 
 use crate::memory::get_virt_addr;
@@ -391,6 +391,14 @@ unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
             self.index_to_frame(index)
         } else {
             None
+        }
+    }
+}
+
+impl FrameDeallocator<Size4KiB> for BitmapFrameAllocator {
+    unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        unsafe {
+            self.deallocate_frame(frame);
         }
     }
 }
