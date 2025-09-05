@@ -10,7 +10,7 @@ use x86_64::{
 
 use crate::{
     apic::get_lapic,
-    drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
+    drivers::fpu::{self, init_fpu_state, restore_fpu_state, save_fpu_state},
     interrupts::InterruptIndex,
     println,
     syscalls::set_gs_kernel_stack,
@@ -102,14 +102,20 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                     *context = kthread.context.clone();
                     return context;
                 }
-            } else if let Some(thread) = sched.threads.get(&current_id.id) {
+            } else if let Some(thread) = sched.threads.get_mut(&current_id.id) {
                 // Going to user space.
-                *context = thread.context.clone();
-                restore_fpu_state(&thread.fpu);
-                // Set RSP0
-                cpu.tss.privilege_stack_table[0] = VirtAddr::new(thread.kernel_stack_top);
                 // Set page table
                 Cr3::write(thread.cr3.0, thread.cr3.1);
+                *context = thread.context.clone();
+                if !thread.fpu_init {
+                    init_fpu_state(&mut thread.fpu);
+                    thread.fpu_init = true;
+                } else {
+                    restore_fpu_state(&thread.fpu);
+                }
+                // Set RSP0
+                cpu.tss.privilege_stack_table[0] = VirtAddr::new(thread.kernel_stack_top);
+
                 // set kernel gs stack
                 set_gs_kernel_stack(thread.kernel_stack_top);
 

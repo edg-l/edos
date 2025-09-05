@@ -1,11 +1,20 @@
 use bytemuck::{Pod, Zeroable};
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 
+use crate::println;
+
 /// Enable FPU/SSE support
 pub unsafe fn init_fpu() {
     unsafe {
         enable_fpu();
         enable_sse();
+        println!("Enabled FPU and SSE");
+        // Simple MMX instruction test
+        core::arch::asm!(
+            "emms", // Empty MMX state
+            options(nostack, preserves_flags)
+        );
+        println!("MMX test passed");
     }
 }
 

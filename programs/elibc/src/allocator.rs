@@ -5,8 +5,8 @@ use spin::Once;
 
 use crate::{MAP_ANONYMOUS, PROT_READ, PROT_WRITE, sys_mmap};
 
-#[global_allocator]
-pub static ALLOCATOR: Locked = Locked::new();
+//#[global_allocator]
+//pub static ALLOCATOR: Locked = Locked::new();
 
 unsafe impl GlobalAlloc for Locked {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {

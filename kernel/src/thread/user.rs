@@ -8,9 +8,18 @@ use x86_64::{
 };
 
 use crate::{
-    boot::boot_info, drivers::fpu::FpuState, loader::{load_elf, ElfLoadError}, memory::mapper::{active_level_4_table, get_level_4_table, MemoryManager}, println, syscalls::Errno, thread::{
-        context::CpuContext, paging::allocate_process_pml4, util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free}, ThreadId, ThreadState
-    }
+    boot::boot_info,
+    drivers::fpu::FpuState,
+    loader::{ElfLoadError, load_elf},
+    memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
+    println,
+    syscalls::Errno,
+    thread::{
+        ThreadId, ThreadState,
+        context::CpuContext,
+        paging::allocate_process_pml4,
+        util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
+    },
 };
 
 #[derive(Debug)]
@@ -86,7 +95,8 @@ impl UserThread {
 
         let mut process_memory_manager = MemoryManager::new(table);
 
-        let stack_top = thread_stack_alloc(&mut process_memory_manager);
+        // call align
+        let stack_top = thread_stack_alloc(&mut process_memory_manager) - 8;
 
         let load_info = load_elf(elf_data, &mut process_memory_manager)?;
 
@@ -98,6 +108,8 @@ impl UserThread {
         static THREAD_NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
         let id = THREAD_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+        println!("User stack top: 0x{stack_top:x}");
 
         let thread = UserThread {
             id: ThreadId::new(id, false),

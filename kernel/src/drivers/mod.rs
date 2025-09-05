@@ -1,8 +1,8 @@
 use crate::{graphics, thread::util::queue_spawn_kthread_named};
 
+pub mod fpu;
 pub mod hpet;
 pub mod keyboard;
-pub mod fpu;
 
 pub fn init_drivers() {
     hpet::driver::init();

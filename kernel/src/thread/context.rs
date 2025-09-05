@@ -1,13 +1,11 @@
 #![expect(unused)]
 
-use bytemuck::{Zeroable, Pod};
+use bytemuck::{Pod, Zeroable};
 use x86_64::{
     PrivilegeLevel, VirtAddr, registers::rflags::RFlags, structures::idt::InterruptStackFrameValue,
 };
 
 use crate::gdt::GDT;
-
-
 
 #[repr(C)]
 #[derive(Debug, Clone)]

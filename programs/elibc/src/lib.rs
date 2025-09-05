@@ -1,6 +1,6 @@
 #![no_std]
 
-extern crate alloc;
+//extern crate alloc;
 
 use core::hint::spin_loop;
 
@@ -115,7 +115,7 @@ unsafe extern "C" {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // Initialize the heap allocator by triggering first allocation
-    allocator::ALLOCATOR.lock();
+    //allocator::ALLOCATOR.lock();
 
     // Call user's main function
     let code = unsafe { main() };

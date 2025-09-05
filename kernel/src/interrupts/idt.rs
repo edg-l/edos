@@ -9,7 +9,8 @@ use crate::{
     drivers::keyboard::keyboard_interrupt_handler,
     gdt,
     interrupts::{
-        io::{ahci_interrupt_handler, device_not_available_handler, mouse_interrupt_handler}, InterruptIndex
+        InterruptIndex,
+        io::{ahci_interrupt_handler, device_not_available_handler, mouse_interrupt_handler},
     },
     println,
     thread::{interrupt::timer_interrupt_handler, scheduler::sched},
