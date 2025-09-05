@@ -150,7 +150,7 @@ impl UserThread {
 
         println!("switching page");
 
-       // unsafe { Cr3::write(kernelcr3.0, kernelcr3.1) };
+       unsafe { Cr3::write(kernelcr3.0, kernelcr3.1) };
 
             println!("switching page done");
 

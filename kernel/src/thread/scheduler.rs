@@ -10,6 +10,7 @@ use x86_64::{
 
 use crate::{
     apic::get_lapic,
+    boot::boot_info,
     drivers::fpu::{self, init_fpu_state, restore_fpu_state, save_fpu_state},
     interrupts::InterruptIndex,
     println,
@@ -54,6 +55,12 @@ pub fn thread_cleaner() -> ! {
         without_interrupts(|| {
             let sched = sched();
 
+            let kernelcr3 = boot_info().cr3;
+
+            println!("switching page");
+
+            unsafe { Cr3::write(kernelcr3.0, kernelcr3.1) };
+
             for thread in sched.threads.values_mut() {
                 if let ThreadState::Exited(code) = thread.state {
                     println!("Thread {} exited {code}", thread.id);
@@ -63,7 +70,10 @@ pub fn thread_cleaner() -> ! {
             }
 
             for t in &to_remove {
-                //sched.threads.remove(&t.id);
+                let t = sched.threads.remove(&t.id); // causes problems, removing this line doesnt page fault
+                if let Some(mut t) = t {
+                    //t.free();
+                }
             }
 
             to_remove.clear();
