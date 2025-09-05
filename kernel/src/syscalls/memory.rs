@@ -1,11 +1,10 @@
 use x86_64::{VirtAddr, structures::paging::PageTableFlags};
 
 use crate::{
-    syscalls::Errno,
-    thread::{
+    println, syscalls::Errno, thread::{
         scheduler::sched,
         user::{MappingType, MemoryMapping, UserThread},
-    },
+    }
 };
 
 // Protection flags (match Linux)
@@ -29,6 +28,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32) -> u64 {
 
     // Only support anonymous private mappings for now
     if (flags & MAP_ANONYMOUS) == 0 || (flags & MAP_PRIVATE) == 0 {
+        println!("Unsupported mapping type");
         thread.errno = Errno::EINVAL;
         return !0u64; // -1 (EINVAL)
     }

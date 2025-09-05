@@ -5,10 +5,12 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
     let thread = sched.current_thread_mut();
     thread.errno = Errno::Clear;
 
+    /*
     println!(
         "Syscall: sys_write(fd={}, buf={:p}, count={})",
         fd, buffer_ptr, count
     );
+     */
 
     if count == 0 {
         return 0;

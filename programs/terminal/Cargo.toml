@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 elibc = { path = "../elibc"}
+spin = "0.10.0"

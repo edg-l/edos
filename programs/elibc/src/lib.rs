@@ -41,15 +41,17 @@ pub fn sys_getpid() -> u64 {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(clippy::upper_case_acronyms)]
+#[repr(u64)]
 pub enum Errno {
     Clear,
     EINVAL,
     ENOMEM,
     EFAULT,
+    UNKNOWN,
 }
 
-pub fn sys_errno() -> u64 {
-    unsafe { syscall0(SYS_ERRNO) }
+pub fn sys_errno() -> Errno {
+    unsafe { core::mem::transmute(syscall0(SYS_ERRNO)) }
 }
 
 pub fn sys_exit(code: i32) -> ! {
@@ -115,7 +117,7 @@ unsafe extern "C" {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // Initialize the heap allocator by triggering first allocation
-    //allocator::ALLOCATOR.lock();
+    allocator::ALLOCATOR.lock();
 
     // Call user's main function
     let code = unsafe { main() };

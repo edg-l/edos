@@ -3,10 +3,10 @@ use core::alloc::{GlobalAlloc, Layout};
 use linked_list_allocator::LockedHeap;
 use spin::Once;
 
-use crate::{MAP_ANONYMOUS, PROT_READ, PROT_WRITE, sys_mmap};
+use crate::{println, sys_errno, sys_mmap, Errno, MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 
-//#[global_allocator]
-//pub static ALLOCATOR: Locked = Locked::new();
+#[global_allocator]
+pub static ALLOCATOR: Locked = Locked::new();
 
 unsafe impl GlobalAlloc for Locked {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -36,7 +36,16 @@ impl Locked {
 
     pub fn lock(&self) -> &LockedHeap {
         self.inner.call_once(|| {
-            let ptr = sys_mmap(0, 1024 * 1024 * 64, PROT_WRITE | PROT_READ, MAP_ANONYMOUS);
+            let ptr = sys_mmap(0, 1024 * 1024 * 64, PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE);
+
+            if ptr as u64 == !0u64 {
+                let errno = sys_errno() as Errno;
+
+                println!("Error getting heap ptr: {errno:?}");
+                panic!();
+            }
+
+            println!("Initializing heap: {ptr:p}");
 
             unsafe { LockedHeap::new(ptr, 1024 * 1024 * 64) }
         })
