@@ -13,9 +13,7 @@ use crate::{
     interrupts::InterruptIndex,
     println,
     syscalls::set_gs_kernel_stack,
-    thread::{
-        KernelThread, ThreadId, ThreadState, context::CpuContext, user::UserThread,
-    },
+    thread::{KernelThread, ThreadId, ThreadState, context::CpuContext, user::UserThread},
     timer::Instant,
     util::per_cpu::get_percpu_data,
 };

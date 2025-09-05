@@ -175,7 +175,7 @@ limine/limine:
 	$(MAKE) -C limine
 
 .PHONY: kernel
-kernel:
+kernel: programs
 	$(MAKE) -C kernel
 
 $(IMAGE_NAME).iso: limine/limine kernel
@@ -251,6 +251,7 @@ endif
 .PHONY: clean
 clean:
 	$(MAKE) -C kernel clean
+	$(MAKE) -C programs clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
 
 .PHONY: distclean
@@ -262,3 +263,8 @@ distclean: clean
 .PHONY: fmt
 fmt:
 	$(MAKE) -C kernel fmt
+	$(MAKE) -C programs fmt
+
+.PHONY: programs
+programs:
+	$(MAKE) -C programs build

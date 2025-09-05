@@ -9,11 +9,7 @@ use crate::{
         KTHREAD_STACK_FIRST, KTHREAD_STACK_SIZE, USER_STACK_SIZE, USER_STACK_TOP,
         mapper::{MemoryManager, memory_mapper},
     },
-    thread::{
-        KernelThread,
-        scheduler::sched,
-        user::UserThread,
-    },
+    thread::{KernelThread, scheduler::sched, user::UserThread},
 };
 
 static KTHREAD_FREED_STACKS: SegQueue<u64> = SegQueue::new();
