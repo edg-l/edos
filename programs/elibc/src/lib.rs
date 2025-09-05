@@ -6,7 +6,10 @@ use core::hint::spin_loop;
 
 use crate::syscall::{syscall0, syscall1, syscall2, syscall3, syscall4};
 
+extern crate alloc;
+
 pub mod allocator;
+pub mod graphics;
 pub mod syscall;
 
 // Syscall numbers
@@ -17,6 +20,10 @@ pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_ERRNO: u64 = 0x400;
+pub const SYS_DRAW_RECT: u64 = 100;
+pub const SYS_RENDER: u64 = 101;
+pub const SYS_SCREEN_INFO: u64 = 102;
+pub const SYS_DRAW: u64 = 103;
 
 // Type-safe wrappers
 pub fn sys_write(fd: u64, buf: *const u8, count: usize) -> isize {

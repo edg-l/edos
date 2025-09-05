@@ -88,6 +88,35 @@ pub unsafe extern "C" fn syscall6(
     result
 }
 
+/// Raw syscall with 5 arguments
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn syscall5(
+    num: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+) -> u64 {
+    let result: u64;
+    unsafe {
+        asm!(
+            "syscall",
+            in("rax") num,
+            in("rdi") arg1,
+            in("rsi") arg2,
+            in("rdx") arg3,
+            in("r10") arg4,
+            in("r8") arg5,
+            lateout("rax") result,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack, preserves_flags)
+        );
+    }
+    result
+}
+
 /// Raw syscall with 2 arguments
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn syscall2(num: u64, arg1: u64, arg2: u64) -> u64 {

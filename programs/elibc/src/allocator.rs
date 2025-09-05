@@ -3,7 +3,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use linked_list_allocator::LockedHeap;
 use spin::Once;
 
-use crate::{println, sys_errno, sys_mmap, Errno, MAP_ANONYMOUS, MAP_PRIVATE, PROT_WRITE};
+use crate::{Errno, MAP_ANONYMOUS, MAP_PRIVATE, PROT_WRITE, println, sys_errno, sys_mmap};
 
 #[global_allocator]
 pub static ALLOCATOR: Locked = Locked::new();

@@ -1,7 +1,4 @@
-use core::{
-    arch::{asm, naked_asm},
-    hint::black_box,
-};
+use core::arch::{asm, naked_asm};
 
 use x86_64::{
     VirtAddr,
@@ -15,6 +12,7 @@ use x86_64::{
 
 use crate::{
     gdt::GDT,
+    graphics::api::{DrawRequest, ScreenInfo},
     println,
     syscalls::{
         io::sys_write,
@@ -24,8 +22,9 @@ use crate::{
     util::per_cpu::get_percpu_data,
 };
 
-pub mod io;
-pub mod memory;
+mod graphics;
+mod io;
+mod memory;
 
 unsafe fn setup_gs_base() {
     let percpu = get_percpu_data();
@@ -187,6 +186,10 @@ const SYS_MUNMAP: u64 = 11;
 const SYS_EXIT: u64 = 60;
 const SYS_ERRNO: u64 = 0x400;
 const SYS_GETPID: u64 = 39; // get process ID
+const SYS_DRAW_RECT: u64 = 100;
+const SYS_RENDER: u64 = 101;
+const SYS_SCREEN_INFO: u64 = 102;
+const SYS_DRAW: u64 = 103;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -226,6 +229,18 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         }
         SYS_ERRNO => {
             ctx.rax = sys_errno();
+        }
+        SYS_DRAW_RECT => {
+            ctx.rax = graphics::sys_draw_rect(ctx.rdi, ctx.rsi, ctx.rdx, ctx.r10, ctx.r8 as u32);
+        }
+        SYS_RENDER => {
+            ctx.rax = graphics::sys_render();
+        }
+        SYS_SCREEN_INFO => {
+            ctx.rax = graphics::sys_screen_info(ctx.rdi as *mut ScreenInfo);
+        }
+        SYS_DRAW => {
+            ctx.rax = graphics::sys_draw(ctx.rdi as *const DrawRequest);
         }
         _ => {
             ctx.rax = !0u64;
