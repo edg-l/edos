@@ -271,8 +271,19 @@ impl Scheduler {
         without_interrupts(|| self.current_thread_id.clone())
     }
 
+    pub fn thread_exists(&self, id: ThreadId) -> bool {
+        if id.kernel {
+            if let Some(thread) = self.kthreads.get(&id.id) {
+                return true;
+            }
+        } else if let Some(thread) = self.threads.get(&id.id) {
+            return true;
+        }
+        false
+    }
+
     /// Wake the given thread
-    pub fn thread_wake(&mut self, id: ThreadId) -> bool {
+    pub fn thread_wake(&mut self, id: ThreadId) {
         without_interrupts(|| {
             if id.kernel {
                 if let Some(thread) = self.kthreads.get_mut(&id.id)
@@ -280,16 +291,13 @@ impl Scheduler {
                 {
                     thread.state = ThreadState::Ready;
                     self.thread_queue.push(id);
-                    return true;
                 }
             } else if let Some(thread) = self.threads.get_mut(&id.id)
                 && thread.state != ThreadState::Ready
             {
                 thread.state = ThreadState::Ready;
                 self.thread_queue.push(id);
-                return true;
             }
-            false
         })
     }
 

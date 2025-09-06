@@ -25,6 +25,10 @@ impl<T: Clone> Broadcast<T> {
 
     /// The calling thread subscribes.
     pub fn subscribe(&self) -> Receiver<T> {
+        if let Some(r) = self.subscribers.read().get(&sched().current_id()) {
+            return r.clone();
+        }
+
         let mut subs = self.subscribers.write();
         let tid = sched().current_id();
         (*subs.entry(tid).or_default()).clone()
@@ -46,8 +50,11 @@ impl<T: Clone> Broadcast<T> {
                 receiver.queue.pop();
             }
             receiver.queue.push(value.clone());
-            if !sched.thread_wake(tid.clone()) {
+
+            if !sched.thread_exists(tid.clone()) {
                 to_remove.push(tid);
+            } else {
+                sched.thread_wake(tid.clone());
             }
         }
 

@@ -15,7 +15,10 @@ use crate::{
     graphics::api::ScreenInfo,
     println,
     syscalls::{
-        graphics::DrawRequestInput, io::{sys_close, sys_pipe, sys_read, sys_write}, keyboard::sys_keyboard_raw, memory::{sys_mmap, sys_munmap}
+        graphics::DrawRequestInput,
+        io::{sys_close, sys_pipe, sys_read, sys_write},
+        keyboard::sys_keyboard_raw,
+        memory::{sys_mmap, sys_munmap},
     },
     thread::scheduler::sched,
     util::per_cpu::get_percpu_data,

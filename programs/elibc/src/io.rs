@@ -3,7 +3,7 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{errno, syscall1, Errno, SYS_RAW_INPUT},
+    sys::{Errno, SYS_RAW_INPUT, errno, syscall1},
     sys_read, sys_write,
 };
 
@@ -195,6 +195,8 @@ pub fn get_raw_input(timeout_ms: u64) -> Option<KeyEvent> {
         Some(KeyEvent::RawScancode((result & 0x7FFFFFFF) as u8))
     } else {
         // Unicode character
-        Some(KeyEvent::Unicode(char::from_u32(result as u32).unwrap_or('\0')))
+        Some(KeyEvent::Unicode(
+            char::from_u32(result as u32).unwrap_or('\0'),
+        ))
     }
 }

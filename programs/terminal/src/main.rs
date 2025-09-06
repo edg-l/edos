@@ -3,8 +3,8 @@
 
 use alloc::{string::String, vec::Vec};
 use elibc::{
+    KeyEvent, get_raw_input,
     graphics::{Color, RasterHeight, Screen, TextMetrics, TextStyle},
-    get_raw_input, KeyEvent,
 };
 
 extern crate alloc;
@@ -190,7 +190,7 @@ impl Terminal {
                         self.backspace();
                     }
                     0x1C => {
-                        // Enter scancode (make code)  
+                        // Enter scancode (make code)
                         self.new_line();
                     }
                     _ => {

@@ -43,7 +43,9 @@ pub fn sys_close(fd: u64) -> i32 {
 }
 
 // Re-export I/O types for convenience
-pub use io::{IoError, IoResult, STDERR, STDOUT, read_from_fd, read_stdin, get_raw_input, KeyEvent};
+pub use io::{
+    IoError, IoResult, KeyEvent, STDERR, STDOUT, get_raw_input, read_from_fd, read_stdin,
+};
 // Re-export memory constants
 pub use sys::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
 
