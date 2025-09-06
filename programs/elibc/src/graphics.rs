@@ -6,9 +6,7 @@ use noto_sans_mono_bitmap::{get_raster, get_raster_width};
 
 use crate::{
     math::isqrt,
-    sys::{
-        Errno, SYS_DRAW, SYS_DRAW_RECT, SYS_RENDER, SYS_SCREEN_INFO, calls as syscall, errno,
-    },
+    sys::{Errno, SYS_DRAW, SYS_DRAW_RECT, SYS_RENDER, SYS_SCREEN_INFO, calls as syscall, errno},
 };
 
 /// Graphics operation error type
