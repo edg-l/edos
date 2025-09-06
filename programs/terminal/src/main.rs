@@ -9,6 +9,8 @@ use elibc::{
 
 extern crate alloc;
 
+const MARGIN: u64 = 10;
+
 fn parse_command(input: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current_arg = String::new();
@@ -83,8 +85,8 @@ impl Terminal {
 
         let metrics = TextMetrics::for_size(text_style.font_size);
 
-        let max_cols = (screen.width() as u64 / metrics.char_width) as usize;
-        let max_lines = (screen.height() as u64 / metrics.line_height) as usize;
+        let max_cols = ((screen.width() as u64 - 2 * MARGIN) / metrics.char_width) as usize;
+        let max_lines = ((screen.height() as u64 - 2 * MARGIN) / metrics.line_height) as usize;
 
         let mut buffer = Vec::new();
         buffer.push(String::new()); // Start with one empty line
@@ -127,7 +129,7 @@ impl Terminal {
                 break; // Don't render lines that would be off-screen
             }
 
-            let y_pos = (line_idx as u64) * self.line_height;
+            let y_pos = (line_idx as u64) * self.line_height + MARGIN;
 
             // Get line type (default to Input if index out of bounds)
             let line_type = self.line_types.get(line_idx).unwrap_or(&LineType::Input);
@@ -136,19 +138,19 @@ impl Terminal {
                 LineType::Input => {
                     // Render prompt and text after it
                     self.screen
-                        .draw_text(0, y_pos, &self.prompt_text, &self.prompt_style)?;
+                        .draw_text(MARGIN, y_pos, &self.prompt_text, &self.prompt_style)?;
 
                     if !line_str.is_empty() {
                         let prompt_width = (self.prompt_text.len() as u64) * self.char_width;
                         self.screen
-                            .draw_text(prompt_width, y_pos, line_str, &self.text_style)?;
+                            .draw_text(prompt_width + MARGIN, y_pos, line_str, &self.text_style)?;
                     }
                 }
                 LineType::Output => {
                     // Render only text, no prompt
                     if !line_str.is_empty() {
                         self.screen
-                            .draw_text(0, y_pos, line_str, &self.text_style)?;
+                            .draw_text(MARGIN, y_pos, line_str, &self.text_style)?;
                     }
                 }
             }
@@ -181,15 +183,15 @@ impl Terminal {
             LineType::Input => {
                 // Account for prompt offset when positioning cursor
                 let prompt_width = (self.prompt_text.len() as u64) * self.char_width;
-                prompt_width + (self.cursor_x as u64) * self.char_width
+                prompt_width + (self.cursor_x as u64) * self.char_width + MARGIN
             }
             LineType::Output => {
                 // No prompt offset for output lines
-                (self.cursor_x as u64) * self.char_width
+                (self.cursor_x as u64) * self.char_width + MARGIN
             }
         };
 
-        let cursor_y_pos = (self.cursor_y as u64) * self.line_height;
+        let cursor_y_pos = (self.cursor_y as u64) * self.line_height + MARGIN;
 
         // Draw a simple vertical line as cursor
         self.screen.draw_rect(
