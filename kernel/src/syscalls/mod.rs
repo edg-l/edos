@@ -218,7 +218,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             ctx.rax = sys_read(fd, buffer_ptr, count) as u64;
         }
         SYS_RAW_INPUT => {
-            ctx.rax = sys_keyboard_raw(ctx.rdi) as u64;
+            let timeout = ctx.rdi;
+            let buffer_ptr = ctx.rsi as *mut u32;
+            let count = ctx.rdx as usize;
+            ctx.rax = sys_keyboard_raw(timeout, buffer_ptr, count) as u64;
         }
         SYS_PIPE => {
             let pipe_fds = ctx.rdi as *mut [u64; 2];

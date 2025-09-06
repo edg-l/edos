@@ -1,9 +1,10 @@
+use alloc::vec::Vec;
 use core::fmt;
 use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{Errno, SYS_RAW_INPUT, errno, syscall1},
+    sys::{Errno, SYS_RAW_INPUT, errno, syscall1, syscall3},
     sys_read, sys_write,
 };
 
@@ -186,17 +187,32 @@ pub enum KeyEvent {
     RawScancode(u8),
 }
 
-pub fn get_raw_input(timeout_ms: u64) -> Option<KeyEvent> {
-    let result = unsafe { syscall1(SYS_RAW_INPUT, timeout_ms) };
+/// Try to get `count` key events. This may not fill up all the buffer, usually just returns one.
+pub fn get_raw_input(timeout_ms: u64, out_buf: &mut Vec<KeyEvent>, count: usize) {
+    let mut buf: Vec<u32> = alloc::vec![0; count];
+
+    let result = unsafe {
+        syscall3(
+            SYS_RAW_INPUT,
+            timeout_ms,
+            buf.as_mut_ptr() as u64,
+            count as u64,
+        )
+    };
+
     if result == !0u64 {
-        None
-    } else if result & 0x80000000 != 0 {
-        // Raw scancode
-        Some(KeyEvent::RawScancode((result & 0x7FFFFFFF) as u8))
-    } else {
-        // Unicode character
-        Some(KeyEvent::Unicode(
-            char::from_u32(result as u32).unwrap_or('\0'),
-        ))
+        return;
+    }
+
+    for scancode in buf {
+        if scancode & 0x80000000 != 0 {
+            // Raw scancode
+            let key = KeyEvent::RawScancode((scancode & 0x7FFFFFFF) as u8);
+            out_buf.push(key);
+        } else {
+            // Unicode character
+            let key = KeyEvent::Unicode(char::from_u32(scancode).unwrap_or('\0'));
+            out_buf.push(key);
+        }
     }
 }

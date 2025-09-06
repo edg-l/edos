@@ -5,6 +5,7 @@ use alloc::{format, string::String, vec::Vec};
 use elibc::{
     KeyEvent, get_raw_input,
     graphics::{Color, RasterHeight, Screen, TextMetrics, TextStyle},
+    println,
 };
 
 extern crate alloc;
@@ -142,8 +143,12 @@ impl Terminal {
 
                     if !line_str.is_empty() {
                         let prompt_width = (self.prompt_text.len() as u64) * self.char_width;
-                        self.screen
-                            .draw_text(prompt_width + MARGIN, y_pos, line_str, &self.text_style)?;
+                        self.screen.draw_text(
+                            prompt_width + MARGIN,
+                            y_pos,
+                            line_str,
+                            &self.text_style,
+                        )?;
                     }
                 }
                 LineType::Output => {
@@ -445,12 +450,22 @@ pub extern "C" fn main() -> i32 {
         return 1;
     }
 
+    let mut key_buffer = Vec::new();
+
     // Main terminal loop
     loop {
         // Get raw input with a small timeout to avoid blocking indefinitely
-        if let Some(key_event) = get_raw_input(10) {
+
+        get_raw_input(10, &mut key_buffer, 16);
+
+        if !key_buffer.is_empty() {
             // Process the key event
-            terminal.handle_key_event(key_event);
+
+            for key_event in &key_buffer {
+                terminal.handle_key_event(*key_event);
+            }
+
+            key_buffer.clear();
 
             // Re-render the terminal immediately for instant feedback
             if terminal.render().is_err() {
