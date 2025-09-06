@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use elibc::{
     KeyEvent, get_raw_input,
     graphics::{Color, RasterHeight, Screen, TextMetrics, TextStyle},
@@ -9,9 +9,58 @@ use elibc::{
 
 extern crate alloc;
 
+fn parse_command(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current_arg = String::new();
+    let mut in_quotes = false;
+    let mut quote_char = '"';
+    let mut chars = input.chars().peekable();
+    
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' | '\'' if !in_quotes => {
+                in_quotes = true;
+                quote_char = ch;
+            }
+            q if in_quotes && q == quote_char => {
+                in_quotes = false;
+            }
+            '\\' if in_quotes => {
+                // Handle escaped characters within quotes
+                if let Some(escaped) = chars.next() {
+                    current_arg.push(escaped);
+                }
+            }
+            ' ' | '\t' if !in_quotes => {
+                if !current_arg.is_empty() {
+                    args.push(current_arg);
+                    current_arg = String::new();
+                }
+            }
+            _ => {
+                current_arg.push(ch);
+            }
+        }
+    }
+    
+    // Add the last argument if it's not empty
+    if !current_arg.is_empty() {
+        args.push(current_arg);
+    }
+    
+    args
+}
+
+#[derive(Clone, Debug)]
+enum LineType {
+    Input,  // Lines where user types commands (show prompt)
+    Output, // Lines with command output (no prompt)
+}
+
 struct Terminal {
     screen: Screen,
     buffer: Vec<Vec<char>>,
+    line_types: Vec<LineType>,
     cursor_x: usize,
     cursor_y: usize,
     max_lines: usize,
@@ -38,11 +87,15 @@ impl Terminal {
         let mut buffer = Vec::new();
         buffer.push(Vec::new()); // Start with one empty line
 
+        let mut line_types = Vec::new();
+        line_types.push(LineType::Input); // First line is input
+
         let prompt_text = String::from("> ");
 
         Ok(Terminal {
             screen,
             buffer,
+            line_types,
             cursor_x: 0, // Start at beginning of input area
             cursor_y: 0,
             max_lines,
@@ -68,16 +121,31 @@ impl Terminal {
 
             let y_pos = (line_idx as u64) * self.line_height;
 
-            // Render prompt at the beginning of each line
-            self.screen
-                .draw_text(0, y_pos, &self.prompt_text, &self.prompt_style)?;
+            // Get line type (default to Input if index out of bounds)
+            let line_type = self.line_types.get(line_idx).unwrap_or(&LineType::Input);
 
-            // Convert line to string and render it after the prompt
+            // Convert line to string
             let line_str: String = line.iter().collect();
-            if !line_str.is_empty() {
-                let prompt_width = (self.prompt_text.len() as u64) * self.char_width;
-                self.screen
-                    .draw_text(prompt_width, y_pos, &line_str, &self.text_style)?;
+
+            match line_type {
+                LineType::Input => {
+                    // Render prompt and text after it
+                    self.screen
+                        .draw_text(0, y_pos, &self.prompt_text, &self.prompt_style)?;
+                    
+                    if !line_str.is_empty() {
+                        let prompt_width = (self.prompt_text.len() as u64) * self.char_width;
+                        self.screen
+                            .draw_text(prompt_width, y_pos, &line_str, &self.text_style)?;
+                    }
+                }
+                LineType::Output => {
+                    // Render only text, no prompt
+                    if !line_str.is_empty() {
+                        self.screen
+                            .draw_text(0, y_pos, &line_str, &self.text_style)?;
+                    }
+                }
             }
         }
 
@@ -90,9 +158,21 @@ impl Terminal {
     }
 
     fn draw_cursor(&self) -> Result<(), elibc::graphics::GraphicsError> {
-        // Account for prompt offset when positioning cursor
-        let prompt_width = (self.prompt_text.len() as u64) * self.char_width;
-        let cursor_x_pos = prompt_width + (self.cursor_x as u64) * self.char_width;
+        // Check line type to determine cursor positioning
+        let line_type = self.line_types.get(self.cursor_y).unwrap_or(&LineType::Input);
+        
+        let cursor_x_pos = match line_type {
+            LineType::Input => {
+                // Account for prompt offset when positioning cursor
+                let prompt_width = (self.prompt_text.len() as u64) * self.char_width;
+                prompt_width + (self.cursor_x as u64) * self.char_width
+            }
+            LineType::Output => {
+                // No prompt offset for output lines
+                (self.cursor_x as u64) * self.char_width
+            }
+        };
+        
         let cursor_y_pos = (self.cursor_y as u64) * self.line_height;
 
         // Draw a simple vertical line as cursor
@@ -135,12 +215,24 @@ impl Terminal {
     }
 
     fn new_line(&mut self) {
+        self.new_line_with_type(LineType::Input);
+    }
+
+    fn new_line_with_type(&mut self, line_type: LineType) {
         self.cursor_y += 1;
-        self.cursor_x = 0; // Reset cursor to beginning of input area (after prompt)
+        self.cursor_x = 0; // Reset cursor to beginning of line
 
         // Add new line to buffer if needed
         if self.cursor_y >= self.buffer.len() {
             self.buffer.push(Vec::new());
+            self.line_types.push(line_type);
+        } else {
+            // Update existing line type
+            if self.cursor_y < self.line_types.len() {
+                self.line_types[self.cursor_y] = line_type;
+            } else {
+                self.line_types.push(line_type);
+            }
         }
 
         // Handle scrolling if we exceed max lines
@@ -170,10 +262,95 @@ impl Terminal {
         // Remove first line and adjust cursor position
         if !self.buffer.is_empty() {
             self.buffer.remove(0);
+            if !self.line_types.is_empty() {
+                self.line_types.remove(0);
+            }
             if self.cursor_y > 0 {
                 self.cursor_y -= 1;
             }
         }
+    }
+
+    fn print_text(&mut self, text: &str) {
+        // Mark current line as Output (where we'll start printing)
+        if self.cursor_y < self.line_types.len() {
+            self.line_types[self.cursor_y] = LineType::Output;
+        }
+
+        let lines: Vec<&str> = text.split('\n').collect();
+        for (i, line) in lines.iter().enumerate() {
+            // Add text to current line
+            for ch in line.chars() {
+                self.insert_char_at_end(ch);
+            }
+            
+            // If this isn't the last line, create a new Output line
+            if i < lines.len() - 1 {
+                self.new_line_with_type(LineType::Output);
+            }
+        }
+    }
+
+    fn insert_char_at_end(&mut self, ch: char) {
+        // Ensure we have enough lines in the buffer
+        while self.buffer.len() <= self.cursor_y {
+            self.buffer.push(Vec::new());
+        }
+
+        // Add character to end of current line
+        self.buffer[self.cursor_y].push(ch);
+        self.cursor_x += 1;
+
+        // Handle line wrapping (account for prompt taking up space for Input lines)
+        let line_type = self.line_types.get(self.cursor_y).unwrap_or(&LineType::Input);
+        let effective_max_cols = match line_type {
+            LineType::Input => self.max_cols - self.prompt_text.len(),
+            LineType::Output => self.max_cols,
+        };
+        
+        if self.cursor_x >= effective_max_cols {
+            // For Output lines, wrap with Output type; for Input lines, wrap with Input type
+            self.new_line_with_type(line_type.clone());
+        }
+    }
+
+    fn on_command(&mut self, command: &str, args: &[String]) {
+        // Echo the command and arguments back for now
+        self.print_text(&format!("Command: '{}'\n", command));
+        
+        if !args.is_empty() {
+            self.print_text("Arguments:\n");
+            for (i, arg) in args.iter().enumerate() {
+                self.print_text(&format!("  {}: '{}'\n", i, arg));
+            }
+        } else {
+            self.print_text("No arguments\n");
+        }
+    }
+
+    fn process_current_line(&mut self) {
+        // Get current line content
+        let current_line: String = if self.cursor_y < self.buffer.len() {
+            self.buffer[self.cursor_y].iter().collect()
+        } else {
+            String::new()
+        };
+
+        // Create a new line for the output
+        self.new_line_with_type(LineType::Output);
+
+        // Parse and process the command if it's not empty
+        let trimmed = current_line.trim();
+        if !trimmed.is_empty() {
+            let args = parse_command(trimmed);
+            if let Some(command) = args.first() {
+                let command_args = &args[1..];
+                self.on_command(command, command_args);
+            }
+        }
+
+        // Create a new Input line for the next command
+        self.new_line_with_type(LineType::Input);
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
@@ -181,8 +358,8 @@ impl Terminal {
             KeyEvent::Unicode(ch) => {
                 match ch {
                     '\n' | '\r' => {
-                        // Enter key - new line
-                        self.new_line();
+                        // Enter key - process command
+                        self.process_current_line();
                     }
                     '\u{08}' | '\u{7F}' => {
                         // Backspace or DEL key
@@ -206,7 +383,7 @@ impl Terminal {
                     }
                     0x1C => {
                         // Enter scancode (make code)
-                        self.new_line();
+                        self.process_current_line();
                     }
                     _ => {
                         // Ignore other scancodes for now
