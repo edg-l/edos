@@ -15,7 +15,7 @@ use crate::{
     graphics::api::{DrawRequest, ScreenInfo},
     println,
     syscalls::{
-        io::sys_write,
+        io::{sys_close, sys_pipe, sys_read, sys_write},
         memory::{sys_mmap, sys_munmap},
     },
     thread::scheduler::sched,
@@ -180,7 +180,11 @@ pub struct SyscallContext {
     pub rflags: u64, // User RFLAGS
 }
 
+const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
+
+const SYS_CLOSE: u64 = 3;
+const SYS_PIPE: u64 = 22;
 const SYS_MMAP: u64 = 9;
 const SYS_MUNMAP: u64 = 11;
 const SYS_EXIT: u64 = 60;
@@ -202,6 +206,20 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let buffer_ptr = ctx.rsi as *const u8;
             let count = ctx.rdx as usize;
             ctx.rax = sys_write(fd, buffer_ptr, count);
+        }
+        SYS_READ => {
+            let fd = ctx.rdi;
+            let buffer_ptr = ctx.rsi as *mut u8;
+            let count = ctx.rdx as usize;
+            ctx.rax = sys_read(fd, buffer_ptr, count) as u64;
+        }
+        SYS_PIPE => {
+            let pipe_fds = ctx.rdi as *mut [u64; 2];
+            ctx.rax = sys_pipe(pipe_fds) as u64;
+        }
+        SYS_CLOSE => {
+            let fd = ctx.rdi;
+            ctx.rax = sys_close(fd) as u64;
         }
         SYS_MMAP => {
             let addr = ctx.rdi;

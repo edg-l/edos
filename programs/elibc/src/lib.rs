@@ -15,6 +15,7 @@ pub mod syscall;
 // Syscall numbers
 pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
+pub const SYS_CLOSE: u64 = 3;
 pub const SYS_MMAP: u64 = 9;
 pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_GETPID: u64 = 39;
@@ -26,12 +27,16 @@ pub const SYS_SCREEN_INFO: u64 = 102;
 pub const SYS_DRAW: u64 = 103;
 
 // Type-safe wrappers
-pub fn sys_write(fd: u64, buf: *const u8, count: usize) -> isize {
+pub unsafe fn sys_write(fd: u64, buf: *const u8, count: usize) -> isize {
     unsafe { syscall3(SYS_WRITE, fd, buf as u64, count as u64) as isize }
 }
 
-pub fn sys_read(fd: u64, buf: *mut u8, count: usize) -> isize {
+pub unsafe fn sys_read(fd: u64, buf: *mut u8, count: usize) -> isize {
     unsafe { syscall3(SYS_READ, fd, buf as u64, count as u64) as isize }
+}
+
+pub fn sys_close(fd: u64) -> i32 {
+    unsafe { syscall1(SYS_CLOSE, fd) as i32 }
 }
 
 pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32) -> *mut u8 {
@@ -70,7 +75,9 @@ pub fn sys_exit(code: i32) -> ! {
 
 // Helper functions
 pub fn print(s: &str) {
-    sys_write(1, s.as_ptr(), s.len());
+    unsafe {
+        sys_write(1, s.as_ptr(), s.len());
+    }
 }
 
 pub fn println(s: &str) {

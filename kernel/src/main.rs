@@ -99,9 +99,6 @@ fn main() -> ! {
     thread::scheduler::init();
     drivers::init_drivers();
 
-    queue_spawn_kthread_named("mb-receiver", test::thread_1);
-    queue_spawn_kthread_named("mb-sender", test::thread_2);
-    queue_spawn_kthread_named("keyboard-listener", test::thread_kb_listener);
     queue_spawn_kthread_named("draw", test::draw);
     queue_spawn_thread(UserThread::new(MINIMAL_ELF_PROGRAM).unwrap());
 

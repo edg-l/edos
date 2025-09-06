@@ -17,6 +17,7 @@ use crate::{
     thread::{
         ThreadId, ThreadState,
         context::CpuContext,
+        fd::FileDescriptorTable,
         paging::allocate_process_pml4,
         util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
     },
@@ -42,6 +43,7 @@ pub struct UserThread {
     // Whether the fpu has been initialized for this thread.
     pub fpu_init: bool,
     pub fpu: FpuState,
+    pub fd_table: FileDescriptorTable,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +133,7 @@ impl UserThread {
             errno: Errno::Clear,
             fpu_init: false,
             fpu: FpuState::default(),
+            fd_table: FileDescriptorTable::new(),
         };
 
         Ok(thread)

@@ -12,9 +12,11 @@ use crate::{
 
 pub mod broadcast;
 pub mod context;
+pub mod fd;
 pub mod interrupt;
 pub mod mailbox;
 pub mod paging;
+pub mod pipe;
 pub mod scheduler;
 pub mod user;
 pub mod util;
