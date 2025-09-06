@@ -1,5 +1,8 @@
 use alloc::vec::Vec;
 use thiserror::Error;
+// Re-export noto-sans-mono-bitmap types for user programs
+pub use noto_sans_mono_bitmap::{FontWeight, RasterHeight};
+use noto_sans_mono_bitmap::{get_raster, get_raster_width};
 
 use crate::{
     Errno, SYS_DRAW, SYS_DRAW_RECT, SYS_RENDER, SYS_SCREEN_INFO, math::isqrt, sys_errno, syscall,
@@ -20,6 +23,10 @@ pub enum GraphicsError {
     InvalidColor,
     #[error("Coordinates out of bounds")]
     OutOfBounds,
+    #[error("Unsupported character")]
+    UnsupportedCharacter,
+    #[error("Text rendering error")]
+    TextError,
 }
 
 impl From<Errno> for GraphicsError {
@@ -36,29 +43,19 @@ impl From<Errno> for GraphicsError {
 
 pub type GraphicsResult<T> = Result<T, GraphicsError>;
 
-/// Type-safe color representation (ARGB format)
+/// Type-safe color representation (RGB format)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color(u32);
 
 impl Color {
-    /// Create a new color from ARGB components
-    pub const fn from_argb(a: u8, r: u8, g: u8, b: u8) -> Self {
-        Self(((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32))
-    }
-
-    /// Create a new color from RGB components (alpha = 255)
+    /// Create a new color from RGB components
     pub const fn from_rgb(r: u8, g: u8, b: u8) -> Self {
-        Self::from_argb(255, r, g, b)
+        Self(((r as u32) << 16) | ((g as u32) << 8) | (b as u32))
     }
 
     /// Get the raw u32 value
     pub const fn raw(self) -> u32 {
         self.0
-    }
-
-    /// Extract alpha component
-    pub const fn alpha(self) -> u8 {
-        ((self.0 >> 24) & 0xFF) as u8
     }
 
     /// Extract red component
@@ -85,7 +82,6 @@ impl Color {
     pub const YELLOW: Color = Color::from_rgb(255, 255, 0);
     pub const CYAN: Color = Color::from_rgb(0, 255, 255);
     pub const MAGENTA: Color = Color::from_rgb(255, 0, 255);
-    pub const TRANSPARENT: Color = Color::from_argb(0, 0, 0, 0);
 }
 
 impl From<u32> for Color {
@@ -118,6 +114,284 @@ impl Rect {
             height,
         }
     }
+}
+
+/// Text styling configuration
+#[derive(Debug, Clone, Copy)]
+pub struct TextStyle {
+    pub font_weight: FontWeight,
+    pub font_size: RasterHeight,
+    pub foreground: Color,
+    pub background: Option<Color>,
+}
+
+impl TextStyle {
+    /// Create a new text style with default settings
+    pub const fn new(foreground: Color) -> Self {
+        Self {
+            font_weight: noto_sans_mono_bitmap::FontWeight::Regular,
+            font_size: noto_sans_mono_bitmap::RasterHeight::Size24,
+            foreground,
+            background: None,
+        }
+    }
+
+    /// Set the font weight
+    pub const fn with_weight(mut self, weight: FontWeight) -> Self {
+        self.font_weight = weight;
+        self
+    }
+
+    /// Set the font size
+    pub const fn with_size(mut self, size: RasterHeight) -> Self {
+        self.font_size = size;
+        self
+    }
+
+    /// Set the background color (for opaque text rendering)
+    pub const fn with_background(mut self, background: Color) -> Self {
+        self.background = Some(background);
+        self
+    }
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        Self::new(Color::WHITE)
+    }
+}
+
+/// Text rendering metrics and character information
+#[derive(Debug, Clone, Copy)]
+pub struct TextMetrics {
+    pub char_width: u64,
+    pub char_height: u64,
+    pub line_height: u64,
+    pub baseline: u64,
+}
+
+impl TextMetrics {
+    /// Get text metrics for a specific font size
+    pub fn for_size(size: RasterHeight) -> Self {
+        let char_width = get_raster_width(noto_sans_mono_bitmap::FontWeight::Regular, size) as u64;
+        let char_height = size as u64;
+        let line_height = char_height + 2; // Add small spacing between lines
+        let baseline = (char_height * 3) / 4; // Approximate baseline position
+
+        Self {
+            char_width,
+            char_height,
+            line_height,
+            baseline,
+        }
+    }
+
+    /// Calculate the bounds of a text string
+    pub fn measure_string(&self, text: &str) -> Rect {
+        let lines: Vec<&str> = text.lines().collect();
+        let max_width = lines
+            .iter()
+            .map(|line| line.chars().count() as u64 * self.char_width)
+            .max()
+            .unwrap_or(0);
+        let height = lines.len() as u64 * self.line_height;
+
+        Rect::new(0, 0, max_width, height)
+    }
+}
+
+/// Render a character at the specified position using bitmap font
+fn render_character_at(
+    pixels: &mut [u32],
+    buffer_width: u64,
+    buffer_height: u64,
+    x: u64,
+    y: u64,
+    character: char,
+    style: &TextStyle,
+) -> GraphicsResult<()> {
+    // Get the rasterized character data
+    let raster = match get_raster(character, style.font_weight, style.font_size) {
+        Some(raster) => raster,
+        None => return Err(GraphicsError::UnsupportedCharacter),
+    };
+
+    let char_width = raster.width() as u64;
+    let char_height = raster.height() as u64;
+
+    // Check bounds
+    if x + char_width > buffer_width || y + char_height > buffer_height {
+        return Err(GraphicsError::OutOfBounds);
+    }
+
+    let raster_data = raster.raster();
+
+    // Render each pixel of the character
+    for char_y in 0..char_height {
+        for char_x in 0..char_width {
+            let pixel_x = x + char_x;
+            let pixel_y = y + char_y;
+            let buffer_index = (pixel_y * buffer_width + pixel_x) as usize;
+
+            if buffer_index >= pixels.len() {
+                continue;
+            }
+
+            // Get the intensity from the bitmap (0-255)
+            let intensity = raster_data[char_y as usize][char_x as usize];
+
+            if intensity == 0 {
+                // Transparent pixel - only render background if specified
+                if let Some(bg_color) = style.background {
+                    pixels[buffer_index] = bg_color.raw();
+                }
+            } else {
+                // Blend foreground based on intensity
+                let current_color = Color::from(pixels[buffer_index]);
+                let blended_color = blend_text_pixel(current_color, style.foreground, intensity, style.background);
+                pixels[buffer_index] = blended_color.raw();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Blend a text pixel with the background based on bitmap intensity
+fn blend_text_pixel(
+    background: Color,
+    foreground: Color,
+    intensity: u8,
+    explicit_bg: Option<Color>,
+) -> Color {
+    // Use explicit background if provided, otherwise use current pixel
+    let bg_color = explicit_bg.unwrap_or(background);
+
+    if intensity == 255 {
+        // Fully opaque - use foreground color
+        foreground
+    } else if intensity == 0 {
+        // Fully transparent - use background color
+        bg_color
+    } else {
+        // Blend based on intensity
+        let alpha = intensity as u32;
+        let inv_alpha = 255 - alpha;
+
+        let r = (foreground.red() as u32 * alpha + bg_color.red() as u32 * inv_alpha) / 255;
+        let g = (foreground.green() as u32 * alpha + bg_color.green() as u32 * inv_alpha) / 255;
+        let b = (foreground.blue() as u32 * alpha + bg_color.blue() as u32 * inv_alpha) / 255;
+
+        Color::from_rgb(r as u8, g as u8, b as u8)
+    }
+}
+
+/// Render a string at the specified position
+fn render_string_at(
+    pixels: &mut [u32],
+    buffer_width: u64,
+    buffer_height: u64,
+    x: u64,
+    y: u64,
+    text: &str,
+    style: &TextStyle,
+) -> GraphicsResult<()> {
+    let metrics = TextMetrics::for_size(style.font_size);
+    let mut current_x = x;
+    let mut current_y = y;
+
+    for character in text.chars() {
+        if character == '\n' {
+            // Move to next line
+            current_x = x;
+            current_y += metrics.line_height;
+            continue;
+        }
+
+        if character == '\r' {
+            // Carriage return - just reset x position
+            current_x = x;
+            continue;
+        }
+
+        // Check if character would fit horizontally
+        if current_x + metrics.char_width > buffer_width {
+            // Word wrapping - move to next line
+            current_x = x;
+            current_y += metrics.line_height;
+        }
+
+        // Check if we're still within vertical bounds
+        if current_y + metrics.char_height > buffer_height {
+            break; // Stop rendering if we're out of vertical space
+        }
+
+        // Render the character
+        render_character_at(
+            pixels,
+            buffer_width,
+            buffer_height,
+            current_x,
+            current_y,
+            character,
+            style
+        )?;
+
+        // Move to next character position
+        current_x += metrics.char_width;
+    }
+
+    Ok(())
+}
+
+/// Render multi-line text with word wrapping
+fn render_text_wrapped(
+    pixels: &mut [u32],
+    buffer_width: u64,
+    buffer_height: u64,
+    x: u64,
+    y: u64,
+    text: &str,
+    style: &TextStyle,
+    wrap_width: u64,
+) -> GraphicsResult<()> {
+    let metrics = TextMetrics::for_size(style.font_size);
+    let mut current_x = x;
+    let mut current_y = y;
+
+    let words: Vec<&str> = text.split_whitespace().collect();
+
+    for word in words {
+        let word_width = word.chars().count() as u64 * metrics.char_width;
+
+        // Check if word fits on current line
+        if current_x != x && current_x + word_width > x + wrap_width {
+            // Move to next line
+            current_x = x;
+            current_y += metrics.line_height;
+        }
+
+        // Check vertical bounds
+        if current_y + metrics.char_height > buffer_height {
+            break;
+        }
+
+        // Render the word
+        render_string_at(
+            pixels,
+            buffer_width,
+            buffer_height,
+            current_x,
+            current_y,
+            word,
+            style,
+        )?;
+
+        // Move past the word and add space
+        current_x += word_width + metrics.char_width; // Add space width
+    }
+
+    Ok(())
 }
 
 /// Texture struct for pixel buffer operations
@@ -230,9 +504,35 @@ impl Texture {
         }
     }
 
-    /// Clear the texture (set all pixels to transparent)
+    /// Clear the texture (set all pixels to black)
     pub fn clear(&mut self) {
-        self.fill(Color::TRANSPARENT);
+        self.fill(Color::BLACK);
+    }
+
+    /// Render a character at the specified position
+    pub fn draw_char(&mut self, x: u64, y: u64, character: char, style: &TextStyle) -> GraphicsResult<()> {
+        render_character_at(&mut self.pixels, self.width, self.height, x, y, character, style)
+    }
+
+    /// Render text at the specified position
+    pub fn draw_text(&mut self, x: u64, y: u64, text: &str, style: &TextStyle) -> GraphicsResult<()> {
+        render_string_at(&mut self.pixels, self.width, self.height, x, y, text, style)
+    }
+
+    /// Render text with word wrapping within the specified width
+    pub fn draw_text_wrapped(&mut self, x: u64, y: u64, text: &str, style: &TextStyle, wrap_width: u64) -> GraphicsResult<()> {
+        render_text_wrapped(&mut self.pixels, self.width, self.height, x, y, text, style, wrap_width)
+    }
+
+    /// Get text metrics for a given style
+    pub fn text_metrics(style: &TextStyle) -> TextMetrics {
+        TextMetrics::for_size(style.font_size)
+    }
+
+    /// Measure the bounds of text without rendering it
+    pub fn measure_text(text: &str, style: &TextStyle) -> Rect {
+        let metrics = TextMetrics::for_size(style.font_size);
+        metrics.measure_string(text)
     }
 }
 
@@ -241,8 +541,8 @@ impl Texture {
 pub enum BlendMode {
     /// Replace destination with source
     Replace,
-    /// Alpha blend source over destination
-    AlphaBlend,
+    /// Blend based on RGB intensity (lighter colors have more influence)
+    IntensityBlend,
     /// Add source to destination
     Add,
     /// Multiply source with destination
@@ -254,32 +554,40 @@ impl BlendMode {
     pub fn blend(self, src: Color, dst: Color) -> Color {
         match self {
             BlendMode::Replace => src,
-            BlendMode::AlphaBlend => {
-                let src_alpha = src.alpha() as u32;
-                let inv_alpha = 255 - src_alpha;
+            BlendMode::IntensityBlend => {
+                // Calculate intensity (brightness) of source color
+                let src_intensity = (src.red() as u32 + src.green() as u32 + src.blue() as u32) / 3;
+                let dst_intensity = (dst.red() as u32 + dst.green() as u32 + dst.blue() as u32) / 3;
 
-                let r = (src.red() as u32 * src_alpha + dst.red() as u32 * inv_alpha) / 255;
-                let g = (src.green() as u32 * src_alpha + dst.green() as u32 * inv_alpha) / 255;
-                let b = (src.blue() as u32 * src_alpha + dst.blue() as u32 * inv_alpha) / 255;
-                let a = src_alpha.max(dst.alpha() as u32);
+                // Blend factor based on relative intensities (0-255)
+                let total_intensity = src_intensity + dst_intensity;
+                if total_intensity == 0 {
+                    Color::from_rgb(0, 0, 0)
+                } else {
+                    let src_factor = (src_intensity * 255) / total_intensity;
+                    let dst_factor = 255 - src_factor;
 
-                Color::from_argb(a as u8, r as u8, g as u8, b as u8)
+                    let r = (src.red() as u32 * src_factor + dst.red() as u32 * dst_factor) / 255;
+                    let g =
+                        (src.green() as u32 * src_factor + dst.green() as u32 * dst_factor) / 255;
+                    let b = (src.blue() as u32 * src_factor + dst.blue() as u32 * dst_factor) / 255;
+
+                    Color::from_rgb(r as u8, g as u8, b as u8)
+                }
             }
             BlendMode::Add => {
                 let r = (src.red() as u32 + dst.red() as u32).min(255);
                 let g = (src.green() as u32 + dst.green() as u32).min(255);
                 let b = (src.blue() as u32 + dst.blue() as u32).min(255);
-                let a = src.alpha().max(dst.alpha());
 
-                Color::from_argb(a, r as u8, g as u8, b as u8)
+                Color::from_rgb(r as u8, g as u8, b as u8)
             }
             BlendMode::Multiply => {
                 let r = (src.red() as u32 * dst.red() as u32) / 255;
                 let g = (src.green() as u32 * dst.green() as u32) / 255;
                 let b = (src.blue() as u32 * dst.blue() as u32) / 255;
-                let a = src.alpha().max(dst.alpha());
 
-                Color::from_argb(a, r as u8, g as u8, b as u8)
+                Color::from_rgb(r as u8, g as u8, b as u8)
             }
         }
     }
@@ -428,9 +736,9 @@ impl DrawRequest {
         }
     }
 
-    /// Clear the DrawRequest (set all pixels to transparent)
+    /// Clear the DrawRequest (set all pixels to black)
     pub fn clear(&mut self) {
-        self.fill(Color::TRANSPARENT);
+        self.fill(Color::BLACK);
     }
 
     /// Draw a line from (x1, y1) to (x2, y2) using Bresenham's algorithm
@@ -580,14 +888,14 @@ impl DrawRequest {
         self.blit_texture_with_blend(texture, Some(src_rect), dst_x, dst_y, BlendMode::Replace)
     }
 
-    /// Blit a texture with alpha blending
-    pub fn blit_texture_alpha(
+    /// Blit a texture with intensity blending
+    pub fn blit_texture_intensity(
         &mut self,
         texture: &Texture,
         dst_x: u64,
         dst_y: u64,
     ) -> GraphicsResult<()> {
-        self.blit_texture_with_blend(texture, None, dst_x, dst_y, BlendMode::AlphaBlend)
+        self.blit_texture_with_blend(texture, None, dst_x, dst_y, BlendMode::IntensityBlend)
     }
 
     /// Blit a texture with custom blending mode
@@ -701,6 +1009,21 @@ impl DrawRequest {
             Ok(())
         }
     }
+
+    /// Render a character at the specified position
+    pub fn draw_char(&mut self, x: u64, y: u64, character: char, style: &TextStyle) -> GraphicsResult<()> {
+        render_character_at(&mut self.pixels, self.width, self.height, x, y, character, style)
+    }
+
+    /// Render text at the specified position
+    pub fn draw_text(&mut self, x: u64, y: u64, text: &str, style: &TextStyle) -> GraphicsResult<()> {
+        render_string_at(&mut self.pixels, self.width, self.height, x, y, text, style)
+    }
+
+    /// Render text with word wrapping within the specified width
+    pub fn draw_text_wrapped(&mut self, x: u64, y: u64, text: &str, style: &TextStyle, wrap_width: u64) -> GraphicsResult<()> {
+        render_text_wrapped(&mut self.pixels, self.width, self.height, x, y, text, style, wrap_width)
+    }
 }
 
 /// Screen management struct providing convenient graphics operations
@@ -787,10 +1110,10 @@ impl Screen {
         draw_req.draw()
     }
 
-    /// Draw a texture with alpha blending directly to the screen
-    pub fn draw_texture_alpha(&self, texture: &Texture, x: u64, y: u64) -> GraphicsResult<()> {
+    /// Draw a texture with intensity blending directly to the screen
+    pub fn draw_texture_intensity(&self, texture: &Texture, x: u64, y: u64) -> GraphicsResult<()> {
         let mut draw_req = DrawRequest::new(texture.width, texture.height)?;
-        draw_req.blit_texture_alpha(texture, 0, 0)?;
+        draw_req.blit_texture_intensity(texture, 0, 0)?;
         draw_req = draw_req.with_position(x, y);
         draw_req.draw()
     }
@@ -808,10 +1131,58 @@ impl Screen {
     }
 
     /// Create a texture from the screen contents (screenshot)
-    pub fn capture_region(&self, region: Rect) -> GraphicsResult<Texture> {
+    pub fn capture_region(&self, _region: Rect) -> GraphicsResult<Texture> {
         // This would require a new syscall to read from framebuffer
         // For now, return an error as this functionality isn't implemented
         Err(GraphicsError::Unknown)
+    }
+
+    /// Draw text directly to the screen
+    pub fn draw_text(&self, x: u64, y: u64, text: &str, style: &TextStyle) -> GraphicsResult<()> {
+        let metrics = TextMetrics::for_size(style.font_size);
+        let text_bounds = metrics.measure_string(text);
+
+        let mut draw_req = DrawRequest::new(text_bounds.width, text_bounds.height)?;
+        draw_req.clear(); // Fill with black background
+        draw_req.draw_text(0, 0, text, style)?;
+        draw_req = draw_req.with_position(x, y);
+        draw_req.draw()
+    }
+
+    /// Draw text with word wrapping directly to the screen
+    pub fn draw_text_wrapped(&self, x: u64, y: u64, text: &str, style: &TextStyle, wrap_width: u64) -> GraphicsResult<()> {
+        // Calculate required height for wrapped text
+        let metrics = TextMetrics::for_size(style.font_size);
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let mut lines = 1;
+        let mut current_width = 0u64;
+
+        for word in words {
+            let word_width = word.chars().count() as u64 * metrics.char_width;
+            if current_width != 0 && current_width + word_width > wrap_width {
+                lines += 1;
+                current_width = word_width;
+            } else {
+                current_width += word_width + metrics.char_width; // Add space width
+            }
+        }
+
+        let text_height = lines * metrics.line_height;
+        let mut draw_req = DrawRequest::new(wrap_width, text_height)?;
+        draw_req.clear(); // Fill with black background
+        draw_req.draw_text_wrapped(0, 0, text, style, wrap_width)?;
+        draw_req = draw_req.with_position(x, y);
+        draw_req.draw()
+    }
+
+    /// Draw a single character directly to the screen
+    pub fn draw_char(&self, x: u64, y: u64, character: char, style: &TextStyle) -> GraphicsResult<()> {
+        let metrics = TextMetrics::for_size(style.font_size);
+        let mut draw_req = DrawRequest::new(metrics.char_width, metrics.char_height)?;
+        draw_req.clear(); // Fill with black background
+        draw_req.draw_char(0, 0, character, style)?;
+        draw_req = draw_req.with_position(x, y);
+        draw_req.draw()
     }
 }
 

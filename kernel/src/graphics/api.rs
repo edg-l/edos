@@ -45,7 +45,7 @@ pub(super) enum Response {
 
 #[derive(Debug, Clone)]
 pub struct DrawRequest {
-    // rr_gg_bb_aa 0xff_ff_ff_ff
+    // 00_rr_gg_bb 0x00_ff_ff_ff
     pub pixels: Vec<u32>,
     pub x: u64,
     pub y: u64,
@@ -106,8 +106,8 @@ pub fn draw_line(x1: u64, y1: u64, x2: u64, y2: u64, color: u32) {
     let width = max_x - min_x + 1;
     let height = max_y - min_y + 1;
 
-    // Create transparent buffer
-    let mut pixels = alloc::vec![crate::graphics::colors::TRANSPARENT; (width * height) as usize];
+    // Create black buffer
+    let mut pixels = alloc::vec![crate::graphics::colors::BLACK; (width * height) as usize];
 
     // Bresenham's line algorithm
     let dx = (x2 as i64 - x1 as i64).abs();

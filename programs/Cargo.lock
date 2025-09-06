@@ -25,6 +25,7 @@ name = "elibc"
 version = "0.1.0"
 dependencies = [
  "linked_list_allocator",
+ "noto-sans-mono-bitmap",
  "spin",
  "thiserror",
  "x86_64",

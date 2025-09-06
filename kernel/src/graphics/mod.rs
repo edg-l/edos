@@ -70,14 +70,13 @@ impl DoubleBuffer {
         }
     }
 
-    /// Convert RGBA color (0xRRGGBBAA) to framebuffer's native format
+    /// Convert RGB color (0x00RRGGBB) to framebuffer's native format
     #[inline]
-    fn convert_color(&self, rgba: u32) -> u32 {
-        // Extract RGBA components from 0xRRGGBBAA
-        let r = ((rgba >> 24) & 0xFF) as u8;
-        let g = ((rgba >> 16) & 0xFF) as u8;
-        let b = ((rgba >> 8) & 0xFF) as u8;
-        let _a = (rgba & 0xFF) as u8; // Alpha not used for now
+    fn convert_color(&self, rgb: u32) -> u32 {
+        // Extract RGB components from 0x00RRGGBB
+        let r = ((rgb >> 16) & 0xFF) as u8;
+        let g = ((rgb >> 8) & 0xFF) as u8;
+        let b = (rgb & 0xFF) as u8;
 
         // Convert to framebuffer format using cached masks
         let fb_r = ((r as u32 * self.red_mask) / 255) << self.red_shift;
@@ -114,8 +113,8 @@ impl DoubleBuffer {
                 // Calculate destination position in back buffer
                 let dst_index = y * pixels_per_row + x;
 
-                let rgba_color = request.pixels[src_index];
-                let fb_color = self.convert_color(rgba_color);
+                let rgb_color = request.pixels[src_index];
+                let fb_color = self.convert_color(rgb_color);
 
                 // Copy pixel (no bounds check needed since we clamped above)
                 self.back_buffer[dst_index] = fb_color;
