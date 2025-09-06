@@ -71,6 +71,11 @@ pub enum MappingType {
     Anonymous,
 }
 
+#[derive(Debug, Clone)]
+pub struct File {
+    fd: u64,
+}
+
 impl UserThread {
     /// Must provide entry point and cr3 page table.
     ///

@@ -16,6 +16,11 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
         return 0;
     }
 
+    if fd != 1 {
+        thread.errno = Errno::EINVAL;
+        return !0u64;
+    }
+
     // Read from user buffer
     let buffer = unsafe { core::slice::from_raw_parts(buffer_ptr, count) };
 
@@ -34,4 +39,9 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             count as u64
         }
     }
+}
+
+
+pub fn sys_read(fd: u64, buf_ptr: *mut u8, count: u64) -> u64 {
+    todo!()
 }
