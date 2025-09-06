@@ -13,7 +13,7 @@ pub mod process;
 pub mod sys;
 
 // Re-export commonly used types and functions for convenience
-pub use memory::{sys_mmap, sys_munmap};
+pub use memory::{mmap, munmap};
 pub use process::{sys_exit, sys_getpid};
 pub use sys::{Errno, sys_errno};
 

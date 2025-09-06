@@ -1,10 +1,10 @@
-use core::alloc::{GlobalAlloc, Layout};
+use core::{alloc::{GlobalAlloc, Layout}, ptr::null_mut};
 
 use linked_list_allocator::LockedHeap;
 use spin::Once;
 
 use crate::{
-    memory::sys_mmap,
+    memory::mmap,
     println,
     sys::{Errno, MAP_ANONYMOUS, MAP_PRIVATE, PROT_WRITE, sys_errno},
 };
@@ -40,7 +40,7 @@ impl Locked {
 
     pub fn lock(&self) -> &LockedHeap {
         self.inner.call_once(|| {
-            let ptr = sys_mmap(0, 1024 * 1024 * 64, PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE);
+            let ptr = mmap(null_mut(), 1024 * 1024 * 64, PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE);
 
             if ptr as u64 == !0u64 {
                 let errno = sys_errno() as Errno;
