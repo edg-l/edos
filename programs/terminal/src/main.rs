@@ -4,7 +4,7 @@
 use alloc::{string::String, vec::Vec};
 use elibc::{
     graphics::{Color, RasterHeight, Screen, TextMetrics, TextStyle},
-    read_stdin,
+    get_raw_input, KeyEvent,
 };
 
 extern crate alloc;
@@ -161,23 +161,41 @@ impl Terminal {
         }
     }
 
-    fn handle_input(&mut self, input: &[u8]) {
-        for &byte in input {
-            match byte {
-                b'\n' | b'\r' => {
-                    // Enter key - new line
-                    self.new_line();
+    fn handle_key_event(&mut self, key_event: KeyEvent) {
+        match key_event {
+            KeyEvent::Unicode(ch) => {
+                match ch {
+                    '\n' | '\r' => {
+                        // Enter key - new line
+                        self.new_line();
+                    }
+                    '\u{08}' | '\u{7F}' => {
+                        // Backspace or DEL key
+                        self.backspace();
+                    }
+                    ch if ch >= ' ' && ch <= '~' => {
+                        // Printable ASCII characters
+                        self.insert_char(ch);
+                    }
+                    _ => {
+                        // Ignore other unicode characters for now
+                    }
                 }
-                0x08 | 0x7F => {
-                    // Backspace or DEL key
-                    self.backspace();
-                }
-                b' '..=b'~' => {
-                    // Printable ASCII characters
-                    self.insert_char(byte as char);
-                }
-                _ => {
-                    // Ignore other characters for now
+            }
+            KeyEvent::RawScancode(scancode) => {
+                // Handle special keys based on scancode
+                match scancode {
+                    0x0E => {
+                        // Backspace scancode (make code)
+                        self.backspace();
+                    }
+                    0x1C => {
+                        // Enter scancode (make code)  
+                        self.new_line();
+                    }
+                    _ => {
+                        // Ignore other scancodes for now
+                    }
                 }
             }
         }
@@ -198,27 +216,17 @@ pub extern "C" fn main() -> i32 {
     }
 
     // Main terminal loop
-    let mut input_buffer = [0u8; 256];
     loop {
-        // Read input from stdin
-        match read_stdin(&mut input_buffer) {
-            Ok(0) => {
-                // No input available, continue loop
-                continue;
-            }
-            Ok(bytes_read) => {
-                // Process the input
-                terminal.handle_input(&input_buffer[..bytes_read]);
+        // Get raw input with a small timeout to avoid blocking indefinitely
+        if let Some(key_event) = get_raw_input(10) {
+            // Process the key event
+            terminal.handle_key_event(key_event);
 
-                // Re-render the terminal
-                if terminal.render().is_err() {
-                    return 1;
-                }
-            }
-            Err(_) => {
-                // Error reading input, exit
+            // Re-render the terminal immediately for instant feedback
+            if terminal.render().is_err() {
                 return 1;
             }
         }
+        // Continue looping even if no input (timeout occurred)
     }
 }

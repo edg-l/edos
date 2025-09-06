@@ -141,7 +141,6 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                         save_fpu_state(&mut thread.fpu);
                     }
 
-                    println!("Context switch from user");
                     sched.thread_queue.push(current_id);
                 }
             }
