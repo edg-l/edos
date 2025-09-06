@@ -6,7 +6,7 @@ use spin::Once;
 use crate::{
     memory::mmap,
     println,
-    sys::{Errno, MAP_ANONYMOUS, MAP_PRIVATE, PROT_WRITE, sys_errno},
+    sys::{Errno, MAP_ANONYMOUS, MAP_PRIVATE, PROT_WRITE, errno},
 };
 
 #[global_allocator]
@@ -43,7 +43,7 @@ impl Locked {
             let ptr = mmap(null_mut(), 1024 * 1024 * 64, PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE);
 
             if ptr as u64 == !0u64 {
-                let errno = sys_errno() as Errno;
+                let errno = errno() as Errno;
 
                 println!("Error getting heap ptr: {errno:?}");
                 panic!();

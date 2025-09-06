@@ -7,7 +7,7 @@ use noto_sans_mono_bitmap::{get_raster, get_raster_width};
 use crate::{
     math::isqrt,
     sys::{
-        Errno, SYS_DRAW, SYS_DRAW_RECT, SYS_RENDER, SYS_SCREEN_INFO, calls as syscall, sys_errno,
+        Errno, SYS_DRAW, SYS_DRAW_RECT, SYS_RENDER, SYS_SCREEN_INFO, calls as syscall, errno,
     },
 };
 
@@ -52,6 +52,7 @@ pub struct Color(u32);
 
 impl Color {
     /// Create a new color from RGB components
+    #[inline]
     pub const fn from_rgb(r: u8, g: u8, b: u8) -> Self {
         Self(((r as u32) << 16) | ((g as u32) << 8) | (b as u32))
     }
@@ -262,6 +263,7 @@ fn render_character_at(
 }
 
 /// Blend a text pixel with the background based on bitmap intensity
+#[inline]
 fn blend_text_pixel(
     background: Color,
     foreground: Color,
@@ -638,7 +640,7 @@ pub fn draw_rect(x: u64, y: u64, width: u64, height: u64, color: Color) -> Graph
     let result =
         unsafe { syscall::syscall5(SYS_DRAW_RECT, x, y, width, height, color.raw() as u64) };
     if result == !0u64 {
-        Err(GraphicsError::from(sys_errno()))
+        Err(GraphicsError::from(errno()))
     } else {
         Ok(())
     }
@@ -648,7 +650,7 @@ pub fn draw_rect(x: u64, y: u64, width: u64, height: u64, color: Color) -> Graph
 pub fn render() -> GraphicsResult<()> {
     let result = unsafe { syscall::syscall0(SYS_RENDER) };
     if result == !0u64 {
-        Err(GraphicsError::from(sys_errno()))
+        Err(GraphicsError::from(errno()))
     } else {
         Ok(())
     }
@@ -663,7 +665,7 @@ pub fn screen_info() -> GraphicsResult<ScreenInfo> {
     let result = unsafe { syscall::syscall1(SYS_SCREEN_INFO, &mut info as *mut _ as u64) };
 
     if result == !0u64 {
-        Err(GraphicsError::from(sys_errno()))
+        Err(GraphicsError::from(errno()))
     } else {
         Ok(info)
     }
@@ -1044,7 +1046,7 @@ impl DrawRequest {
     pub fn draw(&self) -> GraphicsResult<()> {
         let result = unsafe { syscall::syscall1(SYS_DRAW, self as *const _ as u64) };
         if result == !0u64 {
-            Err(GraphicsError::from(sys_errno()))
+            Err(GraphicsError::from(errno()))
         } else {
             Ok(())
         }

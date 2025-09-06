@@ -15,7 +15,7 @@ pub mod sys;
 // Re-export commonly used types and functions for convenience
 pub use memory::{mmap, munmap};
 pub use process::{sys_exit, sys_getpid};
-pub use sys::{Errno, sys_errno};
+pub use sys::{Errno, errno};
 
 // File I/O syscalls
 use crate::sys::{calls::syscall1, calls::syscall3, constants::*};

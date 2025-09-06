@@ -3,7 +3,7 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{Errno, sys_errno},
+    sys::{Errno, errno},
     sys_read, sys_write,
 };
 
@@ -52,7 +52,7 @@ fn write_all_to_fd(fd: u64, mut buf: &[u8]) -> IoResult<()> {
             }
             _ => {
                 // Negative result indicates an error
-                let errno = sys_errno();
+                let errno = errno();
                 return Err(IoError::from(errno));
             }
         }
@@ -155,7 +155,7 @@ impl Stderr {
 /// Global thread-safe stdout instance
 pub static STDOUT: Mutex<Stdout> = Mutex::new(Stdout::new());
 
-/// Global thread-safe stderr instance  
+/// Global thread-safe stderr instance
 pub static STDERR: Mutex<Stderr> = Mutex::new(Stderr::new());
 
 /// Read from a file descriptor into buffer
@@ -167,7 +167,7 @@ pub fn read_from_fd(fd: u64, buf: &mut [u8]) -> IoResult<usize> {
 
     let result = unsafe { sys_read(fd, buf.as_mut_ptr(), buf.len()) };
     if result < 0 {
-        let errno = sys_errno();
+        let errno = errno();
         Err(IoError::from(errno))
     } else {
         Ok(result as usize)

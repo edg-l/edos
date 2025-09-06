@@ -11,6 +11,6 @@ pub enum Errno {
     UNKNOWN,
 }
 
-pub fn sys_errno() -> Errno {
+pub fn errno() -> Errno {
     unsafe { core::mem::transmute(syscall0(SYS_ERRNO)) }
 }
