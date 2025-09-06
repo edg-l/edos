@@ -10,6 +10,7 @@ extern crate alloc;
 
 pub mod allocator;
 pub mod graphics;
+pub mod io;
 pub mod syscall;
 
 // Syscall numbers
@@ -27,10 +28,21 @@ pub const SYS_SCREEN_INFO: u64 = 102;
 pub const SYS_DRAW: u64 = 103;
 
 // Type-safe wrappers
+
+/// # Safety
+/// Caller must ensure:
+/// - `fd` is a valid file descriptor
+/// - `buf` points to readable memory of at least `count` bytes
+/// - `buf` remains valid for the duration of the syscall
 pub unsafe fn sys_write(fd: u64, buf: *const u8, count: usize) -> isize {
     unsafe { syscall3(SYS_WRITE, fd, buf as u64, count as u64) as isize }
 }
 
+/// # Safety
+/// Caller must ensure:
+/// - `fd` is a valid file descriptor
+/// - `buf` points to writable memory of at least `count` bytes
+/// - `buf` remains valid for the duration of the syscall
 pub unsafe fn sys_read(fd: u64, buf: *mut u8, count: usize) -> isize {
     unsafe { syscall3(SYS_READ, fd, buf as u64, count as u64) as isize }
 }
@@ -73,45 +85,42 @@ pub fn sys_exit(code: i32) -> ! {
     }
 }
 
-// Helper functions
-pub fn print(s: &str) {
-    unsafe {
-        sys_write(1, s.as_ptr(), s.len());
-    }
-}
-
-pub fn println(s: &str) {
-    print(s);
-    print("\n");
-}
-
-// Print formatting support
-pub struct Stdout;
-
-impl core::fmt::Write for Stdout {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        print(s);
-        Ok(())
-    }
-}
+// Re-export I/O types for convenience
+pub use io::{IoError, IoResult, STDOUT, STDERR, read_from_fd, read_stdin};
 
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {{
-        use core::fmt::Write;
-        let mut writer = $crate::Stdout;
-        write!(writer, $($arg)*).ok();
+        let _ = $crate::STDOUT.lock().write_fmt(format_args!($($arg)*));
     }};
 }
 
 #[macro_export]
 macro_rules! println {
     () => {
-        $crate::print("\n")
+        $crate::print!("\n")
     };
     ($($arg:tt)*) => {{
         $crate::print!($($arg)*);
-        $crate::print("\n");
+        $crate::print!("\n");
+    }};
+}
+
+#[macro_export]
+macro_rules! eprint {
+    ($($arg:tt)*) => {{
+        let _ = $crate::STDERR.lock().write_fmt(format_args!($($arg)*));
+    }};
+}
+
+#[macro_export]
+macro_rules! eprintln {
+    () => {
+        $crate::eprint!("\n")
+    };
+    ($($arg:tt)*) => {{
+        $crate::eprint!($($arg)*);
+        $crate::eprint!("\n");
     }};
 }
 
