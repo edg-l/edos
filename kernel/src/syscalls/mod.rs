@@ -15,8 +15,7 @@ use crate::{
     graphics::api::{DrawRequest, ScreenInfo},
     println,
     syscalls::{
-        io::{sys_close, sys_pipe, sys_read, sys_write},
-        memory::{sys_mmap, sys_munmap},
+        graphics::DrawRequestInput, io::{sys_close, sys_pipe, sys_read, sys_write}, memory::{sys_mmap, sys_munmap}
     },
     thread::scheduler::sched,
     util::per_cpu::get_percpu_data,
@@ -258,7 +257,7 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             ctx.rax = graphics::sys_screen_info(ctx.rdi as *mut ScreenInfo);
         }
         SYS_DRAW => {
-            ctx.rax = graphics::sys_draw(ctx.rdi as *const DrawRequest);
+            ctx.rax = graphics::sys_draw(ctx.rdi as *const DrawRequestInput);
         }
         _ => {
             ctx.rax = !0u64;

@@ -677,10 +677,20 @@ pub struct ScreenInfo {
     pub height: usize,
 }
 
-#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct DrawRequest {
     pub pixels: Vec<u32>,
+    pub x: u64,
+    pub y: u64,
+    pub width: u64,
+    pub height: u64,
+}
+
+
+#[derive(Debug, Clone)]
+#[repr(C)]
+struct DrawRequestInput {
+    pub pixels: *const u32,
     pub x: u64,
     pub y: u64,
     pub width: u64,
@@ -1043,7 +1053,14 @@ impl DrawRequest {
 
     /// Draw this request to the screen
     pub fn draw(&self) -> GraphicsResult<()> {
-        let result = unsafe { syscall::syscall1(SYS_DRAW, self as *const _ as u64) };
+        let req = DrawRequestInput {
+            pixels: self.pixels.as_ptr(),
+            height: self.height,
+            width: self.width,
+            x: self.x,
+            y: self.y
+        };
+        let result = unsafe { syscall::syscall1(SYS_DRAW, (&raw const req) as u64) };
         if result == !0u64 {
             Err(GraphicsError::from(errno()))
         } else {

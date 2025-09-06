@@ -1,3 +1,5 @@
+use alloc::vec::{self, Vec};
+
 use crate::{
     graphics::api::{DrawRequest, ScreenInfo, draw, draw_rect, render, screen_info},
     syscalls::Errno,
@@ -48,7 +50,17 @@ pub fn sys_screen_info(info_ptr: *mut ScreenInfo) -> u64 {
     0
 }
 
-pub fn sys_draw(request_ptr: *const DrawRequest) -> u64 {
+#[derive(Debug, Clone)]
+#[repr(C)]
+pub struct DrawRequestInput {
+    pub pixels: *const u32,
+    pub x: u64,
+    pub y: u64,
+    pub width: u64,
+    pub height: u64,
+}
+
+pub fn sys_draw(request_ptr: *const DrawRequestInput) -> u64 {
     let sched = sched();
     let thread = sched.current_thread_mut();
     thread.errno = Errno::Clear;
@@ -61,18 +73,26 @@ pub fn sys_draw(request_ptr: *const DrawRequest) -> u64 {
     // Copy the DrawRequest from user space
     let request = unsafe { &*request_ptr };
 
-    // Basic validation
+     // Basic validation
     if request.width == 0 || request.height == 0 {
         thread.errno = Errno::EINVAL;
         return !0u64;
     }
 
-    if request.pixels.len() != (request.width * request.height) as usize {
-        thread.errno = Errno::EINVAL;
-        return !0u64;
-    }
+    let mut pixels = Vec::new();
+    let slice = unsafe { core::slice::from_raw_parts(request.pixels, (request.width * request.height) as usize) };
+    pixels.extend_from_slice(slice);
+    let kernel_request = DrawRequest {
+        pixels: pixels.into_boxed_slice(),
+        height: request.height,
+        width: request.width,
+        x: request.x,
+        y: request.y
+    };
+
+
 
     x86_64::instructions::interrupts::enable();
-    draw(request.clone());
+    draw(kernel_request);
     0
 }

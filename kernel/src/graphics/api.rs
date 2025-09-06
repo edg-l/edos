@@ -2,7 +2,7 @@
 
 use core::time::Duration;
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use spin::Once;
 use x86_64::instructions::hlt;
 
@@ -46,7 +46,7 @@ pub(super) enum Response {
 #[derive(Debug, Clone)]
 pub struct DrawRequest {
     // 00_rr_gg_bb 0x00_ff_ff_ff
-    pub pixels: Vec<u32>,
+    pub pixels: Box<[u32]>,
     pub x: u64,
     pub y: u64,
     pub width: u64,
@@ -86,7 +86,7 @@ pub fn draw_rect(x: u64, y: u64, width: u64, height: u64, color: u32) {
     let pixels = alloc::vec![color; (width * height) as usize];
 
     let request = DrawRequest {
-        pixels,
+        pixels: pixels.into_boxed_slice(),
         x,
         y,
         width,
@@ -145,7 +145,7 @@ pub fn draw_line(x1: u64, y1: u64, x2: u64, y2: u64, color: u32) {
     }
 
     let request = DrawRequest {
-        pixels,
+        pixels: pixels.into_boxed_slice(),
         x: min_x,
         y: min_y,
         width,
