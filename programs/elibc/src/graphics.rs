@@ -5,7 +5,10 @@ pub use noto_sans_mono_bitmap::{FontWeight, RasterHeight};
 use noto_sans_mono_bitmap::{get_raster, get_raster_width};
 
 use crate::{
-    Errno, SYS_DRAW, SYS_DRAW_RECT, SYS_RENDER, SYS_SCREEN_INFO, math::isqrt, sys_errno, syscall,
+    math::isqrt,
+    sys::{
+        Errno, SYS_DRAW, SYS_DRAW_RECT, SYS_RENDER, SYS_SCREEN_INFO, calls as syscall, sys_errno,
+    },
 };
 
 /// Graphics operation error type
@@ -248,7 +251,8 @@ fn render_character_at(
             } else {
                 // Blend foreground based on intensity
                 let current_color = Color::from(pixels[buffer_index]);
-                let blended_color = blend_text_pixel(current_color, style.foreground, intensity, style.background);
+                let blended_color =
+                    blend_text_pixel(current_color, style.foreground, intensity, style.background);
                 pixels[buffer_index] = blended_color.raw();
             }
         }
@@ -334,7 +338,7 @@ fn render_string_at(
             current_x,
             current_y,
             character,
-            style
+            style,
         )?;
 
         // Move to next character position
@@ -510,18 +514,54 @@ impl Texture {
     }
 
     /// Render a character at the specified position
-    pub fn draw_char(&mut self, x: u64, y: u64, character: char, style: &TextStyle) -> GraphicsResult<()> {
-        render_character_at(&mut self.pixels, self.width, self.height, x, y, character, style)
+    pub fn draw_char(
+        &mut self,
+        x: u64,
+        y: u64,
+        character: char,
+        style: &TextStyle,
+    ) -> GraphicsResult<()> {
+        render_character_at(
+            &mut self.pixels,
+            self.width,
+            self.height,
+            x,
+            y,
+            character,
+            style,
+        )
     }
 
     /// Render text at the specified position
-    pub fn draw_text(&mut self, x: u64, y: u64, text: &str, style: &TextStyle) -> GraphicsResult<()> {
+    pub fn draw_text(
+        &mut self,
+        x: u64,
+        y: u64,
+        text: &str,
+        style: &TextStyle,
+    ) -> GraphicsResult<()> {
         render_string_at(&mut self.pixels, self.width, self.height, x, y, text, style)
     }
 
     /// Render text with word wrapping within the specified width
-    pub fn draw_text_wrapped(&mut self, x: u64, y: u64, text: &str, style: &TextStyle, wrap_width: u64) -> GraphicsResult<()> {
-        render_text_wrapped(&mut self.pixels, self.width, self.height, x, y, text, style, wrap_width)
+    pub fn draw_text_wrapped(
+        &mut self,
+        x: u64,
+        y: u64,
+        text: &str,
+        style: &TextStyle,
+        wrap_width: u64,
+    ) -> GraphicsResult<()> {
+        render_text_wrapped(
+            &mut self.pixels,
+            self.width,
+            self.height,
+            x,
+            y,
+            text,
+            style,
+            wrap_width,
+        )
     }
 
     /// Get text metrics for a given style
@@ -1011,18 +1051,54 @@ impl DrawRequest {
     }
 
     /// Render a character at the specified position
-    pub fn draw_char(&mut self, x: u64, y: u64, character: char, style: &TextStyle) -> GraphicsResult<()> {
-        render_character_at(&mut self.pixels, self.width, self.height, x, y, character, style)
+    pub fn draw_char(
+        &mut self,
+        x: u64,
+        y: u64,
+        character: char,
+        style: &TextStyle,
+    ) -> GraphicsResult<()> {
+        render_character_at(
+            &mut self.pixels,
+            self.width,
+            self.height,
+            x,
+            y,
+            character,
+            style,
+        )
     }
 
     /// Render text at the specified position
-    pub fn draw_text(&mut self, x: u64, y: u64, text: &str, style: &TextStyle) -> GraphicsResult<()> {
+    pub fn draw_text(
+        &mut self,
+        x: u64,
+        y: u64,
+        text: &str,
+        style: &TextStyle,
+    ) -> GraphicsResult<()> {
         render_string_at(&mut self.pixels, self.width, self.height, x, y, text, style)
     }
 
     /// Render text with word wrapping within the specified width
-    pub fn draw_text_wrapped(&mut self, x: u64, y: u64, text: &str, style: &TextStyle, wrap_width: u64) -> GraphicsResult<()> {
-        render_text_wrapped(&mut self.pixels, self.width, self.height, x, y, text, style, wrap_width)
+    pub fn draw_text_wrapped(
+        &mut self,
+        x: u64,
+        y: u64,
+        text: &str,
+        style: &TextStyle,
+        wrap_width: u64,
+    ) -> GraphicsResult<()> {
+        render_text_wrapped(
+            &mut self.pixels,
+            self.width,
+            self.height,
+            x,
+            y,
+            text,
+            style,
+            wrap_width,
+        )
     }
 }
 
@@ -1150,7 +1226,14 @@ impl Screen {
     }
 
     /// Draw text with word wrapping directly to the screen
-    pub fn draw_text_wrapped(&self, x: u64, y: u64, text: &str, style: &TextStyle, wrap_width: u64) -> GraphicsResult<()> {
+    pub fn draw_text_wrapped(
+        &self,
+        x: u64,
+        y: u64,
+        text: &str,
+        style: &TextStyle,
+        wrap_width: u64,
+    ) -> GraphicsResult<()> {
         // Calculate required height for wrapped text
         let metrics = TextMetrics::for_size(style.font_size);
         let words: Vec<&str> = text.split_whitespace().collect();
@@ -1176,7 +1259,13 @@ impl Screen {
     }
 
     /// Draw a single character directly to the screen
-    pub fn draw_char(&self, x: u64, y: u64, character: char, style: &TextStyle) -> GraphicsResult<()> {
+    pub fn draw_char(
+        &self,
+        x: u64,
+        y: u64,
+        character: char,
+        style: &TextStyle,
+    ) -> GraphicsResult<()> {
         let metrics = TextMetrics::for_size(style.font_size);
         let mut draw_req = DrawRequest::new(metrics.char_width, metrics.char_height)?;
         draw_req.clear(); // Fill with black background

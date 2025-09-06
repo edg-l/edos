@@ -2,7 +2,10 @@ use core::fmt;
 use spin::Mutex;
 use thiserror::Error;
 
-use crate::{Errno, sys_read, sys_write};
+use crate::{
+    sys::{Errno, sys_errno},
+    sys_read, sys_write,
+};
 
 /// I/O Error type with proper error handling
 #[derive(Debug, Error, Clone, Copy)]
@@ -49,7 +52,7 @@ fn write_all_to_fd(fd: u64, mut buf: &[u8]) -> IoResult<()> {
             }
             _ => {
                 // Negative result indicates an error
-                let errno = crate::sys_errno();
+                let errno = sys_errno();
                 return Err(IoError::from(errno));
             }
         }
@@ -164,7 +167,7 @@ pub fn read_from_fd(fd: u64, buf: &mut [u8]) -> IoResult<usize> {
 
     let result = unsafe { sys_read(fd, buf.as_mut_ptr(), buf.len()) };
     if result < 0 {
-        let errno = crate::sys_errno();
+        let errno = sys_errno();
         Err(IoError::from(errno))
     } else {
         Ok(result as usize)
