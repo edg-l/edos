@@ -20,12 +20,15 @@ struct Terminal {
     char_width: u64,
     char_height: u64,
     line_height: u64,
+    prompt_text: String,
+    prompt_style: TextStyle,
 }
 
 impl Terminal {
     fn new() -> Result<Self, elibc::graphics::GraphicsError> {
         let screen = Screen::get()?;
         let text_style = TextStyle::new(Color::WHITE).with_size(RasterHeight::Size24);
+        let prompt_style = TextStyle::new(Color::GREEN).with_size(RasterHeight::Size24);
 
         let metrics = TextMetrics::for_size(text_style.font_size);
 
@@ -35,10 +38,12 @@ impl Terminal {
         let mut buffer = Vec::new();
         buffer.push(Vec::new()); // Start with one empty line
 
+        let prompt_text = String::from("> ");
+
         Ok(Terminal {
             screen,
             buffer,
-            cursor_x: 0,
+            cursor_x: 0, // Start at beginning of input area
             cursor_y: 0,
             max_lines,
             max_cols,
@@ -46,6 +51,8 @@ impl Terminal {
             char_width: metrics.char_width,
             char_height: metrics.char_height,
             line_height: metrics.line_height,
+            prompt_text,
+            prompt_style,
         })
     }
 
@@ -61,11 +68,16 @@ impl Terminal {
 
             let y_pos = (line_idx as u64) * self.line_height;
 
-            // Convert line to string and render it
+            // Render prompt at the beginning of each line
+            self.screen
+                .draw_text(0, y_pos, &self.prompt_text, &self.prompt_style)?;
+
+            // Convert line to string and render it after the prompt
             let line_str: String = line.iter().collect();
             if !line_str.is_empty() {
+                let prompt_width = (self.prompt_text.len() as u64) * self.char_width;
                 self.screen
-                    .draw_text(0, y_pos, &line_str, &self.text_style)?;
+                    .draw_text(prompt_width, y_pos, &line_str, &self.text_style)?;
             }
         }
 
@@ -78,7 +90,9 @@ impl Terminal {
     }
 
     fn draw_cursor(&self) -> Result<(), elibc::graphics::GraphicsError> {
-        let cursor_x_pos = (self.cursor_x as u64) * self.char_width;
+        // Account for prompt offset when positioning cursor
+        let prompt_width = (self.prompt_text.len() as u64) * self.char_width;
+        let cursor_x_pos = prompt_width + (self.cursor_x as u64) * self.char_width;
         let cursor_y_pos = (self.cursor_y as u64) * self.line_height;
 
         // Draw a simple vertical line as cursor
@@ -113,15 +127,16 @@ impl Terminal {
         // Move cursor right
         self.cursor_x += 1;
 
-        // Handle line wrapping
-        if self.cursor_x >= self.max_cols {
+        // Handle line wrapping (account for prompt taking up space)
+        let effective_max_cols = self.max_cols - self.prompt_text.len();
+        if self.cursor_x >= effective_max_cols {
             self.new_line();
         }
     }
 
     fn new_line(&mut self) {
         self.cursor_y += 1;
-        self.cursor_x = 0;
+        self.cursor_x = 0; // Reset cursor to beginning of input area (after prompt)
 
         // Add new line to buffer if needed
         if self.cursor_y >= self.buffer.len() {
