@@ -11,6 +11,7 @@ extern crate alloc;
 pub mod allocator;
 pub mod graphics;
 pub mod io;
+pub mod math;
 pub mod syscall;
 
 // Syscall numbers
@@ -86,7 +87,7 @@ pub fn sys_exit(code: i32) -> ! {
 }
 
 // Re-export I/O types for convenience
-pub use io::{IoError, IoResult, STDOUT, STDERR, read_from_fd, read_stdin};
+pub use io::{IoError, IoResult, STDERR, STDOUT, read_from_fd, read_stdin};
 
 #[macro_export]
 macro_rules! print {

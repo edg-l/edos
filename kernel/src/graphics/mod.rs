@@ -129,10 +129,6 @@ pub fn render_thread() -> ! {
 
     let mut display = DoubleBuffer::new();
 
-    for i in 0..100_u64 {
-        display.set_pixel(i as usize, i as usize, 0xFFFFFFFF);
-    }
-
     loop {
         while let Some(request) = requests.pop_request() {
             match &request.message {

@@ -2,7 +2,7 @@
 #![no_main]
 
 use elibc::{
-    graphics::{sys_draw_rect, sys_render, sys_screen_info},
+    graphics::{Color, Screen},
     println, sys_getpid, sys_read, sys_write,
 };
 use spin::Once;
@@ -14,7 +14,10 @@ const BLUE: u32 = 0x0000FFFF;
 // This will be called by elibc's _start function
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
-    let screen = sys_screen_info().unwrap();
+    let screen = Screen::get().unwrap();
+
+    screen.draw_rect(600, 20, 50, 60, Color::RED).unwrap();
+    screen.render().unwrap();
 
     println!("hello world");
     0

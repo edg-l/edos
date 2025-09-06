@@ -2,7 +2,7 @@ use core::fmt;
 use spin::Mutex;
 use thiserror::Error;
 
-use crate::{sys_read, sys_write, Errno};
+use crate::{Errno, sys_read, sys_write};
 
 /// I/O Error type with proper error handling
 #[derive(Debug, Error, Clone, Copy)]
@@ -10,7 +10,7 @@ pub enum IoError {
     #[error("Invalid argument")]
     InvalidInput,
     #[error("Out of memory")]
-    OutOfMemory, 
+    OutOfMemory,
     #[error("Bad address/fault")]
     Fault,
     #[error("Unknown error")]

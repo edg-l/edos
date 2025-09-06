@@ -31,7 +31,6 @@ mod loader;
 mod memory;
 mod serial;
 mod syscalls;
-mod test;
 mod thread;
 mod timer;
 mod util;
@@ -99,7 +98,6 @@ fn main() -> ! {
     thread::scheduler::init();
     drivers::init_drivers();
 
-    queue_spawn_kthread_named("draw", test::draw);
     queue_spawn_thread(UserThread::new(MINIMAL_ELF_PROGRAM).unwrap());
 
     // Enable apic timer, every 1 second
