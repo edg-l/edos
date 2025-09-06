@@ -205,6 +205,7 @@ impl TextMetrics {
 }
 
 /// Render a character at the specified position using bitmap font
+#[inline]
 fn render_character_at(
     pixels: &mut [u32],
     buffer_width: u64,
