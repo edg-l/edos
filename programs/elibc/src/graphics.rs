@@ -1122,13 +1122,19 @@ impl DrawRequest {
 /// Screen management struct providing convenient graphics operations
 pub struct Screen {
     info: ScreenInfo,
+    back_buffer: Option<DrawRequest>,
+    dirty: bool,
 }
 
 impl Screen {
     /// Get the global screen instance
     pub fn get() -> GraphicsResult<Self> {
         let info = screen_info()?;
-        Ok(Self { info })
+        Ok(Self {
+            info,
+            back_buffer: None,
+            dirty: false,
+        })
     }
 
     /// Get screen width
@@ -1146,30 +1152,63 @@ impl Screen {
         &self.info
     }
 
+    /// Ensure the back buffer is initialized
+    fn ensure_back_buffer(&mut self) -> GraphicsResult<()> {
+        if self.back_buffer.is_none() {
+            let mut buffer = DrawRequest::new(self.width() as u64, self.height() as u64)?;
+            buffer.clear(); // Initialize with black background
+            self.back_buffer = Some(buffer);
+        }
+        Ok(())
+    }
+
     /// Draw a rectangle on the screen
     pub fn draw_rect(
-        &self,
+        &mut self,
         x: u64,
         y: u64,
         width: u64,
         height: u64,
         color: Color,
     ) -> GraphicsResult<()> {
-        draw_rect(x, y, width, height, color)
+        self.ensure_back_buffer()?;
+
+        if let Some(ref mut buffer) = self.back_buffer {
+            buffer.fill_rect(x, y, width, height, color)?;
+            self.dirty = true;
+        }
+
+        Ok(())
     }
 
     /// Fill the entire screen with a color
-    pub fn fill(&self, color: Color) -> GraphicsResult<()> {
-        self.draw_rect(0, 0, self.width() as u64, self.height() as u64, color)
+    pub fn fill(&mut self, color: Color) -> GraphicsResult<()> {
+        self.ensure_back_buffer()?;
+
+        if let Some(ref mut buffer) = self.back_buffer {
+            buffer.fill(color);
+            self.dirty = true;
+        }
+
+        Ok(())
     }
 
     /// Clear the screen (fill with black)
-    pub fn clear(&self) -> GraphicsResult<()> {
+    pub fn clear(&mut self) -> GraphicsResult<()> {
         self.fill(Color::BLACK)
     }
 
     /// Render all pending operations
-    pub fn render(&self) -> GraphicsResult<()> {
+    pub fn render(&mut self) -> GraphicsResult<()> {
+        // Only render if we have a dirty back buffer
+        if self.dirty {
+            if let Some(ref buffer) = self.back_buffer {
+                buffer.draw()?;
+                self.dirty = false;
+            }
+        }
+
+        // Always call the final render syscall to present to screen
         render()
     }
 
@@ -1231,64 +1270,58 @@ impl Screen {
     }
 
     /// Draw text directly to the screen
-    pub fn draw_text(&self, x: u64, y: u64, text: &str, style: &TextStyle) -> GraphicsResult<()> {
-        let metrics = TextMetrics::for_size(style.font_size);
-        let text_bounds = metrics.measure_string(text);
+    pub fn draw_text(
+        &mut self,
+        x: u64,
+        y: u64,
+        text: &str,
+        style: &TextStyle,
+    ) -> GraphicsResult<()> {
+        self.ensure_back_buffer()?;
 
-        let mut draw_req = DrawRequest::new(text_bounds.width, text_bounds.height)?;
-        draw_req.clear(); // Fill with black background
-        draw_req.draw_text(0, 0, text, style)?;
-        draw_req = draw_req.with_position(x, y);
-        draw_req.draw()
+        if let Some(ref mut buffer) = self.back_buffer {
+            buffer.draw_text(x, y, text, style)?;
+            self.dirty = true;
+        }
+
+        Ok(())
     }
 
     /// Draw text with word wrapping directly to the screen
     pub fn draw_text_wrapped(
-        &self,
+        &mut self,
         x: u64,
         y: u64,
         text: &str,
         style: &TextStyle,
         wrap_width: u64,
     ) -> GraphicsResult<()> {
-        // Calculate required height for wrapped text
-        let metrics = TextMetrics::for_size(style.font_size);
-        let words: Vec<&str> = text.split_whitespace().collect();
-        let mut lines = 1;
-        let mut current_width = 0u64;
+        self.ensure_back_buffer()?;
 
-        for word in words {
-            let word_width = word.chars().count() as u64 * metrics.char_width;
-            if current_width != 0 && current_width + word_width > wrap_width {
-                lines += 1;
-                current_width = word_width;
-            } else {
-                current_width += word_width + metrics.char_width; // Add space width
-            }
+        if let Some(ref mut buffer) = self.back_buffer {
+            buffer.draw_text_wrapped(x, y, text, style, wrap_width)?;
+            self.dirty = true;
         }
 
-        let text_height = lines * metrics.line_height;
-        let mut draw_req = DrawRequest::new(wrap_width, text_height)?;
-        draw_req.clear(); // Fill with black background
-        draw_req.draw_text_wrapped(0, 0, text, style, wrap_width)?;
-        draw_req = draw_req.with_position(x, y);
-        draw_req.draw()
+        Ok(())
     }
 
     /// Draw a single character directly to the screen
     pub fn draw_char(
-        &self,
+        &mut self,
         x: u64,
         y: u64,
         character: char,
         style: &TextStyle,
     ) -> GraphicsResult<()> {
-        let metrics = TextMetrics::for_size(style.font_size);
-        let mut draw_req = DrawRequest::new(metrics.char_width, metrics.char_height)?;
-        draw_req.clear(); // Fill with black background
-        draw_req.draw_char(0, 0, character, style)?;
-        draw_req = draw_req.with_position(x, y);
-        draw_req.draw()
+        self.ensure_back_buffer()?;
+
+        if let Some(ref mut buffer) = self.back_buffer {
+            buffer.draw_char(x, y, character, style)?;
+            self.dirty = true;
+        }
+
+        Ok(())
     }
 }
 

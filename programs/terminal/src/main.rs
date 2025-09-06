@@ -15,7 +15,7 @@ fn parse_command(input: &str) -> Vec<String> {
     let mut in_quotes = false;
     let mut quote_char = '"';
     let mut chars = input.chars().peekable();
-    
+
     while let Some(ch) = chars.next() {
         match ch {
             '"' | '\'' if !in_quotes => {
@@ -42,12 +42,12 @@ fn parse_command(input: &str) -> Vec<String> {
             }
         }
     }
-    
+
     // Add the last argument if it's not empty
     if !current_arg.is_empty() {
         args.push(current_arg);
     }
-    
+
     args
 }
 
@@ -59,7 +59,7 @@ enum LineType {
 
 struct Terminal {
     screen: Screen,
-    buffer: Vec<Vec<char>>,
+    buffer: Vec<String>,
     line_types: Vec<LineType>,
     cursor_x: usize,
     cursor_y: usize,
@@ -71,6 +71,8 @@ struct Terminal {
     line_height: u64,
     prompt_text: String,
     prompt_style: TextStyle,
+    // Performance optimization fields
+    is_dirty: bool,
 }
 
 impl Terminal {
@@ -85,7 +87,7 @@ impl Terminal {
         let max_lines = (screen.height() as u64 / metrics.line_height) as usize;
 
         let mut buffer = Vec::new();
-        buffer.push(Vec::new()); // Start with one empty line
+        buffer.push(String::new()); // Start with one empty line
 
         let mut line_types = Vec::new();
         line_types.push(LineType::Input); // First line is input
@@ -106,15 +108,21 @@ impl Terminal {
             line_height: metrics.line_height,
             prompt_text,
             prompt_style,
+            is_dirty: true, // Start dirty to force initial render
         })
     }
 
-    fn render(&self) -> Result<(), elibc::graphics::GraphicsError> {
+    fn render(&mut self) -> Result<(), elibc::graphics::GraphicsError> {
+        // Only render if content has changed
+        if !self.is_dirty {
+            return Ok(());
+        }
+
         // Clear screen with black background
         self.screen.fill(Color::BLACK)?;
 
         // Render each line of text
-        for (line_idx, line) in self.buffer.iter().enumerate() {
+        for (line_idx, line_str) in self.buffer.iter().enumerate() {
             if line_idx >= self.max_lines {
                 break; // Don't render lines that would be off-screen
             }
@@ -124,26 +132,23 @@ impl Terminal {
             // Get line type (default to Input if index out of bounds)
             let line_type = self.line_types.get(line_idx).unwrap_or(&LineType::Input);
 
-            // Convert line to string
-            let line_str: String = line.iter().collect();
-
             match line_type {
                 LineType::Input => {
                     // Render prompt and text after it
                     self.screen
                         .draw_text(0, y_pos, &self.prompt_text, &self.prompt_style)?;
-                    
+
                     if !line_str.is_empty() {
                         let prompt_width = (self.prompt_text.len() as u64) * self.char_width;
                         self.screen
-                            .draw_text(prompt_width, y_pos, &line_str, &self.text_style)?;
+                            .draw_text(prompt_width, y_pos, line_str, &self.text_style)?;
                     }
                 }
                 LineType::Output => {
                     // Render only text, no prompt
                     if !line_str.is_empty() {
                         self.screen
-                            .draw_text(0, y_pos, &line_str, &self.text_style)?;
+                            .draw_text(0, y_pos, line_str, &self.text_style)?;
                     }
                 }
             }
@@ -154,13 +159,24 @@ impl Terminal {
 
         // Present the rendered frame
         self.screen.render()?;
+
+        // Clear dirty flag after successful render
+        self.is_dirty = false;
+
         Ok(())
     }
 
-    fn draw_cursor(&self) -> Result<(), elibc::graphics::GraphicsError> {
+    fn mark_dirty(&mut self) {
+        self.is_dirty = true;
+    }
+
+    fn draw_cursor(&mut self) -> Result<(), elibc::graphics::GraphicsError> {
         // Check line type to determine cursor positioning
-        let line_type = self.line_types.get(self.cursor_y).unwrap_or(&LineType::Input);
-        
+        let line_type = self
+            .line_types
+            .get(self.cursor_y)
+            .unwrap_or(&LineType::Input);
+
         let cursor_x_pos = match line_type {
             LineType::Input => {
                 // Account for prompt offset when positioning cursor
@@ -172,7 +188,7 @@ impl Terminal {
                 (self.cursor_x as u64) * self.char_width
             }
         };
-        
+
         let cursor_y_pos = (self.cursor_y as u64) * self.line_height;
 
         // Draw a simple vertical line as cursor
@@ -190,7 +206,7 @@ impl Terminal {
     fn insert_char(&mut self, ch: char) {
         // Ensure we have enough lines in the buffer
         while self.buffer.len() <= self.cursor_y {
-            self.buffer.push(Vec::new());
+            self.buffer.push(String::new());
         }
 
         // Insert character at cursor position
@@ -212,6 +228,9 @@ impl Terminal {
         if self.cursor_x >= effective_max_cols {
             self.new_line();
         }
+
+        // Mark terminal as dirty since content changed
+        self.mark_dirty();
     }
 
     fn new_line(&mut self) {
@@ -224,7 +243,7 @@ impl Terminal {
 
         // Add new line to buffer if needed
         if self.cursor_y >= self.buffer.len() {
-            self.buffer.push(Vec::new());
+            self.buffer.push(String::new());
             self.line_types.push(line_type);
         } else {
             // Update existing line type
@@ -239,6 +258,9 @@ impl Terminal {
         if self.cursor_y >= self.max_lines {
             self.scroll_up();
         }
+
+        // Mark terminal as dirty since layout changed
+        self.mark_dirty();
     }
 
     fn backspace(&mut self) {
@@ -254,8 +276,11 @@ impl Terminal {
             self.buffer.remove(self.cursor_y);
             self.cursor_y -= 1;
             self.cursor_x = self.buffer[self.cursor_y].len();
-            self.buffer[self.cursor_y].extend(current_line);
+            self.buffer[self.cursor_y].push_str(&current_line);
         }
+
+        // Mark terminal as dirty since content changed
+        self.mark_dirty();
     }
 
     fn scroll_up(&mut self) {
@@ -269,6 +294,9 @@ impl Terminal {
                 self.cursor_y -= 1;
             }
         }
+
+        // Mark terminal as dirty since content scrolled
+        self.mark_dirty();
     }
 
     fn print_text(&mut self, text: &str) {
@@ -283,18 +311,21 @@ impl Terminal {
             for ch in line.chars() {
                 self.insert_char_at_end(ch);
             }
-            
+
             // If this isn't the last line, create a new Output line
             if i < lines.len() - 1 {
                 self.new_line_with_type(LineType::Output);
             }
         }
+
+        // Mark terminal as dirty since content was added
+        self.mark_dirty();
     }
 
     fn insert_char_at_end(&mut self, ch: char) {
         // Ensure we have enough lines in the buffer
         while self.buffer.len() <= self.cursor_y {
-            self.buffer.push(Vec::new());
+            self.buffer.push(String::new());
         }
 
         // Add character to end of current line
@@ -302,22 +333,27 @@ impl Terminal {
         self.cursor_x += 1;
 
         // Handle line wrapping (account for prompt taking up space for Input lines)
-        let line_type = self.line_types.get(self.cursor_y).unwrap_or(&LineType::Input);
+        let line_type = self
+            .line_types
+            .get(self.cursor_y)
+            .unwrap_or(&LineType::Input);
         let effective_max_cols = match line_type {
             LineType::Input => self.max_cols - self.prompt_text.len(),
             LineType::Output => self.max_cols,
         };
-        
+
         if self.cursor_x >= effective_max_cols {
             // For Output lines, wrap with Output type; for Input lines, wrap with Input type
             self.new_line_with_type(line_type.clone());
         }
+
+        // Note: We don't mark dirty here as this is called from other functions that will mark dirty
     }
 
     fn on_command(&mut self, command: &str, args: &[String]) {
         // Echo the command and arguments back for now
         self.print_text(&format!("Command: '{}'\n", command));
-        
+
         if !args.is_empty() {
             self.print_text("Arguments:\n");
             for (i, arg) in args.iter().enumerate() {
@@ -331,7 +367,7 @@ impl Terminal {
     fn process_current_line(&mut self) {
         // Get current line content
         let current_line: String = if self.cursor_y < self.buffer.len() {
-            self.buffer[self.cursor_y].iter().collect()
+            self.buffer[self.cursor_y].clone()
         } else {
             String::new()
         };
