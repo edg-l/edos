@@ -1,4 +1,5 @@
 #![no_std]
+#![expect(clippy::too_many_arguments)]
 
 extern crate alloc;
 
