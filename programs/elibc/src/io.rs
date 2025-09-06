@@ -3,7 +3,7 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{Errno, errno},
+    sys::{errno, syscall1, Errno, SYS_RAW_INPUT},
     sys_read, sys_write,
 };
 
@@ -178,4 +178,23 @@ pub fn read_from_fd(fd: u64, buf: &mut [u8]) -> IoResult<usize> {
 /// Returns number of bytes read on success
 pub fn read_stdin(buf: &mut [u8]) -> IoResult<usize> {
     read_from_fd(0, buf)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum KeyEvent {
+    Unicode(char),
+    RawScancode(u8),
+}
+
+pub fn get_raw_input(timeout_ms: u64) -> Option<KeyEvent> {
+    let result = unsafe { syscall1(SYS_RAW_INPUT, timeout_ms) };
+    if result == !0u64 {
+        None
+    } else if result & 0x80000000 != 0 {
+        // Raw scancode
+        Some(KeyEvent::RawScancode((result & 0x7FFFFFFF) as u8))
+    } else {
+        // Unicode character
+        Some(KeyEvent::Unicode(char::from_u32(result as u32).unwrap_or('\0')))
+    }
 }

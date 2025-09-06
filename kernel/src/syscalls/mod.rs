@@ -12,12 +12,10 @@ use x86_64::{
 
 use crate::{
     gdt::GDT,
-    graphics::api::{DrawRequest, ScreenInfo},
+    graphics::api::ScreenInfo,
     println,
     syscalls::{
-        graphics::DrawRequestInput,
-        io::{sys_close, sys_pipe, sys_read, sys_write},
-        memory::{sys_mmap, sys_munmap},
+        graphics::DrawRequestInput, io::{sys_close, sys_pipe, sys_read, sys_write}, keyboard::sys_keyboard_raw, memory::{sys_mmap, sys_munmap}
     },
     thread::scheduler::sched,
     util::per_cpu::get_percpu_data,
@@ -25,6 +23,7 @@ use crate::{
 
 mod graphics;
 mod io;
+mod keyboard;
 mod memory;
 
 unsafe fn setup_gs_base() {
@@ -195,6 +194,7 @@ const SYS_DRAW_RECT: u64 = 100;
 const SYS_RENDER: u64 = 101;
 const SYS_SCREEN_INFO: u64 = 102;
 const SYS_DRAW: u64 = 103;
+const SYS_RAW_INPUT: u64 = 200;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -213,6 +213,9 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let buffer_ptr = ctx.rsi as *mut u8;
             let count = ctx.rdx as usize;
             ctx.rax = sys_read(fd, buffer_ptr, count) as u64;
+        }
+        SYS_RAW_INPUT => {
+            ctx.rax = sys_keyboard_raw(ctx.rdi) as u64;
         }
         SYS_PIPE => {
             let pipe_fds = ctx.rdi as *mut [u64; 2];
