@@ -2,7 +2,7 @@
 
 use core::time::Duration;
 
-use alloc::{collections::btree_map::BTreeMap, sync::Arc};
+use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use crossbeam_queue::SegQueue;
 use spin::RwLock;
 use thiserror::Error;
@@ -40,12 +40,22 @@ impl<T: Clone> Broadcast<T> {
     pub fn broadcast(&self, value: T) {
         let subs = self.subscribers.read();
         let sched = sched();
+        let mut to_remove = Vec::new();
         for (tid, receiver) in subs.iter() {
             if receiver.queue.len() > self.bound {
                 receiver.queue.pop();
             }
             receiver.queue.push(value.clone());
-            sched.thread_wake(tid.clone());
+            if !sched.thread_wake(tid.clone()) {
+                to_remove.push(tid);
+            }
+        }
+
+        if !to_remove.is_empty() {
+            let mut subs = self.subscribers.write();
+            for tid in to_remove {
+                subs.remove(tid);
+            }
         }
     }
 }
