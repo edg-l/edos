@@ -122,56 +122,73 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
         return -1;
     }
 
-    let buffer = unsafe { core::slice::from_raw_parts_mut(buffer_ptr, count) };
-
-    match thread.fd_table.get_fd(fd) {
+    // Get kernel data first - all potentially blocking operations happen here
+    let kernel_data = match thread.fd_table.get_fd(fd) {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
             StandardStream::Stdin => {
                 x86_64::instructions::interrupts::enable();
-                read_from_stdin(buffer)
+                read_from_stdin(count)
             }
             StandardStream::Stdout | StandardStream::Stderr => {
                 thread.errno = Errno::EINVAL;
-                -1
+                return -1;
             }
         },
         Some(FileDescriptor::Pipe(pipe)) => {
             x86_64::instructions::interrupts::enable();
-            read_from_pipe(pipe.clone(), buffer)
+            read_from_pipe(pipe.clone(), count)
         }
         None => {
             thread.errno = Errno::EINVAL;
-            -1
+            return -1;
         }
+    };
+
+    x86_64::instructions::interrupts::disable();
+
+    // Handle kernel data result
+    let data = match kernel_data {
+        Ok(data) => data,
+        Err(error_code) => return error_code,
+    };
+
+    let bytes_to_copy = data.len().min(count);
+    if bytes_to_copy == 0 {
+        return 0;
     }
+
+    // Now do the atomic copy to user space - no context switches can happen here
+
+    let user_buffer = unsafe { core::slice::from_raw_parts_mut(buffer_ptr, bytes_to_copy) };
+    user_buffer.copy_from_slice(&data[..bytes_to_copy]);
+
+    bytes_to_copy as i64
 }
 
-fn read_from_stdin(buffer: &mut [u8]) -> i64 {
+fn read_from_stdin(max_count: usize) -> Result<alloc::vec::Vec<u8>, i64> {
+    use alloc::vec::Vec;
     use pc_keyboard::DecodedKey;
 
     let rx = KEYBOARD_BROADCAST.subscribe();
-    let mut bytes_read = 0;
+    let mut kernel_buffer = Vec::new();
 
-    // Read until we get a newline or fill the buffer
-    while bytes_read < buffer.len() {
+    // Read until we get a newline or reach max count
+    while kernel_buffer.len() < max_count {
         match rx.recv_timeout(Duration::from_secs(10)) {
             Ok(DecodedKey::Unicode('\n')) => {
-                buffer[bytes_read] = b'\n';
-                bytes_read += 1;
+                kernel_buffer.push(b'\n');
                 break;
             }
             Ok(DecodedKey::Unicode('\r')) => {
-                buffer[bytes_read] = b'\n';
-                bytes_read += 1;
+                kernel_buffer.push(b'\n');
                 break;
             }
             Ok(DecodedKey::Unicode(c)) if c.is_ascii() => {
-                buffer[bytes_read] = c as u8;
-                bytes_read += 1;
+                kernel_buffer.push(c as u8);
             }
             Ok(DecodedKey::Unicode('\u{8}')) => {
                 // Backspace - remove last character if any
-                bytes_read = bytes_read.saturating_sub(1);
+                kernel_buffer.pop();
             }
             Ok(_) => {
                 // Ignore non-ASCII keys and raw keys
@@ -186,28 +203,33 @@ fn read_from_stdin(buffer: &mut [u8]) -> i64 {
 
     KEYBOARD_BROADCAST.unsubscribe();
 
-    bytes_read as i64
+    Ok(kernel_buffer)
 }
 
-fn read_from_pipe(pipe: alloc::sync::Arc<spin::RwLock<Pipe>>, buffer: &mut [u8]) -> i64 {
+fn read_from_pipe(
+    pipe: alloc::sync::Arc<spin::RwLock<Pipe>>,
+    max_count: usize,
+) -> Result<alloc::vec::Vec<u8>, i64> {
+    use alloc::vec::Vec;
+
     let mut pipe_guard = pipe.write();
 
     if pipe_guard.buffer.is_empty() && pipe_guard.closed {
-        return 0; // EOF
+        return Ok(Vec::new()); // EOF
     }
 
-    let bytes_to_read = buffer.len().min(pipe_guard.buffer.len());
+    let bytes_to_read = max_count.min(pipe_guard.buffer.len());
     if bytes_to_read == 0 {
         // Pipe is empty but not closed - for now return immediately (non-blocking)
         // TODO: Make this blocking later
-        return 0;
+        return Ok(Vec::new());
     }
 
-    // Copy data from pipe buffer
-    buffer[..bytes_to_read].copy_from_slice(&pipe_guard.buffer[..bytes_to_read]);
+    // Copy data to kernel buffer
+    let kernel_buffer = pipe_guard.buffer[..bytes_to_read].to_vec();
 
     // Remove read data from pipe
     pipe_guard.buffer.drain(..bytes_to_read);
 
-    bytes_to_read as i64
+    Ok(kernel_buffer)
 }

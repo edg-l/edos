@@ -73,24 +73,24 @@ pub fn sys_draw(request_ptr: *const DrawRequestInput) -> u64 {
     // Copy the DrawRequest from user space
     let request = unsafe { &*request_ptr };
 
-     // Basic validation
+    // Basic validation
     if request.width == 0 || request.height == 0 {
         thread.errno = Errno::EINVAL;
         return !0u64;
     }
 
     let mut pixels = Vec::new();
-    let slice = unsafe { core::slice::from_raw_parts(request.pixels, (request.width * request.height) as usize) };
+    let slice = unsafe {
+        core::slice::from_raw_parts(request.pixels, (request.width * request.height) as usize)
+    };
     pixels.extend_from_slice(slice);
     let kernel_request = DrawRequest {
         pixels: pixels.into_boxed_slice(),
         height: request.height,
         width: request.width,
         x: request.x,
-        y: request.y
+        y: request.y,
     };
-
-
 
     x86_64::instructions::interrupts::enable();
     draw(kernel_request);

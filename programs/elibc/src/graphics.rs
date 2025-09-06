@@ -686,7 +686,6 @@ pub struct DrawRequest {
     pub height: u64,
 }
 
-
 #[derive(Debug, Clone)]
 #[repr(C)]
 struct DrawRequestInput {
@@ -1058,7 +1057,7 @@ impl DrawRequest {
             height: self.height,
             width: self.width,
             x: self.x,
-            y: self.y
+            y: self.y,
         };
         let result = unsafe { syscall::syscall1(SYS_DRAW, (&raw const req) as u64) };
         if result == !0u64 {
