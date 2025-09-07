@@ -1,107 +1,69 @@
 #![expect(unused)]
 
 use bytemuck::{Pod, Zeroable};
-use volatile::{VolatileFieldAccess, access::ReadWrite};
 
 // AHCI HBA Memory Registers (volatile access required)
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable, VolatileFieldAccess)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct HbaMemory {
     // Generic Host Control
-    #[access(ReadWrite)]
     pub cap: u32, // Host Capabilities
-    #[access(ReadWrite)]
     pub ghc: u32, // Global Host Control
-    #[access(ReadWrite)]
     pub is: u32, // Interrupt Status
-    #[access(ReadWrite)]
     pub pi: u32, // Ports Implemented
-    #[access(ReadWrite)]
     pub vs: u32, // Version
-    #[access(ReadWrite)]
     pub ccc_ctl: u32, // Command Completion Coalescing Control
-    #[access(ReadWrite)]
     pub ccc_pts: u32, // Command Completion Coalescing Ports
-    #[access(ReadWrite)]
     pub em_loc: u32, // Enclosure Management Location
-    #[access(ReadWrite)]
     pub em_ctl: u32, // Enclosure Management Control
-    #[access(ReadWrite)]
     pub cap2: u32, // Host Capabilities Extended
-    #[access(ReadWrite)]
     pub bohc: u32, // BIOS/OS Handoff Control and Status
     pub reserved: [u8; 116],
-    #[access(ReadWrite)]
     pub vendor: [u8; 96],
-    #[access(ReadWrite)]
     pub ports: [HbaPort; 32], // Port control registers
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable, VolatileFieldAccess)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct HbaPort {
-    #[access(ReadWrite)]
     pub clb: u32, // Command List Base Address (lower 32-bits)
-    #[access(ReadWrite)]
     pub clbu: u32, // Command List Base Address (upper 32-bits)
-    #[access(ReadWrite)]
     pub fb: u32, // FIS Base Address (lower 32-bits)
-    #[access(ReadWrite)]
     pub fbu: u32, // FIS Base Address (upper 32-bits)
-    #[access(ReadWrite)]
     pub is: u32, // Interrupt Status
-    #[access(ReadWrite)]
     pub ie: u32, // Interrupt Enable
-    #[access(ReadWrite)]
     pub cmd: u32, // Command and Status
     pub reserved0: u32,
-    #[access(ReadWrite)]
     pub tfd: u32, // Task File Data
-    #[access(ReadWrite)]
     pub sig: u32, // Signature
-    #[access(ReadWrite)]
     pub ssts: u32, // Serial ATA Status
-    #[access(ReadWrite)]
     pub sctl: u32, // Serial ATA Control
-    #[access(ReadWrite)]
     pub serr: u32, // Serial ATA Error
-    #[access(ReadWrite)]
     pub sact: u32, // Serial ATA Active
-    #[access(ReadWrite)]
     pub ci: u32, // Command Issue
-    #[access(ReadWrite)]
     pub sntf: u32, // Serial ATA Notification
-    #[access(ReadWrite)]
     pub fbs: u32, // FIS-based Switching Control
     pub reserved1: [u32; 11],
-    #[access(ReadWrite)]
     pub vendor: [u32; 4],
 }
 
 // Command List Entry - points to command table
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable, VolatileFieldAccess)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct CommandHeader {
-    #[access(ReadWrite)]
     pub flags: u16, // Command flags (CFL, W, P, R, B, C, A)
-    #[access(ReadWrite)]
     pub prdtl: u16, // Physical Region Descriptor Table Length
-    #[access(ReadWrite)]
     pub prdbc: u32, // Physical Region Descriptor Byte Count
-    #[access(ReadWrite)]
     pub ctba: u32, // Command Table Base Address (lower 32-bits)
-    #[access(ReadWrite)]
     pub ctbau: u32, // Command Table Base Address (upper 32-bits)
     pub reserved: [u32; 4],
 }
 
 // Command Table - contains the actual SATA command
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable, VolatileFieldAccess)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct CommandTable {
-    #[access(ReadWrite)]
     pub cfis: [u8; 64], // Command FIS
-    #[access(ReadWrite)]
     pub acmd: [u8; 16], // ATAPI Command
     pub reserved: [u8; 48],
     // PRDT entries follow (variable length)
