@@ -35,7 +35,7 @@ pub struct PciConfigHeader {
     pub max_latency: u8,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PciAddress {
     pub bus: u8,
     pub device: u8,

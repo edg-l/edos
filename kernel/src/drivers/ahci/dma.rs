@@ -39,10 +39,8 @@ impl<T> DmaRegion<T> {
         );
 
         {
-            let mut mapper = memory_mapper();
             without_interrupts(|| {
-                let kernel_cr3 = boot_info().cr3;
-                unsafe { Cr3::write(kernel_cr3.0, kernel_cr3.1) };
+                let mut mapper = memory_mapper();
 
                 mapper
                     .map_memory_contiguous(
@@ -94,8 +92,8 @@ impl DmaBuffer {
         );
 
         {
-            let mut mapper = memory_mapper();
             without_interrupts(|| {
+                let mut mapper = memory_mapper();
                 mapper
                     .map_memory_contiguous(
                         virt_addr,
@@ -151,13 +149,13 @@ impl DmaAllocator {
             if let Some(buf) = self.list_1024.pop() {
                 Ok(buf)
             } else {
-                DmaBuffer::allocate_sized(512)
+                DmaBuffer::allocate_sized(1024)
             }
         } else if size <= 2048 {
             if let Some(buf) = self.list_2048.pop() {
                 Ok(buf)
             } else {
-                DmaBuffer::allocate_sized(512)
+                DmaBuffer::allocate_sized(2048)
             }
         } else {
             for (found_size, buffers) in self.list_big.iter_mut() {

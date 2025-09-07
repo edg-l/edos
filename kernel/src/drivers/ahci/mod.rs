@@ -93,6 +93,141 @@ pub fn ahci_driver_main() -> ! {
         }
     }
 
+    // Add this code after the detected_devices.push() in ahci_driver_main() in mod.rs
+
+    // Test reading GPT header from first detected device
+    if !detected_devices.is_empty() {
+        use alloc::string::String;
+
+        let mut output = String::new();
+        output.push_str("=== Testing Read Sectors with GPT Header ===\n");
+
+        // Get the first controller and port with a device
+        if let Some(first_device) = detected_devices.first() {
+            println!("About to read first sector");
+            // Find the controller
+            for controller in &mut controllers {
+                if controller.pci_device.address == first_device.controller_pci_address
+                    && let Some(port) = controller.ports[first_device.port_idx].as_mut()
+                {
+                    println!("Reading GPT header");
+                    // Read GPT header (LBA 1, 1 sector = 512 bytes)
+                    let mut gpt_buffer = [0u8; 512];
+
+                    output.push_str("Reading GPT header from LBA 1...\n");
+                    match port.read_sectors(1, &mut gpt_buffer, 1) {
+                        Ok(()) => {
+                            println!("Read sectors returned");
+                            output.push_str("Successfully read GPT header!\n");
+
+                            // Check for GPT signature "EFI PART"
+                            let signature = &gpt_buffer[0..8];
+
+                            println!("Read signature: {signature:?}");
+                            if signature == b"EFI PART" {
+                                output.push_str("Valid GPT signature found!\n");
+
+                                // Parse some basic GPT header fields
+                                let revision = u32::from_le_bytes([
+                                    gpt_buffer[8],
+                                    gpt_buffer[9],
+                                    gpt_buffer[10],
+                                    gpt_buffer[11],
+                                ]);
+                                let header_size = u32::from_le_bytes([
+                                    gpt_buffer[12],
+                                    gpt_buffer[13],
+                                    gpt_buffer[14],
+                                    gpt_buffer[15],
+                                ]);
+                                let num_partition_entries = u32::from_le_bytes([
+                                    gpt_buffer[80],
+                                    gpt_buffer[81],
+                                    gpt_buffer[82],
+                                    gpt_buffer[83],
+                                ]);
+
+                                output.push_str(&alloc::format!("GPT Revision: {:#x}\n", revision));
+                                output.push_str(&alloc::format!(
+                                    "Header Size: {} bytes\n",
+                                    header_size
+                                ));
+                                output.push_str(&alloc::format!(
+                                    "Number of partition entries: {}\n",
+                                    num_partition_entries
+                                ));
+
+                                // Build hex dump of first 64 bytes
+                                output.push_str("GPT Header (first 64 bytes):\n");
+                                for i in 0..64 {
+                                    if i % 16 == 0 {
+                                        output.push_str(&alloc::format!("{:04x}: ", i));
+                                    }
+                                    output.push_str(&alloc::format!("{:02x} ", gpt_buffer[i]));
+                                    if i % 16 == 15 {
+                                        output.push('\n');
+                                    }
+                                }
+                                output.push('\n');
+                            } else {
+                                output.push_str(
+                                    "No valid GPT signature found. Raw signature bytes:\n",
+                                );
+                                output.push_str("Signature: ");
+                                for &byte in signature {
+                                    output.push_str(&alloc::format!("{:02x} ", byte));
+                                }
+                                output.push('\n');
+
+                                // Check if it might be MBR instead
+                                if gpt_buffer[510] == 0x55 && gpt_buffer[511] == 0xAA {
+                                    output.push_str(
+                                        "This appears to be an MBR disk (boot signature found)\n",
+                                    );
+                                } else {
+                                    output.push_str("Unknown partition table format\n");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            output
+                                .push_str(&alloc::format!("Failed to read GPT header: {:?}\n", e));
+                        }
+                    }
+
+                    // Also test reading multiple sectors (first 2 sectors)
+                    output.push_str("\nTesting multi-sector read (LBA 0-1, 2 sectors)...\n");
+                    let mut multi_buffer = [0u8; 1024]; // 2 sectors
+
+                    match port.read_sectors(0, &mut multi_buffer, 2) {
+                        Ok(()) => {
+                            output.push_str("Successfully read 2 sectors!\n");
+                            output.push_str(&alloc::format!(
+                                "MBR signature at end of first sector: {:02x} {:02x}\n",
+                                multi_buffer[510],
+                                multi_buffer[511]
+                            ));
+                            output.push_str(&alloc::format!(
+                                "GPT signature in second sector: {:?}\n",
+                                core::str::from_utf8(&multi_buffer[512..520]).unwrap_or("invalid")
+                            ));
+                        }
+                        Err(e) => {
+                            output.push_str(&alloc::format!(
+                                "Failed to read multiple sectors: {:?}\n",
+                                e
+                            ));
+                        }
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        println!("{}", output);
+    }
+
     loop {
         // Yield to scheduler
         sched().thread_yield();
