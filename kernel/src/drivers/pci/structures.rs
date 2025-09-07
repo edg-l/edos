@@ -42,7 +42,7 @@ pub struct PciAddress {
     pub function: u8,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct PciDevice {
     pub address: PciAddress,
     pub header: PciConfigHeader,
