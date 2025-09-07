@@ -188,7 +188,7 @@ impl AhciController {
 
         // Give the controller a moment to fully initialize
         let start = Instant::now();
-        while start.elapsed().as_millis() < 10 {
+        while start.elapsed().as_millis() < 100 {
             sched().thread_yield();
         }
 

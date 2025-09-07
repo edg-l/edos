@@ -134,8 +134,6 @@ impl AhciPort {
             }
         }
 
-        println!("Port stopped");
-
         Ok(())
     }
 
