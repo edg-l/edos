@@ -13,6 +13,7 @@ use crate::{
     boot::boot_info,
     drivers::ahci::AhciError,
     memory::{DMA_REGION_START, mapper::memory_mapper},
+    println,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -94,7 +95,12 @@ impl DmaBuffer {
         {
             without_interrupts(|| {
                 let mut mapper = memory_mapper();
-                mapper
+                println!(
+                    "DMA: Mapping virt_addr={:#x}, aligned_size={:#x}",
+                    virt_addr.as_u64(),
+                    aligned_size
+                );
+                let result = mapper
                     .map_memory_contiguous(
                         virt_addr,
                         aligned_size,
@@ -102,7 +108,15 @@ impl DmaBuffer {
                             | PageTableFlags::NO_CACHE
                             | PageTableFlags::GLOBAL,
                     )
-                    .map_err(|_| AhciError::DmaAllocationFailed)
+                    .map_err(|_| AhciError::DmaAllocationFailed);
+
+                if result.is_ok() {
+                    println!("DMA: Mapping successful for {:#x}", virt_addr.as_u64());
+                } else {
+                    println!("DMA: Mapping FAILED for {:#x}", virt_addr.as_u64());
+                }
+
+                result
             })?;
         }
 
@@ -110,6 +124,8 @@ impl DmaBuffer {
         unsafe {
             ptr::write_bytes(virt_addr.as_mut_ptr::<u8>(), 0, size);
         }
+
+        println!("Allocated dma: {:#?}", Self { virt_addr, size });
 
         Ok(Self { virt_addr, size })
     }

@@ -89,6 +89,13 @@ impl MemoryManager {
     ) -> Result<PageRangeInclusive<Size4KiB>, MapToError<Size4KiB>> {
         let page_range = get_page_range(addr, size);
 
+        crate::println!(
+            "MAPPER: addr={:#x}, size={:#x}, page_range.count()={}",
+            addr.as_u64(),
+            size,
+            page_range.count()
+        );
+
         let flags = PageTableFlags::PRESENT | extra_flags;
         {
             let mut frame_allocator = frame_allocator();
@@ -96,13 +103,25 @@ impl MemoryManager {
                 .allocate_contiguous_frames(page_range.count())
                 .unwrap();
 
-            for page in page_range {
+            crate::println!(
+                "MAPPER: Allocated base frame at phys={:#x}",
+                frame.start_address().as_u64()
+            );
+
+            for (i, page) in page_range.enumerate() {
+                let current_frame = PhysFrame::containing_address(
+                    frame.start_address() + (i as u64 * Size4KiB::SIZE),
+                );
+                crate::println!(
+                    "MAPPER: Mapping page {:#x} to frame {:#x}",
+                    page.start_address().as_u64(),
+                    current_frame.start_address().as_u64()
+                );
                 unsafe {
                     self.mapper
-                        .map_to(page, frame, flags, &mut *frame_allocator)?
+                        .map_to(page, current_frame, flags, &mut *frame_allocator)?
                         .flush()
                 };
-                frame += Size4KiB::SIZE;
             }
         }
 
@@ -237,12 +256,9 @@ impl MemoryManager {
 pub fn get_page_range(addr: VirtAddr, size: u64) -> PageRangeInclusive<Size4KiB> {
     let start_page = Page::containing_address(addr);
 
-    // Calculate the number of pages needed to cover the entire size.
-    let page_count = size.div_ceil(Size4KiB::SIZE);
-
-    // Calculate the ending page by adding the page count to the starting page.
-    // This avoids creating a non-canonical intermediate virtual address.
-    let end_page = start_page + (page_count - 1);
+    // Calculate the address of the last byte
+    let end_addr = VirtAddr::new(addr.as_u64() + size - 1);
+    let end_page = Page::containing_address(end_addr);
 
     // Create an inclusive range of pages.
     Page::range_inclusive(start_page, end_page)

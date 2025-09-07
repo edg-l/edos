@@ -154,6 +154,9 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
             if current_id.kernel {
                 if let Some(kthread) = sched.kthreads.get(&current_id.id) {
                     // going to kernel space.
+                    // for now, always switch to kernel page, just in case.
+                    let kernel_cr3 = boot_info().cr3;
+                    Cr3::write(kernel_cr3.0, kernel_cr3.1);
                     *context = kthread.context.clone();
                     return context;
                 }

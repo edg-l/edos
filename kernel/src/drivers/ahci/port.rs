@@ -1,14 +1,9 @@
-use core::{marker::PhantomData, ptr};
-use x86_64::{
-    PhysAddr, VirtAddr, instructions::interrupts::without_interrupts, registers::control::Cr3,
-    structures::paging::PageTableFlags,
-};
+use core::ptr;
 
 use crate::{
-    boot::boot_info,
     drivers::ahci::{
         AhciError,
-        dma::{DmaAllocator, DmaBuffer, DmaRegion},
+        dma::{DmaAllocator, DmaRegion},
         fis::FisRegH2D,
         structures::{
             CMD_HEADER_WRITE, CommandHeader, CommandTable, DeviceIdentifyInfo, HbaFis, HbaPort,
