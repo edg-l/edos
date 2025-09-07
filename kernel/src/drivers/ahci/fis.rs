@@ -62,4 +62,13 @@ impl FisRegH2D {
 
         fis
     }
+
+    pub fn new_identify() -> Self {
+        let mut fis = Self::zeroed();
+        fis.fis_type = FIS_TYPE_REG_H2D;
+        fis.pmport = 1 << 7; // Command register
+        fis.command = ATA_CMD_IDENTIFY;
+        fis.device = 0; // Master device
+        fis
+    }
 }

@@ -1,6 +1,12 @@
 #![expect(unused)]
 
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 use bytemuck::{Pod, Zeroable};
+
+use crate::println;
 
 // Compile-time structure size assertions
 const _: () = {
@@ -135,6 +141,24 @@ pub const SSTS_DET_PRESENT: u32 = 3; // Device present and communication establi
 pub const SSTS_IPM_MASK: u32 = 0xF00; // Interface Power Management
 pub const SSTS_IPM_ACTIVE: u32 = 0x100; // Interface in active state
 
+pub const PORT_IS_DHRS: u32 = 1 << 0; // Device to Host Register FIS
+pub const PORT_IS_PSS: u32 = 1 << 1; // PIO Setup FIS
+pub const PORT_IS_DSS: u32 = 1 << 2; // DMA Setup FIS
+pub const PORT_IS_SDBS: u32 = 1 << 3; // Set Device Bits FIS
+pub const PORT_IS_UFS: u32 = 1 << 4; // Unknown FIS
+pub const PORT_IS_DPS: u32 = 1 << 5; // Descriptor Processed
+pub const PORT_IS_PCS: u32 = 1 << 6; // Port Connect Change
+pub const PORT_IS_DMPS: u32 = 1 << 7; // Device Mechanical Presence
+pub const PORT_IS_PRCS: u32 = 1 << 22; // PhyRdy Change
+pub const PORT_IS_IPMS: u32 = 1 << 23; // Incorrect Port Multiplier
+pub const PORT_IS_OFS: u32 = 1 << 24; // Overflow
+pub const PORT_IS_INFS: u32 = 1 << 26; // Interface Non-fatal Error
+pub const PORT_IS_IFS: u32 = 1 << 27; // Interface Fatal Error
+pub const PORT_IS_HBDS: u32 = 1 << 28; // Host Bus Data Error
+pub const PORT_IS_HBFS: u32 = 1 << 29; // Host Bus Fatal Error
+pub const PORT_IS_TFES: u32 = 1 << 30; // Task File Error
+pub const PORT_IS_CPDS: u32 = 1 << 31; // Cold Port Detect
+
 impl HbaMemory {
     pub fn print_structure_info() {
         crate::println!("=== HBA Memory Structure Info ===");
@@ -237,5 +261,127 @@ impl HbaPort {
         }
 
         crate::println!("{}", output);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceIdentifyInfo {
+    pub model: String,
+    pub serial: String,
+    pub firmware: String,
+    pub sectors: u64,
+    pub capacity_mb: u64,
+    pub capacity_gb: u64,
+    pub supports_lba48: bool,
+    pub supports_power_mgmt: bool,
+    pub supports_security: bool,
+    pub raw_features: u16,
+}
+
+impl DeviceIdentifyInfo {
+    /// Parse IDENTIFY data into a structured format
+    pub fn from_identify_data(identify_data: &[u8; 512]) -> Self {
+        // Model number (words 27-46, byte-swapped)
+        let model_bytes: Vec<u8> = identify_data[54..94]
+            .chunks_exact(2)
+            .flat_map(|chunk| [chunk[1], chunk[0]]) // Byte swap
+            .collect();
+        let model = core::str::from_utf8(&model_bytes)
+            .unwrap_or("<invalid>")
+            .trim()
+            .to_string();
+
+        // Serial number (words 10-19, byte-swapped)
+        let serial_bytes: Vec<u8> = identify_data[20..40]
+            .chunks_exact(2)
+            .flat_map(|chunk| [chunk[1], chunk[0]]) // Byte swap
+            .collect();
+        let serial = core::str::from_utf8(&serial_bytes)
+            .unwrap_or("<invalid>")
+            .trim()
+            .to_string();
+
+        // Firmware revision (words 23-26, byte-swapped)
+        let firmware_bytes: Vec<u8> = identify_data[46..54]
+            .chunks_exact(2)
+            .flat_map(|chunk| [chunk[1], chunk[0]]) // Byte swap
+            .collect();
+        let firmware = core::str::from_utf8(&firmware_bytes)
+            .unwrap_or("<invalid>")
+            .trim()
+            .to_string();
+
+        // Capacity (words 60-61 for 28-bit LBA, words 100-103 for 48-bit LBA)
+        let lba28_sectors = u32::from_le_bytes([
+            identify_data[120],
+            identify_data[121],
+            identify_data[122],
+            identify_data[123],
+        ]);
+
+        let lba48_sectors = u64::from_le_bytes([
+            identify_data[200],
+            identify_data[201],
+            identify_data[202],
+            identify_data[203],
+            identify_data[204],
+            identify_data[205],
+            identify_data[206],
+            identify_data[207],
+        ]);
+
+        // Check if 48-bit LBA is supported (bit 10 of word 83)
+        let supports_lba48 = identify_data[167] & 0x04 != 0;
+
+        let sectors = if supports_lba48 && lba48_sectors > 0 {
+            lba48_sectors
+        } else {
+            lba28_sectors as u64
+        };
+
+        let capacity_mb = (sectors * 512) / (1024 * 1024);
+        let capacity_gb = capacity_mb / 1024;
+
+        // Additional capabilities
+        let raw_features = u16::from_le_bytes([identify_data[166], identify_data[167]]);
+        let supports_power_mgmt = raw_features & 0x0020 != 0;
+        let supports_security = raw_features & 0x0002 != 0;
+
+        Self {
+            model,
+            serial,
+            firmware,
+            sectors,
+            capacity_mb,
+            capacity_gb,
+            supports_lba48,
+            supports_power_mgmt,
+            supports_security,
+            raw_features,
+        }
+    }
+
+    /// Print device information in a formatted way
+    pub fn print_info(&self, port_idx: usize) {
+        println!("=== Device Info for Port {} ===", port_idx);
+        println!("Model: {}", self.model);
+        println!("Serial: {}", self.serial);
+        println!("Firmware: {}", self.firmware);
+        println!(
+            "Capacity: {} sectors ({} MB / {} GB)",
+            self.sectors, self.capacity_mb, self.capacity_gb
+        );
+        println!("LBA48 Support: {}", self.supports_lba48);
+        println!("Features word 83: {:#06x}", self.raw_features);
+
+        if self.supports_lba48 {
+            println!("  - 48-bit LBA supported");
+        }
+        if self.supports_power_mgmt {
+            println!("  - Power Management supported");
+        }
+        if self.supports_security {
+            println!("  - Security feature set supported");
+        }
     }
 }

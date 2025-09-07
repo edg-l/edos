@@ -1,4 +1,5 @@
-use core::ptr;
+use alloc::vec::Vec;
+use core::{marker::PhantomData, ptr};
 use x86_64::{
     PhysAddr, VirtAddr, instructions::interrupts::without_interrupts, registers::control::Cr3,
     structures::paging::PageTableFlags,
@@ -8,9 +9,10 @@ use crate::{
     boot::boot_info,
     drivers::ahci::{
         AhciError,
+        fis::FisRegH2D,
         structures::{
-            CommandHeader, CommandTable, HbaFis, HbaPort, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE,
-            PORT_CMD_ST,
+            CommandHeader, CommandTable, DeviceIdentifyInfo, HbaFis, HbaPort, PORT_CMD_CR,
+            PORT_CMD_FR, PORT_CMD_FRE, PORT_CMD_ST, PORT_IS_TFES, PrdtEntry,
         },
     },
     memory::{DMA_REGION_START, mapper::memory_mapper},
@@ -33,13 +35,17 @@ pub struct AhciPort {
     pub free_slots: u32, // Bitmap of free command slots
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct DmaRegion<T: 'static> {
     pub virt_addr: VirtAddr,
-    pub data: &'static mut T,
+    _phantom: PhantomData<T>,
 }
 
 impl<T> DmaRegion<T> {
+    pub fn get(&self) -> *mut T {
+        self.virt_addr.as_mut_ptr()
+    }
+
     pub fn allocate() -> Result<Self, AhciError> {
         let size = core::mem::size_of::<T>() as u64 * 2;
         let aligned_size = (size + 0xfff) & !0xfff; // Round up to page boundary
@@ -71,14 +77,15 @@ impl<T> DmaRegion<T> {
             })?;
         }
 
-        let data = unsafe { virt_addr.as_mut_ptr::<T>().as_mut().unwrap() };
-
         // Zero the memory
         unsafe {
             ptr::write_bytes(virt_addr.as_mut_ptr::<T>(), 0, 1);
         }
 
-        Ok(Self { virt_addr, data })
+        Ok(Self {
+            virt_addr,
+            _phantom: PhantomData,
+        })
     }
 
     pub fn phys_addr(&self) -> PhysAddr {
@@ -209,39 +216,116 @@ impl AhciPort {
         }
     }
 
-    pub fn handle_interrupt(&mut self) {
-        let is = unsafe { ptr::read_volatile(&raw const (*self.port_regs).is) };
+    /// Issue IDENTIFY command to get device information
+    pub fn identify_device(&mut self) -> Result<DeviceIdentifyInfo, AhciError> {
+        // Allocate command slot
+        let slot = self
+            .allocate_command_slot()
+            .ok_or(AhciError::PortNotReady)?;
 
-        // Clear interrupt status
-        unsafe { ptr::write_volatile(&raw mut (*self.port_regs).is, is) };
+        // Allocate DMA buffer for identify data (512 bytes)
+        let data_buffer = DmaRegion::<[u8; 512]>::allocate()?;
 
-        // Handle completed commands
-        let ci = unsafe { ptr::read_volatile(&raw const (*self.port_regs).ci) };
-        let completed_slots = !ci & (!self.free_slots);
+        // Allocate command table for this slot
+        let cmd_table = DmaRegion::<CommandTable>::allocate()?;
+        self.command_tables[slot] = Some(cmd_table);
 
-        for slot in 0..AHCI_CMD_SLOTS {
-            if completed_slots & (1 << slot) != 0 {
-                self.handle_command_completion(slot);
+        // Setup command table
+        unsafe {
+            let table = self.command_tables[slot].as_ref().unwrap().get();
+
+            // Zero the command table
+            table.write(core::mem::zeroed());
+
+            let table = &mut *table;
+
+            // Setup Command FIS (Host to Device Register FIS)
+            let fis = FisRegH2D::new_identify();
+            let fis_bytes = bytemuck::bytes_of(&fis);
+            table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
+
+            // Setup PRDT (Physical Region Descriptor Table) - immediately after CommandTable
+            let prdt_entry = PrdtEntry {
+                dba: data_buffer.phys_addr().as_u64() as u32,
+                dbau: (data_buffer.phys_addr().as_u64() >> 32) as u32,
+                reserved: 0,
+                dbc: 512 - 1, // Byte count - 1 (0-based)
+            };
+
+            // Write PRDT entry right after the CommandTable
+            let prdt_ptr = (table as *mut CommandTable as *mut u8)
+                .add(core::mem::size_of::<CommandTable>())
+                as *mut PrdtEntry;
+            ptr::write_volatile(prdt_ptr, prdt_entry);
+        }
+
+        // Setup command header in command list
+        unsafe {
+            let cmd_list = self.command_list.get().as_mut().unwrap();
+            let cmd_header = &mut cmd_list[slot];
+            *cmd_header = CommandHeader {
+                flags: 5, // FIS length = 5 DWORDs (20 bytes)
+                prdtl: 1, // One PRDT entry
+                prdbc: 0, // Will be updated by hardware
+                ctba: self.command_tables[slot]
+                    .as_ref()
+                    .unwrap()
+                    .phys_addr()
+                    .as_u64() as u32,
+                ctbau: (self.command_tables[slot]
+                    .as_ref()
+                    .unwrap()
+                    .phys_addr()
+                    .as_u64()
+                    >> 32) as u32,
+                reserved: [0; 4],
+            };
+        }
+
+        // Issue command by setting bit in Command Issue register
+        unsafe {
+            ptr::write_volatile(&raw mut (*self.port_regs).ci, 1 << slot);
+        }
+
+        // Wait for command completion - interrupt will wake the driver thread
+        let timeout = core::time::Duration::from_secs(5);
+        let start_time = crate::timer::Instant::now();
+
+        loop {
+            // Check if command completed (slot bit cleared in CI register)
+            let ci = unsafe { ptr::read_volatile(&raw const (*self.port_regs).ci) };
+            if ci & (1 << slot) == 0 {
+                break;
             }
+
+            // Check for errors before waiting
+            let is = unsafe { ptr::read_volatile(&raw const (*self.port_regs).is) };
+            if is & PORT_IS_TFES != 0 {
+                println!("IDENTIFY command failed with task file error");
+                unsafe { ptr::write_volatile(&raw mut (*self.port_regs).is, is) };
+                self.free_command_slot(slot);
+                return Err(AhciError::IoError);
+            }
+
+            // Check if we've exceeded our total timeout
+            if start_time.elapsed() >= timeout {
+                println!("IDENTIFY command timed out");
+                self.free_command_slot(slot);
+                return Err(AhciError::CommandTimeout);
+            }
+
+            // Park the driver thread - interrupt will wake us when command completes
+            // Use shorter waits so we can check timeout more frequently
+            crate::thread::scheduler::sched()
+                .thread_wait_timeout(core::time::Duration::from_millis(100));
         }
 
-        if is & (1 << 30) != 0 {
-            // Task file error
-            println!("Port {} task file error", self.port_idx);
-        }
-    }
+        // Copy the identify data
+        let result = unsafe { *data_buffer.get() };
 
-    fn handle_command_completion(&mut self, slot: usize) {
-        println!("Command slot {} completed on port {}", slot, self.port_idx);
-
-        // Free the command table
-        if let Some(cmd_table) = self.command_tables[slot].take() {
-            // Command table will be dropped and frame deallocated
-        }
-
-        // Mark slot as free
+        // Clean up
         self.free_command_slot(slot);
 
-        // TODO: Notify waiting threads via broadcast/mailbox
+        Ok(DeviceIdentifyInfo::from_identify_data(&result))
     }
 }

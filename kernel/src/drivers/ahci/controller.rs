@@ -10,7 +10,7 @@ use crate::{
     apic::init::configure_device_interrupt,
     drivers::{
         ahci::{
-            AhciError, AhciInterruptEvent,
+            AhciError,
             port::AhciPort,
             structures::{
                 GHC_AE, GHC_IE, HbaMemory, HbaPort, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE,
@@ -150,44 +150,6 @@ impl AhciController {
             ptr::write_volatile(&raw mut (*hba).ghc, ghc);
         }
         Ok(())
-    }
-
-    /// Check if this controller has pending interrupts and generate event
-    pub fn check_and_handle_interrupt(&mut self) -> Option<AhciInterruptEvent> {
-        let global_is = unsafe { ptr::read_volatile(&(*self.hba).is) };
-
-        if global_is == 0 {
-            return None; // No interrupts pending on this controller
-        }
-
-        println!(
-            "AHCI Global IS: {:#x} - ports with interrupts: {:?}",
-            global_is,
-            (0..32)
-                .filter(|&i| global_is & (1 << i) != 0)
-                .collect::<Vec<_>>()
-        );
-
-        // Clear global interrupt status
-        unsafe { ptr::write_volatile(&raw mut (*self.hba).is, global_is) };
-
-        // Handle only the ports that actually triggered (no need to check all!)
-        for port_idx in 0..32 {
-            if global_is & (1 << port_idx) != 0 {
-                if let Some(port) = self.ports[port_idx].as_mut() {
-                    println!("Handling interrupt for port {}", port_idx);
-                    port.handle_interrupt();
-                } else {
-                    println!("Port {} has interrupt but no port object!", port_idx);
-                }
-            }
-        }
-
-        Some(AhciInterruptEvent {
-            controller_pci_address: self.pci_device.address,
-            port_mask: global_is,
-            global_is,
-        })
     }
 
     fn reset_controller(&mut self) -> Result<(), AhciError> {
@@ -398,22 +360,6 @@ impl AhciController {
 
         println!("Port {} initialization complete", port_idx);
         Ok(())
-    }
-
-    pub fn handle_interrupt(&mut self) {
-        let is = unsafe { ptr::read_volatile(&(*self.hba).is) };
-
-        // Clear global interrupt status
-        unsafe { ptr::write_volatile(&mut (*self.hba).is, is) };
-
-        // Handle each port's interrupts
-        for (port_idx, port_opt) in self.ports.iter_mut().enumerate() {
-            if is & (1 << port_idx) != 0
-                && let Some(port) = port_opt
-            {
-                port.handle_interrupt();
-            }
-        }
     }
 
     pub fn get_port(&mut self, port_idx: usize) -> Option<&mut AhciPort> {
