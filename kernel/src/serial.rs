@@ -44,11 +44,12 @@ pub fn _serial_print(args: fmt::Arguments) {
                     .unwrap_unchecked()
                     .lock()
                     .write_fmt(format_args!(
-                        "[{secs}.{us:06}] <{}:{}> {args}",
+                        "[{secs}.{us:06}] <{}:{}:{}> {args}",
                         tid.name
                             .as_ref()
                             .map(|x| x.as_str())
                             .unwrap_or_else(|| if tid.kernel { "unk0" } else { "unk3" }),
+                        if tid.kernel { "k" } else { "u" },
                         tid.id
                     ))
                     .unwrap();
@@ -61,7 +62,7 @@ pub fn _serial_print(args: fmt::Arguments) {
                 .get()
                 .unwrap_unchecked()
                 .lock()
-                .write_fmt(format_args!("[{secs}.{us:06}] <main/sched> {args}"))
+                .write_fmt(format_args!("[{secs}.{us:06}] <kernel> {args}"))
                 .unwrap();
         }
     })

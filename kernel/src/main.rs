@@ -4,6 +4,7 @@
 
 use core::{arch::asm, time::Duration};
 
+use alloc::string::ToString;
 use x86_64::{VirtAddr, instructions::hlt};
 
 use crate::{
@@ -98,7 +99,11 @@ fn main() -> ! {
     thread::scheduler::init();
     drivers::init_drivers();
 
-    queue_spawn_thread(UserThread::new(MINIMAL_ELF_PROGRAM).unwrap());
+    queue_spawn_thread({
+        let mut thread = UserThread::new(TERMINAL_PROGRAM).unwrap();
+        thread.id.name = Some("terminal".to_string().into());
+        thread
+    });
 
     // Enable apic timer, every 1 second
     set_apic_timer_and_enable(Duration::from_millis(10));
@@ -110,7 +115,7 @@ fn main() -> ! {
     }
 }
 
-pub const MINIMAL_ELF_PROGRAM: &[u8] = include_bytes!("../../programs/out/terminal");
+pub const TERMINAL_PROGRAM: &[u8] = include_bytes!("../../programs/out/terminal");
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
