@@ -99,13 +99,9 @@ impl AhciPort {
         // Stop the port first
         Self::stop_port(port_regs)?;
 
-        println!("Allocating dma regions");
-
         // Allocate DMA regions
         let command_list = DmaRegion::allocate()?;
         let fis_area = DmaRegion::allocate()?;
-
-        println!("Allocated, setting up port registers");
 
         // Set up the port registers
         unsafe {
@@ -152,7 +148,6 @@ impl AhciPort {
     }
 
     fn stop_port(port_regs: *mut HbaPort) -> Result<(), AhciError> {
-        println!("Stopping port");
         unsafe {
             // Clear ST (start) bit
             let mut cmd = ptr::read_volatile(&(*port_regs).cmd);

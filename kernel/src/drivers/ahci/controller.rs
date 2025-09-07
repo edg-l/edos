@@ -1,7 +1,10 @@
 use core::ptr;
 
 use alloc::vec::Vec;
-use x86_64::{PhysAddr, structures::paging::PageTableFlags};
+use x86_64::{
+    PhysAddr,
+    structures::paging::{PageTableFlags, mapper::TranslateResult},
+};
 
 use crate::{
     drivers::{
@@ -60,23 +63,31 @@ impl AhciController {
 
         // Map the AHCI HBA memory
         let hba_base = PhysAddr::new((pci_device.header.bar5 & !0xF) as u64);
+
         let hba_virt = get_virt_addr(hba_base);
 
         // Map the HBA memory region (need 0x1100 bytes for full AHCI HBA, round up to 8KB to be safe)
-        let hba_size = 0x2000u64; // 8KB to cover the full HBA memory region plus padding
+        let hba_size = 0x1100;
         {
             let mut mapper = memory_mapper();
-            mapper
-                .map_address_range(
-                    hba_virt,
-                    hba_base,
-                    hba_size as usize,
-                    PageTableFlags::PRESENT
-                        | PageTableFlags::WRITABLE
-                        | PageTableFlags::NO_CACHE
-                        | PageTableFlags::GLOBAL,
-                )
-                .map_err(|_| AhciError::InvalidDevice)?;
+            let result = mapper.translate(hba_virt);
+            if let TranslateResult::Mapped { .. } = result {
+            } else if let Err(e) = mapper.map_address_range(
+                hba_virt,
+                hba_base,
+                hba_size as usize,
+                PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::NO_CACHE
+                    | PageTableFlags::GLOBAL,
+            ) {
+                match e {
+                    x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(
+                        _phys_frame,
+                    ) => {}
+                    _ => Err(AhciError::InvalidDevice)?,
+                }
+            }
         }
 
         println!(
@@ -88,18 +99,10 @@ impl AhciController {
 
         let hba = hba_virt.as_mut_ptr::<HbaMemory>();
 
-        // Print structure validation info first
-        crate::drivers::ahci::structures::HbaMemory::print_structure_info();
-
         println!("=== AHCI Controller Memory Mapping ===");
         println!("HBA Physical Address: {:#x}", hba_base.as_u64());
         println!("HBA Virtual Address: {:#x}", hba_virt.as_u64());
         println!("HBA Pointer: {:p}", hba);
-
-        // Safely read and display the HBA memory contents
-        let hba_ref = unsafe { &*hba };
-        hba_ref.print_basic_registers();
-        hba_ref.print_vendor_area();
 
         let mut controller = Self {
             hba,
@@ -174,45 +177,11 @@ impl AhciController {
         for i in 0..32 {
             if pi & (1 << i) != 0 {
                 println!("=== Checking Port {} ===", i);
-
                 let port_ptr = unsafe { &raw mut (*self.hba).ports[i] };
-                let port_addr = port_ptr as *const HbaPort as usize;
-                let expected_offset = self.hba as usize
-                    + core::mem::offset_of!(HbaMemory, ports)
-                    + (i * core::mem::size_of::<HbaPort>());
 
-                println!(
-                    "Port {} address: {:#x} (expected: {:#x})",
-                    i, port_addr, expected_offset
-                );
-                if port_addr != expected_offset {
-                    println!("WARNING: Port {} address mismatch!", i);
-                }
-
-                // Read and display all port registers for debugging
-                let port_ref = unsafe { &*port_ptr };
-                port_ref.print_registers(i);
-
-                // Verify memory access is working by reading multiple times
-                let ssts1 = unsafe { ptr::read_volatile(&raw const (*port_ptr).ssts) };
-                let ssts2 = unsafe { ptr::read_volatile(&raw const (*port_ptr).ssts) };
-                let ssts3 = unsafe { ptr::read_volatile(&raw const (*port_ptr).ssts) };
-
-                if ssts1 != ssts2 || ssts2 != ssts3 {
-                    println!(
-                        "WARNING: SSTS values inconsistent: {:#x}, {:#x}, {:#x}",
-                        ssts1, ssts2, ssts3
-                    );
-                }
-
-                let ssts = ssts1;
+                let ssts = unsafe { ptr::read_volatile(&raw const (*port_ptr).ssts) };
                 let device_detection = ssts & 0xF; // DET field
                 let interface_power = (ssts >> 8) & 0xF; // IPM field
-
-                println!(
-                    "SSTS breakdown: DET={}, IPM={}, full={:#x}",
-                    device_detection, interface_power, ssts
-                );
 
                 if device_detection != 3 || interface_power != 1 {
                     println!(
@@ -222,10 +191,9 @@ impl AhciController {
                     continue;
                 }
 
-                println!("Port {}: Device detected (DET=3, IPM=1) ✓", i);
+                println!("Port {}: Device detected (DET=3, IPM=1)", i);
 
                 // Initialize the port properly before reading signature
-                println!("Initializing port {}", i);
                 self.initialize_port(port_ptr, i)?;
 
                 // Wait for signature to stabilize after power-on and track all reads
@@ -240,47 +208,18 @@ impl AhciController {
 
                     signature = unsafe { ptr::read_volatile(&raw const (*port_ptr).sig) };
                     signature_attempts += 1;
-
-                    println!(
-                        "Port {}: Signature read #{}: {:#x}",
-                        i, signature_attempts, signature
-                    );
-
-                    // Also check all other important registers for changes
-                    let cmd = unsafe { ptr::read_volatile(&raw const (*port_ptr).cmd) };
-                    let tfd = unsafe { ptr::read_volatile(&raw const (*port_ptr).tfd) };
-                    let serr = unsafe { ptr::read_volatile(&raw const (*port_ptr).serr) };
-                    println!(
-                        "Port {} state: CMD={:#x}, TFD={:#x}, SERR={:#x}",
-                        i, cmd, tfd, serr
-                    );
-
-                    if signature == 0xffffffff {
-                        println!(
-                            "Port {}: Signature attempt {} failed, retrying...",
-                            i, signature_attempts
-                        );
-                    }
                 }
-
-                println!(
-                    "Port {} final signature: {:#x} after {} attempts",
-                    i, signature, signature_attempts
-                );
-
-                // Display vendor area for this port too
-                (unsafe { &*port_ptr }).print_vendor_area(i);
 
                 match signature {
                     SATA_SIG_ATA => {
-                        println!("✓ Found SATA drive on port {}", i);
+                        println!("Found SATA drive on port {}", i);
                         // Get volatile pointer to the specific port
                         match AhciPort::new(i, port_ptr) {
                             Ok(port) => {
                                 self.ports[i] = Some(port);
                             }
                             Err(e) => {
-                                println!("✗ Failed to initialize port {}: {:?}", i, e);
+                                println!("Failed to initialize port {}: {:?}", i, e);
                             }
                         }
                     }
@@ -320,7 +259,6 @@ impl AhciController {
         unsafe {
             // First ensure the port is stopped
             let mut cmd = ptr::read_volatile(&raw const (*port_ptr).cmd);
-            println!("Port {} CMD before init: {:#x}", port_idx, cmd);
 
             // Stop command list processing (clear ST bit)
             cmd &= !PORT_CMD_ST;
@@ -329,7 +267,7 @@ impl AhciController {
             // Wait for command list to stop running (CR bit to clear)
             let start = Instant::now();
             while ptr::read_volatile(&raw const (*port_ptr).cmd) & PORT_CMD_CR != 0 {
-                if start.elapsed().as_millis() > 500 {
+                if start.elapsed().as_millis() > 200 {
                     println!("Port {}: Timeout waiting for CR to clear", port_idx);
                     return Err(AhciError::CommandTimeout);
                 }
@@ -349,7 +287,7 @@ impl AhciController {
 
             // Wait a bit for device to spin up
             let start = Instant::now();
-            while start.elapsed().as_millis() < 1000 {
+            while start.elapsed().as_millis() < 400 {
                 // 1 second spin-up time
                 sched().thread_yield();
             }
@@ -376,7 +314,7 @@ impl AhciController {
             // Wait for FIS receive to start
             let start = Instant::now();
             while ptr::read_volatile(&raw const (*port_ptr).cmd) & PORT_CMD_FR == 0 {
-                if start.elapsed().as_millis() > 500 {
+                if start.elapsed().as_millis() > 200 {
                     println!("Port {}: Timeout waiting for FIS receive", port_idx);
                     return Err(AhciError::CommandTimeout);
                 }
@@ -388,13 +326,9 @@ impl AhciController {
             cmd |= PORT_CMD_ST;
             ptr::write_volatile(&raw mut (*port_ptr).cmd, cmd);
 
-            let final_cmd = ptr::read_volatile(&(*port_ptr).cmd);
-            println!("Port {} CMD after init: {:#x}", port_idx, final_cmd);
-
             // Wait a bit more for device to fully initialize and register FIS
             let start = Instant::now();
-            while start.elapsed().as_millis() < 500 {
-                // Additional 500ms wait
+            while start.elapsed().as_millis() < 100 {
                 sched().thread_yield();
             }
         }

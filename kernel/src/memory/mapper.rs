@@ -145,8 +145,7 @@ impl MemoryManager {
                     frame,
                     PageTableFlags::PRESENT | flags,
                     &mut *frame_allocator,
-                )
-                .expect("failed to map")
+                )?
                 .flush()
         };
 

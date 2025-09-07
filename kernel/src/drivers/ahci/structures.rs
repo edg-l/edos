@@ -18,17 +18,17 @@ const _: () = {
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct HbaMemory {
     // Generic Host Control
-    pub cap: u32, // Host Capabilities
-    pub ghc: u32, // Global Host Control
-    pub is: u32, // Interrupt Status
-    pub pi: u32, // Ports Implemented
-    pub vs: u32, // Version
+    pub cap: u32,     // Host Capabilities
+    pub ghc: u32,     // Global Host Control
+    pub is: u32,      // Interrupt Status
+    pub pi: u32,      // Ports Implemented
+    pub vs: u32,      // Version
     pub ccc_ctl: u32, // Command Completion Coalescing Control
     pub ccc_pts: u32, // Command Completion Coalescing Ports
-    pub em_loc: u32, // Enclosure Management Location
-    pub em_ctl: u32, // Enclosure Management Control
-    pub cap2: u32, // Host Capabilities Extended
-    pub bohc: u32, // BIOS/OS Handoff Control and Status
+    pub em_loc: u32,  // Enclosure Management Location
+    pub em_ctl: u32,  // Enclosure Management Control
+    pub cap2: u32,    // Host Capabilities Extended
+    pub bohc: u32,    // BIOS/OS Handoff Control and Status
     pub reserved: [u8; 116],
     pub vendor: [u8; 96],
     pub ports: [HbaPort; 32], // Port control registers
@@ -37,23 +37,23 @@ pub struct HbaMemory {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct HbaPort {
-    pub clb: u32, // Command List Base Address (lower 32-bits)
+    pub clb: u32,  // Command List Base Address (lower 32-bits)
     pub clbu: u32, // Command List Base Address (upper 32-bits)
-    pub fb: u32, // FIS Base Address (lower 32-bits)
-    pub fbu: u32, // FIS Base Address (upper 32-bits)
-    pub is: u32, // Interrupt Status
-    pub ie: u32, // Interrupt Enable
-    pub cmd: u32, // Command and Status
+    pub fb: u32,   // FIS Base Address (lower 32-bits)
+    pub fbu: u32,  // FIS Base Address (upper 32-bits)
+    pub is: u32,   // Interrupt Status
+    pub ie: u32,   // Interrupt Enable
+    pub cmd: u32,  // Command and Status
     pub reserved0: u32,
-    pub tfd: u32, // Task File Data
-    pub sig: u32, // Signature
+    pub tfd: u32,  // Task File Data
+    pub sig: u32,  // Signature
     pub ssts: u32, // Serial ATA Status
     pub sctl: u32, // Serial ATA Control
     pub serr: u32, // Serial ATA Error
     pub sact: u32, // Serial ATA Active
-    pub ci: u32, // Command Issue
+    pub ci: u32,   // Command Issue
     pub sntf: u32, // Serial ATA Notification
-    pub fbs: u32, // FIS-based Switching Control
+    pub fbs: u32,  // FIS-based Switching Control
     pub reserved1: [u32; 11],
     pub vendor: [u32; 4],
 }
@@ -65,7 +65,7 @@ pub struct CommandHeader {
     pub flags: u16, // Command flags (CFL, W, P, R, B, C, A)
     pub prdtl: u16, // Physical Region Descriptor Table Length
     pub prdbc: u32, // Physical Region Descriptor Byte Count
-    pub ctba: u32, // Command Table Base Address (lower 32-bits)
+    pub ctba: u32,  // Command Table Base Address (lower 32-bits)
     pub ctbau: u32, // Command Table Base Address (upper 32-bits)
     pub reserved: [u32; 4],
 }
@@ -130,22 +130,32 @@ pub const GHC_AE: u32 = 1 << 31; // AHCI Enable
 pub const GHC_IE: u32 = 1 << 1; // Interrupt Enable
 
 // SSTS register fields
-pub const SSTS_DET_MASK: u32 = 0xF;          // Device Detection
-pub const SSTS_DET_PRESENT: u32 = 3;         // Device present and communication established
-pub const SSTS_IPM_MASK: u32 = 0xF00;        // Interface Power Management
-pub const SSTS_IPM_ACTIVE: u32 = 0x100;      // Interface in active state
+pub const SSTS_DET_MASK: u32 = 0xF; // Device Detection
+pub const SSTS_DET_PRESENT: u32 = 3; // Device present and communication established
+pub const SSTS_IPM_MASK: u32 = 0xF00; // Interface Power Management
+pub const SSTS_IPM_ACTIVE: u32 = 0x100; // Interface in active state
 
 impl HbaMemory {
     pub fn print_structure_info() {
         crate::println!("=== HBA Memory Structure Info ===");
-        crate::println!("HbaMemory size: {} bytes (expected: {} bytes)",
-            core::mem::size_of::<Self>(), 0x1100);
-        crate::println!("HbaMemory alignment: {} bytes",
-            core::mem::align_of::<Self>());
-        crate::println!("HbaPort size: {} bytes (expected: {} bytes)",
-            core::mem::size_of::<HbaPort>(), 0x80);
-        crate::println!("HbaPort alignment: {} bytes",
-            core::mem::align_of::<HbaPort>());
+        crate::println!(
+            "HbaMemory size: {} bytes (expected: {} bytes)",
+            core::mem::size_of::<Self>(),
+            0x1100
+        );
+        crate::println!(
+            "HbaMemory alignment: {} bytes",
+            core::mem::align_of::<Self>()
+        );
+        crate::println!(
+            "HbaPort size: {} bytes (expected: {} bytes)",
+            core::mem::size_of::<HbaPort>(),
+            0x80
+        );
+        crate::println!(
+            "HbaPort alignment: {} bytes",
+            core::mem::align_of::<HbaPort>()
+        );
 
         // Print field offsets for verification
         crate::println!("Field offsets:");
