@@ -5,3 +5,4 @@
 *.log
 target/
 out/
+sata-disk.img
