@@ -163,7 +163,7 @@ impl AhciPort {
             .ok_or(AhciError::PortNotReady)?;
 
         // Allocate DMA buffer for identify data (512 bytes)
-        let data_buffer = DmaRegion::<[u8; 512]>::allocate()?;
+        let data_buffer = self.dma_alloc.allocate_sized(512)?;
 
         // Allocate command table for this slot
         let cmd_table = DmaRegion::<CommandTable>::allocate()?;
@@ -260,12 +260,16 @@ impl AhciPort {
         }
 
         // Copy the identify data
-        let result = unsafe { *data_buffer.get() };
+        let result = unsafe { &*data_buffer.as_ptr().cast::<[u8; 512]>() };
 
         // Clean up
         self.free_command_slot(slot);
 
-        Ok(DeviceIdentifyInfo::from_identify_data(&result))
+        let info = DeviceIdentifyInfo::from_identify_data(result);
+
+        self.dma_alloc.dealloc(data_buffer);
+
+        Ok(info)
     }
 
     // Read sectors from the device
