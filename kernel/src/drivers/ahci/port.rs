@@ -54,7 +54,7 @@ impl<T> DmaRegion<T> {
             .map_memory(
                 virt_addr,
                 aligned_size,
-                PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE,
+                PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE | PageTableFlags::GLOBAL,
             )
             .map_err(|_| AhciError::DmaAllocationFailed)?;
 

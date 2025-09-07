@@ -1,17 +1,15 @@
-use core::ptr::NonNull;
+use core::ptr::{addr_of_mut, NonNull};
 
-use alloc::{boxed::Box, vec::Vec};
-use volatile::{VolatilePtr, map_field};
-use x86_64::{PhysAddr, VirtAddr, structures::paging::PageTableFlags};
+use alloc::vec::Vec;
+use volatile::VolatilePtr;
+use x86_64::{PhysAddr, structures::paging::PageTableFlags};
 
 use crate::{
     drivers::{
         ahci::{
-            AhciError,
-            port::AhciPort,
-            structures::{
-                GHC_AE, GHC_IE, HbaMemory, HbaMemoryVolatileFieldAccess, HbaPort, SATA_SIG_ATA,
-            },
+            port::AhciPort, structures::{
+                HbaMemory, HbaMemoryVolatileFieldAccess, HbaPort, HbaPortVolatileFieldAccess, GHC_AE, GHC_IE, SATA_SIG_ATA
+            }, AhciError
         },
         pci::structures::PciDevice,
     },
@@ -47,16 +45,19 @@ impl AhciController {
             .map_address(
                 hba_virt,
                 hba_base,
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE | PageTableFlags::GLOBAL,
+                PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::NO_CACHE
+                    | PageTableFlags::GLOBAL,
             )
             .map_err(|_| AhciError::InvalidDevice)?;
 
         let hba =
             unsafe { VolatilePtr::new(NonNull::new_unchecked(hba_virt.as_mut_ptr::<HbaMemory>())) };
 
-        println!("AHCI Version: {:#x}", map_field!(hba.vs).read());
-        println!("AHCI Capabilities: {:#x}", map_field!(hba.cap).read());
-        println!("Ports implemented: {:#x}", map_field!(hba.pi).read());
+        println!("AHCI Version: {:#x}", hba.vs().read());
+        println!("AHCI Capabilities: {:#x}", hba.cap().read());
+        println!("Ports implemented: {:#x}", hba.pi().read());
 
         let mut controller = Self {
             hba,
@@ -105,21 +106,25 @@ impl AhciController {
         let pi = self.hba.pi().read();
         self.ports.resize_with(32, || None);
 
+        println!("PI: {pi}");
         for i in 0..32 {
             if pi & (1 << i) != 0 {
                 println!("Checking port {}", i);
 
-                let signature = self.hba.ports().read()[i].sig;
+
+
+
+                let port_ptr = unsafe { self.hba
+                        .ports().map(|x| NonNull::new(&raw mut (*x.as_ptr())[i]).unwrap()) };
+
+                let signature = port_ptr.sig().read();
+
+                println!("Got port signature: {signature}");
 
                 match signature {
                     SATA_SIG_ATA => {
                         println!("Found SATA drive on port {}", i);
                         // Get volatile pointer to the specific port
-                        let port_ptr = unsafe {
-                            self.hba
-                                .ports()
-                                .map(|x| x.cast::<HbaPort>().offset(i as isize).cast())
-                        };
                         match AhciPort::new(i, port_ptr) {
                             Ok(port) => {
                                 self.ports[i] = Some(port);
@@ -148,10 +153,10 @@ impl AhciController {
 
         // Handle each port's interrupts
         for (port_idx, port_opt) in self.ports.iter_mut().enumerate() {
-            if is & (1 << port_idx) != 0 {
-                if let Some(port) = port_opt {
-                    port.handle_interrupt();
-                }
+            if is & (1 << port_idx) != 0
+                && let Some(port) = port_opt
+            {
+                port.handle_interrupt();
             }
         }
     }

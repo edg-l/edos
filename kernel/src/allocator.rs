@@ -18,7 +18,7 @@ pub fn init_heap() {
 
     let mut mapper = memory_mapper();
     mapper
-        .map_memory(heap_start, KERNEL_HEAP_SIZE, PageTableFlags::WRITABLE)
+        .map_memory(heap_start, KERNEL_HEAP_SIZE, PageTableFlags::WRITABLE | PageTableFlags::GLOBAL)
         .expect("failed to map heap");
 
     println!("Mapped kernel heap at {:p}-{:p}", heap_end, heap_end);
