@@ -1,4 +1,4 @@
-use core::ptr::{addr_of_mut, NonNull};
+use core::ptr::{NonNull, addr_of_mut};
 
 use alloc::vec::Vec;
 use volatile::VolatilePtr;
@@ -7,14 +7,20 @@ use x86_64::{PhysAddr, structures::paging::PageTableFlags};
 use crate::{
     drivers::{
         ahci::{
-            port::AhciPort, structures::{
-                HbaMemory, HbaMemoryVolatileFieldAccess, HbaPort, HbaPortVolatileFieldAccess, GHC_AE, GHC_IE, SATA_SIG_ATA
-            }, AhciError
+            AhciError,
+            port::AhciPort,
+            structures::{
+                GHC_AE, GHC_IE, HbaMemory, HbaMemoryVolatileFieldAccess, HbaPort,
+                HbaPortVolatileFieldAccess, PORT_CMD_POD, PORT_CMD_SUD, SATA_SIG_ATA,
+                SATA_SIG_ATAPI,
+            },
         },
         pci::structures::PciDevice,
     },
     memory::{get_virt_addr, mapper::memory_mapper},
     println,
+    thread::scheduler::sched,
+    timer::Instant,
 };
 
 pub struct AhciController {
@@ -74,18 +80,17 @@ impl AhciController {
 
     fn reset_controller(&mut self) -> Result<(), AhciError> {
         // Request HBA reset
-        _ = self.hba.ghc().read();
         let mut ghc = self.hba.ghc().read();
         ghc |= 1; // HBA Reset bit
         self.hba.ghc().write(ghc);
 
         // Wait for reset to complete (should clear the bit)
-        let start = crate::timer::Instant::now();
+        let start = Instant::now();
         while self.hba.ghc().read() & 1 != 0 {
             if start.elapsed().as_millis() > 1000 {
                 return Err(AhciError::CommandTimeout);
             }
-            x86_64::instructions::hlt();
+            sched().thread_yield();
         }
 
         println!("AHCI controller reset complete");
@@ -97,6 +102,22 @@ impl AhciController {
         ghc |= GHC_AE; // Enable AHCI
         ghc |= GHC_IE; // Enable interrupts
         self.hba.ghc().write(ghc);
+
+        // Wait for AHCI to be enabled (AE bit should remain set)
+        let start = Instant::now();
+        while self.hba.ghc().read() & GHC_AE == 0 {
+            println!("Waiting for ACHI init..");
+            if start.elapsed().as_millis() > 1000 {
+                return Err(AhciError::CommandTimeout);
+            }
+            sched().thread_yield();
+        }
+
+        // Give the controller a moment to fully initialize
+        let start = Instant::now();
+        while start.elapsed().as_millis() < 10 {
+            sched().thread_yield();
+        }
 
         println!("AHCI enabled with interrupts");
         Ok(())
@@ -111,11 +132,47 @@ impl AhciController {
             if pi & (1 << i) != 0 {
                 println!("Checking port {}", i);
 
+                let port_ptr = unsafe {
+                    self.hba
+                        .ports()
+                        .map(|x| NonNull::new(&raw mut (*x.as_ptr())[i]).unwrap())
+                };
 
+                let ssts = port_ptr.ssts().read();
+                let device_detection = ssts & 0xF; // DET field
+                let interface_power = (ssts >> 8) & 0xF; // IPM field
 
+                if device_detection != 3 || interface_power != 1 {
+                    println!("Port {}: No device present (SSTS: {:#x})", i, ssts);
+                    continue;
+                }
 
-                let port_ptr = unsafe { self.hba
-                        .ports().map(|x| NonNull::new(&raw mut (*x.as_ptr())[i]).unwrap()) };
+                println!("Port {}: Device detected", i);
+
+                let mut need_power_cycle = false;
+
+                // Power up port if needed
+                let mut cmd = port_ptr.cmd().read();
+                if cmd & PORT_CMD_SUD == 0 {
+                    println!("Port {}: Spinning up device", i);
+                    cmd |= PORT_CMD_SUD; // Spin-up device
+                    port_ptr.cmd().write(cmd);
+                    need_power_cycle = true;
+                }
+                if cmd & PORT_CMD_POD == 0 {
+                    println!("Port {}: Powering on device", i);
+                    cmd |= PORT_CMD_POD; // Power on device
+                    port_ptr.cmd().write(cmd);
+                    need_power_cycle = true;
+                }
+
+                // Wait a bit for device to stabilize
+                if need_power_cycle {
+                    let start = Instant::now();
+                    while start.elapsed().as_millis() < 500 {
+                        sched().thread_yield();
+                    }
+                }
 
                 let signature = port_ptr.sig().read();
 
@@ -133,6 +190,12 @@ impl AhciController {
                                 println!("Failed to initialize port {}: {:?}", i, e);
                             }
                         }
+                    }
+                    SATA_SIG_ATAPI => {
+                        println!(
+                            "Found ATAPI device on port {} (sig: {:#x}) - not supported yet",
+                            i, signature
+                        );
                     }
                     sig => {
                         println!("Port {} has unsupported signature: {:#x}", i, sig);

@@ -155,3 +155,9 @@ pub const PORT_CMD_CR: u32 = 1 << 15; // Command List Running
 // Global HBA control bits
 pub const GHC_AE: u32 = 1 << 31; // AHCI Enable
 pub const GHC_IE: u32 = 1 << 1; // Interrupt Enable
+
+// SSTS register fields
+pub const SSTS_DET_MASK: u32 = 0xF;          // Device Detection
+pub const SSTS_DET_PRESENT: u32 = 3;         // Device present and communication established
+pub const SSTS_IPM_MASK: u32 = 0xF00;        // Interface Power Management
+pub const SSTS_IPM_ACTIVE: u32 = 0x100;      // Interface in active state
