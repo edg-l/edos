@@ -1,4 +1,3 @@
-use alloc::vec::Vec;
 use core::{marker::PhantomData, ptr};
 use x86_64::{
     PhysAddr, VirtAddr, instructions::interrupts::without_interrupts, registers::control::Cr3,
@@ -9,18 +8,19 @@ use crate::{
     boot::boot_info,
     drivers::ahci::{
         AhciError,
+        dma::{DmaAllocator, DmaBuffer, DmaRegion},
         fis::FisRegH2D,
         structures::{
-            CommandHeader, CommandTable, DeviceIdentifyInfo, HbaFis, HbaPort, PORT_CMD_CR,
-            PORT_CMD_FR, PORT_CMD_FRE, PORT_CMD_ST, PORT_IS_TFES, PrdtEntry,
+            CMD_HEADER_WRITE, CommandHeader, CommandTable, DeviceIdentifyInfo, HbaFis, HbaPort,
+            PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE, PORT_CMD_ST, PORT_IS_TFES, PrdtEntry,
         },
     },
-    memory::{DMA_REGION_START, mapper::memory_mapper},
     println,
 };
 
 const AHCI_CMD_SLOTS: usize = 32;
 
+#[expect(unused)]
 #[derive(Debug)]
 pub struct AhciPort {
     pub port_idx: usize,
@@ -33,72 +33,10 @@ pub struct AhciPort {
 
     // Command slot tracking
     pub free_slots: u32, // Bitmap of free command slots
+    pub dma_alloc: DmaAllocator,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct DmaRegion<T: 'static> {
-    pub virt_addr: VirtAddr,
-    _phantom: PhantomData<T>,
-}
-
-impl<T> DmaRegion<T> {
-    pub fn get(&self) -> *mut T {
-        self.virt_addr.as_mut_ptr()
-    }
-
-    pub fn allocate() -> Result<Self, AhciError> {
-        let size = core::mem::size_of::<T>() as u64 * 2;
-        let aligned_size = (size + 0xfff) & !0xfff; // Round up to page boundary
-
-        // Find a free virtual address (we'd need a virtual address allocator)
-        // For now, let's use a simple approach with a static counter
-        static NEXT_DMA_ADDR: core::sync::atomic::AtomicU64 =
-            core::sync::atomic::AtomicU64::new(DMA_REGION_START.as_u64());
-
-        let virt_addr = VirtAddr::new(
-            NEXT_DMA_ADDR.fetch_add(aligned_size, core::sync::atomic::Ordering::Relaxed),
-        );
-
-        {
-            let mut mapper = memory_mapper();
-            without_interrupts(|| {
-                let kernel_cr3 = boot_info().cr3;
-                unsafe { Cr3::write(kernel_cr3.0, kernel_cr3.1) };
-
-                mapper
-                    .map_memory(
-                        virt_addr,
-                        aligned_size,
-                        PageTableFlags::WRITABLE
-                            | PageTableFlags::NO_CACHE
-                            | PageTableFlags::GLOBAL,
-                    )
-                    .map_err(|_| AhciError::DmaAllocationFailed)
-            })?;
-        }
-
-        // Zero the memory
-        unsafe {
-            ptr::write_bytes(virt_addr.as_mut_ptr::<T>(), 0, 1);
-        }
-
-        Ok(Self {
-            virt_addr,
-            _phantom: PhantomData,
-        })
-    }
-
-    pub fn phys_addr(&self) -> PhysAddr {
-        let mapper = memory_mapper();
-        match mapper.translate(self.virt_addr) {
-            x86_64::structures::paging::mapper::TranslateResult::Mapped {
-                frame, offset, ..
-            } => frame.start_address() + offset,
-            _ => panic!("DMA region not mapped!"),
-        }
-    }
-}
-
+#[expect(unused)]
 impl AhciPort {
     pub fn new(port_idx: usize, port_regs: *mut HbaPort) -> Result<Self, AhciError> {
         println!("Initializing AHCI port {}", port_idx);
@@ -161,6 +99,7 @@ impl AhciPort {
             fis_area,
             command_tables: [const { None }; AHCI_CMD_SLOTS],
             free_slots: 0xFFFFFFFF, // All slots initially free
+            dma_alloc: DmaAllocator::default(),
         })
     }
 
@@ -327,5 +266,245 @@ impl AhciPort {
         self.free_command_slot(slot);
 
         Ok(DeviceIdentifyInfo::from_identify_data(&result))
+    }
+
+    // Read sectors from the device
+    ///
+    /// # Arguments
+    /// * `lba` - Logical block address to start reading from
+    /// * `buffer` - Buffer to read data into (must be at least sectors * 512 bytes)
+    /// * `sectors` - Number of sectors to read (each sector is 512 bytes)
+    pub fn read_sectors(
+        &mut self,
+        lba: u64,
+        buffer: &mut [u8],
+        sectors: u16,
+    ) -> Result<(), AhciError> {
+        let expected_size = sectors as usize * 512;
+        if buffer.len() < expected_size {
+            return Err(AhciError::IoError);
+        }
+
+        // Allocate command slot
+        let slot = self
+            .allocate_command_slot()
+            .ok_or(AhciError::PortNotReady)?;
+
+        // Allocate DMA buffer for read data (sized for multiple sectors)
+        let data_buffer = self.dma_alloc.allocate_sized(expected_size)?;
+
+        // Allocate command table for this slot
+        let cmd_table = DmaRegion::<CommandTable>::allocate()?;
+        self.command_tables[slot] = Some(cmd_table);
+
+        // Setup command table
+        unsafe {
+            let table = self.command_tables[slot].as_ref().unwrap().get();
+            table.write(core::mem::zeroed());
+            let table = &mut *table;
+
+            // Setup Command FIS (Host to Device Register FIS)
+            let fis = FisRegH2D::new_read_dma_ext(lba, sectors);
+            let fis_bytes = bytemuck::bytes_of(&fis);
+            table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
+
+            // Setup PRDT (Physical Region Descriptor Table)
+            let prdt_entry = PrdtEntry {
+                dba: data_buffer.phys_addr().as_u64() as u32,
+                dbau: (data_buffer.phys_addr().as_u64() >> 32) as u32,
+                reserved: 0,
+                dbc: (expected_size - 1) as u32, // Byte count - 1 (0-based)
+            };
+
+            let prdt_ptr = (table as *mut CommandTable as *mut u8)
+                .add(core::mem::size_of::<CommandTable>())
+                as *mut PrdtEntry;
+            ptr::write_volatile(prdt_ptr, prdt_entry);
+        }
+
+        // Setup command header in command list
+        unsafe {
+            let cmd_list = self.command_list.get().as_mut().unwrap();
+            let cmd_header = &mut cmd_list[slot];
+            *cmd_header = CommandHeader {
+                flags: 5, // FIS length = 5 DWORDs (20 bytes)
+                prdtl: 1, // One PRDT entry
+                prdbc: 0, // Will be updated by hardware
+                ctba: self.command_tables[slot]
+                    .as_ref()
+                    .unwrap()
+                    .phys_addr()
+                    .as_u64() as u32,
+                ctbau: (self.command_tables[slot]
+                    .as_ref()
+                    .unwrap()
+                    .phys_addr()
+                    .as_u64()
+                    >> 32) as u32,
+                reserved: [0; 4],
+            };
+        }
+
+        // Issue command
+        unsafe {
+            ptr::write_volatile(&raw mut (*self.port_regs).ci, 1 << slot);
+        }
+
+        // Wait for command completion
+        let timeout = core::time::Duration::from_secs(5);
+        let start_time = crate::timer::Instant::now();
+
+        loop {
+            let ci = unsafe { ptr::read_volatile(&raw const (*self.port_regs).ci) };
+            if ci & (1 << slot) == 0 {
+                break;
+            }
+
+            let is = unsafe { ptr::read_volatile(&raw const (*self.port_regs).is) };
+            if is & PORT_IS_TFES != 0 {
+                unsafe { ptr::write_volatile(&raw mut (*self.port_regs).is, is) };
+                self.free_command_slot(slot);
+                return Err(AhciError::IoError);
+            }
+
+            if start_time.elapsed() >= timeout {
+                self.free_command_slot(slot);
+                return Err(AhciError::CommandTimeout);
+            }
+
+            crate::thread::scheduler::sched()
+                .thread_wait_timeout(core::time::Duration::from_millis(100));
+        }
+
+        // Copy the read data to the output buffer
+        let bytes_to_copy = expected_size.min(buffer.len());
+        unsafe {
+            ptr::copy_nonoverlapping(data_buffer.as_ptr(), buffer.as_mut_ptr(), bytes_to_copy);
+        }
+
+        self.free_command_slot(slot);
+
+        self.dma_alloc.dealloc(data_buffer);
+
+        Ok(())
+    }
+
+    /// Write sectors to the device
+    ///
+    /// # Arguments
+    /// * `lba` - Logical block address to start writing to
+    /// * `buffer` - Buffer containing data to write (must be at least sectors * 512 bytes)
+    /// * `sectors` - Number of sectors to write (each sector is 512 bytes)
+    pub fn write_sectors(
+        &mut self,
+        lba: u64,
+        buffer: &[u8],
+        sectors: u16,
+    ) -> Result<(), AhciError> {
+        let expected_size = sectors as usize * 512;
+        if buffer.len() < expected_size {
+            return Err(AhciError::IoError);
+        }
+
+        // Allocate command slot
+        let slot = self
+            .allocate_command_slot()
+            .ok_or(AhciError::PortNotReady)?;
+
+        // Allocate DMA buffer for write data (sized for multiple sectors)
+        let data_buffer = self.dma_alloc.allocate_sized(expected_size)?;
+
+        // Copy input data to DMA buffer
+        unsafe {
+            ptr::copy_nonoverlapping(buffer.as_ptr(), data_buffer.as_ptr(), expected_size);
+        }
+
+        // Allocate command table for this slot
+        let cmd_table = DmaRegion::<CommandTable>::allocate()?;
+        self.command_tables[slot] = Some(cmd_table);
+
+        // Setup command table
+        unsafe {
+            let table = self.command_tables[slot].as_ref().unwrap().get();
+            table.write(core::mem::zeroed());
+            let table = &mut *table;
+
+            // Setup Command FIS (Host to Device Register FIS)
+            let fis = FisRegH2D::new_write_dma_ext(lba, sectors);
+            let fis_bytes = bytemuck::bytes_of(&fis);
+            table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
+
+            // Setup PRDT (Physical Region Descriptor Table)
+            let prdt_entry = PrdtEntry {
+                dba: data_buffer.phys_addr().as_u64() as u32,
+                dbau: (data_buffer.phys_addr().as_u64() >> 32) as u32,
+                reserved: 0,
+                dbc: (expected_size - 1) as u32, // Byte count - 1 (0-based)
+            };
+
+            let prdt_ptr = (table as *mut CommandTable as *mut u8)
+                .add(core::mem::size_of::<CommandTable>())
+                as *mut PrdtEntry;
+            ptr::write_volatile(prdt_ptr, prdt_entry);
+        }
+
+        // Setup command header in command list
+        unsafe {
+            let cmd_list = self.command_list.get().as_mut().unwrap();
+            let cmd_header = &mut cmd_list[slot];
+            *cmd_header = CommandHeader {
+                flags: 5 | CMD_HEADER_WRITE, // FIS length = 5 DWORDs + Write direction
+                prdtl: 1,                    // One PRDT entry
+                prdbc: 0,                    // Will be updated by hardware
+                ctba: self.command_tables[slot]
+                    .as_ref()
+                    .unwrap()
+                    .phys_addr()
+                    .as_u64() as u32,
+                ctbau: (self.command_tables[slot]
+                    .as_ref()
+                    .unwrap()
+                    .phys_addr()
+                    .as_u64()
+                    >> 32) as u32,
+                reserved: [0; 4],
+            };
+        }
+
+        // Issue command
+        unsafe {
+            ptr::write_volatile(&raw mut (*self.port_regs).ci, 1 << slot);
+        }
+
+        // Wait for command completion
+        let timeout = core::time::Duration::from_secs(5);
+        let start_time = crate::timer::Instant::now();
+
+        loop {
+            let ci = unsafe { ptr::read_volatile(&raw const (*self.port_regs).ci) };
+            if ci & (1 << slot) == 0 {
+                break;
+            }
+
+            let is = unsafe { ptr::read_volatile(&raw const (*self.port_regs).is) };
+            if is & PORT_IS_TFES != 0 {
+                unsafe { ptr::write_volatile(&raw mut (*self.port_regs).is, is) };
+                self.free_command_slot(slot);
+                return Err(AhciError::IoError);
+            }
+
+            if start_time.elapsed() >= timeout {
+                self.free_command_slot(slot);
+                return Err(AhciError::CommandTimeout);
+            }
+
+            crate::thread::scheduler::sched()
+                .thread_wait_timeout(core::time::Duration::from_millis(100));
+        }
+
+        self.free_command_slot(slot);
+
+        self.dma_alloc.dealloc(data_buffer);
+        Ok(())
     }
 }

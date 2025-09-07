@@ -63,6 +63,28 @@ impl FisRegH2D {
         fis
     }
 
+    pub fn new_write_dma_ext(lba: u64, sectors: u16) -> Self {
+        let mut fis = Self::zeroed();
+        fis.fis_type = FIS_TYPE_REG_H2D;
+        fis.pmport = 1 << 7; // Command register
+        fis.command = ATA_CMD_WRITE_DMA_EXT;
+        fis.device = 1 << 6; // LBA mode
+
+        // Set LBA
+        fis.lba0 = (lba & 0xFF) as u8;
+        fis.lba1 = ((lba >> 8) & 0xFF) as u8;
+        fis.lba2 = ((lba >> 16) & 0xFF) as u8;
+        fis.lba3 = ((lba >> 24) & 0xFF) as u8;
+        fis.lba4 = ((lba >> 32) & 0xFF) as u8;
+        fis.lba5 = ((lba >> 40) & 0xFF) as u8;
+
+        // Set sector count
+        fis.countl = (sectors & 0xFF) as u8;
+        fis.counth = ((sectors >> 8) & 0xFF) as u8;
+
+        fis
+    }
+
     pub fn new_identify() -> Self {
         let mut fis = Self::zeroed();
         fis.fis_type = FIS_TYPE_REG_H2D;

@@ -1,5 +1,4 @@
 use alloc::vec::Vec;
-use crossbeam_queue::SegQueue;
 use spin::Once;
 use x86_64::instructions::hlt;
 
@@ -17,6 +16,7 @@ use crate::{
 
 pub mod command;
 pub mod controller;
+pub mod dma;
 pub mod fis;
 pub mod port;
 pub mod structures;

@@ -80,6 +80,35 @@ impl MemoryManager {
         Ok(page_range)
     }
 
+    /// Maps memory, the default flag is PRESENT, use extra flags for more.
+    pub fn map_memory_contiguous(
+        &mut self,
+        addr: VirtAddr,
+        size: u64,
+        extra_flags: PageTableFlags,
+    ) -> Result<PageRangeInclusive<Size4KiB>, MapToError<Size4KiB>> {
+        let page_range = get_page_range(addr, size);
+
+        let flags = PageTableFlags::PRESENT | extra_flags;
+        {
+            let mut frame_allocator = frame_allocator();
+            let mut frame = frame_allocator
+                .allocate_contiguous_frames(page_range.count())
+                .unwrap();
+
+            for page in page_range {
+                unsafe {
+                    self.mapper
+                        .map_to(page, frame, flags, &mut *frame_allocator)?
+                        .flush()
+                };
+                frame += Size4KiB::SIZE;
+            }
+        }
+
+        Ok(page_range)
+    }
+
     pub fn change_flags(
         &mut self,
         addr: VirtAddr,
