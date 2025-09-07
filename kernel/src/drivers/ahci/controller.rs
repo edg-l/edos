@@ -9,9 +9,8 @@ use crate::{
             AhciError,
             port::AhciPort,
             structures::{
-                GHC_AE, GHC_IE, HbaMemory, HbaPort, PORT_CMD_POD, PORT_CMD_SUD,
-                PORT_CMD_ST, PORT_CMD_CR, PORT_CMD_FRE, PORT_CMD_FR,
-                SATA_SIG_ATA, SATA_SIG_ATAPI,
+                GHC_AE, GHC_IE, HbaMemory, HbaPort, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE,
+                PORT_CMD_POD, PORT_CMD_ST, PORT_CMD_SUD, SATA_SIG_ATA, SATA_SIG_ATAPI,
             },
         },
         pci::structures::PciDevice,
@@ -35,6 +34,25 @@ impl AhciController {
             return Err(AhciError::InvalidDevice);
         }
 
+        println!("=== AHCI Controller Discovery ===");
+        println!(
+            "PCI Address: {:02x}:{:02x}.{}",
+            pci_device.address.bus, pci_device.address.device, pci_device.address.function
+        );
+        println!("Vendor ID: {:#x}", pci_device.header.vendor_id);
+        println!("Device ID: {:#x}", pci_device.header.device_id);
+        println!("BAR5: {:#x}", pci_device.header.bar5);
+        println!(
+            "IRQ Line: {}, IRQ Pin: {}",
+            pci_device.header.interrupt_line, pci_device.header.interrupt_pin
+        );
+
+        // Check if BAR5 is valid
+        if pci_device.header.bar5 == 0 || pci_device.header.bar5 == 0xFFFFFFFF {
+            println!("Invalid BAR5, skipping controller");
+            return Err(AhciError::InvalidDevice);
+        }
+
         println!(
             "Initializing AHCI controller at {:02x}:{:02x}.{}",
             pci_device.address.bus, pci_device.address.device, pci_device.address.function
@@ -46,18 +64,20 @@ impl AhciController {
 
         // Map the HBA memory region (need 0x1100 bytes for full AHCI HBA, round up to 8KB to be safe)
         let hba_size = 0x2000u64; // 8KB to cover the full HBA memory region plus padding
-        let mut mapper = memory_mapper();
-        mapper
-            .map_address_range(
-                hba_virt,
-                hba_base,
-                hba_size as usize,
-                PageTableFlags::PRESENT
-                    | PageTableFlags::WRITABLE
-                    | PageTableFlags::NO_CACHE
-                    | PageTableFlags::GLOBAL,
-            )
-            .map_err(|_| AhciError::InvalidDevice)?;
+        {
+            let mut mapper = memory_mapper();
+            mapper
+                .map_address_range(
+                    hba_virt,
+                    hba_base,
+                    hba_size as usize,
+                    PageTableFlags::PRESENT
+                        | PageTableFlags::WRITABLE
+                        | PageTableFlags::NO_CACHE
+                        | PageTableFlags::GLOBAL,
+                )
+                .map_err(|_| AhciError::InvalidDevice)?;
+        }
 
         println!(
             "Mapped HBA memory: virt={:#x}, phys={:#x}, size={:#x}",
@@ -290,7 +310,11 @@ impl AhciController {
         Ok(())
     }
 
-    fn initialize_port(&mut self, port_ptr: *mut HbaPort, port_idx: usize) -> Result<(), AhciError> {
+    fn initialize_port(
+        &mut self,
+        port_ptr: *mut HbaPort,
+        port_idx: usize,
+    ) -> Result<(), AhciError> {
         println!("Initializing port {} registers", port_idx);
 
         unsafe {
@@ -325,7 +349,8 @@ impl AhciController {
 
             // Wait a bit for device to spin up
             let start = Instant::now();
-            while start.elapsed().as_millis() < 1000 { // 1 second spin-up time
+            while start.elapsed().as_millis() < 1000 {
+                // 1 second spin-up time
                 sched().thread_yield();
             }
 
@@ -333,8 +358,10 @@ impl AhciController {
             let ssts = ptr::read_volatile(&raw const (*port_ptr).ssts);
             let device_detection = ssts & 0xF;
             let interface_power = (ssts >> 8) & 0xF;
-            println!("Port {} SSTS after spin-up: {:#x} (DET={}, IPM={})",
-                port_idx, ssts, device_detection, interface_power);
+            println!(
+                "Port {} SSTS after spin-up: {:#x} (DET={}, IPM={})",
+                port_idx, ssts, device_detection, interface_power
+            );
 
             if device_detection != 3 || interface_power != 1 {
                 println!("Port {}: Device not ready after spin-up", port_idx);
@@ -366,7 +393,8 @@ impl AhciController {
 
             // Wait a bit more for device to fully initialize and register FIS
             let start = Instant::now();
-            while start.elapsed().as_millis() < 500 { // Additional 500ms wait
+            while start.elapsed().as_millis() < 500 {
+                // Additional 500ms wait
                 sched().thread_yield();
             }
         }

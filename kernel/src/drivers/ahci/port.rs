@@ -1,12 +1,16 @@
 use core::ptr;
-use x86_64::{PhysAddr, VirtAddr, structures::paging::PageTableFlags};
+use x86_64::{
+    PhysAddr, VirtAddr, instructions::interrupts::without_interrupts, registers::control::Cr3,
+    structures::paging::PageTableFlags,
+};
 
 use crate::{
+    boot::boot_info,
     drivers::ahci::{
         AhciError,
         structures::{
-            CommandHeader, CommandTable, HbaFis, HbaPort, PORT_CMD_CR,
-            PORT_CMD_FR, PORT_CMD_FRE, PORT_CMD_ST,
+            CommandHeader, CommandTable, HbaFis, HbaPort, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE,
+            PORT_CMD_ST,
         },
     },
     memory::{DMA_REGION_START, mapper::memory_mapper},
@@ -37,7 +41,7 @@ pub struct DmaRegion<T: 'static> {
 
 impl<T> DmaRegion<T> {
     pub fn allocate() -> Result<Self, AhciError> {
-        let size = core::mem::size_of::<T>() as u64;
+        let size = core::mem::size_of::<T>() as u64 * 2;
         let aligned_size = (size + 0xfff) & !0xfff; // Round up to page boundary
 
         // Find a free virtual address (we'd need a virtual address allocator)
@@ -49,20 +53,29 @@ impl<T> DmaRegion<T> {
             NEXT_DMA_ADDR.fetch_add(aligned_size, core::sync::atomic::Ordering::Relaxed),
         );
 
-        let mut mapper = memory_mapper();
-        mapper
-            .map_memory(
-                virt_addr,
-                aligned_size,
-                PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE | PageTableFlags::GLOBAL,
-            )
-            .map_err(|_| AhciError::DmaAllocationFailed)?;
+        {
+            let mut mapper = memory_mapper();
+            without_interrupts(|| {
+                let kernel_cr3 = boot_info().cr3;
+                unsafe { Cr3::write(kernel_cr3.0, kernel_cr3.1) };
 
-        let data = unsafe { &mut *(virt_addr.as_mut_ptr::<T>()) };
+                mapper
+                    .map_memory(
+                        virt_addr,
+                        aligned_size,
+                        PageTableFlags::WRITABLE
+                            | PageTableFlags::NO_CACHE
+                            | PageTableFlags::GLOBAL,
+                    )
+                    .map_err(|_| AhciError::DmaAllocationFailed)
+            })?;
+        }
+
+        let data = unsafe { virt_addr.as_mut_ptr::<T>().as_mut().unwrap() };
 
         // Zero the memory
         unsafe {
-            ptr::write_bytes(data as *mut T, 0, core::mem::size_of::<T>());
+            ptr::write_bytes(virt_addr.as_mut_ptr::<T>(), 0, 1);
         }
 
         Ok(Self { virt_addr, data })
@@ -80,37 +93,50 @@ impl<T> DmaRegion<T> {
 }
 
 impl AhciPort {
-    pub fn new(
-        port_idx: usize,
-        port_regs: *mut HbaPort,
-    ) -> Result<Self, AhciError> {
+    pub fn new(port_idx: usize, port_regs: *mut HbaPort) -> Result<Self, AhciError> {
         println!("Initializing AHCI port {}", port_idx);
 
         // Stop the port first
         Self::stop_port(port_regs)?;
 
+        println!("Allocating dma regions");
+
         // Allocate DMA regions
         let command_list = DmaRegion::allocate()?;
         let fis_area = DmaRegion::allocate()?;
 
+        println!("Allocated, setting up port registers");
+
         // Set up the port registers
         unsafe {
-            ptr::write_volatile(&mut (*port_regs).clb, command_list.phys_addr().as_u64() as u32);
-            ptr::write_volatile(&mut (*port_regs).clbu, (command_list.phys_addr().as_u64() >> 32) as u32);
-            ptr::write_volatile(&mut (*port_regs).fb, fis_area.phys_addr().as_u64() as u32);
-            ptr::write_volatile(&mut (*port_regs).fbu, (fis_area.phys_addr().as_u64() >> 32) as u32);
+            ptr::write_volatile(
+                &raw mut (*port_regs).clb,
+                command_list.phys_addr().as_u64() as u32,
+            );
+            ptr::write_volatile(
+                &raw mut (*port_regs).clbu,
+                (command_list.phys_addr().as_u64() >> 32) as u32,
+            );
+            ptr::write_volatile(
+                &raw mut (*port_regs).fb,
+                fis_area.phys_addr().as_u64() as u32,
+            );
+            ptr::write_volatile(
+                &raw mut (*port_regs).fbu,
+                (fis_area.phys_addr().as_u64() >> 32) as u32,
+            );
 
             // Clear interrupt status
-            ptr::write_volatile(&mut (*port_regs).is, 0xFFFFFFFF);
+            ptr::write_volatile(&raw mut (*port_regs).is, 0xFFFFFFFF);
 
             // Enable FIS receive
-            let mut cmd = ptr::read_volatile(&(*port_regs).cmd);
+            let mut cmd = ptr::read_volatile(&raw const (*port_regs).cmd);
             cmd |= PORT_CMD_FRE;
-            ptr::write_volatile(&mut (*port_regs).cmd, cmd);
+            ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
 
             // Start the port
             cmd |= PORT_CMD_ST;
-            ptr::write_volatile(&mut (*port_regs).cmd, cmd);
+            ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
         }
 
         println!("Port {} initialized successfully", port_idx);
@@ -126,15 +152,16 @@ impl AhciPort {
     }
 
     fn stop_port(port_regs: *mut HbaPort) -> Result<(), AhciError> {
+        println!("Stopping port");
         unsafe {
             // Clear ST (start) bit
             let mut cmd = ptr::read_volatile(&(*port_regs).cmd);
             cmd &= !PORT_CMD_ST;
-            ptr::write_volatile(&mut (*port_regs).cmd, cmd);
+            ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
 
             // Wait for CR (command list running) to clear
             let start = crate::timer::Instant::now();
-            while ptr::read_volatile(&(*port_regs).cmd) & PORT_CMD_CR != 0 {
+            while ptr::read_volatile(&raw const (*port_regs).cmd) & PORT_CMD_CR != 0 {
                 if start.elapsed().as_millis() > 500 {
                     return Err(AhciError::CommandTimeout);
                 }
@@ -142,19 +169,21 @@ impl AhciPort {
             }
 
             // Clear FRE (FIS receive enable)
-            cmd = ptr::read_volatile(&(*port_regs).cmd);
+            cmd = ptr::read_volatile(&raw const (*port_regs).cmd);
             cmd &= !PORT_CMD_FRE;
-            ptr::write_volatile(&mut (*port_regs).cmd, cmd);
+            ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
 
             // Wait for FR (FIS receive running) to clear
             let start = crate::timer::Instant::now();
-            while ptr::read_volatile(&(*port_regs).cmd) & PORT_CMD_FR != 0 {
+            while ptr::read_volatile(&raw const (*port_regs).cmd) & PORT_CMD_FR != 0 {
                 if start.elapsed().as_millis() > 500 {
                     return Err(AhciError::CommandTimeout);
                 }
                 x86_64::instructions::hlt();
             }
         }
+
+        println!("Port stopped");
 
         Ok(())
     }
@@ -176,13 +205,13 @@ impl AhciPort {
     }
 
     pub fn handle_interrupt(&mut self) {
-        let is = unsafe { ptr::read_volatile(&(*self.port_regs).is) };
+        let is = unsafe { ptr::read_volatile(&raw const (*self.port_regs).is) };
 
         // Clear interrupt status
-        unsafe { ptr::write_volatile(&mut (*self.port_regs).is, is) };
+        unsafe { ptr::write_volatile(&raw mut (*self.port_regs).is, is) };
 
         // Handle completed commands
-        let ci = unsafe { ptr::read_volatile(&(*self.port_regs).ci) };
+        let ci = unsafe { ptr::read_volatile(&raw const (*self.port_regs).ci) };
         let completed_slots = !ci & (!self.free_slots);
 
         for slot in 0..AHCI_CMD_SLOTS {
