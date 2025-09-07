@@ -26,7 +26,7 @@ run: run-$(KARCH)
 run-hdd: run-hdd-$(KARCH)
 
 .PHONY: run-x86_64
-run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
+run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
 	qemu-system-$(KARCH) \
 		-M q35 \
 		-cpu qemu64,+x2apic \
@@ -36,10 +36,13 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio \
 		-no-reboot \
+		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=sata0,bus=ahci.0 \
 		$(QEMUFLAGS)
 
 .PHONY: run-hdd-x86_64
-run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd
+run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd sata-disk.img
 	qemu-system-$(KARCH) \
 		-M q35 \
 		-cpu qemu64,+x2apic \
@@ -49,10 +52,13 @@ run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NA
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio \
 		-no-reboot \
+		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=sata0,bus=ahci.0 \
 		$(QEMUFLAGS)
 
 
-.PHONY: run-bios
+.PHONY: run-bios sata-disk.img
 run-bios: $(IMAGE_NAME).iso
 	qemu-system-$(KARCH) \
 		-M q35 \
@@ -60,7 +66,7 @@ run-bios: $(IMAGE_NAME).iso
 		-boot d \
 		$(QEMUFLAGS)
 
-.PHONY: run-hdd-bios
+.PHONY: run-hdd-bios sata-disk.img
 run-hdd-bios: $(IMAGE_NAME).hdd
 	qemu-system-$(KARCH) \
 		-M q35 \
@@ -122,7 +128,7 @@ clean:
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
 
 .PHONY: distclean
-distclean: clean
+distclean: clean clean-sata
 	$(MAKE) -C kernel distclean
 	rm -rf limine ovmf
 
@@ -135,3 +141,17 @@ fmt:
 .PHONY: programs
 programs:
 	$(MAKE) -C programs build
+
+
+FILESYSTEM_FILES := $(shell find filesystem -type f 2>/dev/null)
+
+sata-disk.img: $(FILESYSTEM_FILES)
+   qemu-img create -f raw sata-disk.img 1G
+   sgdisk sata-disk.img -n 1:2048 -t 1:0700
+   mformat -i sata-disk.img@@1M
+   if [ -d filesystem ]; then \
+   	mcopy -s -i sata-disk.img@@1M filesystem/* ::/; \
+   fi
+
+clean-sata:
+   rm -f sata-disk.img
