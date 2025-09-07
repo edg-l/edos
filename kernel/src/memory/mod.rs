@@ -19,6 +19,8 @@ pub const KTHREAD_STACK_SIZE: u64 = 1024 * 16; // 16kb
 /// Size of stack region including guard page (total allocation per thread)
 pub const KTHREAD_STACK_REGION_SIZE: u64 = KTHREAD_STACK_SIZE + 4096;
 
+pub const DMA_REGION_START: VirtAddr = VirtAddr::new_truncate(0xFFFF_CA00_0000_0000);
+
 pub const USER_STACK_TOP: VirtAddr = VirtAddr::new_truncate(0x0000_7000_0000_0000);
 pub const USER_STACK_SIZE: u64 = 1024 * 1024 * 8; // 8mb
 

@@ -1,10 +1,10 @@
 use crate::{graphics, thread::util::queue_spawn_kthread_named};
 
+pub mod ahci;
 pub mod fpu;
 pub mod hpet;
 pub mod keyboard;
 pub mod pci;
-pub mod ahci;
 
 pub fn init_drivers() {
     hpet::driver::init();

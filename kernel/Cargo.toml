@@ -33,6 +33,7 @@ slotmap = { version = "1.0.7", default-features = false }
 slab = { version = "0.4.11", default-features = false }
 elf = { version = "0.8.0", default-features = false, features = ["alloc"] }
 raw-cpuid = "11.6.0"
+volatile = { version = "0.6.1", features = ["derive"] }
 
 [profile.dev]
 opt-level = 2

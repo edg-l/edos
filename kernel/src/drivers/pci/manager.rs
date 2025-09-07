@@ -3,7 +3,10 @@
 use alloc::vec::Vec;
 use x86_64::instructions::port::Port;
 
-use crate::{drivers::pci::structures::{PciAddress, PciConfigHeader, PciDevice}, println};
+use crate::{
+    drivers::pci::structures::{PciAddress, PciConfigHeader, PciDevice},
+    println,
+};
 
 pub struct PciManager {
     config_address: Port<u32>,
@@ -72,9 +75,10 @@ impl PciManager {
                     };
 
                     if let Some(header) = self.read_device_header(address) {
-                        println!("Found device {:02x}:{:02x}.{}: {:04x}:{:04x}",
-                            bus, device, function,
-                            header.vendor_id, header.device_id);
+                        println!(
+                            "Found device {:02x}:{:02x}.{}: {:04x}:{:04x}",
+                            bus, device, function, header.vendor_id, header.device_id
+                        );
 
                         self.devices.push(PciDevice { address, header });
 
