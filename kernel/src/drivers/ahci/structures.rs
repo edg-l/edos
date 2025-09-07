@@ -2,6 +2,17 @@
 
 use bytemuck::{Pod, Zeroable};
 
+// Compile-time structure size assertions
+const _: () = {
+    // HbaMemory should be 0x1100 bytes (4352 bytes) according to AHCI spec
+    assert!(core::mem::size_of::<HbaMemory>() == 0x1100);
+    // HbaPort should be 0x80 bytes (128 bytes) according to AHCI spec
+    assert!(core::mem::size_of::<HbaPort>() == 0x80);
+    // Verify proper alignment
+    assert!(core::mem::align_of::<HbaMemory>() >= 4);
+    assert!(core::mem::align_of::<HbaPort>() >= 4);
+};
+
 // AHCI HBA Memory Registers (volatile access required)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -123,3 +134,98 @@ pub const SSTS_DET_MASK: u32 = 0xF;          // Device Detection
 pub const SSTS_DET_PRESENT: u32 = 3;         // Device present and communication established
 pub const SSTS_IPM_MASK: u32 = 0xF00;        // Interface Power Management
 pub const SSTS_IPM_ACTIVE: u32 = 0x100;      // Interface in active state
+
+impl HbaMemory {
+    pub fn print_structure_info() {
+        crate::println!("=== HBA Memory Structure Info ===");
+        crate::println!("HbaMemory size: {} bytes (expected: {} bytes)",
+            core::mem::size_of::<Self>(), 0x1100);
+        crate::println!("HbaMemory alignment: {} bytes",
+            core::mem::align_of::<Self>());
+        crate::println!("HbaPort size: {} bytes (expected: {} bytes)",
+            core::mem::size_of::<HbaPort>(), 0x80);
+        crate::println!("HbaPort alignment: {} bytes",
+            core::mem::align_of::<HbaPort>());
+
+        // Print field offsets for verification
+        crate::println!("Field offsets:");
+        crate::println!("  cap: {}", core::mem::offset_of!(Self, cap));
+        crate::println!("  ghc: {}", core::mem::offset_of!(Self, ghc));
+        crate::println!("  vs: {}", core::mem::offset_of!(Self, vs));
+        crate::println!("  pi: {}", core::mem::offset_of!(Self, pi));
+        crate::println!("  vendor: {}", core::mem::offset_of!(Self, vendor));
+        crate::println!("  ports: {}", core::mem::offset_of!(Self, ports));
+    }
+
+    pub fn print_vendor_area(&self) {
+        use alloc::string::String;
+
+        let mut output = String::new();
+        output.push_str("=== HBA Vendor Area (96 bytes at offset 0xA0) ===\n");
+        output.push_str("Vendor data: ");
+
+        for (i, &byte) in self.vendor.iter().enumerate() {
+            output.push_str(&alloc::format!("{:02x}", byte));
+            if (i + 1) % 16 == 0 {
+                output.push('\n');
+                if i < self.vendor.len() - 1 {
+                    output.push_str("             ");
+                }
+            } else if (i + 1) % 4 == 0 {
+                output.push(' ');
+            }
+        }
+
+        crate::print!("{}", output);
+    }
+
+    pub fn print_basic_registers(&self) {
+        crate::println!("=== HBA Basic Registers ===");
+        crate::println!("CAP: {:#x}", self.cap);
+        crate::println!("GHC: {:#x}", self.ghc);
+        crate::println!("IS: {:#x}", self.is);
+        crate::println!("PI: {:#x}", self.pi);
+        crate::println!("VS: {:#x}", self.vs);
+        crate::println!("CAP2: {:#x}", self.cap2);
+        crate::println!("BOHC: {:#x}", self.bohc);
+    }
+}
+
+impl HbaPort {
+    pub fn print_registers(&self, port_idx: usize) {
+        crate::println!("=== Port {} Registers ===", port_idx);
+        crate::println!("CLB: {:#x}", self.clb);
+        crate::println!("CLBU: {:#x}", self.clbu);
+        crate::println!("FB: {:#x}", self.fb);
+        crate::println!("FBU: {:#x}", self.fbu);
+        crate::println!("IS: {:#x}", self.is);
+        crate::println!("IE: {:#x}", self.ie);
+        crate::println!("CMD: {:#x}", self.cmd);
+        crate::println!("TFD: {:#x}", self.tfd);
+        crate::println!("SIG: {:#x}", self.sig);
+        crate::println!("SSTS: {:#x}", self.ssts);
+        crate::println!("SCTL: {:#x}", self.sctl);
+        crate::println!("SERR: {:#x}", self.serr);
+        crate::println!("SACT: {:#x}", self.sact);
+        crate::println!("CI: {:#x}", self.ci);
+        crate::println!("SNTF: {:#x}", self.sntf);
+        crate::println!("FBS: {:#x}", self.fbs);
+    }
+
+    pub fn print_vendor_area(&self, port_idx: usize) {
+        use alloc::string::String;
+
+        let mut output = String::new();
+        output.push_str(&alloc::format!("=== Port {} Vendor Area ===\n", port_idx));
+        output.push_str("Vendor registers: ");
+
+        for (i, &reg) in self.vendor.iter().enumerate() {
+            output.push_str(&alloc::format!("{:#x}", reg));
+            if i < self.vendor.len() - 1 {
+                output.push(' ');
+            }
+        }
+
+        crate::println!("{}", output);
+    }
+}
