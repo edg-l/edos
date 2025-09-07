@@ -231,15 +231,6 @@ impl AhciController {
                     }
                     sig => {
                         println!("Port {} has unsupported/invalid signature: {:#x}", i, sig);
-
-                        // Do a memory dump around the signature register for debugging
-                        println!("Memory dump around SIG register:");
-                        let sig_addr = unsafe { &raw const (*port_ptr).sig };
-                        for offset in -2..=2isize {
-                            let addr = unsafe { sig_addr.offset(offset) };
-                            let value = unsafe { ptr::read_volatile(addr) };
-                            println!("  [sig{:+}] {:#x}: {:#x}", offset * 4, addr as usize, value);
-                        }
                     }
                 }
             }
