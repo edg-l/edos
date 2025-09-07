@@ -48,7 +48,8 @@ pub fn init() {
                             hpet_base,
                             PageTableFlags::PRESENT
                                 | PageTableFlags::WRITABLE
-                                | PageTableFlags::NO_CACHE,
+                                | PageTableFlags::NO_CACHE
+                                | PageTableFlags::GLOBAL,
                         )
                         .is_err()
                     {

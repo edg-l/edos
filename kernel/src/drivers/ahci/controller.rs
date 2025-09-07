@@ -47,7 +47,7 @@ impl AhciController {
             .map_address(
                 hba_virt,
                 hba_base,
-                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE,
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE | PageTableFlags::GLOBAL,
             )
             .map_err(|_| AhciError::InvalidDevice)?;
 
@@ -73,7 +73,7 @@ impl AhciController {
 
     fn reset_controller(&mut self) -> Result<(), AhciError> {
         // Request HBA reset
-        self.hba.ghc().read();
+        _ = self.hba.ghc().read();
         let mut ghc = self.hba.ghc().read();
         ghc |= 1; // HBA Reset bit
         self.hba.ghc().write(ghc);
