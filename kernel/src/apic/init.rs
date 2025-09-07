@@ -144,3 +144,27 @@ unsafe fn enable_io_apic(
 
     Ok(())
 }
+
+pub fn configure_device_interrupt(irq_line: u8, vector: u8) -> Result<(), MapToError<Size4KiB>> {
+    let mut ioapic = get_ioapic();
+
+    let mut entry = RedirectionTableEntry::default();
+    entry.set_mode(IrqMode::Fixed);
+    entry.set_flags(IrqFlags::LEVEL_TRIGGERED); // AHCI uses level-triggered
+    entry.set_dest(unsafe { get_lapic().id() } as u8);
+    entry.set_vector(vector);
+
+    unsafe {
+        ioapic.set_table_entry(irq_line, entry);
+        ioapic.enable_irq(irq_line);
+    }
+
+    Ok(())
+}
+
+pub fn get_ioapic() -> IoApic {
+    let apic_info = apic_info();
+    let address = apic_info.io_apics[0].address;
+    let ioapic_virt_addr = get_virt_addr(PhysAddr::new(address as u64));
+    unsafe { IoApic::new(ioapic_virt_addr.as_u64()) }
+}

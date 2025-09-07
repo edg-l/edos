@@ -135,6 +135,16 @@ impl AhciPort {
             ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
         }
 
+        unsafe {
+            // Enable specific interrupts we care about
+            let ie = (1 << 0) |  // DHRS - Device to Host Register FIS
+             (1 << 2) |  // DSS - DMA Setup FIS
+             (1 << 5) |  // DPS - Descriptor Processed
+             (1 << 30); // TFES - Task File Error
+
+            ptr::write_volatile(&raw mut (*port_regs).ie, ie);
+        }
+
         println!("Port {} initialized successfully", port_idx);
 
         Ok(Self {

@@ -7,9 +7,10 @@ use x86_64::{
 };
 
 use crate::{
+    apic::init::configure_device_interrupt,
     drivers::{
         ahci::{
-            AhciError,
+            AhciError, AhciInterruptEvent,
             port::AhciPort,
             structures::{
                 GHC_AE, GHC_IE, HbaMemory, HbaPort, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE,
@@ -18,6 +19,7 @@ use crate::{
         },
         pci::structures::PciDevice,
     },
+    interrupts::InterruptIndex,
     memory::{get_virt_addr, mapper::memory_mapper},
     println,
     thread::scheduler::sched,
@@ -113,8 +115,79 @@ impl AhciController {
         controller.reset_controller()?;
         controller.enable_ahci()?;
         controller.discover_ports()?;
+        Self::configure_interrupt(&pci_device)?;
+
+        Self::enable_controller_interrupts(hba)?;
 
         Ok(controller)
+    }
+
+    fn configure_interrupt(pci_device: &PciDevice) -> Result<(), AhciError> {
+        if pci_device.header.interrupt_line == 0xFF {
+            return Err(AhciError::InvalidDevice);
+        }
+
+        println!(
+            "Configuring AHCI interrupt: IRQ {}",
+            pci_device.header.interrupt_line
+        );
+
+        // Route hardware IRQ to our AHCI vector
+        configure_device_interrupt(
+            pci_device.header.interrupt_line,
+            InterruptIndex::Ahci.as_u8(),
+        )
+        .unwrap();
+
+        Ok(())
+    }
+
+    fn enable_controller_interrupts(hba: *mut HbaMemory) -> Result<(), AhciError> {
+        unsafe {
+            // Enable global interrupts
+            let mut ghc = ptr::read_volatile(&(*hba).ghc);
+            ghc |= GHC_IE;
+            ptr::write_volatile(&raw mut (*hba).ghc, ghc);
+        }
+        Ok(())
+    }
+
+    /// Check if this controller has pending interrupts and generate event
+    pub fn check_and_handle_interrupt(&mut self) -> Option<AhciInterruptEvent> {
+        let global_is = unsafe { ptr::read_volatile(&(*self.hba).is) };
+
+        if global_is == 0 {
+            return None; // No interrupts pending on this controller
+        }
+
+        println!(
+            "AHCI Global IS: {:#x} - ports with interrupts: {:?}",
+            global_is,
+            (0..32)
+                .filter(|&i| global_is & (1 << i) != 0)
+                .collect::<Vec<_>>()
+        );
+
+        // Clear global interrupt status
+        unsafe { ptr::write_volatile(&raw mut (*self.hba).is, global_is) };
+
+        // Handle only the ports that actually triggered (no need to check all!)
+        for port_idx in 0..32 {
+            if global_is & (1 << port_idx) != 0 {
+                if let Some(port) = self.ports[port_idx].as_mut() {
+                    println!("Handling interrupt for port {}", port_idx);
+                    port.handle_interrupt();
+                } else {
+                    println!("Port {} has interrupt but no port object!", port_idx);
+                }
+            }
+        }
+
+        Some(AhciInterruptEvent {
+            controller_pci_address: self.pci_device.address,
+            port_mask: global_is,
+            global_is,
+        })
     }
 
     fn reset_controller(&mut self) -> Result<(), AhciError> {
@@ -139,7 +212,6 @@ impl AhciController {
     fn enable_ahci(&mut self) -> Result<(), AhciError> {
         let mut ghc = unsafe { ptr::read_volatile(&raw const (*self.hba).ghc) };
         ghc |= GHC_AE; // Enable AHCI
-        ghc |= GHC_IE; // Enable interrupts
         unsafe { ptr::write_volatile(&raw mut (*self.hba).ghc, ghc) };
 
         // Wait for AHCI to be enabled (AE bit should remain set)

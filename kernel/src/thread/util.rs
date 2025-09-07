@@ -10,7 +10,7 @@ use crate::{
         USER_STACK_TOP,
         mapper::{MemoryManager, memory_mapper},
     },
-    thread::{KernelThread, scheduler::sched, user::UserThread},
+    thread::{KernelThread, ThreadId, scheduler::sched, user::UserThread},
 };
 
 static KTHREAD_FREED_STACKS: SegQueue<u64> = SegQueue::new();
@@ -52,16 +52,19 @@ pub fn kthread_stack_free(stack_top: u64) {
     KTHREAD_FREED_STACKS.push(region_bottom);
 }
 
-pub fn queue_spawn_kthread(entry: fn() -> !) {
+pub fn queue_spawn_kthread(entry: fn() -> !) -> ThreadId {
     let thread = KernelThread::new(None, entry);
-
+    let id = thread.id.clone();
     sched().kthread_spawn_queue.push(thread);
+    id
 }
 
-pub fn queue_spawn_kthread_named(name: &str, entry: fn() -> !) {
+pub fn queue_spawn_kthread_named(name: &str, entry: fn() -> !) -> ThreadId {
     let thread = KernelThread::new(Some(name.to_string()), entry);
 
+    let id = thread.id.clone();
     sched().kthread_spawn_queue.push(thread);
+    id
 }
 
 /// Exits a kthread.

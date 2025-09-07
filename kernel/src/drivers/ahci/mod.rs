@@ -1,13 +1,17 @@
 use alloc::vec::Vec;
-use x86_64::instructions::hlt;
+use crossbeam_queue::SegQueue;
+use spin::Once;
 
 use crate::{
     drivers::{
         ahci::controller::AhciController,
-        pci::{pci_manager, structures::PciDevice},
+        pci::{
+            pci_manager,
+            structures::{PciAddress, PciDevice},
+        },
     },
     println,
-    thread::util::queue_spawn_kthread_named,
+    thread::{ThreadId, scheduler::sched, util::queue_spawn_kthread_named},
 };
 
 pub mod command;
@@ -25,8 +29,30 @@ pub enum AhciError {
     IoError,
 }
 
+pub static AHCI_DRIVER_THREAD_ID: Once<ThreadId> = Once::new();
+
 pub fn init() {
-    queue_spawn_kthread_named("ahci", ahci_driver_main);
+    AHCI_DRIVER_THREAD_ID.call_once(|| queue_spawn_kthread_named("ahci", ahci_driver_main));
+}
+
+#[derive(Debug, Clone)]
+pub struct AhciInterruptEvent {
+    pub controller_pci_address: PciAddress, // Identify controller by PCI address
+    pub port_mask: u32,                     // Bitmask of ports that triggered (bit N = port N)
+    pub global_is: u32,                     // Global interrupt status from HBA
+}
+
+static AHCI_INTERRUPT_QUEUE: SegQueue<AhciInterruptEvent> = SegQueue::new();
+
+static AHCI_INTERRUPT_PENDING: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+pub fn mark_interrupt_pending() {
+    AHCI_INTERRUPT_PENDING.store(true, core::sync::atomic::Ordering::Release);
+}
+
+pub fn check_and_clear_interrupt_pending() -> bool {
+    AHCI_INTERRUPT_PENDING.swap(false, core::sync::atomic::Ordering::AcqRel)
 }
 
 pub fn ahci_driver_main() -> ! {
@@ -54,6 +80,26 @@ pub fn ahci_driver_main() -> ! {
     }
 
     loop {
-        hlt();
+        // Check if any interrupt occurred
+        if check_and_clear_interrupt_pending() {
+            // Poll all controllers to see which one(s) triggered
+            for controller in &mut controllers {
+                if let Some(event) = controller.check_and_handle_interrupt() {
+                    println!(
+                        "AHCI interrupt on controller {:02x}:{:02x}.{} ports: {:#x}",
+                        event.controller_pci_address.bus,
+                        event.controller_pci_address.device,
+                        event.controller_pci_address.function,
+                        event.port_mask
+                    );
+
+                    // Process completed commands, wake waiting threads, etc.
+                    // The actual port handling already happened in check_and_handle_interrupt()
+                }
+            }
+        }
+
+        // Yield to scheduler
+        sched().thread_yield();
     }
 }
