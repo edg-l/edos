@@ -167,126 +167,6 @@ pub fn ahci_driver_main() -> ! {
         }
     }
 
-    // Add this code after the detected_devices.push() in ahci_driver_main() in mod.rs
-
-    // Test reading GPT header from first detected device
-    if !detected_devices.is_empty() {
-        use alloc::string::String;
-
-        let mut output = String::new();
-
-        // Get the first controller and port with a device
-        if let Some(first_device) = detected_devices.first() {
-            // Find the controller
-            for controller in &mut controllers {
-                if controller.pci_device.address == first_device.controller_pci_address
-                    && let Some(port) = controller.ports[first_device.port_idx].as_mut()
-                {
-                    // Read GPT header (LBA 1, 1 sector = 512 bytes)
-                    let mut gpt_buffer = [0u8; 512];
-
-                    output.push_str("Reading GPT header from LBA 1...\n");
-                    let mut port = port.lock();
-                    match port.read_sectors(1, &mut gpt_buffer, 1) {
-                        Ok(()) => {
-                            output.push_str("Successfully read GPT header\n");
-
-                            // Check for GPT signature "EFI PART"
-                            let signature = &gpt_buffer[0..8];
-
-                            println!("Read signature: {signature:?}");
-                            if signature == b"EFI PART" {
-                                output.push_str("Valid GPT signature found\n");
-
-                                // Parse some basic GPT header fields
-                                let revision = u32::from_le_bytes([
-                                    gpt_buffer[8],
-                                    gpt_buffer[9],
-                                    gpt_buffer[10],
-                                    gpt_buffer[11],
-                                ]);
-                                let header_size = u32::from_le_bytes([
-                                    gpt_buffer[12],
-                                    gpt_buffer[13],
-                                    gpt_buffer[14],
-                                    gpt_buffer[15],
-                                ]);
-                                let num_partition_entries = u32::from_le_bytes([
-                                    gpt_buffer[80],
-                                    gpt_buffer[81],
-                                    gpt_buffer[82],
-                                    gpt_buffer[83],
-                                ]);
-
-                                output.push_str(&alloc::format!("GPT Revision: {:#x}\n", revision));
-                                output.push_str(&alloc::format!(
-                                    "Header Size: {} bytes\n",
-                                    header_size
-                                ));
-                                output.push_str(&alloc::format!(
-                                    "Number of partition entries: {}\n",
-                                    num_partition_entries
-                                ));
-                                output.push('\n');
-                            } else {
-                                output.push_str(
-                                    "No valid GPT signature found. Raw signature bytes:\n",
-                                );
-                                output.push_str("Signature: ");
-                                for &byte in signature {
-                                    output.push_str(&alloc::format!("{:02x} ", byte));
-                                }
-                                output.push('\n');
-
-                                // Check if it might be MBR instead
-                                if gpt_buffer[510] == 0x55 && gpt_buffer[511] == 0xAA {
-                                    output.push_str(
-                                        "This appears to be an MBR disk (boot signature found)\n",
-                                    );
-                                } else {
-                                    output.push_str("Unknown partition table format\n");
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            output
-                                .push_str(&alloc::format!("Failed to read GPT header: {:?}\n", e));
-                        }
-                    }
-
-                    // Also test reading multiple sectors (first 2 sectors)
-                    output.push_str("\nTesting multi-sector read (LBA 0-1, 2 sectors)...\n");
-                    let mut multi_buffer = [0u8; 1024]; // 2 sectors
-
-                    match port.read_sectors(0, &mut multi_buffer, 2) {
-                        Ok(()) => {
-                            output.push_str("Successfully read 2 sectors!\n");
-                            output.push_str(&alloc::format!(
-                                "MBR signature at end of first sector: {:02x} {:02x}\n",
-                                multi_buffer[510],
-                                multi_buffer[511]
-                            ));
-                            output.push_str(&alloc::format!(
-                                "GPT signature in second sector: {:?}\n",
-                                core::str::from_utf8(&multi_buffer[512..520]).unwrap_or("invalid")
-                            ));
-                        }
-                        Err(e) => {
-                            output.push_str(&alloc::format!(
-                                "Failed to read multiple sectors: {:?}\n",
-                                e
-                            ));
-                        }
-                    }
-
-                    break;
-                }
-            }
-        }
-
-        println!("{}", output);
-    }
-
     let mut port_map = BTreeMap::new();
     let mut port_map_reverse = BTreeMap::new();
 
@@ -337,7 +217,6 @@ pub fn ahci_driver_main() -> ! {
                         }) {
                             // Wake the worker thread for this device
                             if let Some(worker_tid) = port_map_reverse.get(&device.id) {
-                                println!("Waking worked thread");
                                 sched().thread_wake(worker_tid.clone());
                             }
                         }
@@ -434,6 +313,7 @@ fn port_worker_thread() -> ! {
             let caller = req.message.1;
             match message {
                 Command::Read { lba, sectors } => {
+                    println!("Got read request, lba={lba}, sectors={sectors}");
                     let mut buffer = alloc::vec![0; (*sectors) as usize * 512];
                     let result = port.lock().read_sectors(*lba, &mut buffer, *sectors);
 
@@ -443,14 +323,20 @@ fn port_worker_thread() -> ! {
                     }
                 }
                 Command::Write { lba, data, sectors } => {
+                    println!(
+                        "Got write request, lba={lba}, sectors={sectors}, data_len={}",
+                        data.len()
+                    );
                     let result = port.lock().write_sectors(*lba, data, *sectors);
                     caller.answer(AhciResponse::Result(result));
                 }
                 Command::Flush => {
+                    println!("Got flush request");
                     let result = port.lock().flush_cache();
                     caller.answer(AhciResponse::Result(result));
                 }
                 Command::Identify => {
+                    println!("Got identify request");
                     let result = port.lock().identify_device();
                     caller.answer(AhciResponse::IdentifyResult { info: result });
                 }

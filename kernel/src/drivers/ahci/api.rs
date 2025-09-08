@@ -48,12 +48,12 @@ pub fn list_devices() -> Vec<DetectedDevice> {
 ///
 /// # Returns
 /// Vector containing the read data (sectors * 512 bytes)
-pub fn read_sectors(device_id: usize, lba: u64, sectors: u16) -> Result<Vec<u8>, AhciError> {
+pub fn read_sectors(device_id: u64, lba: u64, sectors: u16) -> Result<Vec<u8>, AhciError> {
     let command = Command::Read { lba, sectors };
 
     let response = send_request(
         AhciRequest::DeviceRequest {
-            device_id,
+            device_id: device_id as usize,
             command: Arc::new(command),
         },
         Duration::from_secs(10),
