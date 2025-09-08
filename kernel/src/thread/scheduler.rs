@@ -354,6 +354,25 @@ impl Scheduler {
         hlt();
     }
 
+    pub fn thread_park(&mut self) {
+        without_interrupts(|| {
+            let now = Instant::now();
+            let id = self.current_id();
+            if id.kernel {
+                if let Some(thread) = self.kthreads.get_mut(&id.id) {
+                    thread.state = ThreadState::Waiting
+                }
+            } else if let Some(thread) = self.threads.get_mut(&id.id) {
+                thread.state = ThreadState::Waiting
+            }
+            let mut lapic = get_lapic();
+            unsafe {
+                lapic.send_ipi_self(InterruptIndex::Timer as u8);
+            }
+        });
+        hlt();
+    }
+
     /// The caller thread sleeps for the given duration.
     #[inline]
     pub fn thread_sleep(&mut self, duration: Duration) {

@@ -9,7 +9,7 @@ use x86_64::{
 use crate::{
     apic::get_lapic,
     println,
-    thread::{broadcast::Broadcast, scheduler::sched},
+    thread::{ThreadId, broadcast::Broadcast, scheduler::sched},
 };
 
 pub static KEYBOARD_BROADCAST: Broadcast<DecodedKey> = Broadcast::new(1024);
@@ -27,12 +27,21 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
     let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
     queue.force_push(scancode);
 
+    if let Some(tid) = KEYBOARD_THREAD_ID.get() {
+        sched().thread_wake(tid.clone());
+    }
+
     unsafe { get_lapic().end_of_interrupt() };
 }
+
+pub static KEYBOARD_THREAD_ID: Once<ThreadId> = Once::new();
 
 pub fn driver_main() -> ! {
     without_interrupts(|| unsafe {
         enable_ps2_keyboard();
+
+        let tid = sched().current_id();
+        KEYBOARD_THREAD_ID.call_once(|| tid);
     });
 
     let mut keyboard = Keyboard::new(
@@ -49,17 +58,9 @@ pub fn driver_main() -> ! {
                 && let Some(key_event) = keyboard.process_keyevent(event)
             {
                 KEYBOARD_BROADCAST.broadcast(key_event);
-                match key_event {
-                    DecodedKey::RawKey(key_code) => {
-                        println!("kb: {key_code:?}")
-                    }
-                    DecodedKey::Unicode(c) => {
-                        println!("kb: {c}");
-                    }
-                }
             }
         }
-        sched().thread_yield();
+        sched().thread_park();
     }
 }
 

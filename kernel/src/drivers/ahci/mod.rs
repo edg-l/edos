@@ -11,9 +11,10 @@ use crate::{
         },
     },
     println,
-    thread::{ThreadId, scheduler::sched, util::queue_spawn_kthread_named},
+    thread::{ThreadId, mailbox::Mailbox, scheduler::sched, util::queue_spawn_kthread_named},
 };
 
+pub mod api;
 pub mod command;
 pub mod controller;
 pub mod dma;
@@ -37,14 +38,30 @@ pub fn init() {
     AHCI_DRIVER_THREAD_ID.call_once(|| queue_spawn_kthread_named("ahci", ahci_driver_main));
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DetectedDevice {
     pub controller_pci_address: PciAddress,
     pub port_idx: usize,
     pub device_info: DeviceIdentifyInfo,
 }
 
+static AHCI_REQUESTS: Once<Mailbox<AhciRequest, AhciResponse>> = Once::new();
+
+#[derive(Debug)]
+pub enum AhciRequest {
+    ListDevices,
+}
+
+#[derive(Debug)]
+pub enum AhciResponse {
+    Devices(Vec<DetectedDevice>),
+}
+
 pub fn ahci_driver_main() -> ! {
+    let tid = sched().current_id();
+
+    let requests = AHCI_REQUESTS.call_once(|| Mailbox::new(tid));
+
     let devices: Vec<PciDevice> = pci_manager().read().get_devices().to_vec();
 
     let mut controllers = Vec::new();
@@ -213,7 +230,15 @@ pub fn ahci_driver_main() -> ! {
     }
 
     loop {
-        // Yield to scheduler
-        sched().thread_yield();
+        while let Some(req) = requests.pop_request() {
+            match req.message {
+                AhciRequest::ListDevices => {
+                    req.answer(AhciResponse::Devices(detected_devices.clone()));
+                }
+            }
+        }
+
+        // Wait for more requests
+        sched().thread_park();
     }
 }

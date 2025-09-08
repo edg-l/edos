@@ -1,4 +1,9 @@
-use core::{ptr, time::Duration};
+use core::{
+    ptr::{self, null_mut},
+    time::Duration,
+};
+
+use x86_64::PhysAddr;
 
 use crate::{
     drivers::ahci::{
@@ -265,6 +270,24 @@ impl AhciPort {
         self.free_command_slot(slot);
 
         self.dma_alloc.dealloc(data_buffer);
+        Ok(())
+    }
+
+    pub fn flush_cache(&mut self) -> Result<(), AhciError> {
+        // Allocate command slot
+        let slot = self
+            .allocate_command_slot()
+            .ok_or(AhciError::PortNotReady)?;
+
+        self.execute_command(
+            &FisRegH2D::new_flush_cache(),
+            PhysAddr::zero(),
+            0,
+            0,
+            Duration::from_secs(5),
+        )?;
+
+        self.free_command_slot(slot);
         Ok(())
     }
 
