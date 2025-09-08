@@ -37,6 +37,7 @@ mod syscalls;
 mod thread;
 mod timer;
 mod util;
+mod fs;
 
 extern crate alloc;
 
