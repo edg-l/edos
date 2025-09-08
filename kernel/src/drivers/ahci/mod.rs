@@ -28,6 +28,7 @@ pub enum AhciError {
     PortNotReady,
     CommandTimeout,
     IoError,
+    InvalidSlot,
 }
 
 pub static AHCI_DRIVER_THREAD_ID: Once<ThreadId> = Once::new();
