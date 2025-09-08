@@ -20,7 +20,7 @@ pub fn sys_keyboard_raw(timeout_milis: u64, scancodes_buffer: *mut u32, size: us
 
     x86_64::instructions::interrupts::enable();
 
-    let rx = KEYBOARD_BROADCAST.subscribe();
+    let rx = KEYBOARD_BROADCAST.subscribe_or_get();
 
     while buf.len() < size
         && let Some(key) = rx.try_recv()

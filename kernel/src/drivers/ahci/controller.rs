@@ -92,19 +92,7 @@ impl AhciController {
             }
         }
 
-        println!(
-            "Mapped HBA memory: virt={:#x}, phys={:#x}, size={:#x}",
-            hba_virt.as_u64(),
-            hba_base.as_u64(),
-            hba_size
-        );
-
         let hba = hba_virt.as_mut_ptr::<HbaMemory>();
-
-        println!("=== AHCI Controller Memory Mapping ===");
-        println!("HBA Physical Address: {:#x}", hba_base.as_u64());
-        println!("HBA Virtual Address: {:#x}", hba_virt.as_u64());
-        println!("HBA Pointer: {:p}", hba);
 
         let mut controller = Self {
             hba,
@@ -199,14 +187,6 @@ impl AhciController {
     fn discover_ports(&mut self) -> Result<(), AhciError> {
         let pi = unsafe { ptr::read_volatile(&(*self.hba).pi) };
         self.ports.resize_with(32, || None);
-
-        println!("=== Port Discovery Debug ===");
-        println!("Ports Implemented (PI): {:#x}", pi);
-        println!("HBA base address: {:p}", self.hba);
-        println!(
-            "Ports array offset: {:#x}",
-            core::mem::offset_of!(HbaMemory, ports)
-        );
 
         for i in 0..32 {
             if pi & (1 << i) != 0 {

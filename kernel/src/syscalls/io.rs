@@ -169,7 +169,7 @@ fn read_from_stdin(max_count: usize) -> Result<alloc::vec::Vec<u8>, i64> {
     use alloc::vec::Vec;
     use pc_keyboard::DecodedKey;
 
-    let rx = KEYBOARD_BROADCAST.subscribe();
+    let rx = KEYBOARD_BROADCAST.subscribe_or_get();
     let mut kernel_buffer = Vec::new();
 
     // Read until we get a newline or reach max count

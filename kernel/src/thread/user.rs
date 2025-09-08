@@ -157,4 +157,10 @@ impl UserThread {
         // clean up all page tables in the lower half of the address space
         self.memory_manager.clean_lower_half();
     }
+
+    pub fn switch_to_page(&self) {
+        if Cr3::read().0.start_address() != self.cr3.0.start_address() {
+            unsafe { Cr3::write(self.cr3.0, self.cr3.1) };
+        }
+    }
 }

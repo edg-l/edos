@@ -185,7 +185,6 @@ pub struct SyscallContext {
 
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
-
 const SYS_CLOSE: u64 = 3;
 const SYS_PIPE: u64 = 22;
 const SYS_MMAP: u64 = 9;
@@ -203,6 +202,8 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
 
     // Beware with some sched() calls, they call hlt which might hang if we don't have interrupts enabled.
+
+    // Note: we may need to call switch_to_kernel_page(); and switch back later.
 
     match ctx.rax {
         SYS_WRITE => {

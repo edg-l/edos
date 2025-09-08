@@ -155,17 +155,14 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                 if let Some(kthread) = sched.kthreads.get(&current_id.id) {
                     // going to kernel space.
                     // for now, always switch to kernel page, just in case.
-                    let kernel_cr3 = boot_info().cr3;
-                    Cr3::write(kernel_cr3.0, kernel_cr3.1);
+                    switch_to_kernel_page();
                     *context = kthread.context.clone();
                     return context;
                 }
             } else if let Some(thread) = sched.threads.get_mut(&current_id.id) {
                 // Going to user space.
                 // Set page table
-                if Cr3::read().0.start_address() != thread.cr3.0.start_address() {
-                    Cr3::write(thread.cr3.0, thread.cr3.1);
-                }
+                thread.switch_to_page();
 
                 *context = thread.context.clone();
                 if !thread.fpu_init {
@@ -373,5 +370,15 @@ impl Scheduler {
         });
 
         hlt();
+    }
+}
+
+// Note: heap allocs are fine because they are mapped before any user thread is created.
+// In the future consider syncing pages.
+#[inline]
+pub fn switch_to_kernel_page() {
+    let kernel_cr3 = boot_info().cr3;
+    if Cr3::read().0.start_address() != kernel_cr3.0.start_address() {
+        unsafe { Cr3::write(kernel_cr3.0, kernel_cr3.1) };
     }
 }

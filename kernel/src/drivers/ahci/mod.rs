@@ -75,7 +75,6 @@ pub fn ahci_driver_main() -> ! {
     for controller in &mut controllers {
         for port_idx in 0..controller.ports.len() {
             if let Some(port) = controller.ports[port_idx].as_mut() {
-                println!("Testing IDENTIFY command on controller port {}", port_idx);
                 match port.identify_device() {
                     Ok(device_info) => {
                         device_info.print_info(port_idx);
@@ -100,32 +99,28 @@ pub fn ahci_driver_main() -> ! {
         use alloc::string::String;
 
         let mut output = String::new();
-        output.push_str("=== Testing Read Sectors with GPT Header ===\n");
 
         // Get the first controller and port with a device
         if let Some(first_device) = detected_devices.first() {
-            println!("About to read first sector");
             // Find the controller
             for controller in &mut controllers {
                 if controller.pci_device.address == first_device.controller_pci_address
                     && let Some(port) = controller.ports[first_device.port_idx].as_mut()
                 {
-                    println!("Reading GPT header");
                     // Read GPT header (LBA 1, 1 sector = 512 bytes)
                     let mut gpt_buffer = [0u8; 512];
 
                     output.push_str("Reading GPT header from LBA 1...\n");
                     match port.read_sectors(1, &mut gpt_buffer, 1) {
                         Ok(()) => {
-                            println!("Read sectors returned");
-                            output.push_str("Successfully read GPT header!\n");
+                            output.push_str("Successfully read GPT header\n");
 
                             // Check for GPT signature "EFI PART"
                             let signature = &gpt_buffer[0..8];
 
                             println!("Read signature: {signature:?}");
                             if signature == b"EFI PART" {
-                                output.push_str("Valid GPT signature found!\n");
+                                output.push_str("Valid GPT signature found\n");
 
                                 // Parse some basic GPT header fields
                                 let revision = u32::from_le_bytes([
@@ -156,18 +151,6 @@ pub fn ahci_driver_main() -> ! {
                                     "Number of partition entries: {}\n",
                                     num_partition_entries
                                 ));
-
-                                // Build hex dump of first 64 bytes
-                                output.push_str("GPT Header (first 64 bytes):\n");
-                                for i in 0..64 {
-                                    if i % 16 == 0 {
-                                        output.push_str(&alloc::format!("{:04x}: ", i));
-                                    }
-                                    output.push_str(&alloc::format!("{:02x} ", gpt_buffer[i]));
-                                    if i % 16 == 15 {
-                                        output.push('\n');
-                                    }
-                                }
                                 output.push('\n');
                             } else {
                                 output.push_str(

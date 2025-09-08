@@ -24,7 +24,7 @@ impl<T: Clone> Broadcast<T> {
     }
 
     /// The calling thread subscribes.
-    pub fn subscribe(&self) -> Receiver<T> {
+    pub fn subscribe_or_get(&self) -> Receiver<T> {
         if let Some(r) = self.subscribers.read().get(&sched().current_id()) {
             return r.clone();
         }
