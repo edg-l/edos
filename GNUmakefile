@@ -146,7 +146,7 @@ FILESYSTEM_FILES := $(shell find filesystem -type f 2>/dev/null)
 sata-disk.img: $(FILESYSTEM_FILES)
 	qemu-img create -f raw sata-disk.img 1G
 	sgdisk sata-disk.img -n 1:2048 -t 1:0700
-	mformat -i sata-disk.img@@1M
+	mformat -F -i sata-disk.img@@1M
 	if [ -d filesystem ]; then \
 		mcopy -s -i sata-disk.img@@1M filesystem/* ::/; \
 	fi
