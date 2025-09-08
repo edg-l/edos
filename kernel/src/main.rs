@@ -101,8 +101,8 @@ fn main() -> ! {
     // Init scheduler
     thread::scheduler::init();
     drivers::init_drivers();
+    fs::init();
 
-    queue_spawn_kthread_named("test-reader", thread_test_read);
     queue_spawn_thread({
         let mut thread = UserThread::new(TERMINAL_PROGRAM).unwrap();
         thread.id.name = Some("terminal".to_string().into());
@@ -120,114 +120,6 @@ fn main() -> ! {
 }
 
 pub const TERMINAL_PROGRAM: &[u8] = include_bytes!("../../programs/out/terminal");
-
-pub fn thread_test_read() -> ! {
-    let detected_devices = ahci::api::list_devices();
-
-    // Test reading GPT header from first detected device
-    if !detected_devices.is_empty() {
-        use alloc::string::String;
-
-        let mut output = String::new();
-
-        // Get the first controller and port with a device
-        if let Some(device) = detected_devices.first() {
-            // Find the controller
-
-            println!("Reading GPT header from LBA 1...");
-
-            let gpt_buffer = ahci::api::read_sectors(device.id, 1, 1);
-
-            if let Ok(gpt_buffer) = gpt_buffer {
-                output.push_str("Successfully read GPT header\n");
-
-                // Check for GPT signature "EFI PART"
-                let signature = &gpt_buffer[0..8];
-
-                println!("Read signature: {signature:?}");
-                if signature == b"EFI PART" {
-                    output.push_str("Valid GPT signature found\n");
-
-                    // Parse some basic GPT header fields
-                    let revision = u32::from_le_bytes([
-                        gpt_buffer[8],
-                        gpt_buffer[9],
-                        gpt_buffer[10],
-                        gpt_buffer[11],
-                    ]);
-                    let header_size = u32::from_le_bytes([
-                        gpt_buffer[12],
-                        gpt_buffer[13],
-                        gpt_buffer[14],
-                        gpt_buffer[15],
-                    ]);
-                    let num_partition_entries = u32::from_le_bytes([
-                        gpt_buffer[80],
-                        gpt_buffer[81],
-                        gpt_buffer[82],
-                        gpt_buffer[83],
-                    ]);
-
-                    output.push_str(&alloc::format!("GPT Revision: {:#x}\n", revision));
-                    output.push_str(&alloc::format!("Header Size: {} bytes\n", header_size));
-                    output.push_str(&alloc::format!(
-                        "Number of partition entries: {}\n",
-                        num_partition_entries
-                    ));
-                    output.push('\n');
-                } else {
-                    output.push_str("No valid GPT signature found. Raw signature bytes:\n");
-                    output.push_str("Signature: ");
-                    for &byte in signature {
-                        output.push_str(&alloc::format!("{:02x} ", byte));
-                    }
-                    output.push('\n');
-
-                    // Check if it might be MBR instead
-                    if gpt_buffer[510] == 0x55 && gpt_buffer[511] == 0xAA {
-                        output.push_str("This appears to be an MBR disk (boot signature found)\n");
-                    } else {
-                        output.push_str("Unknown partition table format\n");
-                    }
-                }
-            }
-
-            println!("{}", output);
-            output.clear();
-
-            println!("Reading lba 0 with 2 sectors..");
-
-            let multi_buffer = ahci::api::read_sectors(device.id, 0, 2);
-
-            match multi_buffer {
-                Ok(multi_buffer) => {
-                    output.push_str("Successfully read 2 sectors!\n");
-                    output.push_str(&alloc::format!(
-                        "MBR signature at end of first sector: {:02x} {:02x}\n",
-                        multi_buffer[510],
-                        multi_buffer[511]
-                    ));
-                    output.push_str(&alloc::format!(
-                        "GPT signature in second sector: {:?}\n",
-                        core::str::from_utf8(&multi_buffer[512..520]).unwrap_or("invalid")
-                    ));
-                }
-                Err(e) => {
-                    output.push_str(&alloc::format!(
-                        "Failed to read multiple sectors: {:?}\n",
-                        e
-                    ));
-                }
-            }
-        }
-
-        println!("{}", output);
-    }
-
-    loop {
-        sched().thread_park();
-    }
-}
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {

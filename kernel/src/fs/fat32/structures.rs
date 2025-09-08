@@ -125,6 +125,21 @@ impl Fat32BootSector {
     pub fn fsinfo_lba(&self) -> u32 {
         self.fs_info as u32
     }
+
+    /// Check if this appears to be a valid FAT32 boot sector
+    pub fn is_fat32(&self) -> bool {
+        // Check basic FAT32 characteristics
+        self.bytes_per_sector == 512 &&
+        self.sectors_per_cluster > 0 &&
+        self.sectors_per_cluster.is_power_of_two() &&
+        self.num_fats > 0 &&
+        self.root_entry_count == 0 &&  // FAT32 has no root directory entries in boot sector
+        self.total_sectors_16 == 0 &&  // FAT32 uses 32-bit sector count
+        self.fat_size_16 == 0 &&       // FAT32 uses 32-bit FAT size
+        self.fat_size_32 > 0 &&
+        self.boot_signature == 0x29 &&
+        &self.file_system_type[0..5] == b"FAT32"
+    }
 }
 
 impl FsInfo {

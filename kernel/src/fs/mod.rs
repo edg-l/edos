@@ -3,12 +3,16 @@
 use alloc::{string::String, vec::Vec};
 use thiserror::Error;
 
-use crate::fs::path::Path;
+use crate::{fs::path::Path, thread::util::queue_spawn_kthread_named};
 
 pub mod path;
 pub mod fat32;
 pub mod api;
+pub mod gpt;
 
+pub fn init() {
+     queue_spawn_kthread_named("fs", api::fs_main_thread);
+}
 
 #[derive(Debug, Error, Clone)]
 pub enum Error {

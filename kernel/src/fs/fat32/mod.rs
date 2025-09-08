@@ -1,6 +1,6 @@
 use crate::{drivers::ahci::structures::DeviceIdentifyInfo, fs::{fat32::structures::{Fat32BootSector, FsInfo}, FileSystem}};
 
-mod structures;
+pub mod structures;
 
 
 #[derive(Debug)]
