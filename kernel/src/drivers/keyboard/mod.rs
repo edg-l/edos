@@ -36,7 +36,7 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
 
 pub static KEYBOARD_THREAD_ID: Once<ThreadId> = Once::new();
 
-pub fn driver_main() -> ! {
+pub extern "C" fn driver_main() -> ! {
     without_interrupts(|| unsafe {
         enable_ps2_keyboard();
 

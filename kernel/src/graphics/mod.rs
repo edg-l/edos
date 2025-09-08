@@ -123,7 +123,7 @@ impl DoubleBuffer {
     }
 }
 
-pub fn render_thread() -> ! {
+pub extern "C" fn render_thread() -> ! {
     let requests = REQUESTS.call_once(|| Mailbox::new(sched().current_id()));
 
     let mut display = DoubleBuffer::new();

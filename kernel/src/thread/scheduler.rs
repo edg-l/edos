@@ -49,10 +49,10 @@ pub fn init() {
     }
     get_percpu_data().scheduler = ptr;
 
-    queue_spawn_kthread_named("tcleaner", thread_cleaner);
+    queue_spawn_kthread_named("tcleaner", thread_cleaner as u64);
 }
 
-pub fn thread_cleaner() -> ! {
+pub extern "C" fn thread_cleaner() -> ! {
     let mut to_remove = Vec::with_capacity(4);
 
     loop {

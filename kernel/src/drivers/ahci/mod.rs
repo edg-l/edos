@@ -53,7 +53,7 @@ pub enum AhciError {
 pub static AHCI_DRIVER_THREAD_ID: Once<ThreadId> = Once::new();
 
 pub fn init() {
-    AHCI_DRIVER_THREAD_ID.call_once(|| queue_spawn_kthread_named("ahci", ahci_driver_main));
+    AHCI_DRIVER_THREAD_ID.call_once(|| queue_spawn_kthread_named("ahci", ahci_driver_main as u64));
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +109,7 @@ pub(super) enum AhciResponse {
 
 type PortMailbox = Mailbox<(Arc<Command>, Request<AhciRequest, AhciResponse>), AhciResponse>;
 
-pub fn ahci_driver_main() -> ! {
+pub extern "C" fn ahci_driver_main() -> ! {
     let tid = sched().current_id();
 
     let requests = AHCI_REQUESTS.call_once(|| Mailbox::new(tid));
@@ -173,7 +173,7 @@ pub fn ahci_driver_main() -> ! {
     for device in &detected_devices {
         let worker_tid = queue_spawn_kthread_named(
             &format!("ahci-port-{}-{}", device.id, device.port_idx),
-            port_worker_thread,
+            port_worker_thread as u64,
         );
         port_map.insert(worker_tid.clone(), device.id);
         port_map_reverse.insert(device.id, worker_tid.clone());
@@ -278,7 +278,7 @@ pub fn ahci_driver_main() -> ! {
     }
 }
 
-fn port_worker_thread() -> ! {
+extern "C" fn port_worker_thread() -> ! {
     let tid = sched().current_id();
 
     let mailbox = {

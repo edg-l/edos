@@ -76,7 +76,7 @@ pub enum ThreadState {
 }
 
 impl KernelThread {
-    pub fn new(name: Option<String>, entry_point: fn() -> !) -> Self {
+    pub fn new(name: Option<String>, entry_point: u64) -> Self {
         let stack_top = kthread_stack_alloc();
         let context = CpuContext::new_kernel_thread(entry_point as *const u8 as u64, stack_top);
 

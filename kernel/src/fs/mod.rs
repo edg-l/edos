@@ -5,13 +5,13 @@ use thiserror::Error;
 
 use crate::{fs::path::Path, thread::util::queue_spawn_kthread_named};
 
-pub mod path;
-pub mod fat32;
 pub mod api;
+pub mod fat32;
 pub mod gpt;
+pub mod path;
 
 pub fn init() {
-     queue_spawn_kthread_named("fs", api::fs_main_thread);
+    queue_spawn_kthread_named("fs", api::fs_main_thread as u64);
 }
 
 #[derive(Debug, Error, Clone)]
@@ -19,7 +19,7 @@ pub enum Error {
     #[error("file not found")]
     FileNotFound,
     #[error("i/o error")]
-    IoError
+    IoError,
 }
 
 pub trait FileSystem {

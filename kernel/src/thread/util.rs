@@ -52,15 +52,24 @@ pub fn kthread_stack_free(stack_top: u64) {
     KTHREAD_FREED_STACKS.push(region_bottom);
 }
 
-pub fn queue_spawn_kthread(entry: fn() -> !) -> ThreadId {
+pub fn queue_spawn_kthread(entry: u64) -> ThreadId {
     let thread = KernelThread::new(None, entry);
     let id = thread.id.clone();
     sched().kthread_spawn_queue.push(thread);
     id
 }
 
-pub fn queue_spawn_kthread_named(name: &str, entry: fn() -> !) -> ThreadId {
+pub fn queue_spawn_kthread_named(name: &str, entry: u64) -> ThreadId {
     let thread = KernelThread::new(Some(name.to_string()), entry);
+
+    let id = thread.id.clone();
+    sched().kthread_spawn_queue.push(thread);
+    id
+}
+
+pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> ThreadId {
+    let mut thread = KernelThread::new(Some(name.to_string()), entry);
+    thread.context.rdi = arg as u64;
 
     let id = thread.id.clone();
     sched().kthread_spawn_queue.push(thread);

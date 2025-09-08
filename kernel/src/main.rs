@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![allow(clippy::fn_to_numeric_cast)]
 
 use core::{arch::asm, time::Duration};
 
@@ -12,13 +13,8 @@ use crate::{
     allocator::init_heap,
     apic::set_apic_timer_and_enable,
     boot::boot_info,
-    drivers::ahci,
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
-    thread::{
-        scheduler::sched,
-        user::UserThread,
-        util::{queue_spawn_kthread_named, queue_spawn_thread},
-    },
+    thread::{user::UserThread, util::queue_spawn_thread},
     timer::{get_timer_calibration, init_boot_time, uptime_us},
 };
 
@@ -27,6 +23,7 @@ mod allocator;
 mod apic;
 mod boot;
 mod drivers;
+mod fs;
 mod gdt;
 mod graphics;
 mod interrupts;
@@ -37,7 +34,6 @@ mod syscalls;
 mod thread;
 mod timer;
 mod util;
-mod fs;
 
 extern crate alloc;
 

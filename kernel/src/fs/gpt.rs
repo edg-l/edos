@@ -1,38 +1,37 @@
-use alloc::{vec::Vec, string::String};
-use bytemuck::{Pod, Zeroable, try_from_bytes};
 use crate::{drivers::ahci, fs::fat32::structures::Fat32BootSector};
+use alloc::{string::String, vec::Vec};
+use bytemuck::{Pod, Zeroable, try_from_bytes};
 
 /// GPT Header structure (LBA 1)
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GptHeader {
-    pub signature: [u8; 8],           // "EFI PART"
-    pub revision: u32,                // GPT revision
-    pub header_size: u32,             // Size of this header
-    pub header_crc32: u32,            // CRC32 of header
-    pub reserved: u32,                // Must be zero
-    pub my_lba: u64,                  // LBA of this header
-    pub alternate_lba: u64,           // LBA of alternate header
-    pub first_usable_lba: u64,        // First usable LBA for partitions
-    pub last_usable_lba: u64,         // Last usable LBA for partitions
-    pub disk_guid: [u8; 16],          // Disk GUID
-    pub partition_entry_lba: u64,     // LBA of partition entry array
-    pub num_partition_entries: u32,   // Number of partition entries
-    pub partition_entry_size: u32,    // Size of each partition entry
-    pub partition_array_crc32: u32,   // CRC32 of partition array
+    pub signature: [u8; 8],         // "EFI PART"
+    pub revision: u32,              // GPT revision
+    pub header_size: u32,           // Size of this header
+    pub header_crc32: u32,          // CRC32 of header
+    pub reserved: u32,              // Must be zero
+    pub my_lba: u64,                // LBA of this header
+    pub alternate_lba: u64,         // LBA of alternate header
+    pub first_usable_lba: u64,      // First usable LBA for partitions
+    pub last_usable_lba: u64,       // Last usable LBA for partitions
+    pub disk_guid: [u8; 16],        // Disk GUID
+    pub partition_entry_lba: u64,   // LBA of partition entry array
+    pub num_partition_entries: u32, // Number of partition entries
+    pub partition_entry_size: u32,  // Size of each partition entry
+    pub partition_array_crc32: u32, // CRC32 of partition array
 }
-
 
 /// GPT Partition Entry structure
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GptPartitionEntry {
-    pub partition_type_guid: [u8; 16],    // Partition type GUID
-    pub unique_partition_guid: [u8; 16],  // Unique partition GUID
-    pub starting_lba: u64,                // Starting LBA
-    pub ending_lba: u64,                  // Ending LBA
-    pub attributes: u64,                  // Partition attributes
-    pub partition_name: [u16; 36],        // Partition name (UTF-16)
+    pub partition_type_guid: [u8; 16],   // Partition type GUID
+    pub unique_partition_guid: [u8; 16], // Unique partition GUID
+    pub starting_lba: u64,               // Starting LBA
+    pub ending_lba: u64,                 // Ending LBA
+    pub attributes: u64,                 // Partition attributes
+    pub partition_name: [u16; 36],       // Partition name (UTF-16)
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +43,7 @@ pub struct ParsedPartition {
     pub partition_type: PartitionType,
     pub name: String,
     pub filesystem: Option<FilesystemType>,
+    pub device_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,21 +101,81 @@ impl GptPartitionEntry {
     pub fn partition_type(&self) -> PartitionType {
         match &self.partition_type_guid {
             // EFI System Partition
-            &[0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B] => {
-                PartitionType::EfiSystem
-            }
+            &[
+                0x28,
+                0x73,
+                0x2A,
+                0xC1,
+                0x1F,
+                0xF8,
+                0xD2,
+                0x11,
+                0xBA,
+                0x4B,
+                0x00,
+                0xA0,
+                0xC9,
+                0x3E,
+                0xC9,
+                0x3B,
+            ] => PartitionType::EfiSystem,
             // Microsoft Basic Data Partition
-            &[0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44, 0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7] => {
-                PartitionType::MicrosoftBasicData
-            }
+            &[
+                0xA2,
+                0xA0,
+                0xD0,
+                0xEB,
+                0xE5,
+                0xB9,
+                0x33,
+                0x44,
+                0x87,
+                0xC0,
+                0x68,
+                0xB6,
+                0xB7,
+                0x26,
+                0x99,
+                0xC7,
+            ] => PartitionType::MicrosoftBasicData,
             // Linux Filesystem
-            &[0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47, 0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4] => {
-                PartitionType::LinuxFilesystem
-            }
+            &[
+                0xAF,
+                0x3D,
+                0xC6,
+                0x0F,
+                0x83,
+                0x84,
+                0x72,
+                0x47,
+                0x8E,
+                0x79,
+                0x3D,
+                0x69,
+                0xD8,
+                0x47,
+                0x7D,
+                0xE4,
+            ] => PartitionType::LinuxFilesystem,
             // Linux Swap
-            &[0x6D, 0xFD, 0x57, 0x06, 0xAB, 0xA4, 0xC4, 0x44, 0x84, 0xE5, 0x09, 0x33, 0xC8, 0x4B, 0x4F, 0x4F] => {
-                PartitionType::LinuxSwap
-            }
+            &[
+                0x6D,
+                0xFD,
+                0x57,
+                0x06,
+                0xAB,
+                0xA4,
+                0xC4,
+                0x44,
+                0x84,
+                0xE5,
+                0x09,
+                0x33,
+                0xC8,
+                0x4B,
+                0x4F,
+                0x4F,
+            ] => PartitionType::LinuxSwap,
             guid => PartitionType::Unknown(*guid),
         }
     }
@@ -124,8 +184,8 @@ impl GptPartitionEntry {
 /// Parse GPT from a device
 pub fn parse_gpt(device_id: u64) -> Result<Vec<ParsedPartition>, &'static str> {
     // Read GPT header from LBA 1
-    let gpt_data = ahci::api::read_sectors(device_id, 1, 1)
-        .map_err(|_| "Failed to read GPT header")?;
+    let gpt_data =
+        ahci::api::read_sectors(device_id, 1, 1).map_err(|_| "Failed to read GPT header")?;
 
     if gpt_data.len() < core::mem::size_of::<GptHeader>() {
         return Err("GPT data too small");
@@ -143,8 +203,12 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<ParsedPartition>, &'static str> {
     let sectors_needed = (gpt_header.num_partition_entries as usize).div_ceil(entries_per_sector);
 
     // Read partition entries
-    let partition_data = ahci::api::read_sectors(device_id, gpt_header.partition_entry_lba, sectors_needed as u16)
-        .map_err(|_| "Failed to read partition entries")?;
+    let partition_data = ahci::api::read_sectors(
+        device_id,
+        gpt_header.partition_entry_lba,
+        sectors_needed as u16,
+    )
+    .map_err(|_| "Failed to read partition entries")?;
 
     let mut partitions = Vec::new();
 
@@ -157,8 +221,9 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<ParsedPartition>, &'static str> {
         }
 
         let entry = try_from_bytes::<GptPartitionEntry>(
-            &partition_data[entry_offset..entry_offset + core::mem::size_of::<GptPartitionEntry>()]
-        ).map_err(|_| "Failed to parse partition entry")?;
+            &partition_data[entry_offset..entry_offset + core::mem::size_of::<GptPartitionEntry>()],
+        )
+        .map_err(|_| "Failed to parse partition entry")?;
 
         if entry.is_used() {
             let filesystem = detect_filesystem(device_id, entry.starting_lba)?;
@@ -171,6 +236,7 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<ParsedPartition>, &'static str> {
                 partition_type: entry.partition_type(),
                 name: entry.name(),
                 filesystem,
+                device_id,
             });
         }
     }
@@ -179,7 +245,10 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<ParsedPartition>, &'static str> {
 }
 
 /// Detect filesystem type by reading the first sector of a partition
-fn detect_filesystem(device_id: u64, partition_start_lba: u64) -> Result<Option<FilesystemType>, &'static str> {
+fn detect_filesystem(
+    device_id: u64,
+    partition_start_lba: u64,
+) -> Result<Option<FilesystemType>, &'static str> {
     // Read first sector of partition
     let sector_data = ahci::api::read_sectors(device_id, partition_start_lba, 1)
         .map_err(|_| "Failed to read partition boot sector")?;
@@ -189,9 +258,9 @@ fn detect_filesystem(device_id: u64, partition_start_lba: u64) -> Result<Option<
     }
 
     // Try to parse as FAT32 boot sector
-    let boot_sector = try_from_bytes::<Fat32BootSector>(
-        &sector_data[0..core::mem::size_of::<Fat32BootSector>()]
-    ).map_err(|_| "Failed to parse boot sector")?;
+    let boot_sector =
+        try_from_bytes::<Fat32BootSector>(&sector_data[0..core::mem::size_of::<Fat32BootSector>()])
+            .map_err(|_| "Failed to parse boot sector")?;
 
     if boot_sector.is_fat32() {
         Ok(Some(FilesystemType::Fat32))
@@ -205,8 +274,10 @@ pub fn print_partitions(partitions: &[ParsedPartition]) {
     use crate::println;
 
     println!("Found {} partitions:", partitions.len());
-    println!("{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {}",
-             "ID", "Start LBA", "End LBA", "Size (MB)", "Type", "FS", "Name");
+    println!(
+        "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {}",
+        "ID", "Start LBA", "End LBA", "Size (MB)", "Type", "FS", "Name"
+    );
     println!("{}", "-".repeat(80));
 
     for partition in partitions {
@@ -224,13 +295,15 @@ pub fn print_partitions(partitions: &[ParsedPartition]) {
             None => "None",
         };
 
-        println!("{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {}",
-                 partition.index,
-                 partition.starting_lba,
-                 partition.ending_lba,
-                 size_mb,
-                 type_str,
-                 fs_str,
-                 partition.name);
+        println!(
+            "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {}",
+            partition.index,
+            partition.starting_lba,
+            partition.ending_lba,
+            size_mb,
+            type_str,
+            fs_str,
+            partition.name
+        );
     }
 }
