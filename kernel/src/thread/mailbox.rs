@@ -18,8 +18,17 @@ use crate::thread::{ThreadId, scheduler::sched};
 #[derive(Debug)]
 /// A mailbox for sending requests with the type T and getting responses with the type R.
 pub struct Mailbox<T, R> {
-    queue: SegQueue<Request<T, R>>,
+    queue: Arc<SegQueue<Request<T, R>>>,
     owner: ThreadId,
+}
+
+impl<T, R> Clone for Mailbox<T, R> {
+    fn clone(&self) -> Self {
+        let queue = self.queue.clone();
+        let tid = self.owner.clone();
+
+        Self { queue, owner: tid }
+    }
 }
 
 #[derive(Debug)]
@@ -39,7 +48,7 @@ impl<T, R> Mailbox<T, R> {
     pub fn new(owner: ThreadId) -> Self {
         Self {
             owner,
-            queue: SegQueue::new(),
+            queue: Arc::new(SegQueue::new()),
         }
     }
 

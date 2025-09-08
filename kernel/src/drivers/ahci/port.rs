@@ -36,6 +36,8 @@ pub struct AhciPort {
     pub dma_alloc: DmaAllocator,
 }
 
+unsafe impl Send for AhciPort {}
+
 #[expect(unused)]
 impl AhciPort {
     pub fn new(port_idx: usize, port_regs: *mut HbaPort) -> Result<Self, AhciError> {

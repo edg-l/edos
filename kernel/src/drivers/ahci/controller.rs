@@ -1,6 +1,7 @@
 use core::ptr;
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
+use spin::mutex::Mutex;
 use x86_64::{
     PhysAddr,
     structures::paging::{PageTableFlags, mapper::TranslateResult},
@@ -28,7 +29,7 @@ use crate::{
 
 pub struct AhciController {
     pub hba: *mut HbaMemory,
-    pub ports: Vec<Option<AhciPort>>,
+    pub ports: Vec<Option<Arc<Mutex<AhciPort>>>>,
     pub pci_device: PciDevice,
 }
 
@@ -230,7 +231,7 @@ impl AhciController {
                         // Get volatile pointer to the specific port
                         match AhciPort::new(i, port_ptr) {
                             Ok(port) => {
-                                self.ports[i] = Some(port);
+                                self.ports[i] = Some(Arc::new(Mutex::new(port)));
                             }
                             Err(e) => {
                                 println!("Failed to initialize port {}: {:?}", i, e);
@@ -340,13 +341,5 @@ impl AhciController {
 
         println!("Port {} initialization complete", port_idx);
         Ok(())
-    }
-
-    pub fn get_port(&mut self, port_idx: usize) -> Option<&mut AhciPort> {
-        if port_idx < self.ports.len() {
-            self.ports[port_idx].as_mut()
-        } else {
-            None
-        }
     }
 }

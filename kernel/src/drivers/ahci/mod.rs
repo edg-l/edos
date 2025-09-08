@@ -1,10 +1,22 @@
-use alloc::vec::Vec;
-use spin::Once;
+#![expect(unused)]
+
+use core::time::Duration;
+
+use alloc::{
+    collections::btree_map::BTreeMap,
+    format,
+    sync::Arc,
+    vec::{self, Vec},
+};
+use spin::{Mutex, Once};
 use x86_64::instructions::hlt;
 
 use crate::{
     drivers::{
-        ahci::{controller::AhciController, structures::DeviceIdentifyInfo},
+        ahci::{
+            api::send_request, controller::AhciController, port::AhciPort,
+            structures::DeviceIdentifyInfo,
+        },
         pci::{
             pci_manager,
             structures::{PciAddress, PciDevice},
@@ -40,21 +52,50 @@ pub fn init() {
 
 #[derive(Debug, Clone)]
 pub struct DetectedDevice {
+    pub id: u64,
     pub controller_pci_address: PciAddress,
     pub port_idx: usize,
     pub device_info: DeviceIdentifyInfo,
 }
 
-static AHCI_REQUESTS: Once<Mailbox<AhciRequest, AhciResponse>> = Once::new();
+pub(super) static AHCI_REQUESTS: Once<Mailbox<AhciRequest, AhciResponse>> = Once::new();
 
 #[derive(Debug)]
-pub enum AhciRequest {
+pub(super) enum AhciRequest {
     ListDevices,
+    PortCommand { port: usize, command: Command },
+    // Used internally
+    GetDeviceMailbox(ThreadId),
+    GetDevicePort(ThreadId),
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum Command {
+    Read {
+        lba: u64,
+        sectors: u16,
+    },
+    Write {
+        lba: u64,
+        data: Vec<u8>,
+        sectors: u16,
+    },
+    Flush,
+    Identify,
 }
 
 #[derive(Debug)]
-pub enum AhciResponse {
+pub(super) enum AhciResponse {
     Devices(Vec<DetectedDevice>),
+    ReadResult {
+        data: Result<Vec<u8>, AhciError>,
+    },
+    IdentifyResult {
+        info: Result<DeviceIdentifyInfo, AhciError>,
+    },
+    Result(Result<(), AhciError>),
+    DeviceMailbox(Option<Mailbox<(Command, ThreadId), AhciResponse>>),
+    DevicePort(Option<Arc<Mutex<AhciPort>>>),
 }
 
 pub fn ahci_driver_main() -> ! {
@@ -90,17 +131,22 @@ pub fn ahci_driver_main() -> ! {
 
     let mut detected_devices: Vec<DetectedDevice> = Vec::new();
 
+    let mut device_mailboxes: Vec<Mailbox<(Command, ThreadId), AhciResponse>> = Vec::new();
+
+    let mut id = 0;
     for controller in &mut controllers {
         for port_idx in 0..controller.ports.len() {
             if let Some(port) = controller.ports[port_idx].as_mut() {
-                match port.identify_device() {
+                match port.lock().identify_device() {
                     Ok(device_info) => {
                         device_info.print_info(port_idx);
                         detected_devices.push(DetectedDevice {
+                            id,
                             controller_pci_address: controller.pci_device.address,
                             port_idx,
                             device_info,
                         });
+                        id += 1;
                     }
                     Err(e) => {
                         println!("Failed to identify device on port {}: {:?}", port_idx, e);
@@ -129,6 +175,7 @@ pub fn ahci_driver_main() -> ! {
                     let mut gpt_buffer = [0u8; 512];
 
                     output.push_str("Reading GPT header from LBA 1...\n");
+                    let mut port = port.lock();
                     match port.read_sectors(1, &mut gpt_buffer, 1) {
                         Ok(()) => {
                             output.push_str("Successfully read GPT header\n");
@@ -229,16 +276,126 @@ pub fn ahci_driver_main() -> ! {
         println!("{}", output);
     }
 
+    let mut port_map = BTreeMap::new();
+    let mut port_map_reverse = BTreeMap::new();
+
+    for device in &detected_devices {
+        let worker_tid = queue_spawn_kthread_named(
+            &format!("ahci-port-{}-{}", device.id, device.port_idx),
+            port_worker_thread,
+        );
+        port_map.insert(worker_tid.clone(), device.id);
+        port_map_reverse.insert(device.id, worker_tid.clone());
+        device_mailboxes.push(Mailbox::new(worker_tid));
+    }
+
+    // The AHCI main thread job is to route requests to ports.
+
     loop {
         while let Some(req) = requests.pop_request() {
-            match req.message {
+            match &req.message {
                 AhciRequest::ListDevices => {
                     req.answer(AhciResponse::Devices(detected_devices.clone()));
+                }
+                AhciRequest::PortCommand { port, command } => todo!(),
+                AhciRequest::GetDeviceMailbox(thread_id) => {
+                    let id = port_map.get(thread_id);
+
+                    if let Some(id) = id {
+                        let mailbox = (device_mailboxes.get((*id) as usize)).cloned();
+
+                        req.answer(AhciResponse::DeviceMailbox(mailbox));
+                    } else {
+                        req.answer(AhciResponse::DeviceMailbox(None));
+                    }
+                }
+                AhciRequest::GetDevicePort(worker_tid) => {
+                    let mut found = false;
+                    let info = port_map.get(worker_tid);
+
+                    if let Some(info) = port_map.get(worker_tid) {
+                        let device = &detected_devices[*info as usize];
+
+                        for controller in &controllers {
+                            if controller.pci_device.address == device.controller_pci_address {
+                                let port = controller.ports.get(device.port_idx).cloned().flatten();
+                                req.answer(AhciResponse::DevicePort(port));
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if !found {
+                        req.answer(AhciResponse::DevicePort(None));
+                    }
                 }
             }
         }
 
         // Wait for more requests
+        sched().thread_park();
+    }
+}
+
+fn port_worker_thread() -> ! {
+    let tid = sched().current_id();
+
+    let mailbox = {
+        loop {
+            let mailbox = send_request(
+                AhciRequest::GetDeviceMailbox(tid.clone()),
+                Duration::from_secs(10),
+            );
+
+            if let AhciResponse::DeviceMailbox(Some(mailbox)) = mailbox {
+                break mailbox;
+            }
+        }
+    };
+
+    let port = {
+        loop {
+            let port = send_request(
+                AhciRequest::GetDevicePort(tid.clone()),
+                Duration::from_secs(10),
+            );
+
+            if let AhciResponse::DevicePort(Some(port)) = port {
+                break port;
+            }
+        }
+    };
+
+    loop {
+        while let Some(req) = mailbox.pop_request() {
+            let message = &req.message.0;
+            let caller = req.message.1.clone();
+            match message {
+                Command::Read { lba, sectors } => {
+                    let mut buffer = alloc::vec![0; (*sectors) as usize * 512];
+                    let result = port.lock().read_sectors(*lba, &mut buffer, *sectors);
+
+                    match result {
+                        Ok(_) => req.answer(AhciResponse::ReadResult { data: Ok(buffer) }),
+                        Err(e) => req.answer(AhciResponse::ReadResult { data: Err(e) }),
+                    }
+                }
+                Command::Write { lba, data, sectors } => {
+                    let result = port.lock().write_sectors(*lba, data, *sectors);
+                    req.answer(AhciResponse::Result(result));
+                }
+                Command::Flush => {
+                    let result = port.lock().flush_cache();
+                    req.answer(AhciResponse::Result(result));
+                }
+                Command::Identify => {
+                    let result = port.lock().identify_device();
+                    req.answer(AhciResponse::IdentifyResult { info: result });
+                }
+            }
+        }
+
         sched().thread_park();
     }
 }
