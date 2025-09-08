@@ -3,6 +3,7 @@
 use core::time::Duration;
 
 use alloc::{
+    boxed::Box,
     collections::btree_map::BTreeMap,
     format,
     sync::Arc,
@@ -23,7 +24,12 @@ use crate::{
         },
     },
     println,
-    thread::{ThreadId, mailbox::Mailbox, scheduler::sched, util::queue_spawn_kthread_named},
+    thread::{
+        ThreadId,
+        mailbox::{Mailbox, Request},
+        scheduler::sched,
+        util::queue_spawn_kthread_named,
+    },
 };
 
 pub mod api;
@@ -63,7 +69,10 @@ pub(super) static AHCI_REQUESTS: Once<Mailbox<AhciRequest, AhciResponse>> = Once
 #[derive(Debug)]
 pub(super) enum AhciRequest {
     ListDevices,
-    PortCommand { port: usize, command: Command },
+    DeviceRequest {
+        device_id: usize,
+        command: Arc<Command>,
+    },
     // Used internally
     GetDeviceMailbox(ThreadId),
     GetDevicePort(ThreadId),
@@ -94,9 +103,11 @@ pub(super) enum AhciResponse {
         info: Result<DeviceIdentifyInfo, AhciError>,
     },
     Result(Result<(), AhciError>),
-    DeviceMailbox(Option<Mailbox<(Command, ThreadId), AhciResponse>>),
+    DeviceMailbox(Option<PortMailbox>),
     DevicePort(Option<Arc<Mutex<AhciPort>>>),
 }
+
+type PortMailbox = Mailbox<(Arc<Command>, Request<AhciRequest, AhciResponse>), AhciResponse>;
 
 pub fn ahci_driver_main() -> ! {
     let tid = sched().current_id();
@@ -131,7 +142,7 @@ pub fn ahci_driver_main() -> ! {
 
     let mut detected_devices: Vec<DetectedDevice> = Vec::new();
 
-    let mut device_mailboxes: Vec<Mailbox<(Command, ThreadId), AhciResponse>> = Vec::new();
+    let mut device_mailboxes: Vec<PortMailbox> = Vec::new();
 
     let mut id = 0;
     for controller in &mut controllers {
@@ -297,7 +308,11 @@ pub fn ahci_driver_main() -> ! {
                 AhciRequest::ListDevices => {
                     req.answer(AhciResponse::Devices(detected_devices.clone()));
                 }
-                AhciRequest::PortCommand { port, command } => todo!(),
+                AhciRequest::DeviceRequest { device_id, command } => {
+                    if let Some(mb) = device_mailboxes.get(*device_id) {
+                        mb.send((command.clone(), req));
+                    }
+                }
                 AhciRequest::GetDeviceMailbox(thread_id) => {
                     let id = port_map.get(thread_id);
 
@@ -369,33 +384,33 @@ fn port_worker_thread() -> ! {
 
     loop {
         while let Some(req) = mailbox.pop_request() {
-            let message = &req.message.0;
-            let caller = req.message.1.clone();
+            let message = &*req.message.0;
+            let caller = req.message.1;
             match message {
                 Command::Read { lba, sectors } => {
                     let mut buffer = alloc::vec![0; (*sectors) as usize * 512];
                     let result = port.lock().read_sectors(*lba, &mut buffer, *sectors);
 
                     match result {
-                        Ok(_) => req.answer(AhciResponse::ReadResult { data: Ok(buffer) }),
-                        Err(e) => req.answer(AhciResponse::ReadResult { data: Err(e) }),
+                        Ok(_) => caller.answer(AhciResponse::ReadResult { data: Ok(buffer) }),
+                        Err(e) => caller.answer(AhciResponse::ReadResult { data: Err(e) }),
                     }
                 }
                 Command::Write { lba, data, sectors } => {
                     let result = port.lock().write_sectors(*lba, data, *sectors);
-                    req.answer(AhciResponse::Result(result));
+                    caller.answer(AhciResponse::Result(result));
                 }
                 Command::Flush => {
                     let result = port.lock().flush_cache();
-                    req.answer(AhciResponse::Result(result));
+                    caller.answer(AhciResponse::Result(result));
                 }
                 Command::Identify => {
                     let result = port.lock().identify_device();
-                    req.answer(AhciResponse::IdentifyResult { info: result });
+                    caller.answer(AhciResponse::IdentifyResult { info: result });
                 }
             }
         }
 
-        sched().thread_park();
+        sched().thread_wait_timeout(Duration::from_secs(1));
     }
 }
