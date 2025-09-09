@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use bytemuck::cast_ref;
+use bytemuck::{Zeroable, cast_ref};
 
 use crate::{
     drivers::ahci::{
@@ -13,6 +13,8 @@ use crate::{
     },
     println,
 };
+
+use super::path::Path;
 
 pub mod read;
 pub mod structures;
@@ -64,10 +66,7 @@ impl Fat32fs {
 }
 
 impl FileSystem for Fat32fs {
-    fn list_files(
-        &self,
-        path: super::path::Path,
-    ) -> Result<alloc::vec::Vec<super::File>, super::Error> {
+    fn list_files(&self, path: &Path) -> Result<alloc::vec::Vec<super::File>, super::Error> {
         let path = path.normalize();
 
         let entries;
@@ -92,7 +91,7 @@ impl FileSystem for Fat32fs {
 
     fn read_bytes(
         &self,
-        path: super::path::Path,
+        path: &Path,
         offset: usize,
         count: usize,
     ) -> Result<alloc::vec::Vec<u8>, super::Error> {
@@ -105,51 +104,255 @@ impl FileSystem for Fat32fs {
 
     fn write_bytes(
         &mut self,
-        path: super::path::Path,
+        path: &Path,
         offset: usize,
-        data: alloc::vec::Vec<u8>,
+        data: &[u8],
     ) -> Result<u64, super::Error> {
-        // Locate file and write payload
-        let (entry, entry_cluster, entry_off) = match self.find_dir_entry(&path)? {
+        if data.is_empty() {
+            return Ok(0);
+        }
+
+        // Locate entry and its position
+        let (mut entry, entry_cluster, entry_off) = match self.find_dir_entry(path)? {
             Some((e, c, o)) if !e.is_directory() => (e, c, o),
             Some(_) => return Err(Error::NotAFile),
             None => return Err(Error::FileNotFound),
         };
 
-        let written = self.write_file_offset(&entry, offset as u64, &data)? as u64;
-        let new_size = core::cmp::max(entry.file_size as u64, offset as u64 + written);
+        let bpc = (self.boot_info.bytes_per_sector as usize)
+            * (self.boot_info.sectors_per_cluster as usize);
 
-        // Patch size and archive bit in-place
+        // If file has no cluster yet, allocate head and enough clusters to reach `offset`
+        if entry.first_cluster() < 2 {
+            // Index of the cluster we will write into
+            let target_idx = (offset / bpc) as u64;
+
+            // Allocate head
+            let head = self.alloc_cluster()?;
+            let mut last = head;
+
+            // Extend chain up to target_idx
+            for _ in 0..target_idx {
+                let nc = self.alloc_cluster()?;
+                self.link_fat_entry(last, nc)?;
+                last = nc;
+            }
+
+            // Patch on-disk entry
+            self.patch_dir_entry_at(entry_cluster, entry_off, |de| {
+                de.first_cluster_high = ((head >> 16) & 0xFFFF) as u16;
+                de.first_cluster_low = (head & 0xFFFF) as u16;
+                de.attributes |= 0x20; // archive
+            })?;
+
+            // Update local copy
+            entry.first_cluster_high = ((head >> 16) & 0xFFFF) as u16;
+            entry.first_cluster_low = (head & 0xFFFF) as u16;
+
+            // Optional: persist FSInfo now
+            let _ = self.save_fs_info();
+        }
+
+        // Write payload
+        let written = self.write_file_offset(&entry, offset as u64, &data)? as u64;
+
+        // Update size
+        let new_size = core::cmp::max(entry.file_size as u64, offset as u64 + written);
         self.patch_dir_entry_at(entry_cluster, entry_off, |de| {
             de.file_size = new_size as u32;
-            de.attributes |= 0x20; // ARCHIVE
-            // TODO: set write_time/write_date here if you have a clock
+            de.attributes |= 0x20;
+            // TODO: set write_time/write_date
         })?;
 
         Ok(written)
     }
 
-    fn create_file(&mut self, path: super::path::Path) -> Result<(), super::Error> {
-        todo!()
+    fn create_file(&mut self, path: &Path) -> Result<(), super::Error> {
+        use crate::fs::fat32::structures::DirectoryEntry;
+        use bytemuck::Zeroable;
+
+        // Resolve parent and leaf name
+        let (parent_cluster, name) = self.resolve_parent_and_name(&path)?;
+
+        // Already exists?
+        if (self.find_dir_entry(&path)?).is_some() {
+            return Err(Error::IoError);
+        }
+
+        // Build short entry
+        let mut de: DirectoryEntry = DirectoryEntry::zeroed();
+        de.set_name_from_string(&name);
+        de.attributes = 0x20; // ARCHIVE
+        de.first_cluster_high = 0;
+        de.first_cluster_low = 0;
+        de.file_size = 0;
+
+        // Append to parent directory
+        let _ = self.append_dir_entry(parent_cluster, &de)?;
+        Ok(())
     }
 
-    fn create_dir(&mut self, path: super::path::Path) -> Result<(), super::Error> {
-        todo!()
+    fn create_dir(&mut self, path: &Path) -> Result<(), super::Error> {
+        // Resolve parent and leaf name
+        let (parent_cluster, name) = self.resolve_parent_and_name(&path)?;
+
+        // Already exists?
+        if (self.find_dir_entry(&path)?).is_some() {
+            return Err(Error::IoError);
+        }
+
+        // Allocate directory cluster
+        let newc = self.alloc_cluster()?;
+
+        // Initialize "." and ".."
+        let spc = self.boot_info.sectors_per_cluster as u16;
+        let bps = self.boot_info.bytes_per_sector as usize;
+        let cluster_bytes = bps * spc as usize;
+        let mut dirbuf = alloc::vec![0u8; cluster_bytes];
+
+        let mut dot: DirectoryEntry = DirectoryEntry::zeroed();
+        dot.set_name_from_string(".");
+        dot.attributes = 0x10; // DIRECTORY
+        dot.first_cluster_high = ((newc >> 16) & 0xFFFF) as u16;
+        dot.first_cluster_low = (newc & 0xFFFF) as u16;
+
+        let mut dotdot: DirectoryEntry = DirectoryEntry::zeroed();
+        dotdot.set_name_from_string("..");
+        dotdot.attributes = 0x10; // DIRECTORY
+        dotdot.first_cluster_high = ((parent_cluster >> 16) & 0xFFFF) as u16;
+        dotdot.first_cluster_low = (parent_cluster & 0xFFFF) as u16;
+
+        let dot_bytes: [u8; 32] = bytemuck::cast(dot);
+        let dotdot_bytes: [u8; 32] = bytemuck::cast(dotdot);
+        dirbuf[0..32].copy_from_slice(&dot_bytes);
+        dirbuf[32..64].copy_from_slice(&dotdot_bytes);
+
+        write_sectors(
+            self.partition.device_id,
+            self.cluster_to_lba(newc),
+            dirbuf,
+            spc,
+        )?;
+
+        // Insert directory entry in parent
+        let mut de: DirectoryEntry = DirectoryEntry::zeroed();
+        de.set_name_from_string(&name);
+        de.attributes = 0x10; // DIRECTORY
+        de.first_cluster_high = ((newc >> 16) & 0xFFFF) as u16;
+        de.first_cluster_low = (newc & 0xFFFF) as u16;
+        de.file_size = 0;
+
+        let _ = self.append_dir_entry(parent_cluster, &de)?;
+        Ok(())
     }
 
-    fn remove_dir(&mut self, path: super::path::Path) -> Result<(), super::Error> {
-        todo!()
+    fn remove_file(&mut self, path: &Path) -> Result<(), super::Error> {
+        // Locate the entry and its position in parent directory
+        let (entry, dir_cluster, entry_off) = match self.find_dir_entry(&path)? {
+            Some((e, c, o)) => (e, c, o),
+            None => return Err(Error::FileNotFound),
+        };
+        if entry.is_directory() {
+            return Err(Error::NotAFile);
+        }
+
+        // Free the file's cluster chain, if any
+        let start = entry.first_cluster();
+        if start >= 2 {
+            let _freed = self.free_cluster_chain(start)?;
+            // Persist FSInfo hints now; or batch at higher level
+            let _ = self.save_fs_info();
+        }
+
+        // Mark the directory entry deleted (0xE5)
+        let spc = self.boot_info.sectors_per_cluster as u16;
+        let base_lba = self.cluster_to_lba(dir_cluster);
+        let mut buf = read_sectors(self.partition.device_id, base_lba, spc)?;
+        if entry_off + 32 > buf.len() {
+            return Err(Error::IoError);
+        }
+        buf[entry_off] = 0xE5;
+        write_sectors(self.partition.device_id, base_lba, buf, spc)?;
+
+        Ok(())
     }
 
-    fn remove_file(&mut self, path: super::path::Path) -> Result<(), super::Error> {
-        todo!()
+    fn remove_dir(&mut self, path: &Path) -> Result<(), super::Error> {
+        // Reject root
+        if path.normalize().is_root() {
+            return Err(Error::NotADir);
+        }
+
+        // Locate the entry and its position in parent directory
+        let (entry, dir_cluster, entry_off) = match self.find_dir_entry(&path)? {
+            Some(x) => x,
+            None => return Err(Error::FileNotFound),
+        };
+        if !entry.is_directory() {
+            return Err(Error::NotADir);
+        }
+
+        // Ensure the directory is empty (only "." and ".." allowed)
+        let mut cur = entry.first_cluster();
+        if cur >= 2 {
+            let spc = self.boot_info.sectors_per_cluster as u16;
+            loop {
+                let base_lba = self.cluster_to_lba(cur);
+                let buf = read_sectors(self.partition.device_id, base_lba, spc)?;
+                let mut off = 0usize;
+                while off + 32 <= buf.len() {
+                    let first = buf[off];
+                    if first == 0x00 {
+                        break;
+                    } // end marker
+                    if first != 0xE5 {
+                        // not deleted
+                        let de: DirectoryEntry = *bytemuck::from_bytes(&buf[off..off + 32]);
+                        let name = de.fat_name_to_string();
+                        if !name.eq(".") && !name.eq("..") {
+                            return Err(Error::IoError); // not empty
+                        }
+                    }
+                    off += 32;
+                }
+                match self.get_fat_entry(cur)? {
+                    Some(next) => cur = next,
+                    None => break,
+                }
+            }
+        }
+
+        // Free the directory's cluster chain
+        let start = entry.first_cluster();
+        if start >= 2 {
+            let _freed = self.free_cluster_chain(start)?;
+            let _ = self.save_fs_info();
+        }
+
+        // Mark the parent directory entry deleted (0xE5)
+        let spc = self.boot_info.sectors_per_cluster as u16;
+        let base_lba = self.cluster_to_lba(dir_cluster);
+        let mut buf = read_sectors(self.partition.device_id, base_lba, spc)?;
+        if entry_off + 32 > buf.len() {
+            return Err(Error::IoError);
+        }
+        buf[entry_off] = 0xE5;
+        write_sectors(self.partition.device_id, base_lba, buf, spc)?;
+
+        Ok(())
     }
 
-    fn file_info(&self, path: super::path::Path) -> Result<super::File, super::Error> {
+    fn file_info(&self, path: &Path) -> Result<super::File, super::Error> {
         if let Some((entry, _, _)) = self.find_dir_entry(&path)? {
             Ok(entry.into())
         } else {
             Err(Error::FileNotFound)
         }
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        self.save_fs_info()?;
+
+        Ok(())
     }
 }

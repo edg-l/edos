@@ -35,18 +35,20 @@ pub enum Error {
 }
 
 pub trait FileSystem {
-    fn list_files(&self, path: Path) -> Result<Vec<File>, Error>;
+    fn list_files(&self, path: &Path) -> Result<Vec<File>, Error>;
 
-    fn read_bytes(&self, path: Path, offset: usize, count: usize) -> Result<Vec<u8>, Error>;
+    fn read_bytes(&self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error>;
 
-    fn write_bytes(&mut self, path: Path, offset: usize, data: Vec<u8>) -> Result<u64, Error>;
+    fn write_bytes(&mut self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error>;
 
-    fn create_file(&mut self, path: Path) -> Result<(), Error>;
-    fn create_dir(&mut self, path: Path) -> Result<(), Error>;
-    fn remove_dir(&mut self, path: Path) -> Result<(), Error>;
-    fn remove_file(&mut self, path: Path) -> Result<(), Error>;
+    fn create_file(&mut self, path: &Path) -> Result<(), Error>;
+    fn create_dir(&mut self, path: &Path) -> Result<(), Error>;
+    fn remove_dir(&mut self, path: &Path) -> Result<(), Error>;
+    fn remove_file(&mut self, path: &Path) -> Result<(), Error>;
 
-    fn file_info(&self, path: Path) -> Result<File, Error>;
+    fn file_info(&self, path: &Path) -> Result<File, Error>;
+
+    fn flush(&mut self) -> Result<(), Error>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

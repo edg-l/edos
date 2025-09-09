@@ -1,4 +1,4 @@
-use core::mem::ManuallyDrop;
+use core::{ffi::CStr, mem::ManuallyDrop};
 
 use alloc::{boxed::Box, format, vec::Vec};
 use x86_64::instructions::hlt;
@@ -103,12 +103,28 @@ extern "C" fn fs32_partition_thread(partition: *mut Partition) -> ! {
 
     let fs = (&mut fs) as &mut dyn FileSystem;
 
-    let files = fs.list_files(Path::parse_str("/").unwrap()).unwrap();
+    let files = fs.list_files(&Path::parse_str("/").unwrap()).unwrap();
 
     for file in files {
         println!("Name: {}", file.name);
         println!("Created: {:?}", file.created.map(|x| x.to_datetime()));
     }
+
+    let path = Path::parse_str("/edgar.txt").unwrap();
+    fs.create_file(&path).unwrap();
+
+    println!("created file");
+
+    fs.write_bytes(&path, 0, c"hello written".to_bytes_with_nul())
+        .unwrap();
+
+    println!("wrote bytes");
+
+    let content = fs.read_bytes(&path, 0, 512).unwrap();
+
+    let content = CStr::from_bytes_with_nul(&content);
+
+    println!("Content: {content:?}");
 
     loop {
         sched().thread_park();

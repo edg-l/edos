@@ -5,8 +5,13 @@ use crate::{
     drivers::ahci::api::{read_sectors, write_sectors},
     fs::{
         Error,
-        fat32::{Fat32fs, structures::DirectoryEntry},
+        fat32::{
+            Fat32fs,
+            structures::{CLUSTER_FREE, DirectoryEntry},
+        },
+        path::Path,
     },
+    println,
 };
 
 impl Fat32fs {
@@ -116,7 +121,7 @@ impl Fat32fs {
     }
 
     /// Allocate a new free cluster and mark it EOF in FAT.
-    fn alloc_cluster(&mut self) -> Result<u32, Error> {
+    pub fn alloc_cluster(&mut self) -> Result<u32, Error> {
         let bytes_per_sector = self.boot_info.bytes_per_sector as usize;
         let fat_sectors = self.boot_info.fat_size_32 as u64;
         let entries_per_sector = bytes_per_sector / 4;
@@ -211,7 +216,7 @@ impl Fat32fs {
 
     /// Link `from` cluster to `to` cluster by setting FAT[from] = to,
     /// and set FAT[to] to EOF.
-    fn link_fat_entry(&self, from: u32, to: u32) -> Result<(), Error> {
+    pub fn link_fat_entry(&self, from: u32, to: u32) -> Result<(), Error> {
         self.set_fat_value(from, to)?;
         self.set_fat_value(to, crate::fs::fat32::structures::CLUSTER_EOF)?;
         Ok(())
@@ -284,5 +289,145 @@ impl Fat32fs {
 
         write_sectors(self.partition.device_id, base_lba, buf, spc)?;
         Ok(())
+    }
+
+    /// Resolve parent directory cluster and final component name.
+    pub fn resolve_parent_and_name(
+        &self,
+        path: &Path,
+    ) -> Result<(u32, alloc::string::String), Error> {
+        let path = path.normalize();
+        let comps = path.components();
+        if comps.is_empty() {
+            return Err(Error::NotADir); // cannot create at root without a name
+        }
+        let parent_components = &comps[..comps.len() - 1];
+        let name = comps[comps.len() - 1].clone();
+
+        // Walk down from root
+        let mut dir_cluster = self.boot_info.root_cluster;
+        for comp in parent_components {
+            let entries = self.get_dir_entries(dir_cluster)?;
+            let mut hit = None;
+            for e in entries {
+                if e.is_directory() && e.fat_name_to_string().eq_ignore_ascii_case(comp) {
+                    hit = Some(e);
+                    break;
+                }
+            }
+            let de = match hit {
+                Some(x) => x,
+                None => return Err(Error::FileNotFound),
+            };
+            dir_cluster = de.first_cluster();
+        }
+
+        Ok((dir_cluster, name))
+    }
+
+    /// Append a short 8.3 DirectoryEntry to a directory, allocating a new cluster if needed.
+    /// Returns (cluster_that_contains_entry, byte_offset_within_cluster).
+    pub fn append_dir_entry(
+        &mut self,
+        mut dir_cluster: u32,
+        new_entry: &DirectoryEntry,
+    ) -> Result<(u32, usize), Error> {
+        let spc = self.boot_info.sectors_per_cluster as u16;
+        let bps = self.boot_info.bytes_per_sector as usize;
+        let cluster_bytes = bps * spc as usize;
+
+        loop {
+            let base_lba = self.cluster_to_lba(dir_cluster);
+            let mut buf = read_sectors(self.partition.device_id, base_lba, spc)?;
+            if buf.len() < cluster_bytes {
+                return Err(Error::IoError);
+            }
+
+            // Scan for free slot (0xE5 = deleted, 0x00 = end/free)
+            let mut off = 0usize;
+            while off + 32 <= buf.len() {
+                let first = buf[off];
+                if first == 0x00 || first == 0xE5 {
+                    let bytes: [u8; 32] = bytemuck::cast(*new_entry);
+                    buf[off..off + 32].copy_from_slice(&bytes);
+                    write_sectors(self.partition.device_id, base_lba, buf, spc)?;
+                    return Ok((dir_cluster, off));
+                }
+                off += 32;
+            }
+
+            // No space here. Advance or extend directory chain.
+            match self.get_fat_entry(dir_cluster)? {
+                Some(next) => dir_cluster = next,
+                None => {
+                    let newc = self.alloc_cluster()?;
+                    self.link_fat_entry(dir_cluster, newc)?;
+                    // Zero-fill new cluster and write the entry at offset 0
+                    let zero = alloc::vec![0u8; cluster_bytes];
+                    write_sectors(
+                        self.partition.device_id,
+                        self.cluster_to_lba(newc),
+                        zero,
+                        spc,
+                    )?;
+                    let mut buf =
+                        read_sectors(self.partition.device_id, self.cluster_to_lba(newc), spc)?;
+                    let bytes: [u8; 32] = bytemuck::cast(*new_entry);
+                    buf[0..32].copy_from_slice(&bytes);
+                    write_sectors(
+                        self.partition.device_id,
+                        self.cluster_to_lba(newc),
+                        buf,
+                        spc,
+                    )?;
+                    return Ok((newc, 0));
+                }
+            }
+        }
+    }
+
+    pub(super) fn free_cluster_chain(&mut self, start: u32) -> Result<u32, Error> {
+        if start < 2 {
+            return Ok(0);
+        }
+
+        // Hard guard to avoid infinite loops on corrupted chains
+        let fat_entries =
+            (self.boot_info.fat_size_32 as usize * self.boot_info.bytes_per_sector as usize) / 4;
+
+        let mut freed: u32 = 0;
+        let mut cur = start;
+        let mut visited = 0usize;
+
+        loop {
+            visited += 1;
+            if visited > fat_entries {
+                // cycle or corruption
+                println!("Possible corruption");
+                return Err(Error::IoError);
+            }
+
+            // Read next before clearing current
+            let next = self.get_fat_entry(cur)?; // None => EOF
+
+            // Mark current as free in both FATs
+            self.set_fat_value(cur, CLUSTER_FREE)?;
+            freed = freed.saturating_add(1);
+
+            match next {
+                Some(n) => cur = n,
+                None => break,
+            }
+        }
+
+        // Update FSInfo in memory
+        if self.fs_info.free_count != 0xFFFF_FFFF {
+            self.fs_info.free_count = self.fs_info.free_count.saturating_add(freed);
+        }
+        if self.fs_info.next_free == 0xFFFF_FFFF || start < self.fs_info.next_free {
+            self.fs_info.next_free = start;
+        }
+
+        Ok(freed)
     }
 }
