@@ -3,7 +3,7 @@ use bytemuck::{Zeroable, cast_ref};
 
 use crate::{
     drivers::ahci::{
-        api::{read_sectors, write_sectors},
+        api::{flush_cache, read_sectors, write_sectors},
         structures::DeviceIdentifyInfo,
     },
     fs::{
@@ -95,7 +95,7 @@ impl FileSystem for Fat32fs {
         offset: usize,
         count: usize,
     ) -> Result<alloc::vec::Vec<u8>, super::Error> {
-        if let Some((entry, _, _)) = self.find_dir_entry(&path)? {
+        if let Some((entry, _, _)) = self.find_dir_entry(path)? {
             self.read_file_offset(&entry, offset, count)
         } else {
             Err(Error::FileNotFound)
@@ -112,54 +112,25 @@ impl FileSystem for Fat32fs {
             return Ok(0);
         }
 
-        // Locate entry and its position
-        let (mut entry, entry_cluster, entry_off) = match self.find_dir_entry(path)? {
+        // Locate entry + its on-disk position
+        let (mut entry, ec, eo) = match self.find_dir_entry(path)? {
             Some((e, c, o)) if !e.is_directory() => (e, c, o),
             Some(_) => return Err(Error::NotAFile),
             None => return Err(Error::FileNotFound),
         };
 
-        let bpc = (self.boot_info.bytes_per_sector as usize)
-            * (self.boot_info.sectors_per_cluster as usize);
+        // Write. Pass the on-disk position so a head cluster can be patched if needed.
+        let written =
+            self.write_file_offset(&mut entry, Some((ec, eo)), offset as u64, data)? as u64;
 
-        // If file has no cluster yet, allocate head and enough clusters to reach `offset`
-        if entry.first_cluster() < 2 {
-            // Index of the cluster we will write into
-            let target_idx = (offset / bpc) as u64;
-
-            // Allocate head
-            let head = self.alloc_cluster()?;
-            let mut last = head;
-
-            // Extend chain up to target_idx
-            for _ in 0..target_idx {
-                let nc = self.alloc_cluster()?;
-                self.link_fat_entry(last, nc)?;
-                last = nc;
-            }
-
-            // Patch on-disk entry
-            self.patch_dir_entry_at(entry_cluster, entry_off, |de| {
-                de.first_cluster_high = ((head >> 16) & 0xFFFF) as u16;
-                de.first_cluster_low = (head & 0xFFFF) as u16;
-                de.attributes |= 0x20; // archive
-            })?;
-
-            // Update local copy
-            entry.first_cluster_high = ((head >> 16) & 0xFFFF) as u16;
-            entry.first_cluster_low = (head & 0xFFFF) as u16;
-        }
-
-        // Write payload
-        let written = self.write_file_offset(&entry, offset as u64, data)? as u64;
-
-        // Update size
+        // Update metadata: size (+ archive bit). Timestamps left to caller.
         let new_size = core::cmp::max(entry.file_size as u64, offset as u64 + written);
-        self.patch_dir_entry_at(entry_cluster, entry_off, |de| {
-            de.file_size = new_size as u32;
-            de.attributes |= 0x20;
-            // TODO: set write_time/write_date
-        })?;
+        if new_size as u32 != entry.file_size {
+            self.patch_dir_entry_at(ec, eo, |de| {
+                de.file_size = new_size as u32;
+                de.attributes |= 0x20; // ARCHIVE
+            })?;
+        }
 
         Ok(written)
     }
@@ -169,10 +140,10 @@ impl FileSystem for Fat32fs {
         use bytemuck::Zeroable;
 
         // Resolve parent and leaf name
-        let (parent_cluster, name) = self.resolve_parent_and_name(&path)?;
+        let (parent_cluster, name) = self.resolve_parent_and_name(path)?;
 
         // Already exists?
-        if (self.find_dir_entry(&path)?).is_some() {
+        if (self.find_dir_entry(path)?).is_some() {
             return Err(Error::IoError);
         }
 
@@ -191,10 +162,10 @@ impl FileSystem for Fat32fs {
 
     fn create_dir(&mut self, path: &Path) -> Result<(), super::Error> {
         // Resolve parent and leaf name
-        let (parent_cluster, name) = self.resolve_parent_and_name(&path)?;
+        let (parent_cluster, name) = self.resolve_parent_and_name(path)?;
 
         // Already exists?
-        if (self.find_dir_entry(&path)?).is_some() {
+        if (self.find_dir_entry(path)?).is_some() {
             return Err(Error::IoError);
         }
 
@@ -245,7 +216,7 @@ impl FileSystem for Fat32fs {
 
     fn remove_file(&mut self, path: &Path) -> Result<(), super::Error> {
         // Locate the entry and its position in parent directory
-        let (entry, dir_cluster, entry_off) = match self.find_dir_entry(&path)? {
+        let (entry, dir_cluster, entry_off) = match self.find_dir_entry(path)? {
             Some((e, c, o)) => (e, c, o),
             None => return Err(Error::FileNotFound),
         };
@@ -257,8 +228,6 @@ impl FileSystem for Fat32fs {
         let start = entry.first_cluster();
         if start >= 2 {
             let _freed = self.free_cluster_chain(start)?;
-            // Persist FSInfo hints now; or batch at higher level
-            let _ = self.save_fs_info();
         }
 
         // Mark the directory entry deleted (0xE5)
@@ -281,7 +250,7 @@ impl FileSystem for Fat32fs {
         }
 
         // Locate the entry and its position in parent directory
-        let (entry, dir_cluster, entry_off) = match self.find_dir_entry(&path)? {
+        let (entry, dir_cluster, entry_off) = match self.find_dir_entry(path)? {
             Some(x) => x,
             None => return Err(Error::FileNotFound),
         };
@@ -323,7 +292,6 @@ impl FileSystem for Fat32fs {
         let start = entry.first_cluster();
         if start >= 2 {
             let _freed = self.free_cluster_chain(start)?;
-            let _ = self.save_fs_info();
         }
 
         // Mark the parent directory entry deleted (0xE5)
@@ -340,7 +308,7 @@ impl FileSystem for Fat32fs {
     }
 
     fn file_info(&self, path: &Path) -> Result<super::File, super::Error> {
-        if let Some((entry, _, _)) = self.find_dir_entry(&path)? {
+        if let Some((entry, _, _)) = self.find_dir_entry(path)? {
             Ok(entry.into())
         } else {
             Err(Error::FileNotFound)
@@ -349,6 +317,7 @@ impl FileSystem for Fat32fs {
 
     fn flush(&mut self) -> Result<(), Error> {
         self.save_fs_info()?;
+        flush_cache(self.partition.device_id)?;
 
         Ok(())
     }

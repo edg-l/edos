@@ -53,7 +53,7 @@ pub fn read_sectors(device_id: u64, lba: u64, sectors: u16) -> Result<Vec<u8>, A
 
     let response = send_request(
         AhciRequest::DeviceRequest {
-            device_id: device_id,
+            device_id,
             command: Arc::new(command),
         },
         Duration::from_secs(10),

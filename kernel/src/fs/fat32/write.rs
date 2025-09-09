@@ -18,8 +18,13 @@ impl Fat32fs {
     /// Overwrite file contents starting at offset 0.
     /// Extends the cluster chain if `buf` is larger than the current file.
     /// Does not shrink or update the on-disk directory entry size yet.
-    pub fn write_file(&mut self, entry: &DirectoryEntry, buf: &[u8]) -> Result<usize, Error> {
-        self.write_file_offset(entry, 0, buf)
+    pub fn write_file(
+        &mut self,
+        entry: &mut DirectoryEntry,
+        entry_pos: Option<(u32, usize)>,
+        buf: &[u8],
+    ) -> Result<usize, Error> {
+        self.write_file_offset(entry, entry_pos, 0, buf)
     }
 
     /// Write `buf` at byte `offset` into `entry`.
@@ -27,10 +32,14 @@ impl Fat32fs {
     /// Returns bytes written.
     pub fn write_file_offset(
         &mut self,
-        entry: &DirectoryEntry,
-        mut offset: u64,
+        entry: &mut crate::fs::fat32::structures::DirectoryEntry,
+        entry_pos: Option<(u32, usize)>, // needed only if entry.first_cluster()<2
+        offset: u64,
         buf: &[u8],
     ) -> Result<usize, Error> {
+        use crate::drivers::ahci::api::{read_sectors, write_sectors};
+        use crate::fs::fat32::structures::DirectoryEntry;
+
         if entry.is_directory() {
             return Err(Error::NotAFile);
         }
@@ -38,45 +47,88 @@ impl Fat32fs {
             return Ok(0);
         }
 
-        // Geometry
-        let bytes_per_sector = self.boot_info.bytes_per_sector as usize;
-        let sectors_per_cluster = self.boot_info.sectors_per_cluster as usize;
-        let bytes_per_cluster = bytes_per_sector * sectors_per_cluster;
+        let bps = self.boot_info.bytes_per_sector as usize;
+        let spc = self.boot_info.sectors_per_cluster as usize;
+        let bpc = bps * spc;
+        let spc_u16 = spc as u16;
 
-        // Navigate to the cluster that contains `offset`
-        let mut cluster = entry.first_cluster();
-
-        if cluster < 2 {
-            println!("Error: Called write_file_offset on a file without preallocated clusters");
-            return Err(Error::IoError);
-        }
-
-        let mut inner_off = (offset % bytes_per_cluster as u64) as usize;
-        let mut clusters_to_skip = (offset / bytes_per_cluster as u64) as usize;
+        let target_idx = (offset as usize) / bpc;
+        let mut head = entry.first_cluster();
         let mut fresh_current = false;
-        let target_idx = (offset as usize) / bytes_per_cluster;
-        let mut fresh_current = target_idx >= cluster as usize;
-        while clusters_to_skip > 0 {
-            match self.get_fat_entry(cluster)? {
-                Some(next) => {
-                    cluster = next;
-                    clusters_to_skip -= 1;
-                }
-                None => {
-                    // Need to allocate clusters to reach the desired offset
-                    while clusters_to_skip > 0 {
-                        let newc = self.alloc_cluster()?;
-                        self.link_fat_entry(cluster, newc)?;
-                        cluster = newc;
-                        clusters_to_skip -= 1;
-                        if clusters_to_skip == 0 {
-                            fresh_current = true; // the cluster we will write into is new
-                        }
+
+        // Ensure a chain exists up to target_idx
+        if head < 2 {
+            // Need head cluster; must have position to patch on-disk entry.
+            let (dir_cluster, entry_off) = entry_pos.ok_or(Error::IoError)?;
+            head = self.alloc_cluster()?;
+            let mut last = head;
+            for _ in 0..target_idx {
+                let nc = self.alloc_cluster()?;
+                self.link_fat_entry(last, nc)?;
+                last = nc;
+            }
+
+            // Patch on-disk entry with new head
+            let base_lba = self.cluster_to_lba(dir_cluster);
+            let mut dirbuf = read_sectors(self.partition.device_id, base_lba, spc_u16)?;
+            if entry_off + 32 > dirbuf.len() {
+                return Err(Error::IoError);
+            }
+            let mut de: DirectoryEntry = *bytemuck::from_bytes(&dirbuf[entry_off..entry_off + 32]);
+            de.first_cluster_high = ((head >> 16) & 0xFFFF) as u16;
+            de.first_cluster_low = (head & 0xFFFF) as u16;
+            let bytes: [u8; 32] = bytemuck::cast(de);
+            dirbuf[entry_off..entry_off + 32].copy_from_slice(&bytes);
+            write_sectors(self.partition.device_id, base_lba, dirbuf, spc_u16)?;
+
+            // Update in-memory copy
+            entry.first_cluster_high = ((head >> 16) & 0xFFFF) as u16;
+            entry.first_cluster_low = (head & 0xFFFF) as u16;
+
+            fresh_current = true; // first target cluster is new if target_idx==0; handled again below
+        } else {
+            // Walk/extend chain up to target_idx
+            let mut idx = 0usize;
+            let mut cur = head;
+            let mut last = head;
+            while idx < target_idx {
+                match self.get_fat_entry(cur)? {
+                    Some(n) => {
+                        last = n;
+                        cur = n;
+                        idx += 1;
                     }
-                    break;
+                    None => {
+                        let nc = self.alloc_cluster()?;
+                        self.link_fat_entry(last, nc)?;
+                        last = nc;
+                        cur = nc;
+                        idx += 1;
+                        if idx == target_idx {
+                            fresh_current = true;
+                        } // target cluster newly allocated
+                    }
                 }
             }
+            if !fresh_current {
+                // Infer freshness from old size if no allocation happened above
+                let old_clusters = if entry.file_size == 0 {
+                    0
+                } else {
+                    (entry.file_size as usize).div_ceil(bpc)
+                };
+                fresh_current = target_idx >= old_clusters;
+            }
         }
+
+        // Position at target cluster
+        let mut cluster = head;
+        let mut skip = target_idx;
+        while skip > 0 {
+            cluster = self.get_fat_entry(cluster)?.ok_or(Error::IoError)?;
+            skip -= 1;
+        }
+        let mut inner_off = (offset as usize) % bpc;
 
         // Write loop
         let mut wrote = 0usize;
@@ -84,55 +136,50 @@ impl Fat32fs {
         let mut buf_off = 0usize;
 
         loop {
-            // Read existing cluster to preserve unaffected bytes
             let lba = self.cluster_to_lba(cluster);
 
-            // Ensure current cluster exists
-            // For partial writes, do read-modify-write of the cluster
-            // Build a cluster-sized scratch buffer
+            // Skip read for freshly allocated clusters
             let mut scratch = if fresh_current {
-                alloc::vec![0; bytes_per_cluster]
+                alloc::vec![0u8; bpc]
             } else {
-                read_sectors(self.partition.device_id, lba, sectors_per_cluster as u16)?
+                let v = read_sectors(self.partition.device_id, lba, spc_u16)?;
+                if v.len() != bpc {
+                    return Err(Error::IoError);
+                }
+                v
             };
 
-            let space = bytes_per_cluster - inner_off;
+            let space = bpc - inner_off;
             let take = space.min(remaining);
-
-            // Copy user data into scratch at inner_off
             scratch[inner_off..inner_off + take].copy_from_slice(&buf[buf_off..buf_off + take]);
 
-            // Write cluster back
-            write_sectors(
-                self.partition.device_id,
-                lba,
-                scratch,
-                sectors_per_cluster as u16,
-            )?;
+            write_sectors(self.partition.device_id, lba, scratch, spc_u16)?;
 
             wrote += take;
             remaining -= take;
             buf_off += take;
             inner_off = 0;
+            fresh_current = false; // only the first of the pair can be fresh here
 
             if remaining == 0 {
                 break;
             }
 
-            // Advance to next cluster, allocate if needed
+            // Advance to next cluster, allocate if at EOF
             match self.get_fat_entry(cluster)? {
-                Some(next) => cluster = next,
+                Some(next) => {
+                    cluster = next;
+                    // fresh_current remains false unless we allocate
+                }
                 None => {
-                    let newc = self.alloc_cluster()?;
-                    self.link_fat_entry(cluster, newc)?;
-                    cluster = newc;
-                    fresh_current = true;
+                    let nc = self.alloc_cluster()?;
+                    self.link_fat_entry(cluster, nc)?;
+                    cluster = nc;
+                    fresh_current = true; // next iteration writes a new cluster → skip read
                 }
             }
         }
 
-        // Note: updating the directory entry's file_size and timestamps
-        // should be done by the caller or via a dedicated metadata updater.
         Ok(wrote)
     }
 
@@ -185,15 +232,6 @@ impl Fat32fs {
                         self.partition.device_id,
                         self.first_fat_lba() + sector_index,
                         sec.clone(),
-                        1,
-                    )
-                    .ok()?;
-
-                    // Mirror to backup FAT
-                    crate::drivers::ahci::api::write_sectors(
-                        self.partition.device_id,
-                        self.backup_fat_lba() + sector_index,
-                        sec,
                         1,
                     )
                     .ok()?;
@@ -259,15 +297,6 @@ impl Fat32fs {
             sec.clone(),
             1,
         )?;
-
-        // Mirror to backup
-        crate::drivers::ahci::api::write_sectors(
-            self.partition.device_id,
-            self.backup_fat_lba() + sector_index,
-            sec,
-            1,
-        )?;
-
         Ok(())
     }
 
@@ -445,5 +474,29 @@ impl Fat32fs {
         }
 
         Ok(freed)
+    }
+
+    /// Copy the entire primary FAT to the backup FAT.
+    pub fn mirror_primary_fat_to_backup(&self) -> Result<(), Error> {
+        let dev = self.partition.device_id;
+        let total: u64 = self.boot_info.fat_size_32 as u64; // sectors in one FAT
+        let mut src_lba = self.first_fat_lba();
+        let mut dst_lba = self.backup_fat_lba();
+
+        // Copy in chunks to avoid large allocations
+        let chunk: u16 = 64; // sectors per transfer
+        let mut remaining = total;
+
+        while remaining > 0 {
+            let take = core::cmp::min(remaining, chunk as u64) as u16;
+            let buf = read_sectors(dev, src_lba, take)?;
+            write_sectors(dev, dst_lba, buf, take)?;
+
+            src_lba += take as u64;
+            dst_lba += take as u64;
+            remaining -= take as u64;
+        }
+
+        Ok(())
     }
 }
