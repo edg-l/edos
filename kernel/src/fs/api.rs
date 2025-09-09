@@ -60,7 +60,7 @@ pub extern "C" fn fs_main_thread() -> ! {
 extern "C" fn fs32_partition_thread(partition: *mut Partition) -> ! {
     let partition = unsafe { Box::from_raw(partition) };
 
-    println!("Partition: {:#?}", partition);
+    println!("Partition: {}({})", partition.index, partition.name);
 
     let Ok(fs) = Fat32fs::new((*partition).clone()) else {
         println!("Failed to create fat32");
@@ -69,6 +69,10 @@ extern "C" fn fs32_partition_thread(partition: *mut Partition) -> ! {
 
     let bytes = fs.boot_info.bytes_per_sector;
     println!("FAT32 bytes per sector: {}", bytes);
+    println!(
+        "FAT32 sectors per cluster: {}",
+        fs.boot_info.sectors_per_cluster
+    );
 
     let entries = fs.get_dir_entries(fs.boot_info.root_cluster).unwrap();
 
@@ -92,8 +96,6 @@ extern "C" fn fs32_partition_thread(partition: *mut Partition) -> ! {
             }
         }
     }
-
-    println!("{entries:#?}");
 
     loop {
         sched().thread_park();

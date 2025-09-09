@@ -293,9 +293,22 @@ impl AhciController {
 
             // Wait a bit for device to spin up
             let start = Instant::now();
-            while start.elapsed().as_millis() < 400 {
-                // 1 second spin-up time
-                sched().thread_yield();
+
+            loop {
+                // Check SSTS again after spin-up
+                let ssts = ptr::read_volatile(&raw const (*port_ptr).ssts);
+                let device_detection = ssts & 0xF;
+                let interface_power = (ssts >> 8) & 0xF;
+                if device_detection != 3 || interface_power != 1 {
+                    if start.elapsed().as_millis() > 400 {
+                        println!("Port {}: Device not ready after spin-up", port_idx);
+                        return Err(AhciError::InvalidDevice);
+                    } else {
+                        sched().thread_yield();
+                    }
+                } else {
+                    break;
+                }
             }
 
             // Check SSTS again after spin-up
@@ -334,7 +347,7 @@ impl AhciController {
 
             // Wait a bit more for device to fully initialize and register FIS
             let start = Instant::now();
-            while start.elapsed().as_millis() < 100 {
+            while start.elapsed().as_millis() < 20 {
                 sched().thread_yield();
             }
         }
