@@ -20,7 +20,7 @@ pub extern "C" fn fs_main_thread() -> ! {
     for device in &devices {
         match parse_gpt(device.id) {
             Ok(found_partitions) => {
-                print_partitions(&partitions);
+                print_partitions(&found_partitions);
                 partitions.extend(found_partitions);
             }
             Err(err) => println!("Error parsing GPT: {err}"),

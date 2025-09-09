@@ -5,6 +5,7 @@ use alloc::{format, string::String, vec::Vec};
 use elibc::{
     KeyEvent, get_raw_input,
     graphics::{Color, RasterHeight, Screen, TextMetrics, TextStyle},
+    io::get_kernel_logs,
     println,
 };
 
@@ -455,6 +456,14 @@ pub extern "C" fn main() -> i32 {
     // Main terminal loop
     loop {
         // Get raw input with a small timeout to avoid blocking indefinitely
+
+        let logs = get_kernel_logs();
+
+        if !logs.is_empty() {
+            for log in logs {
+                terminal.print_text(&log);
+            }
+        }
 
         get_raw_input(10, &mut key_buffer, 16);
 

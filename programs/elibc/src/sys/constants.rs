@@ -12,6 +12,7 @@ pub const SYS_RENDER: u64 = 101;
 pub const SYS_SCREEN_INFO: u64 = 102;
 pub const SYS_DRAW: u64 = 103;
 pub const SYS_RAW_INPUT: u64 = 200;
+pub const SYS_KERNEL_LOGS: u64 = 201;
 
 // Memory protection flags
 pub const PROT_READ: u32 = 0x1;

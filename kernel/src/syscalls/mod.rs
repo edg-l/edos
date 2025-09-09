@@ -1,5 +1,6 @@
 use core::arch::{asm, naked_asm};
 
+use alloc::vec::Vec;
 use x86_64::{
     VirtAddr,
     instructions::interrupts::enable_and_hlt,
@@ -14,6 +15,7 @@ use crate::{
     gdt::GDT,
     graphics::api::ScreenInfo,
     println,
+    serial::SERIAL_SUBSCRIBER,
     syscalls::{
         graphics::DrawRequestInput,
         io::{sys_close, sys_pipe, sys_read, sys_write},
@@ -197,6 +199,7 @@ const SYS_RENDER: u64 = 101;
 const SYS_SCREEN_INFO: u64 = 102;
 const SYS_DRAW: u64 = 103;
 const SYS_RAW_INPUT: u64 = 200;
+const SYS_KERNEL_LOGS: u64 = 201;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -223,6 +226,11 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let buffer_ptr = ctx.rsi as *mut u32;
             let count = ctx.rdx as usize;
             ctx.rax = sys_keyboard_raw(timeout, buffer_ptr, count) as u64;
+        }
+        SYS_KERNEL_LOGS => {
+            let buffer_ptr = ctx.rdi as *mut u8;
+            let count = ctx.rsi as usize;
+            ctx.rax = sys_kernel_log(buffer_ptr, count) as u64;
         }
         SYS_PIPE => {
             let pipe_fds = ctx.rdi as *mut [u64; 2];
@@ -297,4 +305,35 @@ fn sys_getpid() -> u64 {
     let sched = sched();
     let current_id = sched.current_id();
     current_id.id
+}
+
+pub fn sys_kernel_log(log_buffer: *mut u8, size: usize) -> i64 {
+    let thread = sched().current_thread_mut();
+    thread.errno = Errno::Clear;
+
+    if log_buffer.is_null() {
+        thread.errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let mut buf = Vec::with_capacity(size);
+
+    x86_64::instructions::interrupts::enable();
+
+    let rx = SERIAL_SUBSCRIBER.subscribe_or_get();
+
+    // Require a 128 byte space.
+    while buf.len() + 128 + 1 < size
+        && let Some(log) = rx.try_recv()
+    {
+        let bytes = log.bytes();
+        if buf.len() + bytes.len() + 1 < size {
+            buf.extend(bytes);
+            buf.push(b'\0');
+        }
+    }
+
+    unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), log_buffer, buf.len()) };
+
+    buf.len() as i64
 }
