@@ -4,6 +4,8 @@ use alloc::{
 };
 use bytemuck::{NoUninit, Pod, Zeroable};
 
+use crate::fs::{File, FileAttrs, FileKind, FileTime};
+
 /// FAT32 Boot Sector (exactly 512 bytes).
 /// This is the on-disk BIOS Parameter Block (BPB) + Extended BPB + boot code.
 #[repr(C, packed)]
@@ -255,28 +257,28 @@ impl DirectoryEntry {
         ((self.first_cluster_high as u32) << 16) | (self.first_cluster_low as u32)
     }
 
-    /// Check if this is a directory
+    #[inline(always)]
     pub fn is_directory(&self) -> bool {
-        self.attributes & ATTR_DIRECTORY != 0
+        self.attributes & 0x10 != 0
     }
-
-    /// Check if this is a long filename entry
-    pub fn is_long_name(&self) -> bool {
-        self.attributes == ATTR_LONG_NAME
-    }
-
-    /// Check if entry is deleted
-    pub fn is_deleted(&self) -> bool {
-        self.name[0] == 0xE5
-    }
-
+    #[inline(always)]
     pub fn is_hidden(&self) -> bool {
         self.attributes & 0x02 != 0
     }
-
-    /// Check if entry is end of directory
-    pub fn is_end(&self) -> bool {
-        self.name[0] == 0x00
+    #[inline(always)]
+    pub fn is_system(&self) -> bool {
+        self.attributes & 0x04 != 0
+    }
+    pub fn is_volume_label(&self) -> bool {
+        self.attributes & 0x08 != 0
+    }
+    #[inline(always)]
+    pub fn is_readonly(&self) -> bool {
+        self.attributes & 0x01 != 0
+    }
+    #[inline(always)]
+    pub fn is_archive(&self) -> bool {
+        self.attributes & 0x20 != 0
     }
 
     /// Convert string to FAT32 8.3 name format
@@ -444,5 +446,46 @@ impl DirectoryEntry {
                         | '&'
                 )
         })
+    }
+}
+
+impl From<DirectoryEntry> for File {
+    fn from(de: DirectoryEntry) -> Self {
+        let name = de.fat_name_to_string();
+
+        let kind = if de.is_directory() {
+            FileKind::Directory
+        } else {
+            FileKind::File
+        };
+
+        let attrs = FileAttrs {
+            readonly: de.is_readonly(),
+            hidden: de.is_hidden(),
+            system: de.is_system(),
+            archive: de.is_archive(),
+        };
+
+        File {
+            name,
+            kind,
+            size: de.file_size as u64,
+            attrs,
+            created: Some(FileTime {
+                date: de.creation_date,
+                time: de.creation_time,
+                tenth: de.creation_time_tenth,
+            }),
+            accessed: Some(FileTime {
+                date: de.last_access_date,
+                time: 0,
+                tenth: 0,
+            }),
+            modified: Some(FileTime {
+                date: de.write_date,
+                time: de.write_time,
+                tenth: 0,
+            }),
+        }
     }
 }

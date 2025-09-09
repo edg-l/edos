@@ -6,8 +6,10 @@ use x86_64::instructions::hlt;
 use crate::{
     drivers::ahci::api::list_devices,
     fs::{
+        FileSystem,
         fat32::Fat32fs,
         gpt::{Partition, parse_gpt, print_partitions},
+        path::Path,
     },
     println,
     thread::{
@@ -62,7 +64,7 @@ extern "C" fn fs32_partition_thread(partition: *mut Partition) -> ! {
 
     println!("Partition: {}({})", partition.index, partition.name);
 
-    let Ok(fs) = Fat32fs::new((*partition).clone()) else {
+    let Ok(mut fs) = Fat32fs::new((*partition).clone()) else {
         println!("Failed to create fat32");
         kthread_exit(-1)
     };
@@ -95,6 +97,17 @@ extern "C" fn fs32_partition_thread(partition: *mut Partition) -> ! {
                 println!("Content:\n{x:?}");
             }
         }
+    }
+
+    println!("Using the api");
+
+    let fs = (&mut fs) as &mut dyn FileSystem;
+
+    let files = fs.list_files(Path::parse_str("/").unwrap()).unwrap();
+
+    for file in files {
+        println!("Name: {}", file.name);
+        println!("Created: {:?}", file.created.map(|x| x.to_datetime()));
     }
 
     loop {

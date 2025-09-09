@@ -1,9 +1,10 @@
+use alloc::vec::Vec;
 use bytemuck::cast_ref;
 
 use crate::{
     drivers::ahci::{api::read_sectors, structures::DeviceIdentifyInfo},
     fs::{
-        Error, FileSystem,
+        Error, File, FileSystem,
         fat32::structures::{Fat32BootSector, FsInfo},
         gpt::Partition,
     },
@@ -62,8 +63,27 @@ impl FileSystem for Fat32fs {
     fn list_files(
         &self,
         path: super::path::Path,
-    ) -> Result<alloc::vec::Vec<super::FileInfo>, super::Error> {
-        todo!()
+    ) -> Result<alloc::vec::Vec<super::File>, super::Error> {
+        let path = path.normalize();
+
+        let entries;
+        if path.is_root() {
+            entries = self.get_dir_entries(self.boot_info.root_cluster)?;
+        } else if let Some(entry) = self.find_dir_entry(&path)? {
+            if !entry.is_directory() {
+                return Err(Error::NotADir);
+            }
+            entries = self.get_dir_entries(entry.first_cluster())?;
+        } else {
+            return Err(Error::FileNotFound);
+        }
+
+        let mut files = Vec::new();
+        for entry in entries {
+            files.push(File::from(entry));
+        }
+
+        Ok(files)
     }
 
     fn read_bytes(
@@ -72,7 +92,11 @@ impl FileSystem for Fat32fs {
         offset: usize,
         count: usize,
     ) -> Result<alloc::vec::Vec<u8>, super::Error> {
-        todo!()
+        if let Some(entry) = self.find_dir_entry(&path)? {
+            self.read_file_offset(&entry, offset, count)
+        } else {
+            Err(Error::FileNotFound)
+        }
     }
 
     fn write_bytes(
@@ -100,7 +124,11 @@ impl FileSystem for Fat32fs {
         todo!()
     }
 
-    fn file_info(&self, path: super::path::Path) -> Result<super::FileInfo, super::Error> {
-        todo!()
+    fn file_info(&self, path: super::path::Path) -> Result<super::File, super::Error> {
+        if let Some(entry) = self.find_dir_entry(&path)? {
+            Ok(entry.into())
+        } else {
+            Err(Error::FileNotFound)
+        }
     }
 }

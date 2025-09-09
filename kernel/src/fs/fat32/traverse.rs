@@ -14,8 +14,68 @@ use crate::{
 };
 
 impl Fat32fs {
-    pub fn find_dir_entry(&self, path: &Path) {
-        let root = self.boot_info.root_cluster;
+    /// Find a directory entry by absolute path.
+    /// Returns `Ok(None)` if not found. Root ("/") has no dir entry → returns `Ok(None)`.
+    pub fn find_dir_entry(&self, path: &Path) -> Result<Option<DirectoryEntry>, Error> {
+        let path = path.normalize();
+
+        // Start at FAT32 root directory cluster
+        let mut dir_cluster = self.boot_info.root_cluster;
+
+        // Build clean component list: absolute, no empty parts, no "/"
+        let comps_src = path.components();
+        let mut comps: Vec<&str> = Vec::new();
+        for c in comps_src {
+            if c.is_empty() || c == "/" {
+                continue;
+            }
+            comps.push(c.as_str());
+        }
+
+        // Edge: path is "/" → no dir entry exists for root
+        if comps.is_empty() {
+            return Ok(None);
+        }
+
+        // Walk components
+        let last_idx = comps.len() - 1;
+        let mut found_entry: Option<DirectoryEntry> = None;
+
+        for (i, name) in comps.iter().enumerate() {
+            // List current directory
+            let entries = self.get_dir_entries(dir_cluster)?;
+
+            // Linear search by short name (8.3). Case-insensitive per FAT.
+            let mut hit: Option<DirectoryEntry> = None;
+            for e in entries {
+                // Skip LFN entries if your DirectoryEntry represents only short entries.
+                // If your DirectoryEntry includes LFNs, add handling here.
+                let cand = e.fat_name_to_string(); // e.g., "FOO.TXT"
+                if cand.eq_ignore_ascii_case(name) {
+                    hit = Some(e);
+                    break;
+                }
+            }
+
+            // Not found in this directory
+            match hit {
+                None => return Ok(None),
+                Some(e) => {
+                    let is_last = i == last_idx;
+                    if is_last {
+                        found_entry = Some(e);
+                    } else {
+                        // Must descend into a directory
+                        if !e.is_directory() {
+                            return Ok(None);
+                        }
+                        dir_cluster = e.first_cluster();
+                    }
+                }
+            }
+        }
+
+        Ok(found_entry)
     }
 
     pub fn get_dir_entries(&self, start_cluster: u32) -> Result<Vec<DirectoryEntry>, Error> {
@@ -49,7 +109,10 @@ impl Fat32fs {
                 }
 
                 let entry: DirectoryEntry = *bytemuck::from_bytes(entry_slice);
-                entries.push(entry);
+
+                if !entry.is_volume_label() {
+                    entries.push(entry);
+                }
 
                 offset += 32;
             }
@@ -58,8 +121,6 @@ impl Fat32fs {
                 cluster = next;
             }
         }
-
-        todo!()
     }
 
     pub fn get_fat_entry(&self, cluster_number: u32) -> Result<Option<u32>, Error> {
