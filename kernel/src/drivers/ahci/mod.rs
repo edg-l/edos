@@ -10,6 +10,7 @@ use alloc::{
     vec::{self, Vec},
 };
 use spin::{Mutex, Once};
+use thiserror::Error;
 use x86_64::instructions::{hlt, interrupts::without_interrupts};
 
 use crate::{
@@ -40,13 +41,19 @@ pub mod fis;
 pub mod port;
 pub mod structures;
 
-#[derive(Debug)]
+#[derive(Debug, Error, Clone, Copy)]
 pub enum AhciError {
+    #[error("invalid device")]
     InvalidDevice,
+    #[error("dma allocation failed")]
     DmaAllocationFailed,
+    #[error("port not ready")]
     PortNotReady,
+    #[error("command timeout")]
     CommandTimeout,
+    #[error("i/o error")]
     IoError,
+    #[error("invalid command slot")]
     InvalidSlot,
 }
 
@@ -80,6 +87,7 @@ pub(super) enum AhciRequest {
 
 #[derive(Debug, Clone)]
 pub(super) enum Command {
+    // todo: maybe accept a buffer ptr to fill instead of returning a vec
     Read {
         lba: u64,
         sectors: u16,
@@ -343,6 +351,6 @@ extern "C" fn port_worker_thread() -> ! {
             }
         }
 
-        sched().thread_wait_timeout(Duration::from_secs(1));
+        sched().thread_park();
     }
 }

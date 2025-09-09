@@ -5,9 +5,15 @@ use x86_64::instructions::hlt;
 
 use crate::{
     drivers::ahci::api::list_devices,
-    fs::gpt::{ParsedPartition, parse_gpt, print_partitions},
+    fs::{
+        fat32::Fat32fs,
+        gpt::{Partition, parse_gpt, print_partitions},
+    },
     println,
-    thread::util::{queue_spawn_kthread_named, queue_spawn_kthread_named_arg},
+    thread::{
+        scheduler::sched,
+        util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_kthread_named_arg},
+    },
 };
 
 use super::gpt::FilesystemType;
@@ -47,15 +53,49 @@ pub extern "C" fn fs_main_thread() -> ! {
     }
 
     loop {
-        hlt();
+        sched().thread_park();
     }
 }
 
-extern "C" fn fs32_partition_thread(partition: *mut ParsedPartition) -> ! {
+extern "C" fn fs32_partition_thread(partition: *mut Partition) -> ! {
     let partition = unsafe { Box::from_raw(partition) };
 
     println!("Partition: {:#?}", partition);
+
+    let Ok(fs) = Fat32fs::new((*partition).clone()) else {
+        println!("Failed to create fat32");
+        kthread_exit(-1)
+    };
+
+    let bytes = fs.boot_info.bytes_per_sector;
+    println!("FAT32 bytes per sector: {}", bytes);
+
+    let entries = fs.get_dir_entries(fs.boot_info.root_cluster).unwrap();
+
+    println!("Showing root /");
+    for entry in &entries {
+        println!("Name: {}", entry.fat_name_to_string());
+        println!("Is dir: {}", entry.is_directory());
+
+        if entry.is_directory() {
+            let entries = fs.get_dir_entries(entry.first_cluster()).unwrap();
+
+            for entry in &entries {
+                println!("Name: {}", entry.fat_name_to_string());
+                println!("Is dir: {}", entry.is_directory());
+            }
+        } else {
+            let content = fs.read_file(entry).unwrap();
+            let x = core::str::from_utf8(&content);
+            if let Ok(x) = x {
+                println!("Content:\n{x:?}");
+            }
+        }
+    }
+
+    println!("{entries:#?}");
+
     loop {
-        hlt();
+        sched().thread_park();
     }
 }

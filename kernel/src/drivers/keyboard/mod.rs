@@ -1,3 +1,5 @@
+use core::time::Duration;
+
 use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
 use spin::Once;

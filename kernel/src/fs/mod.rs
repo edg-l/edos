@@ -3,7 +3,7 @@
 use alloc::{string::String, vec::Vec};
 use thiserror::Error;
 
-use crate::{fs::path::Path, thread::util::queue_spawn_kthread_named};
+use crate::{drivers::ahci::AhciError, fs::path::Path, thread::util::queue_spawn_kthread_named};
 
 pub mod api;
 pub mod fat32;
@@ -18,8 +18,18 @@ pub fn init() {
 pub enum Error {
     #[error("file not found")]
     FileNotFound,
+    #[error("not a file")]
+    NotAFile,
     #[error("i/o error")]
     IoError,
+    #[error("missing critical sectors, like basic fs info")]
+    MissingCriticalSectors,
+    #[error(transparent)]
+    AhciError(#[from] AhciError),
+    #[error("Invalid filesystem, mismatch in verification.")]
+    InvalidFs,
+    #[error("corrupted filesystem")]
+    Corrupted,
 }
 
 pub trait FileSystem {

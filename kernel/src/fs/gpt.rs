@@ -35,7 +35,7 @@ pub struct GptPartitionEntry {
 }
 
 #[derive(Debug, Clone)]
-pub struct ParsedPartition {
+pub struct Partition {
     pub index: u32,
     pub starting_lba: u64,
     pub ending_lba: u64,
@@ -182,7 +182,7 @@ impl GptPartitionEntry {
 }
 
 /// Parse GPT from a device
-pub fn parse_gpt(device_id: u64) -> Result<Vec<ParsedPartition>, &'static str> {
+pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
     // Read GPT header from LBA 1
     let gpt_data =
         ahci::api::read_sectors(device_id, 1, 1).map_err(|_| "Failed to read GPT header")?;
@@ -228,7 +228,7 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<ParsedPartition>, &'static str> {
         if entry.is_used() {
             let filesystem = detect_filesystem(device_id, entry.starting_lba)?;
 
-            partitions.push(ParsedPartition {
+            partitions.push(Partition {
                 index: i,
                 starting_lba: entry.starting_lba,
                 ending_lba: entry.ending_lba,
@@ -270,7 +270,7 @@ fn detect_filesystem(
 }
 
 /// Pretty print partition information
-pub fn print_partitions(partitions: &[ParsedPartition]) {
+pub fn print_partitions(partitions: &[Partition]) {
     use crate::println;
 
     println!("Found {} partitions:", partitions.len());

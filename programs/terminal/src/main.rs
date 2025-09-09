@@ -278,14 +278,14 @@ impl Terminal {
             if self.cursor_x < self.buffer[self.cursor_y].len() {
                 self.buffer[self.cursor_y].remove(self.cursor_x);
             }
-        } else if self.cursor_y > 0 {
-            // Move to end of previous line and join lines
-            let current_line = self.buffer[self.cursor_y].clone();
-            self.buffer.remove(self.cursor_y);
-            self.cursor_y -= 1;
-            self.cursor_x = self.buffer[self.cursor_y].len();
-            self.buffer[self.cursor_y].push_str(&current_line);
-        }
+        } /*else if self.cursor_y > 0 {
+        // Move to end of previous line and join lines
+        let current_line = self.buffer[self.cursor_y].clone();
+        self.buffer.remove(self.cursor_y);
+        self.cursor_y -= 1;
+        self.cursor_x = self.buffer[self.cursor_y].len();
+        self.buffer[self.cursor_y].push_str(&current_line);
+        }*/
 
         // Mark terminal as dirty since content changed
         self.mark_dirty();
@@ -453,6 +453,8 @@ pub extern "C" fn main() -> i32 {
 
     let mut key_buffer = Vec::new();
 
+    let mut count = 0;
+
     // Main terminal loop
     loop {
         // Get raw input with a small timeout to avoid blocking indefinitely
@@ -465,7 +467,8 @@ pub extern "C" fn main() -> i32 {
             }
         }
 
-        get_raw_input(10, &mut key_buffer, 16);
+        get_raw_input(20, &mut key_buffer, 16);
+        count += 1;
 
         if !key_buffer.is_empty() {
             // Process the key event
