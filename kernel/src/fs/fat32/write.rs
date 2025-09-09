@@ -45,6 +45,12 @@ impl Fat32fs {
 
         // Navigate to the cluster that contains `offset`
         let mut cluster = entry.first_cluster();
+
+        if cluster < 2 {
+            println!("Error: Called write_file_offset on a file without preallocated clusters");
+            return Err(Error::IoError);
+        }
+
         let mut inner_off = (offset % bytes_per_cluster as u64) as usize;
         let mut clusters_to_skip = (offset / bytes_per_cluster as u64) as usize;
         while clusters_to_skip > 0 {
