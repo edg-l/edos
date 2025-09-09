@@ -53,6 +53,9 @@ impl Fat32fs {
 
         let mut inner_off = (offset % bytes_per_cluster as u64) as usize;
         let mut clusters_to_skip = (offset / bytes_per_cluster as u64) as usize;
+        let mut fresh_current = false;
+        let target_idx = (offset as usize) / bytes_per_cluster;
+        let mut fresh_current = target_idx >= cluster as usize;
         while clusters_to_skip > 0 {
             match self.get_fat_entry(cluster)? {
                 Some(next) => {
@@ -66,6 +69,9 @@ impl Fat32fs {
                         self.link_fat_entry(cluster, newc)?;
                         cluster = newc;
                         clusters_to_skip -= 1;
+                        if clusters_to_skip == 0 {
+                            fresh_current = true; // the cluster we will write into is new
+                        }
                     }
                     break;
                 }
@@ -78,14 +84,17 @@ impl Fat32fs {
         let mut buf_off = 0usize;
 
         loop {
+            // Read existing cluster to preserve unaffected bytes
+            let lba = self.cluster_to_lba(cluster);
+
             // Ensure current cluster exists
             // For partial writes, do read-modify-write of the cluster
             // Build a cluster-sized scratch buffer
-            let mut scratch = alloc::vec![0; bytes_per_cluster];
-
-            // Read existing cluster to preserve unaffected bytes
-            let lba = self.cluster_to_lba(cluster);
-            read_sectors(self.partition.device_id, lba, sectors_per_cluster as u16)?;
+            let mut scratch = if fresh_current {
+                alloc::vec![0; bytes_per_cluster]
+            } else {
+                read_sectors(self.partition.device_id, lba, sectors_per_cluster as u16)?
+            };
 
             let space = bytes_per_cluster - inner_off;
             let take = space.min(remaining);
@@ -117,6 +126,7 @@ impl Fat32fs {
                     let newc = self.alloc_cluster()?;
                     self.link_fat_entry(cluster, newc)?;
                     cluster = newc;
+                    fresh_current = true;
                 }
             }
         }

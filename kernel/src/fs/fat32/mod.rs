@@ -148,13 +148,10 @@ impl FileSystem for Fat32fs {
             // Update local copy
             entry.first_cluster_high = ((head >> 16) & 0xFFFF) as u16;
             entry.first_cluster_low = (head & 0xFFFF) as u16;
-
-            // Optional: persist FSInfo now
-            let _ = self.save_fs_info();
         }
 
         // Write payload
-        let written = self.write_file_offset(&entry, offset as u64, &data)? as u64;
+        let written = self.write_file_offset(&entry, offset as u64, data)? as u64;
 
         // Update size
         let new_size = core::cmp::max(entry.file_size as u64, offset as u64 + written);
