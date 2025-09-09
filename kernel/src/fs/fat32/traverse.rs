@@ -14,68 +14,66 @@ use crate::{
 };
 
 impl Fat32fs {
-    /// Find a directory entry by absolute path.
-    /// Returns `Ok(None)` if not found. Root ("/") has no dir entry → returns `Ok(None)`.
-    pub fn find_dir_entry(&self, path: &Path) -> Result<Option<DirectoryEntry>, Error> {
+    /// Find entry and return (entry, cluster_that_contains_it, byte_offset_within_cluster).
+    pub fn find_dir_entry(
+        &self,
+        path: &crate::fs::path::Path,
+    ) -> Result<Option<(DirectoryEntry, u32, usize)>, Error> {
+        // Resolve parent directory cluster chain
         let path = path.normalize();
-
-        // Start at FAT32 root directory cluster
-        let mut dir_cluster = self.boot_info.root_cluster;
-
-        // Build clean component list: absolute, no empty parts, no "/"
-        let comps_src = path.components();
-        let mut comps: Vec<&str> = Vec::new();
-        for c in comps_src {
-            if c.is_empty() || c == "/" {
-                continue;
-            }
-            comps.push(c.as_str());
-        }
-
-        // Edge: path is "/" → no dir entry exists for root
+        let comps = path.components();
         if comps.is_empty() {
-            return Ok(None);
+            return Ok(None); // root has no entry
         }
+        let (parent, name) = (&comps[..comps.len() - 1], &comps[comps.len() - 1]);
 
-        // Walk components
-        let last_idx = comps.len() - 1;
-        let mut found_entry: Option<DirectoryEntry> = None;
-
-        for (i, name) in comps.iter().enumerate() {
-            // List current directory
+        let mut dir_cluster = self.boot_info.root_cluster;
+        for comp in parent {
             let entries = self.get_dir_entries(dir_cluster)?;
-
-            // Linear search by short name (8.3). Case-insensitive per FAT.
-            let mut hit: Option<DirectoryEntry> = None;
+            let mut hit = None;
             for e in entries {
-                // Skip LFN entries if your DirectoryEntry represents only short entries.
-                // If your DirectoryEntry includes LFNs, add handling here.
-                let cand = e.fat_name_to_string(); // e.g., "FOO.TXT"
-                if cand.eq_ignore_ascii_case(name) {
+                if e.is_directory() && e.fat_name_to_string().eq_ignore_ascii_case(comp) {
                     hit = Some(e);
                     break;
                 }
             }
-
-            // Not found in this directory
-            match hit {
+            let de = match hit {
+                Some(x) => x,
                 None => return Ok(None),
-                Some(e) => {
-                    let is_last = i == last_idx;
-                    if is_last {
-                        found_entry = Some(e);
-                    } else {
-                        // Must descend into a directory
-                        if !e.is_directory() {
-                            return Ok(None);
-                        }
-                        dir_cluster = e.first_cluster();
-                    }
-                }
-            }
+            };
+            dir_cluster = de.first_cluster();
         }
 
-        Ok(found_entry)
+        // Scan clusters and return exact position for `name`
+        let spc = self.boot_info.sectors_per_cluster as u16;
+        let bps = self.boot_info.bytes_per_sector as usize;
+        let cluster_bytes = bps * spc as usize;
+        let mut cur = dir_cluster;
+
+        loop {
+            let base_lba = self.cluster_to_lba(cur);
+            let buf = read_sectors(self.partition.device_id, base_lba, spc)?;
+            let mut off = 0usize;
+
+            while off + 32 <= buf.len() {
+                let first = buf[off];
+                if first == 0x00 {
+                    return Ok(None);
+                }
+                if first != 0xE5 {
+                    let de: DirectoryEntry = *bytemuck::from_bytes(&buf[off..off + 32]);
+                    if de.fat_name_to_string().eq_ignore_ascii_case(name) {
+                        return Ok(Some((de, cur, off)));
+                    }
+                }
+                off += 32;
+            }
+
+            match self.get_fat_entry(cur)? {
+                Some(next) => cur = next,
+                None => return Ok(None),
+            }
+        }
     }
 
     pub fn get_dir_entries(&self, start_cluster: u32) -> Result<Vec<DirectoryEntry>, Error> {
@@ -161,19 +159,19 @@ impl Fat32fs {
     }
 
     #[inline(always)]
-    fn first_fat_lba(&self) -> u64 {
+    pub fn first_fat_lba(&self) -> u64 {
         self.partition.starting_lba + self.boot_info.reserved_sector_count as u64
     }
 
     #[inline(always)]
-    fn backup_fat_lba(&self) -> u64 {
+    pub fn backup_fat_lba(&self) -> u64 {
         self.partition.starting_lba
             + self.boot_info.reserved_sector_count as u64
             + self.boot_info.fat_size_32 as u64
     }
 
     #[inline(always)]
-    fn first_data_lba(&self) -> u64 {
+    pub fn first_data_lba(&self) -> u64 {
         self.partition.starting_lba
             + self.boot_info.reserved_sector_count as u64
             + (self.boot_info.num_fats as u64 * self.boot_info.fat_size_32 as u64)

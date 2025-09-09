@@ -2,10 +2,13 @@ use alloc::vec::Vec;
 use bytemuck::cast_ref;
 
 use crate::{
-    drivers::ahci::{api::read_sectors, structures::DeviceIdentifyInfo},
+    drivers::ahci::{
+        api::{read_sectors, write_sectors},
+        structures::DeviceIdentifyInfo,
+    },
     fs::{
         Error, File, FileSystem,
-        fat32::structures::{Fat32BootSector, FsInfo},
+        fat32::structures::{DirectoryEntry, Fat32BootSector, FsInfo},
         gpt::Partition,
     },
     println,
@@ -14,6 +17,7 @@ use crate::{
 pub mod read;
 pub mod structures;
 pub mod traverse;
+pub mod write;
 
 #[derive(Debug)]
 pub struct Fat32fs {
@@ -69,7 +73,7 @@ impl FileSystem for Fat32fs {
         let entries;
         if path.is_root() {
             entries = self.get_dir_entries(self.boot_info.root_cluster)?;
-        } else if let Some(entry) = self.find_dir_entry(&path)? {
+        } else if let Some((entry, _, _)) = self.find_dir_entry(&path)? {
             if !entry.is_directory() {
                 return Err(Error::NotADir);
             }
@@ -92,7 +96,7 @@ impl FileSystem for Fat32fs {
         offset: usize,
         count: usize,
     ) -> Result<alloc::vec::Vec<u8>, super::Error> {
-        if let Some(entry) = self.find_dir_entry(&path)? {
+        if let Some((entry, _, _)) = self.find_dir_entry(&path)? {
             self.read_file_offset(&entry, offset, count)
         } else {
             Err(Error::FileNotFound)
@@ -100,32 +104,49 @@ impl FileSystem for Fat32fs {
     }
 
     fn write_bytes(
-        &self,
+        &mut self,
         path: super::path::Path,
         offset: usize,
         data: alloc::vec::Vec<u8>,
     ) -> Result<u64, super::Error> {
+        // Locate file and write payload
+        let (entry, entry_cluster, entry_off) = match self.find_dir_entry(&path)? {
+            Some((e, c, o)) if !e.is_directory() => (e, c, o),
+            Some(_) => return Err(Error::NotAFile),
+            None => return Err(Error::FileNotFound),
+        };
+
+        let written = self.write_file_offset(&entry, offset as u64, &data)? as u64;
+        let new_size = core::cmp::max(entry.file_size as u64, offset as u64 + written);
+
+        // Patch size and archive bit in-place
+        self.patch_dir_entry_at(entry_cluster, entry_off, |de| {
+            de.file_size = new_size as u32;
+            de.attributes |= 0x20; // ARCHIVE
+            // TODO: set write_time/write_date here if you have a clock
+        })?;
+
+        Ok(written)
+    }
+
+    fn create_file(&mut self, path: super::path::Path) -> Result<(), super::Error> {
         todo!()
     }
 
-    fn create_file(&self, path: super::path::Path) -> Result<(), super::Error> {
+    fn create_dir(&mut self, path: super::path::Path) -> Result<(), super::Error> {
         todo!()
     }
 
-    fn create_dir(&self, path: super::path::Path) -> Result<(), super::Error> {
+    fn remove_dir(&mut self, path: super::path::Path) -> Result<(), super::Error> {
         todo!()
     }
 
-    fn remove_dir(&self, path: super::path::Path) -> Result<(), super::Error> {
-        todo!()
-    }
-
-    fn remove_file(&self, path: super::path::Path) -> Result<(), super::Error> {
+    fn remove_file(&mut self, path: super::path::Path) -> Result<(), super::Error> {
         todo!()
     }
 
     fn file_info(&self, path: super::path::Path) -> Result<super::File, super::Error> {
-        if let Some(entry) = self.find_dir_entry(&path)? {
+        if let Some((entry, _, _)) = self.find_dir_entry(&path)? {
             Ok(entry.into())
         } else {
             Err(Error::FileNotFound)

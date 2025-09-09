@@ -53,7 +53,7 @@ pub fn read_sectors(device_id: u64, lba: u64, sectors: u16) -> Result<Vec<u8>, A
 
     let response = send_request(
         AhciRequest::DeviceRequest {
-            device_id: device_id as usize,
+            device_id: device_id,
             command: Arc::new(command),
         },
         Duration::from_secs(10),
@@ -73,7 +73,7 @@ pub fn read_sectors(device_id: u64, lba: u64, sectors: u16) -> Result<Vec<u8>, A
 /// * `data` - Data to write (must be sectors * 512 bytes)
 /// * `sectors` - Number of sectors to write (each sector is 512 bytes)
 pub fn write_sectors(
-    device_id: usize,
+    device_id: u64,
     lba: u64,
     data: Vec<u8>,
     sectors: u16,
@@ -98,7 +98,7 @@ pub fn write_sectors(
 ///
 /// # Arguments
 /// * `device_id` - The device ID from list_devices()
-pub fn flush_cache(device_id: usize) -> Result<(), AhciError> {
+pub fn flush_cache(device_id: u64) -> Result<(), AhciError> {
     let command = Command::Flush;
 
     let response = send_request(
@@ -122,7 +122,7 @@ pub fn flush_cache(device_id: usize) -> Result<(), AhciError> {
 ///
 /// # Returns
 /// Device identification information including model, serial, etc.
-pub fn identify_device(device_id: usize) -> Result<DeviceIdentifyInfo, AhciError> {
+pub fn identify_device(device_id: u64) -> Result<DeviceIdentifyInfo, AhciError> {
     let command = Command::Identify;
 
     let response = send_request(

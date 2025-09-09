@@ -77,7 +77,7 @@ pub(super) static AHCI_REQUESTS: Once<Mailbox<AhciRequest, AhciResponse>> = Once
 pub(super) enum AhciRequest {
     ListDevices,
     DeviceRequest {
-        device_id: usize,
+        device_id: u64,
         command: Arc<Command>,
     },
     // Used internally
@@ -242,7 +242,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
                     req.answer(AhciResponse::Devices(detected_devices.clone()));
                 }
                 AhciRequest::DeviceRequest { device_id, command } => {
-                    if let Some(mb) = device_mailboxes.get(*device_id) {
+                    if let Some(mb) = device_mailboxes.get(*device_id as usize) {
                         mb.send((command.clone(), req));
                     }
                 }

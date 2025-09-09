@@ -39,12 +39,12 @@ pub trait FileSystem {
 
     fn read_bytes(&self, path: Path, offset: usize, count: usize) -> Result<Vec<u8>, Error>;
 
-    fn write_bytes(&self, path: Path, offset: usize, data: Vec<u8>) -> Result<u64, Error>;
+    fn write_bytes(&mut self, path: Path, offset: usize, data: Vec<u8>) -> Result<u64, Error>;
 
-    fn create_file(&self, path: Path) -> Result<(), Error>;
-    fn create_dir(&self, path: Path) -> Result<(), Error>;
-    fn remove_dir(&self, path: Path) -> Result<(), Error>;
-    fn remove_file(&self, path: Path) -> Result<(), Error>;
+    fn create_file(&mut self, path: Path) -> Result<(), Error>;
+    fn create_dir(&mut self, path: Path) -> Result<(), Error>;
+    fn remove_dir(&mut self, path: Path) -> Result<(), Error>;
+    fn remove_file(&mut self, path: Path) -> Result<(), Error>;
 
     fn file_info(&self, path: Path) -> Result<File, Error>;
 }
