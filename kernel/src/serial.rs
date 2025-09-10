@@ -5,7 +5,10 @@ use spin::{Once, mutex::Mutex};
 use uart_16550::SerialPort;
 use x86_64::instructions::interrupts::without_interrupts;
 
-use crate::{thread::broadcast::Broadcast, timer::uptime_us, util::per_cpu::get_percpu_data};
+use crate::{
+    acpi::current_cpu_index, thread::broadcast::Broadcast, timer::uptime_us,
+    util::per_cpu::get_percpu_data,
+};
 
 static SERIAL_DBG: Once<Mutex<SerialPort>> = Once::new();
 
@@ -42,7 +45,8 @@ pub fn _serial_print(args: fmt::Arguments) {
             && let Some(tid) = sched.current_id_opt()
         {
             let text = format!(
-                "[{secs}.{us:06}] <{}:{}:{}> {args}",
+                "[{secs}.{us:06}] <cpu-{}:{}:{}:{}> {args}",
+                current_cpu_index(),
                 tid.name
                     .as_ref()
                     .map(|x| x.as_str())
@@ -67,7 +71,10 @@ pub fn _serial_print(args: fmt::Arguments) {
                 .get()
                 .unwrap_unchecked()
                 .lock()
-                .write_fmt(format_args!("[{secs}.{us:06}] <kernel> {args}"))
+                .write_fmt(format_args!(
+                    "[{secs}.{us:06}] <cpu-{}:kernel> {args}",
+                    current_cpu_index(),
+                ))
                 .unwrap();
         }
     })

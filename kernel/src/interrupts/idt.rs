@@ -1,4 +1,3 @@
-use spin::Lazy;
 use x86_64::{
     PrivilegeLevel, VirtAddr,
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
@@ -16,8 +15,13 @@ use crate::{
     thread::{interrupt::timer_interrupt_handler, scheduler::sched},
 };
 
-pub static IDT: spin::Lazy<InterruptDescriptorTable> = Lazy::new(|| {
+/// Build an IDT instance for the current CPU.
+///
+/// The descriptor layout is identical across CPUs, but each CPU will load its
+/// own copy to allow future per-CPU customization if desired.
+pub fn build_idt_for_current_cpu() -> InterruptDescriptorTable {
     let mut idt = InterruptDescriptorTable::new();
+
     unsafe {
         idt.double_fault
             .set_handler_fn(double_fault_handler)
@@ -26,6 +30,7 @@ pub static IDT: spin::Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             .set_handler_fn(page_fault_handler)
             .set_stack_index(gdt::PAGE_FAULT_IST_INDEX);
     }
+
     idt.alignment_check.set_handler_fn(alignment_check_handler);
     idt.general_protection_fault
         .set_handler_fn(general_protection_fault_handler);
@@ -57,10 +62,10 @@ pub static IDT: spin::Lazy<InterruptDescriptorTable> = Lazy::new(|| {
         idt[InterruptIndex::Spurious.as_u8()]
             .set_handler_fn(spurious_interrupt_handler)
             .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
-    };
+    }
 
     idt
-});
+}
 
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
