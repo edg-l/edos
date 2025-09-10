@@ -1,20 +1,12 @@
 use alloc::vec::Vec;
 use elf::{ElfBytes, endian::LittleEndian};
 use thiserror::Error;
-use x86_64::{
-    VirtAddr, align_up,
-    registers::control::Cr3,
-    structures::paging::{OffsetPageTable, PageTableFlags},
-};
+use x86_64::{VirtAddr, align_up, structures::paging::PageTableFlags};
 
 use crate::{
-    boot::boot_info,
-    memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
-    print, println,
-    thread::{
-        paging::allocate_process_pml4,
-        user::{MemoryRegion, MemoryRegionType},
-    },
+    memory::mapper::MemoryManager,
+    println,
+    thread::user::{MemoryRegion, MemoryRegionType},
 };
 
 #[derive(Debug, Clone)]

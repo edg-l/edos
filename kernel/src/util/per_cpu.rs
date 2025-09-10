@@ -1,6 +1,6 @@
-use raw_cpuid::CpuId;
 use x86_64::structures::tss::TaskStateSegment;
 
+use crate::acpi;
 use crate::thread::scheduler::Scheduler;
 
 /// Per cpu data
@@ -51,36 +51,17 @@ fn percpu_stride() -> usize {
 }
 
 pub fn get_percpu_data() -> &'static mut PerCpuData {
-    let id = get_current_cpu_id();
-    let ptr = percpu_base() + id * percpu_stride();
+    // Use compact CPU index mapping instead of raw APIC IDs.
+    let cpu_index = acpi::current_cpu_index();
+    let ptr = percpu_base() + cpu_index * percpu_stride();
     unsafe { &mut *(ptr as *mut PerCpuData) }
 }
 
 /* Early boot on each CPU: copy template into its slot once */
 pub unsafe fn init_this_cpu_percpu() {
-    let id = get_current_cpu_id();
-    let dst = (percpu_base() + id * percpu_stride()) as *mut u8;
+    let cpu_index = acpi::current_cpu_index();
+    let dst = (percpu_base() + cpu_index * percpu_stride()) as *mut u8;
     let src = unsafe { &__percpu_tpl_start } as *const u8;
     let len = (unsafe { &__percpu_tpl_end } as *const u8 as usize) - (src as usize);
     unsafe { core::ptr::copy_nonoverlapping(src, dst, len) };
-}
-
-pub fn get_current_cpu_id() -> usize {
-    let cpuid = CpuId::new();
-
-    if let Some(extended_topology) = cpuid.get_extended_topology_info() {
-        for level in extended_topology {
-            if level.level_type() == raw_cpuid::TopologyType::Core {
-                return level.x2apic_id() as usize;
-            }
-        }
-    }
-
-    // Fallback to basic feature info
-    if let Some(feature_info) = cpuid.get_feature_info() {
-        return feature_info.initial_local_apic_id() as usize;
-    }
-
-    // Last resort
-    0
 }

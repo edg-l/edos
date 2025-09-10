@@ -1,3 +1,5 @@
+#![expect(unused)]
+
 use core::sync::atomic::AtomicU64;
 
 use alloc::string::ToString;

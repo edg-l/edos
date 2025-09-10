@@ -2,7 +2,7 @@ use core::time::Duration;
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use crossbeam_queue::SegQueue;
-use spin::{RwLock};
+use spin::RwLock;
 use thiserror::Error;
 
 use crate::thread::{ThreadId, scheduler::sched};

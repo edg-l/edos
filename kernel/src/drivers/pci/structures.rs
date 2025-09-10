@@ -1,5 +1,3 @@
-#![expect(unused)]
-
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]

@@ -10,6 +10,7 @@ use crate::{
 };
 
 // Protection flags (match Linux)
+#[expect(unused)]
 const PROT_READ: u32 = 0x1;
 const PROT_WRITE: u32 = 0x2;
 const PROT_EXEC: u32 = 0x4;

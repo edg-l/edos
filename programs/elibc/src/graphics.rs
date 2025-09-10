@@ -1202,10 +1202,11 @@ impl Screen {
     pub fn render(&mut self) -> GraphicsResult<()> {
         // Only render if we have a dirty back buffer
         if self.dirty
-            && let Some(ref buffer) = self.back_buffer {
-                buffer.draw()?;
-                self.dirty = false;
-            }
+            && let Some(ref buffer) = self.back_buffer
+        {
+            buffer.draw()?;
+            self.dirty = false;
+        }
 
         // Always call the final render syscall to present to screen
         render()

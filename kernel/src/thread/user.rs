@@ -4,7 +4,7 @@ use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 use x86_64::{
     VirtAddr,
     registers::control::{Cr3, Cr3Flags},
-    structures::paging::{OffsetPageTable, Page, PageTableFlags, PhysFrame, mapper::CleanUp},
+    structures::paging::{OffsetPageTable, PageTableFlags, PhysFrame},
 };
 
 use crate::{
@@ -46,6 +46,7 @@ pub struct UserThread {
     pub fd_table: FileDescriptorTable,
 }
 
+#[expect(unused)]
 #[derive(Debug, Clone)]
 pub struct MemoryRegion {
     pub start: VirtAddr,
@@ -61,6 +62,7 @@ pub enum MemoryRegionType {
     Data,
 }
 
+#[expect(unused)]
 #[derive(Debug, Clone)]
 pub struct MemoryMapping {
     pub size: u64,
@@ -73,6 +75,7 @@ pub enum MappingType {
     Anonymous,
 }
 
+#[expect(unused)]
 #[derive(Debug, Clone)]
 pub struct File {
     fd: u64,

@@ -17,14 +17,6 @@ pub fn get_lapic() -> LocalApic {
         .unwrap()
 }
 
-pub fn set_apic_timer(duration: Duration) {
-    unsafe {
-        let mut lapic = get_lapic();
-        let timer = get_timer_calibration();
-        lapic.set_timer_initial(timer.ticks_per_microsecond as u32 * duration.as_micros() as u32);
-    }
-}
-
 pub fn set_apic_timer_and_enable(duration: Duration) {
     unsafe {
         let mut lapic = get_lapic();

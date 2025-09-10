@@ -116,17 +116,16 @@ impl AhciController {
         // Prefer MSI if available
         match msi::enable_msi_for_device(pci_device, InterruptIndex::Ahci.as_u8()) {
             Ok(()) => {
-                println!("AHCI: using MSI on {:02x}:{:02x}.{}",
-                    pci_device.address.bus,
-                    pci_device.address.device,
-                    pci_device.address.function
+                println!(
+                    "AHCI: using MSI on {:02x}:{:02x}.{}",
+                    pci_device.address.bus, pci_device.address.device, pci_device.address.function
                 );
                 return Ok(());
             }
             Err(e) => {
-                println!("AHCI: MSI unavailable ({:?}), falling back to IOAPIC IRQ {}",
-                    e,
-                    pci_device.header.interrupt_line
+                println!(
+                    "AHCI: MSI unavailable ({:?}), falling back to IOAPIC IRQ {}",
+                    e, pci_device.header.interrupt_line
                 );
             }
         }

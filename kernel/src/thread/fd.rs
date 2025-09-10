@@ -1,6 +1,4 @@
 use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
-use spin::RwLock;
 
 use crate::thread::pipe::{FileDescriptor, StandardStream};
 

@@ -105,7 +105,7 @@ fn main() -> ! {
         thread
     });
 
-    // Enable apic timer, every 1 second
+    // Enable apic timer
     set_apic_timer_and_enable(Duration::from_millis(5));
 
     x86_64::instructions::interrupts::enable_and_hlt();

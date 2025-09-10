@@ -52,6 +52,7 @@ impl DoubleBuffer {
         }
     }
 
+    #[expect(unused)]
     pub fn set_pixel(&mut self, x: usize, y: usize, color: u32) {
         if x < self.width && y < self.height {
             let index = y * (self.pitch / 4) + x;

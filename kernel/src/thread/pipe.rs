@@ -1,4 +1,4 @@
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use spin::RwLock;
 
 #[derive(Debug, Clone)]
@@ -40,6 +40,7 @@ impl Pipe {
         }
     }
 
+    #[expect(unused)]
     pub fn close_reader(&mut self) {
         self.readers = self.readers.saturating_sub(1);
     }

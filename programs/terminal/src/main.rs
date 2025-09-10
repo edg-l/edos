@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use alloc::{format, string::{String, ToString}, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use elibc::{
     KeyEvent, get_raw_input,
     graphics::{Color, RasterHeight, Screen, TextMetrics, TextStyle},

@@ -5,11 +5,7 @@ use spin::{Once, mutex::Mutex};
 use uart_16550::SerialPort;
 use x86_64::instructions::interrupts::without_interrupts;
 
-use crate::{
-    thread::{broadcast::Broadcast},
-    timer::uptime_us,
-    util::per_cpu::get_percpu_data,
-};
+use crate::{thread::broadcast::Broadcast, timer::uptime_us, util::per_cpu::get_percpu_data};
 
 static SERIAL_DBG: Once<Mutex<SerialPort>> = Once::new();
 

@@ -37,6 +37,7 @@ impl ThreadId {
         }
     }
 
+    #[expect(unused)]
     pub fn new_named(id: u64, kernel: bool, name: String) -> Self {
         Self {
             id,

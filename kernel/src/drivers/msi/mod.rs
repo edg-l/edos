@@ -27,7 +27,9 @@ const MSI_PER_VECTOR_MASKING: u16 = 1 << 8; // not used yet
 /// Falls back to returning an error if MSI capability is missing.
 pub fn enable_msi_for_device(dev: &PciDevice, vector: u8) -> Result<(), MsiError> {
     let cap_ptr = dev.header.capabilities; // offset of first capability (type 0 header)
-    if cap_ptr == 0 { return Err(MsiError::NoCapabilities); }
+    if cap_ptr == 0 {
+        return Err(MsiError::NoCapabilities);
+    }
 
     let addr = dev.address;
     let msi_offset = find_capability(addr, CAP_ID_MSI).ok_or(MsiError::NoMsiCapability)?;
@@ -78,7 +80,8 @@ fn find_capability(addr: PciAddress, target_cap_id: u8) -> Option<u8> {
     // Capability pointer usually at 0x34 for type-0 headers, but we trust caller to pass pointer
     let mut ptr = pci_read_u8(addr, 0x34);
     let mut guard = 0;
-    while ptr != 0 && guard < 64 { // simple loop guard
+    while ptr != 0 && guard < 64 {
+        // simple loop guard
         let cap_id = pci_read_u8(addr, ptr);
         if cap_id == target_cap_id {
             return Some(ptr);
@@ -134,4 +137,3 @@ fn pci_read_u8(addr: PciAddress, offset: u8) -> u8 {
     let shift = ((offset & 3) as u32) * 8;
     (pci_read_u32(addr, offset) >> shift) as u8
 }
-

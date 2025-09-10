@@ -1,4 +1,4 @@
-use core::{alloc::Layout, arch::asm, time::Duration};
+use core::{alloc::Layout, time::Duration};
 
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 use crossbeam_queue::SegQueue;
@@ -14,7 +14,7 @@ use x86_64::{
 use crate::{
     apic::get_lapic,
     boot::boot_info,
-    drivers::fpu::{self, init_fpu_state, restore_fpu_state, save_fpu_state},
+    drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
     interrupts::InterruptIndex,
     println,
     syscalls::set_gs_kernel_stack,
