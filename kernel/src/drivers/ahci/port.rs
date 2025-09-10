@@ -385,9 +385,9 @@ impl AhciPort {
     /// Returns a bitmask of completed slots
     pub fn check_completed_commands(&self) -> u32 {
         let ci = unsafe { ptr::read_volatile(&raw const (*self.port_regs).ci) };
-        let issued_mask = (!self.free_slots) & 0xFFFFFFFF; // Slots that were issued
-        let completed_mask = issued_mask & !ci; // Issued slots that are no longer in CI
-        completed_mask
+        let issued_mask = (!self.free_slots); // Slots that were issued
+        // Issued slots that are no longer in CI
+        issued_mask & !ci
     }
 
     /// Check for any port errors (non-blocking)
