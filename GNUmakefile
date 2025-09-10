@@ -88,6 +88,10 @@ limine/limine:
 kernel: programs
 	$(MAKE) -C kernel
 
+.PHONY: check
+check: programs
+	$(MAKE) -C kernel check
+
 $(IMAGE_NAME).iso: limine/limine kernel
 	rm -rf iso_root
 	mkdir -p iso_root/boot

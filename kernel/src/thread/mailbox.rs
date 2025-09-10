@@ -35,12 +35,12 @@ impl<T, R> Clone for Mailbox<T, R> {
 /// The message info.
 pub struct Request<T, R> {
     /// The sender thread
-    sender: ThreadId,
+    pub sender: ThreadId,
     /// The response given when the message was sent.
     ///
     /// Saved so we can place the value in the response when the message is processed.
-    response: Arc<Response<R>>,
-    /// The message
+    pub response: Arc<Response<R>>,
+    /// The message.
     pub message: T,
 }
 
@@ -65,6 +65,19 @@ impl<T, R> Mailbox<T, R> {
 
             self.queue.push(Request {
                 sender,
+                message: request,
+                response: response.clone(),
+            });
+
+            sched().thread_wake(self.owner.clone());
+            response
+        })
+    }
+
+    pub fn forward(&self, request: T, response: Arc<Response<R>>) -> Arc<Response<R>> {
+        without_interrupts(|| {
+            self.queue.push(Request {
+                sender: response.thread.clone(),
                 message: request,
                 response: response.clone(),
             });
@@ -146,5 +159,14 @@ impl<R> Response<R> {
         } else {
             Err(ReceiveError::Timeout)
         }
+    }
+
+    pub fn send(&self, value: R) {
+        without_interrupts(|| {
+            unsafe { self.value.get().write(MaybeUninit::new(value)) };
+            self.fulfilled.store(true, Ordering::Release);
+            let sched = sched();
+            sched.thread_wake(self.thread.clone());
+        })
     }
 }

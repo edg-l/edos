@@ -76,10 +76,7 @@ pub(super) static AHCI_REQUESTS: Once<Mailbox<AhciRequest, AhciResponse>> = Once
 #[derive(Debug)]
 pub(super) enum AhciRequest {
     ListDevices,
-    DeviceRequest {
-        device_id: u64,
-        command: Arc<Command>,
-    },
+    DeviceRequest { device_id: u64, command: Command },
     // Used internally
     GetDeviceMailbox(ThreadId),
     GetDevicePort(ThreadId),
@@ -115,7 +112,7 @@ pub(super) enum AhciResponse {
     DevicePort(Option<Arc<Mutex<AhciPort>>>),
 }
 
-type PortMailbox = Mailbox<(Arc<Command>, Request<AhciRequest, AhciResponse>), AhciResponse>;
+type PortMailbox = Mailbox<Command, AhciResponse>;
 
 pub extern "C" fn ahci_driver_main() -> ! {
     let tid = sched().current_id();
@@ -237,37 +234,38 @@ pub extern "C" fn ahci_driver_main() -> ! {
         });
 
         while let Some(req) = requests.pop_request() {
-            match &req.message {
+            match req.message {
                 AhciRequest::ListDevices => {
                     req.answer(AhciResponse::Devices(detected_devices.clone()));
                 }
                 AhciRequest::DeviceRequest { device_id, command } => {
-                    if let Some(mb) = device_mailboxes.get(*device_id as usize) {
-                        mb.send((command.clone(), req));
+                    if let Some(mb) = device_mailboxes.get((device_id) as usize) {
+                        mb.forward(command, req.response);
+                        continue;
                     }
                 }
                 AhciRequest::GetDeviceMailbox(thread_id) => {
-                    let id = port_map.get(thread_id);
+                    let id = port_map.get(&thread_id);
 
                     if let Some(id) = id {
                         let mailbox = (device_mailboxes.get((*id) as usize)).cloned();
 
-                        req.answer(AhciResponse::DeviceMailbox(mailbox));
+                        req.response.send(AhciResponse::DeviceMailbox(mailbox));
                     } else {
-                        req.answer(AhciResponse::DeviceMailbox(None));
+                        req.response.send(AhciResponse::DeviceMailbox(None));
                     }
                 }
                 AhciRequest::GetDevicePort(worker_tid) => {
                     let mut found = false;
-                    let info = port_map.get(worker_tid);
+                    let info = port_map.get(&worker_tid);
 
-                    if let Some(info) = port_map.get(worker_tid) {
+                    if let Some(info) = port_map.get(&worker_tid) {
                         let device = &detected_devices[*info as usize];
 
                         for controller in &controllers {
                             if controller.pci_device.address == device.controller_pci_address {
                                 let port = controller.ports.get(device.port_idx).cloned().flatten();
-                                req.answer(AhciResponse::DevicePort(port));
+                                req.response.send(AhciResponse::DevicePort(port));
                                 found = true;
                                 break;
                             }
@@ -275,7 +273,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
                     }
 
                     if !found {
-                        req.answer(AhciResponse::DevicePort(None));
+                        req.response.send(AhciResponse::DevicePort(None));
                     }
                 }
             }
@@ -316,37 +314,40 @@ extern "C" fn port_worker_thread() -> ! {
     };
 
     loop {
-        while let Some(req) = mailbox.pop_request() {
-            let message = &*req.message.0;
-            let caller = req.message.1;
-            match message {
+        while let Some(mut req) = mailbox.pop_request() {
+            let command = req.message;
+            match command {
                 Command::Read { lba, sectors } => {
                     println!("Got read request, lba={lba}, sectors={sectors}");
-                    let mut buffer = alloc::vec![0; (*sectors) as usize * 512];
-                    let result = port.lock().read_sectors(*lba, &mut buffer, *sectors);
+                    let mut buffer = alloc::vec![0; sectors as usize * 512];
+                    let result = port.lock().read_sectors(lba, &mut buffer, sectors);
 
                     match result {
-                        Ok(_) => caller.answer(AhciResponse::ReadResult { data: Ok(buffer) }),
-                        Err(e) => caller.answer(AhciResponse::ReadResult { data: Err(e) }),
+                        Ok(_) => req
+                            .response
+                            .send(AhciResponse::ReadResult { data: Ok(buffer) }),
+                        Err(e) => req.response.send(AhciResponse::ReadResult { data: Err(e) }),
                     }
+                    println!("Done");
                 }
                 Command::Write { lba, data, sectors } => {
                     println!(
                         "Got write request, lba={lba}, sectors={sectors}, data_len={}",
                         data.len()
                     );
-                    let result = port.lock().write_sectors(*lba, data, *sectors);
-                    caller.answer(AhciResponse::Result(result));
+                    let result = port.lock().write_sectors(lba, &data, sectors);
+                    req.response.send(AhciResponse::Result(result));
                 }
                 Command::Flush => {
                     println!("Got flush request");
                     let result = port.lock().flush_cache();
-                    caller.answer(AhciResponse::Result(result));
+                    req.response.send(AhciResponse::Result(result));
                 }
                 Command::Identify => {
                     println!("Got identify request");
                     let result = port.lock().identify_device();
-                    caller.answer(AhciResponse::IdentifyResult { info: result });
+                    req.response
+                        .send(AhciResponse::IdentifyResult { info: result });
                 }
             }
         }

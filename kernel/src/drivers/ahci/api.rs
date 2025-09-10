@@ -52,10 +52,7 @@ pub fn read_sectors(device_id: u64, lba: u64, sectors: u16) -> Result<Vec<u8>, A
     let command = Command::Read { lba, sectors };
 
     let response = send_request(
-        AhciRequest::DeviceRequest {
-            device_id,
-            command: Arc::new(command),
-        },
+        AhciRequest::DeviceRequest { device_id, command },
         Duration::from_secs(10),
     );
 
@@ -81,10 +78,7 @@ pub fn write_sectors(
     let command = Command::Write { lba, data, sectors };
 
     let response = send_request(
-        AhciRequest::DeviceRequest {
-            device_id,
-            command: Arc::new(command),
-        },
+        AhciRequest::DeviceRequest { device_id, command },
         Duration::from_secs(10),
     );
 
@@ -102,10 +96,7 @@ pub fn flush_cache(device_id: u64) -> Result<(), AhciError> {
     let command = Command::Flush;
 
     let response = send_request(
-        AhciRequest::DeviceRequest {
-            device_id,
-            command: Arc::new(command),
-        },
+        AhciRequest::DeviceRequest { device_id, command },
         Duration::from_secs(5),
     );
 
@@ -126,10 +117,7 @@ pub fn identify_device(device_id: u64) -> Result<DeviceIdentifyInfo, AhciError> 
     let command = Command::Identify;
 
     let response = send_request(
-        AhciRequest::DeviceRequest {
-            device_id,
-            command: Arc::new(command),
-        },
+        AhciRequest::DeviceRequest { device_id, command },
         Duration::from_secs(5),
     );
 

@@ -8,6 +8,10 @@ build:
 build-release:
 	cargo build --release -Z unstable-options --artifact-dir=out --target=x86_64-edos.json
 
+.PHONY: check
+check:
+	cargo check -Z unstable-options --artifact-dir=out --target=x86_64-edos.json
+
 .PHONY: fmt
 fmt:
 	cargo fmt
