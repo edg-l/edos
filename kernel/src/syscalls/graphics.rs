@@ -1,4 +1,4 @@
-use alloc::vec::{self, Vec};
+use alloc::vec::{Vec};
 
 use crate::{
     graphics::api::{DrawRequest, ScreenInfo, draw, draw_rect, render, screen_info},

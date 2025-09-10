@@ -1,12 +1,11 @@
 #![no_std]
 #![no_main]
 
-use alloc::{format, string::String, vec::Vec};
+use alloc::{format, string::{String, ToString}, vec::Vec};
 use elibc::{
     KeyEvent, get_raw_input,
     graphics::{Color, RasterHeight, Screen, TextMetrics, TextStyle},
     io::get_kernel_logs,
-    println,
 };
 
 extern crate alloc;
@@ -77,6 +76,7 @@ struct Terminal {
     prompt_style: TextStyle,
     // Performance optimization fields
     is_dirty: bool,
+    enable_kernel_logs: bool,
 }
 
 impl Terminal {
@@ -90,11 +90,8 @@ impl Terminal {
         let max_cols = ((screen.width() as u64 - 2 * MARGIN) / metrics.char_width) as usize;
         let max_lines = ((screen.height() as u64 - 2 * MARGIN) / metrics.line_height) as usize;
 
-        let mut buffer = Vec::new();
-        buffer.push(String::new()); // Start with one empty line
-
-        let mut line_types = Vec::new();
-        line_types.push(LineType::Input); // First line is input
+        let buffer = alloc::vec![String::new()];
+        let line_types = alloc::vec![LineType::Input];
 
         let prompt_text = String::from("> ");
 
@@ -113,6 +110,7 @@ impl Terminal {
             prompt_text,
             prompt_style,
             is_dirty: true, // Start dirty to force initial render
+            enable_kernel_logs: true,
         })
     }
 
@@ -359,16 +357,22 @@ impl Terminal {
     }
 
     fn on_command(&mut self, command: &str, args: &[String]) {
-        // Echo the command and arguments back for now
-        self.print_text(&format!("Command: '{}'\n", command));
+        match command {
+            "logs" => {
+                if args.is_empty() || !["on", "off"].contains(&args[0].as_str()) {
+                    self.print_text("Usage: logs [on|off]");
+                }
 
-        if !args.is_empty() {
-            self.print_text("Arguments:\n");
-            for (i, arg) in args.iter().enumerate() {
-                self.print_text(&format!("  {}: '{}'\n", i, arg));
+                self.enable_kernel_logs = args[0] == "on";
             }
-        } else {
-            self.print_text("No arguments\n");
+            "help" => {
+                self.print_text("Commands:\n");
+                self.print_text("- help\n");
+                self.print_text("- logs");
+            }
+            _ => {
+                self.print_text(&format!("Unknown command {command}"));
+            }
         }
     }
 
@@ -409,7 +413,7 @@ impl Terminal {
                         // Backspace or DEL key
                         self.backspace();
                     }
-                    ch if ch >= ' ' && ch <= '~' => {
+                    ch if (' '..='~').contains(&ch) => {
                         // Printable ASCII characters
                         self.insert_char(ch);
                     }
@@ -453,22 +457,21 @@ pub extern "C" fn main() -> i32 {
 
     let mut key_buffer = Vec::new();
 
-    let mut count = 0;
-
     // Main terminal loop
     loop {
         // Get raw input with a small timeout to avoid blocking indefinitely
 
-        let logs = get_kernel_logs();
+        if terminal.enable_kernel_logs {
+            let logs = get_kernel_logs();
 
-        if !logs.is_empty() {
-            for log in logs {
-                terminal.print_text(&log);
+            if !logs.is_empty() {
+                for log in logs {
+                    terminal.print_text(&log);
+                }
             }
         }
 
         get_raw_input(20, &mut key_buffer, 16);
-        count += 1;
 
         if !key_buffer.is_empty() {
             // Process the key event

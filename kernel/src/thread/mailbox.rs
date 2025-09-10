@@ -66,7 +66,7 @@ impl<T, R> Mailbox<T, R> {
                 response: response.clone(),
             });
 
-            sched().thread_wake(self.owner.clone());
+            sched().thread_wake(self.owner.clone(), true);
             response
         })
     }
@@ -78,7 +78,7 @@ impl<T, R> Mailbox<T, R> {
                 response: response.clone(),
             });
 
-            sched().thread_wake(self.owner.clone());
+            sched().thread_wake(self.owner.clone(), true);
             response
         })
     }
@@ -151,7 +151,7 @@ impl<R> Response<R> {
             unsafe { self.value.get().write(MaybeUninit::new(value)) };
             self.fulfilled.store(true, Ordering::Release);
             let sched = sched();
-            sched.thread_wake(self.thread.clone());
+            sched.thread_wake(self.thread.clone(), true);
         })
     }
 }

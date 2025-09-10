@@ -29,6 +29,7 @@ use crate::{
 #[derive(Debug, Default)]
 pub struct Scheduler {
     thread_queue: SegQueue<ThreadId>,
+    thread_priority_queue: SegQueue<ThreadId>,
     pub kthread_spawn_queue: SegQueue<KernelThread>,
     kthreads: BTreeMap<u64, KernelThread>,
     pub thread_spawn_queue: SegQueue<UserThread>,
@@ -205,7 +206,56 @@ impl Scheduler {
     fn schedule_next(&mut self) -> bool {
         let now = Instant::now();
         self.current_thread_id = None;
-        while let Some(id) = self.thread_queue.pop() {
+
+        // TODO: dedup this code
+        while let Some(id) = self.thread_priority_queue.pop() {
+            if id.kernel {
+                if let Some(thread) = self.kthreads.get_mut(&id.id) {
+                    match thread.state {
+                        ThreadState::Ready => {}
+                        ThreadState::Waiting => continue,
+                        ThreadState::WaitTimeout((start, timeout)) => {
+                            if now.duration_since(start) >= timeout {
+                                thread.state = ThreadState::Ready;
+                            } else {
+                                self.thread_queue.push(id);
+                                continue;
+                            }
+                        }
+                        ThreadState::Exited(code) => {
+                            continue;
+                        }
+                    }
+                    self.current_thread_id = Some(id);
+                    return true;
+                }
+            } else if let Some(thread) = self.threads.get_mut(&id.id) {
+                match thread.state {
+                    ThreadState::Ready => {}
+                    ThreadState::Waiting => continue,
+                    ThreadState::WaitTimeout((start, timeout)) => {
+                        if now.duration_since(start) >= timeout {
+                            thread.state = ThreadState::Ready;
+                        } else {
+                            self.thread_queue.push(id);
+                            continue;
+                        }
+                    }
+                    ThreadState::Exited(code) => {
+                        continue;
+                    }
+                }
+                self.current_thread_id = Some(id);
+                return true;
+            }
+        }
+
+        let mut limit = self.thread_queue.len();
+
+        while limit > 0
+            && let Some(id) = self.thread_queue.pop()
+        {
+            limit -= 1;
             if id.kernel {
                 if let Some(thread) = self.kthreads.get_mut(&id.id) {
                     match thread.state {
@@ -283,20 +333,28 @@ impl Scheduler {
     }
 
     /// Wake the given thread
-    pub fn thread_wake(&mut self, id: ThreadId) {
+    pub fn thread_wake(&mut self, id: ThreadId, priority: bool) {
         without_interrupts(|| {
             if id.kernel {
                 if let Some(thread) = self.kthreads.get_mut(&id.id)
                     && thread.state != ThreadState::Ready
                 {
                     thread.state = ThreadState::Ready;
-                    self.thread_queue.push(id);
+                    if priority {
+                        self.thread_priority_queue.push(id);
+                    } else {
+                        self.thread_queue.push(id);
+                    }
                 }
             } else if let Some(thread) = self.threads.get_mut(&id.id)
                 && thread.state != ThreadState::Ready
             {
                 thread.state = ThreadState::Ready;
-                self.thread_queue.push(id);
+                if priority {
+                    self.thread_priority_queue.push(id);
+                } else {
+                    self.thread_queue.push(id);
+                }
             }
         })
     }

@@ -1,5 +1,3 @@
-use core::time::Duration;
-
 use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
 use spin::Once;
@@ -10,11 +8,10 @@ use x86_64::{
 
 use crate::{
     apic::get_lapic,
-    println,
     thread::{ThreadId, broadcast::Broadcast, scheduler::sched},
 };
 
-pub static KEYBOARD_BROADCAST: Broadcast<DecodedKey> = Broadcast::new(1024);
+pub static KEYBOARD_BROADCAST: Broadcast<DecodedKey> = Broadcast::new(1024, false);
 
 static SCANCODE_QUEUE: Once<ArrayQueue<u8>> = Once::new();
 const QUEUE_SIZE: usize = 2048;
@@ -30,7 +27,7 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
     queue.force_push(scancode);
 
     if let Some(tid) = KEYBOARD_THREAD_ID.get() {
-        sched().thread_wake(tid.clone());
+        sched().thread_wake(tid.clone(), true);
     }
 
     unsafe { get_lapic().end_of_interrupt() };

@@ -227,7 +227,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
                         }) {
                             // Wake the worker thread for this device
                             if let Some(worker_tid) = port_map_reverse.get(&device.id) {
-                                sched().thread_wake(worker_tid.clone());
+                                sched().thread_wake(worker_tid.clone(), true);
                             }
                         }
                     }

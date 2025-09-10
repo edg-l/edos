@@ -7,7 +7,7 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{Errno, SYS_KERNEL_LOGS, SYS_RAW_INPUT, errno, syscall1, syscall2, syscall3},
+    sys::{Errno, SYS_KERNEL_LOGS, SYS_RAW_INPUT, errno, syscall2, syscall3},
     sys_read, sys_write,
 };
 
