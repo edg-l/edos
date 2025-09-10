@@ -30,10 +30,12 @@ impl Fat32fs {
         let mut out = Vec::with_capacity(file_size);
         let mut remaining = file_size;
 
+        let mut buf = Vec::new();
         loop {
             // read one cluster
             let base_lba = self.cluster_to_lba(cluster);
-            let buf = read_sectors(self.partition.device_id, base_lba, spc)?; // len >= cluster_bytes
+            buf.clear();
+            buf = read_sectors(self.partition.device_id, base_lba, spc, buf)?; // len >= cluster_bytes
 
             // copy only what we need from this cluster
             let take = remaining.min(buf.len().min(cluster_bytes));
@@ -93,9 +95,12 @@ impl Fat32fs {
         let mut inner_off = offset - cluster_index * cluster_size;
         let mut remain = to_read;
 
+        let mut buf = Vec::new();
         loop {
             let base_lba = self.cluster_to_lba(cluster);
-            let buf = read_sectors(self.partition.device_id, base_lba, spc as u16)?;
+
+            buf.clear();
+            buf = read_sectors(self.partition.device_id, base_lba, spc as u16, buf)?;
 
             // slice cluster content
             let cluster_bytes = &buf[inner_off..cluster_size.min(buf.len())];

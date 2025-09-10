@@ -7,7 +7,7 @@ use crate::{
         Error,
         fat32::{
             Fat32fs,
-            structures::{CLUSTER_FREE, DirectoryEntry},
+            structures::{CLUSTER_FREE, DirectoryEntry, FAT32_MASK},
         },
         path::Path,
     },
@@ -70,7 +70,7 @@ impl Fat32fs {
 
             // Patch on-disk entry with new head
             let base_lba = self.cluster_to_lba(dir_cluster);
-            let mut dirbuf = read_sectors(self.partition.device_id, base_lba, spc_u16)?;
+            let mut dirbuf = read_sectors(self.partition.device_id, base_lba, spc_u16, Vec::new())?;
             if entry_off + 32 > dirbuf.len() {
                 return Err(Error::IoError);
             }
@@ -142,7 +142,7 @@ impl Fat32fs {
             let mut scratch = if fresh_current {
                 alloc::vec![0u8; bpc]
             } else {
-                let v = read_sectors(self.partition.device_id, lba, spc_u16)?;
+                let v = read_sectors(self.partition.device_id, lba, spc_u16, Vec::new())?;
                 if v.len() != bpc {
                     return Err(Error::IoError);
                 }
@@ -202,6 +202,7 @@ impl Fat32fs {
         // Search helper
         let mut search = |start: u32, _end_exclusive: u32| -> Option<u32> {
             let mut current_cluster = start;
+            let mut sec = Vec::new();
             while (current_cluster as u64) < (entries_per_sector as u64 * fat_sectors) {
                 // Compute sector and offset
                 let byte_index = (current_cluster as usize) * 4;
@@ -209,10 +210,13 @@ impl Fat32fs {
                 let within = byte_index % bytes_per_sector;
 
                 // Read FAT sector
-                let mut sec = crate::drivers::ahci::api::read_sectors(
+
+                sec.clear();
+                sec = read_sectors(
                     self.partition.device_id,
                     self.first_fat_lba() + sector_index,
                     1,
+                    sec,
                 )
                 .ok()?;
 
@@ -221,7 +225,7 @@ impl Fat32fs {
                     sec[within + 1],
                     sec[within + 2],
                     sec[within + 3],
-                ]) & crate::fs::fat32::structures::FAT32_MASK;
+                ]) & FAT32_MASK;
 
                 if val == crate::fs::fat32::structures::CLUSTER_FREE {
                     // mark as EOF in both FATs
@@ -284,12 +288,13 @@ impl Fat32fs {
         let within = byte_index % bytes_per_sector;
 
         // Update primary
-        let mut sec = crate::drivers::ahci::api::read_sectors(
+        let mut sec = read_sectors(
             self.partition.device_id,
             self.first_fat_lba() + sector_index,
             1,
+            Vec::new(),
         )?;
-        let v = value & crate::fs::fat32::structures::FAT32_MASK;
+        let v = value & FAT32_MASK;
         sec[within..within + 4].copy_from_slice(&v.to_le_bytes());
         crate::drivers::ahci::api::write_sectors(
             self.partition.device_id,
@@ -322,7 +327,7 @@ impl Fat32fs {
         let cluster_bytes = bps * spc as usize;
 
         let base_lba = self.cluster_to_lba(entry_cluster);
-        let mut buf = read_sectors(self.partition.device_id, base_lba, spc)?;
+        let mut buf = read_sectors(self.partition.device_id, base_lba, spc, Vec::new())?;
         if buf.len() < cluster_bytes || entry_offset + 32 > buf.len() {
             return Err(Error::IoError);
         }
@@ -381,9 +386,11 @@ impl Fat32fs {
         let bps = self.boot_info.bytes_per_sector as usize;
         let cluster_bytes = bps * spc as usize;
 
+        let mut buf = Vec::new();
         loop {
             let base_lba = self.cluster_to_lba(dir_cluster);
-            let mut buf = read_sectors(self.partition.device_id, base_lba, spc)?;
+            buf.clear();
+            buf = read_sectors(self.partition.device_id, base_lba, spc, buf)?;
             if buf.len() < cluster_bytes {
                 return Err(Error::IoError);
             }
@@ -415,11 +422,16 @@ impl Fat32fs {
                         zero,
                         spc,
                     )?;
-                    let mut buf =
-                        read_sectors(self.partition.device_id, self.cluster_to_lba(newc), spc)?;
+                    buf.clear();
+                    buf = read_sectors(
+                        self.partition.device_id,
+                        self.cluster_to_lba(newc),
+                        spc,
+                        buf,
+                    )?;
                     let bytes: [u8; 32] = bytemuck::cast(*new_entry);
                     buf[0..32].copy_from_slice(&bytes);
-                    write_sectors(
+                    buf = write_sectors(
                         self.partition.device_id,
                         self.cluster_to_lba(newc),
                         buf,
@@ -487,10 +499,12 @@ impl Fat32fs {
         let chunk: u16 = 64; // sectors per transfer
         let mut remaining = total;
 
+        let mut buf = Vec::new();
         while remaining > 0 {
             let take = core::cmp::min(remaining, chunk as u64) as u16;
-            let buf = read_sectors(dev, src_lba, take)?;
-            write_sectors(dev, dst_lba, buf, take)?;
+            buf.clear();
+            buf = read_sectors(dev, src_lba, take, buf)?;
+            buf = write_sectors(dev, dst_lba, buf, take)?;
 
             src_lba += take as u64;
             dst_lba += take as u64;

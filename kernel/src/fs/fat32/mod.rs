@@ -30,27 +30,31 @@ pub struct Fat32fs {
 
 impl Fat32fs {
     pub fn new(partition: Partition) -> Result<Self, Error> {
-        let boot_bytes = read_sectors(partition.device_id, partition.starting_lba, 1)?;
+        let mut read_buffer = Vec::new();
+        let boot_bytes = read_sectors(partition.device_id, partition.starting_lba, 1, read_buffer)?;
 
         if boot_bytes.len() != 512 {
             return Err(Error::MissingCriticalSectors);
         }
 
-        let boot_info: &Fat32BootSector =
-            cast_ref::<[u8; 512], _>(boot_bytes.as_slice().try_into().unwrap());
+        let boot_info: Fat32BootSector =
+            *cast_ref::<[u8; 512], _>(boot_bytes.as_slice().try_into().unwrap());
 
         if !boot_info.is_fat32() {
             return Err(Error::InvalidFs);
         }
 
+        read_buffer = boot_bytes;
+        read_buffer.clear();
         let fs_info_bytes = read_sectors(
             partition.device_id,
             partition.starting_lba + boot_info.fs_info as u64,
             1,
+            read_buffer,
         )?;
 
-        let fs_info: &FsInfo =
-            cast_ref::<[u8; 512], _>(fs_info_bytes.as_slice().try_into().unwrap());
+        let fs_info: FsInfo =
+            *cast_ref::<[u8; 512], _>(fs_info_bytes.as_slice().try_into().unwrap());
 
         if !fs_info.is_valid() {
             println!("Missing FsInfo, currently required");
@@ -58,8 +62,8 @@ impl Fat32fs {
         }
 
         Ok(Fat32fs {
-            boot_info: *boot_info,
-            fs_info: *fs_info,
+            boot_info,
+            fs_info,
             partition,
         })
     }
@@ -233,7 +237,8 @@ impl FileSystem for Fat32fs {
         // Mark the directory entry deleted (0xE5)
         let spc = self.boot_info.sectors_per_cluster as u16;
         let base_lba = self.cluster_to_lba(dir_cluster);
-        let mut buf = read_sectors(self.partition.device_id, base_lba, spc)?;
+        let mut buf = Vec::new();
+        buf = read_sectors(self.partition.device_id, base_lba, spc, buf)?;
         if entry_off + 32 > buf.len() {
             return Err(Error::IoError);
         }
@@ -258,22 +263,25 @@ impl FileSystem for Fat32fs {
             return Err(Error::NotADir);
         }
 
+        let mut read_buffer = Vec::new();
+
         // Ensure the directory is empty (only "." and ".." allowed)
         let mut cur = entry.first_cluster();
         if cur >= 2 {
             let spc = self.boot_info.sectors_per_cluster as u16;
             loop {
                 let base_lba = self.cluster_to_lba(cur);
-                let buf = read_sectors(self.partition.device_id, base_lba, spc)?;
+                read_buffer.clear();
+                read_buffer = read_sectors(self.partition.device_id, base_lba, spc, read_buffer)?;
                 let mut off = 0usize;
-                while off + 32 <= buf.len() {
-                    let first = buf[off];
+                while off + 32 <= read_buffer.len() {
+                    let first = read_buffer[off];
                     if first == 0x00 {
                         break;
                     } // end marker
                     if first != 0xE5 {
                         // not deleted
-                        let de: DirectoryEntry = *bytemuck::from_bytes(&buf[off..off + 32]);
+                        let de: DirectoryEntry = *bytemuck::from_bytes(&read_buffer[off..off + 32]);
                         let name = de.fat_name_to_string();
                         if !name.eq(".") && !name.eq("..") {
                             return Err(Error::IoError); // not empty
@@ -297,12 +305,14 @@ impl FileSystem for Fat32fs {
         // Mark the parent directory entry deleted (0xE5)
         let spc = self.boot_info.sectors_per_cluster as u16;
         let base_lba = self.cluster_to_lba(dir_cluster);
-        let mut buf = read_sectors(self.partition.device_id, base_lba, spc)?;
-        if entry_off + 32 > buf.len() {
+
+        read_buffer.clear();
+        read_buffer = read_sectors(self.partition.device_id, base_lba, spc, read_buffer)?;
+        if entry_off + 32 > read_buffer.len() {
             return Err(Error::IoError);
         }
-        buf[entry_off] = 0xE5;
-        write_sectors(self.partition.device_id, base_lba, buf, spc)?;
+        read_buffer[entry_off] = 0xE5;
+        read_buffer = write_sectors(self.partition.device_id, base_lba, read_buffer, spc)?;
 
         Ok(())
     }

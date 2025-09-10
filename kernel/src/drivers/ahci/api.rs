@@ -45,11 +45,21 @@ pub fn list_devices() -> Vec<DetectedDevice> {
 /// * `device_id` - The device ID from list_devices()
 /// * `lba` - Logical block address to start reading from
 /// * `sectors` - Number of sectors to read (each sector is 512 bytes)
+/// * `buffer` - The vec where the input will be written to, this function takes ownership of it and it's returned back.
 ///
 /// # Returns
 /// Vector containing the read data (sectors * 512 bytes)
-pub fn read_sectors(device_id: u64, lba: u64, sectors: u16) -> Result<Vec<u8>, AhciError> {
-    let command = Command::Read { lba, sectors };
+pub fn read_sectors(
+    device_id: u64,
+    lba: u64,
+    sectors: u16,
+    buffer: Vec<u8>,
+) -> Result<Vec<u8>, AhciError> {
+    let command = Command::Read {
+        lba,
+        sectors,
+        buffer,
+    };
 
     let response = send_request(
         AhciRequest::DeviceRequest { device_id, command },
@@ -67,14 +77,14 @@ pub fn read_sectors(device_id: u64, lba: u64, sectors: u16) -> Result<Vec<u8>, A
 /// # Arguments
 /// * `device_id` - The device ID from list_devices()
 /// * `lba` - Logical block address to start writing to
-/// * `data` - Data to write (must be sectors * 512 bytes)
+/// * `data` - Data to write (must be sectors * 512 bytes), the Vec is returned back to be able to be reused.
 /// * `sectors` - Number of sectors to write (each sector is 512 bytes)
 pub fn write_sectors(
     device_id: u64,
     lba: u64,
     data: Vec<u8>,
     sectors: u16,
-) -> Result<(), AhciError> {
+) -> Result<Vec<u8>, AhciError> {
     let command = Command::Write { lba, data, sectors };
 
     let response = send_request(
@@ -83,7 +93,7 @@ pub fn write_sectors(
     );
 
     match response {
-        AhciResponse::Result(result) => result,
+        AhciResponse::WriteResult { data } => data,
         _ => unreachable!(),
     }
 }

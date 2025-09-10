@@ -88,6 +88,7 @@ pub(super) enum Command {
     Read {
         lba: u64,
         sectors: u16,
+        buffer: Vec<u8>,
     },
     Write {
         lba: u64,
@@ -102,6 +103,10 @@ pub(super) enum Command {
 pub(super) enum AhciResponse {
     Devices(Vec<DetectedDevice>),
     ReadResult {
+        data: Result<Vec<u8>, AhciError>,
+    },
+    WriteResult {
+        /// The input buffer is returned so it can be reused.
         data: Result<Vec<u8>, AhciError>,
     },
     IdentifyResult {
@@ -318,9 +323,13 @@ extern "C" fn port_worker_thread() -> ! {
         while let Some(mut req) = mailbox.pop_request() {
             let command = req.message;
             match command {
-                Command::Read { lba, sectors } => {
+                Command::Read {
+                    lba,
+                    sectors,
+                    mut buffer,
+                } => {
                     println!("Got read request, lba={lba}, sectors={sectors}");
-                    let mut buffer = alloc::vec![0; sectors as usize * 512];
+                    buffer.resize(sectors as usize * 512, 0);
                     let result = port.lock().read_sectors(lba, &mut buffer, sectors);
 
                     match result {
@@ -337,7 +346,9 @@ extern "C" fn port_worker_thread() -> ! {
                         data.len()
                     );
                     let result = port.lock().write_sectors(lba, &data, sectors);
-                    req.response.send(AhciResponse::Result(result));
+                    req.response.send(AhciResponse::WriteResult {
+                        data: result.map(|_| data),
+                    });
                 }
                 Command::Flush => {
                     println!("Got flush request");

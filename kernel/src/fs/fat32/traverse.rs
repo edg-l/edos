@@ -50,9 +50,11 @@ impl Fat32fs {
         let cluster_bytes = bps * spc as usize;
         let mut cur = dir_cluster;
 
+        let mut buf = Vec::new();
         loop {
             let base_lba = self.cluster_to_lba(cur);
-            let buf = read_sectors(self.partition.device_id, base_lba, spc)?;
+            buf.clear();
+            buf = read_sectors(self.partition.device_id, base_lba, spc, buf)?;
             let mut off = 0usize;
 
             while off + 32 <= buf.len() {
@@ -81,13 +83,15 @@ impl Fat32fs {
 
         let mut entries = Vec::new();
 
+        let mut data = Vec::new();
         loop {
             let base_lba = self.cluster_to_lba(cluster);
-
-            let data = read_sectors(
+            data.clear();
+            data = read_sectors(
                 self.partition.device_id,
                 base_lba,
                 self.boot_info.sectors_per_cluster as u16,
+                data,
             )?;
 
             let mut offset = 0;
@@ -126,7 +130,7 @@ impl Fat32fs {
         let fat_sector = self.first_fat_lba() + (byte_off / 512);
         let off_in_sector = (byte_off % 512) as usize;
 
-        let sector = read_sectors(self.partition.device_id, fat_sector, 1)?;
+        let sector = read_sectors(self.partition.device_id, fat_sector, 1, Vec::new())?;
 
         let raw = u32::from_le_bytes(sector[off_in_sector..off_in_sector + 4].try_into().unwrap());
         let val = raw & FAT32_MASK;

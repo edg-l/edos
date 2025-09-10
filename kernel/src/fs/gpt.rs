@@ -184,8 +184,8 @@ impl GptPartitionEntry {
 /// Parse GPT from a device
 pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
     // Read GPT header from LBA 1
-    let gpt_data =
-        ahci::api::read_sectors(device_id, 1, 1).map_err(|_| "Failed to read GPT header")?;
+    let gpt_data = ahci::api::read_sectors(device_id, 1, 1, Vec::new())
+        .map_err(|_| "Failed to read GPT header")?;
 
     if gpt_data.len() < core::mem::size_of::<GptHeader>() {
         return Err("GPT data too small");
@@ -207,6 +207,7 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
         device_id,
         gpt_header.partition_entry_lba,
         sectors_needed as u16,
+        Vec::new(),
     )
     .map_err(|_| "Failed to read partition entries")?;
 
@@ -250,7 +251,7 @@ fn detect_filesystem(
     partition_start_lba: u64,
 ) -> Result<Option<FilesystemType>, &'static str> {
     // Read first sector of partition
-    let sector_data = ahci::api::read_sectors(device_id, partition_start_lba, 1)
+    let sector_data = ahci::api::read_sectors(device_id, partition_start_lba, 1, Vec::new())
         .map_err(|_| "Failed to read partition boot sector")?;
 
     if sector_data.len() < core::mem::size_of::<Fat32BootSector>() {

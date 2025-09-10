@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use lru::LruCache;
 use spin::Mutex;
 
@@ -11,6 +12,6 @@ pub struct BlockDevice {
 
 impl BlockDevice {
     pub fn read_sectors(&self, lba: u64, sectors: u16) {
-        let sectors = read_sectors(self.device_id, lba, sectors);
+        let sectors = read_sectors(self.device_id, lba, sectors, Vec::new());
     }
 }
