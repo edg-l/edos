@@ -136,15 +136,15 @@ pub extern "C" fn render_thread() -> ! {
                         height: display.height,
                         width: display.width,
                     };
-                    request.answer(Response::ScreenInfo(info));
+                    request.response.send(Response::ScreenInfo(info));
                 }
                 Request::Render => {
                     display.present();
-                    request.answer(Response::Ok);
+                    request.response.send(Response::Ok);
                 }
                 Request::Draw(draw_request) => {
                     display.draw(draw_request);
-                    request.answer(Response::Ok);
+                    request.response.send(Response::Ok);
                 }
             }
         }

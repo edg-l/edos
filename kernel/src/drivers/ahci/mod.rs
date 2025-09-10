@@ -236,7 +236,8 @@ pub extern "C" fn ahci_driver_main() -> ! {
         while let Some(req) = requests.pop_request() {
             match req.message {
                 AhciRequest::ListDevices => {
-                    req.answer(AhciResponse::Devices(detected_devices.clone()));
+                    req.response
+                        .send(AhciResponse::Devices(detected_devices.clone()));
                 }
                 AhciRequest::DeviceRequest { device_id, command } => {
                     if let Some(mb) = device_mailboxes.get((device_id) as usize) {

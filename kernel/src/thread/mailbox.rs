@@ -34,8 +34,6 @@ impl<T, R> Clone for Mailbox<T, R> {
 #[derive(Debug)]
 /// The message info.
 pub struct Request<T, R> {
-    /// The sender thread
-    pub sender: ThreadId,
     /// The response given when the message was sent.
     ///
     /// Saved so we can place the value in the response when the message is processed.
@@ -64,7 +62,6 @@ impl<T, R> Mailbox<T, R> {
             });
 
             self.queue.push(Request {
-                sender,
                 message: request,
                 response: response.clone(),
             });
@@ -77,7 +74,6 @@ impl<T, R> Mailbox<T, R> {
     pub fn forward(&self, request: T, response: Arc<Response<R>>) -> Arc<Response<R>> {
         without_interrupts(|| {
             self.queue.push(Request {
-                sender: response.thread.clone(),
                 message: request,
                 response: response.clone(),
             });
@@ -89,17 +85,6 @@ impl<T, R> Mailbox<T, R> {
 
     pub fn pop_request(&self) -> Option<Request<T, R>> {
         self.queue.pop()
-    }
-}
-
-impl<T, R> Request<T, R> {
-    pub fn answer(&self, value: R) {
-        without_interrupts(|| {
-            unsafe { self.response.value.get().write(MaybeUninit::new(value)) };
-            self.response.fulfilled.store(true, Ordering::Release);
-            let sched = sched();
-            sched.thread_wake(self.response.thread.clone());
-        })
     }
 }
 
