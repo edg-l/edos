@@ -63,7 +63,7 @@ fn init() {
     println!("Initializing acpi tables");
     init_acpi();
     println!("Initializing gdt");
-    gdt::init();
+    gdt::init_current_cpu();
     println!("Initializing idt");
     interrupts::init();
     println!("Initializing apic");

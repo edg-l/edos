@@ -1,7 +1,10 @@
 use core::alloc::Layout;
 
-use alloc::alloc::{alloc, handle_alloc_error};
-use spin::Lazy;
+use alloc::{
+    alloc::{alloc, handle_alloc_error},
+    boxed::Box,
+};
+use spin::Once;
 use x86_64::{
     VirtAddr,
     instructions::tables::load_tss,
@@ -19,7 +22,7 @@ pub const PAGE_FAULT_IST_INDEX: u16 = 1;
 pub const TIMER_SCHED_IST_INDEX: u16 = 2;
 pub const RING3_STACK_PST_INDEX: u16 = 0;
 
-fn init_tss() {
+fn init_tss_for_current_cpu() {
     let mut tss = TaskStateSegment::new();
 
     let page_fault_stack_end = {
@@ -88,28 +91,9 @@ fn init_tss() {
     pcpu.tss = tss;
 }
 
-pub static GDT: spin::Lazy<(GlobalDescriptorTable, GdtSelectors)> = Lazy::new(|| {
-    let mut gdt = GlobalDescriptorTable::new();
-
-    let code_selector = gdt.append(Descriptor::kernel_code_segment());
-    let data_selector = gdt.append(Descriptor::kernel_data_segment());
-    let user_data_selector = gdt.append(Descriptor::user_data_segment());
-    let user_code_selector = gdt.append(Descriptor::user_code_segment());
-    init_tss();
-    let tss_ref = &raw const get_percpu_data().tss;
-    let tss_selector = gdt.append(unsafe { Descriptor::tss_segment_unchecked(tss_ref) });
-
-    (
-        gdt,
-        GdtSelectors {
-            code_selector,
-            data_selector,
-            tss_selector,
-            user_code_selector,
-            user_data_selector,
-        },
-    )
-});
+// Global, CPU-independent view of segment selectors. All per-CPU GDTs are
+// constructed identically so selectors are consistent across CPUs.
+static SELECTORS: Once<GdtSelectors> = Once::new();
 
 #[derive(Debug, Clone, Copy)]
 pub struct GdtSelectors {
@@ -120,12 +104,47 @@ pub struct GdtSelectors {
     pub tss_selector: SegmentSelector,
 }
 
-pub fn init() {
-    GDT.0.load();
+/// Returns the architecture-wide selectors corresponding to the standard
+/// descriptor layout. Valid after the BSP has called `init_current_cpu()`.
+pub fn selectors() -> &'static GdtSelectors {
+    SELECTORS.get().expect("GDT selectors not initialized")
+}
+
+/// Initialize and load a GDT for the current CPU, tying the TSS descriptor to
+/// this CPU’s per-CPU TSS. Must be called once per CPU during bring-up.
+pub fn init_current_cpu() {
+    // Build per-CPU TSS and IST stacks
+    init_tss_for_current_cpu();
+
+    // Construct a fresh GDT for this CPU
+    let mut gdt = GlobalDescriptorTable::new();
+
+    // Keep descriptor order identical across CPUs to maintain stable selectors
+    let code_selector = gdt.append(Descriptor::kernel_code_segment());
+    let data_selector = gdt.append(Descriptor::kernel_data_segment());
+    let user_data_selector = gdt.append(Descriptor::user_data_segment());
+    let user_code_selector = gdt.append(Descriptor::user_code_segment());
+    let tss_ref = &raw const get_percpu_data().tss;
+    let tss_selector = gdt.append(unsafe { Descriptor::tss_segment_unchecked(tss_ref) });
+
+    let sels = GdtSelectors {
+        code_selector,
+        data_selector,
+        tss_selector,
+        user_code_selector,
+        user_data_selector,
+    };
+
+    // Leak the GDT to keep it alive after load (required by CPU)
+    let gdt_static: &'static mut GlobalDescriptorTable = Box::leak(Box::new(gdt));
+    gdt_static.load();
 
     unsafe {
-        CS::set_reg(GDT.1.code_selector);
-        SS::set_reg(GDT.1.data_selector);
-        load_tss(GDT.1.tss_selector);
+        CS::set_reg(sels.code_selector);
+        SS::set_reg(sels.data_selector);
+        load_tss(sels.tss_selector);
     }
+
+    // Publish selectors once (they are identical across CPUs)
+    SELECTORS.call_once(|| sels);
 }

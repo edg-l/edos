@@ -12,7 +12,7 @@ use x86_64::{
 };
 
 use crate::{
-    gdt::GDT,
+    gdt::selectors,
     graphics::api::ScreenInfo,
     println,
     serial::SERIAL_SUBSCRIBER,
@@ -56,17 +56,18 @@ pub unsafe fn setup_syscall() {
         setup_gs_base();
     }
 
-    println!("Kernel code: 0x{:x}", GDT.1.code_selector.0);
-    println!("Kernel data: 0x{:x}", GDT.1.data_selector.0);
-    println!("User code: 0x{:x}", GDT.1.user_code_selector.0);
-    println!("User data: 0x{:x}", GDT.1.user_data_selector.0);
+    let s = selectors();
+    println!("Kernel code: 0x{:x}", s.code_selector.0);
+    println!("Kernel data: 0x{:x}", s.data_selector.0);
+    println!("User code: 0x{:x}", s.user_code_selector.0);
+    println!("User data: 0x{:x}", s.user_data_selector.0);
 
     // STAR register: set kernel/user code segments
     Star::write(
-        GDT.1.user_code_selector,
-        GDT.1.user_data_selector,
-        GDT.1.code_selector,
-        GDT.1.data_selector,
+        s.user_code_selector,
+        s.user_data_selector,
+        s.code_selector,
+        s.data_selector,
     )
     .unwrap();
 

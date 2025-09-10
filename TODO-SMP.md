@@ -81,7 +81,7 @@ Phase 2 — Per‑CPU GDT/TSS
   - Create a non‑static `GDT` instance per CPU and load it on that CPU; or
   - Keep static segment selectors, but re‑append a TSS descriptor for each CPU and reload it. Prefer per‑CPU GDT for clarity.
 - Allocate IST stacks in a per‑CPU init routine and write into that CPU’s `pcpu.tss`.
-- Call sequence per CPU: `build_gdt_this_cpu()` → `load_gdt()` → `load_tss()`.
+- Call sequence per CPU: `build_gdt_current_cpu()` → `load_gdt()` → `load_tss()`.
 
 Phase 3 — IDT per CPU
 - Keep a single shared table, but run `IDT.load()` on every CPU after GDT/TSS are live.
@@ -174,4 +174,3 @@ Phase 8 — Synchronization audit
 ---
 
 If helpful, I can scaffold the AP init skeleton (trampoline + AP startup path) and refactor GDT/TSS into a per‑CPU API next.
-

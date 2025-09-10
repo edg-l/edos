@@ -5,7 +5,7 @@ use x86_64::{
     PrivilegeLevel, VirtAddr, registers::rflags::RFlags, structures::idt::InterruptStackFrameValue,
 };
 
-use crate::gdt::GDT;
+use crate::gdt::selectors;
 
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -68,24 +68,26 @@ impl CpuContext {
 impl CpuContext {
     /// Initialize a context for a new kernel thread
     pub fn new_kernel_thread(entry_point: u64, stack_top: u64) -> Self {
+        let s = selectors();
         Self::new(InterruptStackFrameValue::new(
             VirtAddr::new(entry_point),
-            GDT.1.code_selector,
+            s.code_selector,
             RFlags::INTERRUPT_FLAG,
             // Ensure stack is aligned after a "emulated" call.
             VirtAddr::new(stack_top - 8),
-            GDT.1.data_selector,
+            s.data_selector,
         ))
     }
 
     /// Initialize a context for a new user thread
     pub fn new_user_thread(entry_point: u64, stack_top: u64) -> Self {
+        let s = selectors();
         Self::new(InterruptStackFrameValue::new(
             VirtAddr::new(entry_point),
-            GDT.1.user_code_selector,
+            s.user_code_selector,
             RFlags::INTERRUPT_FLAG,
             VirtAddr::new(stack_top),
-            GDT.1.user_data_selector,
+            s.user_data_selector,
         ))
     }
 
