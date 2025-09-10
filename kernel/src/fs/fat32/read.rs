@@ -1,11 +1,8 @@
 use alloc::vec::Vec;
 
-use crate::{
-    drivers::ahci::api::read_sectors,
-    fs::{
-        Error,
-        fat32::{Fat32fs, structures::DirectoryEntry},
-    },
+use crate::fs::{
+    Error,
+    fat32::{Fat32fs, structures::DirectoryEntry},
 };
 
 impl Fat32fs {
@@ -35,7 +32,7 @@ impl Fat32fs {
             // read one cluster
             let base_lba = self.cluster_to_lba(cluster);
             buf.clear();
-            buf = read_sectors(self.partition.device_id, base_lba, spc, buf)?; // len >= cluster_bytes
+            buf = self.device.read_sectors(base_lba, spc, buf)?; // len >= cluster_bytes
 
             // copy only what we need from this cluster
             let take = remaining.min(buf.len().min(cluster_bytes));
@@ -100,7 +97,7 @@ impl Fat32fs {
             let base_lba = self.cluster_to_lba(cluster);
 
             buf.clear();
-            buf = read_sectors(self.partition.device_id, base_lba, spc as u16, buf)?;
+            buf = self.device.read_sectors(base_lba, spc as u16, buf)?;
 
             // slice cluster content
             let cluster_bytes = &buf[inner_off..cluster_size.min(buf.len())];

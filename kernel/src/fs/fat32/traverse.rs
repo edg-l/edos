@@ -1,16 +1,13 @@
 use alloc::vec::Vec;
 use bytemuck::cast;
 
-use crate::{
-    drivers::ahci::api::read_sectors,
-    fs::{
-        Error,
-        fat32::{
-            Fat32fs,
-            structures::{CLUSTER_BAD, CLUSTER_EOF, CLUSTER_FREE, DirectoryEntry, FAT32_MASK},
-        },
-        path::Path,
+use crate::fs::{
+    Error,
+    fat32::{
+        Fat32fs,
+        structures::{CLUSTER_BAD, CLUSTER_EOF, CLUSTER_FREE, DirectoryEntry, FAT32_MASK},
     },
+    path::Path,
 };
 
 impl Fat32fs {
@@ -54,7 +51,7 @@ impl Fat32fs {
         loop {
             let base_lba = self.cluster_to_lba(cur);
             buf.clear();
-            buf = read_sectors(self.partition.device_id, base_lba, spc, buf)?;
+            buf = self.device.read_sectors(base_lba, spc, buf)?;
             let mut off = 0usize;
 
             while off + 32 <= buf.len() {
@@ -87,8 +84,7 @@ impl Fat32fs {
         loop {
             let base_lba = self.cluster_to_lba(cluster);
             data.clear();
-            data = read_sectors(
-                self.partition.device_id,
+            data = self.device.read_sectors(
                 base_lba,
                 self.boot_info.sectors_per_cluster as u16,
                 data,
@@ -130,7 +126,7 @@ impl Fat32fs {
         let fat_sector = self.first_fat_lba() + (byte_off / 512);
         let off_in_sector = (byte_off % 512) as usize;
 
-        let sector = read_sectors(self.partition.device_id, fat_sector, 1, Vec::new())?;
+        let sector = self.device.read_sectors(fat_sector, 1, Vec::new())?;
 
         let raw = u32::from_le_bytes(sector[off_in_sector..off_in_sector + 4].try_into().unwrap());
         let val = raw & FAT32_MASK;

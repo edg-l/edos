@@ -2,12 +2,10 @@ use alloc::vec::Vec;
 use bytemuck::{Zeroable, cast_ref};
 
 use crate::{
-    drivers::ahci::{
-        api::{flush_cache, read_sectors, write_sectors},
-        structures::DeviceIdentifyInfo,
-    },
+    drivers::ahci::structures::DeviceIdentifyInfo,
     fs::{
         Error, File, FileSystem,
+        block_device::BlockDevice,
         fat32::structures::{DirectoryEntry, Fat32BootSector, FsInfo},
         gpt::Partition,
     },
@@ -26,12 +24,14 @@ pub struct Fat32fs {
     pub boot_info: Fat32BootSector,
     pub fs_info: FsInfo,
     pub partition: Partition,
+    pub device: BlockDevice,
 }
 
 impl Fat32fs {
     pub fn new(partition: Partition) -> Result<Self, Error> {
+        let device = BlockDevice::new(partition.device_id, 128);
         let mut read_buffer = Vec::new();
-        let boot_bytes = read_sectors(partition.device_id, partition.starting_lba, 1, read_buffer)?;
+        let boot_bytes = device.read_sectors(partition.starting_lba, 1, read_buffer)?;
 
         if boot_bytes.len() != 512 {
             return Err(Error::MissingCriticalSectors);
@@ -46,8 +46,7 @@ impl Fat32fs {
 
         read_buffer = boot_bytes;
         read_buffer.clear();
-        let fs_info_bytes = read_sectors(
-            partition.device_id,
+        let fs_info_bytes = device.read_sectors(
             partition.starting_lba + boot_info.fs_info as u64,
             1,
             read_buffer,
@@ -64,6 +63,7 @@ impl Fat32fs {
         Ok(Fat32fs {
             boot_info,
             fs_info,
+            device: BlockDevice::new(partition.device_id, 128),
             partition,
         })
     }
@@ -199,12 +199,8 @@ impl FileSystem for Fat32fs {
         dirbuf[0..32].copy_from_slice(&dot_bytes);
         dirbuf[32..64].copy_from_slice(&dotdot_bytes);
 
-        write_sectors(
-            self.partition.device_id,
-            self.cluster_to_lba(newc),
-            dirbuf,
-            spc,
-        )?;
+        self.device
+            .write_sectors(self.cluster_to_lba(newc), dirbuf, spc)?;
 
         // Insert directory entry in parent
         let mut de: DirectoryEntry = DirectoryEntry::zeroed();
@@ -238,12 +234,12 @@ impl FileSystem for Fat32fs {
         let spc = self.boot_info.sectors_per_cluster as u16;
         let base_lba = self.cluster_to_lba(dir_cluster);
         let mut buf = Vec::new();
-        buf = read_sectors(self.partition.device_id, base_lba, spc, buf)?;
+        buf = self.device.read_sectors(base_lba, spc, buf)?;
         if entry_off + 32 > buf.len() {
             return Err(Error::IoError);
         }
         buf[entry_off] = 0xE5;
-        write_sectors(self.partition.device_id, base_lba, buf, spc)?;
+        self.device.write_sectors(base_lba, buf, spc)?;
 
         Ok(())
     }
@@ -272,7 +268,7 @@ impl FileSystem for Fat32fs {
             loop {
                 let base_lba = self.cluster_to_lba(cur);
                 read_buffer.clear();
-                read_buffer = read_sectors(self.partition.device_id, base_lba, spc, read_buffer)?;
+                read_buffer = self.device.read_sectors(base_lba, spc, read_buffer)?;
                 let mut off = 0usize;
                 while off + 32 <= read_buffer.len() {
                     let first = read_buffer[off];
@@ -307,12 +303,12 @@ impl FileSystem for Fat32fs {
         let base_lba = self.cluster_to_lba(dir_cluster);
 
         read_buffer.clear();
-        read_buffer = read_sectors(self.partition.device_id, base_lba, spc, read_buffer)?;
+        read_buffer = self.device.read_sectors(base_lba, spc, read_buffer)?;
         if entry_off + 32 > read_buffer.len() {
             return Err(Error::IoError);
         }
         read_buffer[entry_off] = 0xE5;
-        read_buffer = write_sectors(self.partition.device_id, base_lba, read_buffer, spc)?;
+        read_buffer = self.device.write_sectors(base_lba, read_buffer, spc)?;
 
         Ok(())
     }
@@ -327,7 +323,7 @@ impl FileSystem for Fat32fs {
 
     fn flush(&mut self) -> Result<(), Error> {
         self.save_fs_info()?;
-        flush_cache(self.partition.device_id)?;
+        self.device.flush()?;
 
         Ok(())
     }
