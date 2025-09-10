@@ -16,6 +16,7 @@ const SECTOR_SIZE: usize = 512;
 pub struct BlockDevice {
     pub device_id: u64,
     pub cache: Mutex<LruCache<u64, [u8; SECTOR_SIZE]>>,
+    scratch: Mutex<Vec<u8>>,
 }
 
 impl BlockDevice {
@@ -23,6 +24,7 @@ impl BlockDevice {
         Self {
             device_id,
             cache: Mutex::new(LruCache::new(NonZero::new(cache_size).unwrap())),
+            scratch: Mutex::new(Vec::new()),
         }
     }
 
@@ -37,7 +39,6 @@ impl BlockDevice {
         let mut cache = self.cache.lock();
         let mut miss_ranges = Vec::new();
 
-        // Step 1: fill from cache
         for i in 0..sectors as u64 {
             let idx = (i as usize) * SECTOR_SIZE;
             let lba_i = lba + i;
@@ -48,12 +49,16 @@ impl BlockDevice {
             }
         }
 
-        // Step 2: fetch misses in one backend call if contiguous
         if !miss_ranges.is_empty() {
             let first = miss_ranges[0].0;
             let count = miss_ranges.len() as u16;
-            let mut tmp = vec![0u8; count as usize * SECTOR_SIZE];
-            let mut data = read_sectors(self.device_id, first, count, tmp)?;
+
+            let mut scratch = self.scratch.lock();
+            scratch.resize(count as usize * SECTOR_SIZE, 0);
+
+            let mut data =
+                read_sectors(self.device_id, first, count, core::mem::take(&mut scratch))?;
+            // now `data` holds the backend-owned buffer
 
             for (j, (lba_i, idx)) in miss_ranges.iter().enumerate() {
                 let start = j * SECTOR_SIZE;
@@ -64,6 +69,9 @@ impl BlockDevice {
                 sector.copy_from_slice(&data[start..end]);
                 cache.put(*lba_i, sector);
             }
+
+            // save `data` back for reuse
+            *scratch = data;
         }
 
         Ok(buffer)
@@ -76,6 +84,7 @@ impl BlockDevice {
         sectors: u16,
     ) -> Result<Vec<u8>, AhciError> {
         assert_eq!(data.len(), sectors as usize * SECTOR_SIZE);
+
         {
             let mut cache = self.cache.lock();
             for i in 0..sectors as u64 {
@@ -85,8 +94,15 @@ impl BlockDevice {
                 cache.put(lba + i, sector);
             }
         }
-        // write-through
-        write_sectors(self.device_id, lba, data, sectors)
+
+        let mut scratch = self.scratch.lock();
+        let mut tmp = core::mem::take(&mut *scratch);
+        core::mem::swap(&mut tmp, &mut data);
+
+        let mut out = write_sectors(self.device_id, lba, tmp, sectors)?;
+
+        *scratch = out; // reclaim backend buffer
+        Ok(data) // caller gets their Vec back
     }
 
     pub fn flush(&self) -> Result<(), AhciError> {
