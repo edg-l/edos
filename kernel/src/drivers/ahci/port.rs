@@ -107,32 +107,38 @@ impl AhciPort {
 
     fn stop_port(port_regs: *mut HbaPort) -> Result<(), AhciError> {
         unsafe {
-            // Clear ST (start) bit
+            // Clear ST (start) bit if set
             let mut cmd = ptr::read_volatile(&(*port_regs).cmd);
-            cmd &= !PORT_CMD_ST;
-            ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
+            if cmd & PORT_CMD_ST != 0 {
+                cmd &= !PORT_CMD_ST;
+                ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
 
-            // Wait for CR (command list running) to clear
-            let start = crate::timer::Instant::now();
-            while ptr::read_volatile(&raw const (*port_regs).cmd) & PORT_CMD_CR != 0 {
-                if start.elapsed().as_millis() > 500 {
-                    return Err(AhciError::CommandTimeout);
+                // Wait for CR (command list running) to clear
+                let start = crate::timer::Instant::now();
+                while ptr::read_volatile(&raw const (*port_regs).cmd) & PORT_CMD_CR != 0 {
+                    if start.elapsed().as_millis() > 500 {
+                        return Err(AhciError::CommandTimeout);
+                    }
+                    crate::thread::scheduler::sched()
+                        .thread_wait_timeout(core::time::Duration::from_millis(1));
                 }
-                x86_64::instructions::hlt();
             }
 
-            // Clear FRE (FIS receive enable)
+            // Clear FRE (FIS receive enable) if set
             cmd = ptr::read_volatile(&raw const (*port_regs).cmd);
-            cmd &= !PORT_CMD_FRE;
-            ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
+            if cmd & PORT_CMD_FRE != 0 {
+                cmd &= !PORT_CMD_FRE;
+                ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
 
-            // Wait for FR (FIS receive running) to clear
-            let start = crate::timer::Instant::now();
-            while ptr::read_volatile(&raw const (*port_regs).cmd) & PORT_CMD_FR != 0 {
-                if start.elapsed().as_millis() > 500 {
-                    return Err(AhciError::CommandTimeout);
+                // Wait for FR (FIS receive running) to clear
+                let start = crate::timer::Instant::now();
+                while ptr::read_volatile(&raw const (*port_regs).cmd) & PORT_CMD_FR != 0 {
+                    if start.elapsed().as_millis() > 500 {
+                        return Err(AhciError::CommandTimeout);
+                    }
+                    crate::thread::scheduler::sched()
+                        .thread_wait_timeout(core::time::Duration::from_millis(1));
                 }
-                x86_64::instructions::hlt();
             }
         }
 
@@ -157,11 +163,6 @@ impl AhciPort {
 
     /// Issue IDENTIFY command to get device information
     pub fn identify_device(&mut self) -> Result<DeviceIdentifyInfo, AhciError> {
-        // Allocate command slot
-        let slot = self
-            .allocate_command_slot()
-            .ok_or(AhciError::PortNotReady)?;
-
         // Allocate DMA buffer for identify data (512 bytes)
         let data_buffer = self.dma_alloc.allocate_sized(512)?;
 
@@ -174,9 +175,6 @@ impl AhciPort {
         )?;
         // Copy the identify data
         let result = unsafe { &*data_buffer.as_ptr().cast::<[u8; 512]>() };
-
-        // Clean up
-        self.free_command_slot(slot);
 
         let info = DeviceIdentifyInfo::from_identify_data(result);
 
@@ -202,11 +200,6 @@ impl AhciPort {
             return Err(AhciError::IoError);
         }
 
-        // Allocate command slot
-        let slot = self
-            .allocate_command_slot()
-            .ok_or(AhciError::PortNotReady)?;
-
         // Allocate DMA buffer for read data (sized for multiple sectors)
         let data_buffer = self.dma_alloc.allocate_sized(expected_size)?;
 
@@ -223,8 +216,6 @@ impl AhciPort {
         unsafe {
             ptr::copy_nonoverlapping(data_buffer.as_ptr(), buffer.as_mut_ptr(), bytes_to_copy);
         }
-
-        self.free_command_slot(slot);
 
         self.dma_alloc.dealloc(data_buffer);
 
@@ -248,11 +239,6 @@ impl AhciPort {
             return Err(AhciError::IoError);
         }
 
-        // Allocate command slot
-        let slot = self
-            .allocate_command_slot()
-            .ok_or(AhciError::PortNotReady)?;
-
         // Allocate DMA buffer for write data (sized for multiple sectors)
         let data_buffer = self.dma_alloc.allocate_sized(expected_size)?;
 
@@ -269,18 +255,11 @@ impl AhciPort {
             Duration::from_secs(5),
         )?;
 
-        self.free_command_slot(slot);
-
         self.dma_alloc.dealloc(data_buffer);
         Ok(())
     }
 
     pub fn flush_cache(&mut self) -> Result<(), AhciError> {
-        // Allocate command slot
-        let slot = self
-            .allocate_command_slot()
-            .ok_or(AhciError::PortNotReady)?;
-
         self.execute_command(
             &FisRegH2D::new_flush_cache(),
             PhysAddr::zero(),
@@ -288,8 +267,6 @@ impl AhciPort {
             0,
             Duration::from_secs(5),
         )?;
-
-        self.free_command_slot(slot);
         Ok(())
     }
 
@@ -396,17 +373,9 @@ impl AhciPort {
                 return Err(AhciError::CommandTimeout);
             }
 
-            // Yield to scheduler while waiting
-            // In threaded design, this would be where the thread sleeps
-            // and gets woken by interrupt
+            // Yield to scheduler while waiting (interrupt-wakeable)
             crate::thread::scheduler::sched()
-                .thread_wait_timeout(core::time::Duration::from_millis(100));
-        }
-
-        // Clear any remaining interrupts for this completion
-        let is = unsafe { ptr::read_volatile(&raw const (*self.port_regs).is) };
-        if is != 0 {
-            unsafe { ptr::write_volatile(&raw mut (*self.port_regs).is, is) };
+                .thread_wait_timeout(core::time::Duration::from_millis(5));
         }
 
         Ok(())

@@ -168,16 +168,9 @@ impl AhciController {
         // Wait for AHCI to be enabled (AE bit should remain set)
         let start = Instant::now();
         while unsafe { ptr::read_volatile(&raw const (*self.hba).ghc) } & GHC_AE == 0 {
-            println!("Waiting for ACHI init..");
             if start.elapsed().as_millis() > 1000 {
                 return Err(AhciError::CommandTimeout);
             }
-            sched().thread_yield();
-        }
-
-        // Give the controller a moment to fully initialize
-        let start = Instant::now();
-        while start.elapsed().as_millis() < 100 {
             sched().thread_yield();
         }
 
@@ -211,18 +204,15 @@ impl AhciController {
                 // Initialize the port properly before reading signature
                 self.initialize_port(port_ptr, i)?;
 
-                // Wait for signature to stabilize after power-on and track all reads
-                let mut signature_attempts = 0;
-                let mut signature = 0xffffffff;
-
-                while signature == 0xffffffff && signature_attempts < 10 {
-                    let start = Instant::now();
-                    while start.elapsed().as_millis() < 100 {
-                        sched().thread_yield();
+                // Read signature with a short bounded wait (fast settle)
+                let mut signature = unsafe { ptr::read_volatile(&raw const (*port_ptr).sig) };
+                if signature == 0xffffffff {
+                    let mut attempts = 0;
+                    while signature == 0xffffffff && attempts < 5 {
+                        sched().thread_wait_timeout(core::time::Duration::from_millis(5));
+                        signature = unsafe { ptr::read_volatile(&raw const (*port_ptr).sig) };
+                        attempts += 1;
                     }
-
-                    signature = unsafe { ptr::read_volatile(&raw const (*port_ptr).sig) };
-                    signature_attempts += 1;
                 }
 
                 match signature {
@@ -344,12 +334,6 @@ impl AhciController {
             cmd = ptr::read_volatile(&raw const (*port_ptr).cmd);
             cmd |= PORT_CMD_ST;
             ptr::write_volatile(&raw mut (*port_ptr).cmd, cmd);
-
-            // Wait a bit more for device to fully initialize and register FIS
-            let start = Instant::now();
-            while start.elapsed().as_millis() < 20 {
-                sched().thread_yield();
-            }
         }
 
         println!("Port {} initialization complete", port_idx);

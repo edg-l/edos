@@ -4,12 +4,19 @@ use alloc::{boxed::Box, format, vec::Vec};
 use x86_64::instructions::hlt;
 
 use crate::{
-    allocator::{print_alloc_stats, ALLOCATOR}, drivers::ahci::api::list_devices, fs::{
-        fat32::Fat32fs, gpt::{parse_gpt, print_partitions, Partition}, path::Path, FileSystem
-    }, println, thread::{
+    allocator::{ALLOCATOR, print_alloc_stats},
+    drivers::ahci::api::list_devices,
+    fs::{
+        FileSystem,
+        fat32::Fat32fs,
+        gpt::{Partition, parse_gpt, print_partitions},
+        path::Path,
+    },
+    println,
+    thread::{
         scheduler::sched,
         util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_kthread_named_arg},
-    }
+    },
 };
 
 use super::gpt::FilesystemType;
@@ -106,7 +113,7 @@ extern "C" fn fs32_partition_thread(partition: *mut Partition) -> ! {
 
     let path = Path::parse_str("/edgar.txt").unwrap();
     fs.create_file(&path).unwrap();
-      print_alloc_stats();
+    print_alloc_stats();
 
     println!("created file");
 
@@ -118,7 +125,6 @@ extern "C" fn fs32_partition_thread(partition: *mut Partition) -> ! {
     let content = fs.read_bytes(&path, 0, 512).unwrap();
 
     let content = CStr::from_bytes_with_nul(&content);
-
 
     println!("Content: {content:?}");
 
