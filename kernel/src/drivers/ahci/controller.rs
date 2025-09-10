@@ -201,41 +201,48 @@ impl AhciController {
 
                 println!("Port {}: Device detected (DET=3, IPM=1)", i);
 
-                // Initialize the port properly before reading signature
+                // Basic init only (power/spin-up); AhciPort::new will start FRE/ST once
                 self.initialize_port(port_ptr, i)?;
 
-                // Read signature with a short bounded wait (fast settle)
-                let mut signature = unsafe { ptr::read_volatile(&raw const (*port_ptr).sig) };
-                if signature == 0xffffffff {
-                    let mut attempts = 0;
-                    while signature == 0xffffffff && attempts < 5 {
-                        sched().thread_wait_timeout(core::time::Duration::from_millis(5));
-                        signature = unsafe { ptr::read_volatile(&raw const (*port_ptr).sig) };
-                        attempts += 1;
-                    }
-                }
+                // Initialize AHCI port (program CLB/FB, enable FRE/ST)
+                match AhciPort::new(i, port_ptr) {
+                    Ok(port) => {
+                        // Read signature with a short bounded wait after start
+                        let mut signature =
+                            unsafe { ptr::read_volatile(&raw const (*port_ptr).sig) };
+                        if signature == 0xffffffff {
+                            let mut attempts = 0;
+                            while signature == 0xffffffff && attempts < 5 {
+                                sched().thread_wait_timeout(core::time::Duration::from_millis(5));
+                                signature =
+                                    unsafe { ptr::read_volatile(&raw const (*port_ptr).sig) };
+                                attempts += 1;
+                            }
+                        }
 
-                match signature {
-                    SATA_SIG_ATA => {
-                        println!("Found SATA drive on port {}", i);
-                        // Get volatile pointer to the specific port
-                        match AhciPort::new(i, port_ptr) {
-                            Ok(port) => {
+                        match signature {
+                            SATA_SIG_ATA => {
+                                println!("Found SATA drive on port {}", i);
                                 self.ports[i] = Some(Arc::new(Mutex::new(port)));
                             }
-                            Err(e) => {
-                                println!("Failed to initialize port {}: {:?}", i, e);
+                            SATA_SIG_ATAPI => {
+                                println!(
+                                    "Found ATAPI device on port {} (sig: {:#x}) - not supported yet",
+                                    i, signature
+                                );
+                                // Unsupported device type; do not keep the port
+                            }
+                            sig => {
+                                println!(
+                                    "Port {} has unsupported/invalid signature: {:#x}",
+                                    i, sig
+                                );
+                                // Unsupported signature; do not keep the port
                             }
                         }
                     }
-                    SATA_SIG_ATAPI => {
-                        println!(
-                            "Found ATAPI device on port {} (sig: {:#x}) - not supported yet",
-                            i, signature
-                        );
-                    }
-                    sig => {
-                        println!("Port {} has unsupported/invalid signature: {:#x}", i, sig);
+                    Err(e) => {
+                        println!("Failed to initialize port {}: {:?}", i, e);
                     }
                 }
             }
@@ -315,25 +322,7 @@ impl AhciController {
                 return Err(AhciError::InvalidDevice);
             }
 
-            // Enable FIS receive
-            cmd = ptr::read_volatile(&raw const (*port_ptr).cmd);
-            cmd |= PORT_CMD_FRE;
-            ptr::write_volatile(&mut (*port_ptr).cmd, cmd);
-
-            // Wait for FIS receive to start
-            let start = Instant::now();
-            while ptr::read_volatile(&raw const (*port_ptr).cmd) & PORT_CMD_FR == 0 {
-                if start.elapsed().as_millis() > 200 {
-                    println!("Port {}: Timeout waiting for FIS receive", port_idx);
-                    return Err(AhciError::CommandTimeout);
-                }
-                sched().thread_yield();
-            }
-
-            // Start command processing
-            cmd = ptr::read_volatile(&raw const (*port_ptr).cmd);
-            cmd |= PORT_CMD_ST;
-            ptr::write_volatile(&raw mut (*port_ptr).cmd, cmd);
+            // Do not enable FRE/ST here; AhciPort::new will program CLB/FB and start the port
         }
 
         println!("Port {} initialization complete", port_idx);
