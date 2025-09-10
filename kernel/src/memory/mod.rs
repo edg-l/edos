@@ -5,7 +5,7 @@ use crate::boot::boot_info;
 pub mod frame_allocator;
 pub mod mapper;
 
-pub const KERNEL_HEAP: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_0000_0000);
+pub const KERNEL_HEAP: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_3000_0000);
 pub const KERNEL_HEAP_SIZE: u64 = 1024 * 1024 * 128; // 128 mb
 
 // After heap

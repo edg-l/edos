@@ -9,7 +9,7 @@ use crate::{
 };
 
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 pub fn init_heap() {
     let heap_start = KERNEL_HEAP;
@@ -32,4 +32,11 @@ pub fn init_heap() {
             .lock()
             .init(heap_start.as_mut_ptr(), heap_size as usize);
     }
+}
+
+pub fn print_alloc_stats() {
+    let used = ALLOCATOR.lock().used();
+    let size = ALLOCATOR.lock().size();
+
+    println!("Kernel heap {} kb / {} kb", used / 1024, size / 1024);
 }
