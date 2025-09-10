@@ -5,6 +5,7 @@ pub mod fpu;
 pub mod hpet;
 pub mod keyboard;
 pub mod pci;
+pub mod msi;
 
 pub fn init_drivers() {
     hpet::driver::init();

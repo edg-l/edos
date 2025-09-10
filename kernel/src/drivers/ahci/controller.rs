@@ -18,6 +18,7 @@ use crate::{
                 PORT_CMD_POD, PORT_CMD_ST, PORT_CMD_SUD, SATA_SIG_ATA, SATA_SIG_ATAPI,
             },
         },
+        msi,
         pci::structures::PciDevice,
     },
     interrupts::InterruptIndex,
@@ -112,16 +113,29 @@ impl AhciController {
     }
 
     fn configure_interrupt(pci_device: &PciDevice) -> Result<(), AhciError> {
+        // Prefer MSI if available
+        match msi::enable_msi_for_device(pci_device, InterruptIndex::Ahci.as_u8()) {
+            Ok(()) => {
+                println!("AHCI: using MSI on {:02x}:{:02x}.{}",
+                    pci_device.address.bus,
+                    pci_device.address.device,
+                    pci_device.address.function
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                println!("AHCI: MSI unavailable ({:?}), falling back to IOAPIC IRQ {}",
+                    e,
+                    pci_device.header.interrupt_line
+                );
+            }
+        }
+
         if pci_device.header.interrupt_line == 0xFF {
             return Err(AhciError::InvalidDevice);
         }
 
-        println!(
-            "Configuring AHCI interrupt: IRQ {}",
-            pci_device.header.interrupt_line
-        );
-
-        // Route hardware IRQ to our AHCI vector
+        // Route legacy hardware IRQ to our AHCI vector
         configure_device_interrupt(
             pci_device.header.interrupt_line,
             InterruptIndex::Ahci.as_u8(),
