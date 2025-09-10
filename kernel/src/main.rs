@@ -65,7 +65,7 @@ fn init() {
     println!("Initializing gdt");
     gdt::init_current_cpu();
     println!("Initializing idt");
-    interrupts::init();
+    interrupts::init_current_cpu();
     println!("Initializing apic");
     apic::init();
     println!("Initializing hpet");

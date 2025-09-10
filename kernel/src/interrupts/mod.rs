@@ -22,6 +22,8 @@ impl InterruptIndex {
     }
 }
 
-pub fn init() {
+/// Initialize interrupt handling for the current CPU by loading the shared IDT.
+/// Must be called once on every CPU after its GDT/TSS is initialized.
+pub fn init_current_cpu() {
     IDT.load();
 }
