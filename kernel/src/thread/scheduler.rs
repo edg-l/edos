@@ -184,9 +184,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
             }
         }
 
-        loop {
-            x86_64::instructions::interrupts::enable_and_hlt();
-        }
+        context
     }
 }
 
