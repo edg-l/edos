@@ -38,7 +38,7 @@ pub fn init() {
     }
 }
 
-pub(super) unsafe fn enable_lapic() {
+pub unsafe fn enable_lapic() {
     let mut lapic = LocalApicBuilder::new()
         .timer_vector(InterruptIndex::Timer as usize)
         .error_vector(InterruptIndex::Error as usize)

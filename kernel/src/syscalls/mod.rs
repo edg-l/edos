@@ -57,10 +57,6 @@ pub unsafe fn setup_syscall() {
     }
 
     let s = selectors();
-    println!("Kernel code: 0x{:x}", s.code_selector.0);
-    println!("Kernel data: 0x{:x}", s.data_selector.0);
-    println!("User code: 0x{:x}", s.user_code_selector.0);
-    println!("User data: 0x{:x}", s.user_data_selector.0);
 
     // STAR register: set kernel/user code segments
     Star::write(
