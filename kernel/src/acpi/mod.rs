@@ -125,6 +125,8 @@ pub fn current_cpu_index() -> usize {
 }
 
 /// Returns the raw current APIC ID via CPUID topology.
+///
+/// TODO: we can simplify this because we get the cpu id at entry point
 pub fn raw_current_apic_id() -> u32 {
     without_interrupts(|| {
         let cpuid = CpuId::new();

@@ -15,7 +15,7 @@ pub struct Broadcast<T: Clone> {
     bound: usize,
 }
 
-pub type LockedBroadcast<T: Clone> = Mutex<Broadcast<T>>;
+pub type LockedBroadcast<T> = Mutex<Broadcast<T>>;
 
 pub const fn new_broadcast<T: Clone>(bound: usize, send_history: bool) -> Mutex<Broadcast<T>> {
     Mutex::new(Broadcast::new(bound, send_history))
