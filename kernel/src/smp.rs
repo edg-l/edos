@@ -5,9 +5,7 @@ use limine::mp::Cpu as MpCpu;
 use crate::{
     apic::{get_lapic, set_apic_timer_and_enable},
     boot::MP_REQUEST,
-    gdt,
-    interrupts,
-    println,
+    gdt, interrupts, println, thread::{self, scheduler::sched, util::queue_spawn_kthread_named},
     util::per_cpu::init_this_cpu_percpu,
 };
 
@@ -18,7 +16,9 @@ pub fn init() {
         let bsp_lapic = resp.bsp_lapic_id();
         for &cpu in resp.cpus() {
             // Skip the BSP; it is already running `init()` and `main()`.
-            if cpu.lapic_id == bsp_lapic { continue; }
+            if cpu.lapic_id == bsp_lapic {
+                continue;
+            }
 
             println!("Initing: {:#?} (bsp: {bsp_lapic})", cpu.id);
 
@@ -45,11 +45,26 @@ pub unsafe extern "C" fn ap_start(_cpu: &MpCpu) -> ! {
     unsafe { get_lapic().enable() };
     set_apic_timer_and_enable(Duration::from_millis(5));
 
-    println!("[smp] AP online: LAPIC id {}", crate::acpi::raw_current_apic_id());
+    println!(
+        "[smp] AP online: LAPIC id {}",
+        crate::acpi::raw_current_apic_id()
+    );
+
+    thread::scheduler::init();
+
+    queue_spawn_kthread_named("test", kthread_test as u64);
 
     // Idle loop for now; scheduler integration can come next.
     x86_64::instructions::interrupts::enable_and_hlt();
     loop {
         x86_64::instructions::hlt();
+    }
+}
+
+
+pub fn kthread_test() -> ! {
+    loop {
+        println!("hello from cpu 1");
+        sched().thread_wait_timeout(Duration::from_secs(1));
     }
 }

@@ -41,6 +41,7 @@ pub struct Scheduler {
 }
 
 pub fn init() {
+    println!("Initializing scheduler");
     let ptr = unsafe { alloc::alloc::alloc(Layout::new::<Scheduler>()).cast::<Scheduler>() };
     unsafe { ptr.write(Scheduler::default()) };
     let cr3 = Cr3::read();
@@ -49,6 +50,7 @@ pub fn init() {
         (*ptr).kernel_cr3_flags = cr3.1.bits();
     }
     get_percpu_data().scheduler = ptr;
+     println!("Saved scheduler on percpu");
 
     queue_spawn_kthread_named("tcleaner", thread_cleaner as u64);
 }
