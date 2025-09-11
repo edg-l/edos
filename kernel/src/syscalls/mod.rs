@@ -304,6 +304,7 @@ fn sys_getpid() -> u64 {
     current_id.id
 }
 
+// TODO: figure out why the syscall gets all logs. it doesnt properly subscribe?
 pub fn sys_kernel_log(log_buffer: *mut u8, size: usize) -> i64 {
     let thread = sched().current_thread_mut();
     thread.errno = Errno::Clear;

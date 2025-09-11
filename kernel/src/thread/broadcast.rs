@@ -5,7 +5,7 @@ use crossbeam_queue::SegQueue;
 use spin::Mutex;
 use thiserror::Error;
 
-use crate::thread::{ThreadId, scheduler::sched};
+use crate::{println, thread::{scheduler::sched, ThreadId}};
 
 #[derive(Debug)]
 pub struct Broadcast<T: Clone> {
