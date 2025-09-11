@@ -1,7 +1,8 @@
 use core::{alloc::Layout, time::Duration};
 
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
-use crossbeam_queue::SegQueue;
+use alloc::{boxed::Box, vec::Vec};
+use crossbeam_queue::ArrayQueue;
+use heapless::LinearMap;
 use x86_64::{
     VirtAddr,
     instructions::{
@@ -26,14 +27,14 @@ use crate::{
     util::per_cpu::get_percpu_data,
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Scheduler {
-    thread_queue: SegQueue<ThreadId>,
-    thread_priority_queue: SegQueue<ThreadId>,
-    pub kthread_spawn_queue: SegQueue<KernelThread>,
-    kthreads: BTreeMap<u64, KernelThread>,
-    pub thread_spawn_queue: SegQueue<UserThread>,
-    pub threads: BTreeMap<u64, UserThread>,
+    thread_queue: ArrayQueue<ThreadId>,
+    thread_priority_queue: ArrayQueue<ThreadId>,
+    pub kthread_spawn_queue: ArrayQueue<KernelThread>,
+    kthreads: heapless::LinearMap<u64, KernelThread, 64>,
+    pub thread_spawn_queue: ArrayQueue<UserThread>,
+    pub threads: heapless::LinearMap<u64, UserThread, 256>,
     current_thread_id: Option<ThreadId>,
     /// Physical addr
     pub kernel_cr3: u64,
@@ -42,15 +43,22 @@ pub struct Scheduler {
 
 pub fn init() {
     println!("Initializing scheduler");
-    let ptr = unsafe { alloc::alloc::alloc(Layout::new::<Scheduler>()).cast::<Scheduler>() };
-    unsafe { ptr.write(Scheduler::default()) };
     let cr3 = Cr3::read();
-    unsafe {
-        (*ptr).kernel_cr3 = cr3.0.start_address().as_u64();
-        (*ptr).kernel_cr3_flags = cr3.1.bits();
-    }
+    let sched = Box::new(Scheduler {
+        thread_queue: ArrayQueue::new(1024),
+        thread_priority_queue: ArrayQueue::new(256),
+        kthread_spawn_queue: ArrayQueue::new(64),
+        kthreads: LinearMap::new(),
+        thread_spawn_queue: ArrayQueue::new(64),
+        threads: LinearMap::new(),
+        current_thread_id: None,
+        kernel_cr3: cr3.0.start_address().as_u64(),
+        kernel_cr3_flags: cr3.1.bits(),
+    });
+
+    let ptr = Box::leak(sched);
     get_percpu_data().scheduler = ptr;
-     println!("Saved scheduler on percpu");
+    println!("Saved scheduler on percpu");
 
     queue_spawn_kthread_named("tcleaner", thread_cleaner as u64);
 }

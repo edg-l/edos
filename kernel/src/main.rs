@@ -30,11 +30,11 @@ mod interrupts;
 mod loader;
 mod memory;
 mod serial;
+mod smp;
 mod syscalls;
 mod thread;
 mod timer;
 mod util;
-mod smp;
 
 extern crate alloc;
 

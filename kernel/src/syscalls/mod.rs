@@ -317,7 +317,7 @@ pub fn sys_kernel_log(log_buffer: *mut u8, size: usize) -> i64 {
 
     x86_64::instructions::interrupts::enable();
 
-    let rx = SERIAL_SUBSCRIBER.subscribe_or_get();
+    let rx = SERIAL_SUBSCRIBER.lock().subscribe_or_get();
 
     // Require a 128 byte space.
     while buf.len() + 128 + 1 < size

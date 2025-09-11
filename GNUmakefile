@@ -57,6 +57,24 @@ run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NA
 		-smp 2 \
 		$(QEMUFLAGS)
 
+.PHONY: run-gdb
+run-gdb: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+	qemu-system-$(KARCH) \
+		-M q35 \
+		-cpu qemu64,+x2apic \
+		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
+		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
+		-cdrom $(IMAGE_NAME).iso \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+		-serial stdio \
+		-no-reboot \
+		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
+		-device ide-hd,drive=sata0,bus=ide.1 \
+		-smp 2 \
+		-no-shutdown \
+		-accel tcg \
+		-s -S \
+		$(QEMUFLAGS)
 
 .PHONY: run-bios sata-disk.img
 run-bios: $(IMAGE_NAME).iso

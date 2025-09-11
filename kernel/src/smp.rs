@@ -3,7 +3,12 @@ use core::time::Duration;
 use limine::mp::Cpu as MpCpu;
 
 use crate::{
-    apic::{get_lapic, init::enable_lapic, set_apic_timer_and_enable}, boot::MP_REQUEST, gdt, interrupts, println, syscalls::setup_syscall, thread::{self, scheduler::sched, util::queue_spawn_kthread_named}, util::per_cpu::init_this_cpu_percpu
+    apic::{get_lapic, init::enable_lapic, set_apic_timer_and_enable},
+    boot::MP_REQUEST,
+    gdt, interrupts, println,
+    syscalls::setup_syscall,
+    thread::{self, scheduler::sched, util::queue_spawn_kthread_named},
+    util::per_cpu::init_this_cpu_percpu,
 };
 
 /// Initialize SMP using Limine's MP request: set AP entrypoints and let Limine bring them up.

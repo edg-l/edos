@@ -1,9 +1,14 @@
 use core::ffi::CStr;
 
 use limine::{
-    framebuffer::Framebuffer, request::{
-        DeviceTreeBlobRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, MpRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest, StackSizeRequest
-    }, response::MemoryMapResponse, BaseRevision
+    BaseRevision,
+    framebuffer::Framebuffer,
+    request::{
+        DeviceTreeBlobRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest,
+        MemoryMapRequest, MpRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest,
+        StackSizeRequest,
+    },
+    response::MemoryMapResponse,
 };
 use spin::{Mutex, Once};
 use x86_64::{

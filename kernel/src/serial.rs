@@ -6,13 +6,15 @@ use uart_16550::SerialPort;
 use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{
-    acpi::current_cpu_index, thread::broadcast::Broadcast, timer::uptime_us,
+    acpi::current_cpu_index,
+    thread::broadcast::{LockedBroadcast, new_broadcast},
+    timer::uptime_us,
     util::per_cpu::get_percpu_data,
 };
 
 static SERIAL_DBG: Once<Mutex<SerialPort>> = Once::new();
 
-pub static SERIAL_SUBSCRIBER: Broadcast<Arc<String>> = Broadcast::new(256, true);
+pub static SERIAL_SUBSCRIBER: LockedBroadcast<Arc<String>> = new_broadcast(256, true);
 
 pub fn init() {
     SERIAL_DBG.call_once(|| {
@@ -62,7 +64,7 @@ pub fn _serial_print(args: fmt::Arguments) {
                     .write_str(&text)
                     .unwrap();
             }
-            SERIAL_SUBSCRIBER.broadcast(Arc::new(text));
+            SERIAL_SUBSCRIBER.lock().broadcast(Arc::new(text));
             return;
         };
 

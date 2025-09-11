@@ -8,10 +8,14 @@ use x86_64::{
 
 use crate::{
     apic::get_lapic,
-    thread::{ThreadId, broadcast::Broadcast, scheduler::sched},
+    thread::{
+        ThreadId,
+        broadcast::{LockedBroadcast, new_broadcast},
+        scheduler::sched,
+    },
 };
 
-pub static KEYBOARD_BROADCAST: Broadcast<DecodedKey> = Broadcast::new(1024, false);
+pub static KEYBOARD_BROADCAST: LockedBroadcast<DecodedKey> = new_broadcast(1024, false);
 
 static SCANCODE_QUEUE: Once<ArrayQueue<u8>> = Once::new();
 const QUEUE_SIZE: usize = 2048;
@@ -56,7 +60,7 @@ pub extern "C" fn driver_main() -> ! {
             if let Ok(Some(event)) = keyboard.add_byte(scancode)
                 && let Some(key_event) = keyboard.process_keyevent(event)
             {
-                KEYBOARD_BROADCAST.broadcast(key_event);
+                KEYBOARD_BROADCAST.lock().broadcast(key_event);
             }
         }
         sched().thread_park();

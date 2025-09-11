@@ -6,6 +6,7 @@ use acpi::{
     sdt::madt::Madt,
 };
 use spin::Once;
+use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{acpi::handler::AcpiHandler, boot::boot_info, println};
 use alloc::{collections::BTreeMap, vec::Vec};
@@ -125,16 +126,18 @@ pub fn current_cpu_index() -> usize {
 
 /// Returns the raw current APIC ID via CPUID topology.
 pub fn raw_current_apic_id() -> u32 {
-    let cpuid = CpuId::new();
-    if let Some(extended_topology) = cpuid.get_extended_topology_info() {
-        for level in extended_topology {
-            if level.level_type() == raw_cpuid::TopologyType::Core {
-                return level.x2apic_id();
+    without_interrupts(|| {
+        let cpuid = CpuId::new();
+        if let Some(extended_topology) = cpuid.get_extended_topology_info() {
+            for level in extended_topology {
+                if level.level_type() == raw_cpuid::TopologyType::Core {
+                    return level.x2apic_id();
+                }
             }
         }
-    }
-    if let Some(feature_info) = cpuid.get_feature_info() {
-        return feature_info.initial_local_apic_id() as u32;
-    }
-    0
+        if let Some(feature_info) = cpuid.get_feature_info() {
+            return feature_info.initial_local_apic_id() as u32;
+        }
+        0
+    })
 }
