@@ -35,7 +35,7 @@ pub fn init() {
 
 /// Limine AP entrypoint. Signature is mandated by limine::mp::GotoAddress::write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ap_start(_cpu: &MpCpu) -> ! {
+pub unsafe extern "C" fn ap_start(cpu: &MpCpu) -> ! {
     // Per-CPU data and core-local tables
     unsafe { init_this_cpu_percpu() };
     gdt::init_current_cpu();
@@ -46,8 +46,10 @@ pub unsafe extern "C" fn ap_start(_cpu: &MpCpu) -> ! {
     set_apic_timer_and_enable(Duration::from_millis(5));
 
     println!(
-        "[smp] AP online: LAPIC id {}",
-        crate::acpi::raw_current_apic_id()
+        "[smp] AP online: LAPIC id {} {}, {}",
+        crate::acpi::raw_current_apic_id(),
+        cpu.lapic_id,
+        get_lapic().id()
     );
 
     thread::scheduler::init();
