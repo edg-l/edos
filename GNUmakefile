@@ -38,6 +38,7 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-no-reboot \
 		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
 		-device ide-hd,drive=sata0,bus=ide.1 \
+		-smp 2 \
 		$(QEMUFLAGS)
 
 .PHONY: run-hdd-x86_64
@@ -53,6 +54,7 @@ run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NA
 		-no-reboot \
 		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
 		-device ide-hd,drive=sata0,bus=ide.1 \
+		-smp 2 \
 		$(QEMUFLAGS)
 
 

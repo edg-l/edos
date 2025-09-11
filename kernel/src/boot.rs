@@ -1,13 +1,9 @@
 use core::ffi::CStr;
 
 use limine::{
-    BaseRevision,
-    framebuffer::Framebuffer,
-    request::{
-        DeviceTreeBlobRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest,
-        MemoryMapRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest, StackSizeRequest,
-    },
-    response::MemoryMapResponse,
+    framebuffer::Framebuffer, request::{
+        DeviceTreeBlobRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, MpRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest, StackSizeRequest
+    }, response::MemoryMapResponse, BaseRevision
 };
 use spin::{Mutex, Once};
 use x86_64::{
@@ -61,6 +57,10 @@ static EXECUTABLE_CMDLINE_REQUEST: ExecutableCmdlineRequest = ExecutableCmdlineR
 #[used]
 #[unsafe(link_section = ".requests")]
 static DEVICE_TREE_BLOB_REQUEST: DeviceTreeBlobRequest = DeviceTreeBlobRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+pub static MP_REQUEST: MpRequest = MpRequest::new();
 
 /// Define the start and end markers for Limine requests.
 #[used]

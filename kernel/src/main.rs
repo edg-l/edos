@@ -34,6 +34,7 @@ mod syscalls;
 mod thread;
 mod timer;
 mod util;
+mod smp;
 
 extern crate alloc;
 
@@ -73,6 +74,7 @@ fn init() {
     println!("Calibrating timer");
     get_timer_calibration();
     init_boot_time();
+    smp::init();
     unsafe { syscalls::setup_syscall() };
     println!("Init done");
 }
