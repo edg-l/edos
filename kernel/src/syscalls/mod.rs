@@ -6,7 +6,7 @@ use x86_64::{
     instructions::interrupts::enable_and_hlt,
     registers::{
         control::{Efer, EferFlags},
-        model_specific::{GsBase, KernelGsBase, LStar, SFMask, Star},
+        model_specific::{LStar, SFMask, Star},
         rflags::RFlags,
     },
 };
@@ -24,22 +24,12 @@ use crate::{
         memory::{sys_mmap, sys_munmap},
     },
     thread::scheduler::sched,
-    util::per_cpu::get_percpu_data,
 };
 
 mod graphics;
 mod io;
 mod keyboard;
 mod memory;
-
-unsafe fn setup_gs_base() {
-    let percpu = get_percpu_data();
-
-    // Set GS base to point to per-CPU data
-    let per_cpu_addr = &raw mut *percpu;
-    GsBase::write(VirtAddr::new(per_cpu_addr as u64));
-    KernelGsBase::write(VirtAddr::new(per_cpu_addr as u64));
-}
 
 pub fn set_gs_kernel_stack(stack: u64) {
     unsafe {
@@ -53,10 +43,6 @@ pub fn set_gs_kernel_stack(stack: u64) {
 /// # Safety
 /// Must be called once per core
 pub unsafe fn setup_syscall() {
-    unsafe {
-        setup_gs_base();
-    }
-
     let s = selectors();
 
     // STAR register: set kernel/user code segments

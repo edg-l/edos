@@ -30,7 +30,7 @@ use crate::{
         util::queue_spawn_kthread_named,
     },
     timer::Instant,
-    util::per_cpu::{get_percpu_data, get_percpu_data_for},
+    util::per_cpu::get_percpu_data,
 };
 
 pub static ALIVE_THREADS: RwLock<FnvIndexMap<ThreadId, u64, 1024>> =
@@ -91,11 +91,6 @@ pub fn init() {
     let ptr = Box::leak(sched);
     get_percpu_data().scheduler = ptr;
     println!("Saved scheduler on percpu");
-}
-
-#[allow(unused)]
-pub fn get_sched_cpu(cpu: usize) -> &'static Scheduler {
-    unsafe { get_percpu_data_for(cpu).scheduler.as_ref().unwrap() }
 }
 
 pub fn sched() -> &'static Scheduler {

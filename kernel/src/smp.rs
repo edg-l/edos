@@ -13,7 +13,7 @@ use crate::{
         scheduler::{sched, switch_to_kernel_page},
         util::{kthread_exit, queue_spawn_kthread_named},
     },
-    util::per_cpu::init_this_cpu_percpu,
+    util::per_cpu::init_gs_for_this_cpu,
 };
 
 pub static NUM_CPUS: AtomicUsize = AtomicUsize::new(0);
@@ -49,7 +49,7 @@ pub unsafe extern "C" fn ap_start(_cpu: &MpCpu) -> ! {
     // Per-CPU data and core-local tables
     switch_to_kernel_page();
     tlb_flush_all_including_global();
-    unsafe { init_this_cpu_percpu() };
+    unsafe { init_gs_for_this_cpu() };
     gdt::init_current_cpu();
     interrupts::init_current_cpu();
 
