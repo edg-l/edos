@@ -3,8 +3,8 @@
 use core::ffi::CStr;
 
 use alloc::{boxed::Box, format, string::String, vec::Vec};
-use thiserror::Error;
 use spin::Once;
+use thiserror::Error;
 
 use crate::{
     allocator::print_alloc_stats,
@@ -152,10 +152,18 @@ pub(super) enum FsRequest {
     // Global
     ListPartitions,
     ListMounts,
-    Mount { index: usize, mount_point: Path },
-    Unmount { mount_point: Path },
+    Mount {
+        index: usize,
+        mount_point: Path,
+    },
+    Unmount {
+        mount_point: Path,
+    },
     // Partition routing
-    PartitionRequest { index: usize, command: PartitionCommand },
+    PartitionRequest {
+        index: usize,
+        command: PartitionCommand,
+    },
     // Internal for worker bootstrap
     GetPartitionMailbox(ThreadId),
 }
@@ -175,14 +183,34 @@ pub(super) enum FsResponse {
 
 #[derive(Debug, Clone)]
 pub(super) enum PartitionCommand {
-    ListFiles { path: Path },
-    ReadBytes { path: Path, offset: usize, count: usize },
-    WriteBytes { path: Path, offset: usize, data: Vec<u8> },
-    CreateFile { path: Path },
-    CreateDir { path: Path },
-    RemoveFile { path: Path },
-    RemoveDir { path: Path },
-    FileInfo { path: Path },
+    ListFiles {
+        path: Path,
+    },
+    ReadBytes {
+        path: Path,
+        offset: usize,
+        count: usize,
+    },
+    WriteBytes {
+        path: Path,
+        offset: usize,
+        data: Vec<u8>,
+    },
+    CreateFile {
+        path: Path,
+    },
+    CreateDir {
+        path: Path,
+    },
+    RemoveFile {
+        path: Path,
+    },
+    RemoveDir {
+        path: Path,
+    },
+    FileInfo {
+        path: Path,
+    },
     Flush,
 }
 
@@ -246,13 +274,13 @@ pub extern "C" fn fs_main_thread() -> ! {
                 }
                 FsRequest::Mount { index, mount_point } => {
                     // Basic validation: index exists and mount point not used
-                    let res = if index < partitions.len() && !mount_points.contains_key(&mount_point)
-                    {
-                        mount_points.insert(mount_point, index);
-                        Ok(())
-                    } else {
-                        Err(Error::IoError)
-                    };
+                    let res =
+                        if index < partitions.len() && !mount_points.contains_key(&mount_point) {
+                            mount_points.insert(mount_point, index);
+                            Ok(())
+                        } else {
+                            Err(Error::IoError)
+                        };
                     req.response.send(FsResponse::Ok(res));
                 }
                 FsRequest::Unmount { mount_point } => {
@@ -273,8 +301,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                 FsRequest::GetPartitionMailbox(tid) => {
                     if let Some(index) = worker_tid_map.get(&tid) {
                         let mb = worker_mailboxes.get(*index).cloned();
-                        req.response
-                            .send(FsResponse::PartitionMailbox(mb));
+                        req.response.send(FsResponse::PartitionMailbox(mb));
                     } else {
                         req.response.send(FsResponse::PartitionMailbox(None));
                     }
@@ -320,7 +347,11 @@ extern "C" fn fat32_partition_thread(partition: *mut Partition) -> ! {
                     let res = (&fs as &dyn FileSystem).list_files(&path);
                     req.response.send(FsResponse::Files(res));
                 }
-                PartitionCommand::ReadBytes { path, offset, count } => {
+                PartitionCommand::ReadBytes {
+                    path,
+                    offset,
+                    count,
+                } => {
                     let res = (&fs as &dyn FileSystem).read_bytes(&path, offset, count);
                     req.response.send(FsResponse::ReadBytes(res));
                 }

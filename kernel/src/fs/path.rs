@@ -1,3 +1,5 @@
+use core::fmt;
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
@@ -18,7 +20,7 @@ pub enum ParseError {
 
 impl Path {
     pub fn parse(value: &str) -> Result<Path, ParseError> {
-         let components: Vec<String> = value
+        let components: Vec<String> = value
             .split('/')
             .filter(|c| !c.is_empty())
             .map(|c| c.to_string())
@@ -78,5 +80,12 @@ impl Path {
         c.components.extend(components);
 
         c
+    }
+}
+
+impl fmt::Display for Path {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = self.components.join("/");
+        write!(f, "/{}", s)
     }
 }

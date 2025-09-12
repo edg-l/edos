@@ -7,8 +7,7 @@ use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 
 use crate::{
     fs::{
-        Error, File, FS_REQUESTS, FsRequest, FsResponse, PartitionCommand,
-        gpt::Partition,
+        Error, FS_REQUESTS, File, FsRequest, FsResponse, PartitionCommand, gpt::Partition,
         path::Path,
     },
     thread::scheduler::sched,
@@ -46,8 +45,7 @@ pub fn list_partitions() -> Vec<Partition> {
 }
 
 pub fn list_mounts() -> BTreeMap<Path, usize> {
-    let FsResponse::MountPoints(mp) =
-        send_request(FsRequest::ListMounts, Duration::from_secs(1))
+    let FsResponse::MountPoints(mp) = send_request(FsRequest::ListMounts, Duration::from_secs(1))
     else {
         unreachable!()
     };
@@ -65,10 +63,9 @@ pub fn mount_partition(index: usize, mount_point: Path) -> Result<(), Error> {
 }
 
 pub fn unmount(mount_point: Path) -> Result<(), Error> {
-    let FsResponse::Ok(result) = send_request(
-        FsRequest::Unmount { mount_point },
-        Duration::from_secs(1),
-    ) else {
+    let FsResponse::Ok(result) =
+        send_request(FsRequest::Unmount { mount_point }, Duration::from_secs(1))
+    else {
         unreachable!()
     };
     result
@@ -79,7 +76,10 @@ pub fn unmount(mount_point: Path) -> Result<(), Error> {
 pub fn list_files(index: usize, path: &Path) -> Result<Vec<File>, Error> {
     let cmd = PartitionCommand::ListFiles { path: path.clone() };
     let FsResponse::Files(r) = send_request(
-        FsRequest::PartitionRequest { index, command: cmd },
+        FsRequest::PartitionRequest {
+            index,
+            command: cmd,
+        },
         Duration::from_secs(5),
     ) else {
         unreachable!()
@@ -87,74 +87,127 @@ pub fn list_files(index: usize, path: &Path) -> Result<Vec<File>, Error> {
     r
 }
 
-pub fn read_bytes(index: usize, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
-    let cmd = PartitionCommand::ReadBytes { path: path.clone(), offset, count };
+pub fn read_bytes(
+    index: usize,
+    path: &Path,
+    offset: usize,
+    count: usize,
+) -> Result<Vec<u8>, Error> {
+    let cmd = PartitionCommand::ReadBytes {
+        path: path.clone(),
+        offset,
+        count,
+    };
     let FsResponse::ReadBytes(r) = send_request(
-        FsRequest::PartitionRequest { index, command: cmd },
+        FsRequest::PartitionRequest {
+            index,
+            command: cmd,
+        },
         Duration::from_secs(10),
-    ) else { unreachable!() };
+    ) else {
+        unreachable!()
+    };
     r
 }
 
 pub fn write_bytes(index: usize, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
-    let cmd = PartitionCommand::WriteBytes { path: path.clone(), offset, data: data.to_vec() };
+    let cmd = PartitionCommand::WriteBytes {
+        path: path.clone(),
+        offset,
+        data: data.to_vec(),
+    };
     let FsResponse::Written(r) = send_request(
-        FsRequest::PartitionRequest { index, command: cmd },
+        FsRequest::PartitionRequest {
+            index,
+            command: cmd,
+        },
         Duration::from_secs(10),
-    ) else { unreachable!() };
+    ) else {
+        unreachable!()
+    };
     r
 }
 
 pub fn create_file(index: usize, path: &Path) -> Result<(), Error> {
     let cmd = PartitionCommand::CreateFile { path: path.clone() };
     let FsResponse::Ok(r) = send_request(
-        FsRequest::PartitionRequest { index, command: cmd },
+        FsRequest::PartitionRequest {
+            index,
+            command: cmd,
+        },
         Duration::from_secs(5),
-    ) else { unreachable!() };
+    ) else {
+        unreachable!()
+    };
     r
 }
 
 pub fn create_dir(index: usize, path: &Path) -> Result<(), Error> {
     let cmd = PartitionCommand::CreateDir { path: path.clone() };
     let FsResponse::Ok(r) = send_request(
-        FsRequest::PartitionRequest { index, command: cmd },
+        FsRequest::PartitionRequest {
+            index,
+            command: cmd,
+        },
         Duration::from_secs(5),
-    ) else { unreachable!() };
+    ) else {
+        unreachable!()
+    };
     r
 }
 
 pub fn remove_file(index: usize, path: &Path) -> Result<(), Error> {
     let cmd = PartitionCommand::RemoveFile { path: path.clone() };
     let FsResponse::Ok(r) = send_request(
-        FsRequest::PartitionRequest { index, command: cmd },
+        FsRequest::PartitionRequest {
+            index,
+            command: cmd,
+        },
         Duration::from_secs(5),
-    ) else { unreachable!() };
+    ) else {
+        unreachable!()
+    };
     r
 }
 
 pub fn remove_dir(index: usize, path: &Path) -> Result<(), Error> {
     let cmd = PartitionCommand::RemoveDir { path: path.clone() };
     let FsResponse::Ok(r) = send_request(
-        FsRequest::PartitionRequest { index, command: cmd },
+        FsRequest::PartitionRequest {
+            index,
+            command: cmd,
+        },
         Duration::from_secs(5),
-    ) else { unreachable!() };
+    ) else {
+        unreachable!()
+    };
     r
 }
 
 pub fn file_info(index: usize, path: &Path) -> Result<File, Error> {
     let cmd = PartitionCommand::FileInfo { path: path.clone() };
     let FsResponse::File(r) = send_request(
-        FsRequest::PartitionRequest { index, command: cmd },
+        FsRequest::PartitionRequest {
+            index,
+            command: cmd,
+        },
         Duration::from_secs(5),
-    ) else { unreachable!() };
+    ) else {
+        unreachable!()
+    };
     r
 }
 
 pub fn flush(index: usize) -> Result<(), Error> {
     let cmd = PartitionCommand::Flush;
     let FsResponse::Ok(r) = send_request(
-        FsRequest::PartitionRequest { index, command: cmd },
+        FsRequest::PartitionRequest {
+            index,
+            command: cmd,
+        },
         Duration::from_secs(5),
-    ) else { unreachable!() };
+    ) else {
+        unreachable!()
+    };
     r
 }

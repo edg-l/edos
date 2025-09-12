@@ -5,7 +5,10 @@
 
 use core::{arch::asm, ffi::CStr, time::Duration};
 
-use alloc::string::ToString;
+use alloc::{
+    ffi::CString,
+    string::{String, ToString},
+};
 use x86_64::{VirtAddr, instructions::hlt};
 
 use crate::{
@@ -145,18 +148,22 @@ pub fn kthread_main_test() -> ! {
     fn loop_dir(dir: &Path, part: &Partition) {
         let files = fs::api::list_files(part.index, dir).unwrap();
         for file in &files {
-            log!("File: {:#?}", file);
+            if file.name == "." || file.name == ".." {
+                continue;
+            }
+
             let path = dir.join(&file.name);
+            log!("{}: {:?} ", path, file.kind);
 
             match file.kind {
                 fs::FileKind::File => {
-                    let content = fs::api::read_bytes(part.index, &path, 0, 1024).unwrap();
-                    let x= CStr::from_bytes_with_nul(&content);
+                    let content = fs::api::read_bytes(part.index, &path, 0, 256).unwrap();
+                    let x = String::from_utf8(content).unwrap();
                     log!("Content: {x:?}");
-                },
+                }
                 fs::FileKind::Directory => {
                     loop_dir(&path, part);
-                },
+                }
                 fs::FileKind::Symlink => todo!(),
                 fs::FileKind::Special => todo!(),
             }
