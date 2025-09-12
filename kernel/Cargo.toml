@@ -14,11 +14,6 @@ x86_64 = "0.15.2"
 uart_16550 = { version = "0.4.0", features = ["nightly"] }
 x2apic = "0.5.0"
 acpi = { version = "6.0.1" }
-noto-sans-mono-bitmap = { version = "0.3.1", features = [
-    "bold",
-    "size_24",
-    "size_32",
-] }
 linked_list_allocator = "0.10.5"
 pc-keyboard = "0.8.0"
 crossbeam-queue = { version = "0.3.12", default-features = false, features = [
@@ -28,12 +23,8 @@ crossbeam-queue = { version = "0.3.12", default-features = false, features = [
 thiserror = { version = "2.0.16", default-features = false }
 bytemuck = { version = "1.23.2", features = ["latest_stable_rust", "extern_crate_alloc", "nightly_portable_simd", "nightly_stdsimd", "nightly_docs"] }
 pic8259 = "0.11.0"
-
-slotmap = { version = "1.0.7", default-features = false }
-slab = { version = "0.4.11", default-features = false }
 elf = { version = "0.8.0", default-features = false, features = ["alloc"] }
 raw-cpuid = "11.6.0"
-volatile = { version = "0.6.1", features = ["derive"] }
 lru = { version = "0.16.1", features = ["nightly"] }
 heapless = "0.9.1"
 
