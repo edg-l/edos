@@ -18,7 +18,7 @@ use crate::{
     println,
     syscalls::{
         graphics::DrawRequestInput,
-        io::{sys_close, sys_pipe, sys_read, sys_write},
+        io::{sys_close, sys_read, sys_write},
         keyboard::sys_keyboard_raw,
         memory::{sys_mmap, sys_munmap},
     },
@@ -229,10 +229,6 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let count = ctx.rsi as usize;
             ctx.rax = sys_kernel_log(buffer_ptr, count) as u64;
         }
-        SYS_PIPE => {
-            let pipe_fds = ctx.rdi as *mut [u64; 2];
-            ctx.rax = sys_pipe(pipe_fds) as u64;
-        }
         SYS_CLOSE => {
             let fd = ctx.rdi;
             ctx.rax = sys_close(fd) as u64;
@@ -284,7 +280,7 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
 
 pub fn sys_errno() -> u64 {
     let sched = sched();
-    sched.current_thread(|t| t.errno) as u64
+    sched.current_thread_info().lock().errno as u64
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -304,17 +300,11 @@ fn sys_getpid() -> u64 {
 
 // TODO: figure out why the syscall gets all logs. it doesnt properly subscribe?
 pub fn sys_kernel_log(log_buffer: *mut u8, size: usize) -> i64 {
-    let ret = sched().current_thread_mut(|thread| {
-        thread.errno = Errno::Clear;
+    let info = sched().current_thread_info();
 
-        if log_buffer.is_null() {
-            thread.errno = Errno::EINVAL;
-            return true;
-        }
-        false
-    });
-
-    if ret {
+    info.lock().errno = Errno::Clear;
+    if log_buffer.is_null() {
+        info.lock().errno = Errno::EINVAL;
         return -1;
     }
 

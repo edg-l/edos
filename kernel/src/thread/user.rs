@@ -1,6 +1,7 @@
 use core::sync::atomic::AtomicU64;
 
 use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec::Vec};
+use spin::Mutex;
 use x86_64::{
     VirtAddr,
     registers::control::{Cr3, Cr3Flags},
@@ -35,17 +36,23 @@ pub struct UserThread {
     pub cr3: (PhysFrame, Cr3Flags),
     pub initial_kernel_stack_top: u64,
     pub kernel_stack_top: u64,
-    pub memory_manager: MemoryManager,
+    pub memory_manager: Arc<Mutex<MemoryManager>>,
     pub memory_regions: Vec<MemoryRegion>,
-    // For mmap
-    pub memory_mappings: BTreeMap<VirtAddr, MemoryMapping>,
-    pub next_mmap_addr: VirtAddr,
-    pub errno: Errno,
     // Whether the fpu has been initialized for this thread.
     pub fpu_init: bool,
     pub fpu: FpuState,
-    pub fd_table: FileDescriptorTable,
     pub logger: Arc<ThreadLogger>,
+    pub heap_break: u64,
+}
+
+#[derive(Debug)]
+pub struct UserThreadInfo {
+    pub errno: Errno,
+    pub fd_table: FileDescriptorTable,
+    // For mmap
+    pub memory_mappings: BTreeMap<VirtAddr, MemoryMapping>,
+    pub next_mmap_addr: VirtAddr,
+    pub memory_manager: Arc<Mutex<MemoryManager>>,
 }
 
 #[expect(unused)]
@@ -133,14 +140,11 @@ impl UserThread {
             kernel_stack_top,
             initial_kernel_stack_top: kernel_stack_top,
             cr3: (page, kernel_pml4.1),
-            memory_manager: process_memory_manager,
+            memory_manager: Arc::new(Mutex::new(process_memory_manager)),
             memory_regions: load_info.memory_regions,
-            memory_mappings: BTreeMap::new(),
-            next_mmap_addr: VirtAddr::new(load_info.heap_break),
-            errno: Errno::Clear,
+            heap_break: load_info.heap_break,
             fpu_init: false,
             fpu: FpuState::default(),
-            fd_table: FileDescriptorTable::new(),
             logger: Arc::new(ThreadLogger {
                 id,
                 kernel: false,
@@ -152,22 +156,23 @@ impl UserThread {
     }
 
     /// Cleans thread resources and switches to kernel page
-    pub fn free(&mut self) {
+    pub fn free(&mut self, info: &UserThreadInfo) {
         println!("Cleaning up thread resources");
         // Unmap all memory mappings
-        for (&addr, mapping) in &self.memory_mappings {
-            let _ = self.memory_manager.unmap_memory(addr, mapping.size);
+        let mut memory_manager = self.memory_manager.lock();
+        for (&addr, mapping) in &info.memory_mappings {
+            let _ = memory_manager.unmap_memory(addr, mapping.size);
         }
 
         for region in &self.memory_regions {
-            let _ = self.memory_manager.unmap_memory(region.start, region.size);
+            let _ = memory_manager.unmap_memory(region.start, region.size);
         }
 
-        thread_stack_free(&mut self.memory_manager, self.initial_stack_top);
+        thread_stack_free(&mut memory_manager, self.initial_stack_top);
         kthread_stack_free(self.initial_kernel_stack_top);
 
         // clean up all page tables in the lower half of the address space
-        self.memory_manager.clean_lower_half();
+        memory_manager.clean_lower_half();
     }
 
     pub fn switch_to_page(&self) {

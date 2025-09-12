@@ -8,16 +8,13 @@ use crate::{drivers::keyboard::KEYBOARD_BROADCAST, thread::scheduler::sched};
 use super::Errno;
 
 pub fn sys_keyboard_raw(timeout_milis: u64, scancodes_buffer: *mut u32, size: usize) -> i64 {
-    if sched().current_thread_mut(|thread| {
-        thread.errno = Errno::Clear;
+    let info = sched().current_thread_info();
+    let mut thread = info.lock();
 
-        if scancodes_buffer.is_null() {
-            thread.errno = Errno::EINVAL;
-            return -1;
-        }
-        0
-    }) != 0
-    {
+    thread.errno = Errno::Clear;
+
+    if scancodes_buffer.is_null() {
+        thread.errno = Errno::EINVAL;
         return -1;
     }
 

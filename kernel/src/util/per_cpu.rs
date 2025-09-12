@@ -57,6 +57,11 @@ pub fn get_percpu_data() -> &'static mut PerCpuData {
     unsafe { &mut *(ptr as *mut PerCpuData) }
 }
 
+pub fn get_percpu_data_for(cpu_index: usize) -> &'static mut PerCpuData {
+    let ptr = percpu_base() + cpu_index * percpu_stride();
+    unsafe { &mut *(ptr as *mut PerCpuData) }
+}
+
 /* Early boot on each CPU: copy template into its slot once */
 pub unsafe fn init_this_cpu_percpu() {
     let cpu_index = acpi::current_cpu_index();

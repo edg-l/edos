@@ -14,7 +14,10 @@ use crate::{
     apic::set_apic_timer_and_enable,
     boot::boot_info,
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
-    thread::{user::UserThread, util::queue_spawn_thread},
+    thread::{
+        user::UserThread,
+        util::{queue_spawn_kthread_named, queue_spawn_thread},
+    },
     timer::{get_timer_calibration, init_boot_time, uptime_us},
 };
 
@@ -104,6 +107,7 @@ fn main() -> ! {
     fs::init();
 
     queue_spawn_thread(UserThread::new(TERMINAL_PROGRAM, Some("terminal".to_string())).unwrap());
+    queue_spawn_kthread_named("test", smp::kthread_test as u64);
 
     // Enable apic timer
     set_apic_timer_and_enable(Duration::from_millis(5));

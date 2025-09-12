@@ -90,7 +90,7 @@ pub fn thread_log_to_serial() -> ! {
     let rx = LOG_BROADCAST.lock().subscribe_or_get();
 
     loop {
-        if let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+        if let Ok(msg) = rx.recv_timeout(Duration::from_millis(50)) {
             without_interrupts(|| {
                 add_serial_log(&msg);
             });

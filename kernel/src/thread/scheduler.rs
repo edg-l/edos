@@ -1,14 +1,14 @@
-use core::{alloc::Layout, time::Duration};
+use core::{alloc::Layout, ptr::null_mut, sync::atomic::AtomicPtr, time::Duration};
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
 use heapless::{LinearMap, index_map::FnvIndexMap};
-use spin::RwLock;
+use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
     instructions::{
         hlt,
-        interrupts::{disable, enable, without_interrupts},
+        interrupts::{disable, enable, enable_and_hlt, without_interrupts},
     },
     registers::control::Cr3,
 };
@@ -17,17 +17,23 @@ use crate::{
     acpi::current_cpu_index,
     apic::get_lapic,
     boot::boot_info,
-    drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
+    drivers::{
+        fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
+        keyboard::KEYBOARD_BROADCAST,
+    },
     interrupts::InterruptIndex,
     logs::ThreadLogger,
     println,
     syscalls::{Errno, set_gs_kernel_stack},
     thread::{
-        KernelThread, ThreadId, ThreadState, context::CpuContext, user::UserThread,
+        KernelThread, ThreadId, ThreadState,
+        context::CpuContext,
+        fd::FileDescriptorTable,
+        user::{UserThread, UserThreadInfo},
         util::queue_spawn_kthread_named,
     },
     timer::Instant,
-    util::per_cpu::get_percpu_data,
+    util::per_cpu::{get_percpu_data, get_percpu_data_for},
 };
 
 pub static ALIVE_THREADS: RwLock<FnvIndexMap<ThreadId, u64, 1024>> =
@@ -38,18 +44,31 @@ pub fn thread_exists(tid: &ThreadId) -> Option<u64> {
     ALIVE_THREADS.read().get(tid).copied()
 }
 
+#[derive(Debug)]
+pub enum SchedCmd {
+    Wake(ThreadId, bool),
+    //Migrate(ThreadId, u64), // u64 = cpu
+    //SetPrio(ThreadId, u8),
+    WaitTimeout(ThreadId, Instant, Duration),
+    Wait(ThreadId),
+    Exit(ThreadId, i32),
+}
+
 pub struct Scheduler {
     thread_queue: ArrayQueue<ThreadId>,
     thread_priority_queue: ArrayQueue<ThreadId>,
+    pub cmd_queue: ArrayQueue<SchedCmd>,
     pub kthread_spawn_queue: ArrayQueue<KernelThread>,
     pub thread_spawn_queue: ArrayQueue<UserThread>,
-    pub storage: RwLock<Storage>,
+    pub storage: Storage,
+    pub current_tid: Option<ThreadId>,
+    pub current_logger: Option<Arc<ThreadLogger>>,
 }
 
 pub struct Storage {
-    current_thread_id: Option<ThreadId>,
     pub kthreads: heapless::LinearMap<u64, KernelThread, 64>,
     pub threads: heapless::LinearMap<u64, UserThread, 256>,
+    pub thread_info: heapless::LinearMap<u64, Arc<Mutex<UserThreadInfo>>, 256>,
 }
 
 pub fn init() {
@@ -59,11 +78,14 @@ pub fn init() {
         thread_priority_queue: ArrayQueue::new(256),
         kthread_spawn_queue: ArrayQueue::new(64),
         thread_spawn_queue: ArrayQueue::new(64),
-        storage: RwLock::new(Storage {
-            current_thread_id: None,
+        cmd_queue: ArrayQueue::new(128),
+        storage: Storage {
             kthreads: LinearMap::new(),
             threads: LinearMap::new(),
-        }),
+            thread_info: LinearMap::new(),
+        },
+        current_tid: None,
+        current_logger: None,
     });
 
     let ptr = Box::leak(sched);
@@ -74,11 +96,15 @@ pub fn init() {
 }
 
 pub extern "C" fn thread_cleaner() -> ! {
-    let mut to_remove = Vec::with_capacity(4);
-
     loop {
         let sched = sched();
+        let id = sched.current_id_opt();
+        println!("Id {id:?}");
+        let cpuindex = current_cpu_index();
+        println!("cpuidx: {cpuindex}");
 
+        // TODO: add a exit queue to scheduler and use it.
+        /*
         sched.modify_storage(|storage| {
             for thread in storage.threads.values_mut() {
                 if let ThreadState::Exited(_) = thread.state {
@@ -106,27 +132,23 @@ pub extern "C" fn thread_cleaner() -> ! {
                 }
             }
         });
+        */
 
-        without_interrupts(|| {
-            let mut lock = ALIVE_THREADS.write();
-
-            for t in &to_remove {
-                lock.remove(t);
-            }
-
-            to_remove.clear();
-        });
-
-        sched.thread_yield();
+        //sched.thread_yield();
+        sched.thread_wait_timeout(Duration::from_millis(1000));
     }
 }
 
 pub fn get_sched_cpu(cpu: usize) -> &'static Scheduler {
-    todo!()
+    unsafe { get_percpu_data_for(cpu).scheduler.as_ref().unwrap() }
 }
 
 pub fn sched() -> &'static Scheduler {
-    unsafe { get_percpu_data().scheduler.as_mut().unwrap_unchecked() }
+    unsafe { get_percpu_data().scheduler.as_mut().unwrap() }
+}
+
+fn sched_mut() -> &'static mut Scheduler {
+    unsafe { get_percpu_data().scheduler.as_mut().unwrap() }
 }
 
 // This function will be called from assembly with pointer to saved context
@@ -143,22 +165,23 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
         */
 
         let cpu = get_percpu_data();
-        let sched = cpu.scheduler.as_ref().unwrap_unchecked();
-        let storage = &mut *sched.storage.write();
-        sched.process_spawn_queue(storage);
+        let sched = cpu.scheduler.as_mut().unwrap();
+        sched.process_spawn_queue();
+        sched.process_cmds();
 
         // Push current thread to queue, it's state will be processed then.
-        if let Some(current_id) = storage.current_thread_id.clone() {
-            storage.current_thread_id = None;
+        if let Some(current_id) = sched.current_id_opt() {
+            sched.current_tid = None;
+            sched.current_logger = None;
             if current_id.kernel {
                 // coming from kernel task
-                if let Some(kthread) = storage.kthreads.get_mut(&current_id.id) {
+                if let Some(kthread) = sched.storage.kthreads.get_mut(&current_id.id) {
                     kthread.context = (*context).clone();
                     sched.thread_queue.push(current_id);
                 }
             } else {
                 // coming from user
-                if let Some(thread) = storage.threads.get_mut(&current_id.id) {
+                if let Some(thread) = sched.storage.threads.get_mut(&current_id.id) {
                     thread.context = (*context).clone();
 
                     if !thread.fpu_init {
@@ -173,20 +196,20 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
             }
         }
 
-        sched.schedule_next(storage);
+        sched.schedule_next();
 
-        if let Some(current_id) = storage.current_thread_id.clone() {
+        if let Some(current_id) = sched.current_id_opt() {
             // serial_println!("Next id {:?}", current_id);
 
             if current_id.kernel {
-                if let Some(kthread) = storage.kthreads.get(&current_id.id) {
+                if let Some(kthread) = sched.storage.kthreads.get(&current_id.id) {
                     // going to kernel space.
                     // for now, always switch to kernel page, just in case.
                     switch_to_kernel_page();
                     *context = kthread.context.clone();
                     return context;
                 }
-            } else if let Some(thread) = storage.threads.get_mut(&current_id.id) {
+            } else if let Some(thread) = sched.storage.threads.get_mut(&current_id.id) {
                 // Going to user space.
                 // Set page table
                 thread.switch_to_page();
@@ -208,59 +231,118 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
             }
         }
 
-        context
+        loop {
+            enable_and_hlt();
+        }
     }
 }
 
 #[expect(unused)]
 impl Scheduler {
-    /// Interrupts are disabled during the function execution.
-    pub fn modify_storage<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut Storage) -> R,
-    {
-        without_interrupts(|| {
-            let mut storage = self.storage.write();
-            f(&mut storage)
-        })
-    }
-
-    /// Interrupts are disabled during the function execution.
-    pub fn read_storage<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&Storage) -> R,
-    {
-        without_interrupts(|| {
-            let mut storage = self.storage.read();
-            f(&storage)
-        })
-    }
-
-    pub fn process_spawn_queue(&self, storage: &mut Storage) {
+    fn process_spawn_queue(&mut self) {
         let mut lock = ALIVE_THREADS.write();
         let cpuidx = current_cpu_index() as u64;
         while let Some(kthread) = self.kthread_spawn_queue.pop() {
             self.thread_queue.push(kthread.id.clone());
             lock.insert(kthread.id.clone(), cpuidx);
-            storage.kthreads.insert(kthread.id.id, kthread);
+            self.storage.kthreads.insert(kthread.id.id, kthread);
         }
 
         while let Some(thread) = self.thread_spawn_queue.pop() {
             self.thread_queue.push(thread.id.clone());
             lock.insert(thread.id.clone(), cpuidx);
-            storage.threads.insert(thread.id.id, thread);
+            self.storage.thread_info.insert(
+                thread.id.id,
+                Arc::new(Mutex::new(UserThreadInfo {
+                    errno: Errno::Clear,
+                    fd_table: FileDescriptorTable::new(),
+                    memory_mappings: BTreeMap::new(),
+                    next_mmap_addr: VirtAddr::new(thread.heap_break),
+                    memory_manager: thread.memory_manager.clone(),
+                })),
+            );
+            self.storage.threads.insert(thread.id.id, thread);
+        }
+    }
+
+    fn process_cmds(&mut self) {
+        while let Some(cmd) = self.cmd_queue.pop() {
+            match cmd {
+                SchedCmd::Wake(thread_id, prio) => {
+                    if thread_id.kernel {
+                        if let Some(thread) = self.storage.kthreads.get_mut(&thread_id.id)
+                            && thread.state != ThreadState::Ready
+                            && !matches!(thread.state, ThreadState::Exited(_))
+                        {
+                            thread.state = ThreadState::Ready;
+                            if prio {
+                                self.thread_priority_queue.push(thread_id);
+                            } else {
+                                self.thread_queue.push(thread_id);
+                            }
+                        }
+                    } else if let Some(thread) = self.storage.threads.get_mut(&thread_id.id)
+                        && thread.state != ThreadState::Ready
+                        && !matches!(thread.state, ThreadState::Exited(_))
+                    {
+                        thread.state = ThreadState::Ready;
+                        if prio {
+                            self.thread_priority_queue.push(thread_id);
+                        } else {
+                            self.thread_queue.push(thread_id);
+                        }
+                    }
+                }
+                SchedCmd::WaitTimeout(thread_id, instant, duration) => {
+                    if thread_id.kernel {
+                        if let Some(thread) = self.storage.kthreads.get_mut(&thread_id.id)
+                            && !matches!(thread.state, ThreadState::Exited(_))
+                        {
+                            thread.state = ThreadState::WaitTimeout((instant, duration));
+                        }
+                    } else if let Some(thread) = self.storage.threads.get_mut(&thread_id.id)
+                        && !matches!(thread.state, ThreadState::Exited(_))
+                    {
+                        thread.state = ThreadState::WaitTimeout((instant, duration));
+                    }
+                }
+                SchedCmd::Wait(thread_id) => {
+                    if thread_id.kernel {
+                        if let Some(thread) = self.storage.kthreads.get_mut(&thread_id.id)
+                            && !matches!(thread.state, ThreadState::Exited(_))
+                        {
+                            thread.state = ThreadState::Waiting;
+                        }
+                    } else if let Some(thread) = self.storage.threads.get_mut(&thread_id.id)
+                        && !matches!(thread.state, ThreadState::Exited(_))
+                    {
+                        thread.state = ThreadState::Waiting;
+                    }
+                }
+                SchedCmd::Exit(thread_id, code) => {
+                    if thread_id.kernel {
+                        if let Some(thread) = self.storage.kthreads.get_mut(&thread_id.id) {
+                            thread.state = ThreadState::Exited(code)
+                        }
+                    } else if let Some(thread) = self.storage.threads.get_mut(&thread_id.id) {
+                        thread.state = ThreadState::Exited(code)
+                    }
+                    ALIVE_THREADS.write().remove(&thread_id);
+                }
+            }
         }
     }
 
     /// Schedules the next thread id, updating current_thread_id.
-    fn schedule_next(&self, storage: &mut Storage) -> bool {
+    fn schedule_next(&mut self) -> bool {
         let now = Instant::now();
-        storage.current_thread_id = None;
+        self.current_tid = None;
+        self.current_logger = None;
 
         // TODO: dedup this code
         while let Some(id) = self.thread_priority_queue.pop() {
             if id.kernel {
-                if let Some(thread) = storage.kthreads.get_mut(&id.id) {
+                if let Some(thread) = self.storage.kthreads.get_mut(&id.id) {
                     match thread.state {
                         ThreadState::Ready => {}
                         ThreadState::Waiting => continue,
@@ -276,10 +358,11 @@ impl Scheduler {
                             continue;
                         }
                     }
-                    storage.current_thread_id = Some(id);
+                    self.current_tid = Some(id);
+                    self.current_logger = Some(thread.logger.clone());
                     return true;
                 }
-            } else if let Some(thread) = storage.threads.get_mut(&id.id) {
+            } else if let Some(thread) = self.storage.threads.get_mut(&id.id) {
                 match thread.state {
                     ThreadState::Ready => {}
                     ThreadState::Waiting => continue,
@@ -295,7 +378,8 @@ impl Scheduler {
                         continue;
                     }
                 }
-                storage.current_thread_id = Some(id);
+                self.current_tid = Some(id);
+                self.current_logger = Some(thread.logger.clone());
                 return true;
             }
         }
@@ -307,7 +391,7 @@ impl Scheduler {
         {
             limit -= 1;
             if id.kernel {
-                if let Some(thread) = storage.kthreads.get_mut(&id.id) {
+                if let Some(thread) = self.storage.kthreads.get_mut(&id.id) {
                     match thread.state {
                         ThreadState::Ready => {}
                         ThreadState::Waiting => continue,
@@ -323,10 +407,11 @@ impl Scheduler {
                             continue;
                         }
                     }
-                    storage.current_thread_id = Some(id);
+                    self.current_tid = Some(id);
+                    self.current_logger = Some(thread.logger.clone());
                     return true;
                 }
-            } else if let Some(thread) = storage.threads.get_mut(&id.id) {
+            } else if let Some(thread) = self.storage.threads.get_mut(&id.id) {
                 match thread.state {
                     ThreadState::Ready => {}
                     ThreadState::Waiting => continue,
@@ -342,70 +427,33 @@ impl Scheduler {
                         continue;
                     }
                 }
-                storage.current_thread_id = Some(id);
+                self.current_tid = Some(id);
+                self.current_logger = Some(thread.logger.clone());
                 return true;
             }
         }
-        storage.current_thread_id = None;
+        self.current_tid = None;
+        self.current_logger = None;
         false
     }
 
     /// Current thread id.
     pub fn current_id(&self) -> ThreadId {
-        self.read_storage(|storage| storage.current_thread_id.clone().expect("need id"))
+        self.current_tid.clone().unwrap()
     }
 
-    /// Mostly called from syscalls
-    pub fn current_thread<FF, RR>(&self, f: FF) -> RR
-    where
-        FF: FnOnce(&UserThread) -> RR,
-    {
+    pub fn current_thread_info(&self) -> Arc<Mutex<UserThreadInfo>> {
         let id = self.current_id();
-        self.read_storage(move |storage: &Storage| -> RR {
-            f(storage.threads.get(&id.id).unwrap())
-        })
-    }
-
-    /// Mostly called from syscalls
-    pub fn current_thread_mut<FF, RR>(&self, f: FF) -> RR
-    where
-        FF: FnOnce(&mut UserThread) -> RR,
-    {
-        let id = self.current_id();
-        self.modify_storage(move |mut storage: &mut Storage| -> RR {
-            f(storage.threads.get_mut(&id.id).unwrap())
-        })
-    }
-
-    // gets a lock
-    pub fn current_thread_set_errno(&self, errno: Errno) {
-        self.current_thread_mut(|t| {
-            t.errno = errno;
-        });
-    }
-
-    pub fn current_thread_clear_errno(&self) {
-        self.current_thread_mut(|t| {
-            t.errno = crate::syscalls::Errno::Clear;
-        });
+        self.storage.thread_info.get(&id.id).unwrap().clone()
     }
 
     pub fn current_id_opt(&self) -> Option<ThreadId> {
-        without_interrupts(|| self.read_storage(|s| s.current_thread_id.clone()))
+        self.current_tid.clone()
     }
 
     /// Gets the current thread logger. Locks momentarely to acquire the logger.
     pub fn get_logger(&self) -> Arc<ThreadLogger> {
-        self.read_storage(|storage| match &storage.current_thread_id {
-            Some(id) => {
-                if id.kernel {
-                    storage.kthreads.get(&id.id).unwrap().logger.clone()
-                } else {
-                    storage.threads.get(&id.id).unwrap().logger.clone()
-                }
-            }
-            None => unreachable!(),
-        })
+        self.current_logger.clone().unwrap()
     }
 
     // TODO: this checks only current cpu scheduler, so it returns true
@@ -415,75 +463,32 @@ impl Scheduler {
 
     /// Wake the given thread
     pub fn thread_wake(&self, id: ThreadId, priority: bool) {
-        self.modify_storage(|storage| {
-            if id.kernel {
-                if let Some(thread) = storage.kthreads.get_mut(&id.id)
-                    && thread.state != ThreadState::Ready
-                {
-                    thread.state = ThreadState::Ready;
-                    if priority {
-                        self.thread_priority_queue.push(id);
-                    } else {
-                        self.thread_queue.push(id);
-                    }
-                }
-            } else if let Some(thread) = storage.threads.get_mut(&id.id)
-                && thread.state != ThreadState::Ready
-            {
-                thread.state = ThreadState::Ready;
-                if priority {
-                    self.thread_priority_queue.push(id);
-                } else {
-                    self.thread_queue.push(id);
-                }
-            }
-        })
+        self.cmd_queue.push(SchedCmd::Wake(id, priority));
     }
 
     /// Sets the given thread as waiting for a maximum of the given timeout.
     pub fn thread_set_wait_timeout(&self, id: ThreadId, timeout: Duration) {
-        self.modify_storage(|storage| {
-            let now = Instant::now();
-            if id.kernel {
-                if let Some(thread) = storage.kthreads.get_mut(&id.id) {
-                    thread.state = ThreadState::WaitTimeout((now, timeout))
-                }
-            } else if let Some(thread) = storage.threads.get_mut(&id.id) {
-                thread.state = ThreadState::WaitTimeout((now, timeout))
-            }
-        })
+        let now = Instant::now();
+        self.cmd_queue.push(SchedCmd::WaitTimeout(id, now, timeout));
     }
 
     // Does not halt.
     pub fn thread_exit(&self, code: i32) {
         let id = self.current_id();
-        self.modify_storage(|storage| {
-            if id.kernel {
-                if let Some(thread) = storage.kthreads.get_mut(&id.id) {
-                    thread.state = ThreadState::Exited(code)
-                }
-            } else if let Some(thread) = storage.threads.get_mut(&id.id) {
-                thread.state = ThreadState::Exited(code)
-            }
+        self.cmd_queue.push(SchedCmd::Exit(id, code));
+        without_interrupts(|| {
             let mut lapic = get_lapic();
             unsafe {
                 lapic.send_ipi_self(InterruptIndex::Timer as u8);
             }
-        })
+        });
     }
 
     /// The caller thread gets put in a wait (and yields execution) until timeout or another thread wakes it.
     pub fn thread_wait_timeout(&self, timeout: Duration) {
         let id = self.current_id();
-        self.modify_storage(|storage| {
-            let now = Instant::now();
-            if id.kernel {
-                if let Some(thread) = storage.kthreads.get_mut(&id.id) {
-                    thread.state = ThreadState::WaitTimeout((now, timeout))
-                }
-            } else if let Some(thread) = storage.threads.get_mut(&id.id) {
-                thread.state = ThreadState::WaitTimeout((now, timeout))
-            }
+        self.thread_set_wait_timeout(id, timeout);
+        without_interrupts(|| {
             let mut lapic = get_lapic();
             unsafe {
                 lapic.send_ipi_self(InterruptIndex::Timer as u8);
@@ -494,15 +499,8 @@ impl Scheduler {
 
     pub fn thread_park(&self) {
         let id = self.current_id();
-        self.modify_storage(|storage| {
-            let now = Instant::now();
-            if id.kernel {
-                if let Some(thread) = storage.kthreads.get_mut(&id.id) {
-                    thread.state = ThreadState::Waiting
-                }
-            } else if let Some(thread) = storage.threads.get_mut(&id.id) {
-                thread.state = ThreadState::Waiting
-            }
+        self.cmd_queue.push(SchedCmd::Wait(id));
+        without_interrupts(|| {
             let mut lapic = get_lapic();
             unsafe {
                 lapic.send_ipi_self(InterruptIndex::Timer as u8);

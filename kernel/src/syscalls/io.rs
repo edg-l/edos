@@ -16,154 +16,92 @@ use crate::{
 
 pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
     let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
 
-    sched.current_thread_mut(|thread| {
-        thread.errno = Errno::Clear;
-
-        if count == 0 {
-            return 0;
-        }
-
-        let buffer = unsafe { core::slice::from_raw_parts(buffer_ptr, count) };
-
-        match thread.fd_table.get_fd(fd) {
-            Some(FileDescriptor::StandardStream(stream)) => match stream {
-                StandardStream::Stdout | StandardStream::Stderr => {
-                    match core::str::from_utf8(buffer) {
-                        Ok(s) => {
-                            println!("{}", s);
-                            count as u64
-                        }
-                        Err(_) => {
-                            println!(
-                                "sys_write: Non-UTF8 data: {:02x?}",
-                                &buffer[..count.min(64)]
-                            );
-                            count as u64
-                        }
-                    }
-                }
-                StandardStream::Stdin => {
-                    thread.errno = Errno::EINVAL;
-                    !0u64
-                }
-            },
-            Some(FileDescriptor::Pipe(pipe)) => {
-                // TODO: is it safe to get this lock here
-                let mut pipe = pipe.write();
-                pipe.buffer.extend_from_slice(buffer);
-                count as u64
-            }
-            None => {
-                thread.errno = Errno::EINVAL;
-                !0u64
-            }
-        }
-    })
-}
-
-pub fn sys_pipe(pipe_fds: *mut [u64; 2]) -> i32 {
-    let sched = sched();
-
-    sched.current_thread_mut(|thread| {
-        thread.errno = Errno::Clear;
-
-        if pipe_fds.is_null() {
-            thread.errno = Errno::EFAULT;
-            return -1;
-        }
-
-        let pipe = Arc::new(RwLock::new(Pipe::new()));
-
-        // TODO: is this correct here
-        let read_fd = thread
-            .fd_table
-            .allocate_fd(FileDescriptor::Pipe(pipe.clone()));
-        let write_fd = thread.fd_table.allocate_fd(FileDescriptor::Pipe(pipe));
-
-        unsafe {
-            (*pipe_fds)[0] = read_fd; // Read end
-            (*pipe_fds)[1] = write_fd; // Write end
-        }
-
-        0
-    })
-}
-
-pub fn sys_close(fd: u64) -> i32 {
-    let sched = sched();
-    let pipe = sched.current_thread_mut(|thread| {
-        thread.errno = Errno::Clear;
-
-        // Can't close standard streams
-        if fd <= 2 {
-            thread.errno = Errno::EINVAL;
-            return None;
-        }
-
-        match thread.fd_table.close_fd(fd) {
-            Some(FileDescriptor::Pipe(pipe)) => Some(pipe.clone()),
-            Some(_) => None, // Other FD types
-            None => {
-                thread.errno = Errno::EINVAL;
-                None
-            }
-        }
-    });
-
-    if let Some(pipe) = pipe {
-        let mut pipe_guard = pipe.write();
-        // TODO: dont assume
-        pipe_guard.close_writer(); // Assume it was a write end for now
-        return 0;
-    } else {
-        -1
-    }
-}
-
-pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
-    let sched = sched();
-    sched.current_thread_clear_errno();
+    thread.errno = Errno::Clear;
 
     if count == 0 {
         return 0;
     }
 
-    let mut kernel_data = Ok(Vec::new());
+    let buffer = unsafe { core::slice::from_raw_parts(buffer_ptr, count) };
 
-    let ret = sched.current_thread_mut(|thread| {
-        if buffer_ptr.is_null() {
-            thread.errno = Errno::EFAULT;
-            return -1;
-        }
-
-        // Get kernel data first - all potentially blocking operations happen here
-        kernel_data = match thread.fd_table.get_fd(fd) {
-            Some(FileDescriptor::StandardStream(stream)) => match stream {
-                StandardStream::Stdin => {
-                    x86_64::instructions::interrupts::enable();
-                    read_from_stdin(count)
+    match thread.fd_table.get_fd(fd) {
+        Some(FileDescriptor::StandardStream(stream)) => match stream {
+            StandardStream::Stdout | StandardStream::Stderr => match core::str::from_utf8(buffer) {
+                Ok(s) => {
+                    println!("{}", s);
+                    count as u64
                 }
-                StandardStream::Stdout | StandardStream::Stderr => {
-                    thread.errno = Errno::EINVAL;
-                    return -1;
+                Err(_) => {
+                    println!(
+                        "sys_write: Non-UTF8 data: {:02x?}",
+                        &buffer[..count.min(64)]
+                    );
+                    count as u64
                 }
             },
-            Some(FileDescriptor::Pipe(pipe)) => {
-                x86_64::instructions::interrupts::enable();
-                read_from_pipe(pipe.clone(), count)
+            StandardStream::Stdin => {
+                thread.errno = Errno::EINVAL;
+                !0u64
             }
-            None => {
+        },
+        Some(FileDescriptor::Pipe(pipe)) => {
+            // TODO: is it safe to get this lock here
+            let mut pipe = pipe.write();
+            pipe.buffer.extend_from_slice(buffer);
+            count as u64
+        }
+        None => {
+            thread.errno = Errno::EINVAL;
+            !0u64
+        }
+    }
+}
+
+pub fn sys_close(fd: u64) -> i32 {
+    let sched = sched();
+
+    0
+}
+
+pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    if count == 0 {
+        return 0;
+    }
+
+    if buffer_ptr.is_null() {
+        thread.errno = Errno::EFAULT;
+        return -1;
+    }
+
+    // Get kernel data first - all potentially blocking operations happen here
+    let kernel_data = match thread.fd_table.get_fd(fd) {
+        Some(FileDescriptor::StandardStream(stream)) => match stream {
+            StandardStream::Stdin => {
+                x86_64::instructions::interrupts::enable();
+                read_from_stdin(count)
+            }
+            StandardStream::Stdout | StandardStream::Stderr => {
                 thread.errno = Errno::EINVAL;
                 return -1;
             }
-        };
-        0
-    });
-
-    if ret != 0 {
-        return -1;
-    }
+        },
+        Some(FileDescriptor::Pipe(pipe)) => {
+            x86_64::instructions::interrupts::enable();
+            read_from_pipe(pipe.clone(), count)
+        }
+        None => {
+            thread.errno = Errno::EINVAL;
+            return -1;
+        }
+    };
 
     x86_64::instructions::interrupts::disable();
 

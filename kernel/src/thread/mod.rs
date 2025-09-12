@@ -87,6 +87,10 @@ pub enum ThreadState {
     Exited(i32),
 }
 
+pub const STATE_READY: u64 = 0;
+pub const STATE_WAITING: u64 = 1;
+pub const STATE_RUNNING: u64 = 2;
+
 impl KernelThread {
     pub fn new(name: Option<String>, entry_point: u64) -> Self {
         let stack_top = kthread_stack_alloc();

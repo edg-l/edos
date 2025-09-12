@@ -8,11 +8,13 @@ use crate::{
 
 pub fn sys_draw_rect(x: u64, y: u64, width: u64, height: u64, color: u32) -> u64 {
     let sched = sched();
-    sched.current_thread_clear_errno();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
 
     // Basic validation
     if width == 0 || height == 0 {
-        sched.current_thread_set_errno(Errno::EINVAL);
+        thread.errno = Errno::EINVAL;
         return !0u64; // -1
     }
 
@@ -23,7 +25,9 @@ pub fn sys_draw_rect(x: u64, y: u64, width: u64, height: u64, color: u32) -> u64
 
 pub fn sys_render() -> u64 {
     let sched = sched();
-    sched.current_thread_clear_errno();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
     x86_64::instructions::interrupts::enable();
     render();
     0
@@ -32,10 +36,12 @@ pub fn sys_render() -> u64 {
 pub fn sys_screen_info(info_ptr: *mut ScreenInfo) -> u64 {
     {
         let sched = sched();
-        sched.current_thread_clear_errno();
+        let info = sched.current_thread_info();
+        let mut thread = info.lock();
+        thread.errno = Errno::Clear;
 
         if info_ptr.is_null() {
-            sched.current_thread_set_errno(Errno::EFAULT);
+            thread.errno = Errno::EFAULT;
             return !0u64; // -1
         }
     }
@@ -58,10 +64,12 @@ pub struct DrawRequestInput {
 
 pub fn sys_draw(request_ptr: *const DrawRequestInput) -> u64 {
     let sched = sched();
-    sched.current_thread_clear_errno();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
 
     if request_ptr.is_null() {
-        sched.current_thread_set_errno(Errno::EFAULT);
+        thread.errno = Errno::EFAULT;
         return !0u64;
     }
 
@@ -70,7 +78,7 @@ pub fn sys_draw(request_ptr: *const DrawRequestInput) -> u64 {
 
     // Basic validation
     if request.width == 0 || request.height == 0 {
-        sched.current_thread_set_errno(Errno::EINVAL);
+        thread.errno = Errno::EINVAL;
         return !0u64;
     }
 
