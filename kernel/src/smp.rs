@@ -76,9 +76,8 @@ pub unsafe extern "C" fn ap_start(cpu: &MpCpu) -> ! {
 }
 
 pub fn kthread_test() -> ! {
-    let logger = sched().get_logger();
     loop {
-        log!(logger, "hello multiple cpus");
+        log!("hello multiple cpus");
         sched().thread_wait_timeout(Duration::from_millis(500));
     }
 }

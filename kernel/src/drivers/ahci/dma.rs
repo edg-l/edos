@@ -13,7 +13,6 @@ use crate::{
     boot::boot_info,
     drivers::ahci::AhciError,
     memory::{DMA_REGION_START, mapper::memory_mapper},
-    println,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -95,7 +94,8 @@ impl DmaBuffer {
         {
             without_interrupts(|| {
                 let mut mapper = memory_mapper();
-                let result = mapper
+
+                mapper
                     .map_memory_contiguous(
                         virt_addr,
                         aligned_size,
@@ -103,9 +103,7 @@ impl DmaBuffer {
                             | PageTableFlags::NO_CACHE
                             | PageTableFlags::GLOBAL,
                     )
-                    .map_err(|_| AhciError::DmaAllocationFailed);
-
-                result
+                    .map_err(|_| AhciError::DmaAllocationFailed)
             })?;
         }
 

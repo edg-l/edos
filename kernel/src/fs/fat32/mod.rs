@@ -9,7 +9,7 @@ use crate::{
         fat32::structures::{DirectoryEntry, Fat32BootSector, FsInfo},
         gpt::Partition,
     },
-    println,
+    log,
 };
 
 use super::path::Path;
@@ -56,7 +56,7 @@ impl Fat32fs {
             *cast_ref::<[u8; 512], _>(fs_info_bytes.as_slice().try_into().unwrap());
 
         if !fs_info.is_valid() {
-            println!("Missing FsInfo, currently required");
+            log!("Missing FsInfo, currently required");
             return Err(Error::InvalidFs);
         }
 

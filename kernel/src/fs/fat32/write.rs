@@ -10,7 +10,7 @@ use crate::{
         },
         path::Path,
     },
-    println,
+    log,
 };
 
 impl Fat32fs {
@@ -431,7 +431,7 @@ impl Fat32fs {
             visited += 1;
             if visited > fat_entries {
                 // cycle or corruption
-                println!("Possible corruption");
+                log!("Possible corruption");
                 return Err(Error::IoError);
             }
 

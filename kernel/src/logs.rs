@@ -80,6 +80,7 @@ impl ThreadLogger {
 #[macro_export]
 macro_rules! log {
     ($logger:tt, $($arg:tt)*) => ($logger.log(&alloc::format!("{}\n", format_args!($($arg)*))));
+    ($($arg:tt)*) => ($crate::thread::scheduler::sched().get_logger().log(&alloc::format!("{}\n", format_args!($($arg)*))));
 }
 
 pub fn init() {

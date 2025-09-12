@@ -24,7 +24,6 @@ use crate::{
     interrupts::InterruptIndex,
     log,
     memory::{get_virt_addr, mapper::memory_mapper},
-    println,
     thread::scheduler::sched,
     timer::Instant,
 };

@@ -12,7 +12,7 @@ use crate::{
         gpt::{Partition, parse_gpt, print_partitions},
         path::Path,
     },
-    log, println,
+    log,
     thread::{
         scheduler::sched,
         util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_kthread_named_arg},
