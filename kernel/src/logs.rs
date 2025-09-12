@@ -7,10 +7,10 @@ use alloc::{
 use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{
-    acpi::current_cpu_index,
     serial::add_serial_log,
     thread::{
         broadcast::{LockedBroadcast, new_broadcast},
+        scheduler::sched,
         util::queue_spawn_kthread_named,
     },
     timer::uptime_us,
@@ -39,9 +39,11 @@ impl Write for ThreadLogger {
                 "unk3".to_string()
             }
         });
+        let cpu_idx = sched().lapic_id;
+
         let text = alloc::format!(
             "[{secs}.{us:06}] <cpu-{}:{}:{}:{}> {s}",
-            current_cpu_index(),
+            cpu_idx,
             name,
             if self.kernel { "k" } else { "u" },
             self.id
@@ -67,12 +69,13 @@ impl ThreadLogger {
                 "unk3".to_string()
             }
         });
+        let cpu_idx = sched().lapic_id;
 
         // build prefix
         let _ = write!(
             buf,
             "[{secs}.{us:06}] <cpu-{}:{}:{}:{}> ",
-            current_cpu_index(),
+            cpu_idx,
             name,
             if self.kernel { "k" } else { "u" },
             self.id,

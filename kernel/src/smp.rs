@@ -45,11 +45,11 @@ pub fn init() {
 
 /// Limine AP entrypoint. Signature is mandated by limine::mp::GotoAddress::write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ap_start(_cpu: &MpCpu) -> ! {
+pub unsafe extern "C" fn ap_start(cpu: &MpCpu) -> ! {
     // Per-CPU data and core-local tables
     switch_to_kernel_page();
     tlb_flush_all_including_global();
-    unsafe { init_gs_for_this_cpu() };
+    unsafe { init_gs_for_this_cpu(cpu.lapic_id) };
     gdt::init_current_cpu();
     interrupts::init_current_cpu();
 

@@ -14,7 +14,6 @@ use x86_64::{
 };
 
 use crate::{
-    acpi::{cpu_index_from_apic_id, current_cpu_index},
     apic::get_lapic,
     boot::boot_info,
     drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
@@ -27,18 +26,18 @@ use crate::{
         context::CpuContext,
         fd::FileDescriptorTable,
         user::{UserThread, UserThreadInfo},
-        util::queue_spawn_kthread_named,
     },
     timer::Instant,
     util::per_cpu::get_percpu_data,
 };
 
-pub static ALIVE_THREADS: RwLock<FnvIndexMap<ThreadId, u64, 1024>> =
+// tid -> lapic that owns it
+pub static ALIVE_THREADS: RwLock<FnvIndexMap<ThreadId, u32, 1024>> =
     RwLock::new(FnvIndexMap::new());
 
 /// Returns the scheduler id this thread lives on.
 #[allow(unused)]
-pub fn thread_exists(tid: &ThreadId) -> Option<u64> {
+pub fn thread_exists(tid: &ThreadId) -> Option<u32> {
     ALIVE_THREADS.read().get(tid).copied()
 }
 
@@ -187,7 +186,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
 impl Scheduler {
     fn process_spawn_queue(&mut self) {
         let mut lock = ALIVE_THREADS.write();
-        let cpuidx = self.cpu_index() as u64;
+        let cpuidx = self.lapic_id;
         while let Some(kthread) = self.kthread_spawn_queue.pop() {
             self.thread_queue.push(kthread.id.clone());
             lock.insert(kthread.id.clone(), cpuidx);
@@ -384,10 +383,6 @@ impl Scheduler {
         self.current_tid = None;
         self.current_logger = None;
         false
-    }
-
-    pub fn cpu_index(&self) -> usize {
-        cpu_index_from_apic_id(self.lapic_id).unwrap()
     }
 
     /// Current thread id.

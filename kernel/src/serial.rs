@@ -3,7 +3,7 @@ use core::fmt::{self, Write};
 use spin::{Once, mutex::Mutex};
 use uart_16550::SerialPort;
 
-use crate::{acpi::current_cpu_index, timer::uptime_us};
+use crate::{timer::uptime_us, util::per_cpu::get_percpu_data};
 
 static SERIAL_DBG: Once<Mutex<SerialPort>> = Once::new();
 
@@ -33,6 +33,8 @@ pub fn _serial_print(args: fmt::Arguments) {
     let secs = uptime_us / 1_000_000;
     let us = uptime_us % 1_000_000;
 
+    let lapic_id = get_percpu_data().lapic_id;
+
     unsafe {
         SERIAL_DBG
             .get()
@@ -40,7 +42,7 @@ pub fn _serial_print(args: fmt::Arguments) {
             .lock()
             .write_fmt(format_args!(
                 "[{secs}.{us:06}] <cpu-{}:kernel> {args}",
-                current_cpu_index(),
+                lapic_id,
             ))
             .unwrap();
     }

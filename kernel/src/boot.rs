@@ -99,6 +99,8 @@ unsafe extern "C" fn kmain() -> ! {
     // removed by the linker.
     assert!(BASE_REVISION.is_supported());
 
+    unsafe { init_gs_for_bsp_static() };
+
     // Early init serial in case we panic on expects.
     serial::init();
 
@@ -133,8 +135,6 @@ unsafe extern "C" fn kmain() -> ! {
     let cr3 = Cr3::read();
     let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };
     let kernel_page_table = unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };
-
-    unsafe { init_gs_for_bsp_static() };
 
     let boot_info = BootInfo {
         framebuffer,

@@ -5,7 +5,7 @@ use x86_64::{
     structures::tss::TaskStateSegment,
 };
 
-use crate::thread::scheduler::Scheduler;
+use crate::{acpi::raw_current_apic_id, thread::scheduler::Scheduler};
 
 /// Per CPU data
 /// Note: try to keep it small.
@@ -14,6 +14,7 @@ pub struct PerCpuData {
     pub user_rsp: u64,   // Offset 0 - save user stack
     pub kernel_rsp: u64, // Offset 8 - kernel stack for syscalls
     pub tss: TaskStateSegment,
+    pub lapic_id: u32,
     pub scheduler: *mut Scheduler,
 }
 
@@ -22,6 +23,7 @@ impl PerCpuData {
         Self {
             user_rsp: 0,
             kernel_rsp: 0,
+            lapic_id: 0,
             tss: TaskStateSegment::new(),
             scheduler: core::ptr::null_mut(),
         }
@@ -38,8 +40,9 @@ pub fn get_percpu_data() -> &'static mut PerCpuData {
 
 /// Allocate and install per-CPU data for the current CPU and set GS bases.
 /// Must be called once per CPU very early during bring-up (before GDT/IDT use it).
-pub unsafe fn init_gs_for_this_cpu() -> &'static mut PerCpuData {
+pub unsafe fn init_gs_for_this_cpu(lapic_id: u32) -> &'static mut PerCpuData {
     let percpu_ptr: *mut PerCpuData = Box::leak(Box::new(PerCpuData::new()));
+    (unsafe { percpu_ptr.as_mut().unwrap() }).lapic_id = lapic_id;
     let addr = VirtAddr::new(percpu_ptr as u64);
     // Set both to the same value so `swapgs` does not change effective base
     // and `get_percpu_data()` works uniformly.
@@ -52,6 +55,9 @@ pub unsafe fn init_gs_for_this_cpu() -> &'static mut PerCpuData {
 /// Call this in early BSP boot before the heap is initialized.
 pub unsafe fn init_gs_for_bsp_static() -> &'static mut PerCpuData {
     static mut BSP_PCPU: PerCpuData = PerCpuData::new();
+    unsafe {
+        BSP_PCPU.lapic_id = raw_current_apic_id();
+    }
     let ptr: *mut PerCpuData = &raw mut BSP_PCPU;
     let addr = VirtAddr::new(ptr as u64);
     GsBase::write(addr);
