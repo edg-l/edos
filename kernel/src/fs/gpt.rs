@@ -39,7 +39,7 @@ pub struct GptPartitionEntry {
 
 #[derive(Debug, Clone)]
 pub struct Partition {
-    pub index: u32,
+    pub index: usize,
     pub starting_lba: u64,
     pub ending_lba: u64,
     pub size_sectors: u64,
@@ -233,7 +233,7 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
             let filesystem = detect_filesystem(device_id, entry.starting_lba)?;
 
             partitions.push(Partition {
-                index: i,
+                index: i as usize,
                 starting_lba: entry.starting_lba,
                 ending_lba: entry.ending_lba,
                 size_sectors: entry.size_sectors(),

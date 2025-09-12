@@ -17,16 +17,12 @@ pub enum ParseError {
 }
 
 impl Path {
-    pub fn parse_str(value: &str) -> Result<Path, ParseError> {
-        let mut components: Vec<String> = value
-            .trim_start_matches("/")
+    pub fn parse(value: &str) -> Result<Path, ParseError> {
+         let components: Vec<String> = value
             .split('/')
-            .map(|x| x.to_string())
+            .filter(|c| !c.is_empty())
+            .map(|c| c.to_string())
             .collect();
-
-        if components.is_empty() {
-            components.push("/".to_string());
-        }
 
         Ok(Path { components })
     }
@@ -55,7 +51,7 @@ impl Path {
 
         if stack.is_empty() {
             Path {
-                components: alloc::vec!["/".to_string()],
+                components: alloc::vec![],
             }
         } else {
             Path { components: stack }
@@ -68,5 +64,19 @@ impl Path {
 
     pub fn is_root(&self) -> bool {
         self.components.is_empty() || (self.components.len() == 1 && self.components[0] == "/")
+    }
+
+    pub fn join(&self, other: &str) -> Self {
+        let components: Vec<String> = other
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .map(|c| c.to_string())
+            .collect();
+
+        let mut c = self.clone();
+
+        c.components.extend(components);
+
+        c
     }
 }

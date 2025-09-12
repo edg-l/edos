@@ -3,7 +3,7 @@
 #![feature(abi_x86_interrupt)]
 #![allow(clippy::fn_to_numeric_cast)]
 
-use core::{arch::asm, time::Duration};
+use core::{arch::asm, ffi::CStr, time::Duration};
 
 use alloc::string::ToString;
 use x86_64::{VirtAddr, instructions::hlt};
@@ -13,10 +13,12 @@ use crate::{
     allocator::init_heap,
     apic::set_apic_timer_and_enable,
     boot::boot_info,
+    fs::{gpt::Partition, path::Path},
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
     thread::{
+        scheduler::sched,
         user::UserThread,
-        util::{queue_spawn_kthread_named, queue_spawn_thread},
+        util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_thread},
     },
     timer::{get_timer_calibration, init_boot_time, uptime_us},
 };
@@ -108,6 +110,7 @@ fn main() -> ! {
 
     queue_spawn_thread(UserThread::new(TERMINAL_PROGRAM, Some("terminal".to_string())).unwrap());
     queue_spawn_kthread_named("test", smp::kthread_test as u64);
+    queue_spawn_kthread_named("main-test", kthread_main_test as u64);
 
     // Enable apic timer
     set_apic_timer_and_enable(Duration::from_millis(5));
@@ -119,13 +122,57 @@ fn main() -> ! {
     }
 }
 
+pub fn kthread_main_test() -> ! {
+    sched().thread_wait_timeout(Duration::from_secs(1));
+    let partitions = fs::api::list_partitions();
+
+    if partitions.is_empty() {
+        kthread_exit(0);
+    }
+
+    let part = &partitions[0];
+    log!("Partition {:#?}", part);
+
+    let root = Path::parse("/").unwrap();
+    fs::api::mount_partition(part.index as usize, root.clone()).unwrap();
+
+    let mounts = fs::api::list_mounts();
+
+    log!("Mounts {:#?}", mounts);
+
+    loop_dir(&root, part);
+
+    fn loop_dir(dir: &Path, part: &Partition) {
+        let files = fs::api::list_files(part.index, dir).unwrap();
+        for file in &files {
+            log!("File: {:#?}", file);
+            let path = dir.join(&file.name);
+
+            match file.kind {
+                fs::FileKind::File => {
+                    let content = fs::api::read_bytes(part.index, &path, 0, 1024).unwrap();
+                    let x= CStr::from_bytes_with_nul(&content);
+                    log!("Content: {x:?}");
+                },
+                fs::FileKind::Directory => {
+                    loop_dir(&path, part);
+                },
+                fs::FileKind::Symlink => todo!(),
+                fs::FileKind::Special => todo!(),
+            }
+        }
+    }
+
+    loop {
+        sched().thread_wait_timeout(Duration::from_millis(1500));
+    }
+}
+
 pub const TERMINAL_PROGRAM: &[u8] = include_bytes!("../../programs/out/terminal");
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    println!("KERNEL PANIC:");
-    println!("{info:#?}");
-    loop {
-        hlt();
-    }
+    log!("KERNEL PANIC:");
+    log!("{info:#?}");
+    kthread_exit(-1);
 }

@@ -4,6 +4,7 @@ use core::ffi::CStr;
 
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use thiserror::Error;
+use spin::Once;
 
 use crate::{
     allocator::print_alloc_stats,
@@ -15,6 +16,8 @@ use crate::{
     },
     log,
     thread::{
+        ThreadId,
+        mailbox::Mailbox,
         scheduler::sched,
         util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_kthread_named_arg},
     },
@@ -141,11 +144,55 @@ impl FileTime {
     }
 }
 
+// Mailbox between FS API callers and FS main thread
+pub(super) static FS_REQUESTS: Once<Mailbox<FsRequest, FsResponse>> = Once::new();
+
+#[derive(Debug, Clone)]
+pub(super) enum FsRequest {
+    // Global
+    ListPartitions,
+    ListMounts,
+    Mount { index: usize, mount_point: Path },
+    Unmount { mount_point: Path },
+    // Partition routing
+    PartitionRequest { index: usize, command: PartitionCommand },
+    // Internal for worker bootstrap
+    GetPartitionMailbox(ThreadId),
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum FsResponse {
+    Partitions(Vec<Partition>),
+    MountPoints(alloc::collections::btree_map::BTreeMap<Path, usize>),
+    Files(Result<Vec<File>, Error>),
+    ReadBytes(Result<Vec<u8>, Error>),
+    Written(Result<u64, Error>),
+    File(Result<File, Error>),
+    Ok(Result<(), Error>),
+    // Internal
+    PartitionMailbox(Option<Mailbox<PartitionCommand, FsResponse>>),
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum PartitionCommand {
+    ListFiles { path: Path },
+    ReadBytes { path: Path, offset: usize, count: usize },
+    WriteBytes { path: Path, offset: usize, data: Vec<u8> },
+    CreateFile { path: Path },
+    CreateDir { path: Path },
+    RemoveFile { path: Path },
+    RemoveDir { path: Path },
+    FileInfo { path: Path },
+    Flush,
+}
+
 pub extern "C" fn fs_main_thread() -> ! {
     let logger = sched().get_logger();
     let devices = list_devices();
 
-    let mut partitions = Vec::new();
+    let requests = FS_REQUESTS.call_once(|| Mailbox::new(sched().current_id()));
+
+    let mut partitions: Vec<Partition> = Vec::new();
 
     for device in &devices {
         match parse_gpt(device.id) {
@@ -157,26 +204,84 @@ pub extern "C" fn fs_main_thread() -> ! {
         }
     }
 
-    // Maybe for each partition create a thread, and use this thread to route requests?
+    // Per-partition worker threads and their mailboxes
+    let mut worker_mailboxes: Vec<Mailbox<PartitionCommand, FsResponse>> = Vec::new();
+    let mut worker_tid_map = alloc::collections::btree_map::BTreeMap::<ThreadId, usize>::new();
 
-    for partition in &partitions {
+    for (idx, partition) in partitions.iter().enumerate() {
         if let Some(filesystem) = &partition.filesystem {
             match filesystem {
                 FilesystemType::Fat32 => {
                     let part = Box::new(partition.clone());
                     let part = &raw mut *Box::leak(part);
-                    queue_spawn_kthread_named_arg(
-                        &format!("fat32-fs-{}", partition.index),
+                    let worker_tid = queue_spawn_kthread_named_arg(
+                        &format!("fs-partition-{}", idx),
                         fat32_partition_thread as u64,
                         part.cast(),
                     );
+                    worker_tid_map.insert(worker_tid.clone(), idx);
+                    worker_mailboxes.push(Mailbox::new(worker_tid));
                 }
-                FilesystemType::Unknown => {}
+                FilesystemType::Unknown => {
+                    // No worker for unknown FS
+                }
             }
         }
     }
 
+    // Mount table: map mount point to partition index
+    let mut mount_points = alloc::collections::btree_map::BTreeMap::new();
+
+    // Main loop: route and respond
     loop {
+        while let Some(req) = requests.pop_request() {
+            match req.message {
+                FsRequest::ListPartitions => {
+                    req.response
+                        .send(FsResponse::Partitions(partitions.clone()));
+                }
+                FsRequest::ListMounts => {
+                    req.response
+                        .send(FsResponse::MountPoints(mount_points.clone()));
+                }
+                FsRequest::Mount { index, mount_point } => {
+                    // Basic validation: index exists and mount point not used
+                    let res = if index < partitions.len() && !mount_points.contains_key(&mount_point)
+                    {
+                        mount_points.insert(mount_point, index);
+                        Ok(())
+                    } else {
+                        Err(Error::IoError)
+                    };
+                    req.response.send(FsResponse::Ok(res));
+                }
+                FsRequest::Unmount { mount_point } => {
+                    let res = if mount_points.remove(&mount_point).is_some() {
+                        Ok(())
+                    } else {
+                        Err(Error::IoError)
+                    };
+                    req.response.send(FsResponse::Ok(res));
+                }
+                FsRequest::PartitionRequest { index, command } => {
+                    if let Some(mb) = worker_mailboxes.get(index) {
+                        mb.forward(command, req.response);
+                    } else {
+                        req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                    }
+                }
+                FsRequest::GetPartitionMailbox(tid) => {
+                    if let Some(index) = worker_tid_map.get(&tid) {
+                        let mb = worker_mailboxes.get(*index).cloned();
+                        req.response
+                            .send(FsResponse::PartitionMailbox(mb));
+                    } else {
+                        req.response.send(FsResponse::PartitionMailbox(None));
+                    }
+                }
+            }
+        }
+
         sched().thread_park();
     }
 }
@@ -192,76 +297,64 @@ extern "C" fn fat32_partition_thread(partition: *mut Partition) -> ! {
         kthread_exit(-1)
     };
 
-    let bytes = fs.boot_info.bytes_per_sector;
-    log!(logger, "FAT32 bytes per sector: {}", bytes);
-    log!(
-        logger,
-        "FAT32 sectors per cluster: {}",
-        fs.boot_info.sectors_per_cluster
-    );
-
-    // Some test code, remove when implementing properly
-
-    let entries = fs.get_dir_entries(fs.boot_info.root_cluster).unwrap();
-
-    log!(logger, "Showing root /");
-    for entry in &entries {
-        log!(logger, "Name: {}", entry.fat_name_to_string());
-        log!(logger, "Is dir: {}", entry.is_directory());
-
-        if entry.is_directory() {
-            let entries = fs.get_dir_entries(entry.first_cluster()).unwrap();
-
-            for entry in &entries {
-                log!(logger, "Name: {}", entry.fat_name_to_string());
-                log!(logger, "Is dir: {}", entry.is_directory());
-            }
-        } else {
-            let content = fs.read_file(entry).unwrap();
-            let x = core::str::from_utf8(&content);
-            if let Ok(x) = x {
-                log!(logger, "Content:\n{x:?}");
+    // Get our mailbox from the FS main
+    let mailbox = {
+        use crate::fs::api::send_request as send;
+        use core::time::Duration;
+        loop {
+            let resp = send(
+                FsRequest::GetPartitionMailbox(sched().current_id()),
+                Duration::from_secs(5),
+            );
+            if let FsResponse::PartitionMailbox(Some(mb)) = resp {
+                break mb;
             }
         }
-    }
+    };
 
-    log!(logger, "Using the api");
-
-    let fs = (&mut fs) as &mut dyn FileSystem;
-
-    let files = fs.list_files(&Path::parse_str("/").unwrap()).unwrap();
-
-    for file in files {
-        log!(logger, "Name: {}", file.name);
-        log!(
-            logger,
-            "Created: {:?}",
-            file.created.map(|x| x.to_datetime())
-        );
-    }
-
-    let path = Path::parse_str("/edgar.txt").unwrap();
-    fs.create_file(&path).unwrap();
-    print_alloc_stats();
-
-    log!(logger, "created file");
-
-    fs.write_bytes(&path, 0, c"hello written".to_bytes_with_nul())
-        .unwrap();
-
-    log!(logger, "wrote bytes");
-
-    let content = fs.read_bytes(&path, 0, 512).unwrap();
-
-    let content = CStr::from_bytes_with_nul(&content);
-
-    log!(logger, "Content: {content:?}");
-
-    print_alloc_stats();
-
-    //
-
+    // Serve partition commands
     loop {
+        while let Some(mut req) = mailbox.pop_request() {
+            match req.message {
+                PartitionCommand::ListFiles { path } => {
+                    let res = (&fs as &dyn FileSystem).list_files(&path);
+                    req.response.send(FsResponse::Files(res));
+                }
+                PartitionCommand::ReadBytes { path, offset, count } => {
+                    let res = (&fs as &dyn FileSystem).read_bytes(&path, offset, count);
+                    req.response.send(FsResponse::ReadBytes(res));
+                }
+                PartitionCommand::WriteBytes { path, offset, data } => {
+                    let res = (&mut fs as &mut dyn FileSystem).write_bytes(&path, offset, &data);
+                    req.response.send(FsResponse::Written(res));
+                }
+                PartitionCommand::CreateFile { path } => {
+                    let res = (&mut fs as &mut dyn FileSystem).create_file(&path);
+                    req.response.send(FsResponse::Ok(res));
+                }
+                PartitionCommand::CreateDir { path } => {
+                    let res = (&mut fs as &mut dyn FileSystem).create_dir(&path);
+                    req.response.send(FsResponse::Ok(res));
+                }
+                PartitionCommand::RemoveFile { path } => {
+                    let res = (&mut fs as &mut dyn FileSystem).remove_file(&path);
+                    req.response.send(FsResponse::Ok(res));
+                }
+                PartitionCommand::RemoveDir { path } => {
+                    let res = (&mut fs as &mut dyn FileSystem).remove_dir(&path);
+                    req.response.send(FsResponse::Ok(res));
+                }
+                PartitionCommand::FileInfo { path } => {
+                    let res = (&fs as &dyn FileSystem).file_info(&path);
+                    req.response.send(FsResponse::File(res));
+                }
+                PartitionCommand::Flush => {
+                    let res = (&mut fs as &mut dyn FileSystem).flush();
+                    req.response.send(FsResponse::Ok(res));
+                }
+            }
+        }
+
         sched().thread_park();
     }
 }
