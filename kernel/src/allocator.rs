@@ -1,6 +1,6 @@
 //! Kernel allocator
 
-use linked_list_allocator::LockedHeap;
+use buddy_system_allocator::LockedHeap;
 use x86_64::structures::paging::PageTableFlags;
 
 use crate::{
@@ -9,7 +9,7 @@ use crate::{
 };
 
 #[global_allocator]
-pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
+pub static ALLOCATOR: LockedHeap<32> = LockedHeap::empty();
 
 pub fn init_heap() {
     let heap_start = KERNEL_HEAP;
@@ -30,13 +30,13 @@ pub fn init_heap() {
     unsafe {
         ALLOCATOR
             .lock()
-            .init(heap_start.as_mut_ptr(), heap_size as usize);
+            .init(heap_start.as_u64() as usize, heap_size as usize);
     }
 }
 
 pub fn print_alloc_stats() {
-    let used = ALLOCATOR.lock().used();
-    let size = ALLOCATOR.lock().size();
+    let used = ALLOCATOR.lock().stats_alloc_actual();
+    let size = ALLOCATOR.lock().stats_total_bytes();
 
     println!("Kernel heap {} kb / {} kb", used / 1024, size / 1024);
 }

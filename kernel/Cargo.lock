@@ -53,6 +53,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2261d10cca569e4643e526d8dc2e62e433cc8aba21ab764233731f8d369bf394"
 
 [[package]]
+name = "buddy_system_allocator"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1a0108968a3a2dab95b089c0fc3f1afa7759aa5ebe6f1d86d206d6f7ba726eb"
+dependencies = [
+ "spin 0.9.8",
+]
+
+[[package]]
 name = "bytemuck"
 version = "1.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -98,6 +107,7 @@ name = "edos-kernel"
 version = "0.1.0"
 dependencies = [
  "acpi",
+ "buddy_system_allocator",
  "bytemuck",
  "crossbeam-queue",
  "elf",
@@ -108,7 +118,7 @@ dependencies = [
  "pc-keyboard",
  "pic8259",
  "raw-cpuid 11.6.0",
- "spin",
+ "spin 0.10.0",
  "thiserror",
  "uart_16550",
  "x2apic",
@@ -284,6 +294,15 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "spin"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+dependencies = [
+ "lock_api",
+]
 
 [[package]]
 name = "spin"
