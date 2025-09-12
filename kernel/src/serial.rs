@@ -1,9 +1,7 @@
 use core::fmt::{self, Write};
 
-use alloc::string::String;
 use spin::{Once, mutex::Mutex};
 use uart_16550::SerialPort;
-use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{acpi::current_cpu_index, timer::uptime_us};
 

@@ -186,6 +186,7 @@ pub struct SyscallContext {
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_CLOSE: u64 = 3;
+#[allow(unused)]
 const SYS_PIPE: u64 = 22;
 const SYS_MMAP: u64 = 9;
 const SYS_MUNMAP: u64 = 11;

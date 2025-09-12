@@ -4,6 +4,7 @@ use spin::RwLock;
 #[derive(Debug, Clone)]
 pub enum FileDescriptor {
     StandardStream(StandardStream),
+    #[allow(unused)]
     Pipe(Arc<RwLock<Pipe>>),
     // Future: File(Arc<RwLock<File>>),
 }
@@ -15,6 +16,7 @@ pub enum StandardStream {
     Stderr,
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 pub struct Pipe {
     pub buffer: Vec<u8>,
@@ -23,6 +25,7 @@ pub struct Pipe {
     pub closed: bool,
 }
 
+#[allow(unused)]
 impl Pipe {
     pub fn new() -> Self {
         Self {

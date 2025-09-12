@@ -30,6 +30,7 @@ pub struct ThreadId {
 }
 
 impl ThreadId {
+    #[allow(unused)]
     pub fn new(id: u64, kernel: bool) -> Self {
         Self {
             id,
@@ -47,13 +48,8 @@ impl ThreadId {
         }
     }
 
-    #[expect(unused)]
     pub fn new_maybe_named(id: u64, kernel: bool, name: Arc<Option<String>>) -> Self {
-        Self {
-            id,
-            kernel,
-            name: name,
-        }
+        Self { id, kernel, name }
     }
 }
 
@@ -86,10 +82,6 @@ pub enum ThreadState {
     WaitTimeout((Instant, Duration)),
     Exited(i32),
 }
-
-pub const STATE_READY: u64 = 0;
-pub const STATE_WAITING: u64 = 1;
-pub const STATE_RUNNING: u64 = 2;
 
 impl KernelThread {
     pub fn new(name: Option<String>, entry_point: u64) -> Self {

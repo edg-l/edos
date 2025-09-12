@@ -57,6 +57,7 @@ pub fn get_percpu_data() -> &'static mut PerCpuData {
     unsafe { &mut *(ptr as *mut PerCpuData) }
 }
 
+#[allow(unused)]
 pub fn get_percpu_data_for(cpu_index: usize) -> &'static mut PerCpuData {
     let ptr = percpu_base() + cpu_index * percpu_stride();
     unsafe { &mut *(ptr as *mut PerCpuData) }

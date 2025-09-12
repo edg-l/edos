@@ -57,6 +57,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
     }
 }
 
+#[allow(unused)]
 pub fn sys_close(fd: u64) -> i32 {
     let sched = sched();
 

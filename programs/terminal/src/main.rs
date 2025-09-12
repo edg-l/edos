@@ -6,7 +6,6 @@ use elibc::{
     KeyEvent, get_raw_input,
     graphics::{Color, RasterHeight, Screen, TextMetrics, TextStyle},
     io::get_kernel_logs,
-    sys_exit,
 };
 
 extern crate alloc;

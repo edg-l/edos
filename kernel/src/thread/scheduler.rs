@@ -37,6 +37,7 @@ pub static ALIVE_THREADS: RwLock<FnvIndexMap<ThreadId, u64, 1024>> =
     RwLock::new(FnvIndexMap::new());
 
 /// Returns the scheduler id this thread lives on.
+#[allow(unused)]
 pub fn thread_exists(tid: &ThreadId) -> Option<u64> {
     ALIVE_THREADS.read().get(tid).copied()
 }
@@ -136,15 +137,12 @@ pub extern "C" fn thread_cleaner() -> ! {
     }
 }
 
+#[allow(unused)]
 pub fn get_sched_cpu(cpu: usize) -> &'static Scheduler {
     unsafe { get_percpu_data_for(cpu).scheduler.as_ref().unwrap() }
 }
 
 pub fn sched() -> &'static Scheduler {
-    unsafe { get_percpu_data().scheduler.as_mut().unwrap() }
-}
-
-fn sched_mut() -> &'static mut Scheduler {
     unsafe { get_percpu_data().scheduler.as_mut().unwrap() }
 }
 

@@ -2,12 +2,14 @@ use alloc::collections::BTreeMap;
 
 use crate::thread::pipe::{FileDescriptor, StandardStream};
 
+#[allow(unused)]
 #[derive(Debug)]
 pub struct FileDescriptorTable {
     fds: BTreeMap<u64, FileDescriptor>,
     next_fd: u64,
 }
 
+#[allow(unused)]
 impl FileDescriptorTable {
     pub fn new() -> Self {
         let mut table = Self {
