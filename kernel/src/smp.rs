@@ -5,7 +5,7 @@ use limine::mp::Cpu as MpCpu;
 use crate::{
     apic::{get_lapic, init::enable_lapic, set_apic_timer_and_enable},
     boot::MP_REQUEST,
-    gdt, interrupts, println,
+    gdt, interrupts, log, println,
     syscalls::setup_syscall,
     thread::{self, scheduler::sched, util::queue_spawn_kthread_named},
     util::per_cpu::init_this_cpu_percpu,
@@ -68,8 +68,9 @@ pub unsafe extern "C" fn ap_start(cpu: &MpCpu) -> ! {
 }
 
 pub fn kthread_test() -> ! {
+    let logger = sched().get_logger();
     loop {
-        println!("hello multiple cpus");
+        log!(logger, "hello multiple cpus");
         sched().thread_wait_timeout(Duration::from_secs(1));
     }
 }

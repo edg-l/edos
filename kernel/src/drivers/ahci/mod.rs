@@ -24,7 +24,7 @@ use crate::{
             structures::{PciAddress, PciDevice},
         },
     },
-    println,
+    log, println,
     thread::{
         ThreadId,
         mailbox::{Mailbox, Request},
@@ -121,6 +121,7 @@ type PortMailbox = Mailbox<Command, AhciResponse>;
 
 pub extern "C" fn ahci_driver_main() -> ! {
     let tid = sched().current_id();
+    let logger = sched().get_logger();
 
     let requests = AHCI_REQUESTS.call_once(|| Mailbox::new(tid));
 
@@ -133,18 +134,18 @@ pub extern "C" fn ahci_driver_main() -> ! {
         if device.header.class_code == 0x01 && device.header.subclass == 0x06 {
             match AhciController::new(device) {
                 Ok(controller) => {
-                    println!("AHCI controller initialized successfully");
+                    log!(logger, "AHCI controller initialized successfully");
                     controllers.push(controller);
                 }
                 Err(e) => {
-                    println!("Failed to initialize AHCI controller: {:?}", e);
+                    log!(logger, "Failed to initialize AHCI controller: {:?}", e);
                 }
             }
         }
     }
 
     if controllers.is_empty() {
-        println!("No AHCI controllers found");
+        log!(logger, "No AHCI controllers found");
         loop {
             hlt();
         }
@@ -170,7 +171,12 @@ pub extern "C" fn ahci_driver_main() -> ! {
                         id += 1;
                     }
                     Err(e) => {
-                        println!("Failed to identify device on port {}: {:?}", port_idx, e);
+                        log!(
+                            logger,
+                            "Failed to identify device on port {}: {:?}",
+                            port_idx,
+                            e
+                        );
                     }
                 }
             }
@@ -292,6 +298,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
 
 extern "C" fn port_worker_thread() -> ! {
     let tid = sched().current_id();
+    let logger = sched().get_logger();
 
     let mailbox = {
         loop {
@@ -328,7 +335,7 @@ extern "C" fn port_worker_thread() -> ! {
                     sectors,
                     mut buffer,
                 } => {
-                    println!("Got read request, lba={lba}, sectors={sectors}");
+                    log!(logger, "Got read request, lba={lba}, sectors={sectors}");
                     buffer.resize(sectors as usize * 512, 0);
                     let result = port.lock().read_sectors(lba, &mut buffer, sectors);
 
@@ -338,10 +345,11 @@ extern "C" fn port_worker_thread() -> ! {
                             .send(AhciResponse::ReadResult { data: Ok(buffer) }),
                         Err(e) => req.response.send(AhciResponse::ReadResult { data: Err(e) }),
                     }
-                    println!("Done");
+                    log!(logger, "Done");
                 }
                 Command::Write { lba, data, sectors } => {
-                    println!(
+                    log!(
+                        logger,
                         "Got write request, lba={lba}, sectors={sectors}, data_len={}",
                         data.len()
                     );
@@ -351,12 +359,12 @@ extern "C" fn port_worker_thread() -> ! {
                     });
                 }
                 Command::Flush => {
-                    println!("Got flush request");
+                    log!(logger, "Got flush request");
                     let result = port.lock().flush_cache();
                     req.response.send(AhciResponse::Result(result));
                 }
                 Command::Identify => {
-                    println!("Got identify request");
+                    log!(logger, "Got identify request");
                     let result = port.lock().identify_device();
                     req.response
                         .send(AhciResponse::IdentifyResult { info: result });

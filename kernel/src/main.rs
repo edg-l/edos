@@ -28,6 +28,7 @@ mod gdt;
 mod graphics;
 mod interrupts;
 mod loader;
+mod logs;
 mod memory;
 mod serial;
 mod smp;
@@ -98,14 +99,11 @@ fn main() -> ! {
 
     // Init scheduler
     thread::scheduler::init();
+    logs::init();
     drivers::init_drivers();
     fs::init();
 
-    queue_spawn_thread({
-        let mut thread = UserThread::new(TERMINAL_PROGRAM).unwrap();
-        thread.id.name = Some("terminal".to_string().into());
-        thread
-    });
+    queue_spawn_thread(UserThread::new(TERMINAL_PROGRAM, Some("terminal".to_string())).unwrap());
 
     // Enable apic timer
     set_apic_timer_and_enable(Duration::from_millis(5));

@@ -3,6 +3,7 @@ use core::{fmt::Display, sync::atomic::AtomicU64, time::Duration};
 use alloc::{string::String, sync::Arc};
 
 use crate::{
+    logs::ThreadLogger,
     thread::{
         context::CpuContext,
         util::{kthread_stack_alloc, kthread_stack_free},
@@ -21,10 +22,10 @@ pub mod scheduler;
 pub mod user;
 pub mod util;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ThreadId {
     pub id: u64,
-    pub name: Option<Arc<String>>,
+    pub name: Arc<Option<String>>,
     pub kernel: bool,
 }
 
@@ -33,7 +34,7 @@ impl ThreadId {
         Self {
             id,
             kernel,
-            name: None,
+            name: Arc::new(None),
         }
     }
 
@@ -42,7 +43,16 @@ impl ThreadId {
         Self {
             id,
             kernel,
-            name: Some(name.into()),
+            name: Some(name).into(),
+        }
+    }
+
+    #[expect(unused)]
+    pub fn new_maybe_named(id: u64, kernel: bool, name: Arc<Option<String>>) -> Self {
+        Self {
+            id,
+            kernel,
+            name: name,
         }
     }
 }
@@ -64,6 +74,7 @@ pub struct KernelThread {
     pub initial_stack_top: u64,
     pub context: CpuContext,
     pub state: ThreadState,
+    pub logger: Arc<ThreadLogger>,
     // no need for another page table for kthreads.
     // no need for tss kernel stack
 }
@@ -85,15 +96,22 @@ impl KernelThread {
 
         let id = KTHREAD_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
+        let name = Arc::new(name);
+
         KernelThread {
             id: ThreadId {
                 id,
                 kernel: true,
-                name: name.map(Arc::new),
+                name: name.clone(),
             },
             initial_stack_top: stack_top,
             context,
             state: ThreadState::Ready,
+            logger: Arc::new(ThreadLogger {
+                kernel: true,
+                id,
+                name,
+            }),
         }
     }
 

@@ -4,8 +4,9 @@ use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use crossbeam_queue::SegQueue;
 use spin::Mutex;
 use thiserror::Error;
+use x86_64::instructions::interrupts::without_interrupts;
 
-use crate::{println, thread::{scheduler::sched, ThreadId}};
+use crate::thread::{ThreadId, scheduler::sched};
 
 #[derive(Debug)]
 pub struct Broadcast<T: Clone> {
@@ -34,21 +35,23 @@ impl<T: Clone> Broadcast<T> {
 
     /// The calling thread subscribes.
     pub fn subscribe_or_get(&mut self) -> Receiver<T> {
-        if let Some(r) = self.subscribers.get(&sched().current_id()) {
-            return r.clone();
-        }
-
-        let tid = sched().current_id();
-        let rx = (*self.subscribers.entry(tid.clone()).or_default()).clone();
-
-        if self.send_history {
-            for x in self.history.iter() {
-                rx.queue.push(x.clone());
+        without_interrupts(|| {
+            let tid = sched().current_id();
+            if let Some(r) = self.subscribers.get(&tid) {
+                return r.clone();
             }
-            sched().thread_wake(tid, false);
-        }
 
-        rx
+            let rx = (*self.subscribers.entry(tid.clone()).or_default()).clone();
+
+            if self.send_history {
+                for x in self.history.iter() {
+                    rx.queue.push(x.clone());
+                }
+                sched().thread_wake(tid, false);
+            }
+
+            rx
+        })
     }
 
     /// The calling thread unsubscribes.
@@ -59,30 +62,32 @@ impl<T: Clone> Broadcast<T> {
 
     /// Broadcasts a message to all subscribers. Waking the threads.
     pub fn broadcast(&mut self, value: T) {
-        if self.send_history {
-            self.history.push(value.clone());
-        }
-
-        let sched = sched();
-        let mut to_remove = Vec::new();
-        for (tid, receiver) in self.subscribers.iter() {
-            if receiver.queue.len() > self.bound {
-                receiver.queue.pop();
+        without_interrupts(|| {
+            if self.send_history {
+                self.history.push(value.clone());
             }
-            receiver.queue.push(value.clone());
 
-            if !sched.thread_exists(tid.clone()) {
-                to_remove.push(tid.clone());
-            } else {
-                sched.thread_wake(tid.clone(), true);
-            }
-        }
+            let sched = sched();
+            let mut to_remove = Vec::new();
+            for (tid, receiver) in self.subscribers.iter() {
+                if receiver.queue.len() > self.bound {
+                    receiver.queue.pop();
+                }
+                receiver.queue.push(value.clone());
 
-        if !to_remove.is_empty() {
-            for tid in to_remove {
-                self.subscribers.remove(&tid);
+                if !sched.thread_exists(tid.clone()) {
+                    to_remove.push(tid.clone());
+                } else {
+                    sched.thread_wake(tid.clone(), true);
+                }
             }
-        }
+
+            if !to_remove.is_empty() {
+                for tid in to_remove {
+                    self.subscribers.remove(&tid);
+                }
+            }
+        })
     }
 }
 

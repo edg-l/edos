@@ -150,8 +150,7 @@ impl<R> Response<R> {
         without_interrupts(|| {
             unsafe { self.value.get().write(MaybeUninit::new(value)) };
             self.fulfilled.store(true, Ordering::Release);
-            let sched = sched();
-            sched.thread_wake(self.thread.clone(), true);
+            sched().thread_wake(self.thread.clone(), true);
         })
     }
 }

@@ -1,4 +1,7 @@
-use crate::{drivers::ahci, fs::fat32::structures::Fat32BootSector};
+use crate::{
+    drivers::ahci, fs::fat32::structures::Fat32BootSector, log, logs::ThreadLogger,
+    thread::scheduler::sched,
+};
 use alloc::{string::String, vec::Vec};
 use bytemuck::{Pod, Zeroable, try_from_bytes};
 
@@ -271,15 +274,20 @@ fn detect_filesystem(
 }
 
 /// Pretty print partition information
-pub fn print_partitions(partitions: &[Partition]) {
-    use crate::println;
-
-    println!("Found {} partitions:", partitions.len());
-    println!(
+pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
+    log!(logger, "Found {} partitions:", partitions.len());
+    log!(
+        logger,
         "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {}",
-        "ID", "Start LBA", "End LBA", "Size (MB)", "Type", "FS", "Name"
+        "ID",
+        "Start LBA",
+        "End LBA",
+        "Size (MB)",
+        "Type",
+        "FS",
+        "Name"
     );
-    println!("{}", "-".repeat(80));
+    log!(logger, "{}", "-".repeat(80));
 
     for partition in partitions {
         let size_mb = (partition.size_sectors * 512) / (1024 * 1024);
@@ -296,7 +304,8 @@ pub fn print_partitions(partitions: &[Partition]) {
             None => "None",
         };
 
-        println!(
+        log!(
+            logger,
             "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {}",
             partition.index,
             partition.starting_lba,

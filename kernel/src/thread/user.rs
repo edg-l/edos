@@ -1,6 +1,6 @@
 use core::sync::atomic::AtomicU64;
 
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
+use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec::Vec};
 use x86_64::{
     VirtAddr,
     registers::control::{Cr3, Cr3Flags},
@@ -11,6 +11,7 @@ use crate::{
     boot::boot_info,
     drivers::fpu::FpuState,
     loader::{ElfLoadError, load_elf},
+    logs::ThreadLogger,
     memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
     println,
     syscalls::Errno,
@@ -44,6 +45,7 @@ pub struct UserThread {
     pub fpu_init: bool,
     pub fpu: FpuState,
     pub fd_table: FileDescriptorTable,
+    pub logger: Arc<ThreadLogger>,
 }
 
 #[expect(unused)]
@@ -87,7 +89,7 @@ impl UserThread {
     /// TODO: also handle arguments.
     ///
     /// Note: This must be called from the kernel cr3.
-    pub fn new(elf_data: &[u8]) -> Result<Self, ElfLoadError> {
+    pub fn new(elf_data: &[u8], name: Option<String>) -> Result<Self, ElfLoadError> {
         // allocate kernel stack before creating page
         let kernel_stack_top = kthread_stack_alloc();
 
@@ -121,8 +123,10 @@ impl UserThread {
 
         let id = THREAD_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
+        let name = Arc::new(name);
+
         let thread = UserThread {
-            id: ThreadId::new(id, false),
+            id: ThreadId::new_maybe_named(id, false, name.clone()),
             initial_stack_top: stack_top,
             context,
             state: ThreadState::Ready,
@@ -137,6 +141,11 @@ impl UserThread {
             fpu_init: false,
             fpu: FpuState::default(),
             fd_table: FileDescriptorTable::new(),
+            logger: Arc::new(ThreadLogger {
+                id,
+                kernel: false,
+                name,
+            }),
         };
 
         Ok(thread)

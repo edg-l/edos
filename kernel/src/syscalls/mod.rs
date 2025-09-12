@@ -14,8 +14,8 @@ use x86_64::{
 use crate::{
     gdt::selectors,
     graphics::api::ScreenInfo,
+    logs::LOG_BROADCAST,
     println,
-    serial::SERIAL_SUBSCRIBER,
     syscalls::{
         graphics::DrawRequestInput,
         io::{sys_close, sys_pipe, sys_read, sys_write},
@@ -284,9 +284,7 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
 
 pub fn sys_errno() -> u64 {
     let sched = sched();
-    let current_id = sched.current_id();
-    let thread = sched.threads.get(&current_id.id).unwrap();
-    thread.errno as u64
+    sched.current_thread(|t| t.errno) as u64
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -306,19 +304,25 @@ fn sys_getpid() -> u64 {
 
 // TODO: figure out why the syscall gets all logs. it doesnt properly subscribe?
 pub fn sys_kernel_log(log_buffer: *mut u8, size: usize) -> i64 {
-    let thread = sched().current_thread_mut();
-    thread.errno = Errno::Clear;
+    let ret = sched().current_thread_mut(|thread| {
+        thread.errno = Errno::Clear;
 
-    if log_buffer.is_null() {
-        thread.errno = Errno::EINVAL;
+        if log_buffer.is_null() {
+            thread.errno = Errno::EINVAL;
+            return true;
+        }
+        false
+    });
+
+    if ret {
         return -1;
     }
 
     let mut buf = Vec::with_capacity(size);
 
-    x86_64::instructions::interrupts::enable();
+    // not needed?      x86_64::instructions::interrupts::enable();
 
-    let rx = SERIAL_SUBSCRIBER.lock().subscribe_or_get();
+    let rx = LOG_BROADCAST.lock().subscribe_or_get();
 
     // Require a 128 byte space.
     while buf.len() + 128 + 1 < size

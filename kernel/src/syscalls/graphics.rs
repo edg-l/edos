@@ -8,12 +8,11 @@ use crate::{
 
 pub fn sys_draw_rect(x: u64, y: u64, width: u64, height: u64, color: u32) -> u64 {
     let sched = sched();
-    let thread = sched.current_thread_mut();
-    thread.errno = Errno::Clear;
+    sched.current_thread_clear_errno();
 
     // Basic validation
     if width == 0 || height == 0 {
-        thread.errno = Errno::EINVAL;
+        sched.current_thread_set_errno(Errno::EINVAL);
         return !0u64; // -1
     }
 
@@ -24,9 +23,7 @@ pub fn sys_draw_rect(x: u64, y: u64, width: u64, height: u64, color: u32) -> u64
 
 pub fn sys_render() -> u64 {
     let sched = sched();
-    let thread = sched.current_thread_mut();
-    thread.errno = Errno::Clear;
-
+    sched.current_thread_clear_errno();
     x86_64::instructions::interrupts::enable();
     render();
     0
@@ -35,11 +32,10 @@ pub fn sys_render() -> u64 {
 pub fn sys_screen_info(info_ptr: *mut ScreenInfo) -> u64 {
     {
         let sched = sched();
-        let thread = sched.current_thread_mut();
-        thread.errno = Errno::Clear;
+        sched.current_thread_clear_errno();
 
         if info_ptr.is_null() {
-            thread.errno = Errno::EFAULT;
+            sched.current_thread_set_errno(Errno::EFAULT);
             return !0u64; // -1
         }
     }
@@ -62,11 +58,10 @@ pub struct DrawRequestInput {
 
 pub fn sys_draw(request_ptr: *const DrawRequestInput) -> u64 {
     let sched = sched();
-    let thread = sched.current_thread_mut();
-    thread.errno = Errno::Clear;
+    sched.current_thread_clear_errno();
 
     if request_ptr.is_null() {
-        thread.errno = Errno::EFAULT;
+        sched.current_thread_set_errno(Errno::EFAULT);
         return !0u64;
     }
 
@@ -75,7 +70,7 @@ pub fn sys_draw(request_ptr: *const DrawRequestInput) -> u64 {
 
     // Basic validation
     if request.width == 0 || request.height == 0 {
-        thread.errno = Errno::EINVAL;
+        sched.current_thread_set_errno(Errno::EINVAL);
         return !0u64;
     }
 

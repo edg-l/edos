@@ -6,7 +6,7 @@ use alloc::{
 };
 use bytemuck::{Pod, Zeroable};
 
-use crate::println;
+use crate::{log, println, thread::scheduler::sched};
 
 // Compile-time structure size assertions
 const _: () = {
@@ -363,25 +363,29 @@ impl DeviceIdentifyInfo {
 
     /// Print device information in a formatted way
     pub fn print_info(&self, port_idx: usize) {
-        println!("=== Device Info for Port {} ===", port_idx);
-        println!("Model: {}", self.model);
-        println!("Serial: {}", self.serial);
-        println!("Firmware: {}", self.firmware);
-        println!(
+        let logger = sched().get_logger();
+        log!(logger, "=== Device Info for Port {} ===", port_idx);
+        log!(logger, "Model: {}", self.model);
+        log!(logger, "Serial: {}", self.serial);
+        log!(logger, "Firmware: {}", self.firmware);
+        log!(
+            logger,
             "Capacity: {} sectors ({} MB / {} GB)",
-            self.sectors, self.capacity_mb, self.capacity_gb
+            self.sectors,
+            self.capacity_mb,
+            self.capacity_gb
         );
-        println!("LBA48 Support: {}", self.supports_lba48);
-        println!("Features word 83: {:#06x}", self.raw_features);
+        log!(logger, "LBA48 Support: {}", self.supports_lba48);
+        log!(logger, "Features word 83: {:#06x}", self.raw_features);
 
         if self.supports_lba48 {
-            println!("  - 48-bit LBA supported");
+            log!(logger, "  - 48-bit LBA supported");
         }
         if self.supports_power_mgmt {
-            println!("  - Power Management supported");
+            log!(logger, "  - Power Management supported");
         }
         if self.supports_security {
-            println!("  - Security feature set supported");
+            log!(logger, "  - Security feature set supported");
         }
     }
 }

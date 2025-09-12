@@ -1,20 +1,13 @@
-use core::fmt;
+use core::fmt::{self, Write};
 
-use alloc::{format, string::String, sync::Arc};
+use alloc::string::String;
 use spin::{Once, mutex::Mutex};
 use uart_16550::SerialPort;
 use x86_64::instructions::interrupts::without_interrupts;
 
-use crate::{
-    acpi::current_cpu_index,
-    thread::broadcast::{LockedBroadcast, new_broadcast},
-    timer::uptime_us,
-    util::per_cpu::get_percpu_data,
-};
+use crate::{acpi::current_cpu_index, timer::uptime_us};
 
 static SERIAL_DBG: Once<Mutex<SerialPort>> = Once::new();
-
-pub static SERIAL_SUBSCRIBER: LockedBroadcast<Arc<String>> = new_broadcast(256, true);
 
 pub fn init() {
     SERIAL_DBG.call_once(|| {
@@ -37,47 +30,24 @@ macro_rules! println {
 
 #[doc(hidden)]
 pub fn _serial_print(args: fmt::Arguments) {
-    without_interrupts(|| {
-        use core::fmt::Write;
-        let uptime_us = uptime_us();
-        let secs = uptime_us / 1_000_000;
-        let us = uptime_us % 1_000_000;
+    use core::fmt::Write;
+    let uptime_us = uptime_us();
+    let secs = uptime_us / 1_000_000;
+    let us = uptime_us % 1_000_000;
 
-        if let Some(sched) = unsafe { get_percpu_data().scheduler.as_mut() }
-            && let Some(tid) = sched.current_id_opt()
-        {
-            let text = format!(
-                "[{secs}.{us:06}] <cpu-{}:{}:{}:{}> {args}",
+    unsafe {
+        SERIAL_DBG
+            .get()
+            .unwrap_unchecked()
+            .lock()
+            .write_fmt(format_args!(
+                "[{secs}.{us:06}] <cpu-{}:kernel> {args}",
                 current_cpu_index(),
-                tid.name
-                    .as_ref()
-                    .map(|x| x.as_str())
-                    .unwrap_or_else(|| if tid.kernel { "unk0" } else { "unk3" }),
-                if tid.kernel { "k" } else { "u" },
-                tid.id
-            );
-            unsafe {
-                SERIAL_DBG
-                    .get()
-                    .unwrap_unchecked()
-                    .lock()
-                    .write_str(&text)
-                    .unwrap();
-            }
-            SERIAL_SUBSCRIBER.lock().broadcast(Arc::new(text));
-            return;
-        };
+            ))
+            .unwrap();
+    }
+}
 
-        unsafe {
-            SERIAL_DBG
-                .get()
-                .unwrap_unchecked()
-                .lock()
-                .write_fmt(format_args!(
-                    "[{secs}.{us:06}] <cpu-{}:kernel> {args}",
-                    current_cpu_index(),
-                ))
-                .unwrap();
-        }
-    })
+pub fn add_serial_log(text: &str) {
+    SERIAL_DBG.get().unwrap().lock().write_str(text).unwrap();
 }
