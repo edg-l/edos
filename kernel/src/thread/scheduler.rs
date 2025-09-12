@@ -1,6 +1,6 @@
-use core::{alloc::Layout, ptr::null_mut, sync::atomic::AtomicPtr, time::Duration};
+use core::time::Duration;
 
-use alloc::{boxed::Box, collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::btree_map::BTreeMap, sync::Arc};
 use crossbeam_queue::ArrayQueue;
 use heapless::{LinearMap, index_map::FnvIndexMap};
 use spin::{Mutex, RwLock};
@@ -8,7 +8,7 @@ use x86_64::{
     VirtAddr,
     instructions::{
         hlt,
-        interrupts::{disable, enable, enable_and_hlt, without_interrupts},
+        interrupts::{enable_and_hlt, without_interrupts},
     },
     registers::control::Cr3,
 };
@@ -17,10 +17,7 @@ use crate::{
     acpi::current_cpu_index,
     apic::get_lapic,
     boot::boot_info,
-    drivers::{
-        fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
-        keyboard::KEYBOARD_BROADCAST,
-    },
+    drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
     interrupts::InterruptIndex,
     logs::ThreadLogger,
     println,
@@ -177,7 +174,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                 // coming from kernel task
                 if let Some(kthread) = sched.storage.kthreads.get_mut(&current_id.id) {
                     kthread.context = (*context).clone();
-                    sched.thread_queue.push(current_id);
+                    sched.thread_queue.push(current_id).unwrap();
                 }
             } else {
                 // coming from user
@@ -191,7 +188,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                         save_fpu_state(&mut thread.fpu);
                     }
 
-                    sched.thread_queue.push(current_id);
+                    sched.thread_queue.push(current_id).unwrap();
                 }
             }
         }
@@ -322,10 +319,13 @@ impl Scheduler {
                 SchedCmd::Exit(thread_id, code) => {
                     if thread_id.kernel {
                         if let Some(thread) = self.storage.kthreads.get_mut(&thread_id.id) {
-                            thread.state = ThreadState::Exited(code)
+                            thread.state = ThreadState::Exited(code);
+                            thread.free();
                         }
                     } else if let Some(thread) = self.storage.threads.get_mut(&thread_id.id) {
-                        thread.state = ThreadState::Exited(code)
+                        thread.state = ThreadState::Exited(code);
+                        let info = self.storage.thread_info.remove(&thread.id.id);
+                        thread.free(info.unwrap());
                     }
                     ALIVE_THREADS.write().remove(&thread_id);
                 }

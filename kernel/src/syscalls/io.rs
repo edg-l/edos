@@ -1,8 +1,5 @@
 use core::time::Duration;
 
-use alloc::{sync::Arc, vec::Vec};
-use spin::RwLock;
-
 use crate::{
     drivers::keyboard::KEYBOARD_BROADCAST,
     println,

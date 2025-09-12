@@ -14,6 +14,7 @@ use x86_64::{
 use crate::{
     gdt::selectors,
     graphics::api::ScreenInfo,
+    log,
     logs::LOG_BROADCAST,
     println,
     syscalls::{
@@ -248,6 +249,7 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             ctx.rax = sys_munmap(addr, length) as u64;
         }
         SYS_EXIT => {
+            log!("Exit called with code {:?}", ctx.rdi as i32);
             sched().thread_exit(ctx.rdi as i32);
 
             loop {

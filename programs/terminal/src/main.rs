@@ -6,6 +6,7 @@ use elibc::{
     KeyEvent, get_raw_input,
     graphics::{Color, RasterHeight, Screen, TextMetrics, TextStyle},
     io::get_kernel_logs,
+    sys_exit,
 };
 
 extern crate alloc;
@@ -457,7 +458,6 @@ pub extern "C" fn main() -> i32 {
 
     let mut key_buffer = Vec::new();
 
-    // Main terminal loop
     loop {
         // Get raw input with a small timeout to avoid blocking indefinitely
 
@@ -487,6 +487,5 @@ pub extern "C" fn main() -> i32 {
                 return 1;
             }
         }
-        // Continue looping even if no input (timeout occurred)
     }
 }

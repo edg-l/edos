@@ -156,11 +156,11 @@ impl UserThread {
     }
 
     /// Cleans thread resources and switches to kernel page
-    pub fn free(&mut self, info: &UserThreadInfo) {
+    pub fn free(&mut self, info: Arc<Mutex<UserThreadInfo>>) {
         println!("Cleaning up thread resources");
         // Unmap all memory mappings
         let mut memory_manager = self.memory_manager.lock();
-        for (&addr, mapping) in &info.memory_mappings {
+        for (&addr, mapping) in &info.lock().memory_mappings {
             let _ = memory_manager.unmap_memory(addr, mapping.size);
         }
 

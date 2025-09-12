@@ -52,7 +52,9 @@ impl Write for ThreadLogger {
 }
 
 impl ThreadLogger {
-    pub fn log(&self, text: &str) {
+    pub fn log(&self, args: core::fmt::Arguments) {
+        use core::fmt::Write;
+        let mut buf = alloc::string::String::new();
         let uptime_us = uptime_us();
         let secs = uptime_us / 1_000_000;
         let us = uptime_us % 1_000_000;
@@ -65,22 +67,41 @@ impl ThreadLogger {
                 "unk3".to_string()
             }
         });
-        let text = alloc::format!(
-            "[{secs}.{us:06}] <cpu-{}:{}:{}:{}> {}",
+
+        // build prefix
+        let _ = write!(
+            buf,
+            "[{secs}.{us:06}] <cpu-{}:{}:{}:{}> ",
             current_cpu_index(),
             name,
             if self.kernel { "k" } else { "u" },
             self.id,
-            text
         );
-        LOG_BROADCAST.lock().broadcast(text);
+
+        // append user’s message
+        let _ = buf.write_fmt(args);
+        buf.push('\n');
+
+        LOG_BROADCAST.lock().broadcast(buf);
     }
 }
 
 #[macro_export]
 macro_rules! log {
-    ($logger:tt, $($arg:tt)*) => ($logger.log(&alloc::format!("{}\n", format_args!($($arg)*))));
-    ($($arg:tt)*) => ($crate::thread::scheduler::sched().get_logger().log(&alloc::format!("{}\n", format_args!($($arg)*))));
+    // explicit logger by identifier
+    ($logger:ident, $fmt:literal $(, $arg:expr)*) => {
+        $logger.log(format_args!($fmt $(, $arg)*))
+    };
+    // explicit logger by arbitrary expression (use @)
+    (@$logger:expr, $($arg:expr)*) => {
+        $logger.log(format_args!($($arg)*))
+    };
+    // default logger
+    ($fmt:literal $(, $arg:expr)*) => {
+        $crate::thread::scheduler::sched()
+            .get_logger()
+            .log(format_args!($fmt $(, $arg)*))
+    };
 }
 
 pub fn init() {
