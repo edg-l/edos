@@ -1,4 +1,4 @@
-use core::time::Duration;
+use core::{sync::atomic::AtomicUsize, time::Duration};
 
 use limine::mp::Cpu as MpCpu;
 
@@ -16,12 +16,15 @@ use crate::{
     util::per_cpu::init_this_cpu_percpu,
 };
 
+pub static NUM_CPUS: AtomicUsize = AtomicUsize::new(0);
+
 /// Initialize SMP using Limine's MP request: set AP entrypoints and let Limine bring them up.
 pub fn init() {
     // Ensure the request is referenced so the linker keeps it.
     if let Some(resp) = MP_REQUEST.get_response() {
         let bsp_lapic = resp.bsp_lapic_id();
         for &cpu in resp.cpus() {
+            NUM_CPUS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             // Skip the BSP; it is already running `init()` and `main()`.
             if cpu.lapic_id == bsp_lapic {
                 continue;

@@ -14,7 +14,7 @@ use x86_64::{
 };
 
 use crate::{
-    acpi::current_cpu_index,
+    acpi::{cpu_index_from_apic_id, current_cpu_index},
     apic::get_lapic,
     boot::boot_info,
     drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
@@ -61,6 +61,7 @@ pub struct Scheduler {
     pub storage: Storage,
     pub current_tid: Option<ThreadId>,
     pub current_logger: Option<Arc<ThreadLogger>>,
+    pub lapic_id: u32,
 }
 
 pub struct Storage {
@@ -84,57 +85,12 @@ pub fn init() {
         },
         current_tid: None,
         current_logger: None,
+        lapic_id: unsafe { get_lapic().id() },
     });
 
     let ptr = Box::leak(sched);
     get_percpu_data().scheduler = ptr;
     println!("Saved scheduler on percpu");
-
-    queue_spawn_kthread_named("tcleaner", thread_cleaner as u64);
-}
-
-pub extern "C" fn thread_cleaner() -> ! {
-    loop {
-        let sched = sched();
-        let id = sched.current_id_opt();
-        println!("Id {id:?}");
-        let cpuindex = current_cpu_index();
-        println!("cpuidx: {cpuindex}");
-
-        // TODO: add a exit queue to scheduler and use it.
-        /*
-        sched.modify_storage(|storage| {
-            for thread in storage.threads.values_mut() {
-                if let ThreadState::Exited(_) = thread.state {
-                    to_remove.push(thread.id.clone());
-                }
-            }
-
-            for thread in storage.kthreads.values_mut() {
-                if let ThreadState::Exited(_) = thread.state {
-                    to_remove.push(thread.id.clone());
-                }
-            }
-
-            for t in &to_remove {
-                if t.kernel {
-                    let t = storage.kthreads.remove(&t.id);
-                    if let Some(t) = t {
-                        t.free();
-                    }
-                } else {
-                    let t = storage.threads.remove(&t.id);
-                    if let Some(mut t) = t {
-                        t.free();
-                    }
-                }
-            }
-        });
-        */
-
-        //sched.thread_yield();
-        sched.thread_wait_timeout(Duration::from_millis(1000));
-    }
 }
 
 #[allow(unused)]
@@ -236,7 +192,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
 impl Scheduler {
     fn process_spawn_queue(&mut self) {
         let mut lock = ALIVE_THREADS.write();
-        let cpuidx = current_cpu_index() as u64;
+        let cpuidx = self.cpu_index() as u64;
         while let Some(kthread) = self.kthread_spawn_queue.pop() {
             self.thread_queue.push(kthread.id.clone());
             lock.insert(kthread.id.clone(), cpuidx);
@@ -433,6 +389,10 @@ impl Scheduler {
         self.current_tid = None;
         self.current_logger = None;
         false
+    }
+
+    pub fn cpu_index(&self) -> usize {
+        cpu_index_from_apic_id(self.lapic_id).unwrap()
     }
 
     /// Current thread id.
