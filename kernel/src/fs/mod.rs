@@ -28,7 +28,6 @@ pub mod block_device;
 pub mod fat32;
 pub mod gpt;
 pub mod path;
-pub mod vfs;
 
 pub fn init() {
     queue_spawn_kthread_named("fs", fs_main_thread as u64);
