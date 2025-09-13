@@ -286,10 +286,14 @@ pub fn read_to_end(fd: u64, max_bytes: Option<usize>) -> IoResult<Vec<u8>> {
     let mut buf = [0u8; 1024];
     loop {
         let n = read_from_fd(fd, &mut buf)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         out.extend_from_slice(&buf[..n]);
         if let Some(max) = max_bytes {
-            if out.len() >= max { break; }
+            if out.len() >= max {
+                break;
+            }
         }
     }
     Ok(out)

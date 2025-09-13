@@ -69,7 +69,10 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             }
             match fs_api::write_bytes(&file.path, file.offset as usize, buffer) {
                 Ok(written) => {
-                    let new_fd = FileDescriptor::FsFile(FsFile { offset: file.offset + written, ..file });
+                    let new_fd = FileDescriptor::FsFile(FsFile {
+                        offset: file.offset + written,
+                        ..file
+                    });
                     thread.fd_table.replace_fd(fd, new_fd);
                     written
                 }
@@ -143,7 +146,10 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             interrupts::enable();
             match fs_api::read_bytes(&file.path, file.offset as usize, count) {
                 Ok(data) => Ok(data),
-                Err(_) => { thread.errno = Errno::EINVAL; Err(-1) }
+                Err(_) => {
+                    thread.errno = Errno::EINVAL;
+                    Err(-1)
+                }
             }
         }
         None => {
@@ -271,7 +277,9 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
     interrupts::enable();
     match fs_api::file_info(&path) {
         Ok(info) => {
-            if append { offset = info.size; }
+            if append {
+                offset = info.size;
+            }
         }
         Err(_) => {
             if create {
