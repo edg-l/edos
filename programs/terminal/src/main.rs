@@ -300,6 +300,7 @@ impl Terminal {
                                     let text =
                                         core::str::from_utf8(&data).unwrap_or("[non-utf8 data]\n");
                                     self.print_text(text);
+                                    self.print_text("\n");
                                 }
                                 Err(_) => self.print_text("cat: read error\n"),
                             }

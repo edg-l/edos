@@ -65,7 +65,6 @@ pub unsafe extern "C" fn ap_start(cpu: &MpCpu) -> ! {
     println!("[smp] AP online: LAPIC id {}", unsafe { get_lapic().id() });
 
     queue_spawn_kthread_named("test", kthread_test as u64);
-    queue_spawn_kthread_named("countdown", kthread_countdown as u64);
 
     set_apic_timer_and_enable(Duration::from_millis(5));
 
@@ -78,20 +77,6 @@ pub fn kthread_test() -> ! {
     loop {
         // log!("hello multiple cpus");
         sched().thread_wait_timeout(Duration::from_millis(1500));
-    }
-}
-
-pub fn kthread_countdown() -> ! {
-    let mut count = 5;
-    loop {
-        if count == 0 {
-            log!("Exiting but spawning another");
-            queue_spawn_kthread_named("countdown", kthread_countdown as u64);
-            kthread_exit(0);
-        }
-        //log!("countdown {count}");
-        sched().thread_wait_timeout(Duration::from_millis(1000));
-        count -= 1;
     }
 }
 
