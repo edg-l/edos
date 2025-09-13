@@ -176,9 +176,15 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
             }
         }
 
-        loop {
-            enable_and_hlt();
-        }
+        // No tasks, return to idle loop.
+        (*context).interrupt_stack_frame.instruction_pointer = VirtAddr::new(idle_loop as u64);
+        context
+    }
+}
+
+pub extern "C" fn idle_loop() -> ! {
+    loop {
+        enable_and_hlt();
     }
 }
 
