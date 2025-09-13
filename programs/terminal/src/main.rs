@@ -9,7 +9,10 @@ use alloc::{
 use elibc::{
     KeyEvent, get_raw_input,
     graphics::{Color, RasterHeight, Screen, TextMetrics, TextStyle},
-    io::{FileType, get_kernel_logs, list_dir, open, open_flags, read_to_end, write_all_fd},
+    io::{
+        FileType, chdir, get_kernel_logs, getcwd, list_dir, open, open_flags, read_to_end,
+        write_all_fd,
+    },
     sys_close,
 };
 
@@ -78,6 +81,7 @@ struct Terminal {
     // Performance optimization fields
     is_dirty: bool,
     enable_kernel_logs: bool,
+    current_dir: String,
 }
 
 impl Terminal {
@@ -96,7 +100,9 @@ impl Terminal {
 
         let buffer = alloc::vec![String::new()];
 
-        let prompt_text = String::from("> ");
+        // Get current working directory
+        let current_dir = getcwd().unwrap_or_else(|_| "/".to_string());
+        let prompt_text = format!("{} > ", current_dir);
 
         Ok(Terminal {
             screen,
@@ -113,6 +119,7 @@ impl Terminal {
             prompt_style,
             is_dirty: true, // Start dirty to force initial render
             enable_kernel_logs: true,
+            current_dir,
         })
     }
 
@@ -169,6 +176,12 @@ impl Terminal {
 
     fn mark_dirty(&mut self) {
         self.is_dirty = true;
+    }
+
+    fn update_prompt(&mut self) {
+        self.current_dir = getcwd().unwrap_or_else(|_| "/".to_string());
+        self.prompt_text = format!("{} > ", self.current_dir);
+        self.mark_dirty();
     }
 
     fn draw_cursor(&mut self) -> Result<(), elibc::graphics::GraphicsError> {
@@ -283,12 +296,33 @@ impl Terminal {
                 self.print_text("Commands:\n");
                 self.print_text("- help\n");
                 self.print_text("- logs\n");
+                self.print_text("- pwd\n");
+                self.print_text("- cd [path]\n");
                 self.print_text("- ls [path]\n");
                 self.print_text("- cat <path>\n");
                 self.print_text("- write <path> <content>\n");
             }
+            "pwd" => match getcwd() {
+                Ok(cwd) => self.print_text(&format!("{}\n", cwd)),
+                Err(_) => self.print_text("pwd: error getting current directory\n"),
+            },
+            "cd" => {
+                let target_path = if args.is_empty() { "/" } else { &args[0] };
+
+                match chdir(target_path) {
+                    Ok(()) => {
+                        self.update_prompt();
+                    }
+                    Err(_) => {
+                        self.print_text(&format!(
+                            "cd: {}: No such file or directory\n",
+                            target_path
+                        ));
+                    }
+                }
+            }
             "ls" => {
-                let path = if args.is_empty() { "/" } else { &args[0] };
+                let path = if args.is_empty() { "." } else { &args[0] };
 
                 match list_dir(path) {
                     Ok(entries) => {

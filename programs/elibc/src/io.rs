@@ -397,3 +397,43 @@ pub fn list_dir(path: &str) -> IoResult<Vec<DirEntry>> {
 
     Ok(entries)
 }
+
+/// Get current working directory
+pub fn getcwd() -> IoResult<String> {
+    // Start with reasonable buffer size
+    let mut buffer = alloc::vec![0u8; 512];
+
+    let result = unsafe { crate::sys_getcwd(buffer.as_mut_ptr(), buffer.len()) };
+
+    if result < 0 {
+        return Err(IoError::from(errno()));
+    }
+
+    let length = result as usize;
+    if length == 0 {
+        return Ok(String::new());
+    }
+
+    // Convert to string (should include null terminator)
+    let cwd_bytes = &buffer[..length - 1]; // Exclude null terminator
+    match core::str::from_utf8(cwd_bytes) {
+        Ok(s) => Ok(s.to_string()),
+        Err(_) => Err(IoError::InvalidInput),
+    }
+}
+
+/// Change current working directory
+pub fn chdir(path: &str) -> IoResult<()> {
+    // Build a C string (nul-terminated) in a scratch buffer
+    let mut path_bytes = alloc::vec::Vec::with_capacity(path.len() + 1);
+    path_bytes.extend_from_slice(path.as_bytes());
+    path_bytes.push(0);
+
+    let result = unsafe { crate::sys_chdir(path_bytes.as_ptr()) };
+
+    if result < 0 {
+        Err(IoError::from(errno()))
+    } else {
+        Ok(())
+    }
+}

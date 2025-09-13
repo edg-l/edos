@@ -1,3 +1,4 @@
+use alloc::string::ToString;
 use core::time::Duration;
 
 use x86_64::instructions::interrupts;
@@ -48,6 +49,17 @@ fn file_attrs_to_u8(attrs: crate::fs::FileAttrs) -> u8 {
         result |= 8;
     }
     result
+}
+
+fn resolve_path(path_str: &str, cwd: &Path) -> Result<Path, crate::fs::path::ParseError> {
+    if path_str.starts_with('/') {
+        // Absolute path
+        Path::parse(path_str).map(|p| p.normalize())
+    } else {
+        // Relative path - join with cwd
+        let joined = cwd.join(&path_str);
+        Ok(joined.normalize())
+    }
 }
 
 pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
@@ -300,11 +312,13 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         }
     };
 
-    let Ok(mut path) = Path::parse(path_str) else {
-        thread.errno = Errno::EINVAL;
-        return -1;
+    let path = match resolve_path(path_str, &thread.cwd) {
+        Ok(path) => path,
+        Err(_) => {
+            thread.errno = Errno::EINVAL;
+            return -1;
+        }
     };
-    path = path.normalize();
 
     // Determine initial offset and verify file exists; support create flag
     let append = (flags & 0x400) != 0; // O_APPEND
@@ -405,11 +419,13 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
         }
     };
 
-    let Ok(mut path) = Path::parse(path_str) else {
-        thread.errno = Errno::EINVAL;
-        return -1;
+    let path = match resolve_path(path_str, &thread.cwd) {
+        Ok(path) => path,
+        Err(_) => {
+            thread.errno = Errno::EINVAL;
+            return -1;
+        }
     };
-    path = path.normalize();
 
     // Get directory listing via FS API
     interrupts::enable();
@@ -462,4 +478,103 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
     }
 
     written as i64
+}
+
+pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    if buffer_ptr.is_null() {
+        thread.errno = Errno::EFAULT;
+        return -1;
+    }
+
+    if size == 0 {
+        thread.errno = Errno::EINVAL;
+        return -1;
+    }
+
+    // Get current working directory as string
+    let cwd_str = thread.cwd.to_string();
+    let cwd_bytes = cwd_str.as_bytes();
+
+    // Need space for string + null terminator
+    if cwd_bytes.len() + 1 > size {
+        thread.errno = Errno::EINVAL;
+        return -1;
+    }
+
+    // Copy the cwd string to user buffer
+    unsafe {
+        core::ptr::copy_nonoverlapping(cwd_bytes.as_ptr(), buffer_ptr, cwd_bytes.len());
+        // Add null terminator
+        core::ptr::write(buffer_ptr.add(cwd_bytes.len()), 0);
+    }
+
+    (cwd_bytes.len() + 1) as i64
+}
+
+pub fn sys_chdir(path_ptr: *const u8) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    if path_ptr.is_null() {
+        thread.errno = Errno::EFAULT;
+        return -1;
+    }
+
+    // Copy C string from user memory (simple, bounded)
+    let mut buf = alloc::vec::Vec::new();
+    for i in 0..1024usize {
+        let c = unsafe { core::ptr::read_volatile(path_ptr.add(i)) };
+        if c == 0 {
+            break;
+        }
+        buf.push(c);
+    }
+    // If no null terminator within bound, treat as invalid
+    if buf.is_empty() || buf.len() == 1024 {
+        thread.errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let path_str = match core::str::from_utf8(&buf) {
+        Ok(s) => s,
+        Err(_) => {
+            thread.errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    // Resolve the target path (absolute or relative to current cwd)
+    let new_path = match resolve_path(path_str, &thread.cwd) {
+        Ok(path) => path,
+        Err(_) => {
+            thread.errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    // Verify the target exists and is a directory
+    interrupts::enable();
+    match fs_api::file_info(&new_path) {
+        Ok(file) => {
+            if file.kind != crate::fs::FileKind::Directory {
+                thread.errno = Errno::EINVAL;
+                return -1;
+            }
+        }
+        Err(_) => {
+            thread.errno = Errno::EINVAL;
+            return -1;
+        }
+    }
+
+    // Update the current working directory
+    thread.cwd = new_path;
+    0
 }

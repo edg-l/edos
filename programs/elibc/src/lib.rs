@@ -57,10 +57,26 @@ pub unsafe fn sys_list_dir(path: *const u8, buffer: *mut u8, buffer_size: usize)
     unsafe { syscall3(SYS_LIST_DIR, path as u64, buffer as u64, buffer_size as u64) as isize }
 }
 
+/// # Safety
+/// Caller must ensure:
+/// - `buffer` points to writable memory of at least `size` bytes
+/// - Buffer remains valid for the duration of the syscall
+pub unsafe fn sys_getcwd(buffer: *mut u8, size: usize) -> isize {
+    unsafe { syscall2(SYS_GETCWD, buffer as u64, size as u64) as isize }
+}
+
+/// # Safety
+/// Caller must ensure:
+/// - `path` points to a valid null-terminated string
+/// - Path remains valid for the duration of the syscall
+pub unsafe fn sys_chdir(path: *const u8) -> isize {
+    unsafe { syscall1(SYS_CHDIR, path as u64) as isize }
+}
+
 // Re-export I/O types for convenience
 pub use io::{
-    DirEntry, FileType, IoError, IoResult, KeyEvent, STDERR, STDOUT, get_raw_input, list_dir, open,
-    open_flags, read_from_fd, read_stdin, read_to_end, write_all_fd,
+    DirEntry, FileType, IoError, IoResult, KeyEvent, STDERR, STDOUT, chdir, get_raw_input, getcwd,
+    list_dir, open, open_flags, read_from_fd, read_stdin, read_to_end, write_all_fd,
 };
 // Re-export memory constants
 pub use sys::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
