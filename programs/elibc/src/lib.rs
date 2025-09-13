@@ -18,7 +18,7 @@ pub use process::{sys_exit, sys_getpid};
 pub use sys::{Errno, errno};
 
 // File I/O syscalls
-use crate::sys::{calls::syscall1, calls::syscall3, constants::*};
+use crate::sys::{calls::syscall1, calls::syscall2, calls::syscall3, constants::*};
 
 /// # Safety
 /// Caller must ensure:
@@ -42,9 +42,16 @@ pub fn sys_close(fd: u64) -> i32 {
     unsafe { syscall1(SYS_CLOSE, fd) as i32 }
 }
 
+/// # Safety
+/// Caller must provide a valid C string pointer. Prefer using `io::open` helper.
+pub unsafe fn sys_open(path: *const u8, flags: u64) -> i64 {
+    unsafe { syscall2(SYS_OPEN, path as u64, flags) as i64 }
+}
+
 // Re-export I/O types for convenience
 pub use io::{
-    IoError, IoResult, KeyEvent, STDERR, STDOUT, get_raw_input, read_from_fd, read_stdin,
+    IoError, IoResult, KeyEvent, STDERR, STDOUT, get_raw_input, open, open_flags, read_from_fd,
+    read_stdin, read_to_end, write_all_fd,
 };
 // Re-export memory constants
 pub use sys::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};

@@ -57,40 +57,23 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
         Some(FileDescriptor::FsFile(file)) => {
             // Write via FS API using current offset (append respected)
             let mut file = file.clone();
-
             interrupts::enable();
-            let res = {
-                let append_err = if file.append {
-                    match fs_api::file_info(&file.path) {
-                        Ok(info) => {
-                            file.offset = info.size;
-                            None
-                        }
-                        Err(_) => Some(()),
+            if file.append {
+                match fs_api::file_info(&file.path) {
+                    Ok(info) => file.offset = info.size,
+                    Err(_) => {
+                        thread.errno = Errno::EINVAL;
+                        return !0u64;
                     }
-                } else {
-                    None
-                };
-
-                if append_err.is_some() {
-                    Err(())
-                } else {
-                    fs_api::write_bytes(&file.path, file.offset as usize, buffer).map_err(|_| ())
                 }
-            };
-            interrupts::disable();
-
-            match res {
+            }
+            match fs_api::write_bytes(&file.path, file.offset as usize, buffer) {
                 Ok(written) => {
-                    // Update offset on success
-                    let new_fd = FileDescriptor::FsFile(FsFile {
-                        offset: file.offset + written,
-                        ..file
-                    });
+                    let new_fd = FileDescriptor::FsFile(FsFile { offset: file.offset + written, ..file });
                     thread.fd_table.replace_fd(fd, new_fd);
                     written
                 }
-                Err(()) => {
+                Err(_) => {
                     thread.errno = Errno::EINVAL;
                     !0u64
                 }
@@ -158,14 +141,9 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
         Some(FileDescriptor::FsFile(file)) => {
             let file = file.clone();
             interrupts::enable();
-            let res = fs_api::read_bytes(&file.path, file.offset as usize, count).map_err(|_| ());
-            interrupts::disable();
-            match res {
+            match fs_api::read_bytes(&file.path, file.offset as usize, count) {
                 Ok(data) => Ok(data),
-                Err(()) => {
-                    thread.errno = Errno::EINVAL;
-                    Err(-1)
-                }
+                Err(_) => { thread.errno = Errno::EINVAL; Err(-1) }
             }
         }
         None => {
@@ -173,8 +151,6 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             return -1;
         }
     };
-
-    interrupts::disable();
 
     // Handle kernel data result
     let data = match kernel_data {
@@ -288,21 +264,25 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
     };
     path = path.normalize();
 
-    // Determine initial offset and verify file exists
-    let append = (flags & 0x400) != 0; // mimic O_APPEND bit
+    // Determine initial offset and verify file exists; support create flag
+    let append = (flags & 0x400) != 0; // O_APPEND
+    let create = (flags & 0x40) != 0; // O_CREAT
     let mut offset = 0u64;
     interrupts::enable();
-    let info = fs_api::file_info(&path);
-    interrupts::disable();
-    match info {
+    match fs_api::file_info(&path) {
         Ok(info) => {
-            if append {
-                offset = info.size;
-            }
+            if append { offset = info.size; }
         }
         Err(_) => {
-            thread.errno = Errno::EINVAL;
-            return -1;
+            if create {
+                if let Err(_) = fs_api::create_file(&path) {
+                    thread.errno = Errno::EINVAL;
+                    return -1;
+                }
+            } else {
+                thread.errno = Errno::EINVAL;
+                return -1;
+            }
         }
     }
 

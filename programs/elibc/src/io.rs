@@ -7,8 +7,8 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{Errno, SYS_KERNEL_LOGS, SYS_RAW_INPUT, errno, syscall2, syscall3},
-    sys_read, sys_write,
+    sys::{Errno, SYS_KERNEL_LOGS, SYS_OPEN, SYS_RAW_INPUT, errno, syscall2, syscall3},
+    sys_close, sys_open as raw_sys_open, sys_read, sys_write,
 };
 
 /// I/O Error type with proper error handling
@@ -251,4 +251,46 @@ pub fn get_kernel_logs() -> Vec<String> {
     }
 
     logs
+}
+/// Public helper to write all bytes to a file descriptor
+pub fn write_all_fd(fd: u64, buf: &[u8]) -> IoResult<()> {
+    write_all_to_fd(fd, buf)
+}
+
+/// File open flags
+pub mod open_flags {
+    /// Append writes to end of file
+    pub const O_APPEND: u64 = 0x400;
+    /// Create file if it does not exist
+    pub const O_CREAT: u64 = 0x40;
+}
+
+/// Open a file by path with flags. Returns an fd.
+pub fn open(path: &str, flags: u64) -> IoResult<u64> {
+    // Build a C string (nul-terminated) in a scratch buffer
+    let mut bytes = alloc::vec::Vec::with_capacity(path.len() + 1);
+    bytes.extend_from_slice(path.as_bytes());
+    bytes.push(0);
+
+    let fd = unsafe { raw_sys_open(bytes.as_ptr(), flags) };
+    if fd < 0 {
+        Err(IoError::from(errno()))
+    } else {
+        Ok(fd as u64)
+    }
+}
+
+/// Read fd until EOF (or up to max_bytes if provided Some)
+pub fn read_to_end(fd: u64, max_bytes: Option<usize>) -> IoResult<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        let n = read_from_fd(fd, &mut buf)?;
+        if n == 0 { break; }
+        out.extend_from_slice(&buf[..n]);
+        if let Some(max) = max_bytes {
+            if out.len() >= max { break; }
+        }
+    }
+    Ok(out)
 }

@@ -5,7 +5,8 @@ use alloc::{format, string::String, vec::Vec};
 use elibc::{
     KeyEvent, get_raw_input,
     graphics::{Color, RasterHeight, Screen, TextMetrics, TextStyle},
-    io::get_kernel_logs,
+    io::{get_kernel_logs, open, open_flags, read_to_end, write_all_fd},
+    sys_close,
 };
 
 extern crate alloc;
@@ -369,6 +370,45 @@ impl Terminal {
                 self.print_text("Commands:\n");
                 self.print_text("- help\n");
                 self.print_text("- logs");
+            }
+            "cat" => {
+                if args.len() != 1 {
+                    self.print_text("Usage: cat <path>");
+                } else {
+                    let path = &args[0];
+                    match open(path, 0) {
+                        Ok(fd) => {
+                            match read_to_end(fd, Some(16 * 1024)) {
+                                Ok(data) => {
+                                    let text = core::str::from_utf8(&data)
+                                        .unwrap_or("[non-utf8 data]\n");
+                                    self.print_text(text);
+                                }
+                                Err(_) => self.print_text("cat: read error"),
+                            }
+                            let _ = sys_close(fd);
+                        }
+                        Err(_) => self.print_text("cat: open failed"),
+                    }
+                }
+            }
+            "write" => {
+                if args.len() < 2 {
+                    self.print_text("Usage: write <path> <content>");
+                } else {
+                    let path = &args[0];
+                    let content = args[1..].join(" ");
+                    match open(path, open_flags::O_APPEND | open_flags::O_CREAT) {
+                        Ok(fd) => {
+                            match write_all_fd(fd, content.as_bytes()) {
+                                Ok(()) => self.print_text("[ok]\n"),
+                                Err(_) => self.print_text("write: error"),
+                            }
+                            let _ = sys_close(fd);
+                        }
+                        Err(_) => self.print_text("write: open failed"),
+                    }
+                }
             }
             _ => {
                 self.print_text(&format!("Unknown command {command}"));
