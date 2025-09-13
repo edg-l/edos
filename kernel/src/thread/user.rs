@@ -12,17 +12,13 @@ use crate::{
     boot::boot_info,
     drivers::fpu::FpuState,
     fs::path::Path,
-    loader::{ElfLoadError, load_elf},
+    loader::{load_elf, ElfLoadError},
     logs::ThreadLogger,
-    memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
+    memory::mapper::{active_level_4_table, get_level_4_table, MemoryManager},
     println,
     syscalls::Errno,
     thread::{
-        ThreadId, ThreadState,
-        context::CpuContext,
-        fd::FileDescriptorTable,
-        paging::allocate_process_pml4,
-        util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
+        context::CpuContext, fd::FileDescriptorTable, paging::allocate_process_pml4, scheduler::switch_to_kernel_page, util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free}, ThreadId, ThreadState
     },
 };
 
@@ -114,8 +110,9 @@ impl UserThread {
     ///
     /// TODO: also handle arguments.
     ///
-    /// Note: This must be called from the kernel cr3.
+    /// Note: This function switches to kernel page, should be called without interrupts
     pub fn new(elf_data: &[u8], name: Option<String>) -> Result<Self, ElfLoadError> {
+        switch_to_kernel_page();
         // allocate kernel stack before creating page
         let kernel_stack_top = kthread_stack_alloc();
 

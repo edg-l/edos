@@ -499,9 +499,6 @@ fn sys_spawn(
 
     x86_64::instructions::interrupts::enable();
 
-    let cr3 = Cr3::read();
-    switch_to_kernel_page();
-
     let elf_data = match fs_api::read_bytes(&path, 0, 1024 * 1024 * 10) {
         // Limit to 1MB for now
         Ok(data) => data,
@@ -511,9 +508,10 @@ fn sys_spawn(
         }
     };
 
-    log!("loaded elf data");
+    x86_64::instructions::interrupts::disable();
 
-    sched.thread_wait_timeout(Duration::from_millis(500));
+    let cr3 = Cr3::read();
+    switch_to_kernel_page();
 
     println!(
         "elf data len: {}, last byte {:?}",
@@ -529,9 +527,6 @@ fn sys_spawn(
             return !0u64;
         }
     };
-
-    log!("created user_thread");
-    sched.thread_wait_timeout(Duration::from_millis(500));
 
     // Create thread info and set up file descriptor redirections
     let mut user_thread_info = UserThreadInfo::from_thread(&user_thread, 0, 0, child_cwd);
@@ -576,6 +571,8 @@ fn sys_spawn(
     queue_spawn_thread(user_thread, user_thread_info);
 
     unsafe { Cr3::write(cr3.0, cr3.1) };
+
+    log!("spawn, returning");
 
     child_pid
 }
