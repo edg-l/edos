@@ -81,6 +81,28 @@ impl Path {
 
         c
     }
+
+    /// Returns true if `self` starts with the given `base` path components.
+    pub fn starts_with(&self, base: &Path) -> bool {
+        if base.components.len() > self.components.len() {
+            return false;
+        }
+        for (i, comp) in base.components.iter().enumerate() {
+            if self.components[i] != *comp {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Returns a new Path with the `base` prefix stripped if present, otherwise returns `self` clone.
+    pub fn strip_prefix(&self, base: &Path) -> Path {
+        if !self.starts_with(base) {
+            return self.clone();
+        }
+        let comps = self.components[base.components.len()..].to_vec();
+        Path { components: comps }
+    }
 }
 
 impl fmt::Display for Path {

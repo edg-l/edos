@@ -6,10 +6,7 @@ use core::time::Duration;
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 
 use crate::{
-    fs::{
-        Error, FS_REQUESTS, File, FsRequest, FsResponse, PartitionCommand, gpt::Partition,
-        path::Path,
-    },
+    fs::{Error, FS_REQUESTS, File, FsRequest, FsResponse, PathOp, gpt::Partition, path::Path},
     thread::scheduler::sched,
 };
 
@@ -71,14 +68,13 @@ pub fn unmount(mount_point: Path) -> Result<(), Error> {
     result
 }
 
-// Partition-scoped APIs (index refers to the partition position returned by list_partitions())
+// Path-scoped APIs (resolve partition via mount table in FS main)
 
-pub fn list_files(index: usize, path: &Path) -> Result<Vec<File>, Error> {
-    let cmd = PartitionCommand::ListFiles { path: path.clone() };
+pub fn list_files(path: &Path) -> Result<Vec<File>, Error> {
     let FsResponse::Files(r) = send_request(
-        FsRequest::PartitionRequest {
-            index,
-            command: cmd,
+        FsRequest::PathRequest {
+            path: path.clone(),
+            op: PathOp::ListFiles,
         },
         Duration::from_secs(5),
     ) else {
@@ -87,21 +83,11 @@ pub fn list_files(index: usize, path: &Path) -> Result<Vec<File>, Error> {
     r
 }
 
-pub fn read_bytes(
-    index: usize,
-    path: &Path,
-    offset: usize,
-    count: usize,
-) -> Result<Vec<u8>, Error> {
-    let cmd = PartitionCommand::ReadBytes {
-        path: path.clone(),
-        offset,
-        count,
-    };
+pub fn read_bytes(path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
     let FsResponse::ReadBytes(r) = send_request(
-        FsRequest::PartitionRequest {
-            index,
-            command: cmd,
+        FsRequest::PathRequest {
+            path: path.clone(),
+            op: PathOp::ReadBytes { offset, count },
         },
         Duration::from_secs(10),
     ) else {
@@ -110,16 +96,14 @@ pub fn read_bytes(
     r
 }
 
-pub fn write_bytes(index: usize, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
-    let cmd = PartitionCommand::WriteBytes {
-        path: path.clone(),
-        offset,
-        data: data.to_vec(),
-    };
+pub fn write_bytes(path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
     let FsResponse::Written(r) = send_request(
-        FsRequest::PartitionRequest {
-            index,
-            command: cmd,
+        FsRequest::PathRequest {
+            path: path.clone(),
+            op: PathOp::WriteBytes {
+                offset,
+                data: data.to_vec(),
+            },
         },
         Duration::from_secs(10),
     ) else {
@@ -128,12 +112,11 @@ pub fn write_bytes(index: usize, path: &Path, offset: usize, data: &[u8]) -> Res
     r
 }
 
-pub fn create_file(index: usize, path: &Path) -> Result<(), Error> {
-    let cmd = PartitionCommand::CreateFile { path: path.clone() };
+pub fn create_file(path: &Path) -> Result<(), Error> {
     let FsResponse::Ok(r) = send_request(
-        FsRequest::PartitionRequest {
-            index,
-            command: cmd,
+        FsRequest::PathRequest {
+            path: path.clone(),
+            op: PathOp::CreateFile,
         },
         Duration::from_secs(5),
     ) else {
@@ -142,12 +125,11 @@ pub fn create_file(index: usize, path: &Path) -> Result<(), Error> {
     r
 }
 
-pub fn create_dir(index: usize, path: &Path) -> Result<(), Error> {
-    let cmd = PartitionCommand::CreateDir { path: path.clone() };
+pub fn create_dir(path: &Path) -> Result<(), Error> {
     let FsResponse::Ok(r) = send_request(
-        FsRequest::PartitionRequest {
-            index,
-            command: cmd,
+        FsRequest::PathRequest {
+            path: path.clone(),
+            op: PathOp::CreateDir,
         },
         Duration::from_secs(5),
     ) else {
@@ -156,12 +138,11 @@ pub fn create_dir(index: usize, path: &Path) -> Result<(), Error> {
     r
 }
 
-pub fn remove_file(index: usize, path: &Path) -> Result<(), Error> {
-    let cmd = PartitionCommand::RemoveFile { path: path.clone() };
+pub fn remove_file(path: &Path) -> Result<(), Error> {
     let FsResponse::Ok(r) = send_request(
-        FsRequest::PartitionRequest {
-            index,
-            command: cmd,
+        FsRequest::PathRequest {
+            path: path.clone(),
+            op: PathOp::RemoveFile,
         },
         Duration::from_secs(5),
     ) else {
@@ -170,12 +151,11 @@ pub fn remove_file(index: usize, path: &Path) -> Result<(), Error> {
     r
 }
 
-pub fn remove_dir(index: usize, path: &Path) -> Result<(), Error> {
-    let cmd = PartitionCommand::RemoveDir { path: path.clone() };
+pub fn remove_dir(path: &Path) -> Result<(), Error> {
     let FsResponse::Ok(r) = send_request(
-        FsRequest::PartitionRequest {
-            index,
-            command: cmd,
+        FsRequest::PathRequest {
+            path: path.clone(),
+            op: PathOp::RemoveDir,
         },
         Duration::from_secs(5),
     ) else {
@@ -184,12 +164,11 @@ pub fn remove_dir(index: usize, path: &Path) -> Result<(), Error> {
     r
 }
 
-pub fn file_info(index: usize, path: &Path) -> Result<File, Error> {
-    let cmd = PartitionCommand::FileInfo { path: path.clone() };
+pub fn file_info(path: &Path) -> Result<File, Error> {
     let FsResponse::File(r) = send_request(
-        FsRequest::PartitionRequest {
-            index,
-            command: cmd,
+        FsRequest::PathRequest {
+            path: path.clone(),
+            op: PathOp::FileInfo,
         },
         Duration::from_secs(5),
     ) else {
@@ -198,12 +177,11 @@ pub fn file_info(index: usize, path: &Path) -> Result<File, Error> {
     r
 }
 
-pub fn flush(index: usize) -> Result<(), Error> {
-    let cmd = PartitionCommand::Flush;
+pub fn flush(path: &Path) -> Result<(), Error> {
     let FsResponse::Ok(r) = send_request(
-        FsRequest::PartitionRequest {
-            index,
-            command: cmd,
+        FsRequest::PathRequest {
+            path: path.clone(),
+            op: PathOp::Flush,
         },
         Duration::from_secs(5),
     ) else {

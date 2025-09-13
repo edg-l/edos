@@ -158,6 +158,11 @@ pub(super) enum FsRequest {
     Unmount {
         mount_point: Path,
     },
+    // Path-based routing (global namespace)
+    PathRequest {
+        path: Path,
+        op: PathOp,
+    },
     // Partition routing
     PartitionRequest {
         index: usize,
@@ -178,6 +183,19 @@ pub(super) enum FsResponse {
     Ok(Result<(), Error>),
     // Internal
     PartitionMailbox(Option<Mailbox<PartitionCommand, FsResponse>>),
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum PathOp {
+    ListFiles,
+    ReadBytes { offset: usize, count: usize },
+    WriteBytes { offset: usize, data: Vec<u8> },
+    CreateFile,
+    CreateDir,
+    RemoveFile,
+    RemoveDir,
+    FileInfo,
+    Flush,
 }
 
 #[derive(Debug, Clone)]
@@ -289,6 +307,54 @@ pub extern "C" fn fs_main_thread() -> ! {
                         Err(Error::IoError)
                     };
                     req.response.send(FsResponse::Ok(res));
+                }
+                FsRequest::PathRequest { path, op } => {
+                    // Resolve longest-prefix mount point
+                    let mut best: Option<(&Path, usize)> = None;
+                    for (mp, &idx) in mount_points.iter() {
+                        if path.starts_with(mp) {
+                            match best {
+                                None => best = Some((mp, idx)),
+                                Some((best_mp, _)) => {
+                                    if mp.components().len() > best_mp.components().len() {
+                                        best = Some((mp, idx));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some((mp, part_idx)) = best {
+                        let rel = path.strip_prefix(mp).normalize();
+                        let cmd = match op {
+                            PathOp::ListFiles => PartitionCommand::ListFiles { path: rel },
+                            PathOp::ReadBytes { offset, count } => PartitionCommand::ReadBytes {
+                                path: rel,
+                                offset,
+                                count,
+                            },
+                            PathOp::WriteBytes { offset, data } => PartitionCommand::WriteBytes {
+                                path: rel,
+                                offset,
+                                data,
+                            },
+                            PathOp::CreateFile => PartitionCommand::CreateFile { path: rel },
+                            PathOp::CreateDir => PartitionCommand::CreateDir { path: rel },
+                            PathOp::RemoveFile => PartitionCommand::RemoveFile { path: rel },
+                            PathOp::RemoveDir => PartitionCommand::RemoveDir { path: rel },
+                            PathOp::FileInfo => PartitionCommand::FileInfo { path: rel },
+                            PathOp::Flush => PartitionCommand::Flush,
+                        };
+
+                        if let Some(mb) = worker_mailboxes.get(part_idx) {
+                            mb.forward(cmd, req.response);
+                        } else {
+                            req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                        }
+                    } else {
+                        // No mount matches this path
+                        req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                    }
                 }
                 FsRequest::PartitionRequest { index, command } => {
                     if let Some(mb) = worker_mailboxes.get(index) {

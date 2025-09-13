@@ -143,10 +143,10 @@ pub fn kthread_main_test() -> ! {
 
     log!("Mounts {:#?}", mounts);
 
-    loop_dir(&root, part);
+    loop_dir(&root);
 
-    fn loop_dir(dir: &Path, part: &Partition) {
-        let files = fs::api::list_files(part.index, dir).unwrap();
+    fn loop_dir(dir: &Path) {
+        let files = fs::api::list_files(dir).unwrap();
         for file in &files {
             if file.name == "." || file.name == ".." {
                 continue;
@@ -157,12 +157,12 @@ pub fn kthread_main_test() -> ! {
 
             match file.kind {
                 fs::FileKind::File => {
-                    let content = fs::api::read_bytes(part.index, &path, 0, 256).unwrap();
+                    let content = fs::api::read_bytes(&path, 0, 256).unwrap();
                     let x = String::from_utf8(content).unwrap();
                     log!("Content: {x:?}");
                 }
                 fs::FileKind::Directory => {
-                    loop_dir(&path, part);
+                    loop_dir(&path);
                 }
                 fs::FileKind::Symlink => todo!(),
                 fs::FileKind::Special => todo!(),
