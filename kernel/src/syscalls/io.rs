@@ -561,16 +561,22 @@ pub fn sys_chdir(path_ptr: *const u8) -> i64 {
 
     // Verify the target exists and is a directory
     interrupts::enable();
-    match fs_api::file_info(&new_path) {
-        Ok(file) => {
-            if file.kind != crate::fs::FileKind::Directory {
+
+    // Special case: root directory always exists and is always a directory
+    if new_path.is_root() {
+        // Root directory is always valid
+    } else {
+        match fs_api::file_info(&new_path) {
+            Ok(file) => {
+                if file.kind != crate::fs::FileKind::Directory {
+                    thread.errno = Errno::EINVAL;
+                    return -1;
+                }
+            }
+            Err(_) => {
                 thread.errno = Errno::EINVAL;
                 return -1;
             }
-        }
-        Err(_) => {
-            thread.errno = Errno::EINVAL;
-            return -1;
         }
     }
 
