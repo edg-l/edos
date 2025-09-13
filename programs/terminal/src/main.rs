@@ -1,11 +1,15 @@
 #![no_std]
 #![no_main]
 
-use alloc::{format, string::String, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 use elibc::{
     KeyEvent, get_raw_input,
     graphics::{Color, RasterHeight, Screen, TextMetrics, TextStyle},
-    io::{get_kernel_logs, open, open_flags, read_to_end, write_all_fd},
+    io::{FileType, get_kernel_logs, list_dir, open, open_flags, read_to_end, write_all_fd},
     sys_close,
 };
 
@@ -226,14 +230,6 @@ impl Terminal {
         self.mark_dirty();
     }
 
-    fn scroll_up(&mut self) {
-        // Remove first output line
-        if !self.buffer.is_empty() {
-            self.buffer.remove(0);
-            self.mark_dirty();
-        }
-    }
-
     fn print_text(&mut self, text: &str) {
         let lines: Vec<&str> = text.split('\n').collect();
         for (i, line) in lines.iter().enumerate() {
@@ -287,6 +283,46 @@ impl Terminal {
                 self.print_text("Commands:\n");
                 self.print_text("- help\n");
                 self.print_text("- logs\n");
+                self.print_text("- ls [path]\n");
+                self.print_text("- cat <path>\n");
+                self.print_text("- write <path> <content>\n");
+            }
+            "ls" => {
+                let path = if args.is_empty() { "/" } else { &args[0] };
+
+                match list_dir(path) {
+                    Ok(entries) => {
+                        if entries.is_empty() {
+                            self.print_text("[empty directory]\n");
+                        } else {
+                            for entry in entries {
+                                let type_char = match entry.file_type {
+                                    FileType::File => ' ',
+                                    FileType::Directory => '/',
+                                    FileType::Symlink => '@',
+                                    FileType::Special => '*',
+                                };
+
+                                let size_str = if entry.file_type == FileType::Directory {
+                                    "".to_string()
+                                } else {
+                                    format!("{:9}", entry.size)
+                                };
+
+                                self.print_text(&format!(
+                                    "{}{} {}\n",
+                                    entry.name, type_char, size_str
+                                ));
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        self.print_text(&format!(
+                            "ls: cannot access '{}': No such file or directory\n",
+                            path
+                        ));
+                    }
+                }
             }
             "cat" => {
                 if args.len() != 1 {

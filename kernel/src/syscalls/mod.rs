@@ -19,7 +19,7 @@ use crate::{
     println,
     syscalls::{
         graphics::DrawRequestInput,
-        io::{sys_close, sys_open, sys_read, sys_write},
+        io::{sys_close, sys_list_dir, sys_open, sys_read, sys_write},
         keyboard::sys_keyboard_raw,
         memory::{sys_mmap, sys_munmap},
     },
@@ -173,6 +173,7 @@ const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
+const SYS_LIST_DIR: u64 = 4;
 #[allow(unused)]
 const SYS_PIPE: u64 = 22;
 const SYS_MMAP: u64 = 9;
@@ -226,6 +227,12 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_CLOSE => {
             let fd = ctx.rdi;
             ctx.rax = sys_close(fd) as u64;
+        }
+        SYS_LIST_DIR => {
+            let path_ptr = ctx.rdi as *const u8;
+            let buffer_ptr = ctx.rsi as *mut u8;
+            let buffer_size = ctx.rdx as usize;
+            ctx.rax = sys_list_dir(path_ptr, buffer_ptr, buffer_size) as u64;
         }
         SYS_MMAP => {
             let addr = ctx.rdi;

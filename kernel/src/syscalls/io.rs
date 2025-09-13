@@ -2,7 +2,7 @@ use core::time::Duration;
 
 use x86_64::instructions::interrupts;
 
-use crate::fs::{api as fs_api, path::Path};
+use crate::fs::{FileKind, api as fs_api, path::Path};
 use crate::log;
 use crate::{
     drivers::keyboard::KEYBOARD_BROADCAST,
@@ -13,6 +13,42 @@ use crate::{
         scheduler::sched,
     },
 };
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DirEntry {
+    pub name_len: u32,     // Length of the filename
+    pub file_type: u8,     // 0=File, 1=Directory, 2=Symlink, 3=Special
+    pub size: u64,         // File size in bytes
+    pub attrs: u8,         // File attributes (readonly=1, hidden=2, system=4, archive=8)
+    pub reserved: [u8; 2], // Padding for alignment
+}
+
+fn file_kind_to_u8(kind: FileKind) -> u8 {
+    match kind {
+        FileKind::File => 0,
+        FileKind::Directory => 1,
+        FileKind::Symlink => 2,
+        FileKind::Special => 3,
+    }
+}
+
+fn file_attrs_to_u8(attrs: crate::fs::FileAttrs) -> u8 {
+    let mut result = 0u8;
+    if attrs.readonly {
+        result |= 1;
+    }
+    if attrs.hidden {
+        result |= 2;
+    }
+    if attrs.system {
+        result |= 4;
+    }
+    if attrs.archive {
+        result |= 8;
+    }
+    result
+}
 
 pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
     let sched = sched();
@@ -329,4 +365,101 @@ fn read_from_pipe(
     pipe_guard.buffer.drain(..bytes_to_read);
 
     Ok(kernel_buffer)
+}
+
+pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    if path_ptr.is_null() || buffer_ptr.is_null() {
+        thread.errno = Errno::EFAULT;
+        return -1;
+    }
+
+    if buffer_size == 0 {
+        return 0;
+    }
+
+    // Copy C string from user memory (simple, bounded)
+    let mut buf = alloc::vec::Vec::new();
+    for i in 0..1024usize {
+        let c = unsafe { core::ptr::read_volatile(path_ptr.add(i)) };
+        if c == 0 {
+            break;
+        }
+        buf.push(c);
+    }
+    // If no null terminator within bound, treat as invalid
+    if buf.is_empty() || buf.len() == 1024 {
+        thread.errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let path_str = match core::str::from_utf8(&buf) {
+        Ok(s) => s,
+        Err(_) => {
+            thread.errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    let Ok(mut path) = Path::parse(path_str) else {
+        thread.errno = Errno::EINVAL;
+        return -1;
+    };
+    path = path.normalize();
+
+    // Get directory listing via FS API
+    interrupts::enable();
+    let files = match fs_api::list_files(&path) {
+        Ok(files) => files,
+        Err(_) => {
+            thread.errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    // Serialize entries into user buffer
+    let mut written = 0usize;
+    let entry_size = core::mem::size_of::<DirEntry>();
+
+    for file in &files {
+        let name_bytes = file.name.as_bytes();
+        let total_entry_size = entry_size + name_bytes.len();
+
+        // Check if we have space for this entry
+        if written + total_entry_size > buffer_size {
+            break;
+        }
+
+        // Create DirEntry
+        let entry = DirEntry {
+            name_len: name_bytes.len() as u32,
+            file_type: file_kind_to_u8(file.kind),
+            size: file.size,
+            attrs: file_attrs_to_u8(file.attrs),
+            reserved: [0, 0],
+        };
+
+        // Copy DirEntry to user buffer
+        let entry_bytes = unsafe {
+            core::slice::from_raw_parts(&entry as *const DirEntry as *const u8, entry_size)
+        };
+        let user_entry_ptr = unsafe { buffer_ptr.add(written) };
+        unsafe {
+            core::ptr::copy_nonoverlapping(entry_bytes.as_ptr(), user_entry_ptr, entry_size);
+        }
+        written += entry_size;
+
+        // Copy filename to user buffer
+        let user_name_ptr = unsafe { buffer_ptr.add(written) };
+        unsafe {
+            core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), user_name_ptr, name_bytes.len());
+        }
+        written += name_bytes.len();
+    }
+
+    written as i64
 }

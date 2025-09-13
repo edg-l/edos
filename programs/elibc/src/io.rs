@@ -7,7 +7,9 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{Errno, SYS_KERNEL_LOGS, SYS_OPEN, SYS_RAW_INPUT, errno, syscall2, syscall3},
+    sys::{
+        Errno, SYS_KERNEL_LOGS, SYS_LIST_DIR, SYS_OPEN, SYS_RAW_INPUT, errno, syscall2, syscall3,
+    },
     sys_close, sys_open as raw_sys_open, sys_read, sys_write,
 };
 
@@ -39,6 +41,44 @@ impl From<Errno> for IoError {
 }
 
 pub type IoResult<T> = Result<T, IoError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileType {
+    File = 0,
+    Directory = 1,
+    Symlink = 2,
+    Special = 3,
+}
+
+impl From<u8> for FileType {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => FileType::File,
+            1 => FileType::Directory,
+            2 => FileType::Symlink,
+            _ => FileType::Special,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct DirEntry {
+    pub name: String,
+    pub file_type: FileType,
+    pub size: u64,
+    pub attrs: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct RawDirEntry {
+    name_len: u32,
+    file_type: u8,
+    size: u64,
+    attrs: u8,
+    reserved: [u8; 2],
+}
 
 /// Helper function to write all bytes to a file descriptor, handling partial writes
 fn write_all_to_fd(fd: u64, mut buf: &[u8]) -> IoResult<()> {
@@ -297,4 +337,63 @@ pub fn read_to_end(fd: u64, max_bytes: Option<usize>) -> IoResult<Vec<u8>> {
         }
     }
     Ok(out)
+}
+
+/// List directory contents
+pub fn list_dir(path: &str) -> IoResult<Vec<DirEntry>> {
+    // Build a C string (nul-terminated) in a scratch buffer
+    let mut path_bytes = alloc::vec::Vec::with_capacity(path.len() + 1);
+    path_bytes.extend_from_slice(path.as_bytes());
+    path_bytes.push(0);
+
+    // Allocate buffer for directory entries (start with 4KB)
+    let mut buffer = alloc::vec![0u8; 4096];
+
+    let result =
+        unsafe { crate::sys_list_dir(path_bytes.as_ptr(), buffer.as_mut_ptr(), buffer.len()) };
+
+    if result < 0 {
+        return Err(IoError::from(errno()));
+    }
+
+    let bytes_read = result as usize;
+    if bytes_read == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Parse the serialized directory entries
+    let mut entries = Vec::new();
+    let mut offset = 0;
+
+    while offset + core::mem::size_of::<RawDirEntry>() <= bytes_read {
+        // Read the raw directory entry header
+        let raw_entry =
+            unsafe { core::ptr::read_unaligned(buffer.as_ptr().add(offset) as *const RawDirEntry) };
+        offset += core::mem::size_of::<RawDirEntry>();
+
+        // Ensure we have enough bytes for the filename
+        if offset + raw_entry.name_len as usize > bytes_read {
+            break; // Truncated entry, stop parsing
+        }
+
+        // Extract the filename
+        let name_bytes = &buffer[offset..offset + raw_entry.name_len as usize];
+        let name = match core::str::from_utf8(name_bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => continue, // Skip invalid UTF-8 filenames
+        };
+        offset += raw_entry.name_len as usize;
+
+        // Create the directory entry
+        let entry = DirEntry {
+            name,
+            file_type: FileType::from(raw_entry.file_type),
+            size: raw_entry.size,
+            attrs: raw_entry.attrs,
+        };
+
+        entries.push(entry);
+    }
+
+    Ok(entries)
 }
