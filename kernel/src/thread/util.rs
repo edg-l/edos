@@ -12,7 +12,11 @@ use crate::{
         USER_STACK_TOP,
         mapper::{MemoryManager, memory_mapper},
     },
-    thread::{KernelThread, ThreadId, scheduler::sched, user::UserThread},
+    thread::{
+        KernelThread, ThreadId,
+        scheduler::sched,
+        user::{UserThread, UserThreadInfo},
+    },
 };
 
 static KTHREAD_FREED_STACKS: SegQueue<u64> = SegQueue::new();
@@ -113,6 +117,6 @@ pub fn thread_stack_free(manager: &mut MemoryManager, stack_top: u64) {
     manager.unmap_memory(stack_bottom, USER_STACK_SIZE).ok();
 }
 
-pub fn queue_spawn_thread(thread: UserThread) {
-    sched().thread_spawn_queue.push(thread);
+pub fn queue_spawn_thread(thread: UserThread, info: UserThreadInfo) {
+    sched().thread_spawn_queue.push((thread, info));
 }

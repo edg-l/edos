@@ -11,6 +11,7 @@ use x86_64::{
 use crate::{
     boot::boot_info,
     drivers::fpu::FpuState,
+    fs::path::Path,
     loader::{ElfLoadError, load_elf},
     logs::ThreadLogger,
     memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
@@ -53,6 +54,24 @@ pub struct UserThreadInfo {
     pub memory_mappings: BTreeMap<VirtAddr, MemoryMapping>,
     pub next_mmap_addr: VirtAddr,
     pub memory_manager: Arc<Mutex<MemoryManager>>,
+    pub cwd: Path,
+    pub user_id: u32,
+    pub group_id: u32,
+}
+
+impl UserThreadInfo {
+    pub fn from_thread(thread: &UserThread, user_id: u32, group_id: u32, cwd: Path) -> Self {
+        Self {
+            errno: Errno::Clear,
+            fd_table: FileDescriptorTable::new(),
+            memory_mappings: BTreeMap::new(),
+            next_mmap_addr: VirtAddr::new(thread.heap_break),
+            memory_manager: thread.memory_manager.clone(),
+            cwd,
+            user_id,
+            group_id,
+        }
+    }
 }
 
 #[expect(unused)]

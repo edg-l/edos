@@ -1,6 +1,6 @@
 use core::time::Duration;
 
-use alloc::{boxed::Box, collections::btree_map::BTreeMap, sync::Arc};
+use alloc::{boxed::Box, sync::Arc};
 use crossbeam_queue::ArrayQueue;
 use heapless::{LinearMap, index_map::FnvIndexMap};
 use spin::{Mutex, RwLock};
@@ -20,11 +20,10 @@ use crate::{
     interrupts::InterruptIndex,
     logs::ThreadLogger,
     println,
-    syscalls::{Errno, set_gs_kernel_stack},
+    syscalls::set_gs_kernel_stack,
     thread::{
         KernelThread, ThreadId, ThreadState,
         context::CpuContext,
-        fd::FileDescriptorTable,
         user::{UserThread, UserThreadInfo},
     },
     timer::Instant,
@@ -56,7 +55,7 @@ pub struct Scheduler {
     thread_priority_queue: ArrayQueue<ThreadId>,
     pub cmd_queue: ArrayQueue<SchedCmd>,
     pub kthread_spawn_queue: ArrayQueue<KernelThread>,
-    pub thread_spawn_queue: ArrayQueue<UserThread>,
+    pub thread_spawn_queue: ArrayQueue<(UserThread, UserThreadInfo)>,
     pub storage: Storage,
     pub current_tid: Option<ThreadId>,
     pub current_logger: Option<Arc<ThreadLogger>>,
@@ -199,19 +198,12 @@ impl Scheduler {
             self.storage.kthreads.insert(kthread.id.id, kthread);
         }
 
-        while let Some(thread) = self.thread_spawn_queue.pop() {
+        while let Some((thread, info)) = self.thread_spawn_queue.pop() {
             self.thread_queue.push(thread.id.clone());
             lock.insert(thread.id.clone(), cpuidx);
-            self.storage.thread_info.insert(
-                thread.id.id,
-                Arc::new(Mutex::new(UserThreadInfo {
-                    errno: Errno::Clear,
-                    fd_table: FileDescriptorTable::new(),
-                    memory_mappings: BTreeMap::new(),
-                    next_mmap_addr: VirtAddr::new(thread.heap_break),
-                    memory_manager: thread.memory_manager.clone(),
-                })),
-            );
+            self.storage
+                .thread_info
+                .insert(thread.id.id, Arc::new(Mutex::new(info)));
             self.storage.threads.insert(thread.id.id, thread);
         }
     }

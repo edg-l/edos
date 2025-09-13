@@ -20,7 +20,7 @@ use crate::{
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
     thread::{
         scheduler::sched,
-        user::UserThread,
+        user::{UserThread, UserThreadInfo},
         util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_thread},
     },
     timer::{get_timer_calibration, init_boot_time, uptime_us},
@@ -111,7 +111,10 @@ fn main() -> ! {
     drivers::init_drivers();
     fs::init();
 
-    queue_spawn_thread(UserThread::new(TERMINAL_PROGRAM, Some("terminal".to_string())).unwrap());
+    let user_thread = UserThread::new(TERMINAL_PROGRAM, Some("terminal".to_string())).unwrap();
+    let user_thread_info =
+        UserThreadInfo::from_thread(&user_thread, 0, 0, Path::parse("/").unwrap());
+    queue_spawn_thread(user_thread, user_thread_info);
     queue_spawn_kthread_named("test", smp::kthread_test as u64);
     queue_spawn_kthread_named("main-test", kthread_main_test as u64);
 
