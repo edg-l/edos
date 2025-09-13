@@ -345,7 +345,6 @@ extern "C" fn port_worker_thread() -> ! {
                             .send(AhciResponse::ReadResult { data: Ok(buffer) }),
                         Err(e) => req.response.send(AhciResponse::ReadResult { data: Err(e) }),
                     }
-                    log!(logger, "Done");
                 }
                 Command::Write { lba, data, sectors } => {
                     log!(
