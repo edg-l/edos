@@ -45,4 +45,10 @@ impl FileDescriptorTable {
     pub fn close_fd(&mut self, fd: u64) -> Option<FileDescriptor> {
         self.fds.remove(&fd)
     }
+
+    pub fn replace_fd(&mut self, fd: u64, new_fd: FileDescriptor) {
+        if let Some(entry) = self.fds.get_mut(&fd) {
+            *entry = new_fd;
+        }
+    }
 }

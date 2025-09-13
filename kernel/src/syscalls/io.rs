@@ -1,12 +1,15 @@
 use core::time::Duration;
 
+use x86_64::instructions::interrupts;
+
+use crate::fs::{api as fs_api, path::Path};
+use crate::log;
 use crate::{
     drivers::keyboard::KEYBOARD_BROADCAST,
-    println,
     syscalls::Errno,
     thread::{
         broadcast::ReceiveError,
-        pipe::{FileDescriptor, Pipe, StandardStream},
+        pipe::{FileDescriptor, FsFile, Pipe, StandardStream},
         scheduler::sched,
     },
 };
@@ -28,11 +31,12 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
             StandardStream::Stdout | StandardStream::Stderr => match core::str::from_utf8(buffer) {
                 Ok(s) => {
-                    println!("{}", s);
+                    // TODO: add stdout stream broadcast?
+                    log!("{}", s);
                     count as u64
                 }
                 Err(_) => {
-                    println!(
+                    log!(
                         "sys_write: Non-UTF8 data: {:02x?}",
                         &buffer[..count.min(64)]
                     );
@@ -50,6 +54,48 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             pipe.buffer.extend_from_slice(buffer);
             count as u64
         }
+        Some(FileDescriptor::FsFile(file)) => {
+            // Write via FS API using current offset (append respected)
+            let mut file = file.clone();
+
+            interrupts::enable();
+            let res = {
+                let append_err = if file.append {
+                    match fs_api::file_info(&file.path) {
+                        Ok(info) => {
+                            file.offset = info.size;
+                            None
+                        }
+                        Err(_) => Some(()),
+                    }
+                } else {
+                    None
+                };
+
+                if append_err.is_some() {
+                    Err(())
+                } else {
+                    fs_api::write_bytes(&file.path, file.offset as usize, buffer).map_err(|_| ())
+                }
+            };
+            interrupts::disable();
+
+            match res {
+                Ok(written) => {
+                    // Update offset on success
+                    let new_fd = FileDescriptor::FsFile(FsFile {
+                        offset: file.offset + written,
+                        ..file
+                    });
+                    thread.fd_table.replace_fd(fd, new_fd);
+                    written
+                }
+                Err(()) => {
+                    thread.errno = Errno::EINVAL;
+                    !0u64
+                }
+            }
+        }
         None => {
             thread.errno = Errno::EINVAL;
             !0u64
@@ -60,8 +106,22 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
 #[allow(unused)]
 pub fn sys_close(fd: u64) -> i32 {
     let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
 
-    0
+    match thread.fd_table.close_fd(fd) {
+        Some(FileDescriptor::Pipe(pipe)) => {
+            let mut guard = pipe.write();
+            guard.close_reader();
+            0
+        }
+        Some(_) => 0,
+        None => {
+            thread.errno = Errno::EINVAL;
+            -1
+        }
+    }
 }
 
 pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
@@ -83,7 +143,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
     let kernel_data = match thread.fd_table.get_fd(fd) {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
             StandardStream::Stdin => {
-                x86_64::instructions::interrupts::enable();
+                interrupts::enable();
                 read_from_stdin(count)
             }
             StandardStream::Stdout | StandardStream::Stderr => {
@@ -92,8 +152,21 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             }
         },
         Some(FileDescriptor::Pipe(pipe)) => {
-            x86_64::instructions::interrupts::enable();
+            interrupts::enable();
             read_from_pipe(pipe.clone(), count)
+        }
+        Some(FileDescriptor::FsFile(file)) => {
+            let file = file.clone();
+            interrupts::enable();
+            let res = fs_api::read_bytes(&file.path, file.offset as usize, count).map_err(|_| ());
+            interrupts::disable();
+            match res {
+                Ok(data) => Ok(data),
+                Err(()) => {
+                    thread.errno = Errno::EINVAL;
+                    Err(-1)
+                }
+            }
         }
         None => {
             thread.errno = Errno::EINVAL;
@@ -101,7 +174,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
         }
     };
 
-    x86_64::instructions::interrupts::disable();
+    interrupts::disable();
 
     // Handle kernel data result
     let data = match kernel_data {
@@ -118,6 +191,18 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
 
     let user_buffer = unsafe { core::slice::from_raw_parts_mut(buffer_ptr, bytes_to_copy) };
     user_buffer.copy_from_slice(&data[..bytes_to_copy]);
+
+    // Update file offset if reading from FsFile
+    if let Some(FileDescriptor::FsFile(file)) = thread.fd_table.get_fd(fd).cloned() {
+        let new_off = file.offset + bytes_to_copy as u64;
+        thread.fd_table.replace_fd(
+            fd,
+            FileDescriptor::FsFile(FsFile {
+                offset: new_off,
+                ..file
+            }),
+        );
+    }
 
     bytes_to_copy as i64
 }
@@ -161,6 +246,73 @@ fn read_from_stdin(max_count: usize) -> Result<alloc::vec::Vec<u8>, i64> {
     KEYBOARD_BROADCAST.lock().unsubscribe();
 
     Ok(kernel_buffer)
+}
+
+pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    if path_ptr.is_null() {
+        thread.errno = Errno::EFAULT;
+        return -1;
+    }
+
+    // Copy C string from user memory (simple, bounded)
+    let mut buf = alloc::vec::Vec::new();
+    for i in 0..1024usize {
+        let c = unsafe { core::ptr::read_volatile(path_ptr.add(i)) };
+        if c == 0 {
+            break;
+        }
+        buf.push(c);
+    }
+    // If no null terminator within bound, treat as invalid
+    if buf.is_empty() || buf.len() == 1024 {
+        thread.errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let path_str = match core::str::from_utf8(&buf) {
+        Ok(s) => s,
+        Err(_) => {
+            thread.errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    let Ok(mut path) = Path::parse(path_str) else {
+        thread.errno = Errno::EINVAL;
+        return -1;
+    };
+    path = path.normalize();
+
+    // Determine initial offset and verify file exists
+    let append = (flags & 0x400) != 0; // mimic O_APPEND bit
+    let mut offset = 0u64;
+    interrupts::enable();
+    let info = fs_api::file_info(&path);
+    interrupts::disable();
+    match info {
+        Ok(info) => {
+            if append {
+                offset = info.size;
+            }
+        }
+        Err(_) => {
+            thread.errno = Errno::EINVAL;
+            return -1;
+        }
+    }
+
+    let desc = FileDescriptor::FsFile(FsFile {
+        path,
+        offset,
+        append,
+    });
+    let fd = thread.fd_table.allocate_fd(desc);
+    fd as i64
 }
 
 fn read_from_pipe(

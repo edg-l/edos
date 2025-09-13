@@ -1,3 +1,4 @@
+use crate::fs::path::Path;
 use alloc::{sync::Arc, vec::Vec};
 use spin::RwLock;
 
@@ -6,7 +7,8 @@ pub enum FileDescriptor {
     StandardStream(StandardStream),
     #[allow(unused)]
     Pipe(Arc<RwLock<Pipe>>),
-    // Future: File(Arc<RwLock<File>>),
+    // Filesystem-backed file descriptor with maintained offset
+    FsFile(FsFile),
 }
 
 #[derive(Debug, Clone)]
@@ -47,4 +49,11 @@ impl Pipe {
     pub fn close_reader(&mut self) {
         self.readers = self.readers.saturating_sub(1);
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct FsFile {
+    pub path: Path,
+    pub offset: u64,
+    pub append: bool,
 }
