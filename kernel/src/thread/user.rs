@@ -142,6 +142,10 @@ impl UserThread {
         // Back to kernel page
         unsafe { Cr3::write(kernel_pml4.0, kernel_pml4.1) };
 
+        println!("Creating CpuContext with entry_point: {:p}, stack_top: {:p}",
+                load_info.entry_point.as_u64() as *const u8,
+                stack_top_call_aligned as *const u8);
+
         let context =
             CpuContext::new_user_thread(load_info.entry_point.as_u64(), stack_top_call_aligned);
 

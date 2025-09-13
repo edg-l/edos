@@ -63,6 +63,11 @@ impl CpuContext {
     pub fn is_from_kernel(&self) -> bool {
         self.interrupt_stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0
     }
+
+    #[inline]
+    pub fn rip(&self) -> u64 {
+        self.interrupt_stack_frame.instruction_pointer.as_u64()
+    }
 }
 
 impl CpuContext {
@@ -89,40 +94,5 @@ impl CpuContext {
             VirtAddr::new(stack_top),
             s.user_data_selector,
         ))
-    }
-
-    /// Switch from current context to this context
-    /// Safety: This function never returns normally - execution continues from saved RIP
-    pub unsafe fn switch_to(&self) -> ! {
-        unsafe {
-            core::arch::asm!(
-                r#"
-            # Load new stack pointer
-            mov rsp, {ctx}
-
-            # Restore all registers from context
-            pop r15
-            pop r14
-            pop r13
-            pop r12
-            pop r11
-            pop r10
-            pop r9
-            pop r8
-            pop rdi
-            pop rsi
-            pop rbp
-            pop rbx
-            pop rdx
-            pop rcx
-            pop rax
-
-            # Return to saved context
-            iretq
-            "#,
-                ctx = in(reg) self as *const _ as u64,
-                options(noreturn)
-            )
-        }
     }
 }

@@ -521,8 +521,12 @@ fn sys_spawn(
 
     // Create new user thread from ELF data
     let user_thread = match UserThread::new(&elf_data, Some(path_str.to_string())) {
-        Ok(thread) => thread,
-        Err(_) => {
+        Ok(thread) => {
+            println!("UserThread created successfully, entry point: {:p}", thread.context.rip() as *const u8);
+            thread
+        },
+        Err(e) => {
+            println!("UserThread creation failed: {:?}", e);
             sched.current_thread_info().lock().errno = Errno::EINVAL;
             return !0u64;
         }
