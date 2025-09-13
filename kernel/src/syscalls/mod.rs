@@ -1,4 +1,7 @@
-use core::arch::{asm, naked_asm};
+use core::{
+    arch::{asm, naked_asm},
+    time::Duration,
+};
 
 use alloc::{string::ToString, vec::Vec};
 use x86_64::{
@@ -208,7 +211,7 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         }
         SYS_OPEN => {
             let path_ptr = ctx.rdi as *const u8;
-            let flags = ctx.rsi as u64;
+            let flags = ctx.rsi;
             ctx.rax = sys_open(path_ptr, flags) as u64;
         }
         SYS_READ => {
@@ -475,7 +478,7 @@ fn sys_spawn(
         if path_str.starts_with('/') {
             Path::parse(path_str).map(|p| p.normalize())
         } else {
-            let joined = cwd.join(&path_str);
+            let joined = cwd.join(path_str);
             Ok(joined.normalize())
         }
     };
@@ -496,10 +499,10 @@ fn sys_spawn(
 
     x86_64::instructions::interrupts::enable();
 
-    //let cr3 = Cr3::read();
-    //switch_to_kernel_page();
+    let cr3 = Cr3::read();
+    switch_to_kernel_page();
 
-    let elf_data = match fs_api::read_bytes(&path, 0, 1024 * 1024) {
+    let elf_data = match fs_api::read_bytes(&path, 0, 1024 * 1024 * 10) {
         // Limit to 1MB for now
         Ok(data) => data,
         Err(_) => {
@@ -508,14 +511,27 @@ fn sys_spawn(
         }
     };
 
+    log!("loaded elf data");
+
+    sched.thread_wait_timeout(Duration::from_millis(500));
+
+    println!(
+        "elf data len: {}, last byte {:?}",
+        elf_data.len(),
+        elf_data.last()
+    );
+
     // Create new user thread from ELF data
-    let mut user_thread = match UserThread::new(&elf_data, Some(path_str.to_string())) {
+    let user_thread = match UserThread::new(&elf_data, Some(path_str.to_string())) {
         Ok(thread) => thread,
         Err(_) => {
             sched.current_thread_info().lock().errno = Errno::EINVAL;
             return !0u64;
         }
     };
+
+    log!("created user_thread");
+    sched.thread_wait_timeout(Duration::from_millis(500));
 
     // Create thread info and set up file descriptor redirections
     let mut user_thread_info = UserThreadInfo::from_thread(&user_thread, 0, 0, child_cwd);
@@ -559,7 +575,7 @@ fn sys_spawn(
     // Queue the new thread for execution
     queue_spawn_thread(user_thread, user_thread_info);
 
-    //unsafe { Cr3::write(cr3.0, cr3.1) };
+    unsafe { Cr3::write(cr3.0, cr3.1) };
 
     child_pid
 }

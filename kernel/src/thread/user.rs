@@ -127,6 +127,7 @@ impl UserThread {
 
         // Use process page to set mappings
         unsafe { Cr3::write(page, kernel_pml4.1) };
+        println!("Switched to new process page");
 
         let page_table = unsafe { active_level_4_table(physical_memory_offset) };
         let table = unsafe { OffsetPageTable::new(page_table, physical_memory_offset) };
@@ -138,6 +139,8 @@ impl UserThread {
         let stack_top_call_aligned = stack_top - 8;
 
         let load_info = load_elf(elf_data, &mut process_memory_manager)?;
+
+        println!("loaded elf, back to kernel page");
 
         // Back to kernel page
         unsafe { Cr3::write(kernel_pml4.0, kernel_pml4.1) };

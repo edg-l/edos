@@ -6,7 +6,7 @@ pub mod frame_allocator;
 pub mod mapper;
 
 pub const KERNEL_HEAP: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_3000_0000);
-pub const KERNEL_HEAP_SIZE: u64 = 1024 * 1024 * 128; // 128 mb
+pub const KERNEL_HEAP_SIZE: u64 = 1024 * 1024 * 256; // 128 mb
 
 // After heap
 pub const ACPI_MAPPINGS: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_0800_0000);
