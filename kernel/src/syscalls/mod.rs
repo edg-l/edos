@@ -1,11 +1,11 @@
 use core::arch::{asm, naked_asm};
 
-use alloc::vec::Vec;
+use alloc::{string::ToString, vec::Vec};
 use x86_64::{
     VirtAddr,
     instructions::interrupts::enable_and_hlt,
     registers::{
-        control::{Efer, EferFlags},
+        control::{Cr3, Efer, EferFlags},
         model_specific::{LStar, SFMask, Star},
         rflags::RFlags,
     },
@@ -23,7 +23,7 @@ use crate::{
         keyboard::sys_keyboard_raw,
         memory::{sys_mmap, sys_munmap},
     },
-    thread::scheduler::sched,
+    thread::scheduler::{sched, switch_to_kernel_page},
 };
 
 mod graphics;
@@ -183,6 +183,8 @@ const SYS_MUNMAP: u64 = 11;
 const SYS_EXIT: u64 = 60;
 const SYS_ERRNO: u64 = 0x400;
 const SYS_GETPID: u64 = 39; // get process ID
+const SYS_SPAWN: u64 = 57; // spawn process
+const SYS_DUP2: u64 = 33; // duplicate file descriptor
 const SYS_DRAW_RECT: u64 = 100;
 const SYS_RENDER: u64 = 101;
 const SYS_SCREEN_INFO: u64 = 102;
@@ -285,6 +287,23 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_DRAW => {
             ctx.rax = graphics::sys_draw(ctx.rdi as *const DrawRequestInput);
         }
+        SYS_PIPE => {
+            let pipefd_ptr = ctx.rdi as *mut [u64; 2];
+            ctx.rax = sys_pipe(pipefd_ptr);
+        }
+        SYS_SPAWN => {
+            let path_ptr = ctx.rdi as *const u8;
+            let argv_ptr = ctx.rsi as *const *const u8;
+            let stdin_fd = ctx.rdx;
+            let stdout_fd = ctx.r10;
+            let stderr_fd = ctx.r8;
+            ctx.rax = sys_spawn(path_ptr, argv_ptr, stdin_fd, stdout_fd, stderr_fd);
+        }
+        SYS_DUP2 => {
+            let oldfd = ctx.rdi;
+            let newfd = ctx.rsi;
+            ctx.rax = sys_dup2(oldfd, newfd);
+        }
         _ => {
             ctx.rax = !0u64;
         }
@@ -341,4 +360,206 @@ pub fn sys_kernel_log(log_buffer: *mut u8, size: usize) -> i64 {
     unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), log_buffer, buf.len()) };
 
     buf.len() as i64
+}
+
+fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
+    use crate::thread::pipe::{FileDescriptor, Pipe};
+    use alloc::sync::Arc;
+    use spin::RwLock;
+
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+
+    thread.errno = Errno::Clear;
+
+    if pipefd_ptr.is_null() {
+        thread.errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    // Create new pipe
+    let pipe = Arc::new(RwLock::new(Pipe::new()));
+
+    // Allocate read and write file descriptors
+    let read_fd = thread
+        .fd_table
+        .allocate_fd(FileDescriptor::Pipe(pipe.clone()));
+    let write_fd = thread.fd_table.allocate_fd(FileDescriptor::Pipe(pipe));
+
+    // Copy file descriptor numbers to user space
+    let pipefd = [read_fd, write_fd];
+    unsafe {
+        core::ptr::copy_nonoverlapping(pipefd.as_ptr(), pipefd_ptr as *mut u64, 2);
+    }
+
+    0 // Success
+}
+
+fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+
+    thread.errno = Errno::Clear;
+
+    // Get the file descriptor we want to duplicate
+    let old_fd_descriptor = match thread.fd_table.get_fd(oldfd) {
+        Some(fd) => fd.clone(),
+        None => {
+            thread.errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    // Close the newfd if it's already in use (but don't fail if it doesn't exist)
+    let _ = thread.fd_table.close_fd(newfd);
+
+    // Insert the duplicated descriptor at newfd
+    thread.fd_table.insert_fd(newfd, old_fd_descriptor);
+
+    newfd // Success - return the new fd number
+}
+
+fn sys_spawn(
+    path_ptr: *const u8,
+    _argv_ptr: *const *const u8, // TODO: implement argv parsing
+    stdin_fd: u64,
+    stdout_fd: u64,
+    stderr_fd: u64,
+) -> u64 {
+    use crate::{
+        fs::api as fs_api,
+        fs::path::Path,
+        thread::{
+            user::{UserThread, UserThreadInfo},
+            util::queue_spawn_thread,
+        },
+    };
+
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+
+    thread.errno = Errno::Clear;
+
+    if path_ptr.is_null() {
+        thread.errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    // Copy C string from user memory (simple, bounded)
+    let mut buf = alloc::vec::Vec::new();
+    for i in 0..1024usize {
+        let c = unsafe { core::ptr::read_volatile(path_ptr.add(i)) };
+        if c == 0 {
+            break;
+        }
+        buf.push(c);
+    }
+    if buf.is_empty() || buf.len() == 1024 {
+        thread.errno = Errno::EINVAL;
+        return !0u64;
+    }
+
+    let path_str = match core::str::from_utf8(&buf) {
+        Ok(s) => s,
+        Err(_) => {
+            thread.errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    // Resolve path relative to current working directory
+    let resolve_path = |path_str: &str, cwd: &Path| -> Result<Path, crate::fs::path::ParseError> {
+        if path_str.starts_with('/') {
+            Path::parse(path_str).map(|p| p.normalize())
+        } else {
+            let joined = cwd.join(&path_str);
+            Ok(joined.normalize())
+        }
+    };
+
+    let path = match resolve_path(path_str, &thread.cwd) {
+        Ok(path) => path,
+        Err(_) => {
+            thread.errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    // Save current cwd for child process
+    let child_cwd = thread.cwd.clone();
+
+    // Load ELF file from filesystem
+    drop(thread); // Release lock before blocking file operations
+
+    x86_64::instructions::interrupts::enable();
+
+    //let cr3 = Cr3::read();
+    //switch_to_kernel_page();
+
+    let elf_data = match fs_api::read_bytes(&path, 0, 1024 * 1024) {
+        // Limit to 1MB for now
+        Ok(data) => data,
+        Err(_) => {
+            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    // Create new user thread from ELF data
+    let mut user_thread = match UserThread::new(&elf_data, Some(path_str.to_string())) {
+        Ok(thread) => thread,
+        Err(_) => {
+            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    // Create thread info and set up file descriptor redirections
+    let mut user_thread_info = UserThreadInfo::from_thread(&user_thread, 0, 0, child_cwd);
+
+    // Override standard file descriptors if specified (non-default values)
+    if stdin_fd != 0
+        && let Some(stdin_desc) = sched
+            .current_thread_info()
+            .lock()
+            .fd_table
+            .get_fd(stdin_fd)
+            .cloned()
+    {
+        user_thread_info.fd_table.insert_fd(0, stdin_desc);
+    }
+
+    if stdout_fd != 1
+        && let Some(stdout_desc) = sched
+            .current_thread_info()
+            .lock()
+            .fd_table
+            .get_fd(stdout_fd)
+            .cloned()
+    {
+        user_thread_info.fd_table.insert_fd(1, stdout_desc);
+    }
+
+    if stderr_fd != 2
+        && let Some(stderr_desc) = sched
+            .current_thread_info()
+            .lock()
+            .fd_table
+            .get_fd(stderr_fd)
+            .cloned()
+    {
+        user_thread_info.fd_table.insert_fd(2, stderr_desc);
+    }
+
+    let child_pid = user_thread.id.id;
+
+    // Queue the new thread for execution
+    queue_spawn_thread(user_thread, user_thread_info);
+
+    //unsafe { Cr3::write(cr3.0, cr3.1) };
+
+    child_pid
 }

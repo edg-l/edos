@@ -4,16 +4,17 @@
 use alloc::{
     format,
     string::{String, ToString},
+    vec,
     vec::Vec,
 };
 use elibc::{
     KeyEvent, get_raw_input,
     graphics::{Color, RasterHeight, Screen, TextMetrics, TextStyle},
     io::{
-        FileType, chdir, get_kernel_logs, getcwd, list_dir, open, open_flags, read_to_end,
-        write_all_fd,
+        FileType, chdir, get_kernel_logs, getcwd, list_dir, open, open_flags, read_from_fd,
+        read_to_end, write_all_fd,
     },
-    sys_close,
+    pipe, spawn, sys_close,
 };
 
 extern crate alloc;
@@ -283,6 +284,69 @@ impl Terminal {
         // Note: We don't mark dirty here as callers will mark dirty
     }
 
+    fn try_spawn_program(&mut self, command: &str, _args: &[String]) {
+        // Create a pipe to capture the program's stdout
+        let (read_fd, write_fd) = match pipe() {
+            Some(fds) => fds,
+            None => {
+                self.print_text(&format!("Failed to create pipe for {command}\n"));
+                return;
+            }
+        };
+
+        // Try absolute path first, then relative in current directory
+        let paths_to_try = vec![
+            format!("/{}", command),         // Try as absolute path
+            format!("./{}", command),        // Try in current directory
+            format!("/bin/{}", command),     // Try in /bin
+            format!("/usr/bin/{}", command), // Try in /usr/bin
+        ];
+
+        let mut spawned = false;
+        for path in &paths_to_try {
+            // Attempt to spawn the program with stdout redirected to our pipe
+            let child_pid = spawn(&path, 0, write_fd, 2); // stdin=0, stdout=pipe, stderr=2
+
+            if child_pid != u64::MAX {
+                self.print_text(&format!("Started {} (PID: {})\n", command, child_pid));
+                spawned = true;
+
+                // Close our copy of the write end since child has it
+                let _ = sys_close(write_fd);
+
+                // Read output from the pipe and display it
+                self.read_and_display_output(read_fd);
+
+                let _ = sys_close(read_fd);
+                return;
+            }
+        }
+
+        if !spawned {
+            self.print_text(&format!("Command not found: {}\n", command));
+        }
+
+        // Clean up pipe if we couldn't spawn
+        let _ = sys_close(read_fd);
+        let _ = sys_close(write_fd);
+    }
+
+    fn read_and_display_output(&mut self, read_fd: u64) {
+        let mut buffer = [0u8; 1024];
+
+        loop {
+            match read_from_fd(read_fd, &mut buffer) {
+                Ok(0) => break, // EOF
+                Ok(bytes_read) => {
+                    if let Ok(text) = core::str::from_utf8(&buffer[..bytes_read]) {
+                        self.print_text(text);
+                    }
+                }
+                Err(_) => break, // Read error
+            }
+        }
+    }
+
     fn on_command(&mut self, command: &str, args: &[String]) {
         match command {
             "logs" => {
@@ -399,7 +463,8 @@ impl Terminal {
                 }
             }
             _ => {
-                self.print_text(&format!("Unknown command {command}\n"));
+                // Try to spawn the command as an external program
+                self.try_spawn_program(command, args);
             }
         }
     }

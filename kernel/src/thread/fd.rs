@@ -51,4 +51,8 @@ impl FileDescriptorTable {
             *entry = new_fd;
         }
     }
+
+    pub fn insert_fd(&mut self, fd: u64, descriptor: FileDescriptor) {
+        self.fds.insert(fd, descriptor);
+    }
 }

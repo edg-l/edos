@@ -116,7 +116,7 @@ fn main() -> ! {
         UserThreadInfo::from_thread(&user_thread, 0, 0, Path::parse("/").unwrap());
     queue_spawn_thread(user_thread, user_thread_info);
     queue_spawn_kthread_named("test", smp::kthread_test as u64);
-    queue_spawn_kthread_named("main-test", kthread_main_test as u64);
+    queue_spawn_kthread_named("mount", mount_filesystems as u64);
 
     // Enable apic timer
     set_apic_timer_and_enable(Duration::from_millis(5));
@@ -128,8 +128,7 @@ fn main() -> ! {
     }
 }
 
-pub fn kthread_main_test() -> ! {
-    sched().thread_wait_timeout(Duration::from_secs(1));
+pub fn mount_filesystems() -> ! {
     let partitions = fs::api::list_partitions();
 
     if partitions.is_empty() {
@@ -142,43 +141,10 @@ pub fn kthread_main_test() -> ! {
     let root = Path::parse("/").unwrap();
     fs::api::mount_partition(part.index as usize, root.clone()).unwrap();
 
-    let mounts = fs::api::list_mounts();
-
-    log!("Mounts {:#?}", mounts);
-
-    loop_dir(&root);
-
-    fn loop_dir(dir: &Path) {
-        let files = fs::api::list_files(dir).unwrap();
-        for file in &files {
-            if file.name == "." || file.name == ".." {
-                continue;
-            }
-
-            let path = dir.join(&file.name);
-            log!("{}: {:?} ", path, file.kind);
-
-            match file.kind {
-                fs::FileKind::File => {
-                    let content = fs::api::read_bytes(&path, 0, 256).unwrap();
-                    let x = String::from_utf8(content).unwrap();
-                    log!("Content: {x:?}");
-                }
-                fs::FileKind::Directory => {
-                    loop_dir(&path);
-                }
-                fs::FileKind::Symlink => todo!(),
-                fs::FileKind::Special => todo!(),
-            }
-        }
-    }
-
-    loop {
-        sched().thread_wait_timeout(Duration::from_millis(1500));
-    }
+    kthread_exit(0)
 }
 
-pub const TERMINAL_PROGRAM: &[u8] = include_bytes!("../../programs/out/terminal");
+pub const TERMINAL_PROGRAM: &[u8] = include_bytes!("../../filesystem/bin/terminal");
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
