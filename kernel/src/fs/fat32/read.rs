@@ -6,7 +6,8 @@ use crate::fs::{
 };
 
 impl Fat32fs {
-    /// Maximum sectors to read in a single batched operation (8MB with 512-byte sectors).
+    /// Maximum sectors to read in a single batched operation (2mb)
+    /// This can't be increased too much since we need a dma region that fits this, this means a contiguous memory location.
     const MAX_BATCH_SECTORS: u16 = 4096;
 
     /// Read consecutive clusters in a single batched operation.
