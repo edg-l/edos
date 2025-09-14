@@ -3,23 +3,19 @@
 #![feature(abi_x86_interrupt)]
 #![allow(clippy::fn_to_numeric_cast)]
 
-use core::{arch::asm, ffi::CStr, time::Duration};
+use core::{arch::asm, time::Duration};
 
-use alloc::{
-    ffi::CString,
-    string::{String, ToString},
-};
+use alloc::string::ToString;
 use x86_64::{VirtAddr, instructions::hlt};
 
 use crate::{
     acpi::{acpi_madt, init_acpi},
-    allocator::init_heap,
+    allocator::{init_heap, print_alloc_stats},
     apic::set_apic_timer_and_enable,
     boot::boot_info,
-    fs::{gpt::Partition, path::Path},
+    fs::path::Path,
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
     thread::{
-        scheduler::sched,
         user::{UserThread, UserThreadInfo},
         util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_thread},
     },
@@ -125,6 +121,8 @@ fn main() -> ! {
     // Enable apic timer
     set_apic_timer_and_enable(Duration::from_millis(5));
 
+    print_alloc_stats();
+
     x86_64::instructions::interrupts::enable_and_hlt();
 
     loop {
@@ -144,6 +142,13 @@ pub fn mount_filesystems() -> ! {
 
     let root = Path::parse("/").unwrap();
     fs::api::mount_partition(part.index as usize, root.clone()).unwrap();
+
+    let path = Path::parse("/file.dat").unwrap();
+    for _ in 0..16 {
+       let bytes =  fs::api::read_bytes(&path, 0, 1024 * 1024).unwrap();
+       log!("Bytes: {}", bytes.len());
+
+    }
 
     kthread_exit(0)
 }
