@@ -289,7 +289,11 @@ impl AhciPort {
 
         // Setup command header in command list
         unsafe {
-            let cmd_list = self.command_list.get().as_mut().unwrap();
+            let cmd_list = self
+                .command_list
+                .get()
+                .as_mut()
+                .expect("failed to get cmdlist");
             let cmd_header = &mut cmd_list[slot];
 
             cmd_header.flags = 5 | flags; // FIS length = 5 DWORDs + additional flags
@@ -297,12 +301,12 @@ impl AhciPort {
             cmd_header.prdbc = 0; // Will be updated by hardware
             cmd_header.ctba = self.command_tables[slot]
                 .as_ref()
-                .unwrap()
+                .expect("failed to get table in ctba")
                 .phys_addr()
                 .as_u64() as u32;
             cmd_header.ctbau = (self.command_tables[slot]
                 .as_ref()
-                .unwrap()
+                .expect("failed to get table in ctbau")
                 .phys_addr()
                 .as_u64()
                 >> 32) as u32;
@@ -444,7 +448,10 @@ impl AhciPort {
         }
 
         unsafe {
-            let table = self.command_tables[slot].as_ref().unwrap().get();
+            let table = self.command_tables[slot]
+                .as_ref()
+                .expect("failed to get slot table")
+                .get();
             table.write(core::mem::zeroed());
             let table = &mut *table;
 

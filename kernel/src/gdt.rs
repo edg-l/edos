@@ -26,7 +26,7 @@ fn init_tss_for_current_cpu() {
     let mut tss = TaskStateSegment::new();
 
     let page_fault_stack_end = {
-        let layout = Layout::from_size_align(4096, 4096).unwrap();
+        let layout = Layout::from_size_align(1024 * 32, 4096).unwrap();
         let stack_start = unsafe { alloc(layout) };
 
         if stack_start.is_null() {
@@ -41,7 +41,7 @@ fn init_tss_for_current_cpu() {
     };
 
     let double_fault_stack_end = {
-        let layout = Layout::from_size_align(4096, 4096).unwrap();
+        let layout = Layout::from_size_align(1024 * 32, 4096).unwrap();
         let stack_start = unsafe { alloc(layout) };
 
         if stack_start.is_null() {
@@ -56,7 +56,7 @@ fn init_tss_for_current_cpu() {
     };
 
     let timer_stack_end = {
-        let layout = Layout::from_size_align(4096 * 4, 4096).unwrap();
+        let layout = Layout::from_size_align(1024 * 1024, 4096).unwrap();
         let stack_start = unsafe { alloc(layout) };
 
         if stack_start.is_null() {

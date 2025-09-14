@@ -210,19 +210,18 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    // Note: do not add complex calls or memory read or scheduler reads, otherwise recursive faults can happen.
     use x86_64::registers::control::Cr2;
 
     let error_desc = decode_page_fault_error(error_code);
 
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0 {
         let address = Cr2::read().unwrap();
-        let current_tid = sched().current_tid.clone();
+
         println!("EXCEPTION: PAGE FAULT in Ring 0");
-        println!("Current tid: {current_tid:?}");
         println!("Accessed Address: {address:?}");
         println!("Error Code: {error_code:?}");
         println!("Fault Type: {error_desc}",);
-
         println!(
             "Page fault, address = {:p}, error = {error_desc:?}",
             address.as_ptr::<u8>()

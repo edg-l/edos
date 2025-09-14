@@ -5,17 +5,17 @@ use crate::boot::boot_info;
 pub mod frame_allocator;
 pub mod mapper;
 
-pub const KERNEL_HEAP: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_3000_0000);
-pub const KERNEL_HEAP_SIZE: u64 = 1024 * 1024 * 256; // 128 mb
+pub const KERNEL_HEAP: VirtAddr = VirtAddr::new_truncate(0xFFFF_C940_0000_0000);
+pub const KERNEL_HEAP_SIZE: u64 = 1024 * 1024 * 256; // 256 mb
 
 // After heap
 pub const ACPI_MAPPINGS: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_0800_0000);
 // Assuming 1mb for acpi
 
-pub const KTHREAD_STACK_FIRST: VirtAddr = VirtAddr::new_truncate(0xFFFF_C900_1000_0000);
+pub const KTHREAD_STACK_FIRST: VirtAddr = VirtAddr::new_truncate(0xFFFF_C910_0000_0000);
 
 // Remember Debug rust builds take a lot of stack
-pub const KTHREAD_STACK_SIZE: u64 = 1024 * 16; // 16kb
+pub const KTHREAD_STACK_SIZE: u64 = 1024 * 32; // 32kb
 /// Size of stack region including guard page (total allocation per thread)
 pub const KTHREAD_STACK_REGION_SIZE: u64 = KTHREAD_STACK_SIZE + 4096;
 

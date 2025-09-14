@@ -35,19 +35,22 @@ pub fn _serial_print(args: fmt::Arguments) {
 
     let lapic_id = get_percpu_data().lapic_id;
 
-    unsafe {
-        SERIAL_DBG
-            .get()
-            .unwrap_unchecked()
-            .lock()
-            .write_fmt(format_args!(
-                "[{secs}.{us:06}] <cpu-{}:kernel> {args}",
-                lapic_id,
-            ))
-            .unwrap();
-    }
+    SERIAL_DBG
+        .get()
+        .expect("failed to get serial dbg in print")
+        .lock()
+        .write_fmt(format_args!(
+            "[{secs}.{us:06}] <cpu-{}:kernel> {args}",
+            lapic_id,
+        ))
+        .expect("write fmt failed in serial");
 }
 
 pub fn add_serial_log(text: &str) {
-    SERIAL_DBG.get().unwrap().lock().write_str(text).unwrap();
+    SERIAL_DBG
+        .get()
+        .expect("failed to get serial dbg")
+        .lock()
+        .write_str(text)
+        .expect("write_str failed in serial");
 }

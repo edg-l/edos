@@ -77,8 +77,8 @@ pub struct Storage {
 pub fn init() {
     println!("Initializing scheduler");
     let sched = Box::new(Scheduler {
-        thread_queue: ArrayQueue::new(1024),
-        thread_priority_queue: ArrayQueue::new(256),
+        thread_queue: ArrayQueue::new(65000),
+        thread_priority_queue: ArrayQueue::new(65000),
         kthread_spawn_queue: ArrayQueue::new(64),
         thread_spawn_queue: ArrayQueue::new(64),
         cmd_queue: ArrayQueue::new(128),
@@ -98,7 +98,12 @@ pub fn init() {
 }
 
 pub fn sched() -> &'static Scheduler {
-    unsafe { get_percpu_data().scheduler.as_mut().unwrap() }
+    unsafe {
+        get_percpu_data()
+            .scheduler
+            .as_mut()
+            .expect("failed to get sched()")
+    }
 }
 
 // This function will be called from assembly with pointer to saved context
@@ -115,7 +120,7 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
         */
 
         let cpu = get_percpu_data();
-        let sched = cpu.scheduler.as_mut().unwrap();
+        let sched = cpu.scheduler.as_mut().expect("failed to get scheduler");
         sched.process_spawn_queue();
         sched.process_cmds();
 
@@ -127,7 +132,10 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                 // coming from kernel task
                 if let Some(kthread) = sched.storage.kthreads.get_mut(&current_id.id) {
                     kthread.context = (*context).clone();
-                    sched.thread_queue.push(current_id).unwrap();
+                    sched
+                        .thread_queue
+                        .push(current_id)
+                        .expect("failed to add kthread to thread_quue");
                 }
             } else {
                 // coming from user
@@ -141,7 +149,10 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                         save_fpu_state(&mut thread.fpu);
                     }
 
-                    sched.thread_queue.push(current_id).unwrap();
+                    sched
+                        .thread_queue
+                        .push(current_id)
+                        .expect("failed to push current_id thread");
                 }
             }
         }
@@ -182,8 +193,13 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
         }
 
         // No tasks, return to idle loop.
+        /*
         (*context).interrupt_stack_frame.instruction_pointer = VirtAddr::new(idle_loop as u64);
         context
+        */
+        loop {
+            enable_and_hlt();
+        }
     }
 }
 
