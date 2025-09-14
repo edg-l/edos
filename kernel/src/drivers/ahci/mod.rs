@@ -335,7 +335,7 @@ extern "C" fn port_worker_thread() -> ! {
                     sectors,
                     mut buffer,
                 } => {
-                    log!(logger, "Got read request, lba={lba}, sectors={sectors}");
+                    //log!(logger, "Got read request, lba={lba}, sectors={sectors}");
                     buffer.resize(sectors as usize * 512, 0);
                     let result = port.lock().read_sectors(lba, &mut buffer, sectors);
 
@@ -347,11 +347,7 @@ extern "C" fn port_worker_thread() -> ! {
                     }
                 }
                 Command::Write { lba, data, sectors } => {
-                    log!(
-                        logger,
-                        "Got write request, lba={lba}, sectors={sectors}, data_len={}",
-                        data.len()
-                    );
+                    //log!(logger, "Got write request, lba={lba}, sectors={sectors}, data_len={}", data.len());
                     let result = port.lock().write_sectors(lba, &data, sectors);
                     req.response.send(AhciResponse::WriteResult {
                         data: result.map(|_| data),

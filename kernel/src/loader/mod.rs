@@ -87,21 +87,24 @@ pub fn load_elf(
 
         for header in program_headers.iter() {
             if header.p_type == elf::abi::PT_LOAD {
+                /*
                 println!(
                     "ELF: Found PT_LOAD segment: vaddr=0x{:x}, filesz={}, memsz={}, flags=0x{:x}",
                     header.p_vaddr, header.p_filesz, header.p_memsz, header.p_flags
-                );
+                ); */
 
                 let vaddr = base_addr + header.p_vaddr;
                 let mem_size = header.p_memsz;
                 let file_size = header.p_filesz;
 
+                /*
                 println!(
                     "ELF: Loading segment at 0x{:x}, file_size: {}, mem_size: {}",
                     vaddr.as_u64(),
                     file_size,
                     mem_size
                 );
+                */
 
                 // todo: verify segments are valid
 
@@ -113,33 +116,35 @@ pub fn load_elf(
                 // Writeable flags first, because we need to write data and relocations
                 let flags = PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
 
+                /*
                 println!(
                     "ELF: Mapping aligned region: 0x{:x}-0x{:x} (size: 0x{:x})",
                     page_aligned_vaddr.as_u64(),
                     page_aligned_vaddr.as_u64() + aligned_size,
                     aligned_size
                 );
+                */
 
                 // Map memory for the entire segment (including BSS if mem_size > file_size)
-                let range = memory_manager
+                let _range = memory_manager
                     .map_memory(page_aligned_vaddr, aligned_size, flags)
                     .map_err(|e| {
                         println!("ELF: Mapping failed: {:?}", e);
                         ElfLoadError::MappingFailed
                     })?;
 
-                println!("Mapped range {range:?}");
-
                 // Copy file data into memory
                 if file_size > 0 {
                     let segment_data = elf_file.segment_data(&header)?;
 
+                    /*
                     println!(
                         "ELF: Copying {} bytes of segment data, segment_data {:p} {}",
                         segment_data.len(),
                         segment_data.as_ptr(),
                         segment_data.as_ptr().align_offset(align_of::<u8>())
                     );
+                    */
 
                     // copy data
                     unsafe {
@@ -266,9 +271,11 @@ pub fn load_elf(
 
         let actual_entry = VirtAddr::new(load_base.as_u64() + header.e_entry);
 
+        /*
         println!("ELF: header.e_entry = 0x{:x}", header.e_entry);
         println!("ELF: load_base = {:p}", load_base.as_u64() as *const u8);
         println!("ELF: calculated entry = {actual_entry:p}");
+        */
 
         Ok(LoadedInfo {
             entry_point: actual_entry,
