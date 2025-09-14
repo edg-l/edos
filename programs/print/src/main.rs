@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 
-
 use elibc::println;
 
 #[unsafe(no_mangle)]

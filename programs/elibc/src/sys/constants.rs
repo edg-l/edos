@@ -11,6 +11,7 @@ pub const SYS_DUP2: u64 = 33;
 pub const SYS_MMAP: u64 = 9;
 pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_GETPID: u64 = 39;
+pub const SYS_WAIT_PID: u64 = 40;
 pub const SYS_SPAWN: u64 = 57;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_ERRNO: u64 = 0x400;

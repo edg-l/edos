@@ -221,9 +221,7 @@ pub fn load_elf(
                 elf::abi::SHT_INIT_ARRAY => {
                     println!("INIT ARRAY FOUND: {:?}", section_header);
                 }
-                _ => {
-
-                }
+                _ => {}
             }
         }
 

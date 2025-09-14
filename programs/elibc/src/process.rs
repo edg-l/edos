@@ -1,6 +1,7 @@
 use core::hint::spin_loop;
 
 use crate::sys::{
+    SYS_WAIT_PID,
     calls::{syscall0, syscall1, syscall2, syscall5},
     constants::{SYS_DUP2, SYS_EXIT, SYS_GETPID, SYS_PIPE, SYS_SPAWN},
 };
@@ -8,6 +9,11 @@ use crate::sys::{
 /// Get the process ID
 pub fn sys_getpid() -> u64 {
     unsafe { syscall0(SYS_GETPID) }
+}
+
+/// Get the process ID
+pub fn sys_waitpid(pid: u64, block: bool) -> bool {
+    unsafe { syscall2(SYS_WAIT_PID, pid, block as u64) == 1 }
 }
 
 /// Exit the process with the given exit code

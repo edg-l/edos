@@ -26,7 +26,7 @@ use crate::{
         keyboard::sys_keyboard_raw,
         memory::{sys_mmap, sys_munmap},
     },
-    thread::scheduler::{sched, switch_to_kernel_page},
+    thread::scheduler::{ALIVE_THREADS, sched, switch_to_kernel_page},
 };
 
 mod graphics;
@@ -196,6 +196,7 @@ const SYS_SCREEN_INFO: u64 = 102;
 const SYS_DRAW: u64 = 103;
 const SYS_RAW_INPUT: u64 = 200;
 const SYS_KERNEL_LOGS: u64 = 201;
+const SYS_WAIT_PID: u64 = 40;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -277,6 +278,11 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_GETPID => {
             ctx.rax = sys_getpid();
         }
+        SYS_WAIT_PID => {
+            let pid = ctx.rdi;
+            let block = ctx.rsi;
+            ctx.rax = sys_waitpid(pid, block == 1);
+        }
         SYS_ERRNO => {
             ctx.rax = sys_errno();
         }
@@ -333,6 +339,23 @@ fn sys_getpid() -> u64 {
     let sched = sched();
     let current_id = sched.current_id();
     current_id.id
+}
+
+fn sys_waitpid(pid: u64, block: bool) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    if block {
+        log!("blocking waitpid not supported yet");
+        thread.errno = Errno::EINVAL;
+        return !0u64;
+    }
+
+    let is_alive = ALIVE_THREADS.read().get(&pid).is_some();
+
+    is_alive as u64
 }
 
 // TODO: figure out why the syscall gets all logs. it doesnt properly subscribe?

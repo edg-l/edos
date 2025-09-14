@@ -115,7 +115,7 @@ fn main() -> ! {
     let user_thread_info =
         UserThreadInfo::from_thread(&user_thread, 0, 0, Path::parse("/").unwrap());
     queue_spawn_thread(user_thread, user_thread_info);
-     let user_thread = UserThread::new(PRINT_PROGRAM, Some("printmain".to_string())).unwrap();
+    let user_thread = UserThread::new(PRINT_PROGRAM, Some("printmain".to_string())).unwrap();
     let user_thread_info =
         UserThreadInfo::from_thread(&user_thread, 0, 0, Path::parse("/").unwrap());
     queue_spawn_thread(user_thread, user_thread_info);

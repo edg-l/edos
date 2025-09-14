@@ -9,9 +9,23 @@ use x86_64::{
 };
 
 use crate::{
-    boot::boot_info, drivers::fpu::FpuState, fs::path::Path, loader::{load_elf, ElfLoadError}, logs::ThreadLogger, memory::mapper::{active_level_4_table, get_level_4_table, MemoryManager}, println, smp::tlb_flush_all_including_global, syscalls::Errno, thread::{
-        context::CpuContext, fd::FileDescriptorTable, paging::allocate_process_pml4, scheduler::switch_to_kernel_page, util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free}, ThreadId, ThreadState
-    }
+    boot::boot_info,
+    drivers::fpu::FpuState,
+    fs::path::Path,
+    loader::{ElfLoadError, load_elf},
+    logs::ThreadLogger,
+    memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
+    println,
+    smp::tlb_flush_all_including_global,
+    syscalls::Errno,
+    thread::{
+        ThreadId, ThreadState,
+        context::CpuContext,
+        fd::FileDescriptorTable,
+        paging::allocate_process_pml4,
+        scheduler::switch_to_kernel_page,
+        util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
+    },
 };
 
 #[derive(Debug)]
@@ -134,9 +148,11 @@ impl UserThread {
         // Back to kernel page
         unsafe { Cr3::write(kernel_pml4.0, kernel_pml4.1) };
 
-        println!("Creating CpuContext with entry_point: {:p}, stack_top: {:p}",
-                load_info.entry_point.as_u64() as *const u8,
-                stack_top_call_aligned as *const u8);
+        println!(
+            "Creating CpuContext with entry_point: {:p}, stack_top: {:p}",
+            load_info.entry_point.as_u64() as *const u8,
+            stack_top_call_aligned as *const u8
+        );
 
         let context =
             CpuContext::new_user_thread(load_info.entry_point.as_u64(), stack_top_call_aligned);
@@ -194,6 +210,6 @@ impl UserThread {
         if Cr3::read().0.start_address() != self.cr3.0.start_address() {
             unsafe { Cr3::write(self.cr3.0, self.cr3.1) };
         }
-          tlb_flush_all_including_global();
+        tlb_flush_all_including_global();
     }
 }

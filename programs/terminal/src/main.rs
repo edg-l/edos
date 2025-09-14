@@ -14,7 +14,9 @@ use elibc::{
         FileType, chdir, get_kernel_logs, getcwd, list_dir, open, open_flags, read_from_fd,
         read_to_end, write_all_fd,
     },
-    pipe, spawn, sys_close,
+    pipe,
+    process::sys_waitpid,
+    spawn, sys_close,
 };
 
 extern crate alloc;
@@ -83,6 +85,13 @@ struct Terminal {
     is_dirty: bool,
     enable_kernel_logs: bool,
     current_dir: String,
+    running_program: Option<Program>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Program {
+    pub pid: u64,
+    pub read_fd: u64,
 }
 
 impl Terminal {
@@ -121,6 +130,7 @@ impl Terminal {
             is_dirty: true, // Start dirty to force initial render
             enable_kernel_logs: true,
             current_dir,
+            running_program: None,
         })
     }
 
@@ -302,29 +312,22 @@ impl Terminal {
             format!("/usr/bin/{}", command), // Try in /usr/bin
         ];
 
-        let mut spawned = false;
         for path in &paths_to_try {
             // Attempt to spawn the program with stdout redirected to our pipe
-            let child_pid = spawn(&path, 0, write_fd, 2); // stdin=0, stdout=pipe, stderr=2
+            let child_pid = spawn(path, 0, write_fd, 2); // stdin=0, stdout=pipe, stderr=2
 
             if child_pid != u64::MAX {
-                self.print_text(&format!("Started {} (PID: {})\n", command, child_pid));
-                spawned = true;
-
-                // Close our copy of the write end since child has it
+                // self.print_text(&format!("Started {} (PID: {})\n", command, child_pid));
                 let _ = sys_close(write_fd);
-
-                // Read output from the pipe and display it
-                self.read_and_display_output(read_fd);
-
-                let _ = sys_close(read_fd);
+                self.running_program = Some(Program {
+                    pid: child_pid,
+                    read_fd,
+                });
                 return;
             }
         }
 
-        if !spawned {
-            self.print_text(&format!("Command not found: {}\n", command));
-        }
+        self.print_text(&format!("Command not found: {}\n", command));
 
         // Clean up pipe if we couldn't spawn
         let _ = sys_close(read_fd);
@@ -342,7 +345,10 @@ impl Terminal {
                         self.print_text(text);
                     }
                 }
-                Err(_) => break, // Read error
+                Err(e) => {
+                    self.print_text(&format!("Read error: {e:?}\n"));
+                    break;
+                } // Read error
             }
         }
     }
@@ -568,6 +574,16 @@ pub extern "C" fn main() -> i32 {
                 for log in logs {
                     terminal.print_text(&log);
                 }
+            }
+        }
+
+        if let Some(program) = terminal.running_program {
+            // Read output from the pipe and display it
+            terminal.read_and_display_output(program.read_fd);
+            if !sys_waitpid(program.pid, false) {
+                // Close our copy of the write end since child has it
+                let _ = sys_close(program.read_fd);
+                terminal.running_program = None;
             }
         }
 

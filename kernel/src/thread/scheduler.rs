@@ -14,19 +14,36 @@ use x86_64::{
 };
 
 use crate::{
-    apic::get_lapic, boot::boot_info, drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state}, interrupts::InterruptIndex, logs::ThreadLogger, println, smp::tlb_flush_all_including_global, syscalls::set_gs_kernel_stack, thread::{
-        context::CpuContext, user::{UserThread, UserThreadInfo}, KernelThread, ThreadId, ThreadState
-    }, timer::Instant, util::per_cpu::get_percpu_data
+    apic::get_lapic,
+    boot::boot_info,
+    drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
+    interrupts::InterruptIndex,
+    logs::ThreadLogger,
+    println,
+    smp::tlb_flush_all_including_global,
+    syscalls::set_gs_kernel_stack,
+    thread::{
+        KernelThread, ThreadId, ThreadState,
+        context::CpuContext,
+        user::{UserThread, UserThreadInfo},
+    },
+    timer::Instant,
+    util::per_cpu::get_percpu_data,
 };
 
 // tid -> lapic that owns it
-pub static ALIVE_THREADS: RwLock<FnvIndexMap<ThreadId, u32, 1024>> =
-    RwLock::new(FnvIndexMap::new());
+pub static ALIVE_KTHREADS: RwLock<FnvIndexMap<u64, u32, 128>> = RwLock::new(FnvIndexMap::new());
+
+pub static ALIVE_THREADS: RwLock<FnvIndexMap<u64, u32, 1024>> = RwLock::new(FnvIndexMap::new());
 
 /// Returns the scheduler id this thread lives on.
 #[allow(unused)]
 pub fn thread_exists(tid: &ThreadId) -> Option<u32> {
-    ALIVE_THREADS.read().get(tid).copied()
+    if tid.kernel {
+        ALIVE_KTHREADS.read().get(&tid.id).copied()
+    } else {
+        ALIVE_THREADS.read().get(&tid.id).copied()
+    }
 }
 
 #[derive(Debug)]
@@ -179,21 +196,27 @@ pub extern "C" fn idle_loop() -> ! {
 #[expect(unused)]
 impl Scheduler {
     fn process_spawn_queue(&mut self) {
-        let mut lock = ALIVE_THREADS.write();
         let cpuidx = self.lapic_id;
-        while let Some(kthread) = self.kthread_spawn_queue.pop() {
-            self.thread_queue.push(kthread.id.clone());
-            lock.insert(kthread.id.clone(), cpuidx);
-            self.storage.kthreads.insert(kthread.id.id, kthread);
+        {
+            let mut kthreads_alive = ALIVE_KTHREADS.write();
+            while let Some(kthread) = self.kthread_spawn_queue.pop() {
+                self.thread_queue.push(kthread.id.clone());
+                kthreads_alive.insert(kthread.id.id, cpuidx);
+                self.storage.kthreads.insert(kthread.id.id, kthread);
+            }
         }
 
-        while let Some((thread, info)) = self.thread_spawn_queue.pop() {
-            self.thread_queue.push(thread.id.clone());
-            lock.insert(thread.id.clone(), cpuidx);
-            self.storage
-                .thread_info
-                .insert(thread.id.id, Arc::new(Mutex::new(info)));
-            self.storage.threads.insert(thread.id.id, thread);
+        {
+            let mut threads_alive = ALIVE_THREADS.write();
+
+            while let Some((thread, info)) = self.thread_spawn_queue.pop() {
+                self.thread_queue.push(thread.id.clone());
+                threads_alive.insert(thread.id.id, cpuidx);
+                self.storage
+                    .thread_info
+                    .insert(thread.id.id, Arc::new(Mutex::new(info)));
+                self.storage.threads.insert(thread.id.id, thread);
+            }
         }
     }
 
@@ -256,13 +279,14 @@ impl Scheduler {
                         if let Some(thread) = self.storage.kthreads.get_mut(&thread_id.id) {
                             thread.state = ThreadState::Exited(code);
                             thread.free();
+                            ALIVE_KTHREADS.write().remove(&thread_id.id);
                         }
                     } else if let Some(thread) = self.storage.threads.get_mut(&thread_id.id) {
                         thread.state = ThreadState::Exited(code);
                         let info = self.storage.thread_info.remove(&thread.id.id);
                         thread.free(info.unwrap());
+                        ALIVE_THREADS.write().remove(&thread_id.id);
                     }
-                    ALIVE_THREADS.write().remove(&thread_id);
                 }
             }
         }
@@ -393,7 +417,11 @@ impl Scheduler {
 
     // TODO: this checks only current cpu scheduler, so it returns true
     pub fn thread_exists(&self, id: ThreadId) -> bool {
-        ALIVE_THREADS.read().get(&id).is_some()
+        if id.kernel {
+            ALIVE_KTHREADS.read().get(&id.id).is_some()
+        } else {
+            ALIVE_THREADS.read().get(&id.id).is_some()
+        }
     }
 
     /// Wake the given thread
@@ -471,5 +499,5 @@ pub fn switch_to_kernel_page() {
     if Cr3::read().0.start_address() != kernel_cr3.0.start_address() {
         unsafe { Cr3::write(kernel_cr3.0, kernel_cr3.1) };
     }
-      tlb_flush_all_including_global();
+    tlb_flush_all_including_global();
 }
