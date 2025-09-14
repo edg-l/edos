@@ -57,8 +57,6 @@ impl Locked {
                 panic!();
             }
 
-            println!("Initializing heap: {ptr:p}");
-
             unsafe { LockedHeap::new(ptr, 1024 * 1024 * 64) }
         })
     }

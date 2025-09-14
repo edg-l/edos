@@ -73,11 +73,11 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
         return 0;
     }
 
-    let buffer = unsafe { core::slice::from_raw_parts(buffer_ptr, count) };
+    let buffer = unsafe { core::slice::from_raw_parts(buffer_ptr, count) }.to_vec();
 
     match thread.fd_table.get_fd(fd) {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
-            StandardStream::Stdout | StandardStream::Stderr => match core::str::from_utf8(buffer) {
+            StandardStream::Stdout | StandardStream::Stderr => match core::str::from_utf8(&buffer) {
                 Ok(s) => {
                     // TODO: add stdout stream broadcast?
                     log!("{}", s);
@@ -98,8 +98,10 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
         },
         Some(FileDescriptor::Pipe(pipe)) => {
             // TODO: is it safe to get this lock here
+            let text = core::str::from_utf8(&buffer);
+             log!("Pipe: {:?}", text);
             let mut pipe = pipe.write();
-            pipe.buffer.extend_from_slice(buffer);
+            pipe.buffer.extend_from_slice(&buffer);
             count as u64
         }
         Some(FileDescriptor::FsFile(file)) => {
@@ -115,7 +117,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                     }
                 }
             }
-            match fs_api::write_bytes(&file.path, file.offset as usize, buffer) {
+            match fs_api::write_bytes(&file.path, file.offset as usize, &buffer) {
                 Ok(written) => {
                     let new_fd = FileDescriptor::FsFile(FsFile {
                         offset: file.offset + written,
