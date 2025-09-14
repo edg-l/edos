@@ -176,4 +176,43 @@ impl Fat32fs {
             + self.boot_info.reserved_sector_count as u64
             + (self.boot_info.num_fats as u64 * self.boot_info.fat_size_32 as u64)
     }
+
+    /// Analyze a cluster chain to find consecutive cluster ranges for batched reading.
+    /// Returns a vector of (start_cluster, cluster_count) tuples representing consecutive ranges.
+    pub fn analyze_cluster_chain(&self, start_cluster: u32) -> Result<Vec<(u32, u32)>, Error> {
+        if start_cluster < 2 {
+            return Ok(Vec::new());
+        }
+
+        let mut ranges = Vec::new();
+        let mut current_cluster = start_cluster;
+
+        loop {
+            let range_start = current_cluster;
+            let mut range_count = 1u32;
+
+            // Extend the current range as long as clusters are consecutive
+            loop {
+                match self.get_fat_entry(current_cluster)? {
+                    Some(next_cluster) => {
+                        // Check if next cluster is consecutive
+                        if next_cluster == current_cluster + 1 {
+                            current_cluster = next_cluster;
+                            range_count += 1;
+                        } else {
+                            // Non-consecutive cluster found, end current range
+                            ranges.push((range_start, range_count));
+                            current_cluster = next_cluster;
+                            break;
+                        }
+                    }
+                    None => {
+                        // End of chain
+                        ranges.push((range_start, range_count));
+                        return Ok(ranges);
+                    }
+                }
+            }
+        }
+    }
 }
