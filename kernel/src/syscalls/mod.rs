@@ -524,37 +524,41 @@ fn sys_spawn(
 
     x86_64::instructions::interrupts::enable();
 
-    let elf_data = match fs_api::read_bytes(&path, 0, 1024 * 1024 * 10) {
-        // Limit to 1MB for now
-        Ok(data) => data,
+    let mut elf_data = Vec::new();
+    let info = match fs_api::file_info(&path) {
+        Ok(info) => info,
         Err(_) => {
             sched.current_thread_info().lock().errno = Errno::EINVAL;
             return !0u64;
         }
     };
 
+    match fs_api::read_bytes(&path, elf_data.len(), info.size as usize) {
+        Ok(data) => {
+            elf_data = data;
+        }
+        Err(_) => {
+            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    }
+
     x86_64::instructions::interrupts::disable();
 
     let cr3 = Cr3::read();
     switch_to_kernel_page();
 
-    println!(
-        "elf data len: {}, last byte {:?}",
-        elf_data.len(),
-        elf_data.last()
-    );
-
     // Create new user thread from ELF data
     let user_thread = match UserThread::new(&elf_data, Some(path_str.to_string())) {
         Ok(thread) => {
-            println!(
+            log!(
                 "UserThread created successfully, entry point: {:p}",
                 thread.context.rip() as *const u8
             );
             thread
         }
         Err(e) => {
-            println!("UserThread creation failed: {:?}", e);
+            log!("UserThread creation failed: {:?}", e);
             sched.current_thread_info().lock().errno = Errno::EINVAL;
             return !0u64;
         }
