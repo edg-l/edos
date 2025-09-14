@@ -110,11 +110,11 @@ fn main() -> ! {
     let user_thread = UserThread::new(TERMINAL_PROGRAM, Some("terminal".to_string())).unwrap();
     let user_thread_info =
         UserThreadInfo::from_thread(&user_thread, 0, 0, Path::parse("/").unwrap());
-    queue_spawn_thread(user_thread, user_thread_info);
+    //queue_spawn_thread(user_thread, user_thread_info);
     let user_thread = UserThread::new(PRINT_PROGRAM, Some("printmain".to_string())).unwrap();
     let user_thread_info =
         UserThreadInfo::from_thread(&user_thread, 0, 0, Path::parse("/").unwrap());
-    queue_spawn_thread(user_thread, user_thread_info);
+    //queue_spawn_thread(user_thread, user_thread_info);
     queue_spawn_kthread_named("test", smp::kthread_test as u64);
     queue_spawn_kthread_named("mount", mount_filesystems as u64);
 
@@ -145,9 +145,8 @@ pub fn mount_filesystems() -> ! {
 
     let path = Path::parse("/file.dat").unwrap();
     for _ in 0..16 {
-       let bytes =  fs::api::read_bytes(&path, 0, 1024 * 1024).unwrap();
-       log!("Bytes: {}", bytes.len());
-
+        let bytes = fs::api::read_bytes(&path, 0, 1024 * 1024).unwrap();
+        log!("Bytes: {}", bytes.len());
     }
 
     kthread_exit(0)

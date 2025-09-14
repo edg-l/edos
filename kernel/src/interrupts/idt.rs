@@ -216,21 +216,25 @@ extern "x86-interrupt" fn page_fault_handler(
 
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0 {
         let address = Cr2::read().unwrap();
+        let current_tid = sched().current_tid.clone();
         println!("EXCEPTION: PAGE FAULT in Ring 0");
+        println!("Current tid: {current_tid:?}");
         println!("Accessed Address: {address:?}");
         println!("Error Code: {error_code:?}");
-        println!("{stack_frame:#?}");
         println!("Fault Type: {error_desc}",);
 
         println!(
             "Page fault, address = {:p}, error = {error_desc:?}",
             address.as_ptr::<u8>()
         );
+
         let stack_ptr = stack_frame.stack_pointer.as_u64();
         let fault_addr = address.as_u64();
         if fault_addr < stack_ptr && (stack_ptr - fault_addr) < 8192 {
-            panic!("Stack overflow detected at {:#x}", fault_addr);
+            println!("Stack overflow detected at {:#x}", fault_addr);
         }
+
+        println!("{stack_frame:#?}");
 
         panic!("EXCEPTION: PAGE FAULT IN RING 0");
     } else {

@@ -12,6 +12,7 @@ use x86_64::{
 use crate::{
     boot::boot_info,
     drivers::ahci::AhciError,
+    log,
     memory::{DMA_REGION_START, mapper::memory_mapper},
 };
 
@@ -36,6 +37,11 @@ impl<T> DmaRegion<T> {
 
         let virt_addr = VirtAddr::new(
             NEXT_DMA_ADDR.fetch_add(aligned_size, core::sync::atomic::Ordering::Relaxed),
+        );
+
+        log!(
+            "Allocating dma region at: {virt_addr:?} {:?}",
+            virt_addr + aligned_size
         );
 
         {
@@ -91,6 +97,11 @@ impl DmaBuffer {
             NEXT_DMA_ADDR.fetch_add(aligned_size, core::sync::atomic::Ordering::Relaxed),
         );
 
+        log!(
+            "Allocating dma buffer at: {virt_addr:?} {:?}",
+            virt_addr + aligned_size
+        );
+
         {
             without_interrupts(|| {
                 let mut mapper = memory_mapper();
@@ -144,16 +155,19 @@ impl DmaAllocator {
             if let Some(buf) = self.list_512.pop() {
                 Ok(buf)
             } else {
+                log!("Allocating new 512 dma buffer");
                 DmaBuffer::allocate_sized(512)
             }
         } else if size <= 1024 {
             if let Some(buf) = self.list_1024.pop() {
+                log!("Allocating new 1024 dma buffer");
                 Ok(buf)
             } else {
                 DmaBuffer::allocate_sized(1024)
             }
         } else if size <= 2048 {
             if let Some(buf) = self.list_2048.pop() {
+                log!("Allocating new 2048 dma buffer");
                 Ok(buf)
             } else {
                 DmaBuffer::allocate_sized(2048)
@@ -167,6 +181,7 @@ impl DmaAllocator {
                 }
             }
 
+            log!("Allocating new {size} dma buffer");
             DmaBuffer::allocate_sized(align_up(size as u64, 4096) as usize)
         }
     }

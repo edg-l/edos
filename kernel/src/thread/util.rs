@@ -84,7 +84,10 @@ pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> Th
 
 /// Exits a kthread.
 pub fn kthread_exit(code: i32) -> ! {
-    sched().thread_exit(code);
+    let sched = sched();
+    if let Some(tid) = sched.current_id_opt() {
+        sched.thread_exit(code);
+    }
 
     loop {
         hlt();
