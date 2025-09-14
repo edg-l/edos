@@ -101,6 +101,7 @@ unsafe extern "C" fn syscall_entry() {
         "mov rsp, gs:8",           // Load kernel stack
 
         // Build SyscallRegs structure on stack
+        "push gs:0", // rsp
         "push r11",                // rflags (RFLAGS saved by syscall)
         "push rcx",                // rip (RIP saved by syscall)
 
@@ -118,7 +119,7 @@ unsafe extern "C" fn syscall_entry() {
         "push r14",                // r14
         "push r15",                // r15
 
-        // 15 * 8 = 120
+        // 16 * 8 = 0x80
 
         // Call handler with pointer to SyscallContext
         "mov rdi, rsp",            // Pass pointer to SyscallContext
@@ -141,9 +142,9 @@ unsafe extern "C" fn syscall_entry() {
 
         "pop rcx", // RIP
         "pop r11", // RFLAGS
+        "pop rsp",
 
         // Return to user
-        "mov rsp, gs:0",
         "swapgs",
         "sysretq",
 
@@ -170,6 +171,7 @@ pub struct SyscallContext {
     pub rax: u64,
     pub rip: u64,    // User RIP
     pub rflags: u64, // User RFLAGS
+    pub rsp: u64,
 }
 
 const SYS_READ: u64 = 0;
@@ -522,9 +524,12 @@ fn sys_spawn(
     // Create new user thread from ELF data
     let user_thread = match UserThread::new(&elf_data, Some(path_str.to_string())) {
         Ok(thread) => {
-            println!("UserThread created successfully, entry point: {:p}", thread.context.rip() as *const u8);
+            println!(
+                "UserThread created successfully, entry point: {:p}",
+                thread.context.rip() as *const u8
+            );
             thread
-        },
+        }
         Err(e) => {
             println!("UserThread creation failed: {:?}", e);
             sched.current_thread_info().lock().errno = Errno::EINVAL;
