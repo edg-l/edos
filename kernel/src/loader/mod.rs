@@ -186,53 +186,43 @@ pub fn load_elf(
             }
         }
 
-        if let Ok(Some(rela_dyn)) = elf_file.section_header_by_name(".rela.dyn") {
-            let rela_entries = elf_file.section_data_as_relas(&rela_dyn)?;
+        let section_headers = elf_file.section_headers().unwrap();
 
-            for rela in rela_entries {
-                let reloc_addr = base_addr + rela.r_offset;
-                let reloc_type = rela.r_type;
+        for section_header in section_headers.iter() {
+            match section_header.sh_type {
+                elf::abi::SHT_RELA => {
+                    let rela_entries = elf_file.section_data_as_relas(&section_header)?;
 
-                match reloc_type {
-                    // R_X86_64_RELATIVE - Most common for PIC static executables
-                    8 => {
-                        let value = base_addr.as_u64() + rela.r_addend as u64;
+                    for rela in rela_entries {
+                        let reloc_addr = base_addr + rela.r_offset;
+                        let reloc_type = rela.r_type;
+                        //println!("Relocation rela R_X86_64_RELATIVE: {}", rela.r_offset);
 
-                        unsafe {
-                            *(reloc_addr.as_u64() as *mut u64) = value;
+                        match reloc_type {
+                            // R_X86_64_RELATIVE - Most common for PIC static executables
+                            8 => {
+                                let value = base_addr.as_u64() + rela.r_addend as u64;
+
+                                unsafe {
+                                    *(reloc_addr.as_u64() as *mut u64) = value;
+                                }
+                            }
+
+                            _ => {
+                                println!("Unsupported relocation type: {}", reloc_type);
+                                // For now, continue - many relocations might not be needed
+                            }
                         }
-                    }
-
-                    _ => {
-                        println!("Unsupported relocation type: {}", reloc_type);
-                        // For now, continue - many relocations might not be needed
                     }
                 }
-            }
-        }
+                elf::abi::SHT_REL => {
+                    panic!("REL relocation unsupported");
+                }
+                elf::abi::SHT_INIT_ARRAY => {
+                    println!("INIT ARRAY FOUND: {:?}", section_header);
+                }
+                _ => {
 
-        // Process .rela.plt section for function relocations (if using PLT)
-        if let Ok(Some(rela_plt)) = elf_file.section_header_by_name(".rela.plt") {
-            let rela_entries = elf_file.section_data_as_relas(&rela_plt)?;
-
-            for rela in rela_entries {
-                let reloc_addr = base_addr + rela.r_offset;
-                let reloc_type = rela.r_type;
-
-                match reloc_type {
-                    // R_X86_64_RELATIVE - Most common for PIC static executables
-                    8 => {
-                        let value = base_addr.as_u64() + rela.r_addend as u64;
-
-                        unsafe {
-                            *(reloc_addr.as_u64() as *mut u64) = value;
-                        }
-                    }
-
-                    _ => {
-                        println!("Unsupported relocation type: {}", reloc_type);
-                        // For now, continue - many relocations might not be needed
-                    }
                 }
             }
         }

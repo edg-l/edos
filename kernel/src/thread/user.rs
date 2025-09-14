@@ -9,17 +9,9 @@ use x86_64::{
 };
 
 use crate::{
-    boot::boot_info,
-    drivers::fpu::FpuState,
-    fs::path::Path,
-    loader::{load_elf, ElfLoadError},
-    logs::ThreadLogger,
-    memory::mapper::{active_level_4_table, get_level_4_table, MemoryManager},
-    println,
-    syscalls::Errno,
-    thread::{
+    boot::boot_info, drivers::fpu::FpuState, fs::path::Path, loader::{load_elf, ElfLoadError}, logs::ThreadLogger, memory::mapper::{active_level_4_table, get_level_4_table, MemoryManager}, println, smp::tlb_flush_all_including_global, syscalls::Errno, thread::{
         context::CpuContext, fd::FileDescriptorTable, paging::allocate_process_pml4, scheduler::switch_to_kernel_page, util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free}, ThreadId, ThreadState
-    },
+    }
 };
 
 #[derive(Debug)]
@@ -202,5 +194,6 @@ impl UserThread {
         if Cr3::read().0.start_address() != self.cr3.0.start_address() {
             unsafe { Cr3::write(self.cr3.0, self.cr3.1) };
         }
+          tlb_flush_all_including_global();
     }
 }

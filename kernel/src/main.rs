@@ -115,6 +115,10 @@ fn main() -> ! {
     let user_thread_info =
         UserThreadInfo::from_thread(&user_thread, 0, 0, Path::parse("/").unwrap());
     queue_spawn_thread(user_thread, user_thread_info);
+     let user_thread = UserThread::new(PRINT_PROGRAM, Some("printmain".to_string())).unwrap();
+    let user_thread_info =
+        UserThreadInfo::from_thread(&user_thread, 0, 0, Path::parse("/").unwrap());
+    queue_spawn_thread(user_thread, user_thread_info);
     queue_spawn_kthread_named("test", smp::kthread_test as u64);
     queue_spawn_kthread_named("mount", mount_filesystems as u64);
 
@@ -145,6 +149,7 @@ pub fn mount_filesystems() -> ! {
 }
 
 pub const TERMINAL_PROGRAM: &[u8] = include_bytes!("../../filesystem/bin/terminal");
+pub const PRINT_PROGRAM: &[u8] = include_bytes!("../../filesystem/bin/print");
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {

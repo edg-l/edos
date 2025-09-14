@@ -14,20 +14,9 @@ use x86_64::{
 };
 
 use crate::{
-    apic::get_lapic,
-    boot::boot_info,
-    drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
-    interrupts::InterruptIndex,
-    logs::ThreadLogger,
-    println,
-    syscalls::set_gs_kernel_stack,
-    thread::{
-        KernelThread, ThreadId, ThreadState,
-        context::CpuContext,
-        user::{UserThread, UserThreadInfo},
-    },
-    timer::Instant,
-    util::per_cpu::get_percpu_data,
+    apic::get_lapic, boot::boot_info, drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state}, interrupts::InterruptIndex, logs::ThreadLogger, println, smp::tlb_flush_all_including_global, syscalls::set_gs_kernel_stack, thread::{
+        context::CpuContext, user::{UserThread, UserThreadInfo}, KernelThread, ThreadId, ThreadState
+    }, timer::Instant, util::per_cpu::get_percpu_data
 };
 
 // tid -> lapic that owns it
@@ -482,4 +471,5 @@ pub fn switch_to_kernel_page() {
     if Cr3::read().0.start_address() != kernel_cr3.0.start_address() {
         unsafe { Cr3::write(kernel_cr3.0, kernel_cr3.1) };
     }
+      tlb_flush_all_including_global();
 }
