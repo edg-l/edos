@@ -5,7 +5,10 @@
 
 use core::{arch::asm, time::Duration};
 
-use alloc::string::ToString;
+use alloc::{
+    string::ToString,
+    vec::{self, Vec},
+};
 use x86_64::{VirtAddr, instructions::hlt};
 
 use crate::{
@@ -13,6 +16,7 @@ use crate::{
     allocator::{init_heap, print_alloc_stats},
     apic::set_apic_timer_and_enable,
     boot::boot_info,
+    drivers::ahci::api::read_sectors,
     fs::path::Path,
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
     thread::{
@@ -143,11 +147,19 @@ pub fn mount_filesystems() -> ! {
     let root = Path::parse("/").unwrap();
     fs::api::mount_partition(part.index as usize, root.clone()).unwrap();
 
-    let path = Path::parse("/file.dat").unwrap();
-    for _ in 0..16 {
-        let bytes = fs::api::read_bytes(&path, 0, 1024 * 1024).unwrap();
-        log!("Bytes: {}", bytes.len());
+    let mut buffer = alloc::vec![0; 512];
+    for i in 0..148 {
+        buffer = read_sectors(0, i , 1, buffer).unwrap();
+        log!("Bytes: {}", buffer.len());
     }
+
+    log!("Done");
+
+    //let path = Path::parse("/file.dat").unwrap();
+    //for _ in 0..16 {
+    //    let bytes = fs::api::read_bytes(&path, 0, 1024 * 1024).unwrap();
+    //    log!("Bytes: {}", bytes.len());
+    //}
 
     kthread_exit(0)
 }
