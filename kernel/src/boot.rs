@@ -136,7 +136,6 @@ unsafe extern "C" fn kmain() -> ! {
     let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };
     let kernel_page_table = unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };
 
-
     let boot_info = BootInfo {
         framebuffer,
         memory_map,

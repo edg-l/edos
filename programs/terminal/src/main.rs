@@ -2,9 +2,9 @@
 #![no_main]
 
 use alloc::{
+    collections::vec_deque::VecDeque,
     format,
     string::{String, ToString},
-    vec,
     vec::Vec,
 };
 use elibc::{
@@ -68,7 +68,7 @@ fn parse_command(input: &str) -> Vec<String> {
 struct Terminal {
     screen: Screen,
     // Output lines only (printed program output and echoed commands)
-    buffer: Vec<String>,
+    buffer: VecDeque<String>,
     // Input state (rendered in a reserved bottom margin)
     input_line: String,
     cursor_x: usize,
@@ -108,7 +108,7 @@ impl Terminal {
         let max_output_lines = ((screen.height() as u64 - 2 * MARGIN - metrics.line_height)
             / metrics.line_height) as usize;
 
-        let buffer = alloc::vec![String::new()];
+        let buffer = VecDeque::new();
 
         // Get current working directory
         let current_dir = getcwd().unwrap_or_else(|_| "/".to_string());
@@ -128,7 +128,7 @@ impl Terminal {
             prompt_text,
             prompt_style,
             is_dirty: true, // Start dirty to force initial render
-            enable_kernel_logs: true,
+            enable_kernel_logs: false,
             current_dir,
             running_program: None,
         })
@@ -233,7 +233,7 @@ impl Terminal {
     }
 
     fn add_output_newline(&mut self) {
-        self.buffer.push(String::new());
+        self.buffer.push_back(String::new());
         // Handle scrolling if we exceed max output lines
         while self.buffer.len() > self.max_output_lines {
             self.buffer.remove(0);
@@ -259,7 +259,7 @@ impl Terminal {
         for (i, line) in lines.iter().enumerate() {
             // Ensure there's at least one output line to write to
             if self.buffer.is_empty() {
-                self.buffer.push(String::new());
+                self.buffer.push_back(String::new());
             }
 
             // Add text to last output line with wrapping
@@ -280,7 +280,7 @@ impl Terminal {
     fn insert_char_at_end(&mut self, ch: char) {
         // Ensure we have at least one output line
         if self.buffer.is_empty() {
-            self.buffer.push(String::new());
+            self.buffer.push_back(String::new());
         }
 
         // Add character to end of the last output line
@@ -305,7 +305,7 @@ impl Terminal {
         };
 
         // Try absolute path first, then relative in current directory
-        let paths_to_try = vec![
+        let paths_to_try = alloc::vec![
             format!("/{}", command),         // Try as absolute path
             format!("./{}", command),        // Try in current directory
             format!("/bin/{}", command),     // Try in /bin
@@ -468,6 +468,9 @@ impl Terminal {
                     }
                 }
             }
+            "clear" => {
+                self.buffer.clear();
+            }
             _ => {
                 // Try to spawn the command as an external program
                 self.try_spawn_program(command, args);
@@ -480,11 +483,11 @@ impl Terminal {
         let echoed = format!("{}{}", self.prompt_text, self.input_line);
         if !echoed.is_empty() {
             // If the current last output line is empty, write there, otherwise create a new one
-            if self.buffer.is_empty() || !self.buffer.last().unwrap().is_empty() {
+            if self.buffer.is_empty() {
                 self.add_output_newline();
             }
             if self.buffer.is_empty() {
-                self.buffer.push(String::new());
+                self.buffer.push_back(String::new());
             }
             let last_idx = self.buffer.len() - 1;
             self.buffer[last_idx].push_str(&echoed);
@@ -557,6 +560,9 @@ pub extern "C" fn main() -> i32 {
         Err(_) => return 1,
     };
 
+    terminal.print_text("edos v0.1.0\n");
+    terminal.print_text("\nType help for more info.\n");
+
     // Initial render
     if terminal.render().is_err() {
         return 1;
@@ -575,6 +581,10 @@ pub extern "C" fn main() -> i32 {
                     terminal.print_text(&log);
                 }
             }
+        }
+
+        while terminal.buffer.len() > 500 {
+            terminal.buffer.pop_front();
         }
 
         if let Some(program) = terminal.running_program {
