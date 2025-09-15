@@ -182,7 +182,7 @@ impl Scheduler {
             let mut threads_alive = ALIVE_THREADS.write();
 
             while let Some((thread, info)) = self.thread_spawn_queue.pop() {
-                self.thread_queue.push(thread.id.clone());
+                self.thread_queue.push(thread.id);
                 threads_alive.insert(thread.id, cpuidx);
                 if let Some(info) = info {
                     self.storage

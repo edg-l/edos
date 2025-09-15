@@ -45,7 +45,6 @@ impl Pipe {
         }
     }
 
-    #[expect(unused)]
     pub fn close_reader(&mut self) {
         self.readers = self.readers.saturating_sub(1);
     }

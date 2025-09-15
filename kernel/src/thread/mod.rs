@@ -78,7 +78,6 @@ pub struct UserThread {
     // Whether the fpu has been initialized for this thread.
     pub fpu_init: bool,
     pub fpu: FpuState,
-    pub logger: Arc<ThreadLogger>,
     pub heap_break: u64,
 }
 
@@ -231,7 +230,7 @@ impl Thread {
             context,
             state: ThreadState::Ready,
             logger: Arc::new(ThreadLogger {
-                kernel: true,
+                kernel: false,
                 id,
                 name: name.clone(),
             }),
@@ -245,11 +244,6 @@ impl Thread {
                 heap_break: load_info.heap_break,
                 fpu_init: false,
                 fpu: FpuState::default(),
-                logger: Arc::new(ThreadLogger {
-                    id,
-                    kernel: false,
-                    name,
-                }),
             }),
         };
 
