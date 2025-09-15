@@ -9,7 +9,6 @@ use x86_64::{
 use crate::{
     apic::get_lapic,
     thread::{
-        ThreadId,
         broadcast::{LockedBroadcast, new_broadcast},
         scheduler::sched,
     },
@@ -37,7 +36,7 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
     unsafe { get_lapic().end_of_interrupt() };
 }
 
-pub static KEYBOARD_THREAD_ID: Once<ThreadId> = Once::new();
+pub static KEYBOARD_THREAD_ID: Once<u64> = Once::new();
 
 pub extern "C" fn driver_main() -> ! {
     without_interrupts(|| unsafe {

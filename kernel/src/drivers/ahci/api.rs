@@ -7,7 +7,7 @@ use crate::{
         AHCI_REQUESTS, AhciError, AhciRequest, AhciResponse, Command, DetectedDevice,
         structures::DeviceIdentifyInfo,
     },
-    thread::{ThreadId, scheduler::sched},
+    thread::scheduler::sched,
 };
 
 pub(super) fn send_request(request: AhciRequest, timeout: Duration) -> AhciResponse {

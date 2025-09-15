@@ -6,11 +6,11 @@ use spin::Mutex;
 use thiserror::Error;
 use x86_64::instructions::interrupts::without_interrupts;
 
-use crate::thread::{ThreadId, scheduler::sched};
+use crate::thread::scheduler::sched;
 
 #[derive(Debug)]
 pub struct Broadcast<T: Clone> {
-    subscribers: BTreeMap<ThreadId, Receiver<T>>,
+    subscribers: BTreeMap<u64, Receiver<T>>,
     history: Vec<T>,
     send_history: bool,
     bound: usize,

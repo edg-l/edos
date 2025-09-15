@@ -12,11 +12,7 @@ use crate::{
         USER_STACK_TOP,
         mapper::{MemoryManager, memory_mapper},
     },
-    thread::{
-        KernelThread, ThreadId,
-        scheduler::sched,
-        user::{UserThread, UserThreadInfo},
-    },
+    thread::{Thread, UserThreadInfo, scheduler::sched},
 };
 
 static KTHREAD_FREED_STACKS: SegQueue<u64> = SegQueue::new();
@@ -58,27 +54,27 @@ pub fn kthread_stack_free(stack_top: u64) {
     KTHREAD_FREED_STACKS.push(region_bottom);
 }
 
-pub fn queue_spawn_kthread(entry: u64) -> ThreadId {
-    let thread = KernelThread::new(None, entry);
+pub fn queue_spawn_kthread(entry: u64) -> u64 {
+    let thread = Thread::new_kernel(None, entry);
     let id = thread.id.clone();
-    sched().kthread_spawn_queue.push(thread);
+    sched().thread_spawn_queue.push((thread, None));
     id
 }
 
-pub fn queue_spawn_kthread_named(name: &str, entry: u64) -> ThreadId {
-    let thread = KernelThread::new(Some(name.to_string()), entry);
+pub fn queue_spawn_kthread_named(name: &str, entry: u64) -> u64 {
+    let thread = Thread::new_kernel(Some(name.to_string()), entry);
 
     let id = thread.id.clone();
-    sched().kthread_spawn_queue.push(thread);
+    sched().thread_spawn_queue.push((thread, None));
     id
 }
 
-pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> ThreadId {
-    let mut thread = KernelThread::new(Some(name.to_string()), entry);
+pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> u64 {
+    let mut thread = Thread::new_kernel(Some(name.to_string()), entry);
     thread.context.rdi = arg as u64;
 
     let id = thread.id.clone();
-    sched().kthread_spawn_queue.push(thread);
+    sched().thread_spawn_queue.push((thread, None));
     id
 }
 
@@ -120,6 +116,6 @@ pub fn thread_stack_free(manager: &mut MemoryManager, stack_top: u64) {
     manager.unmap_memory(stack_bottom, USER_STACK_SIZE).ok();
 }
 
-pub fn queue_spawn_thread(thread: UserThread, info: UserThreadInfo) {
-    sched().thread_spawn_queue.push((thread, info));
+pub fn queue_spawn_thread(thread: Thread, info: UserThreadInfo) {
+    sched().thread_spawn_queue.push((thread, Some(info)));
 }

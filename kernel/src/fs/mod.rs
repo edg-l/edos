@@ -16,7 +16,6 @@ use crate::{
     },
     log,
     thread::{
-        ThreadId,
         mailbox::Mailbox,
         scheduler::sched,
         util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_kthread_named_arg},
@@ -208,7 +207,7 @@ pub(super) enum FsRequest {
         command: PartitionCommand,
     },
     // Internal for worker bootstrap
-    GetPartitionMailbox(ThreadId),
+    GetPartitionMailbox(u64), // threadid
 }
 
 #[derive(Debug, Clone)]
@@ -290,7 +289,7 @@ pub extern "C" fn fs_main_thread() -> ! {
 
     // Per-partition worker threads and their mailboxes
     let mut worker_mailboxes: Vec<Mailbox<PartitionCommand, FsResponse>> = Vec::new();
-    let mut worker_tid_map = alloc::collections::btree_map::BTreeMap::<ThreadId, usize>::new();
+    let mut worker_tid_map = alloc::collections::btree_map::BTreeMap::<u64, usize>::new();
 
     for (idx, partition) in partitions.iter().enumerate() {
         if let Some(filesystem) = &partition.filesystem {

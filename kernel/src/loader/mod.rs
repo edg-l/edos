@@ -9,7 +9,7 @@ use x86_64::{
 use crate::{
     memory::mapper::MemoryManager,
     println,
-    thread::user::{MemoryRegion, MemoryRegionType},
+    thread::{MemoryRegion, MemoryRegionType},
 };
 
 #[derive(Debug, Clone)]

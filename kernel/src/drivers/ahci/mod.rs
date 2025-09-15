@@ -26,7 +26,6 @@ use crate::{
     },
     log, println,
     thread::{
-        ThreadId,
         mailbox::{Mailbox, Request},
         scheduler::sched,
         util::queue_spawn_kthread_named,
@@ -57,7 +56,7 @@ pub enum AhciError {
     InvalidSlot,
 }
 
-pub static AHCI_DRIVER_THREAD_ID: Once<ThreadId> = Once::new();
+pub static AHCI_DRIVER_THREAD_ID: Once<u64> = Once::new();
 
 pub fn init() {
     AHCI_DRIVER_THREAD_ID.call_once(|| queue_spawn_kthread_named("ahci", ahci_driver_main as u64));
@@ -78,8 +77,8 @@ pub(super) enum AhciRequest {
     ListDevices,
     DeviceRequest { device_id: u64, command: Command },
     // Used internally
-    GetDeviceMailbox(ThreadId),
-    GetDevicePort(ThreadId),
+    GetDeviceMailbox(u64), // thread id
+    GetDevicePort(u64),    // thradid
 }
 
 #[derive(Debug, Clone)]

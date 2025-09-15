@@ -3,10 +3,7 @@ use x86_64::{VirtAddr, structures::paging::PageTableFlags};
 use crate::{
     println,
     syscalls::Errno,
-    thread::{
-        scheduler::sched,
-        user::{MappingType, MemoryMapping, UserThreadInfo},
-    },
+    thread::{MappingType, MemoryMapping, UserThreadInfo, scheduler::sched},
 };
 
 // Protection flags (match Linux)

@@ -10,7 +10,7 @@ use crossbeam_queue::SegQueue;
 use thiserror::Error;
 use x86_64::instructions::interrupts::without_interrupts;
 
-use crate::thread::{ThreadId, scheduler::sched};
+use crate::thread::scheduler::sched;
 
 // TODO: maybe make a sender struct so others dont have access to the queue
 // Encapsulate better
@@ -19,7 +19,7 @@ use crate::thread::{ThreadId, scheduler::sched};
 /// A mailbox for sending requests with the type T and getting responses with the type R.
 pub struct Mailbox<T, R> {
     queue: Arc<SegQueue<Request<T, R>>>,
-    owner: ThreadId,
+    owner: u64,
 }
 
 impl<T, R> Clone for Mailbox<T, R> {
@@ -43,7 +43,7 @@ pub struct Request<T, R> {
 }
 
 impl<T, R> Mailbox<T, R> {
-    pub fn new(owner: ThreadId) -> Self {
+    pub fn new(owner: u64) -> Self {
         Self {
             owner,
             queue: Arc::new(SegQueue::new()),
@@ -94,7 +94,7 @@ pub struct Response<R> {
     fulfilled: AtomicBool,
     taken: AtomicBool,
     // Thread to wake on response.
-    thread: ThreadId,
+    thread: u64,
     value: UnsafeCell<MaybeUninit<R>>,
 }
 

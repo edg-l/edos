@@ -26,7 +26,10 @@ use crate::{
         keyboard::sys_keyboard_raw,
         memory::{sys_mmap, sys_munmap},
     },
-    thread::scheduler::{ALIVE_THREADS, sched, switch_to_kernel_page},
+    thread::{
+        Thread, UserThreadInfo,
+        scheduler::{ALIVE_THREADS, sched, switch_to_kernel_page},
+    },
 };
 
 mod graphics;
@@ -337,8 +340,7 @@ pub enum Errno {
 
 fn sys_getpid() -> u64 {
     let sched = sched();
-    let current_id = sched.current_id();
-    current_id.id
+    sched.current_thread_info().lock().pid
 }
 
 fn sys_waitpid(pid: u64, block: bool) -> u64 {
@@ -456,14 +458,7 @@ fn sys_spawn(
     stdout_fd: u64,
     stderr_fd: u64,
 ) -> u64 {
-    use crate::{
-        fs::api as fs_api,
-        fs::path::Path,
-        thread::{
-            user::{UserThread, UserThreadInfo},
-            util::queue_spawn_thread,
-        },
-    };
+    use crate::{fs::api as fs_api, fs::path::Path, thread::util::queue_spawn_thread};
 
     let sched = sched();
     let info = sched.current_thread_info();
@@ -549,7 +544,7 @@ fn sys_spawn(
     switch_to_kernel_page();
 
     // Create new user thread from ELF data
-    let user_thread = match UserThread::new(&elf_data, Some(path_str.to_string())) {
+    let user_thread = match Thread::new_user(&elf_data, Some(path_str.to_string())) {
         Ok(thread) => {
             log!(
                 "UserThread created successfully, entry point: {:p}",
@@ -565,7 +560,8 @@ fn sys_spawn(
     };
 
     // Create thread info and set up file descriptor redirections
-    let mut user_thread_info = UserThreadInfo::from_thread(&user_thread, 0, 0, child_cwd);
+    let mut user_thread_info =
+        UserThreadInfo::from_thread(user_thread.user.as_ref().unwrap(), 0, 0, child_cwd);
 
     // Override standard file descriptors if specified (non-default values)
     if stdin_fd != 0
@@ -601,7 +597,7 @@ fn sys_spawn(
         user_thread_info.fd_table.insert_fd(2, stderr_desc);
     }
 
-    let child_pid = user_thread.id.id;
+    let child_pid = user_thread.user.as_ref().unwrap().pid;
 
     // Queue the new thread for execution
     queue_spawn_thread(user_thread, user_thread_info);
