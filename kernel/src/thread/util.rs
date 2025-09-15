@@ -1,6 +1,6 @@
 #![expect(unused)]
 
-use core::sync::atomic::AtomicU64;
+use core::{sync::atomic::AtomicU64, u64};
 
 use alloc::string::ToString;
 use crossbeam_queue::SegQueue;
@@ -12,7 +12,11 @@ use crate::{
         USER_STACK_TOP,
         mapper::{MemoryManager, memory_mapper},
     },
-    thread::{Thread, UserThreadInfo, scheduler::sched},
+    smp::NUM_CPUS,
+    thread::{
+        Thread, UserThreadInfo,
+        scheduler::{SCHEDULERS, Scheduler, sched},
+    },
 };
 
 static KTHREAD_FREED_STACKS: SegQueue<u64> = SegQueue::new();
@@ -55,6 +59,7 @@ pub fn kthread_stack_free(stack_top: u64) {
 }
 
 pub fn queue_spawn_kthread(entry: u64) -> u64 {
+    // TODO: pick a cpu with lowest thread count
     let thread = Thread::new_kernel(None, entry);
     let id = thread.id;
     sched().thread_spawn_queue.push((thread, None));
@@ -62,10 +67,12 @@ pub fn queue_spawn_kthread(entry: u64) -> u64 {
 }
 
 pub fn queue_spawn_kthread_named(name: &str, entry: u64) -> u64 {
+    // TODO: pick a cpu with lowest thread count
     let thread = Thread::new_kernel(Some(name.to_string()), entry);
 
     let id = thread.id;
-    sched().thread_spawn_queue.push((thread, None));
+    let sched = pick_sched();
+    sched.thread_spawn_queue.push((thread, None));
     id
 }
 
@@ -74,8 +81,34 @@ pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> u6
     thread.context.rdi = arg as u64;
 
     let id = thread.id;
-    sched().thread_spawn_queue.push((thread, None));
+    let sched = pick_sched();
+    sched.thread_spawn_queue.push((thread, None));
     id
+}
+
+pub fn pick_sched() -> &'static Scheduler {
+    let num_cpus = NUM_CPUS.load(core::sync::atomic::Ordering::Relaxed);
+
+    let schedulers = SCHEDULERS.read();
+    let mut id = 0;
+    let mut min_count = u64::MAX;
+    for i in 0..num_cpus {
+        if let Some(sched) = schedulers.get(&(i as u32)).cloned() {
+            let count = sched
+                .thread_count
+                .load(core::sync::atomic::Ordering::Acquire);
+
+            if count < min_count {
+                min_count = count;
+                id = i;
+            }
+        }
+    }
+
+    (*SCHEDULERS
+        .read()
+        .get(&(id as u32))
+        .expect("failed to find scheduler")) as _
 }
 
 /// Exits a kthread.
@@ -117,5 +150,6 @@ pub fn thread_stack_free(manager: &mut MemoryManager, stack_top: u64) {
 }
 
 pub fn queue_spawn_thread(thread: Thread, info: UserThreadInfo) {
-    sched().thread_spawn_queue.push((thread, Some(info)));
+    let sched = pick_sched();
+    sched.thread_spawn_queue.push((thread, Some(info)));
 }

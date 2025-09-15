@@ -62,13 +62,10 @@ impl ThreadLogger {
         let us = uptime_us % 1_000_000;
 
         let name = &*self.name;
-        let name = name.as_ref().map(|x| (*x).clone()).unwrap_or_else(|| {
-            if self.kernel {
-                "unk0".to_string()
-            } else {
-                "unk3".to_string()
-            }
-        });
+        let name = name
+            .as_ref()
+            .map(|x| (*x).clone())
+            .unwrap_or_else(|| "unk".to_string());
         let cpu_idx = sched().lapic_id;
 
         // build prefix

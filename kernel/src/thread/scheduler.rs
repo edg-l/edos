@@ -1,4 +1,4 @@
-use core::time::Duration;
+use core::{sync::atomic::AtomicU64, time::Duration};
 
 use alloc::{boxed::Box, sync::Arc};
 use crossbeam_queue::ArrayQueue;
@@ -20,7 +20,7 @@ use crate::{
     interrupts::InterruptIndex,
     logs::ThreadLogger,
     println,
-    smp::tlb_flush_all_including_global,
+    smp::{NUM_CPUS, tlb_flush_all_including_global},
     thread::{Thread, ThreadState, UserThreadInfo, context::CpuContext},
     timer::Instant,
     util::per_cpu::get_percpu_data,
@@ -28,6 +28,9 @@ use crate::{
 
 // tid -> lapic that owns it
 pub static ALIVE_THREADS: RwLock<FnvIndexMap<u64, u32, 1024>> = RwLock::new(FnvIndexMap::new());
+
+pub static SCHEDULERS: RwLock<heapless::LinearMap<u32, &'static Scheduler, 128>> =
+    RwLock::new(heapless::LinearMap::new());
 
 /// Returns the scheduler id this thread lives on.
 #[allow(unused)]
@@ -54,6 +57,7 @@ pub struct Scheduler {
     pub current_tid: Option<u64>,
     pub current_logger: Option<Arc<ThreadLogger>>,
     pub lapic_id: u32,
+    pub thread_count: AtomicU64,
 }
 
 pub struct Storage {
@@ -66,6 +70,7 @@ pub fn init() {
     // TODO: refactor queue, so it isnt limited to 65k? maybe iterate on the storage threads
     // and use the queue as a priority queue, or that a threadid that is just a u32 or u16 and the queue is just of u16,
     // this would need to add a different pid for user threads alongside thread id and a mapping.
+    let lapic_id = unsafe { get_lapic().id() };
     let sched = Box::new(Scheduler {
         thread_queue: ArrayQueue::new(65000),
         thread_priority_queue: ArrayQueue::new(65000),
@@ -77,11 +82,13 @@ pub fn init() {
         },
         current_tid: None,
         current_logger: None,
-        lapic_id: unsafe { get_lapic().id() },
+        lapic_id,
+        thread_count: AtomicU64::new(0),
     });
 
-    let ptr = Box::leak(sched);
+    let ptr: &'static mut _ = Box::leak(sched);
     get_percpu_data().scheduler = ptr;
+    let _ = SCHEDULERS.write().insert(lapic_id, ptr);
     println!("Saved scheduler on percpu");
 }
 
@@ -191,6 +198,8 @@ impl Scheduler {
                 }
 
                 self.storage.threads.insert(thread.id, thread);
+                self.thread_count
+                    .fetch_add(1, core::sync::atomic::Ordering::Release);
             }
         }
     }
@@ -231,6 +240,8 @@ impl Scheduler {
                         let info = self.storage.thread_info.remove(&thread.id);
                         thread.free(info);
 
+                        self.thread_count
+                            .fetch_sub(1, core::sync::atomic::Ordering::Release);
                         ALIVE_THREADS.write().remove(&thread_id);
                     }
                 }
