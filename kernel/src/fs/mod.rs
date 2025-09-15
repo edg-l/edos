@@ -302,7 +302,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                         fat32_partition_thread as u64,
                         part.cast(),
                     );
-                    worker_tid_map.insert(worker_tid.clone(), idx);
+                    worker_tid_map.insert(worker_tid, idx);
                     worker_mailboxes.push(Mailbox::new(worker_tid));
                 }
                 FilesystemType::Unknown => {

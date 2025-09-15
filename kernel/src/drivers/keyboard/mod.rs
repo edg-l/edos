@@ -30,7 +30,7 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
     queue.force_push(scancode);
 
     if let Some(tid) = KEYBOARD_THREAD_ID.get() {
-        sched().thread_wake(tid.clone(), true);
+        sched().thread_wake(*tid, true);
     }
 
     unsafe { get_lapic().end_of_interrupt() };

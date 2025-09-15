@@ -1,7 +1,4 @@
-use core::{
-    arch::{asm, naked_asm},
-    time::Duration,
-};
+use core::arch::naked_asm;
 
 use alloc::{string::ToString, vec::Vec};
 use x86_64::{
@@ -36,15 +33,6 @@ mod graphics;
 mod io;
 mod keyboard;
 mod memory;
-
-pub fn set_gs_kernel_stack(stack: u64) {
-    unsafe {
-        asm! {
-            "mov gs:8, {s}",
-            s = in(reg) stack,
-        }
-    }
-}
 
 /// # Safety
 /// Must be called once per core

@@ -7,10 +7,8 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{
-        Errno, SYS_KERNEL_LOGS, SYS_LIST_DIR, SYS_OPEN, SYS_RAW_INPUT, errno, syscall2, syscall3,
-    },
-    sys_close, sys_open as raw_sys_open, sys_read, sys_write,
+    sys::{Errno, SYS_KERNEL_LOGS, SYS_RAW_INPUT, errno, syscall2, syscall3},
+    sys_open as raw_sys_open, sys_read, sys_write,
 };
 
 /// I/O Error type with proper error handling
@@ -330,10 +328,10 @@ pub fn read_to_end(fd: u64, max_bytes: Option<usize>) -> IoResult<Vec<u8>> {
             break;
         }
         out.extend_from_slice(&buf[..n]);
-        if let Some(max) = max_bytes {
-            if out.len() >= max {
-                break;
-            }
+        if let Some(max) = max_bytes
+            && out.len() >= max
+        {
+            break;
         }
     }
     Ok(out)

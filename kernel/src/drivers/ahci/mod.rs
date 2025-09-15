@@ -190,8 +190,8 @@ pub extern "C" fn ahci_driver_main() -> ! {
             &format!("ahci-port-{}-{}", device.id, device.port_idx),
             port_worker_thread as u64,
         );
-        port_map.insert(worker_tid.clone(), device.id);
-        port_map_reverse.insert(device.id, worker_tid.clone());
+        port_map.insert(worker_tid, device.id);
+        port_map_reverse.insert(device.id, worker_tid);
         device_mailboxes.push(Mailbox::new(worker_tid));
     }
 
@@ -232,7 +232,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
                         }) {
                             // Wake the worker thread for this device
                             if let Some(worker_tid) = port_map_reverse.get(&device.id) {
-                                sched().thread_wake(worker_tid.clone(), true);
+                                sched().thread_wake(*worker_tid, true);
                             }
                         }
                     }
@@ -301,10 +301,7 @@ extern "C" fn port_worker_thread() -> ! {
 
     let mailbox = {
         loop {
-            let mailbox = send_request(
-                AhciRequest::GetDeviceMailbox(tid.clone()),
-                Duration::from_secs(10),
-            );
+            let mailbox = send_request(AhciRequest::GetDeviceMailbox(tid), Duration::from_secs(10));
 
             if let AhciResponse::DeviceMailbox(Some(mailbox)) = mailbox {
                 break mailbox;
@@ -314,10 +311,7 @@ extern "C" fn port_worker_thread() -> ! {
 
     let port = {
         loop {
-            let port = send_request(
-                AhciRequest::GetDevicePort(tid.clone()),
-                Duration::from_secs(10),
-            );
+            let port = send_request(AhciRequest::GetDevicePort(tid), Duration::from_secs(10));
 
             if let AhciResponse::DevicePort(Some(port)) = port {
                 break port;

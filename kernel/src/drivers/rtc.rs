@@ -69,12 +69,14 @@ pub fn read_rtc() -> RtcDateTime {
 }
 
 unsafe fn read_rtc_register(reg: u16) -> u8 {
-    Port::new(0x70).write(reg as u8);
-    Port::new(0x71).read()
+    unsafe {
+        Port::new(0x70).write(reg as u8);
+        Port::new(0x71).read()
+    }
 }
 
 unsafe fn is_updating() -> bool {
-    (read_rtc_register(RTC_STATUS_A) & 0x80) != 0
+    (unsafe { read_rtc_register(RTC_STATUS_A) } & 0x80) != 0
 }
 
 fn bcd_to_binary(bcd: u8) -> u8 {
