@@ -57,7 +57,7 @@ fn resolve_path(path_str: &str, cwd: &Path) -> Result<Path, crate::fs::path::Par
         Path::parse(path_str).map(|p| p.normalize())
     } else {
         // Relative path - join with cwd
-        let joined = cwd.join(&path_str);
+        let joined = cwd.join(path_str);
         Ok(joined.normalize())
     }
 }
@@ -337,7 +337,7 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         }
         Err(_) => {
             if create {
-                if let Err(_) = fs_api::create_file(&path) {
+                if fs_api::create_file(&path).is_err() {
                     thread.errno = Errno::EINVAL;
                     return -1;
                 }

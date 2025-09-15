@@ -25,7 +25,7 @@ pub struct Mailbox<T, R> {
 impl<T, R> Clone for Mailbox<T, R> {
     fn clone(&self) -> Self {
         let queue = self.queue.clone();
-        let tid = self.owner.clone();
+        let tid = self.owner;
 
         Self { queue, owner: tid }
     }
@@ -58,7 +58,7 @@ impl<T, R> Mailbox<T, R> {
                 fulfilled: AtomicBool::new(false),
                 taken: AtomicBool::new(false),
                 value: UnsafeCell::new(MaybeUninit::uninit()),
-                thread: sender.clone(),
+                thread: sender,
             });
 
             self.queue.push(Request {
@@ -66,7 +66,7 @@ impl<T, R> Mailbox<T, R> {
                 response: response.clone(),
             });
 
-            sched().thread_wake(self.owner.clone(), true);
+            sched().thread_wake(self.owner, true);
             response
         })
     }
@@ -78,7 +78,7 @@ impl<T, R> Mailbox<T, R> {
                 response: response.clone(),
             });
 
-            sched().thread_wake(self.owner.clone(), true);
+            sched().thread_wake(self.owner, true);
             response
         })
     }
@@ -150,7 +150,7 @@ impl<R> Response<R> {
         without_interrupts(|| {
             unsafe { self.value.get().write(MaybeUninit::new(value)) };
             self.fulfilled.store(true, Ordering::Release);
-            sched().thread_wake(self.thread.clone(), true);
+            sched().thread_wake(self.thread, true);
         })
     }
 }

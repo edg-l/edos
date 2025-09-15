@@ -41,7 +41,7 @@ impl<T: Clone> Broadcast<T> {
                 return r.clone();
             }
 
-            let rx = (*self.subscribers.entry(tid.clone()).or_default()).clone();
+            let rx = (*self.subscribers.entry(tid).or_default()).clone();
 
             if self.send_history {
                 for x in self.history.iter() {
@@ -70,15 +70,16 @@ impl<T: Clone> Broadcast<T> {
             let sched = sched();
             let mut to_remove = Vec::new();
             for (tid, receiver) in self.subscribers.iter() {
+                let tid = *tid;
                 if receiver.queue.len() > self.bound {
                     receiver.queue.pop();
                 }
                 receiver.queue.push(value.clone());
 
-                if !sched.thread_exists(tid.clone()) {
-                    to_remove.push(tid.clone());
+                if !sched.thread_exists(tid) {
+                    to_remove.push(tid);
                 } else {
-                    sched.thread_wake(tid.clone(), true);
+                    sched.thread_wake(tid, true);
                 }
             }
 

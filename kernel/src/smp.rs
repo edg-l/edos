@@ -6,12 +6,12 @@ use crate::{
     apic::{get_lapic, init::enable_lapic, set_apic_timer_and_enable},
     boot::MP_REQUEST,
     drivers::fpu,
-    gdt, interrupts, log, println,
+    gdt, interrupts, println,
     syscalls::setup_syscall,
     thread::{
         self,
         scheduler::{sched, switch_to_kernel_page},
-        util::{kthread_exit, queue_spawn_kthread_named},
+        util::queue_spawn_kthread_named,
     },
     util::per_cpu::init_gs_for_this_cpu,
 };
