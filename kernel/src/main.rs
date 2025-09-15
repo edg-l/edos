@@ -5,10 +5,7 @@
 
 use core::{arch::asm, time::Duration};
 
-use alloc::{
-    string::ToString,
-    vec::{self, Vec},
-};
+use alloc::string::ToString;
 use x86_64::{VirtAddr, instructions::hlt};
 
 use crate::{
@@ -16,8 +13,8 @@ use crate::{
     allocator::{init_heap, print_alloc_stats},
     apic::set_apic_timer_and_enable,
     boot::boot_info,
-    drivers::ahci::api::read_sectors,
-    fs::path::Path,
+    cmdline::ParsedCmdline,
+    fs::{gpt::format_uuid, path::Path},
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
     thread::{
         user::{UserThread, UserThreadInfo},
@@ -30,6 +27,7 @@ mod acpi;
 mod allocator;
 mod apic;
 mod boot;
+mod cmdline;
 mod drivers;
 mod fs;
 mod gdt;
@@ -59,6 +57,7 @@ fn init() {
         rtc_time.second
     );
     let info = boot_info();
+    println!("cmdline: {:?}", info.cmdline);
     println!("Initializing frame allocator");
     init_frame_allocator(info.memory_map);
 
@@ -126,7 +125,7 @@ fn main() -> ! {
         UserThreadInfo::from_thread(&user_thread, 0, 0, Path::parse("/").unwrap());
     queue_spawn_thread(user_thread, user_thread_info);
     queue_spawn_kthread_named("test", smp::kthread_test as u64);
-    queue_spawn_kthread_named("mount", mount_filesystems as u64);
+    queue_spawn_kthread_named("mount", mount_root_fs as u64);
 
     // Enable apic timer
     set_apic_timer_and_enable(Duration::from_millis(5));
@@ -140,15 +139,44 @@ fn main() -> ! {
     }
 }
 
-pub fn mount_filesystems() -> ! {
+pub fn mount_root_fs() -> ! {
     let partitions = fs::api::list_partitions();
 
     if partitions.is_empty() {
+        log!("No partitions to mount");
         kthread_exit(0);
     }
 
-    let part = &partitions[0];
-    log!("Partition {:#?}", part);
+    let cmdline = ParsedCmdline::parse(boot_info().cmdline);
+
+    let mut part_idx = 0;
+
+    if cmdline.root.is_none() {
+        println!("Empty cmdline, mounting first partition");
+    } else {
+        let mut keyval = cmdline.root.as_ref().unwrap().trim().split("=");
+        let root_type = keyval.next();
+        let root_value = keyval.next();
+
+        if let Some(root_type) = root_type
+            && let Some(root_value) = root_value
+        {
+            if root_type == "UUID" {
+                for (i, part) in partitions.iter().enumerate() {
+                    if format_uuid(&part.unique_partition_guid).eq_ignore_ascii_case(root_value) {
+                        part_idx = i;
+                        log!("Found root partition with uuid {}", root_value);
+                        break;
+                    }
+                }
+            } else {
+                log!("Unsupported root type, only UUID is supported");
+            }
+        }
+    }
+
+    let part = &partitions[part_idx];
+    log!("Partition name {:?}", part.name);
 
     let root = Path::parse("/").unwrap();
     fs::api::mount_partition(part.index as usize, root.clone()).unwrap();
