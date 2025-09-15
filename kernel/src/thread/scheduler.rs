@@ -33,7 +33,6 @@ use crate::{
 
 // tid -> lapic that owns it
 pub static ALIVE_KTHREADS: RwLock<FnvIndexMap<u64, u32, 128>> = RwLock::new(FnvIndexMap::new());
-
 pub static ALIVE_THREADS: RwLock<FnvIndexMap<u64, u32, 1024>> = RwLock::new(FnvIndexMap::new());
 
 /// Returns the scheduler id this thread lives on.
@@ -189,7 +188,8 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                 cpu.tss.privilege_stack_table[0] = VirtAddr::new(thread.kernel_stack_top);
 
                 // set kernel gs stack
-                set_gs_kernel_stack(thread.kernel_stack_top);
+                cpu.kernel_rsp = thread.kernel_stack_top;
+                cpu.user_rsp = thread.context.interrupt_stack_frame.stack_pointer.as_u64();
 
                 return context;
             }
