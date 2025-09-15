@@ -4,7 +4,7 @@ use bytemuck::{Zeroable, cast_ref};
 use crate::{
     drivers::ahci::structures::DeviceIdentifyInfo,
     fs::{
-        Error, File, FileSystem,
+        Error, File, FileSystem, FileTime,
         block_device::BlockDevice,
         fat32::structures::{DirectoryEntry, Fat32BootSector, FsInfo},
         gpt::Partition,
@@ -127,14 +127,18 @@ impl FileSystem for Fat32fs {
         let written =
             self.write_file_offset(&mut entry, Some((ec, eo)), offset as u64, data)? as u64;
 
-        // Update metadata: size (+ archive bit). Timestamps left to caller.
+        // Update metadata: size (+ archive bit).
         let new_size = core::cmp::max(entry.file_size as u64, offset as u64 + written);
-        if new_size as u32 != entry.file_size {
-            self.patch_dir_entry_at(ec, eo, |de| {
-                de.file_size = new_size as u32;
-                de.attributes |= 0x20; // ARCHIVE
-            })?;
-        }
+        let current_time = crate::fs::FileTime::now();
+
+        self.patch_dir_entry_at(ec, eo, |de| {
+            de.file_size = new_size as u32;
+            de.attributes |= 0x20; // ARCHIVE
+            de.write_date = current_time.date;
+            de.write_time = current_time.time;
+        })?;
+
+        let current_time = crate::fs::FileTime::now();
 
         Ok(written)
     }
@@ -159,6 +163,14 @@ impl FileSystem for Fat32fs {
         de.first_cluster_low = 0;
         de.file_size = 0;
 
+        let current_time = FileTime::now();
+        de.creation_date = current_time.date;
+        de.creation_time = current_time.time;
+        de.creation_time_tenth = current_time.tenth;
+        de.write_date = current_time.date;
+        de.write_time = current_time.time;
+        de.last_access_date = current_time.date;
+
         // Append to parent directory
         let _ = self.append_dir_entry(parent_cluster, &de)?;
         Ok(())
@@ -176,6 +188,8 @@ impl FileSystem for Fat32fs {
         // Allocate directory cluster
         let newc = self.alloc_cluster()?;
 
+        let current_time = FileTime::now();
+
         // Initialize "." and ".."
         let spc = self.boot_info.sectors_per_cluster as u16;
         let bps = self.boot_info.bytes_per_sector as usize;
@@ -187,12 +201,22 @@ impl FileSystem for Fat32fs {
         dot.attributes = 0x10; // DIRECTORY
         dot.first_cluster_high = ((newc >> 16) & 0xFFFF) as u16;
         dot.first_cluster_low = (newc & 0xFFFF) as u16;
+        dot.creation_date = current_time.date;
+        dot.creation_time = current_time.time;
+        dot.write_date = current_time.date;
+        dot.write_time = current_time.time;
+        dot.last_access_date = current_time.date;
 
         let mut dotdot: DirectoryEntry = DirectoryEntry::zeroed();
         dotdot.set_name_from_string("..");
         dotdot.attributes = 0x10; // DIRECTORY
         dotdot.first_cluster_high = ((parent_cluster >> 16) & 0xFFFF) as u16;
         dotdot.first_cluster_low = (parent_cluster & 0xFFFF) as u16;
+        dotdot.creation_date = current_time.date;
+        dotdot.creation_time = current_time.time;
+        dotdot.write_date = current_time.date;
+        dotdot.write_time = current_time.time;
+        dotdot.last_access_date = current_time.date;
 
         let dot_bytes: [u8; 32] = bytemuck::cast(dot);
         let dotdot_bytes: [u8; 32] = bytemuck::cast(dotdot);
@@ -209,6 +233,11 @@ impl FileSystem for Fat32fs {
         de.first_cluster_high = ((newc >> 16) & 0xFFFF) as u16;
         de.first_cluster_low = (newc & 0xFFFF) as u16;
         de.file_size = 0;
+        de.creation_date = current_time.date;
+        de.creation_time = current_time.time;
+        de.write_date = current_time.date;
+        de.write_time = current_time.time;
+        de.last_access_date = current_time.date;
 
         let _ = self.append_dir_entry(parent_cluster, &de)?;
         Ok(())

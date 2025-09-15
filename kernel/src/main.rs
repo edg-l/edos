@@ -48,6 +48,16 @@ mod util;
 extern crate alloc;
 
 fn init() {
+    let rtc_time = crate::drivers::rtc::read_rtc();
+    println!(
+        "Boot time: {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        rtc_time.year,
+        rtc_time.month,
+        rtc_time.day,
+        rtc_time.hour,
+        rtc_time.minute,
+        rtc_time.second
+    );
     let info = boot_info();
     println!("Initializing frame allocator");
     init_frame_allocator(info.memory_map);

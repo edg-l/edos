@@ -115,10 +115,45 @@ pub struct DateTime {
     pub tenth: u8, // 0..=199
 }
 
+impl DateTime {
+    /// Create DateTime from current RTC time
+    pub fn now() -> Self {
+        let rtc = crate::drivers::rtc::read_rtc();
+        Self {
+            year: rtc.year as i32,
+            month: rtc.month,
+            day: rtc.day,
+            hour: rtc.hour,
+            min: rtc.minute,
+            sec: rtc.second,
+            tenth: 0,
+        }
+    }
+
+    /// Convert DateTime to FAT32 FileTime format
+    pub fn to_file_time(self) -> FileTime {
+        // FAT date: year-1980 (7 bits) | month (4 bits) | day (5 bits)
+        let fat_date = (((self.year - 1980) as u16 & 0x7F) << 9)
+            | ((self.month as u16 & 0x0F) << 5)
+            | (self.day as u16 & 0x1F);
+
+        // FAT time: hour (5 bits) | minute (6 bits) | second/2 (5 bits)
+        let fat_time = ((self.hour as u16 & 0x1F) << 11)
+            | ((self.min as u16 & 0x3F) << 5)
+            | ((self.sec as u16 / 2) & 0x1F);
+
+        FileTime {
+            date: fat_date,
+            time: fat_time,
+            tenth: self.tenth,
+        }
+    }
+}
+
 impl FileTime {
     #[inline]
     pub fn to_datetime(self) -> Option<DateTime> {
-        // Zero date often means "unknown"
+        // Zero date means "unknown"
         if self.date == 0 {
             return None;
         }
@@ -140,6 +175,10 @@ impl FileTime {
             sec,
             tenth: self.tenth,
         })
+    }
+
+    pub fn now() -> Self {
+        DateTime::now().to_file_time()
     }
 }
 
