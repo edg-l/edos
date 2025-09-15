@@ -178,5 +178,11 @@ sata-disk.img: $(FILESYSTEM_FILES)
 		mcopy -s -i sata-disk.img@@1M filesystem/* ::/; \
 	fi
 
+.PHONY: clean-sata
 clean-sata:
 	rm -f sata-disk.img
+
+.PHONY: filesystem
+filesystem:
+	mkdir -p filesystem
+	mkdir -p filesystem/{bin,dev,home,lib,var,mnt,opt,root,sys,tmp}
