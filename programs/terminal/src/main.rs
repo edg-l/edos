@@ -358,6 +358,7 @@ impl Terminal {
             "logs" => {
                 if args.is_empty() || !["on", "off"].contains(&args[0].as_str()) {
                     self.print_text("Usage: logs [on|off]\n");
+                    return;
                 }
 
                 self.enable_kernel_logs = args[0] == "on";
