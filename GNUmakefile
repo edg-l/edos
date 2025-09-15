@@ -167,12 +167,14 @@ fmt:
 programs:
 	$(MAKE) -C programs build
 
-
+DISK_UUID := 12345678-1234-5678-9abc-123456789abc
+PARTITION_UUID := 87654321-4321-8765-cba9-987654321fed
+FILESYSTEM_SERIAL := 305419896
 FILESYSTEM_FILES := $(shell find filesystem -type f 2>/dev/null)
 
 sata-disk.img: $(FILESYSTEM_FILES)
 	qemu-img create -f raw sata-disk.img 1G
-	sgdisk sata-disk.img -n 1:2048 -t 1:0700 -c 1:"DATA"
+	sgdisk sata-disk.img -n 1:2048 -t 1:0700 -c 1:"EDOS_DATA" --partition-guid=1:$(PARTITION_UUID)
 	mformat -F -i sata-disk.img@@1M -v EDOS
 	if [ -d filesystem ]; then \
 		mcopy -s -i sata-disk.img@@1M filesystem/* ::/; \

@@ -2,7 +2,7 @@ use crate::{
     drivers::ahci, fs::fat32::structures::Fat32BootSector, log, logs::ThreadLogger,
     thread::scheduler::sched,
 };
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use bytemuck::{Pod, Zeroable, try_from_bytes};
 
 /// GPT Header structure (LBA 1)
@@ -47,6 +47,7 @@ pub struct Partition {
     pub name: String,
     pub filesystem: Option<FilesystemType>,
     pub device_id: u64,
+    pub unique_partition_guid: [u8; 16],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -241,6 +242,7 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
                 name: entry.name(),
                 filesystem,
                 device_id,
+                unique_partition_guid: entry.unique_partition_guid,
             });
         }
     }
@@ -278,16 +280,17 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
     log!(logger, "Found {} partitions:", partitions.len());
     log!(
         logger,
-        "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {}",
+        "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {} {}",
         "ID",
         "Start LBA",
         "End LBA",
         "Size (MB)",
         "Type",
         "FS",
-        "Name"
+        "Name",
+        "UUID"
     );
-    log!(logger, "{}", "-".repeat(80));
+    log!(logger, "{}", "-".repeat(100));
 
     for partition in partitions {
         let size_mb = (partition.size_sectors * 512) / (1024 * 1024);
@@ -306,14 +309,37 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
 
         log!(
             logger,
-            "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {}",
+            "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {} {}",
             partition.index,
             partition.starting_lba,
             partition.ending_lba,
             size_mb,
             type_str,
             fs_str,
-            partition.name
+            partition.name,
+            format_uuid(&partition.unique_partition_guid)
         );
     }
+}
+
+pub fn format_uuid(bytes: &[u8; 16]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[3],
+        bytes[2],
+        bytes[1],
+        bytes[0], // First 4 bytes (little-endian)
+        bytes[5],
+        bytes[4], // Next 2 bytes (little-endian)
+        bytes[7],
+        bytes[6], // Next 2 bytes (little-endian)
+        bytes[8],
+        bytes[9], // Next 2 bytes (big-endian)
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15] // Last 6 bytes (big-endian)
+    )
 }
