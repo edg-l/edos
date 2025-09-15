@@ -1,4 +1,4 @@
-use core::{sync::atomic::AtomicUsize, time::Duration};
+use core::{hint::spin_loop, sync::atomic::AtomicUsize, time::Duration};
 
 use limine::mp::Cpu as MpCpu;
 
@@ -13,10 +13,11 @@ use crate::{
         scheduler::{sched, switch_to_kernel_page},
         util::queue_spawn_kthread_named,
     },
+    timer::Instant,
     util::per_cpu::init_gs_for_this_cpu,
 };
 
-pub static NUM_CPUS: AtomicUsize = AtomicUsize::new(0);
+pub static NUM_CPUS: AtomicUsize = AtomicUsize::new(1);
 
 /// Initialize SMP using Limine's MP request: set AP entrypoints and let Limine bring them up.
 pub fn init() {
@@ -40,6 +41,11 @@ pub fn init() {
         }
     } else {
         println!("[smp] Limine MP response not present; running uniprocessor");
+    }
+
+    let now = Instant::now();
+    while now.elapsed() < Duration::from_millis(50) {
+        spin_loop();
     }
 }
 

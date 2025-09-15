@@ -38,6 +38,11 @@ pub fn thread_exists(tid: u64) -> Option<u32> {
     ALIVE_THREADS.read().get(&tid).copied()
 }
 
+pub fn thread_sched(id: u64) -> Option<&'static Scheduler> {
+    let sched_id = thread_exists(id)?;
+    SCHEDULERS.read().get(&sched_id).cloned()
+}
+
 #[derive(Debug)]
 pub enum SchedCmd {
     Wake(u64, bool),
@@ -332,18 +337,28 @@ impl Scheduler {
 
     // TODO: this checks only current cpu scheduler, so it returns true
     pub fn thread_exists(&self, id: u64) -> bool {
-        ALIVE_THREADS.read().get(&id).is_some()
+        thread_exists(id).is_some()
     }
 
     /// Wake the given thread
     pub fn thread_wake(&self, id: u64, priority: bool) {
-        self.cmd_queue.push(SchedCmd::Wake(id, priority));
+        if let Some(sched) = thread_sched(id) {
+            sched.cmd_queue.push(SchedCmd::Wake(id, priority));
+        } else {
+            self.cmd_queue.push(SchedCmd::Wake(id, priority));
+        }
     }
 
     /// Sets the given thread as waiting for a maximum of the given timeout.
     pub fn thread_set_wait_timeout(&self, id: u64, timeout: Duration) {
         let now = Instant::now();
-        self.cmd_queue.push(SchedCmd::WaitTimeout(id, now, timeout));
+        if let Some(sched) = thread_sched(id) {
+            sched
+                .cmd_queue
+                .push(SchedCmd::WaitTimeout(id, now, timeout));
+        } else {
+            self.cmd_queue.push(SchedCmd::WaitTimeout(id, now, timeout));
+        }
     }
 
     // Does not halt.
