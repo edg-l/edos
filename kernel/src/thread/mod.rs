@@ -67,7 +67,7 @@ pub struct Thread {
 
 #[derive(Debug)]
 pub struct UserThread {
-    /// PID, user facing thread id.
+    /// Same as thread if for now.
     pub pid: u64,
     /// Saved to free it in case the thread exits.
     pub initial_stack_top: u64,
@@ -148,8 +148,8 @@ pub struct File {
     fd: u64,
 }
 
+// For now kernel threads and user share id
 static THREAD_ID_NEXT_ID: AtomicU64 = AtomicU64::new(0);
-static THREAD_PID_NEXT_PID: AtomicU64 = AtomicU64::new(0);
 
 impl Thread {
     pub fn new_kernel(name: Option<String>, entry_point: u64) -> Self {
@@ -222,7 +222,6 @@ impl Thread {
             CpuContext::new_user_thread(load_info.entry_point.as_u64(), stack_top_call_aligned);
 
         let id = THREAD_ID_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        let pid = THREAD_PID_NEXT_PID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
         let name = Arc::new(name);
 
@@ -238,7 +237,7 @@ impl Thread {
             }),
             name: name.clone(),
             user: Some(UserThread {
-                pid,
+                pid: id,
                 initial_stack_top: stack_top,
                 cr3: (page, kernel_pml4.1),
                 memory_manager: Arc::new(Mutex::new(process_memory_manager)),

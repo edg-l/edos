@@ -126,12 +126,11 @@ pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
                     } else {
                         save_fpu_state(&mut user.fpu);
                     }
-
-                    sched
-                        .thread_queue
-                        .push(current_id)
-                        .expect("failed to push current_id thread");
                 }
+                sched
+                    .thread_queue
+                    .push(current_id)
+                    .expect("failed to push current_id thread");
             }
         }
 
@@ -303,7 +302,7 @@ impl Scheduler {
 
     /// Current thread id.
     pub fn current_id(&self) -> u64 {
-        self.current_tid.clone().expect("current id is none")
+        self.current_tid.expect("current id is none")
     }
 
     pub fn current_thread_info(&self) -> Arc<Mutex<UserThreadInfo>> {
@@ -312,7 +311,7 @@ impl Scheduler {
     }
 
     pub fn current_id_opt(&self) -> Option<u64> {
-        self.current_tid.clone()
+        self.current_tid
     }
 
     /// Gets the current thread logger. Locks momentarely to acquire the logger.
