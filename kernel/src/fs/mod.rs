@@ -382,6 +382,8 @@ pub extern "C" fn fs_main_thread() -> ! {
                     req.response.send(FsResponse::Ok(res));
                 }
                 FsRequest::PathRequest { path, op } => {
+                    // Debug logging
+                    log!(logger, "PathRequest: {:?} {:?}", path, op);
                     // Resolve longest-prefix mount point
                     let mut best: Option<(&Path, (usize, usize))> = None;
                     for (mp, &idx) in mount_points.iter() {
@@ -425,8 +427,165 @@ pub extern "C" fn fs_main_thread() -> ! {
                             req.response.send(FsResponse::Ok(Err(Error::IoError)));
                         }
                     } else {
-                        // No mount matches this path
-                        req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                        // No mount matches this path - check for mount point synthesis
+
+                        // Case 1: Path is exactly a mount point (mount root access)
+                        if let Some(part_idx) = mount_points.get(&path).copied() {
+                            log!(
+                                logger,
+                                "Mount point exact match: {:?} -> {:?}",
+                                path,
+                                part_idx
+                            );
+
+                            match op {
+                                PathOp::FileInfo => {
+                                    // Synthesize directory info for mount points instead of forwarding
+                                    log!(
+                                        logger,
+                                        "Synthesizing FileInfo for mount point: {:?}",
+                                        path
+                                    );
+                                    let mount_file = File {
+                                        name: path
+                                            .components()
+                                            .last()
+                                            .unwrap_or(&String::from(""))
+                                            .clone(),
+                                        kind: crate::fs::FileKind::Directory,
+                                        size: 0,
+                                        attrs: crate::fs::FileAttrs {
+                                            readonly: false,
+                                            hidden: false,
+                                            system: false,
+                                            archive: false,
+                                        },
+                                        created: None,
+                                        accessed: None,
+                                        modified: None,
+                                    };
+                                    req.response.send(FsResponse::File(Ok(mount_file)));
+                                }
+                                _ => {
+                                    // Forward other operations to the mounted filesystem
+                                    let cmd = match op {
+                                        PathOp::ListFiles => PartitionCommand::ListFiles {
+                                            path: Path::parse("/").unwrap(),
+                                        },
+                                        PathOp::ReadBytes { offset, count } => {
+                                            PartitionCommand::ReadBytes {
+                                                path: Path::parse("/").unwrap(),
+                                                offset,
+                                                count,
+                                            }
+                                        }
+                                        PathOp::WriteBytes { offset, data } => {
+                                            PartitionCommand::WriteBytes {
+                                                path: Path::parse("/").unwrap(),
+                                                offset,
+                                                data,
+                                            }
+                                        }
+                                        PathOp::CreateFile => PartitionCommand::CreateFile {
+                                            path: Path::parse("/").unwrap(),
+                                        },
+                                        PathOp::CreateDir => PartitionCommand::CreateDir {
+                                            path: Path::parse("/").unwrap(),
+                                        },
+                                        PathOp::RemoveFile => PartitionCommand::RemoveFile {
+                                            path: Path::parse("/").unwrap(),
+                                        },
+                                        PathOp::RemoveDir => PartitionCommand::RemoveDir {
+                                            path: Path::parse("/").unwrap(),
+                                        },
+                                        PathOp::FileInfo => unreachable!("FileInfo handled above"),
+                                        PathOp::Flush => PartitionCommand::Flush,
+                                    };
+
+                                    if let Some(mb) = worker_mailboxes.get(&part_idx) {
+                                        mb.forward(cmd, req.response);
+                                    } else {
+                                        req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                                    }
+                                }
+                            }
+                        }
+                        // Case 2: Path has child mount points (directory synthesis)
+                        else if matches!(op, PathOp::ListFiles) {
+                            // Find child mount points inline
+                            let parent_components = path.components();
+                            let mut has_children = false;
+
+                            for mp in mount_points.keys() {
+                                let mp_components = mp.components();
+                                // Check if this mount point is a direct child of parent_path
+                                if mp_components.len() == parent_components.len() + 1 {
+                                    // Check if all parent components match
+                                    let mut is_child = true;
+                                    for (i, parent_comp) in parent_components.iter().enumerate() {
+                                        if mp_components[i] != *parent_comp {
+                                            is_child = false;
+                                            break;
+                                        }
+                                    }
+                                    if is_child {
+                                        has_children = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if has_children {
+                                log!(logger, "Directory synthesis for: {:?}", path);
+                                // Implement directory synthesis with mount points
+                                let mut virtual_files = Vec::new();
+
+                                // Find and create virtual directory entries for mount points
+                                for mp in mount_points.keys() {
+                                    let mp_components = mp.components();
+                                    // Check if this mount point is a direct child of parent_path
+                                    if mp_components.len() == parent_components.len() + 1 {
+                                        // Check if all parent components match
+                                        let mut is_child = true;
+                                        for (i, parent_comp) in parent_components.iter().enumerate()
+                                        {
+                                            if mp_components[i] != *parent_comp {
+                                                is_child = false;
+                                                break;
+                                            }
+                                        }
+                                        if is_child {
+                                            // Create virtual directory entry for this mount point
+                                            let dir_name =
+                                                mp_components[parent_components.len()].clone();
+                                            virtual_files.push(File {
+                                                name: dir_name,
+                                                kind: crate::fs::FileKind::Directory,
+                                                size: 0,
+                                                attrs: crate::fs::FileAttrs {
+                                                    readonly: false,
+                                                    hidden: false,
+                                                    system: false,
+                                                    archive: false,
+                                                },
+                                                created: None,
+                                                accessed: None,
+                                                modified: None,
+                                            });
+                                        }
+                                    }
+                                }
+
+                                req.response.send(FsResponse::Files(Ok(virtual_files)));
+                            } else {
+                                // Case 3: No mount handling needed - genuine error
+                                req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                            }
+                        } else {
+                            // Case 3: No mount handling needed - genuine error
+                            log!(logger, "No mount handling for: {:?}", path);
+                            req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                        }
                     }
                 }
                 FsRequest::PartitionRequest {
