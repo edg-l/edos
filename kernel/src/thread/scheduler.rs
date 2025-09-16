@@ -379,7 +379,7 @@ impl Scheduler {
         let id = self.current_id();
         self.cmd_queue.push(SchedCmd::Exit(id, code));
         without_interrupts(|| {
-            unsafe { direct_context_switch() };
+            unsafe { context_switch() };
         });
     }
 
@@ -389,7 +389,7 @@ impl Scheduler {
         without_interrupts(|| {
             let now = Instant::now();
             self.cmd_queue.push(SchedCmd::WaitTimeout(id, now, timeout));
-            unsafe { direct_context_switch() };
+            unsafe { context_switch() };
         });
     }
 
@@ -397,7 +397,7 @@ impl Scheduler {
         without_interrupts(|| {
             let id = self.current_id();
             self.cmd_queue.push(SchedCmd::Wait(id));
-            unsafe { direct_context_switch() };
+            unsafe { context_switch() };
         });
     }
 
@@ -410,7 +410,7 @@ impl Scheduler {
     /// Cooperatively yield.
     pub fn thread_yield(&self) {
         without_interrupts(|| {
-            unsafe { direct_context_switch() };
+            unsafe { context_switch() };
         });
     }
 
@@ -422,7 +422,7 @@ impl Scheduler {
 }
 
 #[unsafe(naked)]
-pub unsafe extern "C" fn direct_context_switch() {
+pub unsafe extern "C" fn context_switch() {
     core::arch::naked_asm!(
         // Layout wanted at [rsp]:
         // [ GPRs: r15..rax ] (15*8 bytes)  then  [ IF: RIP,CS,RFLAGS,RSP,SS ] (5*8 bytes)
@@ -496,8 +496,8 @@ pub unsafe extern "C" fn direct_context_switch() {
         "ret",
 
         timer_schedule = sym schedule,
-        KCS = const 0x08,   // replace with your GDT kernel CS selector
-        KSS = const 0x10,   // replace with your GDT kernel SS selector
+        KCS = const 0x08,
+        KSS = const 0x10,
     );
 }
 
