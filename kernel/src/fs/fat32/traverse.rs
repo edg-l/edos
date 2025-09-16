@@ -27,9 +27,23 @@ impl Fatfs {
         }
         let (parent, name) = (&comps[..comps.len() - 1], &comps[comps.len() - 1]);
 
-        let mut dir_cluster = self.boot_info.root_cluster;
+        // Start from root - handle FAT12/16 vs FAT32 differently
+        let mut dir_cluster = match self.variant {
+            FatVariant::Fat32 => self.boot_info.root_cluster,
+            FatVariant::Fat12 | FatVariant::Fat16 => 0, // Use 0 as special marker for root
+        };
+
         for comp in parent {
-            let entries = self.get_dir_entries(dir_cluster)?;
+            let entries = if dir_cluster == 0
+                && matches!(self.variant, FatVariant::Fat12 | FatVariant::Fat16)
+            {
+                // FAT12/16 root directory
+                self.get_root_dir_entries()?
+            } else {
+                // Cluster-based directory (FAT32 root or any subdirectory)
+                self.get_dir_entries(dir_cluster)?
+            };
+
             let mut hit = None;
             for e in entries {
                 if e.is_directory() && e.fat_name_to_string().eq_ignore_ascii_case(comp) {
@@ -44,36 +58,66 @@ impl Fatfs {
             dir_cluster = de.first_cluster();
         }
 
-        // Scan clusters and return exact position for `name`
-        let spc = self.boot_info.sectors_per_cluster as u16;
-        let bps = self.boot_info.bytes_per_sector as usize;
-        let cluster_bytes = bps * spc as usize;
-        let mut cur = dir_cluster;
+        // Scan for the final entry - handle FAT12/16 root vs cluster-based directories
+        if dir_cluster == 0 && matches!(self.variant, FatVariant::Fat12 | FatVariant::Fat16) {
+            // Search in FAT12/16 root directory
+            let root_dir_lba = self.root_dir_lba();
+            let root_dir_sectors = ((self.boot_info.root_entry_count as u64 * 32) + 511) / 512;
 
-        let mut buf = Vec::new();
-        loop {
-            let base_lba = self.cluster_to_lba(cur);
-            buf.clear();
-            buf = self.device.read_sectors(base_lba, spc, buf)?;
-            let mut off = 0usize;
+            let mut buf = Vec::new();
+            for sector in 0..root_dir_sectors {
+                buf.clear();
+                buf = self.device.read_sectors(root_dir_lba + sector, 1, buf)?;
+                let mut off = 0usize;
 
-            while off + 32 <= buf.len() {
-                let first = buf[off];
-                if first == 0x00 {
-                    return Ok(None);
-                }
-                if first != 0xE5 {
-                    let de: DirectoryEntry = *bytemuck::from_bytes(&buf[off..off + 32]);
-                    if de.fat_name_to_string().eq_ignore_ascii_case(name) {
-                        return Ok(Some((de, cur, off)));
+                while off + 32 <= buf.len() {
+                    let first = buf[off];
+                    if first == 0x00 {
+                        return Ok(None);
                     }
+                    if first != 0xE5 {
+                        let de: DirectoryEntry = *bytemuck::from_bytes(&buf[off..off + 32]);
+                        if de.fat_name_to_string().eq_ignore_ascii_case(name) {
+                            // For root directory, return sector as "cluster" and offset
+                            return Ok(Some((de, (root_dir_lba + sector) as u32, off)));
+                        }
+                    }
+                    off += 32;
                 }
-                off += 32;
             }
+            Ok(None)
+        } else {
+            // Search in cluster-based directory (FAT32 root or any subdirectory)
+            let spc = self.boot_info.sectors_per_cluster as u16;
+            let bps = self.boot_info.bytes_per_sector as usize;
+            let cluster_bytes = bps * spc as usize;
+            let mut cur = dir_cluster;
 
-            match self.get_fat_entry(cur)? {
-                Some(next) => cur = next,
-                None => return Ok(None),
+            let mut buf = Vec::new();
+            loop {
+                let base_lba = self.cluster_to_lba(cur);
+                buf.clear();
+                buf = self.device.read_sectors(base_lba, spc, buf)?;
+                let mut off = 0usize;
+
+                while off + 32 <= buf.len() {
+                    let first = buf[off];
+                    if first == 0x00 {
+                        return Ok(None);
+                    }
+                    if first != 0xE5 {
+                        let de: DirectoryEntry = *bytemuck::from_bytes(&buf[off..off + 32]);
+                        if de.fat_name_to_string().eq_ignore_ascii_case(name) {
+                            return Ok(Some((de, cur, off)));
+                        }
+                    }
+                    off += 32;
+                }
+
+                match self.get_fat_entry(cur)? {
+                    Some(next) => cur = next,
+                    None => return Ok(None),
+                }
             }
         }
     }
