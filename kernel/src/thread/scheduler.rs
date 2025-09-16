@@ -20,7 +20,7 @@ use crate::{
     interrupts::InterruptIndex,
     logs::ThreadLogger,
     println,
-    smp::{NUM_CPUS, tlb_flush_all_including_global},
+    smp::tlb_flush_all_including_global,
     thread::{Thread, ThreadState, UserThreadInfo, context::CpuContext},
     timer::Instant,
     util::per_cpu::get_percpu_data,
@@ -344,6 +344,7 @@ impl Scheduler {
     pub fn thread_wake(&self, id: u64, priority: bool) {
         if let Some(sched) = thread_sched(id) {
             sched.cmd_queue.push(SchedCmd::Wake(id, priority));
+            self.send_reschedule_ipi(sched.lapic_id);
         } else {
             self.cmd_queue.push(SchedCmd::Wake(id, priority));
         }
@@ -356,6 +357,7 @@ impl Scheduler {
             sched
                 .cmd_queue
                 .push(SchedCmd::WaitTimeout(id, now, timeout));
+            self.send_reschedule_ipi(sched.lapic_id);
         } else {
             self.cmd_queue.push(SchedCmd::WaitTimeout(id, now, timeout));
         }
@@ -405,7 +407,7 @@ impl Scheduler {
     }
 
     /// Cooperatively yield.
-    pub fn thread_yield(&self) {
+    pub fn thread_yield(&self, halt: bool) {
         without_interrupts(|| {
             let mut lapic = get_lapic();
             unsafe {
@@ -413,7 +415,15 @@ impl Scheduler {
             }
         });
 
-        hlt();
+        if halt {
+            hlt();
+        }
+    }
+
+    pub fn send_reschedule_ipi(&self, target_cpu: u32) {
+        unsafe {
+            get_lapic().send_ipi(InterruptIndex::Reschedule as u8, target_cpu);
+        }
     }
 }
 

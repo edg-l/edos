@@ -62,6 +62,9 @@ pub fn build_idt_for_current_cpu() -> InterruptDescriptorTable {
         idt[InterruptIndex::Spurious.as_u8()]
             .set_handler_fn(spurious_interrupt_handler)
             .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
+        idt[InterruptIndex::Reschedule.as_u8()]
+            .set_handler_addr(VirtAddr::new(timer_interrupt_handler as *mut u8 as u64))
+            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
     }
 
     idt
@@ -123,77 +126,6 @@ extern "x86-interrupt" fn double_fault_handler(
         "EXCEPTION: DOUBLE FAULT: ({error_code})\n{:#?}",
         stack_frame
     );
-}
-
-// Timer interrupt handler for preemptive multitasking
-// We need naked assembly to save/restore all registers properly
-#[unsafe(naked)]
-extern "x86-interrupt" fn _timer_interrupt_handler_cswitch(_stack_frame: InterruptStackFrame) {
-    core::arch::naked_asm!(
-        // Save all registers first
-        "push rax",
-        "push rbx",
-        "push rcx",
-        "push rdx",
-        "push rsi",
-        "push rdi",
-        "push rbp",
-        "push r8",
-        "push r9",
-        "push r10",
-        "push r11",
-        "push r12",
-        "push r13",
-        "push r14",
-        "push r15",
-
-        // check CS
-        "test qword ptr [rsp + 128], 3",  // Test CS directly from stack
-        "jz 2f",                 // Jump if from kernel mode
-
-        // Coming from user mode - need swapgs
-        "swapgs",
-
-        "2:",
-        // Call context switch function
-        "mov rdi, rsp",
-        "call {context_switch}",
-
-         // Check CS
-        "test qword ptr [rsp + 128], 3",  // Test CS
-        "jz 3f",
-        "swapgs",                // Returning to user mode
-
-        "3:",
-
-        // Restore all registers (including correct RAX!)
-        "pop r15",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        "pop r11",
-        "pop r10",
-        "pop r9",
-        "pop r8",
-        "pop rbp",
-        "pop rdi",
-        "pop rsi",
-        "pop rdx",
-        "pop rcx",
-        "pop rbx",
-        "pop rax",
-
-        "iretq",
-
-        context_switch = sym timer_context_switch_handler,
-    )
-}
-
-// Called from naked assembly with pointer to saved registers
-#[expect(unused)]
-extern "C" fn timer_context_switch_handler(_saved_registers: *mut u64) {
-    // Acknowledge interrupt first to prevent stacking
-    unsafe { get_lapic().end_of_interrupt() };
 }
 
 extern "x86-interrupt" fn apic_error_interrupt_handler(_stack_frame: InterruptStackFrame) {

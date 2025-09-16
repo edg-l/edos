@@ -182,7 +182,7 @@ impl AhciController {
             if start.elapsed().as_millis() > 5000 {
                 return Err(AhciError::CommandTimeout);
             }
-            sched().thread_yield();
+            sched().thread_yield(true);
         }
 
         log!(logger, "AHCI controller reset complete");
@@ -201,7 +201,7 @@ impl AhciController {
             if start.elapsed().as_millis() > 1000 {
                 return Err(AhciError::CommandTimeout);
             }
-            sched().thread_yield();
+            sched().thread_yield(true);
         }
 
         log!(logger, "AHCI enabled with interrupts");
@@ -313,7 +313,7 @@ impl AhciController {
                     log!(logger, "Port {}: Timeout waiting for CR to clear", port_idx);
                     return Err(AhciError::CommandTimeout);
                 }
-                sched().thread_yield();
+                sched().thread_yield(true);
             }
 
             // Clear any error conditions
@@ -340,7 +340,7 @@ impl AhciController {
                         log!(logger, "Port {}: Device not ready after spin-up", port_idx);
                         return Err(AhciError::InvalidDevice);
                     } else {
-                        sched().thread_yield();
+                        sched().thread_yield(true);
                     }
                 } else {
                     break;

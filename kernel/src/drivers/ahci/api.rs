@@ -16,7 +16,7 @@ pub(super) fn send_request(request: AhciRequest, timeout: Duration) -> AhciRespo
             if let Some(req) = AHCI_REQUESTS.get() {
                 break req;
             }
-            sched().thread_yield();
+            sched().thread_yield(true);
         }
     };
 
