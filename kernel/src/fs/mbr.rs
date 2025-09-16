@@ -84,6 +84,7 @@ impl MbrPartitionEntry {
             0x82 => PartitionType::LinuxSwap,
             0x83 => PartitionType::LinuxFilesystem,
             0x05 | 0x0F | 0x85 => PartitionType::Extended,
+            0xEF => PartitionType::EfiSystemMbr,
             type_id => PartitionType::MbrUnknown(type_id),
         }
     }
@@ -96,6 +97,7 @@ impl MbrPartitionEntry {
             0x82 => "Linux Swap",
             0x83 => "Linux",
             0x05 | 0x0F => "Extended",
+            0xEF => "EFI System",
             _ => "Unknown",
         };
         format!("MBR Partition {} ({})", index + 1, type_name)
@@ -211,6 +213,7 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
             PartitionType::LinuxFilesystem => "Linux FS".to_string(),
             PartitionType::LinuxSwap => "Linux Swap".to_string(),
             PartitionType::Extended => "Extended".to_string(),
+            PartitionType::EfiSystemMbr => "EFI System".to_string(),
             PartitionType::MbrUnknown(id) => format!("Unknown (0x{:02X})", id),
             _ => "Other".to_string(),
         };

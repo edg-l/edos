@@ -65,6 +65,7 @@ pub enum PartitionType {
     Fat32,
     Ntfs,
     Extended,
+    EfiSystemMbr,
     MbrUnknown(u8),
 }
 
@@ -315,6 +316,7 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
             PartitionType::Fat32 => "FAT32",
             PartitionType::Ntfs => "NTFS",
             PartitionType::Extended => "Extended",
+            PartitionType::EfiSystemMbr => "EFI System (MBR)",
             PartitionType::MbrUnknown(_) => "MBR Unknown",
         };
         let fs_str = match &partition.filesystem {
