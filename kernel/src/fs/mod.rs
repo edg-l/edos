@@ -266,6 +266,9 @@ pub(super) enum PartitionCommand {
         path: Path,
     },
     Flush,
+    AddVirtualInfo {
+        paths: Vec<Path>,
+    },
 }
 
 // Helper functions for mount point handling
@@ -301,7 +304,7 @@ fn find_child_mount_points(
 }
 
 /// Convert PathOp to PartitionCommand
-fn pathop_to_partition_command(op: PathOp, path: Path) -> PartitionCommand {
+fn pathop_to_partition_command(op: PathOp, path: Path, real_path: Path) -> PartitionCommand {
     match op {
         PathOp::ListFiles => PartitionCommand::ListFiles { path },
         PathOp::ReadBytes { offset, count } => PartitionCommand::ReadBytes {
@@ -314,7 +317,7 @@ fn pathop_to_partition_command(op: PathOp, path: Path) -> PartitionCommand {
         PathOp::CreateDir => PartitionCommand::CreateDir { path },
         PathOp::RemoveFile => PartitionCommand::RemoveFile { path },
         PathOp::RemoveDir => PartitionCommand::RemoveDir { path },
-        PathOp::FileInfo => PartitionCommand::FileInfo { path },
+        PathOp::FileInfo => PartitionCommand::FileInfo { path: real_path },
         PathOp::Flush => PartitionCommand::Flush,
     }
 }
@@ -338,13 +341,15 @@ fn create_virtual_file(name: String) -> File {
 }
 
 /// Find the best mount point for a given path (longest prefix match)
-fn find_best_mount_point<'a>(
+fn find_mount_at_path<'a>(
     path: &Path,
     mount_points: &'a BTreeMap<Path, (usize, usize)>,
 ) -> Option<(&'a Path, (usize, usize))> {
     let mut best: Option<(&'a Path, (usize, usize))> = None;
     for (mp, &idx) in mount_points.iter() {
-        if path.starts_with(mp) {
+        if mp.is_root() && best.is_none() {
+            best = Some((mp, idx));
+        } else if path.starts_with(mp) {
             match best {
                 None => best = Some((mp, idx)),
                 Some((best_mp, _)) => {
@@ -427,6 +432,7 @@ pub extern "C" fn fs_main_thread() -> ! {
 
     // Mount table: map mount point to partition index
     let mut mount_points = alloc::collections::btree_map::BTreeMap::new();
+    let mut mount_points_rev = alloc::collections::btree_map::BTreeMap::new();
 
     for part in &partitions {
         let idx = part.index;
@@ -434,7 +440,30 @@ pub extern "C" fn fs_main_thread() -> ! {
         let path = Path::parse(&format!("/dev/sd{}p{}", part.device_id, part.index))
             .expect("failed to parse path");
         log!("Mounted {path}");
-        mount_points.insert(path, (part.device_id as usize, part.index));
+        mount_points.insert(path.clone(), (part.device_id as usize, part.index));
+        mount_points_rev.insert((part.device_id as usize, part.index), path);
+    }
+
+    for (mb_id, mb) in &worker_mailboxes {
+        let mut paths = Vec::new();
+        if let Some(base_path) = mount_points_rev.get(mb_id) {
+            for (path, id) in &mount_points {
+                if *id != *mb_id
+                    && let Some(parent) = base_path.parent()
+                {
+                    let stripped = path.strip_prefix(&parent);
+
+                    if !stripped.is_root() {
+                        paths.push(path.clone());
+                    }
+                }
+            }
+
+            if !paths.is_empty() {
+                log!("Sending virtual info to {mb_id:?}: {paths:?}");
+                mb.send(PartitionCommand::AddVirtualInfo { paths });
+            }
+        }
     }
 
     // Main loop: route and respond
@@ -454,14 +483,43 @@ pub extern "C" fn fs_main_thread() -> ! {
                     partition_index,
                     mount_point,
                 } => {
+                    log!(
+                        "Mount request: {:?} at {:?}",
+                        (device_id, partition_index),
+                        mount_point
+                    );
                     // Basic validation: index exists and mount point not used
                     let res = if !mount_points.contains_key(&mount_point) {
-                        mount_points.insert(mount_point, (device_id, partition_index));
+                        mount_points.insert(mount_point.clone(), (device_id, partition_index));
+                        mount_points_rev.insert((device_id, partition_index), mount_point.clone());
                         Ok(())
                     } else {
                         Err(Error::IoError)
                     };
                     req.response.send(FsResponse::Ok(res));
+
+                    let id = (device_id, partition_index);
+                    for (mb_id, mb) in &worker_mailboxes {
+                        let mut paths = Vec::new();
+                        if let Some(base_path) = mount_points_rev.get(mb_id) {
+                            for (path, id) in &mount_points {
+                                if *id != *mb_id
+                                    && path == &mount_point
+                                    && let Some(parent) = base_path.parent()
+                                {
+                                    let stripped = path.strip_prefix(&parent);
+
+                                    if !stripped.is_root() {
+                                        paths.push(path.clone());
+                                    }
+                                }
+                            }
+                            if !paths.is_empty() {
+                                log!("Sending virtual info to {mb_id:?}: {paths:?}");
+                                mb.send(PartitionCommand::AddVirtualInfo { paths });
+                            }
+                        }
+                    }
                 }
                 FsRequest::Unmount { mount_point } => {
                     let res = if mount_points.remove(&mount_point).is_some() {
@@ -472,13 +530,28 @@ pub extern "C" fn fs_main_thread() -> ! {
                     req.response.send(FsResponse::Ok(res));
                 }
                 FsRequest::PathRequest { path, op } => {
-                    if let Some((mount_path, part_idx)) =
-                        find_best_mount_point(&path, &mount_points)
-                    {
-                        // Mounted path - handle normally with virtual directory synthesis
-                        let rel = path.strip_prefix(mount_path).normalize();
+                    let mut mount_check_path = path.clone();
 
-                        let cmd = pathop_to_partition_command(op, rel);
+                    // If the op requests direct info of the given path, like file info, check the mount point at parent
+                    // This makes it so cd /dev/sda1p1 works.
+                    if matches!(op, PathOp::FileInfo)
+                        && let Some(p) = path.parent()
+                    {
+                        mount_check_path = p;
+                    }
+
+                    // find mount point device/partition to route
+                    if let Some((mount_path, part_idx)) =
+                        find_mount_at_path(&mount_check_path, &mount_points)
+                    {
+                        // relative  path to the mount point.
+                        let mut rel = path.strip_prefix(mount_path).normalize();
+
+                        let cmd = pathop_to_partition_command(
+                            op,
+                            rel.clone(),
+                            if &path == mount_path { path } else { rel },
+                        );
 
                         if let Some(mb) = worker_mailboxes.get(&part_idx) {
                             mb.forward(cmd, req.response);
@@ -547,13 +620,28 @@ extern "C" fn fat_partition_thread(partition: *mut Partition) -> ! {
         }
     };
 
+    let mut virtual_files: BTreeMap<Path, File> = BTreeMap::new();
+
     // Serve partition commands
     loop {
         while let Some(mut req) = mailbox.pop_request() {
             match req.message {
                 PartitionCommand::ListFiles { path } => {
-                    let res = fs.list_files(&path);
-                    req.response.send(FsResponse::Files(res));
+                    if let Some(file) = virtual_files.get(&path) {
+                        req.response
+                            .send(FsResponse::Files(Ok(alloc::vec![file.clone()])));
+                    } else {
+                        let mut res = fs.list_files(&path);
+
+                        if let Ok(res) = &mut res {
+                            for f in &virtual_files {
+                                if path.is_direct_parent(f.0) {
+                                    res.push(f.1.clone());
+                                }
+                            }
+                        }
+                        req.response.send(FsResponse::Files(res));
+                    }
                 }
                 PartitionCommand::ReadBytes {
                     path,
@@ -584,12 +672,22 @@ extern "C" fn fat_partition_thread(partition: *mut Partition) -> ! {
                     req.response.send(FsResponse::Ok(res));
                 }
                 PartitionCommand::FileInfo { path } => {
-                    let res = fs.file_info(&path);
-                    req.response.send(FsResponse::File(res));
+                    if let Some(file) = virtual_files.get(&path) {
+                        req.response.send(FsResponse::File(Ok(file.clone())));
+                    } else {
+                        let res = fs.file_info(&path);
+                        req.response.send(FsResponse::File(res));
+                    }
                 }
                 PartitionCommand::Flush => {
                     let res = fs.flush();
                     req.response.send(FsResponse::Ok(res));
+                }
+                PartitionCommand::AddVirtualInfo { paths } => {
+                    for path in paths {
+                        let file = create_virtual_file(path.components().last().unwrap().clone());
+                        virtual_files.insert(path, file);
+                    }
                 }
             }
         }

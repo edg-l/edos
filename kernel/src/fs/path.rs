@@ -103,6 +103,22 @@ impl Path {
         let comps = self.components[base.components.len()..].to_vec();
         Path { components: comps }
     }
+
+    pub fn parent(&self) -> Option<Path> {
+        if !self.components.is_empty() {
+            Some(Self {
+                components: self.components[0..(self.components.len() - 1)].to_vec(),
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn is_direct_parent(&self, other: &Path) -> bool {
+        let stripped = other.strip_prefix(self);
+
+        stripped.components.len() == 1
+    }
 }
 
 impl fmt::Display for Path {

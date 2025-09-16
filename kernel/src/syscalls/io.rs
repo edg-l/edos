@@ -19,7 +19,7 @@ use crate::{
 #[derive(Debug, Clone, Copy)]
 pub struct DirEntry {
     pub name_len: u32,     // Length of the filename
-    pub file_type: u8,     // 0=File, 1=Directory, 2=Symlink, 3=Special
+    pub file_type: u8,     // 0=File, 1=Directory, 2=Symlink, 3=Special, 4=device
     pub size: u64,         // File size in bytes
     pub attrs: u8,         // File attributes (readonly=1, hidden=2, system=4, archive=8)
     pub reserved: [u8; 2], // Padding for alignment
