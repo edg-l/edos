@@ -386,11 +386,11 @@ impl Scheduler {
     /// The caller thread gets put in a wait (and yields execution) until timeout or another thread wakes it.
     pub fn thread_wait_timeout(&self, timeout: Duration) {
         let id = self.current_id();
-        self.thread_set_wait_timeout(id, timeout);
         without_interrupts(|| {
+            let now = Instant::now();
+            self.cmd_queue.push(SchedCmd::WaitTimeout(id, now, timeout));
             unsafe { direct_context_switch() };
         });
-        hlt();
     }
 
     pub fn thread_park(&self) {
