@@ -153,24 +153,123 @@ fn detect_filesystem(
     device_id: u64,
     partition_start_lba: u64,
 ) -> Result<Option<FilesystemType>, &'static str> {
+    let logger = sched().get_logger();
+
     // Read first sector of partition
     let sector_data = ahci::api::read_sectors(device_id, partition_start_lba, 1, Vec::new())
         .map_err(|_| "Failed to read partition boot sector")?;
 
-    if sector_data.len() < core::mem::size_of::<Fat32BootSector>() {
+    if sector_data.len() < 512 {
         return Ok(Some(FilesystemType::Unknown));
     }
 
-    // Try to parse as FAT32 boot sector
+    log!(
+        logger,
+        "Detecting filesystem at LBA {}, got {} bytes",
+        partition_start_lba,
+        sector_data.len()
+    );
+
+    // Try NTFS detection first
+    if let Some(fs_type) = detect_ntfs(&sector_data) {
+        log!(logger, "Detected NTFS filesystem");
+        return Ok(Some(fs_type));
+    }
+
+    // Try FAT family detection
+    if let Some(fs_type) = detect_fat_family(&sector_data) {
+        log!(logger, "Detected FAT filesystem: {:?}", fs_type);
+        return Ok(Some(fs_type));
+    }
+
+    log!(logger, "Could not identify filesystem type");
+    Ok(Some(FilesystemType::Unknown))
+}
+
+/// Detect NTFS filesystem
+fn detect_ntfs(sector_data: &[u8]) -> Option<FilesystemType> {
+    if sector_data.len() < 512 {
+        return None;
+    }
+
+    // Check for NTFS OEM identifier at offset 3-10 ("NTFS    ")
+    if &sector_data[3..11] == b"NTFS    " {
+        // Additional validation: check bytes per sector (should be 512, 1024, 2048, or 4096)
+        let bytes_per_sector = u16::from_le_bytes([sector_data[11], sector_data[12]]);
+        if matches!(bytes_per_sector, 512 | 1024 | 2048 | 4096) {
+            return Some(FilesystemType::Ntfs);
+        }
+    }
+
+    None
+}
+
+/// Detect FAT family filesystems (FAT12, FAT16, FAT32)
+fn detect_fat_family(sector_data: &[u8]) -> Option<FilesystemType> {
+    if sector_data.len() < core::mem::size_of::<Fat32BootSector>() {
+        return None;
+    }
+
+    // Try to parse as FAT boot sector
     let boot_sector =
         try_from_bytes::<Fat32BootSector>(&sector_data[0..core::mem::size_of::<Fat32BootSector>()])
-            .map_err(|_| "Failed to parse boot sector")?;
+            .ok()?;
 
+    // Check if it's FAT32 first
     if boot_sector.is_fat32() {
-        Ok(Some(FilesystemType::Fat32))
-    } else {
-        Ok(Some(FilesystemType::Unknown))
+        return Some(FilesystemType::Fat32);
     }
+
+    // Check for FAT12/FAT16 characteristics
+    if is_fat16_or_fat12(&boot_sector) {
+        // Determine if it's FAT12 or FAT16 based on cluster count
+        let cluster_count = calculate_cluster_count(&boot_sector);
+
+        if cluster_count < 4085 {
+            Some(FilesystemType::Fat12)
+        } else if cluster_count < 65525 {
+            Some(FilesystemType::Fat16)
+        } else {
+            // Shouldn't happen if not FAT32, but handle gracefully
+            None
+        }
+    } else {
+        None
+    }
+}
+
+/// Check if boot sector has FAT12/FAT16 characteristics
+fn is_fat16_or_fat12(boot_sector: &Fat32BootSector) -> bool {
+    // Basic FAT validation
+    boot_sector.bytes_per_sector == 512 &&
+    boot_sector.sectors_per_cluster > 0 &&
+    boot_sector.sectors_per_cluster.is_power_of_two() &&
+    boot_sector.num_fats > 0 &&
+    boot_sector.root_entry_count > 0 &&  // FAT12/16 has root directory entries
+    boot_sector.fat_size_16 > 0 &&       // FAT12/16 uses 16-bit FAT size
+    // Check for FAT12/16 filesystem type strings
+    (boot_sector.file_system_type.starts_with(b"FAT12") ||
+     boot_sector.file_system_type.starts_with(b"FAT16") ||
+     boot_sector.file_system_type.starts_with(b"FAT  "))
+}
+
+/// Calculate the cluster count for FAT filesystem determination
+fn calculate_cluster_count(boot_sector: &Fat32BootSector) -> u32 {
+    let total_sectors = if boot_sector.total_sectors_16 != 0 {
+        boot_sector.total_sectors_16 as u32
+    } else {
+        boot_sector.total_sectors_32
+    };
+
+    let fat_sectors = boot_sector.fat_size_16 as u32;
+    let root_dir_sectors = ((boot_sector.root_entry_count as u32 * 32) + 511) / 512;
+
+    let data_sectors = total_sectors
+        .saturating_sub(boot_sector.reserved_sector_count as u32)
+        .saturating_sub(boot_sector.num_fats as u32 * fat_sectors)
+        .saturating_sub(root_dir_sectors);
+
+    data_sectors / boot_sector.sectors_per_cluster as u32
 }
 
 /// Generate a pseudo-GUID for MBR partitions for compatibility
@@ -218,7 +317,10 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
             _ => "Other".to_string(),
         };
         let fs_str = match &partition.filesystem {
+            Some(FilesystemType::Fat12) => "FAT12",
+            Some(FilesystemType::Fat16) => "FAT16",
             Some(FilesystemType::Fat32) => "FAT32",
+            Some(FilesystemType::Ntfs) => "NTFS",
             Some(FilesystemType::Unknown) => "Unknown",
             None => "None",
         };

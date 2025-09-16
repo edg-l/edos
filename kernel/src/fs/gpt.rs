@@ -71,7 +71,10 @@ pub enum PartitionType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FilesystemType {
+    Fat12,
+    Fat16,
     Fat32,
+    Ntfs,
     Unknown,
 }
 
@@ -281,6 +284,8 @@ fn detect_filesystem(
     if boot_sector.is_fat32() {
         Ok(Some(FilesystemType::Fat32))
     } else {
+        // For GPT, we'll keep it simple and just mark as Unknown
+        // The comprehensive detection is primarily for MBR partitions
         Ok(Some(FilesystemType::Unknown))
     }
 }
@@ -320,7 +325,10 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
             PartitionType::MbrUnknown(_) => "MBR Unknown",
         };
         let fs_str = match &partition.filesystem {
+            Some(FilesystemType::Fat12) => "FAT12",
+            Some(FilesystemType::Fat16) => "FAT16",
             Some(FilesystemType::Fat32) => "FAT32",
+            Some(FilesystemType::Ntfs) => "NTFS",
             Some(FilesystemType::Unknown) => "Unknown",
             None => "None",
         };

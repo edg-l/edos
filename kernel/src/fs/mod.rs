@@ -320,8 +320,12 @@ pub extern "C" fn fs_main_thread() -> ! {
                     worker_tid_map.insert(worker_tid, idx);
                     worker_mailboxes.push(Mailbox::new(worker_tid));
                 }
-                FilesystemType::Unknown => {
-                    // No worker for unknown FS
+                FilesystemType::Fat12
+                | FilesystemType::Fat16
+                | FilesystemType::Ntfs
+                | FilesystemType::Unknown => {
+                    // No worker for these filesystem types yet
+                    // TODO: Implement workers for FAT12/16 and NTFS
                 }
             }
         }
