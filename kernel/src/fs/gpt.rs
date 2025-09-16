@@ -75,6 +75,7 @@ pub enum FilesystemType {
     Fat16,
     Fat32,
     Ntfs,
+    Iso9660,
     Unknown,
 }
 
@@ -329,6 +330,7 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
             Some(FilesystemType::Fat16) => "FAT16",
             Some(FilesystemType::Fat32) => "FAT32",
             Some(FilesystemType::Ntfs) => "NTFS",
+            Some(FilesystemType::Iso9660) => "ISO9660",
             Some(FilesystemType::Unknown) => "Unknown",
             None => "None",
         };

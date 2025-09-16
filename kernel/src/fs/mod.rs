@@ -323,9 +323,10 @@ pub extern "C" fn fs_main_thread() -> ! {
                 FilesystemType::Fat12
                 | FilesystemType::Fat16
                 | FilesystemType::Ntfs
+                | FilesystemType::Iso9660
                 | FilesystemType::Unknown => {
                     // No worker for these filesystem types yet
-                    // TODO: Implement workers for FAT12/16 and NTFS
+                    // TODO: Implement workers for FAT12/16, NTFS, and ISO9660
                 }
             }
         }
