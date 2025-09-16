@@ -239,7 +239,6 @@ pub(super) enum PathOp {
 pub(super) enum PartitionCommand {
     ListFiles {
         path: Path,
-        virtual_directories: Option<Vec<String>>,
     },
     ReadBytes {
         path: Path,
@@ -304,10 +303,7 @@ fn find_child_mount_points(
 /// Convert PathOp to PartitionCommand
 fn pathop_to_partition_command(op: PathOp, path: Path) -> PartitionCommand {
     match op {
-        PathOp::ListFiles => PartitionCommand::ListFiles {
-            path,
-            virtual_directories: None,
-        },
+        PathOp::ListFiles => PartitionCommand::ListFiles { path },
         PathOp::ReadBytes { offset, count } => PartitionCommand::ReadBytes {
             path,
             offset,
@@ -482,66 +478,15 @@ pub extern "C" fn fs_main_thread() -> ! {
                         // Mounted path - handle normally with virtual directory synthesis
                         let rel = path.strip_prefix(mount_path).normalize();
 
-                        let cmd = if matches!(op, PathOp::ListFiles) {
-                            // For ListFiles, check for child mount points and pass them to worker
-                            let child_mount_points = find_child_mount_points(&path, &mount_points);
-                            let virtual_dirs = if child_mount_points.is_empty() {
-                                None
-                            } else {
-                                Some(child_mount_points)
-                            };
-                            PartitionCommand::ListFiles {
-                                path: rel,
-                                virtual_directories: virtual_dirs,
-                            }
-                        } else {
-                            pathop_to_partition_command(op, rel)
-                        };
+                        let cmd = pathop_to_partition_command(op, rel);
 
                         if let Some(mb) = worker_mailboxes.get(&part_idx) {
                             mb.forward(cmd, req.response);
                         } else {
-                            req.response.send(FsResponse::Ok(Err(Error::IoError)));
-                        }
-                    } else if let Some(&part_idx) = mount_points.get(&path) {
-                        // Exact mount point - handle mount root access
-                        match op {
-                            PathOp::FileInfo => {
-                                // Synthesize directory info for mount points
-                                let mount_file = create_virtual_file(
-                                    path.components()
-                                        .last()
-                                        .unwrap_or(&String::from(""))
-                                        .clone(),
-                                );
-                                req.response.send(FsResponse::File(Ok(mount_file)));
-                            }
-                            _ => {
-                                // Forward to mounted filesystem root
-                                let cmd =
-                                    pathop_to_partition_command(op, Path::parse("/").unwrap());
-                                if let Some(mb) = worker_mailboxes.get(&part_idx) {
-                                    mb.forward(cmd, req.response);
-                                } else {
-                                    req.response.send(FsResponse::Ok(Err(Error::IoError)));
-                                }
-                            }
-                        }
-                    } else if matches!(op, PathOp::ListFiles) {
-                        // Directory with child mounts - pure virtual synthesis
-                        let child_mount_points = find_child_mount_points(&path, &mount_points);
-                        if !child_mount_points.is_empty() {
-                            let virtual_files: Vec<File> = child_mount_points
-                                .into_iter()
-                                .map(create_virtual_file)
-                                .collect();
-                            req.response.send(FsResponse::Files(Ok(virtual_files)));
-                        } else {
-                            req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                            req.response.send(FsResponse::Ok(Err(Error::FileNotFound)));
                         }
                     } else {
-                        // No mount handling - error
-                        req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                        req.response.send(FsResponse::Ok(Err(Error::FileNotFound)));
                     }
                 }
                 FsRequest::PartitionRequest {
@@ -606,59 +551,8 @@ extern "C" fn fat_partition_thread(partition: *mut Partition) -> ! {
     loop {
         while let Some(mut req) = mailbox.pop_request() {
             match req.message {
-                PartitionCommand::ListFiles {
-                    path,
-                    virtual_directories,
-                } => {
-                    let res = match fs.list_files(&path) {
-                        Ok(mut files) => {
-                            // Add virtual directories if provided
-                            if let Some(virtual_dirs) = virtual_directories {
-                                for dir_name in virtual_dirs {
-                                    files.push(File {
-                                        name: dir_name,
-                                        kind: crate::fs::FileKind::Directory,
-                                        size: 0,
-                                        attrs: crate::fs::FileAttrs {
-                                            readonly: false,
-                                            hidden: false,
-                                            system: false,
-                                            archive: false,
-                                        },
-                                        created: None,
-                                        accessed: None,
-                                        modified: None,
-                                    });
-                                }
-                            }
-                            Ok(files)
-                        }
-                        Err(e) => {
-                            // If real filesystem failed but we have virtual directories, show only those
-                            if let Some(virtual_dirs) = virtual_directories {
-                                let mut virtual_files = Vec::new();
-                                for dir_name in virtual_dirs {
-                                    virtual_files.push(File {
-                                        name: dir_name,
-                                        kind: crate::fs::FileKind::Directory,
-                                        size: 0,
-                                        attrs: crate::fs::FileAttrs {
-                                            readonly: false,
-                                            hidden: false,
-                                            system: false,
-                                            archive: false,
-                                        },
-                                        created: None,
-                                        accessed: None,
-                                        modified: None,
-                                    });
-                                }
-                                Ok(virtual_files)
-                            } else {
-                                Err(e)
-                            }
-                        }
-                    };
+                PartitionCommand::ListFiles { path } => {
+                    let res = fs.list_files(&path);
                     req.response.send(FsResponse::Files(res));
                 }
                 PartitionCommand::ReadBytes {
