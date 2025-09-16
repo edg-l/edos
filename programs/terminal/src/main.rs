@@ -400,24 +400,19 @@ impl Terminal {
                         if entries.is_empty() {
                             self.print_text("[empty directory]\n");
                         } else {
-                            for entry in entries {
+                            for (i, entry) in entries.into_iter().enumerate() {
                                 let type_char = match entry.file_type {
-                                    FileType::File => ' ',
-                                    FileType::Directory => '/',
-                                    FileType::Symlink => '@',
-                                    FileType::Special => '*',
+                                    FileType::File => "",
+                                    FileType::Directory => "/",
+                                    FileType::Symlink => "@",
+                                    FileType::Special => "*",
                                 };
 
-                                let size_str = if entry.file_type == FileType::Directory {
-                                    "".to_string()
-                                } else {
-                                    format!("{:9}", entry.size)
-                                };
+                                self.print_text(&format!("{}{} ", entry.name, type_char));
 
-                                self.print_text(&format!(
-                                    "{}{} {}\n",
-                                    entry.name, type_char, size_str
-                                ));
+                                if i != 0 && i % 12 == 0 {
+                                    self.print_text("\n");
+                                }
                             }
                         }
                     }
