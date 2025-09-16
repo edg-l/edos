@@ -12,6 +12,7 @@ use crate::{
     fs::{
         fat32::Fat32fs,
         gpt::{FilesystemType, Partition, parse_gpt, print_partitions},
+        mbr::parse_mbr,
         path::Path,
     },
     log,
@@ -26,6 +27,7 @@ pub mod api;
 pub mod block_device;
 pub mod fat32;
 pub mod gpt;
+pub mod mbr;
 pub mod path;
 
 pub fn init() {
@@ -275,10 +277,28 @@ pub extern "C" fn fs_main_thread() -> ! {
     for device in &devices {
         match parse_gpt(device.id) {
             Ok(found_partitions) => {
+                log!(logger, "GPT found on device {}", device.id);
                 print_partitions(&found_partitions, &logger);
                 partitions.extend(found_partitions);
             }
-            Err(err) => log!(logger, "Error parsing GPT: {err}"),
+            Err(gpt_err) => {
+                log!(logger, "GPT parsing failed: {}, trying MBR", gpt_err);
+                match parse_mbr(device.id) {
+                    Ok(found_partitions) => {
+                        log!(logger, "MBR found on device {}", device.id);
+                        crate::fs::mbr::print_partitions(&found_partitions, &logger);
+                        partitions.extend(found_partitions);
+                    }
+                    Err(mbr_err) => {
+                        log!(
+                            logger,
+                            "Both GPT and MBR parsing failed - GPT: {}, MBR: {}",
+                            gpt_err,
+                            mbr_err
+                        );
+                    }
+                }
+            }
         }
     }
 

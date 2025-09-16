@@ -52,11 +52,20 @@ pub struct Partition {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PartitionType {
+    // GPT partition types
     EfiSystem,
     MicrosoftBasicData,
     LinuxFilesystem,
     LinuxSwap,
     Unknown([u8; 16]),
+    // MBR partition types
+    Fat12,
+    Fat16Small,
+    Fat16,
+    Fat32,
+    Ntfs,
+    Extended,
+    MbrUnknown(u8),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -300,6 +309,13 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
             PartitionType::LinuxFilesystem => "Linux FS",
             PartitionType::LinuxSwap => "Linux Swap",
             PartitionType::Unknown(_) => "Unknown",
+            PartitionType::Fat12 => "FAT12",
+            PartitionType::Fat16Small => "FAT16 Small",
+            PartitionType::Fat16 => "FAT16",
+            PartitionType::Fat32 => "FAT32",
+            PartitionType::Ntfs => "NTFS",
+            PartitionType::Extended => "Extended",
+            PartitionType::MbrUnknown(_) => "MBR Unknown",
         };
         let fs_str = match &partition.filesystem {
             Some(FilesystemType::Fat32) => "FAT32",
