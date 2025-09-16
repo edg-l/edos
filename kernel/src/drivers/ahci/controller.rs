@@ -11,7 +11,7 @@ use crate::{
     apic::init::configure_device_interrupt,
     drivers::{
         ahci::{
-            AhciError,
+            AhciError, DeviceType,
             port::AhciPort,
             structures::{
                 GHC_AE, GHC_IE, HbaMemory, HbaPort, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE,
@@ -239,7 +239,7 @@ impl AhciController {
                 self.initialize_port(port_ptr, i)?;
 
                 // Initialize AHCI port (program CLB/FB, enable FRE/ST)
-                match AhciPort::new(i, port_ptr) {
+                match AhciPort::new(i, port_ptr, DeviceType::Ata) {
                     Ok(port) => {
                         // Read signature with a short bounded wait after start
                         let mut signature =
@@ -257,16 +257,17 @@ impl AhciController {
                         match signature {
                             SATA_SIG_ATA => {
                                 log!(logger, "Found SATA drive on port {}", i);
+                                // Port was initialized with DeviceType::Ata, no change needed
+                                let mut port = port;
+                                port.set_device_type(DeviceType::Ata);
                                 self.ports[i] = Some(Arc::new(Mutex::new(port)));
                             }
                             SATA_SIG_ATAPI => {
-                                log!(
-                                    logger,
-                                    "Found ATAPI device on port {} (sig: {:#x}) - not supported yet",
-                                    i,
-                                    signature
-                                );
-                                // Unsupported device type; do not keep the port
+                                log!(logger, "Found ATAPI device on port {}", i);
+                                // Update device type to ATAPI
+                                let mut port = port;
+                                port.set_device_type(DeviceType::Atapi);
+                                self.ports[i] = Some(Arc::new(Mutex::new(port)));
                             }
                             sig => {
                                 log!(

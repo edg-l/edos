@@ -33,10 +33,9 @@ pub(super) fn send_request(request: FsRequest, timeout: Duration) -> FsResponse 
 // Global/management APIs
 
 pub fn list_partitions() -> Vec<Partition> {
-    let FsResponse::Partitions(parts) =
-        send_request(FsRequest::ListPartitions, Duration::from_secs(1))
-    else {
-        unreachable!()
+    let res = send_request(FsRequest::ListPartitions, Duration::from_secs(1));
+    let FsResponse::Partitions(parts) = res else {
+        unreachable!("{:#?}", res)
     };
     parts
 }
@@ -71,14 +70,15 @@ pub fn unmount(mount_point: Path) -> Result<(), Error> {
 // Path-scoped APIs (resolve partition via mount table in FS main)
 
 pub fn list_files(path: &Path) -> Result<Vec<File>, Error> {
-    let FsResponse::Files(r) = send_request(
+    let res = send_request(
         FsRequest::PathRequest {
             path: path.clone(),
             op: PathOp::ListFiles,
         },
         Duration::from_secs(5),
-    ) else {
-        unreachable!()
+    );
+    let FsResponse::Files(r) = res else {
+        unreachable!("{:#?}", res)
     };
     r
 }

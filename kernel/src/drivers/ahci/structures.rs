@@ -1,12 +1,13 @@
 #![expect(unused)]
 
 use alloc::{
+    format,
     string::{String, ToString},
     vec::Vec,
 };
 use bytemuck::{Pod, Zeroable};
 
-use crate::{log, println, thread::scheduler::sched};
+use crate::{drivers::ahci::DeviceType, log, println, thread::scheduler::sched};
 
 // Compile-time structure size assertions
 const _: () = {
@@ -116,6 +117,7 @@ pub const SATA_SIG_PM: u32 = 0x96690101;
 
 // Command header flags
 pub const CMD_HEADER_CFL_MASK: u16 = 0x1F; // Command FIS Length
+pub const CMD_HEADER_ATAPI: u16 = 1 << 5; // ATAPI command
 pub const CMD_HEADER_WRITE: u16 = 1 << 6; // Write direction
 pub const CMD_HEADER_PREFETCHABLE: u16 = 1 << 7;
 pub const CMD_HEADER_RESET: u16 = 1 << 8;
@@ -278,7 +280,157 @@ pub struct DeviceIdentifyInfo {
     pub raw_features: u16,
 }
 
+// SCSI Command Descriptor Block structures for ATAPI
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct ScsiInquiry {
+    pub operation_code: u8,    // 0x12
+    pub evpd: u8,              // 0
+    pub page_code: u8,         // 0
+    pub reserved: u8,          // 0
+    pub allocation_length: u8, // 96
+    pub control: u8,           // 0
+    pub padding: [u8; 6],      // Pad to 12 bytes
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct ScsiRead10 {
+    pub operation_code: u8,       // 0x28
+    pub flags: u8,                // 0
+    pub lba: [u8; 4],             // Big-endian LBA
+    pub reserved: u8,             // 0
+    pub transfer_length: [u8; 2], // Big-endian sector count
+    pub control: u8,              // 0
+    pub padding: [u8; 2],         // Pad to 12 bytes
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct ScsiReadCapacity10 {
+    pub operation_code: u8, // 0x25
+    pub reserved1: u8,      // 0
+    pub lba: [u8; 4],       // 0 for capacity request
+    pub reserved2: [u8; 2], // 0
+    pub pmi: u8,            // 0
+    pub control: u8,        // 0
+    pub padding: [u8; 3],   // Pad to 12 bytes
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct ScsiTestUnitReady {
+    pub operation_code: u8, // 0x00
+    pub reserved: [u8; 4],  // 0
+    pub control: u8,        // 0
+    pub padding: [u8; 6],   // Pad to 12 bytes
+}
+
+// SCSI command operation codes
+pub const SCSI_CMD_INQUIRY: u8 = 0x12;
+pub const SCSI_CMD_READ_10: u8 = 0x28;
+pub const SCSI_CMD_READ_CAPACITY_10: u8 = 0x25;
+pub const SCSI_CMD_TEST_UNIT_READY: u8 = 0x00;
+pub const SCSI_CMD_REQUEST_SENSE: u8 = 0x03;
+
+impl ScsiInquiry {
+    pub fn new() -> Self {
+        let mut cmd = Self::zeroed();
+        cmd.operation_code = SCSI_CMD_INQUIRY;
+        cmd.allocation_length = 96; // Standard INQUIRY data length
+        cmd
+    }
+}
+
+impl ScsiRead10 {
+    pub fn new(lba: u32, sectors: u16) -> Self {
+        let mut cmd = Self::zeroed();
+        cmd.operation_code = SCSI_CMD_READ_10;
+        cmd.lba = lba.to_be_bytes();
+        cmd.transfer_length = sectors.to_be_bytes();
+        cmd
+    }
+}
+
+impl ScsiReadCapacity10 {
+    pub fn new() -> Self {
+        let mut cmd = Self::zeroed();
+        cmd.operation_code = SCSI_CMD_READ_CAPACITY_10;
+        cmd
+    }
+}
+
+impl ScsiTestUnitReady {
+    pub fn new() -> Self {
+        let mut cmd = Self::zeroed();
+        cmd.operation_code = SCSI_CMD_TEST_UNIT_READY;
+        cmd
+    }
+}
+
 impl DeviceIdentifyInfo {
+    /// Parse SCSI INQUIRY data into DeviceIdentifyInfo format (for ATAPI devices)
+    pub fn from_scsi_inquiry(inquiry_data: &[u8]) -> Self {
+        if inquiry_data.len() < 96 {
+            return Self::default_atapi();
+        }
+
+        // SCSI INQUIRY format:
+        // Bytes 8-15: Vendor identification (8 bytes)
+        // Bytes 16-31: Product identification (16 bytes)
+        // Bytes 32-35: Product revision level (4 bytes)
+
+        let vendor = core::str::from_utf8(&inquiry_data[8..16])
+            .unwrap_or("<invalid>")
+            .trim()
+            .to_string();
+
+        let product = core::str::from_utf8(&inquiry_data[16..32])
+            .unwrap_or("<invalid>")
+            .trim()
+            .to_string();
+
+        let revision = core::str::from_utf8(&inquiry_data[32..36])
+            .unwrap_or("<invalid>")
+            .trim()
+            .to_string();
+
+        // Combine vendor and product for model name
+        let model = if vendor.is_empty() {
+            product
+        } else {
+            format!("{} {}", vendor, product)
+        };
+
+        Self {
+            model,
+            serial: "<ATAPI>".to_string(), // ATAPI devices don't always have serial in INQUIRY
+            firmware: revision,
+            sectors: 0, // Will be filled by READ_CAPACITY
+            capacity_mb: 0,
+            capacity_gb: 0,
+            supports_lba48: false, // Not applicable for ATAPI
+            supports_power_mgmt: false,
+            supports_security: false,
+            raw_features: 0,
+        }
+    }
+
+    fn default_atapi() -> Self {
+        Self {
+            model: "<Unknown ATAPI>".to_string(),
+            serial: "<ATAPI>".to_string(),
+            firmware: "<Unknown>".to_string(),
+            sectors: 0,
+            capacity_mb: 0,
+            capacity_gb: 0,
+            supports_lba48: false,
+            supports_power_mgmt: false,
+            supports_security: false,
+            raw_features: 0,
+        }
+    }
+
     /// Parse IDENTIFY data into a structured format
     pub fn from_identify_data(identify_data: &[u8; 512]) -> Self {
         // Model number (words 27-46, byte-swapped)

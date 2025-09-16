@@ -54,6 +54,14 @@ pub enum AhciError {
     IoError,
     #[error("invalid command slot")]
     InvalidSlot,
+    #[error("device is read-only")]
+    ReadOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceType {
+    Ata,
+    Atapi,
 }
 
 pub static AHCI_DRIVER_THREAD_ID: Once<u64> = Once::new();
@@ -68,6 +76,7 @@ pub struct DetectedDevice {
     pub controller_pci_address: PciAddress,
     pub port_idx: usize,
     pub device_info: DeviceIdentifyInfo,
+    pub device_type: DeviceType,
 }
 
 pub(super) static AHCI_REQUESTS: Once<Mailbox<AhciRequest, AhciResponse>> = Once::new();
@@ -158,7 +167,8 @@ pub extern "C" fn ahci_driver_main() -> ! {
     for controller in &mut controllers {
         for port_idx in 0..controller.ports.len() {
             if let Some(port) = controller.ports[port_idx].as_mut() {
-                match port.lock().identify_device() {
+                let mut port = port.lock();
+                match port.identify_device() {
                     Ok(device_info) => {
                         device_info.print_info(port_idx);
                         detected_devices.push(DetectedDevice {
@@ -166,6 +176,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
                             controller_pci_address: controller.pci_device.address,
                             port_idx,
                             device_info,
+                            device_type: port.device_type,
                         });
                         id += 1;
                     }

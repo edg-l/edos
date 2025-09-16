@@ -70,19 +70,10 @@ pub unsafe extern "C" fn ap_start(cpu: &MpCpu) -> ! {
 
     println!("[smp] AP online: LAPIC id {}", unsafe { get_lapic().id() });
 
-    queue_spawn_kthread_named("test", kthread_test as u64);
-
     set_apic_timer_and_enable(Duration::from_millis(5));
 
     loop {
         x86_64::instructions::interrupts::enable_and_hlt();
-    }
-}
-
-pub fn kthread_test() -> ! {
-    loop {
-        // log!("hello multiple cpus");
-        sched().thread_wait_timeout(Duration::from_millis(1500));
     }
 }
 

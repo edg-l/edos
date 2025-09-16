@@ -39,6 +39,7 @@ pub const FIS_TYPE_DEV_BITS: u8 = 0xA1; // Set device bits
 pub const ATA_CMD_READ_DMA_EXT: u8 = 0x25;
 pub const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
 pub const ATA_CMD_IDENTIFY: u8 = 0xEC;
+pub const ATA_CMD_PACKET: u8 = 0xA0;
 pub const ATA_CMD_FLUSH_CACHE: u8 = 0xE7;
 pub const ATA_CMD_FLUSH_CACHE_EXT: u8 = 0xEA;
 pub const ATA_CMD_STANDBY_IMMEDIATE: u8 = 0xE0;
@@ -177,6 +178,22 @@ impl FisRegH2D {
         fis.fis_type = FIS_TYPE_REG_H2D;
         fis.pmport = 1 << 7;
         fis.command = ATA_CMD_STANDBY_IMMEDIATE;
+        fis
+    }
+
+    /// Create ATAPI PACKET command FIS
+    pub fn new_atapi_packet(transfer_length: u16) -> Self {
+        let mut fis = Self::zeroed();
+        fis.fis_type = FIS_TYPE_REG_H2D;
+        fis.pmport = 1 << 7; // Command register
+        fis.command = ATA_CMD_PACKET;
+        fis.featurel = 0x01; // DMA transfer
+        fis.device = 0x40; // LBA mode
+
+        // Set byte count for transfer (in lba1/lba2 fields for PACKET command)
+        fis.lba1 = (transfer_length & 0xFF) as u8;
+        fis.lba2 = ((transfer_length >> 8) & 0xFF) as u8;
+
         fis
     }
 }

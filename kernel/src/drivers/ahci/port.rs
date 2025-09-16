@@ -3,16 +3,19 @@ use core::{
     time::Duration,
 };
 
+use alloc::vec;
+
 use x86_64::PhysAddr;
 
 use crate::{
     drivers::ahci::{
-        AhciError,
+        AhciError, DeviceType,
         dma::{DmaAllocator, DmaRegion},
         fis::FisRegH2D,
         structures::{
-            CMD_HEADER_WRITE, CommandHeader, CommandTable, DeviceIdentifyInfo, HbaFis, HbaPort,
-            PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE, PORT_CMD_ST, PORT_IS_TFES, PrdtEntry,
+            CMD_HEADER_ATAPI, CMD_HEADER_WRITE, CommandHeader, CommandTable, DeviceIdentifyInfo,
+            HbaFis, HbaPort, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE, PORT_CMD_ST, PORT_IS_TFES,
+            PrdtEntry, ScsiInquiry, ScsiRead10, ScsiReadCapacity10,
         },
     },
     log, println,
@@ -26,6 +29,7 @@ const AHCI_CMD_SLOTS: usize = 32;
 pub struct AhciPort {
     pub port_idx: usize,
     pub port_regs: *mut HbaPort,
+    pub device_type: DeviceType,
 
     // DMA regions
     pub command_list: DmaRegion<[CommandHeader; AHCI_CMD_SLOTS]>,
@@ -41,7 +45,11 @@ unsafe impl Send for AhciPort {}
 
 #[expect(unused)]
 impl AhciPort {
-    pub fn new(port_idx: usize, port_regs: *mut HbaPort) -> Result<Self, AhciError> {
+    pub fn new(
+        port_idx: usize,
+        port_regs: *mut HbaPort,
+        device_type: DeviceType,
+    ) -> Result<Self, AhciError> {
         let logger = sched().get_logger();
         log!(logger, "Initializing AHCI port {}", port_idx);
 
@@ -99,6 +107,7 @@ impl AhciPort {
         Ok(Self {
             port_idx,
             port_regs,
+            device_type,
             command_list,
             fis_area,
             command_tables: [const { None }; AHCI_CMD_SLOTS],
@@ -121,8 +130,7 @@ impl AhciPort {
                     if start.elapsed().as_millis() > 500 {
                         return Err(AhciError::CommandTimeout);
                     }
-                    crate::thread::scheduler::sched()
-                        .thread_wait_timeout(core::time::Duration::from_millis(1));
+                    sched().thread_wait_timeout(core::time::Duration::from_millis(1));
                 }
             }
 
@@ -138,8 +146,7 @@ impl AhciPort {
                     if start.elapsed().as_millis() > 500 {
                         return Err(AhciError::CommandTimeout);
                     }
-                    crate::thread::scheduler::sched()
-                        .thread_wait_timeout(core::time::Duration::from_millis(1));
+                    sched().thread_wait_timeout(core::time::Duration::from_millis(1));
                 }
             }
         }
@@ -163,8 +170,204 @@ impl AhciPort {
         }
     }
 
+    pub fn set_device_type(&mut self, device_type: DeviceType) {
+        self.device_type = device_type;
+    }
+
+    /// Execute ATAPI command (SCSI packet command)
+    fn execute_atapi_command(
+        &mut self,
+        scsi_cmd: &[u8],
+        buffer_addr: PhysAddr,
+        buffer_size: usize,
+        timeout: Duration,
+    ) -> Result<(), AhciError> {
+        let slot = self
+            .allocate_command_slot()
+            .ok_or(AhciError::PortNotReady)?;
+
+        // Setup ATAPI command table
+        self.setup_atapi_command_table(slot, scsi_cmd, buffer_addr, buffer_size)?;
+
+        // Issue and wait - ATAPI needs special command header flags
+        self.issue_command(slot, CMD_HEADER_ATAPI)?;
+        let result = self.wait_for_command_completion(slot, timeout);
+
+        // Always free the slot
+        self.free_command_slot(slot);
+
+        result
+    }
+
+    /// Setup ATAPI command table with PACKET FIS and SCSI CDB
+    fn setup_atapi_command_table(
+        &mut self,
+        slot: usize,
+        scsi_cmd: &[u8],
+        buffer_addr: PhysAddr,
+        buffer_size: usize,
+    ) -> Result<(), AhciError> {
+        if slot >= AHCI_CMD_SLOTS {
+            return Err(AhciError::InvalidSlot);
+        }
+
+        if scsi_cmd.len() > 16 {
+            return Err(AhciError::IoError); // ATAPI command too long
+        }
+
+        // Allocate command table if needed
+        if self.command_tables[slot].is_none() {
+            self.command_tables[slot] = Some(DmaRegion::<CommandTable>::allocate()?);
+        }
+
+        unsafe {
+            let table = self.command_tables[slot]
+                .as_ref()
+                .expect("failed to get slot table")
+                .get();
+            table.write(core::mem::zeroed());
+            let table = &mut *table;
+
+            // For ATAPI, we need both CFIS (PACKET command) and ACMD (SCSI command)
+
+            // 1. Setup Command FIS with PACKET command
+            let packet_fis = FisRegH2D::new_atapi_packet(buffer_size as u16);
+            let fis_bytes = bytemuck::bytes_of(&packet_fis);
+            table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
+
+            // 2. Setup ATAPI Command (SCSI CDB) in ACMD field
+            table.acmd[..scsi_cmd.len()].copy_from_slice(scsi_cmd);
+
+            // 3. Setup PRDT (Physical Region Descriptor Table) if we have data transfer
+            if buffer_size > 0 {
+                let prdt_entry = PrdtEntry {
+                    dba: buffer_addr.as_u64() as u32,
+                    dbau: (buffer_addr.as_u64() >> 32) as u32,
+                    reserved: 0,
+                    dbc: (buffer_size - 1) as u32, // Byte count - 1 (0-based)
+                };
+
+                // Write PRDT entry right after the CommandTable
+                let prdt_ptr = (table as *mut CommandTable as *mut u8)
+                    .add(core::mem::size_of::<CommandTable>())
+                    as *mut PrdtEntry;
+                ptr::write_volatile(prdt_ptr, prdt_entry);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Execute SCSI INQUIRY command and convert to DeviceIdentifyInfo
+    fn execute_atapi_inquiry_as_identify(&mut self) -> Result<DeviceIdentifyInfo, AhciError> {
+        let inquiry_cmd = ScsiInquiry::new();
+        let data_buffer = self.dma_alloc.allocate_sized(96)?;
+
+        let scsi_cmd_bytes = bytemuck::bytes_of(&inquiry_cmd);
+        self.execute_atapi_command(
+            scsi_cmd_bytes,
+            data_buffer.phys_addr(),
+            96,
+            Duration::from_secs(5),
+        )?;
+
+        // Convert SCSI INQUIRY data to DeviceIdentifyInfo
+        let inquiry_data = unsafe { core::slice::from_raw_parts(data_buffer.as_ptr(), 96) };
+        let mut device_info = DeviceIdentifyInfo::from_scsi_inquiry(inquiry_data);
+
+        // Try to get capacity information via READ_CAPACITY
+        if let Ok(capacity) = self.execute_atapi_read_capacity() {
+            device_info.sectors = capacity.0;
+            device_info.capacity_mb = (capacity.0 * capacity.1 as u64) / (1024 * 1024);
+            device_info.capacity_gb = device_info.capacity_mb / 1024;
+        }
+
+        self.dma_alloc.dealloc(data_buffer);
+        Ok(device_info)
+    }
+
+    /// Execute SCSI READ_CAPACITY_10 to get device size
+    fn execute_atapi_read_capacity(&mut self) -> Result<(u64, u32), AhciError> {
+        let capacity_cmd = ScsiReadCapacity10::new();
+        let data_buffer = self.dma_alloc.allocate_sized(8)?;
+
+        let scsi_cmd_bytes = bytemuck::bytes_of(&capacity_cmd);
+        self.execute_atapi_command(
+            scsi_cmd_bytes,
+            data_buffer.phys_addr(),
+            8,
+            Duration::from_secs(5),
+        )?;
+
+        // Parse READ_CAPACITY response: [last_lba(4), block_size(4)]
+        let capacity_data = unsafe { core::slice::from_raw_parts(data_buffer.as_ptr(), 8) };
+
+        let last_lba = u32::from_be_bytes([
+            capacity_data[0],
+            capacity_data[1],
+            capacity_data[2],
+            capacity_data[3],
+        ]);
+        let block_size = u32::from_be_bytes([
+            capacity_data[4],
+            capacity_data[5],
+            capacity_data[6],
+            capacity_data[7],
+        ]);
+
+        self.dma_alloc.dealloc(data_buffer);
+
+        // Total sectors = last_lba + 1 (last_lba is 0-based)
+        Ok(((last_lba as u64) + 1, block_size))
+    }
+
+    /// Execute SCSI READ_10 command for sector reading
+    fn execute_atapi_read_as_sectors(
+        &mut self,
+        lba: u64,
+        buffer: &mut [u8],
+        sectors: u16,
+    ) -> Result<(), AhciError> {
+        let expected_size = sectors as usize * 2048; // CD/DVD sectors are 2048 bytes
+        if buffer.len() < expected_size {
+            return Err(AhciError::IoError);
+        }
+
+        // SCSI READ_10 uses 32-bit LBA
+        if lba > u32::MAX as u64 {
+            return Err(AhciError::IoError);
+        }
+
+        let read_cmd = ScsiRead10::new(lba as u32, sectors);
+        let data_buffer = self.dma_alloc.allocate_sized(expected_size)?;
+
+        let scsi_cmd_bytes = bytemuck::bytes_of(&read_cmd);
+        self.execute_atapi_command(
+            scsi_cmd_bytes,
+            data_buffer.phys_addr(),
+            expected_size,
+            Duration::from_secs(10), // Optical drives can be slower
+        )?;
+
+        // Copy data to output buffer
+        unsafe {
+            ptr::copy_nonoverlapping(data_buffer.as_ptr(), buffer.as_mut_ptr(), expected_size);
+        }
+
+        self.dma_alloc.dealloc(data_buffer);
+        Ok(())
+    }
+
     /// Issue IDENTIFY command to get device information
     pub fn identify_device(&mut self) -> Result<DeviceIdentifyInfo, AhciError> {
+        match self.device_type {
+            DeviceType::Ata => self.execute_ata_identify(),
+            DeviceType::Atapi => self.execute_atapi_inquiry_as_identify(),
+        }
+    }
+
+    /// Execute ATA IDENTIFY command
+    fn execute_ata_identify(&mut self) -> Result<DeviceIdentifyInfo, AhciError> {
         // Allocate DMA buffer for identify data (512 bytes)
         let data_buffer = self.dma_alloc.allocate_sized(512)?;
 
@@ -192,6 +395,46 @@ impl AhciPort {
     /// * `buffer` - Buffer to read data into (must be at least sectors * 512 bytes)
     /// * `sectors` - Number of sectors to read (each sector is 512 bytes)
     pub fn read_sectors(
+        &mut self,
+        lba: u64,
+        buffer: &mut [u8],
+        sectors: u16,
+    ) -> Result<(), AhciError> {
+        match self.device_type {
+            DeviceType::Ata => self.execute_ata_read(lba, buffer, sectors),
+            DeviceType::Atapi => {
+                // For ATAPI, need to handle different sector size (2048 vs 512)
+                // For now, translate request to ATAPI format
+                if sectors == 0 {
+                    return Ok(());
+                }
+
+                // ATAPI sectors are typically 2048 bytes, but the API expects 512-byte sectors
+                // We need to handle this translation
+                let atapi_sectors = (sectors + 3) / 4; // Round up: 4 x 512-byte = 1 x 2048-byte
+                let atapi_lba = lba / 4; // Each ATAPI sector contains 4 ATA sectors
+
+                // Allocate larger buffer for ATAPI
+                let atapi_buffer_size = atapi_sectors as usize * 2048;
+                let mut temp_buffer = vec![0u8; atapi_buffer_size];
+
+                self.execute_atapi_read_as_sectors(atapi_lba, &mut temp_buffer, atapi_sectors)?;
+
+                // Copy the relevant portion to output buffer
+                let start_offset = (lba % 4) as usize * 512;
+                let copy_size = (sectors as usize * 512).min(buffer.len());
+                let available_data = temp_buffer.len().saturating_sub(start_offset);
+                let actual_copy = copy_size.min(available_data);
+
+                buffer[..actual_copy]
+                    .copy_from_slice(&temp_buffer[start_offset..start_offset + actual_copy]);
+                Ok(())
+            }
+        }
+    }
+
+    /// Execute ATA read command
+    fn execute_ata_read(
         &mut self,
         lba: u64,
         buffer: &mut [u8],
@@ -236,6 +479,19 @@ impl AhciPort {
         buffer: &[u8],
         sectors: u16,
     ) -> Result<(), AhciError> {
+        match self.device_type {
+            DeviceType::Ata => self.execute_ata_write(lba, buffer, sectors),
+            DeviceType::Atapi => Err(AhciError::ReadOnly), // ATAPI devices don't support sector writes
+        }
+    }
+
+    /// Execute ATA write command
+    fn execute_ata_write(
+        &mut self,
+        lba: u64,
+        buffer: &[u8],
+        sectors: u16,
+    ) -> Result<(), AhciError> {
         let expected_size = sectors as usize * 512;
         if buffer.len() < expected_size {
             return Err(AhciError::IoError);
@@ -262,14 +518,23 @@ impl AhciPort {
     }
 
     pub fn flush_cache(&mut self) -> Result<(), AhciError> {
-        self.execute_command(
-            &FisRegH2D::new_flush_cache(),
-            PhysAddr::zero(),
-            0,
-            0,
-            Duration::from_secs(5),
-        )?;
-        Ok(())
+        match self.device_type {
+            DeviceType::Ata => {
+                self.execute_command(
+                    &FisRegH2D::new_flush_cache(),
+                    PhysAddr::zero(),
+                    0,
+                    0,
+                    Duration::from_secs(5),
+                )?;
+                Ok(())
+            }
+            DeviceType::Atapi => {
+                // ATAPI devices typically don't need explicit cache flushing
+                // Most optical drives handle this automatically
+                Ok(())
+            }
+        }
     }
 
     /// Issue a command to the hardware
@@ -387,8 +652,7 @@ impl AhciPort {
             }
 
             // Yield to scheduler while waiting (interrupt-wakeable)
-            crate::thread::scheduler::sched()
-                .thread_wait_timeout(core::time::Duration::from_millis(5));
+            sched().thread_wait_timeout(core::time::Duration::from_millis(5));
         }
 
         Ok(())
