@@ -6,7 +6,7 @@ use crate::{
     fs::{
         Error, File, FileSystem, FileTime,
         block_device::BlockDevice,
-        fat32::structures::{DirectoryEntry, Fat32BootSector, FsInfo},
+        fat32::structures::{DirectoryEntry, Fat32BootSector, FatVariant, FsInfo},
         gpt::Partition,
     },
     log,
@@ -20,14 +20,15 @@ pub mod traverse;
 pub mod write;
 
 #[derive(Debug)]
-pub struct Fat32fs {
+pub struct Fatfs {
     pub boot_info: Fat32BootSector,
-    pub fs_info: FsInfo,
+    pub fs_info: Option<FsInfo>,
+    pub variant: FatVariant,
     pub partition: Partition,
     pub device: BlockDevice,
 }
 
-impl Fat32fs {
+impl Fatfs {
     pub fn new(partition: Partition) -> Result<Self, Error> {
         let mut device = BlockDevice::new(partition.device_id, 128);
         let mut read_buffer = Vec::new();
@@ -40,42 +41,60 @@ impl Fat32fs {
         let boot_info: Fat32BootSector =
             *cast_ref::<[u8; 512], _>(boot_bytes.as_slice().try_into().unwrap());
 
-        if !boot_info.is_fat32() {
-            return Err(Error::InvalidFs);
-        }
+        // Determine FAT variant based on cluster count
+        let variant = boot_info.determine_fat_variant().ok_or(Error::InvalidFs)?;
 
-        read_buffer = boot_bytes;
-        read_buffer.clear();
-        let fs_info_bytes = device.read_sectors(
-            partition.starting_lba + boot_info.fs_info as u64,
-            1,
-            read_buffer,
-        )?;
+        // For FAT32, validate strictly and read FSInfo
+        let fs_info = match variant {
+            FatVariant::Fat32 => {
+                if !boot_info.is_fat32() {
+                    return Err(Error::InvalidFs);
+                }
 
-        let fs_info: FsInfo =
-            *cast_ref::<[u8; 512], _>(fs_info_bytes.as_slice().try_into().unwrap());
+                read_buffer = boot_bytes;
+                read_buffer.clear();
+                let fs_info_bytes = device.read_sectors(
+                    partition.starting_lba + boot_info.fs_info as u64,
+                    1,
+                    read_buffer,
+                )?;
 
-        if !fs_info.is_valid() {
-            log!("Missing FsInfo, currently required");
-            return Err(Error::InvalidFs);
-        }
+                let fs_info: FsInfo =
+                    *cast_ref::<[u8; 512], _>(fs_info_bytes.as_slice().try_into().unwrap());
 
-        Ok(Fat32fs {
+                if !fs_info.is_valid() {
+                    log!("Missing FsInfo, currently required for FAT32");
+                    return Err(Error::InvalidFs);
+                }
+
+                Some(fs_info)
+            }
+            FatVariant::Fat12 | FatVariant::Fat16 => {
+                // FAT12/16 don't have FSInfo
+                None
+            }
+        };
+
+        Ok(Fatfs {
             boot_info,
             fs_info,
+            variant,
             device: BlockDevice::new(partition.device_id, 128),
             partition,
         })
     }
 }
 
-impl FileSystem for Fat32fs {
+impl FileSystem for Fatfs {
     fn list_files(&mut self, path: &Path) -> Result<alloc::vec::Vec<super::File>, super::Error> {
         let path = path.normalize();
 
         let entries;
         if path.is_root() {
-            entries = self.get_dir_entries(self.boot_info.root_cluster)?;
+            entries = match self.variant {
+                FatVariant::Fat32 => self.get_dir_entries(self.boot_info.root_cluster)?,
+                FatVariant::Fat12 | FatVariant::Fat16 => self.get_root_dir_entries()?,
+            };
         } else if let Some((entry, _, _)) = self.find_dir_entry(&path)? {
             if !entry.is_directory() {
                 return Err(Error::NotADir);
@@ -351,7 +370,10 @@ impl FileSystem for Fat32fs {
     }
 
     fn flush(&mut self) -> Result<(), Error> {
-        self.save_fs_info()?;
+        // Only save FSInfo for FAT32
+        if matches!(self.variant, FatVariant::Fat32) {
+            self.save_fs_info()?;
+        }
         self.device.flush()?;
 
         Ok(())

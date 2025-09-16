@@ -6,6 +6,14 @@ use bytemuck::{NoUninit, Pod, Zeroable};
 
 use crate::fs::{File, FileAttrs, FileKind, FileTime};
 
+/// FAT filesystem variant
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FatVariant {
+    Fat12,
+    Fat16,
+    Fat32,
+}
+
 /// FAT32 Boot Sector (exactly 512 bytes).
 /// This is the on-disk BIOS Parameter Block (BPB) + Extended BPB + boot code.
 #[repr(C, packed)]
@@ -157,6 +165,12 @@ pub const CLUSTER_FREE: u32 = 0x00000000;
 pub const CLUSTER_BAD: u32 = 0x0FFFFFF7;
 pub const CLUSTER_EOF: u32 = 0x0FFFFFF8; // End of chain (0x0FFFFFF8 - 0x0FFFFFFF)
 pub const FAT32_MASK: u32 = 0x0FFFFFFF;
+pub const FAT16_MASK: u32 = 0x0000FFFF;
+pub const FAT12_MASK: u32 = 0x00000FFF;
+
+// FAT12/16 specific constants
+pub const FAT12_CLUSTER_COUNT_MAX: u32 = 4085;
+pub const FAT16_CLUSTER_COUNT_MAX: u32 = 65525;
 
 // FSInfo signatures
 pub const FSINFO_LEAD_SIG: u32 = 0x41615252; // "RRaA"
@@ -203,6 +217,52 @@ impl Fat32BootSector {
         self.fat_size_32 > 0 &&
         self.boot_signature == 0x29 &&
         &self.file_system_type[0..5] == b"FAT32"
+    }
+
+    /// Determine FAT variant based on cluster count
+    pub fn determine_fat_variant(&self) -> Option<FatVariant> {
+        // Basic validation first
+        if self.bytes_per_sector != 512
+            || self.sectors_per_cluster == 0
+            || !self.sectors_per_cluster.is_power_of_two()
+            || self.num_fats == 0
+        {
+            return None;
+        }
+
+        let cluster_count = self.calculate_cluster_count();
+
+        if cluster_count < FAT12_CLUSTER_COUNT_MAX {
+            Some(FatVariant::Fat12)
+        } else if cluster_count < FAT16_CLUSTER_COUNT_MAX {
+            Some(FatVariant::Fat16)
+        } else {
+            Some(FatVariant::Fat32)
+        }
+    }
+
+    /// Calculate the total number of clusters
+    pub fn calculate_cluster_count(&self) -> u32 {
+        let total_sectors = if self.total_sectors_16 != 0 {
+            self.total_sectors_16 as u32
+        } else {
+            self.total_sectors_32
+        };
+
+        let fat_sectors = if self.fat_size_16 != 0 {
+            self.fat_size_16 as u32
+        } else {
+            self.fat_size_32
+        };
+
+        let root_dir_sectors = ((self.root_entry_count as u32 * 32) + 511) / 512;
+
+        let data_sectors = total_sectors
+            .saturating_sub(self.reserved_sector_count as u32)
+            .saturating_sub(self.num_fats as u32 * fat_sectors)
+            .saturating_sub(root_dir_sectors);
+
+        data_sectors / self.sectors_per_cluster as u32
     }
 }
 

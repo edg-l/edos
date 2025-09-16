@@ -4,13 +4,16 @@ use bytemuck::cast;
 use crate::fs::{
     Error,
     fat32::{
-        Fat32fs,
-        structures::{CLUSTER_BAD, CLUSTER_EOF, CLUSTER_FREE, DirectoryEntry, FAT32_MASK},
+        Fatfs,
+        structures::{
+            CLUSTER_BAD, CLUSTER_EOF, CLUSTER_FREE, DirectoryEntry, FAT12_MASK, FAT16_MASK,
+            FAT32_MASK, FatVariant,
+        },
     },
     path::Path,
 };
 
-impl Fat32fs {
+impl Fatfs {
     /// Find entry and return (entry, cluster_that_contains_it, byte_offset_within_cluster).
     pub fn find_dir_entry(
         &mut self,
@@ -122,37 +125,106 @@ impl Fat32fs {
     }
 
     pub fn get_fat_entry(&mut self, cluster_number: u32) -> Result<Option<u32>, Error> {
-        let byte_off = (cluster_number as u64) * 4;
-        let fat_sector = self.first_fat_lba() + (byte_off / 512);
-        let off_in_sector = (byte_off % 512) as usize;
+        match self.variant {
+            FatVariant::Fat32 => {
+                let byte_off = (cluster_number as u64) * 4;
+                let fat_sector = self.first_fat_lba() + (byte_off / 512);
+                let off_in_sector = (byte_off % 512) as usize;
 
-        let sector = self.device.read_sectors(fat_sector, 1, Vec::new())?;
+                let sector = self.device.read_sectors(fat_sector, 1, Vec::new())?;
 
-        let raw = u32::from_le_bytes(sector[off_in_sector..off_in_sector + 4].try_into().unwrap());
-        let val = raw & FAT32_MASK;
+                let raw = u32::from_le_bytes(
+                    sector[off_in_sector..off_in_sector + 4].try_into().unwrap(),
+                );
+                let val = raw & FAT32_MASK;
 
-        if val == CLUSTER_FREE || val >= CLUSTER_EOF {
-            return Ok(None);
+                if val == CLUSTER_FREE || val >= CLUSTER_EOF {
+                    return Ok(None);
+                }
+
+                if val == CLUSTER_BAD {
+                    return Err(Error::IoError);
+                }
+
+                Ok(Some(raw))
+            }
+            FatVariant::Fat16 => {
+                let byte_off = (cluster_number as u64) * 2;
+                let fat_sector = self.first_fat_lba() + (byte_off / 512);
+                let off_in_sector = (byte_off % 512) as usize;
+
+                let sector = self.device.read_sectors(fat_sector, 1, Vec::new())?;
+
+                let raw = u16::from_le_bytes(
+                    sector[off_in_sector..off_in_sector + 2].try_into().unwrap(),
+                ) as u32;
+                let val = raw & FAT16_MASK;
+
+                if val == 0 || val >= 0xFFF8 {
+                    return Ok(None);
+                }
+
+                if val == 0xFFF7 {
+                    return Err(Error::IoError);
+                }
+
+                Ok(Some(val))
+            }
+            FatVariant::Fat12 => {
+                // FAT12 uses 1.5 bytes per entry, requiring special handling
+                let byte_off = (cluster_number as u64 * 3) / 2;
+                let fat_sector = self.first_fat_lba() + (byte_off / 512);
+                let off_in_sector = (byte_off % 512) as usize;
+
+                let sector = self.device.read_sectors(fat_sector, 1, Vec::new())?;
+
+                let val = if (cluster_number & 1) == 0 {
+                    // Even cluster: use lower 12 bits of the 16-bit value
+                    let raw = u16::from_le_bytes(
+                        sector[off_in_sector..off_in_sector + 2].try_into().unwrap(),
+                    );
+                    (raw & 0x0FFF) as u32
+                } else {
+                    // Odd cluster: use upper 12 bits of the 16-bit value
+                    let raw = u16::from_le_bytes(
+                        sector[off_in_sector..off_in_sector + 2].try_into().unwrap(),
+                    );
+                    ((raw >> 4) & 0x0FFF) as u32
+                };
+
+                if val == 0 || val >= 0xFF8 {
+                    return Ok(None);
+                }
+
+                if val == 0xFF7 {
+                    return Err(Error::IoError);
+                }
+
+                Ok(Some(val))
+            }
         }
-
-        if val == CLUSTER_BAD {
-            return Err(Error::IoError);
-        }
-
-        Ok(Some(raw))
     }
 
     /// Convert a cluster number (>=2) into an absolute LBA.
     #[inline(always)]
     pub fn cluster_to_lba(&self, cluster: u32) -> u64 {
         let reserved = self.boot_info.reserved_sector_count as u64;
-        let fatsz = self.boot_info.fat_size_32 as u64;
+        let fatsz = match self.variant {
+            FatVariant::Fat32 => self.boot_info.fat_size_32 as u64,
+            FatVariant::Fat12 | FatVariant::Fat16 => self.boot_info.fat_size_16 as u64,
+        };
         let numfats = self.boot_info.num_fats as u64;
+        let root_dir_sectors = match self.variant {
+            FatVariant::Fat32 => 0, // FAT32 has cluster-based root
+            FatVariant::Fat12 | FatVariant::Fat16 => {
+                ((self.boot_info.root_entry_count as u64 * 32) + 511) / 512
+            }
+        };
         let spc = self.boot_info.sectors_per_cluster as u64;
         let start = self.partition.starting_lba;
 
         // First sector of data region relative to partition start
-        let first_data_sector = reserved + (numfats * fatsz);
+        let first_data_sector = reserved + (numfats * fatsz) + root_dir_sectors;
 
         // Absolute LBA
         start + ((cluster as u64 - 2) * spc) + first_data_sector
@@ -168,6 +240,58 @@ impl Fat32fs {
         self.partition.starting_lba
             + self.boot_info.reserved_sector_count as u64
             + self.boot_info.fat_size_32 as u64
+    }
+
+    /// Get root directory entries for FAT12/16
+    pub fn get_root_dir_entries(&mut self) -> Result<Vec<DirectoryEntry>, Error> {
+        match self.variant {
+            FatVariant::Fat32 => {
+                // Should not be called for FAT32
+                return Err(Error::IoError);
+            }
+            FatVariant::Fat12 | FatVariant::Fat16 => {
+                let root_dir_lba = self.root_dir_lba();
+                let root_dir_sectors = ((self.boot_info.root_entry_count as u64 * 32) + 511) / 512;
+
+                let mut entries = Vec::new();
+                let mut buffer = Vec::new();
+
+                for sector in 0..root_dir_sectors {
+                    buffer.clear();
+                    buffer = self.device.read_sectors(root_dir_lba + sector, 1, buffer)?;
+
+                    let mut offset = 0;
+                    while offset + 32 <= buffer.len() {
+                        let first = buffer[offset];
+                        if first == 0x00 {
+                            // End of directory entries
+                            return Ok(entries);
+                        }
+                        if first != 0xE5 {
+                            // Not deleted
+                            let entry: DirectoryEntry =
+                                *bytemuck::from_bytes(&buffer[offset..offset + 32]);
+                            if !entry.is_volume_label() {
+                                entries.push(entry);
+                            }
+                        }
+                        offset += 32;
+                    }
+                }
+
+                Ok(entries)
+            }
+        }
+    }
+
+    /// Get root directory LBA for FAT12/16
+    #[inline(always)]
+    pub fn root_dir_lba(&self) -> u64 {
+        let reserved = self.boot_info.reserved_sector_count as u64;
+        let fatsz = self.boot_info.fat_size_16 as u64;
+        let numfats = self.boot_info.num_fats as u64;
+
+        self.partition.starting_lba + reserved + (numfats * fatsz)
     }
 
     #[inline(always)]

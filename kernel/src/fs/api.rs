@@ -40,7 +40,7 @@ pub fn list_partitions() -> Vec<Partition> {
     parts
 }
 
-pub fn list_mounts() -> BTreeMap<Path, usize> {
+pub fn list_mounts() -> BTreeMap<Path, (usize, usize)> {
     let FsResponse::MountPoints(mp) = send_request(FsRequest::ListMounts, Duration::from_secs(1))
     else {
         unreachable!()
@@ -48,9 +48,17 @@ pub fn list_mounts() -> BTreeMap<Path, usize> {
     mp
 }
 
-pub fn mount_partition(index: usize, mount_point: Path) -> Result<(), Error> {
+pub fn mount_partition(
+    device_id: usize,
+    partition_index: usize,
+    mount_point: Path,
+) -> Result<(), Error> {
     let FsResponse::Ok(result) = send_request(
-        FsRequest::Mount { index, mount_point },
+        FsRequest::Mount {
+            device_id,
+            partition_index,
+            mount_point,
+        },
         Duration::from_secs(1),
     ) else {
         unreachable!()

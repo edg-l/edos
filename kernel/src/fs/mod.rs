@@ -2,7 +2,7 @@
 
 use core::ffi::CStr;
 
-use alloc::{boxed::Box, format, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::btree_map::BTreeMap, format, string::String, vec::Vec};
 use spin::Once;
 use thiserror::Error;
 
@@ -10,7 +10,7 @@ use crate::{
     allocator::print_alloc_stats,
     drivers::ahci::{AhciError, api::list_devices},
     fs::{
-        fat32::Fat32fs,
+        fat32::Fatfs,
         gpt::{FilesystemType, Partition, parse_gpt, print_partitions},
         mbr::parse_mbr,
         path::Path,
@@ -187,7 +187,8 @@ pub(super) enum FsRequest {
     ListPartitions,
     ListMounts,
     Mount {
-        index: usize,
+        device_id: usize,
+        partition_index: usize,
         mount_point: Path,
     },
     Unmount {
@@ -200,7 +201,8 @@ pub(super) enum FsRequest {
     },
     // Partition routing
     PartitionRequest {
-        index: usize,
+        device_id: usize,
+        partition_index: usize,
         command: PartitionCommand,
     },
     // Internal for worker bootstrap
@@ -210,7 +212,7 @@ pub(super) enum FsRequest {
 #[derive(Debug, Clone)]
 pub(super) enum FsResponse {
     Partitions(Vec<Partition>),
-    MountPoints(alloc::collections::btree_map::BTreeMap<Path, usize>),
+    MountPoints(alloc::collections::btree_map::BTreeMap<Path, (usize, usize)>),
     Files(Result<Vec<File>, Error>),
     ReadBytes(Result<Vec<u8>, Error>),
     Written(Result<u64, Error>),
@@ -303,30 +305,31 @@ pub extern "C" fn fs_main_thread() -> ! {
     }
 
     // Per-partition worker threads and their mailboxes
-    let mut worker_mailboxes: Vec<Mailbox<PartitionCommand, FsResponse>> = Vec::new();
-    let mut worker_tid_map = alloc::collections::btree_map::BTreeMap::<u64, usize>::new();
+    let mut worker_mailboxes: BTreeMap<(usize, usize), Mailbox<PartitionCommand, FsResponse>> =
+        BTreeMap::new();
+    let mut worker_tid_map = alloc::collections::btree_map::BTreeMap::<u64, (usize, usize)>::new();
 
-    for (idx, partition) in partitions.iter().enumerate() {
+    for partition in partitions.iter() {
         if let Some(filesystem) = &partition.filesystem {
             match filesystem {
-                FilesystemType::Fat32 => {
+                FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32 => {
                     let part = Box::new(partition.clone());
                     let part = &raw mut *Box::leak(part);
                     let worker_tid = queue_spawn_kthread_named_arg(
-                        &format!("fs-partition-{}", idx),
-                        fat32_partition_thread as u64,
+                        &format!("fs-dev{}p{}", partition.device_id, partition.index),
+                        fat_partition_thread as u64,
                         part.cast(),
                     );
-                    worker_tid_map.insert(worker_tid, idx);
-                    worker_mailboxes.push(Mailbox::new(worker_tid));
+                    worker_tid_map
+                        .insert(worker_tid, (partition.device_id as usize, partition.index));
+                    worker_mailboxes.insert(
+                        (partition.device_id as usize, partition.index),
+                        Mailbox::new(worker_tid),
+                    );
                 }
-                FilesystemType::Fat12
-                | FilesystemType::Fat16
-                | FilesystemType::Ntfs
-                | FilesystemType::Iso9660
-                | FilesystemType::Unknown => {
+                FilesystemType::Ntfs | FilesystemType::Iso9660 | FilesystemType::Unknown => {
                     // No worker for these filesystem types yet
-                    // TODO: Implement workers for FAT12/16, NTFS, and ISO9660
+                    // TODO: Implement workers for NTFS and ISO9660
                 }
             }
         }
@@ -334,6 +337,15 @@ pub extern "C" fn fs_main_thread() -> ! {
 
     // Mount table: map mount point to partition index
     let mut mount_points = alloc::collections::btree_map::BTreeMap::new();
+
+    for part in &partitions {
+        let idx = part.index;
+
+        let path = Path::parse(&format!("/dev/sd{}p{}", part.device_id, part.index))
+            .expect("failed to parse path");
+        log!("Mounted {path}");
+        mount_points.insert(path, (part.device_id as usize, part.index));
+    }
 
     // Main loop: route and respond
     loop {
@@ -347,15 +359,18 @@ pub extern "C" fn fs_main_thread() -> ! {
                     req.response
                         .send(FsResponse::MountPoints(mount_points.clone()));
                 }
-                FsRequest::Mount { index, mount_point } => {
+                FsRequest::Mount {
+                    device_id,
+                    partition_index,
+                    mount_point,
+                } => {
                     // Basic validation: index exists and mount point not used
-                    let res =
-                        if index < partitions.len() && !mount_points.contains_key(&mount_point) {
-                            mount_points.insert(mount_point, index);
-                            Ok(())
-                        } else {
-                            Err(Error::IoError)
-                        };
+                    let res = if !mount_points.contains_key(&mount_point) {
+                        mount_points.insert(mount_point, (device_id, partition_index));
+                        Ok(())
+                    } else {
+                        Err(Error::IoError)
+                    };
                     req.response.send(FsResponse::Ok(res));
                 }
                 FsRequest::Unmount { mount_point } => {
@@ -368,7 +383,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                 }
                 FsRequest::PathRequest { path, op } => {
                     // Resolve longest-prefix mount point
-                    let mut best: Option<(&Path, usize)> = None;
+                    let mut best: Option<(&Path, (usize, usize))> = None;
                     for (mp, &idx) in mount_points.iter() {
                         if path.starts_with(mp) {
                             match best {
@@ -404,7 +419,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                             PathOp::Flush => PartitionCommand::Flush,
                         };
 
-                        if let Some(mb) = worker_mailboxes.get(part_idx) {
+                        if let Some(mb) = worker_mailboxes.get(&part_idx) {
                             mb.forward(cmd, req.response);
                         } else {
                             req.response.send(FsResponse::Ok(Err(Error::IoError)));
@@ -414,8 +429,12 @@ pub extern "C" fn fs_main_thread() -> ! {
                         req.response.send(FsResponse::Ok(Err(Error::IoError)));
                     }
                 }
-                FsRequest::PartitionRequest { index, command } => {
-                    if let Some(mb) = worker_mailboxes.get(index) {
+                FsRequest::PartitionRequest {
+                    partition_index,
+                    device_id,
+                    command,
+                } => {
+                    if let Some(mb) = worker_mailboxes.get(&(device_id, partition_index)) {
                         mb.forward(command, req.response);
                     } else {
                         req.response.send(FsResponse::Ok(Err(Error::IoError)));
@@ -423,7 +442,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                 }
                 FsRequest::GetPartitionMailbox(tid) => {
                     if let Some(index) = worker_tid_map.get(&tid) {
-                        let mb = worker_mailboxes.get(*index).cloned();
+                        let mb = worker_mailboxes.get(index).cloned();
                         req.response.send(FsResponse::PartitionMailbox(mb));
                     } else {
                         req.response.send(FsResponse::PartitionMailbox(None));
@@ -436,14 +455,20 @@ pub extern "C" fn fs_main_thread() -> ! {
     }
 }
 
-extern "C" fn fat32_partition_thread(partition: *mut Partition) -> ! {
+extern "C" fn fat_partition_thread(partition: *mut Partition) -> ! {
     let logger = sched().get_logger();
     let partition = unsafe { Box::from_raw(partition) };
 
-    log!(logger, "Partition: {}({})", partition.index, partition.name);
+    log!(
+        logger,
+        "Partition: /dev/sd{}p{} ({})",
+        partition.device_id,
+        partition.index,
+        partition.name
+    );
 
-    let Ok(mut fs) = Fat32fs::new((*partition).clone()) else {
-        log!(logger, "Failed to create fat32");
+    let Ok(mut fs) = Fatfs::new((*partition).clone()) else {
+        log!(logger, "Failed to create FAT filesystem");
         kthread_exit(-1)
     };
 

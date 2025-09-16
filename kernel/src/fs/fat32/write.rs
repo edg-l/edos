@@ -5,15 +5,18 @@ use crate::{
     fs::{
         Error,
         fat32::{
-            Fat32fs,
-            structures::{CLUSTER_FREE, DirectoryEntry, FAT32_MASK},
+            Fatfs,
+            structures::{
+                CLUSTER_EOF, CLUSTER_FREE, DirectoryEntry, FAT12_MASK, FAT16_MASK, FAT32_MASK,
+                FatVariant,
+            },
         },
         path::Path,
     },
     log,
 };
 
-impl Fat32fs {
+impl Fatfs {
     /// Overwrite file contents starting at offset 0.
     /// Extends the cluster chain if `buf` is larger than the current file.
     /// Does not shrink or update the on-disk directory entry size yet.
@@ -182,14 +185,30 @@ impl Fat32fs {
     /// Allocate a new free cluster and mark it EOF in FAT.
     pub fn alloc_cluster(&mut self) -> Result<u32, Error> {
         let bytes_per_sector = self.boot_info.bytes_per_sector as usize;
-        let fat_sectors = self.boot_info.fat_size_32 as u64;
-        let entries_per_sector = bytes_per_sector / 4;
+        let fat_sectors = match self.variant {
+            FatVariant::Fat32 => self.boot_info.fat_size_32 as u64,
+            FatVariant::Fat12 | FatVariant::Fat16 => self.boot_info.fat_size_16 as u64,
+        };
+        let entries_per_sector = match self.variant {
+            FatVariant::Fat32 => bytes_per_sector / 4,
+            FatVariant::Fat16 => bytes_per_sector / 2,
+            FatVariant::Fat12 => bytes_per_sector * 2 / 3,
+        };
 
-        // Start hint from FSInfo if valid, else 2
-        let mut start_cluster = if self.fs_info.next_free != 0xFFFF_FFFF {
-            self.fs_info.next_free
-        } else {
-            2
+        // Start hint from FSInfo if valid (FAT32 only), else 2
+        let mut start_cluster = match self.variant {
+            FatVariant::Fat32 => {
+                if let Some(ref fs_info) = self.fs_info {
+                    if fs_info.next_free != 0xFFFF_FFFF {
+                        fs_info.next_free
+                    } else {
+                        2
+                    }
+                } else {
+                    2
+                }
+            }
+            FatVariant::Fat12 | FatVariant::Fat16 => 2,
         };
         if start_cluster < 2 {
             start_cluster = 2;
@@ -234,9 +253,12 @@ impl Fat32fs {
                     } else {
                         current_cluster.saturating_add(1).max(2)
                     };
-                    self.fs_info.next_free = next;
-                    if self.fs_info.free_count != 0xFFFF_FFFF && self.fs_info.free_count > 0 {
-                        self.fs_info.free_count -= 1;
+                    // Update FSInfo only for FAT32
+                    if let Some(ref mut fs_info) = self.fs_info {
+                        fs_info.next_free = next;
+                        if fs_info.free_count != 0xFFFF_FFFF && fs_info.free_count > 0 {
+                            fs_info.free_count -= 1;
+                        }
                     }
 
                     return Some(current_cluster);
@@ -265,35 +287,84 @@ impl Fat32fs {
     /// and set FAT[to] to EOF.
     pub fn link_fat_entry(&mut self, from: u32, to: u32) -> Result<(), Error> {
         self.set_fat_value(from, to)?;
-        self.set_fat_value(to, crate::fs::fat32::structures::CLUSTER_EOF)?;
+        let eof_val = match self.variant {
+            FatVariant::Fat32 => CLUSTER_EOF,
+            FatVariant::Fat16 => 0xFFFF,
+            FatVariant::Fat12 => 0xFFF,
+        };
+        self.set_fat_value(to, eof_val)?;
         Ok(())
     }
 
     /// Low-level setter for a FAT entry. Writes to both primary and backup FATs.
     fn set_fat_value(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
         let bytes_per_sector = self.boot_info.bytes_per_sector as usize;
-        let byte_index = (cluster as usize) * 4;
-        let sector_index = (byte_index / bytes_per_sector) as u64;
-        let within = byte_index % bytes_per_sector;
 
-        // Update primary
-        let mut sec =
-            self.device
-                .read_sectors(self.first_fat_lba() + sector_index, 1, Vec::new())?;
-        let v = value & FAT32_MASK;
-        sec[within..within + 4].copy_from_slice(&v.to_le_bytes());
-        self.device
-            .write_sectors(self.first_fat_lba() + sector_index, sec.clone(), 1)?;
+        match self.variant {
+            FatVariant::Fat32 => {
+                let byte_index = (cluster as usize) * 4;
+                let sector_index = (byte_index / bytes_per_sector) as u64;
+                let within = byte_index % bytes_per_sector;
+
+                let mut sec =
+                    self.device
+                        .read_sectors(self.first_fat_lba() + sector_index, 1, Vec::new())?;
+                let v = value & FAT32_MASK;
+                sec[within..within + 4].copy_from_slice(&v.to_le_bytes());
+                self.device
+                    .write_sectors(self.first_fat_lba() + sector_index, sec, 1)?;
+            }
+            FatVariant::Fat16 => {
+                let byte_index = (cluster as usize) * 2;
+                let sector_index = (byte_index / bytes_per_sector) as u64;
+                let within = byte_index % bytes_per_sector;
+
+                let mut sec =
+                    self.device
+                        .read_sectors(self.first_fat_lba() + sector_index, 1, Vec::new())?;
+                let v = (value & FAT16_MASK) as u16;
+                sec[within..within + 2].copy_from_slice(&v.to_le_bytes());
+                self.device
+                    .write_sectors(self.first_fat_lba() + sector_index, sec, 1)?;
+            }
+            FatVariant::Fat12 => {
+                // FAT12 uses 1.5 bytes per entry, requiring special handling
+                let byte_offset = (cluster as u64 * 3) / 2;
+                let sector_index = byte_offset / bytes_per_sector as u64;
+                let within = (byte_offset % bytes_per_sector as u64) as usize;
+
+                let mut sec =
+                    self.device
+                        .read_sectors(self.first_fat_lba() + sector_index, 1, Vec::new())?;
+
+                if (cluster & 1) == 0 {
+                    // Even cluster: lower 12 bits
+                    let existing = u16::from_le_bytes([sec[within], sec[within + 1]]);
+                    let new_val = (existing & 0xF000) | ((value & 0x0FFF) as u16);
+                    sec[within..within + 2].copy_from_slice(&new_val.to_le_bytes());
+                } else {
+                    // Odd cluster: upper 12 bits
+                    let existing = u16::from_le_bytes([sec[within], sec[within + 1]]);
+                    let new_val = (existing & 0x000F) | (((value & 0x0FFF) as u16) << 4);
+                    sec[within..within + 2].copy_from_slice(&new_val.to_le_bytes());
+                }
+
+                self.device
+                    .write_sectors(self.first_fat_lba() + sector_index, sec, 1)?;
+            }
+        }
         Ok(())
     }
 
     pub fn save_fs_info(&mut self) -> Result<(), Error> {
-        let data: Vec<u8> = bytes_of(&self.fs_info).to_vec(); // 512 bytes
-        self.device.write_sectors(
-            self.partition.starting_lba + self.boot_info.fs_info as u64,
-            data,
-            1,
-        )?;
+        if let Some(ref fs_info) = self.fs_info {
+            let data: Vec<u8> = bytes_of(fs_info).to_vec(); // 512 bytes
+            self.device.write_sectors(
+                self.partition.starting_lba + self.boot_info.fs_info as u64,
+                data,
+                1,
+            )?;
+        }
         Ok(())
     }
 
@@ -448,12 +519,14 @@ impl Fat32fs {
             }
         }
 
-        // Update FSInfo in memory
-        if self.fs_info.free_count != 0xFFFF_FFFF {
-            self.fs_info.free_count = self.fs_info.free_count.saturating_add(freed);
-        }
-        if self.fs_info.next_free == 0xFFFF_FFFF || start < self.fs_info.next_free {
-            self.fs_info.next_free = start;
+        // Update FSInfo in memory (FAT32 only)
+        if let Some(ref mut fs_info) = self.fs_info {
+            if fs_info.free_count != 0xFFFF_FFFF {
+                fs_info.free_count = fs_info.free_count.saturating_add(freed);
+            }
+            if fs_info.next_free == 0xFFFF_FFFF || start < fs_info.next_free {
+                fs_info.next_free = start;
+            }
         }
 
         Ok(freed)

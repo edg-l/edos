@@ -2,10 +2,10 @@ use alloc::vec::Vec;
 
 use crate::fs::{
     Error,
-    fat32::{Fat32fs, structures::DirectoryEntry},
+    fat32::{Fatfs, structures::DirectoryEntry},
 };
 
-impl Fat32fs {
+impl Fatfs {
     /// Maximum sectors to read in a single batched operation (2mb)
     /// This can't be increased too much since we need a dma region that fits this, this means a contiguous memory location.
     const MAX_BATCH_SECTORS: u16 = 4096;

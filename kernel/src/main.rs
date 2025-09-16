@@ -182,7 +182,7 @@ pub fn mount_root_fs() -> ! {
     log!("Partition name {:?}", part.name);
 
     let root = Path::parse("/").unwrap();
-    fs::api::mount_partition(part.index as usize, root.clone()).unwrap();
+    fs::api::mount_partition(part.device_id as usize, part.index as usize, root.clone()).unwrap();
 
     kthread_exit(0)
 }
