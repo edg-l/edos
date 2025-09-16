@@ -208,6 +208,11 @@ impl Fatfs {
     /// Convert a cluster number (>=2) into an absolute LBA.
     #[inline(always)]
     pub fn cluster_to_lba(&self, cluster: u32) -> u64 {
+        // Validate cluster number
+        if cluster < 2 {
+            return self.partition.starting_lba; // Fallback to partition start
+        }
+
         let reserved = self.boot_info.reserved_sector_count as u64;
         let fatsz = match self.variant {
             FatVariant::Fat32 => self.boot_info.fat_size_32 as u64,
@@ -227,7 +232,14 @@ impl Fatfs {
         let first_data_sector = reserved + (numfats * fatsz) + root_dir_sectors;
 
         // Absolute LBA
-        start + ((cluster as u64 - 2) * spc) + first_data_sector
+        let lba = start + ((cluster as u64 - 2) * spc) + first_data_sector;
+
+        // Bounds check to prevent invalid disk access
+        if lba >= start + self.partition.size_sectors {
+            return start; // Fallback to partition start
+        }
+
+        lba
     }
 
     #[inline(always)]
@@ -237,9 +249,11 @@ impl Fatfs {
 
     #[inline(always)]
     pub fn backup_fat_lba(&self) -> u64 {
-        self.partition.starting_lba
-            + self.boot_info.reserved_sector_count as u64
-            + self.boot_info.fat_size_32 as u64
+        let fat_size = match self.variant {
+            FatVariant::Fat32 => self.boot_info.fat_size_32 as u64,
+            FatVariant::Fat12 | FatVariant::Fat16 => self.boot_info.fat_size_16 as u64,
+        };
+        self.partition.starting_lba + self.boot_info.reserved_sector_count as u64 + fat_size
     }
 
     /// Get root directory entries for FAT12/16
@@ -252,6 +266,16 @@ impl Fatfs {
             FatVariant::Fat12 | FatVariant::Fat16 => {
                 let root_dir_lba = self.root_dir_lba();
                 let root_dir_sectors = ((self.boot_info.root_entry_count as u64 * 32) + 511) / 512;
+
+                // Defensive validation to prevent invalid disk access
+                if root_dir_sectors == 0 {
+                    return Err(Error::Corrupted);
+                }
+                if root_dir_lba < self.partition.starting_lba
+                    || root_dir_lba >= self.partition.starting_lba + self.partition.size_sectors
+                {
+                    return Err(Error::Corrupted);
+                }
 
                 let mut entries = Vec::new();
                 let mut buffer = Vec::new();
@@ -296,9 +320,20 @@ impl Fatfs {
 
     #[inline(always)]
     pub fn first_data_lba(&self) -> u64 {
-        self.partition.starting_lba
-            + self.boot_info.reserved_sector_count as u64
-            + (self.boot_info.num_fats as u64 * self.boot_info.fat_size_32 as u64)
+        let reserved = self.boot_info.reserved_sector_count as u64;
+        let fat_size = match self.variant {
+            FatVariant::Fat32 => self.boot_info.fat_size_32 as u64,
+            FatVariant::Fat12 | FatVariant::Fat16 => self.boot_info.fat_size_16 as u64,
+        };
+        let numfats = self.boot_info.num_fats as u64;
+        let root_dir_sectors = match self.variant {
+            FatVariant::Fat32 => 0, // FAT32 has cluster-based root
+            FatVariant::Fat12 | FatVariant::Fat16 => {
+                ((self.boot_info.root_entry_count as u64 * 32) + 511) / 512
+            }
+        };
+
+        self.partition.starting_lba + reserved + (numfats * fat_size) + root_dir_sectors
     }
 
     /// Analyze a cluster chain to find consecutive cluster ranges for batched reading.
