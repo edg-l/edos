@@ -263,14 +263,14 @@ impl Fat32fs {
 
     /// Link `from` cluster to `to` cluster by setting FAT[from] = to,
     /// and set FAT[to] to EOF.
-    pub fn link_fat_entry(&self, from: u32, to: u32) -> Result<(), Error> {
+    pub fn link_fat_entry(&mut self, from: u32, to: u32) -> Result<(), Error> {
         self.set_fat_value(from, to)?;
         self.set_fat_value(to, crate::fs::fat32::structures::CLUSTER_EOF)?;
         Ok(())
     }
 
     /// Low-level setter for a FAT entry. Writes to both primary and backup FATs.
-    fn set_fat_value(&self, cluster: u32, value: u32) -> Result<(), Error> {
+    fn set_fat_value(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
         let bytes_per_sector = self.boot_info.bytes_per_sector as usize;
         let byte_index = (cluster as usize) * 4;
         let sector_index = (byte_index / bytes_per_sector) as u64;
@@ -287,7 +287,7 @@ impl Fat32fs {
         Ok(())
     }
 
-    pub fn save_fs_info(&self) -> Result<(), Error> {
+    pub fn save_fs_info(&mut self) -> Result<(), Error> {
         let data: Vec<u8> = bytes_of(&self.fs_info).to_vec(); // 512 bytes
         self.device.write_sectors(
             self.partition.starting_lba + self.boot_info.fs_info as u64,
@@ -298,7 +298,7 @@ impl Fat32fs {
     }
 
     pub fn patch_dir_entry_at(
-        &self,
+        &mut self,
         entry_cluster: u32,
         entry_offset: usize, // byte offset within the cluster
         patch: impl FnOnce(&mut DirectoryEntry),
@@ -324,7 +324,7 @@ impl Fat32fs {
 
     /// Resolve parent directory cluster and final component name.
     pub fn resolve_parent_and_name(
-        &self,
+        &mut self,
         path: &Path,
     ) -> Result<(u32, alloc::string::String), Error> {
         let path = path.normalize();
@@ -460,7 +460,7 @@ impl Fat32fs {
     }
 
     /// Copy the entire primary FAT to the backup FAT.
-    pub fn mirror_primary_fat_to_backup(&self) -> Result<(), Error> {
+    pub fn mirror_primary_fat_to_backup(&mut self) -> Result<(), Error> {
         let total: u64 = self.boot_info.fat_size_32 as u64; // sectors in one FAT
         let mut src_lba = self.first_fat_lba();
         let mut dst_lba = self.backup_fat_lba();

@@ -29,7 +29,7 @@ pub struct Fat32fs {
 
 impl Fat32fs {
     pub fn new(partition: Partition) -> Result<Self, Error> {
-        let device = BlockDevice::new(partition.device_id, 128);
+        let mut device = BlockDevice::new(partition.device_id, 128);
         let mut read_buffer = Vec::new();
         let boot_bytes = device.read_sectors(partition.starting_lba, 1, read_buffer)?;
 
@@ -70,7 +70,7 @@ impl Fat32fs {
 }
 
 impl FileSystem for Fat32fs {
-    fn list_files(&self, path: &Path) -> Result<alloc::vec::Vec<super::File>, super::Error> {
+    fn list_files(&mut self, path: &Path) -> Result<alloc::vec::Vec<super::File>, super::Error> {
         let path = path.normalize();
 
         let entries;
@@ -94,7 +94,7 @@ impl FileSystem for Fat32fs {
     }
 
     fn read_bytes(
-        &self,
+        &mut self,
         path: &Path,
         offset: usize,
         count: usize,
@@ -342,7 +342,7 @@ impl FileSystem for Fat32fs {
         Ok(())
     }
 
-    fn file_info(&self, path: &Path) -> Result<super::File, super::Error> {
+    fn file_info(&mut self, path: &Path) -> Result<super::File, super::Error> {
         if let Some((entry, _, _)) = self.find_dir_entry(path)? {
             Ok(entry.into())
         } else {

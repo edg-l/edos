@@ -53,14 +53,14 @@ pub enum Error {
 }
 
 pub trait FileSystem {
-    fn list_files(&self, path: &Path) -> Result<Vec<File>, Error>;
-    fn read_bytes(&self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error>;
+    fn list_files(&mut self, path: &Path) -> Result<Vec<File>, Error>;
+    fn read_bytes(&mut self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error>;
     fn write_bytes(&mut self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error>;
     fn create_file(&mut self, path: &Path) -> Result<(), Error>;
     fn create_dir(&mut self, path: &Path) -> Result<(), Error>;
     fn remove_dir(&mut self, path: &Path) -> Result<(), Error>;
     fn remove_file(&mut self, path: &Path) -> Result<(), Error>;
-    fn file_info(&self, path: &Path) -> Result<File, Error>;
+    fn file_info(&mut self, path: &Path) -> Result<File, Error>;
     fn flush(&mut self) -> Result<(), Error>;
 }
 
@@ -442,7 +442,7 @@ extern "C" fn fat32_partition_thread(partition: *mut Partition) -> ! {
         while let Some(mut req) = mailbox.pop_request() {
             match req.message {
                 PartitionCommand::ListFiles { path } => {
-                    let res = (&fs as &dyn FileSystem).list_files(&path);
+                    let res = fs.list_files(&path);
                     req.response.send(FsResponse::Files(res));
                 }
                 PartitionCommand::ReadBytes {
@@ -450,35 +450,35 @@ extern "C" fn fat32_partition_thread(partition: *mut Partition) -> ! {
                     offset,
                     count,
                 } => {
-                    let res = (&fs as &dyn FileSystem).read_bytes(&path, offset, count);
+                    let res = fs.read_bytes(&path, offset, count);
                     req.response.send(FsResponse::ReadBytes(res));
                 }
                 PartitionCommand::WriteBytes { path, offset, data } => {
-                    let res = (&mut fs as &mut dyn FileSystem).write_bytes(&path, offset, &data);
+                    let res = fs.write_bytes(&path, offset, &data);
                     req.response.send(FsResponse::Written(res));
                 }
                 PartitionCommand::CreateFile { path } => {
-                    let res = (&mut fs as &mut dyn FileSystem).create_file(&path);
+                    let res = fs.create_file(&path);
                     req.response.send(FsResponse::Ok(res));
                 }
                 PartitionCommand::CreateDir { path } => {
-                    let res = (&mut fs as &mut dyn FileSystem).create_dir(&path);
+                    let res = fs.create_dir(&path);
                     req.response.send(FsResponse::Ok(res));
                 }
                 PartitionCommand::RemoveFile { path } => {
-                    let res = (&mut fs as &mut dyn FileSystem).remove_file(&path);
+                    let res = fs.remove_file(&path);
                     req.response.send(FsResponse::Ok(res));
                 }
                 PartitionCommand::RemoveDir { path } => {
-                    let res = (&mut fs as &mut dyn FileSystem).remove_dir(&path);
+                    let res = fs.remove_dir(&path);
                     req.response.send(FsResponse::Ok(res));
                 }
                 PartitionCommand::FileInfo { path } => {
-                    let res = (&fs as &dyn FileSystem).file_info(&path);
+                    let res = fs.file_info(&path);
                     req.response.send(FsResponse::File(res));
                 }
                 PartitionCommand::Flush => {
-                    let res = (&mut fs as &mut dyn FileSystem).flush();
+                    let res = fs.flush();
                     req.response.send(FsResponse::Ok(res));
                 }
             }
