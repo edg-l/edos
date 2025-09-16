@@ -342,25 +342,29 @@ impl Scheduler {
 
     /// Wake the given thread
     pub fn thread_wake(&self, id: u64, priority: bool) {
-        if let Some(sched) = thread_sched(id) {
-            sched.cmd_queue.push(SchedCmd::Wake(id, priority));
-            self.send_reschedule_ipi(sched.lapic_id);
-        } else {
-            self.cmd_queue.push(SchedCmd::Wake(id, priority));
-        }
+        without_interrupts(|| {
+            if let Some(sched) = thread_sched(id) {
+                sched.cmd_queue.push(SchedCmd::Wake(id, priority));
+                self.send_reschedule_ipi(sched.lapic_id);
+            } else {
+                self.cmd_queue.push(SchedCmd::Wake(id, priority));
+            }
+        })
     }
 
     /// Sets the given thread as waiting for a maximum of the given timeout.
     pub fn thread_set_wait_timeout(&self, id: u64, timeout: Duration) {
-        let now = Instant::now();
-        if let Some(sched) = thread_sched(id) {
-            sched
-                .cmd_queue
-                .push(SchedCmd::WaitTimeout(id, now, timeout));
-            self.send_reschedule_ipi(sched.lapic_id);
-        } else {
-            self.cmd_queue.push(SchedCmd::WaitTimeout(id, now, timeout));
-        }
+        without_interrupts(|| {
+            let now = Instant::now();
+            if let Some(sched) = thread_sched(id) {
+                sched
+                    .cmd_queue
+                    .push(SchedCmd::WaitTimeout(id, now, timeout));
+                self.send_reschedule_ipi(sched.lapic_id);
+            } else {
+                self.cmd_queue.push(SchedCmd::WaitTimeout(id, now, timeout));
+            }
+        })
     }
 
     // Does not halt.
@@ -389,9 +393,9 @@ impl Scheduler {
     }
 
     pub fn thread_park(&self) {
-        let id = self.current_id();
-        self.cmd_queue.push(SchedCmd::Wait(id));
         without_interrupts(|| {
+            let id = self.current_id();
+            self.cmd_queue.push(SchedCmd::Wait(id));
             let mut lapic = get_lapic();
             unsafe {
                 lapic.send_ipi_self(InterruptIndex::Timer as u8);
@@ -421,9 +425,9 @@ impl Scheduler {
     }
 
     pub fn send_reschedule_ipi(&self, target_cpu: u32) {
-        unsafe {
+        without_interrupts(|| unsafe {
             get_lapic().send_ipi(InterruptIndex::Reschedule as u8, target_cpu);
-        }
+        });
     }
 }
 
