@@ -149,6 +149,6 @@ pub extern "C" fn render_thread() -> ! {
                 }
             }
         }
-        sched().thread_yield(true);
+        sched().thread_yield();
     }
 }

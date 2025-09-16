@@ -1,4 +1,4 @@
-use core::{sync::atomic::AtomicU64, time::Duration};
+use core::{arch::naked_asm, sync::atomic::AtomicU64, time::Duration};
 
 use alloc::{boxed::Box, sync::Arc};
 use crossbeam_queue::ArrayQueue;
@@ -11,6 +11,7 @@ use x86_64::{
         interrupts::{enable_and_hlt, without_interrupts},
     },
     registers::control::Cr3,
+    structures::idt::InterruptStackFrameValue,
 };
 
 use crate::{
@@ -111,7 +112,13 @@ pub fn sched() -> &'static Scheduler {
 pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
     unsafe {
         get_lapic().end_of_interrupt();
+        schedule(context)
+    }
+}
 
+#[unsafe(no_mangle)]
+pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
+    unsafe {
         /*
             User -> User:       Update RSP0 to new process's kernel stack
             User -> Kernel:     RSP0 doesn't matter
@@ -372,10 +379,7 @@ impl Scheduler {
         let id = self.current_id();
         self.cmd_queue.push(SchedCmd::Exit(id, code));
         without_interrupts(|| {
-            let mut lapic = get_lapic();
-            unsafe {
-                lapic.send_ipi_self(InterruptIndex::Timer as u8);
-            }
+            unsafe { direct_context_switch() };
         });
     }
 
@@ -384,10 +388,7 @@ impl Scheduler {
         let id = self.current_id();
         self.thread_set_wait_timeout(id, timeout);
         without_interrupts(|| {
-            let mut lapic = get_lapic();
-            unsafe {
-                lapic.send_ipi_self(InterruptIndex::Timer as u8);
-            }
+            unsafe { direct_context_switch() };
         });
         hlt();
     }
@@ -396,12 +397,8 @@ impl Scheduler {
         without_interrupts(|| {
             let id = self.current_id();
             self.cmd_queue.push(SchedCmd::Wait(id));
-            let mut lapic = get_lapic();
-            unsafe {
-                lapic.send_ipi_self(InterruptIndex::Timer as u8);
-            }
+            unsafe { direct_context_switch() };
         });
-        hlt();
     }
 
     /// The caller thread sleeps for the given duration.
@@ -411,17 +408,10 @@ impl Scheduler {
     }
 
     /// Cooperatively yield.
-    pub fn thread_yield(&self, halt: bool) {
+    pub fn thread_yield(&self) {
         without_interrupts(|| {
-            let mut lapic = get_lapic();
-            unsafe {
-                lapic.send_ipi_self(InterruptIndex::Timer as u8);
-            }
+            unsafe { direct_context_switch() };
         });
-
-        if halt {
-            hlt();
-        }
     }
 
     pub fn send_reschedule_ipi(&self, target_cpu: u32) {
@@ -429,6 +419,86 @@ impl Scheduler {
             get_lapic().send_ipi(InterruptIndex::Reschedule as u8, target_cpu);
         });
     }
+}
+
+#[unsafe(naked)]
+pub unsafe extern "C" fn direct_context_switch() {
+    core::arch::naked_asm!(
+        // Layout wanted at [rsp]:
+        // [ GPRs: r15..rax ] (15*8 bytes)  then  [ IF: RIP,CS,RFLAGS,RSP,SS ] (5*8 bytes)
+        // Reserve space up front so we can store originals without clobbering them.
+        "sub rsp, 160",                   // 120 + 40
+
+        // ---- store original GPRs into the reserved block (no clobber) ----
+        "mov [rsp +   0], r15",
+        "mov [rsp +   8], r14",
+        "mov [rsp +  16], r13",
+        "mov [rsp +  24], r12",
+        "mov [rsp +  32], r11",
+        "mov [rsp +  40], r10",
+        "mov [rsp +  48], r9",
+        "mov [rsp +  56], r8",
+        "mov [rsp +  64], rdi",
+        "mov [rsp +  72], rsi",
+        "mov [rsp +  80], rbp",
+        "mov [rsp +  88], rbx",
+        "mov [rsp +  96], rdx",
+        "mov [rsp + 104], rcx",
+        "mov [rsp + 112], rax",
+
+        // ---- build synthetic interrupt frame at [rsp + 120] ----
+        // RIP
+        "lea rax, [rip + .Lresume]",
+        "mov [rsp + 120], rax",
+        // CS (use your kernel code selector constant)
+        "mov eax, {KCS}",
+        "mov [rsp + 128], rax",
+        // RFLAGS
+        "pushfq",
+        "pop rax",
+        "mov [rsp + 136], rax",
+        // RSP (original before the 160-byte reservation) = rsp + 160
+        "lea rax, [rsp + 160]",
+        "mov [rsp + 144], rax",
+        // SS (use your kernel data selector constant)
+        "mov eax, {KSS}",
+        "mov [rsp + 152], rax",
+
+        // rdi = &CpuContext (points to r15 field)
+        "mov rdi, rsp",
+
+        // 16-byte align for call
+        "sub rsp, 8",
+        "and rsp, -16",
+        "cld",
+        "call {timer_schedule}",
+
+        // Switch to returned context and exit like IRQ path
+        "mov rsp, rax",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdi",
+        "pop rsi",
+        "pop rbp",
+        "pop rbx",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        "iretq",
+
+        ".Lresume:",
+        "ret",
+
+        timer_schedule = sym schedule,
+        KCS = const 0x08,   // replace with your GDT kernel CS selector
+        KSS = const 0x10,   // replace with your GDT kernel SS selector
+    );
 }
 
 // Note: heap allocs are fine because they are mapped before any user thread is created.

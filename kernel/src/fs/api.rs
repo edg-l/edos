@@ -16,7 +16,7 @@ pub(super) fn send_request(request: FsRequest, timeout: Duration) -> FsResponse 
             if let Some(req) = FS_REQUESTS.get() {
                 break req;
             }
-            sched().thread_yield(true);
+            sched().thread_yield();
         }
     };
 
