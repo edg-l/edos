@@ -49,24 +49,4 @@ impl ParsedCmdline {
 
         parsed
     }
-
-    /// Get a parameter value by key
-    pub fn get_param(&self, key: &str) -> Option<&str> {
-        match key {
-            "root" => self.root.as_deref(),
-            "rootfstype" => self.rootfstype.as_deref(),
-            _ => self
-                .other_params
-                .iter()
-                .find(|(k, _)| k == key)
-                .and_then(|(_, v)| v.as_deref()),
-        }
-    }
-
-    /// Check if a flag parameter is present
-    pub fn has_flag(&self, flag: &str) -> bool {
-        self.other_params
-            .iter()
-            .any(|(k, v)| k == flag && v.is_none())
-    }
 }

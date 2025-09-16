@@ -1,4 +1,4 @@
-use core::{arch::naked_asm, sync::atomic::AtomicU64, time::Duration};
+use core::{sync::atomic::AtomicU64, time::Duration};
 
 use alloc::{boxed::Box, sync::Arc};
 use crossbeam_queue::ArrayQueue;
@@ -6,12 +6,8 @@ use heapless::{LinearMap, index_map::FnvIndexMap};
 use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
-    instructions::{
-        hlt,
-        interrupts::{enable_and_hlt, without_interrupts},
-    },
+    instructions::interrupts::{enable_and_hlt, without_interrupts},
     registers::control::Cr3,
-    structures::idt::InterruptStackFrameValue,
 };
 
 use crate::{

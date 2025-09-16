@@ -1,6 +1,6 @@
 #![expect(unused)]
 
-use core::{sync::atomic::AtomicU64, u64};
+use core::sync::atomic::AtomicU64;
 
 use alloc::string::ToString;
 use crossbeam_queue::SegQueue;
