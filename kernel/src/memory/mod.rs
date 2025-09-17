@@ -4,6 +4,9 @@ use crate::boot::boot_info;
 
 pub mod frame_allocator;
 pub mod mapper;
+pub mod valloc;
+
+pub const DYNAMIC_MEM_START: VirtAddr = VirtAddr::new_truncate(0xFFFF_C000_0000_0000);
 
 pub const KERNEL_HEAP: VirtAddr = VirtAddr::new_truncate(0xFFFF_C940_0000_0000);
 pub const KERNEL_HEAP_SIZE: u64 = 1024 * 1024 * 256; // 256 mb
