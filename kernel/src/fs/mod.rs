@@ -28,6 +28,7 @@ pub mod block_device;
 pub mod fat32;
 pub mod gpt;
 pub mod mbr;
+pub mod memfs;
 pub mod path;
 
 pub fn init() {

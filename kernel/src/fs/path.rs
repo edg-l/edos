@@ -60,6 +60,14 @@ impl Path {
         }
     }
 
+    pub fn filename(&self) -> String {
+        if self.is_root() {
+            String::new()
+        } else {
+            self.components.last().unwrap().clone()
+        }
+    }
+
     pub fn components(&self) -> &[String] {
         &self.components
     }
