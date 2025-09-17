@@ -6,10 +6,13 @@ pub mod frame_allocator;
 pub mod mapper;
 pub mod valloc;
 
-pub const DYNAMIC_MEM_START: VirtAddr = VirtAddr::new_truncate(0xFFFF_C000_0000_0000);
+// physical offset is at 0xffff_8000_0000_0000
+
+pub const DYNAMIC_MEM_START: VirtAddr = VirtAddr::new_truncate(0xFFFF_C000_2000_0000);
 
 // Early heap region
-pub const KERNEL_HEAP: VirtAddr = VirtAddr::new_truncate(0xFFFF_9000_0000_0000);
+pub const KERNEL_HEAP: VirtAddr = VirtAddr::new_truncate(0xFFFF_C000_0000_0000);
+// Ends at 0xFFFF_C000_1000_0000
 pub const KERNEL_HEAP_SIZE: u64 = 1024 * 1024 * 256; // 256 mb
 
 // Remember Debug rust builds take a lot of stack

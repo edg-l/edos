@@ -48,6 +48,11 @@ impl VAlloc {
     }
 }
 
+/// Returns a free virtual address.
+///
+/// All returned addresses are page aligned.
+///
+/// Note: you must map the address.
 pub fn vmalloc(size: u64) -> VirtAddr {
     VALLOC.lock().alloc(size)
 }
