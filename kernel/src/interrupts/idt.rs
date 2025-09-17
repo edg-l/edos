@@ -1,5 +1,6 @@
 use x86_64::{
     PrivilegeLevel, VirtAddr,
+    registers::control::Cr2,
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
 };
 
@@ -11,7 +12,7 @@ use crate::{
         InterruptIndex,
         io::{ahci_interrupt_handler, device_not_available_handler, mouse_interrupt_handler},
     },
-    println,
+    log, println,
     thread::{interrupt::timer_interrupt_handler, scheduler::sched},
 };
 
@@ -74,6 +75,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    unsafe { get_lapic().end_of_interrupt() };
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0 {
         println!("GPF Error code: 0x{:x}", error_code);
         println!("Selector index: {}", (error_code >> 3) & 0x1FFF);
@@ -81,47 +83,47 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         println!("External: {}", error_code & 1 != 0);
         println!("Stack frame: {:#?}", stack_frame);
 
-        // Print current thread info
-        let sched = sched();
-        if let Some(current_id) = sched.current_id_opt() {
-            println!("Current thread: {:?}", current_id);
-        }
-
         panic!("General Protection Fault");
     } else {
-        println!("GPF Error code: 0x{:x}", error_code);
-        println!("Selector index: {}", (error_code >> 3) & 0x1FFF);
-        println!("Table: {}", if error_code & 4 != 0 { "LDT" } else { "GDT" });
-        println!("External: {}", error_code & 1 != 0);
-        println!("Stack frame: {:#?}", stack_frame);
+        log!("GPF Error code: 0x{:x}", error_code);
+        log!("GPF Error code: 0x{:x}", error_code);
+        log!("Selector index: {}", (error_code >> 3) & 0x1FFF);
+        log!("Table: {}", if error_code & 4 != 0 { "LDT" } else { "GDT" });
+        log!("External: {}", error_code & 1 != 0);
+        log!("Stack frame: {:#?}", stack_frame);
 
-        // Print current thread info
-        let sched = sched();
-        if let Some(current_id) = sched.current_id_opt() {
-            println!("Current thread: {:?}", current_id);
-        }
-
-        // todo: remove
-        panic!("General Protection Fault");
+        sched().thread_exit(135);
     }
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    println!("EXCEPTION: invalid_opcode CHECK\n{stack_frame:#?}");
-    panic!();
-    // unsafe { get_lapic().end_of_interrupt() };
+    unsafe { get_lapic().end_of_interrupt() };
+
+    if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3 {
+        log!("Invalid opcode, forcing exit");
+        sched().thread_exit(135);
+    } else {
+        println!("EXCEPTION: invalid_opcode CHECK\n{stack_frame:#?}");
+        panic!();
+    }
 }
 
 extern "x86-interrupt" fn alignment_check_handler(stack_frame: InterruptStackFrame, value: u64) {
-    println!("EXCEPTION: ALIGNMENT CHECK: ({value})\n{stack_frame:#?}");
     unsafe { get_lapic().end_of_interrupt() };
+
+    if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3 {
+        log!("EXCEPTION: ALIGNMENT CHECK: ({value})\n{stack_frame:#?}");
+        sched().thread_exit(135);
+    } else {
+        println!("EXCEPTION: ALIGNMENT CHECK: ({value})\n{stack_frame:#?}");
+        panic!();
+    }
 }
 
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) -> ! {
-    println!("double fault");
     panic!(
         "EXCEPTION: DOUBLE FAULT: ({error_code})\n{:#?}",
         stack_frame
@@ -134,8 +136,7 @@ extern "x86-interrupt" fn apic_error_interrupt_handler(_stack_frame: InterruptSt
 }
 
 extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    println!("spurious");
-    unsafe { get_lapic().end_of_interrupt() };
+    // apic doesnt require EOI for spurious
 }
 
 extern "x86-interrupt" fn page_fault_handler(
@@ -143,44 +144,31 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: PageFaultErrorCode,
 ) {
     // Note: do not add complex calls or memory read or scheduler reads, otherwise recursive faults can happen.
-    use x86_64::registers::control::Cr2;
 
     let error_desc = decode_page_fault_error(error_code);
+    let address = Cr2::read().unwrap();
 
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0 {
-        let address = Cr2::read().unwrap();
-
         println!("EXCEPTION: PAGE FAULT in Ring 0");
-        println!("Accessed Address: {address:?}");
-        println!("Error Code: {error_code:?}");
-        println!("Fault Type: {error_desc}",);
-        println!(
-            "Page fault, address = {:p}, error = {error_desc:?}",
-            address.as_ptr::<u8>()
-        );
-
-        let stack_ptr = stack_frame.stack_pointer.as_u64();
-        let fault_addr = address.as_u64();
-        if fault_addr < stack_ptr && (stack_ptr - fault_addr) < 8192 {
-            println!("Stack overflow detected at {:#x}", fault_addr);
-        }
+        log!("Accessed Address: {address:?}");
+        log!("Error Code: {error_code:?}");
+        log!("Error Desc: {error_desc:?}");
+        log!("RIP: {:p}", stack_frame.instruction_pointer);
+        log!("Stack: {:p}", stack_frame.stack_pointer);
+        log!("Fault Type: {error_desc}");
 
         println!("{stack_frame:#?}");
 
         panic!("EXCEPTION: PAGE FAULT IN RING 0");
     } else {
-        let address = Cr2::read().unwrap();
-        println!("EXCEPTION: PAGE FAULT in Ring3");
-        println!("Accessed Address: {address:?}");
-        println!("Error Code: {error_code:?}");
-        println!("{stack_frame:#?}");
-        println!("Fault Type: {error_desc}");
-
-        println!(
-            "Page fault, address = {:p}, error = {error_desc:?}",
-            address.as_ptr::<u8>()
-        );
-        panic!()
+        log!("Page fault");
+        log!("Accessed Address: {address:?}");
+        log!("Error Code: {error_code:?}");
+        log!("Error Desc: {error_desc:?}");
+        log!("RIP: {:p}", stack_frame.instruction_pointer);
+        log!("Stack: {:p}", stack_frame.stack_pointer);
+        log!("Fault Type: {error_desc}");
+        sched().thread_exit(11);
     }
 }
 

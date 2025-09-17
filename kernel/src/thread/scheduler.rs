@@ -370,7 +370,6 @@ impl Scheduler {
         })
     }
 
-    // Does not halt.
     pub fn thread_exit(&self, code: i32) {
         let id = self.current_id();
         self.cmd_queue.push(SchedCmd::Exit(id, code));
