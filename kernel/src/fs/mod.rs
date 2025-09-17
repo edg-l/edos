@@ -1,8 +1,14 @@
 #![expect(unused)]
 
-use core::ffi::CStr;
+use core::{ffi::CStr, u64};
 
-use alloc::{boxed::Box, collections::btree_map::BTreeMap, format, string::String, vec::Vec};
+use alloc::{
+    boxed::Box,
+    collections::btree_map::BTreeMap,
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 use spin::Once;
 use thiserror::Error;
 
@@ -13,6 +19,7 @@ use crate::{
         fat32::Fatfs,
         gpt::{FilesystemType, Partition, parse_gpt, print_partitions},
         mbr::parse_mbr,
+        memfs::Memfs,
         path::Path,
     },
     log,
@@ -400,6 +407,18 @@ pub extern "C" fn fs_main_thread() -> ! {
         }
     }
 
+    partitions.push(Partition {
+        index: 0,
+        starting_lba: 0,
+        ending_lba: 0,
+        size_sectors: 0,
+        partition_type: gpt::PartitionType::LinuxFilesystem,
+        name: "memfs-dev".to_string(),
+        filesystem: Some(FilesystemType::Memfs),
+        device_id: 9999,
+        unique_partition_guid: [6; 16],
+    });
+
     // Per-partition worker threads and their mailboxes
     let mut worker_mailboxes: BTreeMap<(usize, usize), Mailbox<PartitionCommand, FsResponse>> =
         BTreeMap::new();
@@ -407,27 +426,28 @@ pub extern "C" fn fs_main_thread() -> ! {
 
     for partition in partitions.iter() {
         if let Some(filesystem) = &partition.filesystem {
-            match filesystem {
-                FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32 => {
-                    let part = Box::new(partition.clone());
-                    let part = &raw mut *Box::leak(part);
-                    let worker_tid = queue_spawn_kthread_named_arg(
-                        &format!("fs-dev{}p{}", partition.device_id, partition.index),
-                        fat_partition_thread as u64,
-                        part.cast(),
-                    );
-                    worker_tid_map
-                        .insert(worker_tid, (partition.device_id as usize, partition.index));
-                    worker_mailboxes.insert(
-                        (partition.device_id as usize, partition.index),
-                        Mailbox::new(worker_tid),
-                    );
+            let part = Box::new(partition.clone());
+            let part = &raw mut *Box::leak(part);
+
+            let name = match filesystem {
+                FilesystemType::Memfs => {
+                    format!("fs-memfs-{}", partition.index)
                 }
-                FilesystemType::Ntfs | FilesystemType::Iso9660 | FilesystemType::Unknown => {
-                    // No worker for these filesystem types yet
-                    // TODO: Implement workers for NTFS and ISO9660
+                FilesystemType::Fat32 => {
+                    format!("fs-fat32-{}p{}", partition.device_id, partition.index)
                 }
-            }
+                _ => {
+                    format!("fs-dev{}p{}", partition.device_id, partition.index)
+                }
+            };
+
+            let worker_tid =
+                queue_spawn_kthread_named_arg(&name, partition_thread as u64, part.cast());
+            worker_tid_map.insert(worker_tid, (partition.device_id as usize, partition.index));
+            worker_mailboxes.insert(
+                (partition.device_id as usize, partition.index),
+                Mailbox::new(worker_tid),
+            );
         }
     }
 
@@ -438,8 +458,12 @@ pub extern "C" fn fs_main_thread() -> ! {
     for part in &partitions {
         let idx = part.index;
 
-        let path = Path::parse(&format!("/dev/sd{}p{}", part.device_id, part.index))
-            .expect("failed to parse path");
+        let path = if part.filesystem == Some(FilesystemType::Memfs) {
+            Path::parse(&format!("/dev/memfs{}", part.index)).expect("failed to parse path")
+        } else {
+            Path::parse(&format!("/dev/sd{}p{}", part.device_id, part.index))
+                .expect("failed to parse path")
+        };
         log!("Mounted {path}");
         mount_points.insert(path.clone(), (part.device_id as usize, part.index));
         mount_points_rev.insert((part.device_id as usize, part.index), path);
@@ -588,22 +612,55 @@ pub extern "C" fn fs_main_thread() -> ! {
     }
 }
 
-extern "C" fn fat_partition_thread(partition: *mut Partition) -> ! {
+extern "C" fn partition_thread(partition: *mut Partition) -> ! {
     let logger = sched().get_logger();
     let partition = unsafe { Box::from_raw(partition) };
 
-    log!(
-        logger,
-        "Partition: /dev/sd{}p{} ({})",
-        partition.device_id,
-        partition.index,
-        partition.name
-    );
-
-    let Ok(mut fs) = Fatfs::new((*partition).clone()) else {
-        log!(logger, "Failed to create FAT filesystem");
-        kthread_exit(-1)
+    let path = if partition.filesystem == Some(FilesystemType::Memfs) {
+        Path::parse(&format!("/dev/memfs{}", partition.index)).expect("failed to parse path")
+    } else {
+        Path::parse(&format!(
+            "/dev/sd{}p{}",
+            partition.device_id, partition.index
+        ))
+        .expect("failed to parse path")
     };
+
+    log!(logger, "Partition: {} ({})", path, partition.name);
+
+    let mut fs: Box<dyn FileSystem>;
+
+    match &partition.filesystem {
+        Some(ty) => match ty {
+            FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32 => {
+                let Ok(mut fat_fs) = Fatfs::new((*partition).clone()) else {
+                    log!(logger, "Failed to create FAT filesystem");
+                    kthread_exit(-1)
+                };
+                fs = Box::new(fat_fs);
+            }
+            FilesystemType::Memfs => {
+                let Ok(mut memfs) = Memfs::new() else {
+                    log!(logger, "Failed to create Memfs filesystem");
+                    kthread_exit(-1)
+                };
+                fs = Box::new(memfs);
+            }
+            FilesystemType::Ntfs => {
+                log!("NTFS not yet implemented");
+                kthread_exit(-1)
+            }
+            FilesystemType::Iso9660 => {
+                log!("Iso9660 not yet implemented");
+                kthread_exit(-1)
+            }
+            FilesystemType::Unknown => {
+                log!("Unknown fs type");
+                kthread_exit(-1)
+            }
+        },
+        None => kthread_exit(-1),
+    }
 
     // Get our mailbox from the FS main
     let mailbox = {

@@ -72,15 +72,13 @@ impl<T, R> Mailbox<T, R> {
     }
 
     pub fn forward(&self, request: T, response: Arc<Response<R>>) -> Arc<Response<R>> {
-        without_interrupts(|| {
-            self.queue.push(Request {
-                message: request,
-                response: response.clone(),
-            });
+        self.queue.push(Request {
+            message: request,
+            response: response.clone(),
+        });
 
-            sched().thread_wake(self.owner, true);
-            response
-        })
+        sched().thread_wake(self.owner, true);
+        response
     }
 
     pub fn pop_request(&self) -> Option<Request<T, R>> {

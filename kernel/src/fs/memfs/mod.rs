@@ -8,7 +8,10 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::fs::{Error, FileSystem, memfs::node::Node, path::Path};
+use crate::{
+    fs::{Error, FileSystem, memfs::node::Node, path::Path},
+    log,
+};
 
 use super::FileKind;
 
@@ -157,7 +160,7 @@ impl FileSystem for Memfs {
             return Err(Error::IoError);
         };
 
-        if let Some(parent_node) = self.find_node(&path)? {
+        if let Some(parent_node) = self.find_node(&parent)? {
             let id = self.next_id;
             let parent_node = self.get_node_mut(parent_node)?;
 
@@ -184,7 +187,7 @@ impl FileSystem for Memfs {
             return Err(Error::IoError);
         };
 
-        if let Some(parent_node) = self.find_node(&path)? {
+        if let Some(parent_node) = self.find_node(&parent)? {
             let id = self.next_id;
             let parent_node = self.get_node_mut(parent_node)?;
 
@@ -216,7 +219,7 @@ impl FileSystem for Memfs {
             return Err(Error::IoError);
         };
 
-        if let Some(parent_node_id) = self.find_node(&path)? {
+        if let Some(parent_node_id) = self.find_node(&parent)? {
             let parent_node = self.get_node(parent_node_id)?;
 
             if parent_node.file.kind != FileKind::Directory {
@@ -278,7 +281,7 @@ impl FileSystem for Memfs {
             return Err(Error::IoError);
         };
 
-        if let Some(parent_node_id) = self.find_node(&path)? {
+        if let Some(parent_node_id) = self.find_node(&parent)? {
             let parent_node = self.get_node(parent_node_id)?;
 
             if parent_node.file.kind != FileKind::Directory {

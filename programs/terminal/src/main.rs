@@ -398,7 +398,6 @@ impl Terminal {
                 match list_dir(path) {
                     Ok(entries) => {
                         if entries.is_empty() {
-                            self.print_text("\n");
                         } else {
                             for (i, entry) in entries.iter().enumerate() {
                                 let type_char = match entry.file_type {
@@ -414,6 +413,7 @@ impl Terminal {
                                     self.print_text("\n");
                                 }
                             }
+                            self.print_text("\n");
                         }
                     }
                     Err(_) => {
@@ -423,7 +423,6 @@ impl Terminal {
                         ));
                     }
                 }
-                self.print_text("\n");
             }
             "cat" => {
                 if args.len() != 1 {

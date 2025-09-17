@@ -476,6 +476,7 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
             Some(FilesystemType::Fat32) => "FAT32",
             Some(FilesystemType::Ntfs) => "NTFS",
             Some(FilesystemType::Iso9660) => "ISO9660",
+            Some(FilesystemType::Memfs) => "MEMFS",
             Some(FilesystemType::Unknown) => "Unknown",
             None => "None",
         };
