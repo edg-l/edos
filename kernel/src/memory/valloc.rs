@@ -50,7 +50,9 @@ impl VAlloc {
 
 /// Returns a free virtual address.
 ///
-/// All returned addresses are page aligned.
+/// All returned addresses are page aligned at start and end.
+///
+/// Guaranteed to have a guard page at the aligned end.
 ///
 /// Note: you must map the address.
 pub fn vmalloc(size: u64) -> VirtAddr {
