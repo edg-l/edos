@@ -50,7 +50,7 @@ pub fn run() -> i32 {
             execute_command(&mut terminal, command_name, arguments);
         }
 
-        if let Err(_) = render(&mut terminal) {
+        if render(&mut terminal).is_err() {
             return 1;
         }
     }

@@ -192,8 +192,8 @@ impl TerminalState {
             self.buffer.push_back(String::new());
         }
 
-        let mut chars = fragment.chars();
-        while let Some(ch) = chars.next() {
+        let chars = fragment.chars();
+        for ch in chars {
             self.push_output_char(ch);
         }
     }
