@@ -8,6 +8,7 @@ use crate::memory::DYNAMIC_MEM_START;
 
 static VALLOC: Mutex<VAlloc> = Mutex::new(VAlloc::new(DYNAMIC_MEM_START));
 
+/// Virtual address allocator. Ensures there is a guard page at the end on each allocation.
 struct VAlloc {
     pub next_start: VirtAddr,
     // size -> start
