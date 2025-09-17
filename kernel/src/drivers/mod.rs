@@ -1,6 +1,7 @@
 use crate::{graphics, thread::util::queue_spawn_kthread_named};
 
 pub mod ahci;
+pub mod dma;
 pub mod fpu;
 pub mod hpet;
 pub mod keyboard;

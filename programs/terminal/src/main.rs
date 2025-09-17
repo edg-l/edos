@@ -398,9 +398,9 @@ impl Terminal {
                 match list_dir(path) {
                     Ok(entries) => {
                         if entries.is_empty() {
-                            self.print_text("[empty directory]\n");
+                            self.print_text("\n");
                         } else {
-                            for (i, entry) in entries.into_iter().enumerate() {
+                            for (i, entry) in entries.iter().enumerate() {
                                 let type_char = match entry.file_type {
                                     FileType::File => "",
                                     FileType::Directory => "/",
@@ -423,6 +423,7 @@ impl Terminal {
                         ));
                     }
                 }
+                self.print_text("\n");
             }
             "cat" => {
                 if args.len() != 1 {
@@ -455,7 +456,7 @@ impl Terminal {
                     match open(path, open_flags::O_APPEND | open_flags::O_CREAT) {
                         Ok(fd) => {
                             match write_all_fd(fd, content.as_bytes()) {
-                                Ok(()) => self.print_text("[ok]\n"),
+                                Ok(()) => self.print_text("\n"),
                                 Err(_) => self.print_text("write: error\n"),
                             }
                             let _ = sys_close(fd);

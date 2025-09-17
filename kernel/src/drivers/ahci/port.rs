@@ -8,15 +8,17 @@ use alloc::vec;
 use x86_64::PhysAddr;
 
 use crate::{
-    drivers::ahci::{
-        AhciError, DeviceType,
-        dma::{DmaAllocator, DmaRegion},
-        fis::FisRegH2D,
-        structures::{
-            CMD_HEADER_ATAPI, CMD_HEADER_WRITE, CommandHeader, CommandTable, DeviceIdentifyInfo,
-            HbaFis, HbaPort, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE, PORT_CMD_ST, PORT_IS_TFES,
-            PrdtEntry, ScsiInquiry, ScsiRead10, ScsiReadCapacity10,
+    drivers::{
+        ahci::{
+            AhciError, DeviceType,
+            fis::FisRegH2D,
+            structures::{
+                CMD_HEADER_ATAPI, CMD_HEADER_WRITE, CommandHeader, CommandTable,
+                DeviceIdentifyInfo, HbaFis, HbaPort, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE,
+                PORT_CMD_ST, PORT_IS_TFES, PrdtEntry, ScsiInquiry, ScsiRead10, ScsiReadCapacity10,
+            },
         },
+        dma::{DmaAllocator, DmaRegion, dma},
     },
     log, println,
     thread::scheduler::sched,
@@ -38,7 +40,6 @@ pub struct AhciPort {
 
     // Command slot tracking
     pub free_slots: u32, // Bitmap of free command slots
-    pub dma_alloc: DmaAllocator,
 }
 
 unsafe impl Send for AhciPort {}
@@ -57,8 +58,8 @@ impl AhciPort {
         Self::stop_port(port_regs)?;
 
         // Allocate DMA regions
-        let command_list = DmaRegion::allocate()?;
-        let fis_area = DmaRegion::allocate()?;
+        let command_list = dma().allocate()?;
+        let fis_area = dma().allocate()?;
 
         // Set up the port registers
         unsafe {
@@ -112,7 +113,6 @@ impl AhciPort {
             fis_area,
             command_tables: [const { None }; AHCI_CMD_SLOTS],
             free_slots: 0xFFFFFFFF, // All slots initially free
-            dma_alloc: DmaAllocator::default(),
         })
     }
 
@@ -217,7 +217,7 @@ impl AhciPort {
 
         // Allocate command table if needed
         if self.command_tables[slot].is_none() {
-            self.command_tables[slot] = Some(DmaRegion::<CommandTable>::allocate()?);
+            self.command_tables[slot] = Some(dma().allocate()?);
         }
 
         unsafe {
@@ -261,7 +261,7 @@ impl AhciPort {
     /// Execute SCSI INQUIRY command and convert to DeviceIdentifyInfo
     fn execute_atapi_inquiry_as_identify(&mut self) -> Result<DeviceIdentifyInfo, AhciError> {
         let inquiry_cmd = ScsiInquiry::new();
-        let data_buffer = self.dma_alloc.allocate_sized(96)?;
+        let data_buffer = dma().allocate_sized(96)?;
 
         let scsi_cmd_bytes = bytemuck::bytes_of(&inquiry_cmd);
         self.execute_atapi_command(
@@ -282,14 +282,14 @@ impl AhciPort {
             device_info.capacity_gb = device_info.capacity_mb / 1024;
         }
 
-        self.dma_alloc.dealloc(data_buffer);
+        dma().dealloc(data_buffer);
         Ok(device_info)
     }
 
     /// Execute SCSI READ_CAPACITY_10 to get device size
     fn execute_atapi_read_capacity(&mut self) -> Result<(u64, u32), AhciError> {
         let capacity_cmd = ScsiReadCapacity10::new();
-        let data_buffer = self.dma_alloc.allocate_sized(8)?;
+        let data_buffer = dma().allocate_sized(8)?;
 
         let scsi_cmd_bytes = bytemuck::bytes_of(&capacity_cmd);
         self.execute_atapi_command(
@@ -315,7 +315,7 @@ impl AhciPort {
             capacity_data[7],
         ]);
 
-        self.dma_alloc.dealloc(data_buffer);
+        dma().dealloc(data_buffer);
 
         // Total sectors = last_lba + 1 (last_lba is 0-based)
         Ok(((last_lba as u64) + 1, block_size))
@@ -339,7 +339,7 @@ impl AhciPort {
         }
 
         let read_cmd = ScsiRead10::new(lba as u32, sectors);
-        let data_buffer = self.dma_alloc.allocate_sized(expected_size)?;
+        let data_buffer = dma().allocate_sized(expected_size)?;
 
         let scsi_cmd_bytes = bytemuck::bytes_of(&read_cmd);
         self.execute_atapi_command(
@@ -354,7 +354,7 @@ impl AhciPort {
             ptr::copy_nonoverlapping(data_buffer.as_ptr(), buffer.as_mut_ptr(), expected_size);
         }
 
-        self.dma_alloc.dealloc(data_buffer);
+        dma().dealloc(data_buffer);
         Ok(())
     }
 
@@ -369,7 +369,7 @@ impl AhciPort {
     /// Execute ATA IDENTIFY command
     fn execute_ata_identify(&mut self) -> Result<DeviceIdentifyInfo, AhciError> {
         // Allocate DMA buffer for identify data (512 bytes)
-        let data_buffer = self.dma_alloc.allocate_sized(512)?;
+        let data_buffer = dma().allocate_sized(512)?;
 
         self.execute_command(
             &FisRegH2D::new_identify(),
@@ -383,7 +383,7 @@ impl AhciPort {
 
         let info = DeviceIdentifyInfo::from_identify_data(result);
 
-        self.dma_alloc.dealloc(data_buffer);
+        dma().dealloc(data_buffer);
 
         Ok(info)
     }
@@ -446,7 +446,7 @@ impl AhciPort {
         }
 
         // Allocate DMA buffer for read data (sized for multiple sectors)
-        let data_buffer = self.dma_alloc.allocate_sized(expected_size)?;
+        let data_buffer = dma().allocate_sized(expected_size)?;
 
         self.execute_command(
             &FisRegH2D::new_read_dma_ext(lba, sectors),
@@ -462,7 +462,7 @@ impl AhciPort {
             ptr::copy_nonoverlapping(data_buffer.as_ptr(), buffer.as_mut_ptr(), bytes_to_copy);
         }
 
-        self.dma_alloc.dealloc(data_buffer);
+        dma().dealloc(data_buffer);
 
         Ok(())
     }
@@ -498,7 +498,7 @@ impl AhciPort {
         }
 
         // Allocate DMA buffer for write data (sized for multiple sectors)
-        let data_buffer = self.dma_alloc.allocate_sized(expected_size)?;
+        let data_buffer = dma().allocate_sized(expected_size)?;
 
         // Copy input data to DMA buffer
         unsafe {
@@ -513,7 +513,7 @@ impl AhciPort {
             Duration::from_secs(5),
         )?;
 
-        self.dma_alloc.dealloc(data_buffer);
+        dma().dealloc(data_buffer);
         Ok(())
     }
 
@@ -708,7 +708,7 @@ impl AhciPort {
 
         // Allocate command table if needed
         if self.command_tables[slot].is_none() {
-            self.command_tables[slot] = Some(DmaRegion::<CommandTable>::allocate()?);
+            self.command_tables[slot] = Some(dma().allocate()?);
         }
 
         unsafe {

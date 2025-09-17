@@ -19,6 +19,7 @@ use crate::{
             api::send_request, controller::AhciController, port::AhciPort,
             structures::DeviceIdentifyInfo,
         },
+        dma::DmaError,
         pci::{
             pci_manager,
             structures::{PciAddress, PciDevice},
@@ -35,7 +36,7 @@ use crate::{
 pub mod api;
 pub mod command;
 pub mod controller;
-pub mod dma;
+
 pub mod fis;
 pub mod port;
 pub mod structures;
@@ -44,8 +45,8 @@ pub mod structures;
 pub enum AhciError {
     #[error("invalid device")]
     InvalidDevice,
-    #[error("dma allocation failed")]
-    DmaAllocationFailed,
+    #[error(transparent)]
+    DmaError(#[from] DmaError),
     #[error("port not ready")]
     PortNotReady,
     #[error("command timeout")]
