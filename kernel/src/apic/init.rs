@@ -14,7 +14,7 @@ use crate::{
     acpi::apic_info,
     apic::get_lapic,
     interrupts::InterruptIndex,
-    memory::{get_virt_addr, mapper::memory_mapper},
+    memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
     println,
 };
 
@@ -65,7 +65,7 @@ unsafe fn enable_io_apic(
         unsafe {
             let apic_physical_address = PhysAddr::new(io_apic_info.address as u64);
 
-            let ioapic_virt_addr = get_virt_addr(apic_physical_address);
+            let ioapic_virt_addr = get_virt_addr_from_phys_offset(apic_physical_address);
 
             {
                 let mut mapper = memory_mapper();
@@ -165,6 +165,6 @@ pub fn configure_device_interrupt(irq_line: u8, vector: u8) -> Result<(), MapToE
 pub fn get_ioapic() -> IoApic {
     let apic_info = apic_info();
     let address = apic_info.io_apics[0].address;
-    let ioapic_virt_addr = get_virt_addr(PhysAddr::new(address as u64));
+    let ioapic_virt_addr = get_virt_addr_from_phys_offset(PhysAddr::new(address as u64));
     unsafe { IoApic::new(ioapic_virt_addr.as_u64()) }
 }

@@ -8,9 +8,9 @@ use x86_64::{VirtAddr, instructions::hlt, structures::paging::PageTableFlags};
 
 use crate::{
     memory::{
-        KTHREAD_STACK_FIRST, KTHREAD_STACK_REGION_SIZE, KTHREAD_STACK_SIZE, USER_STACK_SIZE,
-        USER_STACK_TOP,
+        KTHREAD_STACK_REGION_SIZE, KTHREAD_STACK_SIZE, USER_STACK_SIZE, USER_STACK_TOP,
         mapper::{MemoryManager, memory_mapper},
+        valloc::vmalloc,
     },
     smp::NUM_CPUS,
     thread::{
@@ -20,7 +20,6 @@ use crate::{
 };
 
 static KTHREAD_FREED_STACKS: SegQueue<u64> = SegQueue::new();
-static KTHREAD_NEXT_STACK: AtomicU64 = AtomicU64::new(KTHREAD_STACK_FIRST.as_u64());
 
 /// Returns the stack top of a kthread or a kernel stack for a user process.
 ///
@@ -29,32 +28,29 @@ static KTHREAD_NEXT_STACK: AtomicU64 = AtomicU64::new(KTHREAD_STACK_FIRST.as_u64
 pub fn kthread_stack_alloc() -> u64 {
     if let Some(region_bottom) = KTHREAD_FREED_STACKS.pop() {
         // Reuse existing region: region_bottom points to start of guard page
-        // Stack top = region_bottom + guard_page + stack_size
-        return region_bottom + 4096 + KTHREAD_STACK_SIZE;
+        // Stack top = region_bottom + stack_size
+        return region_bottom + KTHREAD_STACK_SIZE;
     }
 
-    let stack_bottom = KTHREAD_NEXT_STACK.fetch_add(
-        KTHREAD_STACK_REGION_SIZE,
-        core::sync::atomic::Ordering::Relaxed,
-    );
+    let stack_bottom = vmalloc(KTHREAD_STACK_REGION_SIZE);
 
     let mut mapper = memory_mapper();
 
     // Map only the stack portion, leaving guard page at the bottom unmapped
     mapper
         .map_memory(
-            VirtAddr::new(stack_bottom + 4096), // Skip guard page at bottom
+            stack_bottom,
             KTHREAD_STACK_SIZE,
             PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
         )
         .expect("failed to map kstack");
 
-    stack_bottom + 4096 + KTHREAD_STACK_SIZE // Skip guard page + stack size
+    stack_bottom.as_u64() + KTHREAD_STACK_SIZE // Skip guard page + stack size
 }
 
 pub fn kthread_stack_free(stack_top: u64) {
     // Calculate the original region bottom (including guard page)
-    let region_bottom = stack_top - KTHREAD_STACK_SIZE - 4096;
+    let region_bottom = stack_top - KTHREAD_STACK_SIZE;
     KTHREAD_FREED_STACKS.push(region_bottom);
 }
 

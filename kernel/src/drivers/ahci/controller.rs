@@ -23,7 +23,7 @@ use crate::{
     },
     interrupts::InterruptIndex,
     log,
-    memory::{get_virt_addr, mapper::memory_mapper},
+    memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
     thread::scheduler::sched,
     timer::Instant,
 };
@@ -77,7 +77,7 @@ impl AhciController {
         // Map the AHCI HBA memory
         let hba_base = PhysAddr::new((pci_device.header.bar5 & !0xF) as u64);
 
-        let hba_virt = get_virt_addr(hba_base);
+        let hba_virt = get_virt_addr_from_phys_offset(hba_base);
 
         // Map the HBA memory region (need 0x1100 bytes for full AHCI HBA, round up to 8KB to be safe)
         let hba_size = 0x1100;

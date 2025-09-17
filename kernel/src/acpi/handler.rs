@@ -8,22 +8,15 @@ use x86_64::{
 };
 
 use crate::{
-    memory::{ACPI_MAPPINGS, mapper::memory_mapper},
+    memory::{
+        mapper::memory_mapper,
+        valloc::{vfree, vmalloc},
+    },
     println,
 };
 
 #[derive(Debug, Clone)]
-pub struct AcpiHandler {
-    current_addr: Arc<Mutex<VirtAddr>>,
-}
-
-impl AcpiHandler {
-    pub fn new() -> Self {
-        Self {
-            current_addr: Arc::new(Mutex::new(ACPI_MAPPINGS)),
-        }
-    }
-}
+pub struct AcpiHandler;
 
 // ACPI handler manages its own "virtual address space", this is why using the physical address mapping isnt correct here, and we need to actually map
 #[expect(unused)]
@@ -34,8 +27,7 @@ impl Handler for AcpiHandler {
         size: usize,
     ) -> acpi::PhysicalMapping<Self, T> {
         let mut mapper = memory_mapper();
-        let mut current_virt = self.current_addr.lock();
-        let virt_start = *current_virt;
+        let virt_start = vmalloc(size as u64);
 
         // Check if virtual address is canonical
         let addr = virt_start.as_u64();
@@ -57,8 +49,6 @@ impl Handler for AcpiHandler {
             }
         }
 
-        *current_virt += align_up(size as u64, 4096);
-
         PhysicalMapping {
             handler: self.clone(),
             mapped_length: size,
@@ -68,7 +58,19 @@ impl Handler for AcpiHandler {
         }
     }
 
-    fn unmap_physical_region<T>(_region: &acpi::PhysicalMapping<Self, T>) {}
+    fn unmap_physical_region<T>(region: &acpi::PhysicalMapping<Self, T>) {
+        let mut mapper = memory_mapper();
+
+        let virt_start = VirtAddr::new(region.virtual_start.as_ptr() as u64);
+        match mapper.unmap_memory(virt_start, region.mapped_length as u64) {
+            Ok(_) => {
+                vfree(virt_start);
+            }
+            Err(e) => {
+                println!("ACPI: Unamp failed: {:?}", e);
+            }
+        }
+    }
 
     fn read_u8(&self, address: usize) -> u8 {
         println!("reading {address:x}");

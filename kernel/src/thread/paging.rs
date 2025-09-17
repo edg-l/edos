@@ -1,6 +1,6 @@
 use x86_64::structures::paging::{FrameAllocator, PageTable, PhysFrame};
 
-use crate::memory::{frame_allocator::frame_allocator, get_virt_addr};
+use crate::memory::{frame_allocator::frame_allocator, get_virt_addr_from_phys_offset};
 
 pub unsafe fn allocate_process_pml4(kernel_pml4: &PageTable) -> PhysFrame {
     let mut alloc = frame_allocator();
@@ -9,7 +9,7 @@ pub unsafe fn allocate_process_pml4(kernel_pml4: &PageTable) -> PhysFrame {
         .allocate_frame()
         .expect("Failed to allocate PML4 frame");
 
-    let pml4_virt = get_virt_addr(pml4_frame.start_address());
+    let pml4_virt = get_virt_addr_from_phys_offset(pml4_frame.start_address());
     let pml4: &mut PageTable = unsafe { &mut *pml4_virt.as_mut_ptr() };
 
     // Zero the entire table

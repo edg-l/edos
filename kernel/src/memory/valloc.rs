@@ -33,7 +33,7 @@ impl VAlloc {
         }
 
         let start = self.next_start;
-        self.next_start += size;
+        self.next_start += size + 4096; // Add guard page
         self.alloc_sizes.insert(start, size);
 
         start

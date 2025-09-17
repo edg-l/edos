@@ -8,7 +8,7 @@ use x86_64::{
 use crate::{
     acpi::acpi_tables,
     drivers::hpet::instant::HpetTimer,
-    memory::{get_virt_addr, mapper::memory_mapper},
+    memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
     println,
 };
 
@@ -28,7 +28,7 @@ pub fn init() {
             println!("HPET base addr at 0x{:x}", hpet_info.base_address);
             let hpet_base = PhysAddr::new(hpet_info.base_address as u64);
             // HPET is mapped by limine.
-            let virt_hpet = get_virt_addr(hpet_base);
+            let virt_hpet = get_virt_addr_from_phys_offset(hpet_base);
 
             let mut mapper = memory_mapper();
 

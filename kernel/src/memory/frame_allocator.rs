@@ -9,7 +9,7 @@ use x86_64::{
     structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB},
 };
 
-use crate::memory::get_virt_addr;
+use crate::memory::get_virt_addr_from_phys_offset;
 
 static FRAME_ALLOCATOR: Once<Mutex<BitmapFrameAllocator>> = Once::new();
 
@@ -61,7 +61,7 @@ fn find_bitmap_storage(
     // Check if first range is sufficient
     if current.end - current.start >= required_size as u64 {
         let phys_addr = PhysAddr::new(current.start);
-        let virt_addr = get_virt_addr(phys_addr);
+        let virt_addr = get_virt_addr_from_phys_offset(phys_addr);
 
         unsafe {
             let ptr = virt_addr.as_mut_ptr::<u8>();
@@ -78,7 +78,7 @@ fn find_bitmap_storage(
             // Check if it fits now
             if current.end - current.start >= required_size as u64 {
                 let phys_addr = PhysAddr::new(current.start);
-                let virt_addr = get_virt_addr(phys_addr);
+                let virt_addr = get_virt_addr_from_phys_offset(phys_addr);
 
                 unsafe {
                     let ptr = virt_addr.as_mut_ptr::<u8>();
@@ -93,7 +93,7 @@ fn find_bitmap_storage(
             // Check if this new range is sufficient
             if current.end - current.start >= required_size as u64 {
                 let phys_addr = PhysAddr::new(current.start);
-                let virt_addr = get_virt_addr(phys_addr);
+                let virt_addr = get_virt_addr_from_phys_offset(phys_addr);
 
                 unsafe {
                     let ptr = virt_addr.as_mut_ptr::<u8>();

@@ -1,6 +1,5 @@
 use core::{marker::PhantomData, ptr};
 
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 use crossbeam_queue::SegQueue;
 use spin::Once;
 use thiserror::Error;
@@ -11,7 +10,10 @@ use x86_64::{
 
 use crate::{
     log,
-    memory::{DMA_REGION_START, mapper::memory_mapper},
+    memory::{
+        mapper::memory_mapper,
+        valloc::{vfree, vmalloc},
+    },
 };
 
 static DMA_ALLOCATOR: DmaAllocator = DmaAllocator::new();
@@ -25,10 +27,6 @@ pub struct DmaRegion<T: 'static> {
     pub buffer: DmaBuffer,
     _phantom: PhantomData<T>,
 }
-
-// TODO: Add a dma pool instead of this hack.
-static NEXT_DMA_ADDR: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(DMA_REGION_START.as_u64());
 
 impl<T> DmaRegion<T> {
     pub fn get(&self) -> *mut T {
@@ -74,9 +72,7 @@ impl DmaBuffer {
     pub fn allocate_sized(size: usize) -> Result<Self, DmaError> {
         let aligned_size = (size as u64 + 0xfff) & !0xfff; // Round up to page boundary
 
-        let virt_addr = VirtAddr::new(
-            NEXT_DMA_ADDR.fetch_add(aligned_size, core::sync::atomic::Ordering::Relaxed),
-        );
+        let virt_addr = vmalloc(aligned_size);
 
         log!(
             "Allocating dma buffer at: {virt_addr:?} {:?}",
@@ -130,14 +126,17 @@ impl DmaBuffer {
     }
 
     fn dealloc(&self) -> Result<(), DmaError> {
-        without_interrupts(|| {
+        without_interrupts(|| -> Result<(), DmaError> {
             let mut mapper = memory_mapper();
 
             mapper
                 .unmap_memory(self.virt_addr, self.size as u64)
-                .map_err(|_| DmaError::DmaAllocationFailed)
-        })?;
-        Ok(())
+                .map_err(|_| DmaError::DmaAllocationFailed)?;
+
+            vfree(self.virt_addr);
+
+            Ok(())
+        })
     }
 }
 

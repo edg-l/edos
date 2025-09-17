@@ -23,9 +23,7 @@ pub fn init_acpi() {
     ACPI_TABLES.call_once(|| {
         let info = boot_info();
 
-        unsafe {
-            AcpiTables::from_rsdp(AcpiHandler::new(), info.rdsp).expect("failed to get acpi tables")
-        }
+        unsafe { AcpiTables::from_rsdp(AcpiHandler, info.rdsp).expect("failed to get acpi tables") }
     });
 
     println!("Acpi tables initialized");

@@ -460,7 +460,6 @@ pub extern "C" fn fs_main_thread() -> ! {
             }
 
             if !paths.is_empty() {
-                log!("Sending virtual info to {mb_id:?}: {paths:?}");
                 mb.send(PartitionCommand::AddVirtualInfo { paths });
             }
         }
