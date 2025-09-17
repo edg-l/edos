@@ -2,7 +2,9 @@ use alloc::{format, string::String, vec::Vec};
 use core::str;
 
 use elibc::io::get_kernel_logs;
-use elibc::{KeyEvent, get_raw_input, process::sys_waitpid, read_from_fd, sys_close};
+use elibc::{
+    KeyEvent, WaitPidStatus, get_raw_input, process::sys_waitpid, read_from_fd, sys_close,
+};
 
 mod command;
 mod render;
@@ -96,8 +98,17 @@ fn pump_running_program(state: &mut TerminalState) {
         }
     }
 
-    if !sys_waitpid(program.pid, false) {
-        let _ = sys_close(program.read_fd);
-        state.set_running_program(None);
+    match sys_waitpid(program.pid, false) {
+        Ok(WaitPidStatus::StillRunning) => {}
+        Ok(WaitPidStatus::Exited(code)) => {
+            let _ = sys_close(program.read_fd);
+            state.set_running_program(None);
+            state.write_line(&format!("Process exited with code {code}"));
+        }
+        Err(err) => {
+            let _ = sys_close(program.read_fd);
+            state.set_running_program(None);
+            state.write_line(&format!("waitpid failed: {err:?}"));
+        }
     }
 }

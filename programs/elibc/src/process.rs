@@ -1,9 +1,10 @@
 use core::hint::spin_loop;
 
 use crate::sys::{
-    SYS_WAIT_PID,
-    calls::{syscall0, syscall1, syscall2, syscall5},
+    Errno, SYS_WAIT_PID,
+    calls::{syscall0, syscall1, syscall2, syscall3, syscall5},
     constants::{SYS_DUP2, SYS_EXIT, SYS_GETPID, SYS_PIPE, SYS_SPAWN},
+    errno,
 };
 
 /// Get the process ID
@@ -11,9 +12,37 @@ pub fn sys_getpid() -> u64 {
     unsafe { syscall0(SYS_GETPID) }
 }
 
-/// Get the process ID
-pub fn sys_waitpid(pid: u64, block: bool) -> bool {
-    unsafe { syscall2(SYS_WAIT_PID, pid, block as u64) == 1 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitPidStatus {
+    StillRunning,
+    Exited(i32),
+}
+
+/// Wait for a child process and optionally retrieve its exit status.
+///
+/// Returns [`WaitPidStatus::StillRunning`] when the process is still alive.
+/// Returns [`WaitPidStatus::Exited`] with the child's exit code when it has terminated.
+/// Returns [`Err`] with the current [`Errno`] when the syscall fails.
+pub fn sys_waitpid(pid: u64, block: bool) -> Result<WaitPidStatus, Errno> {
+    let mut status = 0i32;
+    let result = unsafe {
+        syscall3(
+            SYS_WAIT_PID,
+            pid,
+            block as u64,
+            (&mut status as *mut i32) as u64,
+        )
+    };
+
+    if result == u64::MAX {
+        return Err(errno());
+    }
+
+    if result == 0 {
+        Ok(WaitPidStatus::StillRunning)
+    } else {
+        Ok(WaitPidStatus::Exited(status))
+    }
 }
 
 /// Exit the process with the given exit code

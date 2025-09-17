@@ -25,7 +25,7 @@ use crate::{
     },
     thread::{
         Thread, UserThreadInfo,
-        scheduler::{ALIVE_THREADS, sched, switch_to_kernel_page},
+        scheduler::{ALIVE_THREADS, EXITED_THREADS, sched, switch_to_kernel_page},
     },
 };
 
@@ -272,7 +272,8 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_WAIT_PID => {
             let pid = ctx.rdi;
             let block = ctx.rsi;
-            ctx.rax = sys_waitpid(pid, block == 1);
+            let status_ptr = ctx.rdx as *mut i32;
+            ctx.rax = sys_waitpid(pid, block == 1, status_ptr);
         }
         SYS_ERRNO => {
             ctx.rax = sys_errno();
@@ -331,7 +332,7 @@ fn sys_getpid() -> u64 {
     sched.current_thread_info().lock().pid
 }
 
-fn sys_waitpid(pid: u64, block: bool) -> u64 {
+fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
     let sched = sched();
     let info = sched.current_thread_info();
     let mut thread = info.lock();
@@ -343,9 +344,22 @@ fn sys_waitpid(pid: u64, block: bool) -> u64 {
         return !0u64;
     }
 
-    let is_alive = ALIVE_THREADS.read().get(&pid).is_some();
+    drop(thread);
 
-    is_alive as u64
+    if let Some(code) = EXITED_THREADS.write().remove(&pid) {
+        if !status_ptr.is_null() {
+            unsafe { status_ptr.write(code) };
+        }
+        return pid;
+    }
+
+    if ALIVE_THREADS.read().get(&pid).is_some() {
+        return 0;
+    }
+
+    let mut thread = info.lock();
+    thread.errno = Errno::EINVAL;
+    !0u64
 }
 
 // TODO: figure out why the syscall gets all logs. it doesnt properly subscribe?

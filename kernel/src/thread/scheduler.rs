@@ -25,6 +25,7 @@ use crate::{
 
 // tid -> lapic that owns it
 pub static ALIVE_THREADS: RwLock<FnvIndexMap<u64, u32, 1024>> = RwLock::new(FnvIndexMap::new());
+pub static EXITED_THREADS: RwLock<FnvIndexMap<u64, i32, 1024>> = RwLock::new(FnvIndexMap::new());
 
 pub static SCHEDULERS: RwLock<heapless::LinearMap<u32, &'static Scheduler, 128>> =
     RwLock::new(heapless::LinearMap::new());
@@ -245,6 +246,10 @@ impl Scheduler {
                 SchedCmd::Exit(thread_id, code) => {
                     if let Some(thread) = self.storage.threads.get_mut(&thread_id) {
                         thread.state = ThreadState::Exited(code);
+                        {
+                            let mut exited = EXITED_THREADS.write();
+                            let _ = exited.insert(thread_id, code);
+                        }
                         let info = self.storage.thread_info.remove(&thread.id);
                         thread.free(info);
 
