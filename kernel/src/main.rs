@@ -120,7 +120,13 @@ fn main() -> ! {
     drivers::init_drivers();
     fs::init();
 
-    let user_thread = Thread::new_user(TERMINAL_PROGRAM, Some("terminal".to_string())).unwrap();
+    let terminal_argv: [&[u8]; 1] = [b"terminal"];
+    let user_thread = Thread::new_user(
+        TERMINAL_PROGRAM,
+        Some("terminal".to_string()),
+        &terminal_argv,
+    )
+    .unwrap();
     let user_thread_info = UserThreadInfo::from_thread(
         user_thread.user.as_ref().unwrap(),
         0,

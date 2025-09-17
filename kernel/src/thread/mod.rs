@@ -1,5 +1,5 @@
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
-use core::{sync::atomic::AtomicU64, time::Duration};
+use core::{ptr, sync::atomic::AtomicU64, time::Duration};
 use spin::Mutex;
 use x86_64::{
     VirtAddr,
@@ -12,7 +12,10 @@ use crate::{
     drivers::fpu::FpuState,
     fs::path::Path,
     loader::{ElfLoadError, load_elf},
-    memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
+    memory::{
+        STACK_ALIGNMENT, USER_STACK_SIZE,
+        mapper::{MemoryManager, active_level_4_table, get_level_4_table},
+    },
     println,
     syscalls::Errno,
     thread::{
@@ -112,6 +115,76 @@ impl UserThreadInfo {
     }
 }
 
+#[derive(Debug)]
+enum StackSetupError {
+    StackOverflow,
+}
+
+fn setup_user_stack(stack_top: u64, argv: &[&[u8]]) -> Result<(u64, u64, usize), StackSetupError> {
+    let stack_bottom = stack_top
+        .checked_sub(USER_STACK_SIZE)
+        .ok_or(StackSetupError::StackOverflow)?;
+
+    let mut sp = stack_top;
+    let mut arg_ptrs = Vec::with_capacity(argv.len());
+
+    for arg in argv.iter().rev() {
+        let len = arg.len() as u64;
+        sp = sp
+            .checked_sub(len + 1)
+            .ok_or(StackSetupError::StackOverflow)?;
+
+        if sp < stack_bottom {
+            return Err(StackSetupError::StackOverflow);
+        }
+
+        unsafe {
+            ptr::copy_nonoverlapping(arg.as_ptr(), sp as *mut u8, len as usize);
+            ((sp + len) as *mut u8).write(0);
+        }
+
+        arg_ptrs.push(sp);
+    }
+
+    arg_ptrs.reverse();
+
+    sp &= !(STACK_ALIGNMENT - 1);
+
+    let argc = arg_ptrs.len();
+
+    if argc % 2 == 0 {
+        sp = sp.checked_sub(8).ok_or(StackSetupError::StackOverflow)?;
+        if sp < stack_bottom {
+            return Err(StackSetupError::StackOverflow);
+        }
+        unsafe { (sp as *mut u64).write(0) };
+    }
+
+    sp = sp.checked_sub(8).ok_or(StackSetupError::StackOverflow)?;
+    if sp < stack_bottom {
+        return Err(StackSetupError::StackOverflow);
+    }
+    unsafe { (sp as *mut u64).write(0) };
+
+    for &ptr_value in arg_ptrs.iter().rev() {
+        sp = sp.checked_sub(8).ok_or(StackSetupError::StackOverflow)?;
+        if sp < stack_bottom {
+            return Err(StackSetupError::StackOverflow);
+        }
+        unsafe { (sp as *mut u64).write(ptr_value) };
+    }
+
+    let argv_ptr = sp;
+
+    sp = sp.checked_sub(8).ok_or(StackSetupError::StackOverflow)?;
+    if sp < stack_bottom {
+        return Err(StackSetupError::StackOverflow);
+    }
+    unsafe { (sp as *mut u64).write(argc as u64) };
+
+    Ok((sp, argv_ptr, argc))
+}
+
 #[expect(unused)]
 #[derive(Debug, Clone)]
 pub struct MemoryRegion {
@@ -177,10 +250,12 @@ impl Thread {
 
     /// Must provide entry point and cr3 page table.
     ///
-    /// TODO: also handle arguments.
-    ///
     /// Note: This function switches to kernel page, should be called without interrupts
-    pub fn new_user(elf_data: &[u8], name: Option<String>) -> Result<Self, ElfLoadError> {
+    pub fn new_user(
+        elf_data: &[u8],
+        name: Option<String>,
+        argv: &[&[u8]],
+    ) -> Result<Self, ElfLoadError> {
         switch_to_kernel_page();
         // allocate kernel stack before creating page
         let kernel_stack_top = kthread_stack_alloc();
@@ -202,7 +277,9 @@ impl Thread {
 
         // call align
         let stack_top = thread_stack_alloc(&mut process_memory_manager);
-        let stack_top_call_aligned = stack_top - 8;
+
+        let (user_stack_pointer, argv_ptr, argc) =
+            setup_user_stack(stack_top, argv).map_err(|_| ElfLoadError::MappingFailed)?;
 
         let load_info = load_elf(elf_data, &mut process_memory_manager)?;
 
@@ -214,11 +291,14 @@ impl Thread {
         println!(
             "Creating CpuContext with entry_point: {:p}, stack_top: {:p}",
             load_info.entry_point.as_u64() as *const u8,
-            stack_top_call_aligned as *const u8
+            user_stack_pointer as *const u8
         );
 
-        let context =
-            CpuContext::new_user_thread(load_info.entry_point.as_u64(), stack_top_call_aligned);
+        let mut context =
+            CpuContext::new_user_thread(load_info.entry_point.as_u64(), user_stack_pointer);
+        context.rdi = argc as u64;
+        context.rsi = argv_ptr;
+        context.rdx = 0;
 
         let id = THREAD_ID_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 

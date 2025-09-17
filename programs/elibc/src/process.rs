@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use core::hint::spin_loop;
 
 use crate::sys::{
@@ -71,17 +72,42 @@ pub fn dup2(oldfd: u64, newfd: u64) -> u64 {
     unsafe { syscall2(SYS_DUP2, oldfd, newfd) }
 }
 
-/// Spawn a new process
-/// path: path to executable
-/// stdin_fd, stdout_fd, stderr_fd: file descriptors for standard streams (0, 1, 2 for defaults)
-/// Returns child PID on success, or u64::MAX on error
-pub fn spawn(path: &str, stdin_fd: u64, stdout_fd: u64, stderr_fd: u64) -> u64 {
-    let path_ptr = path.as_ptr();
-    let argv_ptr = core::ptr::null::<*const u8>(); // TODO: implement argv support
+/// Spawn a new process.
+///
+/// * `path`: path to executable (must be a valid UTF-8 string)
+/// * `args`: argument vector (each argument will be converted to a C string)
+/// * `stdin_fd`, `stdout_fd`, `stderr_fd`: file descriptors for standard streams (0, 1, 2 for defaults)
+///
+/// Returns child PID on success, or `u64::MAX` on error.
+pub fn spawn(path: &str, args: &[&str], stdin_fd: u64, stdout_fd: u64, stderr_fd: u64) -> u64 {
+    let mut path_buf = Vec::with_capacity(path.len() + 1);
+    path_buf.extend_from_slice(path.as_bytes());
+    path_buf.push(0);
+
+    let mut argv_storage: Vec<Vec<u8>> = Vec::with_capacity(args.len());
+    let mut argv_ptrs: Vec<*const u8> = Vec::with_capacity(args.len() + 1);
+
+    for &arg in args {
+        let mut buf = Vec::with_capacity(arg.len() + 1);
+        buf.extend_from_slice(arg.as_bytes());
+        buf.push(0);
+        argv_ptrs.push(buf.as_ptr());
+        argv_storage.push(buf);
+    }
+
+    // Null-terminate the argv list following C conventions.
+    argv_ptrs.push(core::ptr::null());
+
+    let argv_ptr = if argv_ptrs.is_empty() {
+        core::ptr::null()
+    } else {
+        argv_ptrs.as_ptr()
+    };
+
     unsafe {
         syscall5(
             SYS_SPAWN,
-            path_ptr as u64,
+            path_buf.as_ptr() as u64,
             argv_ptr as u64,
             stdin_fd,
             stdout_fd,
@@ -91,17 +117,17 @@ pub fn spawn(path: &str, stdin_fd: u64, stdout_fd: u64, stderr_fd: u64) -> u64 {
 }
 
 unsafe extern "C" {
-    fn main() -> i32;
+    fn main(argc: isize, argv: *const *const u8) -> i32;
 }
 
 /// Entry point for user programs
 #[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
+pub extern "C" fn _start(argc: isize, argv: *const *const u8) -> ! {
     // Initialize the heap allocator by triggering first allocation
     crate::allocator::ALLOCATOR.lock();
 
     // Call user's main function
-    let code = unsafe { main() };
+    let code = unsafe { main(argc, argv) };
 
     sys_exit(code);
 }

@@ -186,21 +186,26 @@ fn write_file(state: &mut TerminalState, args: &[String]) {
     }
 }
 
-fn spawn_program(state: &mut TerminalState, command: &str, _args: &[String]) {
+fn spawn_program(state: &mut TerminalState, command: &str, args: &[String]) {
     let Some((read_fd, write_fd)) = pipe() else {
         state.write_line(&format!("Failed to create pipe for {command}"));
         return;
     };
 
+    let mut argv: Vec<&str> = Vec::with_capacity(args.len() + 1);
+    for arg in args {
+        argv.push(arg);
+    }
+
     let candidates = [
-        format!("/{}", command),
-        format!("./{}", command),
         format!("/bin/{}", command),
+        format!("./{}", command),
         format!("/usr/bin/{}", command),
+        format!("/{}", command),
     ];
 
     for path in candidates.iter() {
-        let pid = spawn(path, 0, write_fd, 2);
+        let pid = spawn(path, &argv, 0, write_fd, 2);
         if pid != u64::MAX {
             let _ = sys_close(write_fd);
             state.set_running_program(Some(Program { pid, read_fd }));

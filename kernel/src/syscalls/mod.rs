@@ -1,6 +1,6 @@
-use core::arch::naked_asm;
+use core::{arch::naked_asm, ptr};
 
-use alloc::{string::ToString, vec::Vec};
+use alloc::{format, string::ToString, vec::Vec};
 use x86_64::{
     VirtAddr,
     instructions::interrupts::enable_and_hlt,
@@ -455,12 +455,17 @@ fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
 
 fn sys_spawn(
     path_ptr: *const u8,
-    _argv_ptr: *const *const u8, // TODO: implement argv parsing
+    argv_ptr: *const *const u8,
     stdin_fd: u64,
     stdout_fd: u64,
     stderr_fd: u64,
 ) -> u64 {
     use crate::{fs::api as fs_api, fs::path::Path, thread::util::queue_spawn_thread};
+
+    const MAX_PATH_LEN: usize = 1024;
+    const MAX_ARGC: usize = 64;
+    const MAX_ARG_LEN: usize = 4096;
+    const MAX_ARG_TOTAL: usize = 16 * 1024;
 
     let sched = sched();
     let info = sched.current_thread_info();
@@ -473,21 +478,15 @@ fn sys_spawn(
         return !0u64;
     }
 
-    // Copy C string from user memory (simple, bounded)
-    let mut buf = alloc::vec::Vec::new();
-    for i in 0..1024usize {
-        let c = unsafe { core::ptr::read_volatile(path_ptr.add(i)) };
-        if c == 0 {
-            break;
+    let path_bytes = match copy_user_c_string(path_ptr, MAX_PATH_LEN) {
+        Some(bytes) if !bytes.is_empty() => bytes,
+        _ => {
+            thread.errno = Errno::EINVAL;
+            return !0u64;
         }
-        buf.push(c);
-    }
-    if buf.is_empty() || buf.len() == 1024 {
-        thread.errno = Errno::EINVAL;
-        return !0u64;
-    }
+    };
 
-    let path_str = match core::str::from_utf8(&buf) {
+    let path_str = match core::str::from_utf8(&path_bytes) {
         Ok(s) => s,
         Err(_) => {
             thread.errno = Errno::EINVAL;
@@ -512,6 +511,43 @@ fn sys_spawn(
             return !0u64;
         }
     };
+
+    let mut argv_storage: Vec<Vec<u8>> = Vec::new();
+    argv_storage.push(format!("{path}").as_bytes().to_vec());
+
+    if !argv_ptr.is_null() {
+        let mut total_bytes = 0usize;
+        let mut terminated = false;
+
+        for index in 0..MAX_ARGC {
+            let current_ptr = unsafe { ptr::read_volatile(argv_ptr.add(index)) };
+            if current_ptr.is_null() {
+                terminated = true;
+                break;
+            }
+
+            let arg = match copy_user_c_string(current_ptr, MAX_ARG_LEN) {
+                Some(bytes) => bytes,
+                None => {
+                    thread.errno = Errno::EINVAL;
+                    return !0u64;
+                }
+            };
+
+            total_bytes += arg.len() + 1;
+            if total_bytes > MAX_ARG_TOTAL {
+                thread.errno = Errno::EINVAL;
+                return !0u64;
+            }
+
+            argv_storage.push(arg);
+        }
+
+        if !terminated && argv_storage.len() == MAX_ARGC {
+            thread.errno = Errno::EINVAL;
+            return !0u64;
+        }
+    }
 
     // Save current cwd for child process
     let child_cwd = thread.cwd.clone();
@@ -545,8 +581,10 @@ fn sys_spawn(
     let cr3 = Cr3::read();
     switch_to_kernel_page();
 
+    let argv_slices: Vec<&[u8]> = argv_storage.iter().map(|arg| arg.as_slice()).collect();
+
     // Create new user thread from ELF data
-    let user_thread = match Thread::new_user(&elf_data, Some(path_str.to_string())) {
+    let user_thread = match Thread::new_user(&elf_data, Some(path_str.to_string()), &argv_slices) {
         Ok(thread) => {
             log!(
                 "UserThread created successfully, entry point: {:p}",
@@ -609,4 +647,21 @@ fn sys_spawn(
     log!("spawn, returning");
 
     child_pid
+}
+
+fn copy_user_c_string(ptr: *const u8, max_len: usize) -> Option<Vec<u8>> {
+    if ptr.is_null() {
+        return None;
+    }
+
+    let mut buf = Vec::new();
+    for idx in 0..max_len {
+        let byte = unsafe { ptr::read_volatile(ptr.add(idx)) };
+        if byte == 0 {
+            return Some(buf);
+        }
+        buf.push(byte);
+    }
+
+    None
 }

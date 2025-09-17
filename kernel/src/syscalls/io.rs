@@ -100,8 +100,8 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
         },
         Some(FileDescriptor::Pipe(pipe)) => {
             // TODO: is it safe to get this lock here
-            let text = core::str::from_utf8(&buffer);
-            log!("Pipe: {:?}", text);
+            // let text = core::str::from_utf8(&buffer);
+            // log!("Pipe: {:?}", text);
             let mut pipe = pipe.write();
             pipe.buffer.extend_from_slice(&buffer);
             count as u64
