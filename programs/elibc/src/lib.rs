@@ -5,6 +5,7 @@ extern crate alloc;
 
 // Core modules
 pub mod allocator;
+pub mod fs;
 pub mod graphics;
 pub mod io;
 pub mod math;
@@ -13,6 +14,7 @@ pub mod process;
 pub mod sys;
 
 // Re-export commonly used types and functions for convenience
+pub use fs::{PartitionInfo, list_partitions, mount_partition};
 pub use memory::{mmap, munmap};
 pub use process::{WaitPidStatus, dup2, pipe, spawn, sys_exit, sys_getpid, sys_waitpid};
 pub use sys::{Errno, errno};
@@ -71,6 +73,20 @@ pub unsafe fn sys_getcwd(buffer: *mut u8, size: usize) -> isize {
 /// - Path remains valid for the duration of the syscall
 pub unsafe fn sys_chdir(path: *const u8) -> isize {
     unsafe { syscall1(SYS_CHDIR, path as u64) as isize }
+}
+
+/// # Safety
+/// Caller must ensure the mount point path is a valid null-terminated string located in readable
+/// memory and remains valid for the duration of the syscall.
+pub unsafe fn sys_mount(device_id: u64, partition_idx: u64, path: *const u8) -> i64 {
+    unsafe { syscall3(SYS_MOUNT, device_id, partition_idx, path as u64) as i64 }
+}
+
+/// # Safety
+/// Caller must ensure the buffer points to writable memory of at least `size` bytes and remains
+/// valid for the duration of the syscall.
+pub unsafe fn sys_list_partitions(buffer: *mut u8, size: usize) -> isize {
+    unsafe { syscall2(SYS_LIST_PARTITIONS, buffer as u64, size as u64) as isize }
 }
 
 // Re-export I/O types for convenience

@@ -1,7 +1,9 @@
-use alloc::{format, string::String, vec::Vec};
+use core::fmt::Write as _;
+
+use alloc::{ffi::CString, format, string::String, vec::Vec};
 use elibc::{
     io::{FileType, chdir, getcwd, list_dir, open, open_flags, read_to_end, write_all_fd},
-    pipe, spawn, sys_close,
+    list_partitions, mount_partition, pipe, spawn, sys_close,
 };
 
 use super::state::{Program, TerminalState};
@@ -53,6 +55,8 @@ pub(super) fn execute_command(state: &mut TerminalState, command: &str, args: &[
         "ls" => list_directory(state, args),
         "cat" => cat_file(state, args),
         "write" => write_file(state, args),
+        "partitions" => cmd_list_partitions(state, args),
+        "mount" => cmd_mount(state, args),
         "clear" => state.clear_output(),
         _ => spawn_program(state, command, args),
     }
@@ -80,6 +84,8 @@ fn print_help(state: &mut TerminalState) {
         "- ls [path]",
         "- cat <path>",
         "- write <path> <content>",
+        "- partitions",
+        "- mount <device_id> <partition_idx> <mount_point>",
         "- clear",
     ];
 
@@ -216,4 +222,73 @@ fn spawn_program(state: &mut TerminalState, command: &str, args: &[String]) {
     state.write_line(&format!("Command not found: {}", command));
     let _ = sys_close(read_fd);
     let _ = sys_close(write_fd);
+}
+
+fn cmd_list_partitions(state: &mut TerminalState, _args: &[String]) {
+    match list_partitions() {
+        Ok(parts) if parts.is_empty() => state.write_line("No partitions found."),
+        Ok(parts) => {
+            state.write_line("Device Partition      Start LBA        End LBA  Size(sectors) GUID");
+            for part in parts {
+                let guid = format_guid(&part.unique_partition_guid);
+                state.write_line(&format!(
+                    "{:>5} {:>9} {:>14} {:>14} {:>14} {}",
+                    part.device_id,
+                    part.index,
+                    part.starting_lba,
+                    part.ending_lba,
+                    part.size_sectors,
+                    guid
+                ));
+            }
+        }
+        Err(err) => state.write_line(&format!("partitions: syscall failed ({:?})", err)),
+    }
+}
+
+fn format_guid(bytes: &[u8; 16]) -> String {
+    let mut out = String::with_capacity(36);
+    for (idx, byte) in bytes.iter().enumerate() {
+        if matches!(idx, 4 | 6 | 8 | 10) {
+            out.push('-');
+        }
+        let _ = write!(&mut out, "{:02x}", byte);
+    }
+    out
+}
+
+fn cmd_mount(state: &mut TerminalState, args: &[String]) {
+    if args.len() != 3 {
+        state.write_line("Usage: mount <device_id> <partition_idx> <mount_point>");
+        return;
+    }
+
+    let device_id = match args[0].parse::<u64>() {
+        Ok(id) => id,
+        Err(_) => {
+            state.write_line("mount: invalid device id");
+            return;
+        }
+    };
+
+    let partition_idx = match args[1].parse::<u64>() {
+        Ok(idx) => idx,
+        Err(_) => {
+            state.write_line("mount: invalid partition index");
+            return;
+        }
+    };
+
+    let c_path = match CString::new(args[2].as_str()) {
+        Ok(path) => path,
+        Err(_) => {
+            state.write_line("mount: mount point contains null byte");
+            return;
+        }
+    };
+
+    match mount_partition(device_id, partition_idx, c_path.as_c_str()) {
+        Ok(()) => state.write_line("Mounted successfully."),
+        Err(err) => state.write_line(&format!("mount failed: {:?}", err)),
+    }
 }
