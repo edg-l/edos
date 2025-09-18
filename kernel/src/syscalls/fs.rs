@@ -56,6 +56,8 @@ pub fn sys_mount(device_id: u64, partition_idx: u64, path_ptr: *const u8) -> i64
         }
     };
 
+    interrupts::enable();
+
     // TODO: check mount point is a real folder and empty.
 
     match mount_partition(device_id as usize, partition_idx as usize, mount_point) {
