@@ -51,7 +51,10 @@ fn file_attrs_to_u8(attrs: crate::fs::FileAttrs) -> u8 {
     result
 }
 
-fn resolve_path(path_str: &str, cwd: &Path) -> Result<Path, crate::fs::path::ParseError> {
+pub(super) fn resolve_path(
+    path_str: &str,
+    cwd: &Path,
+) -> Result<Path, crate::fs::path::ParseError> {
     if path_str.starts_with('/') {
         // Absolute path
         Path::parse(path_str).map(|p| p.normalize())

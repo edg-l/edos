@@ -29,6 +29,7 @@ use crate::{
     },
 };
 
+mod fs;
 mod graphics;
 mod io;
 mod keyboard;
