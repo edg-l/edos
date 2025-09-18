@@ -243,6 +243,8 @@ pub(super) enum PathOp {
     Flush,
 }
 
+// TODO: Add rmdir recursive in a atomic command
+
 #[derive(Debug, Clone)]
 pub(super) enum PartitionCommand {
     ListFiles {

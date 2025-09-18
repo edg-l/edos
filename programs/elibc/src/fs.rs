@@ -77,7 +77,7 @@ pub fn list_partitions() -> Result<Vec<PartitionInfo>, Errno> {
         }
 
         let written = written as usize;
-        if written % entry_size != 0 {
+        if !written.is_multiple_of(entry_size) {
             return Err(Errno::EIO);
         }
 
