@@ -23,6 +23,10 @@ pub const SYS_RAW_INPUT: u64 = 200;
 pub const SYS_KERNEL_LOGS: u64 = 201;
 pub const SYS_MOUNT: u64 = 202;
 pub const SYS_LIST_PARTITIONS: u64 = 203;
+pub const SYS_MKDIR: u64 = 204;
+pub const SYS_RMDIR: u64 = 205;
+pub const SYS_RMDIR_ALL: u64 = 206;
+pub const SYS_UNLINK: u64 = 207;
 
 // Memory protection flags
 pub const PROT_READ: u32 = 0x1;

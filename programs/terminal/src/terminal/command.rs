@@ -2,8 +2,10 @@ use core::fmt::Write as _;
 
 use alloc::{ffi::CString, format, string::String, vec::Vec};
 use elibc::{
+    Errno, create_dir,
     io::{FileType, chdir, getcwd, list_dir, open, open_flags, read_to_end, write_all_fd},
-    list_partitions, mount_partition, pipe, spawn, sys_close,
+    list_partitions, mount_partition, pipe, remove_dir, remove_dir_all, remove_file, spawn,
+    sys_close,
 };
 
 use super::state::{Program, TerminalState};
@@ -57,6 +59,9 @@ pub(super) fn execute_command(state: &mut TerminalState, command: &str, args: &[
         "write" => write_file(state, args),
         "partitions" => cmd_list_partitions(state, args),
         "mount" => cmd_mount(state, args),
+        "mkdir" => cmd_mkdir(state, args),
+        "rmdir" => cmd_rmdir(state, args),
+        "rm" => cmd_rm(state, args),
         "clear" => state.clear_output(),
         _ => spawn_program(state, command, args),
     }
@@ -86,6 +91,9 @@ fn print_help(state: &mut TerminalState) {
         "- write <path> <content>",
         "- partitions",
         "- mount <device_id> <partition_idx> <mount_point>",
+        "- mkdir <path>",
+        "- rmdir <path>",
+        "- rm [-r] <path>",
         "- clear",
     ];
 
@@ -290,5 +298,92 @@ fn cmd_mount(state: &mut TerminalState, args: &[String]) {
     match mount_partition(device_id, partition_idx, c_path.as_c_str()) {
         Ok(()) => state.write_line("Mounted successfully."),
         Err(err) => state.write_line(&format!("mount failed: {:?}", err)),
+    }
+}
+
+fn cmd_mkdir(state: &mut TerminalState, args: &[String]) {
+    let Some(path) = args.first() else {
+        state.write_line("Usage: mkdir <path>");
+        return;
+    };
+
+    let c_path = match CString::new(path.as_str()) {
+        Ok(p) => p,
+        Err(_) => {
+            state.write_line("mkdir: path contains null byte");
+            return;
+        }
+    };
+
+    match create_dir(c_path.as_c_str()) {
+        Ok(()) => state.write_line("Directory created."),
+        Err(err) => state.write_line(&format!("mkdir failed: {:?}", err)),
+    }
+}
+
+fn cmd_rmdir(state: &mut TerminalState, args: &[String]) {
+    let Some(path) = args.first() else {
+        state.write_line("Usage: rmdir <path>");
+        return;
+    };
+
+    let c_path = match CString::new(path.as_str()) {
+        Ok(p) => p,
+        Err(_) => {
+            state.write_line("rmdir: path contains null byte");
+            return;
+        }
+    };
+
+    match remove_dir(c_path.as_c_str()) {
+        Ok(()) => state.write_line("Directory removed."),
+        Err(err) => state.write_line(&format!("rmdir failed: {:?}", err)),
+    }
+}
+
+fn cmd_rm(state: &mut TerminalState, args: &[String]) {
+    if args.is_empty() {
+        state.write_line("Usage: rm [-r] <path>");
+        return;
+    }
+
+    let (recursive, path_arg) = if let Some(first) = args.first() {
+        if first == "-r" || first == "-R" {
+            (true, args.get(1))
+        } else {
+            (false, Some(first))
+        }
+    } else {
+        (false, None)
+    };
+
+    let Some(path) = path_arg else {
+        state.write_line("Usage: rm [-r] <path>");
+        return;
+    };
+
+    let c_path = match CString::new(path.as_str()) {
+        Ok(p) => p,
+        Err(_) => {
+            state.write_line("rm: path contains null byte");
+            return;
+        }
+    };
+
+    let result = if recursive {
+        match remove_dir_all(c_path.as_c_str()) {
+            Ok(()) => Ok(()),
+            Err(err) if err == Errno::ENOTDIR || err == Errno::EISDIR => {
+                remove_file(c_path.as_c_str())
+            }
+            Err(err) => Err(err),
+        }
+    } else {
+        remove_file(c_path.as_c_str())
+    };
+
+    match result {
+        Ok(()) => state.write_line("Removed."),
+        Err(err) => state.write_line(&format!("rm failed: {:?}", err)),
     }
 }

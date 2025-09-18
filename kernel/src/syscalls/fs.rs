@@ -5,8 +5,12 @@ use x86_64::instructions::interrupts;
 use crate::{
     fs::{
         Error, FileKind,
-        api::{file_info, list_files, list_partitions, mount_partition},
+        api::{
+            create_dir, file_info, list_files, list_partitions, mount_partition, remove_dir,
+            remove_file,
+        },
         gpt::Partition,
+        path::Path,
     },
     syscalls::io::resolve_path,
     thread::scheduler::sched,
@@ -14,44 +18,59 @@ use crate::{
 
 use super::Errno;
 
-pub fn sys_mount(device_id: u64, partition_idx: u64, path_ptr: *const u8) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+const MAX_PATH_LEN: usize = 1024;
 
+fn read_user_path(path_ptr: *const u8, cwd: &Path) -> Result<Path, Errno> {
     if path_ptr.is_null() {
-        thread.errno = Errno::EFAULT;
-        return -1;
+        return Err(Errno::EFAULT);
     }
 
-    // Copy C string from user memory (simple, bounded)
-    let mut buf = alloc::vec::Vec::new();
-    for i in 0..1024usize {
+    let mut buf = Vec::new();
+    for i in 0..MAX_PATH_LEN {
         let c = unsafe { core::ptr::read_volatile(path_ptr.add(i)) };
         if c == 0 {
             break;
         }
         buf.push(c);
     }
-    // If no null terminator within bound, treat as invalid
-    if buf.is_empty() || buf.len() == 1024 {
-        thread.errno = Errno::EINVAL;
-        return -1;
+
+    if buf.is_empty() || buf.len() == MAX_PATH_LEN {
+        return Err(Errno::EINVAL);
     }
 
-    let path_str = match core::str::from_utf8(&buf) {
-        Ok(s) => s,
-        Err(_) => {
-            thread.errno = Errno::EINVAL;
-            return -1;
-        }
-    };
+    let path_str = core::str::from_utf8(&buf).map_err(|_| Errno::EINVAL)?;
+    resolve_path(path_str, cwd).map_err(|_| Errno::EINVAL)
+}
 
-    let mount_point = match resolve_path(path_str, &thread.cwd) {
+fn remove_dir_recursive(path: &Path) -> Result<(), Error> {
+    let entries = list_files(path)?;
+
+    for entry in entries {
+        if entry.name == "." || entry.name == ".." {
+            continue;
+        }
+
+        let child_path = path.join(entry.name.as_str()).normalize();
+
+        match entry.kind {
+            FileKind::Directory => remove_dir_recursive(&child_path)?,
+            _ => remove_file(&child_path)?,
+        }
+    }
+
+    remove_dir(path)
+}
+
+pub fn sys_mount(device_id: u64, partition_idx: u64, path_ptr: *const u8) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    let mount_point = match read_user_path(path_ptr, &thread.cwd) {
         Ok(path) => path,
-        Err(_) => {
-            thread.errno = Errno::EINVAL;
+        Err(errno) => {
+            thread.errno = errno;
             return -1;
         }
     };
@@ -95,6 +114,106 @@ pub fn sys_mount(device_id: u64, partition_idx: u64, path_ptr: *const u8) -> i64
     // TODO: possible TOCTOU here.
 
     match mount_partition(device_id as usize, partition_idx as usize, mount_point) {
+        Ok(_) => 0,
+        Err(err) => {
+            thread.errno = Errno::from(err);
+            -1
+        }
+    }
+}
+
+pub fn sys_mkdir(path_ptr: *const u8) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    let path = match read_user_path(path_ptr, &thread.cwd) {
+        Ok(path) => path,
+        Err(errno) => {
+            thread.errno = errno;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    match create_dir(&path) {
+        Ok(_) => 0,
+        Err(err) => {
+            thread.errno = Errno::from(err);
+            -1
+        }
+    }
+}
+
+pub fn sys_rmdir(path_ptr: *const u8) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    let path = match read_user_path(path_ptr, &thread.cwd) {
+        Ok(path) => path,
+        Err(errno) => {
+            thread.errno = errno;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    match remove_dir(&path) {
+        Ok(_) => 0,
+        Err(err) => {
+            thread.errno = Errno::from(err);
+            -1
+        }
+    }
+}
+
+pub fn sys_rmdir_all(path_ptr: *const u8) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    let path = match read_user_path(path_ptr, &thread.cwd) {
+        Ok(path) => path,
+        Err(errno) => {
+            thread.errno = errno;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    match remove_dir_recursive(&path) {
+        Ok(_) => 0,
+        Err(err) => {
+            thread.errno = Errno::from(err);
+            -1
+        }
+    }
+}
+
+pub fn sys_unlink(path_ptr: *const u8) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    let path = match read_user_path(path_ptr, &thread.cwd) {
+        Ok(path) => path,
+        Err(errno) => {
+            thread.errno = errno;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    match remove_file(&path) {
         Ok(_) => 0,
         Err(err) => {
             thread.errno = Errno::from(err);

@@ -19,7 +19,7 @@ use crate::{
     logs::LOG_BROADCAST,
     println,
     syscalls::{
-        fs::{sys_list_partitions, sys_mount},
+        fs::{sys_list_partitions, sys_mkdir, sys_mount, sys_rmdir, sys_rmdir_all, sys_unlink},
         graphics::DrawRequestInput,
         io::{sys_chdir, sys_close, sys_getcwd, sys_list_dir, sys_open, sys_read, sys_write},
         keyboard::sys_keyboard_raw,
@@ -193,6 +193,10 @@ const SYS_KERNEL_LOGS: u64 = 201;
 const SYS_WAIT_PID: u64 = 40;
 const SYS_MOUNT: u64 = 202;
 const SYS_LIST_PARTITIONS: u64 = 203;
+const SYS_MKDIR: u64 = 204;
+const SYS_RMDIR: u64 = 205;
+const SYS_RMDIR_ALL: u64 = 206;
+const SYS_UNLINK: u64 = 207;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -320,8 +324,24 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_MOUNT => {
             let device_id = ctx.rdi;
             let partition_idx = ctx.rsi;
-            let path_ptr = ctx.rdx as *mut u8;
+            let path_ptr = ctx.rdx as *const u8;
             ctx.rax = sys_mount(device_id, partition_idx, path_ptr) as u64;
+        }
+        SYS_MKDIR => {
+            let path_ptr = ctx.rdi as *const u8;
+            ctx.rax = sys_mkdir(path_ptr) as u64;
+        }
+        SYS_RMDIR => {
+            let path_ptr = ctx.rdi as *const u8;
+            ctx.rax = sys_rmdir(path_ptr) as u64;
+        }
+        SYS_RMDIR_ALL => {
+            let path_ptr = ctx.rdi as *const u8;
+            ctx.rax = sys_rmdir_all(path_ptr) as u64;
+        }
+        SYS_UNLINK => {
+            let path_ptr = ctx.rdi as *const u8;
+            ctx.rax = sys_unlink(path_ptr) as u64;
         }
         _ => {
             ctx.rax = !0u64;

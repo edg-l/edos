@@ -14,7 +14,10 @@ pub mod process;
 pub mod sys;
 
 // Re-export commonly used types and functions for convenience
-pub use fs::{PartitionInfo, list_partitions, mount_partition};
+pub use fs::{
+    PartitionInfo, create_dir, list_partitions, mount_partition, remove_dir, remove_dir_all,
+    remove_file,
+};
 pub use memory::{mmap, munmap};
 pub use process::{WaitPidStatus, dup2, pipe, spawn, sys_exit, sys_getpid, sys_waitpid};
 pub use sys::{Errno, errno};
@@ -87,6 +90,34 @@ pub unsafe fn sys_mount(device_id: u64, partition_idx: u64, path: *const u8) -> 
 /// valid for the duration of the syscall.
 pub unsafe fn sys_list_partitions(buffer: *mut u8, size: usize) -> isize {
     unsafe { syscall2(SYS_LIST_PARTITIONS, buffer as u64, size as u64) as isize }
+}
+
+/// # Safety
+/// Caller must ensure `path` points to a valid null-terminated string that remains valid for the
+/// duration of the syscall.
+pub unsafe fn sys_mkdir(path: *const u8) -> i64 {
+    unsafe { syscall1(SYS_MKDIR, path as u64) as i64 }
+}
+
+/// # Safety
+/// Caller must ensure `path` points to a valid null-terminated string that remains valid for the
+/// duration of the syscall.
+pub unsafe fn sys_rmdir(path: *const u8) -> i64 {
+    unsafe { syscall1(SYS_RMDIR, path as u64) as i64 }
+}
+
+/// # Safety
+/// Caller must ensure `path` points to a valid null-terminated string that remains valid for the
+/// duration of the syscall.
+pub unsafe fn sys_rmdir_all(path: *const u8) -> i64 {
+    unsafe { syscall1(SYS_RMDIR_ALL, path as u64) as i64 }
+}
+
+/// # Safety
+/// Caller must ensure `path` points to a valid null-terminated string that remains valid for the
+/// duration of the syscall.
+pub unsafe fn sys_unlink(path: *const u8) -> i64 {
+    unsafe { syscall1(SYS_UNLINK, path as u64) as i64 }
 }
 
 // Re-export I/O types for convenience

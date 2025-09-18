@@ -2,7 +2,9 @@ use alloc::vec::Vec;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::{ffi::CStr, mem::size_of};
 
-use crate::{Errno, errno, sys_list_partitions, sys_mount};
+use crate::{
+    Errno, errno, sys_list_partitions, sys_mkdir, sys_mount, sys_rmdir, sys_rmdir_all, sys_unlink,
+};
 
 /// Partition information returned by the kernel when listing partitions.
 #[repr(C)]
@@ -34,9 +36,33 @@ pub fn mount_partition(
     if result == 0 { Ok(()) } else { Err(errno()) }
 }
 
+/// Create a directory at `path`.
+pub fn create_dir(path: &CStr) -> Result<(), Errno> {
+    let result = unsafe { sys_mkdir(path.as_ptr().cast()) };
+    if result == 0 { Ok(()) } else { Err(errno()) }
+}
+
+/// Remove an empty directory at `path`.
+pub fn remove_dir(path: &CStr) -> Result<(), Errno> {
+    let result = unsafe { sys_rmdir(path.as_ptr().cast()) };
+    if result == 0 { Ok(()) } else { Err(errno()) }
+}
+
+/// Remove a directory and all of its contents.
+pub fn remove_dir_all(path: &CStr) -> Result<(), Errno> {
+    let result = unsafe { sys_rmdir_all(path.as_ptr().cast()) };
+    if result == 0 { Ok(()) } else { Err(errno()) }
+}
+
+/// Remove a file located at `path`.
+pub fn remove_file(path: &CStr) -> Result<(), Errno> {
+    let result = unsafe { sys_unlink(path.as_ptr().cast()) };
+    if result == 0 { Ok(()) } else { Err(errno()) }
+}
+
 /// Retrieve all known partitions from the kernel.
 pub fn list_partitions() -> Result<Vec<PartitionInfo>, Errno> {
-    const INITIAL_CAPACITY: usize = 12;
+    const INITIAL_CAPACITY: usize = 4;
     let entry_size = PartitionInfo::byte_size();
 
     let mut capacity = INITIAL_CAPACITY.max(1);
@@ -51,7 +77,7 @@ pub fn list_partitions() -> Result<Vec<PartitionInfo>, Errno> {
         }
 
         let written = written as usize;
-        if !written.is_multiple_of(entry_size) {
+        if written % entry_size != 0 {
             return Err(Errno::EIO);
         }
 
