@@ -86,7 +86,7 @@ pub fn list_files(path: &Path) -> Result<Vec<File>, Error> {
         Duration::from_secs(5),
     );
     let FsResponse::Files(r) = res else {
-        unreachable!("{:#?}", res)
+        return Err(Error::IoError);
     };
     r
 }
@@ -99,7 +99,7 @@ pub fn read_bytes(path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, E
         },
         Duration::from_secs(10),
     ) else {
-        unreachable!()
+        return Err(Error::IoError);
     };
     r
 }
@@ -115,7 +115,7 @@ pub fn write_bytes(path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error
         },
         Duration::from_secs(10),
     ) else {
-        unreachable!()
+        return Err(Error::IoError);
     };
     r
 }
@@ -128,7 +128,7 @@ pub fn create_file(path: &Path) -> Result<(), Error> {
         },
         Duration::from_secs(5),
     ) else {
-        unreachable!()
+        return Err(Error::IoError);
     };
     r
 }
@@ -141,7 +141,7 @@ pub fn create_dir(path: &Path) -> Result<(), Error> {
         },
         Duration::from_secs(5),
     ) else {
-        unreachable!()
+        return Err(Error::IoError);
     };
     r
 }
@@ -154,7 +154,7 @@ pub fn remove_file(path: &Path) -> Result<(), Error> {
         },
         Duration::from_secs(5),
     ) else {
-        unreachable!()
+        return Err(Error::IoError);
     };
     r
 }
@@ -167,7 +167,7 @@ pub fn remove_dir(path: &Path) -> Result<(), Error> {
         },
         Duration::from_secs(5),
     ) else {
-        unreachable!()
+        return Err(Error::IoError);
     };
     r
 }
@@ -180,7 +180,7 @@ pub fn file_info(path: &Path) -> Result<File, Error> {
         },
         Duration::from_secs(5),
     ) else {
-        unreachable!()
+        return Err(Error::IoError);
     };
     r
 }
@@ -193,7 +193,7 @@ pub fn flush(path: &Path) -> Result<(), Error> {
         },
         Duration::from_secs(5),
     ) else {
-        unreachable!()
+        return Err(Error::IoError);
     };
     r
 }

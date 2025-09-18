@@ -628,6 +628,21 @@ extern "C" fn partition_thread(partition: *mut Partition) -> ! {
 
     log!(logger, "Partition: {} ({})", path, partition.name);
 
+    // Get our mailbox from the FS main
+    let mailbox = {
+        use crate::fs::api::send_request as send;
+        use core::time::Duration;
+        loop {
+            let resp = send(
+                FsRequest::GetPartitionMailbox(sched().current_id()),
+                Duration::from_secs(5),
+            );
+            if let FsResponse::PartitionMailbox(Some(mb)) = resp {
+                break mb;
+            }
+        }
+    };
+
     let mut fs: Box<dyn FileSystem>;
 
     match &partition.filesystem {
@@ -648,34 +663,19 @@ extern "C" fn partition_thread(partition: *mut Partition) -> ! {
             }
             FilesystemType::Ntfs => {
                 log!("NTFS not yet implemented");
-                kthread_exit(-1)
+                unsupported_fs(mailbox);
             }
             FilesystemType::Iso9660 => {
                 log!("Iso9660 not yet implemented");
-                kthread_exit(-1)
+                unsupported_fs(mailbox);
             }
             FilesystemType::Unknown => {
                 log!("Unknown fs type");
-                kthread_exit(-1)
+                unsupported_fs(mailbox);
             }
         },
-        None => kthread_exit(-1),
+        None => unsupported_fs(mailbox),
     }
-
-    // Get our mailbox from the FS main
-    let mailbox = {
-        use crate::fs::api::send_request as send;
-        use core::time::Duration;
-        loop {
-            let resp = send(
-                FsRequest::GetPartitionMailbox(sched().current_id()),
-                Duration::from_secs(5),
-            );
-            if let FsResponse::PartitionMailbox(Some(mb)) = resp {
-                break mb;
-            }
-        }
-    };
 
     let mut virtual_files: BTreeMap<Path, File> = BTreeMap::new();
 
@@ -749,6 +749,15 @@ extern "C" fn partition_thread(partition: *mut Partition) -> ! {
             }
         }
 
+        sched().thread_park();
+    }
+}
+
+fn unsupported_fs(mb: Mailbox<PartitionCommand, FsResponse>) -> ! {
+    loop {
+        while let Some(req) = mb.pop_request() {
+            req.response.send(FsResponse::Ok(Err(Error::IoError)));
+        }
         sched().thread_park();
     }
 }

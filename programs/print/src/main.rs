@@ -6,7 +6,7 @@ use core::ffi::{CStr, c_char};
 use elibc::println;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
+extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
     println!("hello world from program");
     println!("argc = {argc}");
 

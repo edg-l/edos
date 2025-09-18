@@ -121,8 +121,11 @@ unsafe extern "C" {
 }
 
 /// Entry point for user programs
+///
+/// # Safety
+/// Pointers must be valid
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(argc: isize, argv: *const *const u8) -> ! {
+pub unsafe extern "C" fn _start(argc: isize, argv: *const *const u8) -> ! {
     // Initialize the heap allocator by triggering first allocation
     crate::allocator::ALLOCATOR.lock();
 
