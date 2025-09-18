@@ -56,19 +56,12 @@ pub fn sys_mount(device_id: u64, partition_idx: u64, path_ptr: *const u8) -> i64
         }
     };
 
+    // TODO: check mount point is a real folder and empty.
+
     match mount_partition(device_id as usize, partition_idx as usize, mount_point) {
         Ok(_) => 0,
         Err(err) => {
-            match err {
-                Error::FileNotFound => thread.errno = Errno::Clear,
-                Error::NotAFile => todo!(),
-                Error::NotADir => todo!(),
-                Error::IoError => todo!(),
-                Error::MissingCriticalSectors => todo!(),
-                Error::AhciError(ahci_error) => todo!(),
-                Error::InvalidFs => todo!(),
-                Error::Corrupted => todo!(),
-            }
+            thread.errno = Errno::from(err);
             -1
         }
     }

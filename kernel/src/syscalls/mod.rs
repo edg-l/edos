@@ -12,12 +12,14 @@ use x86_64::{
 };
 
 use crate::{
+    fs::Error as FsError,
     gdt::selectors,
     graphics::api::ScreenInfo,
     log,
     logs::LOG_BROADCAST,
     println,
     syscalls::{
+        fs::{sys_list_partitions, sys_mount},
         graphics::DrawRequestInput,
         io::{sys_chdir, sys_close, sys_getcwd, sys_list_dir, sys_open, sys_read, sys_write},
         keyboard::sys_keyboard_raw,
@@ -189,6 +191,8 @@ const SYS_DRAW: u64 = 103;
 const SYS_RAW_INPUT: u64 = 200;
 const SYS_KERNEL_LOGS: u64 = 201;
 const SYS_WAIT_PID: u64 = 40;
+const SYS_MOUNT: u64 = 202;
+const SYS_LIST_PARTITIONS: u64 = 203;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -308,6 +312,17 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let newfd = ctx.rsi;
             ctx.rax = sys_dup2(oldfd, newfd);
         }
+        SYS_LIST_PARTITIONS => {
+            let buffer = ctx.rdi as *mut u8;
+            let size = ctx.rsi;
+            ctx.rax = sys_list_partitions(buffer, size) as u64;
+        }
+        SYS_MOUNT => {
+            let device_id = ctx.rdi;
+            let partition_idx = ctx.rsi;
+            let path_ptr = ctx.rdx as *mut u8;
+            ctx.rax = sys_mount(device_id, partition_idx, path_ptr) as u64;
+        }
         _ => {
             ctx.rax = !0u64;
         }
@@ -320,12 +335,54 @@ pub fn sys_errno() -> u64 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(clippy::upper_case_acronyms)]
+#[allow(clippy::upper_case_acronyms, unused)]
+#[repr(u64)]
 pub enum Errno {
+    /// No error; used to clear the errno field.
     Clear,
+    /// Invalid argument passed to a syscall.
     EINVAL,
+    /// Memory allocation failed or memory exhausted.
     ENOMEM,
+    /// Bad memory address provided by userspace.
     EFAULT,
+    /// Invalid or closed file descriptor.
+    EBADF,
+    /// Operation requires permissions the caller lacks.
+    EACCES,
+    /// Operation not permitted for the current caller.
+    EPERM,
+    /// Requested file or directory does not exist.
+    ENOENT,
+    /// Attempted to create an entry that already exists.
+    EEXIST,
+    /// Expected a directory but encountered a non-directory entry.
+    ENOTDIR,
+    /// Operation required a regular file but encountered a directory.
+    EISDIR,
+    /// Device or filesystem has no space left for the operation.
+    ENOSPC,
+    /// Write attempted on a read-only filesystem or device.
+    EROFS,
+    /// Generic I/O failure surfaced from the filesystem or storage layer.
+    EIO,
+    /// Placeholder for unknown or unmapped kernel error codes.
+    UNKNOWN,
+}
+
+impl From<FsError> for Errno {
+    fn from(err: FsError) -> Self {
+        match err {
+            FsError::FileNotFound => Errno::ENOENT,
+            FsError::NotAFile => Errno::EISDIR,
+            FsError::NotADir => Errno::ENOTDIR,
+            FsError::IoError => Errno::EIO,
+            FsError::MissingCriticalSectors => Errno::EIO,
+            FsError::AhciError(_) => Errno::EIO,
+            FsError::InvalidFs => Errno::EINVAL,
+            FsError::Corrupted => Errno::EIO,
+        }
+    }
 }
 
 fn sys_getpid() -> u64 {

@@ -38,6 +38,7 @@ impl From<Errno> for GraphicsError {
             Errno::EFAULT => GraphicsError::Fault,
             Errno::UNKNOWN => GraphicsError::Unknown,
             Errno::Clear => GraphicsError::Unknown,
+            _ => GraphicsError::Unknown,
         }
     }
 }

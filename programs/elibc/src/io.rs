@@ -34,6 +34,7 @@ impl From<Errno> for IoError {
             Errno::EFAULT => IoError::Fault,
             Errno::UNKNOWN => IoError::Unknown,
             Errno::Clear => IoError::Unknown, // Shouldn't happen but handle gracefully
+            _ => IoError::Unknown,
         }
     }
 }
