@@ -265,18 +265,16 @@ fn detect_iso9660(
         for offset in [0, 16, 32] {
             if let Ok(test_sector) =
                 ahci::api::read_sectors(device_id, partition_start_lba + offset, 1, Vec::new())
+                && test_sector.len() >= 6
+                && &test_sector[1..6] == b"CD001"
+                && test_sector[0] == 0x01
             {
-                if test_sector.len() >= 6
-                    && &test_sector[1..6] == b"CD001"
-                    && test_sector[0] == 0x01
-                {
-                    log!(
-                        logger,
-                        "Found ISO 9660 signature at partition offset {}",
-                        offset
-                    );
-                    return Ok(Some(FilesystemType::Iso9660));
-                }
+                log!(
+                    logger,
+                    "Found ISO 9660 signature at partition offset {}",
+                    offset
+                );
+                return Ok(Some(FilesystemType::Iso9660));
             }
         }
     }
@@ -320,14 +318,14 @@ fn detect_fat_family(sector_data: &[u8]) -> Option<FilesystemType> {
     }
 
     // Check for FAT12/FAT16 characteristics (more lenient for EFI partitions)
-    if is_fat16_or_fat12_lenient(&boot_sector) {
+    if is_fat16_or_fat12_lenient(boot_sector) {
         // Determine if it's FAT12 or FAT16 based on cluster count
-        let cluster_count = calculate_cluster_count(&boot_sector);
+        let cluster_count = calculate_cluster_count(boot_sector);
         log!(logger, "FAT12/16 candidate with {} clusters", cluster_count);
 
         if cluster_count == 0 {
             // If cluster calculation fails, use heuristics
-            return detect_fat_by_heuristics(&boot_sector);
+            detect_fat_by_heuristics(boot_sector)
         } else if cluster_count < 4085 {
             Some(FilesystemType::Fat12)
         } else if cluster_count < 65525 {
@@ -342,7 +340,7 @@ fn detect_fat_family(sector_data: &[u8]) -> Option<FilesystemType> {
             logger,
             "Strict FAT12/16 validation failed, trying heuristics"
         );
-        detect_fat_by_heuristics(&boot_sector)
+        detect_fat_by_heuristics(boot_sector)
     }
 }
 
@@ -416,7 +414,7 @@ fn calculate_cluster_count(boot_sector: &Fat32BootSector) -> u32 {
     };
 
     let fat_sectors = boot_sector.fat_size_16 as u32;
-    let root_dir_sectors = ((boot_sector.root_entry_count as u32 * 32) + 511) / 512;
+    let root_dir_sectors = (boot_sector.root_entry_count as u32 * 32).div_ceil(512);
 
     let data_sectors = total_sectors
         .saturating_sub(boot_sector.reserved_sector_count as u32)

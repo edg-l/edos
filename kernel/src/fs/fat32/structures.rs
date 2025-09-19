@@ -19,10 +19,10 @@ impl DirectoryRecord {
     }
 
     pub fn matches_name(&self, needle: &str) -> bool {
-        if let Some(long) = &self.long_name {
-            if long == needle || long.eq_ignore_ascii_case(needle) {
-                return true;
-            }
+        if let Some(long) = &self.long_name
+            && (long == needle || long.eq_ignore_ascii_case(needle))
+        {
+            return true;
         }
 
         self.short_name == needle || self.short_name.eq_ignore_ascii_case(needle)
@@ -282,7 +282,7 @@ impl Fat32BootSector {
             self.fat_size_32
         };
 
-        let root_dir_sectors = ((self.root_entry_count as u32 * 32) + 511) / 512;
+        let root_dir_sectors = (self.root_entry_count as u32 * 32).div_ceil(512);
 
         let data_sectors = total_sectors
             .saturating_sub(self.reserved_sector_count as u32)
@@ -488,10 +488,10 @@ impl DirectoryEntry {
             self.nt_reserved |= Self::NT_LOWER_BASE;
         }
 
-        if let Some(ext) = ext {
-            if Self::component_is_all_lowercase(ext) {
-                self.nt_reserved |= Self::NT_LOWER_EXT;
-            }
+        if let Some(ext) = ext
+            && Self::component_is_all_lowercase(ext)
+        {
+            self.nt_reserved |= Self::NT_LOWER_EXT;
         }
     }
 

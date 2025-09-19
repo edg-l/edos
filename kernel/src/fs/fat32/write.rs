@@ -754,7 +754,7 @@ fn sanitize_short_component(component: &str) -> Vec<u8> {
 fn build_lfn_entries(name: &str, checksum: u8) -> Vec<[u8; 32]> {
     let mut units: Vec<u16> = name.encode_utf16().collect();
     units.push(0);
-    while units.len() % 13 != 0 {
+    while !units.len().is_multiple_of(13) {
         units.push(0xFFFF);
     }
 

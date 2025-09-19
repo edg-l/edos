@@ -193,7 +193,7 @@ impl FileSystem for Fatfs {
         de.last_access_date = current_time.date;
 
         // Append to parent directory
-        let long_name = needs_lfn.then(|| name.as_str());
+        let long_name = needs_lfn.then_some(name.as_str());
         let _ = self.append_dir_entry(parent_cluster, &de, long_name)?;
         Ok(())
     }
@@ -263,7 +263,7 @@ impl FileSystem for Fatfs {
         de.write_time = current_time.time;
         de.last_access_date = current_time.date;
 
-        let long_name = needs_lfn.then(|| name.as_str());
+        let long_name = needs_lfn.then_some(name.as_str());
         let _ = self.append_dir_entry(parent_cluster, &de, long_name)?;
         Ok(())
     }

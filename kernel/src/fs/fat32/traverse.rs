@@ -61,7 +61,7 @@ impl Fatfs {
         if dir_cluster == 0 && matches!(self.variant, FatVariant::Fat12 | FatVariant::Fat16) {
             // Search in FAT12/16 root directory
             let root_dir_lba = self.root_dir_lba();
-            let root_dir_sectors = ((self.boot_info.root_entry_count as u64 * 32) + 511) / 512;
+            let root_dir_sectors = (self.boot_info.root_entry_count as u64 * 32).div_ceil(512);
 
             let mut buf = Vec::new();
             let mut lfn_stack: Vec<LongFilenameEntry> = Vec::new();
@@ -103,10 +103,10 @@ impl Fatfs {
                     let long_name = if !lfn_stack.is_empty()
                         && lfn_stack
                             .first()
-                            .map_or(false, |lfn| (lfn.order & 0x1F) as usize == lfn_stack.len())
+                            .is_some_and(|lfn| (lfn.order & 0x1F) as usize == lfn_stack.len())
                         && lfn_stack
                             .last()
-                            .map_or(false, |lfn| lfn.checksum == de.short_name_checksum())
+                            .is_some_and(|lfn| lfn.checksum == de.short_name_checksum())
                     {
                         let name = decode_long_name(&lfn_stack);
                         lfn_stack.clear();
@@ -178,10 +178,10 @@ impl Fatfs {
                     let long_name = if !lfn_stack.is_empty()
                         && lfn_stack
                             .first()
-                            .map_or(false, |lfn| (lfn.order & 0x1F) as usize == lfn_stack.len())
+                            .is_some_and(|lfn| (lfn.order & 0x1F) as usize == lfn_stack.len())
                         && lfn_stack
                             .last()
-                            .map_or(false, |lfn| lfn.checksum == de.short_name_checksum())
+                            .is_some_and(|lfn| lfn.checksum == de.short_name_checksum())
                     {
                         let name = decode_long_name(&lfn_stack);
                         lfn_stack.clear();
@@ -266,14 +266,14 @@ impl Fatfs {
 
                 let long_name = if !lfn_stack.is_empty()
                     && lfn_stack.iter().all(|lfn| lfn.attributes == ATTR_LONG_NAME)
-                    && lfn_stack.first().map_or(false, |lfn| {
+                    && lfn_stack.first().is_some_and(|lfn| {
                         let count = (lfn.order & 0x1F) as usize;
                         let expected = lfn_stack.len();
                         count == expected
                     })
                     && lfn_stack
                         .last()
-                        .map_or(false, |lfn| lfn.checksum == entry.short_name_checksum())
+                        .is_some_and(|lfn| lfn.checksum == entry.short_name_checksum())
                 {
                     let name = decode_long_name(&lfn_stack);
                     lfn_stack.clear();
@@ -398,7 +398,7 @@ impl Fatfs {
         let root_dir_sectors = match self.variant {
             FatVariant::Fat32 => 0, // FAT32 has cluster-based root
             FatVariant::Fat12 | FatVariant::Fat16 => {
-                ((self.boot_info.root_entry_count as u64 * 32) + 511) / 512
+                (self.boot_info.root_entry_count as u64 * 32).div_ceil(512)
             }
         };
         let spc = self.boot_info.sectors_per_cluster as u64;
@@ -437,11 +437,11 @@ impl Fatfs {
         match self.variant {
             FatVariant::Fat32 => {
                 // Should not be called for FAT32
-                return Err(Error::IoError);
+                Err(Error::IoError)
             }
             FatVariant::Fat12 | FatVariant::Fat16 => {
                 let root_dir_lba = self.root_dir_lba();
-                let root_dir_sectors = ((self.boot_info.root_entry_count as u64 * 32) + 511) / 512;
+                let root_dir_sectors = (self.boot_info.root_entry_count as u64 * 32).div_ceil(512);
 
                 // Defensive validation to prevent invalid disk access
                 if root_dir_sectors == 0 {
@@ -494,13 +494,13 @@ impl Fatfs {
 
                         let long_name = if !lfn_stack.is_empty()
                             && lfn_stack.iter().all(|lfn| lfn.attributes == ATTR_LONG_NAME)
-                            && lfn_stack.first().map_or(false, |lfn| {
+                            && lfn_stack.first().is_some_and(|lfn| {
                                 let count = (lfn.order & 0x1F) as usize;
                                 count == lfn_stack.len()
                             })
                             && lfn_stack
                                 .last()
-                                .map_or(false, |lfn| lfn.checksum == entry.short_name_checksum())
+                                .is_some_and(|lfn| lfn.checksum == entry.short_name_checksum())
                         {
                             let name = decode_long_name(&lfn_stack);
                             lfn_stack.clear();
@@ -547,7 +547,7 @@ impl Fatfs {
         let root_dir_sectors = match self.variant {
             FatVariant::Fat32 => 0, // FAT32 has cluster-based root
             FatVariant::Fat12 | FatVariant::Fat16 => {
-                ((self.boot_info.root_entry_count as u64 * 32) + 511) / 512
+                (self.boot_info.root_entry_count as u64 * 32).div_ceil(512)
             }
         };
 

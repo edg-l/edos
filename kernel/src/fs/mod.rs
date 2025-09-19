@@ -1,9 +1,6 @@
 #![expect(unused)]
 
-use core::{
-    ffi::{CStr, c_void},
-    u64,
-};
+use core::ffi::{CStr, c_void};
 
 use alloc::{
     boxed::Box,
