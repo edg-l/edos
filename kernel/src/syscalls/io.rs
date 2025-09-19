@@ -3,7 +3,7 @@ use core::time::Duration;
 
 use x86_64::instructions::interrupts;
 
-use crate::fs::{FileKind, api as fs_api, path::Path};
+use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
 use crate::log;
 use crate::{
     drivers::keyboard::KEYBOARD_BROADCAST,
@@ -485,6 +485,76 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
     }
 
     written as i64
+}
+
+pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    let descriptor = match thread.fd_table.get_fd(fd).cloned() {
+        Some(desc) => desc,
+        None => {
+            thread.errno = Errno::EBADF;
+            return -1;
+        }
+    };
+
+    let FileDescriptor::FsFile(file) = descriptor else {
+        thread.errno = Errno::EINVAL;
+        return -1;
+    };
+
+    interrupts::enable();
+
+    match fs_api::ioctl(&file.path, request, arg) {
+        Ok(value) => value as i64,
+        Err(err) => {
+            thread.errno = Errno::from(err);
+            -1
+        }
+    }
+}
+
+pub fn sys_poll(fd: u64, events_ptr: *mut PollState, _timeout_ms: u64) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    if events_ptr.is_null() {
+        thread.errno = Errno::EFAULT;
+        return -1;
+    }
+
+    let descriptor = match thread.fd_table.get_fd(fd).cloned() {
+        Some(desc) => desc,
+        None => {
+            thread.errno = Errno::EBADF;
+            return -1;
+        }
+    };
+
+    let FileDescriptor::FsFile(file) = descriptor else {
+        thread.errno = Errno::EINVAL;
+        return -1;
+    };
+
+    interrupts::enable();
+
+    match fs_api::poll(&file.path) {
+        Ok(state) => {
+            unsafe {
+                core::ptr::write(events_ptr, state);
+            }
+            0
+        }
+        Err(err) => {
+            thread.errno = Errno::from(err);
+            -1
+        }
+    }
 }
 
 pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {

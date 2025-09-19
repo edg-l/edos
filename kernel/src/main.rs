@@ -14,7 +14,10 @@ use crate::{
     apic::set_apic_timer_and_enable,
     boot::boot_info,
     cmdline::ParsedCmdline,
-    fs::{gpt::format_uuid, path::Path},
+    fs::{
+        gpt::{FilesystemType, format_uuid},
+        path::Path,
+    },
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
     thread::{
         Thread, UserThreadInfo,
@@ -195,6 +198,12 @@ pub fn mount_root_fs() -> ! {
         part.filesystem.as_ref().expect("expected fs type").clone(),
     )
     .unwrap();
+
+    let dev_dir = root.join("dev").normalize();
+    let _ = fs::api::create_dir(&dev_dir);
+    if let Err(err) = fs::api::mount_partition(0, 0, dev_dir.clone(), FilesystemType::Devfs) {
+        log!("Failed to mount devfs at {:?}: {err:?}", dev_dir);
+    }
 
     kthread_exit(0)
 }

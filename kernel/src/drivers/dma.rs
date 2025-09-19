@@ -33,15 +33,6 @@ impl<T> DmaRegion<T> {
         self.buffer.as_ptr().cast()
     }
 
-    fn allocate() -> Result<Self, DmaError> {
-        let buffer = DmaBuffer::allocate_sized(core::mem::size_of::<T>())?;
-
-        Ok(Self {
-            buffer,
-            _phantom: PhantomData,
-        })
-    }
-
     /// # Safety
     /// Caller must ensure buffer has enough size for T.
     unsafe fn from_buffer(buffer: DmaBuffer) -> Self {
@@ -51,7 +42,7 @@ impl<T> DmaRegion<T> {
         }
     }
 
-    fn into_buffer(self) -> DmaBuffer {
+    pub fn into_buffer(self) -> DmaBuffer {
         self.buffer
     }
 

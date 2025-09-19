@@ -77,6 +77,7 @@ pub enum FilesystemType {
     Ntfs,
     Iso9660,
     Memfs,
+    Devfs,
     Unknown,
 }
 
@@ -333,6 +334,7 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
             Some(FilesystemType::Ntfs) => "NTFS",
             Some(FilesystemType::Iso9660) => "ISO9660",
             Some(FilesystemType::Memfs) => "MEMFS",
+            Some(FilesystemType::Devfs) => "DEVFS",
             Some(FilesystemType::Unknown) => "Unknown",
             None => "None",
         };

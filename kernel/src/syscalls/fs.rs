@@ -123,6 +123,7 @@ pub fn sys_mount(
     let fs_type = match fs_type.as_str() {
         "fat32" => FilesystemType::Fat32,
         "memfs" => FilesystemType::Memfs,
+        "devfs" => FilesystemType::Devfs,
         _ => FilesystemType::Unknown,
     };
 

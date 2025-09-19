@@ -7,7 +7,7 @@ use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 
 use crate::{
     fs::{
-        Error, FS_REQUESTS, File, FsRequest, FsResponse, PathOp,
+        Error, FS_REQUESTS, File, FsRequest, FsResponse, MmapRegion, PathOp, PollState,
         gpt::{FilesystemType, Partition},
         path::Path,
     },
@@ -52,6 +52,9 @@ pub fn list_mounts() -> BTreeMap<Path, (usize, usize)> {
     mp
 }
 
+/// If the filesystem is backed by a device, ensure device_id and partition_index are valid.
+///
+/// Otherwise they are ignored.
 pub fn mount_partition(
     device_id: usize,
     partition_index: usize,
@@ -196,6 +199,45 @@ pub fn flush(path: &Path) -> Result<(), Error> {
         FsRequest::PathRequest {
             path: path.clone(),
             op: PathOp::Flush,
+        },
+        Duration::from_secs(5),
+    ) else {
+        return Err(Error::IoError);
+    };
+    r
+}
+
+pub fn ioctl(path: &Path, request: u64, arg: u64) -> Result<u64, Error> {
+    let FsResponse::Ioctl(r) = send_request(
+        FsRequest::PathRequest {
+            path: path.clone(),
+            op: PathOp::Ioctl { request, arg },
+        },
+        Duration::from_secs(5),
+    ) else {
+        return Err(Error::IoError);
+    };
+    r
+}
+
+pub fn poll(path: &Path) -> Result<PollState, Error> {
+    let FsResponse::Poll(r) = send_request(
+        FsRequest::PathRequest {
+            path: path.clone(),
+            op: PathOp::Poll,
+        },
+        Duration::from_secs(5),
+    ) else {
+        return Err(Error::IoError);
+    };
+    r
+}
+
+pub fn mmap(path: &Path, offset: usize, length: usize) -> Result<MmapRegion, Error> {
+    let FsResponse::Mmap(r) = send_request(
+        FsRequest::PathRequest {
+            path: path.clone(),
+            op: PathOp::Mmap { offset, length },
         },
         Duration::from_secs(5),
     ) else {

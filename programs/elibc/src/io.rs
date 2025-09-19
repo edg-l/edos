@@ -7,7 +7,7 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{Errno, SYS_KERNEL_LOGS, SYS_RAW_INPUT, errno, syscall2, syscall3},
+    sys::{Errno, SYS_IOCTL, SYS_KERNEL_LOGS, SYS_POLL, SYS_RAW_INPUT, errno, syscall2, syscall3},
     sys_open as raw_sys_open, sys_read, sys_write,
 };
 
@@ -77,6 +77,14 @@ struct RawDirEntry {
     size: u64,
     attrs: u8,
     reserved: [u8; 2],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PollState {
+    pub readable: bool,
+    pub writable: bool,
+    pub error: bool,
 }
 
 /// Helper function to write all bytes to a file descriptor, handling partial writes
@@ -294,6 +302,35 @@ pub fn get_kernel_logs() -> Vec<String> {
 /// Public helper to write all bytes to a file descriptor
 pub fn write_all_fd(fd: u64, buf: &[u8]) -> IoResult<()> {
     write_all_to_fd(fd, buf)
+}
+
+/// Issue a device-specific ioctl on a file descriptor.
+pub fn ioctl(fd: u64, request: u64, arg: u64) -> IoResult<u64> {
+    let result = unsafe { syscall3(SYS_IOCTL, fd, request, arg) as isize };
+    if result >= 0 {
+        Ok(result as u64)
+    } else {
+        Err(IoError::from(errno()))
+    }
+}
+
+/// Query poll state for a descriptor; `timeout_ms` currently advisory.
+pub fn poll_fd(fd: u64, timeout_ms: u64) -> IoResult<PollState> {
+    let mut state = PollState::default();
+    let result = unsafe {
+        syscall3(
+            SYS_POLL,
+            fd,
+            (&mut state as *mut PollState) as u64,
+            timeout_ms,
+        ) as isize
+    };
+
+    if result >= 0 {
+        Ok(state)
+    } else {
+        Err(IoError::from(errno()))
+    }
 }
 
 /// File open flags

@@ -32,11 +32,17 @@ use crate::{
 
 pub mod api;
 pub mod block_device;
+pub mod devfs;
 pub mod fat32;
 pub mod gpt;
 pub mod mbr;
 pub mod memfs;
 pub mod path;
+
+pub use devfs::{
+    DevFsDevice, DevFsError, DevFsHandle as DevFs, register_device, register_device_str,
+    unregister_device, unregister_device_str,
+};
 
 pub fn init() {
     queue_spawn_kthread_named("fs", fs_main_thread as u64);
@@ -62,6 +68,44 @@ pub enum Error {
     Corrupted,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollState {
+    pub readable: bool,
+    pub writable: bool,
+    pub error: bool,
+}
+
+impl PollState {
+    pub const fn none() -> Self {
+        Self {
+            readable: false,
+            writable: false,
+            error: false,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MmapRegion {
+    pub phys_addr: u64,
+    pub length: usize,
+    pub writable: bool,
+    pub cacheable: bool,
+}
+
+impl MmapRegion {
+    pub const fn new(phys_addr: u64, length: usize) -> Self {
+        Self {
+            phys_addr,
+            length,
+            writable: false,
+            cacheable: false,
+        }
+    }
+}
+
 pub trait FileSystem {
     fn list_files(&mut self, path: &Path) -> Result<Vec<File>, Error>;
     fn read_bytes(&mut self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error>;
@@ -72,6 +116,18 @@ pub trait FileSystem {
     fn remove_file(&mut self, path: &Path) -> Result<(), Error>;
     fn file_info(&mut self, path: &Path) -> Result<File, Error>;
     fn flush(&mut self) -> Result<(), Error>;
+
+    fn ioctl(&mut self, _path: &Path, _request: u64, _arg: u64) -> Result<u64, Error> {
+        Err(Error::IoError)
+    }
+
+    fn poll(&mut self, _path: &Path) -> Result<PollState, Error> {
+        Err(Error::IoError)
+    }
+
+    fn mmap(&mut self, _path: &Path, _offset: usize, _length: usize) -> Result<MmapRegion, Error> {
+        Err(Error::IoError)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +283,9 @@ pub(super) enum FsResponse {
     Written(Result<u64, Error>),
     File(Result<File, Error>),
     Ok(Result<(), Error>),
+    Ioctl(Result<u64, Error>),
+    Poll(Result<PollState, Error>),
+    Mmap(Result<MmapRegion, Error>),
     // Internal
     PartitionMailbox(Option<Mailbox<FsThreadCommand, FsResponse>>),
 }
@@ -242,6 +301,9 @@ pub(super) enum PathOp {
     RemoveDir,
     FileInfo,
     Flush,
+    Ioctl { request: u64, arg: u64 },
+    Poll,
+    Mmap { offset: usize, length: usize },
 }
 
 // TODO: Add rmdir recursive in a atomic command
@@ -277,6 +339,19 @@ pub(super) enum FsThreadCommand {
         path: Path,
     },
     Flush,
+    Ioctl {
+        path: Path,
+        request: u64,
+        arg: u64,
+    },
+    Poll {
+        path: Path,
+    },
+    Mmap {
+        path: Path,
+        offset: usize,
+        length: usize,
+    },
     AddVirtualInfo {
         paths: Vec<Path>,
     },
@@ -330,6 +405,13 @@ fn pathop_to_partition_command(op: PathOp, path: Path, real_path: Path) -> FsThr
         PathOp::RemoveDir => FsThreadCommand::RemoveDir { path },
         PathOp::FileInfo => FsThreadCommand::FileInfo { path: real_path },
         PathOp::Flush => FsThreadCommand::Flush,
+        PathOp::Ioctl { request, arg } => FsThreadCommand::Ioctl { path, request, arg },
+        PathOp::Poll => FsThreadCommand::Poll { path },
+        PathOp::Mmap { offset, length } => FsThreadCommand::Mmap {
+            path,
+            offset,
+            length,
+        },
     }
 }
 
@@ -537,6 +619,26 @@ pub extern "C" fn fs_main_thread() -> ! {
                             );
                             current_special_part += 1;
                         }
+                        FilesystemType::Devfs => {
+                            log!("Mounting devfs");
+                            let fs = Box::into_raw(Box::new(
+                                DevFs::new().expect("failed to create devfs"),
+                            ));
+                            let worker_tid = queue_spawn_kthread_named_arg(
+                                &format!("mounted-devfs-{}", mount_point.filename()),
+                                start_devfs_thread as u64,
+                                fs.cast(),
+                            );
+                            device_id = SPECIAL_DEV_ID;
+                            partition_index = current_special_part;
+                            worker_tid_map
+                                .insert(worker_tid, (SPECIAL_DEV_ID, current_special_part));
+                            worker_mailboxes.insert(
+                                (SPECIAL_DEV_ID, current_special_part),
+                                Mailbox::new(worker_tid),
+                            );
+                            current_special_part += 1;
+                        }
                         FilesystemType::Unknown
                         | FilesystemType::Iso9660
                         | FilesystemType::Ntfs => {
@@ -689,6 +791,10 @@ extern "C" fn start_partition_fs_thread(partition: *mut Partition) -> ! {
                 };
                 fs = Box::new(memfs);
             }
+            FilesystemType::Devfs => {
+                log!("Devfs cannot be backed by a partition");
+                unsupported_fs(mailbox);
+            }
             FilesystemType::Ntfs => {
                 log!("NTFS not yet implemented");
                 unsupported_fs(mailbox);
@@ -709,6 +815,11 @@ extern "C" fn start_partition_fs_thread(partition: *mut Partition) -> ! {
 }
 
 extern "C" fn start_memfs_thread(fs: *mut Memfs) -> ! {
+    let fs: Box<dyn FileSystem> = unsafe { Box::from_raw(fs) };
+    run_fs_thread(fs)
+}
+
+extern "C" fn start_devfs_thread(fs: *mut DevFs) -> ! {
     let fs: Box<dyn FileSystem> = unsafe { Box::from_raw(fs) };
     run_fs_thread(fs)
 }
@@ -793,6 +904,22 @@ fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
                 FsThreadCommand::Flush => {
                     let res = fs.flush();
                     req.response.send(FsResponse::Ok(res));
+                }
+                FsThreadCommand::Ioctl { path, request, arg } => {
+                    let res = fs.ioctl(&path, request, arg);
+                    req.response.send(FsResponse::Ioctl(res));
+                }
+                FsThreadCommand::Poll { path } => {
+                    let res = fs.poll(&path);
+                    req.response.send(FsResponse::Poll(res));
+                }
+                FsThreadCommand::Mmap {
+                    path,
+                    offset,
+                    length,
+                } => {
+                    let res = fs.mmap(&path, offset, length);
+                    req.response.send(FsResponse::Mmap(res));
                 }
                 FsThreadCommand::AddVirtualInfo { paths } => {
                     for path in paths {

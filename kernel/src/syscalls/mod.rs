@@ -12,7 +12,7 @@ use x86_64::{
 };
 
 use crate::{
-    fs::Error as FsError,
+    fs::{Error as FsError, PollState},
     gdt::selectors,
     graphics::api::ScreenInfo,
     log,
@@ -21,7 +21,10 @@ use crate::{
     syscalls::{
         fs::{sys_list_partitions, sys_mkdir, sys_mount, sys_rmdir, sys_rmdir_all, sys_unlink},
         graphics::DrawRequestInput,
-        io::{sys_chdir, sys_close, sys_getcwd, sys_list_dir, sys_open, sys_read, sys_write},
+        io::{
+            sys_chdir, sys_close, sys_getcwd, sys_ioctl, sys_list_dir, sys_open, sys_poll,
+            sys_read, sys_write,
+        },
         keyboard::sys_keyboard_raw,
         memory::{sys_mmap, sys_munmap},
     },
@@ -175,6 +178,8 @@ const SYS_CLOSE: u64 = 3;
 const SYS_LIST_DIR: u64 = 4;
 const SYS_GETCWD: u64 = 5;
 const SYS_CHDIR: u64 = 6;
+const SYS_POLL: u64 = 7;
+const SYS_IOCTL: u64 = 16;
 #[allow(unused)]
 const SYS_PIPE: u64 = 22;
 const SYS_MMAP: u64 = 9;
@@ -229,6 +234,12 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let count = ctx.rdx as usize;
             ctx.rax = sys_keyboard_raw(timeout, buffer_ptr, count) as u64;
         }
+        SYS_IOCTL => {
+            let fd = ctx.rdi;
+            let request = ctx.rsi;
+            let arg = ctx.rdx;
+            ctx.rax = sys_ioctl(fd, request, arg) as u64;
+        }
         SYS_KERNEL_LOGS => {
             let buffer_ptr = ctx.rdi as *mut u8;
             let count = ctx.rsi as usize;
@@ -252,6 +263,12 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_CHDIR => {
             let path_ptr = ctx.rdi as *const u8;
             ctx.rax = sys_chdir(path_ptr) as u64;
+        }
+        SYS_POLL => {
+            let fd = ctx.rdi;
+            let events_ptr = ctx.rsi as *mut PollState;
+            let timeout = ctx.rdx;
+            ctx.rax = sys_poll(fd, events_ptr, timeout) as u64;
         }
         SYS_MMAP => {
             let addr = ctx.rdi;
