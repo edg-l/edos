@@ -8,11 +8,7 @@ use crate::{
     drivers::fpu,
     gdt, interrupts, println,
     syscalls::setup_syscall,
-    thread::{
-        self,
-        scheduler::{sched, switch_to_kernel_page},
-        util::queue_spawn_kthread_named,
-    },
+    thread::{self, scheduler::switch_to_kernel_page},
     timer::Instant,
     util::per_cpu::init_gs_for_this_cpu,
 };

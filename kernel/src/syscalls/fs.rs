@@ -1,7 +1,7 @@
 use core::ffi::CStr;
 
 use alloc::{borrow::ToOwned, ffi::CString, string::ToString, vec::Vec};
-use bytemuck::{NoUninit, Pod, Zeroable};
+use bytemuck::{Pod, Zeroable};
 use x86_64::instructions::interrupts;
 
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
             create_dir, file_info, list_files, list_partitions, mount_partition, remove_dir,
             remove_file,
         },
-        gpt::{FilesystemType, Partition},
+        gpt::FilesystemType,
         path::Path,
     },
     syscalls::io::resolve_path,
