@@ -6,6 +6,33 @@ use bytemuck::{NoUninit, Pod, Zeroable};
 
 use crate::fs::{File, FileAttrs, FileKind, FileTime};
 
+#[derive(Debug, Clone)]
+pub struct DirectoryRecord {
+    pub entry: DirectoryEntry,
+    pub long_name: Option<String>,
+    pub short_name: String,
+}
+
+impl DirectoryRecord {
+    pub fn best_name(&self) -> &str {
+        self.long_name.as_deref().unwrap_or(&self.short_name)
+    }
+
+    pub fn matches_name(&self, needle: &str) -> bool {
+        if let Some(long) = &self.long_name {
+            if long == needle || long.eq_ignore_ascii_case(needle) {
+                return true;
+            }
+        }
+
+        self.short_name == needle || self.short_name.eq_ignore_ascii_case(needle)
+    }
+
+    pub fn short_name_bytes(&self) -> [u8; 11] {
+        self.entry.name
+    }
+}
+
 /// FAT filesystem variant
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FatVariant {
@@ -438,6 +465,10 @@ impl DirectoryEntry {
         out
     }
 
+    pub fn short_name_checksum(&self) -> u8 {
+        compute_lfn_checksum(&self.name)
+    }
+
     /// Set the name field from a string, tracking original case intent.
     pub fn set_name_from_string(&mut self, filename: &str) {
         self.name = Self::string_to_fat_name(filename);
@@ -544,9 +575,49 @@ impl DirectoryEntry {
     }
 }
 
-impl From<DirectoryEntry> for File {
-    fn from(de: DirectoryEntry) -> Self {
-        let name = de.fat_name_to_string();
+pub fn compute_lfn_checksum(short_name: &[u8; 11]) -> u8 {
+    let mut sum = 0u8;
+    for &ch in short_name {
+        sum = ((sum & 1) << 7) | (sum >> 1);
+        sum = sum.wrapping_add(ch);
+    }
+    sum
+}
+
+pub fn decode_long_name(entries: &[LongFilenameEntry]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+
+    let mut units: Vec<u16> = Vec::with_capacity(entries.len() * 13);
+
+    for entry in entries.iter().rev() {
+        let name1 = entry.name1;
+        let name2 = entry.name2;
+        let name3 = entry.name3;
+        units.extend(name1);
+        units.extend(name2);
+        units.extend(name3);
+    }
+
+    let mut collected = Vec::with_capacity(units.len());
+    for unit in units {
+        if unit == 0x0000 {
+            break;
+        }
+        if unit == 0xFFFF {
+            continue;
+        }
+        collected.push(unit);
+    }
+
+    String::from_utf16(&collected).ok()
+}
+
+impl From<&DirectoryRecord> for File {
+    fn from(record: &DirectoryRecord) -> Self {
+        let name = record.best_name().to_string();
+        let de = &record.entry;
 
         let kind = if de.is_directory() {
             FileKind::Directory
@@ -582,5 +653,17 @@ impl From<DirectoryEntry> for File {
                 tenth: 0,
             }),
         }
+    }
+}
+
+impl From<DirectoryEntry> for File {
+    fn from(entry: DirectoryEntry) -> Self {
+        let short = entry.fat_name_to_string();
+        let record = DirectoryRecord {
+            entry,
+            long_name: None,
+            short_name: short,
+        };
+        File::from(&record)
     }
 }

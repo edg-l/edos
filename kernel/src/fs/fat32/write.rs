@@ -1,5 +1,9 @@
-use alloc::vec::Vec;
-use bytemuck::bytes_of;
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
+use bytemuck::{bytes_of, cast, from_bytes};
 
 use crate::{
     fs::{
@@ -7,8 +11,8 @@ use crate::{
         fat32::{
             Fatfs,
             structures::{
-                CLUSTER_EOF, CLUSTER_FREE, DirectoryEntry, FAT12_MASK, FAT16_MASK, FAT32_MASK,
-                FatVariant,
+                ATTR_LONG_NAME, CLUSTER_EOF, CLUSTER_FREE, DirectoryEntry, DirectoryRecord,
+                FAT12_MASK, FAT16_MASK, FAT32_MASK, FatVariant, LongFilenameEntry,
             },
         },
         path::Path,
@@ -411,9 +415,9 @@ impl Fatfs {
         for comp in parent_components {
             let entries = self.get_dir_entries(dir_cluster)?;
             let mut hit = None;
-            for e in entries {
-                if e.is_directory() && e.fat_name_to_string().eq_ignore_ascii_case(comp) {
-                    hit = Some(e);
+            for record in entries {
+                if record.entry.is_directory() && record.matches_name(comp) {
+                    hit = Some(record.entry);
                     break;
                 }
             }
@@ -427,16 +431,103 @@ impl Fatfs {
         Ok((dir_cluster, name))
     }
 
+    pub(super) fn generate_short_name(
+        &mut self,
+        dir_cluster: u32,
+        desired: &str,
+    ) -> Result<(String, bool), Error> {
+        let existing_records =
+            if dir_cluster == 0 && matches!(self.variant, FatVariant::Fat12 | FatVariant::Fat16) {
+                self.get_root_dir_entries()?
+            } else {
+                self.get_dir_entries(dir_cluster)?
+            };
+
+        let existing_short: Vec<[u8; 11]> = existing_records
+            .iter()
+            .map(DirectoryRecord::short_name_bytes)
+            .collect();
+
+        if DirectoryEntry::is_valid_short_name(desired) {
+            let short_fat = DirectoryEntry::string_to_fat_name(desired);
+            let conflict = existing_short.iter().any(|entry| entry == &short_fat);
+            if !conflict {
+                return Ok((desired.to_string(), false));
+            }
+        }
+
+        let (base_part, ext_part) = desired
+            .rsplit_once('.')
+            .map(|(b, e)| (b, Some(e)))
+            .unwrap_or((desired, None));
+
+        let mut base_clean = sanitize_short_component(base_part);
+        if base_clean.is_empty() {
+            base_clean.push(b'_');
+        }
+
+        let ext_clean_full = ext_part.map(sanitize_short_component).unwrap_or_default();
+        let ext_len = core::cmp::min(ext_clean_full.len(), 3);
+        let ext_slice = &ext_clean_full[..ext_len];
+        let ext_str = core::str::from_utf8(ext_slice).unwrap_or("");
+
+        let mut counter = 1usize;
+        loop {
+            let suffix = format!("~{}", counter);
+            let suffix_bytes = suffix.as_bytes();
+            let mut base_candidate = base_clean.clone();
+            let max_base_len = 8usize.saturating_sub(suffix_bytes.len());
+            if base_candidate.len() > max_base_len {
+                base_candidate.truncate(max_base_len);
+            }
+            if base_candidate.is_empty() {
+                if suffix_bytes.len() >= 8 {
+                    base_candidate.extend_from_slice(&suffix_bytes[suffix_bytes.len() - 8..]);
+                } else {
+                    base_candidate.extend_from_slice(suffix_bytes);
+                }
+            } else {
+                base_candidate.extend_from_slice(suffix_bytes);
+            }
+            if base_candidate.len() > 8 {
+                base_candidate.truncate(8);
+            }
+            if base_candidate.is_empty() {
+                base_candidate.push(b'_');
+            }
+
+            let base_str = core::str::from_utf8(&base_candidate).unwrap_or("_");
+            let candidate_string = if ext_len == 0 {
+                base_str.to_string()
+            } else {
+                format!("{}.{}", base_str, ext_str)
+            };
+
+            let candidate_fat = DirectoryEntry::string_to_fat_name(&candidate_string);
+            if !existing_short.iter().any(|entry| entry == &candidate_fat) {
+                return Ok((candidate_string, true));
+            }
+
+            counter += 1;
+        }
+    }
+
     /// Append a short 8.3 DirectoryEntry to a directory, allocating a new cluster if needed.
     /// Returns (cluster_that_contains_entry, byte_offset_within_cluster).
     pub fn append_dir_entry(
         &mut self,
         mut dir_cluster: u32,
         new_entry: &DirectoryEntry,
+        long_name: Option<&str>,
     ) -> Result<(u32, usize), Error> {
         let spc = self.boot_info.sectors_per_cluster as u16;
         let bps = self.boot_info.bytes_per_sector as usize;
         let cluster_bytes = bps * spc as usize;
+
+        let lfn_entries = long_name
+            .map(|name| build_lfn_entries(name, new_entry.short_name_checksum()))
+            .unwrap_or_default();
+        let needed_slots = lfn_entries.len() + 1;
 
         let mut buf = Vec::new();
         loop {
@@ -447,16 +538,29 @@ impl Fatfs {
                 return Err(Error::IoError);
             }
 
-            // Scan for free slot (0xE5 = deleted, 0x00 = end/free)
+            // Scan for contiguous free slots
             let mut off = 0usize;
             while off + 32 <= buf.len() {
-                let first = buf[off];
-                if first == 0x00 || first == 0xE5 {
-                    let bytes: [u8; 32] = bytemuck::cast(*new_entry);
-                    buf[off..off + 32].copy_from_slice(&bytes);
-                    self.device.write_sectors(base_lba, buf, spc)?;
-                    return Ok((dir_cluster, off));
+                let mut run = 0usize;
+                while run < needed_slots
+                    && off + (run + 1) * 32 <= buf.len()
+                    && matches!(buf[off + run * 32], 0x00 | 0xE5)
+                {
+                    run += 1;
                 }
+
+                if run >= needed_slots {
+                    let mut pos = off;
+                    for entry in &lfn_entries {
+                        buf[pos..pos + 32].copy_from_slice(entry);
+                        pos += 32;
+                    }
+                    let bytes: [u8; 32] = bytemuck::cast(*new_entry);
+                    buf[pos..pos + 32].copy_from_slice(&bytes);
+                    self.device.write_sectors(base_lba, buf, spc)?;
+                    return Ok((dir_cluster, pos));
+                }
+
                 off += 32;
             }
 
@@ -466,21 +570,94 @@ impl Fatfs {
                 None => {
                     let newc = self.alloc_cluster()?;
                     self.link_fat_entry(dir_cluster, newc)?;
-                    // Zero-fill new cluster and write the entry at offset 0
-                    let zero = alloc::vec![0u8; cluster_bytes];
-                    self.device
-                        .write_sectors(self.cluster_to_lba(newc), zero, spc)?;
-                    buf.clear();
-                    buf = self
-                        .device
-                        .read_sectors(self.cluster_to_lba(newc), spc, buf)?;
+                    let mut new_buf = alloc::vec![0u8; cluster_bytes];
+                    let mut pos = 0usize;
+                    for entry in &lfn_entries {
+                        new_buf[pos..pos + 32].copy_from_slice(entry);
+                        pos += 32;
+                    }
                     let bytes: [u8; 32] = bytemuck::cast(*new_entry);
-                    buf[0..32].copy_from_slice(&bytes);
-                    buf = self
-                        .device
-                        .write_sectors(self.cluster_to_lba(newc), buf, spc)?;
-                    return Ok((newc, 0));
+                    new_buf[pos..pos + 32].copy_from_slice(&bytes);
+                    self.device
+                        .write_sectors(self.cluster_to_lba(newc), new_buf, spc)?;
+                    return Ok((newc, pos));
                 }
+            }
+        }
+    }
+
+    fn mark_entry_deleted(
+        &mut self,
+        cluster: u32,
+        entry_offset: usize,
+        spc: u16,
+    ) -> Result<(), Error> {
+        let base_lba = self.cluster_to_lba(cluster);
+        let mut buf = self.device.read_sectors(base_lba, spc, Vec::new())?;
+        if entry_offset + 32 > buf.len() {
+            return Err(Error::IoError);
+        }
+        buf[entry_offset] = 0xE5;
+        self.device.write_sectors(base_lba, buf, spc)?;
+        Ok(())
+    }
+
+    pub(super) fn delete_long_name_sequence(
+        &mut self,
+        dir_head: u32,
+        target_cluster: u32,
+        target_offset: usize,
+        checksum: u8,
+    ) -> Result<(), Error> {
+        if dir_head == 0 && matches!(self.variant, FatVariant::Fat12 | FatVariant::Fat16) {
+            return Ok(());
+        }
+
+        let spc = self.boot_info.sectors_per_cluster as u16;
+        let mut cluster = dir_head;
+        let mut pending: Vec<(u32, usize, LongFilenameEntry)> = Vec::new();
+
+        loop {
+            let base_lba = self.cluster_to_lba(cluster);
+            let buf = self.device.read_sectors(base_lba, spc, Vec::new())?;
+            let mut off = 0usize;
+
+            while off + 32 <= buf.len() {
+                let slice = &buf[off..off + 32];
+                let first = slice[0];
+                if first == 0x00 {
+                    return Ok(());
+                }
+                if first == 0xE5 {
+                    pending.clear();
+                    off += 32;
+                    continue;
+                }
+
+                let attr = slice[11];
+                if attr == ATTR_LONG_NAME {
+                    let lfn: LongFilenameEntry = *from_bytes(slice);
+                    pending.push((cluster, off, lfn));
+                    off += 32;
+                    continue;
+                }
+
+                if cluster == target_cluster && off == target_offset {
+                    for (lfn_cluster, lfn_off, lfn_entry) in pending.iter().rev() {
+                        if lfn_entry.checksum == checksum {
+                            self.mark_entry_deleted(*lfn_cluster, *lfn_off, spc)?;
+                        }
+                    }
+                    return Ok(());
+                }
+
+                pending.clear();
+                off += 32;
+            }
+
+            match self.get_fat_entry(cluster)? {
+                Some(next) => cluster = next,
+                None => return Ok(()),
             }
         }
     }
@@ -556,4 +733,63 @@ impl Fatfs {
 
         Ok(())
     }
+}
+
+fn sanitize_short_component(component: &str) -> Vec<u8> {
+    component
+        .chars()
+        .map(|ch| {
+            let upper = ch.to_ascii_uppercase();
+            match upper {
+                'A'..='Z' | '0'..='9' => upper as u8,
+                '%' | '\'' | '-' | '_' | '@' | '~' | '`' | '!' | '(' | ')' | '{' | '}' | '^'
+                | '#' | '&' => upper as u8,
+                ' ' => b'_',
+                _ => b'_',
+            }
+        })
+        .collect()
+}
+
+fn build_lfn_entries(name: &str, checksum: u8) -> Vec<[u8; 32]> {
+    let mut units: Vec<u16> = name.encode_utf16().collect();
+    units.push(0);
+    while units.len() % 13 != 0 {
+        units.push(0xFFFF);
+    }
+
+    let chunks = units.chunks(13);
+    let total = chunks.len();
+    let mut entries: Vec<[u8; 32]> = Vec::with_capacity(total);
+
+    for (idx, chunk) in chunks.enumerate() {
+        let mut entry = LongFilenameEntry {
+            order: (idx + 1) as u8,
+            name1: [0u16; 5],
+            attributes: ATTR_LONG_NAME,
+            entry_type: 0,
+            checksum,
+            name2: [0u16; 6],
+            first_cluster_low: 0,
+            name3: [0u16; 2],
+        };
+        if idx + 1 == total {
+            entry.order |= 0x40;
+        }
+
+        for i in 0..5 {
+            entry.name1[i] = chunk[i];
+        }
+        for i in 0..6 {
+            entry.name2[i] = chunk[5 + i];
+        }
+        for i in 0..2 {
+            entry.name3[i] = chunk[11 + i];
+        }
+
+        entries.push(bytemuck::cast(entry));
+    }
+
+    entries.reverse();
+    entries
 }

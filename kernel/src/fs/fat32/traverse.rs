@@ -6,8 +6,9 @@ use crate::fs::{
     fat32::{
         Fatfs,
         structures::{
-            CLUSTER_BAD, CLUSTER_EOF, CLUSTER_FREE, DirectoryEntry, FAT12_MASK, FAT16_MASK,
-            FAT32_MASK, FatVariant,
+            ATTR_LONG_NAME, CLUSTER_BAD, CLUSTER_EOF, CLUSTER_FREE, DirectoryEntry,
+            DirectoryRecord, FAT12_MASK, FAT16_MASK, FAT32_MASK, FatVariant, LongFilenameEntry,
+            decode_long_name,
         },
     },
     path::Path,
@@ -37,17 +38,15 @@ impl Fatfs {
             let entries = if dir_cluster == 0
                 && matches!(self.variant, FatVariant::Fat12 | FatVariant::Fat16)
             {
-                // FAT12/16 root directory
                 self.get_root_dir_entries()?
             } else {
-                // Cluster-based directory (FAT32 root or any subdirectory)
                 self.get_dir_entries(dir_cluster)?
             };
 
             let mut hit = None;
-            for e in entries {
-                if e.is_directory() && e.fat_name_to_string().eq_ignore_ascii_case(comp) {
-                    hit = Some(e);
+            for record in entries {
+                if record.entry.is_directory() && record.matches_name(comp) {
+                    hit = Some(record.entry);
                     break;
                 }
             }
@@ -65,23 +64,70 @@ impl Fatfs {
             let root_dir_sectors = ((self.boot_info.root_entry_count as u64 * 32) + 511) / 512;
 
             let mut buf = Vec::new();
+            let mut lfn_stack: Vec<LongFilenameEntry> = Vec::new();
             for sector in 0..root_dir_sectors {
                 buf.clear();
                 buf = self.device.read_sectors(root_dir_lba + sector, 1, buf)?;
                 let mut off = 0usize;
 
                 while off + 32 <= buf.len() {
-                    let first = buf[off];
+                    let slice = &buf[off..off + 32];
+                    let first = slice[0];
                     if first == 0x00 {
                         return Ok(None);
                     }
-                    if first != 0xE5 {
-                        let de: DirectoryEntry = *bytemuck::from_bytes(&buf[off..off + 32]);
-                        if de.fat_name_to_string().eq_ignore_ascii_case(name) {
-                            // For root directory, return sector as "cluster" and offset
-                            return Ok(Some((de, (root_dir_lba + sector) as u32, off)));
-                        }
+                    if first == 0xE5 {
+                        lfn_stack.clear();
+                        off += 32;
+                        continue;
                     }
+
+                    let attr = slice[11];
+                    if attr == ATTR_LONG_NAME {
+                        let lfn: LongFilenameEntry = *bytemuck::from_bytes(slice);
+                        if lfn.order & 0x40 != 0 {
+                            lfn_stack.clear();
+                        }
+                        lfn_stack.push(lfn);
+                        off += 32;
+                        continue;
+                    }
+
+                    let de: DirectoryEntry = *bytemuck::from_bytes(slice);
+                    if de.is_volume_label() {
+                        lfn_stack.clear();
+                        off += 32;
+                        continue;
+                    }
+
+                    let long_name = if !lfn_stack.is_empty()
+                        && lfn_stack
+                            .first()
+                            .map_or(false, |lfn| (lfn.order & 0x1F) as usize == lfn_stack.len())
+                        && lfn_stack
+                            .last()
+                            .map_or(false, |lfn| lfn.checksum == de.short_name_checksum())
+                    {
+                        let name = decode_long_name(&lfn_stack);
+                        lfn_stack.clear();
+                        name
+                    } else {
+                        lfn_stack.clear();
+                        None
+                    };
+
+                    let short_name = de.fat_name_to_string();
+                    let matches = if let Some(long) = &long_name {
+                        long == name || long.eq_ignore_ascii_case(name)
+                    } else {
+                        false
+                    } || short_name.eq_ignore_ascii_case(name)
+                        || short_name == *name;
+
+                    if matches {
+                        return Ok(Some((de, (root_dir_lba + sector) as u32, off)));
+                    }
+
                     off += 32;
                 }
             }
@@ -89,11 +135,10 @@ impl Fatfs {
         } else {
             // Search in cluster-based directory (FAT32 root or any subdirectory)
             let spc = self.boot_info.sectors_per_cluster as u16;
-            let bps = self.boot_info.bytes_per_sector as usize;
-            let cluster_bytes = bps * spc as usize;
             let mut cur = dir_cluster;
 
             let mut buf = Vec::new();
+            let mut lfn_stack: Vec<LongFilenameEntry> = Vec::new();
             loop {
                 let base_lba = self.cluster_to_lba(cur);
                 buf.clear();
@@ -101,16 +146,63 @@ impl Fatfs {
                 let mut off = 0usize;
 
                 while off + 32 <= buf.len() {
-                    let first = buf[off];
+                    let slice = &buf[off..off + 32];
+                    let first = slice[0];
                     if first == 0x00 {
                         return Ok(None);
                     }
-                    if first != 0xE5 {
-                        let de: DirectoryEntry = *bytemuck::from_bytes(&buf[off..off + 32]);
-                        if de.fat_name_to_string().eq_ignore_ascii_case(name) {
-                            return Ok(Some((de, cur, off)));
-                        }
+                    if first == 0xE5 {
+                        lfn_stack.clear();
+                        off += 32;
+                        continue;
                     }
+
+                    let attr = slice[11];
+                    if attr == ATTR_LONG_NAME {
+                        let lfn: LongFilenameEntry = *bytemuck::from_bytes(slice);
+                        if lfn.order & 0x40 != 0 {
+                            lfn_stack.clear();
+                        }
+                        lfn_stack.push(lfn);
+                        off += 32;
+                        continue;
+                    }
+
+                    let de: DirectoryEntry = *bytemuck::from_bytes(slice);
+                    if de.is_volume_label() {
+                        lfn_stack.clear();
+                        off += 32;
+                        continue;
+                    }
+
+                    let long_name = if !lfn_stack.is_empty()
+                        && lfn_stack
+                            .first()
+                            .map_or(false, |lfn| (lfn.order & 0x1F) as usize == lfn_stack.len())
+                        && lfn_stack
+                            .last()
+                            .map_or(false, |lfn| lfn.checksum == de.short_name_checksum())
+                    {
+                        let name = decode_long_name(&lfn_stack);
+                        lfn_stack.clear();
+                        name
+                    } else {
+                        lfn_stack.clear();
+                        None
+                    };
+
+                    let short_name = de.fat_name_to_string();
+                    let matches = if let Some(long) = &long_name {
+                        long == name || long.eq_ignore_ascii_case(name)
+                    } else {
+                        false
+                    } || short_name.eq_ignore_ascii_case(name)
+                        || short_name == *name;
+
+                    if matches {
+                        return Ok(Some((de, cur, off)));
+                    }
+
                     off += 32;
                 }
 
@@ -122,10 +214,10 @@ impl Fatfs {
         }
     }
 
-    pub fn get_dir_entries(&mut self, start_cluster: u32) -> Result<Vec<DirectoryEntry>, Error> {
+    pub fn get_dir_entries(&mut self, start_cluster: u32) -> Result<Vec<DirectoryRecord>, Error> {
         let mut cluster = start_cluster;
-
         let mut entries = Vec::new();
+        let mut lfn_stack: Vec<LongFilenameEntry> = Vec::new();
 
         let mut data = Vec::new();
         loop {
@@ -139,31 +231,71 @@ impl Fatfs {
 
             let mut offset = 0;
 
-            while offset + 32 < data.len() {
+            while offset + 32 <= data.len() {
                 let entry_slice = &data[offset..offset + 32];
                 let first = entry_slice[0];
 
                 if first == 0x00 {
-                    // no more entries
                     return Ok(entries);
                 }
 
                 if first == 0xE5 {
+                    lfn_stack.clear();
                     offset += 32;
-                    continue; // deleted entry
+                    continue;
+                }
+
+                let attr = entry_slice[11];
+                if attr == ATTR_LONG_NAME {
+                    let lfn: LongFilenameEntry = *bytemuck::from_bytes(entry_slice);
+                    if lfn.order & 0x40 != 0 {
+                        lfn_stack.clear();
+                    }
+                    lfn_stack.push(lfn);
+                    offset += 32;
+                    continue;
                 }
 
                 let entry: DirectoryEntry = *bytemuck::from_bytes(entry_slice);
 
-                if !entry.is_volume_label() {
-                    entries.push(entry);
+                if entry.is_volume_label() {
+                    lfn_stack.clear();
+                    offset += 32;
+                    continue;
                 }
+
+                let long_name = if !lfn_stack.is_empty()
+                    && lfn_stack.iter().all(|lfn| lfn.attributes == ATTR_LONG_NAME)
+                    && lfn_stack.first().map_or(false, |lfn| {
+                        let count = (lfn.order & 0x1F) as usize;
+                        let expected = lfn_stack.len();
+                        count == expected
+                    })
+                    && lfn_stack
+                        .last()
+                        .map_or(false, |lfn| lfn.checksum == entry.short_name_checksum())
+                {
+                    let name = decode_long_name(&lfn_stack);
+                    lfn_stack.clear();
+                    name
+                } else {
+                    lfn_stack.clear();
+                    None
+                };
+
+                let short_name = entry.fat_name_to_string();
+                entries.push(DirectoryRecord {
+                    entry,
+                    long_name,
+                    short_name,
+                });
 
                 offset += 32;
             }
 
-            if let Some(next) = self.get_fat_entry(cluster)? {
-                cluster = next;
+            match self.get_fat_entry(cluster)? {
+                Some(next) => cluster = next,
+                None => return Ok(entries),
             }
         }
     }
@@ -301,7 +433,7 @@ impl Fatfs {
     }
 
     /// Get root directory entries for FAT12/16
-    pub fn get_root_dir_entries(&mut self) -> Result<Vec<DirectoryEntry>, Error> {
+    pub fn get_root_dir_entries(&mut self) -> Result<Vec<DirectoryRecord>, Error> {
         match self.variant {
             FatVariant::Fat32 => {
                 // Should not be called for FAT32
@@ -323,6 +455,7 @@ impl Fatfs {
 
                 let mut entries = Vec::new();
                 let mut buffer = Vec::new();
+                let mut lfn_stack: Vec<LongFilenameEntry> = Vec::new();
 
                 for sector in 0..root_dir_sectors {
                     buffer.clear();
@@ -330,19 +463,60 @@ impl Fatfs {
 
                     let mut offset = 0;
                     while offset + 32 <= buffer.len() {
-                        let first = buffer[offset];
+                        let slice = &buffer[offset..offset + 32];
+                        let first = slice[0];
                         if first == 0x00 {
-                            // End of directory entries
                             return Ok(entries);
                         }
-                        if first != 0xE5 {
-                            // Not deleted
-                            let entry: DirectoryEntry =
-                                *bytemuck::from_bytes(&buffer[offset..offset + 32]);
-                            if !entry.is_volume_label() {
-                                entries.push(entry);
-                            }
+                        if first == 0xE5 {
+                            lfn_stack.clear();
+                            offset += 32;
+                            continue;
                         }
+
+                        let attr = slice[11];
+                        if attr == ATTR_LONG_NAME {
+                            let lfn: LongFilenameEntry = *bytemuck::from_bytes(slice);
+                            if lfn.order & 0x40 != 0 {
+                                lfn_stack.clear();
+                            }
+                            lfn_stack.push(lfn);
+                            offset += 32;
+                            continue;
+                        }
+
+                        let entry: DirectoryEntry = *bytemuck::from_bytes(slice);
+                        if entry.is_volume_label() {
+                            lfn_stack.clear();
+                            offset += 32;
+                            continue;
+                        }
+
+                        let long_name = if !lfn_stack.is_empty()
+                            && lfn_stack.iter().all(|lfn| lfn.attributes == ATTR_LONG_NAME)
+                            && lfn_stack.first().map_or(false, |lfn| {
+                                let count = (lfn.order & 0x1F) as usize;
+                                count == lfn_stack.len()
+                            })
+                            && lfn_stack
+                                .last()
+                                .map_or(false, |lfn| lfn.checksum == entry.short_name_checksum())
+                        {
+                            let name = decode_long_name(&lfn_stack);
+                            lfn_stack.clear();
+                            name
+                        } else {
+                            lfn_stack.clear();
+                            None
+                        };
+
+                        let short_name = entry.fat_name_to_string();
+                        entries.push(DirectoryRecord {
+                            entry,
+                            long_name,
+                            short_name,
+                        });
+
                         offset += 32;
                     }
                 }

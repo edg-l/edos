@@ -6,7 +6,7 @@ use crate::{
     fs::{
         Error, File, FileSystem, FileTime,
         block_device::BlockDevice,
-        fat32::structures::{DirectoryEntry, Fat32BootSector, FatVariant, FsInfo},
+        fat32::structures::{ATTR_LONG_NAME, DirectoryEntry, Fat32BootSector, FatVariant, FsInfo},
         gpt::Partition,
     },
     log,
@@ -105,7 +105,7 @@ impl FileSystem for Fatfs {
         }
 
         let mut files = Vec::new();
-        for entry in entries {
+        for entry in entries.iter() {
             files.push(File::from(entry));
         }
 
@@ -174,9 +174,11 @@ impl FileSystem for Fatfs {
             return Err(Error::IoError);
         }
 
+        let (short_name, needs_lfn) = self.generate_short_name(parent_cluster, &name)?;
+
         // Build short entry
         let mut de: DirectoryEntry = DirectoryEntry::zeroed();
-        de.set_name_from_string(&name);
+        de.set_name_from_string(&short_name);
         de.attributes = 0x20; // ARCHIVE
         de.first_cluster_high = 0;
         de.first_cluster_low = 0;
@@ -191,7 +193,8 @@ impl FileSystem for Fatfs {
         de.last_access_date = current_time.date;
 
         // Append to parent directory
-        let _ = self.append_dir_entry(parent_cluster, &de)?;
+        let long_name = needs_lfn.then(|| name.as_str());
+        let _ = self.append_dir_entry(parent_cluster, &de, long_name)?;
         Ok(())
     }
 
@@ -246,8 +249,10 @@ impl FileSystem for Fatfs {
             .write_sectors(self.cluster_to_lba(newc), dirbuf, spc)?;
 
         // Insert directory entry in parent
+        let (short_name, needs_lfn) = self.generate_short_name(parent_cluster, &name)?;
+
         let mut de: DirectoryEntry = DirectoryEntry::zeroed();
-        de.set_name_from_string(&name);
+        de.set_name_from_string(&short_name);
         de.attributes = 0x10; // DIRECTORY
         de.first_cluster_high = ((newc >> 16) & 0xFFFF) as u16;
         de.first_cluster_low = (newc & 0xFFFF) as u16;
@@ -258,11 +263,14 @@ impl FileSystem for Fatfs {
         de.write_time = current_time.time;
         de.last_access_date = current_time.date;
 
-        let _ = self.append_dir_entry(parent_cluster, &de)?;
+        let long_name = needs_lfn.then(|| name.as_str());
+        let _ = self.append_dir_entry(parent_cluster, &de, long_name)?;
         Ok(())
     }
 
     fn remove_file(&mut self, path: &Path) -> Result<(), super::Error> {
+        let (parent_cluster, _) = self.resolve_parent_and_name(path)?;
+
         // Locate the entry and its position in parent directory
         let (entry, dir_cluster, entry_off) = match self.find_dir_entry(path)? {
             Some((e, c, o)) => (e, c, o),
@@ -289,6 +297,13 @@ impl FileSystem for Fatfs {
         buf[entry_off] = 0xE5;
         self.device.write_sectors(base_lba, buf, spc)?;
 
+        self.delete_long_name_sequence(
+            parent_cluster,
+            dir_cluster,
+            entry_off,
+            entry.short_name_checksum(),
+        )?;
+
         Ok(())
     }
 
@@ -297,6 +312,8 @@ impl FileSystem for Fatfs {
         if path.normalize().is_root() {
             return Err(Error::NotADir);
         }
+
+        let (parent_cluster, _) = self.resolve_parent_and_name(path)?;
 
         // Locate the entry and its position in parent directory
         let (entry, dir_cluster, entry_off) = match self.find_dir_entry(path)? {
@@ -323,13 +340,19 @@ impl FileSystem for Fatfs {
                     if first == 0x00 {
                         break;
                     } // end marker
-                    if first != 0xE5 {
-                        // not deleted
-                        let de: DirectoryEntry = *bytemuck::from_bytes(&read_buffer[off..off + 32]);
-                        let name = de.fat_name_to_string();
-                        if !name.eq(".") && !name.eq("..") {
-                            return Err(Error::IoError); // not empty
-                        }
+                    if first == 0xE5 {
+                        off += 32;
+                        continue;
+                    }
+                    let attr = read_buffer[off + 11];
+                    if attr == ATTR_LONG_NAME {
+                        off += 32;
+                        continue;
+                    }
+                    let de: DirectoryEntry = *bytemuck::from_bytes(&read_buffer[off..off + 32]);
+                    let name = de.fat_name_to_string();
+                    if !name.eq(".") && !name.eq("..") {
+                        return Err(Error::IoError); // not empty
                     }
                     off += 32;
                 }
@@ -357,6 +380,13 @@ impl FileSystem for Fatfs {
         }
         read_buffer[entry_off] = 0xE5;
         read_buffer = self.device.write_sectors(base_lba, read_buffer, spc)?;
+
+        self.delete_long_name_sequence(
+            parent_cluster,
+            dir_cluster,
+            entry_off,
+            entry.short_name_checksum(),
+        )?;
 
         Ok(())
     }
