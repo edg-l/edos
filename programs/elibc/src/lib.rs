@@ -15,8 +15,8 @@ pub mod sys;
 
 // Re-export commonly used types and functions for convenience
 pub use fs::{
-    PartitionInfo, create_dir, list_partitions, mount_partition, remove_dir, remove_dir_all,
-    remove_file,
+    FilesystemKind, MountInfo, PartitionInfo, create_dir, list_mounts, list_partitions,
+    mount_partition, remove_dir, remove_dir_all, remove_file,
 };
 pub use memory::{mmap, munmap};
 pub use process::{WaitPidStatus, dup2, pipe, spawn, sys_exit, sys_getpid, sys_waitpid};
@@ -107,6 +107,13 @@ pub unsafe fn sys_mount(
 /// valid for the duration of the syscall.
 pub unsafe fn sys_list_partitions(buffer: *mut u8, size: usize) -> isize {
     unsafe { syscall2(SYS_LIST_PARTITIONS, buffer as u64, size as u64) as isize }
+}
+
+/// # Safety
+/// Caller must ensure the buffer points to writable memory of at least `size` bytes and remains
+/// valid for the duration of the syscall.
+pub unsafe fn sys_list_mounts(buffer: *mut u8, size: usize) -> isize {
+    unsafe { syscall2(SYS_LIST_MOUNTS, buffer as u64, size as u64) as isize }
 }
 
 /// # Safety

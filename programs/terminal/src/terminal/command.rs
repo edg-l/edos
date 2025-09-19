@@ -1,11 +1,16 @@
 use core::fmt::Write as _;
 
-use alloc::{ffi::CString, format, string::String, vec::Vec};
+use alloc::{
+    ffi::CString,
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 use elibc::{
-    Errno, create_dir,
+    Errno, FilesystemKind, create_dir,
     io::{FileType, chdir, getcwd, list_dir, open, open_flags, read_to_end, write_all_fd},
-    list_partitions, mount_partition, pipe, remove_dir, remove_dir_all, remove_file, spawn,
-    sys_close,
+    list_mounts, list_partitions, mount_partition, pipe, remove_dir, remove_dir_all, remove_file,
+    spawn, sys_close,
 };
 
 use super::state::{Program, TerminalState};
@@ -90,7 +95,7 @@ fn print_help(state: &mut TerminalState) {
         "- cat <path>",
         "- write <path> <content>",
         "- partitions",
-        "- mount <device_id> <partition_idx> <mount_point>",
+        "- mount [<device_id> <partition_idx> <mount_point> <fstype>]",
         "- mkdir <path>",
         "- rmdir <path>",
         "- rm [-r] <path>",
@@ -266,8 +271,36 @@ fn format_guid(bytes: &[u8; 16]) -> String {
 }
 
 fn cmd_mount(state: &mut TerminalState, args: &[String]) {
+    if args.is_empty() {
+        match list_mounts() {
+            Ok(mounts) if mounts.is_empty() => state.write_line("No filesystems mounted."),
+            Ok(mounts) => {
+                for entry in mounts {
+                    let device = if entry.device_id == 9000 {
+                        match entry.filesystem {
+                            FilesystemKind::Devfs => "devfs".to_string(),
+                            FilesystemKind::Memfs => "memfs".to_string(),
+                            _ => {
+                                format!("special:{}p{}", entry.device_id, entry.partition_index)
+                            }
+                        }
+                    } else {
+                        format!("dev{}p{}", entry.device_id, entry.partition_index)
+                    };
+                    state.write_line(&format!(
+                        "{device} on {} type {}",
+                        entry.path,
+                        entry.filesystem.as_str()
+                    ));
+                }
+            }
+            Err(err) => state.write_line(&format!("mount: failed to list mounts: {:?}", err)),
+        }
+        return;
+    }
+
     if args.len() != 4 {
-        state.write_line("Usage: mount <device_id> <partition_idx> <mount_point> <fstype>");
+        state.write_line("Usage: mount [<device_id> <partition_idx> <mount_point> <fstype>]");
         return;
     }
 

@@ -19,7 +19,10 @@ use crate::{
     logs::LOG_BROADCAST,
     println,
     syscalls::{
-        fs::{sys_list_partitions, sys_mkdir, sys_mount, sys_rmdir, sys_rmdir_all, sys_unlink},
+        fs::{
+            sys_list_mounts, sys_list_partitions, sys_mkdir, sys_mount, sys_rmdir, sys_rmdir_all,
+            sys_unlink,
+        },
         graphics::DrawRequestInput,
         io::{
             sys_chdir, sys_close, sys_getcwd, sys_ioctl, sys_list_dir, sys_open, sys_poll,
@@ -202,6 +205,7 @@ const SYS_MKDIR: u64 = 204;
 const SYS_RMDIR: u64 = 205;
 const SYS_RMDIR_ALL: u64 = 206;
 const SYS_UNLINK: u64 = 207;
+const SYS_LIST_MOUNTS: u64 = 208;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -337,6 +341,11 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let buffer = ctx.rdi as *mut u8;
             let size = ctx.rsi;
             ctx.rax = sys_list_partitions(buffer, size) as u64;
+        }
+        SYS_LIST_MOUNTS => {
+            let buffer = ctx.rdi as *mut u8;
+            let size = ctx.rsi as usize;
+            ctx.rax = sys_list_mounts(buffer, size) as u64;
         }
         SYS_MOUNT => {
             let device_id = ctx.rdi;

@@ -175,6 +175,14 @@ pub struct DateTime {
     pub tenth: u8, // 0..=199
 }
 
+#[derive(Debug, Clone)]
+pub struct MountInfo {
+    pub mount_point: Path,
+    pub device_id: usize,
+    pub partition_index: usize,
+    pub filesystem: FilesystemType,
+}
+
 impl DateTime {
     /// Create DateTime from current RTC time
     pub fn now() -> Self {
@@ -277,7 +285,7 @@ pub(super) enum FsRequest {
 #[derive(Debug, Clone)]
 pub(super) enum FsResponse {
     Partitions(Vec<Partition>),
-    MountPoints(BTreeMap<Path, (usize, usize)>),
+    Mounts(Vec<MountInfo>),
     Files(Result<Vec<File>, Error>),
     ReadBytes(Result<Vec<u8>, Error>),
     Written(Result<u64, Error>),
@@ -360,9 +368,16 @@ pub(super) enum FsThreadCommand {
 // Helper functions for mount point handling
 
 /// Find child mount points for a given path
+#[derive(Debug, Clone)]
+struct MountMetadata {
+    device_id: usize,
+    partition_index: usize,
+    filesystem: FilesystemType,
+}
+
 fn find_child_mount_points(
     path: &Path,
-    mount_points: &BTreeMap<Path, (usize, usize)>,
+    mount_points: &BTreeMap<Path, MountMetadata>,
 ) -> Vec<String> {
     let parent_components = path.components();
     let mut child_mount_points = Vec::new();
@@ -436,18 +451,18 @@ fn create_virtual_file(name: String) -> File {
 /// Find the best mount point for a given path (longest prefix match)
 fn find_mount_at_path<'a>(
     path: &Path,
-    mount_points: &'a BTreeMap<Path, (usize, usize)>,
-) -> Option<(&'a Path, (usize, usize))> {
-    let mut best: Option<(&'a Path, (usize, usize))> = None;
-    for (mp, &idx) in mount_points.iter() {
+    mount_points: &'a BTreeMap<Path, MountMetadata>,
+) -> Option<(&'a Path, &'a MountMetadata)> {
+    let mut best: Option<(&'a Path, &'a MountMetadata)> = None;
+    for (mp, meta) in mount_points.iter() {
         if mp.is_root() && best.is_none() {
-            best = Some((mp, idx));
+            best = Some((mp, meta));
         } else if path.starts_with(mp) {
             match best {
-                None => best = Some((mp, idx)),
+                None => best = Some((mp, meta)),
                 Some((best_mp, _)) => {
                     if mp.components().len() > best_mp.components().len() {
-                        best = Some((mp, idx));
+                        best = Some((mp, meta));
                     }
                 }
             }
@@ -498,14 +513,14 @@ pub extern "C" fn fs_main_thread() -> ! {
     let mut worker_tid_map = BTreeMap::<u64, (usize, usize)>::new();
 
     // Mount table: map mount point to partition index
-    let mut mount_points: BTreeMap<Path, (usize, usize)> = BTreeMap::new();
+    let mut mount_points: BTreeMap<Path, MountMetadata> = BTreeMap::new();
     let mut mount_points_rev: BTreeMap<(usize, usize), Path> = BTreeMap::new();
 
     for (mb_id, mb) in &worker_mailboxes {
         let mut paths = Vec::new();
         if let Some(base_path) = mount_points_rev.get(mb_id) {
-            for (path, id) in &mount_points {
-                if *id != *mb_id
+            for (path, meta) in &mount_points {
+                if (meta.device_id, meta.partition_index) != *mb_id
                     && let Some(parent) = base_path.parent()
                 {
                     let stripped = path.strip_prefix(&parent);
@@ -534,8 +549,16 @@ pub extern "C" fn fs_main_thread() -> ! {
                         .send(FsResponse::Partitions(partitions.clone()));
                 }
                 FsRequest::ListMounts => {
-                    req.response
-                        .send(FsResponse::MountPoints(mount_points.clone()));
+                    let mounts = mount_points
+                        .iter()
+                        .map(|(path, meta)| MountInfo {
+                            mount_point: path.clone(),
+                            device_id: meta.device_id,
+                            partition_index: meta.partition_index,
+                            filesystem: meta.filesystem.clone(),
+                        })
+                        .collect();
+                    req.response.send(FsResponse::Mounts(mounts));
                 }
                 FsRequest::Mount {
                     mut device_id,
@@ -647,15 +670,21 @@ pub extern "C" fn fs_main_thread() -> ! {
                         }
                     }
 
-                    mount_points.insert(mount_point.clone(), (device_id, partition_index));
+                    let meta = MountMetadata {
+                        device_id,
+                        partition_index,
+                        filesystem: fstype,
+                    };
+
+                    mount_points.insert(mount_point.clone(), meta.clone());
                     mount_points_rev.insert((device_id, partition_index), mount_point.clone());
 
                     let id = (device_id, partition_index);
                     for (mb_id, mb) in &worker_mailboxes {
                         let mut paths = Vec::new();
                         if let Some(base_path) = mount_points_rev.get(mb_id) {
-                            for (path, id) in &mount_points {
-                                if *id != *mb_id
+                            for (path, meta) in &mount_points {
+                                if (meta.device_id, meta.partition_index) != *mb_id
                                     && path == &mount_point
                                     && let Some(parent) = base_path.parent()
                                 {
@@ -676,7 +705,8 @@ pub extern "C" fn fs_main_thread() -> ! {
                     req.response.send(FsResponse::Ok(Ok(())));
                 }
                 FsRequest::Unmount { mount_point } => {
-                    let res = if mount_points.remove(&mount_point).is_some() {
+                    let res = if let Some(meta) = mount_points.remove(&mount_point) {
+                        mount_points_rev.remove(&(meta.device_id, meta.partition_index));
                         Ok(())
                     } else {
                         Err(Error::IoError)
@@ -695,7 +725,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                     }
 
                     // find mount point device/partition to route
-                    if let Some((mount_path, part_idx)) =
+                    if let Some((mount_path, meta)) =
                         find_mount_at_path(&mount_check_path, &mount_points)
                     {
                         // relative  path to the mount point.
@@ -707,7 +737,9 @@ pub extern "C" fn fs_main_thread() -> ! {
                             if &path == mount_path { path } else { rel },
                         );
 
-                        if let Some(mb) = worker_mailboxes.get(&part_idx) {
+                        let mailbox_key = (meta.device_id, meta.partition_index);
+
+                        if let Some(mb) = worker_mailboxes.get(&mailbox_key) {
                             mb.forward(cmd, req.response);
                         } else {
                             req.response.send(FsResponse::Ok(Err(Error::FileNotFound)));

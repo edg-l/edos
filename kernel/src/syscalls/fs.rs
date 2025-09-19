@@ -8,8 +8,8 @@ use crate::{
     fs::{
         Error, FileKind,
         api::{
-            create_dir, file_info, list_files, list_partitions, mount_partition, remove_dir,
-            remove_file,
+            create_dir, file_info, list_files, list_mounts, list_partitions, mount_partition,
+            remove_dir, remove_file,
         },
         gpt::FilesystemType,
         path::Path,
@@ -70,6 +70,28 @@ fn remove_dir_recursive(path: &Path) -> Result<(), Error> {
     }
 
     remove_dir(path)
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct RawMountEntry {
+    path_len: u32,
+    filesystem: u32,
+    device_id: u64,
+    partition_index: u64,
+}
+
+fn filesystem_type_to_u32(fs: FilesystemType) -> u32 {
+    match fs {
+        FilesystemType::Unknown => 0,
+        FilesystemType::Fat12 => 1,
+        FilesystemType::Fat16 => 2,
+        FilesystemType::Fat32 => 3,
+        FilesystemType::Ntfs => 4,
+        FilesystemType::Iso9660 => 5,
+        FilesystemType::Memfs => 6,
+        FilesystemType::Devfs => 7,
+    }
 }
 
 pub fn sys_mount(
@@ -291,6 +313,66 @@ pub fn sys_list_partitions(buffer: *mut u8, size: u64) -> i64 {
         }
         written += bytes.len();
         current_ptr = unsafe { current_ptr.add(bytes.len()) };
+    }
+
+    written as i64
+}
+
+pub fn sys_list_mounts(buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    if buffer_ptr.is_null() {
+        thread.errno = Errno::EFAULT;
+        return -1;
+    }
+
+    if buffer_size == 0 {
+        return 0;
+    }
+
+    interrupts::enable();
+
+    let mounts = list_mounts();
+    let mut written = 0usize;
+    let entry_size = core::mem::size_of::<RawMountEntry>();
+
+    for mount in mounts {
+        let path_str = mount.mount_point.to_string();
+        let path_bytes = path_str.as_bytes();
+        let total_size = entry_size + path_bytes.len();
+
+        if written + total_size > buffer_size {
+            break;
+        }
+
+        let entry = RawMountEntry {
+            path_len: path_bytes.len() as u32,
+            filesystem: filesystem_type_to_u32(mount.filesystem),
+            device_id: mount.device_id as u64,
+            partition_index: mount.partition_index as u64,
+        };
+
+        let entry_bytes = unsafe {
+            core::slice::from_raw_parts((&entry as *const RawMountEntry).cast::<u8>(), entry_size)
+        };
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                entry_bytes.as_ptr(),
+                buffer_ptr.add(written),
+                entry_size,
+            );
+            written += entry_size;
+            core::ptr::copy_nonoverlapping(
+                path_bytes.as_ptr(),
+                buffer_ptr.add(written),
+                path_bytes.len(),
+            );
+        }
+        written += path_bytes.len();
     }
 
     written as i64

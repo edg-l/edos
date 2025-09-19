@@ -3,11 +3,11 @@
 
 use core::time::Duration;
 
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
+use alloc::vec::Vec;
 
 use crate::{
     fs::{
-        Error, FS_REQUESTS, File, FsRequest, FsResponse, MmapRegion, PathOp, PollState,
+        Error, FS_REQUESTS, File, FsRequest, FsResponse, MmapRegion, MountInfo, PathOp, PollState,
         gpt::{FilesystemType, Partition},
         path::Path,
     },
@@ -44,12 +44,12 @@ pub fn list_partitions() -> Vec<Partition> {
     parts
 }
 
-pub fn list_mounts() -> BTreeMap<Path, (usize, usize)> {
-    let FsResponse::MountPoints(mp) = send_request(FsRequest::ListMounts, Duration::from_secs(1))
+pub fn list_mounts() -> Vec<MountInfo> {
+    let FsResponse::Mounts(mounts) = send_request(FsRequest::ListMounts, Duration::from_secs(1))
     else {
         unreachable!()
     };
-    mp
+    mounts
 }
 
 /// If the filesystem is backed by a device, ensure device_id and partition_index are valid.
