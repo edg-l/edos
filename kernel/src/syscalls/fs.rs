@@ -94,25 +94,6 @@ pub fn sys_mount(device_id: u64, partition_idx: u64, path_ptr: *const u8) -> i64
         return -1;
     }
 
-    match list_files(&mount_point) {
-        Ok(entries) => {
-            let has_real_entries = entries
-                .iter()
-                .any(|entry| entry.name != "." && entry.name != "..");
-
-            if has_real_entries {
-                thread.errno = Errno::EEXIST;
-                return -1;
-            }
-        }
-        Err(err) => {
-            thread.errno = Errno::from(err);
-            return -1;
-        }
-    }
-
-    // TODO: possible TOCTOU here.
-
     match mount_partition(device_id as usize, partition_idx as usize, mount_point) {
         Ok(_) => 0,
         Err(err) => {
