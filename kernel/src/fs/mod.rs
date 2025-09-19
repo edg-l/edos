@@ -628,7 +628,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                                 Memfs::new().expect("failed to create memfs"),
                             ));
                             let worker_tid = queue_spawn_kthread_named_arg(
-                                &format!("mounted-fs-{}", mount_point.filename()),
+                                &format!("fs-{}", mount_point.filename()),
                                 start_memfs_thread as u64,
                                 fs.cast(),
                             );
@@ -648,7 +648,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                                 DevFs::new().expect("failed to create devfs"),
                             ));
                             let worker_tid = queue_spawn_kthread_named_arg(
-                                &format!("mounted-devfs-{}", mount_point.filename()),
+                                &format!("devfs-{}", mount_point.filename()),
                                 start_devfs_thread as u64,
                                 fs.cast(),
                             );

@@ -137,7 +137,7 @@ fn main() -> ! {
         Path::parse("/").unwrap(),
     );
     queue_spawn_thread(user_thread, user_thread_info);
-    queue_spawn_kthread_named("mount", mount_root_fs as u64);
+    queue_spawn_kthread_named("system-mount", mount_system_fs as u64);
 
     // Enable apic timer
     set_apic_timer_and_enable(Duration::from_millis(5));
@@ -151,20 +151,15 @@ fn main() -> ! {
     }
 }
 
-pub fn mount_root_fs() -> ! {
+pub fn mount_system_fs() -> ! {
     let partitions = fs::api::list_partitions();
-
-    if partitions.is_empty() {
-        log!("No partitions to mount");
-        kthread_exit(0);
-    }
 
     let cmdline = ParsedCmdline::parse(boot_info().cmdline);
 
     let mut part_idx = 0;
 
     if cmdline.root.is_none() {
-        println!("Empty cmdline, mounting first partition");
+        println!("Empty cmdline, using memfs as root.");
     } else {
         let mut keyval = cmdline.root.as_ref().unwrap().trim().split("=");
         let root_type = keyval.next();
@@ -187,22 +182,35 @@ pub fn mount_root_fs() -> ! {
         }
     }
 
-    let part = &partitions[part_idx];
-    log!("Partition name {:?}", part.name);
-
     let root = Path::parse("/").unwrap();
-    fs::api::mount_partition(
-        part.device_id as usize,
-        part.index as usize,
-        root.clone(),
-        part.filesystem.as_ref().expect("expected fs type").clone(),
-    )
-    .unwrap();
+    if !partitions.is_empty() && cmdline.root.is_some() {
+        let part = &partitions[part_idx];
+        log!("Partition name {:?}", part.name);
+
+        fs::api::mount_partition(
+            part.device_id as usize,
+            part.index as usize,
+            root.clone(),
+            part.filesystem.as_ref().expect("expected fs type").clone(),
+        )
+        .unwrap();
+    } else {
+        log!("Mounting memfs on /");
+        fs::api::mount_partition(0, 0, root.clone(), FilesystemType::Memfs).unwrap();
+    }
 
     let dev_dir = root.join("dev").normalize();
     let _ = fs::api::create_dir(&dev_dir);
     if let Err(err) = fs::api::mount_partition(0, 0, dev_dir.clone(), FilesystemType::Devfs) {
         log!("Failed to mount devfs at {:?}: {err:?}", dev_dir);
+    }
+
+    // TODO: add support for fstab someday.
+    log!("Mounting memfs /tmp");
+    let tmp_dir = root.join("tmp").normalize();
+    let _ = fs::api::create_dir(&tmp_dir);
+    if let Err(err) = fs::api::mount_partition(0, 0, tmp_dir.clone(), FilesystemType::Memfs) {
+        log!("Failed to mount memfs at {:?}: {err:?}", dev_dir);
     }
 
     kthread_exit(0)
