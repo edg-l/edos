@@ -438,9 +438,44 @@ impl DirectoryEntry {
         out
     }
 
-    /// Set the name field from a string
+    /// Set the name field from a string, tracking original case intent.
     pub fn set_name_from_string(&mut self, filename: &str) {
         self.name = Self::string_to_fat_name(filename);
+        self.nt_reserved = 0;
+
+        // Special entries are always case-insensitive
+        if filename == "." || filename == ".." {
+            return;
+        }
+
+        let (base, ext) = match filename.split_once('.') {
+            Some((base, ext)) => (base, Some(ext)),
+            None => (filename, None),
+        };
+
+        if Self::component_is_all_lowercase(base) {
+            self.nt_reserved |= Self::NT_LOWER_BASE;
+        }
+
+        if let Some(ext) = ext {
+            if Self::component_is_all_lowercase(ext) {
+                self.nt_reserved |= Self::NT_LOWER_EXT;
+            }
+        }
+    }
+
+    fn component_is_all_lowercase(component: &str) -> bool {
+        let mut saw_lower = false;
+
+        for ch in component.chars() {
+            if ch.is_ascii_lowercase() {
+                saw_lower = true;
+            } else if ch.is_ascii_uppercase() {
+                return false;
+            }
+        }
+
+        saw_lower
     }
 
     /// Check if filename matches this entry's name
