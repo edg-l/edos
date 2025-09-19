@@ -23,7 +23,11 @@ pub use process::{WaitPidStatus, dup2, pipe, spawn, sys_exit, sys_getpid, sys_wa
 pub use sys::{Errno, errno};
 
 // File I/O syscalls
-use crate::sys::{calls::syscall1, calls::syscall2, calls::syscall3, constants::*};
+use crate::sys::{
+    calls::{syscall1, syscall2, syscall3},
+    constants::*,
+    syscall4,
+};
 
 /// # Safety
 /// Caller must ensure:
@@ -81,8 +85,21 @@ pub unsafe fn sys_chdir(path: *const u8) -> isize {
 /// # Safety
 /// Caller must ensure the mount point path is a valid null-terminated string located in readable
 /// memory and remains valid for the duration of the syscall.
-pub unsafe fn sys_mount(device_id: u64, partition_idx: u64, path: *const u8) -> i64 {
-    unsafe { syscall3(SYS_MOUNT, device_id, partition_idx, path as u64) as i64 }
+pub unsafe fn sys_mount(
+    device_id: u64,
+    partition_idx: u64,
+    path: *const u8,
+    fs_type: *const u8,
+) -> i64 {
+    unsafe {
+        syscall4(
+            SYS_MOUNT,
+            device_id,
+            partition_idx,
+            path as u64,
+            fs_type as u64,
+        ) as i64
+    }
 }
 
 /// # Safety

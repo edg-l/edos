@@ -1,6 +1,9 @@
 #![expect(unused)]
 
-use core::{ffi::CStr, u64};
+use core::{
+    ffi::{CStr, c_void},
+    u64,
+};
 
 use alloc::{
     boxed::Box,
@@ -198,6 +201,7 @@ pub(super) enum FsRequest {
         device_id: usize,
         partition_index: usize,
         mount_point: Path,
+        fstype: FilesystemType,
     },
     Unmount {
         mount_point: Path,
@@ -208,10 +212,10 @@ pub(super) enum FsRequest {
         op: PathOp,
     },
     // Partition routing
-    PartitionRequest {
+    FsThreadRequest {
         device_id: usize,
         partition_index: usize,
-        command: PartitionCommand,
+        command: FsThreadCommand,
     },
     // Internal for worker bootstrap
     GetPartitionMailbox(u64), // threadid
@@ -220,14 +224,14 @@ pub(super) enum FsRequest {
 #[derive(Debug, Clone)]
 pub(super) enum FsResponse {
     Partitions(Vec<Partition>),
-    MountPoints(alloc::collections::btree_map::BTreeMap<Path, (usize, usize)>),
+    MountPoints(BTreeMap<Path, (usize, usize)>),
     Files(Result<Vec<File>, Error>),
     ReadBytes(Result<Vec<u8>, Error>),
     Written(Result<u64, Error>),
     File(Result<File, Error>),
     Ok(Result<(), Error>),
     // Internal
-    PartitionMailbox(Option<Mailbox<PartitionCommand, FsResponse>>),
+    PartitionMailbox(Option<Mailbox<FsThreadCommand, FsResponse>>),
 }
 
 #[derive(Debug, Clone)]
@@ -246,7 +250,7 @@ pub(super) enum PathOp {
 // TODO: Add rmdir recursive in a atomic command
 
 #[derive(Debug, Clone)]
-pub(super) enum PartitionCommand {
+pub(super) enum FsThreadCommand {
     ListFiles {
         path: Path,
     },
@@ -314,21 +318,21 @@ fn find_child_mount_points(
 }
 
 /// Convert PathOp to PartitionCommand
-fn pathop_to_partition_command(op: PathOp, path: Path, real_path: Path) -> PartitionCommand {
+fn pathop_to_partition_command(op: PathOp, path: Path, real_path: Path) -> FsThreadCommand {
     match op {
-        PathOp::ListFiles => PartitionCommand::ListFiles { path },
-        PathOp::ReadBytes { offset, count } => PartitionCommand::ReadBytes {
+        PathOp::ListFiles => FsThreadCommand::ListFiles { path },
+        PathOp::ReadBytes { offset, count } => FsThreadCommand::ReadBytes {
             path,
             offset,
             count,
         },
-        PathOp::WriteBytes { offset, data } => PartitionCommand::WriteBytes { path, offset, data },
-        PathOp::CreateFile => PartitionCommand::CreateFile { path },
-        PathOp::CreateDir => PartitionCommand::CreateDir { path },
-        PathOp::RemoveFile => PartitionCommand::RemoveFile { path },
-        PathOp::RemoveDir => PartitionCommand::RemoveDir { path },
-        PathOp::FileInfo => PartitionCommand::FileInfo { path: real_path },
-        PathOp::Flush => PartitionCommand::Flush,
+        PathOp::WriteBytes { offset, data } => FsThreadCommand::WriteBytes { path, offset, data },
+        PathOp::CreateFile => FsThreadCommand::CreateFile { path },
+        PathOp::CreateDir => FsThreadCommand::CreateDir { path },
+        PathOp::RemoveFile => FsThreadCommand::RemoveFile { path },
+        PathOp::RemoveDir => FsThreadCommand::RemoveDir { path },
+        PathOp::FileInfo => FsThreadCommand::FileInfo { path: real_path },
+        PathOp::Flush => FsThreadCommand::Flush,
     }
 }
 
@@ -409,67 +413,14 @@ pub extern "C" fn fs_main_thread() -> ! {
         }
     }
 
-    partitions.push(Partition {
-        index: 0,
-        starting_lba: 0,
-        ending_lba: 0,
-        size_sectors: 0,
-        partition_type: gpt::PartitionType::LinuxFilesystem,
-        name: "memfs-dev".to_string(),
-        filesystem: Some(FilesystemType::Memfs),
-        device_id: 9999,
-        unique_partition_guid: [6; 16],
-    });
-
     // Per-partition worker threads and their mailboxes
-    let mut worker_mailboxes: BTreeMap<(usize, usize), Mailbox<PartitionCommand, FsResponse>> =
+    let mut worker_mailboxes: BTreeMap<(usize, usize), Mailbox<FsThreadCommand, FsResponse>> =
         BTreeMap::new();
-    let mut worker_tid_map = alloc::collections::btree_map::BTreeMap::<u64, (usize, usize)>::new();
-
-    for partition in partitions.iter() {
-        if let Some(filesystem) = &partition.filesystem {
-            let part = Box::new(partition.clone());
-            let part = &raw mut *Box::leak(part);
-
-            let name = match filesystem {
-                FilesystemType::Memfs => {
-                    format!("fs-memfs-{}", partition.index)
-                }
-                FilesystemType::Fat32 => {
-                    format!("fs-fat32-{}p{}", partition.device_id, partition.index)
-                }
-                _ => {
-                    format!("fs-dev{}p{}", partition.device_id, partition.index)
-                }
-            };
-
-            let worker_tid =
-                queue_spawn_kthread_named_arg(&name, partition_thread as u64, part.cast());
-            worker_tid_map.insert(worker_tid, (partition.device_id as usize, partition.index));
-            worker_mailboxes.insert(
-                (partition.device_id as usize, partition.index),
-                Mailbox::new(worker_tid),
-            );
-        }
-    }
+    let mut worker_tid_map = BTreeMap::<u64, (usize, usize)>::new();
 
     // Mount table: map mount point to partition index
-    let mut mount_points = alloc::collections::btree_map::BTreeMap::new();
-    let mut mount_points_rev = alloc::collections::btree_map::BTreeMap::new();
-
-    for part in &partitions {
-        let idx = part.index;
-
-        let path = if part.filesystem == Some(FilesystemType::Memfs) {
-            Path::parse(&format!("/dev/memfs{}", part.index)).expect("failed to parse path")
-        } else {
-            Path::parse(&format!("/dev/sd{}p{}", part.device_id, part.index))
-                .expect("failed to parse path")
-        };
-        log!("Mounted {path}");
-        mount_points.insert(path.clone(), (part.device_id as usize, part.index));
-        mount_points_rev.insert((part.device_id as usize, part.index), path);
-    }
+    let mut mount_points: BTreeMap<Path, (usize, usize)> = BTreeMap::new();
+    let mut mount_points_rev: BTreeMap<(usize, usize), Path> = BTreeMap::new();
 
     for (mb_id, mb) in &worker_mailboxes {
         let mut paths = Vec::new();
@@ -487,10 +438,13 @@ pub extern "C" fn fs_main_thread() -> ! {
             }
 
             if !paths.is_empty() {
-                mb.send(PartitionCommand::AddVirtualInfo { paths });
+                mb.send(FsThreadCommand::AddVirtualInfo { paths });
             }
         }
     }
+
+    const SPECIAL_DEV_ID: usize = 9000;
+    let mut current_special_part = 0;
 
     // Main loop: route and respond
     loop {
@@ -505,24 +459,97 @@ pub extern "C" fn fs_main_thread() -> ! {
                         .send(FsResponse::MountPoints(mount_points.clone()));
                 }
                 FsRequest::Mount {
-                    device_id,
-                    partition_index,
+                    mut device_id,
+                    mut partition_index,
                     mount_point,
+                    fstype,
                 } => {
                     log!(
-                        "Mount request: {:?} at {:?}",
+                        "Mount request: {:?} ({fstype:?}) at {:?}",
                         (device_id, partition_index),
                         mount_point
                     );
-                    // Basic validation: index exists and mount point not used
-                    let res = if !mount_points.contains_key(&mount_point) {
-                        mount_points.insert(mount_point.clone(), (device_id, partition_index));
-                        mount_points_rev.insert((device_id, partition_index), mount_point.clone());
-                        Ok(())
-                    } else {
-                        Err(Error::IoError)
-                    };
-                    req.response.send(FsResponse::Ok(res));
+
+                    if mount_points.contains_key(&mount_point) {
+                        req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                        continue;
+                    }
+
+                    match fstype {
+                        FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32 => {
+                            for partition in partitions.iter() {
+                                if partition.device_id as usize == device_id
+                                    && partition.index == partition_index
+                                    && let Some(filesystem) = &partition.filesystem
+                                {
+                                    let part = Box::new(partition.clone());
+                                    let part = &raw mut *Box::leak(part);
+
+                                    let name = match filesystem {
+                                        FilesystemType::Memfs => {
+                                            format!("fs-memfs-{}", partition.index)
+                                        }
+                                        FilesystemType::Fat32 => {
+                                            format!(
+                                                "fs-fat32-{}p{}",
+                                                partition.device_id, partition.index
+                                            )
+                                        }
+                                        _ => {
+                                            format!(
+                                                "fs-dev{}p{}",
+                                                partition.device_id, partition.index
+                                            )
+                                        }
+                                    };
+
+                                    let worker_tid = queue_spawn_kthread_named_arg(
+                                        &name,
+                                        start_partition_fs_thread as u64,
+                                        part.cast(),
+                                    );
+                                    worker_tid_map.insert(
+                                        worker_tid,
+                                        (partition.device_id as usize, partition.index),
+                                    );
+                                    worker_mailboxes.insert(
+                                        (partition.device_id as usize, partition.index),
+                                        Mailbox::new(worker_tid),
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        FilesystemType::Memfs => {
+                            log!("Mounting memfs");
+                            let fs = Box::into_raw(Box::new(
+                                Memfs::new().expect("failed to create memfs"),
+                            ));
+                            let worker_tid = queue_spawn_kthread_named_arg(
+                                &format!("mounted-fs-{}", mount_point.filename()),
+                                start_memfs_thread as u64,
+                                fs.cast(),
+                            );
+                            device_id = SPECIAL_DEV_ID;
+                            partition_index = current_special_part;
+                            worker_tid_map
+                                .insert(worker_tid, (SPECIAL_DEV_ID, current_special_part));
+                            worker_mailboxes.insert(
+                                (SPECIAL_DEV_ID, current_special_part),
+                                Mailbox::new(worker_tid),
+                            );
+                            current_special_part += 1;
+                        }
+                        FilesystemType::Unknown
+                        | FilesystemType::Iso9660
+                        | FilesystemType::Ntfs => {
+                            req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                            continue;
+                        }
+                    }
+
+                    mount_points.insert(mount_point.clone(), (device_id, partition_index));
+                    mount_points_rev.insert((device_id, partition_index), mount_point.clone());
 
                     let id = (device_id, partition_index);
                     for (mb_id, mb) in &worker_mailboxes {
@@ -542,10 +569,12 @@ pub extern "C" fn fs_main_thread() -> ! {
                             }
                             if !paths.is_empty() {
                                 log!("Sending virtual info to {mb_id:?}: {paths:?}");
-                                mb.send(PartitionCommand::AddVirtualInfo { paths });
+                                mb.send(FsThreadCommand::AddVirtualInfo { paths });
                             }
                         }
                     }
+
+                    req.response.send(FsResponse::Ok(Ok(())));
                 }
                 FsRequest::Unmount { mount_point } => {
                     let res = if mount_points.remove(&mount_point).is_some() {
@@ -588,7 +617,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                         req.response.send(FsResponse::Ok(Err(Error::FileNotFound)));
                     }
                 }
-                FsRequest::PartitionRequest {
+                FsRequest::FsThreadRequest {
                     partition_index,
                     device_id,
                     command,
@@ -614,7 +643,7 @@ pub extern "C" fn fs_main_thread() -> ! {
     }
 }
 
-extern "C" fn partition_thread(partition: *mut Partition) -> ! {
+extern "C" fn start_partition_fs_thread(partition: *mut Partition) -> ! {
     let logger = sched().get_logger();
     let partition = unsafe { Box::from_raw(partition) };
 
@@ -679,13 +708,39 @@ extern "C" fn partition_thread(partition: *mut Partition) -> ! {
         None => unsupported_fs(mailbox),
     }
 
+    run_fs_thread(fs);
+}
+
+extern "C" fn start_memfs_thread(fs: *mut Memfs) -> ! {
+    let fs: Box<dyn FileSystem> = unsafe { Box::from_raw(fs) };
+    run_fs_thread(fs)
+}
+
+fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
+    log!("Fs thread started");
+    let logger = sched().get_logger();
     let mut virtual_files: BTreeMap<Path, File> = BTreeMap::new();
+
+    // Get our mailbox from the FS main
+    let mailbox = {
+        use crate::fs::api::send_request as send;
+        use core::time::Duration;
+        loop {
+            let resp = send(
+                FsRequest::GetPartitionMailbox(sched().current_id()),
+                Duration::from_secs(5),
+            );
+            if let FsResponse::PartitionMailbox(Some(mb)) = resp {
+                break mb;
+            }
+        }
+    };
 
     // Serve partition commands
     loop {
         while let Some(mut req) = mailbox.pop_request() {
             match req.message {
-                PartitionCommand::ListFiles { path } => {
+                FsThreadCommand::ListFiles { path } => {
                     if let Some(file) = virtual_files.get(&path) {
                         req.response
                             .send(FsResponse::Files(Ok(alloc::vec![file.clone()])));
@@ -702,7 +757,7 @@ extern "C" fn partition_thread(partition: *mut Partition) -> ! {
                         req.response.send(FsResponse::Files(res));
                     }
                 }
-                PartitionCommand::ReadBytes {
+                FsThreadCommand::ReadBytes {
                     path,
                     offset,
                     count,
@@ -710,27 +765,27 @@ extern "C" fn partition_thread(partition: *mut Partition) -> ! {
                     let res = fs.read_bytes(&path, offset, count);
                     req.response.send(FsResponse::ReadBytes(res));
                 }
-                PartitionCommand::WriteBytes { path, offset, data } => {
+                FsThreadCommand::WriteBytes { path, offset, data } => {
                     let res = fs.write_bytes(&path, offset, &data);
                     req.response.send(FsResponse::Written(res));
                 }
-                PartitionCommand::CreateFile { path } => {
+                FsThreadCommand::CreateFile { path } => {
                     let res = fs.create_file(&path);
                     req.response.send(FsResponse::Ok(res));
                 }
-                PartitionCommand::CreateDir { path } => {
+                FsThreadCommand::CreateDir { path } => {
                     let res = fs.create_dir(&path);
                     req.response.send(FsResponse::Ok(res));
                 }
-                PartitionCommand::RemoveFile { path } => {
+                FsThreadCommand::RemoveFile { path } => {
                     let res = fs.remove_file(&path);
                     req.response.send(FsResponse::Ok(res));
                 }
-                PartitionCommand::RemoveDir { path } => {
+                FsThreadCommand::RemoveDir { path } => {
                     let res = fs.remove_dir(&path);
                     req.response.send(FsResponse::Ok(res));
                 }
-                PartitionCommand::FileInfo { path } => {
+                FsThreadCommand::FileInfo { path } => {
                     if let Some(file) = virtual_files.get(&path) {
                         req.response.send(FsResponse::File(Ok(file.clone())));
                     } else {
@@ -738,11 +793,11 @@ extern "C" fn partition_thread(partition: *mut Partition) -> ! {
                         req.response.send(FsResponse::File(res));
                     }
                 }
-                PartitionCommand::Flush => {
+                FsThreadCommand::Flush => {
                     let res = fs.flush();
                     req.response.send(FsResponse::Ok(res));
                 }
-                PartitionCommand::AddVirtualInfo { paths } => {
+                FsThreadCommand::AddVirtualInfo { paths } => {
                     for path in paths {
                         let file = create_virtual_file(path.components().last().unwrap().clone());
                         virtual_files.insert(path, file);
@@ -755,7 +810,7 @@ extern "C" fn partition_thread(partition: *mut Partition) -> ! {
     }
 }
 
-fn unsupported_fs(mb: Mailbox<PartitionCommand, FsResponse>) -> ! {
+fn unsupported_fs(mb: Mailbox<FsThreadCommand, FsResponse>) -> ! {
     loop {
         while let Some(req) = mb.pop_request() {
             req.response.send(FsResponse::Ok(Err(Error::IoError)));

@@ -325,7 +325,8 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let device_id = ctx.rdi;
             let partition_idx = ctx.rsi;
             let path_ptr = ctx.rdx as *const u8;
-            ctx.rax = sys_mount(device_id, partition_idx, path_ptr) as u64;
+            let fs_type_ptr = ctx.r10 as *const u8;
+            ctx.rax = sys_mount(device_id, partition_idx, path_ptr, fs_type_ptr) as u64;
         }
         SYS_MKDIR => {
             let path_ptr = ctx.rdi as *const u8;

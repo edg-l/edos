@@ -31,8 +31,16 @@ pub fn mount_partition(
     device_id: u64,
     partition_idx: u64,
     mount_point: &CStr,
+    fs_type: &CStr,
 ) -> Result<(), Errno> {
-    let result = unsafe { sys_mount(device_id, partition_idx, mount_point.as_ptr().cast()) };
+    let result = unsafe {
+        sys_mount(
+            device_id,
+            partition_idx,
+            mount_point.as_ptr().cast(),
+            fs_type.as_ptr().cast(),
+        )
+    };
     if result == 0 { Ok(()) } else { Err(errno()) }
 }
 

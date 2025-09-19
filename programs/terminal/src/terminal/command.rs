@@ -266,8 +266,8 @@ fn format_guid(bytes: &[u8; 16]) -> String {
 }
 
 fn cmd_mount(state: &mut TerminalState, args: &[String]) {
-    if args.len() != 3 {
-        state.write_line("Usage: mount <device_id> <partition_idx> <mount_point>");
+    if args.len() != 4 {
+        state.write_line("Usage: mount <device_id> <partition_idx> <mount_point> <fstype>");
         return;
     }
 
@@ -295,7 +295,20 @@ fn cmd_mount(state: &mut TerminalState, args: &[String]) {
         }
     };
 
-    match mount_partition(device_id, partition_idx, c_path.as_c_str()) {
+    let fs_type = match CString::new(args[3].as_str()) {
+        Ok(path) => path,
+        Err(_) => {
+            state.write_line("mount: fs type contains null byte");
+            return;
+        }
+    };
+
+    match mount_partition(
+        device_id,
+        partition_idx,
+        c_path.as_c_str(),
+        fs_type.as_c_str(),
+    ) {
         Ok(()) => state.write_line("Mounted successfully."),
         Err(err) => state.write_line(&format!("mount failed: {:?}", err)),
     }

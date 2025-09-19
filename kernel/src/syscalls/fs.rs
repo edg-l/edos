@@ -1,4 +1,6 @@
-use alloc::vec::Vec;
+use core::ffi::CStr;
+
+use alloc::{borrow::ToOwned, ffi::CString, string::ToString, vec::Vec};
 use bytemuck::{NoUninit, Pod, Zeroable};
 use x86_64::instructions::interrupts;
 
@@ -9,7 +11,7 @@ use crate::{
             create_dir, file_info, list_files, list_partitions, mount_partition, remove_dir,
             remove_file,
         },
-        gpt::Partition,
+        gpt::{FilesystemType, Partition},
         path::Path,
     },
     syscalls::io::resolve_path,
@@ -42,6 +44,15 @@ fn read_user_path(path_ptr: *const u8, cwd: &Path) -> Result<Path, Errno> {
     resolve_path(path_str, cwd).map_err(|_| Errno::EINVAL)
 }
 
+fn read_user_str(value_ptr: *const u8) -> Result<CString, Errno> {
+    if value_ptr.is_null() {
+        return Err(Errno::EFAULT);
+    }
+
+    let path_str = unsafe { CStr::from_ptr(value_ptr.cast()) };
+    Ok(path_str.to_owned())
+}
+
 fn remove_dir_recursive(path: &Path) -> Result<(), Error> {
     let entries = list_files(path)?;
 
@@ -61,7 +72,12 @@ fn remove_dir_recursive(path: &Path) -> Result<(), Error> {
     remove_dir(path)
 }
 
-pub fn sys_mount(device_id: u64, partition_idx: u64, path_ptr: *const u8) -> i64 {
+pub fn sys_mount(
+    device_id: u64,
+    partition_idx: u64,
+    path_ptr: *const u8,
+    fs_type: *const u8,
+) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
     let mut thread = info.lock();
@@ -94,7 +110,28 @@ pub fn sys_mount(device_id: u64, partition_idx: u64, path_ptr: *const u8) -> i64
         return -1;
     }
 
-    match mount_partition(device_id as usize, partition_idx as usize, mount_point) {
+    let fs_type = match read_user_str(fs_type) {
+        Ok(x) => x,
+        Err(err) => {
+            thread.errno = err;
+            return -1;
+        }
+    }
+    .to_string_lossy()
+    .to_string();
+
+    let fs_type = match fs_type.as_str() {
+        "fat32" => FilesystemType::Fat32,
+        "memfs" => FilesystemType::Memfs,
+        _ => FilesystemType::Unknown,
+    };
+
+    match mount_partition(
+        device_id as usize,
+        partition_idx as usize,
+        mount_point,
+        fs_type,
+    ) {
         Ok(_) => 0,
         Err(err) => {
             thread.errno = Errno::from(err);

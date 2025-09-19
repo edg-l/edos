@@ -6,7 +6,11 @@ use core::time::Duration;
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 
 use crate::{
-    fs::{Error, FS_REQUESTS, File, FsRequest, FsResponse, PathOp, gpt::Partition, path::Path},
+    fs::{
+        Error, FS_REQUESTS, File, FsRequest, FsResponse, PathOp,
+        gpt::{FilesystemType, Partition},
+        path::Path,
+    },
     thread::scheduler::sched,
 };
 
@@ -52,12 +56,14 @@ pub fn mount_partition(
     device_id: usize,
     partition_index: usize,
     mount_point: Path,
+    fs_type: FilesystemType,
 ) -> Result<(), Error> {
     let FsResponse::Ok(result) = send_request(
         FsRequest::Mount {
             device_id,
             partition_index,
             mount_point,
+            fstype: fs_type,
         },
         Duration::from_secs(1),
     ) else {
