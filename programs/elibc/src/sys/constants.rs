@@ -7,6 +7,7 @@ pub const SYS_LIST_DIR: u64 = 4;
 pub const SYS_GETCWD: u64 = 5;
 pub const SYS_CHDIR: u64 = 6;
 pub const SYS_POLL: u64 = 7;
+pub const SYS_SELECT: u64 = 23;
 pub const SYS_IOCTL: u64 = 16;
 pub const SYS_PIPE: u64 = 22;
 pub const SYS_DUP2: u64 = 33;

@@ -1,8 +1,12 @@
 use alloc::{format, string::String, vec::Vec};
 use core::str;
 
-use elibc::io::get_kernel_logs;
-use elibc::{KeyEvent, WaitPidStatus, get_raw_input, process::sys_waitpid, read_from_fd};
+use elibc::{
+    KeyEvent, WaitPidStatus, get_raw_input,
+    io::{PollState, SelectFd, get_kernel_logs, keyboard_fd, select},
+    process::sys_waitpid,
+    read_from_fd,
+};
 
 mod command;
 mod render;
@@ -28,13 +32,81 @@ pub fn run() -> i32 {
 
     let mut key_events: Vec<KeyEvent> = Vec::new();
     let mut ready_commands: Vec<String> = Vec::new();
+    let mut keyboard_handle = keyboard_fd();
 
     loop {
-        pump_kernel_logs(&mut terminal);
-        pump_tty_output(&mut terminal);
-        pump_running_program(&mut terminal);
+        let mut select_entries: Vec<SelectFd> = Vec::new();
 
-        get_raw_input(20, &mut key_events, 16);
+        if let Some(fd) = keyboard_handle {
+            select_entries.push(SelectFd::new(
+                fd,
+                PollState {
+                    readable: true,
+                    writable: false,
+                    error: true,
+                },
+            ));
+        } else {
+            keyboard_handle = keyboard_fd();
+            if let Some(fd) = keyboard_handle {
+                select_entries.push(SelectFd::new(
+                    fd,
+                    PollState {
+                        readable: true,
+                        writable: false,
+                        error: true,
+                    },
+                ));
+            }
+        }
+
+        select_entries.push(SelectFd::new(
+            terminal.tty_fd(),
+            PollState {
+                readable: true,
+                writable: false,
+                error: true,
+            },
+        ));
+
+        let select_result = select(&mut select_entries, Some(50));
+        if select_result.is_err() {
+            keyboard_handle = None;
+        }
+
+        let mut keyboard_ready = false;
+        let mut keyboard_fault = false;
+        let mut tty_ready = false;
+
+        for entry in &select_entries {
+            if entry.fd == terminal.tty_fd() {
+                if entry.result.readable || entry.result.error {
+                    tty_ready = true;
+                }
+            } else if Some(entry.fd) == keyboard_handle {
+                if entry.result.readable {
+                    keyboard_ready = true;
+                }
+                if entry.result.error {
+                    keyboard_fault = true;
+                }
+            }
+        }
+
+        if keyboard_fault {
+            keyboard_handle = None;
+        }
+
+        if keyboard_ready {
+            get_raw_input(0, &mut key_events, 16);
+        }
+
+        if tty_ready {
+            pump_tty_output(&mut terminal);
+        }
+
+        pump_kernel_logs(&mut terminal);
+        pump_running_program(&mut terminal);
 
         for event in key_events.drain(..) {
             if let Some(line) = terminal.handle_key_event(event) {

@@ -7,7 +7,10 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{Errno, SYS_IOCTL, SYS_KERNEL_LOGS, SYS_POLL, errno, syscall2, syscall3, syscall5},
+    sys::{
+        Errno, SYS_IOCTL, SYS_KERNEL_LOGS, SYS_POLL, SYS_SELECT, errno, syscall2, syscall3,
+        syscall5,
+    },
     sys_open as raw_sys_open, sys_read, sys_write,
 };
 
@@ -239,7 +242,7 @@ pub enum KeyEvent {
 
 static KEYBOARD_FD: Mutex<Option<u64>> = Mutex::new(None);
 
-fn keyboard_fd() -> Option<u64> {
+pub fn keyboard_fd() -> Option<u64> {
     let mut fd_guard = KEYBOARD_FD.lock();
     if let Some(fd) = *fd_guard {
         return Some(fd);
@@ -424,6 +427,54 @@ pub fn poll_fd(fd: u64, timeout_ms: u64) -> IoResult<PollState> {
 
     if result >= 0 {
         Ok(state)
+    } else {
+        Err(IoError::from(errno()))
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SelectFd {
+    pub fd: u64,
+    pub interests: PollState,
+    pub result: PollState,
+}
+
+impl SelectFd {
+    pub const fn new(fd: u64, interests: PollState) -> Self {
+        Self {
+            fd,
+            interests,
+            result: PollState {
+                readable: false,
+                writable: false,
+                error: false,
+            },
+        }
+    }
+}
+
+pub fn select(fds: &mut [SelectFd], timeout_ms: Option<u64>) -> IoResult<usize> {
+    if fds.is_empty() {
+        return Ok(0);
+    }
+
+    for entry in fds.iter_mut() {
+        entry.result = PollState::default();
+    }
+
+    let timeout = timeout_ms.unwrap_or(u64::MAX);
+    let result = unsafe {
+        syscall3(
+            SYS_SELECT,
+            fds.as_mut_ptr() as u64,
+            fds.len() as u64,
+            timeout,
+        ) as isize
+    };
+
+    if result >= 0 {
+        Ok(result as usize)
     } else {
         Err(IoError::from(errno()))
     }

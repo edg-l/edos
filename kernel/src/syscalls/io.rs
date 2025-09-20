@@ -12,6 +12,7 @@ use crate::{
         pipe::{FileDescriptor, FsFile, Pipe, StandardStream},
         scheduler::sched,
     },
+    timer::Instant,
 };
 
 #[repr(C)]
@@ -22,6 +23,14 @@ pub struct DirEntry {
     pub size: u64,         // File size in bytes
     pub attrs: u8,         // File attributes (readonly=1, hidden=2, system=4, archive=8)
     pub reserved: [u8; 2], // Padding for alignment
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SelectFd {
+    pub fd: u64,
+    pub interests: PollState,
+    pub result: PollState,
 }
 
 fn file_kind_to_u8(kind: FileKind) -> u8 {
@@ -512,6 +521,173 @@ pub fn sys_poll(fd: u64, events_ptr: *mut PollState, timeout_ms: u64) -> i64 {
             -1
         }
     }
+}
+
+pub fn sys_select(entries_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
+    if count == 0 {
+        return 0;
+    }
+
+    let sched = sched();
+    let info = sched.current_thread_info();
+
+    if entries_ptr.is_null() {
+        let mut thread = info.lock();
+        thread.errno = Errno::EFAULT;
+        return -1;
+    }
+
+    if count > 1024 {
+        let mut thread = info.lock();
+        thread.errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    let mut entries: Vec<SelectFd> = Vec::with_capacity(count);
+    for idx in 0..count {
+        let entry = unsafe { core::ptr::read(entries_ptr.add(idx)) };
+        entries.push(entry);
+    }
+
+    let mut descriptors = Vec::with_capacity(count);
+    for entry in &mut entries {
+        entry.result = PollState::none();
+        let descriptor = match thread.fd_table.get_fd(entry.fd).cloned() {
+            Some(desc) => desc,
+            None => {
+                thread.errno = Errno::EBADF;
+                return -1;
+            }
+        };
+        descriptors.push(descriptor);
+    }
+
+    drop(thread);
+
+    let timeout = if timeout_ms == u64::MAX {
+        None
+    } else {
+        Some(Duration::from_millis(timeout_ms))
+    };
+    let start = Instant::now();
+
+    interrupts::enable();
+
+    loop {
+        let mut ready = 0usize;
+
+        for (idx, descriptor) in descriptors.iter().enumerate() {
+            let interests = entries[idx].interests;
+            if !interests.readable && !interests.writable && !interests.error {
+                entries[idx].result = PollState::none();
+                continue;
+            }
+
+            match poll_descriptor(descriptor, interests) {
+                Ok(state) => {
+                    entries[idx].result = state;
+                    if (interests.readable && state.readable)
+                        || (interests.writable && state.writable)
+                        || state.error
+                    {
+                        ready += 1;
+                    }
+                }
+                Err(errno) => {
+                    let mut thread = info.lock();
+                    thread.errno = errno;
+                    return -1;
+                }
+            }
+        }
+
+        if ready > 0 {
+            write_back_select_entries(entries_ptr, &entries);
+            let mut thread = info.lock();
+            thread.errno = Errno::Clear;
+            return ready as i64;
+        }
+
+        let remaining = timeout.map(|target| target.saturating_sub(start.elapsed()));
+        if let Some(rem) = remaining {
+            if rem.is_zero() {
+                write_back_select_entries(entries_ptr, &entries);
+                let mut thread = info.lock();
+                thread.errno = Errno::Clear;
+                return 0;
+            }
+        }
+
+        let wait_slice = remaining
+            .filter(|rem| !rem.is_zero())
+            .map(|rem| rem.min(Duration::from_millis(50)))
+            .unwrap_or(Duration::from_millis(50));
+
+        sched.thread_wait_timeout(wait_slice);
+    }
+}
+
+fn write_back_select_entries(ptr: *mut SelectFd, entries: &[SelectFd]) {
+    for (idx, entry) in entries.iter().enumerate() {
+        unsafe {
+            core::ptr::write(ptr.add(idx), *entry);
+        }
+    }
+}
+
+fn poll_descriptor(descriptor: &FileDescriptor, interests: PollState) -> Result<PollState, Errno> {
+    let mut state = PollState::none();
+
+    match descriptor {
+        FileDescriptor::StandardStream(StandardStream::Stdin) => {
+            if interests.readable {
+                let rx = KEYBOARD_BROADCAST.lock().subscribe_or_get();
+                if !rx.is_empty() {
+                    state.readable = true;
+                }
+            }
+            if interests.writable {
+                state.writable = true;
+            }
+        }
+        FileDescriptor::StandardStream(StandardStream::Stdout | StandardStream::Stderr) => {
+            if interests.writable {
+                state.writable = true;
+            }
+        }
+        FileDescriptor::Pipe(pipe) => {
+            let guard = pipe.read();
+            if interests.readable
+                && (!guard.buffer.is_empty() || (guard.closed && guard.writers == 0))
+            {
+                state.readable = true;
+            }
+            if interests.writable && !guard.closed && guard.writers > 0 {
+                state.writable = true;
+            }
+            if interests.error && guard.closed && guard.writers == 0 {
+                state.error = true;
+            }
+        }
+        FileDescriptor::FsFile(file) => {
+            let poll_state =
+                fs_api::poll(&file.path, Duration::from_millis(0)).map_err(Errno::from)?;
+            if interests.readable && poll_state.readable {
+                state.readable = true;
+            }
+            if interests.writable && poll_state.writable {
+                state.writable = true;
+            }
+            if poll_state.error {
+                state.error = true;
+            }
+        }
+    }
+
+    Ok(state)
 }
 
 pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {
