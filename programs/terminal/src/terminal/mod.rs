@@ -1,5 +1,5 @@
 use alloc::{format, string::String, vec::Vec};
-use core::str;
+use core::{hint::spin_loop, str};
 
 use elibc::{
     KeyEvent, WaitPidStatus, get_raw_input,
@@ -34,44 +34,36 @@ pub fn run() -> i32 {
     let mut ready_commands: Vec<String> = Vec::new();
     let mut keyboard_handle = keyboard_fd();
 
+    let mut select_entries: Vec<SelectFd> = Vec::new();
+
+    while keyboard_handle.is_none() {
+        keyboard_handle = keyboard_fd();
+        // todo add sleep here
+        spin_loop();
+    }
+
+    select_entries.push(SelectFd::new(
+        keyboard_handle.unwrap(),
+        PollState {
+            readable: true,
+            writable: false,
+            error: true,
+        },
+    ));
+
+    select_entries.push(SelectFd::new(
+        terminal.tty_fd(),
+        PollState {
+            readable: true,
+            writable: false,
+            error: true,
+        },
+    ));
+
     loop {
-        let mut select_entries: Vec<SelectFd> = Vec::new();
-
-        if let Some(fd) = keyboard_handle {
-            select_entries.push(SelectFd::new(
-                fd,
-                PollState {
-                    readable: true,
-                    writable: false,
-                    error: true,
-                },
-            ));
-        } else {
-            keyboard_handle = keyboard_fd();
-            if let Some(fd) = keyboard_handle {
-                select_entries.push(SelectFd::new(
-                    fd,
-                    PollState {
-                        readable: true,
-                        writable: false,
-                        error: true,
-                    },
-                ));
-            }
-        }
-
-        select_entries.push(SelectFd::new(
-            terminal.tty_fd(),
-            PollState {
-                readable: true,
-                writable: false,
-                error: true,
-            },
-        ));
-
-        let select_result = select(&mut select_entries, Some(50));
+        let select_result = select(&mut select_entries, Some(100));
         if select_result.is_err() {
-            keyboard_handle = None;
+            continue;
         }
 
         let mut keyboard_ready = false;
