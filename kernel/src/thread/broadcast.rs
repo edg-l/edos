@@ -1,4 +1,7 @@
-use core::time::Duration;
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use crossbeam_queue::SegQueue;
@@ -78,7 +81,7 @@ impl<T: Clone> Broadcast<T> {
 
                 if !sched.thread_exists(tid) {
                     to_remove.push(tid);
-                } else {
+                } else if receiver.is_waiting.load(Ordering::Acquire) {
                     sched.thread_wake(tid, true);
                 }
             }
@@ -95,12 +98,14 @@ impl<T: Clone> Broadcast<T> {
 #[derive(Debug, Clone)]
 pub struct Receiver<T> {
     queue: Arc<SegQueue<T>>,
+    is_waiting: Arc<AtomicBool>,
 }
 
 impl<T> Default for Receiver<T> {
     fn default() -> Self {
         Self {
             queue: Arc::new(SegQueue::new()),
+            is_waiting: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -131,7 +136,11 @@ impl<T> Receiver<T> {
             return true;
         }
 
+        self.is_waiting.store(true, Ordering::Release);
+
         sched().thread_wait_timeout(timeout);
+
+        self.is_waiting.store(false, Ordering::Release);
 
         !self.is_empty()
     }
@@ -142,7 +151,11 @@ impl<T> Receiver<T> {
             return Ok(v);
         }
 
+        self.is_waiting.store(true, Ordering::Release);
+
         sched().thread_wait_timeout(timeout);
+
+        self.is_waiting.store(false, Ordering::Release);
 
         if let Some(v) = self.try_recv() {
             Ok(v)
