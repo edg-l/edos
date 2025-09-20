@@ -683,24 +683,15 @@ pub extern "C" fn fs_main_thread() -> ! {
                     mount_points.insert(mount_point.clone(), meta.clone());
                     mount_points_rev.insert((device_id, partition_index), mount_point.clone());
 
-                    let id = (device_id, partition_index);
-                    for (mb_id, mb) in &worker_mailboxes {
-                        let mut paths = Vec::new();
-                        if let Some(base_path) = mount_points_rev.get(mb_id) {
-                            for (path, meta) in &mount_points {
-                                if (meta.device_id, meta.partition_index) != *mb_id
-                                    && path == &mount_point
-                                    && let Some(parent) = base_path.parent()
-                                {
-                                    let stripped = path.strip_prefix(&parent);
+                    if let Some(parent_path) = mount_point.parent() {
+                        if let Some((_parent_mount, parent_meta)) =
+                            find_mount_at_path(&parent_path, &mount_points)
+                        {
+                            let parent_key = (parent_meta.device_id, parent_meta.partition_index);
 
-                                    if !stripped.is_root() {
-                                        paths.push(path.clone());
-                                    }
-                                }
-                            }
-                            if !paths.is_empty() {
-                                log!("Sending virtual info to {mb_id:?}: {paths:?}");
+                            if let Some(mb) = worker_mailboxes.get(&parent_key) {
+                                let paths = alloc::vec![mount_point.clone()];
+                                log!("Sending virtual info for {} to {parent_key:?}", mount_point);
                                 mb.send(FsThreadCommand::AddVirtualInfo { paths });
                             }
                         }

@@ -123,6 +123,10 @@ impl Path {
     }
 
     pub fn is_direct_parent(&self, other: &Path) -> bool {
+        if !other.starts_with(self) {
+            return false;
+        }
+
         let stripped = other.strip_prefix(self);
 
         stripped.components.len() == 1
