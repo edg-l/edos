@@ -14,6 +14,6 @@ pub fn init_drivers() {
     unsafe { fpu::init_fpu() };
     pci::init(); // pci init is blocking
     ahci::init(); // must be after pci
+    graphics::init();
     queue_spawn_kthread_named("keyboard", keyboard::driver_main as u64);
-    queue_spawn_kthread_named("render", graphics::render_thread as u64);
 }

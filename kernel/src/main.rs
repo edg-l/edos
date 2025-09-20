@@ -6,7 +6,10 @@
 use core::{arch::asm, time::Duration};
 
 use alloc::string::ToString;
-use x86_64::{VirtAddr, instructions::hlt};
+use x86_64::{
+    VirtAddr,
+    instructions::{hlt, interrupts::without_interrupts},
+};
 
 use crate::{
     acpi::{acpi_madt, init_acpi},
@@ -123,20 +126,6 @@ fn main() -> ! {
     drivers::init_drivers();
     fs::init();
 
-    let terminal_argv: [&[u8]; 1] = [b"terminal"];
-    let user_thread = Thread::new_user(
-        TERMINAL_PROGRAM,
-        Some("terminal".to_string()),
-        &terminal_argv,
-    )
-    .unwrap();
-    let user_thread_info = UserThreadInfo::from_thread(
-        user_thread.user.as_ref().unwrap(),
-        0,
-        0,
-        Path::parse("/").unwrap(),
-    );
-    queue_spawn_thread(user_thread, user_thread_info);
     queue_spawn_kthread_named("system-mount", mount_system_fs as u64);
 
     // Enable apic timer
@@ -212,6 +201,19 @@ pub fn mount_system_fs() -> ! {
     if let Err(err) = fs::api::mount_partition(0, 0, tmp_dir.clone(), FilesystemType::Memfs) {
         log!("Failed to mount memfs at {:?}: {err:?}", dev_dir);
     }
+
+    without_interrupts(|| {
+        let terminal_argv: [&[u8]; 1] = [b"terminal"];
+        let user_thread = Thread::new_user(
+            TERMINAL_PROGRAM,
+            Some("terminal".to_string()),
+            &terminal_argv,
+        )
+        .unwrap();
+        let user_thread_info =
+            UserThreadInfo::from_thread(user_thread.user.as_ref().unwrap(), 0, 0, root.clone());
+        queue_spawn_thread(user_thread, user_thread_info);
+    });
 
     kthread_exit(0)
 }

@@ -11,7 +11,10 @@ use alloc::{
 use spin::{Once, RwLock};
 use thiserror::Error;
 
-use crate::fs::{self, File, FileAttrs, FileKind, FileSystem, MmapRegion, PollState, path::Path};
+use crate::{
+    fs::{self, File, FileAttrs, FileKind, FileSystem, MmapRegion, PollState, path::Path},
+    log, println,
+};
 
 #[derive(Debug, Error, Clone)]
 pub enum DevFsError {
@@ -365,6 +368,7 @@ impl FileSystem for DevFsHandle {
 
 /// Register a new device node within devfs.
 pub fn register_device(path: &Path, device: Arc<dyn DevFsDevice>) -> Result<(), DevFsError> {
+    println!("Registering device {path}");
     let normalized = path.normalize();
     let devfs = global_devfs();
     let mut devfs = devfs.write();

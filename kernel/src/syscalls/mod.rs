@@ -14,7 +14,6 @@ use x86_64::{
 use crate::{
     fs::{Error as FsError, PollState},
     gdt::selectors,
-    graphics::api::ScreenInfo,
     log,
     logs::LOG_BROADCAST,
     println,
@@ -23,7 +22,6 @@ use crate::{
             sys_list_mounts, sys_list_partitions, sys_mkdir, sys_mount, sys_rmdir, sys_rmdir_all,
             sys_unlink,
         },
-        graphics::DrawRequestInput,
         io::{
             sys_chdir, sys_close, sys_getcwd, sys_ioctl, sys_list_dir, sys_open, sys_poll,
             sys_read, sys_write,
@@ -37,7 +35,6 @@ use crate::{
 };
 
 mod fs;
-mod graphics;
 mod io;
 mod memory;
 
@@ -190,10 +187,6 @@ const SYS_ERRNO: u64 = 0x400;
 const SYS_GETPID: u64 = 39; // get process ID
 const SYS_SPAWN: u64 = 57; // spawn process
 const SYS_DUP2: u64 = 33; // duplicate file descriptor
-const SYS_DRAW_RECT: u64 = 100;
-const SYS_RENDER: u64 = 101;
-const SYS_SCREEN_INFO: u64 = 102;
-const SYS_DRAW: u64 = 103;
 const SYS_KERNEL_LOGS: u64 = 201;
 const SYS_WAIT_PID: u64 = 40;
 const SYS_MOUNT: u64 = 202;
@@ -298,18 +291,6 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         }
         SYS_ERRNO => {
             ctx.rax = sys_errno();
-        }
-        SYS_DRAW_RECT => {
-            ctx.rax = graphics::sys_draw_rect(ctx.rdi, ctx.rsi, ctx.rdx, ctx.r10, ctx.r8 as u32);
-        }
-        SYS_RENDER => {
-            ctx.rax = graphics::sys_render();
-        }
-        SYS_SCREEN_INFO => {
-            ctx.rax = graphics::sys_screen_info(ctx.rdi as *mut ScreenInfo);
-        }
-        SYS_DRAW => {
-            ctx.rax = graphics::sys_draw(ctx.rdi as *const DrawRequestInput);
         }
         SYS_PIPE => {
             let pipefd_ptr = ctx.rdi as *mut [u64; 2];

@@ -3,12 +3,20 @@ use alloc::vec::Vec;
 
 pub mod api;
 pub mod colors;
+pub mod framebuffer;
 
 use crate::{
     boot::boot_info,
-    graphics::api::{DrawRequest, REQUESTS, Request, Response, ScreenInfo},
-    thread::{mailbox::Mailbox, scheduler::sched},
+    graphics::{
+        api::{DrawRequest, REQUESTS, Request, Response, ScreenInfo},
+        framebuffer::FramebufferDevice,
+    },
+    thread::{mailbox::Mailbox, scheduler::sched, util::queue_spawn_kthread_named},
 };
+
+pub fn init() {
+    queue_spawn_kthread_named("framebuffer", render_thread as u64);
+}
 
 pub struct DoubleBuffer {
     back_buffer: Vec<u32>,
@@ -126,6 +134,8 @@ impl DoubleBuffer {
 
 pub extern "C" fn render_thread() -> ! {
     let requests = REQUESTS.call_once(|| Mailbox::new(sched().current_id()));
+
+    FramebufferDevice::register();
 
     let mut display = DoubleBuffer::new();
 

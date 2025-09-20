@@ -260,9 +260,10 @@ fn release_keyboard_fd(fd: u64) {
         .as_ref()
         .map(|stored| *stored == fd)
         .unwrap_or(false)
-        && let Some(fd) = fd_guard.take() {
-            let _ = crate::sys_close(fd);
-        }
+        && let Some(fd) = fd_guard.take()
+    {
+        let _ = crate::sys_close(fd);
+    }
 }
 
 fn read_keyboard_events(

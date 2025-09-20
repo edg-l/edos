@@ -1,4 +1,4 @@
-use alloc::string::ToString;
+use alloc::{boxed::Box, string::ToString, vec::Vec};
 use core::time::Duration;
 
 use x86_64::instructions::interrupts;
@@ -7,6 +7,10 @@ use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
 use crate::log;
 use crate::{
     drivers::keyboard::KEYBOARD_BROADCAST,
+    graphics::framebuffer::{
+        FB_IOCTL_DRAW, FB_IOCTL_DRAW_RECT, FB_IOCTL_RENDER, FB_IOCTL_SCREEN_INFO, FramebufferDraw,
+        FramebufferDrawCommand, FramebufferInfo, FramebufferRect,
+    },
     syscalls::Errno,
     thread::{
         broadcast::ReceiveError,
@@ -506,9 +510,114 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
         return -1;
     };
 
-    interrupts::enable();
+    let result = match request {
+        FB_IOCTL_DRAW_RECT => {
+            if arg == 0 {
+                thread.errno = Errno::EFAULT;
+                return -1;
+            }
+            let user_rect_ptr = arg as *const FramebufferRect;
+            if user_rect_ptr.is_null() {
+                thread.errno = Errno::EFAULT;
+                return -1;
+            }
+            let rect = unsafe { *user_rect_ptr };
+            let mut rect_box = Box::new(rect);
+            interrupts::enable();
+            let res = fs_api::ioctl(
+                &file.path,
+                request,
+                rect_box.as_mut() as *mut FramebufferRect as u64,
+            );
+            drop(rect_box);
+            res
+        }
+        FB_IOCTL_DRAW => {
+            if arg == 0 {
+                thread.errno = Errno::EFAULT;
+                return -1;
+            }
+            let user_req_ptr = arg as *const FramebufferDraw;
+            if user_req_ptr.is_null() {
+                thread.errno = Errno::EFAULT;
+                return -1;
+            }
+            let user_req = unsafe { *user_req_ptr };
+            if user_req.width == 0 || user_req.height == 0 {
+                thread.errno = Errno::EINVAL;
+                return -1;
+            }
+            let Some(total_pixels) = user_req.width.checked_mul(user_req.height) else {
+                thread.errno = Errno::EINVAL;
+                return -1;
+            };
+            let Ok(pixel_count) = usize::try_from(total_pixels) else {
+                thread.errno = Errno::EINVAL;
+                return -1;
+            };
+            if user_req.pixels.is_null() {
+                thread.errno = Errno::EFAULT;
+                return -1;
+            }
+            let user_pixels = unsafe { core::slice::from_raw_parts(user_req.pixels, pixel_count) };
+            let mut pixels = Vec::new();
+            if pixels.try_reserve_exact(pixel_count).is_err() {
+                thread.errno = Errno::ENOMEM;
+                return -1;
+            }
+            pixels.extend_from_slice(user_pixels);
+            let command = FramebufferDrawCommand {
+                x: user_req.x,
+                y: user_req.y,
+                width: user_req.width,
+                height: user_req.height,
+                pixels: pixels.into_boxed_slice(),
+            };
+            let command_ptr = Box::into_raw(Box::new(command));
+            interrupts::enable();
+            let res = fs_api::ioctl(&file.path, request, command_ptr as u64);
+            if res.is_err() {
+                unsafe {
+                    drop(Box::from_raw(command_ptr));
+                }
+            }
+            res
+        }
+        FB_IOCTL_SCREEN_INFO => {
+            if arg == 0 {
+                thread.errno = Errno::EFAULT;
+                return -1;
+            }
+            let user_info_ptr = arg as *mut FramebufferInfo;
+            if user_info_ptr.is_null() {
+                thread.errno = Errno::EFAULT;
+                return -1;
+            }
+            let mut info_box = Box::new(FramebufferInfo::default());
+            interrupts::enable();
+            let res = fs_api::ioctl(
+                &file.path,
+                request,
+                info_box.as_mut() as *mut FramebufferInfo as u64,
+            );
+            if let Ok(_) = res {
+                unsafe {
+                    core::ptr::write(user_info_ptr, *info_box);
+                }
+            }
+            res
+        }
+        FB_IOCTL_RENDER => {
+            interrupts::enable();
+            fs_api::ioctl(&file.path, request, 0)
+        }
+        _ => {
+            interrupts::enable();
+            fs_api::ioctl(&file.path, request, arg)
+        }
+    };
 
-    match fs_api::ioctl(&file.path, request, arg) {
+    match result {
         Ok(value) => value as i64,
         Err(err) => {
             thread.errno = Errno::from(err);

@@ -1,12 +1,14 @@
 use alloc::vec::Vec;
+use spin::Mutex;
 use thiserror::Error;
 // Re-export noto-sans-mono-bitmap types for user programs
 pub use noto_sans_mono_bitmap::{FontWeight, RasterHeight};
 use noto_sans_mono_bitmap::{get_raster, get_raster_width};
 
 use crate::{
+    io::{IoError, ioctl as fd_ioctl, open},
     math::isqrt,
-    sys::{Errno, SYS_DRAW, SYS_DRAW_RECT, SYS_RENDER, SYS_SCREEN_INFO, calls as syscall, errno},
+    sys::Errno,
 };
 
 /// Graphics operation error type
@@ -41,6 +43,72 @@ impl From<Errno> for GraphicsError {
             _ => GraphicsError::Unknown,
         }
     }
+}
+
+impl From<IoError> for GraphicsError {
+    fn from(err: IoError) -> Self {
+        match err {
+            IoError::InvalidInput => GraphicsError::InvalidInput,
+            IoError::OutOfMemory => GraphicsError::OutOfMemory,
+            IoError::Fault => GraphicsError::Fault,
+            IoError::Unknown | IoError::Interrupted => GraphicsError::Unknown,
+        }
+    }
+}
+
+const FB_IOCTL_DRAW_RECT: u64 = 0x4642_0001;
+const FB_IOCTL_RENDER: u64 = 0x4642_0002;
+const FB_IOCTL_DRAW: u64 = 0x4642_0003;
+const FB_IOCTL_SCREEN_INFO: u64 = 0x4642_0004;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct FramebufferRect {
+    x: u64,
+    y: u64,
+    width: u64,
+    height: u64,
+    color: u32,
+    _padding: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct FramebufferDraw {
+    pixels: *const u32,
+    x: u64,
+    y: u64,
+    width: u64,
+    height: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+struct FramebufferInfo {
+    width: u32,
+    height: u32,
+}
+
+static FRAMEBUFFER_FD: Mutex<Option<u64>> = Mutex::new(None);
+
+fn framebuffer_fd() -> GraphicsResult<u64> {
+    let mut guard = FRAMEBUFFER_FD.lock();
+    if let Some(fd) = *guard {
+        return Ok(fd);
+    }
+
+    match open("/dev/fb", 0) {
+        Ok(fd) => {
+            *guard = Some(fd);
+            Ok(fd)
+        }
+        Err(err) => Err(GraphicsError::from(err)),
+    }
+}
+
+fn framebuffer_ioctl(request: u64, arg: u64) -> GraphicsResult<u64> {
+    let fd = framebuffer_fd()?;
+    fd_ioctl(fd, request, arg).map_err(GraphicsError::from)
 }
 
 pub type GraphicsResult<T> = Result<T, GraphicsError>;
@@ -637,38 +705,45 @@ impl BlendMode {
 
 /// Draw a rectangle directly to the screen
 pub fn draw_rect(x: u64, y: u64, width: u64, height: u64, color: Color) -> GraphicsResult<()> {
-    let result =
-        unsafe { syscall::syscall5(SYS_DRAW_RECT, x, y, width, height, color.raw() as u64) };
-    if result == !0u64 {
-        Err(GraphicsError::from(errno()))
-    } else {
-        Ok(())
+    if width == 0 || height == 0 {
+        return Err(GraphicsError::InvalidInput);
     }
+
+    let mut rect = FramebufferRect {
+        x,
+        y,
+        width,
+        height,
+        color: color.raw(),
+        _padding: 0,
+    };
+
+    framebuffer_ioctl(
+        FB_IOCTL_DRAW_RECT,
+        (&mut rect as *mut FramebufferRect) as u64,
+    )?;
+
+    Ok(())
 }
 
 /// Render all pending draw operations to the screen
 pub fn render() -> GraphicsResult<()> {
-    let result = unsafe { syscall::syscall0(SYS_RENDER) };
-    if result == !0u64 {
-        Err(GraphicsError::from(errno()))
-    } else {
-        Ok(())
-    }
+    framebuffer_ioctl(FB_IOCTL_RENDER, 0)?;
+    Ok(())
 }
 
 /// Get screen information
 pub fn screen_info() -> GraphicsResult<ScreenInfo> {
-    let mut info = ScreenInfo {
-        width: 0,
-        height: 0,
-    };
-    let result = unsafe { syscall::syscall1(SYS_SCREEN_INFO, &mut info as *mut _ as u64) };
+    let mut info = FramebufferInfo::default();
+    framebuffer_ioctl(
+        FB_IOCTL_SCREEN_INFO,
+        (&mut info as *mut FramebufferInfo) as u64,
+    )?;
 
-    if result == !0u64 {
-        Err(GraphicsError::from(errno()))
-    } else {
-        Ok(info)
-    }
+    Ok(ScreenInfo {
+        width: info.width as usize,
+        height: info.height as usize,
+    })
 }
 
 #[repr(C)]
@@ -681,16 +756,6 @@ pub struct ScreenInfo {
 #[derive(Debug, Clone)]
 pub struct DrawRequest {
     pub pixels: Vec<u32>,
-    pub x: u64,
-    pub y: u64,
-    pub width: u64,
-    pub height: u64,
-}
-
-#[derive(Debug, Clone)]
-#[repr(C)]
-struct DrawRequestInput {
-    pub pixels: *const u32,
     pub x: u64,
     pub y: u64,
     pub width: u64,
@@ -1053,19 +1118,17 @@ impl DrawRequest {
 
     /// Draw this request to the screen
     pub fn draw(&self) -> GraphicsResult<()> {
-        let req = DrawRequestInput {
+        let request = FramebufferDraw {
             pixels: self.pixels.as_ptr(),
             height: self.height,
             width: self.width,
             x: self.x,
             y: self.y,
         };
-        let result = unsafe { syscall::syscall1(SYS_DRAW, (&raw const req) as u64) };
-        if result == !0u64 {
-            Err(GraphicsError::from(errno()))
-        } else {
-            Ok(())
-        }
+
+        framebuffer_ioctl(FB_IOCTL_DRAW, (&request as *const FramebufferDraw) as u64)?;
+
+        Ok(())
     }
 
     /// Render a character at the specified position
