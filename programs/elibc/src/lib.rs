@@ -19,7 +19,7 @@ pub use fs::{
     mount_partition, remove_dir, remove_dir_all, remove_file,
 };
 pub use memory::{mmap, munmap};
-pub use process::{WaitPidStatus, dup2, pipe, spawn, sys_exit, sys_getpid, sys_waitpid};
+pub use process::{WaitPidStatus, dup2, pipe, sleep_ms, spawn, sys_exit, sys_getpid, sys_waitpid};
 pub use sys::{Errno, errno};
 
 // File I/O syscalls

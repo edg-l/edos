@@ -4,7 +4,7 @@ use core::hint::spin_loop;
 use crate::sys::{
     Errno, SYS_WAIT_PID,
     calls::{syscall0, syscall1, syscall2, syscall3, syscall5},
-    constants::{SYS_DUP2, SYS_EXIT, SYS_GETPID, SYS_PIPE, SYS_SPAWN},
+    constants::{SYS_DUP2, SYS_EXIT, SYS_GETPID, SYS_PIPE, SYS_SLEEP_MS, SYS_SPAWN},
     errno,
 };
 
@@ -51,6 +51,16 @@ pub fn sys_exit(code: i32) -> ! {
     unsafe { syscall1(SYS_EXIT, code as u64) };
     loop {
         spin_loop();
+    }
+}
+
+/// Sleep the current thread for at least `ms` milliseconds.
+pub fn sleep_ms(ms: u64) -> Result<(), Errno> {
+    let result = unsafe { syscall1(SYS_SLEEP_MS, ms) };
+    if result == u64::MAX {
+        Err(errno())
+    } else {
+        Ok(())
     }
 }
 

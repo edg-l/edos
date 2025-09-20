@@ -1,11 +1,11 @@
 use alloc::{format, string::String, vec::Vec};
-use core::{hint::spin_loop, str};
+use core::str;
 
 use elibc::{
     KeyEvent, WaitPidStatus, get_raw_input,
     io::{PollState, SelectFd, get_kernel_logs, keyboard_fd, select},
     process::sys_waitpid,
-    read_from_fd,
+    read_from_fd, sleep_ms,
 };
 
 mod command;
@@ -38,12 +38,14 @@ pub fn run() -> i32 {
 
     while keyboard_handle.is_none() {
         keyboard_handle = keyboard_fd();
-        // todo add sleep here
-        spin_loop();
+        // Avoid a tight busy loop while the keyboard device comes up.
+        let _ = sleep_ms(10);
     }
 
+    let kb_handle = keyboard_handle.unwrap();
+
     select_entries.push(SelectFd::new(
-        keyboard_handle.unwrap(),
+        kb_handle,
         PollState {
             readable: true,
             writable: false,

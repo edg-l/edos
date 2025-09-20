@@ -1,4 +1,4 @@
-use core::{arch::naked_asm, ptr};
+use core::{arch::naked_asm, ptr, time::Duration};
 
 use alloc::{format, string::ToString, vec::Vec};
 use x86_64::{
@@ -199,6 +199,7 @@ const SYS_RMDIR: u64 = 205;
 const SYS_RMDIR_ALL: u64 = 206;
 const SYS_UNLINK: u64 = 207;
 const SYS_LIST_MOUNTS: u64 = 208;
+const SYS_SLEEP_MS: u64 = 209;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -329,6 +330,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let buffer = ctx.rdi as *mut u8;
             let size = ctx.rsi as usize;
             ctx.rax = sys_list_mounts(buffer, size) as u64;
+        }
+        SYS_SLEEP_MS => {
+            let milliseconds = ctx.rdi;
+            ctx.rax = sys_sleep_ms(milliseconds) as u64;
         }
         SYS_MOUNT => {
             let device_id = ctx.rdi;
@@ -480,6 +485,21 @@ pub fn sys_kernel_log(log_buffer: *mut u8, size: usize) -> i64 {
     unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), log_buffer, buf.len()) };
 
     buf.len() as i64
+}
+
+fn sys_sleep_ms(milliseconds: u64) -> u64 {
+    let scheduler = sched();
+    let info = scheduler.current_thread_info();
+    let mut thread = info.lock();
+    thread.errno = Errno::Clear;
+
+    let duration = Duration::from_millis(milliseconds);
+
+    drop(thread);
+
+    scheduler.thread_sleep(duration);
+
+    0
 }
 
 fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
