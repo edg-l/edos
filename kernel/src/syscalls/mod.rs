@@ -28,7 +28,6 @@ use crate::{
             sys_chdir, sys_close, sys_getcwd, sys_ioctl, sys_list_dir, sys_open, sys_poll,
             sys_read, sys_write,
         },
-        keyboard::sys_keyboard_raw,
         memory::{sys_mmap, sys_munmap},
     },
     thread::{
@@ -40,7 +39,6 @@ use crate::{
 mod fs;
 mod graphics;
 mod io;
-mod keyboard;
 mod memory;
 
 /// # Safety
@@ -196,7 +194,6 @@ const SYS_DRAW_RECT: u64 = 100;
 const SYS_RENDER: u64 = 101;
 const SYS_SCREEN_INFO: u64 = 102;
 const SYS_DRAW: u64 = 103;
-const SYS_RAW_INPUT: u64 = 200;
 const SYS_KERNEL_LOGS: u64 = 201;
 const SYS_WAIT_PID: u64 = 40;
 const SYS_MOUNT: u64 = 202;
@@ -231,12 +228,6 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let buffer_ptr = ctx.rsi as *mut u8;
             let count = ctx.rdx as usize;
             ctx.rax = sys_read(fd, buffer_ptr, count) as u64;
-        }
-        SYS_RAW_INPUT => {
-            let timeout = ctx.rdi;
-            let buffer_ptr = ctx.rsi as *mut u32;
-            let count = ctx.rdx as usize;
-            ctx.rax = sys_keyboard_raw(timeout, buffer_ptr, count) as u64;
         }
         SYS_IOCTL => {
             let fd = ctx.rdi;

@@ -21,7 +21,6 @@ pub const SYS_DRAW_RECT: u64 = 100;
 pub const SYS_RENDER: u64 = 101;
 pub const SYS_SCREEN_INFO: u64 = 102;
 pub const SYS_DRAW: u64 = 103;
-pub const SYS_RAW_INPUT: u64 = 200;
 pub const SYS_KERNEL_LOGS: u64 = 201;
 pub const SYS_MOUNT: u64 = 202;
 pub const SYS_LIST_PARTITIONS: u64 = 203;
