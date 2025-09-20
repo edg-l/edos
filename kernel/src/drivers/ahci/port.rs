@@ -411,7 +411,7 @@ impl AhciPort {
 
                 // ATAPI sectors are typically 2048 bytes, but the API expects 512-byte sectors
                 // We need to handle this translation
-                let atapi_sectors = (sectors + 3) / 4; // Round up: 4 x 512-byte = 1 x 2048-byte
+                let atapi_sectors = sectors.div_ceil(4); // Round up: 4 x 512-byte = 1 x 2048-byte
                 let atapi_lba = lba / 4; // Each ATAPI sector contains 4 ATA sectors
 
                 // Allocate larger buffer for ATAPI

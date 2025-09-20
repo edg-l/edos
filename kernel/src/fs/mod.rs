@@ -53,6 +53,7 @@ pub fn init() {
     queue_spawn_kthread_named("fs", fs_main_thread as u64);
 }
 
+#[expect(clippy::enum_variant_names)]
 #[derive(Debug, Error, Clone)]
 pub enum Error {
     #[error("file not found")]
