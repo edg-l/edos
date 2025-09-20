@@ -26,20 +26,20 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
     };
 
     match framebuffer::try_handle(&file, request, arg) {
-        Some(Ok(value)) => value as i64,
+        Some(Ok(value)) => return value as i64,
         Some(Err(errno)) => {
             thread.errno = errno;
-            -1
+            return -1;
         }
-        None => {
-            interrupts::enable();
-            match fs_api::ioctl(&file.path, request, arg) {
-                Ok(value) => value as i64,
-                Err(err) => {
-                    thread.errno = Errno::from(err);
-                    -1
-                }
-            }
+        None => {}
+    }
+
+    interrupts::enable();
+    match fs_api::ioctl(&file.path, request, arg) {
+        Ok(value) => value as i64,
+        Err(err) => {
+            thread.errno = Errno::from(err);
+            -1
         }
     }
 }
