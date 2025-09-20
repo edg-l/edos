@@ -220,11 +220,11 @@ pub fn ioctl(path: &Path, request: u64, arg: u64) -> Result<u64, Error> {
     r
 }
 
-pub fn poll(path: &Path) -> Result<PollState, Error> {
+pub fn poll(path: &Path, timeout: Duration) -> Result<PollState, Error> {
     let FsResponse::Poll(r) = send_request(
         FsRequest::PathRequest {
             path: path.clone(),
-            op: PathOp::Poll,
+            op: PathOp::Poll { timeout },
         },
         Duration::from_secs(5),
     ) else {

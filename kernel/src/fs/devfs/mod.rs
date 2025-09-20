@@ -1,5 +1,7 @@
 //! Device filesystem for exposing kernel devices to userspace.
 
+use core::time::Duration;
+
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     string::{String, ToString},
@@ -51,7 +53,7 @@ pub trait DevFsDevice: Send + Sync {
         Err(DevFsError::Unsupported)
     }
 
-    fn poll(&self) -> Result<PollState, DevFsError> {
+    fn poll(&self, timeout: Duration) -> Result<PollState, DevFsError> {
         Err(DevFsError::Unsupported)
     }
 
@@ -334,14 +336,14 @@ impl FileSystem for DevFsHandle {
         }
     }
 
-    fn poll(&mut self, path: &Path) -> Result<PollState, fs::Error> {
+    fn poll(&mut self, path: &Path, timeout: Duration) -> Result<PollState, fs::Error> {
         let normalized = path.normalize();
         let state = self.shared.read();
         let device = state.get_device(&normalized).map(|d| d.device.clone());
         drop(state);
 
         if let Some(device) = device {
-            device.poll().map_err(fs::Error::from)
+            device.poll(timeout).map_err(fs::Error::from)
         } else {
             Err(fs::Error::FileNotFound)
         }

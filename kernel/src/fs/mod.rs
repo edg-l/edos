@@ -1,6 +1,9 @@
 #![expect(unused)]
 
-use core::ffi::{CStr, c_void};
+use core::{
+    ffi::{CStr, c_void},
+    time::Duration,
+};
 
 use alloc::{
     boxed::Box,
@@ -121,7 +124,7 @@ pub trait FileSystem {
         Err(Error::IoError)
     }
 
-    fn poll(&mut self, _path: &Path) -> Result<PollState, Error> {
+    fn poll(&mut self, _path: &Path, timeout: Duration) -> Result<PollState, Error> {
         Err(Error::IoError)
     }
 
@@ -310,7 +313,7 @@ pub(super) enum PathOp {
     FileInfo,
     Flush,
     Ioctl { request: u64, arg: u64 },
-    Poll,
+    Poll { timeout: Duration },
     Mmap { offset: usize, length: usize },
 }
 
@@ -354,6 +357,7 @@ pub(super) enum FsThreadCommand {
     },
     Poll {
         path: Path,
+        timeout: Duration,
     },
     Mmap {
         path: Path,
@@ -421,7 +425,7 @@ fn pathop_to_partition_command(op: PathOp, path: Path, real_path: Path) -> FsThr
         PathOp::FileInfo => FsThreadCommand::FileInfo { path: real_path },
         PathOp::Flush => FsThreadCommand::Flush,
         PathOp::Ioctl { request, arg } => FsThreadCommand::Ioctl { path, request, arg },
-        PathOp::Poll => FsThreadCommand::Poll { path },
+        PathOp::Poll { timeout } => FsThreadCommand::Poll { path, timeout },
         PathOp::Mmap { offset, length } => FsThreadCommand::Mmap {
             path,
             offset,
@@ -941,8 +945,8 @@ fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
                     let res = fs.ioctl(&path, request, arg);
                     req.response.send(FsResponse::Ioctl(res));
                 }
-                FsThreadCommand::Poll { path } => {
-                    let res = fs.poll(&path);
+                FsThreadCommand::Poll { path, timeout } => {
+                    let res = fs.poll(&path, timeout);
                     req.response.send(FsResponse::Poll(res));
                 }
                 FsThreadCommand::Mmap {

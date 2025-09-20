@@ -1,3 +1,6 @@
+use core::time::Duration;
+
+use alloc::{sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
 use spin::Once;
@@ -8,6 +11,7 @@ use x86_64::{
 
 use crate::{
     apic::get_lapic,
+    fs::{DevFsDevice, DevFsError, MmapRegion, PollState, register_device_str},
     thread::{
         broadcast::{LockedBroadcast, new_broadcast},
         scheduler::sched,
@@ -53,6 +57,8 @@ pub extern "C" fn driver_main() -> ! {
     );
 
     let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
+    let device = Arc::new(KeyboardDevice);
+    register_device_str("/kbd", device).expect("Error registering device");
 
     loop {
         while let Some(scancode) = queue.pop() {
@@ -92,5 +98,66 @@ unsafe fn enable_ps2_keyboard() {
 
         // Reset keyboard
         data_port.write(0xFF_u8);
+    }
+}
+
+#[derive(Debug)]
+pub struct KeyboardDevice;
+
+impl DevFsDevice for KeyboardDevice {
+    fn read(&self, _offset: usize, count: usize) -> Result<Vec<u8>, DevFsError> {
+        let rx = KEYBOARD_BROADCAST.lock().subscribe_or_get();
+        let mut buffer = Vec::new();
+
+        // fill remaining
+        while buffer.len() + 3 < count
+            && let Some(key) = rx.try_recv()
+        {
+            let bytes = convert_key(key).to_le_bytes();
+            buffer.extend(bytes);
+        }
+
+        Ok(buffer)
+    }
+
+    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, DevFsError> {
+        Err(DevFsError::Unsupported)
+    }
+
+    fn ioctl(&self, _request: u64, _arg: u64) -> Result<u64, DevFsError> {
+        Err(DevFsError::Unsupported)
+    }
+
+    fn poll(&self, timeout: Duration) -> Result<PollState, DevFsError> {
+        let rx = KEYBOARD_BROADCAST.lock().subscribe_or_get();
+
+        if rx.poll(timeout) {
+            Ok(PollState {
+                readable: true,
+                error: false,
+                writable: false,
+            })
+        } else {
+            Ok(PollState {
+                readable: false,
+                error: false,
+                writable: false,
+            })
+        }
+    }
+
+    fn mmap(&self, _offset: usize, _length: usize) -> Result<MmapRegion, DevFsError> {
+        Err(DevFsError::Unsupported)
+    }
+
+    fn size(&self) -> u64 {
+        0
+    }
+}
+
+fn convert_key(key: DecodedKey) -> u32 {
+    match key {
+        DecodedKey::Unicode(c) => c as u32,
+        DecodedKey::RawKey(scancode) => scancode as u32 | 0x80000000, // Set high bit for raw
     }
 }

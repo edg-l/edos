@@ -517,7 +517,7 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
     }
 }
 
-pub fn sys_poll(fd: u64, events_ptr: *mut PollState, _timeout_ms: u64) -> i64 {
+pub fn sys_poll(fd: u64, events_ptr: *mut PollState, timeout_ms: u64) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
     let mut thread = info.lock();
@@ -543,7 +543,7 @@ pub fn sys_poll(fd: u64, events_ptr: *mut PollState, _timeout_ms: u64) -> i64 {
 
     interrupts::enable();
 
-    match fs_api::poll(&file.path) {
+    match fs_api::poll(&file.path, Duration::from_millis(timeout_ms)) {
         Ok(state) => {
             unsafe {
                 core::ptr::write(events_ptr, state);

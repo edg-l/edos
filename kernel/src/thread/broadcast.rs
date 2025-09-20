@@ -119,6 +119,23 @@ impl<T> Receiver<T> {
         self.queue.pop()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    /// Returns immediately if there is content, otherwise
+    /// waits until timeout waiting for content, returning
+    /// true if there is content to receive.
+    pub fn poll(&self, timeout: Duration) -> bool {
+        if !self.is_empty() {
+            return true;
+        }
+
+        sched().thread_wait_timeout(timeout);
+
+        self.is_empty()
+    }
+
     /// Blocking receive with a timeout
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, ReceiveError> {
         if let Some(v) = self.try_recv() {
