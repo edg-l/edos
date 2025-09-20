@@ -27,3 +27,18 @@ pub fn set_apic_timer_and_enable(duration: Duration) {
         lapic.enable_timer();
     }
 }
+
+pub fn disable_apic_timer() {
+    unsafe {
+        let mut lapic = get_lapic();
+        lapic.disable_timer();
+    }
+}
+
+fn duration_to_initial_count(duration: Duration, apic_frequency_hz: u64) -> u32 {
+    let nanos = duration.as_nanos();
+    let ticks = nanos.saturating_mul(apic_frequency_hz as u128) / 1_000_000_000u128;
+
+    let clamped = ticks.clamp(1, u32::MAX as u128);
+    clamped as u32
+}
