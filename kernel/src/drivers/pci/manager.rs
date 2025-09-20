@@ -37,6 +37,16 @@ impl PciManager {
         }
     }
 
+    fn read_config_u16(&mut self, address: PciAddress, offset: u8) -> u16 {
+        let shift = (offset & 0x2) * 8;
+        (self.read_config_u32(address, offset) >> shift) as u16
+    }
+
+    fn read_config_u8(&mut self, address: PciAddress, offset: u8) -> u8 {
+        let shift = (offset & 0x3) * 8;
+        (self.read_config_u32(address, offset) >> shift) as u8
+    }
+
     // Step 2: Check if device exists
     fn device_exists(&mut self, address: PciAddress) -> bool {
         let vendor_id = self.read_config_u32(address, 0) & 0xFFFF;
@@ -98,6 +108,10 @@ impl PciManager {
         &self.devices
     }
 
+    pub fn capabilities<'a>(&'a mut self, address: PciAddress) -> CapabilityIter<'a> {
+        CapabilityIter::new(self, address)
+    }
+
     // Helper to decode class information
     pub fn decode_class(class_code: u8, subclass: u8) -> (&'static str, &'static str) {
         match (class_code, subclass) {
@@ -113,5 +127,59 @@ impl PciManager {
             (0x0C, 0x03) => ("Serial Bus", "USB Controller"),
             _ => ("Unknown", "Unknown"),
         }
+    }
+}
+
+pub struct CapabilityIter<'a> {
+    manager: &'a mut PciManager,
+    address: PciAddress,
+    next: u8,
+    remaining: u8,
+}
+
+impl<'a> CapabilityIter<'a> {
+    const MAX_STEPS: u8 = 48;
+
+    fn new(manager: &'a mut PciManager, address: PciAddress) -> Self {
+        let status = manager.read_config_u16(address, 0x06);
+        let has_capabilities = (status & 0x10) != 0;
+        let next = if has_capabilities {
+            manager.read_config_u8(address, 0x34) & 0xFC
+        } else {
+            0
+        };
+
+        Self {
+            manager,
+            address,
+            next,
+            remaining: Self::MAX_STEPS,
+        }
+    }
+}
+
+impl Iterator for CapabilityIter<'_> {
+    type Item = (u8, u8);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next == 0 || self.remaining == 0 {
+            return None;
+        }
+
+        self.remaining -= 1;
+
+        let offset = self.next;
+        let id = self.manager.read_config_u8(self.address, offset);
+        let next_ptr = self.manager.read_config_u8(self.address, offset + 1) & 0xFC;
+
+        // Guard against self-referential loops by clearing next pointer when
+        // the link stops moving forward.
+        if next_ptr == offset {
+            self.next = 0;
+        } else {
+            self.next = next_ptr;
+        }
+
+        Some((id, offset))
     }
 }
