@@ -133,7 +133,7 @@ impl<T> Receiver<T> {
 
         sched().thread_wait_timeout(timeout);
 
-        self.is_empty()
+        !self.is_empty()
     }
 
     /// Blocking receive with a timeout

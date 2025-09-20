@@ -7,7 +7,7 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{Errno, SYS_IOCTL, SYS_KERNEL_LOGS, SYS_POLL, SYS_RAW_INPUT, errno, syscall2, syscall3},
+    sys::{Errno, SYS_IOCTL, SYS_KERNEL_LOGS, SYS_POLL, errno, syscall2, syscall3},
     sys_open as raw_sys_open, sys_read, sys_write,
 };
 
@@ -237,33 +237,130 @@ pub enum KeyEvent {
     RawScancode(u8),
 }
 
+static KEYBOARD_FD: Mutex<Option<u64>> = Mutex::new(None);
+
+fn keyboard_fd() -> Option<u64> {
+    let mut fd_guard = KEYBOARD_FD.lock();
+    if let Some(fd) = *fd_guard {
+        return Some(fd);
+    }
+
+    match open("/dev/kbd", 0) {
+        Ok(fd) => {
+            *fd_guard = Some(fd);
+            Some(fd)
+        }
+        Err(_) => None,
+    }
+}
+
+fn release_keyboard_fd(fd: u64) {
+    let mut fd_guard = KEYBOARD_FD.lock();
+    if fd_guard
+        .as_ref()
+        .map(|stored| *stored == fd)
+        .unwrap_or(false)
+    {
+        if let Some(fd) = fd_guard.take() {
+            let _ = crate::sys_close(fd);
+        }
+    }
+}
+
+fn read_keyboard_events(
+    fd: u64,
+    max_events: usize,
+    out_buf: &mut Vec<KeyEvent>,
+) -> IoResult<usize> {
+    if max_events == 0 {
+        return Ok(0);
+    }
+
+    let bytes_to_read = max_events
+        .checked_mul(core::mem::size_of::<u32>())
+        .ok_or(IoError::InvalidInput)?;
+
+    let mut buffer = alloc::vec![0u8; bytes_to_read];
+    let bytes_read = read_from_fd(fd, &mut buffer)?;
+
+    if bytes_read == 0 {
+        return Ok(0);
+    }
+
+    let mut appended = 0;
+    for chunk in buffer[..bytes_read].chunks_exact(core::mem::size_of::<u32>()) {
+        if appended >= max_events {
+            break;
+        }
+
+        let value = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        out_buf.push(decode_key_event(value));
+        appended += 1;
+    }
+
+    Ok(appended)
+}
+
+fn decode_key_event(value: u32) -> KeyEvent {
+    if value & 0x8000_0000 != 0 {
+        let scancode = (value & 0x7FFF_FFFF) as u8;
+        KeyEvent::RawScancode(scancode)
+    } else {
+        let ch = char::from_u32(value).unwrap_or('\0');
+        KeyEvent::Unicode(ch)
+    }
+}
+
 /// Try to get `count` key events. This may not fill up all the buffer, usually just returns one.
 pub fn get_raw_input(timeout_ms: u64, out_buf: &mut Vec<KeyEvent>, count: usize) {
-    let mut buf: Vec<u32> = alloc::vec![0; count];
-
-    let result = unsafe {
-        syscall3(
-            SYS_RAW_INPUT,
-            timeout_ms,
-            buf.as_mut_ptr() as u64,
-            count as u64,
-        )
-    };
-
-    if result == !0u64 {
+    if count == 0 {
         return;
     }
 
-    for scancode in buf {
-        if scancode & 0x80000000 != 0 {
-            // Raw scancode
-            let key = KeyEvent::RawScancode((scancode & 0x7FFFFFFF) as u8);
-            out_buf.push(key);
-        } else {
-            // Unicode character
-            let key = KeyEvent::Unicode(char::from_u32(scancode).unwrap_or('\0'));
-            out_buf.push(key);
+    let Some(fd) = keyboard_fd() else {
+        return;
+    };
+
+    let mut remaining = count;
+
+    // Drain any pending events without blocking first.
+    loop {
+        match read_keyboard_events(fd, remaining, out_buf) {
+            Ok(0) => break,
+            Ok(read) => {
+                remaining = remaining.saturating_sub(read);
+                if remaining == 0 {
+                    return;
+                }
+            }
+            Err(err) => {
+                if matches!(err, IoError::InvalidInput) {
+                    // Likely overflow configuration; nothing we can do here.
+                }
+                release_keyboard_fd(fd);
+                return;
+            }
         }
+    }
+
+    if remaining == 0 || timeout_ms == 0 {
+        return;
+    }
+
+    match poll_fd(fd, timeout_ms) {
+        Ok(state) => {
+            if !state.readable {
+                return;
+            }
+        }
+        Err(_) => {
+            release_keyboard_fd(fd);
+            return;
+        }
+    }
+
+    if read_keyboard_events(fd, remaining, out_buf).is_err() {
+        release_keyboard_fd(fd);
     }
 }
 
