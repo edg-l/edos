@@ -7,7 +7,7 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{Errno, SYS_IOCTL, SYS_KERNEL_LOGS, SYS_POLL, errno, syscall2, syscall3},
+    sys::{Errno, SYS_IOCTL, SYS_KERNEL_LOGS, SYS_POLL, errno, syscall2, syscall3, syscall5},
     sys_open as raw_sys_open, sys_read, sys_write,
 };
 
@@ -401,8 +401,8 @@ pub fn write_all_fd(fd: u64, buf: &[u8]) -> IoResult<()> {
 }
 
 /// Issue a device-specific ioctl on a file descriptor.
-pub fn ioctl(fd: u64, request: u64, arg: u64) -> IoResult<u64> {
-    let result = unsafe { syscall3(SYS_IOCTL, fd, request, arg) as isize };
+pub fn ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) -> IoResult<u64> {
+    let result = unsafe { syscall5(SYS_IOCTL, fd, request, arg, arg_len as u64, flags) as isize };
     if result >= 0 {
         Ok(result as u64)
     } else {

@@ -26,6 +26,10 @@ pub const SYS_RMDIR_ALL: u64 = 206;
 pub const SYS_UNLINK: u64 = 207;
 pub const SYS_LIST_MOUNTS: u64 = 208;
 
+// Ioctl buffer flags
+pub const IOCTL_ARG_IN: u64 = 1;
+pub const IOCTL_ARG_OUT: u64 = 1 << 1;
+
 // Memory protection flags
 pub const PROT_READ: u32 = 0x1;
 pub const PROT_WRITE: u32 = 0x2;

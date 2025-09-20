@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{sync::Arc, vec::Vec};
 
 use crate::{
     fs::{DevFsDevice, DevFsError, register_device_str},
@@ -24,11 +24,11 @@ pub struct FramebufferRect {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FramebufferDraw {
-    pub pixels: *const u32,
     pub x: u64,
     pub y: u64,
     pub width: u64,
     pub height: u64,
+    pub pixel_count: u64,
 }
 
 #[repr(C)]
@@ -36,26 +36,6 @@ pub struct FramebufferDraw {
 pub struct FramebufferInfo {
     pub width: u32,
     pub height: u32,
-}
-
-pub struct FramebufferDrawCommand {
-    pub x: u64,
-    pub y: u64,
-    pub width: u64,
-    pub height: u64,
-    pub pixels: Box<[u32]>,
-}
-
-impl FramebufferDrawCommand {
-    pub fn into_draw_request(self) -> DrawRequest {
-        DrawRequest {
-            pixels: self.pixels,
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
-        }
-    }
 }
 
 pub struct FramebufferDevice;
@@ -90,12 +70,51 @@ impl DevFsDevice for FramebufferDevice {
                 if arg == 0 {
                     return Err(DevFsError::IoError);
                 }
-                let command_ptr = arg as *mut FramebufferDrawCommand;
-                if command_ptr.is_null() {
+                let draw_ptr = arg as *const FramebufferDraw;
+                if draw_ptr.is_null() {
                     return Err(DevFsError::IoError);
                 }
-                let command = unsafe { Box::from_raw(command_ptr) };
-                let request = command.into_draw_request();
+                let header = unsafe { *draw_ptr };
+
+                if header.width == 0 || header.height == 0 {
+                    return Err(DevFsError::IoError);
+                }
+
+                let expected_pixels = header
+                    .width
+                    .checked_mul(header.height)
+                    .ok_or(DevFsError::IoError)?;
+
+                if header.pixel_count != expected_pixels {
+                    return Err(DevFsError::IoError);
+                }
+
+                let expected_len = header
+                    .pixel_count
+                    .checked_mul(4)
+                    .ok_or(DevFsError::IoError)? as usize;
+
+                let data_ptr =
+                    unsafe { (arg as *const u8).add(core::mem::size_of::<FramebufferDraw>()) };
+                let pixels_slice = unsafe {
+                    core::slice::from_raw_parts(data_ptr as *const u32, header.pixel_count as usize)
+                };
+
+                if pixels_slice.len() * core::mem::size_of::<u32>() != expected_len {
+                    return Err(DevFsError::IoError);
+                }
+
+                let mut pixels = Vec::with_capacity(pixels_slice.len());
+                pixels.extend_from_slice(pixels_slice);
+
+                let request = DrawRequest {
+                    pixels: pixels.into_boxed_slice(),
+                    x: header.x,
+                    y: header.y,
+                    width: header.width,
+                    height: header.height,
+                };
+
                 api::draw(request);
                 Ok(0)
             }

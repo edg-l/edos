@@ -8,7 +8,7 @@ use noto_sans_mono_bitmap::{get_raster, get_raster_width};
 use crate::{
     io::{IoError, ioctl as fd_ioctl, open},
     math::isqrt,
-    sys::Errno,
+    sys::{Errno, IOCTL_ARG_IN, IOCTL_ARG_OUT},
 };
 
 /// Graphics operation error type
@@ -75,11 +75,11 @@ struct FramebufferRect {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct FramebufferDraw {
-    pixels: *const u32,
     x: u64,
     y: u64,
     width: u64,
     height: u64,
+    pixel_count: u64,
 }
 
 #[repr(C)]
@@ -106,9 +106,14 @@ fn framebuffer_fd() -> GraphicsResult<u64> {
     }
 }
 
-fn framebuffer_ioctl(request: u64, arg: u64) -> GraphicsResult<u64> {
+fn framebuffer_ioctl_raw(
+    request: u64,
+    arg: u64,
+    arg_len: usize,
+    flags: u64,
+) -> GraphicsResult<u64> {
     let fd = framebuffer_fd()?;
-    fd_ioctl(fd, request, arg).map_err(GraphicsError::from)
+    fd_ioctl(fd, request, arg, arg_len, flags).map_err(GraphicsError::from)
 }
 
 pub type GraphicsResult<T> = Result<T, GraphicsError>;
@@ -718,9 +723,11 @@ pub fn draw_rect(x: u64, y: u64, width: u64, height: u64, color: Color) -> Graph
         _padding: 0,
     };
 
-    framebuffer_ioctl(
+    framebuffer_ioctl_raw(
         FB_IOCTL_DRAW_RECT,
         (&mut rect as *mut FramebufferRect) as u64,
+        core::mem::size_of::<FramebufferRect>(),
+        IOCTL_ARG_IN,
     )?;
 
     Ok(())
@@ -728,16 +735,18 @@ pub fn draw_rect(x: u64, y: u64, width: u64, height: u64, color: Color) -> Graph
 
 /// Render all pending draw operations to the screen
 pub fn render() -> GraphicsResult<()> {
-    framebuffer_ioctl(FB_IOCTL_RENDER, 0)?;
+    framebuffer_ioctl_raw(FB_IOCTL_RENDER, 0, 0, 0)?;
     Ok(())
 }
 
 /// Get screen information
 pub fn screen_info() -> GraphicsResult<ScreenInfo> {
     let mut info = FramebufferInfo::default();
-    framebuffer_ioctl(
+    framebuffer_ioctl_raw(
         FB_IOCTL_SCREEN_INFO,
         (&mut info as *mut FramebufferInfo) as u64,
+        core::mem::size_of::<FramebufferInfo>(),
+        IOCTL_ARG_OUT,
     )?;
 
     Ok(ScreenInfo {
@@ -1118,15 +1127,46 @@ impl DrawRequest {
 
     /// Draw this request to the screen
     pub fn draw(&self) -> GraphicsResult<()> {
-        let request = FramebufferDraw {
-            pixels: self.pixels.as_ptr(),
-            height: self.height,
-            width: self.width,
+        let pixel_count = self
+            .width
+            .checked_mul(self.height)
+            .ok_or(GraphicsError::InvalidInput)?;
+
+        if pixel_count == 0 {
+            return Ok(());
+        }
+
+        let header = FramebufferDraw {
             x: self.x,
             y: self.y,
+            width: self.width,
+            height: self.height,
+            pixel_count,
         };
 
-        framebuffer_ioctl(FB_IOCTL_DRAW, (&request as *const FramebufferDraw) as u64)?;
+        let header_bytes = core::mem::size_of::<FramebufferDraw>();
+        let pixel_bytes = (pixel_count as usize)
+            .checked_mul(core::mem::size_of::<u32>())
+            .ok_or(GraphicsError::InvalidInput)?;
+
+        let mut buffer = Vec::with_capacity(header_bytes + pixel_bytes);
+
+        buffer.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(
+                (&header as *const FramebufferDraw) as *const u8,
+                header_bytes,
+            )
+        });
+        buffer.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(self.pixels.as_ptr() as *const u8, pixel_bytes)
+        });
+
+        framebuffer_ioctl_raw(
+            FB_IOCTL_DRAW,
+            buffer.as_mut_ptr() as u64,
+            buffer.len(),
+            IOCTL_ARG_IN,
+        )?;
 
         Ok(())
     }

@@ -228,7 +228,9 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let fd = ctx.rdi;
             let request = ctx.rsi;
             let arg = ctx.rdx;
-            ctx.rax = sys_ioctl(fd, request, arg) as u64;
+            let arg_len = ctx.r10 as usize;
+            let flags = ctx.r8;
+            ctx.rax = sys_ioctl(fd, request, arg, arg_len, flags) as u64;
         }
         SYS_KERNEL_LOGS => {
             let buffer_ptr = ctx.rdi as *mut u8;
