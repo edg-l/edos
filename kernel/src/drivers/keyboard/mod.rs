@@ -3,7 +3,7 @@ use core::time::Duration;
 use alloc::{sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
-use spin::Once;
+use spin::{Mutex, Once};
 use x86_64::{
     instructions::{interrupts::without_interrupts, port::Port},
     structures::idt::InterruptStackFrame,
@@ -12,6 +12,7 @@ use x86_64::{
 use crate::{
     apic::get_lapic,
     fs::{DevFsDevice, DevFsError, MmapRegion, PollState, register_device_str},
+    memory::mapper::MemoryManager,
     thread::{
         broadcast::{LockedBroadcast, new_broadcast},
         scheduler::sched,
@@ -146,7 +147,12 @@ impl DevFsDevice for KeyboardDevice {
         }
     }
 
-    fn mmap(&self, _offset: usize, _length: usize) -> Result<MmapRegion, DevFsError> {
+    fn mmap(
+        &self,
+        _offset: usize,
+        _length: usize,
+        _memory: Arc<Mutex<MemoryManager>>,
+    ) -> Result<MmapRegion, DevFsError> {
         Err(DevFsError::Unsupported)
     }
 

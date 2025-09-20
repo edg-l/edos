@@ -10,9 +10,10 @@ use alloc::{
     collections::btree_map::BTreeMap,
     format,
     string::{String, ToString},
+    sync::Arc,
     vec::Vec,
 };
-use spin::Once;
+use spin::{Mutex, Once};
 use thiserror::Error;
 
 use crate::{
@@ -26,6 +27,7 @@ use crate::{
         path::Path,
     },
     log,
+    memory::mapper::MemoryManager,
     thread::{
         mailbox::Mailbox,
         scheduler::sched,
@@ -128,7 +130,13 @@ pub trait FileSystem {
         Err(Error::IoError)
     }
 
-    fn mmap(&mut self, _path: &Path, _offset: usize, _length: usize) -> Result<MmapRegion, Error> {
+    fn mmap(
+        &mut self,
+        _path: &Path,
+        _offset: usize,
+        _length: usize,
+        memory: Arc<Mutex<MemoryManager>>,
+    ) -> Result<MmapRegion, Error> {
         Err(Error::IoError)
     }
 }
@@ -304,17 +312,32 @@ pub(super) enum FsResponse {
 #[derive(Debug, Clone)]
 pub(super) enum PathOp {
     ListFiles,
-    ReadBytes { offset: usize, count: usize },
-    WriteBytes { offset: usize, data: Vec<u8> },
+    ReadBytes {
+        offset: usize,
+        count: usize,
+    },
+    WriteBytes {
+        offset: usize,
+        data: Vec<u8>,
+    },
     CreateFile,
     CreateDir,
     RemoveFile,
     RemoveDir,
     FileInfo,
     Flush,
-    Ioctl { request: u64, arg: u64 },
-    Poll { timeout: Duration },
-    Mmap { offset: usize, length: usize },
+    Ioctl {
+        request: u64,
+        arg: u64,
+    },
+    Poll {
+        timeout: Duration,
+    },
+    Mmap {
+        offset: usize,
+        length: usize,
+        memory: Arc<Mutex<MemoryManager>>,
+    },
 }
 
 // TODO: Add rmdir recursive in a atomic command
@@ -363,6 +386,7 @@ pub(super) enum FsThreadCommand {
         path: Path,
         offset: usize,
         length: usize,
+        memory: Arc<Mutex<MemoryManager>>,
     },
     AddVirtualInfo {
         paths: Vec<Path>,
@@ -426,10 +450,15 @@ fn pathop_to_partition_command(op: PathOp, path: Path, real_path: Path) -> FsThr
         PathOp::Flush => FsThreadCommand::Flush,
         PathOp::Ioctl { request, arg } => FsThreadCommand::Ioctl { path, request, arg },
         PathOp::Poll { timeout } => FsThreadCommand::Poll { path, timeout },
-        PathOp::Mmap { offset, length } => FsThreadCommand::Mmap {
+        PathOp::Mmap {
+            offset,
+            length,
+            memory,
+        } => FsThreadCommand::Mmap {
             path,
             offset,
             length,
+            memory,
         },
     }
 }
@@ -943,8 +972,9 @@ fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
                     path,
                     offset,
                     length,
+                    memory,
                 } => {
-                    let res = fs.mmap(&path, offset, length);
+                    let res = fs.mmap(&path, offset, length, memory);
                     req.response.send(FsResponse::Mmap(res));
                 }
                 FsThreadCommand::AddVirtualInfo { paths } => {

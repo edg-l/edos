@@ -8,12 +8,14 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use spin::{Once, RwLock};
+use spin::{Mutex, Once, RwLock};
 use thiserror::Error;
 
 use crate::{
     fs::{self, File, FileAttrs, FileKind, FileSystem, MmapRegion, PollState, path::Path},
-    log, println,
+    log,
+    memory::mapper::MemoryManager,
+    println,
 };
 
 #[derive(Debug, Error, Clone)]
@@ -60,7 +62,12 @@ pub trait DevFsDevice: Send + Sync {
         Err(DevFsError::Unsupported)
     }
 
-    fn mmap(&self, _offset: usize, _length: usize) -> Result<MmapRegion, DevFsError> {
+    fn mmap(
+        &self,
+        _offset: usize,
+        _length: usize,
+        memory: Arc<Mutex<MemoryManager>>,
+    ) -> Result<MmapRegion, DevFsError> {
         Err(DevFsError::Unsupported)
     }
 
@@ -352,14 +359,20 @@ impl FileSystem for DevFsHandle {
         }
     }
 
-    fn mmap(&mut self, path: &Path, offset: usize, length: usize) -> Result<MmapRegion, fs::Error> {
+    fn mmap(
+        &mut self,
+        path: &Path,
+        offset: usize,
+        length: usize,
+        memory: Arc<Mutex<MemoryManager>>,
+    ) -> Result<MmapRegion, fs::Error> {
         let normalized = path.normalize();
         let state = self.shared.read();
         let device = state.get_device(&normalized).map(|d| d.device.clone());
         drop(state);
 
         if let Some(device) = device {
-            device.mmap(offset, length).map_err(fs::Error::from)
+            device.mmap(offset, length, memory).map_err(fs::Error::from)
         } else {
             Err(fs::Error::FileNotFound)
         }

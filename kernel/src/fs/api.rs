@@ -3,7 +3,8 @@
 
 use core::time::Duration;
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
+use spin::Mutex;
 
 use crate::{
     fs::{
@@ -11,6 +12,7 @@ use crate::{
         gpt::{FilesystemType, Partition},
         path::Path,
     },
+    memory::mapper::MemoryManager,
     thread::scheduler::sched,
 };
 
@@ -233,11 +235,20 @@ pub fn poll(path: &Path, timeout: Duration) -> Result<PollState, Error> {
     r
 }
 
-pub fn mmap(path: &Path, offset: usize, length: usize) -> Result<MmapRegion, Error> {
+pub fn mmap(
+    path: &Path,
+    offset: usize,
+    length: usize,
+    memory: Arc<Mutex<MemoryManager>>,
+) -> Result<MmapRegion, Error> {
     let FsResponse::Mmap(r) = send_request(
         FsRequest::PathRequest {
             path: path.clone(),
-            op: PathOp::Mmap { offset, length },
+            op: PathOp::Mmap {
+                offset,
+                length,
+                memory,
+            },
         },
         Duration::from_secs(5),
     ) else {
