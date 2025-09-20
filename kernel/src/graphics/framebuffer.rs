@@ -78,7 +78,11 @@ impl DevFsDevice for FramebufferDevice {
                 if arg == 0 {
                     return Err(DevFsError::IoError);
                 }
-                let rect = unsafe { &*(arg as *const FramebufferRect) };
+                let rect_ptr = arg as *const FramebufferRect;
+                if rect_ptr.is_null() {
+                    return Err(DevFsError::IoError);
+                }
+                let rect = unsafe { &*rect_ptr };
                 api::draw_rect(rect.x, rect.y, rect.width, rect.height, rect.color);
                 Ok(0)
             }
@@ -87,6 +91,9 @@ impl DevFsDevice for FramebufferDevice {
                     return Err(DevFsError::IoError);
                 }
                 let command_ptr = arg as *mut FramebufferDrawCommand;
+                if command_ptr.is_null() {
+                    return Err(DevFsError::IoError);
+                }
                 let command = unsafe { Box::from_raw(command_ptr) };
                 let request = command.into_draw_request();
                 api::draw(request);
@@ -97,6 +104,9 @@ impl DevFsDevice for FramebufferDevice {
                     return Err(DevFsError::IoError);
                 }
                 let info_ptr = arg as *mut FramebufferInfo;
+                if info_ptr.is_null() {
+                    return Err(DevFsError::IoError);
+                }
                 let info = api::screen_info();
                 unsafe {
                     (*info_ptr).width = info.width as u32;

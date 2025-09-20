@@ -23,8 +23,7 @@ use crate::{
             sys_unlink,
         },
         io::{
-            sys_chdir, sys_close, sys_getcwd, sys_ioctl, sys_list_dir, sys_open, sys_poll,
-            sys_read, sys_write,
+            sys_chdir, sys_close, sys_getcwd, sys_list_dir, sys_open, sys_poll, sys_read, sys_write,
         },
         memory::{sys_mmap, sys_munmap},
     },
@@ -36,7 +35,10 @@ use crate::{
 
 mod fs;
 mod io;
+mod ioctl;
 mod memory;
+
+use self::ioctl::sys_ioctl;
 
 /// # Safety
 /// Must be called once per core
