@@ -9,12 +9,14 @@ pub mod msi;
 pub mod pci;
 pub mod rtc;
 pub mod tty;
+pub mod vga;
 
 pub fn init_drivers() {
     hpet::driver::init();
     unsafe { fpu::init_fpu() };
     pci::init(); // pci init is blocking
     ahci::init(); // must be after pci
+    vga::init();
     graphics::init();
     tty::init();
     queue_spawn_kthread_named("keyboard", keyboard::driver_main as u64);

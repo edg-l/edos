@@ -34,7 +34,6 @@ use crate::{
 };
 
 pub mod api;
-pub mod command;
 pub mod controller;
 
 pub mod fis;
