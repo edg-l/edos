@@ -9,8 +9,8 @@ use alloc::{
 use elibc::{
     Errno, FilesystemKind, create_dir,
     io::{FileType, chdir, getcwd, list_dir, open, open_flags, read_to_end, write_all_fd},
-    list_mounts, list_partitions, mount_partition, pipe, remove_dir, remove_dir_all, remove_file,
-    spawn, sys_close,
+    list_mounts, list_partitions, mount_partition, remove_dir, remove_dir_all, remove_file, spawn,
+    sys_close,
 };
 
 use super::state::{Program, TerminalState};
@@ -206,11 +206,6 @@ fn write_file(state: &mut TerminalState, args: &[String]) {
 }
 
 fn spawn_program(state: &mut TerminalState, command: &str, args: &[String]) {
-    let Some((read_fd, write_fd)) = pipe() else {
-        state.write_line(&format!("Failed to create pipe for {command}"));
-        return;
-    };
-
     let mut argv: Vec<&str> = Vec::with_capacity(args.len() + 1);
     for arg in args {
         argv.push(arg);
@@ -224,17 +219,14 @@ fn spawn_program(state: &mut TerminalState, command: &str, args: &[String]) {
     ];
 
     for path in candidates.iter() {
-        let pid = spawn(path, &argv, 0, write_fd, 2);
+        let pid = spawn(path, &argv, 0, 1, 2);
         if pid != u64::MAX {
-            let _ = sys_close(write_fd);
-            state.set_running_program(Some(Program { pid, read_fd }));
+            state.set_running_program(Some(Program { pid }));
             return;
         }
     }
 
     state.write_line(&format!("Command not found: {}", command));
-    let _ = sys_close(read_fd);
-    let _ = sys_close(write_fd);
 }
 
 fn cmd_list_partitions(state: &mut TerminalState, _args: &[String]) {

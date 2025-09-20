@@ -6,7 +6,7 @@ use alloc::{
 use elibc::{
     KeyEvent,
     graphics::{Color, GraphicsError, RasterHeight, Screen, TextMetrics, TextStyle},
-    io::getcwd,
+    io::{getcwd, open},
 };
 
 pub(crate) const MARGIN: u64 = 10;
@@ -14,7 +14,6 @@ pub(crate) const MARGIN: u64 = 10;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Program {
     pub(crate) pid: u64,
-    pub(crate) read_fd: u64,
 }
 
 pub(crate) struct TerminalState {
@@ -34,6 +33,7 @@ pub(crate) struct TerminalState {
     show_kernel_logs: bool,
     current_dir: String,
     running_program: Option<Program>,
+    tty_fd: u64,
 }
 
 impl TerminalState {
@@ -54,6 +54,8 @@ impl TerminalState {
         let current_dir = getcwd().unwrap_or_else(|_| "/".to_string());
         let prompt_text = format!("{} > ", current_dir);
 
+        let tty_fd = open("/dev/tty0", 0).map_err(GraphicsError::from)?;
+
         Ok(Self {
             screen,
             buffer,
@@ -71,6 +73,7 @@ impl TerminalState {
             show_kernel_logs: false,
             current_dir,
             running_program: None,
+            tty_fd,
         })
     }
 
@@ -101,6 +104,10 @@ impl TerminalState {
     pub(crate) fn set_running_program(&mut self, program: Option<Program>) {
         self.running_program = program;
         self.mark_dirty();
+    }
+
+    pub(crate) fn tty_fd(&self) -> u64 {
+        self.tty_fd
     }
 
     pub(crate) fn clear_output(&mut self) {

@@ -4,9 +4,8 @@ use core::time::Duration;
 use x86_64::instructions::interrupts;
 
 use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
-use crate::log;
 use crate::{
-    drivers::keyboard::KEYBOARD_BROADCAST,
+    drivers::{keyboard::KEYBOARD_BROADCAST, tty},
     syscalls::Errno,
     thread::{
         broadcast::ReceiveError,
@@ -81,20 +80,8 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
     match thread.fd_table.get_fd(fd) {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
             StandardStream::Stdout | StandardStream::Stderr => {
-                match core::str::from_utf8(&buffer) {
-                    Ok(s) => {
-                        // TODO: add stdout stream broadcast?
-                        log!("{}", s);
-                        count as u64
-                    }
-                    Err(_) => {
-                        log!(
-                            "sys_write: Non-UTF8 data: {:02x?}",
-                            &buffer[..count.min(64)]
-                        );
-                        count as u64
-                    }
-                }
+                tty::write_output(&buffer);
+                count as u64
             }
             StandardStream::Stdin => {
                 thread.errno = Errno::EINVAL;

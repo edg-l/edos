@@ -8,6 +8,7 @@ pub mod keyboard;
 pub mod msi;
 pub mod pci;
 pub mod rtc;
+pub mod tty;
 
 pub fn init_drivers() {
     hpet::driver::init();
@@ -15,5 +16,6 @@ pub fn init_drivers() {
     pci::init(); // pci init is blocking
     ahci::init(); // must be after pci
     graphics::init();
+    tty::init();
     queue_spawn_kthread_named("keyboard", keyboard::driver_main as u64);
 }

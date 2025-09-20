@@ -2,9 +2,7 @@ use alloc::{format, string::String, vec::Vec};
 use core::str;
 
 use elibc::io::get_kernel_logs;
-use elibc::{
-    KeyEvent, WaitPidStatus, get_raw_input, process::sys_waitpid, read_from_fd, sys_close,
-};
+use elibc::{KeyEvent, WaitPidStatus, get_raw_input, process::sys_waitpid, read_from_fd};
 
 mod command;
 mod render;
@@ -33,6 +31,7 @@ pub fn run() -> i32 {
 
     loop {
         pump_kernel_logs(&mut terminal);
+        pump_tty_output(&mut terminal);
         pump_running_program(&mut terminal);
 
         get_raw_input(20, &mut key_events, 16);
@@ -82,33 +81,42 @@ fn pump_running_program(state: &mut TerminalState) {
         return;
     };
 
-    let mut buffer = [0u8; 1024];
-    loop {
-        match read_from_fd(program.read_fd, &mut buffer) {
-            Ok(0) => break,
-            Ok(bytes_read) => {
-                if let Ok(text) = str::from_utf8(&buffer[..bytes_read]) {
-                    state.write_str(text);
-                }
-            }
-            Err(err) => {
-                state.write_line(&format!("Read error: {err:?}"));
-                break;
-            }
-        }
-    }
-
     match sys_waitpid(program.pid, false) {
         Ok(WaitPidStatus::StillRunning) => {}
         Ok(WaitPidStatus::Exited(code)) => {
-            let _ = sys_close(program.read_fd);
             state.set_running_program(None);
             state.write_line(&format!("Process exited with code {code}"));
         }
         Err(err) => {
-            let _ = sys_close(program.read_fd);
             state.set_running_program(None);
             state.write_line(&format!("waitpid failed: {err:?}"));
+        }
+    }
+}
+
+fn pump_tty_output(state: &mut TerminalState) {
+    let fd = state.tty_fd();
+    let mut buffer = [0u8; 1024];
+
+    loop {
+        match read_from_fd(fd, &mut buffer) {
+            Ok(0) => break,
+            Ok(bytes_read) => {
+                let slice = &buffer[..bytes_read];
+                let text = match str::from_utf8(slice) {
+                    Ok(txt) => txt,
+                    Err(_) => {
+                        let owned = String::from_utf8_lossy(slice);
+                        state.write_str(owned.as_ref());
+                        continue;
+                    }
+                };
+                state.write_str(text);
+            }
+            Err(err) => {
+                state.write_line(&format!("tty read error: {err:?}"));
+                break;
+            }
         }
     }
 }

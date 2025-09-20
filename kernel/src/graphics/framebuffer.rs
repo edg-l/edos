@@ -100,7 +100,7 @@ impl DevFsDevice for FramebufferDevice {
                     core::slice::from_raw_parts(data_ptr as *const u32, header.pixel_count as usize)
                 };
 
-                if pixels_slice.len() * core::mem::size_of::<u32>() != expected_len {
+                if core::mem::size_of_val(pixels_slice) != expected_len {
                     return Err(DevFsError::IoError);
                 }
 
