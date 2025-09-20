@@ -683,17 +683,16 @@ pub extern "C" fn fs_main_thread() -> ! {
                     mount_points.insert(mount_point.clone(), meta.clone());
                     mount_points_rev.insert((device_id, partition_index), mount_point.clone());
 
-                    if let Some(parent_path) = mount_point.parent() {
-                        if let Some((_parent_mount, parent_meta)) =
+                    if let Some(parent_path) = mount_point.parent()
+                        && let Some((_parent_mount, parent_meta)) =
                             find_mount_at_path(&parent_path, &mount_points)
-                        {
-                            let parent_key = (parent_meta.device_id, parent_meta.partition_index);
+                    {
+                        let parent_key = (parent_meta.device_id, parent_meta.partition_index);
 
-                            if let Some(mb) = worker_mailboxes.get(&parent_key) {
-                                let paths = alloc::vec![mount_point.clone()];
-                                log!("Sending virtual info for {} to {parent_key:?}", mount_point);
-                                mb.send(FsThreadCommand::AddVirtualInfo { paths });
-                            }
+                        if let Some(mb) = worker_mailboxes.get(&parent_key) {
+                            let paths = alloc::vec![mount_point.clone()];
+                            log!("Sending virtual info for {} to {parent_key:?}", mount_point);
+                            mb.send(FsThreadCommand::AddVirtualInfo { paths });
                         }
                     }
 
@@ -765,7 +764,7 @@ pub extern "C" fn fs_main_thread() -> ! {
             }
         }
 
-        sched().thread_park();
+        requests.wait();
     }
 }
 
@@ -957,7 +956,7 @@ fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
             }
         }
 
-        sched().thread_park();
+        mailbox.wait();
     }
 }
 
@@ -966,6 +965,6 @@ fn unsupported_fs(mb: Mailbox<FsThreadCommand, FsResponse>) -> ! {
         while let Some(req) = mb.pop_request() {
             req.response.send(FsResponse::Ok(Err(Error::IoError)));
         }
-        sched().thread_park();
+        mb.wait();
     }
 }

@@ -20,6 +20,7 @@ use crate::thread::scheduler::sched;
 pub struct Mailbox<T, R> {
     queue: Arc<SegQueue<Request<T, R>>>,
     owner: u64,
+    is_waiting: Arc<AtomicBool>,
 }
 
 impl<T, R> Clone for Mailbox<T, R> {
@@ -27,7 +28,11 @@ impl<T, R> Clone for Mailbox<T, R> {
         let queue = self.queue.clone();
         let tid = self.owner;
 
-        Self { queue, owner: tid }
+        Self {
+            queue,
+            owner: tid,
+            is_waiting: self.is_waiting.clone(),
+        }
     }
 }
 
@@ -47,6 +52,14 @@ impl<T, R> Mailbox<T, R> {
         Self {
             owner,
             queue: Arc::new(SegQueue::new()),
+            is_waiting: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn wait(&self) {
+        if self.queue.is_empty() {
+            self.is_waiting.store(true, Ordering::Release);
+            sched().thread_park();
         }
     }
 
@@ -66,7 +79,14 @@ impl<T, R> Mailbox<T, R> {
                 response: response.clone(),
             });
 
-            sched().thread_wake(self.owner, true);
+            if self
+                .is_waiting
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                sched().thread_wake(self.owner, true);
+            }
+
             response
         })
     }

@@ -303,7 +303,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
         }
 
         // Wait for more requests
-        sched().thread_park();
+        requests.wait();
     }
 }
 
@@ -372,6 +372,6 @@ extern "C" fn port_worker_thread() -> ! {
             }
         }
 
-        sched().thread_park();
+        mailbox.wait();
     }
 }
