@@ -108,7 +108,7 @@ pub fn read_bytes(path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, E
             path: path.clone(),
             op: PathOp::ReadBytes { offset, count },
         },
-        Duration::from_secs(10),
+        Duration::from_secs(5),
     ) else {
         return Err(Error::IoError);
     };
@@ -124,7 +124,7 @@ pub fn write_bytes(path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error
                 data: data.to_vec(),
             },
         },
-        Duration::from_secs(10),
+        Duration::from_secs(5),
     ) else {
         return Err(Error::IoError);
     };
@@ -137,7 +137,7 @@ pub fn create_file(path: &Path) -> Result<(), Error> {
             path: path.clone(),
             op: PathOp::CreateFile,
         },
-        Duration::from_secs(5),
+        Duration::from_secs(2),
     ) else {
         return Err(Error::IoError);
     };
@@ -150,7 +150,7 @@ pub fn create_dir(path: &Path) -> Result<(), Error> {
             path: path.clone(),
             op: PathOp::CreateDir,
         },
-        Duration::from_secs(5),
+        Duration::from_secs(2),
     ) else {
         return Err(Error::IoError);
     };
@@ -163,7 +163,7 @@ pub fn remove_file(path: &Path) -> Result<(), Error> {
             path: path.clone(),
             op: PathOp::RemoveFile,
         },
-        Duration::from_secs(5),
+        Duration::from_secs(2),
     ) else {
         return Err(Error::IoError);
     };
@@ -176,7 +176,7 @@ pub fn remove_dir(path: &Path) -> Result<(), Error> {
             path: path.clone(),
             op: PathOp::RemoveDir,
         },
-        Duration::from_secs(5),
+        Duration::from_secs(2),
     ) else {
         return Err(Error::IoError);
     };
@@ -189,7 +189,7 @@ pub fn file_info(path: &Path) -> Result<File, Error> {
             path: path.clone(),
             op: PathOp::FileInfo,
         },
-        Duration::from_secs(5),
+        Duration::from_secs(2),
     ) else {
         return Err(Error::IoError);
     };
@@ -202,7 +202,7 @@ pub fn flush(path: &Path) -> Result<(), Error> {
             path: path.clone(),
             op: PathOp::Flush,
         },
-        Duration::from_secs(5),
+        Duration::from_secs(2),
     ) else {
         return Err(Error::IoError);
     };
@@ -215,7 +215,7 @@ pub fn ioctl(path: &Path, request: u64, arg: u64) -> Result<u64, Error> {
             path: path.clone(),
             op: PathOp::Ioctl { request, arg },
         },
-        Duration::from_secs(5),
+        Duration::from_secs(2),
     ) else {
         return Err(Error::IoError);
     };
@@ -228,7 +228,7 @@ pub fn poll(path: &Path, timeout: Duration) -> Result<PollState, Error> {
             path: path.clone(),
             op: PathOp::Poll { timeout },
         },
-        Duration::from_secs(5),
+        Duration::from_secs(2),
     ) else {
         return Err(Error::IoError);
     };
@@ -250,7 +250,7 @@ pub fn mmap(
                 memory,
             },
         },
-        Duration::from_secs(5),
+        Duration::from_secs(2),
     ) else {
         return Err(Error::IoError);
     };

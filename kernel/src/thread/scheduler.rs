@@ -1,4 +1,7 @@
-use core::{sync::atomic::AtomicU64, time::Duration};
+use core::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use alloc::{boxed::Box, sync::Arc};
 use crossbeam_queue::ArrayQueue;
@@ -6,7 +9,7 @@ use heapless::{LinearMap, index_map::FnvIndexMap};
 use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
-    instructions::interrupts::{enable_and_hlt, without_interrupts},
+    instructions::interrupts::{enable, enable_and_hlt, without_interrupts},
     registers::control::Cr3,
 };
 
@@ -61,6 +64,7 @@ pub struct Scheduler {
     pub current_logger: Option<Arc<ThreadLogger>>,
     pub lapic_id: u32,
     pub thread_count: AtomicU64,
+    pub idling: bool,
 }
 
 pub struct Storage {
@@ -75,8 +79,8 @@ pub fn init() {
     // this would need to add a different pid for user threads alongside thread id and a mapping.
     let lapic_id = unsafe { get_lapic().id() };
     let sched = Box::new(Scheduler {
-        thread_queue: ArrayQueue::new(65000),
-        thread_priority_queue: ArrayQueue::new(65000),
+        thread_queue: ArrayQueue::new(500),
+        thread_priority_queue: ArrayQueue::new(500),
         thread_spawn_queue: ArrayQueue::new(64),
         cmd_queue: ArrayQueue::new(128),
         storage: Storage {
@@ -87,6 +91,7 @@ pub fn init() {
         current_logger: None,
         lapic_id,
         thread_count: AtomicU64::new(0),
+        idling: false,
     });
 
     let ptr: &'static mut _ = Box::leak(sched);
@@ -143,10 +148,12 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
                         save_fpu_state(&mut user.fpu);
                     }
                 }
-                sched
-                    .thread_queue
-                    .push(current_id)
-                    .expect("failed to push current_id thread");
+                if !thread.is_queued.swap(true, Ordering::AcqRel) {
+                    sched
+                        .thread_queue
+                        .push(current_id)
+                        .expect("failed to push current_id thread");
+                }
             }
         }
 
@@ -156,6 +163,11 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
             // serial_println!("Next id {:?}", current_id);
 
             if let Some(thread) = sched.storage.threads.get_mut(&current_id) {
+                if sched.idling {
+                    println!("Stopped idling: {:?}", thread.name);
+                }
+                sched.idling = false;
+                thread.is_queued.store(false, Ordering::SeqCst);
                 *context = thread.context.clone();
                 thread.switch_to_page();
 
@@ -174,8 +186,15 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
                     cpu.user_rsp = thread.context.interrupt_stack_frame.stack_pointer.as_u64();
                 }
                 return context;
+            } else {
+                println!("Thread not found!");
             }
         }
+
+        if !sched.idling {
+            println!("Entering idling");
+        }
+        sched.idling = true;
 
         // No tasks, return to idle loop.
         (*context).interrupt_stack_frame.instruction_pointer = VirtAddr::new(idle_loop as u64);
@@ -198,6 +217,7 @@ impl Scheduler {
             let mut threads_alive = ALIVE_THREADS.write();
 
             while let Some((thread, info)) = self.thread_spawn_queue.pop() {
+                thread.is_queued.store(true, Ordering::SeqCst);
                 self.thread_queue.push(thread.id);
                 threads_alive.insert(thread.id, cpuidx);
                 if let Some(info) = info {
@@ -207,8 +227,7 @@ impl Scheduler {
                 }
 
                 self.storage.threads.insert(thread.id, thread);
-                self.thread_count
-                    .fetch_add(1, core::sync::atomic::Ordering::Release);
+                self.thread_count.fetch_add(1, Ordering::Release);
             }
         }
     }
@@ -222,10 +241,12 @@ impl Scheduler {
                         && !matches!(thread.state, ThreadState::Exited(_))
                     {
                         thread.state = ThreadState::Ready;
-                        if prio {
-                            self.thread_priority_queue.push(thread_id);
-                        } else {
-                            self.thread_queue.push(thread_id);
+                        if !thread.is_queued.swap(true, Ordering::AcqRel) {
+                            if prio {
+                                self.thread_priority_queue.push(thread_id);
+                            } else {
+                                self.thread_queue.push(thread_id);
+                            }
                         }
                     }
                 }
@@ -253,8 +274,7 @@ impl Scheduler {
                         let info = self.storage.thread_info.remove(&thread.id);
                         thread.free(info);
 
-                        self.thread_count
-                            .fetch_sub(1, core::sync::atomic::Ordering::Release);
+                        self.thread_count.fetch_sub(1, Ordering::Release);
                         ALIVE_THREADS.write().remove(&thread_id);
                     }
                 }
@@ -273,19 +293,24 @@ impl Scheduler {
             if let Some(thread) = self.storage.threads.get_mut(&id) {
                 match thread.state {
                     ThreadState::Ready => {}
-                    ThreadState::Waiting => continue,
+                    ThreadState::Waiting => {
+                        thread.is_queued.store(false, Ordering::Release);
+                        continue;
+                    }
                     ThreadState::WaitTimeout((start, timeout)) => {
                         if now.duration_since(start) >= timeout {
                             thread.state = ThreadState::Ready;
                         } else {
-                            self.thread_queue.push(id);
+                            self.thread_priority_queue.push(id);
                             continue;
                         }
                     }
                     ThreadState::Exited(code) => {
+                        thread.is_queued.store(false, Ordering::Release);
                         continue;
                     }
                 }
+                thread.is_queued.store(false, Ordering::Release);
                 self.current_tid = Some(id);
                 self.current_logger = Some(thread.logger.clone());
                 return true;
@@ -301,7 +326,10 @@ impl Scheduler {
             if let Some(thread) = self.storage.threads.get_mut(&id) {
                 match thread.state {
                     ThreadState::Ready => {}
-                    ThreadState::Waiting => continue,
+                    ThreadState::Waiting => {
+                        thread.is_queued.store(false, Ordering::Release);
+                        continue;
+                    }
                     ThreadState::WaitTimeout((start, timeout)) => {
                         if now.duration_since(start) >= timeout {
                             thread.state = ThreadState::Ready;
@@ -311,14 +339,41 @@ impl Scheduler {
                         }
                     }
                     ThreadState::Exited(code) => {
+                        thread.is_queued.store(false, Ordering::Release);
                         continue;
                     }
                 }
+                thread.is_queued.store(false, Ordering::Release);
                 self.current_tid = Some(id);
                 self.current_logger = Some(thread.logger.clone());
                 return true;
             }
         }
+
+        for (id, thread) in self.storage.threads.iter_mut() {
+            match thread.state {
+                ThreadState::Ready => {
+                    println!("Found a ready thread not in queue: {:?}", thread.name);
+                    self.current_tid = Some(*id);
+                    self.current_logger = Some(thread.logger.clone());
+                    return true;
+                }
+                ThreadState::Waiting => {}
+                ThreadState::WaitTimeout((start, timeout)) => {
+                    if now.duration_since(start) >= timeout {
+                        println!(
+                            "Found a WaitTimeout thread that is ready not in queue: {:?}",
+                            thread.name
+                        );
+                        thread.state = ThreadState::Ready;
+                        self.current_tid = Some(*id);
+                        self.current_logger = Some(thread.logger.clone());
+                    }
+                }
+                ThreadState::Exited(_) => {}
+            }
+        }
+
         self.current_tid = None;
         self.current_logger = None;
         false

@@ -57,10 +57,18 @@ impl<T, R> Mailbox<T, R> {
     }
 
     pub fn wait(&self) {
-        if self.queue.is_empty() {
-            self.is_waiting.store(true, Ordering::Release);
-            sched().thread_park();
-        }
+        without_interrupts(|| {
+            if self.queue.is_empty() {
+                self.is_waiting.store(true, Ordering::Release);
+
+                if !self.queue.is_empty() {
+                    self.is_waiting.store(false, Ordering::Release);
+                    return;
+                }
+                sched().thread_park();
+                self.is_waiting.store(false, Ordering::Release);
+            }
+        })
     }
 
     /// Send a request, returning a Response that can be waited for values.
@@ -79,11 +87,7 @@ impl<T, R> Mailbox<T, R> {
                 response: response.clone(),
             });
 
-            if self
-                .is_waiting
-                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+            if self.is_waiting.swap(false, Ordering::AcqRel) {
                 sched().thread_wake(self.owner, true);
             }
 

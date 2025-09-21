@@ -4,6 +4,7 @@ use core::time::Duration;
 use x86_64::instructions::interrupts;
 
 use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
+use crate::log;
 use crate::{
     drivers::{keyboard::KEYBOARD_BROADCAST, tty},
     syscalls::Errno,
@@ -570,6 +571,7 @@ pub fn sys_select(entries_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> 
     let timeout = if timeout_ms == u64::MAX {
         None
     } else {
+        log!("timeout for {:?}ms", timeout_ms);
         Some(Duration::from_millis(timeout_ms))
     };
     let start = Instant::now();
@@ -612,13 +614,13 @@ pub fn sys_select(entries_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> 
         }
 
         let remaining = timeout.map(|target| target.saturating_sub(start.elapsed()));
-        if let Some(rem) = remaining {
-            if rem.is_zero() {
-                write_back_select_entries(entries_ptr, &entries);
-                let mut thread = info.lock();
-                thread.errno = Errno::Clear;
-                return 0;
-            }
+        if let Some(rem) = remaining
+            && rem.is_zero()
+        {
+            write_back_select_entries(entries_ptr, &entries);
+            let mut thread = info.lock();
+            thread.errno = Errno::Clear;
+            return 0;
         }
 
         let wait_slice = remaining

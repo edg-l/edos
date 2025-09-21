@@ -1,5 +1,9 @@
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
-use core::{ptr, sync::atomic::AtomicU64, time::Duration};
+use core::{
+    ptr,
+    sync::atomic::{AtomicBool, AtomicU64},
+    time::Duration,
+};
 use spin::Mutex;
 use x86_64::{
     VirtAddr,
@@ -66,6 +70,7 @@ pub struct Thread {
     pub logger: Arc<ThreadLogger>,
     /// Some if it's a user thread.
     pub user: Option<UserThread>,
+    pub is_queued: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -245,6 +250,7 @@ impl Thread {
             }),
             name,
             user: None,
+            is_queued: AtomicBool::new(false),
         }
     }
 
@@ -325,6 +331,7 @@ impl Thread {
                 fpu_init: false,
                 fpu: FpuState::default(),
             }),
+            is_queued: AtomicBool::new(false),
         };
 
         Ok(thread)

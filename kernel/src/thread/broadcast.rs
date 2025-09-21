@@ -50,7 +50,6 @@ impl<T: Clone> Broadcast<T> {
                 for x in self.history.iter() {
                     rx.queue.push(x.clone());
                 }
-                sched().thread_wake(tid, false);
             }
 
             rx
@@ -81,7 +80,7 @@ impl<T: Clone> Broadcast<T> {
 
                 if !sched.thread_exists(tid) {
                     to_remove.push(tid);
-                } else if receiver.is_waiting.load(Ordering::Acquire) {
+                } else if receiver.is_waiting.swap(false, Ordering::AcqRel) {
                     sched.thread_wake(tid, true);
                 }
             }
@@ -138,6 +137,11 @@ impl<T> Receiver<T> {
 
         self.is_waiting.store(true, Ordering::Release);
 
+        if !self.is_empty() {
+            self.is_waiting.store(false, Ordering::Release);
+            return true;
+        }
+
         sched().thread_wait_timeout(timeout);
 
         self.is_waiting.store(false, Ordering::Release);
@@ -152,6 +156,11 @@ impl<T> Receiver<T> {
         }
 
         self.is_waiting.store(true, Ordering::Release);
+
+        if let Some(v) = self.try_recv() {
+            self.is_waiting.store(false, Ordering::Release);
+            return Ok(v);
+        }
 
         sched().thread_wait_timeout(timeout);
 
