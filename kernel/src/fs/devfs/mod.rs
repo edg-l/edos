@@ -3,13 +3,20 @@
 use core::time::Duration;
 
 use alloc::{
-    boxed::Box, collections::{BTreeMap, BTreeSet}, string::{String, ToString}, sync::Arc, vec::Vec
+    boxed::Box,
+    collections::{BTreeMap, BTreeSet},
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
 };
 use spin::{Mutex, Once, RwLock};
 use thiserror::Error;
 
 use crate::{
-    fs::{self, handle::Pollable, path::Path, File, FileAttrs, FileKind, FileSystem, MmapRegion, PollState},
+    fs::{
+        self, File, FileAttrs, FileKind, FileSystem, MmapRegion, PollState, handle::Pollable,
+        path::Path,
+    },
     log,
     memory::mapper::MemoryManager,
     println,

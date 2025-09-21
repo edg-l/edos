@@ -8,7 +8,10 @@ use spin::Mutex;
 
 use crate::{
     fs::{
-        gpt::{FilesystemType, Partition}, handle::Pollable, path::Path, Error, File, FsRequest, FsResponse, MmapRegion, MountInfo, PathOp, PollState, FS_REQUESTS
+        Error, FS_REQUESTS, File, FsRequest, FsResponse, MmapRegion, MountInfo, PathOp, PollState,
+        gpt::{FilesystemType, Partition},
+        handle::Pollable,
+        path::Path,
     },
     memory::mapper::MemoryManager,
     thread::scheduler::sched,

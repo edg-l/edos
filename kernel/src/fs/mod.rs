@@ -18,9 +18,14 @@ use thiserror::Error;
 
 use crate::{
     allocator::print_alloc_stats,
-    drivers::ahci::{api::list_devices, AhciError},
+    drivers::ahci::{AhciError, api::list_devices},
     fs::{
-        fat32::Fatfs, gpt::{parse_gpt, print_partitions, FilesystemType, Partition}, handle::Pollable, mbr::parse_mbr, memfs::Memfs, path::Path
+        fat32::Fatfs,
+        gpt::{FilesystemType, Partition, parse_gpt, print_partitions},
+        handle::Pollable,
+        mbr::parse_mbr,
+        memfs::Memfs,
+        path::Path,
     },
     log,
     memory::mapper::MemoryManager,
