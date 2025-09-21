@@ -3,7 +3,7 @@ use core::str;
 
 use elibc::{
     KeyEvent, WaitPidStatus, get_raw_input,
-    io::{PollState, SelectFd, get_kernel_logs, keyboard_fd, select},
+    io::{get_kernel_logs, keyboard_fd},
     process::sys_waitpid,
     read_from_fd, sleep_ms,
 };
@@ -34,70 +34,16 @@ pub fn run() -> i32 {
     let mut ready_commands: Vec<String> = Vec::new();
     let mut keyboard_handle = keyboard_fd();
 
-    let mut select_entries: Vec<SelectFd> = Vec::new();
-
     while keyboard_handle.is_none() {
         keyboard_handle = keyboard_fd();
         // Avoid a tight busy loop while the keyboard device comes up.
         let _ = sleep_ms(10);
     }
 
-    let kb_handle = keyboard_handle.unwrap();
-
-    select_entries.push(SelectFd::new(
-        kb_handle,
-        PollState {
-            readable: true,
-            writable: false,
-            error: true,
-        },
-    ));
-
-    select_entries.push(SelectFd::new(
-        terminal.tty_fd(),
-        PollState {
-            readable: true,
-            writable: false,
-            error: true,
-        },
-    ));
-
     loop {
-        let select_result = select(&mut select_entries, Some(100));
-        if select_result.is_err() {
-            continue;
-        }
+        get_raw_input(50, &mut key_events, 100);
 
-        let mut keyboard_ready = false;
-        let mut keyboard_fault = false;
-        let mut tty_ready = false;
-
-        for entry in &select_entries {
-            if entry.fd == terminal.tty_fd() {
-                if entry.result.readable || entry.result.error {
-                    tty_ready = true;
-                }
-            } else if Some(entry.fd) == keyboard_handle {
-                if entry.result.readable {
-                    keyboard_ready = true;
-                }
-                if entry.result.error {
-                    keyboard_fault = true;
-                }
-            }
-        }
-
-        if keyboard_fault {
-            keyboard_handle = None;
-        }
-
-        if keyboard_ready {
-            get_raw_input(0, &mut key_events, 16);
-        }
-
-        if tty_ready {
-            pump_tty_output(&mut terminal);
-        }
+        pump_tty_output(&mut terminal);
 
         pump_kernel_logs(&mut terminal);
         pump_running_program(&mut terminal);

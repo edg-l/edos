@@ -158,7 +158,9 @@ impl<R> Response<R> {
         }
 
         // Wait with timeout
-        sched().thread_wait_timeout(timeout);
+        if !timeout.is_zero() {
+            sched().thread_wait_timeout(timeout);
+        }
 
         // Try again after wakeup
         if let Some(msg) = self.try_receive() {

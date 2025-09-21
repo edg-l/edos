@@ -13,18 +13,14 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use spin::{Mutex, Once};
+use spin::{Mutex, Once, RwLock};
 use thiserror::Error;
 
 use crate::{
     allocator::print_alloc_stats,
-    drivers::ahci::{AhciError, api::list_devices},
+    drivers::ahci::{api::list_devices, AhciError},
     fs::{
-        fat32::Fatfs,
-        gpt::{FilesystemType, Partition, parse_gpt, print_partitions},
-        mbr::parse_mbr,
-        memfs::Memfs,
-        path::Path,
+        fat32::Fatfs, gpt::{parse_gpt, print_partitions, FilesystemType, Partition}, handle::Pollable, mbr::parse_mbr, memfs::Memfs, path::Path
     },
     log,
     memory::mapper::MemoryManager,
@@ -40,6 +36,7 @@ pub mod block_device;
 pub mod devfs;
 pub mod fat32;
 pub mod gpt;
+pub mod handle;
 pub mod mbr;
 pub mod memfs;
 pub mod path;
@@ -72,6 +69,8 @@ pub enum Error {
     InvalidFs,
     #[error("corrupted filesystem")]
     Corrupted,
+    #[error("unsupported op")]
+    Unsupported,
 }
 
 #[repr(C)]
@@ -127,7 +126,7 @@ pub trait FileSystem {
         Err(Error::IoError)
     }
 
-    fn poll(&mut self, _path: &Path, timeout: Duration) -> Result<PollState, Error> {
+    fn poll(&mut self, _path: &Path) -> Result<Box<dyn Pollable>, Error> {
         Err(Error::IoError)
     }
 
@@ -294,7 +293,7 @@ pub(super) enum FsRequest {
     GetPartitionMailbox(u64), // threadid
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) enum FsResponse {
     Partitions(Vec<Partition>),
     Mounts(Vec<MountInfo>),
@@ -304,7 +303,7 @@ pub(super) enum FsResponse {
     File(Result<File, Error>),
     Ok(Result<(), Error>),
     Ioctl(Result<u64, Error>),
-    Poll(Result<PollState, Error>),
+    Poll(Result<Box<dyn Pollable>, Error>),
     Mmap(Result<MmapRegion, Error>),
     // Internal
     PartitionMailbox(Option<Mailbox<FsThreadCommand, FsResponse>>),
@@ -331,9 +330,7 @@ pub(super) enum PathOp {
         request: u64,
         arg: u64,
     },
-    Poll {
-        timeout: Duration,
-    },
+    Poll,
     Mmap {
         offset: usize,
         length: usize,
@@ -381,7 +378,6 @@ pub(super) enum FsThreadCommand {
     },
     Poll {
         path: Path,
-        timeout: Duration,
     },
     Mmap {
         path: Path,
@@ -450,7 +446,7 @@ fn pathop_to_partition_command(op: PathOp, path: Path, real_path: Path) -> FsThr
         PathOp::FileInfo => FsThreadCommand::FileInfo { path: real_path },
         PathOp::Flush => FsThreadCommand::Flush,
         PathOp::Ioctl { request, arg } => FsThreadCommand::Ioctl { path, request, arg },
-        PathOp::Poll { timeout } => FsThreadCommand::Poll { path, timeout },
+        PathOp::Poll => FsThreadCommand::Poll { path },
         PathOp::Mmap {
             offset,
             length,
@@ -505,6 +501,10 @@ fn find_mount_at_path<'a>(
     best
 }
 
+pub static FS_WORKER_MAILBOXES: RwLock<
+    BTreeMap<(usize, usize), Mailbox<FsThreadCommand, FsResponse>>,
+> = RwLock::new(BTreeMap::new());
+
 pub extern "C" fn fs_main_thread() -> ! {
     let logger = sched().get_logger();
     let devices = list_devices();
@@ -542,15 +542,13 @@ pub extern "C" fn fs_main_thread() -> ! {
     }
 
     // Per-partition worker threads and their mailboxes
-    let mut worker_mailboxes: BTreeMap<(usize, usize), Mailbox<FsThreadCommand, FsResponse>> =
-        BTreeMap::new();
     let mut worker_tid_map = BTreeMap::<u64, (usize, usize)>::new();
 
     // Mount table: map mount point to partition index
     let mut mount_points: BTreeMap<Path, MountMetadata> = BTreeMap::new();
     let mut mount_points_rev: BTreeMap<(usize, usize), Path> = BTreeMap::new();
 
-    for (mb_id, mb) in &worker_mailboxes {
+    for (mb_id, mb) in FS_WORKER_MAILBOXES.read().iter() {
         let mut paths = Vec::new();
         if let Some(base_path) = mount_points_rev.get(mb_id) {
             for (path, meta) in &mount_points {
@@ -648,7 +646,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                                         worker_tid,
                                         (partition.device_id as usize, partition.index),
                                     );
-                                    worker_mailboxes.insert(
+                                    FS_WORKER_MAILBOXES.write().insert(
                                         (partition.device_id as usize, partition.index),
                                         Mailbox::new(worker_tid),
                                     );
@@ -670,7 +668,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                             partition_index = current_special_part;
                             worker_tid_map
                                 .insert(worker_tid, (SPECIAL_DEV_ID, current_special_part));
-                            worker_mailboxes.insert(
+                            FS_WORKER_MAILBOXES.write().insert(
                                 (SPECIAL_DEV_ID, current_special_part),
                                 Mailbox::new(worker_tid),
                             );
@@ -690,7 +688,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                             partition_index = current_special_part;
                             worker_tid_map
                                 .insert(worker_tid, (SPECIAL_DEV_ID, current_special_part));
-                            worker_mailboxes.insert(
+                            FS_WORKER_MAILBOXES.write().insert(
                                 (SPECIAL_DEV_ID, current_special_part),
                                 Mailbox::new(worker_tid),
                             );
@@ -719,7 +717,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                     {
                         let parent_key = (parent_meta.device_id, parent_meta.partition_index);
 
-                        if let Some(mb) = worker_mailboxes.get(&parent_key) {
+                        if let Some(mb) = FS_WORKER_MAILBOXES.read().get(&parent_key) {
                             let paths = alloc::vec![mount_point.clone()];
                             log!("Sending virtual info for {} to {parent_key:?}", mount_point);
                             mb.send(FsThreadCommand::AddVirtualInfo { paths });
@@ -763,7 +761,7 @@ pub extern "C" fn fs_main_thread() -> ! {
 
                         let mailbox_key = (meta.device_id, meta.partition_index);
 
-                        if let Some(mb) = worker_mailboxes.get(&mailbox_key) {
+                        if let Some(mb) = FS_WORKER_MAILBOXES.read().get(&mailbox_key) {
                             mb.forward(cmd, req.response);
                         } else {
                             req.response.send(FsResponse::Ok(Err(Error::FileNotFound)));
@@ -777,7 +775,10 @@ pub extern "C" fn fs_main_thread() -> ! {
                     device_id,
                     command,
                 } => {
-                    if let Some(mb) = worker_mailboxes.get(&(device_id, partition_index)) {
+                    if let Some(mb) = FS_WORKER_MAILBOXES
+                        .read()
+                        .get(&(device_id, partition_index))
+                    {
                         mb.forward(command, req.response);
                     } else {
                         req.response.send(FsResponse::Ok(Err(Error::IoError)));
@@ -785,7 +786,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                 }
                 FsRequest::GetPartitionMailbox(tid) => {
                     if let Some(index) = worker_tid_map.get(&tid) {
-                        let mb = worker_mailboxes.get(index).cloned();
+                        let mb = FS_WORKER_MAILBOXES.read().get(index).cloned();
                         req.response.send(FsResponse::PartitionMailbox(mb));
                     } else {
                         req.response.send(FsResponse::PartitionMailbox(None));
@@ -965,8 +966,8 @@ fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
                     let res = fs.ioctl(&path, request, arg);
                     req.response.send(FsResponse::Ioctl(res));
                 }
-                FsThreadCommand::Poll { path, timeout } => {
-                    let res = fs.poll(&path, timeout);
+                FsThreadCommand::Poll { path } => {
+                    let res = fs.poll(&path);
                     req.response.send(FsResponse::Poll(res));
                 }
                 FsThreadCommand::Mmap {

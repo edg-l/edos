@@ -1,0 +1,7 @@
+
+the problem is the fs api
+
+
+the poll makes the calling thread wait yes, but the callign thread is not the original requestor, its the fs thread itself who waits.
+
+maybe i should design a api around a filehandle, so that u do poll directly on the file handle and so the direct caller is the one waiting on  a poll

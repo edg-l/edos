@@ -1,6 +1,6 @@
 use core::time::Duration;
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
 use spin::{Mutex, Once};
@@ -11,7 +11,7 @@ use x86_64::{
 
 use crate::{
     apic::get_lapic,
-    fs::{DevFsDevice, DevFsError, MmapRegion, PollState, register_device_str},
+    fs::{DevFsDevice, DevFsError, MmapRegion, PollState, handle::Pollable, register_device_str},
     memory::mapper::MemoryManager,
     thread::{
         broadcast::{LockedBroadcast, new_broadcast},
@@ -105,6 +105,29 @@ unsafe fn enable_ps2_keyboard() {
 #[derive(Debug)]
 pub struct KeyboardDevice;
 
+#[derive(Debug)]
+struct KeyboardPoll;
+
+impl Pollable for KeyboardPoll {
+    fn poll(&self, timeout: Duration) -> PollState {
+        let rx = KEYBOARD_BROADCAST.lock().subscribe_or_get();
+
+        if rx.poll(timeout) {
+            PollState {
+                readable: true,
+                error: false,
+                writable: false,
+            }
+        } else {
+            PollState {
+                readable: false,
+                error: false,
+                writable: false,
+            }
+        }
+    }
+}
+
 impl DevFsDevice for KeyboardDevice {
     fn read(&self, _offset: usize, count: usize) -> Result<Vec<u8>, DevFsError> {
         let rx = KEYBOARD_BROADCAST.lock().subscribe_or_get();
@@ -129,22 +152,8 @@ impl DevFsDevice for KeyboardDevice {
         Err(DevFsError::Unsupported)
     }
 
-    fn poll(&self, timeout: Duration) -> Result<PollState, DevFsError> {
-        let rx = KEYBOARD_BROADCAST.lock().subscribe_or_get();
-
-        if rx.poll(timeout) {
-            Ok(PollState {
-                readable: true,
-                error: false,
-                writable: false,
-            })
-        } else {
-            Ok(PollState {
-                readable: false,
-                error: false,
-                writable: false,
-            })
-        }
+    fn poll(&self) -> Result<Box<dyn Pollable>, DevFsError> {
+        Ok(Box::new(KeyboardPoll))
     }
 
     fn mmap(

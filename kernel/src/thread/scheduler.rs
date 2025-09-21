@@ -65,6 +65,7 @@ pub struct Scheduler {
     pub lapic_id: u32,
     pub thread_count: AtomicU64,
     pub idling: bool,
+    pub last_tick: Instant,
 }
 
 pub struct Storage {
@@ -92,6 +93,7 @@ pub fn init() {
         lapic_id,
         thread_count: AtomicU64::new(0),
         idling: false,
+        last_tick: Instant::now(),
     });
 
     let ptr: &'static mut _ = Box::leak(sched);
@@ -130,6 +132,9 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
 
         let cpu = get_percpu_data();
         let sched = cpu.scheduler.as_mut().expect("failed to get scheduler");
+
+        let elapsed = sched.last_tick.elapsed();
+
         sched.process_spawn_queue();
         sched.process_cmds();
 
@@ -139,6 +144,10 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
             sched.current_logger = None;
 
             if let Some(thread) = sched.storage.threads.get_mut(&current_id) {
+                if elapsed > Duration::from_nanos(5100000) {
+                    println!("Thread {:?} took more than 5ms {:?}", thread.name, elapsed);
+                }
+
                 thread.context = (*context).clone();
                 if let Some(user) = &mut thread.user {
                     if !user.fpu_init {
@@ -160,8 +169,6 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
         sched.schedule_next();
 
         if let Some(current_id) = sched.current_id_opt() {
-            // serial_println!("Next id {:?}", current_id);
-
             if let Some(thread) = sched.storage.threads.get_mut(&current_id) {
                 if sched.idling {
                     println!("Stopped idling: {:?}", thread.name);
@@ -185,6 +192,7 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
                     cpu.kernel_rsp = thread.initial_kstack_top;
                     cpu.user_rsp = thread.context.interrupt_stack_frame.stack_pointer.as_u64();
                 }
+                sched.last_tick = Instant::now();
                 return context;
             } else {
                 println!("Thread not found!");
@@ -195,6 +203,8 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
             println!("Entering idling");
         }
         sched.idling = true;
+
+        sched.last_tick = Instant::now();
 
         // No tasks, return to idle loop.
         (*context).interrupt_stack_frame.instruction_pointer = VirtAddr::new(idle_loop as u64);

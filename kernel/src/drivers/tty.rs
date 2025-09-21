@@ -1,10 +1,11 @@
-use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use core::time::Duration;
+use x86_64::instructions::interrupts::without_interrupts;
 
 use spin::Mutex;
 
 use crate::{
-    fs::{DevFsDevice, DevFsError, PollState, register_device_str},
+    fs::{DevFsDevice, DevFsError, PollState, handle::Pollable, register_device_str},
     thread::broadcast::{LockedBroadcast, new_broadcast},
 };
 
@@ -64,6 +65,39 @@ pub fn init() {
     TtyDevice::register();
 }
 
+#[derive(Debug, Clone)]
+struct TtyPoll;
+
+impl Pollable for TtyPoll {
+    fn poll(&self, timeout: Duration) -> PollState {
+        {
+            let buffer = TTY_BUFFER.lock();
+            if !buffer.is_empty() {
+                return PollState {
+                    readable: true,
+                    writable: true,
+                    error: false,
+                };
+            }
+        }
+
+        let rx = TTY_NOTIFY.lock().subscribe_or_get();
+        if rx.poll(timeout) {
+            PollState {
+                readable: true,
+                writable: true,
+                error: false,
+            }
+        } else {
+            PollState {
+                readable: false,
+                writable: true,
+                error: false,
+            }
+        }
+    }
+}
+
 impl DevFsDevice for TtyDevice {
     fn read(&self, _offset: usize, count: usize) -> Result<Vec<u8>, DevFsError> {
         if count == 0 {
@@ -88,32 +122,8 @@ impl DevFsDevice for TtyDevice {
         Ok(data.len())
     }
 
-    fn poll(&self, timeout: Duration) -> Result<PollState, DevFsError> {
-        {
-            let buffer = TTY_BUFFER.lock();
-            if !buffer.is_empty() {
-                return Ok(PollState {
-                    readable: true,
-                    writable: true,
-                    error: false,
-                });
-            }
-        }
-
-        let rx = TTY_NOTIFY.lock().subscribe_or_get();
-        if rx.poll(timeout) {
-            Ok(PollState {
-                readable: true,
-                writable: true,
-                error: false,
-            })
-        } else {
-            Ok(PollState {
-                readable: false,
-                writable: true,
-                error: false,
-            })
-        }
+    fn poll(&self) -> Result<Box<dyn Pollable>, DevFsError> {
+        Ok(Box::new(TtyPoll))
     }
 
     fn size(&self) -> u64 {

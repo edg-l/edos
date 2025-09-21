@@ -179,7 +179,6 @@ const SYS_LIST_DIR: u64 = 4;
 const SYS_GETCWD: u64 = 5;
 const SYS_CHDIR: u64 = 6;
 const SYS_POLL: u64 = 7;
-const SYS_SELECT: u64 = 23;
 const SYS_IOCTL: u64 = 16;
 #[allow(unused)]
 const SYS_PIPE: u64 = 22;
@@ -264,12 +263,6 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let timeout = ctx.rdx;
             ctx.rax = sys_poll(fd, events_ptr, timeout) as u64;
         }
-        SYS_SELECT => {
-            let entries_ptr = ctx.rdi as *mut crate::syscalls::io::SelectFd;
-            let count = ctx.rsi as usize;
-            let timeout = ctx.rdx;
-            ctx.rax = io::sys_select(entries_ptr, count, timeout) as u64;
-        }
         SYS_MMAP => {
             let addr = ctx.rdi;
             let length = ctx.rsi;
@@ -333,7 +326,7 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         }
         SYS_SLEEP_MS => {
             let milliseconds = ctx.rdi;
-            ctx.rax = sys_sleep_ms(milliseconds) as u64;
+            ctx.rax = sys_sleep_ms(milliseconds);
         }
         SYS_MOUNT => {
             let device_id = ctx.rdi;
@@ -416,6 +409,7 @@ impl From<FsError> for Errno {
             FsError::AhciError(_) => Errno::EIO,
             FsError::InvalidFs => Errno::EINVAL,
             FsError::Corrupted => Errno::EIO,
+            FsError::Unsupported => Errno::EIO,
         }
     }
 }
