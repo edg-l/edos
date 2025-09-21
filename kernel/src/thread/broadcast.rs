@@ -131,45 +131,47 @@ impl<T> Receiver<T> {
     /// waits until timeout waiting for content, returning
     /// true if there is content to receive.
     pub fn poll(&self, timeout: Duration) -> bool {
-        if !self.is_empty() {
-            return true;
-        }
+        without_interrupts(|| {
+            if !self.is_empty() {
+                return true;
+            }
 
-        self.is_waiting.store(true, Ordering::Release);
+            self.is_waiting.store(true, Ordering::Release);
 
-        if !self.is_empty() {
+            if !self.is_empty() {
+                self.is_waiting.store(false, Ordering::Release);
+                return true;
+            }
+
+            sched().thread_wait_timeout(timeout);
+
             self.is_waiting.store(false, Ordering::Release);
-            return true;
-        }
 
-        sched().thread_wait_timeout(timeout);
-
-        self.is_waiting.store(false, Ordering::Release);
-
-        !self.is_empty()
+            !self.is_empty()
+        })
     }
 
     /// Blocking receive with a timeout
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, ReceiveError> {
-        if let Some(v) = self.try_recv() {
-            return Ok(v);
-        }
+        without_interrupts(|| {
+            if let Some(v) = self.try_recv() {
+                return Ok(v);
+            }
+            self.is_waiting.store(true, Ordering::Release);
 
-        self.is_waiting.store(true, Ordering::Release);
+            if let Some(v) = self.try_recv() {
+                self.is_waiting.store(false, Ordering::Release);
+                return Ok(v);
+            }
 
-        if let Some(v) = self.try_recv() {
+            sched().thread_wait_timeout(timeout);
+
             self.is_waiting.store(false, Ordering::Release);
-            return Ok(v);
-        }
-
-        sched().thread_wait_timeout(timeout);
-
-        self.is_waiting.store(false, Ordering::Release);
-
-        if let Some(v) = self.try_recv() {
-            Ok(v)
-        } else {
-            Err(ReceiveError::Timeout)
-        }
+            if let Some(v) = self.try_recv() {
+                Ok(v)
+            } else {
+                Err(ReceiveError::Timeout)
+            }
+        })
     }
 }

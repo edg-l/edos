@@ -171,7 +171,7 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
         if let Some(current_id) = sched.current_id_opt() {
             if let Some(thread) = sched.storage.threads.get_mut(&current_id) {
                 if sched.idling {
-                    println!("Stopped idling: {:?}", thread.name);
+                    //println!("Stopped idling: {:?}", thread.name);
                 }
                 sched.idling = false;
                 thread.is_queued.store(false, Ordering::SeqCst);
@@ -200,7 +200,7 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
         }
 
         if !sched.idling {
-            println!("Entering idling");
+            //println!("Entering idling");
         }
         sched.idling = true;
 

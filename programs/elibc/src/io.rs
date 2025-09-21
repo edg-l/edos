@@ -323,32 +323,6 @@ pub fn get_raw_input(timeout_ms: u64, out_buf: &mut Vec<KeyEvent>, count: usize)
         return;
     };
 
-    let mut remaining = count;
-
-    // Drain any pending events without blocking first.
-    loop {
-        match read_keyboard_events(fd, remaining, out_buf) {
-            Ok(0) => break,
-            Ok(read) => {
-                remaining = remaining.saturating_sub(read);
-                if remaining == 0 {
-                    return;
-                }
-            }
-            Err(err) => {
-                if matches!(err, IoError::InvalidInput) {
-                    // Likely overflow configuration; nothing we can do here.
-                }
-                release_keyboard_fd(fd);
-                return;
-            }
-        }
-    }
-
-    if remaining == 0 || timeout_ms == 0 {
-        return;
-    }
-
     match poll_fd(fd, timeout_ms) {
         Ok(state) => {
             if !state.readable {
@@ -361,7 +335,7 @@ pub fn get_raw_input(timeout_ms: u64, out_buf: &mut Vec<KeyEvent>, count: usize)
         }
     }
 
-    if read_keyboard_events(fd, remaining, out_buf).is_err() {
+    if read_keyboard_events(fd, count, out_buf).is_err() {
         release_keyboard_fd(fd);
     }
 }
