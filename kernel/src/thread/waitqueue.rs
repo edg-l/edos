@@ -19,7 +19,7 @@ pub struct WaitQueue {
 }
 
 impl WaitQueue {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { inner: Mutex::new(VecDeque::new()) }
     }
 

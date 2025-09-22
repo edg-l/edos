@@ -109,14 +109,7 @@ pub fn pick_sched() -> &'static Scheduler {
 
 /// Exits a kthread.
 pub fn kthread_exit(code: i32) -> ! {
-    let sched = sched();
-    if let Some(tid) = sched.current_thread_id() {
-        sched.exit_self(tid, code);
-    }
-
-    loop {
-        hlt();
-    }
+    sched().thread_exit(code)
 }
 
 /// Returns the stack top of a kthread or a kernel stack for a user process.

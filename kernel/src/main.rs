@@ -23,7 +23,8 @@ use crate::{
     },
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
     thread::{
-        Thread, UserThreadInfo,
+        UserThreadInfo,
+        thread::Thread,
         util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_thread},
     },
     timer::{get_timer_calibration, init_boot_time, uptime_us},
@@ -208,11 +209,12 @@ pub fn mount_system_fs() -> ! {
             TERMINAL_PROGRAM,
             Some("terminal".to_string()),
             &terminal_argv,
+            0,
+            0,
+            root.clone(),
         )
         .unwrap();
-        let user_thread_info =
-            UserThreadInfo::from_thread(user_thread.user.as_ref().unwrap(), 0, 0, root.clone());
-        queue_spawn_thread(user_thread, user_thread_info);
+        queue_spawn_thread(user_thread);
     });
 
     kthread_exit(0)

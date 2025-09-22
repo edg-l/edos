@@ -4,16 +4,13 @@ use core::time::Duration;
 use x86_64::instructions::interrupts;
 
 use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
-use crate::log;
 use crate::{
     drivers::{keyboard::KEYBOARD_BROADCAST, tty},
     syscalls::Errno,
     thread::{
-        broadcast::ReceiveError,
         pipe::{FileDescriptor, FsFile, Pipe, StandardStream},
         scheduler::sched,
     },
-    timer::Instant,
 };
 
 #[repr(C)]
@@ -245,39 +242,39 @@ fn read_from_stdin(max_count: usize) -> Result<alloc::vec::Vec<u8>, i64> {
     use alloc::vec::Vec;
     use pc_keyboard::DecodedKey;
 
-    let rx = KEYBOARD_BROADCAST.lock().subscribe_or_get();
+    let rx = KEYBOARD_BROADCAST.subscribe();
     let mut kernel_buffer = Vec::new();
 
     // Read until we get a newline or reach max count
     while kernel_buffer.len() < max_count {
         match rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(DecodedKey::Unicode('\n')) => {
+            Some(DecodedKey::Unicode('\n')) => {
                 kernel_buffer.push(b'\n');
                 break;
             }
-            Ok(DecodedKey::Unicode('\r')) => {
+            Some(DecodedKey::Unicode('\r')) => {
                 kernel_buffer.push(b'\n');
                 break;
             }
-            Ok(DecodedKey::Unicode(c)) if c.is_ascii() => {
+            Some(DecodedKey::Unicode(c)) if c.is_ascii() => {
                 kernel_buffer.push(c as u8);
             }
-            Ok(DecodedKey::Unicode('\u{8}')) => {
+            Some(DecodedKey::Unicode('\u{8}')) => {
                 // Backspace - remove last character if any
                 kernel_buffer.pop();
             }
-            Ok(_) => {
+            Some(_) => {
                 // Ignore non-ASCII keys and raw keys
                 continue;
             }
-            Err(ReceiveError::Timeout) => {
+            None => {
                 // Recv again
                 continue;
             }
         }
     }
 
-    KEYBOARD_BROADCAST.lock().unsubscribe();
+    KEYBOARD_BROADCAST.unsubscribe();
 
     Ok(kernel_buffer)
 }

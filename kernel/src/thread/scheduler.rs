@@ -1,9 +1,10 @@
 use core::{
     cmp,
     sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
 };
 
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 use crossbeam_queue::ArrayQueue;
 use heapless::{BinaryHeap, Deque, LinearMap, binary_heap::Min};
 use spin::{Mutex, RwLock};
@@ -18,14 +19,30 @@ use crate::{
     boot::boot_info,
     drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
     interrupts::InterruptIndex,
+    println,
     smp::tlb_flush_all_including_global,
     thread::{
+        UserThreadInfo,
         context::CpuContext,
         thread::{Flags, State, THREADS, Thread, ThreadId, get_thread_by_id},
     },
     timer::Instant,
     util::per_cpu::get_percpu_data,
 };
+
+pub fn init() {
+    println!("Initializing scheduler");
+    // TODO: refactor queue, so it isnt limited to 65k? maybe iterate on the storage threads
+    // and use the queue as a priority queue, or that a threadid that is just a u32 or u16 and the queue is just of u16,
+    // this would need to add a different pid for user threads alongside thread id and a mapping.
+    let lapic_id = unsafe { get_lapic().id() };
+    let sched = Box::new(Scheduler::new(lapic_id));
+
+    let ptr: &'static mut _ = Box::leak(sched);
+    get_percpu_data().scheduler = ptr;
+    let _ = SCHEDULERS.write().insert(lapic_id, ptr);
+    println!("Saved scheduler on percpu");
+}
 
 pub fn sched() -> &'static Scheduler {
     unsafe {
@@ -163,10 +180,17 @@ impl Scheduler {
     }
 
     fn run_idle(&self) {
-        // Mark CPU idle. HLT until next interrupt.
+        // Mark CPU idle
         self.current.store(0, Ordering::Release);
+
         loop {
-            enable_and_hlt();
+            // Break out if any work is available
+            if !self.cmds.is_empty() {
+                break;
+            }
+
+            // Halt until next interrupt (timer, IPI, device)
+            x86_64::instructions::interrupts::enable_and_hlt();
         }
     }
 
@@ -263,26 +287,41 @@ impl Scheduler {
             .fetch_and(!Flags::NEED_RESCHED.bits(), Ordering::AcqRel);
 
         // Requeue current if still runnable.
-        let st = cur.state();
-        if st == State::Running {
-            cur.state.store(State::Ready as u8, Ordering::Release);
-            let mut rq = self.rq.lock();
-            rq.push_back(cur.clone()).expect("failed to push back");
+        let state_now: State = cur.state.load(Ordering::Acquire).into();
+        match state_now {
+            State::Running => {
+                // If another CPU already marked it Parked/Sleeping/Dying, don't requeue
+                if cur.cas_state(State::Running, State::Ready) {
+                    let mut rq = self.rq.lock();
+                    rq.push_back(cur.clone()).ok();
+                }
+            }
+            // If it was already moved elsewhere (Parked, Sleeping, Dying), skip requeue
+            _ => {}
         }
 
         self.pick_and_run(context);
     }
 
     fn pick_and_run(&self, context: *mut CpuContext) {
-        let next = {
-            let mut rq = self.rq.lock();
-            // Simple RR. You can add N priority buckets if wanted.
-            rq.pop_front()
-        };
+        loop {
+            let next = { self.rq.lock().pop_front() };
 
-        match next {
-            Some(t) => unsafe { self.context_switch_to(t, context) },
-            None => self.run_idle(),
+            match next {
+                Some(t) => {
+                    if t.cas_state(State::Ready, State::Running) {
+                        unsafe { self.context_switch_to(t, context) };
+                        return;
+                    } else {
+                        continue; // invalid state, try again
+                    }
+                }
+                None => {
+                    self.run_idle();
+                    // after idle returns, loop and try again
+                    continue;
+                }
+            }
         }
     }
 
@@ -354,25 +393,23 @@ impl Scheduler {
     }
 
     #[inline]
-    pub fn yield_now(&self, tid: ThreadId) {
+    pub fn thread_yield(&self) {
+        let tid = self.current_thread_id().unwrap();
         route_cmd_to_thread(tid, || SchedCmd::Yield(tid));
 
-        if Some(tid) == self.current_thread_id() {
-            without_interrupts(|| unsafe {
-                context_switch();
-            })
-        }
+        without_interrupts(|| unsafe {
+            context_switch();
+        })
     }
 
     #[inline]
-    pub fn sleep_for_ticks(&self, tid: ThreadId, dt: u64) {
-        let deadline = Instant::now().tick().saturating_add(dt);
-        route_cmd_to_thread(tid, || SchedCmd::SleepUntil(tid, deadline));
-        if Some(tid) == self.current_thread_id() {
-            without_interrupts(|| unsafe {
-                context_switch();
-            })
-        }
+    pub fn thread_sleep(&self, dt: Duration) {
+        let tid = self.current_thread_id().unwrap();
+        let deadline = Instant::now() + dt;
+        route_cmd_to_thread(tid, || SchedCmd::SleepUntil(tid, deadline.tick()));
+        without_interrupts(|| unsafe {
+            context_switch();
+        })
     }
 
     #[inline]
@@ -396,13 +433,23 @@ impl Scheduler {
         }
     }
 
+    pub fn thread_park(&self) {
+        let tid = self.current_thread_id().unwrap();
+        route_cmd_to_thread(tid, || SchedCmd::Park(tid));
+
+        without_interrupts(|| unsafe {
+            context_switch();
+        })
+    }
+
     pub fn wake_thread(&self, tid: ThreadId, high: bool) {
         self.cmds.push(SchedCmd::Wake(tid, high));
         self.send_reschedule_ipi(self.cpu); // kick target CPU if needed
     }
 
-    pub fn exit_self(&self, tid: ThreadId, code: i32) -> ! {
+    pub fn thread_exit(&self, code: i32) -> ! {
         // Tell the scheduler this thread is done
+        let tid = self.current_thread_id().unwrap();
         self.cmds.push(SchedCmd::Exit(tid, code));
 
         if let Some(t) = get_thread_by_id(tid) {
@@ -416,6 +463,17 @@ impl Scheduler {
         loop {
             enable_and_hlt();
         }
+    }
+
+    pub fn current_thread_info(&self) -> Arc<Mutex<UserThreadInfo>> {
+        THREADS
+            .get_info(self.current_thread_id().unwrap())
+            .clone()
+            .unwrap()
+    }
+
+    pub fn get_logger(&self) -> Arc<crate::logs::ThreadLogger> {
+        self.current_thread().unwrap().logger.clone()
     }
 }
 

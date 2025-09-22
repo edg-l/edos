@@ -28,8 +28,9 @@ use crate::{
         memory::{sys_mmap, sys_munmap},
     },
     thread::{
-        Thread, UserThreadInfo,
-        scheduler::{ALIVE_THREADS, EXITED_THREADS, sched, switch_to_kernel_page},
+        UserThreadInfo,
+        scheduler::{sched, switch_to_kernel_page},
+        thread::{State, Thread, ThreadId, get_thread_by_id, get_thread_info_by_id},
     },
 };
 
@@ -280,10 +281,6 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_EXIT => {
             log!("Exit called with code {:?}", ctx.rdi as i32);
             sched().thread_exit(ctx.rdi as i32);
-
-            loop {
-                enable_and_hlt();
-            }
         }
         SYS_GETPID => {
             ctx.rax = sys_getpid();
@@ -433,20 +430,18 @@ fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
 
     drop(thread);
 
-    if let Some(code) = EXITED_THREADS.write().remove(&pid) {
-        if !status_ptr.is_null() {
-            unsafe { status_ptr.write(code) };
+    if let Some(thread) = get_thread_by_id(ThreadId(pid)) {
+        if thread.state.load(core::sync::atomic::Ordering::Acquire) == State::Dying as u8 {
+            if !status_ptr.is_null() {
+                unsafe { status_ptr.write(0) }; // TODO: change code
+            }
+            return pid;
+        } else {
+            return 0;
         }
-        return pid;
-    }
-
-    if ALIVE_THREADS.read().get(&pid).is_some() {
+    } else {
         return 0;
     }
-
-    let mut thread = info.lock();
-    thread.errno = Errno::EINVAL;
-    !0u64
 }
 
 // TODO: figure out why the syscall gets all logs. it doesnt properly subscribe?
@@ -463,7 +458,7 @@ pub fn sys_kernel_log(log_buffer: *mut u8, size: usize) -> i64 {
 
     // not needed?      x86_64::instructions::interrupts::enable();
 
-    let rx = LOG_BROADCAST.lock().subscribe_or_get();
+    let rx = LOG_BROADCAST.subscribe();
 
     // Require a 128 byte space.
     while buf.len() + 128 + 1 < size
@@ -686,12 +681,16 @@ fn sys_spawn(
     let argv_slices: Vec<&[u8]> = argv_storage.iter().map(|arg| arg.as_slice()).collect();
 
     // Create new user thread from ELF data
-    let user_thread = match Thread::new_user(&elf_data, Some(path_str.to_string()), &argv_slices) {
+    let user_thread = match Thread::new_user(
+        &elf_data,
+        Some(path_str.to_string()),
+        &argv_slices,
+        0,
+        0,
+        child_cwd,
+    ) {
         Ok(thread) => {
-            log!(
-                "UserThread created successfully, entry point: {:p}",
-                thread.context.rip() as *const u8
-            );
+            log!("UserThread created successfully");
             thread
         }
         Err(e) => {
@@ -702,51 +701,50 @@ fn sys_spawn(
     };
 
     // Create thread info and set up file descriptor redirections
-    let mut user_thread_info =
-        UserThreadInfo::from_thread(user_thread.user.as_ref().unwrap(), 0, 0, child_cwd);
-
-    // Override standard file descriptors if specified (non-default values)
-    if stdin_fd != 0
-        && let Some(stdin_desc) = sched
-            .current_thread_info()
-            .lock()
-            .fd_table
-            .get_fd(stdin_fd)
-            .cloned()
     {
-        user_thread_info.fd_table.insert_fd(0, stdin_desc);
+        let info = get_thread_info_by_id(user_thread.id).unwrap();
+        let mut user_thread_info = info.lock();
+
+        // Override standard file descriptors if specified (non-default values)
+        if stdin_fd != 0
+            && let Some(stdin_desc) = sched
+                .current_thread_info()
+                .lock()
+                .fd_table
+                .get_fd(stdin_fd)
+                .cloned()
+        {
+            user_thread_info.fd_table.insert_fd(0, stdin_desc);
+        }
+
+        if stdout_fd != 1
+            && let Some(stdout_desc) = sched
+                .current_thread_info()
+                .lock()
+                .fd_table
+                .get_fd(stdout_fd)
+                .cloned()
+        {
+            user_thread_info.fd_table.insert_fd(1, stdout_desc);
+        }
+
+        if stderr_fd != 2
+            && let Some(stderr_desc) = sched
+                .current_thread_info()
+                .lock()
+                .fd_table
+                .get_fd(stderr_fd)
+                .cloned()
+        {
+            user_thread_info.fd_table.insert_fd(2, stderr_desc);
+        }
     }
 
-    if stdout_fd != 1
-        && let Some(stdout_desc) = sched
-            .current_thread_info()
-            .lock()
-            .fd_table
-            .get_fd(stdout_fd)
-            .cloned()
-    {
-        user_thread_info.fd_table.insert_fd(1, stdout_desc);
-    }
-
-    if stderr_fd != 2
-        && let Some(stderr_desc) = sched
-            .current_thread_info()
-            .lock()
-            .fd_table
-            .get_fd(stderr_fd)
-            .cloned()
-    {
-        user_thread_info.fd_table.insert_fd(2, stderr_desc);
-    }
-
-    let child_pid = user_thread.user.as_ref().unwrap().pid;
-
+    let child_pid = user_thread.id.0;
     // Queue the new thread for execution
-    queue_spawn_thread(user_thread, user_thread_info);
+    queue_spawn_thread(user_thread);
 
     unsafe { Cr3::write(cr3.0, cr3.1) };
-
-    log!("spawn, returning");
 
     child_pid
 }

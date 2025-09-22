@@ -8,15 +8,11 @@ use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{
     serial::add_serial_log,
-    thread::{
-        broadcast::{LockedBroadcast, new_broadcast},
-        scheduler::sched,
-        util::queue_spawn_kthread_named,
-    },
+    thread::{broadcast::Broadcaster, scheduler::sched, util::queue_spawn_kthread_named},
     timer::uptime_us,
 };
 
-pub static LOG_BROADCAST: LockedBroadcast<String> = new_broadcast(1024, true);
+pub static LOG_BROADCAST: Broadcaster<String> = Broadcaster::new();
 
 #[derive(Debug, Clone)]
 pub struct ThreadLogger {
@@ -39,7 +35,7 @@ impl Write for ThreadLogger {
                 "unk3".to_string()
             }
         });
-        let cpu_idx = sched().lapic_id;
+        let cpu_idx = sched().cpu;
 
         let text = alloc::format!(
             "[{secs}.{us:06}] <cpu-{}:{}:{}:{}> {s}",
@@ -48,7 +44,7 @@ impl Write for ThreadLogger {
             if self.kernel { "k" } else { "u" },
             self.id
         );
-        LOG_BROADCAST.lock().broadcast(text);
+        LOG_BROADCAST.broadcast(text);
         Ok(())
     }
 }
@@ -66,7 +62,7 @@ impl ThreadLogger {
             .as_ref()
             .map(|x| (*x).clone())
             .unwrap_or_else(|| "unk".to_string());
-        let cpu_idx = sched().lapic_id;
+        let cpu_idx = sched().cpu;
 
         // build prefix
         let _ = write!(
@@ -82,7 +78,7 @@ impl ThreadLogger {
         let _ = buf.write_fmt(args);
         buf.push('\n');
 
-        LOG_BROADCAST.lock().broadcast(buf);
+        LOG_BROADCAST.broadcast(buf);
     }
 }
 
@@ -109,10 +105,10 @@ pub fn init() {
 }
 
 pub fn thread_log_to_serial() -> ! {
-    let rx = LOG_BROADCAST.lock().subscribe_or_get();
+    let rx = LOG_BROADCAST.subscribe();
 
     loop {
-        if let Ok(msg) = rx.recv_timeout(Duration::from_millis(50)) {
+        if let msg = rx.recv() {
             without_interrupts(|| {
                 add_serial_log(&msg);
             });

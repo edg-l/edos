@@ -46,7 +46,7 @@ pub struct Mailbox<T, R> {
 }
 
 impl<T, R> Mailbox<T, R> {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
             not_empty: WaitQueue::new(),

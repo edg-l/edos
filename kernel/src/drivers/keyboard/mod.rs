@@ -11,15 +11,15 @@ use x86_64::{
 
 use crate::{
     apic::get_lapic,
-    fs::{DevFsDevice, DevFsError, MmapRegion, PollState, handle::Pollable, register_device_str},
+    fs::{handle::Pollable, register_device_str, DevFsDevice, DevFsError, MmapRegion, PollState},
     memory::mapper::MemoryManager,
     thread::{
-        broadcast::{LockedBroadcast, new_broadcast},
-        scheduler::sched,
+        broadcast::Broadcaster,
+        scheduler::sched, thread::ThreadId,
     },
 };
 
-pub static KEYBOARD_BROADCAST: LockedBroadcast<DecodedKey> = new_broadcast(1024, false);
+pub static KEYBOARD_BROADCAST: Broadcaster<DecodedKey> = Broadcaster::new();
 
 static SCANCODE_QUEUE: Once<ArrayQueue<u8>> = Once::new();
 const QUEUE_SIZE: usize = 2048;
@@ -35,7 +35,7 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
     queue.force_push(scancode);
 
     if let Some(tid) = KEYBOARD_THREAD_ID.get() {
-        sched().thread_wake(*tid, true);
+        sched().wake_thread(ThreadId(*tid), true);
     }
 
     unsafe { get_lapic().end_of_interrupt() };
@@ -47,8 +47,8 @@ pub extern "C" fn driver_main() -> ! {
     without_interrupts(|| unsafe {
         enable_ps2_keyboard();
 
-        let tid = sched().current_id();
-        KEYBOARD_THREAD_ID.call_once(|| tid);
+        let tid = sched().current_thread_id().unwrap();
+        KEYBOARD_THREAD_ID.call_once(|| tid.0);
     });
 
     let mut keyboard = Keyboard::new(
@@ -66,7 +66,7 @@ pub extern "C" fn driver_main() -> ! {
             if let Ok(Some(event)) = keyboard.add_byte(scancode)
                 && let Some(key_event) = keyboard.process_keyevent(event)
             {
-                KEYBOARD_BROADCAST.lock().broadcast(key_event);
+                KEYBOARD_BROADCAST.broadcast(key_event);
             }
         }
         sched().thread_park();
@@ -110,7 +110,7 @@ struct KeyboardPoll;
 
 impl Pollable for KeyboardPoll {
     fn poll(&self, timeout: Duration) -> PollState {
-        let rx = KEYBOARD_BROADCAST.lock().subscribe_or_get();
+        let rx = KEYBOARD_BROADCAST.subscribe();
 
         if rx.poll(timeout) {
             PollState {
@@ -130,7 +130,7 @@ impl Pollable for KeyboardPoll {
 
 impl DevFsDevice for KeyboardDevice {
     fn read(&self, _offset: usize, count: usize) -> Result<Vec<u8>, DevFsError> {
-        let rx = KEYBOARD_BROADCAST.lock().subscribe_or_get();
+        let rx = KEYBOARD_BROADCAST.subscribe();
         let mut buffer = Vec::new();
 
         // fill remaining

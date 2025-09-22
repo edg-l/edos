@@ -255,7 +255,7 @@ impl Thread {
         THREADS.insert(thread.clone());
         THREADS.insert_info(
             id,
-            Arc::new(RwLock::new(UserThreadInfo {
+            Arc::new(Mutex::new(UserThreadInfo {
                 pid: id.0,
                 errno: Errno::Clear,
                 fd_table: FileDescriptorTable::new(),
@@ -280,7 +280,7 @@ impl Thread {
             // Unmap all memory mappings
             let mut memory_manager = user.memory_manager.lock();
             if let Some(info) = info {
-                for (&addr, mapping) in &info.write().memory_mappings {
+                for (&addr, mapping) in &info.lock().memory_mappings {
                     let _ = memory_manager.unmap_memory(addr, mapping.size);
                 }
             }
@@ -321,7 +321,7 @@ impl Thread {
 
 pub struct ThreadRegistry {
     pub(super) map: RwLock<BTreeMap<ThreadId, Arc<Thread>>>,
-    infos: RwLock<BTreeMap<ThreadId, Arc<RwLock<UserThreadInfo>>>>,
+    infos: RwLock<BTreeMap<ThreadId, Arc<Mutex<UserThreadInfo>>>>,
 }
 
 impl ThreadRegistry {
@@ -340,7 +340,7 @@ impl ThreadRegistry {
         self.map.write().remove(&tid);
     }
 
-    pub fn insert_info(&self, tid: ThreadId, t: Arc<RwLock<UserThreadInfo>>) {
+    pub fn insert_info(&self, tid: ThreadId, t: Arc<Mutex<UserThreadInfo>>) {
         self.infos.write().insert(tid, t);
     }
 
@@ -348,7 +348,7 @@ impl ThreadRegistry {
         self.map.read().get(&tid).cloned()
     }
 
-    pub fn get_info(&self, tid: ThreadId) -> Option<Arc<RwLock<UserThreadInfo>>> {
+    pub fn get_info(&self, tid: ThreadId) -> Option<Arc<Mutex<UserThreadInfo>>> {
         self.infos.read().get(&tid).cloned()
     }
 }
@@ -359,4 +359,9 @@ pub(super) static THREADS: ThreadRegistry = ThreadRegistry::new();
 // simple wrapper
 pub fn get_thread_by_id(tid: ThreadId) -> Option<Arc<Thread>> {
     THREADS.get(tid)
+}
+
+
+pub fn get_thread_info_by_id(tid: ThreadId) -> Option<Arc<Mutex<UserThreadInfo>>> {
+    THREADS.get_info(tid)
 }

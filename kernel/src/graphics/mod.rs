@@ -133,32 +133,30 @@ impl DoubleBuffer {
 }
 
 pub extern "C" fn render_thread() -> ! {
-    let requests = REQUESTS.call_once(|| Mailbox::new(sched().current_id()));
+    let mail = REQUESTS.call_once(|| Mailbox::new());
 
     FramebufferDevice::register();
 
     let mut display = DoubleBuffer::new();
 
     loop {
-        while let Some(request) = requests.pop_request() {
-            match &request.message {
-                Request::ScreenInfo => {
-                    let info = ScreenInfo {
-                        height: display.height,
-                        width: display.width,
-                    };
-                    request.response.send(Response::ScreenInfo(info));
-                }
-                Request::Render => {
-                    display.present();
-                    request.response.send(Response::Ok);
-                }
-                Request::Draw(draw_request) => {
-                    display.draw(draw_request);
-                    request.response.send(Response::Ok);
-                }
+        let request = mail.recv();
+        match &request.payload {
+            Request::ScreenInfo => {
+                let info = ScreenInfo {
+                    height: display.height,
+                    width: display.width,
+                };
+                Mailbox::reply(request, Response::ScreenInfo(info));
+            }
+            Request::Render => {
+                display.present();
+                Mailbox::reply(request, Response::Ok);
+            }
+            Request::Draw(draw_request) => {
+                display.draw(draw_request);
+                Mailbox::reply(request, Response::Ok);
             }
         }
-        requests.wait();
     }
 }
