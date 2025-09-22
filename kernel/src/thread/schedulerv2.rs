@@ -7,14 +7,26 @@ use alloc::sync::Arc;
 use crossbeam_queue::ArrayQueue;
 use heapless::{BinaryHeap, Deque, LinearMap, binary_heap::Min};
 use spin::{Mutex, RwLock};
-use x86_64::{VirtAddr, instructions::interrupts::enable_and_hlt};
+use x86_64::{
+    VirtAddr,
+    instructions::interrupts::{enable_and_hlt, without_interrupts},
+};
 
 use crate::{
-    apic::get_lapic, drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state}, interrupts::InterruptIndex, thread::{
+    apic::get_lapic,
+    drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
+    interrupts::InterruptIndex,
+    thread::{
         context::CpuContext,
-        threadv2::{get_thread_by_id, Flags, State, Thread, ThreadId, THREADS},
-    }, timer::Instant, util::per_cpu::get_percpu_data
+        threadv2::{Flags, State, THREADS, Thread, ThreadId, get_thread_by_id},
+    },
+    timer::Instant,
+    util::per_cpu::get_percpu_data,
 };
+
+pub fn sched() -> &'static Scheduler {
+    unsafe { todo!() }
+}
 
 #[derive(Debug)]
 pub enum SchedCmd {
@@ -59,7 +71,15 @@ impl Scheduler {
         }
     }
 
-    fn current_thread(&self) -> Option<Arc<Thread>> {
+    pub fn current_thread_id(&self) -> Option<ThreadId> {
+        let tid = self.current.load(Ordering::Acquire);
+        if tid == 0 {
+            return None;
+        }
+        Some(ThreadId(tid))
+    }
+
+    pub fn current_thread(&self) -> Option<Arc<Thread>> {
         let tid = self.current.load(Ordering::Acquire);
         if tid == 0 {
             return None;
@@ -289,7 +309,7 @@ impl Scheduler {
         // return handles context switch
     }
 
-     pub fn send_reschedule_ipi(&self, target_cpu: u32) {
+    pub fn send_reschedule_ipi(&self, target_cpu: u32) {
         unsafe { get_lapic().send_ipi(InterruptIndex::Reschedule as u8, target_cpu) };
     }
 
@@ -301,6 +321,12 @@ impl Scheduler {
         // local CPU: set NEED_RESCHED and return to kernel exit path
         if let Some(t) = get_thread_by_id(tid) {
             t.mark_need_resched();
+        }
+
+        if Some(tid) == self.current_thread_id() {
+            without_interrupts(|| unsafe {
+                context_switch();
+            })
         }
     }
 
@@ -335,6 +361,12 @@ impl Scheduler {
         self.cmds.push(SchedCmd::Park(tid));
         if let Some(t) = get_thread_by_id(tid) {
             t.mark_need_resched();
+        }
+
+        if Some(tid) == self.current_thread_id() {
+            without_interrupts(|| unsafe {
+                context_switch();
+            })
         }
     }
 
@@ -398,3 +430,83 @@ impl PartialEq for SleepEntry {
     }
 }
 impl Eq for SleepEntry {}
+
+#[unsafe(naked)]
+pub unsafe extern "C" fn context_switch() {
+    core::arch::naked_asm!(
+        // Layout wanted at [rsp]:
+        // [ GPRs: r15..rax ] (15*8 bytes)  then  [ IF: RIP,CS,RFLAGS,RSP,SS ] (5*8 bytes)
+        // Reserve space up front so we can store originals without clobbering them.
+        "sub rsp, 160",                   // 120 + 40
+
+        // ---- store original GPRs into the reserved block (no clobber) ----
+        "mov [rsp +   0], r15",
+        "mov [rsp +   8], r14",
+        "mov [rsp +  16], r13",
+        "mov [rsp +  24], r12",
+        "mov [rsp +  32], r11",
+        "mov [rsp +  40], r10",
+        "mov [rsp +  48], r9",
+        "mov [rsp +  56], r8",
+        "mov [rsp +  64], rdi",
+        "mov [rsp +  72], rsi",
+        "mov [rsp +  80], rbp",
+        "mov [rsp +  88], rbx",
+        "mov [rsp +  96], rdx",
+        "mov [rsp + 104], rcx",
+        "mov [rsp + 112], rax",
+
+        // ---- build synthetic interrupt frame at [rsp + 120] ----
+        // RIP
+        "lea rax, [rip + .Lresume]",
+        "mov [rsp + 120], rax",
+        // CS (use your kernel code selector constant)
+        "mov eax, {KCS}",
+        "mov [rsp + 128], rax",
+        // RFLAGS
+        "pushfq",
+        "pop rax",
+        "mov [rsp + 136], rax",
+        // RSP (original before the 160-byte reservation) = rsp + 160
+        "lea rax, [rsp + 160]",
+        "mov [rsp + 144], rax",
+        // SS (use your kernel data selector constant)
+        "mov eax, {KSS}",
+        "mov [rsp + 152], rax",
+
+        // rdi = &CpuContext (points to r15 field)
+        "mov rdi, rsp",
+
+        // 16-byte align for call
+        "sub rsp, 8",
+        "and rsp, -16",
+        "cld",
+        "call {timer_schedule}",
+
+        // Switch to returned context and exit like IRQ path
+        "mov rsp, rax",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdi",
+        "pop rsi",
+        "pop rbp",
+        "pop rbx",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        "iretq",
+
+        ".Lresume:",
+        "ret",
+
+        timer_schedule = sym schedule,
+        KCS = const 0x08,
+        KSS = const 0x10,
+    );
+}

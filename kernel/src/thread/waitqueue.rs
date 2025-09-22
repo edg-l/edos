@@ -1,9 +1,9 @@
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use alloc::{collections::vec_deque::VecDeque, sync::Arc};
+use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::thread::threadv2::ThreadId;
+use crate::thread::{schedulerv2::sched, threadv2::ThreadId};
 
 
 
@@ -23,7 +23,7 @@ impl WaitQueue {
 
     /// Current thread goes to sleep until woken
     pub fn wait(&self) {
-        let tid = current_thread_id(); // your kernel helper
+        let tid = sched().current_thread_id().unwrap(); // your kernel helper
         let entry = Arc::new(WaitEntry {
             tid,
             woken: AtomicBool::new(false),
@@ -37,9 +37,9 @@ impl WaitQueue {
         // park until woken
         loop {
             // Scheduler call to block this thread
-            thread_park();
+            sched().park_thread(tid);
 
-            if entry.woken.swap(false, Acquire) {
+            if entry.woken.swap(false, Ordering::Acquire) {
                 break;
             }
         }
@@ -53,8 +53,8 @@ impl WaitQueue {
         };
 
         if let Some(entry) = opt {
-            entry.woken.store(true, Release);
-            thread_wake(entry.tid, false); // false = normal priority
+            entry.woken.store(true, Ordering::Release);
+            sched().wake_thread(entry.tid, false); // false = normal priority
         }
     }
 
@@ -66,8 +66,8 @@ impl WaitQueue {
         };
 
         for entry in list {
-            entry.woken.store(true, Release);
-            thread_wake(entry.tid, false);
+            entry.woken.store(true, Ordering::Release);
+            sched().wake_thread(entry.tid, false);
         }
     }
 }
