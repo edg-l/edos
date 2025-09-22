@@ -1,15 +1,15 @@
 use core::{
+    cmp,
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
 };
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use crossbeam_queue::ArrayQueue;
-use heapless::{LinearMap, index_map::FnvIndexMap};
+use heapless::{BinaryHeap, Deque, LinearMap, binary_heap::Min};
 use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
-    instructions::interrupts::{enable, enable_and_hlt, without_interrupts},
+    instructions::interrupts::{enable_and_hlt, without_interrupts},
     registers::control::Cr3,
 };
 
@@ -18,89 +18,14 @@ use crate::{
     boot::boot_info,
     drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
     interrupts::InterruptIndex,
-    logs::ThreadLogger,
-    println,
     smp::tlb_flush_all_including_global,
-    thread::{Thread, ThreadState, UserThreadInfo, context::CpuContext},
+    thread::{
+        context::CpuContext,
+        thread::{Flags, State, THREADS, Thread, ThreadId, get_thread_by_id},
+    },
     timer::Instant,
     util::per_cpu::get_percpu_data,
 };
-
-// tid -> lapic that owns it
-pub static ALIVE_THREADS: RwLock<FnvIndexMap<u64, u32, 1024>> = RwLock::new(FnvIndexMap::new());
-pub static EXITED_THREADS: RwLock<FnvIndexMap<u64, i32, 1024>> = RwLock::new(FnvIndexMap::new());
-
-pub static SCHEDULERS: RwLock<heapless::LinearMap<u32, &'static Scheduler, 128>> =
-    RwLock::new(heapless::LinearMap::new());
-
-/// Returns the scheduler id this thread lives on.
-#[allow(unused)]
-pub fn thread_exists(tid: u64) -> Option<u32> {
-    ALIVE_THREADS.read().get(&tid).copied()
-}
-
-pub fn thread_sched(id: u64) -> Option<&'static Scheduler> {
-    let sched_id = thread_exists(id)?;
-    SCHEDULERS.read().get(&sched_id).cloned()
-}
-
-#[derive(Debug)]
-pub enum SchedCmd {
-    Wake(u64, bool),
-    //Migrate(ThreadId, u64), // u64 = cpu
-    //SetPrio(ThreadId, u8),
-    WaitTimeout(u64, Instant, Duration),
-    Wait(u64),
-    Exit(u64, i32),
-}
-
-pub struct Scheduler {
-    thread_queue: ArrayQueue<u64>,
-    thread_priority_queue: ArrayQueue<u64>,
-    pub cmd_queue: ArrayQueue<SchedCmd>,
-    pub thread_spawn_queue: ArrayQueue<(Thread, Option<UserThreadInfo>)>,
-    pub storage: Storage,
-    pub current_tid: Option<u64>,
-    pub current_logger: Option<Arc<ThreadLogger>>,
-    pub lapic_id: u32,
-    pub thread_count: AtomicU64,
-    pub idling: bool,
-    pub last_tick: Instant,
-}
-
-pub struct Storage {
-    pub threads: heapless::LinearMap<u64, Thread, 256>,
-    pub thread_info: heapless::LinearMap<u64, Arc<Mutex<UserThreadInfo>>, 256>,
-}
-
-pub fn init() {
-    println!("Initializing scheduler");
-    // TODO: refactor queue, so it isnt limited to 65k? maybe iterate on the storage threads
-    // and use the queue as a priority queue, or that a threadid that is just a u32 or u16 and the queue is just of u16,
-    // this would need to add a different pid for user threads alongside thread id and a mapping.
-    let lapic_id = unsafe { get_lapic().id() };
-    let sched = Box::new(Scheduler {
-        thread_queue: ArrayQueue::new(500),
-        thread_priority_queue: ArrayQueue::new(500),
-        thread_spawn_queue: ArrayQueue::new(64),
-        cmd_queue: ArrayQueue::new(128),
-        storage: Storage {
-            threads: LinearMap::new(),
-            thread_info: LinearMap::new(),
-        },
-        current_tid: None,
-        current_logger: None,
-        lapic_id,
-        thread_count: AtomicU64::new(0),
-        idling: false,
-        last_tick: Instant::now(),
-    });
-
-    let ptr: &'static mut _ = Box::leak(sched);
-    get_percpu_data().scheduler = ptr;
-    let _ = SCHEDULERS.write().insert(lapic_id, ptr);
-    println!("Saved scheduler on percpu");
-}
 
 pub fn sched() -> &'static Scheduler {
     unsafe {
@@ -111,12 +36,394 @@ pub fn sched() -> &'static Scheduler {
     }
 }
 
-// This function will be called from assembly with pointer to saved context
-#[unsafe(no_mangle)]
-pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
-    unsafe {
-        get_lapic().end_of_interrupt();
-        schedule(context)
+#[derive(Debug)]
+pub enum SchedCmd {
+    New(Arc<Thread>),
+    Wake(ThreadId, /*high_prio:*/ bool),
+    SleepUntil(ThreadId, u64),
+    Park(ThreadId),
+    Exit(ThreadId, i32),
+    SetAffinity(ThreadId, u32),
+    SetPriority(ThreadId, u8),
+    Yield(ThreadId),
+}
+
+pub static SCHEDULERS: RwLock<heapless::LinearMap<u32, &'static Scheduler, 128>> =
+    RwLock::new(heapless::LinearMap::new());
+
+fn sched_for_cpu(cpu: u32) -> &'static Scheduler {
+    *SCHEDULERS.read().get(&cpu).expect("cpu sched")
+}
+
+fn route_cmd_to_thread(tid: ThreadId, mk: impl FnOnce() -> SchedCmd) {
+    if let Some(t) = get_thread_by_id(tid) {
+        let cpu = t.cpu.load(Ordering::Acquire);
+        let sc = sched_for_cpu(cpu);
+        let _ = sc.cmds.push(mk()); // handle full case below
+        t.mark_need_resched();
+
+        if cpu != sched().cpu {
+            sc.send_reschedule_ipi(cpu);
+        }
+    }
+}
+
+pub struct Scheduler {
+    pub cpu: u32,
+
+    // Ready queue. Simple round-robin with priority buckets is enough.
+    // Keep it small and predictable.
+    pub rq: Mutex<heapless::Deque<Arc<Thread>, 1024>>,
+
+    // Current running thread id for this CPU.
+    pub current: AtomicU64, // 0 means idle
+
+    // Command queue visible to syscalls/IRQs on any CPU.
+    pub cmds: Arc<ArrayQueue<SchedCmd>>,
+
+    // Time accounting
+    pub default_timeslice: u32,
+
+    sleepers: Mutex<BinaryHeap<SleepEntry, Min, 1024>>,
+
+    pub thread_count: AtomicU64,
+}
+
+impl Scheduler {
+    pub fn new(cpu: u32) -> Self {
+        Self {
+            cpu,
+            rq: Mutex::new(Deque::new()),
+            current: AtomicU64::new(0),
+            cmds: Arc::new(ArrayQueue::new(1024)),
+            default_timeslice: 8, // ticks
+            sleepers: Mutex::new(BinaryHeap::new()),
+            thread_count: AtomicU64::new(0),
+        }
+    }
+
+    pub fn current_thread_id(&self) -> Option<ThreadId> {
+        let tid = self.current.load(Ordering::Acquire);
+        if tid == 0 {
+            return None;
+        }
+        Some(ThreadId(tid))
+    }
+
+    pub fn current_thread(&self) -> Option<Arc<Thread>> {
+        let tid = self.current.load(Ordering::Acquire);
+        if tid == 0 {
+            return None;
+        }
+        // Provide a lookup: per-CPU "running" pointer or global map.
+        // Keep a per-CPU pointer for O(1).
+        self.get_thread_by_id(ThreadId(tid))
+    }
+
+    pub fn on_tick(&self, context: *mut CpuContext) {
+        self.drain_cmds();
+
+        // Decrement timeslice for current thread and flag preempt if expired.
+        if let Some(cur) = self.current_thread() {
+            let left = cur
+                .timeslice_ticks
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_sub(1))
+                .ok();
+            if left == Some(0) {
+                cur.flags
+                    .fetch_or(Flags::NEED_RESCHED.bits(), Ordering::AcqRel);
+            }
+        }
+
+        self.wake_sleepers();
+        self.maybe_preempt(context);
+    }
+
+    fn wake_sleepers(&self) {
+        // O(n) option: scan rq + a small sleep list per CPU.
+        // Minimal variant: rely on SchedCmd::Wake from timer or devices.
+        // If you keep a per-CPU min-heap of sleepers, check head only.
+        // Shown here as a no-op placeholder to keep the core minimal.
+        let now = Instant::now().tick();
+        let mut sl = self.sleepers.lock();
+        while let Some(top) = sl.peek() {
+            if top.deadline > now {
+                break;
+            }
+            let t = sl.pop().unwrap().thread;
+            if t.try_wake() {
+                let mut rq = self.rq.lock();
+                rq.push_back(t).unwrap();
+            }
+        }
+    }
+
+    fn get_thread_by_id(&self, id: ThreadId) -> Option<Arc<Thread>> {
+        get_thread_by_id(id)
+    }
+
+    fn run_idle(&self) {
+        // Mark CPU idle. HLT until next interrupt.
+        self.current.store(0, Ordering::Release);
+        loop {
+            enable_and_hlt();
+        }
+    }
+
+    fn drain_cmds(&self) {
+        // Apply all pending external changes with minimal lock time.
+        while let Some(cmd) = self.cmds.pop() {
+            match cmd {
+                SchedCmd::New(t) => {
+                    t.state.store(State::Ready as u8, Ordering::Release);
+                    t.cpu.store(self.cpu, Ordering::Release);
+                    t.timeslice_ticks
+                        .store(self.default_timeslice, Ordering::Release);
+                    if self.thread_can_run_here(&t) {
+                        let mut rq = self.rq.lock();
+                        rq.push_back(t).expect("failed to push back");
+                    } else {
+                        // will be queued on its target cpu by that cpu’s scheduler
+                    }
+                }
+                SchedCmd::Wake(tid, high) => {
+                    if let Some(t) = self.get_thread_by_id(tid) {
+                        if t.try_wake() {
+                            let mut rq = self.rq.lock();
+                            if high {
+                                rq.push_front(t).unwrap();
+                            } else {
+                                rq.push_back(t).unwrap();
+                            }
+                        }
+                    }
+                }
+                SchedCmd::SleepUntil(tid, dl) => {
+                    if let Some(t) = self.get_thread_by_id(tid) {
+                        if t.cas_state(State::Running, State::Sleeping) {
+                            t.sleep_deadline.store(dl, Ordering::Release);
+                            let mut sl = self.sleepers.lock();
+                            sl.push(SleepEntry {
+                                deadline: dl,
+                                thread: t,
+                            })
+                            .unwrap();
+                        }
+                    }
+                }
+                SchedCmd::Park(tid) => {
+                    if let Some(t) = self.get_thread_by_id(tid) {
+                        let _ = t.cas_state(State::Running, State::Parked);
+                    }
+                }
+                SchedCmd::Exit(tid, code) => {
+                    if let Some(t) = self.get_thread_by_id(tid) {
+                        t.state.store(State::Dying as u8, Ordering::Release);
+                        self.thread_count.fetch_sub(1, Ordering::Relaxed);
+                        // cleanup deferred out of IRQ, not yet tho
+                        THREADS.remove(tid);
+                        t.free();
+                    }
+                }
+                SchedCmd::SetAffinity(tid, m) => {
+                    if let Some(t) = self.get_thread_by_id(tid) {
+                        t.cpu_affinity.store(m, Ordering::Release);
+                        t.mark_need_resched();
+                    }
+                }
+                SchedCmd::SetPriority(tid, p) => {
+                    if let Some(t) = self.get_thread_by_id(tid) {
+                        t.set_priority(p);
+                    }
+                }
+                SchedCmd::Yield(tid) => {
+                    if let Some(t) = self.get_thread_by_id(tid) {
+                        t.flags
+                            .fetch_or(Flags::NEED_RESCHED.bits(), Ordering::AcqRel);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn maybe_preempt(&self, context: *mut CpuContext) {
+        let Some(cur) = self.current_thread() else {
+            self.pick_and_run(context); // was idle
+            return;
+        };
+
+        // Fast check without locking the runqueue.
+        let need = cur.flags.load(Ordering::Acquire) & Flags::NEED_RESCHED.bits() != 0;
+        if !need {
+            return;
+        }
+
+        // Clear request and pick another.
+        cur.flags
+            .fetch_and(!Flags::NEED_RESCHED.bits(), Ordering::AcqRel);
+
+        // Requeue current if still runnable.
+        let st = cur.state();
+        if st == State::Running {
+            cur.state.store(State::Ready as u8, Ordering::Release);
+            let mut rq = self.rq.lock();
+            rq.push_back(cur.clone()).expect("failed to push back");
+        }
+
+        self.pick_and_run(context);
+    }
+
+    fn pick_and_run(&self, context: *mut CpuContext) {
+        let next = {
+            let mut rq = self.rq.lock();
+            // Simple RR. You can add N priority buckets if wanted.
+            rq.pop_front()
+        };
+
+        match next {
+            Some(t) => unsafe { self.context_switch_to(t, context) },
+            None => self.run_idle(),
+        }
+    }
+
+    fn thread_can_run_here(&self, t: &Thread) -> bool {
+        let mask = t.cpu_affinity.load(Ordering::Acquire);
+        mask == 0 || (mask & (1u32 << self.cpu)) != 0
+    }
+
+    unsafe fn context_switch_to(&self, next: Arc<Thread>, context: *mut CpuContext) {
+        // Save current
+        if let Some(current) = self.current_thread() {
+            unsafe {
+                *current.ctx.lock() = (*context).clone();
+                if let Some(user) = &current.user {
+                    let mut user = user.write();
+
+                    if !user.fpu_init {
+                        init_fpu_state(&mut user.fpu);
+                        user.fpu_init = true;
+                    } else {
+                        save_fpu_state(&mut user.fpu);
+                    }
+                }
+            }
+        }
+
+        // Set as current
+        self.current.store(next.id.0, Ordering::Release);
+
+        // Prepare next
+        next.state.store(State::Running as u8, Ordering::Release);
+        next.timeslice_ticks
+            .store(self.default_timeslice, Ordering::Release);
+
+        // Switch address space
+        next.switch_to_page();
+        unsafe { *context = next.ctx.lock().clone() };
+        if let Some(user) = &next.user {
+            let mut user = user.write();
+            unsafe {
+                if !user.fpu_init {
+                    init_fpu_state(&mut user.fpu);
+                    user.fpu_init = true;
+                } else {
+                    restore_fpu_state(&user.fpu);
+                }
+            }
+        }
+
+        let cpu = get_percpu_data();
+        // Set RSP0
+        cpu.tss.privilege_stack_table[0] = VirtAddr::new(next.kstack_top);
+
+        // set kernel gs stack
+        cpu.kernel_rsp = next.kstack_top;
+        cpu.user_rsp = next.ctx.lock().interrupt_stack_frame.stack_pointer.as_u64();
+        // return handles context switch
+    }
+
+    pub fn send_reschedule_ipi(&self, target_cpu: u32) {
+        unsafe { get_lapic().send_ipi(InterruptIndex::Reschedule as u8, target_cpu) };
+    }
+
+    // External messaging to sched
+
+    #[inline]
+    pub fn spawn_thread(&self, thread: Arc<Thread>) {
+        self.cmds.push(SchedCmd::New(thread));
+    }
+
+    #[inline]
+    pub fn yield_now(&self, tid: ThreadId) {
+        route_cmd_to_thread(tid, || SchedCmd::Yield(tid));
+
+        if Some(tid) == self.current_thread_id() {
+            without_interrupts(|| unsafe {
+                context_switch();
+            })
+        }
+    }
+
+    #[inline]
+    pub fn sleep_for_ticks(&self, tid: ThreadId, dt: u64) {
+        let deadline = Instant::now().tick().saturating_add(dt);
+        route_cmd_to_thread(tid, || SchedCmd::SleepUntil(tid, deadline));
+        if Some(tid) == self.current_thread_id() {
+            without_interrupts(|| unsafe {
+                context_switch();
+            })
+        }
+    }
+
+    #[inline]
+    pub fn set_priority(&self, tid: ThreadId, prio: u8) {
+        route_cmd_to_thread(tid, || SchedCmd::SetPriority(tid, prio));
+    }
+
+    #[inline]
+    pub fn set_affinity_mask(&self, tid: ThreadId, mask: u32) {
+        // If the thread is on another CPU, kick it.
+        route_cmd_to_thread(tid, || SchedCmd::SetAffinity(tid, mask));
+    }
+
+    pub fn park_thread(&self, tid: ThreadId) {
+        route_cmd_to_thread(tid, || SchedCmd::Park(tid));
+
+        if Some(tid) == self.current_thread_id() {
+            without_interrupts(|| unsafe {
+                context_switch();
+            })
+        }
+    }
+
+    pub fn wake_thread(&self, tid: ThreadId, high: bool) {
+        self.cmds.push(SchedCmd::Wake(tid, high));
+        self.send_reschedule_ipi(self.cpu); // kick target CPU if needed
+    }
+
+    pub fn exit_self(&self, tid: ThreadId, code: i32) -> ! {
+        // Tell the scheduler this thread is done
+        self.cmds.push(SchedCmd::Exit(tid, code));
+
+        if let Some(t) = get_thread_by_id(tid) {
+            t.mark_need_resched();
+        }
+
+        without_interrupts(|| unsafe {
+            context_switch();
+        });
+
+        loop {
+            enable_and_hlt();
+        }
+    }
+}
+
+pub fn exit_thread(tid: ThreadId) {
+    if let Some(t) = THREADS.get(tid) {
+        t.state.store(State::Dying as u8, Ordering::Release);
+        THREADS.remove(tid);
+        t.free();
     }
 }
 
@@ -131,360 +438,41 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
         */
 
         let cpu = get_percpu_data();
-        let sched = cpu.scheduler.as_mut().expect("failed to get scheduler");
+        // let sched = cpu.scheduler.as_mut().expect("failed to get scheduler");
 
-        let elapsed = sched.last_tick.elapsed();
+        let sched: &'static Scheduler = cpu.scheduler.as_ref().unwrap();
 
-        sched.process_spawn_queue();
-        sched.process_cmds();
+        sched.on_tick(context);
 
-        // Push current thread to queue, it's state will be processed then.
-        if let Some(current_id) = sched.current_id_opt() {
-            sched.current_tid = None;
-            sched.current_logger = None;
-
-            if let Some(thread) = sched.storage.threads.get_mut(&current_id) {
-                if elapsed > Duration::from_nanos(5100000) {
-                    println!("Thread {:?} took more than 5ms {:?}", thread.name, elapsed);
-                }
-
-                thread.context = (*context).clone();
-                if let Some(user) = &mut thread.user {
-                    if !user.fpu_init {
-                        init_fpu_state(&mut user.fpu);
-                        user.fpu_init = true;
-                    } else {
-                        save_fpu_state(&mut user.fpu);
-                    }
-                }
-                if !thread.is_queued.swap(true, Ordering::AcqRel) {
-                    sched
-                        .thread_queue
-                        .push(current_id)
-                        .expect("failed to push current_id thread");
-                }
-            }
-        }
-
-        sched.schedule_next();
-
-        if let Some(current_id) = sched.current_id_opt() {
-            if let Some(thread) = sched.storage.threads.get_mut(&current_id) {
-                if sched.idling {
-                    //println!("Stopped idling: {:?}", thread.name);
-                }
-                sched.idling = false;
-                thread.is_queued.store(false, Ordering::SeqCst);
-                *context = thread.context.clone();
-                thread.switch_to_page();
-
-                if let Some(user) = &mut thread.user {
-                    if !user.fpu_init {
-                        init_fpu_state(&mut user.fpu);
-                        user.fpu_init = true;
-                    } else {
-                        restore_fpu_state(&user.fpu);
-                    }
-                    // Set RSP0
-                    cpu.tss.privilege_stack_table[0] = VirtAddr::new(thread.initial_kstack_top);
-
-                    // set kernel gs stack
-                    cpu.kernel_rsp = thread.initial_kstack_top;
-                    cpu.user_rsp = thread.context.interrupt_stack_frame.stack_pointer.as_u64();
-                }
-                sched.last_tick = Instant::now();
-                return context;
-            } else {
-                println!("Thread not found!");
-            }
-        }
-
-        if !sched.idling {
-            //println!("Entering idling");
-        }
-        sched.idling = true;
-
-        sched.last_tick = Instant::now();
-
-        // No tasks, return to idle loop.
-        (*context).interrupt_stack_frame.instruction_pointer = VirtAddr::new(idle_loop as u64);
         context
     }
 }
 
-pub extern "C" fn idle_loop() -> ! {
-    loop {
-        enable_and_hlt();
-    }
+// move to file
+
+#[derive(Debug, Clone)]
+struct SleepEntry {
+    deadline: u64,
+    thread: Arc<Thread>,
 }
 
-#[expect(unused)]
-impl Scheduler {
-    fn process_spawn_queue(&mut self) {
-        let cpuidx = self.lapic_id;
-
-        {
-            let mut threads_alive = ALIVE_THREADS.write();
-
-            while let Some((thread, info)) = self.thread_spawn_queue.pop() {
-                thread.is_queued.store(true, Ordering::SeqCst);
-                self.thread_queue.push(thread.id);
-                threads_alive.insert(thread.id, cpuidx);
-                if let Some(info) = info {
-                    self.storage
-                        .thread_info
-                        .insert(thread.id, Arc::new(Mutex::new(info)));
-                }
-
-                self.storage.threads.insert(thread.id, thread);
-                self.thread_count.fetch_add(1, Ordering::Release);
-            }
-        }
-    }
-
-    fn process_cmds(&mut self) {
-        while let Some(cmd) = self.cmd_queue.pop() {
-            match cmd {
-                SchedCmd::Wake(thread_id, prio) => {
-                    if let Some(thread) = self.storage.threads.get_mut(&thread_id)
-                        && thread.state != ThreadState::Ready
-                        && !matches!(thread.state, ThreadState::Exited(_))
-                    {
-                        thread.state = ThreadState::Ready;
-                        if !thread.is_queued.swap(true, Ordering::AcqRel) {
-                            if prio {
-                                self.thread_priority_queue.push(thread_id);
-                            } else {
-                                self.thread_queue.push(thread_id);
-                            }
-                        }
-                    }
-                }
-                SchedCmd::WaitTimeout(thread_id, instant, duration) => {
-                    if let Some(thread) = self.storage.threads.get_mut(&thread_id)
-                        && !matches!(thread.state, ThreadState::Exited(_))
-                    {
-                        thread.state = ThreadState::WaitTimeout((instant, duration));
-                    }
-                }
-                SchedCmd::Wait(thread_id) => {
-                    if let Some(thread) = self.storage.threads.get_mut(&thread_id)
-                        && !matches!(thread.state, ThreadState::Exited(_))
-                    {
-                        thread.state = ThreadState::Waiting;
-                    }
-                }
-                SchedCmd::Exit(thread_id, code) => {
-                    if let Some(thread) = self.storage.threads.get_mut(&thread_id) {
-                        thread.state = ThreadState::Exited(code);
-                        {
-                            let mut exited = EXITED_THREADS.write();
-                            let _ = exited.insert(thread_id, code);
-                        }
-                        let info = self.storage.thread_info.remove(&thread.id);
-                        thread.free(info);
-
-                        self.thread_count.fetch_sub(1, Ordering::Release);
-                        ALIVE_THREADS.write().remove(&thread_id);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Schedules the next thread id, updating current_thread_id.
-    fn schedule_next(&mut self) -> bool {
-        let now = Instant::now();
-        self.current_tid = None;
-        self.current_logger = None;
-
-        // TODO: dedup this code
-        while let Some(id) = self.thread_priority_queue.pop() {
-            if let Some(thread) = self.storage.threads.get_mut(&id) {
-                match thread.state {
-                    ThreadState::Ready => {}
-                    ThreadState::Waiting => {
-                        thread.is_queued.store(false, Ordering::Release);
-                        continue;
-                    }
-                    ThreadState::WaitTimeout((start, timeout)) => {
-                        if now.duration_since(start) >= timeout {
-                            thread.state = ThreadState::Ready;
-                        } else {
-                            self.thread_priority_queue.push(id);
-                            continue;
-                        }
-                    }
-                    ThreadState::Exited(code) => {
-                        thread.is_queued.store(false, Ordering::Release);
-                        continue;
-                    }
-                }
-                thread.is_queued.store(false, Ordering::Release);
-                self.current_tid = Some(id);
-                self.current_logger = Some(thread.logger.clone());
-                return true;
-            }
-        }
-
-        let mut limit = self.thread_queue.len();
-
-        while limit > 0
-            && let Some(id) = self.thread_queue.pop()
-        {
-            limit -= 1;
-            if let Some(thread) = self.storage.threads.get_mut(&id) {
-                match thread.state {
-                    ThreadState::Ready => {}
-                    ThreadState::Waiting => {
-                        thread.is_queued.store(false, Ordering::Release);
-                        continue;
-                    }
-                    ThreadState::WaitTimeout((start, timeout)) => {
-                        if now.duration_since(start) >= timeout {
-                            thread.state = ThreadState::Ready;
-                        } else {
-                            self.thread_queue.push(id);
-                            continue;
-                        }
-                    }
-                    ThreadState::Exited(code) => {
-                        thread.is_queued.store(false, Ordering::Release);
-                        continue;
-                    }
-                }
-                thread.is_queued.store(false, Ordering::Release);
-                self.current_tid = Some(id);
-                self.current_logger = Some(thread.logger.clone());
-                return true;
-            }
-        }
-
-        for (id, thread) in self.storage.threads.iter_mut() {
-            match thread.state {
-                ThreadState::Ready => {
-                    println!("Found a ready thread not in queue: {:?}", thread.name);
-                    self.current_tid = Some(*id);
-                    self.current_logger = Some(thread.logger.clone());
-                    return true;
-                }
-                ThreadState::Waiting => {}
-                ThreadState::WaitTimeout((start, timeout)) => {
-                    if now.duration_since(start) >= timeout {
-                        println!(
-                            "Found a WaitTimeout thread that is ready not in queue: {:?}",
-                            thread.name
-                        );
-                        thread.state = ThreadState::Ready;
-                        self.current_tid = Some(*id);
-                        self.current_logger = Some(thread.logger.clone());
-                    }
-                }
-                ThreadState::Exited(_) => {}
-            }
-        }
-
-        self.current_tid = None;
-        self.current_logger = None;
-        false
-    }
-
-    /// Current thread id.
-    pub fn current_id(&self) -> u64 {
-        self.current_tid.expect("current id is none")
-    }
-
-    pub fn current_thread_info(&self) -> Arc<Mutex<UserThreadInfo>> {
-        let id = self.current_id();
-        self.storage.thread_info.get(&id).unwrap().clone()
-    }
-
-    pub fn current_id_opt(&self) -> Option<u64> {
-        self.current_tid
-    }
-
-    /// Gets the current thread logger. Locks momentarely to acquire the logger.
-    pub fn get_logger(&self) -> Arc<ThreadLogger> {
-        self.current_logger.clone().unwrap()
-    }
-
-    // TODO: this checks only current cpu scheduler, so it returns true
-    pub fn thread_exists(&self, id: u64) -> bool {
-        thread_exists(id).is_some()
-    }
-
-    /// Wake the given thread
-    pub fn thread_wake(&self, id: u64, priority: bool) {
-        without_interrupts(|| {
-            if let Some(sched) = thread_sched(id) {
-                sched.cmd_queue.push(SchedCmd::Wake(id, priority));
-                self.send_reschedule_ipi(sched.lapic_id);
-            } else {
-                self.cmd_queue.push(SchedCmd::Wake(id, priority));
-            }
-        })
-    }
-
-    /// Sets the given thread as waiting for a maximum of the given timeout.
-    pub fn thread_set_wait_timeout(&self, id: u64, timeout: Duration) {
-        without_interrupts(|| {
-            let now = Instant::now();
-            if let Some(sched) = thread_sched(id) {
-                sched
-                    .cmd_queue
-                    .push(SchedCmd::WaitTimeout(id, now, timeout));
-                self.send_reschedule_ipi(sched.lapic_id);
-            } else {
-                self.cmd_queue.push(SchedCmd::WaitTimeout(id, now, timeout));
-            }
-        })
-    }
-
-    pub fn thread_exit(&self, code: i32) {
-        let id = self.current_id();
-        self.cmd_queue.push(SchedCmd::Exit(id, code));
-        without_interrupts(|| {
-            unsafe { context_switch() };
-        });
-    }
-
-    /// The caller thread gets put in a wait (and yields execution) until timeout or another thread wakes it.
-    pub fn thread_wait_timeout(&self, timeout: Duration) {
-        let id = self.current_id();
-        without_interrupts(|| {
-            let now = Instant::now();
-            self.cmd_queue.push(SchedCmd::WaitTimeout(id, now, timeout));
-            unsafe { context_switch() };
-        });
-    }
-
-    pub fn thread_park(&self) {
-        without_interrupts(|| {
-            let id = self.current_id();
-            self.cmd_queue.push(SchedCmd::Wait(id));
-            unsafe { context_switch() };
-        });
-    }
-
-    /// The caller thread sleeps for the given duration.
-    #[inline]
-    pub fn thread_sleep(&self, duration: Duration) {
-        self.thread_wait_timeout(duration);
-    }
-
-    /// Cooperatively yield.
-    pub fn thread_yield(&self) {
-        without_interrupts(|| {
-            unsafe { context_switch() };
-        });
-    }
-
-    pub fn send_reschedule_ipi(&self, target_cpu: u32) {
-        without_interrupts(|| unsafe {
-            get_lapic().send_ipi(InterruptIndex::Reschedule as u8, target_cpu);
-        });
+// Reverse ordering so BinaryHeap becomes min-heap on deadline
+impl Ord for SleepEntry {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        other.deadline.cmp(&self.deadline)
     }
 }
+impl PartialOrd for SleepEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl PartialEq for SleepEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.deadline == other.deadline && Arc::ptr_eq(&self.thread, &other.thread)
+    }
+}
+impl Eq for SleepEntry {}
 
 #[unsafe(naked)]
 pub unsafe extern "C" fn context_switch() {

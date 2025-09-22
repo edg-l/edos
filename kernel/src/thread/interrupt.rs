@@ -1,6 +1,7 @@
 use core::arch::naked_asm;
 
-use crate::thread::scheduler::timer_schedule;
+use crate::{apic::get_lapic, thread::{context::CpuContext, scheduler::schedule}};
+
 
 // Naked function for timer interrupt handler
 #[unsafe(naked)]
@@ -69,4 +70,12 @@ pub unsafe extern "C" fn timer_interrupt_handler() {
 
         timer_schedule = sym timer_schedule,
     );
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn timer_schedule(context: *mut CpuContext) -> *mut CpuContext {
+    unsafe {
+        get_lapic().end_of_interrupt();
+        schedule(context)
+    }
 }

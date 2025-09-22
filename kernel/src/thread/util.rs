@@ -2,7 +2,7 @@
 
 use core::sync::atomic::AtomicU64;
 
-use alloc::string::ToString;
+use alloc::{string::ToString, sync::Arc};
 use crossbeam_queue::SegQueue;
 use x86_64::{VirtAddr, instructions::hlt, structures::paging::PageTableFlags};
 
@@ -14,8 +14,9 @@ use crate::{
     },
     smp::NUM_CPUS,
     thread::{
-        Thread, UserThreadInfo,
-        scheduler::{SCHEDULERS, Scheduler, sched},
+        UserThreadInfo,
+        scheduler::{SCHEDULERS, Scheduler, exit_thread, sched},
+        thread::{Thread, ThreadId},
     },
 };
 
@@ -54,31 +55,30 @@ pub fn kthread_stack_free(stack_top: u64) {
     KTHREAD_FREED_STACKS.push(region_bottom);
 }
 
-pub fn queue_spawn_kthread(entry: u64) -> u64 {
-    // TODO: pick a cpu with lowest thread count
-    let thread = Thread::new_kernel(None, entry);
+pub fn queue_spawn_kthread(entry: u64) -> ThreadId {
+    let thread = Thread::new_kernel(None, entry, 0);
     let id = thread.id;
-    sched().thread_spawn_queue.push((thread, None));
+    let sched = pick_sched();
+    sched.spawn_thread(thread);
     id
 }
 
-pub fn queue_spawn_kthread_named(name: &str, entry: u64) -> u64 {
+pub fn queue_spawn_kthread_named(name: &str, entry: u64) -> ThreadId {
     // TODO: pick a cpu with lowest thread count
-    let thread = Thread::new_kernel(Some(name.to_string()), entry);
+    let thread = Thread::new_kernel(Some(name.to_string()), entry, 0);
 
     let id = thread.id;
     let sched = pick_sched();
-    sched.thread_spawn_queue.push((thread, None));
+    sched.spawn_thread(thread);
     id
 }
 
-pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> u64 {
-    let mut thread = Thread::new_kernel(Some(name.to_string()), entry);
-    thread.context.rdi = arg as u64;
+pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> ThreadId {
+    let mut thread = Thread::new_kernel(Some(name.to_string()), entry, arg as u64);
 
     let id = thread.id;
     let sched = pick_sched();
-    sched.thread_spawn_queue.push((thread, None));
+    sched.spawn_thread(thread);
     id
 }
 
@@ -110,8 +110,8 @@ pub fn pick_sched() -> &'static Scheduler {
 /// Exits a kthread.
 pub fn kthread_exit(code: i32) -> ! {
     let sched = sched();
-    if let Some(tid) = sched.current_id_opt() {
-        sched.thread_exit(code);
+    if let Some(tid) = sched.current_thread_id() {
+        sched.exit_self(tid, code);
     }
 
     loop {
@@ -145,7 +145,10 @@ pub fn thread_stack_free(manager: &mut MemoryManager, stack_top: u64) {
     manager.unmap_memory(stack_bottom, USER_STACK_SIZE).ok();
 }
 
-pub fn queue_spawn_thread(thread: Thread, info: UserThreadInfo) {
+pub fn queue_spawn_thread(thread: Arc<Thread>) -> ThreadId {
     let sched = pick_sched();
-    sched.thread_spawn_queue.push((thread, Some(info)));
+    let id = thread.id;
+    let sched = pick_sched();
+    sched.spawn_thread(thread);
+    id
 }

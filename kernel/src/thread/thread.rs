@@ -70,6 +70,7 @@ bitflags::bitflags! {
 #[derive(Debug)]
 pub struct Thread {
     pub id: ThreadId,
+    pub cpu: AtomicU32,
     pub name: Arc<String>,
 
     // Scheduling-visible fields as atomics:
@@ -153,6 +154,7 @@ impl Thread {
             timeslice_ticks: AtomicU32::new(0),
             priority: AtomicU8::new(16),
             sleep_deadline: AtomicU64::new(0),
+            cpu: AtomicU32::new(0),
         });
 
         THREADS.insert(thread.clone());
@@ -237,6 +239,7 @@ impl Thread {
             timeslice_ticks: AtomicU32::new(0),
             priority: AtomicU8::new(16),
             sleep_deadline: AtomicU64::new(0),
+            cpu: AtomicU32::new(0),
             user: Some(Arc::new(RwLock::new(UserThread {
                 pid: id.0,
                 initial_stack_top: stack_top,
@@ -292,10 +295,32 @@ impl Thread {
             memory_manager.clean_lower_half();
         }
     }
+
+    #[inline]
+    pub fn cas_state(&self, from: State, to: State) -> bool {
+        self.state
+            .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+    #[inline]
+    pub fn try_wake(&self) -> bool {
+        loop {
+            let s = self.state.load(Ordering::Acquire).into();
+            match s {
+                State::Sleeping | State::Parked => {
+                    if self.cas_state(s, State::Ready) {
+                        return true;
+                    }
+                    continue;
+                }
+                _ => return false,
+            }
+        }
+    }
 }
 
 pub struct ThreadRegistry {
-    pub(super)  map: RwLock<BTreeMap<ThreadId, Arc<Thread>>>,
+    pub(super) map: RwLock<BTreeMap<ThreadId, Arc<Thread>>>,
     infos: RwLock<BTreeMap<ThreadId, Arc<RwLock<UserThreadInfo>>>>,
 }
 
@@ -329,7 +354,7 @@ impl ThreadRegistry {
 }
 
 // single global instance
-pub(super)  static THREADS: ThreadRegistry = ThreadRegistry::new();
+pub(super) static THREADS: ThreadRegistry = ThreadRegistry::new();
 
 // simple wrapper
 pub fn get_thread_by_id(tid: ThreadId) -> Option<Arc<Thread>> {

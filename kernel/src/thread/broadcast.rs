@@ -3,175 +3,81 @@ use core::{
     time::Duration,
 };
 
-use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{btree_map::BTreeMap, vec_deque::VecDeque},
+    sync::Arc,
+    vec::Vec,
+};
 use crossbeam_queue::SegQueue;
 use spin::Mutex;
 use thiserror::Error;
 use x86_64::instructions::interrupts::without_interrupts;
 
-use crate::thread::scheduler::sched;
+use crate::{
+    thread::{scheduler::sched, thread::ThreadId},
+    timer::Instant,
+};
 
-#[derive(Debug)]
-pub struct Broadcast<T: Clone> {
-    subscribers: BTreeMap<u64, Receiver<T>>,
-    history: Vec<T>,
-    send_history: bool,
-    bound: usize,
+/// A single subscriber queue
+pub struct Subscriber<T> {
+    owner: ThreadId,
+    queue: Mutex<VecDeque<T>>,
 }
 
-pub type LockedBroadcast<T> = Mutex<Broadcast<T>>;
-
-pub const fn new_broadcast<T: Clone>(bound: usize, send_history: bool) -> Mutex<Broadcast<T>> {
-    Mutex::new(Broadcast::new(bound, send_history))
-}
-
-impl<T: Clone> Broadcast<T> {
-    /// If send_history is true when a new subscriber will get all history sent.
-    pub const fn new(bound: usize, send_history: bool) -> Self {
-        Self {
-            subscribers: BTreeMap::new(),
-            history: Vec::new(),
-            send_history,
-            bound,
+impl<T> Subscriber<T> {
+    pub fn recv(&self) -> T {
+        let sched = sched();
+        loop {
+            if let Some(msg) = self.queue.lock().pop_front() {
+                return msg;
+            }
+            sched.park_thread(sched.current_thread_id().unwrap());
         }
     }
 
-    /// The calling thread subscribes.
-    pub fn subscribe_or_get(&mut self) -> Receiver<T> {
-        without_interrupts(|| {
-            let tid = sched().current_id();
-            if let Some(r) = self.subscribers.get(&tid) {
-                return r.clone();
-            }
+    pub fn recv_timeout(&self, dur: Duration) -> Option<T> {
+        let deadline = Instant::now() + dur; // adapt to your tick granularity
+        let sched = sched();
 
-            let rx = (*self.subscribers.entry(tid).or_default()).clone();
-
-            if self.send_history {
-                for x in self.history.iter() {
-                    rx.queue.push(x.clone());
-                }
-            }
-
-            rx
-        })
-    }
-
-    /// The calling thread unsubscribes.
-    pub fn unsubscribe(&mut self) -> bool {
-        let tid = sched().current_id();
-        self.subscribers.remove(&tid).is_some()
-    }
-
-    /// Broadcasts a message to all subscribers. Waking the threads.
-    pub fn broadcast(&mut self, value: T) {
-        without_interrupts(|| {
-            if self.send_history {
-                self.history.push(value.clone());
-            }
-
-            let sched = sched();
-            let mut to_remove = Vec::new();
-            for (tid, receiver) in self.subscribers.iter() {
-                let tid = *tid;
-                if receiver.queue.len() > self.bound {
-                    receiver.queue.pop();
-                }
-                receiver.queue.push(value.clone());
-
-                if !sched.thread_exists(tid) {
-                    to_remove.push(tid);
-                } else if receiver.is_waiting.swap(false, Ordering::AcqRel) {
-                    sched.thread_wake(tid, true);
-                }
-            }
-
-            if !to_remove.is_empty() {
-                for tid in to_remove {
-                    self.subscribers.remove(&tid);
-                }
-            }
-        })
+        if let Some(msg) = self.queue.lock().pop_front() {
+            return Some(msg);
+        }
+        // park until either wake or timeout
+        sched.sleep_for_ticks(sched.current_thread_id().unwrap(), deadline.tick());
+        return self.queue.lock().pop_front();
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Receiver<T> {
-    queue: Arc<SegQueue<T>>,
-    is_waiting: Arc<AtomicBool>,
+/// Broadcaster with many subscribers
+pub struct Broadcaster<T> {
+    subs: Mutex<Vec<Arc<Subscriber<T>>>>,
 }
 
-impl<T> Default for Receiver<T> {
-    fn default() -> Self {
+impl<T: Clone> Broadcaster<T> {
+    pub fn new() -> Self {
         Self {
-            queue: Arc::new(SegQueue::new()),
-            is_waiting: Arc::new(AtomicBool::new(false)),
+            subs: Mutex::new(Vec::new()),
         }
     }
-}
 
-#[derive(Debug, Error)]
-pub enum ReceiveError {
-    #[error("timeout")]
-    Timeout,
-}
-
-impl<T> Receiver<T> {
-    /// Try to receive a value.
-    ///
-    /// This call doesn't block.
-    pub fn try_recv(&self) -> Option<T> {
-        self.queue.pop()
+    pub fn subscribe(&self, owner: ThreadId) -> Arc<Subscriber<T>> {
+        let sub = Arc::new(Subscriber {
+            owner,
+            queue: Mutex::new(VecDeque::new()),
+        });
+        self.subs.lock().push(sub.clone());
+        sub
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
-    /// Returns immediately if there is content, otherwise
-    /// waits until timeout waiting for content, returning
-    /// true if there is content to receive.
-    pub fn poll(&self, timeout: Duration) -> bool {
-        without_interrupts(|| {
-            if !self.is_empty() {
-                return true;
+    pub fn broadcast(&self, msg: T) {
+        let sched = sched();
+        let subs = self.subs.lock();
+        for sub in subs.iter() {
+            {
+                let mut q = sub.queue.lock();
+                q.push_back(msg.clone());
             }
-
-            self.is_waiting.store(true, Ordering::Release);
-
-            if !self.is_empty() {
-                self.is_waiting.store(false, Ordering::Release);
-                return true;
-            }
-
-            sched().thread_wait_timeout(timeout);
-
-            self.is_waiting.store(false, Ordering::Release);
-
-            !self.is_empty()
-        })
-    }
-
-    /// Blocking receive with a timeout
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<T, ReceiveError> {
-        without_interrupts(|| {
-            if let Some(v) = self.try_recv() {
-                return Ok(v);
-            }
-            self.is_waiting.store(true, Ordering::Release);
-
-            if let Some(v) = self.try_recv() {
-                self.is_waiting.store(false, Ordering::Release);
-                return Ok(v);
-            }
-
-            sched().thread_wait_timeout(timeout);
-
-            self.is_waiting.store(false, Ordering::Release);
-            if let Some(v) = self.try_recv() {
-                Ok(v)
-            } else {
-                Err(ReceiveError::Timeout)
-            }
-        })
+            sched.wake_thread(sub.owner, false);
+        }
     }
 }

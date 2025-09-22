@@ -3,15 +3,17 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::thread::{schedulerv2::sched, threadv2::ThreadId};
+use crate::thread::{scheduler::sched, thread::ThreadId};
 
 
 
+#[derive(Debug)]
 struct WaitEntry {
     tid: ThreadId,
     woken: AtomicBool,
 }
 
+#[derive(Debug)]
 pub struct WaitQueue {
     inner: Mutex<VecDeque<Arc<WaitEntry>>>,
 }
@@ -54,7 +56,7 @@ impl WaitQueue {
 
         if let Some(entry) = opt {
             entry.woken.store(true, Ordering::Release);
-            sched().wake_thread(entry.tid, false); // false = normal priority
+            sched().wake_thread(entry.tid, false);
         }
     }
 
