@@ -33,6 +33,10 @@ impl HpetInstant {
         }
     }
 
+    pub fn tick(&self) -> u64 {
+        self.counter_value
+    }
+
     pub fn elapsed(&self) -> Duration {
         let now = Self::now();
         let ticks = now.counter_value.saturating_sub(self.counter_value);

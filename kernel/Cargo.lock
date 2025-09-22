@@ -51,6 +51,9 @@ name = "bitflags"
 version = "2.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2261d10cca569e4643e526d8dc2e62e433cc8aba21ab764233731f8d369bf394"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "buddy_system_allocator"
@@ -107,6 +110,7 @@ name = "edos-kernel"
 version = "0.1.0"
 dependencies = [
  "acpi",
+ "bitflags 2.9.4",
  "buddy_system_allocator",
  "bytemuck",
  "crossbeam-queue",

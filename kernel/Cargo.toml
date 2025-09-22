@@ -27,6 +27,7 @@ raw-cpuid = "11.6.0"
 lru = { version = "0.16.1", features = ["nightly"] }
 heapless = "0.9.1"
 buddy_system_allocator = "0.11.0"
+bitflags = { version = "2.9.4", default-features = false, features = ["bytemuck"] }
 
 [profile.dev]
 opt-level = 2
