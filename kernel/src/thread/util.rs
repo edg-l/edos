@@ -1,6 +1,6 @@
 #![expect(unused)]
 
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::{string::ToString, sync::Arc};
 use crossbeam_queue::SegQueue;
@@ -12,6 +12,7 @@ use crate::{
         mapper::{MemoryManager, memory_mapper},
         valloc::vmalloc,
     },
+    print, println,
     smp::NUM_CPUS,
     thread::{
         UserThreadInfo,
@@ -64,7 +65,6 @@ pub fn queue_spawn_kthread(entry: u64) -> ThreadId {
 }
 
 pub fn queue_spawn_kthread_named(name: &str, entry: u64) -> ThreadId {
-    // TODO: pick a cpu with lowest thread count
     let thread = Thread::new_kernel(Some(name.to_string()), entry, 0);
 
     let id = thread.id;
@@ -83,16 +83,17 @@ pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> Th
 }
 
 pub fn pick_sched() -> &'static Scheduler {
-    let num_cpus = NUM_CPUS.load(core::sync::atomic::Ordering::Relaxed);
+    let num_cpus = NUM_CPUS.load(Ordering::Relaxed);
+    println!("Picking sheduler from {num_cpus} cpus");
 
     let schedulers = SCHEDULERS.read();
     let mut id = 0;
     let mut min_count = u64::MAX;
     for i in 0..num_cpus {
         if let Some(sched) = schedulers.get(&(i as u32)).cloned() {
-            let count = sched
-                .thread_count
-                .load(core::sync::atomic::Ordering::Acquire);
+            let count = sched.thread_count.load(Ordering::Acquire);
+
+            println!("Sched {}, count {}", sched.cpu, count);
 
             if count < min_count {
                 min_count = count;
@@ -101,10 +102,12 @@ pub fn pick_sched() -> &'static Scheduler {
         }
     }
 
-    (*SCHEDULERS
+    let sched: &'static Scheduler = *SCHEDULERS
         .read()
         .get(&(id as u32))
-        .expect("failed to find scheduler")) as _
+        .expect("failed to find scheduler") as _;
+
+    sched
 }
 
 /// Exits a kthread.

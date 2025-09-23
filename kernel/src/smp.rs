@@ -3,7 +3,7 @@ use core::{hint::spin_loop, sync::atomic::AtomicUsize, time::Duration};
 use limine::mp::Cpu as MpCpu;
 
 use crate::{
-    apic::{get_lapic, init::enable_lapic, set_apic_timer_and_enable},
+    apic::{get_lapic, init::enable_lapic},
     boot::MP_REQUEST,
     drivers::fpu,
     gdt, interrupts, println,
@@ -13,7 +13,7 @@ use crate::{
     util::per_cpu::init_gs_for_this_cpu,
 };
 
-pub static NUM_CPUS: AtomicUsize = AtomicUsize::new(1);
+pub static NUM_CPUS: AtomicUsize = AtomicUsize::new(0);
 
 /// Initialize SMP using Limine's MP request: set AP entrypoints and let Limine bring them up.
 pub fn init() {
@@ -40,7 +40,7 @@ pub fn init() {
     }
 
     let now = Instant::now();
-    while now.elapsed() < Duration::from_millis(50) {
+    while now.elapsed() < Duration::from_millis(100) {
         spin_loop();
     }
 }

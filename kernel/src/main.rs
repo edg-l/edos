@@ -3,9 +3,9 @@
 #![feature(abi_x86_interrupt)]
 #![allow(clippy::fn_to_numeric_cast)]
 
-use core::{arch::asm, time::Duration};
+use core::{arch::asm, hint::spin_loop, time::Duration};
 
-use alloc::string::ToString;
+use alloc::{boxed::Box, string::ToString, sync::Arc};
 use x86_64::{
     VirtAddr,
     instructions::{hlt, interrupts::without_interrupts},
@@ -24,9 +24,13 @@ use crate::{
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
     thread::{
         UserThreadInfo,
+        mailbox::Mailbox,
         scheduler::sched,
         thread::Thread,
-        util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_thread},
+        util::{
+            kthread_exit, queue_spawn_kthread_named, queue_spawn_kthread_named_arg,
+            queue_spawn_thread,
+        },
     },
     timer::{Instant, get_timer_calibration, init_boot_time, uptime_us},
 };
@@ -124,6 +128,12 @@ fn main() -> ! {
 
     // Init scheduler
     thread::scheduler::init();
+
+    let now = Instant::now();
+
+    while now.elapsed() < Duration::from_millis(100) {
+        spin_loop();
+    }
     test_new();
     logs::init();
     drivers::init_drivers();
@@ -142,8 +152,23 @@ fn main() -> ! {
 
 pub fn test_new() -> ! {
     log!("Spawning test thread");
-    queue_spawn_kthread_named("test", test_thread as u64);
-    queue_spawn_kthread_named("test2", test_thread2 as u64);
+
+    let mb: Arc<Mailbox<u64, u64>> = Arc::new(Mailbox::new());
+    queue_spawn_kthread_named_arg(
+        "test",
+        test_thread as u64,
+        Box::into_raw(Box::new(mb.clone())).cast(),
+    );
+    queue_spawn_kthread_named_arg(
+        "test2",
+        test_thread2 as u64,
+        Box::into_raw(Box::new(mb.clone())).cast(),
+    );
+    queue_spawn_kthread_named_arg(
+        "test3",
+        test_thread3 as u64,
+        Box::into_raw(Box::new(mb.clone())).cast(),
+    );
 
     x86_64::instructions::interrupts::enable_and_hlt();
 
@@ -152,23 +177,51 @@ pub fn test_new() -> ! {
     }
 }
 
-extern "C" fn test_thread() -> ! {
-    log!("Spawned test thread");
-    let sched = sched();
+extern "C" fn test_thread(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
+    let mb = *unsafe { Box::from_raw(arg) };
+    log!("test: Spawned test thread, waiting requests");
     loop {
-        log!("t1");
-
-        sched.thread_sleep(Duration::from_secs(1));
+        log!("test: WAITING FOR REQUEST");
+        let mut req = mb.recv();
+        let num = req.payload.take().unwrap();
+        log!("test: Got request {}", num);
+        req.reply(num);
     }
 }
 
-extern "C" fn test_thread2() -> ! {
-    log!("Spawned test thread");
+extern "C" fn test_thread2(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
+    let mb = *unsafe { Box::from_raw(arg) };
+    log!("test2: Spawned test thread2");
     let sched = sched();
+    let mut counter = 0;
     loop {
-        log!("t2");
+        log!("test2: Sending request");
+        let res = mb.send(counter);
 
-        sched.thread_sleep(Duration::from_millis(500));
+        log!("test2: Waiting for answer");
+        let c = res.wait();
+        log!("test2: Got {c} expected {counter}");
+        counter += 1;
+
+        sched.thread_sleep(Duration::from_millis(1000));
+    }
+}
+
+extern "C" fn test_thread3(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
+    let mb = *unsafe { Box::from_raw(arg) };
+    log!("test3: Spawned test thread3");
+    let sched = sched();
+    let mut counter = 100;
+    loop {
+        log!("test3: Sending request");
+        let res = mb.send(counter);
+
+        log!("test3: Waiting for answer");
+        let c = res.wait();
+        log!("test3: Got {c} expected {counter}");
+        counter += 1;
+
+        sched.thread_sleep(Duration::from_millis(2000));
     }
 }
 

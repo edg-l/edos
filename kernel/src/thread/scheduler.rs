@@ -81,9 +81,8 @@ fn route_cmd_to_thread(tid: ThreadId, mk: impl FnOnce() -> SchedCmd) {
         let sc = sched_for_cpu(cpu);
         let _ = sc.cmds.push(mk()); // handle full case below
         t.mark_need_resched();
-
         if cpu != sched().cpu {
-            sc.send_reschedule_ipi(cpu);
+            sched().send_reschedule_ipi(cpu);
         }
     }
 }
@@ -182,9 +181,9 @@ impl Scheduler {
     }
 
     fn run_idle(&self) {
-        get_percpu_data().current_thread = None;
         // Mark CPU idle
         self.current.store(0, Ordering::Release);
+        get_percpu_data().current_thread = None;
 
         let earliest_deadline = self.earliest_deadline.load(Ordering::Acquire);
 
@@ -407,14 +406,22 @@ impl Scheduler {
     }
 
     pub fn send_reschedule_ipi(&self, target_cpu: u32) {
-        unsafe { get_lapic().send_ipi(InterruptIndex::Reschedule as u8, target_cpu) };
+        println!("Sending reschedule ipi to {target_cpu}");
+        without_interrupts(|| {
+            unsafe { get_lapic().send_ipi(InterruptIndex::Reschedule as u8, target_cpu) };
+        });
     }
 
     // External messaging to sched
 
     #[inline]
     pub fn spawn_thread(&self, thread: Arc<Thread>) {
-        self.cmds.push(SchedCmd::New(thread));
+        self.thread_count.fetch_add(1, Ordering::AcqRel);
+        self.cmds.push(SchedCmd::New(thread)).unwrap();
+
+        if self.cpu != get_percpu_data().lapic_id {
+            sched().send_reschedule_ipi(self.cpu);
+        }
     }
 
     #[inline]
@@ -471,8 +478,7 @@ impl Scheduler {
     }
 
     pub fn wake_thread(&self, tid: ThreadId, high: bool) {
-        self.cmds.push(SchedCmd::Wake(tid, high));
-        self.send_reschedule_ipi(self.cpu); // kick target CPU if needed
+        route_cmd_to_thread(tid, || SchedCmd::Wake(tid, high));
     }
 
     pub fn thread_exit(&self, code: i32) -> ! {

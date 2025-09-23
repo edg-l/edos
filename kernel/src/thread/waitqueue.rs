@@ -25,7 +25,7 @@ impl WaitQueue {
 
     /// Current thread goes to sleep until woken
     pub fn wait(&self) {
-        let tid = sched().current_thread_id().unwrap(); // your kernel helper
+        let tid = sched().current_thread_id().expect("failed to get id"); // your kernel helper
         let entry = Arc::new(WaitEntry {
             tid,
             woken: AtomicBool::new(false),
