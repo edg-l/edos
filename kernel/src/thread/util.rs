@@ -84,7 +84,6 @@ pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> Th
 
 pub fn pick_sched() -> &'static Scheduler {
     let num_cpus = NUM_CPUS.load(Ordering::Relaxed);
-    println!("Picking sheduler from {num_cpus} cpus");
 
     let schedulers = SCHEDULERS.read();
     let mut id = 0;
@@ -92,8 +91,6 @@ pub fn pick_sched() -> &'static Scheduler {
     for i in 0..num_cpus {
         if let Some(sched) = schedulers.get(&(i as u32)).cloned() {
             let count = sched.thread_count.load(Ordering::Acquire);
-
-            println!("Sched {}, count {}", sched.cpu, count);
 
             if count < min_count {
                 min_count = count;

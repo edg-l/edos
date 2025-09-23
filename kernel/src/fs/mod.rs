@@ -268,7 +268,7 @@ impl FileTime {
 }
 
 // Mailbox between FS API callers and FS main thread
-pub(super) static FS_REQUESTS: Once<Mailbox<FsRequest, FsResponse>> = Once::new();
+pub(super) static FS_REQUESTS: Once<Arc<Mailbox<FsRequest, FsResponse>>> = Once::new();
 
 #[derive(Debug, Clone)]
 pub(super) enum FsRequest {
@@ -512,9 +512,11 @@ pub static FS_WORKER_MAILBOXES: RwLock<
 > = RwLock::new(BTreeMap::new());
 
 pub extern "C" fn fs_main_thread() -> ! {
+    log!("Started main fs");
     let devices = list_devices();
+        log!("Listed devices");
 
-    let requests = FS_REQUESTS.call_once(|| Mailbox::new());
+    let requests = FS_REQUESTS.call_once(|| Arc::new(Mailbox::new()));
 
     let mut partitions: Vec<Partition> = Vec::new();
 
@@ -578,11 +580,14 @@ pub extern "C" fn fs_main_thread() -> ! {
 
     // Main loop: route and respond
     loop {
+        log!("Waiting for new request");
         let mut req = requests.recv();
+        log!("Got request");
         let payload = req.payload.take().unwrap();
         {
             match payload {
                 FsRequest::ListPartitions => {
+                    log!("Got partitions request");
                     req.reply(FsResponse::Partitions(partitions.clone()));
                 }
                 FsRequest::ListMounts => {

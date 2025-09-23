@@ -20,7 +20,7 @@ use crate::{
     boot::boot_info,
     drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
     interrupts::InterruptIndex,
-    println,
+    log, println,
     smp::tlb_flush_all_including_global,
     thread::{
         UserThreadInfo,
@@ -426,6 +426,7 @@ impl Scheduler {
 
     #[inline]
     pub fn thread_yield(&self) {
+        log!("Yielding");
         let tid = self.current_thread_id().unwrap();
         route_cmd_to_thread(tid, || SchedCmd::Yield(tid));
 
@@ -469,6 +470,7 @@ impl Scheduler {
     }
 
     pub fn thread_park(&self) {
+        log!("parking");
         let tid = self.current_thread_id().unwrap();
         route_cmd_to_thread(tid, || SchedCmd::Park(tid));
 
@@ -478,6 +480,7 @@ impl Scheduler {
     }
 
     pub fn wake_thread(&self, tid: ThreadId, high: bool) {
+              log!("waking {tid:?}");
         route_cmd_to_thread(tid, || SchedCmd::Wake(tid, high));
     }
 

@@ -201,9 +201,11 @@ impl GptPartitionEntry {
 /// Parse GPT from a device
 pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
     // Read GPT header from LBA 1
+    log!("reading sector for gpt");
     let gpt_data = ahci::api::read_sectors(device_id, 1, 1, Vec::new())
         .map_err(|_| "Failed to read GPT header")?;
 
+            log!("read gpt sector");
     if gpt_data.len() < core::mem::size_of::<GptHeader>() {
         return Err("GPT data too small");
     }
@@ -227,6 +229,8 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
         Vec::new(),
     )
     .map_err(|_| "Failed to read partition entries")?;
+
+        log!("data");
 
     let mut partitions = Vec::new();
 
@@ -259,6 +263,8 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
             });
         }
     }
+
+    log!("Read all partitions");
 
     Ok(partitions)
 }

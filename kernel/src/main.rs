@@ -134,8 +134,7 @@ fn main() -> ! {
     while now.elapsed() < Duration::from_millis(100) {
         spin_loop();
     }
-    test_new();
-    logs::init();
+    // test_new();
     drivers::init_drivers();
     fs::init();
 
@@ -226,7 +225,10 @@ extern "C" fn test_thread3(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
 }
 
 pub fn mount_system_fs() -> ! {
+    log!("Starting mountfs thread");
     let partitions = fs::api::list_partitions();
+
+        log!("Got partitions");
 
     let cmdline = ParsedCmdline::parse(boot_info().cmdline);
 
@@ -287,6 +289,7 @@ pub fn mount_system_fs() -> ! {
         log!("Failed to mount memfs at {:?}: {err:?}", dev_dir);
     }
 
+    /*
     without_interrupts(|| {
         let terminal_argv: [&[u8]; 1] = [b"terminal"];
         let user_thread = Thread::new_user(
@@ -300,6 +303,7 @@ pub fn mount_system_fs() -> ! {
         .unwrap();
         queue_spawn_thread(user_thread);
     });
+     */
 
     kthread_exit(0)
 }

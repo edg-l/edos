@@ -60,5 +60,3 @@ macro_rules! log {
         $crate::logs::log(format_args!($fmt $(, $arg)*))
     };
 }
-
-pub fn init() {}
