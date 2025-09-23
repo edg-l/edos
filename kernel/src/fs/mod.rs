@@ -512,7 +512,6 @@ pub static FS_WORKER_MAILBOXES: RwLock<
 > = RwLock::new(BTreeMap::new());
 
 pub extern "C" fn fs_main_thread() -> ! {
-    let logger = sched().get_logger();
     let devices = list_devices();
 
     let requests = FS_REQUESTS.call_once(|| Mailbox::new());
@@ -522,21 +521,20 @@ pub extern "C" fn fs_main_thread() -> ! {
     for device in &devices {
         match parse_gpt(device.id) {
             Ok(found_partitions) => {
-                log!(logger, "GPT found on device {}", device.id);
-                print_partitions(&found_partitions, &logger);
+                log!("GPT found on device {}", device.id);
+                print_partitions(&found_partitions);
                 partitions.extend(found_partitions);
             }
             Err(gpt_err) => {
-                log!(logger, "GPT parsing failed: {}, trying MBR", gpt_err);
+                log!("GPT parsing failed: {}, trying MBR", gpt_err);
                 match parse_mbr(device.id) {
                     Ok(found_partitions) => {
-                        log!(logger, "MBR found on device {}", device.id);
-                        crate::fs::mbr::print_partitions(&found_partitions, &logger);
+                        log!("MBR found on device {}", device.id);
+                        crate::fs::mbr::print_partitions(&found_partitions);
                         partitions.extend(found_partitions);
                     }
                     Err(mbr_err) => {
                         log!(
-                            logger,
                             "Both GPT and MBR parsing failed - GPT: {}, MBR: {}",
                             gpt_err,
                             mbr_err
@@ -809,7 +807,6 @@ pub extern "C" fn fs_main_thread() -> ! {
 }
 
 extern "C" fn start_partition_fs_thread(partition: *mut Partition) -> ! {
-    let logger = sched().get_logger();
     let partition = unsafe { Box::from_raw(partition) };
 
     let path = if partition.filesystem == Some(FilesystemType::Memfs) {
@@ -822,7 +819,7 @@ extern "C" fn start_partition_fs_thread(partition: *mut Partition) -> ! {
         .expect("failed to parse path")
     };
 
-    log!(logger, "Partition: {} ({})", path, partition.name);
+    log!("Partition: {} ({})", path, partition.name);
 
     // Get our mailbox from the FS main
     let mailbox = {
@@ -845,14 +842,14 @@ extern "C" fn start_partition_fs_thread(partition: *mut Partition) -> ! {
         Some(ty) => match ty {
             FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32 => {
                 let Ok(mut fat_fs) = Fatfs::new((*partition).clone()) else {
-                    log!(logger, "Failed to create FAT filesystem");
+                    log!("Failed to create FAT filesystem");
                     kthread_exit(-1)
                 };
                 fs = Box::new(fat_fs);
             }
             FilesystemType::Memfs => {
                 let Ok(mut memfs) = Memfs::new() else {
-                    log!(logger, "Failed to create Memfs filesystem");
+                    log!("Failed to create Memfs filesystem");
                     kthread_exit(-1)
                 };
                 fs = Box::new(memfs);
@@ -892,7 +889,6 @@ extern "C" fn start_devfs_thread(fs: *mut DevFs) -> ! {
 
 fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
     log!("Fs thread started");
-    let logger = sched().get_logger();
     let mut virtual_files: BTreeMap<Path, File> = BTreeMap::new();
 
     // Get our mailbox from the FS main

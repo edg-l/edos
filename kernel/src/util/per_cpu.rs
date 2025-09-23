@@ -1,11 +1,14 @@
-use alloc::boxed::Box;
+use alloc::{boxed::Box, sync::Arc};
 use x86_64::{
     VirtAddr,
     registers::model_specific::{GsBase, KernelGsBase},
     structures::tss::TaskStateSegment,
 };
 
-use crate::{acpi::raw_current_apic_id, thread::scheduler::Scheduler};
+use crate::{
+    acpi::raw_current_apic_id,
+    thread::{scheduler::Scheduler, thread::Thread},
+};
 
 /// Per CPU data
 /// Note: try to keep it small.
@@ -16,6 +19,7 @@ pub struct PerCpuData {
     pub tss: TaskStateSegment,
     pub lapic_id: u32,
     pub scheduler: *mut Scheduler,
+    pub current_thread: Option<Arc<Thread>>,
 }
 
 impl PerCpuData {
@@ -26,6 +30,7 @@ impl PerCpuData {
             lapic_id: 0,
             tss: TaskStateSegment::new(),
             scheduler: core::ptr::null_mut(),
+            current_thread: None,
         }
     }
 }

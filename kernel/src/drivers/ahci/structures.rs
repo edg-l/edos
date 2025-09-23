@@ -515,29 +515,27 @@ impl DeviceIdentifyInfo {
 
     /// Print device information in a formatted way
     pub fn print_info(&self, port_idx: usize) {
-        let logger = sched().get_logger();
-        log!(logger, "=== Device Info for Port {} ===", port_idx);
-        log!(logger, "Model: {}", self.model);
-        log!(logger, "Serial: {}", self.serial);
-        log!(logger, "Firmware: {}", self.firmware);
+        log!("=== Device Info for Port {} ===", port_idx);
+        log!("Model: {}", self.model);
+        log!("Serial: {}", self.serial);
+        log!("Firmware: {}", self.firmware);
         log!(
-            logger,
             "Capacity: {} sectors ({} MB / {} GB)",
             self.sectors,
             self.capacity_mb,
             self.capacity_gb
         );
-        log!(logger, "LBA48 Support: {}", self.supports_lba48);
-        log!(logger, "Features word 83: {:#06x}", self.raw_features);
+        log!("LBA48 Support: {}", self.supports_lba48);
+        log!("Features word 83: {:#06x}", self.raw_features);
 
         if self.supports_lba48 {
-            log!(logger, "  - 48-bit LBA supported");
+            log!("  - 48-bit LBA supported");
         }
         if self.supports_power_mgmt {
-            log!(logger, "  - Power Management supported");
+            log!("  - Power Management supported");
         }
         if self.supports_security {
-            log!(logger, "  - Security feature set supported");
+            log!("  - Security feature set supported");
         }
     }
 }

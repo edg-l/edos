@@ -1,7 +1,4 @@
-use crate::{
-    drivers::ahci, fs::fat32::structures::Fat32BootSector, log, logs::ThreadLogger,
-    thread::scheduler::sched,
-};
+use crate::{drivers::ahci, fs::fat32::structures::Fat32BootSector, log, thread::scheduler::sched};
 use alloc::{format, string::String, vec::Vec};
 use bytemuck::{Pod, Zeroable, try_from_bytes};
 
@@ -294,10 +291,9 @@ fn detect_filesystem(
 }
 
 /// Pretty print partition information
-pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
-    log!(logger, "Found {} partitions:", partitions.len());
+pub fn print_partitions(partitions: &[Partition]) {
+    log!("Found {} partitions:", partitions.len());
     log!(
-        logger,
         "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {} {}",
         "ID",
         "Start LBA",
@@ -308,7 +304,7 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
         "Name",
         "UUID"
     );
-    log!(logger, "{}", "-".repeat(100));
+    log!("{}", "-".repeat(100));
 
     for partition in partitions {
         let size_mb = (partition.size_sectors * 512) / (1024 * 1024);
@@ -340,7 +336,6 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
         };
 
         log!(
-            logger,
             "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {} {}",
             partition.index,
             partition.starting_lba,

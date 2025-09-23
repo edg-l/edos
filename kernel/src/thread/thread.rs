@@ -12,7 +12,6 @@ use crate::{
     drivers::fpu::FpuState,
     fs::path::Path,
     loader::{ElfLoadError, load_elf},
-    logs::ThreadLogger,
     memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
     println,
     syscalls::Errno,
@@ -84,7 +83,6 @@ pub struct Thread {
     // Sleep data split to avoid locking:
     pub sleep_deadline: AtomicU64, // ticks to wake at if Sleeping
 
-    pub logger: Arc<ThreadLogger>,
     pub user: Option<Arc<RwLock<UserThread>>>,
 
     // Context and kernel stack pointer:
@@ -142,11 +140,6 @@ impl Thread {
             kstack_top: initial_kstack_top,
             ctx: Mutex::new(context),
             state: AtomicU8::new(State::Ready as u8),
-            logger: Arc::new(ThreadLogger {
-                kernel: true,
-                id: id.0,
-                name: name.clone(),
-            }),
             name: Arc::new(name.as_ref().clone().unwrap_or(String::new())),
             user: None,
             cpu_affinity: AtomicU32::new(0),
@@ -228,11 +221,6 @@ impl Thread {
             kstack_top: kernel_stack_top,
             ctx: Mutex::new(context),
             state: AtomicU8::new(State::Ready as u8),
-            logger: Arc::new(ThreadLogger {
-                kernel: true,
-                id: id.0,
-                name: name.clone(),
-            }),
             name: Arc::new(name.as_ref().clone().unwrap_or(String::new())),
             cpu_affinity: AtomicU32::new(0),
             flags: AtomicU32::new(0),

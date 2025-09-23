@@ -51,8 +51,7 @@ impl AhciPort {
         port_regs: *mut HbaPort,
         device_type: DeviceType,
     ) -> Result<Self, AhciError> {
-        let logger = sched().get_logger();
-        log!(logger, "Initializing AHCI port {}", port_idx);
+        log!("Initializing AHCI port {}", port_idx);
 
         // Stop the port first
         Self::stop_port(port_regs)?;
@@ -103,7 +102,7 @@ impl AhciPort {
             ptr::write_volatile(&raw mut (*port_regs).ie, ie);
         }
 
-        log!(logger, "Port {} initialized successfully", port_idx);
+        log!("Port {} initialized successfully", port_idx);
 
         Ok(Self {
             port_idx,
@@ -627,9 +626,7 @@ impl AhciPort {
                 let status = (tfd & 0xFF) as u8;
                 let error = ((tfd >> 8) & 0xFF) as u8;
 
-                let logger = sched().get_logger();
                 log!(
-                    logger,
                     "AHCI port {}: Command error - Status: {:#x}, Error: {:#x}",
                     self.port_idx,
                     status,
@@ -641,9 +638,7 @@ impl AhciPort {
 
             // Check for timeout
             if start_time.elapsed() >= timeout {
-                let logger = sched().get_logger();
                 log!(
-                    logger,
                     "AHCI port {}: Command timeout on slot {}",
                     self.port_idx,
                     slot
@@ -669,7 +664,6 @@ impl AhciPort {
 
     /// Check for any port errors (non-blocking)
     pub fn check_errors(&mut self) -> Option<AhciError> {
-        let logger = sched().get_logger();
         let is = unsafe { ptr::read_volatile(&raw const (*self.port_regs).is) };
 
         if is & PORT_IS_TFES != 0 {
@@ -681,7 +675,6 @@ impl AhciPort {
             let error = ((tfd >> 8) & 0xFF) as u8;
 
             log!(
-                logger,
                 "AHCI port {}: Error detected - Status: {:#x}, Error: {:#x}",
                 self.port_idx,
                 status,

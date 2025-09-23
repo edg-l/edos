@@ -1,44 +1,20 @@
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
-use core::{
-    ptr,
-    sync::atomic::{AtomicBool, AtomicU64},
-    time::Duration,
-};
+use core::{ptr, sync::atomic::AtomicU64};
 use spin::Mutex;
 use x86_64::{
     VirtAddr,
-    registers::control::{Cr3, Cr3Flags},
-    structures::paging::{OffsetPageTable, PageTableFlags, PhysFrame},
+    registers::control::Cr3Flags,
+    structures::paging::{PageTableFlags, PhysFrame},
 };
 
 use crate::{
-    boot::boot_info,
     drivers::fpu::FpuState,
     fs::path::Path,
-    loader::{ElfLoadError, load_elf},
-    memory::{
-        STACK_ALIGNMENT, USER_STACK_SIZE,
-        mapper::{MemoryManager, active_level_4_table, get_level_4_table},
-    },
-    println,
+    memory::{STACK_ALIGNMENT, USER_STACK_SIZE, mapper::MemoryManager},
     syscalls::Errno,
-    thread::{
-        fd::FileDescriptorTable,
-        paging::allocate_process_pml4,
-        scheduler::switch_to_kernel_page,
-        util::{thread_stack_alloc, thread_stack_free},
-    },
+    thread::fd::FileDescriptorTable,
 };
-use alloc::{string::String, sync::Arc};
-
-use crate::{
-    logs::ThreadLogger,
-    thread::{
-        context::CpuContext,
-        util::{kthread_stack_alloc, kthread_stack_free},
-    },
-    timer::Instant,
-};
+use alloc::sync::Arc;
 
 pub mod broadcast;
 pub mod context;

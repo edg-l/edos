@@ -36,25 +36,22 @@ pub struct AhciController {
 
 impl AhciController {
     pub fn new(pci_device: PciDevice) -> Result<Self, AhciError> {
-        let logger = sched().get_logger();
         // Check if this is actually an AHCI controller
         if pci_device.header.class_code != 0x01 || pci_device.header.subclass != 0x06 {
             return Err(AhciError::InvalidDevice);
         }
 
-        log!(logger, "=== AHCI Controller Discovery ===");
+        log!("=== AHCI Controller Discovery ===");
         log!(
-            logger,
             "PCI Address: {:02x}:{:02x}.{}",
             pci_device.address.bus,
             pci_device.address.device,
             pci_device.address.function
         );
-        log!(logger, "Vendor ID: {:#x}", pci_device.header.vendor_id);
-        log!(logger, "Device ID: {:#x}", pci_device.header.device_id);
-        log!(logger, "BAR5: {:#x}", pci_device.header.bar5);
+        log!("Vendor ID: {:#x}", pci_device.header.vendor_id);
+        log!("Device ID: {:#x}", pci_device.header.device_id);
+        log!("BAR5: {:#x}", pci_device.header.bar5);
         log!(
-            logger,
             "IRQ Line: {}, IRQ Pin: {}",
             pci_device.header.interrupt_line,
             pci_device.header.interrupt_pin
@@ -62,12 +59,11 @@ impl AhciController {
 
         // Check if BAR5 is valid
         if pci_device.header.bar5 == 0 || pci_device.header.bar5 == 0xFFFFFFFF {
-            log!(logger, "Invalid BAR5, skipping controller");
+            log!("Invalid BAR5, skipping controller");
             return Err(AhciError::InvalidDevice);
         }
 
         log!(
-            logger,
             "Initializing AHCI controller at {:02x}:{:02x}.{}",
             pci_device.address.bus,
             pci_device.address.device,
@@ -122,12 +118,10 @@ impl AhciController {
     }
 
     fn configure_interrupt(pci_device: &PciDevice) -> Result<(), AhciError> {
-        let logger = sched().get_logger();
         // Prefer MSI if available
         match msi::enable_msi_for_device(pci_device, InterruptIndex::Ahci.as_u8()) {
             Ok(()) => {
                 log!(
-                    logger,
                     "AHCI: using MSI on {:02x}:{:02x}.{}",
                     pci_device.address.bus,
                     pci_device.address.device,
@@ -137,7 +131,6 @@ impl AhciController {
             }
             Err(e) => {
                 log!(
-                    logger,
                     "AHCI: MSI unavailable ({:?}), falling back to IOAPIC IRQ {}",
                     e,
                     pci_device.header.interrupt_line
@@ -170,7 +163,6 @@ impl AhciController {
     }
 
     fn reset_controller(&mut self) -> Result<(), AhciError> {
-        let logger = sched().get_logger();
         // Request HBA reset
         let mut ghc = unsafe { ptr::read_volatile(&raw const (*self.hba).ghc) };
         ghc |= 1; // HBA Reset bit
@@ -185,12 +177,11 @@ impl AhciController {
             sched().thread_yield();
         }
 
-        log!(logger, "AHCI controller reset complete");
+        log!("AHCI controller reset complete");
         Ok(())
     }
 
     fn enable_ahci(&mut self) -> Result<(), AhciError> {
-        let logger = sched().get_logger();
         let mut ghc = unsafe { ptr::read_volatile(&raw const (*self.hba).ghc) };
         ghc |= GHC_AE; // Enable AHCI
         unsafe { ptr::write_volatile(&raw mut (*self.hba).ghc, ghc) };
@@ -204,18 +195,17 @@ impl AhciController {
             sched().thread_yield();
         }
 
-        log!(logger, "AHCI enabled with interrupts");
+        log!("AHCI enabled with interrupts");
         Ok(())
     }
 
     fn discover_ports(&mut self) -> Result<(), AhciError> {
-        let logger = sched().get_logger();
         let pi = unsafe { ptr::read_volatile(&(*self.hba).pi) };
         self.ports.resize_with(32, || None);
 
         for i in 0..32 {
             if pi & (1 << i) != 0 {
-                log!(logger, "=== Checking Port {} ===", i);
+                log!("=== Checking Port {} ===", i);
                 let port_ptr = unsafe { &raw mut (*self.hba).ports[i] };
 
                 let ssts = unsafe { ptr::read_volatile(&raw const (*port_ptr).ssts) };
@@ -224,7 +214,6 @@ impl AhciController {
 
                 if device_detection != 3 || interface_power != 1 {
                     log!(
-                        logger,
                         "Port {}: No device present (DET={}, IPM={})",
                         i,
                         device_detection,
@@ -233,7 +222,7 @@ impl AhciController {
                     continue;
                 }
 
-                log!(logger, "Port {}: Device detected (DET=3, IPM=1)", i);
+                log!("Port {}: Device detected (DET=3, IPM=1)", i);
 
                 // Basic init only (power/spin-up); AhciPort::new will start FRE/ST once
                 self.initialize_port(port_ptr, i)?;
@@ -256,38 +245,33 @@ impl AhciController {
 
                         match signature {
                             SATA_SIG_ATA => {
-                                log!(logger, "Found SATA drive on port {}", i);
+                                log!("Found SATA drive on port {}", i);
                                 // Port was initialized with DeviceType::Ata, no change needed
                                 let mut port = port;
                                 port.set_device_type(DeviceType::Ata);
                                 self.ports[i] = Some(Arc::new(Mutex::new(port)));
                             }
                             SATA_SIG_ATAPI => {
-                                log!(logger, "Found ATAPI device on port {}", i);
+                                log!("Found ATAPI device on port {}", i);
                                 // Update device type to ATAPI
                                 let mut port = port;
                                 port.set_device_type(DeviceType::Atapi);
                                 self.ports[i] = Some(Arc::new(Mutex::new(port)));
                             }
                             sig => {
-                                log!(
-                                    logger,
-                                    "Port {} has unsupported/invalid signature: {:#x}",
-                                    i,
-                                    sig
-                                );
+                                log!("Port {} has unsupported/invalid signature: {:#x}", i, sig);
                                 // Unsupported signature; do not keep the port
                             }
                         }
                     }
                     Err(e) => {
-                        log!(logger, "Failed to initialize port {}: {:?}", i, e);
+                        log!("Failed to initialize port {}: {:?}", i, e);
                     }
                 }
             }
         }
 
-        log!(logger, "Port discovery complete");
+        log!("Port discovery complete");
         Ok(())
     }
 
@@ -296,8 +280,7 @@ impl AhciController {
         port_ptr: *mut HbaPort,
         port_idx: usize,
     ) -> Result<(), AhciError> {
-        let logger = sched().get_logger();
-        log!(logger, "Initializing port {} registers", port_idx);
+        log!("Initializing port {} registers", port_idx);
 
         unsafe {
             // First ensure the port is stopped
@@ -311,7 +294,7 @@ impl AhciController {
             let start = Instant::now();
             while ptr::read_volatile(&raw const (*port_ptr).cmd) & PORT_CMD_CR != 0 {
                 if start.elapsed().as_millis() > 200 {
-                    log!(logger, "Port {}: Timeout waiting for CR to clear", port_idx);
+                    log!("Port {}: Timeout waiting for CR to clear", port_idx);
                     return Err(AhciError::CommandTimeout);
                 }
                 sched().thread_yield();
@@ -326,7 +309,7 @@ impl AhciController {
             cmd |= PORT_CMD_POD | PORT_CMD_SUD;
             ptr::write_volatile(&raw mut (*port_ptr).cmd, cmd);
 
-            log!(logger, "Port {} powered on, waiting for spin-up", port_idx);
+            log!("Port {} powered on, waiting for spin-up", port_idx);
 
             // Wait a bit for device to spin up
             let start = Instant::now();
@@ -338,7 +321,7 @@ impl AhciController {
                 let interface_power = (ssts >> 8) & 0xF;
                 if device_detection != 3 || interface_power != 1 {
                     if start.elapsed().as_millis() > 400 {
-                        log!(logger, "Port {}: Device not ready after spin-up", port_idx);
+                        log!("Port {}: Device not ready after spin-up", port_idx);
                         return Err(AhciError::InvalidDevice);
                     } else {
                         sched().thread_yield();
@@ -353,7 +336,6 @@ impl AhciController {
             let device_detection = ssts & 0xF;
             let interface_power = (ssts >> 8) & 0xF;
             log!(
-                logger,
                 "Port {} SSTS after spin-up: {:#x} (DET={}, IPM={})",
                 port_idx,
                 ssts,
@@ -362,14 +344,14 @@ impl AhciController {
             );
 
             if device_detection != 3 || interface_power != 1 {
-                log!(logger, "Port {}: Device not ready after spin-up", port_idx);
+                log!("Port {}: Device not ready after spin-up", port_idx);
                 return Err(AhciError::InvalidDevice);
             }
 
             // Do not enable FRE/ST here; AhciPort::new will program CLB/FB and start the port
         }
 
-        log!(logger, "Port {} initialization complete", port_idx);
+        log!("Port {} initialization complete", port_idx);
         Ok(())
     }
 }

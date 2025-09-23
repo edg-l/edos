@@ -3,14 +3,12 @@ use core::time::Duration;
 use alloc::{
     collections::{btree_map::BTreeMap, vec_deque::VecDeque},
     sync::Arc,
-    vec::Vec,
 };
 use spin::Mutex;
 
 use crate::{
     fs::PollState,
     thread::{scheduler::sched, thread::ThreadId},
-    timer::Instant,
 };
 
 /// A single subscriber queue

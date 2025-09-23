@@ -6,7 +6,7 @@ use core::{
 
 use alloc::{boxed::Box, sync::Arc};
 use crossbeam_queue::ArrayQueue;
-use heapless::{binary_heap::{Max, Min}, BinaryHeap, Deque, LinearMap};
+use heapless::{BinaryHeap, Deque, binary_heap::Max};
 use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
@@ -128,6 +128,10 @@ impl Scheduler {
     }
 
     pub fn current_thread(&self) -> Option<Arc<Thread>> {
+        get_percpu_data().current_thread.clone()
+    }
+
+    pub fn current_thread_external(&self) -> Option<Arc<Thread>> {
         let tid = self.current.load(Ordering::Acquire);
         if tid == 0 {
             return None;
@@ -180,6 +184,7 @@ impl Scheduler {
     }
 
     fn run_idle(&self) {
+        get_percpu_data().current_thread = None;
         // Mark CPU idle
         self.current.store(0, Ordering::Release);
 
@@ -354,6 +359,7 @@ impl Scheduler {
     unsafe fn context_switch_to(&self, next: Arc<Thread>, context: *mut CpuContext) {
         // Set as current
         self.current.store(next.id.0, Ordering::Release);
+        get_percpu_data().current_thread = Some(next.clone());
 
         // Prepare next
         next.state.store(State::Running as u8, Ordering::Release);
@@ -477,10 +483,6 @@ impl Scheduler {
             .get_info(self.current_thread_id().unwrap())
             .clone()
             .unwrap()
-    }
-
-    pub fn get_logger(&self) -> Arc<crate::logs::ThreadLogger> {
-        self.current_thread().unwrap().logger.clone()
     }
 }
 

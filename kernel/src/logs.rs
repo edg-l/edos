@@ -1,102 +1,59 @@
-use core::{fmt::Write, time::Duration};
-
-use alloc::{
-    string::{String, ToString},
-    sync::Arc,
-};
-use x86_64::instructions::interrupts::without_interrupts;
+use alloc::string::String;
 
 use crate::{
     serial::add_serial_log,
     thread::{broadcast::Broadcaster, scheduler::sched, util::queue_spawn_kthread_named},
     timer::uptime_us,
+    util::per_cpu::get_percpu_data,
 };
 
 pub static LOG_BROADCAST: Broadcaster<String> = Broadcaster::new();
 
-#[derive(Debug, Clone)]
-pub struct ThreadLogger {
-    pub kernel: bool,
-    pub id: u64,
-    pub name: Arc<Option<String>>,
-}
+pub fn log(args: core::fmt::Arguments) {
+    use core::fmt::Write;
+    let mut buf = alloc::string::String::new();
+    let uptime_us = uptime_us();
+    let secs = uptime_us / 1_000_000;
+    let us = uptime_us % 1_000_000;
 
-impl Write for ThreadLogger {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let uptime_us = uptime_us();
-        let secs = uptime_us / 1_000_000;
-        let us = uptime_us % 1_000_000;
+    let cpu = get_percpu_data();
+    let cpu_idx = cpu.lapic_id;
 
-        let name = &*self.name;
-        let name = name.as_ref().map(|x| (*x).clone()).unwrap_or_else(|| {
-            if self.kernel {
-                "unk0".to_string()
-            } else {
-                "unk3".to_string()
-            }
-        });
-        let cpu_idx = sched().cpu;
+    if !cpu.scheduler.is_null() {
+        let sched = sched();
 
-        let text = alloc::format!(
-            "[{secs}.{us:06}] <cpu-{}:{}:{}:{}> {s}",
-            cpu_idx,
-            name,
-            if self.kernel { "k" } else { "u" },
-            self.id
-        );
-        LOG_BROADCAST.broadcast(text);
-        Ok(())
-    }
-}
+        if let Some(thread) = sched.current_thread() {
+            let name = &*thread.name;
 
-impl ThreadLogger {
-    pub fn log(&self, args: core::fmt::Arguments) {
-        use core::fmt::Write;
-        let mut buf = alloc::string::String::new();
-        let uptime_us = uptime_us();
-        let secs = uptime_us / 1_000_000;
-        let us = uptime_us % 1_000_000;
+            // build prefix
+            let _ = write!(
+                buf,
+                "[{secs}.{us:06}] <cpu-{}:{}:{}:{}> ",
+                cpu_idx,
+                name,
+                if thread.user.is_none() { "k" } else { "u" },
+                thread.id.0,
+            );
 
-        let name = &*self.name;
-        let name = name
-            .as_ref()
-            .map(|x| (*x).clone())
-            .unwrap_or_else(|| "unk".to_string());
-        let cpu_idx = sched().cpu;
+            // append user’s message
+            let _ = buf.write_fmt(args);
+            buf.push('\n');
 
-        // build prefix
-        let _ = write!(
-            buf,
-            "[{secs}.{us:06}] <cpu-{}:{}:{}:{}> ",
-            cpu_idx,
-            name,
-            if self.kernel { "k" } else { "u" },
-            self.id,
-        );
-
-        // append user’s message
-        let _ = buf.write_fmt(args);
-        buf.push('\n');
-
-        LOG_BROADCAST.broadcast(buf);
+            add_serial_log(&buf);
+            LOG_BROADCAST.broadcast(buf);
+        } else {
+            let _ = buf.write_fmt(args);
+            buf.push('\n');
+            add_serial_log(&buf);
+        }
     }
 }
 
 #[macro_export]
 macro_rules! log {
-    // explicit logger by identifier
-    ($logger:ident, $fmt:literal $(, $arg:expr)*) => {
-        $logger.log(format_args!($fmt $(, $arg)*))
-    };
-    // explicit logger by arbitrary expression (use @)
-    (@$logger:expr, $($arg:expr)*) => {
-        $logger.log(format_args!($($arg)*))
-    };
     // default logger
     ($fmt:literal $(, $arg:expr)*) => {
-        $crate::thread::scheduler::sched()
-            .get_logger()
-            .log(format_args!($fmt $(, $arg)*))
+        $crate::logs::log(format_args!($fmt $(, $arg)*))
     };
 }
 

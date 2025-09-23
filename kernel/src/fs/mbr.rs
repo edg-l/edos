@@ -3,7 +3,6 @@ use crate::{
     fs::fat32::structures::Fat32BootSector,
     fs::gpt::{FilesystemType, Partition, PartitionType},
     log,
-    logs::ThreadLogger,
     thread::scheduler::sched,
 };
 use alloc::{
@@ -153,8 +152,6 @@ fn detect_filesystem(
     device_id: u64,
     partition_start_lba: u64,
 ) -> Result<Option<FilesystemType>, &'static str> {
-    let logger = sched().get_logger();
-
     // Read first sector of partition
     let sector_data = ahci::api::read_sectors(device_id, partition_start_lba, 1, Vec::new())
         .map_err(|_| "Failed to read partition boot sector")?;
@@ -164,7 +161,6 @@ fn detect_filesystem(
     }
 
     log!(
-        logger,
         "Detecting filesystem at LBA {}, got {} bytes",
         partition_start_lba,
         sector_data.len()
@@ -172,33 +168,30 @@ fn detect_filesystem(
 
     // Try ISO 9660 detection first (most likely for CD/DVD)
     if let Some(fs_type) = detect_iso9660(device_id, partition_start_lba).unwrap_or(None) {
-        log!(logger, "Detected ISO 9660 filesystem");
+        log!("Detected ISO 9660 filesystem");
         return Ok(Some(fs_type));
     }
 
     // Try FAT family detection (for EFI boot partitions)
     if let Some(fs_type) = detect_fat_family(&sector_data) {
-        log!(logger, "Detected FAT filesystem: {:?}", fs_type);
+        log!("Detected FAT filesystem: {:?}", fs_type);
         return Ok(Some(fs_type));
     }
 
     // Try NTFS detection
     if let Some(fs_type) = detect_ntfs(&sector_data) {
-        log!(logger, "Detected NTFS filesystem");
+        log!("Detected NTFS filesystem");
         return Ok(Some(fs_type));
     }
 
     // Check for basic boot signature
     if sector_data.len() >= 512 && sector_data[510] == 0x55 && sector_data[511] == 0xAA {
-        log!(
-            logger,
-            "Found boot signature (0x55AA) but unknown filesystem"
-        );
+        log!("Found boot signature (0x55AA) but unknown filesystem");
     } else {
-        log!(logger, "No boot signature found");
+        log!("No boot signature found");
     }
 
-    log!(logger, "Could not identify filesystem type");
+    log!("Could not identify filesystem type");
     Ok(Some(FilesystemType::Unknown))
 }
 
@@ -225,14 +218,11 @@ fn detect_iso9660(
     device_id: u64,
     partition_start_lba: u64,
 ) -> Result<Option<FilesystemType>, &'static str> {
-    let logger = sched().get_logger();
-
     // ISO 9660 Primary Volume Descriptor is at sector 16 (relative to partition start)
     // But for hybrid ISOs, we need to check if this partition actually contains ISO data
     let iso_check_lba = partition_start_lba + 16;
 
     log!(
-        logger,
         "Checking for ISO 9660 at LBA {} (partition {} + 16)",
         iso_check_lba,
         partition_start_lba
@@ -252,7 +242,7 @@ fn detect_iso9660(
         if signature == b"CD001" {
             // Additional validation: check volume descriptor type (should be 1 for Primary VD)
             if iso_sector[0] == 0x01 {
-                log!(logger, "Found ISO 9660 Primary Volume Descriptor signature");
+                log!("Found ISO 9660 Primary Volume Descriptor signature");
                 return Ok(Some(FilesystemType::Iso9660));
             }
         }
@@ -269,11 +259,7 @@ fn detect_iso9660(
                 && &test_sector[1..6] == b"CD001"
                 && test_sector[0] == 0x01
             {
-                log!(
-                    logger,
-                    "Found ISO 9660 signature at partition offset {}",
-                    offset
-                );
+                log!("Found ISO 9660 signature at partition offset {}", offset);
                 return Ok(Some(FilesystemType::Iso9660));
             }
         }
@@ -284,16 +270,14 @@ fn detect_iso9660(
 
 /// Detect FAT family filesystems (FAT12, FAT16, FAT32)
 fn detect_fat_family(sector_data: &[u8]) -> Option<FilesystemType> {
-    let logger = sched().get_logger();
-
     if sector_data.len() < core::mem::size_of::<Fat32BootSector>() {
-        log!(logger, "Sector too small for FAT detection");
+        log!("Sector too small for FAT detection");
         return None;
     }
 
     // Check for boot signature first (0x55AA at end)
     if sector_data[510] != 0x55 || sector_data[511] != 0xAA {
-        log!(logger, "No boot signature for FAT detection");
+        log!("No boot signature for FAT detection");
         return None;
     }
 
@@ -305,7 +289,6 @@ fn detect_fat_family(sector_data: &[u8]) -> Option<FilesystemType> {
     let bytes_per_sector = boot_sector.bytes_per_sector;
     let sectors_per_cluster = boot_sector.sectors_per_cluster;
     log!(
-        logger,
         "FAT boot sector parsed - bytes_per_sector: {}, sectors_per_cluster: {}",
         bytes_per_sector,
         sectors_per_cluster
@@ -313,7 +296,7 @@ fn detect_fat_family(sector_data: &[u8]) -> Option<FilesystemType> {
 
     // Check if it's FAT32 first (strict check)
     if boot_sector.is_fat32() {
-        log!(logger, "Strict FAT32 validation passed");
+        log!("Strict FAT32 validation passed");
         return Some(FilesystemType::Fat32);
     }
 
@@ -321,7 +304,7 @@ fn detect_fat_family(sector_data: &[u8]) -> Option<FilesystemType> {
     if is_fat16_or_fat12_lenient(boot_sector) {
         // Determine if it's FAT12 or FAT16 based on cluster count
         let cluster_count = calculate_cluster_count(boot_sector);
-        log!(logger, "FAT12/16 candidate with {} clusters", cluster_count);
+        log!("FAT12/16 candidate with {} clusters", cluster_count);
 
         if cluster_count == 0 {
             // If cluster calculation fails, use heuristics
@@ -336,10 +319,7 @@ fn detect_fat_family(sector_data: &[u8]) -> Option<FilesystemType> {
         }
     } else {
         // Try heuristic detection for unusual EFI partitions
-        log!(
-            logger,
-            "Strict FAT12/16 validation failed, trying heuristics"
-        );
+        log!("Strict FAT12/16 validation failed, trying heuristics");
         detect_fat_by_heuristics(boot_sector)
     }
 }
@@ -358,21 +338,16 @@ fn is_fat16_or_fat12_lenient(boot_sector: &Fat32BootSector) -> bool {
 
 /// Heuristic FAT detection for unusual boot sectors
 fn detect_fat_by_heuristics(boot_sector: &Fat32BootSector) -> Option<FilesystemType> {
-    let logger = sched().get_logger();
-
     // Check OEM name for common FAT signatures
     let oem_str = core::str::from_utf8(&boot_sector.oem_name).unwrap_or("");
-    log!(logger, "OEM name: '{}'", oem_str);
+    log!("OEM name: '{}'", oem_str);
 
     if oem_str.contains("MSDOS") || oem_str.contains("mkfs") || oem_str.contains("FAT") {
         // If we have reasonable sector size and cluster size, assume FAT16
         let bytes_per_sector = boot_sector.bytes_per_sector;
         let sectors_per_cluster = boot_sector.sectors_per_cluster;
         if bytes_per_sector == 512 && sectors_per_cluster > 0 && sectors_per_cluster <= 64 {
-            log!(
-                logger,
-                "Heuristic detection: assuming FAT16 based on OEM and geometry"
-            );
+            log!("Heuristic detection: assuming FAT16 based on OEM and geometry");
             return Some(FilesystemType::Fat16);
         }
     }
@@ -381,7 +356,7 @@ fn detect_fat_by_heuristics(boot_sector: &Fat32BootSector) -> Option<FilesystemT
     let jmp_first = boot_sector.jmp_boot[0];
     let bytes_per_sector = boot_sector.bytes_per_sector;
     if jmp_first == 0xEB || jmp_first == 0xE9 {
-        log!(logger, "Found jump instruction, might be FAT");
+        log!("Found jump instruction, might be FAT");
         if bytes_per_sector == 512 {
             return Some(FilesystemType::Fat16); // Default guess
         }
@@ -438,10 +413,9 @@ fn generate_mbr_guid(device_id: u64, partition_index: usize) -> [u8; 16] {
 }
 
 /// Pretty print MBR partition information
-pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
-    log!(logger, "Found {} MBR partitions:", partitions.len());
+pub fn print_partitions(partitions: &[Partition]) {
+    log!("Found {} MBR partitions:", partitions.len());
     log!(
-        logger,
         "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {}",
         "ID",
         "Start LBA",
@@ -451,7 +425,7 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
         "FS",
         "Name"
     );
-    log!(logger, "{}", "-".repeat(80));
+    log!("{}", "-".repeat(80));
 
     for partition in partitions {
         let size_mb = (partition.size_sectors * 512) / (1024 * 1024);
@@ -481,7 +455,6 @@ pub fn print_partitions(partitions: &[Partition], logger: &ThreadLogger) {
         };
 
         log!(
-            logger,
             "{:<3} {:<12} {:<12} {:<12} {:<20} {:<10} {}",
             partition.index,
             partition.starting_lba,

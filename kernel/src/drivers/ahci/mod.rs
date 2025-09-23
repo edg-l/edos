@@ -130,7 +130,6 @@ type PortMailbox = Mailbox<Command, AhciResponse>;
 
 pub extern "C" fn ahci_driver_main() -> ! {
     let tid = sched().current_thread_id().unwrap();
-    let logger = sched().get_logger();
 
     let requests = AHCI_REQUESTS.call_once(|| Mailbox::new().into());
 
@@ -143,18 +142,18 @@ pub extern "C" fn ahci_driver_main() -> ! {
         if device.header.class_code == 0x01 && device.header.subclass == 0x06 {
             match AhciController::new(device) {
                 Ok(controller) => {
-                    log!(logger, "AHCI controller initialized successfully");
+                    log!("AHCI controller initialized successfully");
                     controllers.push(controller);
                 }
                 Err(e) => {
-                    log!(logger, "Failed to initialize AHCI controller: {:?}", e);
+                    log!("Failed to initialize AHCI controller: {:?}", e);
                 }
             }
         }
     }
 
     if controllers.is_empty() {
-        log!(logger, "No AHCI controllers found");
+        log!("No AHCI controllers found");
         loop {
             hlt();
         }
@@ -182,12 +181,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
                         id += 1;
                     }
                     Err(e) => {
-                        log!(
-                            logger,
-                            "Failed to identify device on port {}: {:?}",
-                            port_idx,
-                            e
-                        );
+                        log!("Failed to identify device on port {}: {:?}", port_idx, e);
                     }
                 }
             }
@@ -304,7 +298,6 @@ pub extern "C" fn ahci_driver_main() -> ! {
 
 extern "C" fn port_worker_thread() -> ! {
     let tid = sched().current_thread_id().unwrap();
-    let logger = sched().get_logger();
 
     let mailbox = {
         loop {
@@ -334,7 +327,7 @@ extern "C" fn port_worker_thread() -> ! {
                 sectors,
                 mut buffer,
             } => {
-                log!(logger, "Got read request, lba={lba}, sectors={sectors}");
+                log!("Got read request, lba={lba}, sectors={sectors}");
                 buffer.resize(sectors as usize * 512, 0);
                 let result = port.lock().read_sectors(lba, &mut buffer, sectors);
 
@@ -351,12 +344,12 @@ extern "C" fn port_worker_thread() -> ! {
                 });
             }
             Command::Flush => {
-                log!(logger, "Got flush request");
+                log!("Got flush request");
                 let result = port.lock().flush_cache();
                 req.reply(AhciResponse::Result(result));
             }
             Command::Identify => {
-                log!(logger, "Got identify request");
+                log!("Got identify request");
                 let result = port.lock().identify_device();
                 req.reply(AhciResponse::IdentifyResult { info: result });
             }
