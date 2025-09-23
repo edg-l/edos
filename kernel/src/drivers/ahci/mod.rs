@@ -205,49 +205,47 @@ pub extern "C" fn ahci_driver_main() -> ! {
 
     loop {
         // Check and wake relevant port worker threads.
-        without_interrupts(|| {
-            for controller in &controllers {
-                // Read HBA interrupt status register
-                let hba_is = unsafe { ptr::read_volatile(&(*controller.hba).is) };
+        for controller in &controllers {
+            // Read HBA interrupt status register
+            let hba_is = unsafe { ptr::read_volatile(&(*controller.hba).is) };
 
-                if hba_is == 0 {
-                    continue; // No interrupts on this controller
-                }
+            if hba_is == 0 {
+                continue; // No interrupts on this controller
+            }
 
-                // Process only ports with pending interrupts using bit manipulation
-                let mut pending_ports = hba_is;
-                while pending_ports != 0 {
-                    // Find the lowest set bit (next port with interrupt)
-                    let port_idx = pending_ports.trailing_zeros() as usize;
+            // Process only ports with pending interrupts using bit manipulation
+            let mut pending_ports = hba_is;
+            while pending_ports != 0 {
+                // Find the lowest set bit (next port with interrupt)
+                let port_idx = pending_ports.trailing_zeros() as usize;
 
-                    // Clear this bit for next iteration
-                    pending_ports &= pending_ports - 1;
+                // Clear this bit for next iteration
+                pending_ports &= pending_ports - 1;
 
-                    // Process this port's interrupt
-                    let port_regs = unsafe { &mut (*controller.hba).ports[port_idx] };
-                    let port_is = unsafe { ptr::read_volatile(&port_regs.is) };
+                // Process this port's interrupt
+                let port_regs = unsafe { &mut (*controller.hba).ports[port_idx] };
+                let port_is = unsafe { ptr::read_volatile(&port_regs.is) };
 
-                    if port_is != 0 {
-                        // Clear the port interrupt status
-                        unsafe { ptr::write_volatile(&mut port_regs.is, port_is) };
+                if port_is != 0 {
+                    // Clear the port interrupt status
+                    unsafe { ptr::write_volatile(&mut port_regs.is, port_is) };
 
-                        // Find the device for this controller+port combination
-                        if let Some(device) = detected_devices.iter().find(|d| {
-                            d.controller_pci_address == controller.pci_device.address
-                                && d.port_idx == port_idx
-                        }) {
-                            // Wake the worker thread for this device
-                            if let Some(worker_tid) = port_map_reverse.get(&device.id) {
-                                sched().wake_thread(*worker_tid, true);
-                            }
+                    // Find the device for this controller+port combination
+                    if let Some(device) = detected_devices.iter().find(|d| {
+                        d.controller_pci_address == controller.pci_device.address
+                            && d.port_idx == port_idx
+                    }) {
+                        // Wake the worker thread for this device
+                        if let Some(worker_tid) = port_map_reverse.get(&device.id) {
+                            sched().wake_thread(*worker_tid, true);
                         }
                     }
                 }
-
-                // Clear HBA interrupt status for processed ports
-                unsafe { ptr::write_volatile(&mut (*controller.hba).is, hba_is) };
             }
-        });
+
+            // Clear HBA interrupt status for processed ports
+            unsafe { ptr::write_volatile(&mut (*controller.hba).is, hba_is) };
+        }
 
         let mut req = requests.recv();
         match req.payload.take().unwrap() {

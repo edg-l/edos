@@ -1,8 +1,7 @@
 use core::{
     cmp,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Duration,
-    u64,
 };
 
 use alloc::{boxed::Box, sync::Arc};
@@ -11,7 +10,7 @@ use heapless::{BinaryHeap, Deque, binary_heap::Max};
 use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
-    instructions::interrupts::{enable_and_hlt, without_interrupts},
+    instructions::interrupts::{disable, enable, enable_and_hlt, without_interrupts},
     registers::control::Cr3,
 };
 
@@ -81,6 +80,7 @@ fn route_cmd_to_thread(tid: ThreadId, mk: impl FnOnce() -> SchedCmd) {
         let sc = sched_for_cpu(cpu);
         let _ = sc.cmds.push(mk()); // handle full case below
         t.mark_need_resched();
+        sc.has_work.store(true, Ordering::Release);
         if cpu != sched().cpu {
             sched().send_reschedule_ipi(cpu);
         }
@@ -108,6 +108,8 @@ pub struct Scheduler {
     pub earliest_deadline: AtomicU64,
 
     pub thread_count: AtomicU64,
+
+    has_work: AtomicBool,
 }
 
 impl Scheduler {
@@ -122,6 +124,7 @@ impl Scheduler {
             sleepers: Mutex::new(BinaryHeap::new()),
             thread_count: AtomicU64::new(0),
             earliest_deadline: AtomicU64::new(u64::MAX),
+            has_work: AtomicBool::new(false),
         }
     }
 
@@ -148,6 +151,7 @@ impl Scheduler {
     }
 
     pub fn on_tick(&self, context: *mut CpuContext) {
+        self.earliest_deadline.store(u64::MAX, Ordering::Release);
         self.drain_cmds();
 
         self.wake_sleepers();
@@ -163,14 +167,15 @@ impl Scheduler {
         let mut sl = self.sleepers.lock();
         let mut earliest = u64::MAX;
         while let Some(top) = sl.peek() {
+            earliest = earliest.min(top.deadline);
             if top.deadline > now {
-                earliest = earliest.min(top.deadline);
                 break;
             }
             let t = sl.pop().unwrap().thread;
             if t.try_wake() {
                 let mut rq = self.rq.lock();
                 rq.push_back(t).unwrap();
+                self.has_work.store(true, Ordering::Release);
             }
         }
         self.earliest_deadline.store(earliest, Ordering::Release);
@@ -185,27 +190,41 @@ impl Scheduler {
         self.current.store(0, Ordering::Release);
         get_percpu_data().current_thread = None;
 
-        let earliest_deadline = self.earliest_deadline.load(Ordering::Acquire);
-
-        if earliest_deadline != u64::MAX && earliest_deadline != 0 {
-            let now = Instant::now();
-            let deadline = Instant::from_tick(earliest_deadline);
-            set_apic_timer(deadline.duration_since(now));
-        }
+        enable();
 
         loop {
             // Break out if any work is available
-            if !self.cmds.is_empty() {
+            if !self.cmds.is_empty() || self.has_work.load(Ordering::Acquire) {
                 break;
+            }
+
+            let earliest_deadline = self.earliest_deadline.load(Ordering::Acquire);
+
+            if earliest_deadline != u64::MAX && earliest_deadline != 0 {
+                let now = Instant::now();
+                if earliest_deadline <= now.tick() {
+                    println!("earliest deadline passed");
+                    set_apic_timer(Duration::from_micros(1));
+                } else {
+                    let deadline = Instant::from_tick(earliest_deadline);
+                    println!("idling for {:?}", deadline.duration_since(now));
+                    set_apic_timer(deadline.duration_since(now));
+                }
+            } else {
+                println!("Endless idle")
             }
 
             // Halt until next interrupt (timer, IPI, device)
             x86_64::instructions::interrupts::enable_and_hlt();
         }
+
+        disable();
+        self.has_work.store(false, Ordering::Release);
     }
 
     fn drain_cmds(&self) {
         // Apply all pending external changes with minimal lock time.
+        let now = Instant::now();
         while let Some(cmd) = self.cmds.pop() {
             match cmd {
                 SchedCmd::New(t) => {
@@ -214,6 +233,7 @@ impl Scheduler {
                     if self.thread_can_run_here(&t) {
                         let mut rq = self.rq.lock();
                         rq.push_back(t).expect("failed to push back");
+                        self.has_work.store(true, Ordering::Release);
                     } else {
                         // will be queued on its target cpu by that cpu’s scheduler
                     }
@@ -228,19 +248,29 @@ impl Scheduler {
                         } else {
                             rq.push_back(t).unwrap();
                         }
+                        self.has_work.store(true, Ordering::Release);
                     }
                 }
                 SchedCmd::SleepUntil(tid, dl) => {
                     if let Some(t) = self.get_thread_by_id(tid)
                         && t.cas_state(State::Running, State::Sleeping)
                     {
-                        t.sleep_deadline.store(dl, Ordering::Release);
-                        let mut sl = self.sleepers.lock();
-                        sl.push(SleepEntry {
-                            deadline: dl,
-                            thread: t,
-                        })
-                        .unwrap();
+                        if dl <= now.tick() {
+                            println!("Sleep deadline passed, queueing");
+                            if t.try_wake() {
+                                self.rq.lock().push_front(t).unwrap();
+                                self.has_work.store(true, Ordering::Release);
+                            }
+                        } else {
+                            println!("sleep for {tid:?}");
+                            t.sleep_deadline.store(dl, Ordering::Release);
+                            let mut sl = self.sleepers.lock();
+                            sl.push(SleepEntry {
+                                deadline: dl,
+                                thread: t,
+                            })
+                            .unwrap();
+                        }
                     }
                 }
                 SchedCmd::Park(tid) => {
@@ -280,6 +310,7 @@ impl Scheduler {
 
     pub fn maybe_preempt(&self, context: *mut CpuContext) {
         let Some(cur) = self.current_thread() else {
+            println!("Waking from idle");
             self.pick_and_run(context); // was idle
             return;
         };
@@ -287,6 +318,7 @@ impl Scheduler {
         // Fast check without locking the runqueue.
         let need = cur.flags.load(Ordering::Acquire) & Flags::NEED_RESCHED.bits() != 0;
         if !need {
+            println!("No resched needed for {:?}", cur.id);
             return;
         }
 
@@ -304,6 +336,7 @@ impl Scheduler {
                 if cur.cas_state(State::Running, State::Ready) {
                     let mut rq = self.rq.lock();
                     rq.push_back(cur.clone()).ok();
+                    self.has_work.store(true, Ordering::Release);
                 }
             }
             // If it was already moved elsewhere (Parked, Sleeping, Dying), skip requeue
@@ -320,6 +353,8 @@ impl Scheduler {
 
             match next {
                 Some(t) => {
+                    self.has_work
+                        .store(!self.rq.lock().is_empty(), Ordering::Release);
                     if t.cas_state(State::Ready, State::Running) {
                         unsafe { self.context_switch_to(t, context) };
                         return;
@@ -337,8 +372,9 @@ impl Scheduler {
     }
 
     fn thread_can_run_here(&self, t: &Thread) -> bool {
-        let mask = t.cpu_affinity.load(Ordering::Acquire);
-        mask == 0 || (mask & (1u32 << self.cpu)) != 0
+        true
+        //let mask = t.cpu_affinity.load(Ordering::Acquire);
+        //mask == 0 || (mask & (1u32 << self.cpu)) != 0
     }
 
     fn save_current_thread(&self, context: *mut CpuContext) {
@@ -374,6 +410,9 @@ impl Scheduler {
 
         if earliest_deadline < deadline.tick() {
             deadline = Instant::from_tick(earliest_deadline);
+        } else {
+            self.earliest_deadline
+                .store(deadline.tick(), Ordering::Release);
         }
 
         next.slice_deadline
@@ -426,23 +465,21 @@ impl Scheduler {
 
     #[inline]
     pub fn thread_yield(&self) {
-        log!("Yielding");
-        let tid = self.current_thread_id().unwrap();
-        route_cmd_to_thread(tid, || SchedCmd::Yield(tid));
-
         without_interrupts(|| unsafe {
+            let tid = self.current_thread_id().unwrap();
+            route_cmd_to_thread(tid, || SchedCmd::Yield(tid));
             context_switch();
         })
     }
 
     #[inline]
     pub fn thread_sleep(&self, dt: Duration) {
-        let tid = self
-            .current_thread_id()
-            .expect("failed to get current thread id in sleep");
-        let deadline = Instant::now() + dt;
-
         without_interrupts(|| unsafe {
+            let tid = self
+                .current_thread_id()
+                .expect("failed to get current thread id in sleep");
+            let deadline = Instant::now() + dt;
+
             route_cmd_to_thread(tid, || SchedCmd::SleepUntil(tid, deadline.tick()));
             context_switch();
         })
@@ -459,16 +496,6 @@ impl Scheduler {
         route_cmd_to_thread(tid, || SchedCmd::SetAffinity(tid, mask));
     }
 
-    pub fn park_thread(&self, tid: ThreadId) {
-        route_cmd_to_thread(tid, || SchedCmd::Park(tid));
-
-        if Some(tid) == self.current_thread_id() {
-            without_interrupts(|| unsafe {
-                context_switch();
-            })
-        }
-    }
-
     pub fn thread_park(&self) {
         log!("parking");
         let tid = self.current_thread_id().unwrap();
@@ -480,7 +507,6 @@ impl Scheduler {
     }
 
     pub fn wake_thread(&self, tid: ThreadId, high: bool) {
-              log!("waking {tid:?}");
         route_cmd_to_thread(tid, || SchedCmd::Wake(tid, high));
     }
 

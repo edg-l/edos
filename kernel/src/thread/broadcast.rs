@@ -37,7 +37,7 @@ impl<T> Subscriber<T> {
             if let Some(msg) = self.queue.lock().pop_front() {
                 return msg;
             }
-            sched.park_thread(sched.current_thread_id().unwrap());
+            sched.thread_park();
         }
     }
 

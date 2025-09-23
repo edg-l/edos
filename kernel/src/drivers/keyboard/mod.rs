@@ -66,6 +66,7 @@ pub extern "C" fn driver_main() -> ! {
                 KEYBOARD_BROADCAST.broadcast(key_event);
             }
         }
+        // change me to a waitqeueu
         sched().thread_park();
     }
 }
