@@ -15,16 +15,14 @@ use x86_64::{
 };
 
 use crate::{
-    apic::get_lapic,
+    apic::{get_lapic, set_apic_timer_and_enable},
     boot::boot_info,
     drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
     interrupts::InterruptIndex,
     println,
     smp::tlb_flush_all_including_global,
     thread::{
-        UserThreadInfo,
-        context::CpuContext,
-        thread::{Flags, State, THREADS, Thread, ThreadId, get_thread_by_id},
+        context::CpuContext, thread::{get_thread_by_id, Flags, State, Thread, ThreadId, THREADS}, UserThreadInfo
     },
     timer::Instant,
     util::per_cpu::get_percpu_data,
@@ -42,6 +40,8 @@ pub fn init() {
     get_percpu_data().scheduler = ptr;
     let _ = SCHEDULERS.write().insert(lapic_id, ptr);
     println!("Saved scheduler on percpu");
+    // Enable apic timer
+    set_apic_timer_and_enable(Duration::from_millis(5));
 }
 
 pub fn sched() -> &'static Scheduler {

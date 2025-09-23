@@ -124,8 +124,6 @@ fn main() -> ! {
 
     // Init scheduler
     thread::scheduler::init();
-    // Enable apic timer
-    set_apic_timer_and_enable(Duration::from_millis(5));
     test_new();
     logs::init();
     drivers::init_drivers();

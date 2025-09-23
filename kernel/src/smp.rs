@@ -66,8 +66,6 @@ pub unsafe extern "C" fn ap_start(cpu: &MpCpu) -> ! {
 
     println!("[smp] AP online: LAPIC id {}", unsafe { get_lapic().id() });
 
-    set_apic_timer_and_enable(Duration::from_millis(5));
-
     loop {
         x86_64::instructions::interrupts::enable_and_hlt();
     }
