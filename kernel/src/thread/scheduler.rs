@@ -77,10 +77,10 @@ fn sched_for_cpu(cpu: u32) -> &'static Scheduler {
 fn route_cmd_to_thread(tid: ThreadId, mk: impl FnOnce() -> SchedCmd) {
     if let Some(t) = get_thread_by_id(tid) {
         let cpu = t.cpu.load(Ordering::Acquire);
+                t.mark_need_resched();
         let sc = sched_for_cpu(cpu);
+                sc.has_work.store(true, Ordering::Release);
         let _ = sc.cmds.push(mk()); // handle full case below
-        t.mark_need_resched();
-        sc.has_work.store(true, Ordering::Release);
         if cpu != sched().cpu {
             sched().send_reschedule_ipi(cpu);
         }
