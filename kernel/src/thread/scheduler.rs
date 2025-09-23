@@ -22,7 +22,9 @@ use crate::{
     println,
     smp::tlb_flush_all_including_global,
     thread::{
-        context::CpuContext, thread::{get_thread_by_id, Flags, State, Thread, ThreadId, THREADS}, UserThreadInfo
+        UserThreadInfo,
+        context::CpuContext,
+        thread::{Flags, State, THREADS, Thread, ThreadId, get_thread_by_id},
     },
     timer::Instant,
     util::per_cpu::get_percpu_data,

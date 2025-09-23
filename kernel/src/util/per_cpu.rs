@@ -1,4 +1,5 @@
 use alloc::{boxed::Box, sync::Arc};
+use x2apic::lapic::LocalApic;
 use x86_64::{
     VirtAddr,
     registers::model_specific::{GsBase, KernelGsBase},
@@ -18,6 +19,7 @@ pub struct PerCpuData {
     pub kernel_rsp: u64, // Offset 8 - kernel stack for syscalls
     pub tss: TaskStateSegment,
     pub lapic_id: u32,
+    pub lapic: *mut LocalApic,
     pub scheduler: *mut Scheduler,
     pub current_thread: Option<Arc<Thread>>,
 }
@@ -29,6 +31,7 @@ impl PerCpuData {
             kernel_rsp: 0,
             lapic_id: 0,
             tss: TaskStateSegment::new(),
+            lapic: core::ptr::null_mut(),
             scheduler: core::ptr::null_mut(),
             current_thread: None,
         }

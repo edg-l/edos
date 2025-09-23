@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use x2apic::{
     ioapic::{IoApic, IrqFlags, IrqMode, RedirectionTableEntry},
     lapic::LocalApicBuilder,
@@ -16,6 +17,7 @@ use crate::{
     interrupts::InterruptIndex,
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
     println,
+    util::per_cpu::get_percpu_data,
 };
 
 pub fn init() {
@@ -49,6 +51,8 @@ pub unsafe fn enable_lapic() {
     unsafe {
         lapic.enable();
     }
+
+    get_percpu_data().lapic = Box::leak(Box::new(lapic));
 }
 
 /// # Safety
