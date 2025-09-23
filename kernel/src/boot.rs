@@ -47,7 +47,7 @@ pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests")]
-pub static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(16 * 1024);
+pub static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(64 * 1024);
 
 // Request the RSDP address
 #[used]
