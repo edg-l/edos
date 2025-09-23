@@ -361,7 +361,6 @@ pub fn get_thread_by_id(tid: ThreadId) -> Option<Arc<Thread>> {
     THREADS.get(tid)
 }
 
-
 pub fn get_thread_info_by_id(tid: ThreadId) -> Option<Arc<Mutex<UserThreadInfo>>> {
     THREADS.get_info(tid)
 }

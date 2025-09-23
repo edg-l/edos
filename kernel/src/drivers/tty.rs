@@ -6,13 +6,13 @@ use spin::Mutex;
 
 use crate::{
     fs::{DevFsDevice, DevFsError, PollState, handle::Pollable, register_device_str},
-    thread::broadcast::{LockedBroadcast, new_broadcast},
+    thread::broadcast::Broadcaster,
 };
 
 const TTY_BUFFER_CAPACITY: usize = 16 * 1024;
 
 static TTY_BUFFER: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
-static TTY_NOTIFY: LockedBroadcast<()> = new_broadcast(128, false);
+static TTY_NOTIFY: Broadcaster<()> = Broadcaster::new();
 
 pub struct TtyDevice;
 
@@ -53,7 +53,7 @@ fn push_bytes(data: &[u8]) {
     }
 
     if should_notify {
-        TTY_NOTIFY.lock().broadcast(());
+        TTY_NOTIFY.broadcast(());
     }
 }
 
@@ -81,20 +81,8 @@ impl Pollable for TtyPoll {
             }
         }
 
-        let rx = TTY_NOTIFY.lock().subscribe_or_get();
-        if rx.poll(timeout) {
-            PollState {
-                readable: true,
-                writable: true,
-                error: false,
-            }
-        } else {
-            PollState {
-                readable: false,
-                writable: true,
-                error: false,
-            }
-        }
+        let rx = TTY_NOTIFY.subscribe();
+        rx.poll(timeout)
     }
 }
 

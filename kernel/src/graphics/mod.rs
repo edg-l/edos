@@ -140,8 +140,8 @@ pub extern "C" fn render_thread() -> ! {
     let mut display = DoubleBuffer::new();
 
     loop {
-        let request = mail.recv();
-        match &request.payload {
+        let mut request = mail.recv();
+        match request.payload.take().unwrap() {
             Request::ScreenInfo => {
                 let info = ScreenInfo {
                     height: display.height,
@@ -154,7 +154,7 @@ pub extern "C" fn render_thread() -> ! {
                 Mailbox::reply(request, Response::Ok);
             }
             Request::Draw(draw_request) => {
-                display.draw(draw_request);
+                display.draw(&draw_request);
                 Mailbox::reply(request, Response::Ok);
             }
         }

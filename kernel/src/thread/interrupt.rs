@@ -1,7 +1,9 @@
 use core::arch::naked_asm;
 
-use crate::{apic::get_lapic, thread::{context::CpuContext, scheduler::schedule}};
-
+use crate::{
+    apic::get_lapic,
+    thread::{context::CpuContext, scheduler::schedule},
+};
 
 // Naked function for timer interrupt handler
 #[unsafe(naked)]

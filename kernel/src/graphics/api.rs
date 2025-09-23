@@ -22,12 +22,7 @@ fn send_request(request: Request) -> Response {
 
     let response = requests.send(request);
 
-    loop {
-        match response.receive_timeout(Duration::from_millis(200)) {
-            Ok(res) => break res,
-            Err(_) => continue,
-        }
-    }
+    response.wait()
 }
 
 #[derive(Debug, Clone)]

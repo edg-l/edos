@@ -21,13 +21,7 @@ pub(super) fn send_request(request: AhciRequest, timeout: Duration) -> AhciRespo
     };
 
     let response = requests.send(request);
-
-    loop {
-        match response.receive_timeout(timeout) {
-            Ok(res) => break res,
-            Err(_) => continue,
-        }
-    }
+    response.wait()
 }
 
 pub fn list_devices() -> Vec<DetectedDevice> {

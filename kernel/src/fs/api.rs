@@ -28,13 +28,7 @@ pub(super) fn send_request(request: FsRequest, timeout: Duration) -> FsResponse 
     };
 
     let response = requests.send(request);
-
-    loop {
-        match response.receive_timeout(timeout) {
-            Ok(res) => break res,
-            Err(_) => continue,
-        }
-    }
+    response.wait()
 }
 
 // Global/management APIs

@@ -247,7 +247,7 @@ impl AhciController {
                         if signature == 0xffffffff {
                             let mut attempts = 0;
                             while signature == 0xffffffff && attempts < 5 {
-                                sched().thread_wait_timeout(core::time::Duration::from_millis(5));
+                                sched().thread_sleep(core::time::Duration::from_millis(5));
                                 signature =
                                     unsafe { ptr::read_volatile(&raw const (*port_ptr).sig) };
                                 attempts += 1;

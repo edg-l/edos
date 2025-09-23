@@ -6,11 +6,13 @@ use spin::Mutex;
 use crate::thread::waitqueue::WaitQueue;
 
 /// A single request with a response slot
+#[derive(Debug)]
 pub struct Request<T, R> {
-    pub payload: T,
+    pub payload: Option<T>,
     resp: Arc<ResponseInner<R>>,
 }
 
+#[derive(Debug)]
 struct ResponseInner<R> {
     ready: AtomicBool,
     value: Mutex<Option<R>>,
@@ -18,6 +20,7 @@ struct ResponseInner<R> {
 }
 
 /// Sender’s handle to await a reply
+#[derive(Debug)]
 pub struct Response<R> {
     inner: Arc<ResponseInner<R>>,
 }
@@ -40,6 +43,7 @@ impl<R> Response<R> {
 }
 
 /// Receiver side mailbox
+#[derive(Debug)]
 pub struct Mailbox<T, R> {
     queue: Mutex<VecDeque<Request<T, R>>>,
     not_empty: WaitQueue,
@@ -63,7 +67,7 @@ impl<T, R> Mailbox<T, R> {
             inner: inner.clone(),
         };
         let req = Request {
-            payload,
+            payload: Some(payload),
             resp: inner,
         };
 
@@ -91,5 +95,29 @@ impl<T, R> Mailbox<T, R> {
         }
         req.resp.ready.store(true, Ordering::Release);
         req.resp.waitq.wake_one();
+    }
+
+    pub fn forward<U>(&self, req: Request<U, R>, payload: T) {
+        let new_req = Request {
+            payload: Some(payload),
+            resp: req.resp, // keep same response channel
+        };
+
+        {
+            let mut q = self.queue.lock();
+            q.push_back(new_req);
+        }
+        self.not_empty.wake_one();
+    }
+}
+
+impl<T, R> Request<T, R> {
+    pub fn reply(&self, val: R) {
+        {
+            let mut slot = self.resp.value.lock();
+            *slot = Some(val);
+        }
+        self.resp.ready.store(true, Ordering::Release);
+        self.resp.waitq.wake_one();
     }
 }

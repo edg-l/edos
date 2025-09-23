@@ -48,9 +48,9 @@ pub mod mailbox;
 pub mod paging;
 pub mod pipe;
 //pub mod scheduler;
-pub mod util;
 pub mod scheduler;
 pub mod thread;
+pub mod util;
 pub mod waitqueue;
 
 #[derive(Debug)]
@@ -105,7 +105,10 @@ pub enum StackSetupError {
     StackOverflow,
 }
 
-pub fn setup_user_stack(stack_top: u64, argv: &[&[u8]]) -> Result<(u64, u64, usize), StackSetupError> {
+pub fn setup_user_stack(
+    stack_top: u64,
+    argv: &[&[u8]],
+) -> Result<(u64, u64, usize), StackSetupError> {
     let stack_bottom = stack_top
         .checked_sub(USER_STACK_SIZE)
         .ok_or(StackSetupError::StackOverflow)?;

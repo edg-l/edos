@@ -130,7 +130,7 @@ impl AhciPort {
                     if start.elapsed().as_millis() > 500 {
                         return Err(AhciError::CommandTimeout);
                     }
-                    sched().thread_wait_timeout(core::time::Duration::from_millis(1));
+                    sched().thread_sleep(core::time::Duration::from_millis(1));
                 }
             }
 
@@ -146,7 +146,7 @@ impl AhciPort {
                     if start.elapsed().as_millis() > 500 {
                         return Err(AhciError::CommandTimeout);
                     }
-                    sched().thread_wait_timeout(core::time::Duration::from_millis(1));
+                    sched().thread_sleep(core::time::Duration::from_millis(1));
                 }
             }
         }
@@ -652,7 +652,7 @@ impl AhciPort {
             }
 
             // Yield to scheduler while waiting (interrupt-wakeable)
-            sched().thread_wait_timeout(core::time::Duration::from_millis(5));
+            sched().thread_sleep(core::time::Duration::from_millis(5));
         }
 
         Ok(())

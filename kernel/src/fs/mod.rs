@@ -32,6 +32,7 @@ use crate::{
     thread::{
         mailbox::Mailbox,
         scheduler::sched,
+        thread::ThreadId,
         util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_kthread_named_arg},
     },
 };
@@ -295,7 +296,7 @@ pub(super) enum FsRequest {
         command: FsThreadCommand,
     },
     // Internal for worker bootstrap
-    GetPartitionMailbox(u64), // threadid
+    GetPartitionMailbox(ThreadId), // threadid
 }
 
 #[derive(Debug)]
@@ -311,7 +312,7 @@ pub(super) enum FsResponse {
     Poll(Result<Box<dyn Pollable>, Error>),
     Mmap(Result<MmapRegion, Error>),
     // Internal
-    PartitionMailbox(Option<Mailbox<FsThreadCommand, FsResponse>>),
+    PartitionMailbox(Option<Arc<Mailbox<FsThreadCommand, FsResponse>>>),
 }
 
 #[derive(Debug, Clone)]
@@ -507,14 +508,14 @@ fn find_mount_at_path<'a>(
 }
 
 pub static FS_WORKER_MAILBOXES: RwLock<
-    BTreeMap<(usize, usize), Mailbox<FsThreadCommand, FsResponse>>,
+    BTreeMap<(usize, usize), Arc<Mailbox<FsThreadCommand, FsResponse>>>,
 > = RwLock::new(BTreeMap::new());
 
 pub extern "C" fn fs_main_thread() -> ! {
     let logger = sched().get_logger();
     let devices = list_devices();
 
-    let requests = FS_REQUESTS.call_once(|| Mailbox::new(sched().current_id()));
+    let requests = FS_REQUESTS.call_once(|| Mailbox::new());
 
     let mut partitions: Vec<Partition> = Vec::new();
 
@@ -547,7 +548,7 @@ pub extern "C" fn fs_main_thread() -> ! {
     }
 
     // Per-partition worker threads and their mailboxes
-    let mut worker_tid_map = BTreeMap::<u64, (usize, usize)>::new();
+    let mut worker_tid_map = BTreeMap::<ThreadId, (usize, usize)>::new();
 
     // Mount table: map mount point to partition index
     let mut mount_points: BTreeMap<Path, MountMetadata> = BTreeMap::new();
@@ -579,11 +580,12 @@ pub extern "C" fn fs_main_thread() -> ! {
 
     // Main loop: route and respond
     loop {
-        while let Some(req) = requests.pop_request() {
-            match req.message {
+        let mut req = requests.recv();
+        let payload = req.payload.take().unwrap();
+        {
+            match payload {
                 FsRequest::ListPartitions => {
-                    req.response
-                        .send(FsResponse::Partitions(partitions.clone()));
+                    req.reply(FsResponse::Partitions(partitions.clone()));
                 }
                 FsRequest::ListMounts => {
                     let mounts = mount_points
@@ -595,13 +597,13 @@ pub extern "C" fn fs_main_thread() -> ! {
                             filesystem: meta.filesystem.clone(),
                         })
                         .collect();
-                    req.response.send(FsResponse::Mounts(mounts));
+                    req.reply(FsResponse::Mounts(mounts));
                 }
                 FsRequest::Mount {
                     mut device_id,
                     mut partition_index,
-                    mount_point,
-                    fstype,
+                    mut mount_point,
+                    mut fstype,
                 } => {
                     log!(
                         "Mount request: {:?} ({fstype:?}) at {:?}",
@@ -610,7 +612,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                     );
 
                     if mount_points.contains_key(&mount_point) {
-                        req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                        req.reply(FsResponse::Ok(Err(Error::IoError)));
                         continue;
                     }
 
@@ -653,7 +655,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                                     );
                                     FS_WORKER_MAILBOXES.write().insert(
                                         (partition.device_id as usize, partition.index),
-                                        Mailbox::new(worker_tid),
+                                        Mailbox::new().into(),
                                     );
                                     break;
                                 }
@@ -675,7 +677,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                                 .insert(worker_tid, (SPECIAL_DEV_ID, current_special_part));
                             FS_WORKER_MAILBOXES.write().insert(
                                 (SPECIAL_DEV_ID, current_special_part),
-                                Mailbox::new(worker_tid),
+                                Mailbox::new().into(),
                             );
                             current_special_part += 1;
                         }
@@ -695,14 +697,14 @@ pub extern "C" fn fs_main_thread() -> ! {
                                 .insert(worker_tid, (SPECIAL_DEV_ID, current_special_part));
                             FS_WORKER_MAILBOXES.write().insert(
                                 (SPECIAL_DEV_ID, current_special_part),
-                                Mailbox::new(worker_tid),
+                                Mailbox::new().into(),
                             );
                             current_special_part += 1;
                         }
                         FilesystemType::Unknown
                         | FilesystemType::Iso9660
                         | FilesystemType::Ntfs => {
-                            req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                            req.reply(FsResponse::Ok(Err(Error::IoError)));
                             continue;
                         }
                     }
@@ -710,7 +712,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                     let meta = MountMetadata {
                         device_id,
                         partition_index,
-                        filesystem: fstype,
+                        filesystem: fstype.clone(),
                     };
 
                     mount_points.insert(mount_point.clone(), meta.clone());
@@ -729,7 +731,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                         }
                     }
 
-                    req.response.send(FsResponse::Ok(Ok(())));
+                    req.reply(FsResponse::Ok(Ok(())));
                 }
                 FsRequest::Unmount { mount_point } => {
                     let res = if let Some(meta) = mount_points.remove(&mount_point) {
@@ -738,7 +740,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                     } else {
                         Err(Error::IoError)
                     };
-                    req.response.send(FsResponse::Ok(res));
+                    req.reply(FsResponse::Ok(res));
                 }
                 FsRequest::PathRequest { path, op } => {
                     let mut mount_check_path = path.clone();
@@ -759,20 +761,24 @@ pub extern "C" fn fs_main_thread() -> ! {
                         let mut rel = path.strip_prefix(mount_path).normalize();
 
                         let cmd = pathop_to_partition_command(
-                            op,
+                            op.clone(),
                             rel.clone(),
-                            if &path == mount_path { path } else { rel },
+                            if &path == mount_path {
+                                path.clone()
+                            } else {
+                                rel
+                            },
                         );
 
                         let mailbox_key = (meta.device_id, meta.partition_index);
 
                         if let Some(mb) = FS_WORKER_MAILBOXES.read().get(&mailbox_key) {
-                            mb.forward(cmd, req.response);
+                            mb.forward(req, cmd);
                         } else {
-                            req.response.send(FsResponse::Ok(Err(Error::FileNotFound)));
+                            req.reply(FsResponse::Ok(Err(Error::FileNotFound)));
                         }
                     } else {
-                        req.response.send(FsResponse::Ok(Err(Error::FileNotFound)));
+                        req.reply(FsResponse::Ok(Err(Error::FileNotFound)));
                     }
                 }
                 FsRequest::FsThreadRequest {
@@ -784,23 +790,21 @@ pub extern "C" fn fs_main_thread() -> ! {
                         .read()
                         .get(&(device_id, partition_index))
                     {
-                        mb.forward(command, req.response);
+                        mb.forward(req, command.clone());
                     } else {
-                        req.response.send(FsResponse::Ok(Err(Error::IoError)));
+                        req.reply(FsResponse::Ok(Err(Error::IoError)));
                     }
                 }
                 FsRequest::GetPartitionMailbox(tid) => {
                     if let Some(index) = worker_tid_map.get(&tid) {
                         let mb = FS_WORKER_MAILBOXES.read().get(index).cloned();
-                        req.response.send(FsResponse::PartitionMailbox(mb));
+                        req.reply(FsResponse::PartitionMailbox(mb));
                     } else {
-                        req.response.send(FsResponse::PartitionMailbox(None));
+                        req.reply(FsResponse::PartitionMailbox(None));
                     }
                 }
             }
         }
-
-        requests.wait();
     }
 }
 
@@ -826,7 +830,7 @@ extern "C" fn start_partition_fs_thread(partition: *mut Partition) -> ! {
         use core::time::Duration;
         loop {
             let resp = send(
-                FsRequest::GetPartitionMailbox(sched().current_id()),
+                FsRequest::GetPartitionMailbox(sched().current_thread_id().unwrap()),
                 Duration::from_secs(5),
             );
             if let FsResponse::PartitionMailbox(Some(mb)) = resp {
@@ -897,7 +901,7 @@ fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
         use core::time::Duration;
         loop {
             let resp = send(
-                FsRequest::GetPartitionMailbox(sched().current_id()),
+                FsRequest::GetPartitionMailbox(sched().current_thread_id().unwrap()),
                 Duration::from_secs(5),
             );
             if let FsResponse::PartitionMailbox(Some(mb)) = resp {
@@ -908,12 +912,13 @@ fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
 
     // Serve partition commands
     loop {
-        while let Some(mut req) = mailbox.pop_request() {
-            match req.message {
+        let mut req = mailbox.recv();
+        let message = req.payload.take().unwrap();
+        {
+            match message {
                 FsThreadCommand::ListFiles { path } => {
                     if let Some(file) = virtual_files.get(&path) {
-                        req.response
-                            .send(FsResponse::Files(Ok(alloc::vec![file.clone()])));
+                        req.reply(FsResponse::Files(Ok(alloc::vec![file.clone()])));
                     } else {
                         let mut res = fs.list_files(&path);
 
@@ -924,7 +929,7 @@ fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
                                 }
                             }
                         }
-                        req.response.send(FsResponse::Files(res));
+                        req.reply(FsResponse::Files(res));
                     }
                 }
                 FsThreadCommand::ReadBytes {
@@ -933,47 +938,47 @@ fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
                     count,
                 } => {
                     let res = fs.read_bytes(&path, offset, count);
-                    req.response.send(FsResponse::ReadBytes(res));
+                    req.reply(FsResponse::ReadBytes(res));
                 }
                 FsThreadCommand::WriteBytes { path, offset, data } => {
                     let res = fs.write_bytes(&path, offset, &data);
-                    req.response.send(FsResponse::Written(res));
+                    req.reply(FsResponse::Written(res));
                 }
                 FsThreadCommand::CreateFile { path } => {
                     let res = fs.create_file(&path);
-                    req.response.send(FsResponse::Ok(res));
+                    req.reply(FsResponse::Ok(res));
                 }
                 FsThreadCommand::CreateDir { path } => {
                     let res = fs.create_dir(&path);
-                    req.response.send(FsResponse::Ok(res));
+                    req.reply(FsResponse::Ok(res));
                 }
                 FsThreadCommand::RemoveFile { path } => {
                     let res = fs.remove_file(&path);
-                    req.response.send(FsResponse::Ok(res));
+                    req.reply(FsResponse::Ok(res));
                 }
                 FsThreadCommand::RemoveDir { path } => {
                     let res = fs.remove_dir(&path);
-                    req.response.send(FsResponse::Ok(res));
+                    req.reply(FsResponse::Ok(res));
                 }
                 FsThreadCommand::FileInfo { path } => {
                     if let Some(file) = virtual_files.get(&path) {
-                        req.response.send(FsResponse::File(Ok(file.clone())));
+                        req.reply(FsResponse::File(Ok(file.clone())));
                     } else {
                         let res = fs.file_info(&path);
-                        req.response.send(FsResponse::File(res));
+                        req.reply(FsResponse::File(res));
                     }
                 }
                 FsThreadCommand::Flush => {
                     let res = fs.flush();
-                    req.response.send(FsResponse::Ok(res));
+                    req.reply(FsResponse::Ok(res));
                 }
                 FsThreadCommand::Ioctl { path, request, arg } => {
                     let res = fs.ioctl(&path, request, arg);
-                    req.response.send(FsResponse::Ioctl(res));
+                    req.reply(FsResponse::Ioctl(res));
                 }
                 FsThreadCommand::Poll { path } => {
                     let res = fs.poll(&path);
-                    req.response.send(FsResponse::Poll(res));
+                    req.reply(FsResponse::Poll(res));
                 }
                 FsThreadCommand::Mmap {
                     path,
@@ -982,26 +987,22 @@ fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
                     memory,
                 } => {
                     let res = fs.mmap(&path, offset, length, memory);
-                    req.response.send(FsResponse::Mmap(res));
+                    req.reply(FsResponse::Mmap(res));
                 }
                 FsThreadCommand::AddVirtualInfo { paths } => {
                     for path in paths {
                         let file = create_virtual_file(path.components().last().unwrap().clone());
-                        virtual_files.insert(path, file);
+                        virtual_files.insert(path.clone(), file);
                     }
                 }
             }
         }
-
-        mailbox.wait();
     }
 }
 
-fn unsupported_fs(mb: Mailbox<FsThreadCommand, FsResponse>) -> ! {
+fn unsupported_fs(mb: Arc<Mailbox<FsThreadCommand, FsResponse>>) -> ! {
     loop {
-        while let Some(req) = mb.pop_request() {
-            req.response.send(FsResponse::Ok(Err(Error::IoError)));
-        }
-        mb.wait();
+        let req = mb.recv();
+        req.reply(FsResponse::Ok(Err(Error::IoError)));
     }
 }

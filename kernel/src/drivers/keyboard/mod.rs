@@ -11,12 +11,9 @@ use x86_64::{
 
 use crate::{
     apic::get_lapic,
-    fs::{handle::Pollable, register_device_str, DevFsDevice, DevFsError, MmapRegion, PollState},
+    fs::{DevFsDevice, DevFsError, MmapRegion, PollState, handle::Pollable, register_device_str},
     memory::mapper::MemoryManager,
-    thread::{
-        broadcast::Broadcaster,
-        scheduler::sched, thread::ThreadId,
-    },
+    thread::{broadcast::Broadcaster, scheduler::sched, thread::ThreadId},
 };
 
 pub static KEYBOARD_BROADCAST: Broadcaster<DecodedKey> = Broadcaster::new();
@@ -112,19 +109,7 @@ impl Pollable for KeyboardPoll {
     fn poll(&self, timeout: Duration) -> PollState {
         let rx = KEYBOARD_BROADCAST.subscribe();
 
-        if rx.poll(timeout) {
-            PollState {
-                readable: true,
-                error: false,
-                writable: false,
-            }
-        } else {
-            PollState {
-                readable: false,
-                error: false,
-                writable: false,
-            }
-        }
+        rx.poll(timeout)
     }
 }
 

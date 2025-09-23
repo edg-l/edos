@@ -108,10 +108,7 @@ pub fn thread_log_to_serial() -> ! {
     let rx = LOG_BROADCAST.subscribe();
 
     loop {
-        if let msg = rx.recv() {
-            without_interrupts(|| {
-                add_serial_log(&msg);
-            });
-        }
+        let msg = rx.recv();
+        add_serial_log(&msg);
     }
 }

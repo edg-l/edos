@@ -5,8 +5,6 @@ use spin::Mutex;
 
 use crate::thread::{scheduler::sched, thread::ThreadId};
 
-
-
 #[derive(Debug)]
 struct WaitEntry {
     tid: ThreadId,
@@ -20,7 +18,9 @@ pub struct WaitQueue {
 
 impl WaitQueue {
     pub const fn new() -> Self {
-        Self { inner: Mutex::new(VecDeque::new()) }
+        Self {
+            inner: Mutex::new(VecDeque::new()),
+        }
     }
 
     /// Current thread goes to sleep until woken
