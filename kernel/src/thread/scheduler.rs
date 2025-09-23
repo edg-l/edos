@@ -371,10 +371,12 @@ impl Scheduler {
             let Some(cur) = self.current_thread() else {
                 return;
             };
-            let _ = cur.cas_state(State::Running, State::Parked);
-            cur.mark_need_resched();
-            unsafe {
-                context_switch();
+            if cur.cas_state(State::Running, State::Parked) {
+                cur.mark_need_resched();
+                core::sync::atomic::compiler_fence(Ordering::SeqCst);
+                unsafe {
+                    context_switch();
+                }
             }
         })
     }
@@ -398,19 +400,18 @@ impl Scheduler {
                         thread: cur.clone(),
                     })
                     .unwrap();
-                    // maintain earliest_deadline
-                    let prev = self.earliest_deadline.load(Ordering::Acquire);
-                    if deadline_tick < prev {
-                        self.earliest_deadline
-                            .store(deadline_tick, Ordering::Release);
-                    }
-                     cur.mark_need_resched();
                 }
-                // Optional: if oneshot is earlier than current, reprogram here; else idle path will do it
-            }
-
-            unsafe {
-                context_switch();
+                // maintain earliest_deadline
+                let prev = self.earliest_deadline.load(Ordering::Acquire);
+                if deadline_tick < prev {
+                    self.earliest_deadline
+                        .store(deadline_tick, Ordering::Release);
+                }
+                cur.mark_need_resched();
+                core::sync::atomic::compiler_fence(Ordering::SeqCst);
+                unsafe {
+                    context_switch();
+                }
             }
         })
     }
