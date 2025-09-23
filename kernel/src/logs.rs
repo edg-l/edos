@@ -2,7 +2,7 @@ use alloc::string::String;
 
 use crate::{
     serial::add_serial_log,
-    thread::{broadcast::Broadcaster, scheduler::sched, util::queue_spawn_kthread_named},
+    thread::{broadcast::Broadcaster, scheduler::sched},
     timer::uptime_us,
     util::per_cpu::get_percpu_data,
 };
@@ -42,6 +42,7 @@ pub fn log(args: core::fmt::Arguments) {
             add_serial_log(&buf);
             LOG_BROADCAST.broadcast(buf);
         } else {
+            let _ = write!(buf, "[{secs}.{us:06}] <cpu-{}:kernel> ", cpu_idx,);
             let _ = buf.write_fmt(args);
             buf.push('\n');
             add_serial_log(&buf);
@@ -57,15 +58,4 @@ macro_rules! log {
     };
 }
 
-pub fn init() {
-    queue_spawn_kthread_named("logger", thread_log_to_serial as u64);
-}
-
-pub fn thread_log_to_serial() -> ! {
-    let rx = LOG_BROADCAST.subscribe();
-
-    loop {
-        let msg = rx.recv();
-        add_serial_log(&msg);
-    }
-}
+pub fn init() {}

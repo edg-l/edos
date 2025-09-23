@@ -141,7 +141,7 @@ fn main() -> ! {
 }
 
 pub fn test_new() -> ! {
-    println!("Spawning test thread");
+    log!("Spawning test thread");
     queue_spawn_kthread_named("test", test_thread as u64);
     queue_spawn_kthread_named("test2", test_thread2 as u64);
 
@@ -153,20 +153,20 @@ pub fn test_new() -> ! {
 }
 
 extern "C" fn test_thread() -> ! {
-    println!("Spawned test thread");
+    log!("Spawned test thread");
     let sched = sched();
     loop {
-        println!("t1");
+        log!("t1");
 
         sched.thread_sleep(Duration::from_secs(1));
     }
 }
 
 extern "C" fn test_thread2() -> ! {
-    println!("Spawned test thread");
+    log!("Spawned test thread");
     let sched = sched();
     loop {
-        println!("t2");
+        log!("t2");
 
         sched.thread_sleep(Duration::from_millis(500));
     }
