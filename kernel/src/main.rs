@@ -24,10 +24,11 @@ use crate::{
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
     thread::{
         UserThreadInfo,
+        scheduler::sched,
         thread::Thread,
         util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_thread},
     },
-    timer::{get_timer_calibration, init_boot_time, uptime_us},
+    timer::{Instant, get_timer_calibration, init_boot_time, uptime_us},
 };
 
 mod acpi;
@@ -123,14 +124,14 @@ fn main() -> ! {
 
     // Init scheduler
     thread::scheduler::init();
+    // Enable apic timer
+    set_apic_timer_and_enable(Duration::from_millis(5));
+    test_new();
     logs::init();
     drivers::init_drivers();
     fs::init();
 
     queue_spawn_kthread_named("system-mount", mount_system_fs as u64);
-
-    // Enable apic timer
-    set_apic_timer_and_enable(Duration::from_millis(5));
 
     print_alloc_stats();
 
@@ -138,6 +139,38 @@ fn main() -> ! {
 
     loop {
         hlt();
+    }
+}
+
+pub fn test_new() -> ! {
+    println!("Spawning test thread");
+    queue_spawn_kthread_named("test", test_thread as u64);
+    queue_spawn_kthread_named("test2", test_thread2 as u64);
+
+    x86_64::instructions::interrupts::enable_and_hlt();
+
+    loop {
+        hlt();
+    }
+}
+
+extern "C" fn test_thread() -> ! {
+    println!("Spawned test thread");
+    let sched = sched();
+    loop {
+        println!("t1");
+
+        sched.thread_sleep(Duration::from_secs(1));
+    }
+}
+
+extern "C" fn test_thread2() -> ! {
+    println!("Spawned test thread");
+    let sched = sched();
+    loop {
+        println!("t2");
+
+        sched.thread_sleep(Duration::from_millis(500));
     }
 }
 

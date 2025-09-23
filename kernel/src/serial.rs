@@ -2,6 +2,7 @@ use core::fmt::{self, Write};
 
 use spin::{Once, mutex::Mutex};
 use uart_16550::SerialPort;
+use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{timer::uptime_us, util::per_cpu::get_percpu_data};
 
@@ -35,22 +36,26 @@ pub fn _serial_print(args: fmt::Arguments) {
 
     let lapic_id = get_percpu_data().lapic_id;
 
-    SERIAL_DBG
-        .get()
-        .expect("failed to get serial dbg in print")
-        .lock()
-        .write_fmt(format_args!(
-            "[{secs}.{us:06}] <cpu-{}:kernel> {args}",
-            lapic_id,
-        ))
-        .expect("write fmt failed in serial");
+    without_interrupts(|| {
+        SERIAL_DBG
+            .get()
+            .expect("failed to get serial dbg in print")
+            .lock()
+            .write_fmt(format_args!(
+                "[{secs}.{us:06}] <cpu-{}:kernel> {args}",
+                lapic_id,
+            ))
+            .expect("write fmt failed in serial");
+    })
 }
 
 pub fn add_serial_log(text: &str) {
-    SERIAL_DBG
-        .get()
-        .expect("failed to get serial dbg")
-        .lock()
-        .write_str(text)
-        .expect("write_str failed in serial");
+    without_interrupts(|| {
+        SERIAL_DBG
+            .get()
+            .expect("failed to get serial dbg")
+            .lock()
+            .write_str(text)
+            .expect("write_str failed in serial");
+    })
 }

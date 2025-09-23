@@ -93,7 +93,7 @@ pub struct Thread {
 }
 
 // For now kernel threads and user share id
-static THREAD_ID_NEXT_ID: AtomicU64 = AtomicU64::new(0);
+static THREAD_ID_NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl Thread {
     pub fn switch_to_page(&self) {

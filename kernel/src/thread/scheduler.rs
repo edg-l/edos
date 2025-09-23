@@ -6,7 +6,7 @@ use core::{
 
 use alloc::{boxed::Box, sync::Arc};
 use crossbeam_queue::ArrayQueue;
-use heapless::{BinaryHeap, Deque, LinearMap, binary_heap::Min};
+use heapless::{binary_heap::{Max, Min}, BinaryHeap, Deque, LinearMap};
 use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
@@ -69,7 +69,7 @@ pub static SCHEDULERS: RwLock<heapless::LinearMap<u32, &'static Scheduler, 128>>
     RwLock::new(heapless::LinearMap::new());
 
 fn sched_for_cpu(cpu: u32) -> &'static Scheduler {
-    *SCHEDULERS.read().get(&cpu).expect("cpu sched")
+    SCHEDULERS.read().get(&cpu).expect("cpu sched")
 }
 
 fn route_cmd_to_thread(tid: ThreadId, mk: impl FnOnce() -> SchedCmd) {
@@ -101,7 +101,7 @@ pub struct Scheduler {
     // Time accounting
     pub default_timeslice: u32,
 
-    sleepers: Mutex<BinaryHeap<SleepEntry, Min, 1024>>,
+    sleepers: Mutex<BinaryHeap<SleepEntry, Max, 1024>>,
 
     pub thread_count: AtomicU64,
 }
@@ -113,7 +113,7 @@ impl Scheduler {
             rq: Mutex::new(Deque::new()),
             current: AtomicU64::new(0),
             cmds: Arc::new(ArrayQueue::new(1024)),
-            default_timeslice: 8, // ticks
+            default_timeslice: 1, // ticks
             sleepers: Mutex::new(BinaryHeap::new()),
             thread_count: AtomicU64::new(0),
         }
@@ -211,28 +211,28 @@ impl Scheduler {
                     }
                 }
                 SchedCmd::Wake(tid, high) => {
-                    if let Some(t) = self.get_thread_by_id(tid) {
-                        if t.try_wake() {
-                            let mut rq = self.rq.lock();
-                            if high {
-                                rq.push_front(t).unwrap();
-                            } else {
-                                rq.push_back(t).unwrap();
-                            }
+                    if let Some(t) = self.get_thread_by_id(tid)
+                        && t.try_wake()
+                    {
+                        let mut rq = self.rq.lock();
+                        if high {
+                            rq.push_front(t).unwrap();
+                        } else {
+                            rq.push_back(t).unwrap();
                         }
                     }
                 }
                 SchedCmd::SleepUntil(tid, dl) => {
-                    if let Some(t) = self.get_thread_by_id(tid) {
-                        if t.cas_state(State::Running, State::Sleeping) {
-                            t.sleep_deadline.store(dl, Ordering::Release);
-                            let mut sl = self.sleepers.lock();
-                            sl.push(SleepEntry {
-                                deadline: dl,
-                                thread: t,
-                            })
-                            .unwrap();
-                        }
+                    if let Some(t) = self.get_thread_by_id(tid)
+                        && t.cas_state(State::Running, State::Sleeping)
+                    {
+                        t.sleep_deadline.store(dl, Ordering::Release);
+                        let mut sl = self.sleepers.lock();
+                        sl.push(SleepEntry {
+                            deadline: dl,
+                            thread: t,
+                        })
+                        .unwrap();
                     }
                 }
                 SchedCmd::Park(tid) => {
@@ -288,6 +288,8 @@ impl Scheduler {
 
         // Requeue current if still runnable.
         let state_now: State = cur.state.load(Ordering::Acquire).into();
+
+        #[allow(clippy::single_match)]
         match state_now {
             State::Running => {
                 // If another CPU already marked it Parked/Sleeping/Dying, don't requeue
@@ -304,6 +306,7 @@ impl Scheduler {
     }
 
     fn pick_and_run(&self, context: *mut CpuContext) {
+        self.save_current_thread(context);
         loop {
             let next = { self.rq.lock().pop_front() };
 
@@ -330,8 +333,7 @@ impl Scheduler {
         mask == 0 || (mask & (1u32 << self.cpu)) != 0
     }
 
-    unsafe fn context_switch_to(&self, next: Arc<Thread>, context: *mut CpuContext) {
-        // Save current
+    fn save_current_thread(&self, context: *mut CpuContext) {
         if let Some(current) = self.current_thread() {
             unsafe {
                 *current.ctx.lock() = (*context).clone();
@@ -347,7 +349,9 @@ impl Scheduler {
                 }
             }
         }
+    }
 
+    unsafe fn context_switch_to(&self, next: Arc<Thread>, context: *mut CpuContext) {
         // Set as current
         self.current.store(next.id.0, Ordering::Release);
 
@@ -404,10 +408,13 @@ impl Scheduler {
 
     #[inline]
     pub fn thread_sleep(&self, dt: Duration) {
-        let tid = self.current_thread_id().unwrap();
+        let tid = self
+            .current_thread_id()
+            .expect("failed to get current thread id in sleep");
         let deadline = Instant::now() + dt;
-        route_cmd_to_thread(tid, || SchedCmd::SleepUntil(tid, deadline.tick()));
+
         without_interrupts(|| unsafe {
+            route_cmd_to_thread(tid, || SchedCmd::SleepUntil(tid, deadline.tick()));
             context_switch();
         })
     }
