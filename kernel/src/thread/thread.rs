@@ -78,10 +78,11 @@ pub struct Thread {
     pub cpu_affinity: AtomicU32, // bitmask of allowed CPUs
     pub flags: AtomicU32,        // Flags
 
-    pub timeslice_ticks: AtomicU32, // current remaining slice
+    // deadline as Instant counter value
+    pub slice_deadline: AtomicU64,
 
     // Sleep data split to avoid locking:
-    pub sleep_deadline: AtomicU64, // ticks to wake at if Sleeping
+    pub sleep_deadline: AtomicU64, // instant counter value
 
     pub user: Option<Arc<RwLock<UserThread>>>,
 
@@ -144,7 +145,7 @@ impl Thread {
             user: None,
             cpu_affinity: AtomicU32::new(0),
             flags: AtomicU32::new(0),
-            timeslice_ticks: AtomicU32::new(0),
+            slice_deadline: AtomicU64::new(0),
             priority: AtomicU8::new(16),
             sleep_deadline: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
@@ -224,7 +225,7 @@ impl Thread {
             name: Arc::new(name.as_ref().clone().unwrap_or(String::new())),
             cpu_affinity: AtomicU32::new(0),
             flags: AtomicU32::new(0),
-            timeslice_ticks: AtomicU32::new(0),
+            slice_deadline: AtomicU64::new(0),
             priority: AtomicU8::new(16),
             sleep_deadline: AtomicU64::new(0),
             cpu: AtomicU32::new(0),

@@ -2,6 +2,7 @@ use core::{
     cmp,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
+    u64,
 };
 
 use alloc::{boxed::Box, sync::Arc};
@@ -15,7 +16,7 @@ use x86_64::{
 };
 
 use crate::{
-    apic::{get_lapic, set_apic_timer_and_enable},
+    apic::{get_lapic, set_apic_timer, set_apic_timer_and_enable},
     boot::boot_info,
     drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
     interrupts::InterruptIndex,
@@ -101,23 +102,27 @@ pub struct Scheduler {
     pub cmds: Arc<ArrayQueue<SchedCmd>>,
 
     // Time accounting
-    pub default_timeslice: u32,
+    pub default_timeslice: Duration,
 
     sleepers: Mutex<BinaryHeap<SleepEntry, Max, 1024>>,
+
+    pub earliest_deadline: AtomicU64,
 
     pub thread_count: AtomicU64,
 }
 
 impl Scheduler {
     pub fn new(cpu: u32) -> Self {
+        println!("New scheduler");
         Self {
             cpu,
             rq: Mutex::new(Deque::new()),
             current: AtomicU64::new(0),
             cmds: Arc::new(ArrayQueue::new(1024)),
-            default_timeslice: 1, // ticks
+            default_timeslice: Duration::from_millis(5),
             sleepers: Mutex::new(BinaryHeap::new()),
             thread_count: AtomicU64::new(0),
+            earliest_deadline: AtomicU64::new(u64::MAX),
         }
     }
 
@@ -146,18 +151,6 @@ impl Scheduler {
     pub fn on_tick(&self, context: *mut CpuContext) {
         self.drain_cmds();
 
-        // Decrement timeslice for current thread and flag preempt if expired.
-        if let Some(cur) = self.current_thread() {
-            let left = cur
-                .timeslice_ticks
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_sub(1))
-                .ok();
-            if left == Some(0) {
-                cur.flags
-                    .fetch_or(Flags::NEED_RESCHED.bits(), Ordering::AcqRel);
-            }
-        }
-
         self.wake_sleepers();
         self.maybe_preempt(context);
     }
@@ -169,8 +162,10 @@ impl Scheduler {
         // Shown here as a no-op placeholder to keep the core minimal.
         let now = Instant::now().tick();
         let mut sl = self.sleepers.lock();
+        let mut earliest = u64::MAX;
         while let Some(top) = sl.peek() {
             if top.deadline > now {
+                earliest = earliest.min(top.deadline);
                 break;
             }
             let t = sl.pop().unwrap().thread;
@@ -179,6 +174,7 @@ impl Scheduler {
                 rq.push_back(t).unwrap();
             }
         }
+        self.earliest_deadline.store(earliest, Ordering::Release);
     }
 
     fn get_thread_by_id(&self, id: ThreadId) -> Option<Arc<Thread>> {
@@ -189,6 +185,14 @@ impl Scheduler {
         get_percpu_data().current_thread = None;
         // Mark CPU idle
         self.current.store(0, Ordering::Release);
+
+        let earliest_deadline = self.earliest_deadline.load(Ordering::Acquire);
+
+        if earliest_deadline != u64::MAX && earliest_deadline != 0 {
+            let now = Instant::now();
+            let deadline = Instant::from_tick(earliest_deadline);
+            set_apic_timer(deadline.duration_since(now));
+        }
 
         loop {
             // Break out if any work is available
@@ -208,8 +212,6 @@ impl Scheduler {
                 SchedCmd::New(t) => {
                     t.state.store(State::Ready as u8, Ordering::Release);
                     t.cpu.store(self.cpu, Ordering::Release);
-                    t.timeslice_ticks
-                        .store(self.default_timeslice, Ordering::Release);
                     if self.thread_can_run_here(&t) {
                         let mut rq = self.rq.lock();
                         rq.push_back(t).expect("failed to push back");
@@ -365,8 +367,19 @@ impl Scheduler {
 
         // Prepare next
         next.state.store(State::Running as u8, Ordering::Release);
-        next.timeslice_ticks
-            .store(self.default_timeslice, Ordering::Release);
+
+        let now = Instant::now();
+        let mut deadline = now + self.default_timeslice;
+
+        let earliest_deadline = self.earliest_deadline.load(Ordering::Acquire);
+
+        if earliest_deadline < deadline.tick() {
+            deadline = Instant::from_tick(earliest_deadline);
+        }
+
+        next.slice_deadline
+            .store(deadline.tick(), Ordering::Release);
+        set_apic_timer(deadline.duration_since(now));
 
         // Switch address space
         next.switch_to_page();

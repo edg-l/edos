@@ -33,7 +33,7 @@ impl HpetInstant {
         }
     }
 
-    pub fn tick(&self) -> u64 {
+    pub const fn tick(&self) -> u64 {
         self.counter_value
     }
 
@@ -48,6 +48,12 @@ impl HpetInstant {
         let ticks = self.counter_value.saturating_sub(earlier.counter_value);
         let nanos = get_hpet_timer().unwrap().ticks_to_nanos(ticks);
         Duration::from_nanos(nanos)
+    }
+
+    pub const fn from_tick(tick: u64) -> Self {
+        Self {
+            counter_value: tick,
+        }
     }
 }
 

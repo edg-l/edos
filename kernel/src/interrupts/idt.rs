@@ -71,6 +71,7 @@ pub fn build_idt_for_current_cpu() -> InterruptDescriptorTable {
     idt
 }
 
+#[unsafe(no_mangle)]
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
@@ -96,6 +97,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     }
 }
 
+#[unsafe(no_mangle)]
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     unsafe { get_lapic().end_of_interrupt() };
 
@@ -108,6 +110,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     }
 }
 
+#[unsafe(no_mangle)]
 extern "x86-interrupt" fn alignment_check_handler(stack_frame: InterruptStackFrame, value: u64) {
     unsafe { get_lapic().end_of_interrupt() };
 
@@ -135,10 +138,12 @@ extern "x86-interrupt" fn apic_error_interrupt_handler(_stack_frame: InterruptSt
     unsafe { get_lapic().end_of_interrupt() };
 }
 
+#[unsafe(no_mangle)]
 extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {
     // apic doesnt require EOI for spurious
 }
 
+#[unsafe(no_mangle)]
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
