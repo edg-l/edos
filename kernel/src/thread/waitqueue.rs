@@ -32,6 +32,11 @@ impl WaitQueue {
     }
 
     /// Wait until `ready()` returns true. Must be called in a loop at call site.
+    ///
+    /// Caller should call this function in a loop, rechecking themselves ready().
+    ///
+    /// while !cond() { wait_until(cond); }
+    ///
     pub fn wait_until<F: Fn() -> bool>(&self, ready: F) {
         if ready() {
             return;
@@ -74,6 +79,8 @@ impl WaitQueue {
     }
 
     /// Wake one thread
+    ///
+    /// Returns true if a thread was woken.
     pub fn wake_one(&self) -> bool {
         let entry = loop {
             let mut q = self.inner.lock();
@@ -90,13 +97,15 @@ impl WaitQueue {
             let prev = e.state.swap(WState::Woken as u8, Ordering::Release);
             if prev == WState::Sleeping as u8 {
                 sched().wake_thread(e.tid, false);
+                return true;
             }
-            return true;
         }
         false
     }
 
     /// Wake all threads
+    ///
+    /// Returns threads awakened.
     pub fn wake_all(&self) -> usize {
         let list = {
             let mut q = self.inner.lock();

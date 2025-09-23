@@ -5,6 +5,22 @@ use spin::Mutex;
 
 use crate::thread::waitqueue::WaitQueue;
 
+/*
+
+Not IRQ safe.
+
+SMP Safe if:
+
+Only one thread ever calls reply() on a given Request.
+Only one thread ever calls Response::wait() or try_get() (so only one consumer).
+You do not reuse a Request after reply().
+
+Then:
+There’s no race where two writers fight over value.
+The ready.store(Release) + wait() loop with Acquire ensures the consumer sees the written value.
+The waitq wake after the Release store prevents lost-wake.
+*/
+
 /// A single request with a response slot
 #[derive(Debug)]
 pub struct Request<T, R> {
