@@ -3,6 +3,7 @@ use core::time::Duration;
 use alloc::{
     collections::{btree_map::BTreeMap, vec_deque::VecDeque},
     sync::Arc,
+    vec::Vec,
 };
 use spin::Mutex;
 
@@ -107,8 +108,11 @@ impl<T: Clone> Broadcaster<T> {
 
     pub fn broadcast(&self, msg: T) {
         let sched = sched();
-        let subs = self.subs.lock();
-        for sub in subs.values() {
+        let targets: Vec<Arc<Subscriber<T>>> = {
+            let subs = self.subs.lock();
+            subs.values().cloned().collect()
+        };
+        for sub in targets {
             {
                 let mut q = sub.queue.lock();
                 q.push_back(msg.clone());
