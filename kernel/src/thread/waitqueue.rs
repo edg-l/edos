@@ -3,7 +3,10 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{log, thread::{scheduler::sched, thread::ThreadId}};
+use crate::{
+    log,
+    thread::{scheduler::sched, thread::ThreadId},
+};
 
 #[repr(u8)]
 enum WState {

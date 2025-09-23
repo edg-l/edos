@@ -134,11 +134,11 @@ fn main() -> ! {
     while now.elapsed() < Duration::from_millis(100) {
         spin_loop();
     }
-    // test_new();
-    drivers::init_drivers();
-    fs::init();
+    test_new();
+    //drivers::init_drivers();
+    //fs::init();
 
-    queue_spawn_kthread_named("system-mount", mount_system_fs as u64);
+    //queue_spawn_kthread_named("system-mount", mount_system_fs as u64);
 
     print_alloc_stats();
 
@@ -163,6 +163,7 @@ pub fn test_new() -> ! {
         test_thread2 as u64,
         Box::into_raw(Box::new(mb.clone())).cast(),
     );
+
     queue_spawn_kthread_named_arg(
         "test3",
         test_thread3 as u64,
@@ -228,7 +229,7 @@ pub fn mount_system_fs() -> ! {
     log!("Starting mountfs thread");
     let partitions = fs::api::list_partitions();
 
-        log!("Got partitions");
+    log!("Got partitions");
 
     let cmdline = ParsedCmdline::parse(boot_info().cmdline);
 

@@ -49,7 +49,7 @@ impl<R> Response<R> {
                 .waitq
                 .wait_until(|| self.inner.ready.load(Ordering::Acquire));
         }
-           log!("Got response");
+        log!("Got response");
         self.inner.value.lock().take().unwrap()
     }
 }

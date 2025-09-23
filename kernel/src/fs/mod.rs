@@ -514,7 +514,7 @@ pub static FS_WORKER_MAILBOXES: RwLock<
 pub extern "C" fn fs_main_thread() -> ! {
     log!("Started main fs");
     let devices = list_devices();
-        log!("Listed devices");
+    log!("Listed devices");
 
     let requests = FS_REQUESTS.call_once(|| Arc::new(Mailbox::new()));
 
