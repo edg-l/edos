@@ -2,10 +2,7 @@ use alloc::{collections::vec_deque::VecDeque, vec::Vec};
 use spin::Mutex;
 use x86_64::instructions::interrupts;
 
-use crate::{
-    log,
-    thread::{scheduler::sched, thread::ThreadId},
-};
+use crate::thread::{scheduler::sched, thread::ThreadId};
 
 #[derive(Debug)]
 pub struct WaitQueue {
@@ -34,25 +31,18 @@ impl WaitQueue {
             {
                 let mut q = self.inner.lock();
                 q.push_back(tid);
-                log!("waitqueue enqueue tid={} len={}", tid.0, q.len());
             }
 
             if ready() {
                 let mut q = self.inner.lock();
                 if let Some(pos) = q.iter().position(|&id| id == tid) {
                     q.remove(pos);
-                    log!(
-                        "waitqueue dequeue-before-park tid={} len={}",
-                        tid.0,
-                        q.len()
-                    );
                 }
                 return;
             }
 
             // Park current thread; it will be woken by wake_one/wake_all
             sched().thread_park();
-            log!("waitqueue wakeup tid={}", tid.0);
         });
     }
 
@@ -63,7 +53,6 @@ impl WaitQueue {
             q.pop_front()
         };
         if let Some(tid) = tid_opt {
-            log!("waitqueue wake_one tid={}", tid.0);
             sched().wake_thread(tid, false);
             true
         } else {
@@ -77,7 +66,6 @@ impl WaitQueue {
             let mut q = self.inner.lock();
             q.drain(..).collect::<Vec<_>>()
         };
-        log!("waitqueue wake_all count={}", tids.len());
         let n = tids.len();
         for tid in tids {
             sched().wake_thread(tid, false);
