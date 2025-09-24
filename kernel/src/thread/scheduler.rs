@@ -85,7 +85,6 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new(cpu: u32) -> Self {
-        println!("New scheduler");
         Self {
             cpu,
             rq: Mutex::new(Deque::new()),
@@ -180,7 +179,6 @@ impl Scheduler {
                 };
                 set_apic_timer(dur);
             } else {
-                println!("Endless idle")
             }
 
             // Halt until next interrupt (timer, IPI, device)
@@ -192,7 +190,6 @@ impl Scheduler {
 
     pub fn maybe_preempt(&self, context: *mut CpuContext) {
         let Some(cur) = self.current_thread() else {
-            println!("Waking from idle");
             self.pick_and_run(context); // was idle
             return;
         };
@@ -335,7 +332,6 @@ impl Scheduler {
     }
 
     pub fn send_reschedule_ipi(&self, target_cpu: u32) {
-        println!("Sending reschedule ipi to {target_cpu}");
         without_interrupts(|| {
             unsafe { get_lapic().send_ipi(InterruptIndex::Reschedule as u8, target_cpu) };
         });
@@ -345,7 +341,6 @@ impl Scheduler {
 
     #[inline]
     pub fn spawn_thread(&self, thread: Arc<Thread>) {
-        println!("Spawning");
         self.thread_count.fetch_add(1, Ordering::AcqRel);
         thread.state.store(State::Ready as u8, Ordering::Release);
         thread.cpu.store(self.cpu, Ordering::Release);
@@ -360,7 +355,6 @@ impl Scheduler {
         }
 
         if self.cpu != get_percpu_data().lapic_id {
-            println!("Sending ipi due to spawn");
             sched().send_reschedule_ipi(self.cpu);
         }
     }
@@ -385,8 +379,6 @@ impl Scheduler {
     }
 
     pub fn thread_park(&self) {
-        log!("parking");
-
         let Some(cur) = self.current_thread() else {
             return;
         };

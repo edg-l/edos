@@ -134,11 +134,11 @@ fn main() -> ! {
     while now.elapsed() < Duration::from_millis(100) {
         spin_loop();
     }
-    test_new();
-    //drivers::init_drivers();
-    //fs::init();
+    //test_new();
+    drivers::init_drivers();
+    fs::init();
 
-    //queue_spawn_kthread_named("system-mount", mount_system_fs as u64);
+    queue_spawn_kthread_named("system-mount", mount_system_fs as u64);
 
     print_alloc_stats();
 
