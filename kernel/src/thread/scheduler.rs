@@ -19,7 +19,7 @@ use crate::{
     boot::boot_info,
     drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
     interrupts::InterruptIndex,
-    log, println,
+    println,
     smp::tlb_flush_all_including_global,
     thread::{
         UserThreadInfo,
@@ -84,6 +84,31 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    fn enqueue_ready(sc: &Scheduler, thread: &Arc<Thread>, high: bool) {
+        let mut rq = sc.rq.lock();
+        let _ = if high {
+            rq.push_front(thread.clone())
+        } else {
+            rq.push_back(thread.clone())
+        };
+        if !rq.is_empty() {
+            sc.has_work.store(true, Ordering::Release);
+        }
+    }
+
+    fn complete_wake(&self, thread: &Arc<Thread>, high: bool) {
+        let cpu = thread.cpu.load(Ordering::Acquire);
+        let sc = sched_for_cpu(cpu);
+        without_interrupts(|| {
+            thread.state.store(State::Ready as u8, Ordering::Release);
+            Self::enqueue_ready(sc, thread, high);
+            thread.mark_need_resched();
+            if cpu != self.cpu {
+                self.send_reschedule_ipi(cpu);
+            }
+        });
+    }
+
     pub fn new(cpu: u32) -> Self {
         Self {
             cpu,
@@ -458,51 +483,75 @@ impl Scheduler {
     }
 
     pub fn wake_thread(&self, tid: ThreadId, high: bool) {
-        if let Some(t) = get_thread_by_id(tid) {
-            loop {
-                if t.try_wake() {
-                    break;
-                }
+        self.wake_thread_internal(tid, high, false);
+    }
 
-                match State::from(t.state.load(Ordering::Acquire)) {
-                    State::Ready | State::Waking => {
-                        return;
-                    }
-                    State::Running => {
-                        t.mark_need_resched();
-                        let cpu = t.cpu.load(Ordering::Acquire);
-                        if cpu == self.cpu {
-                            // Target is running on this CPU; reschedule will happen on return.
-                            return;
-                        }
-                        self.send_reschedule_ipi(cpu);
-                        spin_loop();
-                    }
-                    State::Dying => return,
-                    _ => spin_loop(),
-                }
+    #[inline(never)]
+    pub fn wake_thread_irq(&self, tid: ThreadId, high: bool) {
+        self.wake_thread_internal(tid, high, true);
+    }
+
+    fn wake_thread_internal(&self, tid: ThreadId, high: bool, from_irq: bool) {
+        if let Some(t) = get_thread_by_id(tid) {
+            if from_irq {
+                self.wake_thread_from_irq(t, high);
+            } else {
+                self.wake_thread_slow(t, high);
+            }
+        }
+    }
+
+    fn wake_thread_slow(&self, thread: Arc<Thread>, high: bool) {
+        loop {
+            if thread.try_wake() {
+                self.complete_wake(&thread, high);
+                return;
             }
 
-            let cpu = t.cpu.load(Ordering::Acquire);
-            let sc = sched_for_cpu(cpu);
-            without_interrupts(|| {
-                t.state.store(State::Ready as u8, Ordering::Release);
-
-                let mut rq = sc.rq.lock();
-                let _ = if high {
-                    rq.push_front(t.clone())
-                } else {
-                    rq.push_back(t.clone())
-                };
-                if !rq.is_empty() {
-                    sc.has_work.store(true, Ordering::Release);
+            match State::from(thread.state.load(Ordering::Acquire)) {
+                State::Ready | State::Waking => {
+                    thread.mark_need_resched();
+                    let cpu = thread.cpu.load(Ordering::Acquire);
+                    if cpu != self.cpu {
+                        self.send_reschedule_ipi(cpu);
+                    }
+                    return;
                 }
-
-                t.mark_need_resched();
-                if cpu != self.cpu {
-                    self.send_reschedule_ipi(cpu);
+                State::Running => {
+                    thread.mark_need_resched();
+                    let cpu = thread.cpu.load(Ordering::Acquire);
+                    if cpu != self.cpu {
+                        self.send_reschedule_ipi(cpu);
+                    }
+                    spin_loop();
                 }
-            })
+                State::Dying => return,
+                _ => spin_loop(),
+            }
+        }
+    }
+
+    fn wake_thread_from_irq(&self, thread: Arc<Thread>, high: bool) {
+        let state = State::from(thread.state.load(Ordering::Acquire));
+        match state {
+            State::Sleeping | State::Parked => {
+                if thread.try_wake() {
+                    self.complete_wake(&thread, high);
+                    return;
+                }
+            }
+            State::Ready | State::Waking => {
+                thread.mark_need_resched();
+            }
+            State::Running => {
+                thread.mark_need_resched();
+            }
+            State::Dying => return,
+        }
+
+        let cpu = thread.cpu.load(Ordering::Acquire);
+        if cpu != self.cpu {
+            self.send_reschedule_ipi(cpu);
         }
     }
 
