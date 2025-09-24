@@ -129,20 +129,25 @@ impl Scheduler {
     fn wake_sleepers(&self) {
         let now = Instant::now().tick();
         let mut sl = self.sleepers.lock();
-        let mut earliest = u64::MAX;
         while let Some(top) = sl.peek() {
             if top.deadline > now {
-                earliest = top.deadline;
                 break;
             }
             let t = sl.pop().unwrap().thread;
             if t.try_wake() {
+                // Set thread state to Ready after successful wake attempt
+                t.state.store(State::Ready as u8, Ordering::Release);
+
                 let mut rq = self.rq.lock();
                 rq.push_back(t).unwrap();
                 self.has_work.store(true, Ordering::Release);
             }
         }
-        self.earliest_deadline.store(earliest, Ordering::Release);
+         if let Some(next_sleep) = sl.peek() {
+            self.earliest_deadline.store(next_sleep.deadline, Ordering::Release);
+        } else {
+            self.earliest_deadline.store(u64::MAX, Ordering::Release);
+        }
     }
 
     fn get_thread_by_id(&self, id: ThreadId) -> Option<Arc<Thread>> {
@@ -192,11 +197,12 @@ impl Scheduler {
         };
 
         // Fast check without locking the runqueue.
-        let need = cur.flags.load(Ordering::Acquire) & Flags::NEED_RESCHED.bits() != 0;
-        if !need {
-            println!("No resched needed for {:?}", cur.id);
-            return;
-        }
+        //let need = cur.flags.load(Ordering::Acquire) & Flags::NEED_RESCHED.bits() != 0;
+        // ingnore need resched for now
+        //if !need {
+        //    println!("No resched needed for {:?}", cur.id);
+        //    return;
+        //}
 
         // Clear request and pick another.
         cur.flags
@@ -357,9 +363,11 @@ impl Scheduler {
                 return;
             };
             if cur.cas_state(State::Running, State::Ready) {
+                cur.mark_need_resched();
                 self.rq.lock().push_back(cur).ok();
                 self.has_work.store(true, Ordering::Release);
             }
+
             context_switch();
         })
     }
@@ -422,6 +430,23 @@ impl Scheduler {
             let now = Instant::now();
             let deadline_tick = (now + dt).tick();
             cur.sleep_deadline.store(deadline_tick, Ordering::Release);
+
+            // Add to sleepers heap - this was missing!
+            {
+                let mut sleepers = self.sleepers.lock();
+                let sleep_entry = SleepEntry {
+                    deadline: deadline_tick,
+                    thread: cur.clone(),
+                };
+                sleepers.push(sleep_entry).ok(); // ignore if heap is full
+            }
+
+            // Update earliest deadline if this sleep is sooner
+            let current_earliest = self.earliest_deadline.load(Ordering::Acquire);
+            if deadline_tick < current_earliest {
+                self.earliest_deadline.store(deadline_tick, Ordering::Release);
+            }
+
             cur.mark_need_resched();
             context_switch();
         })
@@ -435,6 +460,9 @@ impl Scheduler {
             let cpu = t.cpu.load(Ordering::Acquire);
             let sc = sched_for_cpu(cpu);
             without_interrupts(|| {
+                // Set to Ready state before queueing
+                t.state.store(State::Ready as u8, Ordering::Release);
+
                 {
                     let mut rq = sc.rq.lock();
                     if high {
@@ -444,7 +472,7 @@ impl Scheduler {
                     }
                     sc.has_work.store(true, Ordering::Release);
                 }
-                t.state.store(State::Ready as u8, Ordering::Release);
+
                 if cpu != self.cpu {
                     t.mark_need_resched();
                     self.send_reschedule_ipi(cpu);
