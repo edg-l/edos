@@ -86,16 +86,20 @@ impl<T, R> Mailbox<T, R> {
         {
             let mut q = self.queue.lock();
             q.push_back(req);
+            log!("mailbox send queued len={}", q.len());
         }
-        self.not_empty.wake_one();
+        let woke = self.not_empty.wake_one();
+        log!("mailbox send wake_one_result={}", woke);
         resp
     }
 
     pub fn recv(&self) -> Request<T, R> {
         loop {
             if let Some(req) = self.queue.lock().pop_front() {
+                log!("mailbox recv returned item");
                 return req;
             }
+            log!("mailbox recv blocking");
             self.not_empty.wait_until(|| !self.queue.lock().is_empty());
         }
     }

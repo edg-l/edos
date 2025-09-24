@@ -30,6 +30,16 @@ use crate::{
     util::per_cpu::get_percpu_data,
 };
 
+const TRACE_SCHED: bool = true;
+
+macro_rules! trace_sched {
+    ($($arg:tt)*) => {
+        if TRACE_SCHED {
+            log!($($arg)*);
+        }
+    };
+}
+
 pub fn init() {
     println!("Initializing scheduler");
     // TODO: refactor queue, so it isnt limited to 65k? maybe iterate on the storage threads
@@ -135,9 +145,23 @@ impl Scheduler {
             }
             let t = sl.pop().unwrap().thread;
             if t.try_wake() {
+                trace_sched!(
+                    "sleepers wake tid={} deadline={} cpu={} by cpu {}",
+                    t.id.0,
+                    now,
+                    self.cpu,
+                    get_percpu_data().lapic_id
+                );
                 t.state.store(State::Ready as u8, Ordering::Release);
                 let mut rq = self.rq.lock();
-                let _ = rq.push_back(t);
+                let before = rq.len();
+                let res = rq.push_back(t);
+                trace_sched!(
+                    "sleepers enqueue ok={} len_before={} len_after={}",
+                    res.is_ok(),
+                    before,
+                    rq.len()
+                );
                 if !rq.is_empty() {
                     self.has_work.store(true, Ordering::Release);
                 }
@@ -166,6 +190,7 @@ impl Scheduler {
         loop {
             // Break out if any work is available
             if self.has_work.load(Ordering::Acquire) {
+                trace_sched!("run_idle cpu={} sees work", self.cpu);
                 break;
             }
 
@@ -218,7 +243,15 @@ impl Scheduler {
                 // If another CPU already marked it Parked/Sleeping/Dying, don't requeue
                 if cur.cas_state(State::Running, State::Ready) {
                     let mut rq = self.rq.lock();
-                    let _ = rq.push_back(cur.clone());
+                    let before = rq.len();
+                    let res = rq.push_back(cur.clone());
+                    trace_sched!(
+                        "maybe_preempt requeue tid={} ok={} len_before={} len_after={}",
+                        cur.id.0,
+                        res.is_ok(),
+                        before,
+                        rq.len()
+                    );
                     if !rq.is_empty() {
                         self.has_work.store(true, Ordering::Release);
                     }
@@ -237,7 +270,17 @@ impl Scheduler {
             let next = {
                 let mut rq = self.rq.lock();
                 let item = rq.pop_front();
+                let remaining = rq.len();
                 self.has_work.store(!rq.is_empty(), Ordering::Release);
+                match &item {
+                    Some(thread) => trace_sched!(
+                        "pick_and_run cpu={} picked tid={} remaining={}",
+                        self.cpu,
+                        thread.id.0,
+                        remaining
+                    ),
+                    None => trace_sched!("pick_and_run cpu={} queue empty", self.cpu),
+                }
                 item
             };
 
@@ -247,6 +290,13 @@ impl Scheduler {
                         unsafe { self.context_switch_to(t, context) };
                         return;
                     } else {
+                        let current = State::from(t.state.load(Ordering::Acquire));
+                        trace_sched!(
+                            "pick_and_run cas_failed tid={} observed_state={:?} cpu={}",
+                            t.id.0,
+                            current,
+                            self.cpu
+                        );
                         continue; // invalid state, try again
                     }
                 }
@@ -351,7 +401,16 @@ impl Scheduler {
         thread.cpu.store(self.cpu, Ordering::Release);
         if self.thread_can_run_here(&thread) {
             let mut rq = self.rq.lock();
-            let _ = rq.push_back(thread);
+            let before = rq.len();
+            let res = rq.push_back(thread.clone());
+            trace_sched!(
+                "spawn enqueue tid={} cpu={} ok={} len_before={} len_after={}",
+                thread.id.0,
+                self.cpu,
+                res.is_ok(),
+                before,
+                rq.len()
+            );
             if !rq.is_empty() {
                 self.has_work.store(true, Ordering::Release);
             }
@@ -374,7 +433,15 @@ impl Scheduler {
             if cur.cas_state(State::Running, State::Ready) {
                 cur.mark_need_resched();
                 let mut rq = self.rq.lock();
-                let _ = rq.push_back(cur);
+                let before = rq.len();
+                let res = rq.push_back(cur.clone());
+                trace_sched!(
+                    "thread_yield enqueue tid={} ok={} len_before={} len_after={}",
+                    cur.id.0,
+                    res.is_ok(),
+                    before,
+                    rq.len()
+                );
                 if !rq.is_empty() {
                     self.has_work.store(true, Ordering::Release);
                 }
@@ -391,6 +458,7 @@ impl Scheduler {
             return;
         };
 
+        trace_sched!("thread_park tid={} cpu={}", cur.id.0, self.cpu);
         loop {
             if cur
                 .state
@@ -442,6 +510,13 @@ impl Scheduler {
             let now = Instant::now();
             let deadline_tick = (now + dt).tick();
             cur.sleep_deadline.store(deadline_tick, Ordering::Release);
+            trace_sched!(
+                "thread_sleep tid={} cpu={} deadline={} now={}",
+                cur.id.0,
+                self.cpu,
+                deadline_tick,
+                now.tick()
+            );
 
             // Add to sleepers heap - this was missing!
             {
@@ -450,7 +525,14 @@ impl Scheduler {
                     deadline: deadline_tick,
                     thread: cur.clone(),
                 };
-                sleepers.push(sleep_entry).ok(); // ignore if heap is full
+                let res = sleepers.push(sleep_entry);
+                trace_sched!(
+                    "thread_sleep queued tid={} heap_len={} ok={}",
+                    cur.id.0,
+                    sleepers.len(),
+                    res.is_ok()
+                );
+                res.ok();
             }
 
             // Update earliest deadline if this sleep is sooner
@@ -468,21 +550,41 @@ impl Scheduler {
     pub fn wake_thread(&self, tid: ThreadId, high: bool) {
         if let Some(t) = get_thread_by_id(tid) {
             loop {
+                let state = State::from(t.state.load(Ordering::Acquire));
+                trace_sched!(
+                    "wake_thread tid={} target_cpu={} from_cpu={} observed_state={:?}",
+                    t.id.0,
+                    t.cpu.load(Ordering::Acquire),
+                    self.cpu,
+                    state
+                );
                 if t.try_wake() {
+                    trace_sched!("wake_thread tid={} claimed", t.id.0);
                     break;
                 }
 
-                match State::from(t.state.load(Ordering::Acquire)) {
-                    State::Ready | State::Waking => return,
+                match state {
+                    State::Ready | State::Waking => {
+                        trace_sched!("wake_thread tid={} already runnable", t.id.0);
+                        return;
+                    }
                     State::Running => {
                         t.mark_need_resched();
                         let cpu = t.cpu.load(Ordering::Acquire);
                         if cpu != self.cpu {
+                            trace_sched!(
+                                "wake_thread tid={} send ipi to {} (running)",
+                                t.id.0,
+                                cpu
+                            );
                             self.send_reschedule_ipi(cpu);
                         }
                         spin_loop();
                     }
-                    State::Dying => return,
+                    State::Dying => {
+                        trace_sched!("wake_thread tid={} dying", t.id.0);
+                        return;
+                    }
                     _ => spin_loop(),
                 }
             }
@@ -493,17 +595,28 @@ impl Scheduler {
                 t.state.store(State::Ready as u8, Ordering::Release);
 
                 let mut rq = sc.rq.lock();
-                let _ = if high {
+                let before = rq.len();
+                let res = if high {
                     rq.push_front(t.clone())
                 } else {
                     rq.push_back(t.clone())
                 };
+                trace_sched!(
+                    "wake_thread tid={} queue_ok={} len_before={} len_after={} high={} on_cpu={}",
+                    t.id.0,
+                    res.is_ok(),
+                    before,
+                    rq.len(),
+                    high,
+                    sc.cpu
+                );
                 if !rq.is_empty() {
                     sc.has_work.store(true, Ordering::Release);
                 }
 
                 t.mark_need_resched();
                 if cpu != self.cpu {
+                    trace_sched!("wake_thread tid={} sending ipi to {}", t.id.0, cpu);
                     self.send_reschedule_ipi(cpu);
                 }
             })
