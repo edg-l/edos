@@ -471,9 +471,11 @@ impl Scheduler {
                     State::Running => {
                         t.mark_need_resched();
                         let cpu = t.cpu.load(Ordering::Acquire);
-                        if cpu != self.cpu {
-                            self.send_reschedule_ipi(cpu);
+                        if cpu == self.cpu {
+                            // Target is running on this CPU; reschedule will happen on return.
+                            return;
                         }
+                        self.send_reschedule_ipi(cpu);
                         spin_loop();
                     }
                     State::Dying => return,
