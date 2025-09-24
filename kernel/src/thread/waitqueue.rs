@@ -1,9 +1,7 @@
 use alloc::{collections::vec_deque::VecDeque, vec::Vec};
 use spin::Mutex;
 
-use crate::{
-    thread::{scheduler::sched, thread::ThreadId},
-};
+use crate::thread::{scheduler::sched, thread::ThreadId};
 
 #[derive(Debug)]
 pub struct WaitQueue {

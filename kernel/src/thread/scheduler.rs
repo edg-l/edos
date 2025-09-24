@@ -1,11 +1,11 @@
 use core::{
     cmp,
+    hint::spin_loop,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Duration,
 };
 
 use alloc::{boxed::Box, sync::Arc};
-use crossbeam_queue::ArrayQueue;
 use heapless::{BinaryHeap, Deque, binary_heap::Max};
 use spin::{Mutex, RwLock};
 use x86_64::{
@@ -66,7 +66,7 @@ pub struct Scheduler {
 
     // Ready queue. Simple round-robin with priority buckets is enough.
     // Keep it small and predictable.
-    pub rq: Mutex<heapless::Deque<Arc<Thread>, 1024>>,
+    pub rq: Mutex<Deque<Arc<Thread>, 1024>>,
 
     // Current running thread id for this CPU.
     pub current: AtomicU64, // 0 means idle
@@ -135,16 +135,17 @@ impl Scheduler {
             }
             let t = sl.pop().unwrap().thread;
             if t.try_wake() {
-                // Set thread state to Ready after successful wake attempt
                 t.state.store(State::Ready as u8, Ordering::Release);
-
                 let mut rq = self.rq.lock();
-                rq.push_back(t).unwrap();
-                self.has_work.store(true, Ordering::Release);
+                let _ = rq.push_back(t);
+                if !rq.is_empty() {
+                    self.has_work.store(true, Ordering::Release);
+                }
             }
         }
-         if let Some(next_sleep) = sl.peek() {
-            self.earliest_deadline.store(next_sleep.deadline, Ordering::Release);
+        if let Some(next_sleep) = sl.peek() {
+            self.earliest_deadline
+                .store(next_sleep.deadline, Ordering::Release);
         } else {
             self.earliest_deadline.store(u64::MAX, Ordering::Release);
         }
@@ -217,8 +218,10 @@ impl Scheduler {
                 // If another CPU already marked it Parked/Sleeping/Dying, don't requeue
                 if cur.cas_state(State::Running, State::Ready) {
                     let mut rq = self.rq.lock();
-                    rq.push_back(cur.clone()).ok();
-                    self.has_work.store(true, Ordering::Release);
+                    let _ = rq.push_back(cur.clone());
+                    if !rq.is_empty() {
+                        self.has_work.store(true, Ordering::Release);
+                    }
                 }
             }
             // If it was already moved elsewhere (Parked, Sleeping, Dying), skip requeue
@@ -231,12 +234,15 @@ impl Scheduler {
     fn pick_and_run(&self, context: *mut CpuContext) {
         self.save_current_thread(context);
         loop {
-            let next = { self.rq.lock().pop_front() };
+            let next = {
+                let mut rq = self.rq.lock();
+                let item = rq.pop_front();
+                self.has_work.store(!rq.is_empty(), Ordering::Release);
+                item
+            };
 
             match next {
                 Some(t) => {
-                    self.has_work
-                        .store(!self.rq.lock().is_empty(), Ordering::Release);
                     if t.cas_state(State::Ready, State::Running) {
                         unsafe { self.context_switch_to(t, context) };
                         return;
@@ -253,7 +259,7 @@ impl Scheduler {
         }
     }
 
-    fn thread_can_run_here(&self, t: &Thread) -> bool {
+    fn thread_can_run_here(&self, _t: &Thread) -> bool {
         true
         //let mask = t.cpu_affinity.load(Ordering::Acquire);
         //mask == 0 || (mask & (1u32 << self.cpu)) != 0
@@ -281,6 +287,7 @@ impl Scheduler {
         // Set as current
         self.current.store(next.id.0, Ordering::Release);
         get_percpu_data().current_thread = Some(next.clone());
+        next.cpu.store(self.cpu, Ordering::Release);
 
         // Prepare next
         next.state.store(State::Running as u8, Ordering::Release);
@@ -344,8 +351,10 @@ impl Scheduler {
         thread.cpu.store(self.cpu, Ordering::Release);
         if self.thread_can_run_here(&thread) {
             let mut rq = self.rq.lock();
-            rq.push_back(thread).expect("failed to push back");
-            self.has_work.store(true, Ordering::Release);
+            let _ = rq.push_back(thread);
+            if !rq.is_empty() {
+                self.has_work.store(true, Ordering::Release);
+            }
         } else {
             // will be queued on its target cpu by that cpu’s scheduler
         }
@@ -364,8 +373,11 @@ impl Scheduler {
             };
             if cur.cas_state(State::Running, State::Ready) {
                 cur.mark_need_resched();
-                self.rq.lock().push_back(cur).ok();
-                self.has_work.store(true, Ordering::Release);
+                let mut rq = self.rq.lock();
+                let _ = rq.push_back(cur);
+                if !rq.is_empty() {
+                    self.has_work.store(true, Ordering::Release);
+                }
             }
 
             context_switch();
@@ -444,7 +456,8 @@ impl Scheduler {
             // Update earliest deadline if this sleep is sooner
             let current_earliest = self.earliest_deadline.load(Ordering::Acquire);
             if deadline_tick < current_earliest {
-                self.earliest_deadline.store(deadline_tick, Ordering::Release);
+                self.earliest_deadline
+                    .store(deadline_tick, Ordering::Release);
             }
 
             cur.mark_need_resched();
@@ -454,36 +467,50 @@ impl Scheduler {
 
     pub fn wake_thread(&self, tid: ThreadId, high: bool) {
         if let Some(t) = get_thread_by_id(tid) {
-            if !t.try_wake() {
-                return;
-            } // CAS handles dupe-enqueue
+            loop {
+                if t.try_wake() {
+                    break;
+                }
+
+                match State::from(t.state.load(Ordering::Acquire)) {
+                    State::Ready | State::Waking => return,
+                    State::Running => {
+                        t.mark_need_resched();
+                        let cpu = t.cpu.load(Ordering::Acquire);
+                        if cpu != self.cpu {
+                            self.send_reschedule_ipi(cpu);
+                        }
+                        spin_loop();
+                    }
+                    State::Dying => return,
+                    _ => spin_loop(),
+                }
+            }
+
             let cpu = t.cpu.load(Ordering::Acquire);
             let sc = sched_for_cpu(cpu);
             without_interrupts(|| {
-                // Set to Ready state before queueing
                 t.state.store(State::Ready as u8, Ordering::Release);
 
-                {
-                    let mut rq = sc.rq.lock();
-                    if high {
-                        rq.push_front(t.clone()).ok();
-                    } else {
-                        rq.push_back(t.clone()).ok();
-                    }
+                let mut rq = sc.rq.lock();
+                let _ = if high {
+                    rq.push_front(t.clone())
+                } else {
+                    rq.push_back(t.clone())
+                };
+                if !rq.is_empty() {
                     sc.has_work.store(true, Ordering::Release);
                 }
 
+                t.mark_need_resched();
                 if cpu != self.cpu {
-                    t.mark_need_resched();
                     self.send_reschedule_ipi(cpu);
-                } else {
-                    t.mark_need_resched();
                 }
             })
         }
     }
 
-    pub fn thread_exit(&self, code: i32) -> ! {
+    pub fn thread_exit(&self, _code: i32) -> ! {
         let tid = self.current_thread_id().unwrap();
         if let Some(t) = get_thread_by_id(tid) {
             t.state.store(State::Dying as u8, Ordering::Release);

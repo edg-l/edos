@@ -62,7 +62,7 @@ impl Add<Duration> for HpetInstant {
     fn add(self, rhs: Duration) -> Self::Output {
         let ticks = get_hpet_timer().unwrap().nanos_to_ticks(rhs.as_nanos());
         Self {
-            counter_value: self.counter_value + ticks,
+            counter_value: self.counter_value.wrapping_add(ticks),
         }
     }
 }
