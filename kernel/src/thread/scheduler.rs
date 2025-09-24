@@ -367,63 +367,74 @@ impl Scheduler {
     pub fn thread_park(&self) {
         log!("parking");
 
-        without_interrupts(|| unsafe {
-            let Some(cur) = self.current_thread() else {
-                return;
-            };
-            if cur.cas_state(State::Running, State::Parked) {
-                cur.mark_need_resched();
-                core::sync::atomic::compiler_fence(Ordering::SeqCst);
-                unsafe {
-                    context_switch();
-                }
+        let Some(cur) = self.current_thread() else {
+            return;
+        };
+
+        loop {
+            if cur
+                .state
+                .compare_exchange(
+                    State::Running as u8,
+                    State::Parked as u8,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                break;
             }
-        })
+        }
+
+        unsafe {
+            cur.mark_need_resched();
+            context_switch();
+        }
     }
 
     #[inline]
     pub fn thread_sleep(&self, dt: Duration) {
+        let Some(cur) = self.current_thread() else {
+            return;
+        };
+
+        loop {
+            let state = cur.state.load(Ordering::Acquire);
+            if state == State::Running as u8 {
+                if cur
+                    .state
+                    .compare_exchange(
+                        State::Running as u8,
+                        State::Sleeping as u8,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
+            } else {
+                break; // only running threads can sleep
+            }
+        }
+
         without_interrupts(|| unsafe {
-            let Some(cur) = self.current_thread() else {
-                return;
-            };
             let now = Instant::now();
             let deadline_tick = (now + dt).tick();
             cur.sleep_deadline.store(deadline_tick, Ordering::Release);
-
-            // Move to Sleeping only if still Running
-            if cur.cas_state(State::Running, State::Sleeping) {
-                {
-                    let mut sl = self.sleepers.lock();
-                    sl.push(SleepEntry {
-                        deadline: deadline_tick,
-                        thread: cur.clone(),
-                    })
-                    .unwrap();
-                }
-                // maintain earliest_deadline
-                let prev = self.earliest_deadline.load(Ordering::Acquire);
-                if deadline_tick < prev {
-                    self.earliest_deadline
-                        .store(deadline_tick, Ordering::Release);
-                }
-                cur.mark_need_resched();
-                core::sync::atomic::compiler_fence(Ordering::SeqCst);
-                unsafe {
-                    context_switch();
-                }
-            }
+            cur.mark_need_resched();
+            context_switch();
         })
     }
 
     pub fn wake_thread(&self, tid: ThreadId, high: bool) {
-        without_interrupts(|| {
-            if let Some(t) = get_thread_by_id(tid) {
-                if !t.try_wake() {
-                    return;
-                } // CAS handles dupe-enqueue
-                let cpu = t.cpu.load(Ordering::Acquire);
-                let sc = sched_for_cpu(cpu);
+        if let Some(t) = get_thread_by_id(tid) {
+            if !t.try_wake() {
+                return;
+            } // CAS handles dupe-enqueue
+            let cpu = t.cpu.load(Ordering::Acquire);
+            let sc = sched_for_cpu(cpu);
+            without_interrupts(|| {
                 {
                     let mut rq = sc.rq.lock();
                     if high {
@@ -433,14 +444,15 @@ impl Scheduler {
                     }
                     sc.has_work.store(true, Ordering::Release);
                 }
+                t.state.store(State::Ready as u8, Ordering::Release);
                 if cpu != self.cpu {
                     t.mark_need_resched();
                     self.send_reschedule_ipi(cpu);
                 } else {
                     t.mark_need_resched();
                 }
-            }
-        })
+            })
+        }
     }
 
     pub fn thread_exit(&self, code: i32) -> ! {

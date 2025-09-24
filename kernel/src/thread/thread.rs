@@ -44,7 +44,8 @@ pub enum State {
     Running = 1,
     Sleeping = 2,
     Parked = 3,
-    Dying = 4,
+    Waking = 4,
+    Dying = 5,
 }
 
 impl From<u8> for State {
@@ -53,7 +54,8 @@ impl From<u8> for State {
             1 => State::Running,
             2 => State::Sleeping,
             3 => State::Parked,
-            4 => State::Dying,
+            4 => State::Waking,
+            5 => State::Dying,
             _ => State::Ready,
         }
     }
@@ -291,18 +293,33 @@ impl Thread {
             .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
-    #[inline]
+
     pub fn try_wake(&self) -> bool {
         loop {
-            let s = self.state.load(Ordering::Acquire).into();
-            match s {
-                State::Sleeping | State::Parked => {
-                    if self.cas_state(s, State::Ready) {
+            let state = self.state.load(Ordering::Acquire);
+
+            match state {
+                x if x == State::Sleeping as u8 || x == State::Parked as u8 => {
+                    // Attempt to claim ownership of the wakeup
+                    if self
+                        .state
+                        .compare_exchange(
+                            state,
+                            State::Waking as u8,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
                         return true;
+                    } else {
+                        continue; // retry if raced
                     }
-                    continue;
                 }
-                _ => return false,
+                x if x == State::Ready as u8 || x == State::Running as u8 => {
+                    return false; // already runnable
+                }
+                _ => return false, // Zombie etc.
             }
         }
     }
