@@ -647,10 +647,7 @@ impl AhciPort {
             }
 
             // Yield to scheduler while waiting (interrupt-wakeable)
-            // problem" while we go to sleep we get
-            log!("sleeping 5ms");
             sched().thread_sleep(core::time::Duration::from_millis(5));
-            log!("woke up");
         }
 
         Ok(())

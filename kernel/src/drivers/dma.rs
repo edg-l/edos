@@ -136,6 +136,8 @@ pub struct DmaAllocator {
     list_4096: SegQueue<DmaBuffer>,
     list_8192: SegQueue<DmaBuffer>,
     list_16384: SegQueue<DmaBuffer>,
+    // ahci may use up to 2mb
+    list_2mb: SegQueue<DmaBuffer>,
 }
 
 impl DmaAllocator {
@@ -144,6 +146,7 @@ impl DmaAllocator {
             list_4096: SegQueue::new(),
             list_8192: SegQueue::new(),
             list_16384: SegQueue::new(),
+            list_2mb: SegQueue::new(),
         }
     }
 
@@ -176,9 +179,18 @@ impl DmaAllocator {
                 log!("Allocating new 16kb dma buffer");
                 DmaBuffer::allocate_sized(16384)
             }
+        } else if size == 2097152 {
+            // 2mb case, max dma region for our AHCI driver.
+            if let Some(buf) = self.list_2mb.pop() {
+                Ok(buf)
+            } else {
+                log!("Allocating new 2mb dma buffer");
+                DmaBuffer::allocate_sized(2097152)
+            }
         } else {
+            let size = align_up(size as u64, 4096);
             log!("Allocating new big {size} dma buffer");
-            DmaBuffer::allocate_sized(align_up(size as u64, 4096) as usize)
+            DmaBuffer::allocate_sized(size as usize)
         }
     }
 
@@ -192,6 +204,9 @@ impl DmaAllocator {
             }
             16384 => {
                 self.list_16384.push(buffer);
+            }
+            2097152 => {
+                self.list_2mb.push(buffer);
             }
             _ => {
                 buffer.dealloc()?;
