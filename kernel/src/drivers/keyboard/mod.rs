@@ -12,7 +12,9 @@ use x86_64::{
 use crate::{
     apic::get_lapic,
     fs::{DevFsDevice, DevFsError, MmapRegion, PollState, handle::Pollable, register_device_str},
+    log,
     memory::mapper::MemoryManager,
+    println,
     thread::{broadcast::Broadcaster, scheduler::sched, thread::ThreadId},
 };
 
@@ -29,9 +31,11 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
     let scancode: u8 = unsafe { port.read() };
 
     let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
+
     queue.force_push(scancode);
 
     if let Some(tid) = KEYBOARD_THREAD_ID.get() {
+        println!("waking {:?} ", tid);
         sched().wake_thread_irq(ThreadId(*tid), true);
     }
 
@@ -63,10 +67,12 @@ pub extern "C" fn driver_main() -> ! {
             if let Ok(Some(event)) = keyboard.add_byte(scancode)
                 && let Some(key_event) = keyboard.process_keyevent(event)
             {
+                log!("Key {:?}", key_event);
                 KEYBOARD_BROADCAST.broadcast(key_event);
             }
         }
         // change me to a waitqeueu
+        log!("Parking");
         sched().thread_park();
     }
 }

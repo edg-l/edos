@@ -6,6 +6,7 @@ use alloc::{
     vec::Vec,
 };
 use spin::Mutex;
+use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{
     fs::PollState,
@@ -86,38 +87,44 @@ impl<T: Clone> Broadcaster<T> {
     }
 
     pub fn subscribe(&self) -> Arc<Subscriber<T>> {
-        let mut subs = self.subs.lock();
-        let owner = sched().current_thread_id().unwrap();
-        if let Some(existing) = subs.get(&owner) {
-            return existing.clone();
-        }
+        without_interrupts(|| {
+            let mut subs = self.subs.lock();
+            let owner = sched().current_thread_id().unwrap();
+            if let Some(existing) = subs.get(&owner) {
+                return existing.clone();
+            }
 
-        let sub = Arc::new(Subscriber {
-            owner,
-            queue: Mutex::new(VecDeque::new()),
-        });
-        subs.insert(owner, sub.clone());
-        sub
+            let sub = Arc::new(Subscriber {
+                owner,
+                queue: Mutex::new(VecDeque::new()),
+            });
+            subs.insert(owner, sub.clone());
+            sub
+        })
     }
 
     pub fn unsubscribe(&self) {
-        self.subs
-            .lock()
-            .remove(&sched().current_thread_id().unwrap());
+        without_interrupts(|| {
+            self.subs
+                .lock()
+                .remove(&sched().current_thread_id().unwrap());
+        })
     }
 
     pub fn broadcast(&self, msg: T) {
-        let sched = sched();
-        let targets: Vec<Arc<Subscriber<T>>> = {
-            let subs = self.subs.lock();
-            subs.values().cloned().collect()
-        };
-        for sub in targets {
-            {
-                let mut q = sub.queue.lock();
-                q.push_back(msg.clone());
+        without_interrupts(|| {
+            let sched = sched();
+            let targets: Vec<Arc<Subscriber<T>>> = {
+                let subs = self.subs.lock();
+                subs.values().cloned().collect()
+            };
+            for sub in targets {
+                {
+                    let mut q = sub.queue.lock();
+                    q.push_back(msg.clone());
+                }
+                sched.wake_thread(sub.owner, false);
             }
-            sched.wake_thread(sub.owner, false);
-        }
+        })
     }
 }

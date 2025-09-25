@@ -85,21 +85,23 @@ pub struct Scheduler {
 
 impl Scheduler {
     fn enqueue_ready(sc: &Scheduler, thread: &Arc<Thread>, high: bool) {
-        let mut rq = sc.rq.lock();
-        let _ = if high {
-            rq.push_front(thread.clone())
-        } else {
-            rq.push_back(thread.clone())
-        };
-        if !rq.is_empty() {
-            sc.has_work.store(true, Ordering::Release);
-        }
+        without_interrupts(|| {
+            let mut rq = sc.rq.lock();
+            let _ = if high {
+                rq.push_front(thread.clone())
+            } else {
+                rq.push_back(thread.clone())
+            };
+            if !rq.is_empty() {
+                sc.has_work.store(true, Ordering::Release);
+            }
+        })
     }
 
     fn complete_wake(&self, thread: &Arc<Thread>, high: bool) {
-        let cpu = thread.cpu.load(Ordering::Acquire);
-        let sc = sched_for_cpu(cpu);
         without_interrupts(|| {
+            let cpu = thread.cpu.load(Ordering::Acquire);
+            let sc = sched_for_cpu(cpu);
             thread.state.store(State::Ready as u8, Ordering::Release);
             Self::enqueue_ready(sc, thread, high);
             thread.mark_need_resched();
@@ -145,9 +147,11 @@ impl Scheduler {
     }
 
     pub fn on_tick(&self, context: *mut CpuContext) {
-        //self.earliest_deadline.store(u64::MAX, Ordering::Release);
-        self.wake_sleepers();
-        self.maybe_preempt(context);
+        without_interrupts(|| {
+            //self.earliest_deadline.store(u64::MAX, Ordering::Release);
+            self.wake_sleepers();
+            self.maybe_preempt(context);
+        })
     }
 
     fn wake_sleepers(&self) {
@@ -193,18 +197,19 @@ impl Scheduler {
                 break;
             }
 
-            let ed = self.earliest_deadline.load(Ordering::Acquire);
-            if ed != u64::MAX && ed != 0 {
-                let now = Instant::now();
-                let dl = Instant::from_tick(ed);
-                let dur = if ed <= now.tick() {
-                    Duration::from_micros(1)
-                } else {
-                    dl.duration_since(now)
-                };
-                set_apic_timer(dur);
-            } else {
-            }
+            without_interrupts(|| {
+                let ed = self.earliest_deadline.load(Ordering::Acquire);
+                if ed != u64::MAX && ed != 0 {
+                    let now = Instant::now();
+                    let dl = Instant::from_tick(ed);
+                    let dur = if ed <= now.tick() {
+                        Duration::from_micros(1)
+                    } else {
+                        dl.duration_since(now)
+                    };
+                    set_apic_timer(dur);
+                }
+            });
 
             // Halt until next interrupt (timer, IPI, device)
             x86_64::instructions::interrupts::enable_and_hlt();
@@ -330,6 +335,17 @@ impl Scheduler {
             .store(deadline.tick(), Ordering::Release);
         set_apic_timer(deadline.duration_since(now));
 
+        if context.is_null() {
+            panic!("cw: null context ptr");
+        }
+
+        if (context as u64) < 0xFFFF_0000_0000_0000u64 {
+            panic!("cw: Low context address {context:p}");
+        }
+
+        if !context.is_aligned() {
+            panic!("cw: Misaligned context: {context:p}");
+        }
         unsafe { *context = next.ctx.lock().clone() };
 
         // Switch address space
@@ -366,22 +382,24 @@ impl Scheduler {
 
     #[inline]
     pub fn spawn_thread(&self, thread: Arc<Thread>) {
-        self.thread_count.fetch_add(1, Ordering::AcqRel);
-        thread.state.store(State::Ready as u8, Ordering::Release);
-        thread.cpu.store(self.cpu, Ordering::Release);
-        if self.thread_can_run_here(&thread) {
-            let mut rq = self.rq.lock();
-            let _ = rq.push_back(thread.clone());
-            if !rq.is_empty() {
-                self.has_work.store(true, Ordering::Release);
+        without_interrupts(|| {
+            self.thread_count.fetch_add(1, Ordering::AcqRel);
+            thread.state.store(State::Ready as u8, Ordering::Release);
+            thread.cpu.store(self.cpu, Ordering::Release);
+            if self.thread_can_run_here(&thread) {
+                let mut rq = self.rq.lock();
+                let _ = rq.push_back(thread.clone());
+                if !rq.is_empty() {
+                    self.has_work.store(true, Ordering::Release);
+                }
+            } else {
+                // will be queued on its target cpu by that cpu’s scheduler
             }
-        } else {
-            // will be queued on its target cpu by that cpu’s scheduler
-        }
 
-        if self.cpu != get_percpu_data().lapic_id {
-            sched().send_reschedule_ipi(self.cpu);
-        }
+            if self.cpu != get_percpu_data().lapic_id {
+                sched().send_reschedule_ipi(self.cpu);
+            }
+        })
     }
 
     #[inline]
@@ -423,10 +441,10 @@ impl Scheduler {
             }
         }
 
-        unsafe {
+        without_interrupts(|| unsafe {
             cur.mark_need_resched();
             context_switch();
-        }
+        })
     }
 
     #[inline]
@@ -491,6 +509,7 @@ impl Scheduler {
         self.wake_thread_internal(tid, high, true);
     }
 
+    #[inline(never)]
     fn wake_thread_internal(&self, tid: ThreadId, high: bool, from_irq: bool) {
         if let Some(t) = get_thread_by_id(tid) {
             if from_irq {
@@ -510,19 +529,23 @@ impl Scheduler {
 
             match State::from(thread.state.load(Ordering::Acquire)) {
                 State::Ready | State::Waking => {
-                    thread.mark_need_resched();
-                    let cpu = thread.cpu.load(Ordering::Acquire);
-                    if cpu != self.cpu {
-                        self.send_reschedule_ipi(cpu);
-                    }
+                    without_interrupts(|| {
+                        thread.mark_need_resched();
+                        let cpu = thread.cpu.load(Ordering::Acquire);
+                        if cpu != self.cpu {
+                            self.send_reschedule_ipi(cpu);
+                        }
+                    });
                     return;
                 }
                 State::Running => {
-                    thread.mark_need_resched();
-                    let cpu = thread.cpu.load(Ordering::Acquire);
-                    if cpu != self.cpu {
-                        self.send_reschedule_ipi(cpu);
-                    }
+                    without_interrupts(|| {
+                        thread.mark_need_resched();
+                        let cpu = thread.cpu.load(Ordering::Acquire);
+                        if cpu != self.cpu {
+                            self.send_reschedule_ipi(cpu);
+                        }
+                    });
                     spin_loop();
                 }
                 State::Dying => return,
@@ -531,7 +554,9 @@ impl Scheduler {
         }
     }
 
+    #[inline(never)]
     fn wake_thread_from_irq(&self, thread: Arc<Thread>, high: bool) {
+        println!("Waking from irq");
         let state = State::from(thread.state.load(Ordering::Acquire));
         match state {
             State::Sleeping | State::Parked => {
@@ -553,6 +578,7 @@ impl Scheduler {
         if cpu != self.cpu {
             self.send_reschedule_ipi(cpu);
         }
+        println!("done Waking from irq");
     }
 
     pub fn thread_exit(&self, _code: i32) -> ! {
@@ -561,9 +587,9 @@ impl Scheduler {
             t.state.store(State::Dying as u8, Ordering::Release);
             self.thread_count.fetch_sub(1, Ordering::Relaxed);
         }
-        unsafe {
+        without_interrupts(|| unsafe {
             context_switch();
-        }
+        });
         loop {
             enable_and_hlt();
         }
@@ -594,6 +620,18 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
             Kernel -> User:     Must update RSP0 to user's kernel stack
             Kernel -> Kernel:   RSP0 doesn't matter
         */
+
+        if context.is_null() {
+            panic!("null context ptr");
+        }
+
+        if (context as u64) < 0xFFFF_0000_0000_0000u64 {
+            panic!("Low context address {context:p}");
+        }
+
+        if !context.is_aligned() {
+            panic!("Misaligned context: {context:p}");
+        }
 
         let cpu = get_percpu_data();
         // let sched = cpu.scheduler.as_mut().expect("failed to get scheduler");
@@ -632,6 +670,7 @@ impl PartialEq for SleepEntry {
 }
 impl Eq for SleepEntry {}
 
+// Must be called without interrupts enabled.
 #[unsafe(naked)]
 pub unsafe extern "C" fn context_switch() {
     core::arch::naked_asm!(
