@@ -1,4 +1,4 @@
-use core::{arch::naked_asm, ptr, time::Duration};
+use core::{arch::naked_asm, ptr, sync::atomic::Ordering, time::Duration};
 
 use alloc::{format, string::ToString, vec::Vec};
 use x86_64::{
@@ -29,7 +29,7 @@ use crate::{
     },
     thread::{
         UserThreadInfo,
-        scheduler::{sched, switch_to_kernel_page},
+        scheduler::{exit_thread, sched, switch_to_kernel_page},
         thread::{State, Thread, ThreadId, get_thread_by_id, get_thread_info_by_id},
     },
 };
@@ -430,18 +430,22 @@ fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
 
     drop(thread);
 
-    if let Some(thread) = get_thread_by_id(ThreadId(pid)) {
-        if thread.state.load(core::sync::atomic::Ordering::Acquire) == State::Dying as u8 {
+    let tid = ThreadId(pid);
+
+    if let Some(thread) = get_thread_by_id(tid) {
+        if thread.state.load(Ordering::Acquire) == State::Dying as u8 {
+            let code = thread.exit_code.load(Ordering::Acquire);
             if !status_ptr.is_null() {
-                unsafe { status_ptr.write(0) }; // TODO: change code
+                unsafe { status_ptr.write(code) };
             }
+
+            drop(thread);
+            exit_thread(tid);
             return pid;
-        } else {
-            return 0;
         }
-    } else {
-        return 0;
     }
+
+    0
 }
 
 // TODO: figure out why the syscall gets all logs. it doesnt properly subscribe?

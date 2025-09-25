@@ -579,9 +579,10 @@ impl Scheduler {
         }
     }
 
-    pub fn thread_exit(&self, _code: i32) -> ! {
+    pub fn thread_exit(&self, code: i32) -> ! {
         let tid = self.current_thread_id().unwrap();
         if let Some(t) = get_thread_by_id(tid) {
+            t.exit_code.store(code, Ordering::Release);
             t.state.store(State::Dying as u8, Ordering::Release);
             self.thread_count.fetch_sub(1, Ordering::Relaxed);
         }

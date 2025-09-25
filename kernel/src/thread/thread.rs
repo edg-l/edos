@@ -1,6 +1,6 @@
 use core::{
     ops::Deref,
-    sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
 };
 
 use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc};
@@ -86,6 +86,8 @@ pub struct Thread {
     // Sleep data split to avoid locking:
     pub sleep_deadline: AtomicU64, // instant counter value
 
+    pub exit_code: AtomicI32,
+
     pub user: Option<Arc<RwLock<UserThread>>>,
 
     // Context and kernel stack pointer:
@@ -151,6 +153,7 @@ impl Thread {
             priority: AtomicU8::new(16),
             sleep_deadline: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
+            exit_code: AtomicI32::new(0),
         });
 
         THREADS.insert(thread.clone());
@@ -231,6 +234,7 @@ impl Thread {
             priority: AtomicU8::new(16),
             sleep_deadline: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
+            exit_code: AtomicI32::new(0),
             user: Some(Arc::new(RwLock::new(UserThread {
                 pid: id.0,
                 initial_stack_top: stack_top,
