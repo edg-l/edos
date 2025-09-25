@@ -5,7 +5,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{
@@ -76,41 +76,43 @@ impl<T> Subscriber<T> {
 
 /// Broadcaster with many subscribers
 pub struct Broadcaster<T> {
-    subs: Mutex<BTreeMap<ThreadId, Arc<Subscriber<T>>>>,
+    subs: RwLock<BTreeMap<ThreadId, Arc<Subscriber<T>>>>,
 }
 
 impl<T: Clone> Broadcaster<T> {
     pub const fn new() -> Self {
         Self {
-            subs: Mutex::new(BTreeMap::new()),
+            subs: RwLock::new(BTreeMap::new()),
         }
     }
 
     pub fn subscribe(&self) -> Arc<Subscriber<T>> {
-        let mut subs = self.subs.lock();
         let owner = sched().current_thread_id().unwrap();
-        if let Some(existing) = subs.get(&owner) {
-            return existing.clone();
+        {
+            let subs = self.subs.read();
+            if let Some(existing) = subs.get(&owner) {
+                return existing.clone();
+            }
         }
 
         let sub = Arc::new(Subscriber {
             owner,
             queue: Mutex::new(VecDeque::new()),
         });
-        subs.insert(owner, sub.clone());
+        self.subs.write().insert(owner, sub.clone());
         sub
     }
 
     pub fn unsubscribe(&self) {
         self.subs
-            .lock()
+            .write()
             .remove(&sched().current_thread_id().unwrap());
     }
 
     pub fn broadcast(&self, msg: T) {
         let sched = sched();
         let targets: Vec<Arc<Subscriber<T>>> = {
-            let subs = self.subs.lock();
+            let subs = self.subs.read();
             subs.values().cloned().collect()
         };
         for sub in targets {
@@ -118,7 +120,7 @@ impl<T: Clone> Broadcaster<T> {
                 let mut q = sub.queue.lock();
                 q.push_back(msg.clone());
             }
-            sched.wake_thread(sub.owner, false);
+            sched.wake_thread(sub.owner, true);
         }
     }
 }
