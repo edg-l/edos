@@ -43,13 +43,11 @@ pub struct Response<R> {
 
 impl<R> Response<R> {
     pub fn wait(self) -> R {
-        log!("Waiting for response");
         while !self.inner.ready.load(Ordering::Acquire) {
             self.inner
                 .waitq
                 .wait_until(|| self.inner.ready.load(Ordering::Acquire));
         }
-        log!("Got response");
         self.inner.value.lock().take().unwrap()
     }
 }

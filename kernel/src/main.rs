@@ -290,7 +290,6 @@ pub fn mount_system_fs() -> ! {
         log!("Failed to mount memfs at {:?}: {err:?}", dev_dir);
     }
 
-    /*
     without_interrupts(|| {
         let terminal_argv: [&[u8]; 1] = [b"terminal"];
         let user_thread = Thread::new_user(
@@ -304,7 +303,6 @@ pub fn mount_system_fs() -> ! {
         .unwrap();
         queue_spawn_thread(user_thread);
     });
-     */
 
     kthread_exit(0)
 }

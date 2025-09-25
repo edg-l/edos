@@ -580,14 +580,11 @@ pub extern "C" fn fs_main_thread() -> ! {
 
     // Main loop: route and respond
     loop {
-        log!("Waiting for new request");
         let mut req = requests.recv();
-        log!("Got request");
         let payload = req.payload.take().unwrap();
         {
             match payload {
                 FsRequest::ListPartitions => {
-                    log!("Got partitions request");
                     req.reply(FsResponse::Partitions(partitions.clone()));
                 }
                 FsRequest::ListMounts => {
