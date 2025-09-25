@@ -67,12 +67,9 @@ pub extern "C" fn driver_main() -> ! {
             if let Ok(Some(event)) = keyboard.add_byte(scancode)
                 && let Some(key_event) = keyboard.process_keyevent(event)
             {
-                log!("Key {:?}", key_event);
                 KEYBOARD_BROADCAST.broadcast(key_event);
             }
         }
-        // change me to a waitqeueu
-        log!("Parking");
         sched().thread_park();
     }
 }

@@ -19,7 +19,6 @@ use crate::{memory::mapper::align_stack_pointer, println, util::per_cpu::get_per
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 pub const PAGE_FAULT_IST_INDEX: u16 = 1;
-pub const TIMER_SCHED_IST_INDEX: u16 = 2;
 pub const RING3_STACK_PST_INDEX: u16 = 0;
 
 fn init_tss_for_current_cpu() {
@@ -55,21 +54,6 @@ fn init_tss_for_current_cpu() {
         VirtAddr::from_ptr(unsafe { stack_start.byte_add(layout.size()) })
     };
 
-    let timer_stack_end = {
-        let layout = Layout::from_size_align(1024 * 1024, 4096).unwrap();
-        let stack_start = unsafe { alloc(layout) };
-
-        if stack_start.is_null() {
-            handle_alloc_error(layout)
-        }
-
-        println!("Created timer stack at : {:p}", unsafe {
-            stack_start.byte_add(layout.size())
-        });
-
-        VirtAddr::from_ptr(unsafe { stack_start.byte_add(layout.size()) })
-    };
-
     // Stack used in user space.
     let ring3_pst_stack_end = {
         let layout = Layout::from_size_align(4096, 4096).unwrap();
@@ -84,7 +68,6 @@ fn init_tss_for_current_cpu() {
 
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = double_fault_stack_end;
     tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = page_fault_stack_end;
-    tss.interrupt_stack_table[TIMER_SCHED_IST_INDEX as usize] = timer_stack_end;
     tss.privilege_stack_table[RING3_STACK_PST_INDEX as usize] = ring3_pst_stack_end;
 
     let pcpu = get_percpu_data();

@@ -23,6 +23,9 @@ use crate::{
 pub fn build_idt_for_current_cpu() -> InterruptDescriptorTable {
     let mut idt = InterruptDescriptorTable::new();
 
+    // Avoid assigning the timer/device interrupts to the shared IST stack while the
+    // scheduler runs with interrupts enabled: re-entrancy would reset the stack pointer
+    // to the IST top and corrupt the in-flight context frame.
     unsafe {
         idt.double_fault
             .set_handler_fn(double_fault_handler)
@@ -36,36 +39,22 @@ pub fn build_idt_for_current_cpu() -> InterruptDescriptorTable {
     idt.general_protection_fault
         .set_handler_fn(general_protection_fault_handler);
 
+    // Note: dont use shared ist stack
     unsafe {
-        idt.invalid_opcode
-            .set_handler_fn(invalid_opcode_handler)
-            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
+        idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
 
         idt.device_not_available
-            .set_handler_fn(device_not_available_handler)
-            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
+            .set_handler_fn(device_not_available_handler);
         idt[InterruptIndex::Timer.as_u8()]
-            .set_handler_addr(VirtAddr::new(timer_interrupt_handler as *mut u8 as u64))
-            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
+            .set_handler_addr(VirtAddr::new(timer_interrupt_handler as *mut u8 as u64));
 
-        idt[InterruptIndex::Error.as_u8()]
-            .set_handler_fn(apic_error_interrupt_handler)
-            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
-        idt[InterruptIndex::Keyboard.as_u8()]
-            .set_handler_fn(keyboard_interrupt_handler)
-            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
-        idt[InterruptIndex::Mouse.as_u8()]
-            .set_handler_fn(mouse_interrupt_handler)
-            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
-        idt[InterruptIndex::Ahci.as_u8()]
-            .set_handler_fn(ahci_interrupt_handler)
-            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
-        idt[InterruptIndex::Spurious.as_u8()]
-            .set_handler_fn(spurious_interrupt_handler)
-            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
+        idt[InterruptIndex::Error.as_u8()].set_handler_fn(apic_error_interrupt_handler);
+        idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
+        idt[InterruptIndex::Mouse.as_u8()].set_handler_fn(mouse_interrupt_handler);
+        idt[InterruptIndex::Ahci.as_u8()].set_handler_fn(ahci_interrupt_handler);
+        idt[InterruptIndex::Spurious.as_u8()].set_handler_fn(spurious_interrupt_handler);
         idt[InterruptIndex::Reschedule.as_u8()]
-            .set_handler_addr(VirtAddr::new(timer_interrupt_handler as *mut u8 as u64))
-            .set_stack_index(gdt::TIMER_SCHED_IST_INDEX);
+            .set_handler_addr(VirtAddr::new(timer_interrupt_handler as *mut u8 as u64));
     }
 
     idt

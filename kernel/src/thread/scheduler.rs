@@ -556,7 +556,6 @@ impl Scheduler {
 
     #[inline(never)]
     fn wake_thread_from_irq(&self, thread: Arc<Thread>, high: bool) {
-        println!("Waking from irq");
         let state = State::from(thread.state.load(Ordering::Acquire));
         match state {
             State::Sleeping | State::Parked => {
@@ -578,7 +577,6 @@ impl Scheduler {
         if cpu != self.cpu {
             self.send_reschedule_ipi(cpu);
         }
-        println!("done Waking from irq");
     }
 
     pub fn thread_exit(&self, _code: i32) -> ! {
