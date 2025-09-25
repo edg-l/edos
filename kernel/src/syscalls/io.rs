@@ -247,28 +247,24 @@ fn read_from_stdin(max_count: usize) -> Result<alloc::vec::Vec<u8>, i64> {
 
     // Read until we get a newline or reach max count
     while kernel_buffer.len() < max_count {
-        match rx.recv_timeout(Duration::from_secs(10)) {
-            Some(DecodedKey::Unicode('\n')) => {
+        match rx.recv() {
+            DecodedKey::Unicode('\n') => {
                 kernel_buffer.push(b'\n');
                 break;
             }
-            Some(DecodedKey::Unicode('\r')) => {
+            DecodedKey::Unicode('\r') => {
                 kernel_buffer.push(b'\n');
                 break;
             }
-            Some(DecodedKey::Unicode(c)) if c.is_ascii() => {
+            DecodedKey::Unicode(c) if c.is_ascii() => {
                 kernel_buffer.push(c as u8);
             }
-            Some(DecodedKey::Unicode('\u{8}')) => {
+            DecodedKey::Unicode('\u{8}') => {
                 // Backspace - remove last character if any
                 kernel_buffer.pop();
             }
-            Some(_) => {
+            _ => {
                 // Ignore non-ASCII keys and raw keys
-                continue;
-            }
-            None => {
-                // Recv again
                 continue;
             }
         }

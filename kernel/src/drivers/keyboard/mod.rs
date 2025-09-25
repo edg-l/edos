@@ -1,4 +1,4 @@
-use core::time::Duration;
+use core::{hint::spin_loop, time::Duration};
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
@@ -12,9 +12,7 @@ use x86_64::{
 use crate::{
     apic::get_lapic,
     fs::{DevFsDevice, DevFsError, MmapRegion, PollState, handle::Pollable, register_device_str},
-    log,
     memory::mapper::MemoryManager,
-    println,
     thread::{broadcast::Broadcaster, scheduler::sched, thread::ThreadId},
 };
 
@@ -99,7 +97,25 @@ unsafe fn enable_ps2_keyboard() {
 
         // Reset keyboard
         data_port.write(0xFF_u8);
+
+        // Consume the expected ACK (0xFA) and self-test pass (0xAA) bytes so they don't
+        // appear as spurious key events for user-space on the first read.
+        let _ = read_data_with_timeout(&mut command_port, &mut data_port);
+        let _ = read_data_with_timeout(&mut command_port, &mut data_port);
     }
+}
+
+unsafe fn read_data_with_timeout(
+    command_port: &mut Port<u8>,
+    data_port: &mut Port<u8>,
+) -> Option<u8> {
+    for _ in 0..1_000 {
+        if unsafe { command_port.read() } & 0x01 != 0 {
+            return Some(unsafe { data_port.read() });
+        }
+        spin_loop();
+    }
+    None
 }
 
 #[derive(Debug)]
@@ -141,6 +157,7 @@ impl DevFsDevice for KeyboardDevice {
     }
 
     fn poll(&self) -> Result<Box<dyn Pollable>, DevFsError> {
+        KEYBOARD_BROADCAST.subscribe();
         Ok(Box::new(KeyboardPoll))
     }
 
