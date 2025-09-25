@@ -92,8 +92,13 @@ impl Scheduler {
             } else {
                 rq.push_back(thread.clone())
             };
-            if !rq.is_empty() {
+            let has_entries = !rq.is_empty();
+            if has_entries {
                 sc.has_work.store(true, Ordering::Release);
+            }
+            drop(rq);
+            if has_entries {
+                sc.mark_running_thread_need_resched();
             }
         })
     }
@@ -104,7 +109,6 @@ impl Scheduler {
             let sc = sched_for_cpu(cpu);
             thread.state.store(State::Ready as u8, Ordering::Release);
             Self::enqueue_ready(sc, thread, high);
-            thread.mark_need_resched();
             if cpu != self.cpu {
                 self.send_reschedule_ipi(cpu);
             }
@@ -169,6 +173,8 @@ impl Scheduler {
                 if !rq.is_empty() {
                     self.has_work.store(true, Ordering::Release);
                 }
+                drop(rq);
+                self.mark_running_thread_need_resched();
             }
         }
         if let Some(next_sleep) = sl.peek() {
@@ -225,12 +231,11 @@ impl Scheduler {
         };
 
         // Fast check without locking the runqueue.
-        //let need = cur.flags.load(Ordering::Acquire) & Flags::NEED_RESCHED.bits() != 0;
+        let need = cur.flags.load(Ordering::Acquire) & Flags::NEED_RESCHED.bits() != 0;
         // ingnore need resched for now
-        //if !need {
-        //    println!("No resched needed for {:?}", cur.id);
-        //    return;
-        //}
+        if !need {
+            return;
+        }
 
         // Clear request and pick another.
         cur.flags
@@ -290,6 +295,14 @@ impl Scheduler {
         true
         //let mask = t.cpu_affinity.load(Ordering::Acquire);
         //mask == 0 || (mask & (1u32 << self.cpu)) != 0
+    }
+
+    fn mark_running_thread_need_resched(&self) {
+        if let Some(current_tid) = self.current_thread_id() {
+            if let Some(current_thread) = self.get_thread_by_id(current_tid) {
+                current_thread.mark_need_resched();
+            }
+        }
     }
 
     fn save_current_thread(&self, context: *mut CpuContext) {
@@ -392,6 +405,8 @@ impl Scheduler {
                 if !rq.is_empty() {
                     self.has_work.store(true, Ordering::Release);
                 }
+                drop(rq);
+                self.mark_running_thread_need_resched();
             } else {
                 // will be queued on its target cpu by that cpu’s scheduler
             }
@@ -530,8 +545,9 @@ impl Scheduler {
             match State::from(thread.state.load(Ordering::Acquire)) {
                 State::Ready | State::Waking => {
                     without_interrupts(|| {
-                        thread.mark_need_resched();
                         let cpu = thread.cpu.load(Ordering::Acquire);
+                        let sc = sched_for_cpu(cpu);
+                        sc.mark_running_thread_need_resched();
                         if cpu != self.cpu {
                             self.send_reschedule_ipi(cpu);
                         }
@@ -557,6 +573,7 @@ impl Scheduler {
     #[inline(never)]
     fn wake_thread_from_irq(&self, thread: Arc<Thread>, high: bool) {
         let state = State::from(thread.state.load(Ordering::Acquire));
+        let cpu = thread.cpu.load(Ordering::Acquire);
         match state {
             State::Sleeping | State::Parked => {
                 if thread.try_wake() {
@@ -565,7 +582,8 @@ impl Scheduler {
                 }
             }
             State::Ready | State::Waking => {
-                thread.mark_need_resched();
+                let sc = sched_for_cpu(cpu);
+                sc.mark_running_thread_need_resched();
             }
             State::Running => {
                 thread.mark_need_resched();
@@ -573,7 +591,6 @@ impl Scheduler {
             State::Dying => return,
         }
 
-        let cpu = thread.cpu.load(Ordering::Acquire);
         if cpu != self.cpu {
             self.send_reschedule_ipi(cpu);
         }
@@ -584,6 +601,7 @@ impl Scheduler {
         if let Some(t) = get_thread_by_id(tid) {
             t.exit_code.store(code, Ordering::Release);
             t.state.store(State::Dying as u8, Ordering::Release);
+            t.mark_need_resched();
             self.thread_count.fetch_sub(1, Ordering::Relaxed);
         }
         without_interrupts(|| unsafe {
