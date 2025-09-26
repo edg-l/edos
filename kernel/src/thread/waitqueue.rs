@@ -1,6 +1,6 @@
 use alloc::{collections::vec_deque::VecDeque, vec::Vec};
 use spin::Mutex;
-use x86_64::instructions::interrupts;
+use x86_64::instructions::interrupts::{self, without_interrupts};
 
 use crate::thread::{scheduler::sched, thread::ThreadId};
 
@@ -48,28 +48,32 @@ impl WaitQueue {
 
     /// Wake one thread
     pub fn wake_one(&self) -> bool {
-        let tid_opt = {
-            let mut q = self.inner.lock();
-            q.pop_front()
-        };
-        if let Some(tid) = tid_opt {
-            sched().wake_thread(tid, true);
-            true
-        } else {
-            false
-        }
+        without_interrupts(|| {
+            let tid_opt = {
+                let mut q = self.inner.lock();
+                q.pop_front()
+            };
+            if let Some(tid) = tid_opt {
+                sched().wake_thread(tid, true);
+                true
+            } else {
+                false
+            }
+        })
     }
 
     /// Wake all threads
     pub fn wake_all(&self) -> usize {
-        let tids = {
-            let mut q = self.inner.lock();
-            q.drain(..).collect::<Vec<_>>()
-        };
-        let n = tids.len();
-        for tid in tids {
-            sched().wake_thread(tid, true);
-        }
-        n
+        without_interrupts(|| {
+            let tids = {
+                let mut q = self.inner.lock();
+                q.drain(..).collect::<Vec<_>>()
+            };
+            let n = tids.len();
+            for tid in tids {
+                sched().wake_thread(tid, true);
+            }
+            n
+        })
     }
 }
