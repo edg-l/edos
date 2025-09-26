@@ -7,3 +7,4 @@ target/
 out/
 sata-disk.img
 /filesystem
+.gdb_history

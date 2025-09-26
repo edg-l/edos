@@ -174,6 +174,8 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
         return -1;
     }
 
+    interrupts::enable();
+
     // Get kernel data first - all potentially blocking operations happen here
     let kernel_data = match thread.fd_table.get_fd(fd) {
         Some(FileDescriptor::StandardStream(stream)) => match stream {

@@ -77,7 +77,8 @@ run-gdb: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
 		$(QEMUFLAGS)
 
 gdb:
-	rust-gdb -x gdbinit
+	#rust-gdb -x gdbinit
+	pwndbg -x gdbinit
 
 .PHONY: run-bios sata-disk.img
 run-bios: $(IMAGE_NAME).iso

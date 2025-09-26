@@ -24,6 +24,7 @@ pub mod mailbox;
 pub mod paging;
 pub mod pipe;
 //pub mod scheduler;
+pub mod irqlock;
 pub mod scheduler;
 pub mod thread;
 pub mod util;
