@@ -135,6 +135,7 @@ fn main() -> ! {
         spin_loop();
     }
     //test_new();
+    logs::init();
     drivers::init_drivers();
     fs::init();
 

@@ -55,7 +55,6 @@ pub(super) fn parse_command(input: &str) -> Vec<String> {
 
 pub(super) fn execute_command(state: &mut TerminalState, command: &str, args: &[String]) {
     match command {
-        "logs" => toggle_logs(state, args),
         "help" => print_help(state),
         "pwd" => print_pwd(state),
         "cd" => change_directory(state, args),
@@ -72,23 +71,10 @@ pub(super) fn execute_command(state: &mut TerminalState, command: &str, args: &[
     }
 }
 
-fn toggle_logs(state: &mut TerminalState, args: &[String]) {
-    if let Some(mode) = args.first().map(String::as_str) {
-        match mode {
-            "on" => state.set_logs_enabled(true),
-            "off" => state.set_logs_enabled(false),
-            _ => state.write_line("Usage: logs [on|off]"),
-        }
-    } else {
-        state.write_line("Usage: logs [on|off]");
-    }
-}
-
 fn print_help(state: &mut TerminalState) {
     let lines = [
         "Commands:",
         "- help",
-        "- logs",
         "- pwd",
         "- cd [path]",
         "- ls [path]",

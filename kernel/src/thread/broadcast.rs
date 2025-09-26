@@ -10,7 +10,10 @@ use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{
     fs::PollState,
-    thread::{scheduler::sched, thread::ThreadId},
+    thread::{
+        scheduler::sched,
+        thread::{State, ThreadId, get_thread_by_id},
+    },
 };
 
 /// A single subscriber queue
@@ -121,6 +124,19 @@ impl<T: Clone> Broadcaster<T> {
                 q.push_back(msg.clone());
             }
             sched.wake_thread(sub.owner, true);
+        }
+    }
+
+    pub fn cleanup(&self) {
+        let mut to_remove = Vec::new();
+        for sub in self.subs.read().iter() {
+            if let Some(thread) = get_thread_by_id(*sub.0) {
+                if thread.state() == State::Dying {
+                    to_remove.push(*sub.0);
+                }
+            } else {
+                to_remove.push(*sub.0);
+            }
         }
     }
 }

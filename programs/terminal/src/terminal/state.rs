@@ -30,7 +30,6 @@ pub(crate) struct TerminalState {
     pub(super) line_height: u64,
     pub(super) prompt_text: String,
     dirty: bool,
-    show_kernel_logs: bool,
     current_dir: String,
     running_program: Option<Program>,
     tty_fd: u64,
@@ -70,7 +69,6 @@ impl TerminalState {
             line_height: metrics.line_height,
             prompt_text,
             dirty: true,
-            show_kernel_logs: false,
             current_dir,
             running_program: None,
             tty_fd,
@@ -87,14 +85,6 @@ impl TerminalState {
 
     pub(crate) fn clear_dirty(&mut self) {
         self.dirty = false;
-    }
-
-    pub(crate) fn logs_enabled(&self) -> bool {
-        self.show_kernel_logs
-    }
-
-    pub(crate) fn set_logs_enabled(&mut self, enabled: bool) {
-        self.show_kernel_logs = enabled;
     }
 
     pub(crate) fn running_program(&self) -> Option<Program> {

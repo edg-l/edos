@@ -516,6 +516,9 @@ impl Scheduler {
     }
 
     pub fn wake_thread(&self, tid: ThreadId, high: bool) {
+        if Some(tid) == self.current_thread_id() {
+            return;
+        }
         self.wake_thread_internal(tid, high, false);
     }
 
@@ -598,13 +601,15 @@ impl Scheduler {
 
     pub fn thread_exit(&self, code: i32) -> ! {
         let tid = self.current_thread_id().unwrap();
-        if let Some(t) = get_thread_by_id(tid) {
-            t.exit_code.store(code, Ordering::Release);
-            t.state.store(State::Dying as u8, Ordering::Release);
-            t.mark_need_resched();
-            self.thread_count.fetch_sub(1, Ordering::Relaxed);
-        }
+
         without_interrupts(|| unsafe {
+            if let Some(t) = get_thread_by_id(tid) {
+                t.exit_code.store(code, Ordering::Release);
+                t.state.store(State::Dying as u8, Ordering::Release);
+                t.mark_need_resched();
+                t.free();
+                self.thread_count.fetch_sub(1, Ordering::Relaxed);
+            }
             context_switch();
         });
         loop {

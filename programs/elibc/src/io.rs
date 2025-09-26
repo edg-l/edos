@@ -2,15 +2,12 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use core::{ffi::CStr, fmt};
+use core::fmt;
 use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{
-        Errno, SYS_IOCTL, SYS_KERNEL_LOGS, SYS_POLL, SYS_SELECT, errno, syscall2, syscall3,
-        syscall5,
-    },
+    sys::{Errno, SYS_IOCTL, SYS_POLL, errno, syscall3, syscall5},
     sys_open as raw_sys_open, sys_read, sys_write,
 };
 
@@ -340,38 +337,6 @@ pub fn get_raw_input(timeout_ms: u64, out_buf: &mut Vec<KeyEvent>, count: usize)
     }
 }
 
-pub fn get_kernel_logs() -> Vec<String> {
-    let mut buf: Vec<u8> = alloc::vec![0; 1024];
-
-    let result = unsafe { syscall2(SYS_KERNEL_LOGS, buf.as_mut_ptr() as u64, 1024_u64) };
-
-    if result == !0u64 {
-        return Vec::new();
-    }
-
-    let mut last_idx = 0;
-
-    let mut logs = Vec::new();
-
-    for (i, b) in buf.iter().enumerate() {
-        if *b == 0 {
-            let len = i - last_idx;
-
-            if len > 0 {
-                if let Ok(log) = CStr::from_bytes_with_nul(&buf[last_idx..(i + 1)]) {
-                    logs.push(log.to_string_lossy().to_string());
-                }
-                last_idx = i + 1;
-            }
-        }
-
-        if i >= result as usize {
-            break;
-        }
-    }
-
-    logs
-}
 /// Public helper to write all bytes to a file descriptor
 pub fn write_all_fd(fd: u64, buf: &[u8]) -> IoResult<()> {
     write_all_to_fd(fd, buf)

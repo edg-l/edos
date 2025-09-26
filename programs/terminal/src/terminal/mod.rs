@@ -2,10 +2,8 @@ use alloc::{format, string::String, vec::Vec};
 use core::str;
 
 use elibc::{
-    KeyEvent, WaitPidStatus, get_raw_input,
-    io::{get_kernel_logs, keyboard_fd},
-    process::sys_waitpid,
-    read_from_fd, sleep_ms,
+    KeyEvent, WaitPidStatus, get_raw_input, io::keyboard_fd, process::sys_waitpid, read_from_fd,
+    sleep_ms,
 };
 
 mod command;
@@ -42,7 +40,6 @@ pub fn run() -> i32 {
 
     loop {
         pump_tty_output(&mut terminal);
-        pump_kernel_logs(&mut terminal);
         pump_running_program(&mut terminal);
         get_raw_input(20, &mut key_events, 16);
 
@@ -63,25 +60,6 @@ pub fn run() -> i32 {
 
         if render(&mut terminal).is_err() {
             return 1;
-        }
-    }
-}
-
-fn pump_kernel_logs(state: &mut TerminalState) {
-    if !state.logs_enabled() {
-        return;
-    }
-
-    let logs = get_kernel_logs();
-    if logs.is_empty() {
-        return;
-    }
-
-    for log in logs {
-        if log.ends_with('\n') {
-            state.write_str(&log);
-        } else {
-            state.write_line(&log);
         }
     }
 }

@@ -18,7 +18,6 @@ pub const SYS_WAIT_PID: u64 = 40;
 pub const SYS_SPAWN: u64 = 57;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_ERRNO: u64 = 0x400;
-pub const SYS_KERNEL_LOGS: u64 = 201;
 pub const SYS_MOUNT: u64 = 202;
 pub const SYS_LIST_PARTITIONS: u64 = 203;
 pub const SYS_MKDIR: u64 = 204;

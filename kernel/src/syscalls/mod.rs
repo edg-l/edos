@@ -3,7 +3,6 @@ use core::{arch::naked_asm, ptr, sync::atomic::Ordering, time::Duration};
 use alloc::{format, string::ToString, vec::Vec};
 use x86_64::{
     VirtAddr,
-    instructions::interrupts::enable_and_hlt,
     registers::{
         control::{Cr3, Efer, EferFlags},
         model_specific::{LStar, SFMask, Star},
@@ -14,9 +13,7 @@ use x86_64::{
 use crate::{
     fs::{Error as FsError, PollState},
     gdt::selectors,
-    log,
-    logs::LOG_BROADCAST,
-    println,
+    log, println,
     syscalls::{
         fs::{
             sys_list_mounts, sys_list_partitions, sys_mkdir, sys_mount, sys_rmdir, sys_rmdir_all,
@@ -28,8 +25,7 @@ use crate::{
         memory::{sys_mmap, sys_munmap},
     },
     thread::{
-        UserThreadInfo,
-        scheduler::{exit_thread, sched, switch_to_kernel_page},
+        scheduler::{sched, switch_to_kernel_page},
         thread::{State, Thread, ThreadId, get_thread_by_id, get_thread_info_by_id},
     },
 };
@@ -190,7 +186,6 @@ const SYS_ERRNO: u64 = 0x400;
 const SYS_GETPID: u64 = 39; // get process ID
 const SYS_SPAWN: u64 = 57; // spawn process
 const SYS_DUP2: u64 = 33; // duplicate file descriptor
-const SYS_KERNEL_LOGS: u64 = 201;
 const SYS_WAIT_PID: u64 = 40;
 const SYS_MOUNT: u64 = 202;
 const SYS_LIST_PARTITIONS: u64 = 203;
@@ -233,11 +228,6 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let arg_len = ctx.r10 as usize;
             let flags = ctx.r8;
             ctx.rax = sys_ioctl(fd, request, arg, arg_len, flags) as u64;
-        }
-        SYS_KERNEL_LOGS => {
-            let buffer_ptr = ctx.rdi as *mut u8;
-            let count = ctx.rsi as usize;
-            ctx.rax = sys_kernel_log(buffer_ptr, count) as u64;
         }
         SYS_CLOSE => {
             let fd = ctx.rdi;
@@ -432,52 +422,19 @@ fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
 
     let tid = ThreadId(pid);
 
-    if let Some(thread) = get_thread_by_id(tid) {
-        if thread.state.load(Ordering::Acquire) == State::Dying as u8 {
-            let code = thread.exit_code.load(Ordering::Acquire);
-            if !status_ptr.is_null() {
-                unsafe { status_ptr.write(code) };
-            }
-
-            drop(thread);
-            exit_thread(tid);
-            return pid;
+    if let Some(thread) = get_thread_by_id(tid)
+        && thread.state.load(Ordering::Acquire) == State::Dying as u8
+    {
+        let code = thread.exit_code.load(Ordering::Acquire);
+        if !status_ptr.is_null() {
+            unsafe { status_ptr.write(code) };
         }
+
+        drop(thread);
+        return pid;
     }
 
     0
-}
-
-// TODO: figure out why the syscall gets all logs. it doesnt properly subscribe?
-pub fn sys_kernel_log(log_buffer: *mut u8, size: usize) -> i64 {
-    let info = sched().current_thread_info();
-
-    info.lock().errno = Errno::Clear;
-    if log_buffer.is_null() {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
-    }
-
-    let mut buf = Vec::with_capacity(size);
-
-    // not needed?      x86_64::instructions::interrupts::enable();
-
-    let rx = LOG_BROADCAST.subscribe();
-
-    // Require a 128 byte space.
-    while buf.len() + 128 + 1 < size
-        && let Some(log) = rx.try_recv()
-    {
-        let bytes = log.bytes();
-        if buf.len() + bytes.len() + 1 < size {
-            buf.extend(bytes);
-            buf.push(b'\0');
-        }
-    }
-
-    unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), log_buffer, buf.len()) };
-
-    buf.len() as i64
 }
 
 fn sys_sleep_ms(milliseconds: u64) -> u64 {

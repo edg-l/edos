@@ -59,3 +59,12 @@ pub fn add_serial_log(text: &str) {
             .expect("write_str failed in serial");
     })
 }
+
+pub fn add_serial_log_unlocked(text: &str) {
+    SERIAL_DBG
+        .get()
+        .expect("failed to get serial dbg")
+        .lock()
+        .write_str(text)
+        .expect("write_str failed in serial");
+}

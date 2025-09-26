@@ -67,6 +67,7 @@ pub extern "C" fn driver_main() -> ! {
                 KEYBOARD_BROADCAST.broadcast(key_event);
             }
         }
+        KEYBOARD_BROADCAST.cleanup();
         sched().thread_park();
     }
 }
