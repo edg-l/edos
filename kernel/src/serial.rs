@@ -1,18 +1,17 @@
 use core::fmt::{self, Write};
 
-use spin::{Once, mutex::Mutex};
+use spin::Once;
 use uart_16550::SerialPort;
-use x86_64::instructions::interrupts::without_interrupts;
 
-use crate::{timer::uptime_us, util::per_cpu::get_percpu_data};
+use crate::{thread::irqlock::IrqSpinlock, timer::uptime_us, util::per_cpu::get_percpu_data};
 
-static SERIAL_DBG: Once<Mutex<SerialPort>> = Once::new();
+static SERIAL_DBG: Once<IrqSpinlock<SerialPort>> = Once::new();
 
 pub fn init() {
     SERIAL_DBG.call_once(|| {
         let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
         port.init();
-        Mutex::new(port)
+        IrqSpinlock::new(port)
     });
 }
 
@@ -48,15 +47,6 @@ pub fn _serial_print(args: fmt::Arguments) {
 }
 
 pub fn add_serial_log(text: &str) {
-    SERIAL_DBG
-        .get()
-        .expect("failed to get serial dbg")
-        .lock()
-        .write_str(text)
-        .expect("write_str failed in serial");
-}
-
-pub fn add_serial_log_unlocked(text: &str) {
     SERIAL_DBG
         .get()
         .expect("failed to get serial dbg")
