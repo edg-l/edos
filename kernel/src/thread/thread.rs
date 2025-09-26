@@ -5,7 +5,10 @@ use core::{
 
 use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc};
 use spin::{Mutex, RwLock};
-use x86_64::{VirtAddr, registers::control::Cr3, structures::paging::OffsetPageTable};
+use x86_64::{
+    VirtAddr, instructions::interrupts::without_interrupts, registers::control::Cr3,
+    structures::paging::OffsetPageTable,
+};
 
 use crate::{
     boot::boot_info,
@@ -343,23 +346,29 @@ impl ThreadRegistry {
     }
 
     pub fn insert(&self, t: Arc<Thread>) {
-        self.map.write().insert(t.id, t);
+        without_interrupts(|| {
+            self.map.write().insert(t.id, t);
+        })
     }
 
     pub fn remove(&self, tid: ThreadId) {
-        self.map.write().remove(&tid);
+        without_interrupts(|| {
+            self.map.write().remove(&tid);
+        })
     }
 
     pub fn insert_info(&self, tid: ThreadId, t: Arc<Mutex<UserThreadInfo>>) {
-        self.infos.write().insert(tid, t);
+        without_interrupts(|| {
+            self.infos.write().insert(tid, t);
+        })
     }
 
     pub fn get(&self, tid: ThreadId) -> Option<Arc<Thread>> {
-        self.map.read().get(&tid).cloned()
+        without_interrupts(|| self.map.read().get(&tid).cloned())
     }
 
     pub fn get_info(&self, tid: ThreadId) -> Option<Arc<Mutex<UserThreadInfo>>> {
-        self.infos.read().get(&tid).cloned()
+        without_interrupts(|| self.infos.read().get(&tid).cloned())
     }
 }
 
