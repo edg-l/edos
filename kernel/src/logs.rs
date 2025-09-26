@@ -5,13 +5,13 @@ use spin::{Once, RwLock};
 use crate::{
     fs::{DevFsDevice, register_device_str},
     serial::add_serial_log,
-    thread::{scheduler::sched, thread::ThreadId, util::queue_spawn_kthread_named},
+    thread::{scheduler::sched, util::queue_spawn_kthread_named, waitqueue::WaitQueue},
     timer::uptime_us,
     util::per_cpu::get_percpu_data,
 };
 
-pub static LOG_QUEUE: Once<ArrayQueue<String>> = Once::new();
-pub static KLOG_THREADID: Once<ThreadId> = Once::new();
+static LOG_QUEUE: Once<ArrayQueue<String>> = Once::new();
+static LOG_WAITQ: WaitQueue = WaitQueue::new();
 
 fn get_log_queue() -> &'static ArrayQueue<String> {
     LOG_QUEUE.call_once(|| ArrayQueue::new(1000))
@@ -48,9 +48,7 @@ pub fn log(args: core::fmt::Arguments) {
             buf.push('\n');
 
             get_log_queue().push(buf).ok();
-            if let Some(tid) = KLOG_THREADID.get() {
-                sched.wake_thread(*tid, false);
-            }
+            LOG_WAITQ.wake_one();
         } else {
             let _ = write!(buf, "[{secs}.{us:06}] <cpu-{}:kernel> ", cpu_idx,);
             let _ = buf.write_fmt(args);
@@ -130,19 +128,17 @@ pub fn init() {
 }
 
 pub fn klogger() {
-    KLOG_THREADID.call_once(|| sched().current_thread_id().unwrap());
     let queue = LOG_QUEUE.call_once(|| ArrayQueue::new(1000));
 
     let dev = Arc::new(LogDevfs::new());
     register_device_str("klog", dev.clone()).expect("failed to register klog device");
-    let sched = sched();
 
     loop {
         while let Some(msg) = queue.pop() {
             add_serial_log(&msg);
             dev.add_log(msg);
         }
-        sched.thread_park();
+        LOG_WAITQ.wait_until(|| !queue.is_empty());
     }
 }
 
