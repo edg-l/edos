@@ -15,7 +15,10 @@ use crate::{
     drivers::{fpu::FpuState, hpet::driver::get_hpet_timer},
     fs::path::Path,
     loader::{ElfLoadError, load_elf},
-    memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
+    memory::{
+        frame_allocator::frame_allocator,
+        mapper::{MemoryManager, active_level_4_table, get_level_4_table, memory_mapper},
+    },
     println,
     syscalls::Errno,
     thread::{
@@ -353,6 +356,11 @@ impl Thread {
 
             // clean up all page tables in the lower half of the address space
             memory_manager.clean_lower_half();
+
+            switch_to_kernel_page();
+
+            let pml4 = user.cr3.0;
+            unsafe { frame_allocator().deallocate_frame(pml4) };
         }
     }
 
