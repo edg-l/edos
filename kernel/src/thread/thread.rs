@@ -358,10 +358,12 @@ impl ThreadRegistry {
         })
     }
 
-    pub fn remove(&self, tid: ThreadId) {
-        without_interrupts(|| {
-            self.map.write().remove(&tid);
-        })
+    pub fn remove(&self, tid: ThreadId) -> Option<Arc<Thread>> {
+        without_interrupts(|| self.map.write().remove(&tid))
+    }
+
+    pub fn remove_info(&self, tid: ThreadId) -> Option<Arc<IrqSpinlock<UserThreadInfo>>> {
+        without_interrupts(|| self.infos.write().remove(&tid))
     }
 
     pub fn insert_info(&self, tid: ThreadId, t: Arc<IrqSpinlock<UserThreadInfo>>) {
@@ -385,6 +387,38 @@ impl ThreadRegistry {
 
 // single global instance
 pub(super) static THREADS: ThreadRegistry = ThreadRegistry::new();
+
+pub struct ThreadExitRegistry {
+    map: RwLock<BTreeMap<ThreadId, i32>>,
+}
+
+impl ThreadExitRegistry {
+    pub const fn new() -> Self {
+        Self {
+            map: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    pub fn insert(&self, tid: ThreadId, code: i32) {
+        without_interrupts(|| {
+            self.map.write().insert(tid, code);
+        })
+    }
+
+    pub fn take(&self, tid: ThreadId) -> Option<i32> {
+        without_interrupts(|| self.map.write().remove(&tid))
+    }
+}
+
+pub(super) static EXITED_THREADS: ThreadExitRegistry = ThreadExitRegistry::new();
+
+pub fn record_thread_exit(tid: ThreadId, code: i32) {
+    EXITED_THREADS.insert(tid, code);
+}
+
+pub fn take_thread_exit_code(tid: ThreadId) -> Option<i32> {
+    EXITED_THREADS.take(tid)
+}
 
 // simple wrapper
 pub fn get_thread_by_id(tid: ThreadId) -> Option<Arc<Thread>> {

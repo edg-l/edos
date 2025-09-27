@@ -413,17 +413,17 @@ fn read_thread_info(
     Option<usize>,
     Option<u64>,
 ) {
-    if let Some(info_arc) = get_thread_info_by_id(tid) {
-        if let Some(info) = info_arc.try_lock() {
-            return (
-                Some(info.user_id),
-                Some(info.group_id),
-                Some(format!("{}", info.cwd)),
-                Some(info.errno),
-                Some(info.memory_mappings.len()),
-                Some(info.next_mmap_addr.as_u64()),
-            );
-        }
+    if let Some(info_arc) = get_thread_info_by_id(tid)
+        && let Some(info) = info_arc.try_lock()
+    {
+        return (
+            Some(info.user_id),
+            Some(info.group_id),
+            Some(format!("{}", info.cwd)),
+            Some(info.errno),
+            Some(info.memory_mappings.len()),
+            Some(info.next_mmap_addr.as_u64()),
+        );
     }
     (None, None, None, None, None, None)
 }

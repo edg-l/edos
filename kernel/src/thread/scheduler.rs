@@ -26,7 +26,7 @@ use crate::{
         context::CpuContext,
         irqlock::IrqSpinlock,
         runqueue::RunQueue,
-        thread::{Flags, State, THREADS, Thread, ThreadId, get_thread_by_id},
+        thread::{Flags, State, THREADS, Thread, ThreadId, get_thread_by_id, record_thread_exit},
     },
     timer::Instant,
     util::per_cpu::get_percpu_data,
@@ -603,11 +603,13 @@ impl Scheduler {
         let tid = self.current_thread_id().unwrap();
 
         without_interrupts(|| unsafe {
-            if let Some(t) = get_thread_by_id(tid) {
+            if let Some(t) = THREADS.remove(tid).or_else(|| get_thread_by_id(tid)) {
                 t.exit_code.store(code, Ordering::Release);
                 t.state.store(State::Dying as u8, Ordering::Release);
                 t.mark_need_resched();
                 t.free();
+                record_thread_exit(tid, code);
+                let _ = THREADS.remove_info(tid);
                 self.thread_count.fetch_sub(1, Ordering::Relaxed);
             }
             context_switch();
@@ -626,10 +628,12 @@ impl Scheduler {
 }
 
 pub fn exit_thread(tid: ThreadId) {
-    if let Some(t) = THREADS.get(tid) {
+    if let Some(t) = THREADS.remove(tid) {
         t.state.store(State::Dying as u8, Ordering::Release);
-        THREADS.remove(tid);
         t.free();
+        let code = t.exit_code.load(Ordering::Acquire);
+        record_thread_exit(tid, code);
+        let _ = THREADS.remove_info(tid);
     }
 }
 

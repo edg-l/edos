@@ -26,7 +26,7 @@ use crate::{
     },
     thread::{
         scheduler::{sched, switch_to_kernel_page},
-        thread::{State, Thread, ThreadId, get_thread_by_id, get_thread_info_by_id},
+        thread::{Thread, ThreadId, get_thread_info_by_id, take_thread_exit_code},
     },
 };
 
@@ -419,15 +419,10 @@ fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
 
     let tid = ThreadId(pid);
 
-    if let Some(thread) = get_thread_by_id(tid)
-        && thread.state.load(Ordering::Acquire) == State::Dying as u8
-    {
-        let code = thread.exit_code.load(Ordering::Acquire);
+    if let Some(code) = take_thread_exit_code(tid) {
         if !status_ptr.is_null() {
             unsafe { status_ptr.write(code) };
         }
-
-        drop(thread);
         return pid;
     }
 
