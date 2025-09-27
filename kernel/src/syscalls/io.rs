@@ -160,7 +160,11 @@ pub fn sys_close(fd: u64) -> i32 {
 pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    info.lock().errno = Errno::Clear;
+    let fd_info = {
+        let mut guard = info.lock();
+        guard.errno = Errno::Clear;
+        guard.fd_table.get_fd(fd).cloned()
+    };
 
     if count == 0 {
         return 0;
@@ -173,26 +177,23 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
 
     interrupts::enable();
 
+    // Track FsFile state so we can advance offsets without re-locking unnecessarily.
+    let fs_state = match &fd_info {
+        Some(FileDescriptor::FsFile(file)) => Some(file.clone()),
+        _ => None,
+    };
+
     // Get kernel data first - all potentially blocking operations happen here
-    let fd_info = info.lock().fd_table.get_fd(fd).cloned();
     let kernel_data = match fd_info {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
-            StandardStream::Stdin => {
-                interrupts::enable();
-                read_from_stdin(count)
-            }
+            StandardStream::Stdin => read_from_stdin(count),
             StandardStream::Stdout | StandardStream::Stderr => {
                 info.lock().errno = Errno::EINVAL;
                 return -1;
             }
         },
-        Some(FileDescriptor::Pipe(pipe)) => {
-            interrupts::enable();
-            read_from_pipe(pipe.clone(), count)
-        }
+        Some(FileDescriptor::Pipe(pipe)) => read_from_pipe(pipe.clone(), count),
         Some(FileDescriptor::FsFile(file)) => {
-            let file = file.clone();
-            interrupts::enable();
             match fs_api::read_bytes(&file.path, file.offset as usize, count) {
                 Ok(data) => Ok(data),
                 Err(_) => {
@@ -224,18 +225,11 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
     user_buffer.copy_from_slice(&data[..bytes_to_copy]);
 
     // Update file offset if reading from FsFile
-    {
-        let fd_info = info.lock().fd_table.get_fd(fd).cloned();
-        if let Some(FileDescriptor::FsFile(file)) = fd_info {
-            let new_off = file.offset + bytes_to_copy as u64;
-            info.lock().fd_table.replace_fd(
-                fd,
-                FileDescriptor::FsFile(FsFile {
-                    offset: new_off,
-                    ..file
-                }),
-            );
-        }
+    if let Some(mut file) = fs_state {
+        file.offset += bytes_to_copy as u64;
+        info.lock()
+            .fd_table
+            .replace_fd(fd, FileDescriptor::FsFile(file));
     }
 
     bytes_to_copy as i64
