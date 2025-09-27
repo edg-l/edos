@@ -69,6 +69,7 @@ pub(super) fn execute_command(state: &mut TerminalState, command: &str, args: &[
         "ps" => cmd_ps(state, args),
         "dmesg" => cmd_dmesg(state, args),
         "clear" => state.clear_output(),
+        "profile" => cmd_profile(state, args),
         _ => spawn_program(state, command, args),
     }
 }
@@ -90,10 +91,34 @@ fn print_help(state: &mut TerminalState) {
         "- rmdir <path>",
         "- rm [-r] <path>",
         "- clear",
+        "- profile [on|off]",
     ];
 
     for line in lines {
         state.write_line(line);
+    }
+}
+
+fn cmd_profile(state: &mut TerminalState, args: &[String]) {
+    if args.is_empty() {
+        if state.toggle_profiling(None) {
+            state.write_line("profiling overlay enabled");
+        } else {
+            state.write_line("profiling overlay disabled");
+        }
+        return;
+    }
+
+    match args[0].as_str() {
+        "on" => {
+            state.toggle_profiling(Some(true));
+            state.write_line("profiling overlay enabled");
+        }
+        "off" => {
+            state.toggle_profiling(Some(false));
+            state.write_line("profiling overlay disabled");
+        }
+        _ => state.write_line("Usage: profile [on|off]"),
     }
 }
 

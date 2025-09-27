@@ -33,6 +33,24 @@ pub(crate) struct TerminalState {
     current_dir: String,
     running_program: Option<Program>,
     tty_fd: u64,
+    profiling: ProfilingInfo,
+    profiling_text: String,
+    last_profile_overlay_ns: u64,
+    profiling_enabled: bool,
+}
+
+#[derive(Default, Debug, Clone)]
+struct ProfilingInfo {
+    last_loop_ns: u64,
+    last_poll_ns: u64,
+    last_render_ns: u64,
+    last_command_ns: u64,
+    max_loop_ns: u64,
+    max_poll_ns: u64,
+    max_render_ns: u64,
+    max_command_ns: u64,
+    total_loop_ns: u128,
+    samples: u64,
 }
 
 impl TerminalState {
@@ -72,6 +90,10 @@ impl TerminalState {
             current_dir,
             running_program: None,
             tty_fd,
+            profiling: ProfilingInfo::default(),
+            profiling_text: "profiling: collecting...".to_string(),
+            last_profile_overlay_ns: 0,
+            profiling_enabled: true,
         })
     }
 
@@ -98,6 +120,63 @@ impl TerminalState {
 
     pub(crate) fn tty_fd(&self) -> u64 {
         self.tty_fd
+    }
+
+    pub(crate) fn toggle_profiling(&mut self, desired: Option<bool>) -> bool {
+        if let Some(flag) = desired {
+            self.profiling_enabled = flag;
+        } else {
+            self.profiling_enabled = !self.profiling_enabled;
+        }
+
+        if !self.profiling_enabled {
+            if !self.profiling_text.is_empty() {
+                self.profiling_text.clear();
+                self.mark_dirty();
+            }
+        } else {
+            self.profiling_text = self.profiling.format_overlay();
+            self.mark_dirty();
+        }
+
+        self.profiling_enabled
+    }
+
+    pub(crate) fn profiling_overlay(&self) -> &str {
+        if self.profiling_enabled {
+            &self.profiling_text
+        } else {
+            ""
+        }
+    }
+
+    pub(crate) fn record_profile(
+        &mut self,
+        loop_ns: u64,
+        poll_ns: u64,
+        render_ns: u64,
+        command_ns: u64,
+        timestamp_ns: u64,
+    ) {
+        if !self.profiling_enabled {
+            return;
+        }
+
+        self.profiling
+            .record(loop_ns, poll_ns, render_ns, command_ns);
+
+        const OVERLAY_INTERVAL_NS: u64 = 200_000_000; // 200ms cadence
+        let should_refresh = self.last_profile_overlay_ns == 0
+            || timestamp_ns.saturating_sub(self.last_profile_overlay_ns) >= OVERLAY_INTERVAL_NS;
+
+        if should_refresh {
+            let new_text = self.profiling.format_overlay();
+            if new_text != self.profiling_text {
+                self.profiling_text = new_text;
+                self.mark_dirty();
+            }
+            self.last_profile_overlay_ns = timestamp_ns;
+        }
     }
 
     pub(crate) fn clear_output(&mut self) {
@@ -221,5 +300,49 @@ impl TerminalState {
         if self.buffer.is_empty() {
             self.buffer.push_back(String::new());
         }
+    }
+}
+
+impl ProfilingInfo {
+    fn record(&mut self, loop_ns: u64, poll_ns: u64, render_ns: u64, command_ns: u64) {
+        self.last_loop_ns = loop_ns;
+        self.last_poll_ns = poll_ns;
+        self.last_render_ns = render_ns;
+        self.last_command_ns = command_ns;
+
+        self.max_loop_ns = self.max_loop_ns.max(loop_ns);
+        self.max_poll_ns = self.max_poll_ns.max(poll_ns);
+        self.max_render_ns = self.max_render_ns.max(render_ns);
+        self.max_command_ns = self.max_command_ns.max(command_ns);
+
+        self.total_loop_ns = self.total_loop_ns.saturating_add(loop_ns as u128);
+        self.samples = self.samples.saturating_add(1);
+    }
+
+    fn format_overlay(&self) -> String {
+        if self.samples == 0 {
+            return "profiling: collecting...".to_string();
+        }
+
+        let avg_loop_ns = (self.total_loop_ns / self.samples as u128) as u64;
+
+        format!(
+            "loop ms avg {} last {} max {}\npoll last {} max {}\nrender last {} max {}\ncmd last {} max {}",
+            Self::fmt_ms(avg_loop_ns),
+            Self::fmt_ms(self.last_loop_ns),
+            Self::fmt_ms(self.max_loop_ns),
+            Self::fmt_ms(self.last_poll_ns),
+            Self::fmt_ms(self.max_poll_ns),
+            Self::fmt_ms(self.last_render_ns),
+            Self::fmt_ms(self.max_render_ns),
+            Self::fmt_ms(self.last_command_ns),
+            Self::fmt_ms(self.max_command_ns)
+        )
+    }
+
+    fn fmt_ms(ns: u64) -> String {
+        let ms = ns / 1_000_000;
+        let hundredths = (ns % 1_000_000) / 10_000;
+        format!("{ms}.{hundredths:02}")
     }
 }

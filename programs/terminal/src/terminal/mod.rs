@@ -2,8 +2,8 @@ use alloc::{format, string::String, vec::Vec};
 use core::str;
 
 use elibc::{
-    KeyEvent, PollFd, PollState, WaitPidStatus, get_raw_input, io::keyboard_fd, poll_fds,
-    process::sys_waitpid, read_from_fd, sleep_ms,
+    KeyEvent, PollFd, PollState, WaitPidStatus, get_raw_input, io::keyboard_fd, monotonic_time_ns,
+    poll_fds, process::sys_waitpid, read_from_fd, sleep_ms,
 };
 
 mod command;
@@ -39,6 +39,7 @@ pub fn run() -> i32 {
     }
 
     loop {
+        let loop_start = monotonic_now();
         pump_running_program(&mut terminal);
 
         if keyboard_handle.is_none() {
@@ -72,7 +73,10 @@ pub fn run() -> i32 {
 
         let timeout_ms: u64 = if terminal.is_dirty() { 0 } else { 50 };
         let poll_slice = &mut entries[..entry_count];
+        let poll_start = monotonic_now();
         let poll_result = poll_fds(poll_slice, timeout_ms);
+        let poll_end = monotonic_now();
+        let poll_ns = elapsed_ns(poll_start, poll_end);
 
         if let Ok(_) = poll_result {
             let tty_state = poll_slice[0].result;
@@ -99,17 +103,29 @@ pub fn run() -> i32 {
             }
         }
 
+        let mut command_time_ns = 0u64;
         for line in ready_commands.drain(..) {
             let parsed = parse_command(&line);
             if parsed.is_empty() {
                 continue;
             }
             let (command_name, arguments) = parsed.split_first().unwrap();
+            let cmd_start = monotonic_now();
             execute_command(&mut terminal, command_name, arguments);
+            let cmd_end = monotonic_now();
+            command_time_ns = command_time_ns.saturating_add(elapsed_ns(cmd_start, cmd_end));
         }
 
+        let render_start = monotonic_now();
         if render(&mut terminal).is_err() {
             return 1;
+        }
+        let render_end = monotonic_now();
+        let render_ns = elapsed_ns(render_start, render_end);
+
+        if let (Some(loop_start_ns), Some(loop_end_ns)) = (loop_start, monotonic_now()) {
+            let loop_ns = loop_end_ns.saturating_sub(loop_start_ns);
+            terminal.record_profile(loop_ns, poll_ns, render_ns, command_time_ns, loop_end_ns);
         }
     }
 }
@@ -156,5 +172,16 @@ fn pump_tty_output(state: &mut TerminalState) {
                 break;
             }
         }
+    }
+}
+
+fn monotonic_now() -> Option<u64> {
+    monotonic_time_ns().ok()
+}
+
+fn elapsed_ns(start: Option<u64>, end: Option<u64>) -> u64 {
+    match (start, end) {
+        (Some(s), Some(e)) => e.saturating_sub(s),
+        _ => 0,
     }
 }
