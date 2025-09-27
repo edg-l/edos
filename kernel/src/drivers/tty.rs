@@ -1,17 +1,14 @@
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use core::time::Duration;
-use x86_64::instructions::interrupts::without_interrupts;
-
-use spin::Mutex;
 
 use crate::{
     fs::{DevFsDevice, DevFsError, PollState, handle::Pollable, register_device_str},
-    thread::broadcast::Broadcaster,
+    thread::{broadcast::Broadcaster, mutex::BlockingMutex},
 };
 
 const TTY_BUFFER_CAPACITY: usize = 16 * 1024;
 
-static TTY_BUFFER: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
+static TTY_BUFFER: BlockingMutex<VecDeque<u8>> = BlockingMutex::new(VecDeque::new());
 static TTY_NOTIFY: Broadcaster<()> = Broadcaster::new();
 
 pub struct TtyDevice;

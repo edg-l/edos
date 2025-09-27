@@ -41,7 +41,7 @@ pub fn run() -> i32 {
     loop {
         pump_tty_output(&mut terminal);
         pump_running_program(&mut terminal);
-        get_raw_input(20, &mut key_events, 16);
+        get_raw_input(5, &mut key_events, 6);
 
         for event in key_events.drain(..) {
             if let Some(line) = terminal.handle_key_event(event) {

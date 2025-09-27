@@ -133,7 +133,7 @@ impl DoubleBuffer {
 }
 
 pub extern "C" fn render_thread() -> ! {
-    let mail = REQUESTS.call_once(|| Mailbox::new());
+    let mail = REQUESTS.call_once(Mailbox::new);
 
     FramebufferDevice::register();
 
