@@ -79,7 +79,7 @@ pub struct Thread {
 
     // Scheduling-visible fields as atomics:
     pub state: AtomicU8,         // State as u8
-    pub priority: AtomicU8,      // 0..=31 small static priority
+    pub priority: AtomicU8,      // 0..=16 small static priority
     pub cpu_affinity: AtomicU32, // bitmask of allowed CPUs
     pub flags: AtomicU32,        // Flags
 
@@ -124,7 +124,7 @@ impl Thread {
     }
 
     pub fn set_priority(&self, prio: u8) {
-        self.priority.store(prio.min(31), Ordering::Release);
+        self.priority.store(prio.min(15), Ordering::Release);
         self.mark_need_resched();
     }
 
@@ -157,7 +157,7 @@ impl Thread {
             cpu_affinity: AtomicU32::new(0),
             flags: AtomicU32::new(0),
             slice_deadline: AtomicU64::new(0),
-            priority: AtomicU8::new(16),
+            priority: AtomicU8::new(15),
             sleep_deadline: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
