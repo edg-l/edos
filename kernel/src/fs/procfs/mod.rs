@@ -10,6 +10,7 @@ use alloc::{
 
 use crate::{
     fs::{Error, File, FileAttrs, FileKind, FileSystem, path::Path},
+    memory::frame_allocator::frame_allocator,
     syscalls::Errno,
     thread::thread::{State, Thread, ThreadId, get_thread_info_by_id, list_threads},
 };
@@ -80,6 +81,37 @@ impl Procfs {
         table
     }
 
+    fn render_meminfo() -> String {
+        let stats = {
+            let allocator = frame_allocator();
+            allocator.stats()
+        };
+
+        let frame_size_bytes = 4096u64;
+        let total_bytes = stats.total_frames as u64 * frame_size_bytes;
+        let free_bytes = stats.free_frames as u64 * frame_size_bytes;
+        let used_bytes = total_bytes.saturating_sub(free_bytes);
+        let used_frames = stats.total_frames.saturating_sub(stats.free_frames);
+
+        format!(
+            concat!(
+                "MemTotal: {} KiB\n",
+                "MemFree: {} KiB\n",
+                "MemUsed: {} KiB\n",
+                "PageSize: 4096 B\n",
+                "FramesTotal: {}\n",
+                "FramesFree: {}\n",
+                "FramesUsed: {}\n"
+            ),
+            total_bytes / 1024,
+            free_bytes / 1024,
+            used_bytes / 1024,
+            stats.total_frames,
+            stats.free_frames,
+            used_frames,
+        )
+    }
+
     fn resolve_path(path: &Path) -> Result<ProcNode, Error> {
         if path.is_root() {
             return Ok(ProcNode::Root);
@@ -90,6 +122,7 @@ impl Procfs {
         match components.len() {
             1 => match components[0].as_str() {
                 "processes" => Ok(ProcNode::ProcessesFile),
+                "meminfo" => Ok(ProcNode::MemInfo),
                 tid_component => parse_tid(tid_component)
                     .map(ProcNode::ProcessDir)
                     .ok_or(Error::FileNotFound),
@@ -126,10 +159,13 @@ impl FileSystem for Procfs {
         match Self::resolve_path(&path)? {
             ProcNode::Root => {
                 let snapshots = Self::collect_snapshots();
-                let mut files = Vec::with_capacity(snapshots.len() + 1);
+                let mut files = Vec::with_capacity(snapshots.len() + 2);
 
                 let summary = Self::render_process_table(&snapshots);
                 files.push(Self::file_entry("processes".to_string(), summary.len()));
+
+                let meminfo = Self::render_meminfo();
+                files.push(Self::file_entry("meminfo".to_string(), meminfo.len()));
 
                 for snapshot in snapshots {
                     files.push(Self::dir_entry(snapshot.tid.to_string()));
@@ -155,9 +191,10 @@ impl FileSystem for Procfs {
 
                 Ok(files)
             }
-            ProcNode::ProcessesFile | ProcNode::ProcessStatus(_) | ProcNode::ProcessCmdline(_) => {
-                Err(Error::NotADir)
-            }
+            ProcNode::ProcessesFile
+            | ProcNode::MemInfo
+            | ProcNode::ProcessStatus(_)
+            | ProcNode::ProcessCmdline(_) => Err(Error::NotADir),
         }
     }
 
@@ -183,6 +220,10 @@ impl FileSystem for Procfs {
                     return Err(Error::FileNotFound);
                 };
                 let content = snapshot.cmdline_text();
+                Ok(Self::read_text(content, offset, count))
+            }
+            ProcNode::MemInfo => {
+                let content = Self::render_meminfo();
                 Ok(Self::read_text(content, offset, count))
             }
             ProcNode::Root | ProcNode::ProcessDir(_) => Err(Error::NotAFile),
@@ -217,6 +258,10 @@ impl FileSystem for Procfs {
                 let snapshots = Self::collect_snapshots();
                 let summary = Self::render_process_table(&snapshots);
                 Ok(Self::file_entry("processes".to_string(), summary.len()))
+            }
+            ProcNode::MemInfo => {
+                let meminfo = Self::render_meminfo();
+                Ok(Self::file_entry("meminfo".to_string(), meminfo.len()))
             }
             ProcNode::ProcessDir(tid) => {
                 let snapshots = Self::collect_snapshots();
@@ -461,6 +506,7 @@ fn display_option_errno(value: Option<Errno>) -> String {
 enum ProcNode {
     Root,
     ProcessesFile,
+    MemInfo,
     ProcessDir(u64),
     ProcessStatus(u64),
     ProcessCmdline(u64),
