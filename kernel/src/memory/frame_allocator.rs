@@ -3,7 +3,7 @@
 //! The allocator finds first a memory region to allocate itself into, the bitmap.
 
 use limine::{memory_map::EntryType, response::MemoryMapResponse};
-use spin::{Mutex, Once};
+use spin::Once;
 use x86_64::{
     PhysAddr,
     structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB},
