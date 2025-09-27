@@ -23,12 +23,9 @@ pub struct DoubleBuffer {
     width: usize,
     height: usize,
     pitch: usize,
-    red_mask: u32,
-    red_shift: u8,
-    green_mask: u32,
-    green_shift: u8,
-    blue_mask: u32,
-    blue_shift: u8,
+    red_lut: [u32; 256],
+    green_lut: [u32; 256],
+    blue_lut: [u32; 256],
 }
 
 impl DoubleBuffer {
@@ -38,26 +35,35 @@ impl DoubleBuffer {
         let height = fb.height() as usize;
         let pitch = fb.pitch() as usize;
 
-        // Cache color conversion masks and shifts
-        let red_mask = (1u32 << fb.red_mask_size()) - 1;
-        let red_shift = fb.red_mask_shift();
-        let green_mask = (1u32 << fb.green_mask_size()) - 1;
-        let green_shift = fb.green_mask_shift();
-        let blue_mask = (1u32 << fb.blue_mask_size()) - 1;
-        let blue_shift = fb.blue_mask_shift();
+        let red_lut = Self::build_channel_lut(fb.red_mask_size(), fb.red_mask_shift());
+        let green_lut = Self::build_channel_lut(fb.green_mask_size(), fb.green_mask_shift());
+        let blue_lut = Self::build_channel_lut(fb.blue_mask_size(), fb.blue_mask_shift());
 
         Self {
             back_buffer: vec![0; (pitch * height) / 4],
             width,
             height,
             pitch,
-            red_mask,
-            red_shift,
-            green_mask,
-            green_shift,
-            blue_mask,
-            blue_shift,
+            red_lut,
+            green_lut,
+            blue_lut,
         }
+    }
+
+    fn build_channel_lut(mask_size: u8, shift: u8) -> [u32; 256] {
+        let mask = if mask_size == 0 {
+            0
+        } else {
+            (1u32 << mask_size.min(31)) - 1
+        };
+
+        core::array::from_fn(|value| {
+            if mask == 0 {
+                0
+            } else {
+                ((value as u32 * mask) / 255) << shift
+            }
+        })
     }
 
     #[expect(unused)]
@@ -87,12 +93,8 @@ impl DoubleBuffer {
         let g = ((rgb >> 8) & 0xFF) as u8;
         let b = (rgb & 0xFF) as u8;
 
-        // Convert to framebuffer format using cached masks
-        let fb_r = ((r as u32 * self.red_mask) / 255) << self.red_shift;
-        let fb_g = ((g as u32 * self.green_mask) / 255) << self.green_shift;
-        let fb_b = ((b as u32 * self.blue_mask) / 255) << self.blue_shift;
-
-        fb_r | fb_g | fb_b
+        // Convert to framebuffer format using cached lookup tables
+        self.red_lut[r as usize] | self.green_lut[g as usize] | self.blue_lut[b as usize]
     }
 
     pub fn draw(&mut self, request: &DrawRequest) {
@@ -109,25 +111,26 @@ impl DoubleBuffer {
         }
 
         let pixels_per_row = self.pitch / 4; // Convert byte pitch to u32 pitch
+        let src_width = request.width as usize;
+        let src_offset_x = (start_x as u64 - request.x) as usize;
+        let src_offset_y = (start_y as u64 - request.y) as usize;
+        let row_len = end_x - start_x;
 
-        for y in start_y..end_y {
-            for x in start_x..end_x {
-                // Calculate position within the source rectangle
-                let src_x = x - start_x;
-                let src_y = y - start_y;
+        let mut src_row = src_offset_y;
+        for dst_y in start_y..end_y {
+            let mut src_index = src_row * src_width + src_offset_x;
+            let mut dst_index = dst_y * pixels_per_row + start_x;
 
-                // Index into the request's pixel data (width x height rectangle)
-                let src_index = src_y * request.width as usize + src_x;
-
-                // Calculate destination position in back buffer
-                let dst_index = y * pixels_per_row + x;
-
+            for _ in 0..row_len {
                 let rgb_color = request.pixels[src_index];
                 let fb_color = self.convert_color(rgb_color);
-
-                // Copy pixel (no bounds check needed since we clamped above)
                 self.back_buffer[dst_index] = fb_color;
+
+                src_index += 1;
+                dst_index += 1;
             }
+
+            src_row += 1;
         }
     }
 }
