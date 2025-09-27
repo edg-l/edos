@@ -4,7 +4,9 @@ use core::hint::spin_loop;
 use crate::sys::{
     Errno, SYS_WAIT_PID,
     calls::{syscall0, syscall1, syscall2, syscall3, syscall5},
-    constants::{SYS_DUP2, SYS_EXIT, SYS_GETPID, SYS_PIPE, SYS_SLEEP_MS, SYS_SPAWN},
+    constants::{
+        SYS_DUP2, SYS_EXIT, SYS_GETPID, SYS_MONOTONIC_TIME, SYS_PIPE, SYS_SLEEP_MS, SYS_SPAWN,
+    },
     errno,
 };
 
@@ -61,6 +63,16 @@ pub fn sleep_ms(ms: u64) -> Result<(), Errno> {
         Err(errno())
     } else {
         Ok(())
+    }
+}
+
+/// Retrieve monotonic time since boot in nanoseconds.
+pub fn monotonic_time_ns() -> Result<u64, Errno> {
+    let result = unsafe { syscall0(SYS_MONOTONIC_TIME) };
+    if result == u64::MAX {
+        Err(errno())
+    } else {
+        Ok(result)
     }
 }
 

@@ -196,6 +196,7 @@ const SYS_RMDIR_ALL: u64 = 206;
 const SYS_UNLINK: u64 = 207;
 const SYS_LIST_MOUNTS: u64 = 208;
 const SYS_SLEEP_MS: u64 = 209;
+const SYS_MONOTONIC_TIME: u64 = 210;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -315,6 +316,9 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_SLEEP_MS => {
             let milliseconds = ctx.rdi;
             ctx.rax = sys_sleep_ms(milliseconds);
+        }
+        SYS_MONOTONIC_TIME => {
+            ctx.rax = sys_monotonic_time();
         }
         SYS_MOUNT => {
             let device_id = ctx.rdi;
@@ -440,6 +444,16 @@ fn sys_sleep_ms(milliseconds: u64) -> u64 {
     scheduler.thread_sleep(duration);
 
     0
+}
+
+fn sys_monotonic_time() -> u64 {
+    let scheduler = sched();
+    let info = scheduler.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    // HPET-driven uptime is monotonic with microsecond resolution.
+    let micros = crate::timer::uptime_us();
+    micros.saturating_mul(1_000)
 }
 
 fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
