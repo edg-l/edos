@@ -238,7 +238,7 @@ impl Thread {
             cpu_affinity: AtomicU32::new(0),
             flags: AtomicU32::new(0),
             slice_deadline: AtomicU64::new(0),
-            priority: AtomicU8::new(16),
+            priority: AtomicU8::new(15),
             sleep_deadline: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
