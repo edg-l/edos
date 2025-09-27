@@ -3,7 +3,7 @@ use core::{
     sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
 };
 
-use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc};
+use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec::Vec};
 use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr, instructions::interrupts::without_interrupts, registers::control::Cr3,
@@ -22,6 +22,7 @@ use crate::{
         UserThread, UserThreadInfo,
         context::CpuContext,
         fd::FileDescriptorTable,
+        irqlock::IrqSpinlock,
         paging::allocate_process_pml4,
         runqueue::{DEFAULT_PRIORITY, PRIORITY_LEVELS},
         scheduler::switch_to_kernel_page,
@@ -259,7 +260,7 @@ impl Thread {
         THREADS.insert(thread.clone());
         THREADS.insert_info(
             id,
-            Arc::new(Mutex::new(UserThreadInfo {
+            Arc::new(IrqSpinlock::new(UserThreadInfo {
                 pid: id.0,
                 errno: Errno::Clear,
                 fd_table: FileDescriptorTable::new(),
@@ -340,7 +341,7 @@ impl Thread {
 
 pub struct ThreadRegistry {
     pub(super) map: RwLock<BTreeMap<ThreadId, Arc<Thread>>>,
-    infos: RwLock<BTreeMap<ThreadId, Arc<Mutex<UserThreadInfo>>>>,
+    infos: RwLock<BTreeMap<ThreadId, Arc<IrqSpinlock<UserThreadInfo>>>>,
 }
 
 impl ThreadRegistry {
@@ -363,7 +364,7 @@ impl ThreadRegistry {
         })
     }
 
-    pub fn insert_info(&self, tid: ThreadId, t: Arc<Mutex<UserThreadInfo>>) {
+    pub fn insert_info(&self, tid: ThreadId, t: Arc<IrqSpinlock<UserThreadInfo>>) {
         without_interrupts(|| {
             self.infos.write().insert(tid, t);
         })
@@ -373,8 +374,12 @@ impl ThreadRegistry {
         without_interrupts(|| self.map.read().get(&tid).cloned())
     }
 
-    pub fn get_info(&self, tid: ThreadId) -> Option<Arc<Mutex<UserThreadInfo>>> {
+    pub fn get_info(&self, tid: ThreadId) -> Option<Arc<IrqSpinlock<UserThreadInfo>>> {
         without_interrupts(|| self.infos.read().get(&tid).cloned())
+    }
+
+    pub fn list(&self) -> Vec<Arc<Thread>> {
+        without_interrupts(|| self.map.read().values().cloned().collect())
     }
 }
 
@@ -383,9 +388,13 @@ pub(super) static THREADS: ThreadRegistry = ThreadRegistry::new();
 
 // simple wrapper
 pub fn get_thread_by_id(tid: ThreadId) -> Option<Arc<Thread>> {
-    THREADS.get(tid)
+    without_interrupts(|| THREADS.get(tid))
 }
 
-pub fn get_thread_info_by_id(tid: ThreadId) -> Option<Arc<Mutex<UserThreadInfo>>> {
-    THREADS.get_info(tid)
+pub fn get_thread_info_by_id(tid: ThreadId) -> Option<Arc<IrqSpinlock<UserThreadInfo>>> {
+    without_interrupts(|| THREADS.get_info(tid))
+}
+
+pub fn list_threads() -> Vec<Arc<Thread>> {
+    without_interrupts(|| THREADS.list())
 }

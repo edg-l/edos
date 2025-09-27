@@ -12,19 +12,18 @@ pub const IOCTL_FLAG_WRITE: u64 = 1 << 1;
 
 pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) -> i64 {
     let info = sched().current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
-    let descriptor = match thread.fd_table.get_fd(fd).cloned() {
+    let descriptor = match info.lock().fd_table.get_fd(fd).cloned() {
         Some(desc) => desc,
         None => {
-            thread.errno = Errno::EBADF;
+            info.lock().errno = Errno::EBADF;
             return -1;
         }
     };
 
     let FileDescriptor::FsFile(file) = descriptor else {
-        thread.errno = Errno::EINVAL;
+        info.lock().errno = Errno::EINVAL;
         return -1;
     };
 
@@ -34,13 +33,13 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
 
     if need_buffer {
         if arg == 0 {
-            thread.errno = Errno::EFAULT;
+            info.lock().errno = Errno::EFAULT;
             return -1;
         }
 
         let user_ptr = arg as *mut u8;
         if user_ptr.is_null() {
-            thread.errno = Errno::EFAULT;
+            info.lock().errno = Errno::EFAULT;
             return -1;
         }
 
@@ -64,7 +63,7 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
                 value as i64
             }
             Err(err) => {
-                thread.errno = Errno::from(err);
+                info.lock().errno = Errno::from(err);
                 -1
             }
         }
@@ -73,7 +72,7 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
         match fs_api::ioctl(&file.path, request, arg) {
             Ok(value) => value as i64,
             Err(err) => {
-                thread.errno = Errno::from(err);
+                info.lock().errno = Errno::from(err);
                 -1
             }
         }

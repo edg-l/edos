@@ -26,6 +26,7 @@ use crate::{
         mbr::parse_mbr,
         memfs::Memfs,
         path::Path,
+        procfs::Procfs,
     },
     log,
     memory::mapper::MemoryManager,
@@ -47,6 +48,7 @@ pub mod handle;
 pub mod mbr;
 pub mod memfs;
 pub mod path;
+pub mod procfs;
 
 pub use devfs::{
     DevFsDevice, DevFsError, DevFsHandle as DevFs, register_device, register_device_str,
@@ -704,6 +706,26 @@ pub extern "C" fn fs_main_thread() -> ! {
                             );
                             current_special_part += 1;
                         }
+                        FilesystemType::Procfs => {
+                            log!("Mounting procfs");
+                            let fs = Box::into_raw(Box::new(
+                                Procfs::new().expect("failed to create procfs"),
+                            ));
+                            let worker_tid = queue_spawn_kthread_named_arg(
+                                &format!("procfs-{}", mount_point.filename()),
+                                start_procfs_thread as u64,
+                                fs.cast(),
+                            );
+                            device_id = SPECIAL_DEV_ID;
+                            partition_index = current_special_part;
+                            worker_tid_map
+                                .insert(worker_tid, (SPECIAL_DEV_ID, current_special_part));
+                            FS_WORKER_MAILBOXES.write().insert(
+                                (SPECIAL_DEV_ID, current_special_part),
+                                Mailbox::new().into(),
+                            );
+                            current_special_part += 1;
+                        }
                         FilesystemType::Unknown
                         | FilesystemType::Iso9660
                         | FilesystemType::Ntfs => {
@@ -863,6 +885,10 @@ extern "C" fn start_partition_fs_thread(partition: *mut Partition) -> ! {
                 log!("Devfs cannot be backed by a partition");
                 unsupported_fs(mailbox);
             }
+            FilesystemType::Procfs => {
+                log!("Procfs cannot be backed by a partition");
+                unsupported_fs(mailbox);
+            }
             FilesystemType::Ntfs => {
                 log!("NTFS not yet implemented");
                 unsupported_fs(mailbox);
@@ -888,6 +914,11 @@ extern "C" fn start_memfs_thread(fs: *mut Memfs) -> ! {
 }
 
 extern "C" fn start_devfs_thread(fs: *mut DevFs) -> ! {
+    let fs: Box<dyn FileSystem> = unsafe { Box::from_raw(fs) };
+    run_fs_thread(fs)
+}
+
+extern "C" fn start_procfs_thread(fs: *mut Procfs) -> ! {
     let fs: Box<dyn FileSystem> = unsafe { Box::from_raw(fs) };
     run_fs_thread(fs)
 }

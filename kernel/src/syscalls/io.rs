@@ -74,9 +74,8 @@ pub(super) fn resolve_path(
 pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
 
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if count == 0 {
         return 0;
@@ -84,14 +83,14 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
 
     let buffer = unsafe { core::slice::from_raw_parts(buffer_ptr, count) }.to_vec();
 
-    match thread.fd_table.get_fd(fd) {
+    match info.lock().fd_table.get_fd(fd).cloned() {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
             StandardStream::Stdout | StandardStream::Stderr => {
                 tty::write_output(&buffer);
                 count as u64
             }
             StandardStream::Stdin => {
-                thread.errno = Errno::EINVAL;
+                info.lock().errno = Errno::EINVAL;
                 !0u64
             }
         },
@@ -111,7 +110,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 match fs_api::file_info(&file.path) {
                     Ok(info) => file.offset = info.size,
                     Err(_) => {
-                        thread.errno = Errno::EINVAL;
+                        info.lock().errno = Errno::EINVAL;
                         return !0u64;
                     }
                 }
@@ -122,17 +121,17 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                         offset: file.offset + written,
                         ..file
                     });
-                    thread.fd_table.replace_fd(fd, new_fd);
+                    info.lock().fd_table.replace_fd(fd, new_fd);
                     written
                 }
                 Err(_) => {
-                    thread.errno = Errno::EINVAL;
+                    info.lock().errno = Errno::EINVAL;
                     !0u64
                 }
             }
         }
         None => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             !0u64
         }
     }
@@ -142,10 +141,9 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
 pub fn sys_close(fd: u64) -> i32 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
-    match thread.fd_table.close_fd(fd) {
+    match info.lock().fd_table.close_fd(fd) {
         Some(FileDescriptor::Pipe(pipe)) => {
             let mut guard = pipe.write();
             guard.close_reader();
@@ -153,7 +151,7 @@ pub fn sys_close(fd: u64) -> i32 {
         }
         Some(_) => 0,
         None => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             -1
         }
     }
@@ -162,29 +160,29 @@ pub fn sys_close(fd: u64) -> i32 {
 pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if count == 0 {
         return 0;
     }
 
     if buffer_ptr.is_null() {
-        thread.errno = Errno::EFAULT;
+        info.lock().errno = Errno::EFAULT;
         return -1;
     }
 
     interrupts::enable();
 
     // Get kernel data first - all potentially blocking operations happen here
-    let kernel_data = match thread.fd_table.get_fd(fd) {
+    let fd_info = info.lock().fd_table.get_fd(fd).cloned();
+    let kernel_data = match fd_info {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
             StandardStream::Stdin => {
                 interrupts::enable();
                 read_from_stdin(count)
             }
             StandardStream::Stdout | StandardStream::Stderr => {
-                thread.errno = Errno::EINVAL;
+                info.lock().errno = Errno::EINVAL;
                 return -1;
             }
         },
@@ -198,13 +196,13 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             match fs_api::read_bytes(&file.path, file.offset as usize, count) {
                 Ok(data) => Ok(data),
                 Err(_) => {
-                    thread.errno = Errno::EINVAL;
+                    info.lock().errno = Errno::EINVAL;
                     Err(-1)
                 }
             }
         }
         None => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return -1;
         }
     };
@@ -226,15 +224,18 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
     user_buffer.copy_from_slice(&data[..bytes_to_copy]);
 
     // Update file offset if reading from FsFile
-    if let Some(FileDescriptor::FsFile(file)) = thread.fd_table.get_fd(fd).cloned() {
-        let new_off = file.offset + bytes_to_copy as u64;
-        thread.fd_table.replace_fd(
-            fd,
-            FileDescriptor::FsFile(FsFile {
-                offset: new_off,
-                ..file
-            }),
-        );
+    {
+        let fd_info = info.lock().fd_table.get_fd(fd).cloned();
+        if let Some(FileDescriptor::FsFile(file)) = fd_info {
+            let new_off = file.offset + bytes_to_copy as u64;
+            info.lock().fd_table.replace_fd(
+                fd,
+                FileDescriptor::FsFile(FsFile {
+                    offset: new_off,
+                    ..file
+                }),
+            );
+        }
     }
 
     bytes_to_copy as i64
@@ -280,11 +281,10 @@ fn read_from_stdin(max_count: usize) -> Result<alloc::vec::Vec<u8>, i64> {
 pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if path_ptr.is_null() {
-        thread.errno = Errno::EFAULT;
+        info.lock().errno = Errno::EFAULT;
         return -1;
     }
 
@@ -299,22 +299,22 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
     }
     // If no null terminator within bound, treat as invalid
     if buf.is_empty() || buf.len() == 1024 {
-        thread.errno = Errno::EINVAL;
+        info.lock().errno = Errno::EINVAL;
         return -1;
     }
 
     let path_str = match core::str::from_utf8(&buf) {
         Ok(s) => s,
         Err(_) => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return -1;
         }
     };
 
-    let path = match resolve_path(path_str, &thread.cwd) {
+    let path = match resolve_path(path_str, &info.lock().cwd) {
         Ok(path) => path,
         Err(_) => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return -1;
         }
     };
@@ -333,11 +333,11 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         Err(_) => {
             if create {
                 if fs_api::create_file(&path).is_err() {
-                    thread.errno = Errno::EINVAL;
+                    info.lock().errno = Errno::EINVAL;
                     return -1;
                 }
             } else {
-                thread.errno = Errno::EINVAL;
+                info.lock().errno = Errno::EINVAL;
                 return -1;
             }
         }
@@ -348,7 +348,7 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         offset,
         append,
     });
-    let fd = thread.fd_table.allocate_fd(desc);
+    let fd = info.lock().fd_table.allocate_fd(desc);
     fd as i64
 }
 
@@ -383,11 +383,10 @@ fn read_from_pipe(
 pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if path_ptr.is_null() || buffer_ptr.is_null() {
-        thread.errno = Errno::EFAULT;
+        info.lock().errno = Errno::EFAULT;
         return -1;
     }
 
@@ -406,22 +405,22 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
     }
     // If no null terminator within bound, treat as invalid
     if buf.is_empty() || buf.len() == 1024 {
-        thread.errno = Errno::EINVAL;
+        info.lock().errno = Errno::EINVAL;
         return -1;
     }
 
     let path_str = match core::str::from_utf8(&buf) {
         Ok(s) => s,
         Err(_) => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return -1;
         }
     };
 
-    let path = match resolve_path(path_str, &thread.cwd) {
+    let path = match resolve_path(path_str, &info.lock().cwd) {
         Ok(path) => path,
         Err(_) => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return -1;
         }
     };
@@ -431,7 +430,7 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
     let files = match fs_api::list_files(&path) {
         Ok(files) => files,
         Err(_) => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return -1;
         }
     };
@@ -482,24 +481,23 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
 pub fn sys_poll(fd: u64, events_ptr: *mut PollState, timeout_ms: u64) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if events_ptr.is_null() {
-        thread.errno = Errno::EFAULT;
+        info.lock().errno = Errno::EFAULT;
         return -1;
     }
 
-    let descriptor = match thread.fd_table.get_fd(fd).cloned() {
+    let descriptor = match info.lock().fd_table.get_fd(fd).cloned() {
         Some(desc) => desc,
         None => {
-            thread.errno = Errno::EBADF;
+            info.lock().errno = Errno::EBADF;
             return -1;
         }
     };
 
     let FileDescriptor::FsFile(file) = descriptor else {
-        thread.errno = Errno::EINVAL;
+        info.lock().errno = Errno::EINVAL;
         return -1;
     };
 
@@ -516,7 +514,7 @@ pub fn sys_poll(fd: u64, events_ptr: *mut PollState, timeout_ms: u64) -> i64 {
             0
         }
         Err(err) => {
-            thread.errno = Errno::from(err);
+            info.lock().errno = Errno::from(err);
             -1
         }
     }
@@ -525,26 +523,25 @@ pub fn sys_poll(fd: u64, events_ptr: *mut PollState, timeout_ms: u64) -> i64 {
 pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if buffer_ptr.is_null() {
-        thread.errno = Errno::EFAULT;
+        info.lock().errno = Errno::EFAULT;
         return -1;
     }
 
     if size == 0 {
-        thread.errno = Errno::EINVAL;
+        info.lock().errno = Errno::EINVAL;
         return -1;
     }
 
     // Get current working directory as string
-    let cwd_str = thread.cwd.to_string();
+    let cwd_str = info.lock().cwd.to_string();
     let cwd_bytes = cwd_str.as_bytes();
 
     // Need space for string + null terminator
     if cwd_bytes.len() + 1 > size {
-        thread.errno = Errno::EINVAL;
+        info.lock().errno = Errno::EINVAL;
         return -1;
     }
 
@@ -561,11 +558,10 @@ pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {
 pub fn sys_chdir(path_ptr: *const u8) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if path_ptr.is_null() {
-        thread.errno = Errno::EFAULT;
+        info.lock().errno = Errno::EFAULT;
         return -1;
     }
 
@@ -580,23 +576,23 @@ pub fn sys_chdir(path_ptr: *const u8) -> i64 {
     }
     // If no null terminator within bound, treat as invalid
     if buf.is_empty() || buf.len() == 1024 {
-        thread.errno = Errno::EINVAL;
+        info.lock().errno = Errno::EINVAL;
         return -1;
     }
 
     let path_str = match core::str::from_utf8(&buf) {
         Ok(s) => s,
         Err(_) => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return -1;
         }
     };
 
     // Resolve the target path (absolute or relative to current cwd)
-    let new_path = match resolve_path(path_str, &thread.cwd) {
+    let new_path = match resolve_path(path_str, &info.lock().cwd) {
         Ok(path) => path,
         Err(_) => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return -1;
         }
     };
@@ -611,18 +607,18 @@ pub fn sys_chdir(path_ptr: *const u8) -> i64 {
         match fs_api::file_info(&new_path) {
             Ok(file) => {
                 if file.kind != crate::fs::FileKind::Directory {
-                    thread.errno = Errno::EINVAL;
+                    info.lock().errno = Errno::EINVAL;
                     return -1;
                 }
             }
             Err(_) => {
-                thread.errno = Errno::EINVAL;
+                info.lock().errno = Errno::EINVAL;
                 return -1;
             }
         }
     }
 
     // Update the current working directory
-    thread.cwd = new_path;
+    info.lock().cwd = new_path;
     0
 }

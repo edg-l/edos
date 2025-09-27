@@ -283,6 +283,13 @@ pub fn mount_system_fs() -> ! {
         log!("Failed to mount devfs at {:?}: {err:?}", dev_dir);
     }
 
+    log!("Mounting procfs /proc");
+    let proc_dir = root.join("proc").normalize();
+    let _ = fs::api::create_dir(&proc_dir);
+    if let Err(err) = fs::api::mount_partition(0, 0, proc_dir.clone(), FilesystemType::Procfs) {
+        log!("Failed to mount procfs at {:?}: {err:?}", proc_dir);
+    }
+
     // TODO: add support for fstab someday.
     log!("Mounting memfs /tmp");
     let tmp_dir = root.join("tmp").normalize();

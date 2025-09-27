@@ -19,25 +19,24 @@ const MAP_PRIVATE: u32 = 0x02;
 pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32) -> u64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
 
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if length == 0 {
-        thread.errno = Errno::EINVAL;
+        info.lock().errno = Errno::EINVAL;
         return !0u64; // -1 (EINVAL)
     }
 
     // Only support anonymous private mappings for now
     if (flags & MAP_ANONYMOUS) == 0 || (flags & MAP_PRIVATE) == 0 {
         println!("Unsupported mapping type");
-        thread.errno = Errno::EINVAL;
+        info.lock().errno = Errno::EINVAL;
         return !0u64; // -1 (EINVAL)
     }
 
     let map_addr = if addr == 0 {
         // Find free virtual address
-        find_free_virtual_address(&mut thread, length)
+        find_free_virtual_address(&mut info.lock(), length)
     } else {
         VirtAddr::new(addr)
     };
@@ -52,13 +51,14 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32) -> u64 {
     }
 
     // Map the memory
-    if thread
+    if info
+        .lock()
         .memory_manager
         .lock()
         .map_memory(map_addr, length, page_flags)
         .is_ok()
     {
-        thread.memory_mappings.insert(
+        info.lock().memory_mappings.insert(
             map_addr,
             MemoryMapping {
                 size: length,
@@ -69,7 +69,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32) -> u64 {
 
         map_addr.as_u64()
     } else {
-        thread.errno = Errno::ENOMEM;
+        info.lock().errno = Errno::ENOMEM;
         !0u64 // -1 (ENOMEM)
     }
 }
@@ -77,21 +77,21 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32) -> u64 {
 pub fn sys_munmap(addr: u64, length: u64) -> i32 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if length == 0 {
-        thread.errno = Errno::EINVAL;
+        info.lock().errno = Errno::EINVAL;
         return -1; // EINVAL
     }
 
     let map_addr = VirtAddr::new(addr);
 
     // Check if this is a valid mapping
-    if let Some(mapping) = thread.memory_mappings.remove(&map_addr) {
+    if let Some(mapping) = info.lock().memory_mappings.remove(&map_addr) {
         if mapping.size == length {
             // Unmap the memory
-            if thread
+            if info
+                .lock()
                 .memory_manager
                 .lock()
                 .unmap_memory(map_addr, length)
@@ -99,17 +99,17 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
             {
                 0 // Success
             } else {
-                thread.errno = Errno::EFAULT;
+                info.lock().errno = Errno::EFAULT;
                 -1 // EFAULT
             }
         } else {
             // Re-insert the mapping since we couldn't handle partial unmapping
-            thread.memory_mappings.insert(map_addr, mapping);
-            thread.errno = Errno::EINVAL;
+            info.lock().memory_mappings.insert(map_addr, mapping);
+            info.lock().errno = Errno::EINVAL;
             -1 // EINVAL - partial unmapping not supported yet
         }
     } else {
-        thread.errno = Errno::EINVAL;
+        info.lock().errno = Errno::EINVAL;
         -1 // EINVAL - not a valid mapping
     }
 }

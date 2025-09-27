@@ -450,6 +450,7 @@ pub fn print_partitions(partitions: &[Partition]) {
             Some(FilesystemType::Iso9660) => "ISO9660",
             Some(FilesystemType::Memfs) => "MEMFS",
             Some(FilesystemType::Devfs) => "DEVFS",
+            Some(FilesystemType::Procfs) => "PROCFS",
             Some(FilesystemType::Unknown) => "Unknown",
             None => "None",
         };

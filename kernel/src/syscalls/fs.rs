@@ -91,6 +91,7 @@ fn filesystem_type_to_u32(fs: FilesystemType) -> u32 {
         FilesystemType::Iso9660 => 5,
         FilesystemType::Memfs => 6,
         FilesystemType::Devfs => 7,
+        FilesystemType::Procfs => 8,
     }
 }
 
@@ -101,41 +102,40 @@ pub fn sys_mount(
     fs_type: *const u8,
 ) -> i64 {
     let sched = sched();
-    let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    let mut info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
 
-    let mount_point = match read_user_path(path_ptr, &thread.cwd) {
+    let mount_point = match read_user_path(path_ptr, &info.lock().cwd) {
         Ok(path) => path,
         Err(errno) => {
-            thread.errno = errno;
+            info.lock().errno = errno;
             return -1;
         }
     };
 
     interrupts::enable();
 
-    let info = match file_info(&mount_point) {
+    let finfo = match file_info(&mount_point) {
         Ok(info) => info,
         Err(Error::FileNotFound) => {
-            thread.errno = Errno::ENOENT;
+            info.lock().errno = Errno::ENOENT;
             return -1;
         }
         Err(err) => {
-            thread.errno = Errno::from(err);
+            info.lock().errno = Errno::from(err);
             return -1;
         }
     };
 
-    if info.kind != FileKind::Directory {
-        thread.errno = Errno::ENOTDIR;
+    if finfo.kind != FileKind::Directory {
+        info.lock().errno = Errno::ENOTDIR;
         return -1;
     }
 
     let fs_type = match read_user_str(fs_type) {
         Ok(x) => x,
         Err(err) => {
-            thread.errno = err;
+            info.lock().errno = err;
             return -1;
         }
     }
@@ -146,6 +146,7 @@ pub fn sys_mount(
         "fat32" => FilesystemType::Fat32,
         "memfs" => FilesystemType::Memfs,
         "devfs" => FilesystemType::Devfs,
+        "procfs" => FilesystemType::Procfs,
         _ => FilesystemType::Unknown,
     };
 
@@ -157,7 +158,7 @@ pub fn sys_mount(
     ) {
         Ok(_) => 0,
         Err(err) => {
-            thread.errno = Errno::from(err);
+            info.lock().errno = Errno::from(err);
             -1
         }
     }
@@ -166,13 +167,12 @@ pub fn sys_mount(
 pub fn sys_mkdir(path_ptr: *const u8) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
-    let path = match read_user_path(path_ptr, &thread.cwd) {
+    let path = match read_user_path(path_ptr, &info.lock().cwd) {
         Ok(path) => path,
         Err(errno) => {
-            thread.errno = errno;
+            info.lock().errno = errno;
             return -1;
         }
     };
@@ -182,7 +182,7 @@ pub fn sys_mkdir(path_ptr: *const u8) -> i64 {
     match create_dir(&path) {
         Ok(_) => 0,
         Err(err) => {
-            thread.errno = Errno::from(err);
+            info.lock().errno = Errno::from(err);
             -1
         }
     }
@@ -191,13 +191,12 @@ pub fn sys_mkdir(path_ptr: *const u8) -> i64 {
 pub fn sys_rmdir(path_ptr: *const u8) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
-    let path = match read_user_path(path_ptr, &thread.cwd) {
+    let path = match read_user_path(path_ptr, &info.lock().cwd) {
         Ok(path) => path,
         Err(errno) => {
-            thread.errno = errno;
+            info.lock().errno = errno;
             return -1;
         }
     };
@@ -207,7 +206,7 @@ pub fn sys_rmdir(path_ptr: *const u8) -> i64 {
     match remove_dir(&path) {
         Ok(_) => 0,
         Err(err) => {
-            thread.errno = Errno::from(err);
+            info.lock().errno = Errno::from(err);
             -1
         }
     }
@@ -216,13 +215,12 @@ pub fn sys_rmdir(path_ptr: *const u8) -> i64 {
 pub fn sys_rmdir_all(path_ptr: *const u8) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
-    let path = match read_user_path(path_ptr, &thread.cwd) {
+    let path = match read_user_path(path_ptr, &info.lock().cwd) {
         Ok(path) => path,
         Err(errno) => {
-            thread.errno = errno;
+            info.lock().errno = errno;
             return -1;
         }
     };
@@ -232,7 +230,7 @@ pub fn sys_rmdir_all(path_ptr: *const u8) -> i64 {
     match remove_dir_recursive(&path) {
         Ok(_) => 0,
         Err(err) => {
-            thread.errno = Errno::from(err);
+            info.lock().errno = Errno::from(err);
             -1
         }
     }
@@ -241,13 +239,13 @@ pub fn sys_rmdir_all(path_ptr: *const u8) -> i64 {
 pub fn sys_unlink(path_ptr: *const u8) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
 
-    let path = match read_user_path(path_ptr, &thread.cwd) {
+    info.lock().errno = Errno::Clear;
+
+    let path = match read_user_path(path_ptr, &info.lock().cwd) {
         Ok(path) => path,
         Err(errno) => {
-            thread.errno = errno;
+            info.lock().errno = errno;
             return -1;
         }
     };
@@ -257,7 +255,7 @@ pub fn sys_unlink(path_ptr: *const u8) -> i64 {
     match remove_file(&path) {
         Ok(_) => 0,
         Err(err) => {
-            thread.errno = Errno::from(err);
+            info.lock().errno = Errno::from(err);
             -1
         }
     }
@@ -277,11 +275,10 @@ struct SysPartition {
 pub fn sys_list_partitions(buffer: *mut u8, size: u64) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if buffer.is_null() {
-        thread.errno = Errno::EFAULT;
+        info.lock().errno = Errno::EFAULT;
         return -1;
     }
 
@@ -321,11 +318,10 @@ pub fn sys_list_partitions(buffer: *mut u8, size: u64) -> i64 {
 pub fn sys_list_mounts(buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if buffer_ptr.is_null() {
-        thread.errno = Errno::EFAULT;
+        info.lock().errno = Errno::EFAULT;
         return -1;
     }
 

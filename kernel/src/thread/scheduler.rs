@@ -24,6 +24,7 @@ use crate::{
     thread::{
         UserThreadInfo,
         context::CpuContext,
+        irqlock::IrqSpinlock,
         runqueue::RunQueue,
         thread::{Flags, State, THREADS, Thread, ThreadId, get_thread_by_id},
     },
@@ -616,7 +617,7 @@ impl Scheduler {
         }
     }
 
-    pub fn current_thread_info(&self) -> Arc<Mutex<UserThreadInfo>> {
+    pub fn current_thread_info(&self) -> Arc<IrqSpinlock<UserThreadInfo>> {
         THREADS
             .get_info(self.current_thread_id().unwrap())
             .clone()
