@@ -310,6 +310,8 @@ impl Scheduler {
 
     fn save_current_thread(&self, context: *mut CpuContext) {
         if let Some(current) = self.current_thread() {
+            let end_tick = Instant::now().tick();
+            current.end_run(end_tick);
             unsafe {
                 *current.ctx.lock() = (*context).clone();
                 if let Some(user) = &current.user {
@@ -336,6 +338,7 @@ impl Scheduler {
         next.state.store(State::Running as u8, Ordering::Release);
 
         let now = Instant::now();
+        next.begin_run(now.tick());
         let mut deadline = now + self.default_timeslice;
 
         let earliest_deadline = self.earliest_deadline.load(Ordering::Acquire);

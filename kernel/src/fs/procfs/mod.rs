@@ -65,15 +65,16 @@ impl Procfs {
     }
 
     fn render_process_table(entries: &[ThreadSnapshot]) -> String {
-        let mut table = String::from("PID   TYPE   STATE     PRIO CPU NAME\n");
+        let mut table = String::from("PID   TYPE   STATE     PRIO CPU CPUms NAME\n");
         for entry in entries {
             let ty = if entry.is_kernel { "kernel" } else { "user" };
             let state = format!("{:?}", entry.state);
             let name = entry.display_name();
+            let cpu_ms = entry.cpu_time_ns / 1_000_000;
             let _ = writeln!(
                 table,
-                "{:<5} {:<6} {:<9} {:<4} {:<3} {}",
-                entry.tid, ty, state, entry.priority, entry.cpu, name
+                "{:<5} {:<6} {:<9} {:<4} {:<3} {:>6} {}",
+                entry.tid, ty, state, entry.priority, entry.cpu, cpu_ms, name
             );
         }
         table
@@ -260,6 +261,7 @@ struct ThreadSnapshot {
     flags: u32,
     slice_deadline: u64,
     sleep_deadline: u64,
+    cpu_time_ns: u64,
     exit_code: i32,
     kstack_top: u64,
     is_kernel: bool,
@@ -291,6 +293,7 @@ impl ThreadSnapshot {
         let flags = thread.flags.load(Ordering::Acquire);
         let slice_deadline = thread.slice_deadline.load(Ordering::Acquire);
         let sleep_deadline = thread.sleep_deadline.load(Ordering::Acquire);
+        let cpu_time_ns = thread.cpu_time_ns();
         let exit_code = thread.exit_code.load(Ordering::Acquire);
         let kstack_top = thread.kstack_top;
         let is_kernel = thread.user.is_none();
@@ -321,6 +324,7 @@ impl ThreadSnapshot {
             flags,
             slice_deadline,
             sleep_deadline,
+            cpu_time_ns,
             exit_code,
             kstack_top,
             is_kernel,
@@ -361,6 +365,13 @@ impl ThreadSnapshot {
         let _ = writeln!(out, "Priority: {}", self.priority);
         let _ = writeln!(out, "CPU: {}", self.cpu);
         let _ = writeln!(out, "CPU Affinity: 0x{:08x}", self.cpu_affinity);
+        let cpu_time_ms = self.cpu_time_ns / 1_000_000;
+        let cpu_time_frac = (self.cpu_time_ns / 1_000) % 1000;
+        let _ = writeln!(
+            out,
+            "CPU Time: {}.{:03} ms ({} ns)",
+            cpu_time_ms, cpu_time_frac, self.cpu_time_ns
+        );
         let _ = writeln!(out, "Flags: 0x{:08x}", self.flags);
         let _ = writeln!(out, "Slice Deadline: {}", self.slice_deadline);
         let _ = writeln!(out, "Sleep Deadline: {}", self.sleep_deadline);

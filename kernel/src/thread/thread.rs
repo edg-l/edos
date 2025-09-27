@@ -12,7 +12,7 @@ use x86_64::{
 
 use crate::{
     boot::boot_info,
-    drivers::fpu::FpuState,
+    drivers::{fpu::FpuState, hpet::driver::get_hpet_timer},
     fs::path::Path,
     loader::{ElfLoadError, load_elf},
     memory::mapper::{MemoryManager, active_level_4_table, get_level_4_table},
@@ -29,6 +29,7 @@ use crate::{
         setup_user_stack,
         util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
     },
+    timer::Instant,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -91,6 +92,10 @@ pub struct Thread {
     // Sleep data split to avoid locking:
     pub sleep_deadline: AtomicU64, // instant counter value
 
+    // CPU time accounting (nanoseconds + current run start tick)
+    pub cpu_time_ns: AtomicU64,
+    pub run_start_tick: AtomicU64,
+
     pub exit_code: AtomicI32,
 
     pub user: Option<Arc<RwLock<UserThread>>>,
@@ -140,6 +145,52 @@ impl Thread {
         self.mark_need_resched();
     }
 
+    pub fn begin_run(&self, start_tick: u64) {
+        self.run_start_tick.store(start_tick, Ordering::Release);
+    }
+
+    pub fn end_run(&self, end_tick: u64) {
+        let start_tick = self.run_start_tick.swap(0, Ordering::AcqRel);
+        if start_tick == 0 {
+            return;
+        }
+
+        let elapsed_ticks = end_tick.saturating_sub(start_tick);
+        if elapsed_ticks == 0 {
+            return;
+        }
+
+        if let Some(timer) = get_hpet_timer() {
+            let elapsed_ns = timer.ticks_to_nanos(elapsed_ticks);
+            if elapsed_ns != 0 {
+                self.cpu_time_ns.fetch_add(elapsed_ns, Ordering::AcqRel);
+            }
+        }
+    }
+
+    pub fn cpu_time_ns(&self) -> u64 {
+        let accumulated = self.cpu_time_ns.load(Ordering::Acquire);
+        let start_tick = self.run_start_tick.load(Ordering::Acquire);
+
+        if start_tick == 0 {
+            return accumulated;
+        }
+
+        // Only report in-flight runtime while the scheduler still considers us running.
+        if !matches!(self.state(), State::Running) {
+            return accumulated;
+        }
+
+        if let Some(timer) = get_hpet_timer() {
+            let now_tick = Instant::now().tick();
+            let extra_ticks = now_tick.saturating_sub(start_tick);
+            let extra_ns = timer.ticks_to_nanos(extra_ticks);
+            return accumulated.saturating_add(extra_ns);
+        }
+
+        accumulated
+    }
+
     pub fn new_kernel(name: Option<String>, entry_point: u64, arg: u64) -> Arc<Self> {
         let initial_kstack_top = kthread_stack_alloc();
         let mut context =
@@ -162,6 +213,8 @@ impl Thread {
             slice_deadline: AtomicU64::new(0),
             priority: AtomicU8::new(DEFAULT_PRIORITY),
             sleep_deadline: AtomicU64::new(0),
+            cpu_time_ns: AtomicU64::new(0),
+            run_start_tick: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
         });
@@ -243,6 +296,8 @@ impl Thread {
             slice_deadline: AtomicU64::new(0),
             priority: AtomicU8::new(DEFAULT_PRIORITY),
             sleep_deadline: AtomicU64::new(0),
+            cpu_time_ns: AtomicU64::new(0),
+            run_start_tick: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
             user: Some(Arc::new(RwLock::new(UserThread {
