@@ -128,8 +128,14 @@ impl<T: Clone> Broadcaster<T> {
     }
 
     pub fn cleanup(&self) {
+        let subs = self.subs.read();
+
+        if subs.is_empty() {
+            return;
+        }
+
         let mut to_remove = Vec::new();
-        for sub in self.subs.read().iter() {
+        for sub in subs.iter() {
             if let Some(thread) = get_thread_by_id(*sub.0) {
                 if thread.state() == State::Dying {
                     to_remove.push(*sub.0);

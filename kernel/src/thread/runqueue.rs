@@ -4,9 +4,12 @@ use alloc::{collections::VecDeque, sync::Arc};
 
 use crate::thread::thread::Thread;
 
-const PRIORITY_LEVELS: usize = 16;
+pub const PRIORITY_LEVELS: usize = 16;
 const BOOST_DELTA: usize = 2;
 const BOOST_STREAK_LIMIT: usize = 2;
+
+pub const DEFAULT_PRIORITY: u8 = 7;
+pub const IO_PRIORITY: u8 = 8;
 
 #[derive(Clone)]
 struct RunQueueEntry {

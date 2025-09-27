@@ -23,6 +23,7 @@ use crate::{
         context::CpuContext,
         fd::FileDescriptorTable,
         paging::allocate_process_pml4,
+        runqueue::{DEFAULT_PRIORITY, PRIORITY_LEVELS},
         scheduler::switch_to_kernel_page,
         setup_user_stack,
         util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
@@ -79,7 +80,7 @@ pub struct Thread {
 
     // Scheduling-visible fields as atomics:
     pub state: AtomicU8,         // State as u8
-    pub priority: AtomicU8,      // 0..=16 small static priority
+    pub priority: AtomicU8,      // 0..16 small static priority, higher means more prio
     pub cpu_affinity: AtomicU32, // bitmask of allowed CPUs
     pub flags: AtomicU32,        // Flags
 
@@ -124,7 +125,8 @@ impl Thread {
     }
 
     pub fn set_priority(&self, prio: u8) {
-        self.priority.store(prio.min(15), Ordering::Release);
+        self.priority
+            .store(prio.min((PRIORITY_LEVELS - 1) as u8), Ordering::Release);
         self.mark_need_resched();
     }
 
@@ -157,7 +159,7 @@ impl Thread {
             cpu_affinity: AtomicU32::new(0),
             flags: AtomicU32::new(0),
             slice_deadline: AtomicU64::new(0),
-            priority: AtomicU8::new(15),
+            priority: AtomicU8::new(DEFAULT_PRIORITY),
             sleep_deadline: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
@@ -238,7 +240,7 @@ impl Thread {
             cpu_affinity: AtomicU32::new(0),
             flags: AtomicU32::new(0),
             slice_deadline: AtomicU64::new(0),
-            priority: AtomicU8::new(15),
+            priority: AtomicU8::new(DEFAULT_PRIORITY),
             sleep_deadline: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),

@@ -37,20 +37,21 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
     queue.force_push(scancode);
 
     if let Some(tid) = KEYBOARD_THREAD_ID.get() {
-        sched().wake_thread_irq(ThreadId(*tid), WakePriority::Interrupt);
+        sched().wake_thread_irq(*tid, WakePriority::Interrupt);
     }
 
     unsafe { get_lapic().end_of_interrupt() };
 }
 
-pub static KEYBOARD_THREAD_ID: Once<u64> = Once::new();
+pub static KEYBOARD_THREAD_ID: Once<ThreadId> = Once::new();
 
 pub extern "C" fn driver_main() -> ! {
     without_interrupts(|| unsafe {
         enable_ps2_keyboard();
 
-        let tid = sched().current_thread_id().unwrap();
-        KEYBOARD_THREAD_ID.call_once(|| tid.0);
+        let thread = sched().current_thread().unwrap();
+        KEYBOARD_THREAD_ID.call_once(|| thread.id);
+        thread.set_priority(10); // Priority 10, input should be handled asap
     });
 
     let mut keyboard = Keyboard::new(

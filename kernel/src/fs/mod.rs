@@ -31,6 +31,7 @@ use crate::{
     memory::mapper::MemoryManager,
     thread::{
         mailbox::Mailbox,
+        runqueue::{DEFAULT_PRIORITY, IO_PRIORITY},
         scheduler::sched,
         thread::ThreadId,
         util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_kthread_named_arg},
@@ -513,6 +514,8 @@ pub static FS_WORKER_MAILBOXES: RwLock<
 
 pub extern "C" fn fs_main_thread() -> ! {
     log!("Started main fs");
+    let thread = sched().current_thread().unwrap();
+    thread.set_priority(IO_PRIORITY);
     let devices = list_devices();
     log!("Listed devices");
 
@@ -891,6 +894,8 @@ extern "C" fn start_devfs_thread(fs: *mut DevFs) -> ! {
 
 fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
     log!("Fs thread started");
+    let thread = sched().current_thread().unwrap();
+    thread.set_priority(IO_PRIORITY);
     let mut virtual_files: BTreeMap<Path, File> = BTreeMap::new();
 
     // Get our mailbox from the FS main

@@ -28,6 +28,7 @@ use crate::{
     log, println,
     thread::{
         mailbox::{Mailbox, Request},
+        runqueue::IO_PRIORITY,
         scheduler::{WakePriority, sched},
         thread::ThreadId,
         util::queue_spawn_kthread_named,
@@ -129,9 +130,11 @@ pub(super) enum AhciResponse {
 type PortMailbox = Mailbox<Command, AhciResponse>;
 
 pub extern "C" fn ahci_driver_main() -> ! {
-    let tid = sched().current_thread_id().unwrap();
+    let thread = sched().current_thread().unwrap();
+    thread.set_priority(IO_PRIORITY);
+    let tid = thread.id;
 
-    let requests = AHCI_REQUESTS.call_once(|| Mailbox::new().into());
+    let requests = AHCI_REQUESTS.call_once(Mailbox::new);
 
     let devices: Vec<PciDevice> = pci_manager().read().get_devices().to_vec();
 
@@ -295,7 +298,9 @@ pub extern "C" fn ahci_driver_main() -> ! {
 }
 
 extern "C" fn port_worker_thread() -> ! {
-    let tid = sched().current_thread_id().unwrap();
+    let thread = sched().current_thread().unwrap();
+    thread.set_priority(IO_PRIORITY);
+    let tid = thread.id;
 
     let mailbox = {
         loop {
