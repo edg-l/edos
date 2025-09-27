@@ -6,7 +6,7 @@ use core::{
 };
 
 use buddy_system_allocator::Heap;
-use x86_64::{align_up, structures::paging::PageTableFlags};
+use x86_64::{VirtAddr, align_up, structures::paging::PageTableFlags};
 
 use crate::{
     memory::{KERNEL_HEAP, KERNEL_HEAP_SIZE, mapper::memory_mapper, valloc::vmalloc},
@@ -23,6 +23,8 @@ pub struct Allocator {
     inner: IrqSpinlock<Heap<32>>,
 }
 
+const MIN_EXPANSION: u64 = 1 << 20; // 1mb
+
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         {
@@ -32,32 +34,46 @@ unsafe impl GlobalAlloc for Allocator {
             }
         }
 
-        // Align to page size, minimum heap expansion of 256 pages, 1mb.
-        let padded_layout = layout.pad_to_align();
-        let requested_size = align_up(padded_layout.size() as u64 * 3, 4096).max(4096 * 256);
-        let addr = vmalloc(requested_size);
+        // expansion size
+        let padded = layout.pad_to_align();
+        let mut need = padded.size() as u64;
+        need = align_up(need, 4096);
+
+        // at least 1 MiB, rounded power of two, cap at 1<<32
+        let mut chunk = need.next_power_of_two().max(MIN_EXPANSION);
+        let max_block: u64 = 1u64 << 32;
+        if chunk > max_block {
+            chunk = max_block;
+        }
+
+        // over-reserve to allow alignment
+        let reserve = chunk * 2;
+        let raw = vmalloc(reserve); // returns 4 KiB aligned
+
+        // align base up to chunk
+        let base = align_up(raw.as_u64(), chunk);
+        let end = base + chunk;
+
+        // only map the aligned window
         {
             let mut mapper = memory_mapper();
             mapper
                 .map_memory(
-                    addr,
-                    requested_size,
+                    VirtAddr::new(base),
+                    chunk,
                     PageTableFlags::WRITABLE | PageTableFlags::GLOBAL,
                 )
                 .expect("failed to map heap expansion");
         }
 
-        let mut heap = self.inner.lock();
-        unsafe {
-            heap.add_to_heap(
-                addr.as_u64() as usize,
-                addr.as_u64() as usize + requested_size as usize,
-            );
+        // add to heap and retry
+        {
+            let mut heap = self.inner.lock();
+            unsafe { heap.add_to_heap(base as usize, end as usize) };
+            heap.alloc(layout)
+                .map(|b| b.as_ptr())
+                .unwrap_or(core::ptr::null_mut())
         }
-
-        heap.alloc(layout)
-            .map(|block| block.as_ptr())
-            .unwrap_or(null_mut())
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
@@ -65,6 +81,32 @@ unsafe impl GlobalAlloc for Allocator {
             .lock()
             .dealloc(unsafe { NonNull::new_unchecked(ptr) }, layout);
     }
+}
+
+fn expand_for_alloc(
+    heap: &mut Heap<32>,
+    size: usize,
+    align: usize,
+    mut next_region_start: usize,
+) -> (usize, usize) {
+    // round up to alignment
+    let needed = (size + align - 1) & !(align - 1);
+    // round up to next power of two, but cap at max order
+    let mut len = needed.next_power_of_two();
+    let max_block = 1 << 32;
+    if len > max_block {
+        len = max_block;
+    }
+
+    // align start to len
+    next_region_start = (next_region_start + len - 1) & !(len - 1);
+    let end = next_region_start + len;
+
+    unsafe {
+        heap.add_to_heap(next_region_start, end);
+    }
+
+    (next_region_start, end)
 }
 
 pub fn init_heap() {
