@@ -54,7 +54,7 @@ impl WaitQueue {
                 q.pop_front()
             };
             if let Some(tid) = tid_opt {
-                sched().wake_thread(tid, true);
+                sched().wake_thread(tid, false);
                 true
             } else {
                 false
@@ -71,7 +71,7 @@ impl WaitQueue {
             };
             let n = tids.len();
             for tid in tids {
-                sched().wake_thread(tid, true);
+                sched().wake_thread(tid, false);
             }
             n
         })

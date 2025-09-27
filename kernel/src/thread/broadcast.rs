@@ -123,7 +123,7 @@ impl<T: Clone> Broadcaster<T> {
                 let mut q = sub.queue.lock();
                 q.push_back(msg.clone());
             }
-            sched.wake_thread(sub.owner, true);
+            sched.wake_thread(sub.owner, false);
         }
     }
 
