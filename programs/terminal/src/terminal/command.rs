@@ -66,6 +66,7 @@ pub(super) fn execute_command(state: &mut TerminalState, command: &str, args: &[
         "mkdir" => cmd_mkdir(state, args),
         "rmdir" => cmd_rmdir(state, args),
         "rm" => cmd_rm(state, args),
+        "ps" => cmd_ps(state, args),
         "clear" => state.clear_output(),
         _ => spawn_program(state, command, args),
     }
@@ -80,6 +81,7 @@ fn print_help(state: &mut TerminalState) {
         "- ls [path]",
         "- cat <path>",
         "- write <path> <content>",
+        "- ps [<path>]",
         "- partitions",
         "- mount [<device_id> <partition_idx> <mount_point> <fstype>]",
         "- mkdir <path>",
@@ -188,6 +190,34 @@ fn write_file(state: &mut TerminalState, args: &[String]) {
             let _ = sys_close(fd);
         }
         Err(_) => state.write_line("write: open failed"),
+    }
+}
+
+fn cmd_ps(state: &mut TerminalState, args: &[String]) {
+    let path = args
+        .first()
+        .map(String::as_str)
+        .unwrap_or("/proc/processes");
+
+    match open(path, 0) {
+        Ok(fd) => {
+            let read_result = read_to_end(fd, Some(64 * 1024));
+            let _ = sys_close(fd);
+
+            match read_result {
+                Ok(data) => match core::str::from_utf8(&data) {
+                    Ok(text) => {
+                        state.write_str(text);
+                        if !text.ends_with('\n') {
+                            state.write_line("");
+                        }
+                    }
+                    Err(_) => state.write_line("ps: non-text response"),
+                },
+                Err(_) => state.write_line("ps: read error"),
+            }
+        }
+        Err(_) => state.write_line(&format!("ps: failed to open {}", path)),
     }
 }
 
