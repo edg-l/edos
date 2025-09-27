@@ -67,6 +67,14 @@ impl<T> Subscriber<T> {
             };
         }
 
+        if dur.is_zero() {
+            return PollState {
+                readable: false,
+                writable: true,
+                error: false,
+            };
+        }
+
         sched.thread_sleep(dur);
 
         return PollState {

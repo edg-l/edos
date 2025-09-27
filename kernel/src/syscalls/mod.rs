@@ -11,7 +11,7 @@ use x86_64::{
 };
 
 use crate::{
-    fs::{Error as FsError, PollState},
+    fs::Error as FsError,
     gdt::selectors,
     log, println,
     syscalls::{
@@ -20,7 +20,8 @@ use crate::{
             sys_unlink,
         },
         io::{
-            sys_chdir, sys_close, sys_getcwd, sys_list_dir, sys_open, sys_poll, sys_read, sys_write,
+            SelectFd, sys_chdir, sys_close, sys_getcwd, sys_list_dir, sys_open, sys_poll, sys_read,
+            sys_write,
         },
         memory::{sys_mmap, sys_munmap},
     },
@@ -249,10 +250,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             ctx.rax = sys_chdir(path_ptr) as u64;
         }
         SYS_POLL => {
-            let fd = ctx.rdi;
-            let events_ptr = ctx.rsi as *mut PollState;
+            let fds_ptr = ctx.rdi as *mut SelectFd;
+            let count = ctx.rsi as usize;
             let timeout = ctx.rdx;
-            ctx.rax = sys_poll(fd, events_ptr, timeout) as u64;
+            ctx.rax = sys_poll(fds_ptr, count, timeout) as u64;
         }
         SYS_MMAP => {
             let addr = ctx.rdi;

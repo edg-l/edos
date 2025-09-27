@@ -146,9 +146,9 @@ pub unsafe fn sys_unlink(path: *const u8) -> i64 {
 
 // Re-export I/O types for convenience
 pub use io::{
-    DirEntry, FileType, IoError, IoResult, KeyEvent, PollState, STDERR, STDOUT, chdir,
-    get_raw_input, getcwd, ioctl, keyboard_fd, list_dir, open, open_flags, poll_fd, read_from_fd,
-    read_stdin, read_to_end, write_all_fd,
+    DirEntry, FileType, IoError, IoResult, KeyEvent, PollFd, PollState, STDERR, STDOUT, chdir,
+    get_raw_input, getcwd, ioctl, keyboard_fd, list_dir, open, open_flags, poll_fd, poll_fds,
+    read_from_fd, read_stdin, read_to_end, write_all_fd,
 };
 // Re-export memory constants
 pub use sys::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};

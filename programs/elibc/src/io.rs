@@ -2,7 +2,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use core::fmt;
+use core::{fmt, slice};
 use spin::Mutex;
 use thiserror::Error;
 
@@ -85,6 +85,34 @@ pub struct PollState {
     pub readable: bool,
     pub writable: bool,
     pub error: bool,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PollFd {
+    pub fd: u64,
+    pub interests: PollState,
+    pub result: PollState,
+}
+
+impl PollFd {
+    pub fn new(fd: u64, interests: PollState) -> Self {
+        Self {
+            fd,
+            interests,
+            result: PollState::default(),
+        }
+    }
+}
+
+impl Default for PollFd {
+    fn default() -> Self {
+        Self {
+            fd: 0,
+            interests: PollState::default(),
+            result: PollState::default(),
+        }
+    }
 }
 
 /// Helper function to write all bytes to a file descriptor, handling partial writes
@@ -320,9 +348,18 @@ pub fn get_raw_input(timeout_ms: u64, out_buf: &mut Vec<KeyEvent>, count: usize)
         return;
     };
 
-    match poll_fd(fd, timeout_ms) {
-        Ok(state) => {
-            if !state.readable {
+    let mut poll_entry = PollFd::new(
+        fd,
+        PollState {
+            readable: true,
+            writable: false,
+            error: true,
+        },
+    );
+
+    match poll_fds(slice::from_mut(&mut poll_entry), timeout_ms) {
+        Ok(ready) => {
+            if ready == 0 || !poll_entry.result.readable {
                 return;
             }
         }
@@ -354,18 +391,31 @@ pub fn ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) -> IoR
 
 /// Query poll state for a descriptor; `timeout_ms` currently advisory.
 pub fn poll_fd(fd: u64, timeout_ms: u64) -> IoResult<PollState> {
-    let mut state = PollState::default();
-    let result = unsafe {
-        syscall3(
-            SYS_POLL,
-            fd,
-            (&mut state as *mut PollState) as u64,
-            timeout_ms,
-        ) as isize
+    let mut entry = PollFd::new(
+        fd,
+        PollState {
+            readable: true,
+            writable: true,
+            error: true,
+        },
+    );
+
+    poll_fds(slice::from_mut(&mut entry), timeout_ms)?;
+    Ok(entry.result)
+}
+
+/// Poll multiple descriptors, returning the number that satisfied their interests.
+pub fn poll_fds(entries: &mut [PollFd], timeout_ms: u64) -> IoResult<usize> {
+    let (ptr, len) = if entries.is_empty() {
+        (core::ptr::null_mut::<PollFd>(), 0)
+    } else {
+        (entries.as_mut_ptr(), entries.len())
     };
 
+    let result = unsafe { syscall3(SYS_POLL, ptr as u64, len as u64, timeout_ms) as isize };
+
     if result >= 0 {
-        Ok(state)
+        Ok(result as usize)
     } else {
         Err(IoError::from(errno()))
     }

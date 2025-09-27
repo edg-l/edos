@@ -11,6 +11,7 @@ use crate::{
         pipe::{FileDescriptor, FsFile, Pipe, StandardStream},
         scheduler::sched,
     },
+    timer::Instant,
 };
 
 #[repr(C)]
@@ -472,51 +473,135 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
     written as i64
 }
 
-pub fn sys_poll(fd: u64, events_ptr: *mut PollState, timeout_ms: u64) -> i64 {
+pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
 
-    if events_ptr.is_null() {
+    if fds_ptr.is_null() && count != 0 {
         info.lock().errno = Errno::EFAULT;
         return -1;
     }
 
-    let descriptor = {
+    let timeout = if timeout_ms == u64::MAX {
+        None
+    } else {
+        Some(Duration::from_millis(timeout_ms))
+    };
+
+    if count == 0 {
+        if let Some(t) = timeout {
+            if !t.is_zero() {
+                interrupts::enable();
+                sched.thread_sleep(t);
+            }
+        } else {
+            // Sleep in chunks to allow wakeups from signals in the future
+            interrupts::enable();
+            loop {
+                sched.thread_sleep(Duration::from_millis(50));
+            }
+        }
+        return 0;
+    }
+
+    let fds = unsafe { core::slice::from_raw_parts_mut(fds_ptr, count) };
+
+    let descriptors = {
         let mut guard = info.lock();
         guard.errno = Errno::Clear;
-        guard.fd_table.get_fd(fd).cloned()
+        fds.iter()
+            .map(|entry| guard.fd_table.get_fd(entry.fd).cloned())
+            .collect::<Vec<_>>()
     };
 
-    let descriptor = match descriptor {
-        Some(desc) => desc,
-        None => {
-            info.lock().errno = Errno::EBADF;
-            return -1;
-        }
-    };
-
-    let FileDescriptor::FsFile(file) = descriptor else {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
-    };
+    let mut contexts = Vec::with_capacity(count);
 
     interrupts::enable();
 
-    let timeout = Duration::from_millis(timeout_ms);
-
-    match fs_api::poll(&file.path) {
-        Ok(pollable) => {
-            let state = pollable.poll(timeout);
-            unsafe {
-                core::ptr::write(events_ptr, state);
+    for idx in 0..count {
+        let entry = fds[idx];
+        let descriptor = match descriptors[idx].clone() {
+            Some(desc) => desc,
+            None => {
+                info.lock().errno = Errno::EBADF;
+                return -1;
             }
-            0
+        };
+
+        let FileDescriptor::FsFile(file) = descriptor else {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        };
+
+        let pollable = match fs_api::poll(&file.path) {
+            Ok(p) => p,
+            Err(err) => {
+                info.lock().errno = Errno::from(err);
+                return -1;
+            }
+        };
+
+        let interests = entry.interests;
+        contexts.push((idx, interests, pollable));
+        // Reset result so callers don't observe stale bits.
+        fds[idx].result = PollState::none();
+    }
+
+    let deadline = timeout.map(|t| Instant::now() + t);
+
+    loop {
+        let mut ready = 0usize;
+
+        for (idx, interests, pollable) in contexts.iter_mut() {
+            let state = pollable.poll(Duration::ZERO);
+            let entry = &mut fds[*idx];
+            entry.result = state;
+
+            if poll_matches(state, *interests) {
+                ready += 1;
+            }
         }
-        Err(err) => {
-            info.lock().errno = Errno::from(err);
-            -1
+
+        if ready > 0 {
+            return ready as i64;
+        }
+
+        match deadline {
+            Some(dl) => {
+                let now = Instant::now();
+                if now >= dl {
+                    return 0;
+                }
+                let remaining = dl.duration_since(now);
+                let sleep_dur = remaining.min(Duration::from_millis(10));
+                sched.thread_sleep(sleep_dur);
+            }
+            None => {
+                sched.thread_sleep(Duration::from_millis(10));
+            }
         }
     }
+}
+
+fn poll_matches(state: PollState, interests: PollState) -> bool {
+    let mut matched = false;
+
+    if interests.readable && state.readable {
+        matched = true;
+    }
+    if interests.writable && state.writable {
+        matched = true;
+    }
+    if interests.error && state.error {
+        matched = true;
+    }
+
+    if !interests.readable && !interests.writable && !interests.error {
+        // If caller passed no interests, treat any readiness as a match.
+        matched = state.readable || state.writable || state.error;
+    }
+
+    matched
 }
 
 pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {

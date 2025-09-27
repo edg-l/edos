@@ -2,8 +2,8 @@ use alloc::{format, string::String, vec::Vec};
 use core::str;
 
 use elibc::{
-    KeyEvent, WaitPidStatus, get_raw_input, io::keyboard_fd, process::sys_waitpid, read_from_fd,
-    sleep_ms,
+    KeyEvent, PollFd, PollState, WaitPidStatus, get_raw_input, io::keyboard_fd, poll_fds,
+    process::sys_waitpid, read_from_fd, sleep_ms,
 };
 
 mod command;
@@ -39,9 +39,56 @@ pub fn run() -> i32 {
     }
 
     loop {
-        pump_tty_output(&mut terminal);
         pump_running_program(&mut terminal);
-        get_raw_input(5, &mut key_events, 6);
+
+        if keyboard_handle.is_none() {
+            keyboard_handle = keyboard_fd();
+        }
+
+        let mut polls = Vec::new();
+        polls.push(PollFd::new(
+            terminal.tty_fd(),
+            PollState {
+                readable: true,
+                writable: false,
+                error: true,
+            },
+        ));
+
+        if let Some(fd) = keyboard_handle {
+            polls.push(PollFd::new(
+                fd,
+                PollState {
+                    readable: true,
+                    writable: false,
+                    error: true,
+                },
+            ));
+        }
+
+        let timeout_ms: u64 = if terminal.is_dirty() { 0 } else { 50 };
+        let poll_result = poll_fds(&mut polls, timeout_ms);
+
+        if let Ok(_) = poll_result {
+            if polls
+                .first()
+                .is_some_and(|entry| entry.result.readable || entry.result.error)
+            {
+                pump_tty_output(&mut terminal);
+            }
+
+            if polls.len() > 1 {
+                let keyboard_state = polls[1].result;
+                if keyboard_state.error {
+                    keyboard_handle = None;
+                } else if keyboard_state.readable {
+                    get_raw_input(0, &mut key_events, 6);
+                }
+            }
+        } else {
+            // If polling failed, clear cached keyboard handle so we can retry opening it.
+            keyboard_handle = None;
+        }
 
         for event in key_events.drain(..) {
             if let Some(line) = terminal.handle_key_event(event) {
