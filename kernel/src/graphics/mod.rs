@@ -1,3 +1,6 @@
+extern crate alloc;
+use alloc::vec::Vec;
+
 pub mod api;
 pub mod colors;
 pub mod framebuffer;
@@ -22,6 +25,7 @@ pub struct DirectFramebuffer {
     red_lut: [u32; 256],
     green_lut: [u32; 256],
     blue_lut: [u32; 256],
+    converted_row_buffer: Vec<u32>,
 }
 
 impl DirectFramebuffer {
@@ -42,6 +46,7 @@ impl DirectFramebuffer {
             red_lut,
             green_lut,
             blue_lut,
+            converted_row_buffer: Vec::new(),
         }
     }
 
@@ -93,8 +98,9 @@ impl DirectFramebuffer {
         let src_offset_y = (start_y as u64 - request.y) as usize;
         let row_len = end_x - start_x;
 
-        // Pre-allocate temporary buffer for one row of converted pixels
-        let mut converted_row = alloc::vec![0u32; row_len];
+        // Reuse buffer, resizing if needed
+        self.converted_row_buffer.clear();
+        self.converted_row_buffer.resize(row_len, 0);
 
         let mut src_row = src_offset_y;
         for dst_y in start_y..end_y {
@@ -104,14 +110,18 @@ impl DirectFramebuffer {
             // Convert entire row from RGB to framebuffer format
             for i in 0..row_len {
                 let rgb_color = request.pixels[src_start_index + i];
-                converted_row[i] = self.convert_color(rgb_color);
+                self.converted_row_buffer[i] = self.convert_color(rgb_color);
             }
 
             // Bulk copy the entire converted row to framebuffer
             unsafe {
                 let fb_ptr = fb.addr() as *mut u32;
                 let dst_ptr = fb_ptr.add(dst_start_index);
-                core::ptr::copy_nonoverlapping(converted_row.as_ptr(), dst_ptr, row_len);
+                core::ptr::copy_nonoverlapping(
+                    self.converted_row_buffer.as_ptr(),
+                    dst_ptr,
+                    row_len,
+                );
             }
 
             src_row += 1;
