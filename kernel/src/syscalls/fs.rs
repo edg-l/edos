@@ -102,7 +102,7 @@ pub fn sys_mount(
     fs_type: *const u8,
 ) -> i64 {
     let sched = sched();
-    let mut info = sched.current_thread_info();
+    let info = sched.current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let mount_point = match read_user_path(path_ptr, &info.lock().cwd) {

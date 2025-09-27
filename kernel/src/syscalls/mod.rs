@@ -409,16 +409,13 @@ fn sys_getpid() -> u64 {
 fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if block {
         log!("blocking waitpid not supported yet");
-        thread.errno = Errno::EINVAL;
+        info.lock().errno = Errno::EINVAL;
         return !0u64;
     }
-
-    drop(thread);
 
     let tid = ThreadId(pid);
 
@@ -440,12 +437,9 @@ fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
 fn sys_sleep_ms(milliseconds: u64) -> u64 {
     let scheduler = sched();
     let info = scheduler.current_thread_info();
-    let mut thread = info.lock();
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     let duration = Duration::from_millis(milliseconds);
-
-    drop(thread);
 
     scheduler.thread_sleep(duration);
 
@@ -459,12 +453,11 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
 
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
 
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if pipefd_ptr.is_null() {
-        thread.errno = Errno::EFAULT;
+        info.lock().errno = Errno::EFAULT;
         return !0u64;
     }
 
@@ -472,10 +465,11 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
     let pipe = Arc::new(RwLock::new(Pipe::new()));
 
     // Allocate read and write file descriptors
-    let read_fd = thread
+    let read_fd = info
+        .lock()
         .fd_table
         .allocate_fd(FileDescriptor::Pipe(pipe.clone()));
-    let write_fd = thread.fd_table.allocate_fd(FileDescriptor::Pipe(pipe));
+    let write_fd = info.lock().fd_table.allocate_fd(FileDescriptor::Pipe(pipe));
 
     // Copy file descriptor numbers to user space
     let pipefd = [read_fd, write_fd];
@@ -489,24 +483,23 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
 fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
 
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     // Get the file descriptor we want to duplicate
-    let old_fd_descriptor = match thread.fd_table.get_fd(oldfd) {
+    let old_fd_descriptor = match info.lock().fd_table.get_fd(oldfd) {
         Some(fd) => fd.clone(),
         None => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
     };
 
     // Close the newfd if it's already in use (but don't fail if it doesn't exist)
-    let _ = thread.fd_table.close_fd(newfd);
+    let _ = info.lock().fd_table.close_fd(newfd);
 
     // Insert the duplicated descriptor at newfd
-    thread.fd_table.insert_fd(newfd, old_fd_descriptor);
+    info.lock().fd_table.insert_fd(newfd, old_fd_descriptor);
 
     newfd // Success - return the new fd number
 }
@@ -527,19 +520,18 @@ fn sys_spawn(
 
     let sched = sched();
     let info = sched.current_thread_info();
-    let mut thread = info.lock();
 
-    thread.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
     if path_ptr.is_null() {
-        thread.errno = Errno::EFAULT;
+        info.lock().errno = Errno::EFAULT;
         return !0u64;
     }
 
     let path_bytes = match copy_user_c_string(path_ptr, MAX_PATH_LEN) {
         Some(bytes) if !bytes.is_empty() => bytes,
         _ => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
     };
@@ -547,7 +539,7 @@ fn sys_spawn(
     let path_str = match core::str::from_utf8(&path_bytes) {
         Ok(s) => s,
         Err(_) => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
     };
@@ -562,10 +554,10 @@ fn sys_spawn(
         }
     };
 
-    let path = match resolve_path(path_str, &thread.cwd) {
+    let path = match resolve_path(path_str, &info.lock().cwd) {
         Ok(path) => path,
         Err(_) => {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
     };
@@ -587,14 +579,14 @@ fn sys_spawn(
             let arg = match copy_user_c_string(current_ptr, MAX_ARG_LEN) {
                 Some(bytes) => bytes,
                 None => {
-                    thread.errno = Errno::EINVAL;
+                    info.lock().errno = Errno::EINVAL;
                     return !0u64;
                 }
             };
 
             total_bytes += arg.len() + 1;
             if total_bytes > MAX_ARG_TOTAL {
-                thread.errno = Errno::EINVAL;
+                info.lock().errno = Errno::EINVAL;
                 return !0u64;
             }
 
@@ -602,34 +594,33 @@ fn sys_spawn(
         }
 
         if !terminated && argv_storage.len() == MAX_ARGC {
-            thread.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
     }
 
     // Save current cwd for child process
-    let child_cwd = thread.cwd.clone();
+    let child_cwd = info.lock().cwd.clone();
 
     // Load ELF file from filesystem
-    drop(thread); // Release lock before blocking file operations
 
     x86_64::instructions::interrupts::enable();
 
     let mut elf_data = Vec::new();
-    let info = match fs_api::file_info(&path) {
+    let finfo = match fs_api::file_info(&path) {
         Ok(info) => info,
         Err(_) => {
-            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
     };
 
-    match fs_api::read_bytes(&path, elf_data.len(), info.size as usize) {
+    match fs_api::read_bytes(&path, elf_data.len(), finfo.size as usize) {
         Ok(data) => {
             elf_data = data;
         }
         Err(_) => {
-            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
     }
@@ -656,7 +647,7 @@ fn sys_spawn(
         }
         Err(e) => {
             log!("UserThread creation failed: {:?}", e);
-            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
     };
