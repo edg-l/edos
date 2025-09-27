@@ -6,7 +6,7 @@ use core::{
 };
 
 use alloc::{boxed::Box, sync::Arc};
-use heapless::{BinaryHeap, Deque, binary_heap::Max};
+use heapless::{BinaryHeap, binary_heap::Max};
 use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
@@ -24,6 +24,7 @@ use crate::{
     thread::{
         UserThreadInfo,
         context::CpuContext,
+        runqueue::RunQueue,
         thread::{Flags, State, THREADS, Thread, ThreadId, get_thread_by_id},
     },
     timer::Instant,
@@ -61,12 +62,25 @@ fn sched_for_cpu(cpu: u32) -> &'static Scheduler {
     SCHEDULERS.read().get(&cpu).expect("cpu sched")
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WakePriority {
+    Normal,
+    Interrupt,
+}
+
+impl WakePriority {
+    #[inline]
+    const fn is_boosted(self) -> bool {
+        matches!(self, WakePriority::Interrupt)
+    }
+}
+
 pub struct Scheduler {
     pub cpu: u32,
 
     // Ready queue. Simple round-robin with priority buckets is enough.
     // Keep it small and predictable.
-    pub rq: Mutex<Deque<Arc<Thread>, 1024>>,
+    rq: Mutex<RunQueue>,
 
     // Current running thread id for this CPU.
     pub current: AtomicU64, // 0 means idle
@@ -84,31 +98,22 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    fn enqueue_ready(sc: &Scheduler, thread: &Arc<Thread>, high: bool) {
+    fn enqueue_ready(sc: &Scheduler, thread: &Arc<Thread>, priority: WakePriority) {
         without_interrupts(|| {
             let mut rq = sc.rq.lock();
-            let _ = if high {
-                rq.push_front(thread.clone())
-            } else {
-                rq.push_back(thread.clone())
-            };
-            let has_entries = !rq.is_empty();
-            if has_entries {
-                sc.has_work.store(true, Ordering::Release);
-            }
+            rq.enqueue(thread.clone(), thread.priority(), priority.is_boosted());
+            sc.has_work.store(true, Ordering::Release);
             drop(rq);
-            if has_entries {
-                sc.mark_running_thread_need_resched();
-            }
+            sc.mark_running_thread_need_resched();
         })
     }
 
-    fn complete_wake(&self, thread: &Arc<Thread>, high: bool) {
+    fn complete_wake(&self, thread: &Arc<Thread>, priority: WakePriority) {
         without_interrupts(|| {
             let cpu = thread.cpu.load(Ordering::Acquire);
             let sc = sched_for_cpu(cpu);
             thread.state.store(State::Ready as u8, Ordering::Release);
-            Self::enqueue_ready(sc, thread, high);
+            Self::enqueue_ready(sc, thread, priority);
             if cpu != self.cpu {
                 self.send_reschedule_ipi(cpu);
             }
@@ -118,7 +123,7 @@ impl Scheduler {
     pub fn new(cpu: u32) -> Self {
         Self {
             cpu,
-            rq: Mutex::new(Deque::new()),
+            rq: Mutex::new(RunQueue::new()),
             current: AtomicU64::new(0),
             default_timeslice: Duration::from_millis(5),
             sleepers: Mutex::new(BinaryHeap::new()),
@@ -169,10 +174,9 @@ impl Scheduler {
             if t.try_wake() {
                 t.state.store(State::Ready as u8, Ordering::Release);
                 let mut rq = self.rq.lock();
-                let _ = rq.push_back(t);
-                if !rq.is_empty() {
-                    self.has_work.store(true, Ordering::Release);
-                }
+                let priority = t.priority();
+                rq.enqueue(t, priority, false);
+                self.has_work.store(true, Ordering::Release);
                 drop(rq);
                 self.mark_running_thread_need_resched();
             }
@@ -250,10 +254,8 @@ impl Scheduler {
                 // If another CPU already marked it Parked/Sleeping/Dying, don't requeue
                 if cur.cas_state(State::Running, State::Ready) {
                     let mut rq = self.rq.lock();
-                    let _ = rq.push_back(cur.clone());
-                    if !rq.is_empty() {
-                        self.has_work.store(true, Ordering::Release);
-                    }
+                    rq.enqueue(cur.clone(), cur.priority(), false);
+                    self.has_work.store(true, Ordering::Release);
                 }
             }
             // If it was already moved elsewhere (Parked, Sleeping, Dying), skip requeue
@@ -268,7 +270,7 @@ impl Scheduler {
         loop {
             let next = {
                 let mut rq = self.rq.lock();
-                let item = rq.pop_front();
+                let item = rq.pop_next();
                 self.has_work.store(!rq.is_empty(), Ordering::Release);
                 item
             };
@@ -401,10 +403,8 @@ impl Scheduler {
             thread.cpu.store(self.cpu, Ordering::Release);
             if self.thread_can_run_here(&thread) {
                 let mut rq = self.rq.lock();
-                let _ = rq.push_back(thread.clone());
-                if !rq.is_empty() {
-                    self.has_work.store(true, Ordering::Release);
-                }
+                rq.enqueue(thread.clone(), thread.priority(), false);
+                self.has_work.store(true, Ordering::Release);
                 drop(rq);
                 self.mark_running_thread_need_resched();
             } else {
@@ -426,10 +426,8 @@ impl Scheduler {
             if cur.cas_state(State::Running, State::Ready) {
                 cur.mark_need_resched();
                 let mut rq = self.rq.lock();
-                let _ = rq.push_back(cur.clone());
-                if !rq.is_empty() {
-                    self.has_work.store(true, Ordering::Release);
-                }
+                rq.enqueue(cur.clone(), cur.priority(), false);
+                self.has_work.store(true, Ordering::Release);
             }
 
             context_switch();
@@ -516,33 +514,33 @@ impl Scheduler {
     }
 
     // Careful over proritizing, it can starve threads, specially in smp 1
-    pub fn wake_thread(&self, tid: ThreadId, high: bool) {
+    pub fn wake_thread(&self, tid: ThreadId, priority: WakePriority) {
         if Some(tid) == self.current_thread_id() {
             return;
         }
-        self.wake_thread_internal(tid, high, false);
+        self.wake_thread_internal(tid, priority, false);
     }
 
     #[inline(never)]
-    pub fn wake_thread_irq(&self, tid: ThreadId, high: bool) {
-        self.wake_thread_internal(tid, high, true);
+    pub fn wake_thread_irq(&self, tid: ThreadId, priority: WakePriority) {
+        self.wake_thread_internal(tid, priority, true);
     }
 
     #[inline(never)]
-    fn wake_thread_internal(&self, tid: ThreadId, high: bool, from_irq: bool) {
+    fn wake_thread_internal(&self, tid: ThreadId, priority: WakePriority, from_irq: bool) {
         if let Some(t) = get_thread_by_id(tid) {
             if from_irq {
-                self.wake_thread_from_irq(t, high);
+                self.wake_thread_from_irq(t, priority);
             } else {
-                self.wake_thread_slow(t, high);
+                self.wake_thread_slow(t, priority);
             }
         }
     }
 
-    fn wake_thread_slow(&self, thread: Arc<Thread>, high: bool) {
+    fn wake_thread_slow(&self, thread: Arc<Thread>, priority: WakePriority) {
         loop {
             if thread.try_wake() {
-                self.complete_wake(&thread, high);
+                self.complete_wake(&thread, priority);
                 return;
             }
 
@@ -575,13 +573,13 @@ impl Scheduler {
     }
 
     #[inline(never)]
-    fn wake_thread_from_irq(&self, thread: Arc<Thread>, high: bool) {
+    fn wake_thread_from_irq(&self, thread: Arc<Thread>, priority: WakePriority) {
         let state = State::from(thread.state.load(Ordering::Acquire));
         let cpu = thread.cpu.load(Ordering::Acquire);
         match state {
             State::Sleeping | State::Parked => {
                 if thread.try_wake() {
-                    self.complete_wake(&thread, high);
+                    self.complete_wake(&thread, priority);
                     return;
                 }
             }

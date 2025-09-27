@@ -13,7 +13,11 @@ use crate::{
     apic::get_lapic,
     fs::{DevFsDevice, DevFsError, MmapRegion, PollState, handle::Pollable, register_device_str},
     memory::mapper::MemoryManager,
-    thread::{broadcast::Broadcaster, scheduler::sched, thread::ThreadId},
+    thread::{
+        broadcast::Broadcaster,
+        scheduler::{WakePriority, sched},
+        thread::ThreadId,
+    },
 };
 
 pub static KEYBOARD_BROADCAST: Broadcaster<DecodedKey> = Broadcaster::new();
@@ -33,7 +37,7 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
     queue.force_push(scancode);
 
     if let Some(tid) = KEYBOARD_THREAD_ID.get() {
-        sched().wake_thread_irq(ThreadId(*tid), true);
+        sched().wake_thread_irq(ThreadId(*tid), WakePriority::Interrupt);
     }
 
     unsafe { get_lapic().end_of_interrupt() };

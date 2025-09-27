@@ -11,7 +11,7 @@ use x86_64::instructions::interrupts::without_interrupts;
 use crate::{
     fs::PollState,
     thread::{
-        scheduler::sched,
+        scheduler::{WakePriority, sched},
         thread::{State, ThreadId, get_thread_by_id},
     },
 };
@@ -123,7 +123,7 @@ impl<T: Clone> Broadcaster<T> {
                 let mut q = sub.queue.lock();
                 q.push_back(msg.clone());
             }
-            sched.wake_thread(sub.owner, false);
+            sched.wake_thread(sub.owner, WakePriority::Normal);
         }
     }
 

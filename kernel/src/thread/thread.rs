@@ -128,6 +128,10 @@ impl Thread {
         self.mark_need_resched();
     }
 
+    pub fn priority(&self) -> u8 {
+        self.priority.load(Ordering::Acquire)
+    }
+
     pub fn set_affinity_mask(&self, mask: u32) {
         self.cpu_affinity.store(mask, Ordering::Release);
         self.mark_need_resched();
