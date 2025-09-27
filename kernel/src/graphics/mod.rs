@@ -1,5 +1,3 @@
-use alloc::vec;
-use alloc::vec::Vec;
 
 pub mod api;
 pub mod colors;
@@ -18,8 +16,7 @@ pub fn init() {
     queue_spawn_kthread_named("framebuffer", render_thread as u64);
 }
 
-pub struct DoubleBuffer {
-    back_buffer: Vec<u32>,
+pub struct DirectFramebuffer {
     width: usize,
     height: usize,
     pitch: usize,
@@ -28,7 +25,7 @@ pub struct DoubleBuffer {
     blue_lut: [u32; 256],
 }
 
-impl DoubleBuffer {
+impl DirectFramebuffer {
     pub fn new() -> Self {
         let fb = &boot_info().framebuffer;
         let width = fb.width() as usize;
@@ -40,7 +37,6 @@ impl DoubleBuffer {
         let blue_lut = Self::build_channel_lut(fb.blue_mask_size(), fb.blue_mask_shift());
 
         Self {
-            back_buffer: vec![0; (pitch * height) / 4],
             width,
             height,
             pitch,
@@ -64,25 +60,6 @@ impl DoubleBuffer {
                 ((value as u32 * mask) / 255) << shift
             }
         })
-    }
-
-    #[expect(unused)]
-    pub fn set_pixel(&mut self, x: usize, y: usize, color: u32) {
-        if x < self.width && y < self.height {
-            let index = y * (self.pitch / 4) + x;
-            self.back_buffer[index] = color;
-        }
-    }
-
-    pub fn present(&self) {
-        let fb = &boot_info().framebuffer;
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                self.back_buffer.as_ptr() as *const u8,
-                fb.addr(),
-                self.pitch * self.height,
-            );
-        }
     }
 
     /// Convert RGB color (0x00RRGGBB) to framebuffer's native format
@@ -110,6 +87,7 @@ impl DoubleBuffer {
             return;
         }
 
+        let fb = &boot_info().framebuffer;
         let pixels_per_row = self.pitch / 4; // Convert byte pitch to u32 pitch
         let src_width = request.width as usize;
         let src_offset_x = (start_x as u64 - request.x) as usize;
@@ -124,7 +102,12 @@ impl DoubleBuffer {
             for _ in 0..row_len {
                 let rgb_color = request.pixels[src_index];
                 let fb_color = self.convert_color(rgb_color);
-                self.back_buffer[dst_index] = fb_color;
+
+                // Write directly to framebuffer
+                unsafe {
+                    let fb_ptr = fb.addr() as *mut u32;
+                    *fb_ptr.add(dst_index) = fb_color;
+                }
 
                 src_index += 1;
                 dst_index += 1;
@@ -140,7 +123,7 @@ pub extern "C" fn render_thread() -> ! {
 
     FramebufferDevice::register();
 
-    let mut display = DoubleBuffer::new();
+    let mut display = DirectFramebuffer::new();
 
     loop {
         let mut request = mail.recv();
@@ -153,7 +136,7 @@ pub extern "C" fn render_thread() -> ! {
                 Mailbox::reply(request, Response::ScreenInfo(info));
             }
             Request::Render => {
-                display.present();
+                // No-op since we write directly to framebuffer
                 Mailbox::reply(request, Response::Ok);
             }
             Request::Draw(draw_request) => {
