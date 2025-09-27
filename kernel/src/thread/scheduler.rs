@@ -515,6 +515,7 @@ impl Scheduler {
         })
     }
 
+    // Careful over proritizing, it can starve threads, specially in smp 1
     pub fn wake_thread(&self, tid: ThreadId, high: bool) {
         if Some(tid) == self.current_thread_id() {
             return;
