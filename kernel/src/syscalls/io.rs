@@ -475,14 +475,19 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
 pub fn sys_poll(fd: u64, events_ptr: *mut PollState, timeout_ms: u64) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    info.lock().errno = Errno::Clear;
 
     if events_ptr.is_null() {
         info.lock().errno = Errno::EFAULT;
         return -1;
     }
 
-    let descriptor = match info.lock().fd_table.get_fd(fd).cloned() {
+    let descriptor = {
+        let mut guard = info.lock();
+        guard.errno = Errno::Clear;
+        guard.fd_table.get_fd(fd).cloned()
+    };
+
+    let descriptor = match descriptor {
         Some(desc) => desc,
         None => {
             info.lock().errno = Errno::EBADF;
