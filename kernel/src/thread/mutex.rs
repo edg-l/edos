@@ -1,5 +1,6 @@
 use core::{
     cell::UnsafeCell,
+    fmt,
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -72,6 +73,19 @@ impl<T> BlockingMutex<T> {
     /// Check whether the lock is currently held.
     pub fn is_locked(&self) -> bool {
         self.locked.load(Ordering::Acquire)
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for BlockingMutex<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut dbg = f.debug_struct("BlockingMutex");
+        if let Some(guard) = self.try_lock() {
+            dbg.field("value", &*guard);
+            drop(guard);
+        } else {
+            dbg.field("value", &"<locked>");
+        }
+        dbg.finish()
     }
 }
 

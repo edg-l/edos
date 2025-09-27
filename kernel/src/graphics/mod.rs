@@ -11,7 +11,7 @@ use crate::{
         api::{DrawRequest, REQUESTS, Request, Response, ScreenInfo},
         framebuffer::FramebufferDevice,
     },
-    thread::{mailbox::Mailbox, scheduler::sched, util::queue_spawn_kthread_named},
+    thread::{mailbox::Mailbox, util::queue_spawn_kthread_named},
 };
 
 pub fn init() {

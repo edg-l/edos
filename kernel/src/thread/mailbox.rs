@@ -1,9 +1,8 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::{collections::vec_deque::VecDeque, sync::Arc};
-use spin::Mutex;
 
-use crate::{log, thread::waitqueue::WaitQueue};
+use crate::thread::{mutex::BlockingMutex, waitqueue::WaitQueue};
 
 /*
 
@@ -31,7 +30,7 @@ pub struct Request<T, R> {
 #[derive(Debug)]
 struct ResponseInner<R> {
     ready: AtomicBool,
-    value: Mutex<Option<R>>,
+    value: BlockingMutex<Option<R>>,
     waitq: WaitQueue,
 }
 
@@ -55,14 +54,14 @@ impl<R> Response<R> {
 /// Receiver side mailbox
 #[derive(Debug)]
 pub struct Mailbox<T, R> {
-    queue: Mutex<VecDeque<Request<T, R>>>,
+    queue: BlockingMutex<VecDeque<Request<T, R>>>,
     not_empty: WaitQueue,
 }
 
 impl<T, R> Mailbox<T, R> {
     pub const fn new() -> Self {
         Self {
-            queue: Mutex::new(VecDeque::new()),
+            queue: BlockingMutex::new(VecDeque::new()),
             not_empty: WaitQueue::new(),
         }
     }
@@ -70,7 +69,7 @@ impl<T, R> Mailbox<T, R> {
     pub fn send(&self, payload: T) -> Response<R> {
         let inner = Arc::new(ResponseInner {
             ready: AtomicBool::new(false),
-            value: Mutex::new(None),
+            value: BlockingMutex::new(None),
             waitq: WaitQueue::new(),
         });
         let resp = Response {

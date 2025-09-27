@@ -38,6 +38,22 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-no-reboot \
 		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
 		-device ide-hd,drive=sata0,bus=ide.1 \
+		-smp 4 \
+		$(QEMUFLAGS)
+
+.PHONY: run-single
+run-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+	qemu-system-$(KARCH) \
+		-M q35 \
+		-cpu qemu64,+x2apic \
+		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
+		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
+		-cdrom $(IMAGE_NAME).iso \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+		-serial stdio \
+		-no-reboot \
+		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
+		-device ide-hd,drive=sata0,bus=ide.1 \
 		-smp 1 \
 		$(QEMUFLAGS)
 
