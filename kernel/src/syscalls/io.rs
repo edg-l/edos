@@ -84,7 +84,8 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
 
     let buffer = unsafe { core::slice::from_raw_parts(buffer_ptr, count) }.to_vec();
 
-    match info.lock().fd_table.get_fd(fd).cloned() {
+    let fdinfo = info.lock().fd_table.get_fd(fd).cloned();
+    match fdinfo {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
             StandardStream::Stdout | StandardStream::Stderr => {
                 tty::write_output(&buffer);
@@ -144,7 +145,8 @@ pub fn sys_close(fd: u64) -> i32 {
     let info = sched.current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    match info.lock().fd_table.close_fd(fd) {
+    let result = info.lock().fd_table.close_fd(fd);
+    match result {
         Some(FileDescriptor::Pipe(pipe)) => {
             let mut guard = pipe.write();
             guard.close_reader();
