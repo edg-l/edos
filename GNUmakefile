@@ -25,72 +25,50 @@ run: run-$(KARCH)
 .PHONY: run-hdd
 run-hdd: run-hdd-$(KARCH)
 
-.PHONY: run-x86_64
-run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+# QEMU runner function
+# $(1) = boot media type (iso/hdd)
+# $(2) = smp cores
+# $(3) = extra flags
+define run_qemu_uefi
 	qemu-system-$(KARCH) \
 		-M q35 \
 		-cpu qemu64,+x2apic \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
-		-cdrom $(IMAGE_NAME).iso \
+		$(if $(filter iso,$(1)),-cdrom $(IMAGE_NAME).iso,-hda $(IMAGE_NAME).hdd) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio \
 		-no-reboot \
 		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
 		-device ide-hd,drive=sata0,bus=ide.1 \
-		-smp 4 \
+		-smp $(2) \
+		$(3) \
 		$(QEMUFLAGS)
+endef
+
+.PHONY: run-x86_64
+run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+	$(call run_qemu_uefi,iso,4,)
 
 .PHONY: run-single
 run-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
-	qemu-system-$(KARCH) \
-		-M q35 \
-		-cpu qemu64,+x2apic \
-		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
-		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
-		-cdrom $(IMAGE_NAME).iso \
-		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-serial stdio \
-		-no-reboot \
-		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
-		-device ide-hd,drive=sata0,bus=ide.1 \
-		-smp 1 \
-		$(QEMUFLAGS)
+	$(call run_qemu_uefi,iso,1,)
 
-.PHONY: run-hdd-x86_64
-run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd sata-disk.img
-	qemu-system-$(KARCH) \
-		-M q35 \
-		-cpu qemu64,+x2apic \
-		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
-		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
-		-hda $(IMAGE_NAME).hdd \
-		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-serial stdio \
-		-no-reboot \
-		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
-		-device ide-hd,drive=sata0,bus=ide.1 \
-		-smp 4 \
-		$(QEMUFLAGS)
+.PHONY: run-big
+run-big: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+	$(call run_qemu_uefi,iso,16,)
 
 .PHONY: run-gdb
 run-gdb: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
-	qemu-system-$(KARCH) \
-		-M q35 \
-		-cpu qemu64,+x2apic \
-		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
-		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
-		-cdrom $(IMAGE_NAME).iso \
-		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-serial stdio \
-		-no-reboot \
-		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
-		-device ide-hd,drive=sata0,bus=ide.1 \
-		-smp 1 \
-		-no-shutdown \
-		-accel tcg \
-		-s -S \
-		$(QEMUFLAGS)
+	$(call run_qemu_uefi,iso,1,-no-shutdown -accel tcg -s -S)
+
+.PHONY: run-kvm
+run-kvm: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+	$(call run_qemu_uefi,iso,4,-accel kvm)
+
+.PHONY: run-hdd-x86_64
+run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd sata-disk.img
+	$(call run_qemu_uefi,hdd,4,)
 
 gdb:
 	#rust-gdb -x gdbinit
