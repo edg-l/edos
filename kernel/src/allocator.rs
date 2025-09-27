@@ -6,10 +6,10 @@ use core::{
 };
 
 use buddy_system_allocator::Heap;
-use x86_64::structures::paging::PageTableFlags;
+use x86_64::{align_up, structures::paging::PageTableFlags};
 
 use crate::{
-    memory::{KERNEL_HEAP, KERNEL_HEAP_SIZE, mapper::memory_mapper},
+    memory::{KERNEL_HEAP, KERNEL_HEAP_SIZE, mapper::memory_mapper, valloc::vmalloc},
     println,
     thread::irqlock::IrqSpinlock,
 };
@@ -25,11 +25,43 @@ pub struct Allocator {
 
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        self.inner
+        let ptr = self
+            .inner
             .lock()
             .alloc(layout)
             .map(|x| x.as_ptr())
-            .unwrap_or(null_mut())
+            .unwrap_or(null_mut());
+
+        if !ptr.is_null() {
+            ptr
+        } else {
+            // Align to page size, minimum heap expansion of 256 pages, 1mb.
+            let requested_size = align_up(
+                layout.pad_to_align().size() as u64 + (layout.pad_to_align().size() as u64 * 2),
+                4096,
+            )
+            .max(4096 * 256);
+            let addr = vmalloc(requested_size);
+            {
+                let mut mapper = memory_mapper();
+                mapper
+                    .map_memory(
+                        addr,
+                        requested_size,
+                        PageTableFlags::WRITABLE | PageTableFlags::GLOBAL,
+                    )
+                    .expect("failed to map heap expansion");
+            }
+            unsafe {
+                self.inner.lock().add_to_heap(
+                    addr.as_u64() as usize,
+                    addr.as_u64() as usize + requested_size as usize,
+                )
+            };
+            let ptr = self.inner.lock().alloc(layout);
+
+            ptr.map(|x| x.as_ptr()).unwrap_or(null_mut())
+        }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {

@@ -13,6 +13,7 @@ use x86_64::{
 use crate::{
     boot::boot_info,
     memory::{STACK_ALIGNMENT, frame_allocator::frame_allocator},
+    thread::irqlock::IrqLockGuard,
 };
 
 pub unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut PageTable {
@@ -37,7 +38,7 @@ pub unsafe fn get_level_4_table(cr3: (PhysFrame, Cr3Flags)) -> &'static mut Page
     unsafe { &mut *page_table_ptr }
 }
 
-pub fn memory_mapper() -> MutexGuard<'static, MemoryManager> {
+pub fn memory_mapper() -> IrqLockGuard<'static, MemoryManager> {
     boot_info().memory_manager.lock()
 }
 

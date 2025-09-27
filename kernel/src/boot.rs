@@ -21,6 +21,7 @@ use crate::{
     main,
     memory::mapper::{MemoryManager, active_level_4_table},
     serial,
+    thread::irqlock::IrqSpinlock,
     util::per_cpu::init_gs_for_bsp_static,
 };
 
@@ -80,7 +81,7 @@ pub struct BootInfo {
     pub framebuffer: Framebuffer<'static>,
     pub memory_map: &'static MemoryMapResponse,
     pub physical_memory_offset: VirtAddr,
-    pub memory_manager: Mutex<MemoryManager>,
+    pub memory_manager: IrqSpinlock<MemoryManager>,
     pub rdsp: usize,
     pub cmdline: &'static CStr,
     pub device_tree_blob: Option<usize>,
@@ -140,7 +141,7 @@ unsafe extern "C" fn kmain() -> ! {
         framebuffer,
         memory_map,
         physical_memory_offset,
-        memory_manager: Mutex::new(MemoryManager::new(kernel_page_table)),
+        memory_manager: IrqSpinlock::new(MemoryManager::new(kernel_page_table)),
         rdsp,
         cmdline,
         device_tree_blob,
