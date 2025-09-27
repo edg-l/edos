@@ -522,12 +522,10 @@ impl Scheduler {
         self.wake_thread_internal(tid, priority, false);
     }
 
-    #[inline(never)]
     pub fn wake_thread_irq(&self, tid: ThreadId, priority: WakePriority) {
         self.wake_thread_internal(tid, priority, true);
     }
 
-    #[inline(never)]
     fn wake_thread_internal(&self, tid: ThreadId, priority: WakePriority, from_irq: bool) {
         if let Some(t) = get_thread_by_id(tid) {
             if from_irq {

@@ -72,14 +72,21 @@ pub extern "C" fn driver_main() -> ! {
     let device = Arc::new(KeyboardDevice);
     register_device_str("/kbd", device).expect("Error registering device");
 
+    let mut decoded_events: Vec<DecodedKey> = Vec::new();
     loop {
         while let Some(scancode) = queue.pop() {
             if let Ok(Some(event)) = keyboard.add_byte(scancode)
                 && let Some(key_event) = keyboard.process_keyevent(event)
             {
-                KEYBOARD_BROADCAST.broadcast(key_event);
+                decoded_events.push(key_event);
             }
         }
+
+        if !decoded_events.is_empty() {
+            KEYBOARD_BROADCAST.broadcast_many(&decoded_events);
+            decoded_events.clear();
+        }
+
         KEYBOARD_BROADCAST.cleanup();
         sched().thread_park();
     }

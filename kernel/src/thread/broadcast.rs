@@ -135,6 +135,27 @@ impl<T: Clone> Broadcaster<T> {
         }
     }
 
+    pub fn broadcast_many(&self, msgs: &[T]) {
+        if msgs.is_empty() {
+            return;
+        }
+
+        let sched = sched();
+        let targets: Vec<Arc<Subscriber<T>>> = {
+            let subs = self.subs.read();
+            subs.values().cloned().collect()
+        };
+        for sub in targets {
+            {
+                let mut q = sub.queue.lock();
+                for msg in msgs {
+                    q.push_back(msg.clone());
+                }
+            }
+            sched.wake_thread(sub.owner, WakePriority::Normal);
+        }
+    }
+
     pub fn cleanup(&self) {
         let subs = self.subs.read();
 
