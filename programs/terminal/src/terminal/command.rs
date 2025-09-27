@@ -315,6 +315,7 @@ fn cmd_mount(state: &mut TerminalState, args: &[String]) {
                         match entry.filesystem {
                             FilesystemKind::Devfs => "devfs".to_string(),
                             FilesystemKind::Memfs => "memfs".to_string(),
+                            FilesystemKind::Procfs => "procfs".to_string(),
                             _ => {
                                 format!("special:{}p{}", entry.device_id, entry.partition_index)
                             }

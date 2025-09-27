@@ -1,12 +1,11 @@
 //! Higher half virtual address allocator
 
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
-use spin::Mutex;
 use x86_64::{VirtAddr, align_up};
 
-use crate::memory::DYNAMIC_MEM_START;
+use crate::{memory::DYNAMIC_MEM_START, thread::irqlock::IrqSpinlock};
 
-static VALLOC: Mutex<VAlloc> = Mutex::new(VAlloc::new(DYNAMIC_MEM_START));
+static VALLOC: IrqSpinlock<VAlloc> = IrqSpinlock::new(VAlloc::new(DYNAMIC_MEM_START));
 
 /// Virtual address allocator. Ensures there is a guard page at the end on each allocation.
 struct VAlloc {

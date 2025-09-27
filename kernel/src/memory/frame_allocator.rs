@@ -3,18 +3,21 @@
 //! The allocator finds first a memory region to allocate itself into, the bitmap.
 
 use limine::{memory_map::EntryType, response::MemoryMapResponse};
-use spin::{Mutex, MutexGuard, Once};
+use spin::{Mutex, Once};
 use x86_64::{
     PhysAddr,
     structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB},
 };
 
-use crate::memory::get_virt_addr_from_phys_offset;
+use crate::{
+    memory::get_virt_addr_from_phys_offset,
+    thread::irqlock::{IrqLockGuard, IrqSpinlock},
+};
 
-static FRAME_ALLOCATOR: Once<Mutex<BitmapFrameAllocator>> = Once::new();
+static FRAME_ALLOCATOR: Once<IrqSpinlock<BitmapFrameAllocator>> = Once::new();
 
 #[must_use]
-pub fn frame_allocator() -> MutexGuard<'static, BitmapFrameAllocator> {
+pub fn frame_allocator() -> IrqLockGuard<'static, BitmapFrameAllocator> {
     FRAME_ALLOCATOR.get().unwrap().lock()
 }
 
@@ -42,7 +45,7 @@ pub fn init_frame_allocator(memory_regions: &'static MemoryMapResponse) {
         }
     }
 
-    FRAME_ALLOCATOR.call_once(|| Mutex::new(allocator));
+    FRAME_ALLOCATOR.call_once(|| IrqSpinlock::new(allocator));
 }
 
 /// Find suitable memory for bitmap storage

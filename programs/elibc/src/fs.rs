@@ -47,6 +47,7 @@ pub enum FilesystemKind {
     Iso9660,
     Memfs,
     Devfs,
+    Procfs,
 }
 
 impl FilesystemKind {
@@ -59,6 +60,7 @@ impl FilesystemKind {
             5 => FilesystemKind::Iso9660,
             6 => FilesystemKind::Memfs,
             7 => FilesystemKind::Devfs,
+            8 => FilesystemKind::Procfs,
             _ => FilesystemKind::Unknown,
         }
     }
@@ -73,6 +75,7 @@ impl FilesystemKind {
             FilesystemKind::Iso9660 => "iso9660",
             FilesystemKind::Memfs => "memfs",
             FilesystemKind::Devfs => "devfs",
+            FilesystemKind::Procfs => "procfs",
         }
     }
 }
