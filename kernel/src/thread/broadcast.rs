@@ -5,12 +5,12 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use spin::{Mutex, RwLock};
-use x86_64::instructions::interrupts::without_interrupts;
+use spin::RwLock;
 
 use crate::{
     fs::PollState,
     thread::{
+        mutex::BlockingMutex,
         scheduler::{WakePriority, sched},
         thread::{State, ThreadId, get_thread_by_id},
     },
@@ -19,7 +19,7 @@ use crate::{
 /// A single subscriber queue
 pub struct Subscriber<T> {
     owner: ThreadId,
-    queue: Mutex<VecDeque<T>>,
+    queue: BlockingMutex<VecDeque<T>>,
 }
 
 impl<T> Subscriber<T> {
@@ -100,7 +100,7 @@ impl<T: Clone> Broadcaster<T> {
 
         let sub = Arc::new(Subscriber {
             owner,
-            queue: Mutex::new(VecDeque::new()),
+            queue: BlockingMutex::new(VecDeque::new()),
         });
         self.subs.write().insert(owner, sub.clone());
         sub
