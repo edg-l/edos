@@ -25,43 +25,39 @@ pub struct Allocator {
 
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let ptr = self
-            .inner
-            .lock()
-            .alloc(layout)
-            .map(|x| x.as_ptr())
-            .unwrap_or(null_mut());
-
-        if !ptr.is_null() {
-            ptr
-        } else {
-            // Align to page size, minimum heap expansion of 256 pages, 1mb.
-            let requested_size = align_up(
-                layout.pad_to_align().size() as u64 + (layout.pad_to_align().size() as u64 * 2),
-                4096,
-            )
-            .max(4096 * 256);
-            let addr = vmalloc(requested_size);
-            {
-                let mut mapper = memory_mapper();
-                mapper
-                    .map_memory(
-                        addr,
-                        requested_size,
-                        PageTableFlags::WRITABLE | PageTableFlags::GLOBAL,
-                    )
-                    .expect("failed to map heap expansion");
+        {
+            let mut heap = self.inner.lock();
+            if let Ok(block) = heap.alloc(layout) {
+                return block.as_ptr();
             }
-            unsafe {
-                self.inner.lock().add_to_heap(
-                    addr.as_u64() as usize,
-                    addr.as_u64() as usize + requested_size as usize,
-                )
-            };
-            let ptr = self.inner.lock().alloc(layout);
-
-            ptr.map(|x| x.as_ptr()).unwrap_or(null_mut())
         }
+
+        // Align to page size, minimum heap expansion of 256 pages, 1mb.
+        let padded_layout = layout.pad_to_align();
+        let requested_size = align_up(padded_layout.size() as u64 * 3, 4096).max(4096 * 256);
+        let addr = vmalloc(requested_size);
+        {
+            let mut mapper = memory_mapper();
+            mapper
+                .map_memory(
+                    addr,
+                    requested_size,
+                    PageTableFlags::WRITABLE | PageTableFlags::GLOBAL,
+                )
+                .expect("failed to map heap expansion");
+        }
+
+        let mut heap = self.inner.lock();
+        unsafe {
+            heap.add_to_heap(
+                addr.as_u64() as usize,
+                addr.as_u64() as usize + requested_size as usize,
+            );
+        }
+
+        heap.alloc(layout)
+            .map(|block| block.as_ptr())
+            .unwrap_or(null_mut())
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
