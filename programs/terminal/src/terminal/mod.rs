@@ -45,40 +45,43 @@ pub fn run() -> i32 {
             keyboard_handle = keyboard_fd();
         }
 
-        let mut polls = Vec::new();
-        polls.push(PollFd::new(
+        let mut entries = [PollFd::default(); 2];
+        let mut entry_count = 0;
+
+        entries[entry_count] = PollFd::new(
             terminal.tty_fd(),
             PollState {
                 readable: true,
                 writable: false,
                 error: true,
             },
-        ));
+        );
+        entry_count += 1;
 
         if let Some(fd) = keyboard_handle {
-            polls.push(PollFd::new(
+            entries[entry_count] = PollFd::new(
                 fd,
                 PollState {
                     readable: true,
                     writable: false,
                     error: true,
                 },
-            ));
+            );
+            entry_count += 1;
         }
 
         let timeout_ms: u64 = if terminal.is_dirty() { 0 } else { 50 };
-        let poll_result = poll_fds(&mut polls, timeout_ms);
+        let poll_slice = &mut entries[..entry_count];
+        let poll_result = poll_fds(poll_slice, timeout_ms);
 
         if let Ok(_) = poll_result {
-            if polls
-                .first()
-                .is_some_and(|entry| entry.result.readable || entry.result.error)
-            {
+            let tty_state = poll_slice[0].result;
+            if tty_state.readable || tty_state.error {
                 pump_tty_output(&mut terminal);
             }
 
-            if polls.len() > 1 {
-                let keyboard_state = polls[1].result;
+            if entry_count > 1 {
+                let keyboard_state = poll_slice[1].result;
                 if keyboard_state.error {
                     keyboard_handle = None;
                 } else if keyboard_state.readable {
