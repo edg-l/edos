@@ -3,9 +3,9 @@ use elibc::graphics::{Color, GraphicsError};
 
 use super::state::{MARGIN, TerminalState};
 
-pub(super) fn render(state: &mut TerminalState) -> Result<(), GraphicsError> {
+pub(super) fn render(state: &mut TerminalState) -> Result<u64, GraphicsError> {
     if !state.is_dirty() {
-        return Ok(());
+        return Ok(0);
     }
 
     state.screen.fill(Color::BLACK)?;
@@ -50,9 +50,11 @@ pub(super) fn render(state: &mut TerminalState) -> Result<(), GraphicsError> {
         .screen
         .draw_rect(cursor_x, cursor_y, 2, state.char_height, Color::WHITE)?;
 
+    let present_start = super::monotonic_now();
     state.screen.render()?;
+    let present_end = super::monotonic_now();
     state.clear_dirty();
-    Ok(())
+    Ok(super::elapsed_ns(present_start, present_end))
 }
 
 fn draw_profiling_overlay(state: &mut TerminalState, input_y: u64) -> Result<(), GraphicsError> {

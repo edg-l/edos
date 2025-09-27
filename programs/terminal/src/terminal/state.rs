@@ -44,10 +44,12 @@ struct ProfilingInfo {
     last_loop_ns: u64,
     last_poll_ns: u64,
     last_render_ns: u64,
+    last_present_ns: u64,
     last_command_ns: u64,
     max_loop_ns: u64,
     max_poll_ns: u64,
     max_render_ns: u64,
+    max_present_ns: u64,
     max_command_ns: u64,
     total_loop_ns: u128,
     samples: u64,
@@ -155,6 +157,7 @@ impl TerminalState {
         loop_ns: u64,
         poll_ns: u64,
         render_ns: u64,
+        present_ns: u64,
         command_ns: u64,
         timestamp_ns: u64,
     ) {
@@ -163,7 +166,7 @@ impl TerminalState {
         }
 
         self.profiling
-            .record(loop_ns, poll_ns, render_ns, command_ns);
+            .record(loop_ns, poll_ns, render_ns, present_ns, command_ns);
 
         const OVERLAY_INTERVAL_NS: u64 = 200_000_000; // 200ms cadence
         let should_refresh = self.last_profile_overlay_ns == 0
@@ -304,15 +307,24 @@ impl TerminalState {
 }
 
 impl ProfilingInfo {
-    fn record(&mut self, loop_ns: u64, poll_ns: u64, render_ns: u64, command_ns: u64) {
+    fn record(
+        &mut self,
+        loop_ns: u64,
+        poll_ns: u64,
+        render_ns: u64,
+        present_ns: u64,
+        command_ns: u64,
+    ) {
         self.last_loop_ns = loop_ns;
         self.last_poll_ns = poll_ns;
         self.last_render_ns = render_ns;
+        self.last_present_ns = present_ns;
         self.last_command_ns = command_ns;
 
         self.max_loop_ns = self.max_loop_ns.max(loop_ns);
         self.max_poll_ns = self.max_poll_ns.max(poll_ns);
         self.max_render_ns = self.max_render_ns.max(render_ns);
+        self.max_present_ns = self.max_present_ns.max(present_ns);
         self.max_command_ns = self.max_command_ns.max(command_ns);
 
         self.total_loop_ns = self.total_loop_ns.saturating_add(loop_ns as u128);
@@ -327,7 +339,13 @@ impl ProfilingInfo {
         let avg_loop_ns = (self.total_loop_ns / self.samples as u128) as u64;
 
         format!(
-            "loop ms avg {} last {} max {}\npoll last {} max {}\nrender last {} max {}\ncmd last {} max {}",
+            concat!(
+                "loop ms avg {} last {} max {}\n",
+                "poll last {} max {}\n",
+                "render last {} max {}\n",
+                "present last {} max {}\n",
+                "cmd last {} max {}"
+            ),
             Self::fmt_ms(avg_loop_ns),
             Self::fmt_ms(self.last_loop_ns),
             Self::fmt_ms(self.max_loop_ns),
@@ -335,6 +353,8 @@ impl ProfilingInfo {
             Self::fmt_ms(self.max_poll_ns),
             Self::fmt_ms(self.last_render_ns),
             Self::fmt_ms(self.max_render_ns),
+            Self::fmt_ms(self.last_present_ns),
+            Self::fmt_ms(self.max_present_ns),
             Self::fmt_ms(self.last_command_ns),
             Self::fmt_ms(self.max_command_ns)
         )

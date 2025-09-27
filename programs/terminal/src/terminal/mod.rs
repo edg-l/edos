@@ -117,15 +117,23 @@ pub fn run() -> i32 {
         }
 
         let render_start = monotonic_now();
-        if render(&mut terminal).is_err() {
-            return 1;
-        }
+        let present_ns = match render(&mut terminal) {
+            Ok(ns) => ns,
+            Err(_) => return 1,
+        };
         let render_end = monotonic_now();
         let render_ns = elapsed_ns(render_start, render_end);
 
         if let (Some(loop_start_ns), Some(loop_end_ns)) = (loop_start, monotonic_now()) {
             let loop_ns = loop_end_ns.saturating_sub(loop_start_ns);
-            terminal.record_profile(loop_ns, poll_ns, render_ns, command_time_ns, loop_end_ns);
+            terminal.record_profile(
+                loop_ns,
+                poll_ns,
+                render_ns,
+                present_ns,
+                command_time_ns,
+                loop_end_ns,
+            );
         }
     }
 }
