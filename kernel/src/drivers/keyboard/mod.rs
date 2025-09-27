@@ -28,13 +28,21 @@ const QUEUE_SIZE: usize = 2048;
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
 
-    let mut port = Port::new(0x60);
-
-    let scancode: u8 = unsafe { port.read() };
-
+    let mut data_port = Port::new(0x60);
+    let mut status_port = Port::new(0x64);
     let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
 
-    queue.force_push(scancode);
+    // Drain all bytes currently buffered by the controller. Limit the loop so the ISR
+    // cannot monopolize the CPU if the device misbehaves.
+    for _ in 0..8 {
+        let status: u8 = unsafe { status_port.read() };
+        if status & 0x01 == 0 {
+            break;
+        }
+
+        let scancode: u8 = unsafe { data_port.read() };
+        queue.force_push(scancode);
+    }
 
     if let Some(tid) = KEYBOARD_THREAD_ID.get() {
         sched().wake_thread_irq(*tid, WakePriority::Interrupt);
