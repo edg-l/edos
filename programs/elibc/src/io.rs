@@ -7,7 +7,7 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{Errno, SYS_IOCTL, SYS_POLL, errno, syscall3, syscall5},
+    sys::{Errno, SYS_FSTAT, SYS_IOCTL, SYS_POLL, errno, syscall2, syscall3, syscall5},
     sys_open as raw_sys_open, sys_read, sys_write,
 };
 
@@ -559,5 +559,64 @@ pub fn chdir(path: &str) -> IoResult<()> {
         Err(IoError::from(errno()))
     } else {
         Ok(())
+    }
+}
+
+/// File metadata returned by fstat
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FstatEntry {
+    pub size: u64,
+    pub created: u64,
+    pub accessed: u64,
+    pub modified: u64,
+    pub attrs: u16,
+    pub kind: u8,
+}
+
+impl FstatEntry {
+    /// Get file type from kind field
+    pub fn file_type(&self) -> FileType {
+        FileType::from(self.kind)
+    }
+
+    /// Check if this is a regular file
+    pub fn is_file(&self) -> bool {
+        self.kind == 0
+    }
+
+    /// Check if this is a directory
+    pub fn is_directory(&self) -> bool {
+        self.kind == 1
+    }
+
+    /// Check if file is read-only
+    pub fn is_readonly(&self) -> bool {
+        self.attrs & 1 != 0
+    }
+
+    /// Check if file is hidden
+    pub fn is_hidden(&self) -> bool {
+        self.attrs & 2 != 0
+    }
+}
+
+/// Get file metadata for a file descriptor
+pub fn fstat(fd: u64) -> IoResult<FstatEntry> {
+    let mut entry = FstatEntry {
+        size: 0,
+        created: 0,
+        accessed: 0,
+        modified: 0,
+        attrs: 0,
+        kind: 0,
+    };
+
+    let result = unsafe { syscall2(SYS_FSTAT, fd, &mut entry as *mut FstatEntry as u64) as isize };
+
+    if result < 0 {
+        Err(IoError::from(errno()))
+    } else {
+        Ok(entry)
     }
 }

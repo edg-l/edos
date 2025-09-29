@@ -8,7 +8,10 @@ use alloc::{
 };
 use elibc::{
     Errno, FilesystemKind, create_dir,
-    io::{FileType, chdir, getcwd, list_dir, open, open_flags, read_to_end, write_all_fd},
+    io::{
+        FileType, FstatEntry, chdir, fstat, getcwd, list_dir, open, open_flags, read_to_end,
+        write_all_fd,
+    },
     list_mounts, list_partitions, mount_partition, remove_dir, remove_dir_all, remove_file, spawn,
     sys_close,
 };
@@ -61,6 +64,7 @@ pub(super) fn execute_command(state: &mut TerminalState, command: &str, args: &[
         "ls" => list_directory(state, args),
         "cat" => cat_file(state, args),
         "write" => write_file(state, args),
+        "stat" => cmd_stat(state, args),
         "partitions" => cmd_list_partitions(state, args),
         "mount" => cmd_mount(state, args),
         "mkdir" => cmd_mkdir(state, args),
@@ -83,6 +87,7 @@ fn print_help(state: &mut TerminalState) {
         "- ls [path]",
         "- cat <path>",
         "- write <path> <content>",
+        "- stat <path>",
         "- ps [<path>]",
         "- dmesg [<path>]",
         "- partitions",
@@ -492,5 +497,73 @@ fn cmd_rm(state: &mut TerminalState, args: &[String]) {
     match result {
         Ok(()) => state.write_line("Removed."),
         Err(err) => state.write_line(&format!("rm failed: {:?}", err)),
+    }
+}
+
+fn cmd_stat(state: &mut TerminalState, args: &[String]) {
+    let Some(path) = args.first() else {
+        state.write_line("Usage: stat <path>");
+        return;
+    };
+
+    match open(path, 0) {
+        Ok(fd) => {
+            match fstat(fd) {
+                Ok(entry) => {
+                    display_file_stat(state, path, &entry);
+                }
+                Err(_) => state.write_line("stat: fstat failed"),
+            }
+            let _ = sys_close(fd);
+        }
+        Err(_) => state.write_line(&format!("stat: failed to open '{}'", path)),
+    }
+}
+
+fn display_file_stat(state: &mut TerminalState, path: &str, entry: &FstatEntry) {
+    state.write_line(&format!("File: {}", path));
+
+    // Display file type
+    let file_type = match entry.file_type() {
+        FileType::File => "Regular file",
+        FileType::Directory => "Directory",
+        FileType::Symlink => "Symbolic link",
+        FileType::Special => "Special file",
+    };
+    state.write_line(&format!("Type: {}", file_type));
+
+    // Display size
+    state.write_line(&format!("Size: {} bytes", entry.size));
+
+    // Display timestamps (raw values for now)
+    if entry.created != 0 {
+        state.write_line(&format!("Created: {}", entry.created));
+    }
+    if entry.accessed != 0 {
+        state.write_line(&format!("Accessed: {}", entry.accessed));
+    }
+    if entry.modified != 0 {
+        state.write_line(&format!("Modified: {}", entry.modified));
+    }
+
+    // Display attributes
+    let mut attrs = Vec::new();
+    if entry.is_readonly() {
+        attrs.push("readonly");
+    }
+    if entry.is_hidden() {
+        attrs.push("hidden");
+    }
+    if entry.attrs & 4 != 0 {
+        attrs.push("system");
+    }
+    if entry.attrs & 8 != 0 {
+        attrs.push("archive");
+    }
+
+    if !attrs.is_empty() {
+        state.write_line(&format!("Attributes: {}", attrs.join(", ")));
+    } else {
+        state.write_line("Attributes: none");
     }
 }

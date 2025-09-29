@@ -147,11 +147,20 @@ pub unsafe fn sys_unlink(path: *const u8) -> i64 {
     unsafe { syscall1(SYS_UNLINK, path as u64) as i64 }
 }
 
+/// # Safety
+/// Caller must ensure:
+/// - `fd` is a valid file descriptor
+/// - `fstat_buf` points to writable memory of size FstatEntry
+/// - Buffer remains valid for the duration of the syscall
+pub unsafe fn sys_fstat(fd: u64, fstat_buf: *mut io::FstatEntry) -> i64 {
+    unsafe { syscall2(SYS_FSTAT, fd, fstat_buf as u64) as i64 }
+}
+
 // Re-export I/O types for convenience
 pub use io::{
-    DirEntry, FileType, IoError, IoResult, KeyEvent, PollFd, PollState, STDERR, STDOUT, chdir,
-    get_raw_input, getcwd, ioctl, keyboard_fd, list_dir, open, open_flags, poll_fd, poll_fds,
-    read_from_fd, read_stdin, read_to_end, write_all_fd,
+    DirEntry, FileType, FstatEntry, IoError, IoResult, KeyEvent, PollFd, PollState, STDERR, STDOUT,
+    chdir, fstat, get_raw_input, getcwd, ioctl, keyboard_fd, list_dir, open, open_flags, poll_fd,
+    poll_fds, read_from_fd, read_stdin, read_to_end, write_all_fd,
 };
 // Re-export memory constants
 pub use sys::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};

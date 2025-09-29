@@ -385,6 +385,134 @@ pub struct FstatEntry {
     pub kind: u8,
 }
 
-pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) {
+fn file_to_fstat_entry(file: &crate::fs::File) -> FstatEntry {
+    let created = file
+        .created
+        .and_then(|ft| ft.to_datetime())
+        .map(|dt| {
+            // Convert to Unix timestamp approximation
+            // This is a simplified conversion - real implementation would be more precise
+            ((dt.year - 1970) as u64 * 365 * 24 * 3600)
+                + (dt.month as u64 * 30 * 24 * 3600)
+                + (dt.day as u64 * 24 * 3600)
+                + (dt.hour as u64 * 3600)
+                + (dt.min as u64 * 60)
+                + (dt.sec as u64)
+        })
+        .unwrap_or(0);
 
+    let accessed = file
+        .accessed
+        .and_then(|ft| ft.to_datetime())
+        .map(|dt| {
+            ((dt.year - 1970) as u64 * 365 * 24 * 3600)
+                + (dt.month as u64 * 30 * 24 * 3600)
+                + (dt.day as u64 * 24 * 3600)
+                + (dt.hour as u64 * 3600)
+                + (dt.min as u64 * 60)
+                + (dt.sec as u64)
+        })
+        .unwrap_or(0);
+
+    let modified = file
+        .modified
+        .and_then(|ft| ft.to_datetime())
+        .map(|dt| {
+            ((dt.year - 1970) as u64 * 365 * 24 * 3600)
+                + (dt.month as u64 * 30 * 24 * 3600)
+                + (dt.day as u64 * 24 * 3600)
+                + (dt.hour as u64 * 3600)
+                + (dt.min as u64 * 60)
+                + (dt.sec as u64)
+        })
+        .unwrap_or(0);
+
+    let mut attrs = 0u16;
+    if file.attrs.readonly {
+        attrs |= 1;
+    }
+    if file.attrs.hidden {
+        attrs |= 2;
+    }
+    if file.attrs.system {
+        attrs |= 4;
+    }
+    if file.attrs.archive {
+        attrs |= 8;
+    }
+
+    let kind = match file.kind {
+        crate::fs::FileKind::File => 0,
+        crate::fs::FileKind::Directory => 1,
+        crate::fs::FileKind::Symlink => 2,
+        crate::fs::FileKind::Special => 3,
+    };
+
+    FstatEntry {
+        size: file.size,
+        created,
+        accessed,
+        modified,
+        attrs,
+        kind,
+    }
+}
+
+pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if fstat_buf.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+
+    let fd_descriptor = match info.lock().fd_table.get_fd(fd) {
+        Some(desc) => desc.clone(),
+        None => {
+            info.lock().errno = Errno::EBADF;
+            return -1;
+        }
+    };
+
+    let fstat_entry = match fd_descriptor {
+        crate::thread::pipe::FileDescriptor::FsFile(fs_file) => {
+            interrupts::enable();
+
+            match file_info(&fs_file.path) {
+                Ok(file) => file_to_fstat_entry(&file),
+                Err(err) => {
+                    info.lock().errno = Errno::from(err);
+                    return -1;
+                }
+            }
+        }
+        crate::thread::pipe::FileDescriptor::StandardStream(_) => {
+            FstatEntry {
+                size: 0,
+                created: 0,
+                accessed: 0,
+                modified: 0,
+                attrs: 0,
+                kind: 3, // Special file
+            }
+        }
+        crate::thread::pipe::FileDescriptor::Pipe(_) => {
+            FstatEntry {
+                size: 0,
+                created: 0,
+                accessed: 0,
+                modified: 0,
+                attrs: 0,
+                kind: 3, // Special file
+            }
+        }
+    };
+
+    unsafe {
+        core::ptr::write(fstat_buf, fstat_entry);
+    }
+
+    0
 }

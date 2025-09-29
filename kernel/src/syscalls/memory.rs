@@ -111,14 +111,14 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                 -1 // EFAULT
             }
         } else {
-               log!("Unmap fail, partial");
+            log!("Unmap fail, partial");
             // Re-insert the mapping since we couldn't handle partial unmapping
             info.lock().memory_mappings.insert(map_addr, mapping);
             info.lock().errno = Errno::EINVAL;
             -1 // EINVAL - partial unmapping not supported yet
         }
     } else {
-         log!("Unmap fail, einval");
+        log!("Unmap fail, einval");
         info.lock().errno = Errno::EINVAL;
         -1 // EINVAL - not a valid mapping
     }
