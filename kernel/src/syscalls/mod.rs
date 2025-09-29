@@ -17,7 +17,7 @@ use crate::{
     syscalls::{
         fs::{
             FstatEntry, sys_fstat, sys_list_mounts, sys_list_partitions, sys_mkdir, sys_mount,
-            sys_rmdir, sys_rmdir_all, sys_unlink,
+            sys_rmdir, sys_rmdir_all, sys_stat, sys_unlink,
         },
         io::{
             SelectFd, sys_chdir, sys_close, sys_getcwd, sys_list_dir, sys_open, sys_poll, sys_read,
@@ -178,11 +178,12 @@ const SYS_GETCWD: u64 = 5;
 const SYS_CHDIR: u64 = 6;
 const SYS_POLL: u64 = 7;
 const SYS_FSTAT: u64 = 8;
+const SYS_MMAP: u64 = 9;
+const SYS_STAT: u64 = 10;
+const SYS_MUNMAP: u64 = 11;
 const SYS_IOCTL: u64 = 16;
 #[allow(unused)]
 const SYS_PIPE: u64 = 22;
-const SYS_MMAP: u64 = 9;
-const SYS_MUNMAP: u64 = 11;
 const SYS_EXIT: u64 = 60;
 const SYS_ERRNO: u64 = 0x400;
 const SYS_GETPID: u64 = 39; // get process ID
@@ -261,6 +262,12 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let fd = ctx.rdi;
             let fstat_buf = ctx.rsi as *mut FstatEntry;
             ctx.rax = sys_fstat(fd, fstat_buf) as u64;
+        }
+        SYS_STAT => {
+            let path_ptr = ctx.rdi as *const u8;
+            let path_len = ctx.rsi as usize;
+            let fstat_buf = ctx.rdx as *mut FstatEntry;
+            ctx.rax = sys_stat(path_ptr, path_len, fstat_buf) as u64;
         }
         SYS_MMAP => {
             let addr = ctx.rdi;

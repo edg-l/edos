@@ -15,7 +15,7 @@ use crate::{
         path::Path,
     },
     syscalls::io::resolve_path,
-    thread::scheduler::sched,
+    thread::{pipe::FileDescriptor, scheduler::sched},
 };
 
 use super::Errno;
@@ -38,6 +38,29 @@ fn read_user_path(path_ptr: *const u8, cwd: &Path) -> Result<Path, Errno> {
 
     if buf.is_empty() || buf.len() == MAX_PATH_LEN {
         return Err(Errno::EINVAL);
+    }
+
+    let path_str = core::str::from_utf8(&buf).map_err(|_| Errno::EINVAL)?;
+    resolve_path(path_str, cwd).map_err(|_| Errno::EINVAL)
+}
+
+fn read_user_path_with_len(
+    path_ptr: *const u8,
+    path_len: usize,
+    cwd: &Path,
+) -> Result<Path, Errno> {
+    if path_ptr.is_null() {
+        return Err(Errno::EFAULT);
+    }
+
+    if path_len == 0 || path_len > MAX_PATH_LEN {
+        return Err(Errno::EINVAL);
+    }
+
+    let mut buf = Vec::with_capacity(path_len);
+    for i in 0..path_len {
+        let c = unsafe { core::ptr::read_volatile(path_ptr.add(i)) };
+        buf.push(c);
     }
 
     let path_str = core::str::from_utf8(&buf).map_err(|_| Errno::EINVAL)?;
@@ -468,8 +491,9 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
         return -1;
     }
 
-    let fd_descriptor = match info.lock().fd_table.get_fd(fd) {
-        Some(desc) => desc.clone(),
+    let fd = info.lock().fd_table.get_fd(fd).cloned();
+    let fd_descriptor = match fd {
+        Some(desc) => desc,
         None => {
             info.lock().errno = Errno::EBADF;
             return -1;
@@ -477,7 +501,7 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
     };
 
     let fstat_entry = match fd_descriptor {
-        crate::thread::pipe::FileDescriptor::FsFile(fs_file) => {
+        FileDescriptor::FsFile(fs_file) => {
             interrupts::enable();
 
             match file_info(&fs_file.path) {
@@ -488,7 +512,7 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
                 }
             }
         }
-        crate::thread::pipe::FileDescriptor::StandardStream(_) => {
+        FileDescriptor::StandardStream(_) => {
             FstatEntry {
                 size: 0,
                 created: 0,
@@ -498,7 +522,7 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
                 kind: 3, // Special file
             }
         }
-        crate::thread::pipe::FileDescriptor::Pipe(_) => {
+        FileDescriptor::Pipe(_) => {
             FstatEntry {
                 size: 0,
                 created: 0,
@@ -507,6 +531,43 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
                 attrs: 0,
                 kind: 3, // Special file
             }
+        }
+    };
+
+    unsafe {
+        core::ptr::write(fstat_buf, fstat_entry);
+    }
+
+    0
+}
+
+pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut FstatEntry) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if fstat_buf.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+
+    let cwd = info.lock().cwd.clone();
+
+    let path = match read_user_path_with_len(path_ptr, path_len, &cwd) {
+        Ok(p) => p,
+        Err(err) => {
+            info.lock().errno = err;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    let fstat_entry = match file_info(&path) {
+        Ok(file) => file_to_fstat_entry(&file),
+        Err(err) => {
+            info.lock().errno = Errno::from(err);
+            return -1;
         }
     };
 

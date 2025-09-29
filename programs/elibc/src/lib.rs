@@ -156,11 +156,24 @@ pub unsafe fn sys_fstat(fd: u64, fstat_buf: *mut io::FstatEntry) -> i64 {
     unsafe { syscall2(SYS_FSTAT, fd, fstat_buf as u64) as i64 }
 }
 
+/// # Safety
+/// Caller must ensure:
+/// - `path_ptr` points to readable memory of at least `path_len` bytes
+/// - `fstat_buf` points to writable memory of size FstatEntry
+/// - Both pointers remain valid for the duration of the syscall
+pub unsafe fn sys_stat_path(
+    path_ptr: *const u8,
+    path_len: usize,
+    fstat_buf: *mut io::FstatEntry,
+) -> i64 {
+    unsafe { syscall3(SYS_STAT, path_ptr as u64, path_len as u64, fstat_buf as u64) as i64 }
+}
+
 // Re-export I/O types for convenience
 pub use io::{
     DirEntry, FileType, FstatEntry, IoError, IoResult, KeyEvent, PollFd, PollState, STDERR, STDOUT,
     chdir, fstat, get_raw_input, getcwd, ioctl, keyboard_fd, list_dir, open, open_flags, poll_fd,
-    poll_fds, read_from_fd, read_stdin, read_to_end, write_all_fd,
+    poll_fds, read_from_fd, read_stdin, read_to_end, stat_path, write_all_fd,
 };
 // Re-export memory constants
 pub use sys::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};

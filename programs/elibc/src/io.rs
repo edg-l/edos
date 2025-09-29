@@ -7,7 +7,7 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{Errno, SYS_FSTAT, SYS_IOCTL, SYS_POLL, errno, syscall2, syscall3, syscall5},
+    sys::{Errno, SYS_FSTAT, SYS_IOCTL, SYS_POLL, SYS_STAT, errno, syscall2, syscall3, syscall5},
     sys_open as raw_sys_open, sys_read, sys_write,
 };
 
@@ -613,6 +613,34 @@ pub fn fstat(fd: u64) -> IoResult<FstatEntry> {
     };
 
     let result = unsafe { syscall2(SYS_FSTAT, fd, &mut entry as *mut FstatEntry as u64) as isize };
+
+    if result < 0 {
+        Err(IoError::from(errno()))
+    } else {
+        Ok(entry)
+    }
+}
+
+/// Get file metadata for a file path
+pub fn stat_path(path: &str) -> IoResult<FstatEntry> {
+    let mut entry = FstatEntry {
+        size: 0,
+        created: 0,
+        accessed: 0,
+        modified: 0,
+        attrs: 0,
+        kind: 0,
+    };
+
+    let path_bytes = path.as_bytes();
+    let result = unsafe {
+        syscall3(
+            SYS_STAT,
+            path_bytes.as_ptr() as u64,
+            path_bytes.len() as u64,
+            &mut entry as *mut FstatEntry as u64,
+        ) as isize
+    };
 
     if result < 0 {
         Err(IoError::from(errno()))
