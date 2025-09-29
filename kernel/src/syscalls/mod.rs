@@ -1,4 +1,4 @@
-use core::{arch::naked_asm, ptr, sync::atomic::Ordering, time::Duration};
+use core::{arch::naked_asm, ptr, time::Duration};
 
 use alloc::{format, string::ToString, vec::Vec};
 use x86_64::{
@@ -177,6 +177,7 @@ const SYS_LIST_DIR: u64 = 4;
 const SYS_GETCWD: u64 = 5;
 const SYS_CHDIR: u64 = 6;
 const SYS_POLL: u64 = 7;
+const SYS_FSTAT: u64 = 8;
 const SYS_IOCTL: u64 = 16;
 #[allow(unused)]
 const SYS_PIPE: u64 = 22;

@@ -373,3 +373,18 @@ pub fn sys_list_mounts(buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
 
     written as i64
 }
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct FstatEntry {
+    pub size: u64,
+    pub created: u64,
+    pub accessed: u64,
+    pub modified: u64,
+    pub attrs: u16,
+    pub kind: u8,
+}
+
+pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) {
+
+}

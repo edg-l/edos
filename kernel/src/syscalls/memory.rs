@@ -1,7 +1,7 @@
 use x86_64::{VirtAddr, structures::paging::PageTableFlags};
 
 use crate::{
-    println,
+    log, println,
     syscalls::Errno,
     thread::{MappingType, MemoryMapping, UserThreadInfo, scheduler::sched},
 };
@@ -17,6 +17,7 @@ const MAP_ANONYMOUS: u32 = 0x20;
 const MAP_PRIVATE: u32 = 0x02;
 
 pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32) -> u64 {
+    log!("MMap: {addr} {length} {prot} {flags}");
     let sched = sched();
     let info = sched.current_thread_info();
 
@@ -67,14 +68,18 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32) -> u64 {
             },
         );
 
+        log!("Returning {map_addr:p} {page_flags:?}");
+
         map_addr.as_u64()
     } else {
+        log!("Error mapping");
         info.lock().errno = Errno::ENOMEM;
         !0u64 // -1 (ENOMEM)
     }
 }
 
 pub fn sys_munmap(addr: u64, length: u64) -> i32 {
+    log!("Unmapping {addr} {length}");
     let sched = sched();
     let info = sched.current_thread_info();
     info.lock().errno = Errno::Clear;
@@ -87,7 +92,8 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
     let map_addr = VirtAddr::new(addr);
 
     // Check if this is a valid mapping
-    if let Some(mapping) = info.lock().memory_mappings.remove(&map_addr) {
+    let mapping = info.lock().memory_mappings.remove(&map_addr);
+    if let Some(mapping) = mapping {
         if mapping.size == length {
             // Unmap the memory
             if info
@@ -97,18 +103,22 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                 .unmap_memory(map_addr, length)
                 .is_ok()
             {
+                log!("Unmap success");
                 0 // Success
             } else {
+                log!("Unmap fault");
                 info.lock().errno = Errno::EFAULT;
                 -1 // EFAULT
             }
         } else {
+               log!("Unmap fail, partial");
             // Re-insert the mapping since we couldn't handle partial unmapping
             info.lock().memory_mappings.insert(map_addr, mapping);
             info.lock().errno = Errno::EINVAL;
             -1 // EINVAL - partial unmapping not supported yet
         }
     } else {
+         log!("Unmap fail, einval");
         info.lock().errno = Errno::EINVAL;
         -1 // EINVAL - not a valid mapping
     }

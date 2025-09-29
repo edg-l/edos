@@ -271,11 +271,9 @@ pub fn load_elf(
 
         let actual_entry = VirtAddr::new(load_base.as_u64() + header.e_entry);
 
-        /*
         println!("ELF: header.e_entry = 0x{:x}", header.e_entry);
         println!("ELF: load_base = {:p}", load_base.as_u64() as *const u8);
         println!("ELF: calculated entry = {actual_entry:p}");
-        */
 
         Ok(LoadedInfo {
             entry_point: actual_entry,

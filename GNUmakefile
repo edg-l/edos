@@ -103,11 +103,11 @@ limine/limine:
 	$(MAKE) -C limine
 
 .PHONY: kernel
-kernel: programs
+kernel: programs programsv2
 	$(MAKE) -C kernel
 
 .PHONY: check
-check: programs
+check: programs programsv2
 	$(MAKE) -C kernel check
 
 $(IMAGE_NAME).iso: limine/limine kernel
@@ -145,6 +145,7 @@ $(IMAGE_NAME).hdd: limine/limine kernel
 clean:
 	$(MAKE) -C kernel clean
 	$(MAKE) -C programs clean
+	$(MAKE) -C programsv2 clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
 
 .PHONY: distclean
@@ -159,8 +160,12 @@ fmt:
 	$(MAKE) -C programs fmt
 
 .PHONY: programs
-programs:
+programs: programsv2
 	$(MAKE) -C programs build
+
+.PHONY: programsv2
+programsv2:
+	$(MAKE) -C programsv2 build
 
 DISK_UUID := 12345678-1234-5678-9abc-123456789abc
 PARTITION_UUID := 87654321-4321-8765-cba9-987654321fed

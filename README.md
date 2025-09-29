@@ -80,3 +80,47 @@ Running `make run` will build the kernel and a bootable ISO (equivalent to make 
 Running `make run-hdd` will build the kernel and a raw HDD image (equivalent to make all-hdd) and then run it using `qemu` (if installed).
 
 The `run-uefi` and `run-hdd-uefi` targets are equivalent to their non `-uefi` counterparts except that they boot `qemu` using a UEFI-compatible firmware.
+
+
+## Creating and using the Rust std
+
+Source: https://github.com/edg-l/rust/tree/edos_std
+
+```
+./x install
+./x install src
+```
+
+vscodejson ` "rust-analyzer.cargo.target": "/data2/edgar/rust/x86_64-unknown-edos.json"`
+
+
+```
+# bootstrap.toml
+profile = "compiler"  # Includes one of the default files in src/bootstrap/defaults
+change-id = 99999
+
+[build]
+host = ["x86_64-unknown-linux-gnu"]
+target = ["x86_64-unknown-edos"]
+tools = ["cargo", "clippy", "rustfmt"]
+docs = false
+extended = true
+
+[llvm]
+download-ci-llvm = true
+
+[install]
+prefix = "/data2/edgar/edos-programs/toolchain/edos"
+sysconfdir = "/data2/edgar/edos-programs/toolchain/etc"
+
+```
+
+
+```
+# rust-toolchain.toml
+[toolchain]
+path = "/data2/edgar/edos-programs/toolchain/edos"
+```
+
+
+Runtime: https://github.com/edg-l/edos_rt
