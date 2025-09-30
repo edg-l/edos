@@ -3,7 +3,7 @@ use alloc::collections::BTreeMap;
 use crate::thread::pipe::{FileDescriptor, StandardStream};
 
 #[allow(unused)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FileDescriptorTable {
     fds: BTreeMap<u64, FileDescriptor>,
     next_fd: u64,

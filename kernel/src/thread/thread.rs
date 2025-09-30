@@ -495,3 +495,15 @@ pub fn get_thread_info_by_id(tid: ThreadId) -> Option<Arc<IrqSpinlock<UserThread
 pub fn list_threads() -> Vec<Arc<Thread>> {
     without_interrupts(|| THREADS.list())
 }
+
+pub fn insert_thread(thread: Arc<Thread>) {
+    THREADS.insert(thread);
+}
+
+pub fn insert_thread_info(tid: ThreadId, info: Arc<IrqSpinlock<UserThreadInfo>>) {
+    THREADS.insert_info(tid, info);
+}
+
+pub fn allocate_thread_id() -> ThreadId {
+    ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed))
+}

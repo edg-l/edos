@@ -53,10 +53,10 @@ pub struct UserThread {
 pub struct UserThreadInfo {
     pub pid: u64,
     pub errno: Errno,
-    pub fd_table: FileDescriptorTable,
+    pub fd_table: FileDescriptorTable, // should be arc mutex
     // For mmap
-    pub memory_mappings: BTreeMap<VirtAddr, MemoryMapping>,
-    pub next_mmap_addr: VirtAddr,
+    pub memory_mappings: BTreeMap<VirtAddr, MemoryMapping>, // should be arc mutex
+    pub next_mmap_addr: VirtAddr,                           // should be arc mutex
     pub memory_manager: Arc<Mutex<MemoryManager>>,
     pub cwd: Path,
     pub user_id: u32,

@@ -1,9 +1,15 @@
 #![no_std]
 #![no_main]
 
-use core::ffi::{CStr, c_char};
+use core::{
+    ffi::{CStr, c_char},
+    ptr::null_mut,
+};
 
-use elibc::println;
+use elibc::{
+    println,
+    process::{thread_create, thread_join},
+};
 
 #[unsafe(no_mangle)]
 extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
@@ -25,5 +31,20 @@ extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
             }
         }
     }
+
+    let id = elibc::process::sys_getpid();
+    println!("hi from process {id}");
+
+    let pid = thread_create(thread_fn, null_mut()).unwrap();
+
+    thread_join(pid).unwrap();
+
+    0
+}
+
+extern "C" fn thread_fn(args: *mut u8) -> i32 {
+    let id = elibc::process::sys_getpid();
+    println!("hi from thread {id}");
+
     0
 }

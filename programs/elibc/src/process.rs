@@ -3,9 +3,10 @@ use core::hint::spin_loop;
 
 use crate::sys::{
     Errno, SYS_WAIT_PID,
-    calls::{syscall0, syscall1, syscall2, syscall3, syscall5},
+    calls::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall5},
     constants::{
-        SYS_DUP2, SYS_EXIT, SYS_GETPID, SYS_MONOTONIC_TIME, SYS_PIPE, SYS_SLEEP_MS, SYS_SPAWN,
+        SYS_CLONE, SYS_DUP2, SYS_EXIT, SYS_GETPID, SYS_MONOTONIC_TIME, SYS_PIPE, SYS_SLEEP_MS,
+        SYS_SPAWN,
     },
     errno,
 };
@@ -94,6 +95,23 @@ pub fn dup2(oldfd: u64, newfd: u64) -> u64 {
     unsafe { syscall2(SYS_DUP2, oldfd, newfd) }
 }
 
+/// Clone the calling thread to create a new thread.
+///
+/// * `func`: function pointer to execute in the new thread
+/// * `arg`: argument to pass to the function
+/// * `flags`: clone flags (currently unused)
+/// * `stack`: user stack pointer for the child thread (0 = kernel allocates)
+///
+/// Returns child thread ID on success, or `u64::MAX` on error.
+pub fn sys_clone(
+    func: extern "C" fn(*mut u8) -> i32,
+    arg: *mut u8,
+    flags: u64,
+    stack: *mut u8,
+) -> u64 {
+    unsafe { syscall4(SYS_CLONE, func as u64, arg as u64, flags, stack as u64) }
+}
+
 /// Spawn a new process.
 ///
 /// * `path`: path to executable (must be a valid UTF-8 string)
@@ -162,4 +180,78 @@ pub unsafe extern "C" fn _start(argc: isize, argv: *const *const u8) -> ! {
 pub fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     crate::println!("{info}");
     sys_exit(-1);
+}
+
+// Thread support
+pub type ThreadId = u64;
+
+/// Thread creation result
+pub type ThreadResult = Result<ThreadId, Errno>;
+
+/// Internal structure to pass both function and argument to thread wrapper
+#[repr(C)]
+struct ThreadStartData {
+    func: extern "C" fn(*mut u8) -> i32,
+    arg: *mut u8,
+}
+
+/// Hidden thread entry wrapper that ensures threads exit cleanly when they return.
+/// This is analogous to _start for main().
+extern "C" fn thread_entry_wrapper(data_ptr: *mut u8) -> i32 {
+    // Unpack the thread start data
+    let data = unsafe { &*(data_ptr as *const ThreadStartData) };
+    let func = data.func;
+    let arg = data.arg;
+
+    // Deallocate the ThreadStartData box
+    unsafe {
+        let _ = alloc::boxed::Box::from_raw(data_ptr as *mut ThreadStartData);
+    }
+
+    // Call the user's thread function
+    let exit_code = func(arg);
+
+    // Exit the thread cleanly
+    sys_exit(exit_code);
+}
+
+/// Create a new thread that executes the given function.
+///
+/// * `func`: function to execute in the new thread
+/// * `arg`: argument to pass to the function
+///
+/// Returns the thread ID on success.
+pub fn thread_create(func: extern "C" fn(*mut u8) -> i32, arg: *mut u8) -> ThreadResult {
+    // Pack function and argument into a box
+    let data = alloc::boxed::Box::new(ThreadStartData { func, arg });
+    let data_ptr = alloc::boxed::Box::into_raw(data) as *mut u8;
+
+    // Create thread with wrapper function
+    let tid = sys_clone(thread_entry_wrapper, data_ptr, 0, core::ptr::null_mut());
+    if tid == u64::MAX {
+        // If clone failed, deallocate the box
+        unsafe {
+            let _ = alloc::boxed::Box::from_raw(data_ptr as *mut ThreadStartData);
+        }
+        Err(errno())
+    } else {
+        Ok(tid)
+    }
+}
+
+/// Wait for a thread to complete and retrieve its exit status.
+///
+/// * `tid`: thread ID to wait for
+///
+/// Returns the thread's exit code on success.
+pub fn thread_join(tid: ThreadId) -> Result<i32, Errno> {
+    loop {
+        match sys_waitpid(tid, false)? {
+            WaitPidStatus::Exited(code) => return Ok(code),
+            WaitPidStatus::StillRunning => {
+                // Sleep a bit to avoid busy waiting
+                let _ = sleep_ms(1);
+            }
+        }
+    }
 }

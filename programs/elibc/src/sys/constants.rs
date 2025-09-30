@@ -29,6 +29,7 @@ pub const SYS_UNLINK: u64 = 207;
 pub const SYS_LIST_MOUNTS: u64 = 208;
 pub const SYS_SLEEP_MS: u64 = 209;
 pub const SYS_MONOTONIC_TIME: u64 = 210;
+pub const SYS_CLONE: u64 = 211;
 
 // Ioctl buffer flags
 pub const IOCTL_ARG_IN: u64 = 1;

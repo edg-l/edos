@@ -1,6 +1,12 @@
-use core::{arch::naked_asm, ptr, time::Duration};
+use core::{
+    arch::naked_asm,
+    ptr,
+    sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64},
+    time::Duration,
+};
 
 use alloc::{format, string::ToString, sync::Arc, vec::Vec};
+use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
     registers::{
@@ -8,6 +14,7 @@ use x86_64::{
         model_specific::{LStar, SFMask, Star},
         rflags::RFlags,
     },
+    structures::paging::PageTableFlags,
 };
 
 use crate::{
@@ -26,10 +33,12 @@ use crate::{
         memory::{sys_mmap, sys_munmap},
     },
     thread::{
+        UserThreadInfo,
+        irqlock::IrqSpinlock,
         mutex::BlockingMutex,
         pipe::{FileDescriptor, Pipe},
         scheduler::{sched, switch_to_kernel_page},
-        thread::{Thread, ThreadId, get_thread_info_by_id, take_thread_exit_code},
+        thread::{State, Thread, ThreadId, get_thread_info_by_id, take_thread_exit_code},
     },
 };
 
@@ -201,6 +210,7 @@ const SYS_UNLINK: u64 = 207;
 const SYS_LIST_MOUNTS: u64 = 208;
 const SYS_SLEEP_MS: u64 = 209;
 const SYS_MONOTONIC_TIME: u64 = 210;
+const SYS_CLONE: u64 = 211;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -357,6 +367,13 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_UNLINK => {
             let path_ptr = ctx.rdi as *const u8;
             ctx.rax = sys_unlink(path_ptr) as u64;
+        }
+        SYS_CLONE => {
+            let func_ptr = ctx.rdi;
+            let arg = ctx.rsi;
+            let flags = ctx.rdx;
+            let child_stack = ctx.r10;
+            ctx.rax = sys_clone(ctx, func_ptr, arg, flags, child_stack);
         }
         _ => {
             ctx.rax = !0u64;
@@ -720,6 +737,160 @@ fn sys_spawn(
     unsafe { Cr3::write(cr3.0, cr3.1) };
 
     child_pid
+}
+
+fn sys_clone(
+    parent_ctx: &mut SyscallContext,
+    func_ptr: u64,
+    arg: u64,
+    _flags: u64,
+    child_stack: u64,
+) -> u64 {
+    use crate::thread::{
+        MemoryRegion, MemoryRegionType,
+        context::CpuContext,
+        thread::{Thread, allocate_thread_id, insert_thread, insert_thread_info},
+        util::kthread_stack_alloc,
+    };
+
+    let sched = sched();
+    let parent_thread = match sched.current_thread() {
+        Some(t) => t,
+        None => {
+            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    let parent_user = match &parent_thread.user {
+        Some(u) => u,
+        None => {
+            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    // Allocate user stack if not provided
+    let (user_stack_top, stack_region) = if child_stack == 0 {
+        // Allocate a new user stack using internal mmap
+        let parent_info = sched.current_thread_info();
+        let stack_size = 2 * 1024 * 1024; // 2MB stack
+
+        let stack_bottom = {
+            let mut info = parent_info.lock();
+            memory::find_free_virtual_address(&mut info, stack_size)
+        };
+
+        // Map the stack
+        let page_flags =
+            PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+
+        if parent_info
+            .lock()
+            .memory_manager
+            .lock()
+            .map_memory(stack_bottom, stack_size, page_flags)
+            .is_err()
+        {
+            parent_info.lock().errno = Errno::ENOMEM;
+            return !0u64;
+        }
+
+        let stack_region = MemoryRegion {
+            start: stack_bottom,
+            size: stack_size,
+            flags: page_flags,
+            region_type: MemoryRegionType::Data,
+        };
+
+        (stack_bottom.as_u64() + stack_size, Some(stack_region))
+    } else {
+        (child_stack, None)
+    };
+
+    // Allocate kernel stack for child
+    let kernel_stack_top = kthread_stack_alloc();
+
+    // Get parent UserThread data
+    let parent_user_read = parent_user.read();
+    let cr3 = parent_user_read.cr3;
+    let memory_manager = parent_user_read.memory_manager.clone();
+
+    // Create child context - clone parent's CPU state
+    let mut child_ctx = CpuContext::new_user_thread(func_ptr, user_stack_top);
+
+    // Copy callee-saved registers from parent
+    child_ctx.r15 = parent_ctx.r15;
+    child_ctx.r14 = parent_ctx.r14;
+    child_ctx.r13 = parent_ctx.r13;
+    child_ctx.r12 = parent_ctx.r12;
+    child_ctx.rbp = parent_ctx.rbp;
+    child_ctx.rbx = parent_ctx.rbx;
+
+    // Set child-specific values
+    child_ctx.rax = 0; // Child returns 0
+    child_ctx.rdi = arg; // First argument to function
+    child_ctx.rsi = 0;
+
+    // Allocate new thread ID
+    let child_id = allocate_thread_id();
+
+    // Create child Thread
+    let child_thread = Arc::new(Thread {
+        id: child_id,
+        kstack_top: kernel_stack_top,
+        ctx: Mutex::new(child_ctx),
+        state: AtomicU8::new(State::Ready as u8),
+        name: Arc::new(format!("thread-{}", child_id.0)),
+        cpu_affinity: AtomicU32::new(0),
+        flags: AtomicU32::new(0),
+        slice_deadline: AtomicU64::new(0),
+        priority: AtomicU8::new(crate::thread::runqueue::DEFAULT_PRIORITY),
+        sleep_deadline: AtomicU64::new(0),
+        cpu_time_ns: AtomicU64::new(0),
+        run_start_tick: AtomicU64::new(0),
+        cpu: AtomicU32::new(0),
+        exit_code: AtomicI32::new(0),
+        user: Some(Arc::new(RwLock::new(crate::thread::UserThread {
+            pid: child_id.0,
+            initial_stack_top: user_stack_top,
+            cr3,
+            memory_manager: memory_manager.clone(),
+            memory_regions: stack_region.into_iter().collect(),
+            heap_break: parent_user_read.heap_break,
+            fpu_init: false,
+            fpu: crate::drivers::fpu::FpuState::default(),
+        }))),
+    });
+
+    // Clone parent's UserThreadInfo - share fd_table
+    let parent_info = sched.current_thread_info();
+    let parent_info_guard = parent_info.lock();
+
+    insert_thread(child_thread.clone());
+    insert_thread_info(
+        child_id,
+        Arc::new(IrqSpinlock::new(UserThreadInfo {
+            pid: child_id.0,
+            errno: Errno::Clear,
+            fd_table: parent_info_guard.fd_table.clone(),
+            memory_mappings: parent_info_guard.memory_mappings.clone(),
+            next_mmap_addr: parent_info_guard.next_mmap_addr,
+            memory_manager,
+            cwd: parent_info_guard.cwd.clone(),
+            user_id: parent_info_guard.user_id,
+            group_id: parent_info_guard.group_id,
+        })),
+    );
+
+    drop(parent_info_guard);
+    drop(parent_user_read);
+
+    // Queue the child thread
+    crate::thread::util::queue_spawn_thread(child_thread);
+
+    // Parent returns child thread ID
+    child_id.0
 }
 
 fn copy_user_c_string(ptr: *const u8, max_len: usize) -> Option<Vec<u8>> {

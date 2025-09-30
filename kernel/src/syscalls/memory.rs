@@ -124,7 +124,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
     }
 }
 
-fn find_free_virtual_address(thread: &mut UserThreadInfo, length: u64) -> VirtAddr {
+pub fn find_free_virtual_address(thread: &mut UserThreadInfo, length: u64) -> VirtAddr {
     let aligned_length = (length + 0xfff) & !0xfff;
 
     loop {
