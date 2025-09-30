@@ -33,12 +33,17 @@ use crate::{
         memory::{sys_mmap, sys_munmap},
     },
     thread::{
-        UserThreadInfo,
+        MemoryRegion, MemoryRegionType, UserThreadInfo,
+        context::CpuContext,
         irqlock::IrqSpinlock,
         mutex::BlockingMutex,
         pipe::{FileDescriptor, Pipe},
         scheduler::{sched, switch_to_kernel_page},
-        thread::{State, Thread, ThreadId, get_thread_info_by_id, take_thread_exit_code},
+        thread::{
+            State, Thread, ThreadId, allocate_thread_id, get_thread_info_by_id, insert_thread,
+            insert_thread_info, take_thread_exit_code,
+        },
+        util::kthread_stack_alloc,
     },
 };
 
@@ -746,13 +751,6 @@ fn sys_clone(
     _flags: u64,
     child_stack: u64,
 ) -> u64 {
-    use crate::thread::{
-        MemoryRegion, MemoryRegionType,
-        context::CpuContext,
-        thread::{Thread, allocate_thread_id, insert_thread, insert_thread_info},
-        util::kthread_stack_alloc,
-    };
-
     let sched = sched();
     let parent_thread = match sched.current_thread() {
         Some(t) => t,
@@ -841,11 +839,11 @@ fn sys_clone(
         kstack_top: kernel_stack_top,
         ctx: Mutex::new(child_ctx),
         state: AtomicU8::new(State::Ready as u8),
-        name: Arc::new(format!("thread-{}", child_id.0)),
+        name: Arc::new(format!("{}-thread-{}", parent_thread.name, child_id.0)),
         cpu_affinity: AtomicU32::new(0),
         flags: AtomicU32::new(0),
         slice_deadline: AtomicU64::new(0),
-        priority: AtomicU8::new(crate::thread::runqueue::DEFAULT_PRIORITY),
+        priority: AtomicU8::new(parent_thread.priority()),
         sleep_deadline: AtomicU64::new(0),
         cpu_time_ns: AtomicU64::new(0),
         run_start_tick: AtomicU64::new(0),
