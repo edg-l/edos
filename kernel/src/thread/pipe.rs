@@ -1,12 +1,14 @@
-use crate::fs::path::Path;
+use crate::{
+    fs::{PollState, handle::Pollable, path::Path},
+    thread::mutex::BlockingMutex,
+};
 use alloc::{sync::Arc, vec::Vec};
-use spin::RwLock;
 
 #[derive(Debug, Clone)]
 pub enum FileDescriptor {
     StandardStream(StandardStream),
     #[allow(unused)]
-    Pipe(Arc<RwLock<Pipe>>),
+    Pipe(Arc<BlockingMutex<Pipe>>),
     // Filesystem-backed file descriptor with maintained offset
     FsFile(FsFile),
 }
@@ -55,4 +57,31 @@ pub struct FsFile {
     pub path: Path,
     pub offset: u64,
     pub append: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PollablePipe {
+    inner: Arc<BlockingMutex<Pipe>>,
+}
+
+impl PollablePipe {
+    pub fn new(pipe: Arc<BlockingMutex<Pipe>>) -> Self {
+        Self { inner: pipe }
+    }
+}
+
+impl Pollable for PollablePipe {
+    fn poll(&self, _timeout: core::time::Duration) -> PollState {
+        let inner = self.inner.lock();
+
+        if inner.closed || inner.buffer.is_empty() {
+            PollState::none()
+        } else {
+            PollState {
+                readable: true,
+                writable: true,
+                error: false,
+            }
+        }
+    }
 }

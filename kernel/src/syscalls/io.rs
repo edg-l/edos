@@ -1,9 +1,14 @@
+use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::{string::ToString, vec::Vec};
 use core::time::Duration;
 
 use x86_64::instructions::interrupts;
 
+use crate::fs::handle::Pollable;
 use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
+use crate::thread::mutex::BlockingMutex;
+use crate::thread::pipe::PollablePipe;
 use crate::{
     drivers::{keyboard::KEYBOARD_BROADCAST, tty},
     syscalls::Errno,
@@ -84,6 +89,8 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
 
     let buffer = unsafe { core::slice::from_raw_parts(buffer_ptr, count) }.to_vec();
 
+    interrupts::enable();
+
     let fdinfo = info.lock().fd_table.get_fd(fd).cloned();
     match fdinfo {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
@@ -100,14 +107,13 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             // TODO: is it safe to get this lock here
             // let text = core::str::from_utf8(&buffer);
             // log!("Pipe: {:?}", text);
-            let mut pipe = pipe.write();
+            let mut pipe = pipe.lock();
             pipe.buffer.extend_from_slice(&buffer);
             count as u64
         }
         Some(FileDescriptor::FsFile(file)) => {
             // Write via FS API using current offset (append respected)
             let mut file = file.clone();
-            interrupts::enable();
             if file.append {
                 match fs_api::file_info(&file.path) {
                     Ok(info) => file.offset = info.size,
@@ -145,10 +151,11 @@ pub fn sys_close(fd: u64) -> i32 {
     let info = sched.current_thread_info();
     info.lock().errno = Errno::Clear;
 
+    interrupts::enable();
     let result = info.lock().fd_table.close_fd(fd);
     match result {
         Some(FileDescriptor::Pipe(pipe)) => {
-            let mut guard = pipe.write();
+            let mut guard = pipe.lock();
             guard.close_reader();
             0
         }
@@ -350,12 +357,12 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
 }
 
 fn read_from_pipe(
-    pipe: alloc::sync::Arc<spin::RwLock<Pipe>>,
+    pipe: Arc<BlockingMutex<Pipe>>,
     max_count: usize,
 ) -> Result<alloc::vec::Vec<u8>, i64> {
     use alloc::vec::Vec;
 
-    let mut pipe_guard = pipe.write();
+    let mut pipe_guard = pipe.lock();
 
     if pipe_guard.buffer.is_empty() && pipe_guard.closed {
         return Ok(Vec::new()); // EOF
@@ -516,7 +523,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
             .collect::<Vec<_>>()
     };
 
-    let mut contexts = Vec::with_capacity(count);
+    let mut contexts: Vec<(usize, PollState, Box<dyn Pollable>)> = Vec::with_capacity(count);
 
     interrupts::enable();
 
@@ -530,23 +537,33 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
             }
         };
 
-        let FileDescriptor::FsFile(file) = descriptor else {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
-        };
-
-        let pollable = match fs_api::poll(&file.path) {
-            Ok(p) => p,
-            Err(err) => {
-                info.lock().errno = Errno::from(err);
+        match descriptor {
+            FileDescriptor::StandardStream(_) => {
+                info.lock().errno = Errno::EINVAL;
                 return -1;
             }
-        };
+            FileDescriptor::Pipe(pipe) => {
+                let pollable = Box::new(PollablePipe::new(pipe.clone()));
+                let interests = entry.interests;
+                contexts.push((idx, interests, pollable));
+                // Reset result so callers don't observe stale bits.
+                fds[idx].result = PollState::none();
+            }
+            FileDescriptor::FsFile(file) => {
+                let pollable = match fs_api::poll(&file.path) {
+                    Ok(p) => p,
+                    Err(err) => {
+                        info.lock().errno = Errno::from(err);
+                        return -1;
+                    }
+                };
 
-        let interests = entry.interests;
-        contexts.push((idx, interests, pollable));
-        // Reset result so callers don't observe stale bits.
-        fds[idx].result = PollState::none();
+                let interests = entry.interests;
+                contexts.push((idx, interests, pollable));
+                // Reset result so callers don't observe stale bits.
+                fds[idx].result = PollState::none();
+            }
+        }
     }
 
     let deadline = timeout.map(|t| Instant::now() + t);

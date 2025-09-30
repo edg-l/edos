@@ -1,6 +1,6 @@
 use core::{arch::naked_asm, ptr, time::Duration};
 
-use alloc::{format, string::ToString, vec::Vec};
+use alloc::{format, string::ToString, sync::Arc, vec::Vec};
 use x86_64::{
     VirtAddr,
     registers::{
@@ -26,6 +26,8 @@ use crate::{
         memory::{sys_mmap, sys_munmap},
     },
     thread::{
+        mutex::BlockingMutex,
+        pipe::{FileDescriptor, Pipe},
         scheduler::{sched, switch_to_kernel_page},
         thread::{Thread, ThreadId, get_thread_info_by_id, take_thread_exit_code},
     },
@@ -470,10 +472,6 @@ fn sys_monotonic_time() -> u64 {
 }
 
 fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
-    use crate::thread::pipe::{FileDescriptor, Pipe};
-    use alloc::sync::Arc;
-    use spin::RwLock;
-
     let sched = sched();
     let info = sched.current_thread_info();
 
@@ -485,7 +483,7 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
     }
 
     // Create new pipe
-    let pipe = Arc::new(RwLock::new(Pipe::new()));
+    let pipe = Arc::new(BlockingMutex::new(Pipe::new()));
 
     // Allocate read and write file descriptors
     let read_fd = info
