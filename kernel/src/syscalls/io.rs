@@ -91,7 +91,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
 
     interrupts::enable();
 
-    let fdinfo = info.lock().fd_table.get_fd(fd).cloned();
+    let fdinfo = info.lock().fd_table.lock().get_fd(fd).cloned();
     match fdinfo {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
             StandardStream::Stdout | StandardStream::Stderr => {
@@ -129,7 +129,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                         offset: file.offset + written,
                         ..file
                     });
-                    info.lock().fd_table.replace_fd(fd, new_fd);
+                    info.lock().fd_table.lock().replace_fd(fd, new_fd);
                     written
                 }
                 Err(_) => {
@@ -152,7 +152,7 @@ pub fn sys_close(fd: u64) -> i32 {
     info.lock().errno = Errno::Clear;
 
     interrupts::enable();
-    let result = info.lock().fd_table.close_fd(fd);
+    let result = info.lock().fd_table.lock().close_fd(fd);
     match result {
         Some(FileDescriptor::Pipe(pipe)) => {
             let mut guard = pipe.lock();
@@ -173,7 +173,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
     let fd_info = {
         let mut guard = info.lock();
         guard.errno = Errno::Clear;
-        guard.fd_table.get_fd(fd).cloned()
+        guard.fd_table.lock().get_fd(fd).cloned()
     };
 
     if count == 0 {
@@ -239,6 +239,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
         file.offset += bytes_to_copy as u64;
         info.lock()
             .fd_table
+            .lock()
             .replace_fd(fd, FileDescriptor::FsFile(file));
     }
 
@@ -315,7 +316,7 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         }
     };
 
-    let path = match resolve_path(path_str, &info.lock().cwd) {
+    let path = match resolve_path(path_str, &info.lock().cwd.lock()) {
         Ok(path) => path,
         Err(_) => {
             info.lock().errno = Errno::EINVAL;
@@ -352,7 +353,7 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         offset,
         append,
     });
-    let fd = info.lock().fd_table.allocate_fd(desc);
+    let fd = info.lock().fd_table.lock().allocate_fd(desc);
     fd as i64
 }
 
@@ -421,7 +422,7 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
         }
     };
 
-    let path = match resolve_path(path_str, &info.lock().cwd) {
+    let path = match resolve_path(path_str, &info.lock().cwd.lock()) {
         Ok(path) => path,
         Err(_) => {
             info.lock().errno = Errno::EINVAL;
@@ -519,7 +520,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
         let mut guard = info.lock();
         guard.errno = Errno::Clear;
         fds.iter()
-            .map(|entry| guard.fd_table.get_fd(entry.fd).cloned())
+            .map(|entry| guard.fd_table.lock().get_fd(entry.fd).cloned())
             .collect::<Vec<_>>()
     };
 
@@ -639,7 +640,7 @@ pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {
     }
 
     // Get current working directory as string
-    let cwd_str = info.lock().cwd.to_string();
+    let cwd_str = info.lock().cwd.lock().to_string();
     let cwd_bytes = cwd_str.as_bytes();
 
     // Need space for string + null terminator
@@ -692,7 +693,7 @@ pub fn sys_chdir(path_ptr: *const u8) -> i64 {
     };
 
     // Resolve the target path (absolute or relative to current cwd)
-    let new_path = match resolve_path(path_str, &info.lock().cwd) {
+    let new_path = match resolve_path(path_str, &info.lock().cwd.lock()) {
         Ok(path) => path,
         Err(_) => {
             info.lock().errno = Errno::EINVAL;
@@ -722,6 +723,6 @@ pub fn sys_chdir(path_ptr: *const u8) -> i64 {
     }
 
     // Update the current working directory
-    info.lock().cwd = new_path;
+    *info.lock().cwd.lock() = new_path;
     0
 }

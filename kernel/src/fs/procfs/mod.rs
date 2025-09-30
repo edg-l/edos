@@ -475,10 +475,13 @@ fn read_thread_info(
         return (
             Some(info.user_id),
             Some(info.group_id),
-            Some(format!("{}", info.cwd)),
+            Some(info.cwd.lock().to_string()),
             Some(info.errno),
-            Some(info.memory_mappings.len()),
-            Some(info.next_mmap_addr.as_u64()),
+            Some(info.memory_mappings.lock().len()),
+            Some(
+                info.next_mmap_addr
+                    .load(core::sync::atomic::Ordering::Relaxed),
+            ),
         );
     }
     (None, None, None, None, None, None)

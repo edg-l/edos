@@ -26,6 +26,7 @@ use crate::{
         context::CpuContext,
         fd::FileDescriptorTable,
         irqlock::IrqSpinlock,
+        mutex::BlockingMutex,
         paging::allocate_process_pml4,
         runqueue::{DEFAULT_PRIORITY, PRIORITY_LEVELS},
         scheduler::switch_to_kernel_page,
@@ -321,11 +322,11 @@ impl Thread {
             Arc::new(IrqSpinlock::new(UserThreadInfo {
                 pid: id.0,
                 errno: Errno::Clear,
-                fd_table: FileDescriptorTable::new(),
-                memory_mappings: BTreeMap::new(),
-                next_mmap_addr: VirtAddr::new(load_info.heap_break),
+                fd_table: Arc::new(BlockingMutex::new(FileDescriptorTable::new())),
+                memory_mappings: Arc::new(BlockingMutex::new(BTreeMap::new())),
+                next_mmap_addr: Arc::new(AtomicU64::new(load_info.heap_break)),
                 memory_manager: mm,
-                cwd,
+                cwd: Arc::new(BlockingMutex::new(cwd)),
                 user_id: user,
                 group_id: group,
             })),
@@ -343,7 +344,8 @@ impl Thread {
             // Unmap all memory mappings
             let mut memory_manager = user.memory_manager.lock();
             if let Some(info) = info {
-                for (&addr, mapping) in &info.lock().memory_mappings {
+                let mappings = info.lock().memory_mappings.lock().clone();
+                for (addr, mapping) in mappings {
                     let _ = memory_manager.unmap_memory(addr, mapping.size);
                 }
             }

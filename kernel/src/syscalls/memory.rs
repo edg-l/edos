@@ -1,9 +1,12 @@
+use alloc::{collections::btree_map::BTreeMap, sync::Arc};
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use x86_64::{VirtAddr, structures::paging::PageTableFlags};
 
 use crate::{
     log, println,
     syscalls::Errno,
-    thread::{MappingType, MemoryMapping, UserThreadInfo, scheduler::sched},
+    thread::{MappingType, MemoryMapping, UserThreadInfo, mutex::BlockingMutex, scheduler::sched},
 };
 
 // Protection flags (match Linux)
@@ -36,8 +39,9 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32) -> u64 {
     }
 
     let map_addr = if addr == 0 {
-        // Find free virtual address
-        find_free_virtual_address(&mut info.lock(), length)
+        // Find free virtual address using atomic allocation
+        let guard = info.lock();
+        find_free_virtual_address_atomic(&guard.memory_mappings, &guard.next_mmap_addr, length)
     } else {
         VirtAddr::new(addr)
     };
@@ -52,14 +56,14 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32) -> u64 {
     }
 
     // Map the memory
-    if info
-        .lock()
-        .memory_manager
+    let memory_manager = info.lock().memory_manager.clone();
+    if memory_manager
         .lock()
         .map_memory(map_addr, length, page_flags)
         .is_ok()
     {
-        info.lock().memory_mappings.insert(
+        // Insert mapping - short lock duration
+        info.lock().memory_mappings.lock().insert(
             map_addr,
             MemoryMapping {
                 size: length,
@@ -91,18 +95,13 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
 
     let map_addr = VirtAddr::new(addr);
 
-    // Check if this is a valid mapping
-    let mapping = info.lock().memory_mappings.remove(&map_addr);
+    // Check if this is a valid mapping - short lock
+    let mapping = info.lock().memory_mappings.lock().remove(&map_addr);
     if let Some(mapping) = mapping {
         if mapping.size == length {
-            // Unmap the memory
-            if info
-                .lock()
-                .memory_manager
-                .lock()
-                .unmap_memory(map_addr, length)
-                .is_ok()
-            {
+            // Unmap the memory - clone manager before long operation
+            let memory_manager = info.lock().memory_manager.clone();
+            if memory_manager.lock().unmap_memory(map_addr, length).is_ok() {
                 log!("Unmap success");
                 0 // Success
             } else {
@@ -113,7 +112,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
         } else {
             log!("Unmap fail, partial");
             // Re-insert the mapping since we couldn't handle partial unmapping
-            info.lock().memory_mappings.insert(map_addr, mapping);
+            info.lock().memory_mappings.lock().insert(map_addr, mapping);
             info.lock().errno = Errno::EINVAL;
             -1 // EINVAL - partial unmapping not supported yet
         }
@@ -124,29 +123,41 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
     }
 }
 
-pub fn find_free_virtual_address(thread: &mut UserThreadInfo, length: u64) -> VirtAddr {
+/// Find free virtual address with atomic next_mmap_addr and locked memory_mappings
+pub fn find_free_virtual_address_atomic(
+    memory_mappings: &Arc<BlockingMutex<BTreeMap<VirtAddr, MemoryMapping>>>,
+    next_mmap_addr: &Arc<AtomicU64>,
+    length: u64,
+) -> VirtAddr {
     let aligned_length = (length + 0xfff) & !0xfff;
 
     loop {
-        let candidate = thread.next_mmap_addr;
+        // Atomically allocate address range
+        let candidate_u64 = next_mmap_addr.fetch_add(aligned_length, Ordering::Relaxed);
+        let candidate = VirtAddr::new(candidate_u64);
         let end_addr = candidate + aligned_length;
 
-        // Check if this range overlaps with existing mappings
+        // Check if this range overlaps with existing mappings - short lock
+        let mappings = memory_mappings.lock();
         let mut overlaps = false;
-        for (&mapping_start, mapping) in &thread.memory_mappings {
+        for (&mapping_start, mapping) in mappings.iter() {
             let mapping_end = mapping_start + mapping.size;
             if !(end_addr <= mapping_start || candidate >= mapping_end) {
                 overlaps = true;
                 break;
             }
         }
+        drop(mappings); // Release lock immediately
 
         if !overlaps {
-            thread.next_mmap_addr = end_addr;
             return candidate;
         }
 
-        // Move to next potential address
-        thread.next_mmap_addr += 0x10000; // 64KB increment
+        // Address collided, atomic counter already advanced so try again
     }
+}
+
+/// Legacy function for compatibility - now uses atomic version
+pub fn find_free_virtual_address(thread: &mut UserThreadInfo, length: u64) -> VirtAddr {
+    find_free_virtual_address_atomic(&thread.memory_mappings, &thread.next_mmap_addr, length)
 }

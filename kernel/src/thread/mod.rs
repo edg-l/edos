@@ -1,5 +1,8 @@
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
-use core::{ptr, sync::atomic::AtomicU64};
+use core::{
+    ptr,
+    sync::atomic::{AtomicU64, Ordering},
+};
 use spin::Mutex;
 use x86_64::{
     VirtAddr,
@@ -12,7 +15,7 @@ use crate::{
     fs::path::Path,
     memory::{STACK_ALIGNMENT, USER_STACK_SIZE, mapper::MemoryManager},
     syscalls::Errno,
-    thread::fd::FileDescriptorTable,
+    thread::{fd::FileDescriptorTable, mutex::BlockingMutex},
 };
 use alloc::sync::Arc;
 
@@ -53,12 +56,12 @@ pub struct UserThread {
 pub struct UserThreadInfo {
     pub pid: u64,
     pub errno: Errno,
-    pub fd_table: FileDescriptorTable, // should be arc mutex
+    pub fd_table: Arc<BlockingMutex<FileDescriptorTable>>,
     // For mmap
-    pub memory_mappings: BTreeMap<VirtAddr, MemoryMapping>, // should be arc mutex
-    pub next_mmap_addr: VirtAddr,                           // should be arc mutex
+    pub memory_mappings: Arc<BlockingMutex<BTreeMap<VirtAddr, MemoryMapping>>>,
+    pub next_mmap_addr: Arc<AtomicU64>,
     pub memory_manager: Arc<Mutex<MemoryManager>>,
-    pub cwd: Path,
+    pub cwd: Arc<BlockingMutex<Path>>,
     pub user_id: u32,
     pub group_id: u32,
 }
@@ -68,11 +71,11 @@ impl UserThreadInfo {
         Self {
             pid: thread.pid,
             errno: Errno::Clear,
-            fd_table: FileDescriptorTable::new(),
-            memory_mappings: BTreeMap::new(),
-            next_mmap_addr: VirtAddr::new(thread.heap_break),
+            fd_table: Arc::new(BlockingMutex::new(FileDescriptorTable::new())),
+            memory_mappings: Arc::new(BlockingMutex::new(BTreeMap::new())),
+            next_mmap_addr: Arc::new(AtomicU64::new(thread.heap_break)),
             memory_manager: thread.memory_manager.clone(),
-            cwd,
+            cwd: Arc::new(BlockingMutex::new(cwd)),
             user_id,
             group_id,
         }

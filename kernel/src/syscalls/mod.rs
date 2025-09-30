@@ -511,8 +511,13 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
     let read_fd = info
         .lock()
         .fd_table
+        .lock()
         .allocate_fd(FileDescriptor::Pipe(pipe.clone()));
-    let write_fd = info.lock().fd_table.allocate_fd(FileDescriptor::Pipe(pipe));
+    let write_fd = info
+        .lock()
+        .fd_table
+        .lock()
+        .allocate_fd(FileDescriptor::Pipe(pipe));
 
     // Copy file descriptor numbers to user space
     let pipefd = [read_fd, write_fd];
@@ -530,7 +535,7 @@ fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
     info.lock().errno = Errno::Clear;
 
     // Get the file descriptor we want to duplicate
-    let old_fd_descriptor = match info.lock().fd_table.get_fd(oldfd) {
+    let old_fd_descriptor = match info.lock().fd_table.lock().get_fd(oldfd) {
         Some(fd) => fd.clone(),
         None => {
             info.lock().errno = Errno::EINVAL;
@@ -539,10 +544,13 @@ fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
     };
 
     // Close the newfd if it's already in use (but don't fail if it doesn't exist)
-    let _ = info.lock().fd_table.close_fd(newfd);
+    let _ = info.lock().fd_table.lock().close_fd(newfd);
 
     // Insert the duplicated descriptor at newfd
-    info.lock().fd_table.insert_fd(newfd, old_fd_descriptor);
+    info.lock()
+        .fd_table
+        .lock()
+        .insert_fd(newfd, old_fd_descriptor);
 
     newfd // Success - return the new fd number
 }
@@ -597,7 +605,7 @@ fn sys_spawn(
         }
     };
 
-    let path = match resolve_path(path_str, &info.lock().cwd) {
+    let path = match resolve_path(path_str, &info.lock().cwd.lock()) {
         Ok(path) => path,
         Err(_) => {
             info.lock().errno = Errno::EINVAL;
@@ -643,7 +651,7 @@ fn sys_spawn(
     }
 
     // Save current cwd for child process
-    let child_cwd = info.lock().cwd.clone();
+    let child_cwd = info.lock().cwd.lock().clone();
 
     // Load ELF file from filesystem
 
@@ -706,10 +714,11 @@ fn sys_spawn(
                 .current_thread_info()
                 .lock()
                 .fd_table
+                .lock()
                 .get_fd(stdin_fd)
                 .cloned()
         {
-            user_thread_info.fd_table.insert_fd(0, stdin_desc);
+            user_thread_info.fd_table.lock().insert_fd(0, stdin_desc);
         }
 
         if stdout_fd != 1
@@ -717,10 +726,11 @@ fn sys_spawn(
                 .current_thread_info()
                 .lock()
                 .fd_table
+                .lock()
                 .get_fd(stdout_fd)
                 .cloned()
         {
-            user_thread_info.fd_table.insert_fd(1, stdout_desc);
+            user_thread_info.fd_table.lock().insert_fd(1, stdout_desc);
         }
 
         if stderr_fd != 2
@@ -728,10 +738,11 @@ fn sys_spawn(
                 .current_thread_info()
                 .lock()
                 .fd_table
+                .lock()
                 .get_fd(stderr_fd)
                 .cloned()
         {
-            user_thread_info.fd_table.insert_fd(2, stderr_desc);
+            user_thread_info.fd_table.lock().insert_fd(2, stderr_desc);
         }
     }
 
@@ -871,11 +882,11 @@ fn sys_clone(
         Arc::new(IrqSpinlock::new(UserThreadInfo {
             pid: child_id.0,
             errno: Errno::Clear,
-            fd_table: parent_info_guard.fd_table.clone(),
-            memory_mappings: parent_info_guard.memory_mappings.clone(),
-            next_mmap_addr: parent_info_guard.next_mmap_addr,
+            fd_table: parent_info_guard.fd_table.clone(), // Arc clone - shared
+            memory_mappings: parent_info_guard.memory_mappings.clone(), // Arc clone - shared
+            next_mmap_addr: parent_info_guard.next_mmap_addr.clone(), // Arc clone - shared
             memory_manager,
-            cwd: parent_info_guard.cwd.clone(),
+            cwd: parent_info_guard.cwd.clone(), // Arc clone - shared
             user_id: parent_info_guard.user_id,
             group_id: parent_info_guard.group_id,
         })),

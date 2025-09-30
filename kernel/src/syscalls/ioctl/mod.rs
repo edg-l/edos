@@ -14,7 +14,7 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
     let info = sched().current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let descriptor = match info.lock().fd_table.get_fd(fd).cloned() {
+    let descriptor = match info.lock().fd_table.lock().get_fd(fd).cloned() {
         Some(desc) => desc,
         None => {
             info.lock().errno = Errno::EBADF;
