@@ -66,6 +66,7 @@ impl WaitQueue {
     }
 
     /// Wake all threads
+    #[expect(unused)]
     pub fn wake_all(&self) -> usize {
         without_interrupts(|| {
             let tids = {

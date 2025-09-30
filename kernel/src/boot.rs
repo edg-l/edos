@@ -10,7 +10,7 @@ use limine::{
     },
     response::MemoryMapResponse,
 };
-use spin::{Mutex, Once};
+use spin::Once;
 use x86_64::{
     VirtAddr,
     registers::control::{Cr3, Cr3Flags},

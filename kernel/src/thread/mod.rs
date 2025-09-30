@@ -1,8 +1,5 @@
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
-use core::{
-    ptr,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use core::{ptr, sync::atomic::AtomicU64};
 use spin::Mutex;
 use x86_64::{
     VirtAddr,
@@ -64,22 +61,6 @@ pub struct UserThreadInfo {
     pub cwd: Arc<BlockingMutex<Path>>,
     pub user_id: u32,
     pub group_id: u32,
-}
-
-impl UserThreadInfo {
-    pub fn from_thread(thread: &UserThread, user_id: u32, group_id: u32, cwd: Path) -> Self {
-        Self {
-            pid: thread.pid,
-            errno: Errno::Clear,
-            fd_table: Arc::new(BlockingMutex::new(FileDescriptorTable::new())),
-            memory_mappings: Arc::new(BlockingMutex::new(BTreeMap::new())),
-            next_mmap_addr: Arc::new(AtomicU64::new(thread.heap_break)),
-            memory_manager: thread.memory_manager.clone(),
-            cwd: Arc::new(BlockingMutex::new(cwd)),
-            user_id,
-            group_id,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -189,6 +170,3 @@ pub enum MappingType {
 pub struct File {
     fd: u64,
 }
-
-// For now kernel threads and user share id
-static THREAD_ID_NEXT_ID: AtomicU64 = AtomicU64::new(0);

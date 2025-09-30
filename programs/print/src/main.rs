@@ -42,7 +42,7 @@ extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
     0
 }
 
-extern "C" fn thread_fn(args: *mut u8) -> i32 {
+extern "C" fn thread_fn(_args: *mut u8) -> i32 {
     let id = elibc::process::sys_getpid();
     println!("hi from thread {id}");
 

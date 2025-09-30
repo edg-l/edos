@@ -42,6 +42,7 @@ impl<T> DmaRegion<T> {
         }
     }
 
+    #[expect(unused)]
     pub fn into_buffer(self) -> DmaBuffer {
         self.buffer
     }

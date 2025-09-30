@@ -6,7 +6,7 @@ use core::{
 use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec::Vec};
 use spin::{Mutex, RwLock};
 use x86_64::{
-    VirtAddr, instructions::interrupts::without_interrupts, registers::control::Cr3,
+    instructions::interrupts::without_interrupts, registers::control::Cr3,
     structures::paging::OffsetPageTable,
 };
 
@@ -17,7 +17,7 @@ use crate::{
     loader::{ElfLoadError, load_elf},
     memory::{
         frame_allocator::frame_allocator,
-        mapper::{MemoryManager, active_level_4_table, get_level_4_table, memory_mapper},
+        mapper::{MemoryManager, active_level_4_table, get_level_4_table},
     },
     println,
     syscalls::Errno,
@@ -144,6 +144,7 @@ impl Thread {
         self.priority.load(Ordering::Acquire)
     }
 
+    #[expect(unused)]
     pub fn set_affinity_mask(&self, mask: u32) {
         self.cpu_affinity.store(mask, Ordering::Release);
         self.mark_need_resched();

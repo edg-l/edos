@@ -27,10 +27,12 @@ impl<T> Subscriber<T> {
         self.queue.lock().pop_front()
     }
 
+    #[expect(unused)]
     pub fn len(&self) -> usize {
         self.queue.lock().len()
     }
 
+    #[expect(unused)]
     pub fn is_empty(&self) -> bool {
         self.queue.lock().is_empty()
     }
@@ -45,6 +47,7 @@ impl<T> Subscriber<T> {
         }
     }
 
+    #[expect(unused)]
     pub fn recv_timeout(&self, dur: Duration) -> Option<T> {
         let sched = sched();
 

@@ -1,9 +1,6 @@
 //! Kernel allocator
 
-use core::{
-    alloc::GlobalAlloc,
-    ptr::{NonNull, null_mut},
-};
+use core::{alloc::GlobalAlloc, ptr::NonNull};
 
 use buddy_system_allocator::Heap;
 use x86_64::{VirtAddr, align_up, structures::paging::PageTableFlags};
@@ -81,32 +78,6 @@ unsafe impl GlobalAlloc for Allocator {
             .lock()
             .dealloc(unsafe { NonNull::new_unchecked(ptr) }, layout);
     }
-}
-
-fn expand_for_alloc(
-    heap: &mut Heap<32>,
-    size: usize,
-    align: usize,
-    mut next_region_start: usize,
-) -> (usize, usize) {
-    // round up to alignment
-    let needed = (size + align - 1) & !(align - 1);
-    // round up to next power of two, but cap at max order
-    let mut len = needed.next_power_of_two();
-    let max_block = 1 << 32;
-    if len > max_block {
-        len = max_block;
-    }
-
-    // align start to len
-    next_region_start = (next_region_start + len - 1) & !(len - 1);
-    let end = next_region_start + len;
-
-    unsafe {
-        heap.add_to_heap(next_region_start, end);
-    }
-
-    (next_region_start, end)
 }
 
 pub fn init_heap() {

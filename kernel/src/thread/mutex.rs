@@ -65,12 +65,14 @@ impl<T> BlockingMutex<T> {
     }
 
     /// Get mutable access when the mutex itself is uniquely borrowed.
+    #[expect(unused)]
     pub fn get_mut(&mut self) -> &mut T {
         // Safe because &mut self guarantees unique access to the inner value.
         unsafe { &mut *self.value.get() }
     }
 
     /// Check whether the lock is currently held.
+    #[expect(unused)]
     pub fn is_locked(&self) -> bool {
         self.locked.load(Ordering::Acquire)
     }

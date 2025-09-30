@@ -1,4 +1,3 @@
-use spin::MutexGuard;
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::control::Cr3Flags,

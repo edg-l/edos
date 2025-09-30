@@ -706,7 +706,7 @@ fn sys_spawn(
     // Create thread info and set up file descriptor redirections
     {
         let info = get_thread_info_by_id(user_thread.id).unwrap();
-        let mut user_thread_info = info.lock();
+        let user_thread_info = info.lock();
 
         // Override standard file descriptors if specified (non-default values)
         if stdin_fd != 0

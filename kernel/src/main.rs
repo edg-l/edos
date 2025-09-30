@@ -14,7 +14,6 @@ use x86_64::{
 use crate::{
     acpi::{acpi_madt, init_acpi},
     allocator::{init_heap, print_alloc_stats},
-    apic::set_apic_timer_and_enable,
     boot::boot_info,
     cmdline::ParsedCmdline,
     fs::{
@@ -23,7 +22,6 @@ use crate::{
     },
     memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
     thread::{
-        UserThreadInfo,
         mailbox::Mailbox,
         scheduler::sched,
         thread::Thread,

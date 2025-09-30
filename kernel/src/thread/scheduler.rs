@@ -146,16 +146,6 @@ impl Scheduler {
         get_percpu_data().current_thread.clone()
     }
 
-    pub fn current_thread_external(&self) -> Option<Arc<Thread>> {
-        let tid = self.current.load(Ordering::Acquire);
-        if tid == 0 {
-            return None;
-        }
-        // Provide a lookup: per-CPU "running" pointer or global map.
-        // Keep a per-CPU pointer for O(1).
-        self.get_thread_by_id(ThreadId(tid))
-    }
-
     pub fn on_tick(&self, context: *mut CpuContext) {
         without_interrupts(|| {
             //self.earliest_deadline.store(u64::MAX, Ordering::Release);
