@@ -3,5 +3,4 @@ resolver = "3"
 members = ["hello"]
 
 [profile.dev]
-panic = 'abort'
 opt-level = 2

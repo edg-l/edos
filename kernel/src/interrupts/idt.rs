@@ -14,6 +14,7 @@ use crate::{
     },
     log, println,
     thread::{interrupt::timer_interrupt_handler, scheduler::sched},
+    util::uaccess::current_cpu_uaccess,
 };
 
 /// Build an IDT instance for the current CPU.
@@ -134,7 +135,7 @@ extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStac
 
 #[unsafe(no_mangle)]
 extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
+    mut stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
     // Note: do not add complex calls or memory read or scheduler reads, otherwise recursive faults can happen.
@@ -143,6 +144,24 @@ extern "x86-interrupt" fn page_fault_handler(
     let address = Cr2::read().unwrap();
 
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0 {
+        // Check if we're in a user access operation
+        let uaccess = current_cpu_uaccess();
+        if uaccess.is_active() {
+            // Resume at the fault handler
+            let resume_addr = uaccess.fault_resume;
+            uaccess.clear();
+
+            // Modify the stack frame to resume at the fault handler
+            unsafe {
+                stack_frame.as_mut().update(|frame| {
+                    frame.instruction_pointer = VirtAddr::new(resume_addr);
+                });
+            }
+
+            // Return from interrupt - execution will resume at fault handler
+            return;
+        }
+
         println!("EXCEPTION: PAGE FAULT in Ring 0");
         log!("Accessed Address: {address:?}");
         log!("Error Code: {error_code:?}");
