@@ -2,6 +2,7 @@
 //!
 //! This module provides safe mechanisms for copying data between kernel and user space
 //! with proper page fault handling and recovery.
+#![allow(unused)]
 
 use crate::util::per_cpu::get_percpu_data;
 use core::{
