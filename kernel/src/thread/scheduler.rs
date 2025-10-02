@@ -11,7 +11,7 @@ use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
     instructions::interrupts::{disable, enable, enable_and_hlt, without_interrupts},
-    registers::control::Cr3,
+    registers::{control::Cr3, model_specific::FsBase},
 };
 
 use crate::{
@@ -315,6 +315,9 @@ impl Scheduler {
                     }
                 }
             }
+
+            let fs_base = FsBase::read();
+            current.tls_base.store(fs_base.as_u64(), Ordering::Release);
         }
     }
 
@@ -359,6 +362,12 @@ impl Scheduler {
 
         // Switch address space
         next.switch_to_page();
+
+        let next_fs_base = next.tls_base.load(Ordering::Acquire);
+        unsafe {
+            FsBase::write(VirtAddr::new(next_fs_base));
+        }
+
         if let Some(user) = &next.user {
             let mut user = user.write();
             unsafe {

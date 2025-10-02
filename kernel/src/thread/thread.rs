@@ -6,23 +6,26 @@ use core::{
 use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec::Vec};
 use spin::{Mutex, RwLock};
 use x86_64::{
-    instructions::interrupts::without_interrupts, registers::control::Cr3,
-    structures::paging::OffsetPageTable,
+    VirtAddr,
+    instructions::interrupts::without_interrupts,
+    registers::control::Cr3,
+    structures::paging::{OffsetPageTable, PageTableFlags},
 };
 
 use crate::{
     boot::boot_info,
     drivers::{fpu::FpuState, hpet::driver::get_hpet_timer},
     fs::path::Path,
-    loader::{ElfLoadError, load_elf},
+    loader::{ElfLoadError, TlsTemplate, load_elf},
     memory::{
+        USER_STACK_SIZE, USER_STACK_TOP,
         frame_allocator::frame_allocator,
         mapper::{MemoryManager, active_level_4_table, get_level_4_table},
     },
     println,
     syscalls::Errno,
     thread::{
-        UserThread, UserThreadInfo,
+        MemoryRegion, MemoryRegionType, UserThread, UserThreadInfo, UserThreadTls,
         context::CpuContext,
         fd::FileDescriptorTable,
         irqlock::IrqSpinlock,
@@ -100,6 +103,8 @@ pub struct Thread {
     pub cpu_time_ns: AtomicU64,
     pub run_start_tick: AtomicU64,
 
+    pub tls_base: AtomicU64,
+
     pub exit_code: AtomicI32,
 
     pub user: Option<Arc<RwLock<UserThread>>>,
@@ -111,6 +116,141 @@ pub struct Thread {
 
 // For now kernel threads and user share id
 static THREAD_ID_NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+const TLS_REGION_STRIDE: u64 = 0x20000; // 128 KiB per-thread slot
+const TLS_GUARD_GAP: u64 = 0x20000; // Keep a gap below the user stack
+const TLS_TCB_MIN_SIZE: u64 = 64;
+const PAGE_SIZE: u64 = 4096;
+
+pub(crate) struct TlsAllocation {
+    runtime: UserThreadTls,
+    region: MemoryRegion,
+    fs_base: u64,
+}
+
+fn align_up_u64(value: u64, align: u64) -> u64 {
+    if align <= 1 {
+        value
+    } else {
+        value.checked_add(align - 1).unwrap_or(u64::MAX) / align * align
+    }
+}
+
+fn align_down_u64(value: u64, align: u64) -> u64 {
+    if align <= 1 {
+        value
+    } else {
+        value / align * align
+    }
+}
+
+pub(crate) fn allocate_tls_region(
+    template: &Arc<TlsTemplate>,
+    thread_id: ThreadId,
+    memory_manager: &mut MemoryManager,
+) -> Result<TlsAllocation, ElfLoadError> {
+    let align = template.align.max(1);
+    let init_len = template.init_data.len() as u64;
+    let data_size = align_up_u64(template.mem_size.max(init_len), align);
+
+    // Reserve extra space for alignment padding between TLS block and TCB.
+    let total_required = data_size
+        .saturating_add(TLS_TCB_MIN_SIZE)
+        .saturating_add(align);
+    let map_size = align_up_u64(total_required, PAGE_SIZE);
+
+    if map_size > TLS_REGION_STRIDE {
+        return Err(ElfLoadError::MappingFailed);
+    }
+
+    let stack_bottom = USER_STACK_TOP.as_u64().saturating_sub(USER_STACK_SIZE);
+    let base_anchor = stack_bottom.saturating_sub(TLS_GUARD_GAP);
+    let slot_offset = thread_id
+        .0
+        .checked_mul(TLS_REGION_STRIDE)
+        .ok_or(ElfLoadError::MappingFailed)?;
+
+    if slot_offset >= base_anchor {
+        return Err(ElfLoadError::MappingFailed);
+    }
+
+    let region_top = base_anchor - slot_offset;
+    let region_top_aligned = align_down_u64(region_top, PAGE_SIZE);
+    if region_top_aligned < map_size {
+        return Err(ElfLoadError::MappingFailed);
+    }
+
+    let mapping_base_u64 = region_top_aligned - map_size;
+    let mapping_base = VirtAddr::new(mapping_base_u64);
+    let tls_region_top = VirtAddr::new(region_top_aligned);
+
+    let flags =
+        PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+
+    memory_manager
+        .map_memory(mapping_base, map_size, flags)
+        .map_err(|_| ElfLoadError::MappingFailed)?;
+
+    // Layout: [padding][TLS data][TCB]
+    let min_tcb_base_u64 = tls_region_top.as_u64().saturating_sub(TLS_TCB_MIN_SIZE);
+    let aligned_tcb_base_u64 = align_down_u64(min_tcb_base_u64, align);
+    let tcb_base_u64 = aligned_tcb_base_u64.max(mapping_base_u64 + data_size);
+
+    if tcb_base_u64 + TLS_TCB_MIN_SIZE > tls_region_top.as_u64() {
+        let _ = memory_manager.unmap_memory(mapping_base, map_size);
+        return Err(ElfLoadError::MappingFailed);
+    }
+
+    let tls_data_base_u64 = tcb_base_u64
+        .checked_sub(data_size)
+        .ok_or(ElfLoadError::MappingFailed)?;
+
+    if tls_data_base_u64 < mapping_base_u64 {
+        let _ = memory_manager.unmap_memory(mapping_base, map_size);
+        return Err(ElfLoadError::MappingFailed);
+    }
+
+    let tls_data_base = VirtAddr::new(tls_data_base_u64);
+    let tcb_base = VirtAddr::new(tcb_base_u64);
+
+    unsafe {
+        core::ptr::write_bytes(mapping_base.as_u64() as *mut u8, 0, map_size as usize);
+
+        if !template.init_data.is_empty() {
+            core::ptr::copy_nonoverlapping(
+                template.init_data.as_ptr(),
+                tls_data_base.as_u64() as *mut u8,
+                template.init_data.len(),
+            );
+        }
+
+        let tcb_ptr = tcb_base.as_u64() as *mut u64;
+        tcb_ptr.write(tcb_base.as_u64());
+    }
+
+    let runtime = UserThreadTls {
+        template: Arc::clone(template),
+        data_base: tls_data_base,
+        data_size,
+        tcb_base,
+        tcb_size: tls_region_top.as_u64() - tcb_base.as_u64(),
+        mapping_base,
+        mapping_size: map_size,
+    };
+
+    let region = MemoryRegion {
+        start: mapping_base,
+        size: map_size,
+        flags,
+        region_type: MemoryRegionType::Tls,
+    };
+
+    Ok(TlsAllocation {
+        runtime,
+        region,
+        fs_base: tcb_base.as_u64(),
+    })
+}
 
 impl Thread {
     pub fn switch_to_page(&self) {
@@ -220,6 +360,7 @@ impl Thread {
             sleep_deadline: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),
             run_start_tick: AtomicU64::new(0),
+            tls_base: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
         });
@@ -265,7 +406,28 @@ impl Thread {
         let (user_stack_pointer, argv_ptr, argc) =
             setup_user_stack(stack_top, argv).map_err(|_| ElfLoadError::MappingFailed)?;
 
-        let load_info = load_elf(elf_data, &mut process_memory_manager)?;
+        let mut load_info = load_elf(elf_data, &mut process_memory_manager)?;
+
+        let id = ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, Ordering::Relaxed));
+
+        let mut tls_runtime: Option<UserThreadTls> = None;
+        let mut tls_region: Option<MemoryRegion> = None;
+        let mut tls_fs_base = 0u64;
+
+        if let Some(template) = load_info.tls_template.take() {
+            let template = Arc::new(template);
+            let allocation = allocate_tls_region(&template, id, &mut process_memory_manager)?;
+            tls_fs_base = allocation.fs_base;
+            tls_region = Some(allocation.region);
+            tls_runtime = Some(allocation.runtime);
+        }
+
+        let entry_point = load_info.entry_point;
+        let heap_break = load_info.heap_break;
+        let mut memory_regions = load_info.memory_regions;
+        if let Some(region) = tls_region {
+            memory_regions.push(region);
+        }
 
         println!("loaded elf, back to kernel page");
 
@@ -274,21 +436,30 @@ impl Thread {
 
         println!(
             "Creating CpuContext with entry_point: {:p}, stack_top: {:p}",
-            load_info.entry_point.as_u64() as *const u8,
+            entry_point.as_u64() as *const u8,
             user_stack_pointer as *const u8
         );
 
-        let mut context =
-            CpuContext::new_user_thread(load_info.entry_point.as_u64(), user_stack_pointer);
+        let mut context = CpuContext::new_user_thread(entry_point.as_u64(), user_stack_pointer);
         context.rdi = argc as u64;
         context.rsi = argv_ptr;
         context.rdx = 0;
 
-        let id = ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed));
-
         let name = Arc::new(name);
 
         let mm = Arc::new(Mutex::new(process_memory_manager));
+
+        let user_state = Arc::new(RwLock::new(UserThread {
+            pid: id.0,
+            initial_stack_top: stack_top,
+            cr3: (page, kernel_pml4.1),
+            memory_manager: mm.clone(),
+            memory_regions,
+            tls: tls_runtime,
+            fpu_init: false,
+            fpu: FpuState::default(),
+            heap_break,
+        }));
 
         let thread = Arc::new(Thread {
             id,
@@ -303,18 +474,10 @@ impl Thread {
             sleep_deadline: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),
             run_start_tick: AtomicU64::new(0),
+            tls_base: AtomicU64::new(tls_fs_base),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
-            user: Some(Arc::new(RwLock::new(UserThread {
-                pid: id.0,
-                initial_stack_top: stack_top,
-                cr3: (page, kernel_pml4.1),
-                memory_manager: mm.clone(),
-                memory_regions: load_info.memory_regions,
-                heap_break: load_info.heap_break,
-                fpu_init: false,
-                fpu: FpuState::default(),
-            }))),
+            user: Some(user_state),
         });
 
         THREADS.insert(thread.clone());
@@ -325,7 +488,7 @@ impl Thread {
                 errno: Errno::Clear,
                 fd_table: Arc::new(BlockingMutex::new(FileDescriptorTable::new())),
                 memory_mappings: Arc::new(BlockingMutex::new(BTreeMap::new())),
-                next_mmap_addr: Arc::new(AtomicU64::new(load_info.heap_break)),
+                next_mmap_addr: Arc::new(AtomicU64::new(heap_break)),
                 memory_manager: mm,
                 cwd: Arc::new(BlockingMutex::new(cwd)),
                 user_id: user,

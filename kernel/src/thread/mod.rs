@@ -10,6 +10,7 @@ use x86_64::{
 use crate::{
     drivers::fpu::FpuState,
     fs::path::Path,
+    loader::TlsTemplate,
     memory::{STACK_ALIGNMENT, USER_STACK_SIZE, mapper::MemoryManager},
     syscalls::Errno,
     thread::{fd::FileDescriptorTable, mutex::BlockingMutex},
@@ -42,10 +43,22 @@ pub struct UserThread {
     pub cr3: (PhysFrame, Cr3Flags),
     pub memory_manager: Arc<Mutex<MemoryManager>>,
     pub memory_regions: Vec<MemoryRegion>,
+    pub tls: Option<UserThreadTls>,
     // Whether the fpu has been initialized for this thread.
     pub fpu_init: bool,
     pub fpu: FpuState,
     pub heap_break: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserThreadTls {
+    pub template: Arc<TlsTemplate>,
+    pub data_base: VirtAddr,
+    pub data_size: u64,
+    pub tcb_base: VirtAddr,
+    pub tcb_size: u64,
+    pub mapping_base: VirtAddr,
+    pub mapping_size: u64,
 }
 
 /// Thread info, used for syscalls mainly, this struct is allowed to be freely modified by the thread itself at kernel level.
@@ -150,6 +163,7 @@ pub struct MemoryRegion {
 pub enum MemoryRegionType {
     Code,
     Data,
+    Tls,
 }
 
 #[expect(unused)]

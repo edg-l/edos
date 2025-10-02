@@ -43,7 +43,7 @@ use crate::{
             State, Thread, ThreadId, allocate_thread_id, get_thread_info_by_id, insert_thread,
             insert_thread_info, take_thread_exit_code,
         },
-        util::kthread_stack_alloc,
+        util::{kthread_stack_alloc, kthread_stack_free},
     },
     util::uaccess::{
         UAccessError, try_copy_string_from_user, try_copy_to_user, try_read_user, try_write_user,
@@ -878,6 +878,11 @@ fn sys_clone(
     let parent_user_read = parent_user.read();
     let cr3 = parent_user_read.cr3;
     let memory_manager = parent_user_read.memory_manager.clone();
+    let parent_heap_break = parent_user_read.heap_break;
+    let mut tls_template = parent_user_read
+        .tls
+        .as_ref()
+        .map(|tls| tls.template.clone());
 
     // Create child context - clone parent's CPU state
     let mut child_ctx = CpuContext::new_user_thread(func_ptr, user_stack_top);
@@ -895,8 +900,48 @@ fn sys_clone(
     child_ctx.rdi = arg; // First argument to function
     child_ctx.rsi = 0;
 
+    drop(parent_user_read);
+
     // Allocate new thread ID
     let child_id = allocate_thread_id();
+
+    let mut tls_runtime = None;
+    let mut tls_region = None;
+    let mut tls_fs_base = 0u64;
+    if let Some(template) = tls_template.take() {
+        let mut manager_guard = memory_manager.lock();
+        match crate::thread::thread::allocate_tls_region(&template, child_id, &mut manager_guard) {
+            Ok(allocation) => {
+                tls_fs_base = allocation.fs_base;
+                tls_region = Some(allocation.region);
+                tls_runtime = Some(allocation.runtime);
+            }
+            Err(_) => {
+                drop(manager_guard);
+                kthread_stack_free(kernel_stack_top);
+                sched.current_thread_info().lock().errno = Errno::ENOMEM;
+                return !0u64;
+            }
+        }
+        drop(manager_guard);
+    }
+
+    let mut child_memory_regions: Vec<MemoryRegion> = stack_region.into_iter().collect();
+    if let Some(region) = tls_region.take() {
+        child_memory_regions.push(region);
+    }
+
+    let child_user = Arc::new(RwLock::new(crate::thread::UserThread {
+        pid: child_id.0,
+        initial_stack_top: user_stack_top,
+        cr3,
+        memory_manager: memory_manager.clone(),
+        memory_regions: child_memory_regions,
+        tls: tls_runtime,
+        fpu_init: false,
+        fpu: crate::drivers::fpu::FpuState::default(),
+        heap_break: parent_heap_break,
+    }));
 
     // Create child Thread
     let child_thread = Arc::new(Thread {
@@ -912,18 +957,10 @@ fn sys_clone(
         sleep_deadline: AtomicU64::new(0),
         cpu_time_ns: AtomicU64::new(0),
         run_start_tick: AtomicU64::new(0),
+        tls_base: AtomicU64::new(tls_fs_base),
         cpu: AtomicU32::new(0),
         exit_code: AtomicI32::new(0),
-        user: Some(Arc::new(RwLock::new(crate::thread::UserThread {
-            pid: child_id.0,
-            initial_stack_top: user_stack_top,
-            cr3,
-            memory_manager: memory_manager.clone(),
-            memory_regions: stack_region.into_iter().collect(),
-            heap_break: parent_user_read.heap_break,
-            fpu_init: false,
-            fpu: crate::drivers::fpu::FpuState::default(),
-        }))),
+        user: Some(child_user),
     });
 
     // Clone parent's UserThreadInfo - share fd_table
