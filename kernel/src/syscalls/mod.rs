@@ -27,8 +27,8 @@ use crate::{
             sys_rmdir, sys_rmdir_all, sys_stat, sys_unlink,
         },
         io::{
-            SelectFd, sys_chdir, sys_close, sys_getcwd, sys_list_dir, sys_open, sys_poll, sys_read,
-            sys_write,
+            SelectFd, sys_chdir, sys_close, sys_getcwd, sys_getrandom, sys_list_dir, sys_open,
+            sys_poll, sys_read, sys_write,
         },
         memory::{sys_mmap, sys_munmap},
     },
@@ -223,6 +223,7 @@ const SYS_MONOTONIC_TIME: u64 = 210;
 const SYS_CLONE: u64 = 211;
 const SYS_FUTEX_WAIT: u64 = 212;
 const SYS_FUTEX_WAKE: u64 = 213;
+const SYS_GETRANDOM: u64 = 214;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -397,6 +398,12 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let addr = ctx.rdi as *const u32;
             let count = ctx.rsi as u32;
             ctx.rax = sys_futex_wake(addr, count);
+        }
+        SYS_GETRANDOM => {
+            let buffer_ptr = ctx.rdi as *mut u8;
+            let length = ctx.rsi as usize;
+            let flags = ctx.rdx;
+            ctx.rax = sys_getrandom(buffer_ptr, length, flags) as u64;
         }
         _ => {
             ctx.rax = !0u64;

@@ -7,6 +7,7 @@ pub mod hpet;
 pub mod keyboard;
 pub mod msi;
 pub mod pci;
+pub mod random;
 pub mod rtc;
 pub mod tty;
 pub mod vga;
@@ -19,5 +20,6 @@ pub fn init_drivers() {
     vga::init();
     graphics::init();
     tty::init();
+    random::init();
     queue_spawn_kthread_named("keyboard", keyboard::driver_main as u64);
 }

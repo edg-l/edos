@@ -14,7 +14,7 @@ use crate::util::uaccess::{
     UAccessError, try_copy_from_user, try_copy_string_from_user, try_copy_to_user, try_write_user,
 };
 use crate::{
-    drivers::{keyboard::KEYBOARD_BROADCAST, tty},
+    drivers::{keyboard::KEYBOARD_BROADCAST, random, tty},
     syscalls::Errno,
     thread::{
         pipe::{FileDescriptor, FsFile, Pipe, StandardStream},
@@ -42,6 +42,7 @@ pub struct SelectFd {
 }
 
 const MAX_PATH_LEN: usize = 1024;
+const MAX_RANDOM_LEN: usize = 1 << 20;
 
 fn file_kind_to_u8(kind: FileKind) -> u8 {
     match kind {
@@ -263,6 +264,36 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
     }
 
     bytes_to_copy as i64
+}
+
+pub fn sys_getrandom(buffer_ptr: *mut u8, count: usize, flags: u64) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if buffer_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+
+    if count == 0 {
+        return 0;
+    }
+
+    if count > MAX_RANDOM_LEN || flags != 0 {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let mut kernel_buffer = vec![0u8; count];
+    random::fill_bytes(&mut kernel_buffer);
+
+    if !unsafe { try_copy_to_user(buffer_ptr, kernel_buffer.as_ptr(), kernel_buffer.len()) } {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+
+    kernel_buffer.len() as i64
 }
 
 fn read_from_stdin(max_count: usize) -> Result<alloc::vec::Vec<u8>, i64> {
