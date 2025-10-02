@@ -52,6 +52,15 @@ pub unsafe fn sys_read(fd: u64, buf: *mut u8, count: usize) -> isize {
     unsafe { syscall3(SYS_READ, fd, buf as u64, count as u64) as isize }
 }
 
+/// # Safety
+/// Caller must ensure:
+/// - `buf` points to writable memory of at least `count` bytes
+/// - Buffer remains valid for the duration of the syscall
+/// - `flags` matches kernel expectations (currently must be zero)
+pub unsafe fn sys_getrandom(buf: *mut u8, count: usize, flags: u64) -> isize {
+    unsafe { syscall3(SYS_GETRANDOM, buf as u64, count as u64, flags) as isize }
+}
+
 pub fn sys_close(fd: u64) -> i32 {
     unsafe { syscall1(SYS_CLOSE, fd) as i32 }
 }
@@ -174,8 +183,8 @@ pub unsafe fn sys_stat_path(
 // Re-export I/O types for convenience
 pub use io::{
     DirEntry, FileType, FstatEntry, IoError, IoResult, KeyEvent, PollFd, PollState, STDERR, STDOUT,
-    chdir, fstat, get_raw_input, getcwd, ioctl, keyboard_fd, list_dir, open, open_flags, poll_fd,
-    poll_fds, read_from_fd, read_stdin, read_to_end, stat_path, write_all_fd,
+    chdir, fstat, get_raw_input, getcwd, getrandom, ioctl, keyboard_fd, list_dir, open, open_flags,
+    poll_fd, poll_fds, read_from_fd, read_stdin, read_to_end, stat_path, write_all_fd,
 };
 // Re-export memory constants
 pub use sys::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};

@@ -32,6 +32,7 @@ pub const SYS_MONOTONIC_TIME: u64 = 210;
 pub const SYS_CLONE: u64 = 211;
 pub const SYS_FUTEX_WAIT: u64 = 212;
 pub const SYS_FUTEX_WAKE: u64 = 213;
+pub const SYS_GETRANDOM: u64 = 214;
 
 // Ioctl buffer flags
 pub const IOCTL_ARG_IN: u64 = 1;

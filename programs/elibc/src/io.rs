@@ -7,7 +7,10 @@ use spin::Mutex;
 use thiserror::Error;
 
 use crate::{
-    sys::{Errno, SYS_FSTAT, SYS_IOCTL, SYS_POLL, SYS_STAT, errno, syscall2, syscall3, syscall5},
+    sys::{
+        Errno, SYS_FSTAT, SYS_GETRANDOM, SYS_IOCTL, SYS_POLL, SYS_STAT, errno, syscall2, syscall3,
+        syscall5,
+    },
     sys_open as raw_sys_open, sys_read, sys_write,
 };
 
@@ -40,6 +43,8 @@ impl From<Errno> for IoError {
 }
 
 pub type IoResult<T> = Result<T, IoError>;
+
+const MAX_RANDOM_LEN: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
@@ -413,6 +418,32 @@ pub fn poll_fds(entries: &mut [PollFd], timeout_ms: u64) -> IoResult<usize> {
     };
 
     let result = unsafe { syscall3(SYS_POLL, ptr as u64, len as u64, timeout_ms) as isize };
+
+    if result >= 0 {
+        Ok(result as usize)
+    } else {
+        Err(IoError::from(errno()))
+    }
+}
+
+/// Fill the provided buffer with random bytes obtained from the kernel RNG.
+pub fn getrandom(buffer: &mut [u8]) -> IoResult<usize> {
+    if buffer.is_empty() {
+        return Ok(0);
+    }
+
+    if buffer.len() > MAX_RANDOM_LEN {
+        return Err(IoError::InvalidInput);
+    }
+
+    let result = unsafe {
+        syscall3(
+            SYS_GETRANDOM,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+        ) as isize
+    };
 
     if result >= 0 {
         Ok(result as usize)
