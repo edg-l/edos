@@ -70,6 +70,7 @@ pub(super) fn execute_command(state: &mut TerminalState, command: &str, args: &[
         "mkdir" => cmd_mkdir(state, args),
         "rmdir" => cmd_rmdir(state, args),
         "rm" => cmd_rm(state, args),
+        "free" => cmd_free(state, args),
         "ps" => cmd_ps(state, args),
         "dmesg" => cmd_dmesg(state, args),
         "clear" => state.clear_output(),
@@ -88,6 +89,7 @@ fn print_help(state: &mut TerminalState) {
         "- cat <path>",
         "- write <path> <content>",
         "- stat <path>",
+        "- free [-h]",
         "- ps [<path>]",
         "- dmesg [<path>]",
         "- partitions",
@@ -222,6 +224,179 @@ fn write_file(state: &mut TerminalState, args: &[String]) {
             let _ = sys_close(fd);
         }
         Err(_) => state.write_line("write: open failed"),
+    }
+}
+
+fn cmd_free(state: &mut TerminalState, args: &[String]) {
+    let mut human_readable = false;
+
+    for arg in args {
+        match arg.as_str() {
+            "-h" => human_readable = true,
+            _ => {
+                state.write_line("Usage: free [-h]");
+                return;
+            }
+        }
+    }
+
+    match open("/proc/meminfo", 0) {
+        Ok(fd) => {
+            let read_result = read_to_end(fd, Some(8 * 1024));
+            let _ = sys_close(fd);
+
+            match read_result {
+                Ok(data) => match core::str::from_utf8(&data) {
+                    Ok(text) => match parse_meminfo(text) {
+                        Some(info) => {
+                            state.write_line(if human_readable {
+                                "             total        used        free"
+                            } else {
+                                "             total(KiB)  used(KiB)  free(KiB)"
+                            });
+                            state.write_line(&format!(
+                                "Mem:       {} {} {}",
+                                format_kib(info.total_kib, human_readable),
+                                format_kib(info.used_kib, human_readable),
+                                format_kib(info.free_kib, human_readable)
+                            ));
+                            state.write_line(&format!(
+                                "Frames:    {} {} {}",
+                                format_count(info.frames_total, human_readable),
+                                format_count(info.frames_used, human_readable),
+                                format_count(info.frames_free, human_readable)
+                            ));
+                            state.write_line(&format!(
+                                "Page size: {}",
+                                format_bytes(info.page_size_bytes, human_readable)
+                            ));
+                        }
+                        None => {
+                            state.write_line("free: failed to parse meminfo, raw output follows:");
+                            state.write_str(text);
+                            if !text.ends_with('\n') {
+                                state.write_line("");
+                            }
+                        }
+                    },
+                    Err(_) => state.write_line("free: meminfo not UTF-8"),
+                },
+                Err(_) => state.write_line("free: read error"),
+            }
+        }
+        Err(_) => state.write_line("free: failed to open /proc/meminfo"),
+    }
+}
+
+struct ParsedMeminfo {
+    total_kib: u64,
+    free_kib: u64,
+    used_kib: u64,
+    page_size_bytes: u64,
+    frames_total: u64,
+    frames_free: u64,
+    frames_used: u64,
+}
+
+fn parse_meminfo(text: &str) -> Option<ParsedMeminfo> {
+    let mut total_kib = None;
+    let mut free_kib = None;
+    let mut used_kib = None;
+    let mut page_size_bytes = None;
+    let mut frames_total = None;
+    let mut frames_free = None;
+    let mut frames_used = None;
+
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(label) = parts.next() else { continue };
+        let Some(value_str) = parts.next() else {
+            continue;
+        };
+        let value = match value_str.parse::<u64>() {
+            Ok(val) => val,
+            Err(_) => continue,
+        };
+
+        match label {
+            "MemTotal:" => total_kib = Some(value),
+            "MemFree:" => free_kib = Some(value),
+            "MemUsed:" => used_kib = Some(value),
+            "PageSize:" => page_size_bytes = Some(value),
+            "FramesTotal:" => frames_total = Some(value),
+            "FramesFree:" => frames_free = Some(value),
+            "FramesUsed:" => frames_used = Some(value),
+            _ => {}
+        }
+    }
+
+    let total_kib = total_kib?;
+    let free_kib = free_kib?;
+    let used_kib = used_kib.unwrap_or_else(|| total_kib.saturating_sub(free_kib));
+    let frames_total = frames_total?;
+    let frames_free = frames_free?;
+    let frames_used = frames_used.unwrap_or_else(|| frames_total.saturating_sub(frames_free));
+    let page_size_bytes = page_size_bytes.unwrap_or(4096);
+
+    Some(ParsedMeminfo {
+        total_kib,
+        free_kib,
+        used_kib,
+        page_size_bytes,
+        frames_total,
+        frames_free,
+        frames_used,
+    })
+}
+
+fn format_kib(value: u64, human: bool) -> String {
+    if !human {
+        return format!("{:>10}", value);
+    }
+
+    let text = format_bytes(value * 1024, true);
+    format!("{:>12}", text)
+}
+
+fn format_count(value: u64, human: bool) -> String {
+    if !human {
+        return format!("{:>10}", value);
+    }
+
+    if value < 1000 {
+        return format!("{:>10}", value);
+    }
+
+    let units = ["", "K", "M", "G", "T", "P"];
+    let mut v = value as f64;
+    let mut unit = 0;
+    while v >= 1000.0 && unit + 1 < units.len() {
+        v /= 1000.0;
+        unit += 1;
+    }
+
+    let text = format!("{:.1} {}", v, units[unit]);
+    format!("{:>10}", text)
+}
+
+fn format_bytes(bytes: u64, human: bool) -> String {
+    if !human {
+        return format!("{} B", bytes);
+    }
+
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{} B", bytes)
+    } else {
+        format!("{:.1} {}", value, UNITS[unit])
     }
 }
 
