@@ -14,13 +14,15 @@ use command::{execute_command, parse_command};
 use render::render;
 use state::TerminalState;
 
+const KERNEL_VERSION: &str = env!("KERNEL_VERSION");
+
 pub fn run() -> i32 {
     let mut terminal = match TerminalState::new() {
         Ok(terminal) => terminal,
         Err(_) => return 1,
     };
 
-    terminal.write_line("edos v0.1.0");
+    terminal.write_line(&format!("edos kernel v{}", KERNEL_VERSION));
     terminal.write_line("");
     terminal.write_line("Type help for more info.");
 
