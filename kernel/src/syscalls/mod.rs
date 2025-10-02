@@ -390,7 +390,8 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_FUTEX_WAIT => {
             let addr = ctx.rdi as *const u32;
             let expected = ctx.rsi as u32;
-            ctx.rax = sys_futex_wait(addr, expected);
+            let timeout_ns = ctx.rdx;
+            ctx.rax = sys_futex_wait(addr, expected, timeout_ns);
         }
         SYS_FUTEX_WAKE => {
             let addr = ctx.rdi as *const u32;

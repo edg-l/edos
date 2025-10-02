@@ -3,11 +3,12 @@ use core::{
     hint::spin_loop,
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
 };
 
 use crate::sys::{
     Errno,
-    calls::syscall2,
+    calls::{syscall2, syscall3},
     constants::{SYS_FUTEX_WAIT, SYS_FUTEX_WAKE},
     errno,
 };
@@ -18,6 +19,8 @@ pub enum FutexWaitResult {
     Woken,
     /// The futex value no longer matched the expected value; caller should retry in userspace.
     NotReady,
+    /// The futex wait timed out before the value changed.
+    TimedOut,
 }
 
 /// Wait on a userspace futex word until it differs from `expected` or another thread wakes us.
@@ -25,14 +28,31 @@ pub enum FutexWaitResult {
 /// Returns [`FutexWaitResult::NotReady`] when the value changed (or a spurious wake occurred) and
 /// no blocking happened, [`FutexWaitResult::Woken`] when the thread slept and was explicitly woken,
 /// and [`Err`] if the syscall failed.
-pub fn futex_wait(addr: &AtomicU32, expected: u32) -> Result<FutexWaitResult, Errno> {
+pub fn futex_wait(
+    addr: &AtomicU32,
+    expected: u32,
+    timeout: Option<Duration>,
+) -> Result<FutexWaitResult, Errno> {
     let ptr = addr as *const AtomicU32 as *const u32;
-    let result = unsafe { syscall2(SYS_FUTEX_WAIT, ptr as u64, expected as u64) };
+    let timeout_ns = match timeout {
+        Some(duration) => {
+            let nanos = duration.as_nanos();
+            if nanos >= u64::MAX as u128 {
+                u64::MAX - 1
+            } else {
+                nanos as u64
+            }
+        }
+        None => u64::MAX,
+    };
+    let result = unsafe { syscall3(SYS_FUTEX_WAIT, ptr as u64, expected as u64, timeout_ns) };
 
     if result == u64::MAX {
         Err(errno())
     } else if result == 0 {
         Ok(FutexWaitResult::Woken)
+    } else if result == 2 {
+        Ok(FutexWaitResult::TimedOut)
     } else {
         Ok(FutexWaitResult::NotReady)
     }
@@ -80,8 +100,10 @@ impl<T> Mutex<T> {
             }
 
             while self.state.load(Ordering::Acquire) != 0 {
-                match futex_wait(&self.state, 1) {
-                    Ok(FutexWaitResult::Woken) | Ok(FutexWaitResult::NotReady) => {}
+                match futex_wait(&self.state, 1, None) {
+                    Ok(FutexWaitResult::Woken)
+                    | Ok(FutexWaitResult::NotReady)
+                    | Ok(FutexWaitResult::TimedOut) => {}
                     Err(_) => break,
                 }
                 spin_loop();

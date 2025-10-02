@@ -48,7 +48,8 @@ extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
         pid = thread_create(thread_fn, null_mut()).unwrap();
 
         while SIGNAL.load(core::sync::atomic::Ordering::Relaxed) != true {
-            sleep_ms(1000).unwrap();
+            println!("Signal not ready, waiting 200ms");
+            sleep_ms(200).unwrap();
         }
         *x = 2;
         println!("Dropping lock");

@@ -1,4 +1,5 @@
 use alloc::{collections::vec_deque::VecDeque, vec::Vec};
+use core::time::Duration;
 use spin::Mutex;
 use x86_64::instructions::interrupts::{self, without_interrupts};
 
@@ -13,6 +14,8 @@ pub enum WaitOutcome {
     Ready,
     /// Thread was parked and later woken.
     Parked,
+    /// Thread slept until the timeout elapsed without the condition becoming ready.
+    TimedOut,
 }
 
 #[derive(Debug)]
@@ -29,41 +32,16 @@ impl WaitQueue {
 
     /// Put the current thread to sleep until woken.
     pub fn wait_until<F: Fn() -> bool>(&self, ready: F) -> WaitOutcome {
-        if ready() {
-            return WaitOutcome::Ready;
-        }
+        self.wait_internal(ready, None)
+    }
 
-        let tid = sched().current_thread_id().unwrap();
-        let mut parked = false;
-
-        interrupts::without_interrupts(|| {
-            if ready() {
-                return;
-            }
-
-            {
-                let mut q = self.inner.lock();
-                q.push_back(tid);
-            }
-
-            if ready() {
-                let mut q = self.inner.lock();
-                if let Some(pos) = q.iter().position(|&id| id == tid) {
-                    q.remove(pos);
-                }
-                return;
-            }
-
-            // Park current thread; it will be woken by wake_one/wake_all
-            parked = true;
-            sched().thread_park();
-        });
-
-        if parked {
-            WaitOutcome::Parked
-        } else {
-            WaitOutcome::Ready
-        }
+    /// Put the current thread to sleep until woken or the timeout elapses.
+    pub fn wait_until_timeout<F: Fn() -> bool>(
+        &self,
+        ready: F,
+        timeout: Option<Duration>,
+    ) -> WaitOutcome {
+        self.wait_internal(ready, timeout)
     }
 
     /// Wake one thread
@@ -101,5 +79,76 @@ impl WaitQueue {
     /// Check whether the queue currently has any waiters.
     pub fn is_empty(&self) -> bool {
         self.inner.lock().is_empty()
+    }
+
+    fn wait_internal<F: Fn() -> bool>(&self, ready: F, timeout: Option<Duration>) -> WaitOutcome {
+        if ready() {
+            return WaitOutcome::Ready;
+        }
+
+        #[derive(Copy, Clone)]
+        enum SleepAction {
+            Park,
+            Sleep(Duration),
+        }
+
+        let tid = sched().current_thread_id().unwrap();
+        let mut action: Option<SleepAction> = None;
+
+        interrupts::without_interrupts(|| {
+            if ready() {
+                return;
+            }
+
+            {
+                let mut q = self.inner.lock();
+                q.push_back(tid);
+            }
+
+            if ready() {
+                let mut q = self.inner.lock();
+                if let Some(pos) = q.iter().position(|&id| id == tid) {
+                    q.remove(pos);
+                }
+                return;
+            }
+
+            let chosen = match timeout {
+                Some(dt) => SleepAction::Sleep(dt),
+                None => SleepAction::Park,
+            };
+
+            action = Some(chosen);
+
+            match chosen {
+                SleepAction::Park => {
+                    sched().thread_park();
+                }
+                SleepAction::Sleep(dt) => {
+                    sched().thread_sleep(dt);
+                }
+            }
+        });
+
+        let Some(action) = action else {
+            return WaitOutcome::Ready;
+        };
+
+        if ready() {
+            return WaitOutcome::Parked;
+        }
+
+        match action {
+            SleepAction::Park => WaitOutcome::Parked,
+            SleepAction::Sleep(_) => {
+                interrupts::without_interrupts(|| {
+                    let mut q = self.inner.lock();
+                    if let Some(pos) = q.iter().position(|&id| id == tid) {
+                        q.remove(pos);
+                    }
+                });
+                WaitOutcome::TimedOut
+            }
+        }
     }
 }

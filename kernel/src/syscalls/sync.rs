@@ -1,5 +1,5 @@
 use alloc::{collections::btree_map::BTreeMap, sync::Arc};
-use core::cell::Cell;
+use core::{cell::Cell, time::Duration};
 
 use crate::{
     syscalls::Errno,
@@ -44,7 +44,7 @@ fn cleanup_if_empty(key: &FutexKey, queue: &Arc<WaitQueue>) {
     }
 }
 
-pub fn sys_futex_wait(addr: *const u32, expected: u32) -> u64 {
+pub fn sys_futex_wait(addr: *const u32, expected: u32, timeout_ns: u64) -> u64 {
     let sched = sched();
     let info = sched.current_thread_info();
     info.lock().errno = Errno::Clear;
@@ -72,15 +72,22 @@ pub fn sys_futex_wait(addr: *const u32, expected: u32) -> u64 {
     };
     let key = FutexKey::new(Arc::as_ptr(&mm_arc) as usize, addr as u64);
     let queue = queue_for(key);
-
+    let timeout = if timeout_ns == u64::MAX {
+        None
+    } else {
+        Some(Duration::from_nanos(timeout_ns))
+    };
     let fault = Cell::new(None);
-    let outcome = queue.wait_until(|| match unsafe { try_read_user(addr) } {
-        Some(value) => value != expected,
-        None => {
-            fault.set(Some(Errno::EFAULT));
-            true
-        }
-    });
+    let outcome = queue.wait_until_timeout(
+        || match unsafe { try_read_user(addr) } {
+            Some(value) => value != expected,
+            None => {
+                fault.set(Some(Errno::EFAULT));
+                true
+            }
+        },
+        timeout,
+    );
 
     if let Some(err) = fault.get() {
         cleanup_if_empty(&key, &queue);
@@ -104,6 +111,7 @@ pub fn sys_futex_wait(addr: *const u32, expected: u32) -> u64 {
                 return !0u64;
             }
         },
+        WaitOutcome::TimedOut => 2,
     };
 
     cleanup_if_empty(&key, &queue);
