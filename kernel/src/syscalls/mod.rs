@@ -54,8 +54,10 @@ mod fs;
 mod io;
 mod ioctl;
 mod memory;
+mod sync;
 
 use self::ioctl::sys_ioctl;
+use self::sync::{sys_futex_wait, sys_futex_wake};
 
 /// # Safety
 /// Must be called once per core
@@ -219,6 +221,8 @@ const SYS_LIST_MOUNTS: u64 = 208;
 const SYS_SLEEP_MS: u64 = 209;
 const SYS_MONOTONIC_TIME: u64 = 210;
 const SYS_CLONE: u64 = 211;
+const SYS_FUTEX_WAIT: u64 = 212;
+const SYS_FUTEX_WAKE: u64 = 213;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -382,6 +386,16 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let flags = ctx.rdx;
             let child_stack = ctx.r10;
             ctx.rax = sys_clone(ctx, func_ptr, arg, flags, child_stack);
+        }
+        SYS_FUTEX_WAIT => {
+            let addr = ctx.rdi as *const u32;
+            let expected = ctx.rsi as u32;
+            ctx.rax = sys_futex_wait(addr, expected);
+        }
+        SYS_FUTEX_WAKE => {
+            let addr = ctx.rdi as *const u32;
+            let count = ctx.rsi as u32;
+            ctx.rax = sys_futex_wake(addr, count);
         }
         _ => {
             ctx.rax = !0u64;

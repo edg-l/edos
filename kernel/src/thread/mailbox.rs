@@ -43,7 +43,8 @@ pub struct Response<R> {
 impl<R> Response<R> {
     pub fn wait(self) -> R {
         while !self.inner.ready.load(Ordering::Acquire) {
-            self.inner
+            let _ = self
+                .inner
                 .waitq
                 .wait_until(|| self.inner.ready.load(Ordering::Acquire));
         }
@@ -93,7 +94,7 @@ impl<T, R> Mailbox<T, R> {
             if let Some(req) = self.queue.lock().pop_front() {
                 return req;
             }
-            self.not_empty.wait_until(|| !self.queue.lock().is_empty());
+            let _ = self.not_empty.wait_until(|| !self.queue.lock().is_empty());
         }
     }
 

@@ -138,7 +138,7 @@ pub fn klogger() {
             add_serial_log(&msg);
             dev.add_log(msg);
         }
-        LOG_WAITQ.wait_until(|| !queue.is_empty());
+        let _ = LOG_WAITQ.wait_until(|| !queue.is_empty());
     }
 }
 

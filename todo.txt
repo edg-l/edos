@@ -1,0 +1,14 @@
+
+- add a way to kill threads from user (user threads, maybe signals)
+
+- research what try_clone on pipe means, can pipes be cloned?
+
+- add system time (real time) as opposed to just time since boot
+
+- seek and related syscalls
+
+- users, file perms
+
+- set file time syscall?
+
+- direct copy and rename file

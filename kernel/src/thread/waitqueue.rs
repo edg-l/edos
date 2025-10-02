@@ -7,6 +7,14 @@ use crate::thread::{
     thread::ThreadId,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitOutcome {
+    /// Condition became ready without blocking.
+    Ready,
+    /// Thread was parked and later woken.
+    Parked,
+}
+
 #[derive(Debug)]
 pub struct WaitQueue {
     inner: Mutex<VecDeque<ThreadId>>,
@@ -20,12 +28,14 @@ impl WaitQueue {
     }
 
     /// Put the current thread to sleep until woken.
-    pub fn wait_until<F: Fn() -> bool>(&self, ready: F) {
+    pub fn wait_until<F: Fn() -> bool>(&self, ready: F) -> WaitOutcome {
         if ready() {
-            return;
+            return WaitOutcome::Ready;
         }
 
         let tid = sched().current_thread_id().unwrap();
+        let mut parked = false;
+
         interrupts::without_interrupts(|| {
             if ready() {
                 return;
@@ -45,8 +55,15 @@ impl WaitQueue {
             }
 
             // Park current thread; it will be woken by wake_one/wake_all
+            parked = true;
             sched().thread_park();
         });
+
+        if parked {
+            WaitOutcome::Parked
+        } else {
+            WaitOutcome::Ready
+        }
     }
 
     /// Wake one thread
@@ -79,5 +96,10 @@ impl WaitQueue {
             }
             n
         })
+    }
+
+    /// Check whether the queue currently has any waiters.
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().is_empty()
     }
 }

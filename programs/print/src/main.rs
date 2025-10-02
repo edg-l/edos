@@ -3,13 +3,19 @@
 
 use core::{
     ffi::{CStr, c_char},
+    hint::spin_loop,
     ptr::null_mut,
+    sync::atomic::AtomicBool,
 };
 
 use elibc::{
-    println,
+    Mutex, println,
     process::{thread_create, thread_join},
+    sleep_ms,
 };
+
+static DATA: Mutex<u64> = Mutex::new(0);
+static SIGNAL: AtomicBool = AtomicBool::new(false);
 
 #[unsafe(no_mangle)]
 extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
@@ -35,7 +41,18 @@ extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
     let id = elibc::process::sys_getpid();
     println!("hi from process {id}");
 
-    let pid = thread_create(thread_fn, null_mut()).unwrap();
+    let pid;
+    {
+        let mut x = DATA.lock();
+
+        pid = thread_create(thread_fn, null_mut()).unwrap();
+
+        while SIGNAL.load(core::sync::atomic::Ordering::Relaxed) != true {
+            sleep_ms(1000).unwrap();
+        }
+        *x = 2;
+        println!("Dropping lock");
+    }
 
     thread_join(pid).unwrap();
 
@@ -44,7 +61,18 @@ extern "C" fn main(argc: isize, argv: *const *const u8) -> i32 {
 
 extern "C" fn thread_fn(_args: *mut u8) -> i32 {
     let id = elibc::process::sys_getpid();
-    println!("hi from thread {id}");
+    println!(
+        "hi from thread {id}, trying to get lock {}",
+        DATA.try_lock().is_some()
+    );
+
+    SIGNAL.store(true, core::sync::atomic::Ordering::Relaxed);
+
+    println!("Stored signal true");
+
+    let x = DATA.lock();
+
+    println!("lock acquired: {:?}", x);
 
     0
 }

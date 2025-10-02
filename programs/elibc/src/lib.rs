@@ -11,6 +11,7 @@ pub mod io;
 pub mod math;
 pub mod memory;
 pub mod process;
+pub mod sync;
 pub mod sys;
 
 // Re-export commonly used types and functions for convenience
@@ -23,6 +24,7 @@ pub use process::{
     WaitPidStatus, dup2, monotonic_time_ns, pipe, sleep_ms, spawn, sys_exit, sys_getpid,
     sys_waitpid,
 };
+pub use sync::{FutexWaitResult, Mutex, MutexGuard, futex_wait, futex_wake};
 pub use sys::{Errno, errno};
 
 // File I/O syscalls

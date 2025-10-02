@@ -45,7 +45,8 @@ impl<T> BlockingMutex<T> {
             if self.try_acquire() {
                 return BlockingMutexGuard { lock: self };
             }
-            self.waiters
+            let _ = self
+                .waiters
                 .wait_until(|| !self.locked.load(Ordering::Acquire));
         }
     }
