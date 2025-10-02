@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::{string::ToString, vec::Vec};
 use core::time::Duration;
 
@@ -9,6 +10,9 @@ use crate::fs::handle::Pollable;
 use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
 use crate::thread::mutex::BlockingMutex;
 use crate::thread::pipe::PollablePipe;
+use crate::util::uaccess::{
+    UAccessError, try_copy_from_user, try_copy_string_from_user, try_copy_to_user, try_write_user,
+};
 use crate::{
     drivers::{keyboard::KEYBOARD_BROADCAST, tty},
     syscalls::Errno,
@@ -36,6 +40,8 @@ pub struct SelectFd {
     pub interests: PollState,
     pub result: PollState,
 }
+
+const MAX_PATH_LEN: usize = 1024;
 
 fn file_kind_to_u8(kind: FileKind) -> u8 {
     match kind {
@@ -87,7 +93,17 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
         return 0;
     }
 
-    let buffer = unsafe { core::slice::from_raw_parts(buffer_ptr, count) }.to_vec();
+    if buffer_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    let mut buffer = vec![0u8; count];
+
+    if !unsafe { try_copy_from_user(buffer.as_mut_ptr(), buffer_ptr, count) } {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
 
     interrupts::enable();
 
@@ -231,8 +247,11 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
 
     // Now do the atomic copy to user space - no context switches can happen here
 
-    let user_buffer = unsafe { core::slice::from_raw_parts_mut(buffer_ptr, bytes_to_copy) };
-    user_buffer.copy_from_slice(&data[..bytes_to_copy]);
+    let ok = unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_copy) };
+    if !ok {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
 
     // Update file offset if reading from FsFile
     if let Some(mut file) = fs_state {
@@ -293,20 +312,25 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         return -1;
     }
 
-    // Copy C string from user memory (simple, bounded)
-    let mut buf = Vec::new();
-    for i in 0..1024usize {
-        let c = unsafe { core::ptr::read_volatile(path_ptr.add(i)) };
-        if c == 0 {
-            break;
+    let mut buf = vec![0u8; MAX_PATH_LEN];
+    let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), path_ptr, MAX_PATH_LEN) } {
+        Ok(len) => len,
+        Err(UAccessError::TooLong) => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
         }
-        buf.push(c);
-    }
-    // If no null terminator within bound, treat as invalid
-    if buf.is_empty() || buf.len() == 1024 {
+        Err(UAccessError::Fault) => {
+            info.lock().errno = Errno::EFAULT;
+            return -1;
+        }
+    };
+
+    if len == 0 {
         info.lock().errno = Errno::EINVAL;
         return -1;
     }
+
+    buf.truncate(len);
 
     let path_str = match core::str::from_utf8(&buf) {
         Ok(s) => s,
@@ -399,20 +423,25 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
         return 0;
     }
 
-    // Copy C string from user memory (simple, bounded)
-    let mut buf = Vec::new();
-    for i in 0..1024usize {
-        let c = unsafe { core::ptr::read_volatile(path_ptr.add(i)) };
-        if c == 0 {
-            break;
+    let mut buf = vec![0u8; MAX_PATH_LEN];
+    let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), path_ptr, MAX_PATH_LEN) } {
+        Ok(len) => len,
+        Err(UAccessError::TooLong) => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
         }
-        buf.push(c);
-    }
-    // If no null terminator within bound, treat as invalid
-    if buf.is_empty() || buf.len() == 1024 {
+        Err(UAccessError::Fault) => {
+            info.lock().errno = Errno::EFAULT;
+            return -1;
+        }
+    };
+
+    if len == 0 {
         info.lock().errno = Errno::EINVAL;
         return -1;
     }
+
+    buf.truncate(len);
 
     let path_str = match core::str::from_utf8(&buf) {
         Ok(s) => s,
@@ -467,15 +496,17 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
             core::slice::from_raw_parts(&entry as *const DirEntry as *const u8, entry_size)
         };
         let user_entry_ptr = unsafe { buffer_ptr.add(written) };
-        unsafe {
-            core::ptr::copy_nonoverlapping(entry_bytes.as_ptr(), user_entry_ptr, entry_size);
+        if !unsafe { try_copy_to_user(user_entry_ptr, entry_bytes.as_ptr(), entry_size) } {
+            info.lock().errno = Errno::EFAULT;
+            return -1;
         }
         written += entry_size;
 
         // Copy filename to user buffer
         let user_name_ptr = unsafe { buffer_ptr.add(written) };
-        unsafe {
-            core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), user_name_ptr, name_bytes.len());
+        if !unsafe { try_copy_to_user(user_name_ptr, name_bytes.as_ptr(), name_bytes.len()) } {
+            info.lock().errno = Errno::EFAULT;
+            return -1;
         }
         written += name_bytes.len();
     }
@@ -514,7 +545,26 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
         return 0;
     }
 
-    let fds = unsafe { core::slice::from_raw_parts_mut(fds_ptr, count) };
+    let mut fds = vec![
+        SelectFd {
+            fd: 0,
+            interests: PollState::none(),
+            result: PollState::none(),
+        };
+        count
+    ];
+
+    let fds_bytes = count * core::mem::size_of::<SelectFd>();
+
+    if !unsafe { try_copy_from_user(fds.as_mut_ptr() as *mut u8, fds_ptr as *const u8, fds_bytes) }
+    {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+
+    let copy_back = |entries: &[SelectFd]| unsafe {
+        try_copy_to_user(fds_ptr as *mut u8, entries.as_ptr() as *const u8, fds_bytes)
+    };
 
     let descriptors = {
         let mut guard = info.lock();
@@ -534,6 +584,9 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
             Some(desc) => desc,
             None => {
                 info.lock().errno = Errno::EBADF;
+                if !copy_back(&fds) {
+                    info.lock().errno = Errno::EFAULT;
+                }
                 return -1;
             }
         };
@@ -541,6 +594,9 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
         match descriptor {
             FileDescriptor::StandardStream(_) => {
                 info.lock().errno = Errno::EINVAL;
+                if !copy_back(&fds) {
+                    info.lock().errno = Errno::EFAULT;
+                }
                 return -1;
             }
             FileDescriptor::Pipe(pipe) => {
@@ -555,6 +611,9 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                     Ok(p) => p,
                     Err(err) => {
                         info.lock().errno = Errno::from(err);
+                        if !copy_back(&fds) {
+                            info.lock().errno = Errno::EFAULT;
+                        }
                         return -1;
                     }
                 };
@@ -583,6 +642,10 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
         }
 
         if ready > 0 {
+            if !copy_back(&fds) {
+                info.lock().errno = Errno::EFAULT;
+                return -1;
+            }
             return ready as i64;
         }
 
@@ -590,6 +653,10 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
             Some(dl) => {
                 let now = Instant::now();
                 if now >= dl {
+                    if !copy_back(&fds) {
+                        info.lock().errno = Errno::EFAULT;
+                        return -1;
+                    }
                     return 0;
                 }
                 let remaining = dl.duration_since(now);
@@ -649,11 +716,14 @@ pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {
         return -1;
     }
 
-    // Copy the cwd string to user buffer
-    unsafe {
-        core::ptr::copy_nonoverlapping(cwd_bytes.as_ptr(), buffer_ptr, cwd_bytes.len());
-        // Add null terminator
-        core::ptr::write(buffer_ptr.add(cwd_bytes.len()), 0);
+    if !unsafe { try_copy_to_user(buffer_ptr, cwd_bytes.as_ptr(), cwd_bytes.len()) } {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+
+    if !unsafe { try_write_user(buffer_ptr.add(cwd_bytes.len()), 0u8) } {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
     }
 
     (cwd_bytes.len() + 1) as i64
@@ -669,20 +739,25 @@ pub fn sys_chdir(path_ptr: *const u8) -> i64 {
         return -1;
     }
 
-    // Copy C string from user memory (simple, bounded)
-    let mut buf = Vec::new();
-    for i in 0..1024usize {
-        let c = unsafe { core::ptr::read_volatile(path_ptr.add(i)) };
-        if c == 0 {
-            break;
+    let mut buf = vec![0u8; MAX_PATH_LEN];
+    let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), path_ptr, MAX_PATH_LEN) } {
+        Ok(len) => len,
+        Err(UAccessError::TooLong) => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
         }
-        buf.push(c);
-    }
-    // If no null terminator within bound, treat as invalid
-    if buf.is_empty() || buf.len() == 1024 {
+        Err(UAccessError::Fault) => {
+            info.lock().errno = Errno::EFAULT;
+            return -1;
+        }
+    };
+
+    if len == 0 {
         info.lock().errno = Errno::EINVAL;
         return -1;
     }
+
+    buf.truncate(len);
 
     let path_str = match core::str::from_utf8(&buf) {
         Ok(s) => s,

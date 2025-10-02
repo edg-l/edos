@@ -1,6 +1,5 @@
-use core::ffi::CStr;
-
-use alloc::{borrow::ToOwned, ffi::CString, string::ToString, vec::Vec};
+use alloc::vec;
+use alloc::{ffi::CString, string::ToString};
 use bytemuck::{Pod, Zeroable};
 use x86_64::instructions::interrupts;
 
@@ -16,6 +15,10 @@ use crate::{
     },
     syscalls::io::resolve_path,
     thread::{pipe::FileDescriptor, scheduler::sched},
+    util::uaccess::{
+        UAccessError, try_copy_from_user, try_copy_string_from_user, try_copy_to_user,
+        try_write_user,
+    },
 };
 
 use super::Errno;
@@ -27,18 +30,18 @@ fn read_user_path(path_ptr: *const u8, cwd: &Path) -> Result<Path, Errno> {
         return Err(Errno::EFAULT);
     }
 
-    let mut buf = Vec::new();
-    for i in 0..MAX_PATH_LEN {
-        let c = unsafe { core::ptr::read_volatile(path_ptr.add(i)) };
-        if c == 0 {
-            break;
-        }
-        buf.push(c);
-    }
+    let mut buf = vec![0u8; MAX_PATH_LEN];
+    let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), path_ptr, MAX_PATH_LEN) } {
+        Ok(len) => len,
+        Err(UAccessError::TooLong) => return Err(Errno::EINVAL),
+        Err(UAccessError::Fault) => return Err(Errno::EFAULT),
+    };
 
-    if buf.is_empty() || buf.len() == MAX_PATH_LEN {
+    if len == 0 {
         return Err(Errno::EINVAL);
     }
+
+    buf.truncate(len);
 
     let path_str = core::str::from_utf8(&buf).map_err(|_| Errno::EINVAL)?;
     resolve_path(path_str, cwd).map_err(|_| Errno::EINVAL)
@@ -57,10 +60,9 @@ fn read_user_path_with_len(
         return Err(Errno::EINVAL);
     }
 
-    let mut buf = Vec::with_capacity(path_len);
-    for i in 0..path_len {
-        let c = unsafe { core::ptr::read_volatile(path_ptr.add(i)) };
-        buf.push(c);
+    let mut buf = vec![0u8; path_len];
+    if !unsafe { try_copy_from_user(buf.as_mut_ptr(), path_ptr, path_len) } {
+        return Err(Errno::EFAULT);
     }
 
     let path_str = core::str::from_utf8(&buf).map_err(|_| Errno::EINVAL)?;
@@ -72,8 +74,16 @@ fn read_user_str(value_ptr: *const u8) -> Result<CString, Errno> {
         return Err(Errno::EFAULT);
     }
 
-    let path_str = unsafe { CStr::from_ptr(value_ptr.cast()) };
-    Ok(path_str.to_owned())
+    let mut buf = vec![0u8; MAX_PATH_LEN];
+    let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), value_ptr, MAX_PATH_LEN) }
+    {
+        Ok(len) => len,
+        Err(UAccessError::TooLong) => return Err(Errno::EINVAL),
+        Err(UAccessError::Fault) => return Err(Errno::EFAULT),
+    };
+
+    buf.truncate(len);
+    CString::new(buf).map_err(|_| Errno::EINVAL)
 }
 
 fn remove_dir_recursive(path: &Path) -> Result<(), Error> {
@@ -333,8 +343,9 @@ pub fn sys_list_partitions(buffer: *mut u8, size: u64) -> i64 {
             break;
         }
 
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), current_ptr, bytes.len());
+        if !unsafe { try_copy_to_user(current_ptr, bytes.as_ptr(), bytes.len()) } {
+            info.lock().errno = Errno::EFAULT;
+            return -1;
         }
         written += bytes.len();
         current_ptr = unsafe { current_ptr.add(bytes.len()) };
@@ -383,18 +394,20 @@ pub fn sys_list_mounts(buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
             core::slice::from_raw_parts((&entry as *const RawMountEntry).cast::<u8>(), entry_size)
         };
 
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                entry_bytes.as_ptr(),
+        if !unsafe { try_copy_to_user(buffer_ptr.add(written), entry_bytes.as_ptr(), entry_size) } {
+            info.lock().errno = Errno::EFAULT;
+            return -1;
+        }
+        written += entry_size;
+        if !unsafe {
+            try_copy_to_user(
                 buffer_ptr.add(written),
-                entry_size,
-            );
-            written += entry_size;
-            core::ptr::copy_nonoverlapping(
                 path_bytes.as_ptr(),
-                buffer_ptr.add(written),
                 path_bytes.len(),
-            );
+            )
+        } {
+            info.lock().errno = Errno::EFAULT;
+            return -1;
         }
         written += path_bytes.len();
     }
@@ -539,8 +552,9 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
         }
     };
 
-    unsafe {
-        core::ptr::write(fstat_buf, fstat_entry);
+    if !unsafe { try_write_user(fstat_buf, fstat_entry) } {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
     }
 
     0
@@ -576,8 +590,9 @@ pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut FstatEntry
         }
     };
 
-    unsafe {
-        core::ptr::write(fstat_buf, fstat_entry);
+    if !unsafe { try_write_user(fstat_buf, fstat_entry) } {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
     }
 
     0

@@ -1,10 +1,10 @@
 use core::{
     arch::naked_asm,
-    ptr,
     sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64},
     time::Duration,
 };
 
+use alloc::vec;
 use alloc::{format, string::ToString, sync::Arc, vec::Vec};
 use spin::{Mutex, RwLock};
 use x86_64::{
@@ -44,6 +44,9 @@ use crate::{
             insert_thread_info, take_thread_exit_code,
         },
         util::kthread_stack_alloc,
+    },
+    util::uaccess::{
+        UAccessError, try_copy_string_from_user, try_copy_to_user, try_read_user, try_write_user,
     },
 };
 
@@ -463,7 +466,10 @@ fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
 
     if let Some(code) = take_thread_exit_code(tid) {
         if !status_ptr.is_null() {
-            unsafe { status_ptr.write(code) };
+            if !unsafe { try_write_user(status_ptr, code) } {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
+            }
         }
         return pid;
     }
@@ -521,8 +527,16 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
 
     // Copy file descriptor numbers to user space
     let pipefd = [read_fd, write_fd];
-    unsafe {
-        core::ptr::copy_nonoverlapping(pipefd.as_ptr(), pipefd_ptr as *mut u64, 2);
+    let pipefd_bytes = core::mem::size_of_val(&pipefd);
+    if !unsafe {
+        try_copy_to_user(
+            pipefd_ptr as *mut u8,
+            pipefd.as_ptr() as *const u8,
+            pipefd_bytes,
+        )
+    } {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
     }
 
     0 // Success
@@ -580,8 +594,16 @@ fn sys_spawn(
     }
 
     let path_bytes = match copy_user_c_string(path_ptr, MAX_PATH_LEN) {
-        Some(bytes) if !bytes.is_empty() => bytes,
-        _ => {
+        Ok(bytes) if !bytes.is_empty() => bytes,
+        Ok(_) => {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+        Err(UAccessError::Fault) => {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
+        }
+        Err(UAccessError::TooLong) => {
             info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
@@ -621,15 +643,25 @@ fn sys_spawn(
         let mut terminated = false;
 
         for index in 0..MAX_ARGC {
-            let current_ptr = unsafe { ptr::read_volatile(argv_ptr.add(index)) };
+            let current_ptr = match unsafe { try_read_user(argv_ptr.add(index)) } {
+                Some(ptr) => ptr,
+                None => {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+            };
             if current_ptr.is_null() {
                 terminated = true;
                 break;
             }
 
             let arg = match copy_user_c_string(current_ptr, MAX_ARG_LEN) {
-                Some(bytes) => bytes,
-                None => {
+                Ok(bytes) => bytes,
+                Err(UAccessError::Fault) => {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+                Err(UAccessError::TooLong) => {
                     info.lock().errno = Errno::EINVAL;
                     return !0u64;
                 }
@@ -902,19 +934,17 @@ fn sys_clone(
     child_id.0
 }
 
-fn copy_user_c_string(ptr: *const u8, max_len: usize) -> Option<Vec<u8>> {
+fn copy_user_c_string(ptr: *const u8, max_len: usize) -> Result<Vec<u8>, UAccessError> {
     if ptr.is_null() {
-        return None;
+        return Err(UAccessError::Fault);
     }
 
-    let mut buf = Vec::new();
-    for idx in 0..max_len {
-        let byte = unsafe { ptr::read_volatile(ptr.add(idx)) };
-        if byte == 0 {
-            return Some(buf);
-        }
-        buf.push(byte);
-    }
+    let mut buf = vec![0u8; max_len];
+    let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), ptr, max_len) } {
+        Ok(len) => len,
+        Err(err) => return Err(err),
+    };
 
-    None
+    buf.truncate(len);
+    Ok(buf)
 }

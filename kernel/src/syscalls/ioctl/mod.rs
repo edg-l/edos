@@ -4,6 +4,7 @@ use crate::{
     fs::api as fs_api,
     syscalls::Errno,
     thread::{pipe::FileDescriptor, scheduler::sched},
+    util::uaccess::{try_copy_from_user, try_copy_to_user},
 };
 use x86_64::instructions::interrupts;
 
@@ -46,8 +47,9 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
         let mut buffer: Vec<u8> = vec![0u8; arg_len];
 
         if copy_in {
-            unsafe {
-                core::ptr::copy_nonoverlapping(user_ptr as *const u8, buffer.as_mut_ptr(), arg_len);
+            if !unsafe { try_copy_from_user(buffer.as_mut_ptr(), user_ptr as *const u8, arg_len) } {
+                info.lock().errno = Errno::EFAULT;
+                return -1;
             }
         }
 
@@ -56,8 +58,9 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
         match fs_api::ioctl(&file.path, request, buffer.as_mut_ptr() as u64) {
             Ok(value) => {
                 if copy_out {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(buffer.as_ptr(), user_ptr, arg_len);
+                    if !unsafe { try_copy_to_user(user_ptr, buffer.as_ptr(), arg_len) } {
+                        info.lock().errno = Errno::EFAULT;
+                        return -1;
                     }
                 }
                 value as i64

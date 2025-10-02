@@ -9,6 +9,7 @@ use x86_64::{
 use crate::{
     acpi::raw_current_apic_id,
     thread::{scheduler::Scheduler, thread::Thread},
+    util::uaccess::UAccessState,
 };
 
 /// Per CPU data
@@ -23,6 +24,7 @@ pub struct PerCpuData {
     pub lapic: *mut LocalApic,
     pub scheduler: *mut Scheduler,
     pub current_thread: Option<Arc<Thread>>,
+    pub uaccess: UAccessState,
 }
 
 impl PerCpuData {
@@ -35,6 +37,7 @@ impl PerCpuData {
             lapic: core::ptr::null_mut(),
             scheduler: core::ptr::null_mut(),
             current_thread: None,
+            uaccess: UAccessState::new(),
         }
     }
 }

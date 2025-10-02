@@ -1,3 +1,5 @@
+use core::sync::atomic::Ordering;
+
 use x86_64::{
     PrivilegeLevel, VirtAddr,
     registers::control::Cr2,
@@ -148,7 +150,7 @@ extern "x86-interrupt" fn page_fault_handler(
         let uaccess = current_cpu_uaccess();
         if uaccess.is_active() {
             // Resume at the fault handler
-            let resume_addr = uaccess.fault_resume;
+            let resume_addr = uaccess.fault_resume.load(Ordering::Relaxed);
             uaccess.clear();
 
             // Modify the stack frame to resume at the fault handler

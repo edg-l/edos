@@ -4,39 +4,51 @@
 //! with proper page fault handling and recovery.
 
 use crate::util::per_cpu::get_percpu_data;
+use core::{
+    ptr,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UAccessError {
+    Fault,
+    TooLong,
+}
 
 /// Per-CPU user access state
 ///
 /// Tracks the current user access operation and provides a fault resume point
 /// if a page fault occurs during user memory access.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct UAccessState {
     /// Resume label for page faults during user access
     /// If non-zero, page faults will resume execution at this address
-    pub fault_resume: u64,
+    pub fault_resume: AtomicU64,
 }
 
 impl UAccessState {
     pub const fn new() -> Self {
-        Self { fault_resume: 0 }
+        Self {
+            fault_resume: AtomicU64::new(0),
+        }
     }
 
     /// Check if we're currently in a user access operation
     #[inline]
     pub fn is_active(&self) -> bool {
-        self.fault_resume != 0
+        self.fault_resume.load(Ordering::Relaxed) != 0
     }
 
     /// Set the fault resume point
     #[inline]
-    pub fn set_resume(&mut self, resume: u64) {
-        self.fault_resume = resume;
+    pub fn set_resume(&self, resume: u64) {
+        self.fault_resume.store(resume, Ordering::Relaxed);
     }
 
     /// Clear the fault resume point
     #[inline]
-    pub fn clear(&mut self) {
-        self.fault_resume = 0;
+    pub fn clear(&self) {
+        self.fault_resume.store(0, Ordering::Relaxed);
     }
 }
 
@@ -51,13 +63,9 @@ pub struct UAccessGuard {
 
 impl UAccessGuard {
     /// Create a new user access guard
-    ///
-    /// This sets up the fault handler to catch page faults during user access.
-    /// The guard must be held for the duration of the user access operation.
     #[inline]
     pub fn new(resume_addr: u64) -> Self {
-        let uaccess = current_cpu_uaccess();
-        uaccess.set_resume(resume_addr);
+        current_cpu_uaccess().set_resume(resume_addr);
         Self { _private: () }
     }
 }
@@ -65,24 +73,14 @@ impl UAccessGuard {
 impl Drop for UAccessGuard {
     #[inline]
     fn drop(&mut self) {
-        let uaccess = current_cpu_uaccess();
-        uaccess.clear();
+        current_cpu_uaccess().clear();
     }
 }
 
 /// Get a mutable reference to the current CPU's user access state
-///
-/// This is stored in the per-CPU data structure and accessed via GS base.
 #[inline]
-pub fn current_cpu_uaccess() -> &'static mut UAccessState {
-    // For now, we'll use a static per-CPU array indexed by APIC ID
-    // This could be integrated into PerCpuData later
-    static mut UACCESS_STATES: [UAccessState; 256] = [UAccessState::new(); 256];
-
-    let percpu = get_percpu_data();
-    let apic_id = percpu.lapic_id as usize;
-
-    unsafe { &mut UACCESS_STATES[apic_id] }
+pub fn current_cpu_uaccess() -> &'static UAccessState {
+    &get_percpu_data().uaccess
 }
 
 /// Low-level copy with fault handling
@@ -158,9 +156,9 @@ unsafe fn do_user_copy(dst: *mut u8, src: *const u8, size: usize) -> bool {
 /// Setup helper - called from assembly
 /// Returns a pointer to the current CPU's UAccessState
 #[inline(never)]
-unsafe extern "C" fn setup_fault_resume() -> *mut UAccessState {
+unsafe extern "C" fn setup_fault_resume() -> *mut AtomicU64 {
     let uaccess = current_cpu_uaccess();
-    uaccess as *mut UAccessState
+    ptr::addr_of!(uaccess.fault_resume) as *mut AtomicU64
 }
 
 /// Clear helper - called from assembly
@@ -213,8 +211,9 @@ pub unsafe fn try_copy_to_user(dst: *mut u8, src: *const u8, size: usize) -> boo
 /// Copy a C string from user space to kernel space
 ///
 /// Copies a null-terminated string from user space to a kernel buffer.
-/// Returns the number of bytes copied (excluding null terminator) on success,
-/// or None if a fault occurred or the string exceeds max_len.
+/// Returns the number of bytes copied (excluding null terminator) on success.
+/// On failure, distinguishes between memory faults and strings exceeding
+/// `max_len`.
 ///
 /// # Safety
 ///
@@ -224,9 +223,9 @@ pub unsafe fn try_copy_string_from_user(
     dst: *mut u8,
     src: *const u8,
     max_len: usize,
-) -> Option<usize> {
+) -> Result<usize, UAccessError> {
     if src.is_null() || dst.is_null() || max_len == 0 {
-        return None;
+        return Err(UAccessError::Fault);
     }
 
     let mut len = 0;
@@ -234,11 +233,11 @@ pub unsafe fn try_copy_string_from_user(
     for i in 0..max_len {
         let mut byte: u8 = 0;
         if !unsafe { try_copy_from_user(&mut byte as *mut u8, src.add(i), 1) } {
-            return None;
+            return Err(UAccessError::Fault);
         }
 
         if byte == 0 {
-            return Some(len);
+            return Ok(len);
         }
 
         unsafe { dst.add(i).write(byte) };
@@ -246,7 +245,7 @@ pub unsafe fn try_copy_string_from_user(
     }
 
     // String too long - no null terminator found
-    None
+    Err(UAccessError::TooLong)
 }
 
 /// Read a single value from user space
