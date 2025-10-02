@@ -17,8 +17,9 @@ use crate::{
 pub struct PerCpuData {
     pub user_rsp: u64,   // Offset 0 - save user stack
     pub kernel_rsp: u64, // Offset 8 - kernel stack for syscalls
-    pub tss: TaskStateSegment,
     pub lapic_id: u32,
+    pub tss: TaskStateSegment,
+    // Cache line
     pub lapic: *mut LocalApic,
     pub scheduler: *mut Scheduler,
     pub current_thread: Option<Arc<Thread>>,
