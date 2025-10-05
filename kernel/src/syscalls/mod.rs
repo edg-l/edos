@@ -20,7 +20,9 @@ use x86_64::{
 use crate::{
     fs::Error as FsError,
     gdt::selectors,
-    log, println,
+    log,
+    memory::STACK_ALIGNMENT,
+    println,
     syscalls::{
         fs::{
             FstatEntry, sys_fstat, sys_list_mounts, sys_list_partitions, sys_mkdir, sys_mount,
@@ -866,7 +868,10 @@ fn sys_clone(
             region_type: MemoryRegionType::ThreadLocal,
         };
 
-        (stack_bottom.as_u64() + stack_size, Some(stack_region))
+        let stack_top_aligned =
+            (stack_bottom.as_u64() + stack_size) & !(STACK_ALIGNMENT as u64 - 1);
+
+        (stack_top_aligned, Some(stack_region))
     } else {
         (child_stack, None)
     };
@@ -888,7 +893,7 @@ fn sys_clone(
         .map(|tls| tls.template.clone());
 
     // Create child context - clone parent's CPU state
-    let mut child_ctx = CpuContext::new_user_thread(func_ptr, user_stack_top);
+    let mut child_ctx = CpuContext::new_user_thread(func_ptr, user_stack_top - 8);
 
     // Copy callee-saved registers from parent
     child_ctx.r15 = parent_ctx.r15;
