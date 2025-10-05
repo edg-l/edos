@@ -1,6 +1,6 @@
 use core::{
     arch::naked_asm,
-    sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64},
+    sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -863,7 +863,7 @@ fn sys_clone(
             start: stack_bottom,
             size: stack_size,
             flags: page_flags,
-            region_type: MemoryRegionType::Data,
+            region_type: MemoryRegionType::ThreadLocal,
         };
 
         (stack_bottom.as_u64() + stack_size, Some(stack_region))
@@ -879,6 +879,9 @@ fn sys_clone(
     let cr3 = parent_user_read.cr3;
     let memory_manager = parent_user_read.memory_manager.clone();
     let parent_heap_break = parent_user_read.heap_break;
+    let parent_process_regions = parent_user_read.memory_regions.clone();
+    let process_stack_top = parent_user_read.process_stack_top.clone();
+    let address_space_refs = parent_user_read.address_space_refs.clone();
     let mut tls_template = parent_user_read
         .tls
         .as_ref()
@@ -926,21 +929,25 @@ fn sys_clone(
         drop(manager_guard);
     }
 
-    let mut child_memory_regions: Vec<MemoryRegion> = stack_region.into_iter().collect();
+    let mut child_owned_regions: Vec<MemoryRegion> = stack_region.into_iter().collect();
     if let Some(region) = tls_region.take() {
-        child_memory_regions.push(region);
+        child_owned_regions.push(region);
     }
+
+    address_space_refs.fetch_add(1, Ordering::AcqRel);
 
     let child_user = Arc::new(RwLock::new(crate::thread::UserThread {
         pid: child_id.0,
-        initial_stack_top: user_stack_top,
         cr3,
         memory_manager: memory_manager.clone(),
-        memory_regions: child_memory_regions,
+        memory_regions: parent_process_regions,
+        owned_regions: child_owned_regions,
         tls: tls_runtime,
         fpu_init: false,
         fpu: crate::drivers::fpu::FpuState::default(),
         heap_break: parent_heap_break,
+        address_space_refs,
+        process_stack_top,
     }));
 
     // Create child Thread

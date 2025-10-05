@@ -1,6 +1,6 @@
 use core::{
     ops::Deref,
-    sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec::Vec};
@@ -424,10 +424,11 @@ impl Thread {
 
         let entry_point = load_info.entry_point;
         let heap_break = load_info.heap_break;
-        let mut memory_regions = load_info.memory_regions;
+        let mut owned_regions = Vec::new();
         if let Some(region) = tls_region {
-            memory_regions.push(region);
+            owned_regions.push(region);
         }
+        let process_regions = Arc::new(load_info.memory_regions);
 
         println!("loaded elf, back to kernel page");
 
@@ -449,16 +450,21 @@ impl Thread {
 
         let mm = Arc::new(Mutex::new(process_memory_manager));
 
+        let address_space_refs = Arc::new(AtomicUsize::new(1));
+        let process_stack_top = Arc::new(AtomicU64::new(stack_top));
+
         let user_state = Arc::new(RwLock::new(UserThread {
             pid: id.0,
-            initial_stack_top: stack_top,
             cr3: (page, kernel_pml4.1),
             memory_manager: mm.clone(),
-            memory_regions,
+            memory_regions: Arc::clone(&process_regions),
+            owned_regions,
             tls: tls_runtime,
             fpu_init: false,
             fpu: FpuState::default(),
             heap_break,
+            address_space_refs,
+            process_stack_top,
         }));
 
         let thread = Arc::new(Thread {
@@ -500,28 +506,37 @@ impl Thread {
     }
 
     pub fn free(&self) {
-        return;
         kthread_stack_free(self.kstack_top);
 
-        if let Some(user) = &self.user {
-            let user = user.write();
-            let info = THREADS.get_info(self.id);
-            // Unmap all memory mappings
-            let mut memory_manager = user.memory_manager.lock();
-            if let Some(info) = info {
+        let Some(user_lock) = &self.user else {
+            return;
+        };
+
+        let user = user_lock.write();
+        let remaining = user.address_space_refs.fetch_sub(1, Ordering::AcqRel);
+        let is_last_thread = remaining == 1;
+
+        let mut memory_manager = user.memory_manager.lock();
+
+        for region in &user.owned_regions {
+            let _ = memory_manager.unmap_memory(region.start, region.size);
+        }
+
+        if is_last_thread {
+            if let Some(info) = THREADS.get_info(self.id) {
                 let mappings = info.lock().memory_mappings.lock().clone();
                 for (addr, mapping) in mappings {
                     let _ = memory_manager.unmap_memory(addr, mapping.size);
                 }
             }
 
-            for region in &user.memory_regions {
+            for region in user.memory_regions.iter() {
                 let _ = memory_manager.unmap_memory(region.start, region.size);
             }
 
-            thread_stack_free(&mut memory_manager, user.initial_stack_top);
+            let stack_top = user.process_stack_top.load(Ordering::Acquire);
+            thread_stack_free(&mut memory_manager, stack_top);
 
-            // clean up all page tables in the lower half of the address space
             memory_manager.clean_lower_half();
 
             switch_to_kernel_page();

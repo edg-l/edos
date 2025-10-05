@@ -1,5 +1,8 @@
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
-use core::{ptr, sync::atomic::AtomicU64};
+use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
+use core::{
+    ptr,
+    sync::atomic::{AtomicU64, AtomicUsize},
+};
 use spin::Mutex;
 use x86_64::{
     VirtAddr,
@@ -15,8 +18,6 @@ use crate::{
     syscalls::Errno,
     thread::{fd::FileDescriptorTable, mutex::BlockingMutex},
 };
-use alloc::sync::Arc;
-
 pub mod broadcast;
 pub mod context;
 pub mod fd;
@@ -35,19 +36,20 @@ pub mod waitqueue;
 
 #[derive(Debug)]
 pub struct UserThread {
-    /// Same as thread if for now.
+    /// Same as thread id for now.
     pub pid: u64,
-    /// Saved to free it in case the thread exits.
-    pub initial_stack_top: u64,
     /// Physical addr
     pub cr3: (PhysFrame, Cr3Flags),
     pub memory_manager: Arc<Mutex<MemoryManager>>,
-    pub memory_regions: Vec<MemoryRegion>,
+    pub memory_regions: Arc<Vec<MemoryRegion>>,
+    pub owned_regions: Vec<MemoryRegion>,
     pub tls: Option<UserThreadTls>,
     // Whether the fpu has been initialized for this thread.
     pub fpu_init: bool,
     pub fpu: FpuState,
     pub heap_break: u64,
+    pub address_space_refs: Arc<AtomicUsize>,
+    pub process_stack_top: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +166,7 @@ pub enum MemoryRegionType {
     Code,
     Data,
     Tls,
+    ThreadLocal,
 }
 
 #[expect(unused)]
