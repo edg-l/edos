@@ -14,6 +14,7 @@ pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_SELECT: u64 = 23;
 pub const SYS_IOCTL: u64 = 16;
 pub const SYS_PIPE: u64 = 22;
+pub const SYS_DUP: u64 = 32;
 pub const SYS_DUP2: u64 = 33;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_WAIT_PID: u64 = 40;

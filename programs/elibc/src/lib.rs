@@ -21,7 +21,7 @@ pub use fs::{
 };
 pub use memory::{mmap, munmap};
 pub use process::{
-    WaitPidStatus, dup2, monotonic_time_ns, pipe, sleep_ms, spawn, sys_exit, sys_getpid,
+    WaitPidStatus, dup, dup2, monotonic_time_ns, pipe, sleep_ms, spawn, sys_exit, sys_getpid,
     sys_waitpid,
 };
 pub use sync::{FutexWaitResult, Mutex, MutexGuard, futex_wait, futex_wake};

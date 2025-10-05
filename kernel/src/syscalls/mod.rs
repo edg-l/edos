@@ -211,7 +211,8 @@ const SYS_EXIT: u64 = 60;
 const SYS_ERRNO: u64 = 0x400;
 const SYS_GETPID: u64 = 39; // get process ID
 const SYS_SPAWN: u64 = 57; // spawn process
-const SYS_DUP2: u64 = 33; // duplicate file descriptor
+const SYS_DUP: u64 = 32; // duplicate file descriptor assigning lowest unused fd
+const SYS_DUP2: u64 = 33; // duplicate file descriptor to specific target
 const SYS_WAIT_PID: u64 = 40;
 const SYS_MOUNT: u64 = 202;
 const SYS_LIST_PARTITIONS: u64 = 203;
@@ -337,6 +338,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let stdout_fd = ctx.r10;
             let stderr_fd = ctx.r8;
             ctx.rax = sys_spawn(path_ptr, argv_ptr, stdin_fd, stdout_fd, stderr_fd);
+        }
+        SYS_DUP => {
+            let oldfd = ctx.rdi;
+            ctx.rax = sys_dup(oldfd);
         }
         SYS_DUP2 => {
             let oldfd = ctx.rdi;
@@ -566,29 +571,56 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
     0 // Success
 }
 
+fn sys_dup(oldfd: u64) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+
+    let mut thread_info = info.lock();
+    thread_info.errno = Errno::Clear;
+
+    let mut fd_table = thread_info.fd_table.lock();
+
+    let old_fd_descriptor = match fd_table.get_fd(oldfd) {
+        Some(fd) => fd.clone(),
+        None => {
+            thread_info.errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    let mut candidate = 0;
+    while fd_table.get_fd(candidate).is_some() {
+        candidate += 1;
+    }
+
+    fd_table.insert_fd(candidate, old_fd_descriptor);
+
+    candidate
+}
+
 fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
     let sched = sched();
     let info = sched.current_thread_info();
 
-    info.lock().errno = Errno::Clear;
+    let mut thread_info = info.lock();
+    thread_info.errno = Errno::Clear;
+
+    let mut fd_table = thread_info.fd_table.lock();
 
     // Get the file descriptor we want to duplicate
-    let old_fd_descriptor = match info.lock().fd_table.lock().get_fd(oldfd) {
+    let old_fd_descriptor = match fd_table.get_fd(oldfd) {
         Some(fd) => fd.clone(),
         None => {
-            info.lock().errno = Errno::EINVAL;
+            thread_info.errno = Errno::EINVAL;
             return !0u64;
         }
     };
 
     // Close the newfd if it's already in use (but don't fail if it doesn't exist)
-    let _ = info.lock().fd_table.lock().close_fd(newfd);
+    let _ = fd_table.close_fd(newfd);
 
     // Insert the duplicated descriptor at newfd
-    info.lock()
-        .fd_table
-        .lock()
-        .insert_fd(newfd, old_fd_descriptor);
+    fd_table.insert_fd(newfd, old_fd_descriptor);
 
     newfd // Success - return the new fd number
 }

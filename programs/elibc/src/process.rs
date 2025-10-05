@@ -5,8 +5,8 @@ use crate::sys::{
     Errno, SYS_WAIT_PID,
     calls::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall5},
     constants::{
-        SYS_CLONE, SYS_DUP2, SYS_EXIT, SYS_GETPID, SYS_MONOTONIC_TIME, SYS_PIPE, SYS_SLEEP_MS,
-        SYS_SPAWN,
+        SYS_CLONE, SYS_DUP, SYS_DUP2, SYS_EXIT, SYS_GETPID, SYS_MONOTONIC_TIME, SYS_PIPE,
+        SYS_SLEEP_MS, SYS_SPAWN,
     },
     errno,
 };
@@ -93,6 +93,12 @@ pub fn pipe() -> Option<(u64, u64)> {
 /// Returns newfd on success, or u64::MAX on error
 pub fn dup2(oldfd: u64, newfd: u64) -> u64 {
     unsafe { syscall2(SYS_DUP2, oldfd, newfd) }
+}
+
+/// Duplicate file descriptor to the lowest available descriptor number
+/// Returns the new descriptor on success, or `u64::MAX` on error
+pub fn dup(oldfd: u64) -> u64 {
+    unsafe { syscall1(SYS_DUP, oldfd) }
 }
 
 /// Clone the calling thread to create a new thread.
