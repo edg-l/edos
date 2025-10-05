@@ -202,6 +202,8 @@ pub fn load_elf(
                     continue;
                 }
 
+                println!("TLS segment found {:?}", header);
+
                 let align = header.p_align.max(1);
                 let init_data = if header.p_filesz == 0 {
                     Vec::new()

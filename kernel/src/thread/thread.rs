@@ -500,6 +500,7 @@ impl Thread {
     }
 
     pub fn free(&self) {
+        return;
         kthread_stack_free(self.kstack_top);
 
         if let Some(user) = &self.user {
