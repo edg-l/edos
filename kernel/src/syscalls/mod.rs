@@ -984,7 +984,6 @@ fn sys_clone(
     );
 
     drop(parent_info_guard);
-    drop(parent_user_read);
 
     // Queue the child thread
     crate::thread::util::queue_spawn_thread(child_thread);

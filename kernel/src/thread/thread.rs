@@ -123,9 +123,9 @@ const TLS_TCB_MIN_SIZE: u64 = 64;
 const PAGE_SIZE: u64 = 4096;
 
 pub(crate) struct TlsAllocation {
-    runtime: UserThreadTls,
-    region: MemoryRegion,
-    fs_base: u64,
+    pub runtime: UserThreadTls,
+    pub region: MemoryRegion,
+    pub fs_base: u64,
 }
 
 fn align_up_u64(value: u64, align: u64) -> u64 {
