@@ -42,7 +42,6 @@ pub fn run() -> i32 {
 
     loop {
         let loop_start = monotonic_now();
-        pump_running_program(&mut terminal);
 
         if keyboard_handle.is_none() {
             keyboard_handle = keyboard_fd();
@@ -99,6 +98,8 @@ pub fn run() -> i32 {
             keyboard_handle = None;
         }
 
+        pump_running_program(&mut terminal);
+
         for event in key_events.drain(..) {
             if let Some(line) = terminal.handle_key_event(event) {
                 ready_commands.push(line);
@@ -149,7 +150,9 @@ fn pump_running_program(state: &mut TerminalState) {
         Ok(WaitPidStatus::StillRunning) => {}
         Ok(WaitPidStatus::Exited(code)) => {
             state.set_running_program(None);
-            state.write_line(&format!("Process exited with code {code}"));
+            if code != 0 {
+                state.write_line(&format!("Process exited with code {code}"));
+            }
         }
         Err(err) => {
             state.set_running_program(None);
