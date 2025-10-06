@@ -1,4 +1,10 @@
-use std::{cell::Cell, fs::File, hint::black_box, io::Write, thread};
+use std::{
+    cell::Cell,
+    thread::{self, sleep},
+    time::Duration,
+};
+
+use edos_render::graphics::{Color, Screen};
 
 thread_local! {
     static HELLO: Cell<u64> = Cell::new(2);
@@ -11,16 +17,11 @@ fn main() {
     HELLO.set(4);
     println!("m {:?}", HELLO.get());
 
-    thread::spawn(|| {
-        println!("hello from thread {:?}", thread::current());
-        println!("t {:?}", HELLO.get());
-        HELLO.set(6);
-        println!("t {:?}", HELLO.get());
-    })
-    .join()
-    .unwrap();
+    let mut screen = Screen::get().unwrap();
 
-    println!("hello after joining");
-    println!("m {:?}", HELLO.get());
-    println!("{:?}", thread::current());
+    loop {
+        screen.fill(Color::CYAN).unwrap();
+        screen.render().unwrap();
+        sleep(Duration::from_millis(10));
+    }
 }

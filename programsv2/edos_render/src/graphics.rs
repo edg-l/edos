@@ -1,15 +1,9 @@
-use alloc::vec::Vec;
-use spin::Mutex;
-use thiserror::Error;
+use std::{fs::File, os::edos::io::FileExt};
+
 // Re-export noto-sans-mono-bitmap types for user programs
 pub use noto_sans_mono_bitmap::{FontWeight, RasterHeight};
 use noto_sans_mono_bitmap::{get_raster, get_raster_width};
-
-use crate::{
-    io::{IoError, ioctl as fd_ioctl, open},
-    math::isqrt,
-    sys::{Errno, IOCTL_ARG_IN, IOCTL_ARG_OUT},
-};
+use thiserror::Error;
 
 /// Graphics operation error type
 #[derive(Debug, Error, Clone, Copy)]
@@ -32,29 +26,9 @@ pub enum GraphicsError {
     TextError,
 }
 
-impl From<Errno> for GraphicsError {
-    fn from(errno: Errno) -> Self {
-        match errno {
-            Errno::EINVAL => GraphicsError::InvalidInput,
-            Errno::ENOMEM => GraphicsError::OutOfMemory,
-            Errno::EFAULT => GraphicsError::Fault,
-            Errno::UNKNOWN => GraphicsError::Unknown,
-            Errno::Clear => GraphicsError::Unknown,
-            _ => GraphicsError::Unknown,
-        }
-    }
-}
-
-impl From<IoError> for GraphicsError {
-    fn from(err: IoError) -> Self {
-        match err {
-            IoError::InvalidInput => GraphicsError::InvalidInput,
-            IoError::OutOfMemory => GraphicsError::OutOfMemory,
-            IoError::Fault => GraphicsError::Fault,
-            IoError::Unknown | IoError::Interrupted => GraphicsError::Unknown,
-        }
-    }
-}
+// Ioctl buffer flags
+pub const IOCTL_ARG_IN: u64 = 1;
+pub const IOCTL_ARG_OUT: u64 = 1 << 1;
 
 const FB_IOCTL_DRAW_RECT: u64 = 0x4642_0001;
 const FB_IOCTL_RENDER: u64 = 0x4642_0002;
@@ -89,34 +63,120 @@ struct FramebufferInfo {
     height: u32,
 }
 
-static FRAMEBUFFER_FD: Mutex<Option<u64>> = Mutex::new(None);
+#[derive(Debug)]
+pub struct Framebuffer {
+    fd: File,
+    buffer: Vec<u8>,
+}
 
-fn framebuffer_fd() -> GraphicsResult<u64> {
-    let mut guard = FRAMEBUFFER_FD.lock();
-    if let Some(fd) = *guard {
-        return Ok(fd);
-    }
-
-    match open("/dev/fb", 0) {
-        Ok(fd) => {
-            *guard = Some(fd);
-            Ok(fd)
+impl Framebuffer {
+    pub fn new() -> Self {
+        let file = File::open("/dev/fb").unwrap();
+        Self {
+            fd: file,
+            buffer: Vec::with_capacity(size_of::<FramebufferDraw>()),
         }
-        Err(err) => Err(GraphicsError::from(err)),
+    }
+
+    /// Draw a rectangle directly to the screen
+    pub fn draw_rect(&self, x: u64, y: u64, width: u64, height: u64, color: Color) {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let mut rect = FramebufferRect {
+            x,
+            y,
+            width,
+            height,
+            color: color.raw(),
+            _padding: 0,
+        };
+
+        self.fd
+            .ioctl(
+                FB_IOCTL_DRAW_RECT,
+                (&mut rect as *mut FramebufferRect) as u64,
+                core::mem::size_of::<FramebufferRect>(),
+                IOCTL_ARG_IN,
+            )
+            .unwrap();
+    }
+
+    /// Render all pending draw operations to the screen
+    pub fn render(&self) {
+        self.fd.ioctl(FB_IOCTL_RENDER, 0, 0, 0).unwrap();
+    }
+
+    /// Get screen information
+    pub fn screen_info(&self) -> Result<ScreenInfo> {
+        let mut info = FramebufferInfo::default();
+        self.fd
+            .ioctl(
+                FB_IOCTL_SCREEN_INFO,
+                (&mut info as *mut FramebufferInfo) as u64,
+                core::mem::size_of::<FramebufferInfo>(),
+                IOCTL_ARG_OUT,
+            )
+            .unwrap();
+
+        Ok(ScreenInfo {
+            width: info.width as usize,
+            height: info.height as usize,
+        })
+    }
+
+    /// Draw this request to the screen
+    pub fn draw(&mut self, request: &DrawRequest) -> Result<()> {
+        let pixel_count = request
+            .width
+            .checked_mul(request.height)
+            .ok_or(GraphicsError::InvalidInput)?;
+
+        if pixel_count == 0 {
+            return Ok(());
+        }
+
+        let header = FramebufferDraw {
+            x: request.x,
+            y: request.y,
+            width: request.width,
+            height: request.height,
+            pixel_count,
+        };
+
+        let header_bytes = core::mem::size_of::<FramebufferDraw>();
+        let pixel_bytes = (pixel_count as usize)
+            .checked_mul(core::mem::size_of::<u32>())
+            .ok_or(GraphicsError::InvalidInput)?;
+
+        self.buffer.clear();
+        self.buffer.reserve(header_bytes + pixel_bytes);
+
+        self.buffer.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(
+                (&header as *const FramebufferDraw) as *const u8,
+                header_bytes,
+            )
+        });
+        self.buffer.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(request.pixels.as_ptr() as *const u8, pixel_bytes)
+        });
+
+        self.fd
+            .ioctl(
+                FB_IOCTL_DRAW,
+                self.buffer.as_mut_ptr() as u64,
+                self.buffer.len(),
+                IOCTL_ARG_IN,
+            )
+            .unwrap();
+
+        Ok(())
     }
 }
 
-fn framebuffer_ioctl_raw(
-    request: u64,
-    arg: u64,
-    arg_len: usize,
-    flags: u64,
-) -> GraphicsResult<u64> {
-    let fd = framebuffer_fd()?;
-    fd_ioctl(fd, request, arg, arg_len, flags).map_err(GraphicsError::from)
-}
-
-pub type GraphicsResult<T> = Result<T, GraphicsError>;
+pub type Result<T> = std::result::Result<T, GraphicsError>;
 
 /// Type-safe color representation (RGB format)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,21 +190,25 @@ impl Color {
     }
 
     /// Get the raw u32 value
+    #[inline]
     pub const fn raw(self) -> u32 {
         self.0
     }
 
     /// Extract red component
+    #[inline]
     pub const fn red(self) -> u8 {
         ((self.0 >> 16) & 0xFF) as u8
     }
 
     /// Extract green component
+    #[inline]
     pub const fn green(self) -> u8 {
         ((self.0 >> 8) & 0xFF) as u8
     }
 
     /// Extract blue component
+    #[inline]
     pub const fn blue(self) -> u8 {
         (self.0 & 0xFF) as u8
     }
@@ -161,12 +225,14 @@ impl Color {
 }
 
 impl From<u32> for Color {
+    #[inline]
     fn from(value: u32) -> Self {
         Self(value)
     }
 }
 
 impl From<Color> for u32 {
+    #[inline]
     fn from(color: Color) -> Self {
         color.0
     }
@@ -182,6 +248,7 @@ pub struct Rect {
 }
 
 impl Rect {
+    #[inline]
     pub const fn new(x: u64, y: u64, width: u64, height: u64) -> Self {
         Self {
             x,
@@ -203,6 +270,7 @@ pub struct TextStyle {
 
 impl TextStyle {
     /// Create a new text style with default settings
+    #[inline]
     pub const fn new(foreground: Color) -> Self {
         Self {
             font_weight: noto_sans_mono_bitmap::FontWeight::Regular,
@@ -232,6 +300,7 @@ impl TextStyle {
 }
 
 impl Default for TextStyle {
+    #[inline]
     fn default() -> Self {
         Self::new(Color::WHITE)
     }
@@ -286,7 +355,7 @@ fn render_character_at(
     y: u64,
     character: char,
     style: &TextStyle,
-) -> GraphicsResult<()> {
+) -> Result<()> {
     // Get the rasterized character data
     let raster = match get_raster(character, style.font_weight, style.font_size) {
         Some(raster) => raster,
@@ -374,7 +443,7 @@ fn render_string_at(
     y: u64,
     text: &str,
     style: &TextStyle,
-) -> GraphicsResult<()> {
+) -> Result<()> {
     let metrics = TextMetrics::for_size(style.font_size);
     let mut current_x = x;
     let mut current_y = y;
@@ -433,7 +502,7 @@ fn render_text_wrapped(
     text: &str,
     style: &TextStyle,
     wrap_width: u64,
-) -> GraphicsResult<()> {
+) -> Result<()> {
     let metrics = TextMetrics::for_size(style.font_size);
     let mut current_x = x;
     let mut current_y = y;
@@ -483,7 +552,7 @@ pub struct Texture {
 
 impl Texture {
     /// Create a new empty texture with specified dimensions
-    pub fn new(width: u64, height: u64) -> GraphicsResult<Self> {
+    pub fn new(width: u64, height: u64) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(GraphicsError::InvalidInput);
         }
@@ -492,7 +561,7 @@ impl Texture {
             .checked_mul(height)
             .ok_or(GraphicsError::InvalidInput)? as usize;
 
-        let pixels = alloc::vec![0; pixel_count];
+        let pixels = vec![0; pixel_count];
 
         Ok(Self {
             pixels,
@@ -502,7 +571,7 @@ impl Texture {
     }
 
     /// Create a texture from existing pixel buffer
-    pub fn from_buffer(width: u64, height: u64, pixels: Vec<u32>) -> GraphicsResult<Self> {
+    pub fn from_buffer(width: u64, height: u64, pixels: Vec<u32>) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(GraphicsError::InvalidInput);
         }
@@ -523,7 +592,7 @@ impl Texture {
     }
 
     /// Set a pixel at the given coordinates
-    pub fn set_pixel(&mut self, x: u64, y: u64, color: Color) -> GraphicsResult<()> {
+    pub fn set_pixel(&mut self, x: u64, y: u64, color: Color) -> Result<()> {
         if x >= self.width || y >= self.height {
             return Err(GraphicsError::OutOfBounds);
         }
@@ -538,7 +607,7 @@ impl Texture {
     }
 
     /// Get a pixel color at the given coordinates
-    pub fn get_pixel(&self, x: u64, y: u64) -> GraphicsResult<Color> {
+    pub fn get_pixel(&self, x: u64, y: u64) -> Result<Color> {
         if x >= self.width || y >= self.height {
             return Err(GraphicsError::OutOfBounds);
         }
@@ -559,7 +628,7 @@ impl Texture {
         width: u64,
         height: u64,
         color: Color,
-    ) -> GraphicsResult<()> {
+    ) -> Result<()> {
         if x >= self.width || y >= self.height {
             return Err(GraphicsError::OutOfBounds);
         }
@@ -589,13 +658,7 @@ impl Texture {
     }
 
     /// Render a character at the specified position
-    pub fn draw_char(
-        &mut self,
-        x: u64,
-        y: u64,
-        character: char,
-        style: &TextStyle,
-    ) -> GraphicsResult<()> {
+    pub fn draw_char(&mut self, x: u64, y: u64, character: char, style: &TextStyle) -> Result<()> {
         render_character_at(
             &mut self.pixels,
             self.width,
@@ -608,13 +671,7 @@ impl Texture {
     }
 
     /// Render text at the specified position
-    pub fn draw_text(
-        &mut self,
-        x: u64,
-        y: u64,
-        text: &str,
-        style: &TextStyle,
-    ) -> GraphicsResult<()> {
+    pub fn draw_text(&mut self, x: u64, y: u64, text: &str, style: &TextStyle) -> Result<()> {
         render_string_at(&mut self.pixels, self.width, self.height, x, y, text, style)
     }
 
@@ -626,7 +683,7 @@ impl Texture {
         text: &str,
         style: &TextStyle,
         wrap_width: u64,
-    ) -> GraphicsResult<()> {
+    ) -> Result<()> {
         render_text_wrapped(
             &mut self.pixels,
             self.width,
@@ -708,53 +765,6 @@ impl BlendMode {
     }
 }
 
-/// Draw a rectangle directly to the screen
-pub fn draw_rect(x: u64, y: u64, width: u64, height: u64, color: Color) -> GraphicsResult<()> {
-    if width == 0 || height == 0 {
-        return Err(GraphicsError::InvalidInput);
-    }
-
-    let mut rect = FramebufferRect {
-        x,
-        y,
-        width,
-        height,
-        color: color.raw(),
-        _padding: 0,
-    };
-
-    framebuffer_ioctl_raw(
-        FB_IOCTL_DRAW_RECT,
-        (&mut rect as *mut FramebufferRect) as u64,
-        core::mem::size_of::<FramebufferRect>(),
-        IOCTL_ARG_IN,
-    )?;
-
-    Ok(())
-}
-
-/// Render all pending draw operations to the screen
-pub fn render() -> GraphicsResult<()> {
-    framebuffer_ioctl_raw(FB_IOCTL_RENDER, 0, 0, 0)?;
-    Ok(())
-}
-
-/// Get screen information
-pub fn screen_info() -> GraphicsResult<ScreenInfo> {
-    let mut info = FramebufferInfo::default();
-    framebuffer_ioctl_raw(
-        FB_IOCTL_SCREEN_INFO,
-        (&mut info as *mut FramebufferInfo) as u64,
-        core::mem::size_of::<FramebufferInfo>(),
-        IOCTL_ARG_OUT,
-    )?;
-
-    Ok(ScreenInfo {
-        width: info.width as usize,
-        height: info.height as usize,
-    })
-}
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenInfo {
@@ -773,7 +783,7 @@ pub struct DrawRequest {
 
 impl DrawRequest {
     /// Create a new DrawRequest with specified dimensions at origin (0,0)
-    pub fn new(width: u64, height: u64) -> GraphicsResult<Self> {
+    pub fn new(width: u64, height: u64) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(GraphicsError::InvalidInput);
         }
@@ -782,7 +792,7 @@ impl DrawRequest {
             .checked_mul(height)
             .ok_or(GraphicsError::InvalidInput)? as usize;
 
-        let pixels = alloc::vec![0; pixel_count];
+        let pixels = vec![0; pixel_count];
 
         Ok(Self {
             pixels,
@@ -801,7 +811,8 @@ impl DrawRequest {
     }
 
     /// Set a pixel at the given coordinates within this DrawRequest
-    pub fn set_pixel(&mut self, x: u64, y: u64, color: Color) -> GraphicsResult<()> {
+    #[inline(always)]
+    pub fn set_pixel(&mut self, x: u64, y: u64, color: Color) -> Result<()> {
         if x >= self.width || y >= self.height {
             return Err(GraphicsError::OutOfBounds);
         }
@@ -816,7 +827,7 @@ impl DrawRequest {
     }
 
     /// Get a pixel color at the given coordinates
-    pub fn get_pixel(&self, x: u64, y: u64) -> GraphicsResult<Color> {
+    pub fn get_pixel(&self, x: u64, y: u64) -> Result<Color> {
         if x >= self.width || y >= self.height {
             return Err(GraphicsError::OutOfBounds);
         }
@@ -837,7 +848,7 @@ impl DrawRequest {
         width: u64,
         height: u64,
         color: Color,
-    ) -> GraphicsResult<()> {
+    ) -> Result<()> {
         if x >= self.width || y >= self.height {
             return Err(GraphicsError::OutOfBounds);
         }
@@ -867,14 +878,7 @@ impl DrawRequest {
     }
 
     /// Draw a line from (x1, y1) to (x2, y2) using Bresenham's algorithm
-    pub fn draw_line(
-        &mut self,
-        x1: u64,
-        y1: u64,
-        x2: u64,
-        y2: u64,
-        color: Color,
-    ) -> GraphicsResult<()> {
+    pub fn draw_line(&mut self, x1: u64, y1: u64, x2: u64, y2: u64, color: Color) -> Result<()> {
         let mut x1 = x1 as i64;
         let mut y1 = y1 as i64;
         let x2 = x2 as i64;
@@ -909,13 +913,7 @@ impl DrawRequest {
     }
 
     /// Draw a circle outline at (cx, cy) with given radius
-    pub fn draw_circle(
-        &mut self,
-        cx: u64,
-        cy: u64,
-        radius: u64,
-        color: Color,
-    ) -> GraphicsResult<()> {
+    pub fn draw_circle(&mut self, cx: u64, cy: u64, radius: u64, color: Color) -> Result<()> {
         let cx = cx as i64;
         let cy = cy as i64;
         let radius = radius as i64;
@@ -956,13 +954,7 @@ impl DrawRequest {
     }
 
     /// Fill a circle at (cx, cy) with given radius
-    pub fn fill_circle(
-        &mut self,
-        cx: u64,
-        cy: u64,
-        radius: u64,
-        color: Color,
-    ) -> GraphicsResult<()> {
+    pub fn fill_circle(&mut self, cx: u64, cy: u64, radius: u64, color: Color) -> Result<()> {
         let cx = cx as i64;
         let cy = cy as i64;
         let radius = radius as i64;
@@ -980,7 +972,7 @@ impl DrawRequest {
                 continue;
             }
 
-            let dx = isqrt(under_sqrt as u64) as i64;
+            let dx = (under_sqrt as u64).isqrt() as i64;
 
             let start = (cx - dx).max(0) as u64;
             let end = (cx + dx).min(self.width as i64 - 1) as u64;
@@ -993,12 +985,7 @@ impl DrawRequest {
     }
 
     /// Blit a texture to this DrawRequest at the specified position
-    pub fn blit_texture(
-        &mut self,
-        texture: &Texture,
-        dst_x: u64,
-        dst_y: u64,
-    ) -> GraphicsResult<()> {
+    pub fn blit_texture(&mut self, texture: &Texture, dst_x: u64, dst_y: u64) -> Result<()> {
         self.blit_texture_with_blend(texture, None, dst_x, dst_y, BlendMode::Replace)
     }
 
@@ -1009,7 +996,7 @@ impl DrawRequest {
         src_rect: Rect,
         dst_x: u64,
         dst_y: u64,
-    ) -> GraphicsResult<()> {
+    ) -> Result<()> {
         self.blit_texture_with_blend(texture, Some(src_rect), dst_x, dst_y, BlendMode::Replace)
     }
 
@@ -1019,7 +1006,7 @@ impl DrawRequest {
         texture: &Texture,
         dst_x: u64,
         dst_y: u64,
-    ) -> GraphicsResult<()> {
+    ) -> Result<()> {
         self.blit_texture_with_blend(texture, None, dst_x, dst_y, BlendMode::IntensityBlend)
     }
 
@@ -1031,7 +1018,7 @@ impl DrawRequest {
         dst_x: u64,
         dst_y: u64,
         blend_mode: BlendMode,
-    ) -> GraphicsResult<()> {
+    ) -> Result<()> {
         // Determine source region
         let (src_x, src_y, src_width, src_height) = match src_rect {
             Some(rect) => (rect.x, rect.y, rect.width, rect.height),
@@ -1083,7 +1070,7 @@ impl DrawRequest {
         height: u64,
         dst_x: u64,
         dst_y: u64,
-    ) -> GraphicsResult<()> {
+    ) -> Result<()> {
         let texture = Texture::from_buffer(width, height, pixels.to_vec())?;
         self.blit_texture(&texture, dst_x, dst_y)
     }
@@ -1094,7 +1081,7 @@ impl DrawRequest {
         texture: &Texture,
         src_rect: Option<Rect>,
         dst_rect: Rect,
-    ) -> GraphicsResult<()> {
+    ) -> Result<()> {
         let (src_x, src_y, src_width, src_height) = match src_rect {
             Some(rect) => (rect.x, rect.y, rect.width, rect.height),
             None => (0, 0, texture.width, texture.height),
@@ -1125,61 +1112,8 @@ impl DrawRequest {
         Ok(())
     }
 
-    /// Draw this request to the screen
-    pub fn draw(&self, buffer: &mut Vec<u8>) -> GraphicsResult<()> {
-        let pixel_count = self
-            .width
-            .checked_mul(self.height)
-            .ok_or(GraphicsError::InvalidInput)?;
-
-        if pixel_count == 0 {
-            return Ok(());
-        }
-
-        let header = FramebufferDraw {
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
-            pixel_count,
-        };
-
-        let header_bytes = core::mem::size_of::<FramebufferDraw>();
-        let pixel_bytes = (pixel_count as usize)
-            .checked_mul(core::mem::size_of::<u32>())
-            .ok_or(GraphicsError::InvalidInput)?;
-
-        buffer.clear();
-        buffer.reserve(header_bytes + pixel_bytes);
-
-        buffer.extend_from_slice(unsafe {
-            core::slice::from_raw_parts(
-                (&header as *const FramebufferDraw) as *const u8,
-                header_bytes,
-            )
-        });
-        buffer.extend_from_slice(unsafe {
-            core::slice::from_raw_parts(self.pixels.as_ptr() as *const u8, pixel_bytes)
-        });
-
-        framebuffer_ioctl_raw(
-            FB_IOCTL_DRAW,
-            buffer.as_mut_ptr() as u64,
-            buffer.len(),
-            IOCTL_ARG_IN,
-        )?;
-
-        Ok(())
-    }
-
     /// Render a character at the specified position
-    pub fn draw_char(
-        &mut self,
-        x: u64,
-        y: u64,
-        character: char,
-        style: &TextStyle,
-    ) -> GraphicsResult<()> {
+    pub fn draw_char(&mut self, x: u64, y: u64, character: char, style: &TextStyle) -> Result<()> {
         render_character_at(
             &mut self.pixels,
             self.width,
@@ -1192,13 +1126,7 @@ impl DrawRequest {
     }
 
     /// Render text at the specified position
-    pub fn draw_text(
-        &mut self,
-        x: u64,
-        y: u64,
-        text: &str,
-        style: &TextStyle,
-    ) -> GraphicsResult<()> {
+    pub fn draw_text(&mut self, x: u64, y: u64, text: &str, style: &TextStyle) -> Result<()> {
         render_string_at(&mut self.pixels, self.width, self.height, x, y, text, style)
     }
 
@@ -1210,7 +1138,7 @@ impl DrawRequest {
         text: &str,
         style: &TextStyle,
         wrap_width: u64,
-    ) -> GraphicsResult<()> {
+    ) -> Result<()> {
         render_text_wrapped(
             &mut self.pixels,
             self.width,
@@ -1226,20 +1154,21 @@ impl DrawRequest {
 
 /// Screen management struct providing convenient graphics operations
 pub struct Screen {
+    framebuffer: Framebuffer,
     info: ScreenInfo,
     back_buffer: Option<DrawRequest>,
-    buffer: Vec<u8>,
     dirty: bool,
 }
 
 impl Screen {
     /// Get the global screen instance
-    pub fn get() -> GraphicsResult<Self> {
-        let info = screen_info()?;
-        Ok(Self {
+    pub fn get() -> Result<Screen> {
+        let fb = Framebuffer::new();
+        let info = fb.screen_info()?;
+        Ok(Screen {
+            framebuffer: fb,
             info,
             back_buffer: None,
-            buffer: Vec::new(),
             dirty: false,
         })
     }
@@ -1260,7 +1189,7 @@ impl Screen {
     }
 
     /// Ensure the back buffer is initialized
-    fn ensure_back_buffer(&mut self) -> GraphicsResult<()> {
+    fn ensure_back_buffer(&mut self) -> Result<()> {
         if self.back_buffer.is_none() {
             let mut buffer = DrawRequest::new(self.width() as u64, self.height() as u64)?;
             buffer.clear(); // Initialize with black background
@@ -1277,7 +1206,7 @@ impl Screen {
         width: u64,
         height: u64,
         color: Color,
-    ) -> GraphicsResult<()> {
+    ) -> Result<()> {
         self.ensure_back_buffer()?;
 
         if let Some(ref mut buffer) = self.back_buffer {
@@ -1289,7 +1218,7 @@ impl Screen {
     }
 
     /// Fill the entire screen with a color
-    pub fn fill(&mut self, color: Color) -> GraphicsResult<()> {
+    pub fn fill(&mut self, color: Color) -> Result<()> {
         self.ensure_back_buffer()?;
 
         if let Some(ref mut buffer) = self.back_buffer {
@@ -1301,26 +1230,27 @@ impl Screen {
     }
 
     /// Clear the screen (fill with black)
-    pub fn clear(&mut self) -> GraphicsResult<()> {
+    pub fn clear(&mut self) -> Result<()> {
         self.fill(Color::BLACK)
     }
 
     /// Render all pending operations
-    pub fn render(&mut self) -> GraphicsResult<()> {
+    pub fn render(&mut self) -> Result<()> {
         // Only render if we have a dirty back buffer
         if self.dirty
             && let Some(ref buffer) = self.back_buffer
         {
-            buffer.draw(&mut self.buffer)?;
+            self.framebuffer.draw(buffer)?;
             self.dirty = false;
         }
 
         // Always call the final render syscall to present to screen
-        render()
+        self.framebuffer.render();
+        Ok(())
     }
 
     /// Create a new DrawRequest that fits entirely on screen
-    pub fn create_draw_request(&self, width: u64, height: u64) -> GraphicsResult<DrawRequest> {
+    pub fn create_draw_request(&self, width: u64, height: u64) -> Result<DrawRequest> {
         if width > self.width() as u64 || height > self.height() as u64 {
             return Err(GraphicsError::OutOfBounds);
         }
@@ -1328,11 +1258,11 @@ impl Screen {
     }
 
     /// Draw a texture directly to the screen at the specified position
-    pub fn draw_texture(&mut self, texture: &Texture, x: u64, y: u64) -> GraphicsResult<()> {
+    pub fn draw_texture(&mut self, texture: &Texture, x: u64, y: u64) -> Result<()> {
         let mut draw_req = DrawRequest::new(texture.width, texture.height)?;
         draw_req.blit_texture(texture, 0, 0)?;
         draw_req = draw_req.with_position(x, y);
-        draw_req.draw(&mut self.buffer)
+        self.framebuffer.draw(&draw_req)
     }
 
     /// Draw a texture region directly to the screen
@@ -1342,28 +1272,23 @@ impl Screen {
         src_rect: Rect,
         x: u64,
         y: u64,
-    ) -> GraphicsResult<()> {
+    ) -> Result<()> {
         let mut draw_req = DrawRequest::new(src_rect.width, src_rect.height)?;
         draw_req.blit_texture_region(texture, src_rect, 0, 0)?;
         draw_req = draw_req.with_position(x, y);
-        draw_req.draw(&mut self.buffer)
+        self.framebuffer.draw(&draw_req)
     }
 
     /// Draw a texture with intensity blending directly to the screen
-    pub fn draw_texture_intensity(
-        &mut self,
-        texture: &Texture,
-        x: u64,
-        y: u64,
-    ) -> GraphicsResult<()> {
+    pub fn draw_texture_intensity(&mut self, texture: &Texture, x: u64, y: u64) -> Result<()> {
         let mut draw_req = DrawRequest::new(texture.width, texture.height)?;
         draw_req.blit_texture_intensity(texture, 0, 0)?;
         draw_req = draw_req.with_position(x, y);
-        draw_req.draw(&mut self.buffer)
+        self.framebuffer.draw(&draw_req)
     }
 
     /// Draw a texture with scaling directly to the screen
-    pub fn draw_texture_scaled(&mut self, texture: &Texture, dst_rect: Rect) -> GraphicsResult<()> {
+    pub fn draw_texture_scaled(&mut self, texture: &Texture, dst_rect: Rect) -> Result<()> {
         let mut draw_req = DrawRequest::new(dst_rect.width, dst_rect.height)?;
         draw_req.blit_texture_scaled(
             texture,
@@ -1371,24 +1296,18 @@ impl Screen {
             Rect::new(0, 0, dst_rect.width, dst_rect.height),
         )?;
         draw_req = draw_req.with_position(dst_rect.x, dst_rect.y);
-        draw_req.draw(&mut self.buffer)
+        self.framebuffer.draw(&draw_req)
     }
 
     /// Create a texture from the screen contents (screenshot)
-    pub fn capture_region(&self, _region: Rect) -> GraphicsResult<Texture> {
+    pub fn capture_region(&self, _region: Rect) -> Result<Texture> {
         // This would require a new syscall to read from framebuffer
         // For now, return an error as this functionality isn't implemented
         Err(GraphicsError::Unknown)
     }
 
     /// Draw text directly to the screen
-    pub fn draw_text(
-        &mut self,
-        x: u64,
-        y: u64,
-        text: &str,
-        style: &TextStyle,
-    ) -> GraphicsResult<()> {
+    pub fn draw_text(&mut self, x: u64, y: u64, text: &str, style: &TextStyle) -> Result<()> {
         self.ensure_back_buffer()?;
 
         if let Some(ref mut buffer) = self.back_buffer {
@@ -1407,7 +1326,7 @@ impl Screen {
         text: &str,
         style: &TextStyle,
         wrap_width: u64,
-    ) -> GraphicsResult<()> {
+    ) -> Result<()> {
         self.ensure_back_buffer()?;
 
         if let Some(ref mut buffer) = self.back_buffer {
@@ -1419,13 +1338,7 @@ impl Screen {
     }
 
     /// Draw a single character directly to the screen
-    pub fn draw_char(
-        &mut self,
-        x: u64,
-        y: u64,
-        character: char,
-        style: &TextStyle,
-    ) -> GraphicsResult<()> {
+    pub fn draw_char(&mut self, x: u64, y: u64, character: char, style: &TextStyle) -> Result<()> {
         self.ensure_back_buffer()?;
 
         if let Some(ref mut buffer) = self.back_buffer {
@@ -1438,6 +1351,6 @@ impl Screen {
 }
 
 /// Get the global screen instance (convenience function)
-pub fn screen() -> GraphicsResult<Screen> {
+pub fn screen() -> Result<Screen> {
     Screen::get()
 }

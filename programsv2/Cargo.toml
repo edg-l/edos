@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["hello"]
+members = ["edos_render","hello"]
 
 [profile.dev]
-opt-level = 2
+opt-level = 3
