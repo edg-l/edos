@@ -50,12 +50,7 @@ pub fn init() {
 
 #[inline(always)]
 pub fn sched() -> &'static Scheduler {
-    unsafe {
-        get_percpu_data()
-            .scheduler
-            .as_mut()
-            .unwrap_unchecked()
-    }
+    unsafe { get_percpu_data().scheduler.as_mut().unwrap_unchecked() }
 }
 pub static SCHEDULERS: RwLock<heapless::LinearMap<u32, &'static Scheduler, 128>> =
     RwLock::new(heapless::LinearMap::new());

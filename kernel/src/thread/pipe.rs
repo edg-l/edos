@@ -71,7 +71,7 @@ impl PollablePipe {
 }
 
 impl Pollable for PollablePipe {
-    fn poll(&self, _timeout: core::time::Duration) -> PollState {
+    fn subscribe(&self) -> PollState {
         let inner = self.inner.lock();
 
         if inner.closed || inner.buffer.is_empty() {
@@ -84,4 +84,6 @@ impl Pollable for PollablePipe {
             }
         }
     }
+
+    fn unsubscribe(&self) {}
 }

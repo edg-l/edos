@@ -72,7 +72,7 @@ pub fn run() -> i32 {
             entry_count += 1;
         }
 
-        let timeout_ms: u64 = if terminal.is_dirty() { 0 } else { 100 };
+        let timeout_ms: u64 = if terminal.is_dirty() { 0 } else { 1000 };
         let poll_slice = &mut entries[..entry_count];
         let poll_start = monotonic_now();
         let poll_result = poll_fds(poll_slice, timeout_ms);

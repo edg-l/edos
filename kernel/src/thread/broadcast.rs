@@ -59,27 +59,7 @@ impl<T> Subscriber<T> {
         return self.queue.lock().pop_front();
     }
 
-    pub fn poll(&self, dur: Duration) -> PollState {
-        let sched = sched();
-
-        if !self.queue.lock().is_empty() {
-            return PollState {
-                readable: true,
-                writable: true,
-                error: false,
-            };
-        }
-
-        if dur.is_zero() {
-            return PollState {
-                readable: false,
-                writable: true,
-                error: false,
-            };
-        }
-
-        sched.thread_sleep(dur);
-
+    pub fn poll(&self) -> PollState {
         return PollState {
             readable: !self.queue.lock().is_empty(),
             writable: true,

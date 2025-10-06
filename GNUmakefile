@@ -48,7 +48,7 @@ endef
 
 .PHONY: run-x86_64
 run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
-	$(call run_qemu_uefi,iso,4,)
+	$(call run_qemu_uefi,iso,4,-accel kvm)
 
 .PHONY: run-single
 run-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
@@ -63,8 +63,8 @@ run-gdb: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
 	$(call run_qemu_uefi,iso,1,-no-shutdown -accel tcg -s -S)
 
 .PHONY: run-kvm
-run-kvm: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
-	$(call run_qemu_uefi,iso,4,-accel kvm)
+run-emu: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+	$(call run_qemu_uefi,iso,4,-accel tcg)
 
 .PHONY: run-hdd-x86_64
 run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd sata-disk.img

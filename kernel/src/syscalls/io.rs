@@ -661,7 +661,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
         let mut ready = 0usize;
 
         for (idx, interests, pollable) in contexts.iter_mut() {
-            let state = pollable.poll(Duration::ZERO);
+            let state = pollable.subscribe();
             let entry = &mut fds[*idx];
             entry.result = state;
 
@@ -671,6 +671,9 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
         }
 
         if ready > 0 {
+            for (_idx, _interests, pollable) in contexts.iter_mut() {
+                pollable.unsubscribe();
+            }
             if !copy_back(&fds) {
                 let info = sched.current_thread_info();
                 info.lock().errno = Errno::EFAULT;
@@ -688,14 +691,17 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                         info.lock().errno = Errno::EFAULT;
                         return -1;
                     }
+                    for (_idx, _interests, pollable) in contexts.iter_mut() {
+                        pollable.unsubscribe();
+                    }
                     return 0;
                 }
                 let remaining = dl.duration_since(now);
-                let sleep_dur = remaining.min(Duration::from_millis(10));
+                let sleep_dur = remaining.max(Duration::from_millis(1));
                 sched.thread_sleep(sleep_dur);
             }
             None => {
-                sched.thread_sleep(Duration::from_millis(10));
+                sched.thread_park();
             }
         }
     }

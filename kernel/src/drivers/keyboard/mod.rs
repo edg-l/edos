@@ -146,10 +146,14 @@ pub struct KeyboardDevice;
 struct KeyboardPoll;
 
 impl Pollable for KeyboardPoll {
-    fn poll(&self, timeout: Duration) -> PollState {
+    fn subscribe(&self) -> PollState {
         let rx = KEYBOARD_BROADCAST.subscribe();
 
-        rx.poll(timeout)
+        rx.poll()
+    }
+
+    fn unsubscribe(&self) {
+        KEYBOARD_BROADCAST.unsubscribe();
     }
 }
 

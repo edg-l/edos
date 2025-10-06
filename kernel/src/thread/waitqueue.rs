@@ -3,9 +3,12 @@ use core::time::Duration;
 use spin::Mutex;
 use x86_64::instructions::interrupts::{self, without_interrupts};
 
-use crate::thread::{
-    scheduler::{WakePriority, sched},
-    thread::ThreadId,
+use crate::{
+    fs::PollState,
+    thread::{
+        scheduler::{WakePriority, sched},
+        thread::ThreadId,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +82,36 @@ impl WaitQueue {
     /// Check whether the queue currently has any waiters.
     pub fn is_empty(&self) -> bool {
         self.inner.lock().is_empty()
+    }
+
+    pub fn poll<F: Fn() -> bool>(&self, ready: F) -> PollState {
+        if ready() {
+            return PollState {
+                readable: true,
+                writable: true,
+                error: false,
+            };
+        }
+
+        #[derive(Copy, Clone)]
+        enum SleepAction {
+            Park,
+            Sleep(Duration),
+        }
+
+        let tid = sched().current_thread_id().unwrap();
+
+        interrupts::without_interrupts(|| {
+            if ready() {
+                return;
+            }
+            {
+                let mut q = self.inner.lock();
+                q.push_back(tid);
+            }
+        });
+
+        PollState::none()
     }
 
     fn wait_internal<F: Fn() -> bool>(&self, ready: F, timeout: Option<Duration>) -> WaitOutcome {

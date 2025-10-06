@@ -66,7 +66,7 @@ pub fn init() {
 struct TtyPoll;
 
 impl Pollable for TtyPoll {
-    fn poll(&self, timeout: Duration) -> PollState {
+    fn subscribe(&self) -> PollState {
         {
             let buffer = TTY_BUFFER.lock();
             if !buffer.is_empty() {
@@ -79,7 +79,11 @@ impl Pollable for TtyPoll {
         }
 
         let rx = TTY_NOTIFY.subscribe();
-        rx.poll(timeout)
+        rx.poll()
+    }
+
+    fn unsubscribe(&self) {
+        TTY_NOTIFY.unsubscribe();
     }
 }
 

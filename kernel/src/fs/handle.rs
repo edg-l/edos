@@ -6,5 +6,7 @@ use spin::Mutex;
 use crate::fs::PollState;
 
 pub trait Pollable: Send + Sync + Debug {
-    fn poll(&self, timeout: Duration) -> PollState;
+    fn subscribe(&self) -> PollState;
+
+    fn unsubscribe(&self);
 }
