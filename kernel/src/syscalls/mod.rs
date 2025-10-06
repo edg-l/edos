@@ -575,25 +575,24 @@ fn sys_dup(oldfd: u64) -> u64 {
     let sched = sched();
     let info = sched.current_thread_info();
 
-    let mut thread_info = info.lock();
-    thread_info.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
-    let mut fd_table = thread_info.fd_table.lock();
+    let fd_table = info.lock().fd_table.clone();
 
-    let old_fd_descriptor = match fd_table.get_fd(oldfd) {
+    let old_fd_descriptor = match fd_table.lock().get_fd(oldfd) {
         Some(fd) => fd.clone(),
         None => {
-            thread_info.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
     };
 
     let mut candidate = 0;
-    while fd_table.get_fd(candidate).is_some() {
+    while fd_table.lock().get_fd(candidate).is_some() {
         candidate += 1;
     }
 
-    fd_table.insert_fd(candidate, old_fd_descriptor);
+    fd_table.lock().insert_fd(candidate, old_fd_descriptor);
 
     candidate
 }
@@ -602,25 +601,24 @@ fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
     let sched = sched();
     let info = sched.current_thread_info();
 
-    let mut thread_info = info.lock();
-    thread_info.errno = Errno::Clear;
+    info.lock().errno = Errno::Clear;
 
-    let mut fd_table = thread_info.fd_table.lock();
+    let fd_table = info.lock().fd_table.clone();
 
     // Get the file descriptor we want to duplicate
-    let old_fd_descriptor = match fd_table.get_fd(oldfd) {
+    let old_fd_descriptor = match fd_table.lock().get_fd(oldfd) {
         Some(fd) => fd.clone(),
         None => {
-            thread_info.errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
     };
 
     // Close the newfd if it's already in use (but don't fail if it doesn't exist)
-    let _ = fd_table.close_fd(newfd);
+    let _ = fd_table.lock().close_fd(newfd);
 
     // Insert the duplicated descriptor at newfd
-    fd_table.insert_fd(newfd, old_fd_descriptor);
+    fd_table.lock().insert_fd(newfd, old_fd_descriptor);
 
     newfd // Success - return the new fd number
 }
