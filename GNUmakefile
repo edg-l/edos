@@ -32,7 +32,7 @@ run-hdd: run-hdd-$(KARCH)
 define run_qemu_uefi
 	qemu-system-$(KARCH) \
 		-M q35 \
-		-cpu qemu64,+x2apic \
+		-cpu qemu64,+sse4.1,+sse4.2,+x2apic \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		$(if $(filter iso,$(1)),-cdrom $(IMAGE_NAME).iso,-hda $(IMAGE_NAME).hdd) \

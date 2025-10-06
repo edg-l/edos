@@ -94,7 +94,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     unsafe { get_lapic().end_of_interrupt() };
 
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3 {
-        log!("Invalid opcode, forcing exit");
+        log!("Invalid opcode, forcing exit, {stack_frame:#?}");
         sched().thread_exit(135);
     } else {
         println!("EXCEPTION: invalid_opcode CHECK\n{stack_frame:#?}");
