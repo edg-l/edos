@@ -547,10 +547,9 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
 
 pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     let sched = sched();
-    let info = sched.current_thread_info();
 
     if fds_ptr.is_null() && count != 0 {
-        info.lock().errno = Errno::EFAULT;
+        sched.current_thread_info().lock().errno = Errno::EFAULT;
         return -1;
     }
 
@@ -565,12 +564,6 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
             if !t.is_zero() {
                 interrupts::enable();
                 sched.thread_sleep(t);
-            }
-        } else {
-            // Sleep in chunks to allow wakeups from signals in the future
-            interrupts::enable();
-            loop {
-                sched.thread_sleep(Duration::from_millis(50));
             }
         }
         return 0;
@@ -589,6 +582,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
 
     if !unsafe { try_copy_from_user(fds.as_mut_ptr() as *mut u8, fds_ptr as *const u8, fds_bytes) }
     {
+        let info = sched.current_thread_info();
         info.lock().errno = Errno::EFAULT;
         return -1;
     }
@@ -598,6 +592,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     };
 
     let descriptors = {
+        let info = sched.current_thread_info();
         let mut guard = info.lock();
         guard.errno = Errno::Clear;
         fds.iter()
@@ -614,6 +609,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
         let descriptor = match descriptors[idx].clone() {
             Some(desc) => desc,
             None => {
+                let info = sched.current_thread_info();
                 info.lock().errno = Errno::EBADF;
                 if !copy_back(&fds) {
                     info.lock().errno = Errno::EFAULT;
@@ -624,6 +620,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
 
         match descriptor {
             FileDescriptor::StandardStream(_) => {
+                let info = sched.current_thread_info();
                 info.lock().errno = Errno::EINVAL;
                 if !copy_back(&fds) {
                     info.lock().errno = Errno::EFAULT;
@@ -641,6 +638,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                 let pollable = match fs_api::poll(&file.path) {
                     Ok(p) => p,
                     Err(err) => {
+                        let info = sched.current_thread_info();
                         info.lock().errno = Errno::from(err);
                         if !copy_back(&fds) {
                             info.lock().errno = Errno::EFAULT;
@@ -674,6 +672,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
 
         if ready > 0 {
             if !copy_back(&fds) {
+                let info = sched.current_thread_info();
                 info.lock().errno = Errno::EFAULT;
                 return -1;
             }
@@ -685,6 +684,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                 let now = Instant::now();
                 if now >= dl {
                     if !copy_back(&fds) {
+                        let info = sched.current_thread_info();
                         info.lock().errno = Errno::EFAULT;
                         return -1;
                     }

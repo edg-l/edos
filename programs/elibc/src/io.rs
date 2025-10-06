@@ -344,7 +344,7 @@ fn decode_key_event(value: u32) -> KeyEvent {
 }
 
 /// Try to get `count` key events. This may not fill up all the buffer, usually just returns one.
-pub fn get_raw_input(timeout_ms: u64, out_buf: &mut Vec<KeyEvent>, count: usize) {
+pub fn get_raw_input(out_buf: &mut Vec<KeyEvent>, count: usize) {
     if count == 0 {
         return;
     }
@@ -352,27 +352,6 @@ pub fn get_raw_input(timeout_ms: u64, out_buf: &mut Vec<KeyEvent>, count: usize)
     let Some(fd) = keyboard_fd() else {
         return;
     };
-
-    let mut poll_entry = PollFd::new(
-        fd,
-        PollState {
-            readable: true,
-            writable: false,
-            error: true,
-        },
-    );
-
-    match poll_fds(slice::from_mut(&mut poll_entry), timeout_ms) {
-        Ok(ready) => {
-            if ready == 0 || !poll_entry.result.readable {
-                return;
-            }
-        }
-        Err(_) => {
-            release_keyboard_fd(fd);
-            return;
-        }
-    }
 
     if read_keyboard_events(fd, count, out_buf).is_err() {
         release_keyboard_fd(fd);

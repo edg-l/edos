@@ -72,7 +72,7 @@ pub fn run() -> i32 {
             entry_count += 1;
         }
 
-        let timeout_ms: u64 = if terminal.is_dirty() { 0 } else { 50 };
+        let timeout_ms: u64 = if terminal.is_dirty() { 0 } else { 100 };
         let poll_slice = &mut entries[..entry_count];
         let poll_start = monotonic_now();
         let poll_result = poll_fds(poll_slice, timeout_ms);
@@ -85,13 +85,11 @@ pub fn run() -> i32 {
                 pump_tty_output(&mut terminal);
             }
 
-            if entry_count > 1 {
-                let keyboard_state = poll_slice[1].result;
-                if keyboard_state.error {
-                    keyboard_handle = None;
-                } else if keyboard_state.readable {
-                    get_raw_input(0, &mut key_events, 6);
-                }
+            let keyboard_state = poll_slice[1].result;
+            if keyboard_state.error {
+                keyboard_handle = None;
+            } else if keyboard_state.readable {
+                get_raw_input(&mut key_events, 32);
             }
         } else {
             // If polling failed, clear cached keyboard handle so we can retry opening it.

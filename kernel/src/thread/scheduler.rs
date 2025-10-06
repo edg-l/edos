@@ -48,12 +48,13 @@ pub fn init() {
     set_apic_timer_and_enable(Duration::from_millis(100));
 }
 
+#[inline(always)]
 pub fn sched() -> &'static Scheduler {
     unsafe {
         get_percpu_data()
             .scheduler
             .as_mut()
-            .expect("failed to get sched()")
+            .unwrap_unchecked()
     }
 }
 pub static SCHEDULERS: RwLock<heapless::LinearMap<u32, &'static Scheduler, 128>> =
