@@ -8,7 +8,6 @@ use alloc::{
 use spin::RwLock;
 
 use crate::{
-    fs::PollState,
     thread::{
         mutex::BlockingMutex,
         scheduler::{WakePriority, sched},
@@ -56,16 +55,6 @@ impl<T> Subscriber<T> {
         // park until either wake or timeout
         sched.thread_sleep(dur);
         return self.queue.lock().pop_front();
-    }
-
-    pub fn poll(&self) -> PollState {
-        PollState {
-            readable: !self.queue.lock().is_empty(),
-            writable: true,
-            error: false,
-            hangup: false,
-            invalid: false,
-        }
     }
 }
 
