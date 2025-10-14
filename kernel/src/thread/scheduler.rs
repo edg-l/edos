@@ -360,9 +360,8 @@ impl Scheduler {
         next.switch_to_page();
 
         let next_fs_base = next.tls_base.load(Ordering::Acquire);
-        unsafe {
-            FsBase::write(VirtAddr::new(next_fs_base));
-        }
+
+        FsBase::write(VirtAddr::new(next_fs_base));
 
         if let Some(user) = &next.user {
             let mut user = user.write();

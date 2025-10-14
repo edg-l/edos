@@ -28,6 +28,7 @@ pub mod pipe;
 //pub mod scheduler;
 pub mod irqlock;
 pub mod mutex;
+pub mod poll;
 pub mod runqueue;
 pub mod scheduler;
 pub mod thread;

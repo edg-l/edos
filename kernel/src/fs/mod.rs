@@ -88,6 +88,8 @@ pub struct PollState {
     pub readable: bool,
     pub writable: bool,
     pub error: bool,
+    pub hangup: bool,
+    pub invalid: bool,
 }
 
 impl PollState {
@@ -96,6 +98,75 @@ impl PollState {
             readable: false,
             writable: false,
             error: false,
+            hangup: false,
+            invalid: false,
+        }
+    }
+
+    pub const fn with_readable() -> Self {
+        Self {
+            readable: true,
+            writable: false,
+            error: false,
+            hangup: false,
+            invalid: false,
+        }
+    }
+
+    pub fn matches(&self, interests: Self) -> bool {
+        let mut matched = false;
+
+        if interests.readable && self.readable {
+            matched = true;
+        }
+        if interests.writable && self.writable {
+            matched = true;
+        }
+        if interests.error && self.error {
+            matched = true;
+        }
+        if interests.hangup && self.hangup {
+            matched = true;
+        }
+        if interests.invalid && self.invalid {
+            matched = true;
+        }
+
+        if !interests.readable
+            && !interests.writable
+            && !interests.error
+            && !interests.hangup
+            && !interests.invalid
+        {
+            matched = self.readable || self.writable || self.error || self.hangup || self.invalid;
+        }
+
+        matched
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.readable |= other.readable;
+        self.writable |= other.writable;
+        self.error |= other.error;
+        self.hangup |= other.hangup;
+        self.invalid |= other.invalid;
+    }
+
+    pub const fn to_bits(self) -> u8 {
+        (self.readable as u8)
+            | ((self.writable as u8) << 1)
+            | ((self.error as u8) << 2)
+            | ((self.hangup as u8) << 3)
+            | ((self.invalid as u8) << 4)
+    }
+
+    pub const fn from_bits(bits: u8) -> Self {
+        Self {
+            readable: (bits & 0x01) != 0,
+            writable: (bits & 0x02) != 0,
+            error: (bits & 0x04) != 0,
+            hangup: (bits & 0x08) != 0,
+            invalid: (bits & 0x10) != 0,
         }
     }
 }

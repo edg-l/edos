@@ -1,8 +1,12 @@
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
-use core::time::Duration;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
-    fs::{DevFsDevice, DevFsError, PollState, handle::Pollable, register_device_str},
+    fs::{
+        DevFsDevice, DevFsError, PollState,
+        handle::{PollEntry, PollKey, PollRegistration, Pollable},
+        register_device_str,
+    },
     thread::{broadcast::Broadcaster, mutex::BlockingMutex},
 };
 
@@ -10,6 +14,8 @@ const TTY_BUFFER_CAPACITY: usize = 16 * 1024;
 
 static TTY_BUFFER: BlockingMutex<VecDeque<u8>> = BlockingMutex::new(VecDeque::new());
 static TTY_NOTIFY: Broadcaster<()> = Broadcaster::new();
+static TTY_POLLERS: BlockingMutex<Vec<(PollKey, Arc<PollEntry>)>> = BlockingMutex::new(Vec::new());
+static TTY_NEXT_POLL_KEY: AtomicU64 = AtomicU64::new(1);
 
 pub struct TtyDevice;
 
@@ -26,6 +32,7 @@ fn push_bytes(data: &[u8]) {
     }
 
     let mut should_notify = false;
+    let mut resulting_state = None;
     {
         let mut buffer = TTY_BUFFER.lock();
         for &byte in data {
@@ -47,10 +54,31 @@ fn push_bytes(data: &[u8]) {
                 }
             }
         }
+        if should_notify {
+            resulting_state = Some(poll_state_for_len(buffer.len()));
+        }
     }
 
     if should_notify {
+        notify_pollers(resulting_state.expect("state must exist when notifying"));
         TTY_NOTIFY.broadcast(());
+    }
+}
+
+fn poll_state_for_len(len: usize) -> PollState {
+    PollState {
+        readable: len > 0,
+        writable: true,
+        error: false,
+        hangup: false,
+        invalid: false,
+    }
+}
+
+fn notify_pollers(state: PollState) {
+    let pollers = TTY_POLLERS.lock();
+    for (_, entry) in pollers.iter() {
+        entry.update(state);
     }
 }
 
@@ -66,24 +94,31 @@ pub fn init() {
 struct TtyPoll;
 
 impl Pollable for TtyPoll {
-    fn subscribe(&self) -> PollState {
-        {
+    fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
+        let state = {
             let buffer = TTY_BUFFER.lock();
-            if !buffer.is_empty() {
-                return PollState {
-                    readable: true,
-                    writable: true,
-                    error: false,
-                };
+            poll_state_for_len(buffer.len())
+        };
+
+        entry.update(state);
+
+        if state.matches(entry.interests()) {
+            PollRegistration {
+                initial: state,
+                key: None,
+            }
+        } else {
+            let key = TTY_NEXT_POLL_KEY.fetch_add(1, Ordering::Relaxed);
+            TTY_POLLERS.lock().push((key, entry));
+            PollRegistration {
+                initial: state,
+                key: Some(key),
             }
         }
-
-        let rx = TTY_NOTIFY.subscribe();
-        rx.poll()
     }
 
-    fn unsubscribe(&self) {
-        TTY_NOTIFY.unsubscribe();
+    fn unregister(&self, key: PollKey) {
+        TTY_POLLERS.lock().retain(|(stored, _)| *stored != key);
     }
 }
 
@@ -102,6 +137,9 @@ impl DevFsDevice for TtyDevice {
                 None => break,
             }
         }
+        let new_state = poll_state_for_len(buffer.len());
+        drop(buffer);
+        notify_pollers(new_state);
 
         Ok(result)
     }

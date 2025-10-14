@@ -3,7 +3,6 @@
 
 use core::{
     ffi::{CStr, c_char},
-    hint::spin_loop,
     ptr::null_mut,
     sync::atomic::AtomicBool,
 };

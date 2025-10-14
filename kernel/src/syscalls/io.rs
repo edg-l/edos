@@ -6,10 +6,11 @@ use core::time::Duration;
 
 use x86_64::instructions::interrupts;
 
-use crate::fs::handle::Pollable;
+use crate::fs::handle::{PollEntry, PollKey, Pollable};
 use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
 use crate::thread::mutex::BlockingMutex;
 use crate::thread::pipe::PollablePipe;
+use crate::thread::poll::PollWaiter;
 use crate::util::uaccess::{
     UAccessError, try_copy_from_user, try_copy_string_from_user, try_copy_to_user, try_write_user,
 };
@@ -39,6 +40,14 @@ pub struct SelectFd {
     pub fd: u64,
     pub interests: PollState,
     pub result: PollState,
+}
+
+struct PollContext {
+    index: usize,
+    interests: PollState,
+    pollable: Box<dyn Pollable>,
+    entry: Arc<PollEntry>,
+    key: Option<PollKey>,
 }
 
 const MAX_PATH_LEN: usize = 1024;
@@ -121,12 +130,8 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             }
         },
         Some(FileDescriptor::Pipe(pipe)) => {
-            // TODO: is it safe to get this lock here
-            // let text = core::str::from_utf8(&buffer);
-            // log!("Pipe: {:?}", text);
             let mut pipe = pipe.lock();
-            pipe.buffer.extend_from_slice(&buffer);
-            count as u64
+            pipe.write(&buffer) as u64
         }
         Some(FileDescriptor::FsFile(file)) => {
             // Write via FS API using current offset (append respected)
@@ -416,28 +421,8 @@ fn read_from_pipe(
     pipe: Arc<BlockingMutex<Pipe>>,
     max_count: usize,
 ) -> Result<alloc::vec::Vec<u8>, i64> {
-    use alloc::vec::Vec;
-
     let mut pipe_guard = pipe.lock();
-
-    if pipe_guard.buffer.is_empty() && pipe_guard.closed {
-        return Ok(Vec::new()); // EOF
-    }
-
-    let bytes_to_read = max_count.min(pipe_guard.buffer.len());
-    if bytes_to_read == 0 {
-        // Pipe is empty but not closed - for now return immediately (non-blocking)
-        // TODO: Make this blocking later
-        return Ok(Vec::new());
-    }
-
-    // Copy data to kernel buffer
-    let kernel_buffer = pipe_guard.buffer[..bytes_to_read].to_vec();
-
-    // Remove read data from pipe
-    pipe_guard.buffer.drain(..bytes_to_read);
-
-    Ok(kernel_buffer)
+    Ok(pipe_guard.read(max_count))
 }
 
 pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
@@ -560,12 +545,6 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     };
 
     if count == 0 {
-        if let Some(t) = timeout {
-            if !t.is_zero() {
-                interrupts::enable();
-                sched.thread_sleep(t);
-            }
-        }
         return 0;
     }
 
@@ -600,132 +579,152 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
             .collect::<Vec<_>>()
     };
 
-    let mut contexts: Vec<(usize, PollState, Box<dyn Pollable>)> = Vec::with_capacity(count);
+    let thread_id = match sched.current_thread_id() {
+        Some(id) => id,
+        None => {
+            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+    let waiter = Arc::new(PollWaiter::new(thread_id));
 
     interrupts::enable();
 
+    let mut contexts: Vec<PollContext> = Vec::with_capacity(count);
+    let mut base_ready = 0usize;
+
     for idx in 0..count {
-        let entry = fds[idx];
-        let descriptor = match descriptors[idx].clone() {
-            Some(desc) => desc,
-            None => {
-                let info = sched.current_thread_info();
-                info.lock().errno = Errno::EBADF;
-                if !copy_back(&fds) {
-                    info.lock().errno = Errno::EFAULT;
-                }
-                return -1;
-            }
-        };
+        let interests = fds[idx].interests;
+        fds[idx].result = PollState::none();
+
+        let descriptor = descriptors.get(idx).and_then(|d| d.clone());
 
         match descriptor {
-            FileDescriptor::StandardStream(_) => {
-                let info = sched.current_thread_info();
-                info.lock().errno = Errno::EINVAL;
-                if !copy_back(&fds) {
-                    info.lock().errno = Errno::EFAULT;
+            None => {
+                let entry = &mut fds[idx];
+                entry.result.invalid = true;
+                entry.result.error = true;
+                base_ready += 1;
+            }
+            Some(FileDescriptor::StandardStream(_)) => {
+                let entry = &mut fds[idx];
+                entry.result.invalid = true;
+                entry.result.error = true;
+                base_ready += 1;
+            }
+            Some(FileDescriptor::Pipe(pipe)) => {
+                let pollable: Box<dyn Pollable> = Box::new(PollablePipe::new(pipe.clone()));
+                let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
+                let registration = pollable.register(poll_entry.clone());
+                fds[idx].result = registration.initial;
+                contexts.push(PollContext {
+                    index: idx,
+                    interests,
+                    pollable,
+                    entry: poll_entry,
+                    key: registration.key,
+                });
+            }
+            Some(FileDescriptor::FsFile(file)) => match fs_api::poll(&file.path) {
+                Ok(pollable) => {
+                    let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
+                    let registration = pollable.register(poll_entry.clone());
+                    fds[idx].result = registration.initial;
+                    contexts.push(PollContext {
+                        index: idx,
+                        interests,
+                        pollable,
+                        entry: poll_entry,
+                        key: registration.key,
+                    });
                 }
-                return -1;
-            }
-            FileDescriptor::Pipe(pipe) => {
-                let pollable = Box::new(PollablePipe::new(pipe.clone()));
-                let interests = entry.interests;
-                contexts.push((idx, interests, pollable));
-                // Reset result so callers don't observe stale bits.
-                fds[idx].result = PollState::none();
-            }
-            FileDescriptor::FsFile(file) => {
-                let pollable = match fs_api::poll(&file.path) {
-                    Ok(p) => p,
-                    Err(err) => {
-                        let info = sched.current_thread_info();
-                        info.lock().errno = Errno::from(err);
-                        if !copy_back(&fds) {
-                            info.lock().errno = Errno::EFAULT;
-                        }
-                        return -1;
-                    }
-                };
-
-                let interests = entry.interests;
-                contexts.push((idx, interests, pollable));
-                // Reset result so callers don't observe stale bits.
-                fds[idx].result = PollState::none();
-            }
+                Err(_err) => {
+                    let entry = &mut fds[idx];
+                    entry.result.error = true;
+                    entry.result.invalid = true;
+                    base_ready += 1;
+                }
+            },
         }
     }
 
-    let deadline = timeout.map(|t| Instant::now() + t);
-
-    loop {
-        let mut ready = 0usize;
-
-        for (idx, interests, pollable) in contexts.iter_mut() {
-            let state = pollable.subscribe();
-            let entry = &mut fds[*idx];
-            entry.result = state;
-
-            if poll_matches(state, *interests) {
-                ready += 1;
-            }
+    let mut ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
+    if ready > 0 {
+        cleanup_poll_contexts(&mut contexts);
+        if !copy_back(&fds) {
+            sched.current_thread_info().lock().errno = Errno::EFAULT;
+            return -1;
         }
+        return ready as i64;
+    }
 
+    let deadline = timeout.map(|t| Instant::now() + t);
+    loop {
+        ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
         if ready > 0 {
-            for (_idx, _interests, pollable) in contexts.iter_mut() {
-                pollable.unsubscribe();
-            }
-            if !copy_back(&fds) {
-                let info = sched.current_thread_info();
-                info.lock().errno = Errno::EFAULT;
-                return -1;
-            }
-            return ready as i64;
+            break;
         }
 
         match deadline {
             Some(dl) => {
                 let now = Instant::now();
                 if now >= dl {
-                    if !copy_back(&fds) {
-                        let info = sched.current_thread_info();
-                        info.lock().errno = Errno::EFAULT;
-                        return -1;
-                    }
-                    for (_idx, _interests, pollable) in contexts.iter_mut() {
-                        pollable.unsubscribe();
-                    }
-                    return 0;
+                    break;
                 }
+
+                if waiter.arm() {
+                    continue;
+                }
+
                 let remaining = dl.duration_since(now);
-                let sleep_dur = remaining.max(Duration::from_millis(1));
+                let sleep_dur = if remaining.is_zero() {
+                    Duration::from_millis(1)
+                } else {
+                    remaining
+                };
                 sched.thread_sleep(sleep_dur);
             }
             None => {
+                if waiter.arm() {
+                    continue;
+                }
                 sched.thread_park();
             }
         }
     }
+
+    ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
+
+    cleanup_poll_contexts(&mut contexts);
+
+    if !copy_back(&fds) {
+        sched.current_thread_info().lock().errno = Errno::EFAULT;
+        return -1;
+    }
+
+    ready as i64
 }
 
-fn poll_matches(state: PollState, interests: PollState) -> bool {
-    let mut matched = false;
+fn refresh_poll_contexts(contexts: &mut [PollContext], fds: &mut [SelectFd]) -> usize {
+    let mut ready = 0usize;
 
-    if interests.readable && state.readable {
-        matched = true;
-    }
-    if interests.writable && state.writable {
-        matched = true;
-    }
-    if interests.error && state.error {
-        matched = true;
+    for ctx in contexts.iter() {
+        let state = ctx.entry.state();
+        fds[ctx.index].result = state;
+        if state.matches(ctx.interests) {
+            ready += 1;
+        }
     }
 
-    if !interests.readable && !interests.writable && !interests.error {
-        // If caller passed no interests, treat any readiness as a match.
-        matched = state.readable || state.writable || state.error;
-    }
+    ready
+}
 
-    matched
+fn cleanup_poll_contexts(contexts: &mut [PollContext]) {
+    for ctx in contexts.iter_mut() {
+        if let Some(key) = ctx.key.take() {
+            ctx.pollable.unregister(key);
+        }
+    }
 }
 
 pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {

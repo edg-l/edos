@@ -1,5 +1,9 @@
 use crate::{
-    fs::{PollState, handle::Pollable, path::Path},
+    fs::{
+        PollState,
+        handle::{PollEntry, PollKey, PollRegistration, Pollable},
+        path::Path,
+    },
     thread::mutex::BlockingMutex,
 };
 use alloc::{sync::Arc, vec::Vec};
@@ -27,6 +31,8 @@ pub struct Pipe {
     pub readers: usize,
     pub writers: usize,
     pub closed: bool,
+    pollers: Vec<(PollKey, Arc<PollEntry>)>,
+    next_poll_key: PollKey,
 }
 
 #[allow(unused)]
@@ -37,6 +43,8 @@ impl Pipe {
             readers: 1,
             writers: 1,
             closed: false,
+            pollers: Vec::new(),
+            next_poll_key: 1,
         }
     }
 
@@ -45,10 +53,73 @@ impl Pipe {
         if self.writers == 0 {
             self.closed = true;
         }
+        self.notify_pollers();
     }
 
     pub fn close_reader(&mut self) {
         self.readers = self.readers.saturating_sub(1);
+        self.notify_pollers();
+    }
+
+    pub fn write(&mut self, data: &[u8]) -> usize {
+        self.buffer.extend_from_slice(data);
+        let written = data.len();
+        self.notify_pollers();
+        written
+    }
+
+    pub fn read(&mut self, count: usize) -> Vec<u8> {
+        let available = count.min(self.buffer.len());
+        let mut out = self.buffer[..available].to_vec();
+        self.buffer.drain(..available);
+        self.notify_pollers();
+        if available == 0 {
+            out.clear();
+        }
+        out
+    }
+
+    fn poll_state(&self) -> PollState {
+        let mut state = PollState::none();
+
+        if !self.buffer.is_empty() {
+            state.readable = true;
+        }
+
+        if self.readers > 0 && !self.closed {
+            state.writable = true;
+        }
+
+        if self.closed && self.buffer.is_empty() {
+            state.hangup = true;
+        }
+
+        if self.readers == 0 && self.writers > 0 {
+            state.error = true;
+        }
+
+        state
+    }
+
+    fn add_poller(&mut self, entry: Arc<PollEntry>) -> PollKey {
+        let key = self.next_poll_key;
+        self.next_poll_key = self.next_poll_key.wrapping_add(1).max(1);
+        self.pollers.push((key, entry));
+        key
+    }
+
+    fn remove_poller(&mut self, key: PollKey) {
+        self.pollers.retain(|(stored, _)| *stored != key);
+    }
+
+    fn notify_pollers(&mut self) {
+        if self.pollers.is_empty() {
+            return;
+        }
+        let state = self.poll_state();
+        for (_, entry) in self.pollers.iter() {
+            entry.update(state);
+        }
     }
 }
 
@@ -71,19 +142,27 @@ impl PollablePipe {
 }
 
 impl Pollable for PollablePipe {
-    fn subscribe(&self) -> PollState {
-        let inner = self.inner.lock();
+    fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
+        let mut inner = self.inner.lock();
+        let state = inner.poll_state();
+        entry.update(state);
 
-        if inner.closed || inner.buffer.is_empty() {
-            PollState::none()
+        if state.matches(entry.interests()) {
+            PollRegistration {
+                initial: state,
+                key: None,
+            }
         } else {
-            PollState {
-                readable: true,
-                writable: true,
-                error: false,
+            let key = inner.add_poller(entry);
+            PollRegistration {
+                initial: state,
+                key: Some(key),
             }
         }
     }
 
-    fn unsubscribe(&self) {}
+    fn unregister(&self, key: PollKey) {
+        let mut inner = self.inner.lock();
+        inner.remove_poller(key);
+    }
 }

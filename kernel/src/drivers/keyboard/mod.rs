@@ -1,4 +1,7 @@
-use core::{hint::spin_loop, time::Duration};
+use core::{
+    hint::spin_loop,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
@@ -11,16 +14,25 @@ use x86_64::{
 
 use crate::{
     apic::get_lapic,
-    fs::{DevFsDevice, DevFsError, MmapRegion, PollState, handle::Pollable, register_device_str},
+    fs::{
+        DevFsDevice, DevFsError, MmapRegion, PollState,
+        handle::{PollEntry, PollKey, PollRegistration, Pollable},
+        register_device_str,
+    },
     memory::mapper::MemoryManager,
     thread::{
-        broadcast::Broadcaster,
+        broadcast::{Broadcaster, Subscriber},
+        mutex::BlockingMutex,
         scheduler::{WakePriority, sched},
         thread::ThreadId,
     },
 };
 
 pub static KEYBOARD_BROADCAST: Broadcaster<DecodedKey> = Broadcaster::new();
+static KEYBOARD_POLLERS: BlockingMutex<
+    Vec<(PollKey, Arc<PollEntry>, Arc<Subscriber<DecodedKey>>)>,
+> = BlockingMutex::new(Vec::new());
+static KEYBOARD_NEXT_POLL_KEY: AtomicU64 = AtomicU64::new(1);
 
 static SCANCODE_QUEUE: Once<ArrayQueue<u8>> = Once::new();
 const QUEUE_SIZE: usize = 2048;
@@ -84,6 +96,7 @@ pub extern "C" fn driver_main() -> ! {
 
         if !decoded_events.is_empty() {
             KEYBOARD_BROADCAST.broadcast_many(&decoded_events);
+            notify_keyboard_pollers();
             decoded_events.clear();
         }
 
@@ -145,15 +158,49 @@ pub struct KeyboardDevice;
 #[derive(Debug)]
 struct KeyboardPoll;
 
-impl Pollable for KeyboardPoll {
-    fn subscribe(&self) -> PollState {
-        let rx = KEYBOARD_BROADCAST.subscribe();
+fn keyboard_poll_state(subscriber: &Subscriber<DecodedKey>) -> PollState {
+    PollState {
+        readable: !subscriber.is_empty(),
+        writable: false,
+        error: false,
+        hangup: false,
+        invalid: false,
+    }
+}
 
-        rx.poll()
+fn notify_keyboard_pollers() {
+    let pollers = KEYBOARD_POLLERS.lock();
+    for (_, entry, subscriber) in pollers.iter() {
+        let state = keyboard_poll_state(subscriber);
+        entry.update(state);
+    }
+}
+
+impl Pollable for KeyboardPoll {
+    fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
+        let subscriber = KEYBOARD_BROADCAST.subscribe();
+        let state = keyboard_poll_state(&subscriber);
+        entry.update(state);
+
+        if state.matches(entry.interests()) {
+            PollRegistration {
+                initial: state,
+                key: None,
+            }
+        } else {
+            let key = KEYBOARD_NEXT_POLL_KEY.fetch_add(1, Ordering::Relaxed);
+            KEYBOARD_POLLERS.lock().push((key, entry, subscriber));
+            PollRegistration {
+                initial: state,
+                key: Some(key),
+            }
+        }
     }
 
-    fn unsubscribe(&self) {
-        KEYBOARD_BROADCAST.unsubscribe();
+    fn unregister(&self, key: PollKey) {
+        KEYBOARD_POLLERS
+            .lock()
+            .retain(|(stored, _, _)| *stored != key);
     }
 }
 
@@ -170,6 +217,8 @@ impl DevFsDevice for KeyboardDevice {
             buffer.extend(bytes);
         }
 
+        notify_keyboard_pollers();
+
         Ok(buffer)
     }
 
@@ -182,7 +231,6 @@ impl DevFsDevice for KeyboardDevice {
     }
 
     fn poll(&self) -> Result<Box<dyn Pollable>, DevFsError> {
-        KEYBOARD_BROADCAST.subscribe();
         Ok(Box::new(KeyboardPoll))
     }
 

@@ -90,6 +90,8 @@ pub struct PollState {
     pub readable: bool,
     pub writable: bool,
     pub error: bool,
+    pub hangup: bool,
+    pub invalid: bool,
 }
 
 #[repr(C)]
@@ -381,6 +383,8 @@ pub fn poll_fd(fd: u64, timeout_ms: u64) -> IoResult<PollState> {
             readable: true,
             writable: true,
             error: true,
+            hangup: true,
+            invalid: true,
         },
     );
 

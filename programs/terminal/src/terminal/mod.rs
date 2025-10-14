@@ -56,6 +56,8 @@ pub fn run() -> i32 {
                 readable: true,
                 writable: false,
                 error: true,
+                hangup: true,
+                invalid: true,
             },
         );
         entry_count += 1;
@@ -67,6 +69,8 @@ pub fn run() -> i32 {
                     readable: true,
                     writable: false,
                     error: true,
+                    hangup: true,
+                    invalid: true,
                 },
             );
             entry_count += 1;

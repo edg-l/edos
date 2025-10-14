@@ -5,7 +5,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::{fs::PollState, thread::waitqueue::WaitQueue};
+use crate::thread::waitqueue::WaitQueue;
 
 /// A mutex that blocks waiting threads instead of spinning.
 ///
@@ -76,10 +76,6 @@ impl<T> BlockingMutex<T> {
     #[expect(unused)]
     pub fn is_locked(&self) -> bool {
         self.locked.load(Ordering::Acquire)
-    }
-
-    pub fn poll(&self) -> PollState {
-        self.waiters.poll(|| !self.locked.load(Ordering::Acquire))
     }
 }
 
