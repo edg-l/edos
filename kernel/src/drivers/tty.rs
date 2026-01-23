@@ -8,6 +8,7 @@ use crate::{
         register_device_str,
     },
     thread::{broadcast::Broadcaster, mutex::BlockingMutex},
+    util::uaccess::try_copy_from_user,
 };
 
 const TTY_BUFFER_CAPACITY: usize = 16 * 1024;
@@ -84,6 +85,62 @@ fn notify_pollers(state: PollState) {
 
 pub fn write_output(data: &[u8]) {
     push_bytes(data);
+}
+
+/// Write directly from user space to TTY buffer.
+/// Returns bytes written, or None on fault.
+pub fn write_from_user(user_ptr: *const u8, len: usize) -> Option<usize> {
+    if len == 0 {
+        return Some(0);
+    }
+
+    let mut should_notify = false;
+    let mut resulting_state = None;
+
+    {
+        let mut buffer = TTY_BUFFER.lock();
+        for i in 0..len {
+            let mut byte: u8 = 0;
+            if !unsafe { try_copy_from_user(&mut byte, user_ptr.add(i), 1) } {
+                // Partial write on fault - return what we wrote
+                if should_notify {
+                    resulting_state = Some(poll_state_for_len(buffer.len()));
+                }
+                drop(buffer);
+                if should_notify {
+                    notify_pollers(resulting_state.unwrap());
+                    TTY_NOTIFY.broadcast(());
+                }
+                return Some(i);
+            }
+
+            match byte {
+                b'\x08' | b'\x7f' => {
+                    if buffer.pop_back().is_some() {
+                        should_notify = true;
+                    }
+                }
+                b'\r' => {}
+                value => {
+                    if buffer.len() >= TTY_BUFFER_CAPACITY {
+                        buffer.pop_front();
+                    }
+                    buffer.push_back(value);
+                    should_notify = true;
+                }
+            }
+        }
+        if should_notify {
+            resulting_state = Some(poll_state_for_len(buffer.len()));
+        }
+    }
+
+    if should_notify {
+        notify_pollers(resulting_state.unwrap());
+        TTY_NOTIFY.broadcast(());
+    }
+
+    Some(len)
 }
 
 pub fn init() {

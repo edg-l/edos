@@ -7,12 +7,10 @@ use alloc::{
 };
 use spin::RwLock;
 
-use crate::{
-    thread::{
-        mutex::BlockingMutex,
-        scheduler::{WakePriority, sched},
-        thread::{State, ThreadId, get_thread_by_id},
-    },
+use crate::thread::{
+    mutex::BlockingMutex,
+    scheduler::{WakePriority, sched},
+    thread::{State, ThreadId, get_thread_by_id},
 };
 
 /// A single subscriber queue

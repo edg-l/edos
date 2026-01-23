@@ -96,21 +96,12 @@ pub(super) fn resolve_path(
 pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
     let sched = sched();
     let info = sched.current_thread_info();
-
     info.lock().errno = Errno::Clear;
 
     if count == 0 {
         return 0;
     }
-
     if buffer_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return !0u64;
-    }
-
-    let mut buffer = vec![0u8; count];
-
-    if !unsafe { try_copy_from_user(buffer.as_mut_ptr(), buffer_ptr, count) } {
         info.lock().errno = Errno::EFAULT;
         return !0u64;
     }
@@ -118,11 +109,18 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
     interrupts::enable();
 
     let fdinfo = info.lock().fd_table.lock().get_fd(fd).cloned();
+
     match fdinfo {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
             StandardStream::Stdout | StandardStream::Stderr => {
-                tty::write_output(&buffer);
-                count as u64
+                // Direct copy from user to TTY
+                match tty::write_from_user(buffer_ptr, count) {
+                    Some(n) => n as u64,
+                    None => {
+                        info.lock().errno = Errno::EFAULT;
+                        !0u64
+                    }
+                }
             }
             StandardStream::Stdin => {
                 info.lock().errno = Errno::EINVAL;
@@ -130,22 +128,36 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             }
         },
         Some(FileDescriptor::Pipe(pipe)) => {
+            // Direct copy from user to pipe
             let mut pipe = pipe.lock();
-            pipe.write(&buffer) as u64
+            match pipe.write_from_user(buffer_ptr, count) {
+                Some(n) => n as u64,
+                None => {
+                    info.lock().errno = Errno::EFAULT;
+                    !0u64
+                }
+            }
         }
         Some(FileDescriptor::FsFile(file)) => {
-            // Write via FS API using current offset (append respected)
+            // FS still needs intermediate buffer (worker thread in different context)
+            // But we pass ownership to avoid the to_vec() copy in fs_api
+            let mut buffer = vec![0u8; count];
+            if !unsafe { try_copy_from_user(buffer.as_mut_ptr(), buffer_ptr, count) } {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
+            }
+
             let mut file = file.clone();
             if file.append {
                 match fs_api::file_info(&file.path) {
-                    Ok(info) => file.offset = info.size,
+                    Ok(finfo) => file.offset = finfo.size,
                     Err(_) => {
                         info.lock().errno = Errno::EINVAL;
                         return !0u64;
                     }
                 }
             }
-            match fs_api::write_bytes(&file.path, file.offset as usize, &buffer) {
+            match fs_api::write_bytes_owned(&file.path, file.offset as usize, buffer) {
                 Ok(written) => {
                     let new_fd = FileDescriptor::FsFile(FsFile {
                         offset: file.offset + written,

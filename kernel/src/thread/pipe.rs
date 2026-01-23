@@ -5,6 +5,7 @@ use crate::{
         path::Path,
     },
     thread::mutex::BlockingMutex,
+    util::uaccess::try_copy_from_user,
 };
 use alloc::{sync::Arc, vec::Vec};
 
@@ -66,6 +67,28 @@ impl Pipe {
         let written = data.len();
         self.notify_pollers();
         written
+    }
+
+    /// Write directly from user space into pipe buffer.
+    /// Returns bytes written, or None on fault.
+    pub fn write_from_user(&mut self, user_ptr: *const u8, len: usize) -> Option<usize> {
+        if len == 0 {
+            return Some(0);
+        }
+
+        // Reserve space in buffer
+        let start = self.buffer.len();
+        self.buffer.resize(start + len, 0);
+
+        // Copy directly from user space
+        if !unsafe { try_copy_from_user(self.buffer[start..].as_mut_ptr(), user_ptr, len) } {
+            // Rollback on fault
+            self.buffer.truncate(start);
+            return None;
+        }
+
+        self.notify_pollers();
+        Some(len)
     }
 
     pub fn read(&mut self, count: usize) -> Vec<u8> {

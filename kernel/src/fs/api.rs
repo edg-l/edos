@@ -126,6 +126,20 @@ pub fn write_bytes(path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error
     r
 }
 
+/// Variant that takes ownership of the Vec to avoid an extra to_vec() copy.
+pub fn write_bytes_owned(path: &Path, offset: usize, data: Vec<u8>) -> Result<u64, Error> {
+    let FsResponse::Written(r) = send_request(
+        FsRequest::PathRequest {
+            path: path.clone(),
+            op: PathOp::WriteBytes { offset, data },
+        },
+        Duration::from_secs(1),
+    ) else {
+        return Err(Error::IoError);
+    };
+    r
+}
+
 pub fn create_file(path: &Path) -> Result<(), Error> {
     let FsResponse::Ok(r) = send_request(
         FsRequest::PathRequest {
