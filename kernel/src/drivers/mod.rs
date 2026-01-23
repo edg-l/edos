@@ -5,6 +5,7 @@ pub mod dma;
 pub mod fpu;
 pub mod hpet;
 pub mod keyboard;
+pub mod mouse;
 pub mod msi;
 pub mod pci;
 pub mod random;
@@ -22,4 +23,6 @@ pub fn init_drivers() {
     tty::init();
     random::init();
     queue_spawn_kthread_named("keyboard", keyboard::driver_main as *const () as u64);
+    mouse::init();
+    queue_spawn_kthread_named("mouse", mouse::driver_main as *const () as u64);
 }
