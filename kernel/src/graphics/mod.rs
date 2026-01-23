@@ -15,7 +15,7 @@ use crate::{
 };
 
 pub fn init() {
-    queue_spawn_kthread_named("framebuffer", render_thread as u64);
+    queue_spawn_kthread_named("framebuffer", render_thread as *const () as u64);
 }
 
 pub struct DirectFramebuffer {

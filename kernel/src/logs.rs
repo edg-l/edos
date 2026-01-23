@@ -124,7 +124,7 @@ impl DevFsDevice for LogDevfs {
 }
 
 pub fn init() {
-    queue_spawn_kthread_named("klogger", klogger as u64);
+    queue_spawn_kthread_named("klogger", klogger as *const () as u64);
 }
 
 pub fn klogger() {

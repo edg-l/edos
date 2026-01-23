@@ -22,7 +22,7 @@ pub fn init() {
         if device.header.class_code == 0x03 && device.header.subclass == 0x0 {
             queue_spawn_kthread_named_arg(
                 "vga",
-                vga_thread as u64,
+                vga_thread as *const () as u64,
                 Box::into_raw(Box::new(*device)).cast(),
             );
             break;

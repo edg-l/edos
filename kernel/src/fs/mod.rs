@@ -56,7 +56,7 @@ pub use devfs::{
 };
 
 pub fn init() {
-    queue_spawn_kthread_named("fs", fs_main_thread as u64);
+    queue_spawn_kthread_named("fs", fs_main_thread as *const () as u64);
 }
 
 #[expect(clippy::enum_variant_names)]
@@ -722,7 +722,7 @@ pub extern "C" fn fs_main_thread() -> ! {
 
                                     let worker_tid = queue_spawn_kthread_named_arg(
                                         &name,
-                                        start_partition_fs_thread as u64,
+                                        start_partition_fs_thread as *const () as u64,
                                         part.cast(),
                                     );
                                     worker_tid_map.insert(
@@ -744,7 +744,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                             ));
                             let worker_tid = queue_spawn_kthread_named_arg(
                                 &format!("fs-{}", mount_point.filename()),
-                                start_memfs_thread as u64,
+                                start_memfs_thread as *const () as u64,
                                 fs.cast(),
                             );
                             device_id = SPECIAL_DEV_ID;
@@ -764,7 +764,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                             ));
                             let worker_tid = queue_spawn_kthread_named_arg(
                                 &format!("devfs-{}", mount_point.filename()),
-                                start_devfs_thread as u64,
+                                start_devfs_thread as *const () as u64,
                                 fs.cast(),
                             );
                             device_id = SPECIAL_DEV_ID;
@@ -784,7 +784,7 @@ pub extern "C" fn fs_main_thread() -> ! {
                             ));
                             let worker_tid = queue_spawn_kthread_named_arg(
                                 &format!("procfs-{}", mount_point.filename()),
-                                start_procfs_thread as u64,
+                                start_procfs_thread as *const () as u64,
                                 fs.cast(),
                             );
                             device_id = SPECIAL_DEV_ID;

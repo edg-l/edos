@@ -74,9 +74,11 @@ unsafe impl GlobalAlloc for Allocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
-        self.inner
-            .lock()
-            .dealloc(unsafe { NonNull::new_unchecked(ptr) }, layout);
+        unsafe {
+            self.inner
+                .lock()
+                .dealloc(NonNull::new_unchecked(ptr), layout);
+        }
     }
 }
 

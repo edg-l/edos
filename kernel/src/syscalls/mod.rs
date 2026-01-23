@@ -76,7 +76,7 @@ pub unsafe fn setup_syscall() {
     .unwrap();
 
     // LSTAR: syscall entry point
-    LStar::write(VirtAddr::new(syscall_entry as usize as u64));
+    LStar::write(VirtAddr::new(syscall_entry as *const () as usize as u64));
 
     // SFMASK: flags to clear on syscall (clear interrupt flag for atomic entry)
     SFMask::write(RFlags::INTERRUPT_FLAG);

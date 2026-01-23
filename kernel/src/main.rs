@@ -137,7 +137,7 @@ fn main() -> ! {
     drivers::init_drivers();
     fs::init();
 
-    queue_spawn_kthread_named("system-mount", mount_system_fs as u64);
+    queue_spawn_kthread_named("system-mount", mount_system_fs as *const () as u64);
 
     print_alloc_stats();
 
@@ -154,18 +154,18 @@ pub fn test_new() -> ! {
     let mb: Arc<Mailbox<u64, u64>> = Arc::new(Mailbox::new());
     queue_spawn_kthread_named_arg(
         "test",
-        test_thread as u64,
+        test_thread as *const () as u64,
         Box::into_raw(Box::new(mb.clone())).cast(),
     );
     queue_spawn_kthread_named_arg(
         "test2",
-        test_thread2 as u64,
+        test_thread2 as *const () as u64,
         Box::into_raw(Box::new(mb.clone())).cast(),
     );
 
     queue_spawn_kthread_named_arg(
         "test3",
-        test_thread3 as u64,
+        test_thread3 as *const () as u64,
         Box::into_raw(Box::new(mb.clone())).cast(),
     );
 

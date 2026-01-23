@@ -21,5 +21,5 @@ pub fn init_drivers() {
     graphics::init();
     tty::init();
     random::init();
-    queue_spawn_kthread_named("keyboard", keyboard::driver_main as u64);
+    queue_spawn_kthread_named("keyboard", keyboard::driver_main as *const () as u64);
 }

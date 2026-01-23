@@ -30,6 +30,7 @@ impl PollWaiter {
         self.pending.swap(false, Ordering::AcqRel)
     }
 
+    #[allow(dead_code)]
     pub fn is_pending(&self) -> bool {
         self.pending.load(Ordering::Acquire)
     }

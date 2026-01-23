@@ -54,6 +54,7 @@ pub struct UserThread {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct UserThreadTls {
     pub template: Arc<TlsTemplate>,
     pub data_base: VirtAddr,

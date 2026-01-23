@@ -69,7 +69,7 @@ pub enum DeviceType {
 pub static AHCI_DRIVER_THREAD_ID: Once<ThreadId> = Once::new();
 
 pub fn init() {
-    AHCI_DRIVER_THREAD_ID.call_once(|| queue_spawn_kthread_named("ahci", ahci_driver_main as u64));
+    AHCI_DRIVER_THREAD_ID.call_once(|| queue_spawn_kthread_named("ahci", ahci_driver_main as *const () as u64));
 }
 
 #[derive(Debug, Clone)]
@@ -197,7 +197,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
     for device in &detected_devices {
         let worker_tid = queue_spawn_kthread_named(
             &format!("ahci-port-{}-{}", device.id, device.port_idx),
-            port_worker_thread as u64,
+            port_worker_thread as *const () as u64,
         );
         port_map.insert(worker_tid, device.id);
         port_map_reverse.insert(device.id, worker_tid);
