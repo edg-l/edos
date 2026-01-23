@@ -56,6 +56,7 @@ mod fs;
 mod io;
 mod ioctl;
 mod memory;
+mod shm;
 mod sync;
 
 use self::ioctl::sys_ioctl;
@@ -227,6 +228,10 @@ const SYS_CLONE: u64 = 211;
 const SYS_FUTEX_WAIT: u64 = 212;
 const SYS_FUTEX_WAKE: u64 = 213;
 const SYS_GETRANDOM: u64 = 214;
+const SYS_SHM_CREATE: u64 = 215;
+const SYS_SHM_MAP: u64 = 216;
+const SYS_SHM_UNMAP: u64 = 217;
+const SYS_SHM_DESTROY: u64 = 218;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -411,6 +416,24 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let length = ctx.rsi as usize;
             let flags = ctx.rdx;
             ctx.rax = sys_getrandom(buffer_ptr, length, flags) as u64;
+        }
+        SYS_SHM_CREATE => {
+            let size = ctx.rdi;
+            ctx.rax = shm::sys_shm_create(size) as u64;
+        }
+        SYS_SHM_MAP => {
+            let shm_id = ctx.rdi;
+            let addr_hint = ctx.rsi;
+            let prot = ctx.rdx;
+            ctx.rax = shm::sys_shm_map(shm_id, addr_hint, prot);
+        }
+        SYS_SHM_UNMAP => {
+            let addr = ctx.rdi;
+            ctx.rax = shm::sys_shm_unmap(addr) as u64;
+        }
+        SYS_SHM_DESTROY => {
+            let shm_id = ctx.rdi;
+            ctx.rax = shm::sys_shm_destroy(shm_id) as u64;
         }
         _ => {
             ctx.rax = !0u64;

@@ -32,10 +32,10 @@ const DATA_PORT: u16 = 0x60;
 const CMD_PORT: u16 = 0x64;
 
 // Commands to controller (write to 0x64)
-const CMD_ENABLE_AUX: u8 = 0xA8;     // Enable auxiliary (mouse) port
-const CMD_GET_CONFIG: u8 = 0x20;     // Read config byte
-const CMD_SET_CONFIG: u8 = 0x60;     // Write config byte
-const CMD_WRITE_AUX: u8 = 0xD4;      // Send next byte to mouse
+const CMD_ENABLE_AUX: u8 = 0xA8; // Enable auxiliary (mouse) port
+const CMD_GET_CONFIG: u8 = 0x20; // Read config byte
+const CMD_SET_CONFIG: u8 = 0x60; // Write config byte
+const CMD_WRITE_AUX: u8 = 0xD4; // Send next byte to mouse
 
 // Commands to mouse (write to 0x60 after CMD_WRITE_AUX)
 const MOUSE_SET_DEFAULTS: u8 = 0xF6;
@@ -166,7 +166,7 @@ unsafe fn enable_ps2_mouse() {
         command_port.write(CMD_GET_CONFIG);
         wait_read();
         let mut config: u8 = data_port.read();
-        config |= 0x02;  // Enable IRQ12 (aux port interrupt)
+        config |= 0x02; // Enable IRQ12 (aux port interrupt)
         config &= !0x20; // Enable aux port clock
 
         wait_write();
@@ -256,8 +256,12 @@ pub extern "C" fn driver_main() -> ! {
     // Get screen dimensions and center the mouse
     let info = screen_info();
     set_screen_bounds(info.width as i32, info.height as i32);
-    MOUSE_POSITION.0.store(info.width as i32 / 2, Ordering::Relaxed);
-    MOUSE_POSITION.1.store(info.height as i32 / 2, Ordering::Relaxed);
+    MOUSE_POSITION
+        .0
+        .store(info.width as i32 / 2, Ordering::Relaxed);
+    MOUSE_POSITION
+        .1
+        .store(info.height as i32 / 2, Ordering::Relaxed);
 
     // Initialize PS/2 mouse hardware
     unsafe {
@@ -402,9 +406,7 @@ impl Pollable for MousePoll {
     }
 
     fn unregister(&self, key: PollKey) {
-        MOUSE_POLLERS
-            .lock()
-            .retain(|(stored, _, _)| *stored != key);
+        MOUSE_POLLERS.lock().retain(|(stored, _, _)| *stored != key);
     }
 }
 

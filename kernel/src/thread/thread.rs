@@ -21,11 +21,12 @@ use crate::{
         USER_STACK_SIZE, USER_STACK_TOP,
         frame_allocator::frame_allocator,
         mapper::{MemoryManager, active_level_4_table, get_level_4_table},
+        shared::SharedMemory,
     },
     println,
     syscalls::Errno,
     thread::{
-        MemoryRegion, MemoryRegionType, UserThread, UserThreadInfo, UserThreadTls,
+        MappingType, MemoryRegion, MemoryRegionType, UserThread, UserThreadInfo, UserThreadTls,
         context::CpuContext,
         fd::FileDescriptorTable,
         irqlock::IrqSpinlock,
@@ -526,7 +527,29 @@ impl Thread {
             if let Some(info) = THREADS.get_info(self.id) {
                 let mappings = info.lock().memory_mappings.lock().clone();
                 for (addr, mapping) in mappings {
-                    let _ = memory_manager.unmap_memory(addr, mapping.size);
+                    match mapping.mapping_type {
+                        MappingType::Anonymous => {
+                            // Anonymous mappings: unmap and deallocate frames
+                            let _ = memory_manager.unmap_memory(addr, mapping.size);
+                        }
+                        MappingType::Shared(shm_id) => {
+                            // Shared memory: unmap pages but DON'T deallocate frames
+                            // The frames belong to the SharedMemory object
+                            use x86_64::structures::paging::{Mapper, Page, Size4KiB};
+                            let page_count = (mapping.size + 0xFFF) / 4096;
+                            for i in 0..page_count {
+                                let virt_addr = VirtAddr::new(addr.as_u64() + i * 4096);
+                                let page: Page<Size4KiB> = Page::containing_address(virt_addr);
+                                if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
+                                    flush.flush();
+                                }
+                            }
+                            // Decrement the shared memory ref count
+                            if let Some(shm) = SharedMemory::get(shm_id) {
+                                shm.dec_ref();
+                            }
+                        }
+                    }
                 }
             }
 

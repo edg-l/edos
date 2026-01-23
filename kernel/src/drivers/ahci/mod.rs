@@ -69,7 +69,8 @@ pub enum DeviceType {
 pub static AHCI_DRIVER_THREAD_ID: Once<ThreadId> = Once::new();
 
 pub fn init() {
-    AHCI_DRIVER_THREAD_ID.call_once(|| queue_spawn_kthread_named("ahci", ahci_driver_main as *const () as u64));
+    AHCI_DRIVER_THREAD_ID
+        .call_once(|| queue_spawn_kthread_named("ahci", ahci_driver_main as *const () as u64));
 }
 
 #[derive(Debug, Clone)]

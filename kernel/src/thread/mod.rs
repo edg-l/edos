@@ -182,6 +182,7 @@ pub struct MemoryMapping {
 #[derive(Debug, Clone)]
 pub enum MappingType {
     Anonymous,
+    Shared(u64), // shm_id
 }
 
 #[expect(unused)]

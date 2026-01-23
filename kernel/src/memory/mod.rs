@@ -4,6 +4,7 @@ use crate::boot::boot_info;
 
 pub mod frame_allocator;
 pub mod mapper;
+pub mod shared;
 pub mod valloc;
 
 // physical offset is at 0xffff_8000_0000_0000
