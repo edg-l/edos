@@ -8,7 +8,6 @@ use x86_64::instructions::interrupts;
 
 use crate::fs::handle::{PollEntry, PollKey, Pollable};
 use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
-use crate::thread::mutex::BlockingMutex;
 use crate::thread::pipe::PollablePipe;
 use crate::thread::poll::PollWaiter;
 use crate::util::uaccess::{
@@ -18,7 +17,7 @@ use crate::{
     drivers::{keyboard::KEYBOARD_BROADCAST, random, tty},
     syscalls::Errno,
     thread::{
-        pipe::{FileDescriptor, FsFile, Pipe, StandardStream},
+        pipe::{FileDescriptor, FsFile, StandardStream},
         scheduler::sched,
     },
     timer::Instant,
@@ -221,66 +220,73 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
 
     interrupts::enable();
 
-    // Track FsFile state so we can advance offsets without re-locking unnecessarily.
-    let fs_state = match &fd_info {
-        Some(FileDescriptor::FsFile(file)) => Some(file.clone()),
-        _ => None,
-    };
-
-    // Get kernel data first - all potentially blocking operations happen here
-    let kernel_data = match fd_info {
+    match fd_info {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
-            StandardStream::Stdin => read_from_stdin(count),
+            StandardStream::Stdin => {
+                // Stdin reads from keyboard - still needs intermediate buffer
+                let kernel_data = match read_from_stdin(count) {
+                    Ok(data) => data,
+                    Err(code) => return code,
+                };
+                let bytes_to_copy = kernel_data.len().min(count);
+                if bytes_to_copy == 0 {
+                    return 0;
+                }
+                if !unsafe { try_copy_to_user(buffer_ptr, kernel_data.as_ptr(), bytes_to_copy) } {
+                    info.lock().errno = Errno::EFAULT;
+                    return -1;
+                }
+                bytes_to_copy as i64
+            }
             StandardStream::Stdout | StandardStream::Stderr => {
                 info.lock().errno = Errno::EINVAL;
-                return -1;
+                -1
             }
         },
-        Some(FileDescriptor::Pipe(pipe)) => read_from_pipe(pipe.clone(), count),
-        Some(FileDescriptor::FsFile(file)) => {
-            match fs_api::read_bytes(&file.path, file.offset as usize, count) {
-                Ok(data) => Ok(data),
-                Err(_) => {
-                    info.lock().errno = Errno::EINVAL;
-                    Err(-1)
+        Some(FileDescriptor::Pipe(pipe)) => {
+            // Direct copy from pipe to user space
+            let mut pipe = pipe.lock();
+            match pipe.read_to_user(buffer_ptr, count) {
+                Some(n) => n as i64,
+                None => {
+                    info.lock().errno = Errno::EFAULT;
+                    -1
                 }
             }
         }
+        Some(FileDescriptor::FsFile(file)) => {
+            // FS reads still need intermediate buffer (worker thread in different context)
+            let data = match fs_api::read_bytes(&file.path, file.offset as usize, count) {
+                Ok(data) => data,
+                Err(_) => {
+                    info.lock().errno = Errno::EINVAL;
+                    return -1;
+                }
+            };
+
+            let bytes_to_copy = data.len().min(count);
+            if bytes_to_copy == 0 {
+                return 0;
+            }
+
+            if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_copy) } {
+                info.lock().errno = Errno::EFAULT;
+                return -1;
+            }
+
+            // Update file offset
+            let new_fd = FileDescriptor::FsFile(FsFile {
+                offset: file.offset + bytes_to_copy as u64,
+                ..file
+            });
+            info.lock().fd_table.lock().replace_fd(fd, new_fd);
+            bytes_to_copy as i64
+        }
         None => {
             info.lock().errno = Errno::EINVAL;
-            return -1;
+            -1
         }
-    };
-
-    // Handle kernel data result
-    let data = match kernel_data {
-        Ok(data) => data,
-        Err(error_code) => return error_code,
-    };
-
-    let bytes_to_copy = data.len().min(count);
-    if bytes_to_copy == 0 {
-        return 0;
     }
-
-    // Now do the atomic copy to user space - no context switches can happen here
-
-    let ok = unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_copy) };
-    if !ok {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
-    }
-
-    // Update file offset if reading from FsFile
-    if let Some(mut file) = fs_state {
-        file.offset += bytes_to_copy as u64;
-        info.lock()
-            .fd_table
-            .lock()
-            .replace_fd(fd, FileDescriptor::FsFile(file));
-    }
-
-    bytes_to_copy as i64
 }
 
 pub fn sys_getrandom(buffer_ptr: *mut u8, count: usize, flags: u64) -> i64 {
@@ -427,14 +433,6 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
     });
     let fd = info.lock().fd_table.lock().allocate_fd(desc);
     fd as i64
-}
-
-fn read_from_pipe(
-    pipe: Arc<BlockingMutex<Pipe>>,
-    max_count: usize,
-) -> Result<alloc::vec::Vec<u8>, i64> {
-    let mut pipe_guard = pipe.lock();
-    Ok(pipe_guard.read(max_count))
 }
 
 pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize) -> i64 {

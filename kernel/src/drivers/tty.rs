@@ -83,26 +83,32 @@ fn notify_pollers(state: PollState) {
     }
 }
 
-pub fn write_output(data: &[u8]) {
-    push_bytes(data);
-}
-
 /// Write directly from user space to TTY buffer.
 /// Returns bytes written, or None on fault.
 pub fn write_from_user(user_ptr: *const u8, len: usize) -> Option<usize> {
+    const CHUNK_SIZE: usize = 256;
+
     if len == 0 {
         return Some(0);
     }
 
     let mut should_notify = false;
     let mut resulting_state = None;
+    let mut total_processed = 0usize;
 
     {
         let mut buffer = TTY_BUFFER.lock();
-        for i in 0..len {
-            let mut byte: u8 = 0;
-            if !unsafe { try_copy_from_user(&mut byte, user_ptr.add(i), 1) } {
-                // Partial write on fault - return what we wrote
+        let mut chunk = [0u8; CHUNK_SIZE];
+
+        while total_processed < len {
+            let remaining = len - total_processed;
+            let to_copy = remaining.min(CHUNK_SIZE);
+
+            // Batch copy from user space to stack buffer
+            if !unsafe {
+                try_copy_from_user(chunk.as_mut_ptr(), user_ptr.add(total_processed), to_copy)
+            } {
+                // Fault - return what we processed so far
                 if should_notify {
                     resulting_state = Some(poll_state_for_len(buffer.len()));
                 }
@@ -111,25 +117,34 @@ pub fn write_from_user(user_ptr: *const u8, len: usize) -> Option<usize> {
                     notify_pollers(resulting_state.unwrap());
                     TTY_NOTIFY.broadcast(());
                 }
-                return Some(i);
+                return if total_processed > 0 {
+                    Some(total_processed)
+                } else {
+                    None
+                };
             }
 
-            match byte {
-                b'\x08' | b'\x7f' => {
-                    if buffer.pop_back().is_some() {
+            // Process the chunk
+            for &byte in &chunk[..to_copy] {
+                match byte {
+                    b'\x08' | b'\x7f' => {
+                        if buffer.pop_back().is_some() {
+                            should_notify = true;
+                        }
+                    }
+                    b'\r' => {}
+                    value => {
+                        if buffer.len() >= TTY_BUFFER_CAPACITY {
+                            buffer.pop_front();
+                        }
+                        buffer.push_back(value);
                         should_notify = true;
                     }
                 }
-                b'\r' => {}
-                value => {
-                    if buffer.len() >= TTY_BUFFER_CAPACITY {
-                        buffer.pop_front();
-                    }
-                    buffer.push_back(value);
-                    should_notify = true;
-                }
             }
+            total_processed += to_copy;
         }
+
         if should_notify {
             resulting_state = Some(poll_state_for_len(buffer.len()));
         }

@@ -5,7 +5,7 @@ use crate::{
         path::Path,
     },
     thread::mutex::BlockingMutex,
-    util::uaccess::try_copy_from_user,
+    util::uaccess::{try_copy_from_user, try_copy_to_user},
 };
 use alloc::{sync::Arc, vec::Vec};
 
@@ -100,6 +100,29 @@ impl Pipe {
             out.clear();
         }
         out
+    }
+
+    /// Read directly from pipe buffer to user space.
+    /// Returns bytes read, or None on fault.
+    pub fn read_to_user(&mut self, user_ptr: *mut u8, count: usize) -> Option<usize> {
+        if count == 0 {
+            return Some(0);
+        }
+
+        let available = count.min(self.buffer.len());
+        if available == 0 {
+            return Some(0);
+        }
+
+        // Copy directly from pipe buffer to user space
+        if !unsafe { try_copy_to_user(user_ptr, self.buffer.as_ptr(), available) } {
+            return None;
+        }
+
+        // Remove copied bytes from buffer
+        self.buffer.drain(..available);
+        self.notify_pollers();
+        Some(available)
     }
 
     fn poll_state(&self) -> PollState {
