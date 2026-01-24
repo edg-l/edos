@@ -183,10 +183,10 @@ pub type Result<T> = std::result::Result<T, GraphicsError>;
 pub struct Color(u32);
 
 impl Color {
-    /// Create a new color from RGB components
+    /// Create a new color from RGB components (alpha defaults to 255)
     #[inline]
     pub const fn from_rgb(r: u8, g: u8, b: u8) -> Self {
-        Self(((r as u32) << 16) | ((g as u32) << 8) | (b as u32))
+        Self(0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32))
     }
 
     /// Get the raw u32 value
@@ -1268,6 +1268,42 @@ impl Screen {
 
         if let Some(ref mut buffer) = self.back_buffer {
             buffer.blit_texture(texture, x, y)?;
+            self.dirty = true;
+        }
+
+        Ok(())
+    }
+
+    /// Draw a texture with transparency (skip pixels with alpha=0).
+    pub fn draw_texture_transparent(&mut self, texture: &Texture, x: u64, y: u64) -> Result<()> {
+        self.ensure_back_buffer()?;
+
+        if let Some(ref mut buffer) = self.back_buffer {
+            let screen_width = buffer.width;
+            let screen_height = buffer.height;
+
+            for src_y in 0..texture.height {
+                for src_x in 0..texture.width {
+                    let dst_x = x + src_x;
+                    let dst_y = y + src_y;
+
+                    if dst_x >= screen_width || dst_y >= screen_height {
+                        continue;
+                    }
+
+                    let src_idx = (src_y * texture.width + src_x) as usize;
+                    let src_pixel = texture.pixels[src_idx];
+
+                    // Skip fully transparent pixels (value = 0, i.e. unset)
+                    if src_pixel == 0 {
+                        continue;
+                    }
+
+                    let dst_idx = (dst_y * screen_width + dst_x) as usize;
+                    buffer.pixels[dst_idx] = src_pixel;
+                }
+            }
+
             self.dirty = true;
         }
 

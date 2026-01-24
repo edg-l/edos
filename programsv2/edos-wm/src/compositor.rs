@@ -188,7 +188,7 @@ fn draw_window_direct(screen: &mut Screen, window: &WindowListEntry, is_focused:
 fn draw_cursor(screen: &mut Screen, cursor: &Cursor) {
     let cx = cursor.x.max(0) as u64;
     let cy = cursor.y.max(0) as u64;
-    let _ = screen.draw_texture(&cursor.texture, cx, cy);
+    let _ = screen.draw_texture_transparent(&cursor.texture, cx, cy);
 }
 
 /// Draw an X symbol for the close button.
