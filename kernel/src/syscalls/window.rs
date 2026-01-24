@@ -103,18 +103,23 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
 
     let mut registry = WINDOW_REGISTRY.write();
 
-    // Check ownership
-    if let Some(window) = registry.get_window(window_id) {
-        if window.pid != pid {
-            info.lock().errno = Errno::EPERM;
+    // Check window exists
+    let window = match registry.get_window_mut(window_id) {
+        Some(w) => w,
+        None => {
+            info.lock().errno = Errno::ENOENT;
             return !0u64;
         }
-    } else {
-        info.lock().errno = Errno::ENOENT;
+    };
+
+    // X and Y can be set by any process (for window manager)
+    // Other properties require ownership
+    let requires_ownership = !matches!(prop, property::X | property::Y);
+
+    if requires_ownership && window.pid != pid {
+        info.lock().errno = Errno::EPERM;
         return !0u64;
     }
-
-    let window = registry.get_window_mut(window_id).unwrap();
 
     match prop {
         property::VISIBLE => {
