@@ -128,6 +128,7 @@ pub struct WindowListEntry {
     pub z_order: u32,
     pub visible: u32,
     pub buffer_shm_id: u64,
+    pub flags: u64,
 }
 
 impl Default for WindowListEntry {
@@ -142,6 +143,7 @@ impl Default for WindowListEntry {
             z_order: 0,
             visible: 0,
             buffer_shm_id: 0,
+            flags: 0,
         }
     }
 }
@@ -162,6 +164,14 @@ pub mod property {
     pub const TITLE_PTR: u64 = 6;
     /// Shared memory buffer ID for window contents.
     pub const BUFFER_SHM: u64 = 7;
+    /// Window flags.
+    pub const FLAGS: u64 = 8;
+}
+
+/// Window flags.
+pub mod flags {
+    /// Dock window: no decorations, not draggable/resizable.
+    pub const FLAG_DOCK: u64 = 1;
 }
 
 // Syscall numbers

@@ -7,6 +7,20 @@ name = "alloctest"
 version = "0.1.0"
 
 [[package]]
+name = "edos-taskbar"
+version = "0.1.0"
+dependencies = [
+ "edos_render",
+]
+
+[[package]]
+name = "edos-terminal"
+version = "0.1.0"
+dependencies = [
+ "edos_render",
+]
+
+[[package]]
 name = "edos-wm"
 version = "0.1.0"
 dependencies = [

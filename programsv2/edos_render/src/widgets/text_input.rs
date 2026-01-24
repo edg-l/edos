@@ -255,6 +255,13 @@ impl Widget for TextInput {
             return None;
         }
 
+        // Handle backspace character (sent by keyboard driver as Unicode)
+        if ch == '\u{8}' {
+            self.delete_before();
+            self.reset_cursor_blink();
+            return Some(WidgetEvent::TextChanged(self.text.clone()));
+        }
+
         // Only handle printable characters
         if ch.is_control() {
             return None;

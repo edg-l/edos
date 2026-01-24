@@ -175,6 +175,9 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
         property::BUFFER_SHM => {
             window.buffer_shm_id = if value == 0 { None } else { Some(value) };
         }
+        property::FLAGS => {
+            window.flags = value;
+        }
         _ => {
             info.lock().errno = Errno::EINVAL;
             return !0u64;
@@ -206,6 +209,7 @@ pub fn sys_window_get(window_id: WindowId, prop: u64) -> u64 {
             property::WIDTH => window.width as u64,
             property::HEIGHT => window.height as u64,
             property::BUFFER_SHM => window.buffer_shm_id.unwrap_or(0),
+            property::FLAGS => window.flags,
             property::TITLE_PTR => {
                 // Can't return a pointer for title; use a separate syscall if needed
                 info.lock().errno = Errno::EINVAL;
@@ -314,7 +318,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
     }
 
     let copy_count = total_count.min(max as usize);
-    let entry_size = 48; // Size of WindowListEntry
+    let entry_size = 56; // Size of WindowListEntry
 
     for (i, window) in windows.iter().take(copy_count).enumerate() {
         let offset = i * entry_size;
@@ -330,6 +334,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
             z_order: window.z_order,
             visible: window.visible as u32,
             buffer_shm_id: window.buffer_shm_id.unwrap_or(0),
+            flags: window.flags,
         };
 
         let entry_bytes = unsafe {
@@ -358,6 +363,7 @@ pub struct WindowListEntry {
     pub z_order: u32,
     pub visible: u32,
     pub buffer_shm_id: u64,
+    pub flags: u64,
 }
 
 /// Send an event to a window.

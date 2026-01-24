@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use edos_render::graphics::{Color, Screen};
-use edos_render::window::{shm_map, shm_unmap, WindowListEntry, PROT_READ};
+use edos_render::window::{flags::FLAG_DOCK, shm_map, shm_unmap, WindowListEntry, PROT_READ};
 
 use crate::cursor::Cursor;
 use crate::decorations::{self, BORDER_WIDTH, TITLE_HEIGHT};
@@ -106,22 +106,83 @@ pub fn composite(
 
 /// Draw a single window with decorations directly to the screen buffer.
 /// This avoids per-frame allocations by drawing directly.
+/// Handles windows partially off-screen by clipping to visible region.
 fn draw_window_direct(screen: &mut Screen, window: &WindowListEntry, is_focused: bool, shm_cache: &mut ShmCache) {
-    // Skip windows that are completely off-screen to the left or top
-    // (negative coordinates would overflow when cast to u64)
-    if window.x < 0 || window.y < 0 {
+    // Check if this is a dock window (no decorations)
+    let is_dock = (window.flags & FLAG_DOCK) != 0;
+
+    if is_dock {
+        // Draw dock window directly without decorations
+        draw_dock_window(screen, window, shm_cache);
         return;
     }
 
-    let win_x = window.x as u64;
-    let win_y = window.y as u64;
-    let w = window.width as u64;
-    let h = window.height as u64;
-    let total_w = decorations::decorated_width(window.width);
-    let total_h = decorations::decorated_height(window.height);
+    let w = window.width as i64;
+    let h = window.height as i64;
+    let total_w = decorations::decorated_width(window.width) as i64;
+    let total_h = decorations::decorated_height(window.height) as i64;
+    let screen_w = screen.width() as i64;
+    let screen_h = screen.height() as i64;
 
-    // Draw border (outer rectangle)
-    let _ = screen.draw_rect(win_x, win_y, total_w, total_h, COLOR_BORDER);
+    // Skip windows completely off-screen
+    if window.x + total_w as i32 <= 0 || window.y + total_h as i32 <= 0 {
+        return;
+    }
+    if window.x as i64 >= screen_w || window.y as i64 >= screen_h {
+        return;
+    }
+
+    // Calculate visible region (clipping)
+    let clip_left = (-window.x).max(0) as i64;
+    let clip_top = (-window.y).max(0) as i64;
+    let draw_x = (window.x).max(0) as u64;
+    let draw_y = (window.y).max(0) as u64;
+
+    // Calculate visible dimensions
+    let visible_w = ((total_w - clip_left) as u64).min(screen_w as u64 - draw_x);
+    let visible_h = ((total_h - clip_top) as u64).min(screen_h as u64 - draw_y);
+
+    if visible_w == 0 || visible_h == 0 {
+        return;
+    }
+
+    // Helper to draw a rect with clipping applied
+    // Takes coordinates relative to window origin (before decoration offset)
+    let draw_clipped_rect = |screen: &mut Screen, rx: i64, ry: i64, rw: i64, rh: i64, color: Color| {
+        // Convert to absolute screen coordinates
+        let abs_x = window.x as i64 + rx;
+        let abs_y = window.y as i64 + ry;
+
+        // Skip if completely off-screen
+        if abs_x + rw <= 0 || abs_y + rh <= 0 || abs_x >= screen_w || abs_y >= screen_h {
+            return;
+        }
+
+        // Clip to screen bounds
+        let clipped_x = abs_x.max(0) as u64;
+        let clipped_y = abs_y.max(0) as u64;
+        let clip_l = (-abs_x).max(0) as u64;
+        let clip_t = (-abs_y).max(0) as u64;
+        let clipped_w = ((rw as u64).saturating_sub(clip_l)).min(screen_w as u64 - clipped_x);
+        let clipped_h = ((rh as u64).saturating_sub(clip_t)).min(screen_h as u64 - clipped_y);
+
+        if clipped_w > 0 && clipped_h > 0 {
+            let _ = screen.draw_rect(clipped_x, clipped_y, clipped_w, clipped_h, color);
+        }
+    };
+
+    // Draw border (outer rectangle) - as 4 separate edges for proper clipping
+    let bw = BORDER_WIDTH as i64;
+    let th = TITLE_HEIGHT as i64;
+
+    // Top edge
+    draw_clipped_rect(screen, 0, 0, total_w, bw, COLOR_BORDER);
+    // Bottom edge
+    draw_clipped_rect(screen, 0, total_h - bw, total_w, bw, COLOR_BORDER);
+    // Left edge
+    draw_clipped_rect(screen, 0, bw, bw, total_h - 2 * bw, COLOR_BORDER);
+    // Right edge
+    draw_clipped_rect(screen, total_w - bw, bw, bw, total_h - 2 * bw, COLOR_BORDER);
 
     // Draw title bar
     let title_color = if is_focused {
@@ -129,57 +190,123 @@ fn draw_window_direct(screen: &mut Screen, window: &WindowListEntry, is_focused:
     } else {
         COLOR_TITLE_INACTIVE
     };
-    let _ = screen.draw_rect(
-        win_x + BORDER_WIDTH,
-        win_y + BORDER_WIDTH,
-        w,
-        TITLE_HEIGHT - BORDER_WIDTH,
-        title_color,
-    );
+    draw_clipped_rect(screen, bw, bw, w, th - bw, title_color);
 
     // Draw close button (right side of title bar)
-    let close_x = win_x + BORDER_WIDTH + w - 20;
-    let close_y = win_y + BORDER_WIDTH + 2;
-    let _ = screen.draw_rect(
-        close_x,
-        close_y,
-        18,
-        TITLE_HEIGHT - BORDER_WIDTH - 4,
-        COLOR_CLOSE_BUTTON,
-    );
+    let close_rx = bw + w - 20;
+    let close_ry = bw + 2;
+    draw_clipped_rect(screen, close_rx, close_ry, 18, th - bw - 4, COLOR_CLOSE_BUTTON);
 
-    // Draw X symbol on close button
-    draw_close_x(screen, close_x + 4, close_y + 3);
+    // Draw X symbol on close button (only if visible)
+    let close_abs_x = window.x as i64 + close_rx + 4;
+    let close_abs_y = window.y as i64 + close_ry + 3;
+    if close_abs_x >= 0 && close_abs_y >= 0 &&
+       close_abs_x + 10 <= screen_w && close_abs_y + 10 <= screen_h {
+        draw_close_x(screen, close_abs_x as u64, close_abs_y as u64);
+    }
 
     // Draw content area background
-    let _ = screen.draw_rect(
-        win_x + BORDER_WIDTH,
-        win_y + TITLE_HEIGHT,
-        w,
-        h,
-        Color::from_rgb(0x30, 0x30, 0x30),
-    );
+    draw_clipped_rect(screen, bw, th, w, h, Color::from_rgb(0x30, 0x30, 0x30));
 
-    // Blit client buffer content directly
+    // Blit client buffer content with clipping
     if window.buffer_shm_id != 0 {
         if let Some((ptr, buf_w, buf_h)) = shm_cache.get_or_map(window.buffer_shm_id, window.width, window.height) {
-            // Use the original buffer dimensions to avoid reading past the buffer
-            // This handles the case where window was resized but client hasn't reallocated its buffer
             let pixel_count = (buf_w as usize) * (buf_h as usize);
             let pixels = unsafe { std::slice::from_raw_parts(ptr as *const u32, pixel_count) };
 
-            // Draw pixels directly to screen at content offset
-            let content_x = win_x + BORDER_WIDTH;
-            let content_y = win_y + TITLE_HEIGHT;
+            // Content position in window-relative coordinates
+            let content_rx = bw;
+            let content_ry = th;
 
-            // Blit using the original buffer dimensions (safe to read)
-            let _ = screen.blit_pixels_direct(
-                pixels,
-                buf_w as u64,
-                buf_h as u64,
-                content_x,
-                content_y,
-            );
+            // Absolute screen position of content
+            let content_abs_x = window.x as i64 + content_rx;
+            let content_abs_y = window.y as i64 + content_ry;
+
+            // Skip if content is completely off-screen
+            if content_abs_x + (buf_w as i64) > 0 && content_abs_y + (buf_h as i64) > 0 &&
+               content_abs_x < screen_w && content_abs_y < screen_h {
+                // Calculate source offset (how much to skip in the buffer)
+                let src_off_x = (-content_abs_x).max(0) as u64;
+                let src_off_y = (-content_abs_y).max(0) as u64;
+
+                // Calculate destination position (where to draw on screen)
+                let dst_x = content_abs_x.max(0) as u64;
+                let dst_y = content_abs_y.max(0) as u64;
+
+                // Calculate visible dimensions of the content
+                let vis_w = ((buf_w as u64).saturating_sub(src_off_x)).min(screen_w as u64 - dst_x);
+                let vis_h = ((buf_h as u64).saturating_sub(src_off_y)).min(screen_h as u64 - dst_y);
+
+                if vis_w > 0 && vis_h > 0 {
+                    let _ = screen.blit_pixels_clipped(
+                        pixels,
+                        buf_w as u64,
+                        buf_h as u64,
+                        src_off_x,
+                        src_off_y,
+                        dst_x,
+                        dst_y,
+                        vis_w,
+                        vis_h,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Draw a dock window (no decorations, just content).
+fn draw_dock_window(screen: &mut Screen, window: &WindowListEntry, shm_cache: &mut ShmCache) {
+    let screen_w = screen.width() as i64;
+    let screen_h = screen.height() as i64;
+
+    // Skip windows completely off-screen
+    if window.x as i64 + window.width as i64 <= 0 || window.y as i64 + window.height as i64 <= 0 {
+        return;
+    }
+    if window.x as i64 >= screen_w || window.y as i64 >= screen_h {
+        return;
+    }
+
+    // Blit client buffer content with clipping
+    if window.buffer_shm_id != 0 {
+        if let Some((ptr, buf_w, buf_h)) = shm_cache.get_or_map(window.buffer_shm_id, window.width, window.height) {
+            let pixel_count = (buf_w as usize) * (buf_h as usize);
+            let pixels = unsafe { std::slice::from_raw_parts(ptr as *const u32, pixel_count) };
+
+            // Absolute screen position of content (no decoration offset)
+            let content_abs_x = window.x as i64;
+            let content_abs_y = window.y as i64;
+
+            // Skip if content is completely off-screen
+            if content_abs_x + (buf_w as i64) > 0 && content_abs_y + (buf_h as i64) > 0 &&
+               content_abs_x < screen_w && content_abs_y < screen_h {
+                // Calculate source offset (how much to skip in the buffer)
+                let src_off_x = (-content_abs_x).max(0) as u64;
+                let src_off_y = (-content_abs_y).max(0) as u64;
+
+                // Calculate destination position (where to draw on screen)
+                let dst_x = content_abs_x.max(0) as u64;
+                let dst_y = content_abs_y.max(0) as u64;
+
+                // Calculate visible dimensions of the content
+                let vis_w = ((buf_w as u64).saturating_sub(src_off_x)).min(screen_w as u64 - dst_x);
+                let vis_h = ((buf_h as u64).saturating_sub(src_off_y)).min(screen_h as u64 - dst_y);
+
+                if vis_w > 0 && vis_h > 0 {
+                    let _ = screen.blit_pixels_clipped(
+                        pixels,
+                        buf_w as u64,
+                        buf_h as u64,
+                        src_off_x,
+                        src_off_y,
+                        dst_x,
+                        dst_y,
+                        vis_w,
+                        vis_h,
+                    );
+                }
+            }
         }
     }
 }

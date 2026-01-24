@@ -324,6 +324,32 @@ pub fn mount_system_fs() -> ! {
         )
         .unwrap();
         queue_spawn_thread(wintest_thread);
+
+        let taskbar_path = root.join("bin/edos-taskbar").normalize();
+        let taskbar_argv: [&[u8]; 1] = [b"edos-taskbar"];
+        let taskbar_thread = Thread::new_user_from_path(
+            &taskbar_path,
+            Some("edos-taskbar".to_string()),
+            &taskbar_argv,
+            0,
+            0,
+            root.clone(),
+        )
+        .unwrap();
+        queue_spawn_thread(taskbar_thread);
+
+        let terminal_path = root.join("bin/edos-terminal").normalize();
+        let terminal_argv: [&[u8]; 1] = [b"edos-terminal"];
+        let terminal_thread = Thread::new_user_from_path(
+            &terminal_path,
+            Some("edos-terminal".to_string()),
+            &terminal_argv,
+            0,
+            0,
+            root.clone(),
+        )
+        .unwrap();
+        queue_spawn_thread(terminal_thread);
     });
 
     kthread_exit(0)

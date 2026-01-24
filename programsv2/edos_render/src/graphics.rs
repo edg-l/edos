@@ -1454,6 +1454,74 @@ impl Screen {
 
         Ok(())
     }
+
+    /// Blit a clipped region of raw pixels to the back buffer.
+    /// This is used for compositing windows that are partially off-screen.
+    ///
+    /// - `pixels`: Source pixel buffer
+    /// - `src_width`, `src_height`: Full dimensions of the source buffer
+    /// - `src_x`, `src_y`: Offset into the source buffer to start copying from
+    /// - `dst_x`, `dst_y`: Destination position on screen
+    /// - `copy_w`, `copy_h`: Dimensions of the region to copy
+    pub fn blit_pixels_clipped(
+        &mut self,
+        pixels: &[u32],
+        src_width: u64,
+        src_height: u64,
+        src_x: u64,
+        src_y: u64,
+        dst_x: u64,
+        dst_y: u64,
+        copy_w: u64,
+        copy_h: u64,
+    ) -> Result<()> {
+        self.ensure_back_buffer()?;
+
+        if let Some(ref mut buffer) = self.back_buffer {
+            let screen_width = buffer.width;
+            let screen_height = buffer.height;
+
+            // Validate inputs
+            if src_x >= src_width || src_y >= src_height {
+                return Ok(());
+            }
+            if dst_x >= screen_width || dst_y >= screen_height {
+                return Ok(());
+            }
+            if copy_w == 0 || copy_h == 0 {
+                return Ok(());
+            }
+
+            // Clamp copy dimensions to available source and destination space
+            let actual_w = copy_w
+                .min(src_width - src_x)
+                .min(screen_width - dst_x);
+            let actual_h = copy_h
+                .min(src_height - src_y)
+                .min(screen_height - dst_y);
+
+            // Copy row by row
+            for row in 0..actual_h {
+                let src_row = src_y + row;
+                let dst_row = dst_y + row;
+
+                let src_start = (src_row * src_width + src_x) as usize;
+                let dst_start = (dst_row * screen_width + dst_x) as usize;
+                let width = actual_w as usize;
+
+                if src_start + width <= pixels.len()
+                    && dst_start + width <= buffer.pixels.len()
+                {
+                    buffer.pixels[dst_start..dst_start + width]
+                        .copy_from_slice(&pixels[src_start..src_start + width]);
+                }
+            }
+
+            self.dirty = true;
+        }
+
+        Ok(())
+    }
 }
 
 /// Get the global screen instance (convenience function)

@@ -36,6 +36,8 @@ pub struct WindowInfo {
     pub title: String,
     /// Shared memory ID for the window buffer, if any.
     pub buffer_shm_id: Option<u64>,
+    /// Window flags (e.g., FLAG_DOCK for no decorations).
+    pub flags: u64,
 }
 
 impl WindowInfo {
@@ -55,6 +57,7 @@ impl WindowInfo {
             visible: true,
             title: String::new(),
             buffer_shm_id: None,
+            flags: 0,
         }
     }
 
@@ -98,6 +101,7 @@ pub mod property {
     pub const HEIGHT: u64 = 5;
     pub const TITLE_PTR: u64 = 6;
     pub const BUFFER_SHM: u64 = 7;
+    pub const FLAGS: u64 = 8;
 }
 
 /// Window decoration constants (must match WM).

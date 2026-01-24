@@ -4,7 +4,9 @@ pub mod button;
 pub mod checkbox;
 pub mod container;
 pub mod label;
+pub mod layout;
 pub mod slider;
+pub mod terminal;
 pub mod text_input;
 
 pub use button::Button;
@@ -12,6 +14,7 @@ pub use checkbox::Checkbox;
 pub use container::WidgetContainer;
 pub use label::Label;
 pub use slider::Slider;
+pub use terminal::Terminal;
 pub use text_input::TextInput;
 
 /// Unique identifier for a widget.

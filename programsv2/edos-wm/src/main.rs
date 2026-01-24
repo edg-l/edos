@@ -53,8 +53,8 @@ fn find_window_at(windows: &[WindowListEntry], x: i32, y: i32) -> Option<&Window
         .iter()
         .filter(|w| w.visible != 0)
         .filter(|w| {
-            let total_w = decorations::decorated_width(w.width) as i32;
-            let total_h = decorations::decorated_height(w.height) as i32;
+            let total_w = decorations::effective_width(w) as i32;
+            let total_h = decorations::effective_height(w) as i32;
             x >= w.x && x < w.x + total_w && y >= w.y && y < w.y + total_h
         })
         .max_by_key(|w| w.z_order)

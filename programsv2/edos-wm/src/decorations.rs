@@ -1,6 +1,6 @@
 //! Window decorations for the window manager.
 
-use edos_render::window::WindowListEntry;
+use edos_render::window::{flags::FLAG_DOCK, WindowListEntry};
 
 /// Height of the title bar.
 pub const TITLE_HEIGHT: u64 = 24;
@@ -36,6 +36,24 @@ pub fn decorated_width(window_width: u32) -> u64 {
 /// Calculate the total decorated window height.
 pub fn decorated_height(window_height: u32) -> u64 {
     window_height as u64 + TITLE_HEIGHT + BORDER_WIDTH
+}
+
+/// Calculate the total width for a window considering its flags.
+pub fn effective_width(window: &WindowListEntry) -> u64 {
+    if (window.flags & FLAG_DOCK) != 0 {
+        window.width as u64
+    } else {
+        decorated_width(window.width)
+    }
+}
+
+/// Calculate the total height for a window considering its flags.
+pub fn effective_height(window: &WindowListEntry) -> u64 {
+    if (window.flags & FLAG_DOCK) != 0 {
+        window.height as u64
+    } else {
+        decorated_height(window.height)
+    }
 }
 
 /// Check if a point is within the close button area of a window.
@@ -74,6 +92,21 @@ fn is_in_title_bar(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> bo
 
 /// Unified hit testing function that determines which region of a window the cursor is in.
 pub fn hit_test(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> HitRegion {
+    // Dock windows only have client area (no decorations)
+    if (window.flags & FLAG_DOCK) != 0 {
+        let win_x = window.x as i64;
+        let win_y = window.y as i64;
+        let w = window.width as i64;
+        let h = window.height as i64;
+        let px = screen_x as i64;
+        let py = screen_y as i64;
+
+        if px >= win_x && px < win_x + w && py >= win_y && py < win_y + h {
+            return HitRegion::Client;
+        }
+        return HitRegion::None;
+    }
+
     let win_x = window.x as i64;
     let win_y = window.y as i64;
     let total_w = decorated_width(window.width) as i64;
