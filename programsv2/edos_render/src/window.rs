@@ -521,6 +521,38 @@ impl Window {
         window_poll(self.id, events)
     }
 
+    /// Resize the window buffer to new dimensions.
+    /// This reallocates the shared memory and updates the window property.
+    pub fn resize(&mut self, new_width: u32, new_height: u32) -> Result<(), i64> {
+        if new_width == 0 || new_height == 0 {
+            return Err(-1);
+        }
+
+        // Create new shared memory
+        let buffer_size = (new_width as usize) * (new_height as usize) * 4;
+        let new_shm_id = shm_create(buffer_size)?;
+        let new_buffer = shm_map(new_shm_id, PROT_READ | PROT_WRITE)?;
+
+        // Attach new buffer to window
+        window_set(self.id, property::BUFFER_SHM, new_shm_id)?;
+
+        // Clean up old buffer
+        if let Some(old_ptr) = self.buffer.take() {
+            let _ = shm_unmap(old_ptr as *mut u8);
+        }
+        if let Some(old_shm) = self.shm_id.take() {
+            let _ = shm_destroy(old_shm);
+        }
+
+        // Update state
+        self.width = new_width;
+        self.height = new_height;
+        self.shm_id = Some(new_shm_id);
+        self.buffer = Some(new_buffer as *mut u32);
+
+        Ok(())
+    }
+
     /// Fill the buffer with a color.
     pub fn fill(&mut self, color: u32) {
         if let Some(buffer) = self.buffer_mut() {

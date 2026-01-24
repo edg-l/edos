@@ -258,6 +258,18 @@ fn main() {
                 let _ = window_set(resize.window_id, property::HEIGHT, new_h as u64);
             } else {
                 // Mouse released - stop resizing
+                // Send resize event to the window with final dimensions
+                // First get the current dimensions from kernel
+                if let Some(win) = windows.iter().find(|w| w.id == resize.window_id) {
+                    let resize_event = WindowEvent {
+                        event_type: 10, // WindowEventType::Resize
+                        x: win.width as i32,
+                        y: win.height as i32,
+                        code: 0,
+                        data: 0,
+                    };
+                    let _ = window_send_event(resize.window_id, &resize_event);
+                }
                 resize_state = None;
             }
         }
