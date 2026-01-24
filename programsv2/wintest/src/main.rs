@@ -37,7 +37,7 @@ fn main() {
             for event in &events[..count] {
                 match event.event_type() {
                     Some(WindowEventType::CloseRequested) => {
-                        println!("Close requested, exiting.");
+                        println!("[wintest] Received CloseRequested, exiting.");
                         return;
                     }
                     Some(WindowEventType::Resize) => {

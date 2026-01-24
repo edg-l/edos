@@ -239,6 +239,7 @@ const SYS_WINDOW_SET: u64 = 221;
 const SYS_WINDOW_GET: u64 = 222;
 const SYS_WINDOW_POLL: u64 = 223;
 const SYS_WINDOW_LIST: u64 = 224;
+const SYS_WINDOW_SEND_EVENT: u64 = 225;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -474,6 +475,11 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let buffer_ptr = ctx.rdi as *mut u8;
             let max = ctx.rsi;
             ctx.rax = window::sys_window_list(buffer_ptr, max);
+        }
+        SYS_WINDOW_SEND_EVENT => {
+            let window_id = ctx.rdi;
+            let event_ptr = ctx.rsi as *const crate::window::WindowEvent;
+            ctx.rax = window::sys_window_send_event(window_id, event_ptr);
         }
         _ => {
             ctx.rax = !0u64;

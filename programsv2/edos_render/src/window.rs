@@ -102,6 +102,17 @@ impl WindowEvent {
             None
         }
     }
+
+    /// Create a close requested event.
+    pub fn close_requested() -> Self {
+        Self {
+            event_type: WindowEventType::CloseRequested as u32,
+            x: 0,
+            y: 0,
+            code: 0,
+            data: 0,
+        }
+    }
 }
 
 /// Entry in the window list returned by window_list syscall.
@@ -138,19 +149,19 @@ impl Default for WindowListEntry {
 /// Window property constants (for window_set/window_get).
 pub mod property {
     /// Window visibility (0 = hidden, 1 = visible).
-    pub const VISIBLE: u64 = 0;
+    pub const VISIBLE: u64 = 1;
     /// Window X position.
-    pub const X: u64 = 1;
+    pub const X: u64 = 2;
     /// Window Y position.
-    pub const Y: u64 = 2;
+    pub const Y: u64 = 3;
     /// Window width.
-    pub const WIDTH: u64 = 3;
+    pub const WIDTH: u64 = 4;
     /// Window height.
-    pub const HEIGHT: u64 = 4;
+    pub const HEIGHT: u64 = 5;
     /// Title string pointer (for set only).
-    pub const TITLE_PTR: u64 = 5;
+    pub const TITLE_PTR: u64 = 6;
     /// Shared memory buffer ID for window contents.
-    pub const BUFFER_SHM: u64 = 6;
+    pub const BUFFER_SHM: u64 = 7;
 }
 
 // Syscall numbers
@@ -164,6 +175,7 @@ const SYS_WINDOW_SET: u64 = 221;
 const SYS_WINDOW_GET: u64 = 222;
 const SYS_WINDOW_POLL: u64 = 223;
 const SYS_WINDOW_LIST: u64 = 224;
+const SYS_WINDOW_SEND_EVENT: u64 = 225;
 
 // Protection flags for shm_map
 pub const PROT_READ: u64 = 0x1;
@@ -357,6 +369,23 @@ pub fn window_list(buffer: &mut [WindowListEntry]) -> Result<usize, i64> {
     }
 }
 
+/// Send an event to a window.
+///
+/// This allows the window manager to send events (like CloseRequested)
+/// to windows it doesn't own.
+///
+/// # Arguments
+/// * `id` - Window ID
+/// * `event` - Event to send
+pub fn window_send_event(id: WindowId, event: &WindowEvent) -> Result<(), i64> {
+    let result = unsafe { syscall2(SYS_WINDOW_SEND_EVENT, id, event as *const WindowEvent as u64) };
+    if is_error(result) {
+        Err(-1)
+    } else {
+        Ok(())
+    }
+}
+
 /// Create a shared memory region.
 ///
 /// # Arguments
@@ -538,14 +567,15 @@ pub fn get_mouse_state() -> Option<(i32, i32, u8)> {
     use std::fs::File;
     use std::io::Read;
 
-    // MouseState structure from kernel: x (i32), y (i32), buttons (u8)
+    // MouseEvent structure from kernel is 16 bytes:
+    // x (i32), y (i32), dx (i16), dy (i16), buttons (u8), scroll (i8), padding (2)
     let mut file = File::open("/dev/mouse").ok()?;
-    let mut buf = [0u8; 9]; // 4 + 4 + 1 bytes
+    let mut buf = [0u8; 16];
     file.read_exact(&mut buf).ok()?;
 
     let x = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     let y = i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-    let buttons = buf[8];
+    let buttons = buf[12]; // Correct offset for buttons field
 
     Some((x, y, buttons))
 }

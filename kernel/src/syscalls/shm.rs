@@ -8,7 +8,6 @@ use x86_64::{
 };
 
 use crate::{
-    log,
     memory::shared::{SharedMemory, SharedMemoryError},
     syscalls::{Errno, memory::find_free_virtual_address_atomic},
     thread::{MappingType, MemoryMapping, scheduler::sched},
@@ -29,8 +28,6 @@ const PROT_EXEC: u64 = 0x4;
 /// * Shared memory ID on success
 /// * -1 on error (errno set)
 pub fn sys_shm_create(size: u64) -> i64 {
-    log!("shm_create: size={}", size);
-
     let sched = sched();
     let info = sched.current_thread_info();
     info.lock().errno = Errno::Clear;
@@ -41,11 +38,7 @@ pub fn sys_shm_create(size: u64) -> i64 {
     }
 
     match SharedMemory::new(size as usize) {
-        Ok(shm) => {
-            let id = shm.id();
-            log!("shm_create: created shm_id={}", id);
-            id as i64
-        }
+        Ok(shm) => shm.id() as i64,
         Err(SharedMemoryError::InvalidSize) => {
             info.lock().errno = Errno::EINVAL;
             -1
@@ -72,13 +65,6 @@ pub fn sys_shm_create(size: u64) -> i64 {
 /// * Virtual address of the mapping on success
 /// * -1 on error (errno set)
 pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
-    log!(
-        "shm_map: shm_id={}, addr_hint={:#x}, prot={}",
-        shm_id,
-        addr_hint,
-        prot
-    );
-
     let sched = sched();
     let info = sched.current_thread_info();
     info.lock().errno = Errno::Clear;
@@ -87,7 +73,6 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
     let shm = match SharedMemory::get(shm_id) {
         Some(shm) => shm,
         None => {
-            log!("shm_map: shm_id {} not found", shm_id);
             info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
@@ -154,11 +139,6 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
         },
     );
 
-    log!(
-        "shm_map: mapped shm_id={} at {:#x}",
-        shm_id,
-        map_addr.as_u64()
-    );
     map_addr.as_u64()
 }
 
@@ -171,8 +151,6 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
 /// * 0 on success
 /// * -1 on error (errno set)
 pub fn sys_shm_unmap(addr: u64) -> i64 {
-    log!("shm_unmap: addr={:#x}", addr);
-
     let sched = sched();
     let info = sched.current_thread_info();
     info.lock().errno = Errno::Clear;
@@ -204,7 +182,6 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
                         }
                     }
 
-                    log!("shm_unmap: unmapped shm_id={} at {:#x}", shm_id, addr);
                     0
                 }
                 MappingType::Anonymous => {
@@ -216,7 +193,6 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
             }
         }
         None => {
-            log!("shm_unmap: no mapping at {:#x}", addr);
             info.lock().errno = Errno::EINVAL;
             -1
         }
@@ -234,17 +210,12 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
 /// * 0 on success
 /// * -1 on error (errno set)
 pub fn sys_shm_destroy(shm_id: u64) -> i64 {
-    log!("shm_destroy: shm_id={}", shm_id);
-
     let sched = sched();
     let info = sched.current_thread_info();
     info.lock().errno = Errno::Clear;
 
     match SharedMemory::destroy(shm_id) {
-        Ok(()) => {
-            log!("shm_destroy: destroyed shm_id={}", shm_id);
-            0
-        }
+        Ok(()) => 0,
         Err(SharedMemoryError::NotFound) => {
             info.lock().errno = Errno::EINVAL;
             -1

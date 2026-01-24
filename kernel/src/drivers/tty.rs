@@ -124,6 +124,11 @@ pub fn write_from_user(user_ptr: *const u8, len: usize) -> Option<usize> {
                 };
             }
 
+            // Echo chunk to serial for debug visibility
+            if let Ok(s) = core::str::from_utf8(&chunk[..to_copy]) {
+                crate::serial::add_serial_log(s);
+            }
+
             // Process the chunk
             for &byte in &chunk[..to_copy] {
                 match byte {

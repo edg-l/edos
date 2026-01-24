@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-use super::registry::{WINDOW_REGISTRY, WindowId};
+use super::registry::{WINDOW_REGISTRY, WindowId, decoration};
 
 /// Maximum number of queued events per window.
 const EVENT_QUEUE_SIZE: usize = 256;
@@ -304,8 +304,8 @@ extern "C" fn input_routing_thread() -> ! {
 fn handle_mouse_event(event: MouseEvent) {
     let registry = WINDOW_REGISTRY.read();
 
-    // Find window under cursor
-    let window_under_cursor = registry.window_at(event.x, event.y);
+    // Find window whose CLIENT area contains the cursor (excludes decorations)
+    let window_under_cursor = registry.window_at_client(event.x, event.y);
 
     // Get currently focused window
     let focused = registry.focused_window();
@@ -341,8 +341,9 @@ fn handle_mouse_event(event: MouseEvent) {
 
                 // Send the click event to the new focused window
                 if let Some(window) = registry.get_window(target_window) {
-                    let local_x = event.x - window.x;
-                    let local_y = event.y - window.y;
+                    // Calculate coordinates relative to client area (excluding decorations)
+                    let local_x = event.x - window.x - decoration::BORDER_WIDTH;
+                    let local_y = event.y - window.y - decoration::TITLE_HEIGHT;
 
                     for bit in 0..3 {
                         if button_pressed & (1 << bit) != 0 {
@@ -361,8 +362,9 @@ fn handle_mouse_event(event: MouseEvent) {
     // Route mouse events to window under cursor (for move/scroll) or focused window (for buttons)
     if let Some(target) = window_under_cursor {
         if let Some(window) = registry.get_window(target) {
-            let local_x = event.x - window.x;
-            let local_y = event.y - window.y;
+            // Calculate coordinates relative to client area (excluding decorations)
+            let local_x = event.x - window.x - decoration::BORDER_WIDTH;
+            let local_y = event.y - window.y - decoration::TITLE_HEIGHT;
 
             // Always send move events if there's movement
             if event.dx != 0 || event.dy != 0 {

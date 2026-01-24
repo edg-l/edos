@@ -1,6 +1,5 @@
 //! Window decorations for the window manager.
 
-use edos_render::graphics::{Color, DrawRequest};
 use edos_render::window::WindowListEntry;
 
 /// Height of the title bar.
@@ -29,21 +28,6 @@ pub enum HitRegion {
     ResizeBottomRight,
 }
 
-/// Title bar color for active windows.
-pub const COLOR_TITLE_ACTIVE: Color = Color::from_rgb(0x40, 0x60, 0x90);
-
-/// Title bar color for inactive windows.
-pub const COLOR_TITLE_INACTIVE: Color = Color::from_rgb(0x50, 0x50, 0x60);
-
-/// Border color.
-pub const COLOR_BORDER: Color = Color::from_rgb(0x20, 0x20, 0x20);
-
-/// Close button color.
-pub const COLOR_CLOSE_BUTTON: Color = Color::from_rgb(0xE0, 0x40, 0x40);
-
-/// Close button hover color.
-pub const COLOR_CLOSE_BUTTON_HOVER: Color = Color::from_rgb(0xFF, 0x60, 0x60);
-
 /// Calculate the total decorated window width.
 pub fn decorated_width(window_width: u32) -> u64 {
     window_width as u64 + BORDER_WIDTH * 2
@@ -54,70 +38,8 @@ pub fn decorated_height(window_height: u32) -> u64 {
     window_height as u64 + TITLE_HEIGHT + BORDER_WIDTH
 }
 
-/// Calculate the content area position within the decorated frame.
-pub fn content_offset() -> (u64, u64) {
-    (BORDER_WIDTH, TITLE_HEIGHT)
-}
-
-/// Draw window decorations (title bar, border, close button) to a draw request.
-///
-/// This draws at position (0, 0) within the request; caller should position the request.
-pub fn draw_frame(
-    request: &mut DrawRequest,
-    window: &WindowListEntry,
-    is_focused: bool,
-) {
-    let w = window.width as u64;
-    let h = window.height as u64;
-    let total_w = decorated_width(window.width);
-    let total_h = decorated_height(window.height);
-
-    // Draw border (outer rectangle)
-    let _ = request.fill_rect(0, 0, total_w, total_h, COLOR_BORDER);
-
-    // Draw title bar
-    let title_color = if is_focused {
-        COLOR_TITLE_ACTIVE
-    } else {
-        COLOR_TITLE_INACTIVE
-    };
-    let _ = request.fill_rect(BORDER_WIDTH, BORDER_WIDTH, w, TITLE_HEIGHT - BORDER_WIDTH, title_color);
-
-    // Draw close button (right side of title bar)
-    let close_x = BORDER_WIDTH + w - 20;
-    let close_y = BORDER_WIDTH + 2;
-    let _ = request.fill_rect(close_x, close_y, 18, TITLE_HEIGHT - BORDER_WIDTH - 4, COLOR_CLOSE_BUTTON);
-
-    // Draw X on close button
-    draw_close_x(request, close_x + 4, close_y + 3);
-
-    // Draw content area background (will be overwritten by window content)
-    let _ = request.fill_rect(
-        BORDER_WIDTH,
-        TITLE_HEIGHT,
-        w,
-        h,
-        Color::from_rgb(0x30, 0x30, 0x30),
-    );
-}
-
-/// Draw an X symbol for the close button.
-fn draw_close_x(request: &mut DrawRequest, x: u64, y: u64) {
-    let color = Color::WHITE;
-    // Simple X pattern (10x10)
-    for i in 0..10 {
-        let _ = request.set_pixel(x + i, y + i, color);
-        let _ = request.set_pixel(x + 9 - i, y + i, color);
-        // Make it thicker
-        if i > 0 {
-            let _ = request.set_pixel(x + i - 1, y + i, color);
-            let _ = request.set_pixel(x + 9 - i + 1, y + i, color);
-        }
-    }
-}
-
 /// Check if a point is within the close button area of a window.
-pub fn is_in_close_button(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> bool {
+fn is_in_close_button(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> bool {
     let win_x = window.x as i64;
     let win_y = window.y as i64;
     let w = window.width as i64;
@@ -134,7 +56,7 @@ pub fn is_in_close_button(window: &WindowListEntry, screen_x: i32, screen_y: i32
 }
 
 /// Check if a point is within the title bar (for dragging).
-pub fn is_in_title_bar(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> bool {
+fn is_in_title_bar(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> bool {
     let win_x = window.x as i64;
     let win_y = window.y as i64;
     let w = window.width as i64;
@@ -171,18 +93,22 @@ pub fn hit_test(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> HitRe
     let from_top = py - win_y;
     let from_bottom = (win_y + total_h) - py;
 
+    // Check close button first (has highest priority in title area)
+    if is_in_close_button(window, screen_x, screen_y) {
+        return HitRegion::CloseButton;
+    }
+
+    // Check title bar next (clicking title bar should drag, not resize)
+    if is_in_title_bar(window, screen_x, screen_y) {
+        return HitRegion::TitleBar;
+    }
+
+    // Now check resize zones
     let on_left = from_left < RESIZE_BORDER;
     let on_right = from_right <= RESIZE_BORDER;
-    let on_top = from_top < RESIZE_BORDER;
     let on_bottom = from_bottom <= RESIZE_BORDER;
 
-    // Corners take priority over edges
-    if on_top && on_left {
-        return HitRegion::ResizeTopLeft;
-    }
-    if on_top && on_right {
-        return HitRegion::ResizeTopRight;
-    }
+    // Bottom corners take priority
     if on_bottom && on_left {
         return HitRegion::ResizeBottomLeft;
     }
@@ -190,28 +116,30 @@ pub fn hit_test(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> HitRe
         return HitRegion::ResizeBottomRight;
     }
 
-    // Edges
+    // Top corners (work from title bar edges too for easier grabbing)
+    if from_top < RESIZE_BORDER && on_left {
+        return HitRegion::ResizeTopLeft;
+    }
+    if from_top < RESIZE_BORDER && on_right {
+        return HitRegion::ResizeTopRight;
+    }
+
+    // Side edges
     if on_left {
         return HitRegion::ResizeLeft;
     }
     if on_right {
         return HitRegion::ResizeRight;
     }
-    if on_top {
-        return HitRegion::ResizeTop;
-    }
+
+    // Bottom edge
     if on_bottom {
         return HitRegion::ResizeBottom;
     }
 
-    // Check close button (must check before title bar since it's within the title area)
-    if is_in_close_button(window, screen_x, screen_y) {
-        return HitRegion::CloseButton;
-    }
-
-    // Check title bar
-    if is_in_title_bar(window, screen_x, screen_y) {
-        return HitRegion::TitleBar;
+    // Top edge only in the thin border area (not title bar)
+    if from_top < BORDER_WIDTH as i64 {
+        return HitRegion::ResizeTop;
     }
 
     // Everything else is the client area

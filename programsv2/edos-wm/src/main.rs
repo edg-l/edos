@@ -4,13 +4,15 @@ use std::time::Duration;
 
 use edos_render::graphics::Screen;
 use edos_render::window::{
-    get_mouse_state, property, window_destroy, window_list, window_set, WindowListEntry,
+    get_mouse_state, property, window_list, window_send_event, window_set, WindowEvent,
+    WindowListEntry,
 };
 
 mod compositor;
 mod cursor;
 mod decorations;
 
+use compositor::ShmCache;
 use cursor::Cursor;
 use decorations::HitRegion;
 
@@ -82,6 +84,9 @@ fn main() {
     let mut resize_state: Option<ResizeState> = None;
     let mut last_mouse_buttons: u8 = 0;
 
+    // Shared memory mapping cache
+    let mut shm_cache = ShmCache::new();
+
     // Main compositor loop
     loop {
         // Get mouse state (position + buttons)
@@ -115,8 +120,10 @@ fn main() {
 
                 match region {
                     HitRegion::CloseButton => {
-                        // Close the window
-                        let _ = window_destroy(window_id);
+                        // Send close request to the window
+                        println!("[WM] Sending CloseRequested to window {}", window_id);
+                        let event = WindowEvent::close_requested();
+                        let _ = window_send_event(window_id, &event);
                     }
                     HitRegion::TitleBar => {
                         // Start dragging
@@ -278,7 +285,7 @@ fn main() {
         }
 
         // Composite all windows and present
-        compositor::composite(&mut screen, windows, &cursor, focused_window_id);
+        compositor::composite(&mut screen, windows, &cursor, focused_window_id, &mut shm_cache);
         let _ = screen.render();
 
         // Sleep to maintain frame rate

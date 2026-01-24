@@ -1357,6 +1357,67 @@ impl Screen {
 
         Ok(())
     }
+
+    /// Set a single pixel in the back buffer.
+    pub fn set_pixel(&mut self, x: u64, y: u64, color: Color) -> Result<()> {
+        self.ensure_back_buffer()?;
+
+        if let Some(ref mut buffer) = self.back_buffer {
+            buffer.set_pixel(x, y, color)?;
+            self.dirty = true;
+        }
+
+        Ok(())
+    }
+
+    /// Blit raw pixels directly to the back buffer without allocating intermediate structures.
+    /// This is an optimized path for compositing window contents.
+    pub fn blit_pixels_direct(
+        &mut self,
+        pixels: &[u32],
+        src_width: u64,
+        src_height: u64,
+        dst_x: u64,
+        dst_y: u64,
+    ) -> Result<()> {
+        self.ensure_back_buffer()?;
+
+        if let Some(ref mut buffer) = self.back_buffer {
+            let screen_width = buffer.width;
+            let screen_height = buffer.height;
+
+            // Clip to screen bounds
+            let end_x = (dst_x + src_width).min(screen_width);
+            let end_y = (dst_y + src_height).min(screen_height);
+
+            if dst_x >= screen_width || dst_y >= screen_height {
+                return Ok(());
+            }
+
+            // Copy row by row
+            for src_y in 0..src_height {
+                let screen_y = dst_y + src_y;
+                if screen_y >= end_y {
+                    break;
+                }
+
+                let src_row_start = (src_y * src_width) as usize;
+                let dst_row_start = (screen_y * screen_width + dst_x) as usize;
+                let copy_width = (end_x - dst_x) as usize;
+
+                if src_row_start + copy_width <= pixels.len()
+                    && dst_row_start + copy_width <= buffer.pixels.len()
+                {
+                    buffer.pixels[dst_row_start..dst_row_start + copy_width]
+                        .copy_from_slice(&pixels[src_row_start..src_row_start + copy_width]);
+                }
+            }
+
+            self.dirty = true;
+        }
+
+        Ok(())
+    }
 }
 
 /// Get the global screen instance (convenience function)

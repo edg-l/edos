@@ -1,7 +1,0 @@
-[package]
-name = "wintest"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-elibc = { path = "../elibc"}

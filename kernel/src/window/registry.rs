@@ -58,13 +58,40 @@ impl WindowInfo {
         }
     }
 
-    /// Check if a point is inside this window.
+    /// Check if a point is inside this window (client area only, excluding decorations).
     pub fn contains(&self, px: i32, py: i32) -> bool {
-        self.visible
-            && px >= self.x
-            && px < self.x + self.width as i32
+        self.contains_client(px, py)
+    }
+
+    /// Check if a point is within the window's CLIENT area (excluding decorations).
+    pub fn contains_client(&self, px: i32, py: i32) -> bool {
+        if !self.visible {
+            return false;
+        }
+        // Client area starts at (x + BORDER_WIDTH, y + TITLE_HEIGHT)
+        let client_x = self.x + decoration::BORDER_WIDTH;
+        let client_y = self.y + decoration::TITLE_HEIGHT;
+        let client_w = self.width as i32;
+        let client_h = self.height as i32;
+
+        px >= client_x
+            && px < client_x + client_w
+            && py >= client_y
+            && py < client_y + client_h
+    }
+
+    /// Check if point is within decorated bounds (for finding windows).
+    pub fn contains_decorated(&self, px: i32, py: i32) -> bool {
+        if !self.visible {
+            return false;
+        }
+        let total_w = self.width as i32 + decoration::BORDER_WIDTH * 2;
+        let total_h = self.height as i32 + decoration::TITLE_HEIGHT + decoration::BORDER_WIDTH;
+
+        px >= self.x
+            && px < self.x + total_w
             && py >= self.y
-            && py < self.y + self.height as i32
+            && py < self.y + total_h
     }
 }
 
@@ -77,6 +104,12 @@ pub mod property {
     pub const HEIGHT: u64 = 5;
     pub const TITLE_PTR: u64 = 6;
     pub const BUFFER_SHM: u64 = 7;
+}
+
+/// Window decoration constants (must match WM).
+pub mod decoration {
+    pub const TITLE_HEIGHT: i32 = 24;
+    pub const BORDER_WIDTH: i32 = 2;
 }
 
 /// Global window registry.
@@ -153,11 +186,20 @@ impl WindowRegistry {
         self.focused_window
     }
 
-    /// Find the topmost window at the given coordinates.
+    /// Find the topmost window at the given coordinates (checks decorated bounds).
     pub fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
         self.windows
             .values()
-            .filter(|w| w.contains(x, y))
+            .filter(|w| w.contains_decorated(x, y))
+            .max_by_key(|w| w.z_order)
+            .map(|w| w.id)
+    }
+
+    /// Find window whose CLIENT area contains the point (for routing input).
+    pub fn window_at_client(&self, x: i32, y: i32) -> Option<WindowId> {
+        self.windows
+            .values()
+            .filter(|w| w.contains_client(x, y))
             .max_by_key(|w| w.z_order)
             .map(|w| w.id)
     }

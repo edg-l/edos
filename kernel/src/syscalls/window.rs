@@ -353,3 +353,47 @@ pub struct WindowListEntry {
     pub visible: u32,
     pub buffer_shm_id: u64,
 }
+
+/// Send an event to a window.
+///
+/// This allows the window manager to send events (like CloseRequested)
+/// to windows it doesn't own.
+///
+/// Arguments:
+/// - rdi: window ID
+/// - rsi: pointer to WindowEvent
+///
+/// Returns: 0 on success, !0 on error (sets errno).
+pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if event_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    // Check that the target window exists
+    {
+        let registry = WINDOW_REGISTRY.read();
+        if registry.get_window(window_id).is_none() {
+            info.lock().errno = Errno::ENOENT;
+            return !0u64;
+        }
+    }
+
+    // Read the event from user space
+    let event: WindowEvent = match unsafe { try_read_user(event_ptr) } {
+        Some(e) => e,
+        None => {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
+        }
+    };
+
+    // Send the event to the window's event queue
+    crate::window::input::send_event(window_id, event);
+
+    0
+}
