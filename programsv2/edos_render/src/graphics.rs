@@ -1249,6 +1249,11 @@ impl Screen {
         Ok(())
     }
 
+    /// DEBUG: Only call the present syscall, skip the back_buffer draw
+    pub fn render_present_only(&mut self) {
+        self.framebuffer.render();
+    }
+
     /// Create a new DrawRequest that fits entirely on screen
     pub fn create_draw_request(&self, width: u64, height: u64) -> Result<DrawRequest> {
         if width > self.width() as u64 || height > self.height() as u64 {
@@ -1261,7 +1266,7 @@ impl Screen {
     pub fn draw_texture(&mut self, texture: &Texture, x: u64, y: u64) -> Result<()> {
         let mut draw_req = DrawRequest::new(texture.width, texture.height)?;
         draw_req.blit_texture(texture, 0, 0)?;
-        draw_req = draw_req.with_position(x, y);
+        let draw_req = draw_req.with_position(x, y);
         self.framebuffer.draw(&draw_req)
     }
 

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["edos_render","hello"]
+members = ["edos_render", "edos-wm", "hello", "alloctest"]
 
 [profile.dev]
 opt-level = 3

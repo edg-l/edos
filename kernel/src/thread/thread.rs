@@ -25,6 +25,7 @@ use crate::{
     },
     println,
     syscalls::Errno,
+    window,
     thread::{
         MappingType, MemoryRegion, MemoryRegionType, UserThread, UserThreadInfo, UserThreadTls,
         context::CpuContext,
@@ -524,6 +525,9 @@ impl Thread {
         }
 
         if is_last_thread {
+            // Clean up windows owned by this process
+            window::cleanup_process_windows(user.pid);
+
             if let Some(info) = THREADS.get_info(self.id) {
                 let mappings = info.lock().memory_mappings.lock().clone();
                 for (addr, mapping) in mappings {

@@ -34,6 +34,25 @@ pub const SYS_CLONE: u64 = 211;
 pub const SYS_FUTEX_WAIT: u64 = 212;
 pub const SYS_FUTEX_WAKE: u64 = 213;
 pub const SYS_GETRANDOM: u64 = 214;
+pub const SYS_SHM_CREATE: u64 = 215;
+pub const SYS_SHM_MAP: u64 = 216;
+pub const SYS_SHM_UNMAP: u64 = 217;
+pub const SYS_SHM_DESTROY: u64 = 218;
+pub const SYS_WINDOW_CREATE: u64 = 219;
+pub const SYS_WINDOW_DESTROY: u64 = 220;
+pub const SYS_WINDOW_SET: u64 = 221;
+pub const SYS_WINDOW_GET: u64 = 222;
+pub const SYS_WINDOW_POLL: u64 = 223;
+pub const SYS_WINDOW_LIST: u64 = 224;
+
+// Window property constants
+pub const WINDOW_PROP_VISIBLE: u64 = 1;
+pub const WINDOW_PROP_X: u64 = 2;
+pub const WINDOW_PROP_Y: u64 = 3;
+pub const WINDOW_PROP_WIDTH: u64 = 4;
+pub const WINDOW_PROP_HEIGHT: u64 = 5;
+pub const WINDOW_PROP_TITLE_PTR: u64 = 6;
+pub const WINDOW_PROP_BUFFER_SHM: u64 = 7;
 
 // Ioctl buffer flags
 pub const IOCTL_ARG_IN: u64 = 1;

@@ -376,8 +376,17 @@ impl Scheduler {
         }
 
         let cpu = get_percpu_data();
-        // Set RSP0
-        cpu.tss.privilege_stack_table[0] = VirtAddr::new(next.kstack_top);
+        // Set RSP0 - validate it's in kernel space
+        let kstack = next.kstack_top;
+        if kstack < 0xFFFF_0000_0000_0000 {
+            panic!(
+                "Invalid kstack_top for thread {}: 0x{:x} (name: {})",
+                next.id.0,
+                kstack,
+                next.name
+            );
+        }
+        cpu.tss.privilege_stack_table[0] = VirtAddr::new(kstack);
 
         // set kernel gs stack
         cpu.kernel_rsp = next.kstack_top;

@@ -58,6 +58,7 @@ mod ioctl;
 mod memory;
 mod shm;
 mod sync;
+mod window;
 
 use self::ioctl::sys_ioctl;
 use self::sync::{sys_futex_wait, sys_futex_wake};
@@ -232,6 +233,12 @@ const SYS_SHM_CREATE: u64 = 215;
 const SYS_SHM_MAP: u64 = 216;
 const SYS_SHM_UNMAP: u64 = 217;
 const SYS_SHM_DESTROY: u64 = 218;
+const SYS_WINDOW_CREATE: u64 = 219;
+const SYS_WINDOW_DESTROY: u64 = 220;
+const SYS_WINDOW_SET: u64 = 221;
+const SYS_WINDOW_GET: u64 = 222;
+const SYS_WINDOW_POLL: u64 = 223;
+const SYS_WINDOW_LIST: u64 = 224;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -434,6 +441,39 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_SHM_DESTROY => {
             let shm_id = ctx.rdi;
             ctx.rax = shm::sys_shm_destroy(shm_id) as u64;
+        }
+        SYS_WINDOW_CREATE => {
+            let x = ctx.rdi as i64;
+            let y = ctx.rsi as i64;
+            let width = ctx.rdx;
+            let height = ctx.r10;
+            ctx.rax = window::sys_window_create(x, y, width, height);
+        }
+        SYS_WINDOW_DESTROY => {
+            let window_id = ctx.rdi;
+            ctx.rax = window::sys_window_destroy(window_id);
+        }
+        SYS_WINDOW_SET => {
+            let window_id = ctx.rdi;
+            let prop = ctx.rsi;
+            let value = ctx.rdx;
+            ctx.rax = window::sys_window_set(window_id, prop, value);
+        }
+        SYS_WINDOW_GET => {
+            let window_id = ctx.rdi;
+            let prop = ctx.rsi;
+            ctx.rax = window::sys_window_get(window_id, prop);
+        }
+        SYS_WINDOW_POLL => {
+            let window_id = ctx.rdi;
+            let events_ptr = ctx.rsi as *mut crate::window::WindowEvent;
+            let max = ctx.rdx;
+            ctx.rax = window::sys_window_poll(window_id, events_ptr, max);
+        }
+        SYS_WINDOW_LIST => {
+            let buffer_ptr = ctx.rdi as *mut u8;
+            let max = ctx.rsi;
+            ctx.rax = window::sys_window_list(buffer_ptr, max);
         }
         _ => {
             ctx.rax = !0u64;

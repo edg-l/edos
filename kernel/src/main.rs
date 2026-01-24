@@ -52,6 +52,7 @@ mod syscalls;
 mod thread;
 mod timer;
 mod util;
+mod window;
 
 extern crate alloc;
 
@@ -136,6 +137,7 @@ fn main() -> ! {
     logs::init();
     drivers::init_drivers();
     fs::init();
+    window::init();
 
     queue_spawn_kthread_named("system-mount", mount_system_fs as *const () as u64);
 

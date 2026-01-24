@@ -13,6 +13,7 @@ pub mod memory;
 pub mod process;
 pub mod sync;
 pub mod sys;
+pub mod window;
 
 // Re-export commonly used types and functions for convenience
 pub use fs::{

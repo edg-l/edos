@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "alloctest"
+version = "0.1.0"
+
+[[package]]
+name = "edos-wm"
+version = "0.1.0"
+dependencies = [
+ "edos_render",
+]
+
+[[package]]
 name = "edos_render"
 version = "0.1.0"
 dependencies = [
