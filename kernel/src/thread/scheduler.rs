@@ -381,9 +381,7 @@ impl Scheduler {
         if kstack < 0xFFFF_0000_0000_0000 {
             panic!(
                 "Invalid kstack_top for thread {}: 0x{:x} (name: {})",
-                next.id.0,
-                kstack,
-                next.name
+                next.id.0, kstack, next.name
             );
         }
         cpu.tss.privilege_stack_table[0] = VirtAddr::new(kstack);

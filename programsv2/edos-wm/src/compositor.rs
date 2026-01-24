@@ -10,8 +10,8 @@ use crate::decorations::{self, BORDER_WIDTH, TITLE_HEIGHT};
 
 /// Cache for shared memory mappings to avoid map/unmap on every frame.
 pub struct ShmCache {
-    /// Maps shm_id to (mapped_ptr, size in pixels).
-    mappings: HashMap<u64, (*mut u8, usize)>,
+    /// Maps shm_id to (mapped_ptr, original_width, original_height).
+    mappings: HashMap<u64, (*mut u8, u32, u32)>,
 }
 
 impl ShmCache {
@@ -22,16 +22,18 @@ impl ShmCache {
     }
 
     /// Get or create a mapping for the given shm_id.
-    /// Returns the mapped pointer if successful.
-    pub fn get_or_map(&mut self, shm_id: u64, pixel_count: usize) -> Option<*mut u8> {
-        if let Some(&(ptr, _)) = self.mappings.get(&shm_id) {
-            return Some(ptr);
+    /// Returns the mapped pointer and the original buffer dimensions if successful.
+    /// The returned dimensions are from when the buffer was first mapped,
+    /// which may differ from the current window dimensions if the window was resized.
+    pub fn get_or_map(&mut self, shm_id: u64, width: u32, height: u32) -> Option<(*mut u8, u32, u32)> {
+        if let Some(&(ptr, orig_w, orig_h)) = self.mappings.get(&shm_id) {
+            return Some((ptr, orig_w, orig_h));
         }
 
         // Not cached, map it
         if let Ok(ptr) = shm_map(shm_id, PROT_READ) {
-            self.mappings.insert(shm_id, (ptr, pixel_count));
-            Some(ptr)
+            self.mappings.insert(shm_id, (ptr, width, height));
+            Some((ptr, width, height))
         } else {
             None
         }
@@ -48,7 +50,7 @@ impl ShmCache {
             .collect();
 
         for shm_id in stale {
-            if let Some((ptr, _)) = self.mappings.remove(&shm_id) {
+            if let Some((ptr, _, _)) = self.mappings.remove(&shm_id) {
                 let _ = shm_unmap(ptr);
             }
         }
@@ -105,6 +107,12 @@ pub fn composite(
 /// Draw a single window with decorations directly to the screen buffer.
 /// This avoids per-frame allocations by drawing directly.
 fn draw_window_direct(screen: &mut Screen, window: &WindowListEntry, is_focused: bool, shm_cache: &mut ShmCache) {
+    // Skip windows that are completely off-screen to the left or top
+    // (negative coordinates would overflow when cast to u64)
+    if window.x < 0 || window.y < 0 {
+        return;
+    }
+
     let win_x = window.x as u64;
     let win_y = window.y as u64;
     let w = window.width as u64;
@@ -154,17 +162,21 @@ fn draw_window_direct(screen: &mut Screen, window: &WindowListEntry, is_focused:
 
     // Blit client buffer content directly
     if window.buffer_shm_id != 0 {
-        let pixel_count = (window.width * window.height) as usize;
-        if let Some(ptr) = shm_cache.get_or_map(window.buffer_shm_id, pixel_count) {
+        if let Some((ptr, buf_w, buf_h)) = shm_cache.get_or_map(window.buffer_shm_id, window.width, window.height) {
+            // Use the original buffer dimensions to avoid reading past the buffer
+            // This handles the case where window was resized but client hasn't reallocated its buffer
+            let pixel_count = (buf_w as usize) * (buf_h as usize);
             let pixels = unsafe { std::slice::from_raw_parts(ptr as *const u32, pixel_count) };
 
             // Draw pixels directly to screen at content offset
             let content_x = win_x + BORDER_WIDTH;
             let content_y = win_y + TITLE_HEIGHT;
+
+            // Blit using the original buffer dimensions (safe to read)
             let _ = screen.blit_pixels_direct(
                 pixels,
-                window.width as u64,
-                window.height as u64,
+                buf_w as u64,
+                buf_h as u64,
                 content_x,
                 content_y,
             );

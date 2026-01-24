@@ -6,7 +6,7 @@ pub mod input;
 pub mod registry;
 
 pub use input::{WindowEvent, WindowEventType};
-pub use registry::{WindowId, WindowInfo, WindowRegistry, WINDOW_REGISTRY, property};
+pub use registry::{WINDOW_REGISTRY, WindowId, WindowInfo, WindowRegistry, property};
 
 /// Initialize the window server.
 pub fn init() {
@@ -29,5 +29,7 @@ pub fn cleanup_process_windows(pid: u64) {
     }
 
     // Destroy the windows
-    registry::WINDOW_REGISTRY.write().destroy_windows_for_pid(pid);
+    registry::WINDOW_REGISTRY
+        .write()
+        .destroy_windows_for_pid(pid);
 }

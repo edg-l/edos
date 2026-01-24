@@ -25,7 +25,6 @@ use crate::{
     },
     println,
     syscalls::Errno,
-    window,
     thread::{
         MappingType, MemoryRegion, MemoryRegionType, UserThread, UserThreadInfo, UserThreadTls,
         context::CpuContext,
@@ -39,6 +38,7 @@ use crate::{
         util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
     },
     timer::Instant,
+    window,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

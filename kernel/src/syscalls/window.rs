@@ -37,9 +37,10 @@ pub fn sys_window_create(x: i64, y: i64, width: u64, height: u64) -> u64 {
     let pid = info.lock().pid;
 
     // Create the window
-    let window_id = WINDOW_REGISTRY
-        .write()
-        .create_window(pid, x as i32, y as i32, width as u32, height as u32);
+    let window_id =
+        WINDOW_REGISTRY
+            .write()
+            .create_window(pid, x as i32, y as i32, width as u32, height as u32);
 
     // Create event queue for the window
     get_or_create_event_queue(window_id);
@@ -112,9 +113,12 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
         }
     };
 
-    // X and Y can be set by any process (for window manager)
+    // X, Y, WIDTH, HEIGHT can be set by any process (for window manager)
     // Other properties require ownership
-    let requires_ownership = !matches!(prop, property::X | property::Y);
+    let requires_ownership = !matches!(
+        prop,
+        property::X | property::Y | property::WIDTH | property::HEIGHT
+    );
 
     if requires_ownership && window.pid != pid {
         info.lock().errno = Errno::EPERM;
@@ -329,10 +333,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
         };
 
         let entry_bytes = unsafe {
-            core::slice::from_raw_parts(
-                &entry as *const WindowListEntry as *const u8,
-                entry_size,
-            )
+            core::slice::from_raw_parts(&entry as *const WindowListEntry as *const u8, entry_size)
         };
 
         if !unsafe { try_copy_to_user(buffer_ptr.add(offset), entry_bytes.as_ptr(), entry_size) } {

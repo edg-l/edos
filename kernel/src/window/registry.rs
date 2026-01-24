@@ -74,10 +74,7 @@ impl WindowInfo {
         let client_w = self.width as i32;
         let client_h = self.height as i32;
 
-        px >= client_x
-            && px < client_x + client_w
-            && py >= client_y
-            && py < client_y + client_h
+        px >= client_x && px < client_x + client_w && py >= client_y && py < client_y + client_h
     }
 
     /// Check if point is within decorated bounds (for finding windows).
@@ -88,10 +85,7 @@ impl WindowInfo {
         let total_w = self.width as i32 + decoration::BORDER_WIDTH * 2;
         let total_h = self.height as i32 + decoration::TITLE_HEIGHT + decoration::BORDER_WIDTH;
 
-        px >= self.x
-            && px < self.x + total_w
-            && py >= self.y
-            && py < self.y + total_h
+        px >= self.x && px < self.x + total_w && py >= self.y && py < self.y + total_h
     }
 }
 
@@ -147,7 +141,8 @@ impl WindowRegistry {
             // Clear focus if this was the focused window
             if self.focused_window == Some(id) {
                 // Find the next window with highest z-order
-                self.focused_window = self.windows
+                self.focused_window = self
+                    .windows
                     .values()
                     .filter(|w| w.visible)
                     .max_by_key(|w| w.z_order)

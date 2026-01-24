@@ -8,7 +8,7 @@ use spin::{Once, RwLock};
 use crate::{
     drivers::{
         keyboard::KEYBOARD_BROADCAST,
-        mouse::{MouseEvent, MOUSE_BROADCAST},
+        mouse::{MOUSE_BROADCAST, MouseEvent},
     },
     log,
     thread::{
@@ -373,17 +373,26 @@ fn handle_mouse_event(event: MouseEvent) {
 
             // Send scroll events
             if event.scroll != 0 {
-                send_event(target, WindowEvent::mouse_scroll(local_x, local_y, event.scroll));
+                send_event(
+                    target,
+                    WindowEvent::mouse_scroll(local_x, local_y, event.scroll),
+                );
             }
 
             // Send button events
             if buttons_changed {
                 for bit in 0..3 {
                     if button_pressed & (1 << bit) != 0 {
-                        send_event(target, WindowEvent::mouse_button(local_x, local_y, bit, true));
+                        send_event(
+                            target,
+                            WindowEvent::mouse_button(local_x, local_y, bit, true),
+                        );
                     }
                     if button_released & (1 << bit) != 0 {
-                        send_event(target, WindowEvent::mouse_button(local_x, local_y, bit, false));
+                        send_event(
+                            target,
+                            WindowEvent::mouse_button(local_x, local_y, bit, false),
+                        );
                     }
                 }
             }
