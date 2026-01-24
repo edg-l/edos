@@ -12,6 +12,7 @@ mod cursor;
 mod decorations;
 
 use cursor::Cursor;
+use decorations::HitRegion;
 
 /// Maximum number of windows to track.
 const MAX_WINDOWS: usize = 64;
@@ -19,11 +20,29 @@ const MAX_WINDOWS: usize = 64;
 /// Target frame time (approximately 60 FPS).
 const FRAME_TIME_MS: u64 = 16;
 
+/// Minimum window width in pixels.
+const MIN_WINDOW_WIDTH: u32 = 100;
+
+/// Minimum window height in pixels.
+const MIN_WINDOW_HEIGHT: u32 = 50;
+
 /// Track window dragging state.
 struct DragState {
     window_id: u64,
     offset_x: i32, // cursor offset from window origin
     offset_y: i32,
+}
+
+/// Track window resize state.
+struct ResizeState {
+    window_id: u64,
+    region: HitRegion,
+    start_x: i32,
+    start_y: i32,
+    orig_win_x: i32,
+    orig_win_y: i32,
+    orig_win_w: u32,
+    orig_win_h: u32,
 }
 
 /// Find the topmost window under the cursor.
@@ -60,6 +79,7 @@ fn main() {
 
     // Interaction state
     let mut drag_state: Option<DragState> = None;
+    let mut resize_state: Option<ResizeState> = None;
     let mut last_mouse_buttons: u8 = 0;
 
     // Main compositor loop
@@ -91,17 +111,42 @@ fn main() {
         if left_pressed {
             if let Some(window) = find_window_at(windows, mx, my) {
                 let window_id = window.id;
+                let region = decorations::hit_test(window, mx, my);
 
-                if decorations::is_in_close_button(window, mx, my) {
-                    // Close the window
-                    let _ = window_destroy(window_id);
-                } else if decorations::is_in_title_bar(window, mx, my) {
-                    // Start dragging
-                    drag_state = Some(DragState {
-                        window_id,
-                        offset_x: mx - window.x,
-                        offset_y: my - window.y,
-                    });
+                match region {
+                    HitRegion::CloseButton => {
+                        // Close the window
+                        let _ = window_destroy(window_id);
+                    }
+                    HitRegion::TitleBar => {
+                        // Start dragging
+                        drag_state = Some(DragState {
+                            window_id,
+                            offset_x: mx - window.x,
+                            offset_y: my - window.y,
+                        });
+                    }
+                    HitRegion::ResizeTop
+                    | HitRegion::ResizeBottom
+                    | HitRegion::ResizeLeft
+                    | HitRegion::ResizeRight
+                    | HitRegion::ResizeTopLeft
+                    | HitRegion::ResizeTopRight
+                    | HitRegion::ResizeBottomLeft
+                    | HitRegion::ResizeBottomRight => {
+                        // Start resizing
+                        resize_state = Some(ResizeState {
+                            window_id,
+                            region,
+                            start_x: mx,
+                            start_y: my,
+                            orig_win_x: window.x,
+                            orig_win_y: window.y,
+                            orig_win_w: window.width,
+                            orig_win_h: window.height,
+                        });
+                    }
+                    _ => {}
                 }
 
                 // Update focus to clicked window
@@ -120,6 +165,93 @@ fn main() {
             } else {
                 // Mouse released - stop dragging
                 drag_state = None;
+            }
+        }
+
+        // Handle resizing
+        if let Some(ref resize) = resize_state {
+            if left_held {
+                let dx = mx - resize.start_x;
+                let dy = my - resize.start_y;
+
+                // Calculate new position and dimensions based on which region is being dragged
+                let (mut new_x, mut new_y, mut new_w, mut new_h) = (
+                    resize.orig_win_x,
+                    resize.orig_win_y,
+                    resize.orig_win_w as i32,
+                    resize.orig_win_h as i32,
+                );
+
+                match resize.region {
+                    HitRegion::ResizeRight => {
+                        new_w += dx;
+                    }
+                    HitRegion::ResizeBottom => {
+                        new_h += dy;
+                    }
+                    HitRegion::ResizeLeft => {
+                        new_x += dx;
+                        new_w -= dx;
+                    }
+                    HitRegion::ResizeTop => {
+                        new_y += dy;
+                        new_h -= dy;
+                    }
+                    HitRegion::ResizeBottomRight => {
+                        new_w += dx;
+                        new_h += dy;
+                    }
+                    HitRegion::ResizeTopLeft => {
+                        new_x += dx;
+                        new_y += dy;
+                        new_w -= dx;
+                        new_h -= dy;
+                    }
+                    HitRegion::ResizeTopRight => {
+                        new_y += dy;
+                        new_w += dx;
+                        new_h -= dy;
+                    }
+                    HitRegion::ResizeBottomLeft => {
+                        new_x += dx;
+                        new_w -= dx;
+                        new_h += dy;
+                    }
+                    _ => {}
+                }
+
+                // Enforce minimum window size
+                if new_w < MIN_WINDOW_WIDTH as i32 {
+                    // Adjust position if resizing from left side
+                    if matches!(
+                        resize.region,
+                        HitRegion::ResizeLeft
+                            | HitRegion::ResizeTopLeft
+                            | HitRegion::ResizeBottomLeft
+                    ) {
+                        new_x = resize.orig_win_x + resize.orig_win_w as i32 - MIN_WINDOW_WIDTH as i32;
+                    }
+                    new_w = MIN_WINDOW_WIDTH as i32;
+                }
+                if new_h < MIN_WINDOW_HEIGHT as i32 {
+                    // Adjust position if resizing from top side
+                    if matches!(
+                        resize.region,
+                        HitRegion::ResizeTop | HitRegion::ResizeTopLeft | HitRegion::ResizeTopRight
+                    ) {
+                        new_y = resize.orig_win_y + resize.orig_win_h as i32 - MIN_WINDOW_HEIGHT as i32;
+                    }
+                    new_h = MIN_WINDOW_HEIGHT as i32;
+                }
+
+                // Apply the new dimensions
+                let _ = window_set(resize.window_id, property::X, new_x as i64 as u64);
+                let _ = window_set(resize.window_id, property::Y, new_y as i64 as u64);
+                let _ = window_set(resize.window_id, property::WIDTH, new_w as u64);
+                let _ = window_set(resize.window_id, property::HEIGHT, new_h as u64);
+            } else {
+                // Mouse released - stop resizing
+                resize_state = None;
             }
         }
 

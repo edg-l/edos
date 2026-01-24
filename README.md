@@ -124,3 +124,27 @@ path = "/data2/edgar/edos-programs/toolchain/edos"
 
 
 Runtime: https://github.com/edg-l/edos_rt
+
+## Updating edos_rt
+
+When making changes to `edos_rt` (the Rust runtime library for EDOS), you need to rebuild and reinstall it for programs to pick up the changes:
+
+```bash
+cd /data2/edgar/edos_rt
+cargo +edos build --release --target x86_64-unknown-edos
+cp target/x86_64-unknown-edos/release/libedos_rt.rlib /data2/edgar/edos-programs/toolchain/edos/lib/rustlib/x86_64-unknown-edos/lib/
+```
+
+After updating edos_rt, rebuild any programs that depend on it (e.g., in `programsv2/`):
+
+```bash
+cd programsv2
+make build
+```
+
+Then rebuild the kernel to embed the updated binaries:
+
+```bash
+cd kernel
+cargo build
+```

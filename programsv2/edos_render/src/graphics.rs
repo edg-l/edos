@@ -1264,10 +1264,14 @@ impl Screen {
 
     /// Draw a texture directly to the screen at the specified position
     pub fn draw_texture(&mut self, texture: &Texture, x: u64, y: u64) -> Result<()> {
-        let mut draw_req = DrawRequest::new(texture.width, texture.height)?;
-        draw_req.blit_texture(texture, 0, 0)?;
-        let draw_req = draw_req.with_position(x, y);
-        self.framebuffer.draw(&draw_req)
+        self.ensure_back_buffer()?;
+
+        if let Some(ref mut buffer) = self.back_buffer {
+            buffer.blit_texture(texture, x, y)?;
+            self.dirty = true;
+        }
+
+        Ok(())
     }
 
     /// Draw a texture region directly to the screen

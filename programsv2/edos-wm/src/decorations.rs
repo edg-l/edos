@@ -9,6 +9,26 @@ pub const TITLE_HEIGHT: u64 = 24;
 /// Width of the window border.
 pub const BORDER_WIDTH: u64 = 2;
 
+/// Size of the resize grab zone in pixels.
+pub const RESIZE_BORDER: i64 = 8;
+
+/// Hit regions for mouse interaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitRegion {
+    None,
+    TitleBar,
+    CloseButton,
+    Client,
+    ResizeTop,
+    ResizeBottom,
+    ResizeLeft,
+    ResizeRight,
+    ResizeTopLeft,
+    ResizeTopRight,
+    ResizeBottomLeft,
+    ResizeBottomRight,
+}
+
 /// Title bar color for active windows.
 pub const COLOR_TITLE_ACTIVE: Color = Color::from_rgb(0x40, 0x60, 0x90);
 
@@ -128,4 +148,72 @@ pub fn is_in_title_bar(window: &WindowListEntry, screen_x: i32, screen_y: i32) -
     let py = screen_y as i64;
 
     px >= title_x && px < title_x + title_w && py >= title_y && py < title_y + title_h
+}
+
+/// Unified hit testing function that determines which region of a window the cursor is in.
+pub fn hit_test(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> HitRegion {
+    let win_x = window.x as i64;
+    let win_y = window.y as i64;
+    let total_w = decorated_width(window.width) as i64;
+    let total_h = decorated_height(window.height) as i64;
+
+    let px = screen_x as i64;
+    let py = screen_y as i64;
+
+    // Check if point is outside the window entirely
+    if px < win_x || px >= win_x + total_w || py < win_y || py >= win_y + total_h {
+        return HitRegion::None;
+    }
+
+    // Calculate distances from edges
+    let from_left = px - win_x;
+    let from_right = (win_x + total_w) - px;
+    let from_top = py - win_y;
+    let from_bottom = (win_y + total_h) - py;
+
+    let on_left = from_left < RESIZE_BORDER;
+    let on_right = from_right <= RESIZE_BORDER;
+    let on_top = from_top < RESIZE_BORDER;
+    let on_bottom = from_bottom <= RESIZE_BORDER;
+
+    // Corners take priority over edges
+    if on_top && on_left {
+        return HitRegion::ResizeTopLeft;
+    }
+    if on_top && on_right {
+        return HitRegion::ResizeTopRight;
+    }
+    if on_bottom && on_left {
+        return HitRegion::ResizeBottomLeft;
+    }
+    if on_bottom && on_right {
+        return HitRegion::ResizeBottomRight;
+    }
+
+    // Edges
+    if on_left {
+        return HitRegion::ResizeLeft;
+    }
+    if on_right {
+        return HitRegion::ResizeRight;
+    }
+    if on_top {
+        return HitRegion::ResizeTop;
+    }
+    if on_bottom {
+        return HitRegion::ResizeBottom;
+    }
+
+    // Check close button (must check before title bar since it's within the title area)
+    if is_in_close_button(window, screen_x, screen_y) {
+        return HitRegion::CloseButton;
+    }
+
+    // Check title bar
+    if is_in_title_bar(window, screen_x, screen_y) {
+        return HitRegion::TitleBar;
+    }
+
+    // Everything else is the client area
+    HitRegion::Client
 }

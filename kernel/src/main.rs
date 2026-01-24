@@ -299,23 +299,37 @@ pub fn mount_system_fs() -> ! {
     }
 
     without_interrupts(|| {
-        let terminal_argv: [&[u8]; 1] = [b"terminal"];
-        let user_thread = Thread::new_user(
-            TERMINAL_PROGRAM,
-            Some("terminal".to_string()),
-            &terminal_argv,
+        let wm_path = root.join("bin/edos-wm").normalize();
+        let wm_argv: [&[u8]; 1] = [b"edos-wm"];
+        let user_thread = Thread::new_user_from_path(
+            &wm_path,
+            Some("edos-wm".to_string()),
+            &wm_argv,
             0,
             0,
             root.clone(),
         )
         .unwrap();
         queue_spawn_thread(user_thread);
+
+        let wintest_path = root.join("bin/wintest").normalize();
+        let wintest_argv: [&[u8]; 1] = [b"wintest"];
+        let wintest_thread = Thread::new_user_from_path(
+            &wintest_path,
+            Some("wintest".to_string()),
+            &wintest_argv,
+            0,
+            0,
+            root.clone(),
+        )
+        .unwrap();
+        queue_spawn_thread(wintest_thread);
     });
 
     kthread_exit(0)
 }
 
-pub const TERMINAL_PROGRAM: &[u8] = include_bytes!("../../filesystem/bin/terminal");
+// Programs are now loaded from /bin on the filesystem at runtime.
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {

@@ -15,7 +15,7 @@ use x86_64::{
 use crate::{
     boot::boot_info,
     drivers::{fpu::FpuState, hpet::driver::get_hpet_timer},
-    fs::path::Path,
+    fs::{self, path::Path},
     loader::{ElfLoadError, TlsTemplate, load_elf},
     memory::{
         USER_STACK_SIZE, USER_STACK_TOP,
@@ -505,6 +505,39 @@ impl Thread {
         );
 
         Ok(thread)
+    }
+
+    /// Load a user thread from an ELF file on the filesystem.
+    ///
+    /// This is a convenience wrapper around `new_user` that reads the file first.
+    pub fn new_user_from_path(
+        path: &Path,
+        name: Option<String>,
+        argv: &[&[u8]],
+        user: u32,
+        group: u32,
+        cwd: Path,
+    ) -> Result<Arc<Self>, ElfLoadError> {
+        // Get file info to know the size
+        let file_info = fs::api::file_info(path).map_err(|e| {
+            println!("Failed to get file info for {:?}: {:?}", path, e);
+            ElfLoadError::MappingFailed
+        })?;
+
+        let file_size = file_info.size as usize;
+        if file_size == 0 {
+            println!("File {:?} is empty", path);
+            return Err(ElfLoadError::MissingSegments);
+        }
+
+        // Read the entire file
+        let elf_data = fs::api::read_bytes(path, 0, file_size).map_err(|e| {
+            println!("Failed to read file {:?}: {:?}", path, e);
+            ElfLoadError::MappingFailed
+        })?;
+
+        // Call the existing new_user with the loaded data
+        Self::new_user(&elf_data, name, argv, user, group, cwd)
     }
 
     pub fn free(&self) {
