@@ -5,10 +5,58 @@ mod command;
 mod spawn;
 
 use std::io::Write;
-use std::time::Duration;
 
 // Syscall numbers
 const SYS_READ: u64 = 0;
+const SYS_POLL: u64 = 7;
+
+/// Poll interest/result state for a file descriptor.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct PollState {
+    readable: bool,
+    writable: bool,
+    error: bool,
+    hangup: bool,
+    invalid: bool,
+}
+
+/// A file descriptor to poll with its interests and results.
+#[repr(C)]
+struct SelectFd {
+    fd: u64,
+    interests: PollState,
+    result: PollState,
+}
+
+/// Poll stdin for readability with the given timeout.
+/// Returns true if stdin has data available.
+fn poll_stdin(timeout_ms: u64) -> bool {
+    let mut fds = [SelectFd {
+        fd: 0, // stdin
+        interests: PollState {
+            readable: true,
+            ..Default::default()
+        },
+        result: PollState::default(),
+    }];
+
+    let result: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_POLL,
+            in("rdi") fds.as_mut_ptr(),
+            in("rsi") 1usize,
+            in("rdx") timeout_ms,
+            lateout("rax") result,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
+    }
+    result > 0 && fds[0].result.readable
+}
 
 /// Read from a file descriptor using raw syscall.
 /// Returns bytes read, 0 for no data available, or negative for error/EOF.
@@ -30,13 +78,22 @@ fn sys_read(fd: u64, buf: &mut [u8]) -> isize {
     result as isize
 }
 
-/// Read a line from stdin, handling EDOS's non-blocking pipe reads.
+/// Read a line from stdin, using poll() to efficiently wait for input.
 /// Returns the line (including newline), or None on EOF/error.
+///
+/// Uses a hybrid approach: poll for efficiency, but always attempt read
+/// regardless of poll result to handle race conditions where poll might
+/// miss events.
 fn read_line() -> Option<String> {
     let mut line = String::new();
     let mut buf = [0u8; 1];
 
     loop {
+        // Try poll first with short timeout for efficiency
+        let poll_ready = poll_stdin(100);
+
+        // Always try to read (non-blocking) regardless of poll result.
+        // This provides resilience against poll edge cases/races.
         let n = sys_read(0, &mut buf);
 
         if n < 0 {
@@ -45,8 +102,12 @@ fn read_line() -> Option<String> {
         }
 
         if n == 0 {
-            // No data available yet - sleep briefly and retry
-            std::thread::sleep(Duration::from_millis(1));
+            // No data available
+            if !poll_ready {
+                // Poll timed out and no data - continue polling
+                continue;
+            }
+            // Poll said readable but no data - spurious, retry
             continue;
         }
 

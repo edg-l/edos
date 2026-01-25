@@ -22,15 +22,23 @@ impl ShmCache {
     }
 
     /// Get or create a mapping for the given shm_id.
-    /// Returns the mapped pointer and the original buffer dimensions if successful.
-    /// The returned dimensions are from when the buffer was first mapped,
-    /// which may differ from the current window dimensions if the window was resized.
+    /// Returns the mapped pointer and buffer dimensions if successful.
+    ///
+    /// IMPORTANT: A shared memory buffer's size is fixed at creation time.
+    /// If the kernel reports different dimensions than we cached, it means
+    /// the WM updated the window size but the client hasn't created a new
+    /// buffer yet. We return the cached (actual) dimensions to avoid
+    /// reading beyond the buffer's real size. Once the client creates a
+    /// new shm_id, cleanup() will remove the old mapping.
     pub fn get_or_map(&mut self, shm_id: u64, width: u32, height: u32) -> Option<(*mut u8, u32, u32)> {
-        if let Some(&(ptr, orig_w, orig_h)) = self.mappings.get(&shm_id) {
-            return Some((ptr, orig_w, orig_h));
+        if let Some(&(ptr, cached_w, cached_h)) = self.mappings.get(&shm_id) {
+            // Always return cached mapping with its ACTUAL dimensions.
+            // Don't try to remap - the buffer size is fixed at creation.
+            // If window dimensions changed, client will create new shm_id.
+            return Some((ptr, cached_w, cached_h));
         }
 
-        // Not cached, map it
+        // Not cached, map fresh
         if let Ok(ptr) = shm_map(shm_id, PROT_READ) {
             self.mappings.insert(shm_id, (ptr, width, height));
             Some((ptr, width, height))

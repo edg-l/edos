@@ -686,6 +686,14 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                     continue;
                 }
 
+                // Re-check poll state after arming to close race window.
+                // If notification arrived after refresh but before arm,
+                // the state was updated before notify() was called.
+                ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
+                if ready > 0 {
+                    break;
+                }
+
                 let remaining = dl.duration_since(now);
                 let sleep_dur = if remaining.is_zero() {
                     Duration::from_millis(1)
@@ -698,6 +706,13 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                 if waiter.arm() {
                     continue;
                 }
+
+                // Re-check poll state after arming to close race window.
+                ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
+                if ready > 0 {
+                    break;
+                }
+
                 sched.thread_park();
             }
         }
