@@ -35,6 +35,16 @@ fn main() {
     let mut terminal = Terminal::new(1, 0, 0, TERMINAL_COLS, TERMINAL_ROWS);
     terminal.set_focused(true);
 
+    // Pre-render before showing window to avoid black frame
+    window.fill(0xFF1E1E1E);
+    {
+        let w = window.width;
+        let h = window.height;
+        if let Some(buf) = window.buffer_mut() {
+            terminal.draw(buf, w, h);
+        }
+    }
+
     // Show the window
     if let Err(e) = window.show() {
         eprintln!("Failed to show window: {:?}", e);
@@ -57,11 +67,11 @@ fn main() {
         }
     };
 
-    // Event buffer
-    let mut events = [WindowEvent::default(); 16];
-
     // Read buffer for shell output
     let mut read_buf = [0u8; 4096];
+
+    // Event buffer
+    let mut events = [WindowEvent::default(); 16];
 
     // Main loop
     loop {
@@ -91,6 +101,12 @@ fn main() {
                     Some(WindowEventType::KeyRelease) => {
                         terminal.on_key(event.code, false);
                     }
+                    Some(WindowEventType::FocusGained) => {
+                        terminal.set_focused(true);
+                    }
+                    Some(WindowEventType::FocusLost) => {
+                        terminal.set_focused(false);
+                    }
                     _ => {}
                 }
             }
@@ -100,6 +116,15 @@ fn main() {
         let input_chars = terminal.take_input();
         if !input_chars.is_empty() {
             if let Some(ref child) = child {
+                // Echo input locally so user can see what they're typing
+                for ch in &input_chars {
+                    // Convert CR to LF for proper line advance on Enter
+                    if *ch == '\r' {
+                        terminal.write_char('\n');
+                    } else {
+                        terminal.write_char(*ch);
+                    }
+                }
                 // Send input to shell
                 let input_str: String = input_chars.iter().collect();
                 child.write_str(&input_str);

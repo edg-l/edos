@@ -89,14 +89,8 @@ fn main() {
 
     // Main compositor loop
     loop {
-        // Get mouse state (position + buttons)
-        let (mx, my, buttons) = match get_mouse_state() {
-            Some(state) => state,
-            None => {
-                std::thread::sleep(Duration::from_millis(FRAME_TIME_MS));
-                continue;
-            }
-        };
+        // Get mouse state (position + buttons), default to (0, 0, 0) if unavailable
+        let (mx, my, buttons) = get_mouse_state().unwrap_or((0, 0, 0));
 
         cursor.set_position(mx, my);
 

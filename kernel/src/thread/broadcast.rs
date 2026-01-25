@@ -128,20 +128,31 @@ impl<T: Clone> Broadcaster<T> {
     }
 
     pub fn cleanup(&self) {
-        let subs = self.subs.read();
+        let to_remove = {
+            let subs = self.subs.read();
 
-        if subs.is_empty() {
-            return;
-        }
+            if subs.is_empty() {
+                return;
+            }
 
-        let mut to_remove = Vec::new();
-        for sub in subs.iter() {
-            if let Some(thread) = get_thread_by_id(*sub.0) {
-                if thread.state() == State::Dying {
+            let mut to_remove = Vec::new();
+            for sub in subs.iter() {
+                if let Some(thread) = get_thread_by_id(*sub.0) {
+                    if thread.state() == State::Dying {
+                        to_remove.push(*sub.0);
+                    }
+                } else {
                     to_remove.push(*sub.0);
                 }
-            } else {
-                to_remove.push(*sub.0);
+            }
+            to_remove
+        };
+
+        // Actually remove dead subscribers
+        if !to_remove.is_empty() {
+            let mut subs = self.subs.write();
+            for tid in to_remove {
+                subs.remove(&tid);
             }
         }
     }
