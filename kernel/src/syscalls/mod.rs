@@ -863,7 +863,9 @@ fn sys_spawn(
         let info = get_thread_info_by_id(user_thread.id).unwrap();
         let user_thread_info = info.lock();
 
-        // Override standard file descriptors if specified (non-default values)
+        // Copy parent's file descriptors to child's standard streams
+        // For stdin, only override if caller specified a non-default FD
+        // (passing 0 means "use default stdin")
         if stdin_fd != 0
             && let Some(stdin_desc) = sched
                 .current_thread_info()
@@ -876,26 +878,25 @@ fn sys_spawn(
             user_thread_info.fd_table.lock().insert_fd(0, stdin_desc);
         }
 
-        if stdout_fd != 1
-            && let Some(stdout_desc) = sched
-                .current_thread_info()
-                .lock()
-                .fd_table
-                .lock()
-                .get_fd(stdout_fd)
-                .cloned()
+        // For stdout/stderr, always copy parent's FD so output goes to the right place
+        if let Some(stdout_desc) = sched
+            .current_thread_info()
+            .lock()
+            .fd_table
+            .lock()
+            .get_fd(stdout_fd)
+            .cloned()
         {
             user_thread_info.fd_table.lock().insert_fd(1, stdout_desc);
         }
 
-        if stderr_fd != 2
-            && let Some(stderr_desc) = sched
-                .current_thread_info()
-                .lock()
-                .fd_table
-                .lock()
-                .get_fd(stderr_fd)
-                .cloned()
+        if let Some(stderr_desc) = sched
+            .current_thread_info()
+            .lock()
+            .fd_table
+            .lock()
+            .get_fd(stderr_fd)
+            .cloned()
         {
             user_thread_info.fd_table.lock().insert_fd(2, stderr_desc);
         }
