@@ -200,16 +200,20 @@ impl Scheduler {
 
             without_interrupts(|| {
                 let ed = self.earliest_deadline.load(Ordering::Acquire);
-                if ed != u64::MAX && ed != 0 {
+                let dur = if ed != u64::MAX && ed != 0 {
                     let now = Instant::now();
-                    let dl = Instant::from_tick(ed);
-                    let dur = if ed <= now.tick() {
+                    if ed <= now.tick() {
                         Duration::from_micros(1)
                     } else {
+                        let dl = Instant::from_tick(ed);
                         dl.duration_since(now)
-                    };
-                    set_apic_timer(dur);
-                }
+                    }
+                } else {
+                    // Fallback: always configure a periodic tick so the CPU
+                    // doesn't halt forever when there are no sleepers.
+                    Duration::from_millis(100)
+                };
+                set_apic_timer(dur);
             });
 
             // Halt until next interrupt (timer, IPI, device)
