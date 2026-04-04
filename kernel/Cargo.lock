@@ -116,6 +116,7 @@ dependencies = [
  "crossbeam-queue",
  "elf",
  "heapless",
+ "intrusive-list",
  "limine",
  "lru",
  "pc-keyboard",
@@ -175,6 +176,10 @@ dependencies = [
  "hash32",
  "stable_deref_trait",
 ]
+
+[[package]]
+name = "intrusive-list"
+version = "0.1.0"
 
 [[package]]
 name = "limine"
