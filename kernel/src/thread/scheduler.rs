@@ -505,24 +505,18 @@ impl Scheduler {
                     return;
                 }
                 // CAS failed: a waker set Parked → Waking → Ready and
-                // enqueued us. Spin until complete_wake finishes (state
-                // becomes Ready), then reclaim Running. The stale runqueue
-                // entry will be harmlessly skipped by pick_and_run (its
-                // CAS Ready→Running will fail since we're already Running).
-                loop {
-                    let state = cur.state.load(Ordering::Acquire);
-                    if state == State::Ready as u8 {
-                        if cur.cas_state(State::Ready, State::Running) {
-                            return;
-                        }
-                    } else if state == State::Running as u8 {
-                        return;
-                    } else if state == State::Waking as u8 {
-                        spin_loop();
-                    } else {
-                        return; // Dying, etc.
-                    }
-                }
+                // enqueued us on our last CPU (this CPU). Context-switch
+                // so the scheduler properly pops and unlinks us from the
+                // runqueue. This is safe because complete_wake enqueues
+                // on the thread's last CPU, which is this CPU — no
+                // cross-CPU context race.
+                without_interrupts(|| unsafe {
+                    cur.mark_need_resched();
+                    context_switch();
+                });
+                // Woken: scheduler popped us, set Running, unlinked rq_link.
+                // Loop back to re-check condition.
+                continue;
             }
 
             // 3. Condition is true — actually sleep.
