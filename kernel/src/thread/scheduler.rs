@@ -211,6 +211,8 @@ impl Scheduler {
         self.has_work.store(false, Ordering::Release);
         enable();
 
+        let mut idle_ticks: u32 = 0;
+
         loop {
             // Break out if any work is available
             if self.has_work.load(Ordering::Acquire) {
@@ -237,6 +239,16 @@ impl Scheduler {
 
             // Halt until next interrupt (timer, IPI, device)
             x86_64::instructions::interrupts::enable_and_hlt();
+
+            idle_ticks += 1;
+            // Warn if this CPU has been idle for ~5s (50 × 100ms)
+            if idle_ticks == 50 {
+                println!(
+                    "WARNING: cpu {} idle for ~5s, thread_count={}",
+                    self.cpu,
+                    self.thread_count.load(Ordering::Relaxed)
+                );
+            }
         }
 
         disable();
