@@ -66,6 +66,31 @@ pub enum State {
     Dying = 5,
 }
 
+/// Valid state machine transitions:
+///   Ready   -> Running  (scheduler picks thread)
+///   Running -> Ready    (preempted, re-enqueued)
+///   Running -> Parked   (thread_park / thread_park_while)
+///   Running -> Sleeping (thread_sleep)
+///   Running -> Dying    (thread_exit)
+///   Parked  -> Waking   (try_wake)
+///   Parked  -> Running  (thread_park_while abort)
+///   Sleeping-> Waking   (try_wake)
+///   Waking  -> Ready    (complete_wake)
+fn is_valid_transition(from: State, to: State) -> bool {
+    matches!(
+        (from, to),
+        (State::Ready, State::Running)
+            | (State::Running, State::Ready)
+            | (State::Running, State::Parked)
+            | (State::Running, State::Sleeping)
+            | (State::Running, State::Dying)
+            | (State::Parked, State::Waking)
+            | (State::Parked, State::Running)
+            | (State::Sleeping, State::Waking)
+            | (State::Waking, State::Ready)
+    )
+}
+
 impl From<u8> for State {
     fn from(v: u8) -> Self {
         match v {
@@ -566,6 +591,18 @@ impl Thread {
     }
 
     pub fn free(&self) {
+        debug_assert_eq!(
+            self.state(),
+            State::Dying,
+            "free: thread {} not Dying (state={:?})",
+            self.id.0,
+            self.state()
+        );
+        debug_assert!(
+            !self.rq_link.is_linked(),
+            "free: thread {} still linked on runqueue",
+            self.id.0
+        );
         kthread_stack_free(self.kstack_top);
 
         let Some(user_lock) = &self.user else {
@@ -633,6 +670,14 @@ impl Thread {
 
     #[inline]
     pub fn cas_state(&self, from: State, to: State) -> bool {
+        // Validate state transitions are legal
+        debug_assert!(
+            is_valid_transition(from, to),
+            "cas_state: illegal transition {:?} -> {:?} for thread {}",
+            from,
+            to,
+            self.id.0
+        );
         self.state
             .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
@@ -655,6 +700,11 @@ impl Thread {
                         )
                         .is_ok()
                     {
+                        debug_assert!(
+                            !self.rq_link.is_linked(),
+                            "try_wake: thread {} linked on runqueue while Sleeping/Parked",
+                            self.id.0
+                        );
                         return true;
                     } else {
                         continue; // retry if raced
@@ -663,7 +713,7 @@ impl Thread {
                 x if x == State::Ready as u8 || x == State::Running as u8 => {
                     return false; // already runnable
                 }
-                _ => return false, // Zombie etc.
+                _ => return false, // Waking, Dying, etc.
             }
         }
     }

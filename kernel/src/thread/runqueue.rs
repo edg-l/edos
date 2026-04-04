@@ -3,7 +3,7 @@ use core::{array, cmp, sync::atomic::Ordering};
 use alloc::sync::Arc;
 use intrusive_list::IntrusiveList;
 
-use crate::thread::thread::Thread;
+use crate::thread::thread::{State, Thread};
 
 pub const PRIORITY_LEVELS: usize = 16;
 const BOOST_DELTA: usize = 2;
@@ -27,6 +27,18 @@ impl RunQueue {
 
     /// Enqueue a thread. Consumes one Arc refcount into the list.
     pub(crate) fn enqueue(&mut self, thread: Arc<Thread>, priority: u8, boosted: bool) {
+        debug_assert!(
+            !thread.rq_link.is_linked(),
+            "runqueue::enqueue: thread {} already linked",
+            thread.id.0
+        );
+        debug_assert!(
+            thread.state() == State::Ready,
+            "runqueue::enqueue: thread {} state {:?}, expected Ready",
+            thread.id.0,
+            thread.state()
+        );
+
         let base_idx = priority.min((PRIORITY_LEVELS - 1) as u8) as usize;
         let target_idx = if boosted {
             cmp::min(base_idx + BOOST_DELTA, PRIORITY_LEVELS - 1)
@@ -46,6 +58,11 @@ impl RunQueue {
         for idx in (0..PRIORITY_LEVELS).rev() {
             if let Some(ptr) = self.queues[idx].pop_front() {
                 let thread = unsafe { Arc::from_raw(ptr) };
+                debug_assert!(
+                    !thread.rq_link.is_linked(),
+                    "runqueue::pop_next: thread {} still linked after pop",
+                    thread.id.0
+                );
                 let boosted = thread.rq_boosted.load(Ordering::Relaxed);
                 if boosted {
                     self.boosted_streak += 1;

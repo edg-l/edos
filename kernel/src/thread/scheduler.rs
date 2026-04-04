@@ -775,6 +775,11 @@ impl Scheduler {
 
 pub fn exit_thread(tid: ThreadId) {
     if let Some(t) = THREADS.remove(tid) {
+        debug_assert!(
+            !t.rq_link.is_linked(),
+            "exit_thread: thread {} still linked on runqueue",
+            tid.0
+        );
         t.state.store(State::Dying as u8, Ordering::Release);
         t.free();
         let code = t.exit_code.load(Ordering::Acquire);
