@@ -33,7 +33,7 @@ pub fn _serial_print(args: fmt::Arguments) {
     let secs = uptime_us / 1_000_000;
     let us = uptime_us % 1_000_000;
 
-    let lapic_id = get_percpu_data().lapic_id;
+    let lapic_id = get_percpu_data().lapic_id.get();
 
     SERIAL_DBG
         .get()

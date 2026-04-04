@@ -10,7 +10,7 @@ use crate::{timer::get_timer_calibration, util::per_cpu::get_percpu_data};
 // Get the lapic
 pub fn get_lapic() -> &'static mut LocalApic {
     // TODO: maybe put behind a loc
-    unsafe { get_percpu_data().lapic.as_mut().unwrap() }
+    unsafe { get_percpu_data().lapic.get().as_mut().unwrap() }
 }
 
 pub fn set_apic_timer_and_enable(duration: Duration) {

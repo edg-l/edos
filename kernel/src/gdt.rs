@@ -71,7 +71,7 @@ fn init_tss_for_current_cpu() {
     tss.privilege_stack_table[RING3_STACK_PST_INDEX as usize] = ring3_pst_stack_end;
 
     let pcpu = get_percpu_data();
-    pcpu.tss = tss;
+    unsafe { *pcpu.tss_mut() = tss };
 }
 
 // Global, CPU-independent view of segment selectors. All per-CPU GDTs are
@@ -107,7 +107,7 @@ pub fn init_current_cpu() {
     let data_selector = gdt.append(Descriptor::kernel_data_segment());
     let user_data_selector = gdt.append(Descriptor::user_data_segment());
     let user_code_selector = gdt.append(Descriptor::user_code_segment());
-    let tss_ref = &raw const get_percpu_data().tss;
+    let tss_ref = get_percpu_data().tss_ptr();
     let tss_selector = gdt.append(unsafe { Descriptor::tss_segment_unchecked(tss_ref) });
 
     let sels = GdtSelectors {

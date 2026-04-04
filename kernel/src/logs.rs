@@ -25,9 +25,9 @@ pub fn log(args: core::fmt::Arguments) {
     let us = uptime_us % 1_000_000;
 
     let cpu = get_percpu_data();
-    let cpu_idx = cpu.lapic_id;
+    let cpu_idx = cpu.lapic_id.get();
 
-    if !cpu.scheduler.is_null() {
+    if !cpu.scheduler.get().is_null() {
         let sched = sched();
 
         if let Some(thread) = sched.current_thread() {

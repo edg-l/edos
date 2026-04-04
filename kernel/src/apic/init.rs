@@ -52,7 +52,7 @@ pub unsafe fn enable_lapic() {
         lapic.enable();
     }
 
-    get_percpu_data().lapic = Box::leak(Box::new(lapic));
+    get_percpu_data().lapic.set(Box::leak(Box::new(lapic)));
 }
 
 /// # Safety

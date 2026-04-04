@@ -41,7 +41,7 @@ pub fn init() {
     let sched = Box::new(Scheduler::new(lapic_id));
 
     let ptr: &'static mut _ = Box::leak(sched);
-    get_percpu_data().scheduler = ptr;
+    get_percpu_data().scheduler.set(ptr);
     let _ = SCHEDULERS.write().insert(lapic_id, ptr);
     println!("Saved scheduler on percpu");
     // Enable apic timer
@@ -50,7 +50,13 @@ pub fn init() {
 
 #[inline(always)]
 pub fn sched() -> &'static Scheduler {
-    unsafe { get_percpu_data().scheduler.as_mut().unwrap_unchecked() }
+    unsafe {
+        get_percpu_data()
+            .scheduler
+            .get()
+            .as_mut()
+            .unwrap_unchecked()
+    }
 }
 pub static SCHEDULERS: RwLock<heapless::LinearMap<u32, &'static Scheduler, 128>> =
     RwLock::new(heapless::LinearMap::new());
@@ -138,7 +144,7 @@ impl Scheduler {
     }
 
     pub fn current_thread(&self) -> Option<Arc<Thread>> {
-        get_percpu_data().current_thread.clone()
+        get_percpu_data().current_thread()
     }
 
     pub fn on_tick(&self, context: *mut CpuContext) {
@@ -182,7 +188,7 @@ impl Scheduler {
     fn run_idle(&self) {
         // Mark CPU idle
         self.current.store(0, Ordering::Release);
-        get_percpu_data().current_thread = None;
+        unsafe { get_percpu_data().set_current_thread(None) };
 
         self.has_work.store(false, Ordering::Release);
         enable();
@@ -318,7 +324,7 @@ impl Scheduler {
     unsafe fn context_switch_to(&self, next: Arc<Thread>, context: *mut CpuContext) {
         // Set as current
         self.current.store(next.id.0, Ordering::Release);
-        get_percpu_data().current_thread = Some(next.clone());
+        unsafe { get_percpu_data().set_current_thread(Some(next.clone())) };
         next.cpu.store(self.cpu, Ordering::Release);
 
         // Prepare next
@@ -384,11 +390,11 @@ impl Scheduler {
                 next.id.0, kstack, next.name
             );
         }
-        cpu.tss.privilege_stack_table[0] = VirtAddr::new(kstack);
+        unsafe { cpu.tss_mut().privilege_stack_table[0] = VirtAddr::new(kstack) };
 
         // set kernel gs stack
-        cpu.kernel_rsp = next.kstack_top;
-        cpu.user_rsp = user_rsp;
+        cpu.kernel_rsp.set(next.kstack_top);
+        cpu.user_rsp.set(user_rsp);
         // return handles context switch
     }
 
@@ -416,7 +422,7 @@ impl Scheduler {
                 // will be queued on its target cpu by that cpu’s scheduler
             }
 
-            if self.cpu != get_percpu_data().lapic_id {
+            if self.cpu != get_percpu_data().lapic_id.get() {
                 sched().send_reschedule_ipi(self.cpu);
             }
         })
@@ -632,7 +638,7 @@ impl Scheduler {
         // save_current_thread won't touch the freed thread.
         without_interrupts(|| unsafe {
             self.current.store(0, Ordering::Release);
-            get_percpu_data().current_thread = None;
+            get_percpu_data().set_current_thread(None);
 
             if let Some(t) = THREADS.remove(tid).or_else(|| get_thread_by_id(tid)) {
                 t.exit_code.store(code, Ordering::Release);
@@ -693,7 +699,7 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
         let cpu = get_percpu_data();
         // let sched = cpu.scheduler.as_mut().expect("failed to get scheduler");
 
-        let sched: &'static Scheduler = cpu.scheduler.as_ref().unwrap();
+        let sched: &'static Scheduler = unsafe { cpu.scheduler.get().as_ref().unwrap() };
 
         sched.on_tick(context);
 
