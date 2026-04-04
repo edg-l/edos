@@ -103,6 +103,18 @@ pub struct Scheduler {
 impl Scheduler {
     fn enqueue_ready(sc: &Scheduler, thread: &Arc<Thread>, priority: WakePriority) {
         without_interrupts(|| {
+            debug_assert!(
+                !thread.rq_link.is_linked(),
+                "enqueue_ready: thread {} already linked on runqueue",
+                thread.id.0
+            );
+            let state = thread.state();
+            debug_assert!(
+                state == State::Ready,
+                "enqueue_ready: thread {} in state {:?}, expected Ready",
+                thread.id.0,
+                state
+            );
             let mut rq = sc.rq.lock();
             rq.enqueue(thread.clone(), thread.priority(), priority.is_boosted());
             sc.has_work.store(true, Ordering::Release);
@@ -165,6 +177,11 @@ impl Scheduler {
             }
             let t = sl.pop().unwrap().thread;
             if t.try_wake() {
+                debug_assert!(
+                    !t.rq_link.is_linked(),
+                    "wake_sleepers: thread {} already linked",
+                    t.id.0
+                );
                 t.state.store(State::Ready as u8, Ordering::Release);
                 let mut rq = self.rq.lock();
                 let priority = t.priority();
@@ -250,6 +267,11 @@ impl Scheduler {
             State::Running => {
                 // If another CPU already marked it Parked/Sleeping/Dying, don't requeue
                 if cur.cas_state(State::Running, State::Ready) {
+                    debug_assert!(
+                        !cur.rq_link.is_linked(),
+                        "maybe_preempt: thread {} already linked before re-enqueue",
+                        cur.id.0
+                    );
                     let mut rq = self.rq.lock();
                     rq.enqueue(cur.clone(), cur.priority(), false);
                     self.has_work.store(true, Ordering::Release);
@@ -274,10 +296,21 @@ impl Scheduler {
 
             match next {
                 Some(t) => {
+                    debug_assert!(
+                        !t.rq_link.is_linked(),
+                        "pick_and_run: thread {} still linked after pop",
+                        t.id.0
+                    );
                     if t.cas_state(State::Ready, State::Running) {
                         unsafe { self.context_switch_to(t, context) };
                         return;
                     } else {
+                        let state = t.state();
+                        debug_assert!(
+                            state != State::Dying,
+                            "pick_and_run: popped Dying thread {}",
+                            t.id.0
+                        );
                         continue; // invalid state, try again
                     }
                 }
@@ -327,12 +360,24 @@ impl Scheduler {
     }
 
     unsafe fn context_switch_to(&self, next: Arc<Thread>, context: *mut CpuContext) {
+        debug_assert!(
+            !next.rq_link.is_linked(),
+            "context_switch_to: thread {} rq_link still linked",
+            next.id.0
+        );
+        debug_assert_eq!(
+            next.state(),
+            State::Running,
+            "context_switch_to: thread {} not Running",
+            next.id.0
+        );
+
         // Set as current
         self.current.store(next.id.0, Ordering::Release);
         unsafe { get_percpu_data().set_current_thread(Some(next.clone())) };
         next.cpu.store(self.cpu, Ordering::Release);
 
-        // Prepare next
+        // Prepare next (redundant store, but kept for clarity)
         next.state.store(State::Running as u8, Ordering::Release);
 
         let now = Instant::now();
@@ -414,6 +459,11 @@ impl Scheduler {
     #[inline]
     pub fn spawn_thread(&self, thread: Arc<Thread>) {
         without_interrupts(|| {
+            debug_assert!(
+                !thread.rq_link.is_linked(),
+                "spawn_thread: thread {} already linked",
+                thread.id.0
+            );
             self.thread_count.fetch_add(1, Ordering::AcqRel);
             thread.state.store(State::Ready as u8, Ordering::Release);
             thread.cpu.store(self.cpu, Ordering::Release);
@@ -492,6 +542,12 @@ impl Scheduler {
         };
 
         loop {
+            debug_assert!(
+                !cur.rq_link.is_linked(),
+                "thread_park_while: thread {} rq_link linked at loop start",
+                cur.id.0
+            );
+
             // 1. Transition Running -> Parked
             if !cur.cas_state(State::Running, State::Parked) {
                 return; // Dying, Waking, etc.
