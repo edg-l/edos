@@ -110,6 +110,9 @@ impl Scheduler {
             thread.state.store(State::Ready as u8, Ordering::Release);
             // Enqueue on the waker's CPU for better cache locality.
             Self::enqueue_ready(self, thread, priority);
+            // Self-IPI to trigger a reschedule after the current interrupt
+            // returns, so the newly enqueued thread runs promptly.
+            self.send_reschedule_ipi(self.cpu);
         });
     }
 
@@ -623,23 +626,23 @@ impl Scheduler {
     pub fn thread_exit(&self, code: i32) -> ! {
         let tid = self.current_thread_id().unwrap();
 
-        // Do heavy cleanup with interrupts enabled. The thread is marked Dying
-        // and removed from THREADS so no scheduler will pick it up.
-        let thread = THREADS.remove(tid).or_else(|| get_thread_by_id(tid));
-        if let Some(t) = &thread {
-            t.exit_code.store(code, Ordering::Release);
-            t.state.store(State::Dying as u8, Ordering::Release);
-            t.free();
-            record_thread_exit(tid, code);
-            let _ = THREADS.remove_info(tid);
-            self.thread_count.fetch_sub(1, Ordering::Relaxed);
-        }
-
-        // Detach from per-CPU slot before context_switch so
+        // Must run with interrupts disabled: free() is not preemption-safe
+        // (if preempted, the Dying thread is never rescheduled and cleanup
+        // never finishes). Detach from per-CPU slot first so
         // save_current_thread won't touch the freed thread.
         without_interrupts(|| unsafe {
             self.current.store(0, Ordering::Release);
             get_percpu_data().current_thread = None;
+
+            if let Some(t) = THREADS.remove(tid).or_else(|| get_thread_by_id(tid)) {
+                t.exit_code.store(code, Ordering::Release);
+                t.state.store(State::Dying as u8, Ordering::Release);
+                t.free();
+                record_thread_exit(tid, code);
+                let _ = THREADS.remove_info(tid);
+                self.thread_count.fetch_sub(1, Ordering::Relaxed);
+            }
+
             context_switch();
         });
         loop {
