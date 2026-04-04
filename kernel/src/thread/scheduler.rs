@@ -6,8 +6,9 @@ use core::{
 };
 
 use alloc::{boxed::Box, sync::Arc};
+use crossbeam_queue::ArrayQueue;
 use heapless::{BinaryHeap, binary_heap::Min};
-use spin::{Mutex, RwLock};
+use spin::{Mutex, Once, RwLock};
 use x86_64::{
     VirtAddr,
     instructions::interrupts::{disable, enable, enable_and_hlt, without_interrupts},
@@ -750,10 +751,10 @@ impl Scheduler {
     pub fn thread_exit(&self, code: i32) -> ! {
         let tid = self.current_thread_id().unwrap();
 
-        // Must run with interrupts disabled: free() is not preemption-safe
-        // (if preempted, the Dying thread is never rescheduled and cleanup
-        // never finishes). Detach from per-CPU slot first so
-        // save_current_thread won't touch the freed thread.
+        // Fast path with interrupts disabled: mark Dying, detach from
+        // per-CPU, enqueue on reaper for deferred cleanup, context_switch.
+        // Heavy cleanup (free, unmap, etc.) happens in the reaper thread
+        // with interrupts enabled.
         without_interrupts(|| unsafe {
             self.current.store(0, Ordering::Release);
             get_percpu_data().set_current_thread(None);
@@ -761,10 +762,8 @@ impl Scheduler {
             if let Some(t) = THREADS.remove(tid).or_else(|| get_thread_by_id(tid)) {
                 t.exit_code.store(code, Ordering::Release);
                 t.state.store(State::Dying as u8, Ordering::Release);
-                t.free();
-                record_thread_exit(tid, code);
-                let _ = THREADS.remove_info(tid);
                 self.thread_count.fetch_sub(1, Ordering::Relaxed);
+                reaper_enqueue(t);
             }
 
             context_switch();
@@ -830,7 +829,59 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
     }
 }
 
-// move to file
+// ---------------------------------------------------------------------------
+// Reaper — deferred cleanup of dead threads
+// ---------------------------------------------------------------------------
+
+/// Queue of dead threads awaiting cleanup. Lock-free, allocation-free on push.
+static REAPER_QUEUE: Once<ArrayQueue<Arc<Thread>>> = Once::new();
+static REAPER_TID: AtomicU64 = AtomicU64::new(0);
+
+/// Initialize the reaper subsystem. Call once from the BSP after scheduler init.
+pub fn init_reaper() {
+    REAPER_QUEUE.call_once(|| ArrayQueue::new(256));
+
+    let tid =
+        crate::thread::util::queue_spawn_kthread_named("reaper", reaper_thread as *const () as u64);
+    REAPER_TID.store(tid.0, Ordering::Release);
+    println!("Reaper thread started (tid={})", tid.0);
+}
+
+fn reaper_queue() -> &'static ArrayQueue<Arc<Thread>> {
+    REAPER_QUEUE.call_once(|| ArrayQueue::new(256))
+}
+
+extern "C" fn reaper_thread() -> ! {
+    loop {
+        sched().thread_park_while(|| reaper_queue().is_empty());
+
+        while let Some(t) = reaper_queue().pop() {
+            let tid = t.id;
+            let code = t.exit_code.load(Ordering::Acquire);
+            t.free();
+            record_thread_exit(tid, code);
+            let _ = THREADS.remove_info(tid);
+        }
+    }
+}
+
+/// Push a dead thread onto the reaper queue for deferred cleanup.
+/// Called from thread_exit with interrupts disabled — must not allocate.
+fn reaper_enqueue(thread: Arc<Thread>) {
+    debug_assert_eq!(thread.state(), State::Dying);
+    if reaper_queue().push(thread).is_err() {
+        // Queue full — should not happen with 256 slots, but don't lose the thread.
+        // The thread's resources will leak. Log it.
+        println!("WARNING: reaper queue full, thread cleanup leaked");
+    }
+    // Wake the reaper thread.
+    let reaper_tid = REAPER_TID.load(Ordering::Acquire);
+    if reaper_tid != 0 {
+        sched().wake_thread(ThreadId(reaper_tid), WakePriority::Normal);
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 struct SleepEntry {

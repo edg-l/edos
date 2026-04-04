@@ -127,6 +127,7 @@ fn main() -> ! {
 
     // Init scheduler
     thread::scheduler::init();
+    thread::scheduler::init_reaper();
 
     let now = Instant::now();
 
