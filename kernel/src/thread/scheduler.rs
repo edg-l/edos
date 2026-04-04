@@ -6,7 +6,7 @@ use core::{
 };
 
 use alloc::{boxed::Box, sync::Arc};
-use heapless::{BinaryHeap, binary_heap::Max};
+use heapless::{BinaryHeap, binary_heap::Min};
 use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
@@ -91,7 +91,7 @@ pub struct Scheduler {
     // Time accounting
     pub default_timeslice: Duration,
 
-    sleepers: Mutex<BinaryHeap<SleepEntry, Max, 1024>>,
+    sleepers: Mutex<BinaryHeap<SleepEntry, Min, 1024>>,
 
     pub earliest_deadline: AtomicU64,
 
@@ -389,9 +389,6 @@ impl Scheduler {
         unsafe { get_percpu_data().set_current_thread(Some(next.clone())) };
         next.cpu.store(self.cpu, Ordering::Release);
 
-        // Prepare next (redundant store, but kept for clarity)
-        next.state.store(State::Running as u8, Ordering::Release);
-
         let now = Instant::now();
         next.begin_run(now.tick());
         let mut deadline = now + self.default_timeslice;
@@ -639,13 +636,13 @@ impl Scheduler {
                     cur.state.store(State::Running as u8, Ordering::Release);
                     return;
                 }
-            }
-
-            // Update earliest deadline if this sleep is sooner
-            let current_earliest = self.earliest_deadline.load(Ordering::Acquire);
-            if deadline_tick < current_earliest {
-                self.earliest_deadline
-                    .store(deadline_tick, Ordering::Release);
+                // Update earliest deadline while still holding the sleepers lock,
+                // so a timer interrupt on another CPU can't miss this deadline.
+                let current_earliest = self.earliest_deadline.load(Ordering::Acquire);
+                if deadline_tick < current_earliest {
+                    self.earliest_deadline
+                        .store(deadline_tick, Ordering::Release);
+                }
             }
 
             cur.mark_need_resched();
@@ -841,10 +838,10 @@ struct SleepEntry {
     thread: Arc<Thread>,
 }
 
-// Reverse ordering so BinaryHeap becomes min-heap on deadline
+// Natural ordering: smallest deadline first (used with BinaryHeap<_, Min>).
 impl Ord for SleepEntry {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        other.deadline.cmp(&self.deadline)
+        self.deadline.cmp(&other.deadline)
     }
 }
 impl PartialOrd for SleepEntry {

@@ -34,6 +34,11 @@ impl<T> Subscriber<T> {
     }
 
     pub fn recv(&self) -> T {
+        debug_assert_eq!(
+            sched().current_thread_id(),
+            Some(self.owner),
+            "Subscriber::recv called from non-owner thread"
+        );
         loop {
             if let Some(msg) = self.queue.lock().pop_front() {
                 return msg;
@@ -44,14 +49,18 @@ impl<T> Subscriber<T> {
 
     #[allow(dead_code)]
     pub fn recv_timeout(&self, dur: Duration) -> Option<T> {
-        let sched = sched();
+        debug_assert_eq!(
+            sched().current_thread_id(),
+            Some(self.owner),
+            "Subscriber::recv_timeout called from non-owner thread"
+        );
 
         if let Some(msg) = self.queue.lock().pop_front() {
             return Some(msg);
         }
-        // park until either wake or timeout
-        sched.thread_sleep(dur);
-        return self.queue.lock().pop_front();
+        // Sleep until either wake or timeout, then re-check.
+        sched().thread_sleep(dur);
+        self.queue.lock().pop_front()
     }
 }
 

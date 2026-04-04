@@ -130,6 +130,15 @@ impl WaitQueue {
             }
         });
 
+        // Always remove our tid from the wait queue after waking,
+        // regardless of how we were woken (park, sleep, or timeout).
+        interrupts::without_interrupts(|| {
+            let mut q = self.inner.lock();
+            if let Some(pos) = q.iter().position(|&id| id == tid) {
+                q.remove(pos);
+            }
+        });
+
         let Some(action) = action else {
             return WaitOutcome::Ready;
         };
@@ -140,15 +149,7 @@ impl WaitQueue {
 
         match action {
             SleepAction::Park => WaitOutcome::Parked,
-            SleepAction::Sleep(_) => {
-                interrupts::without_interrupts(|| {
-                    let mut q = self.inner.lock();
-                    if let Some(pos) = q.iter().position(|&id| id == tid) {
-                        q.remove(pos);
-                    }
-                });
-                WaitOutcome::TimedOut
-            }
+            SleepAction::Sleep(_) => WaitOutcome::TimedOut,
         }
     }
 }
