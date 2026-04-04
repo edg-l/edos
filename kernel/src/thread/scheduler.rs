@@ -475,6 +475,44 @@ impl Scheduler {
         })
     }
 
+    /// Park the current thread while `should_park` returns true.
+    ///
+    /// Sets state to Parked *before* calling the closure, so any concurrent
+    /// `try_wake()` sees Parked and succeeds. This closes the lost-wakeup
+    /// window that exists with `thread_park()`.
+    pub fn thread_park_while<F: FnMut() -> bool>(&self, mut should_park: F) {
+        let Some(cur) = self.current_thread() else {
+            return;
+        };
+
+        loop {
+            // 1. Transition Running -> Parked
+            if !cur.cas_state(State::Running, State::Parked) {
+                return; // Dying, Waking, etc.
+            }
+
+            // 2. Check condition with state already Parked.
+            //    Any wakeup arriving now will succeed via try_wake().
+            if !should_park() {
+                // Condition is false — revert to Running.
+                if !cur.cas_state(State::Parked, State::Running) {
+                    // Wakeup arrived between step 1 and here (Parked -> Waking).
+                    // The waker already enqueued us. Just return.
+                    return;
+                }
+                return;
+            }
+
+            // 3. Condition is true — actually sleep.
+            without_interrupts(|| unsafe {
+                cur.mark_need_resched();
+                context_switch();
+            });
+
+            // 4. Woken up (state is Running again). Loop to re-check condition.
+        }
+    }
+
     #[inline]
     pub fn thread_sleep(&self, dt: Duration) {
         let Some(cur) = self.current_thread() else {

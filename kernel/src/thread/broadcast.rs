@@ -34,12 +34,11 @@ impl<T> Subscriber<T> {
     }
 
     pub fn recv(&self) -> T {
-        let sched = sched();
         loop {
             if let Some(msg) = self.queue.lock().pop_front() {
                 return msg;
             }
-            sched.thread_park();
+            sched().thread_park_while(|| self.queue.lock().is_empty());
         }
     }
 

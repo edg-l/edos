@@ -86,6 +86,8 @@ pub extern "C" fn driver_main() -> ! {
 
     let mut decoded_events: Vec<DecodedKey> = Vec::new();
     loop {
+        sched().thread_park_while(|| queue.is_empty());
+
         while let Some(scancode) = queue.pop() {
             if let Ok(Some(event)) = keyboard.add_byte(scancode)
                 && let Some(key_event) = keyboard.process_keyevent(event)
@@ -101,7 +103,6 @@ pub extern "C" fn driver_main() -> ! {
         }
 
         KEYBOARD_BROADCAST.cleanup();
-        sched().thread_park();
     }
 }
 

@@ -281,7 +281,8 @@ pub extern "C" fn driver_main() -> ! {
     let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
 
     loop {
-        // Drain queue
+        sched().thread_park_while(|| queue.is_empty());
+
         while let Some(byte) = queue.pop() {
             // Sync: first byte must have bit 3 set (always-1 bit in PS/2 protocol)
             if packet_idx == 0 && (byte & 0x08) == 0 {
@@ -298,7 +299,6 @@ pub extern "C" fn driver_main() -> ! {
         }
 
         MOUSE_BROADCAST.cleanup();
-        sched().thread_park();
     }
 }
 

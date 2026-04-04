@@ -707,13 +707,9 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                     continue;
                 }
 
-                // Re-check poll state after arming to close race window.
-                ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
-                if ready > 0 {
-                    break;
-                }
-
-                sched.thread_park();
+                sched.thread_park_while(|| {
+                    base_ready + refresh_poll_contexts(&mut contexts, &mut fds) == 0
+                });
             }
         }
     }

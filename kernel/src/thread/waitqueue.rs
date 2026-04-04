@@ -122,7 +122,7 @@ impl WaitQueue {
 
             match chosen {
                 SleepAction::Park => {
-                    sched().thread_park();
+                    sched().thread_park_while(|| !ready());
                 }
                 SleepAction::Sleep(dt) => {
                     sched().thread_sleep(dt);

@@ -285,18 +285,15 @@ extern "C" fn input_routing_thread() -> ! {
     let keyboard_sub: Arc<Subscriber<DecodedKey>> = KEYBOARD_BROADCAST.subscribe();
 
     loop {
-        // Process mouse events
+        sched().thread_park_while(|| mouse_sub.is_empty() && keyboard_sub.is_empty());
+
         while let Some(mouse_event) = mouse_sub.try_recv() {
             handle_mouse_event(mouse_event);
         }
 
-        // Process keyboard events
         while let Some(key_event) = keyboard_sub.try_recv() {
             handle_keyboard_event(key_event);
         }
-
-        // Park until woken by new input
-        sched().thread_park();
     }
 }
 
