@@ -107,13 +107,9 @@ impl Scheduler {
 
     fn complete_wake(&self, thread: &Arc<Thread>, priority: WakePriority) {
         without_interrupts(|| {
-            let cpu = thread.cpu.load(Ordering::Acquire);
-            let sc = sched_for_cpu(cpu);
             thread.state.store(State::Ready as u8, Ordering::Release);
-            Self::enqueue_ready(sc, thread, priority);
-            if cpu != self.cpu {
-                self.send_reschedule_ipi(cpu);
-            }
+            // Enqueue on the waker's CPU for better cache locality.
+            Self::enqueue_ready(self, thread, priority);
         });
     }
 

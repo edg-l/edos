@@ -86,25 +86,21 @@ pub fn pick_sched() -> &'static Scheduler {
     let num_cpus = NUM_CPUS.load(Ordering::Relaxed);
 
     let schedulers = SCHEDULERS.read();
-    let mut id = 0;
+    let mut best_id = 0;
     let mut min_count = u64::MAX;
     for i in 0..num_cpus {
         if let Some(sched) = schedulers.get(&(i as u32)).cloned() {
             let count = sched.thread_count.load(Ordering::Acquire);
-
             if count < min_count {
                 min_count = count;
-                id = i;
+                best_id = i;
             }
         }
     }
 
-    let sched: &'static Scheduler = *SCHEDULERS
-        .read()
-        .get(&(id as u32))
-        .expect("failed to find scheduler") as _;
-
-    sched
+    schedulers
+        .get(&(best_id as u32))
+        .expect("failed to find scheduler")
 }
 
 /// Exits a kthread.
@@ -140,7 +136,6 @@ pub fn thread_stack_free(manager: &mut MemoryManager, stack_top: u64) {
 }
 
 pub fn queue_spawn_thread(thread: Arc<Thread>) -> ThreadId {
-    let sched = pick_sched();
     let id = thread.id;
     let sched = pick_sched();
     sched.spawn_thread(thread);
