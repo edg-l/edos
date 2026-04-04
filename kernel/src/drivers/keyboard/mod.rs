@@ -53,9 +53,10 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
             break; // no data available
         }
         if status & 0x20 != 0 {
-            // Mouse byte — read and discard so it doesn't block
-            // subsequent keyboard bytes in the buffer.
-            let _ = unsafe { data_port.read() };
+            // Mouse byte — read and forward to the mouse driver so it
+            // doesn't block subsequent keyboard bytes in the buffer.
+            let byte: u8 = unsafe { data_port.read() };
+            crate::drivers::mouse::push_mouse_byte(byte);
             continue;
         }
 

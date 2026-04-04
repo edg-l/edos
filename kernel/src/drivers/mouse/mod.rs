@@ -105,6 +105,17 @@ static HAS_WHEEL: AtomicU8 = AtomicU8::new(0);
 // Driver thread ID for waking
 pub static MOUSE_THREAD_ID: Once<ThreadId> = Once::new();
 
+/// Push a mouse byte from an external handler (e.g. keyboard IRQ
+/// draining a mouse byte from the shared 8042 buffer).
+pub fn push_mouse_byte(byte: u8) {
+    if let Some(queue) = SCANCODE_QUEUE.get() {
+        let _ = queue.push(byte);
+        if let Some(tid) = MOUSE_THREAD_ID.get() {
+            sched().wake_thread_irq(*tid, WakePriority::Interrupt);
+        }
+    }
+}
+
 // Polling support
 static MOUSE_POLLERS: BlockingMutex<Vec<(PollKey, Arc<PollEntry>, Arc<Subscriber<MouseEvent>>)>> =
     BlockingMutex::new(Vec::new());
