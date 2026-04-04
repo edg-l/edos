@@ -1,0 +1,319 @@
+## Scheduler & Thread System Review
+
+### CRITICAL — Likely Deadlocks / Hangs
+
+#### 1. `thread_park()` infinite loop if state is not `Running` (`scheduler.rs:442-466`)
+
+```rust
+pub fn thread_park(&self) {
+    let Some(cur) = self.current_thread() else { return; };
+    loop {
+        if cur.state.compare_exchange(Running, Parked, ...).is_ok() {
+            break;
+        }
+        // NO exit for non-Running states → infinite loop
+    }
+```
+
+If another CPU marks the thread `Dying` (e.g., via `exit_thread`), or a wakeup transitions it to `Waking`, this CAS never succeeds and **loops forever**. Unlike `thread_sleep()` which has an `else { break; }`, `thread_park` has no escape hatch.
+
+**Fix:** Add a match on the current state — bail out if `Dying`, and handle `Waking` explicitly.
+
+---
+
+#### 2. `thread_sleep()` silently drops sleep if heap is full (`scheduler.rs:500-507`)
+
+```rust
+sleepers.push(sleep_entry).ok(); // ignore if heap is full
+```
+
+The `sleepers` heap is capped at 1024 entries. If full, the thread transitions to `Sleeping` state but is **never added to the sleepers heap**. It will never be woken by `wake_sleepers()`. The thread is **permanently stuck** unless something else explicitly wakes it. On a system with many threads doing timed waits, this will silently hang threads.
+
+**Fix:** Either grow the heap dynamically (use a `BinaryHeap` from `alloc`), or return an error / fall back to parking with a check.
+
+---
+
+#### 3. `wake_thread_slow()` can livelock (`scheduler.rs:543-576`)
+
+```rust
+State::Running => {
+    thread.mark_need_resched();
+    let cpu = thread.cpu.load(Ordering::Acquire);
+    if cpu != self.cpu { self.send_reschedule_ipi(cpu); }
+    spin_loop();  // loops back to top
+}
+```
+
+If the target thread is `Running` on another CPU and that CPU's timer interrupt is somehow delayed or broken (e.g., APIC timer misconfigured), this **spins forever** on the calling CPU, blocking the calling thread. There's no iteration limit or fallback.
+
+**Fix:** Add a bounded retry count, and after N iterations, just enqueue a deferred wake and yield.
+
+---
+
+#### 4. `thread_exit()` does heavy work with interrupts disabled (`scheduler.rs:604-622`)
+
+```rust
+without_interrupts(|| unsafe {
+    t.free();                    // Unmaps memory, deallocates frames, cleans up windows
+    record_thread_exit(tid, code);
+    let _ = THREADS.remove_info(tid);
+    ...
+    context_switch();
+});
+```
+
+`t.free()` (`thread.rs:543-607`) does **massive work**: acquires `user.write()` (spinning RwLock), locks `memory_manager` (spin Mutex), iterates and unmaps all memory regions, deallocates shared memory, cleans up windows, deallocates the PML4 frame, and calls `switch_to_kernel_page()` with a global TLB flush. All of this runs with **interrupts disabled**, blocking the APIC timer on this CPU for potentially milliseconds. Other CPUs sending IPIs to this CPU will be ignored.
+
+**Fix:** Do the heavy cleanup with interrupts enabled. Only disable interrupts for the state transition and context switch. Consider deferring cleanup to a reaper thread.
+
+---
+
+#### 5. Nested lock acquisition: `save_current_thread` takes `user.write()` during scheduler tick (`scheduler.rs:297-317`)
+
+```rust
+fn save_current_thread(&self, context: *mut CpuContext) {
+    if let Some(current) = self.current_thread() {
+        *current.ctx.lock() = (*context).clone();       // spin::Mutex
+        if let Some(user) = &current.user {
+            let mut user = user.write();                  // spin::RwLock
+            save_fpu_state(&mut user.fpu);
+        }
+    }
+}
+```
+
+This runs inside `on_tick` → `maybe_preempt` → `pick_and_run`, all under `without_interrupts`. If a syscall on another CPU holds a **read lock** on this same thread's `user` RwLock (e.g., reading `cr3` for page table access), `user.write()` here will **spin with interrupts disabled** waiting for the reader. The reader on the other CPU may itself be waiting for something that requires this CPU's scheduler to run — classic priority inversion / deadlock.
+
+Same issue in `context_switch_to` at line 367 which also takes `user.write()` for FPU restore.
+
+**Fix:** Move FPU save/restore out of the RwLock. Store FPU state in per-CPU data or in a separate lock from the `UserThread`. The FPU state is inherently per-CPU — only the currently running CPU touches it.
+
+---
+
+### HIGH — Data Races / Logic Bugs
+
+#### 6. `PerCpuData` is `&'static mut` returned to any caller — no Send/Sync safety (`per_cpu.rs:47-51`)
+
+```rust
+pub fn get_percpu_data() -> &'static mut PerCpuData {
+    let base = GsBase::read().as_u64() as *mut PerCpuData;
+    unsafe { &mut *base }
+}
+```
+
+Multiple callers on the **same CPU** can hold `&'static mut` references to the same `PerCpuData` simultaneously. This is immediate UB. For example, `schedule()` calls `get_percpu_data()`, and `context_switch_to()` also calls `get_percpu_data()` — both hold `&mut` to the same data. In Rust's aliasing model, this is unsound.
+
+**Fix:** Return `*mut PerCpuData` or use a wrapper type that returns `&PerCpuData` (shared ref) with interior mutability for mutable fields.
+
+---
+
+#### 7. `complete_wake` reads `thread.cpu` which may be stale (`scheduler.rs:108-118`)
+
+```rust
+fn complete_wake(&self, thread: &Arc<Thread>, priority: WakePriority) {
+    without_interrupts(|| {
+        let cpu = thread.cpu.load(Ordering::Acquire);
+        let sc = sched_for_cpu(cpu);
+        thread.state.store(State::Ready as u8, Ordering::Release);
+        Self::enqueue_ready(sc, thread, priority);
+```
+
+The thread's `cpu` field reflects which CPU it **last ran on**, not where it should be enqueued. After being parked and woken, the CPU affinity should ideally determine placement. More critically: the thread is enqueued on CPU X's runqueue, but if CPU X is busy, no one migrates it. There's no work-stealing.
+
+Also, between reading `cpu` and enqueuing, the thread could theoretically be picked up by another scheduler (if it was already on a runqueue). The `without_interrupts` prevents this on the local CPU but not on remote CPUs.
+
+---
+
+#### 8. `Broadcaster::cleanup()` is a no-op (`broadcast.rs:130-148`)
+
+```rust
+pub fn cleanup(&self) {
+    let subs = self.subs.read();
+    let mut to_remove = Vec::new();
+    for sub in subs.iter() {
+        if ... { to_remove.push(*sub.0); }
+    }
+    // to_remove is NEVER USED — dead subscribers are never removed
+}
+```
+
+Dead subscribers accumulate forever. Every `broadcast()` call iterates them, wasting time and attempting to wake non-existent threads.
+
+**Fix:** Actually use `to_remove` — drop the read lock, take a write lock, and remove the dead entries.
+
+---
+
+#### 9. `queue_spawn_thread` calls `pick_sched()` twice (`util.rs:142-148`)
+
+```rust
+pub fn queue_spawn_thread(thread: Arc<Thread>) -> ThreadId {
+    let sched = pick_sched();  // UNUSED, wasted work
+    let id = thread.id;
+    let sched = pick_sched();  // shadows the first
+    sched.spawn_thread(thread);
+    id
+}
+```
+
+Copy-paste bug. The first `pick_sched()` acquires `SCHEDULERS.read()` for nothing.
+
+---
+
+#### 10. `pick_sched` acquires `SCHEDULERS.read()` twice (`util.rs:85-108`)
+
+```rust
+pub fn pick_sched() -> &'static Scheduler {
+    let schedulers = SCHEDULERS.read();    // first lock
+    // ... find best CPU ...
+    let sched = *SCHEDULERS.read()         // second lock, map could change
+        .get(&(id as u32))...;
+    sched
+}
+```
+
+Takes the read lock twice. Between the two, the map could theoretically change. Should use one lock for the entire operation.
+
+---
+
+#### 11. `context_switch_to` acquires `ctx.lock()` twice (`scheduler.rs:357, 391`)
+
+```rust
+unsafe { *context = next.ctx.lock().clone() };   // line 357
+// ... page table switch, FPU restore ...
+cpu.user_rsp = next.ctx.lock().interrupt_stack_frame.stack_pointer.as_u64();  // line 391
+```
+
+The second lock is taken after a page table switch. Between the two locks, nothing should modify `ctx` (the thread is transitioning to Running on this CPU), but it's fragile. If the thread is somehow woken on another CPU between these points (shouldn't happen, but...), the `ctx` could be stale.
+
+**Fix:** Take the lock once, extract both values.
+
+---
+
+### MEDIUM — Correctness Concerns
+
+#### 12. `WaitQueue::wait_internal` — timeout path doesn't remove from queue on Park wake (`waitqueue.rs:84-154`)
+
+```rust
+fn wait_internal<F>(&self, ready: F, timeout: Option<Duration>) -> WaitOutcome {
+    // ... add tid to queue, then park or sleep ...
+
+    let Some(action) = action else { return WaitOutcome::Ready; };
+
+    if ready() { return WaitOutcome::Parked; }  // tid may still be in the queue!
+
+    match action {
+        SleepAction::Park => WaitOutcome::Parked,  // tid still in queue!
+        SleepAction::Sleep(_) => {
+            // removes from queue only for sleep timeout
+        }
+    }
+}
+```
+
+When a parked thread is woken (not timed out), it returns `WaitOutcome::Parked` but **never removes its tid from the wait queue**. If the `WaitQueue` is later used for `wake_one()`, it will try to wake this (already awake) thread again, causing spurious wake attempts. Over time the queue fills with stale tids.
+
+**Fix:** Always remove the tid from the queue after waking, regardless of path.
+
+---
+
+#### 13. `Subscriber::recv()` can park a non-owner thread permanently (`broadcast.rs:36-44`)
+
+```rust
+pub fn recv(&self) -> T {
+    loop {
+        if let Some(msg) = self.queue.lock().pop_front() {
+            return msg;
+        }
+        sched.thread_park();  // parks the CALLING thread
+    }
+}
+```
+
+`broadcast()` wakes `sub.owner` — the thread that originally subscribed. If a different thread calls `recv()` on this subscriber (possible since it's `Arc`), it parks itself but **nobody will ever wake it** since the broadcaster wakes the owner, not the caller.
+
+---
+
+#### 14. State set redundancy in `context_switch_to` (`scheduler.rs:327`)
+
+```rust
+// In pick_and_run:
+if t.cas_state(State::Ready, State::Running) {  // sets Running
+    self.context_switch_to(t, context);
+
+// In context_switch_to:
+next.state.store(State::Running as u8, ...);     // redundant store
+```
+
+Minor but could mask bugs. The redundant store means even if something changed the state between the CAS and here (which shouldn't happen with interrupts disabled), it would be silently overwritten.
+
+---
+
+#### 15. `SleepEntry` Ord reversal for min-heap is fragile (`scheduler.rs:684-698`)
+
+```rust
+impl Ord for SleepEntry {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        other.deadline.cmp(&self.deadline)  // reversed for min-heap via Max
+    }
+}
+```
+
+Using `BinaryHeap<_, Max>` with reversed `Ord` to get min-heap behavior. This works but is error-prone — any future code that assumes natural ordering will break. Consider using `BinaryHeap<_, Min>` if available, or documenting heavily.
+
+---
+
+#### 16. `earliest_deadline` update race in `thread_sleep` (`scheduler.rs:510-514`)
+
+The `earliest_deadline` is updated after releasing the `sleepers` lock. A timer interrupt on another CPU could read `earliest_deadline` (still the old value) and miss this closer deadline, causing the sleep to wake late. The update should happen while still holding the sleepers lock, or atomically with a CAS loop.
+
+---
+
+### LOW — Style / Robustness
+
+#### 17. No work-stealing between CPUs
+
+Threads are always enqueued on the CPU they last ran on (`complete_wake` uses `thread.cpu`). There's no mechanism for an idle CPU to steal work from a busy CPU's runqueue. This can lead to load imbalance.
+
+#### 18. `Subscriber::recv_timeout` has a single-shot check (`broadcast.rs:47-56`)
+
+```rust
+pub fn recv_timeout(&self, dur: Duration) -> Option<T> {
+    if let Some(msg) = self.queue.lock().pop_front() {
+        return Some(msg);
+    }
+    sched.thread_sleep(dur);
+    return self.queue.lock().pop_front();  // only checks once after wake
+}
+```
+
+After waking from sleep, it checks the queue exactly once. If the message arrived and was consumed by a spurious check, or if the wake was for a different reason, this returns `None` even though more time could remain.
+
+#### 19. `SCHEDULERS` uses `RwLock` (spinning) accessed from interrupt-disabled contexts
+
+Since `sched_for_cpu` and `pick_sched` acquire `SCHEDULERS.read()`, and these can be called from `without_interrupts` blocks, a writer (adding a new scheduler during SMP init) could cause other CPUs to spin with interrupts disabled.
+
+---
+
+### Summary Table
+
+| # | Severity | Issue | File:Line |
+|---|----------|-------|-----------|
+| 1 | CRITICAL | `thread_park` infinite loop on non-Running state | scheduler.rs:447-459 |
+| 2 | CRITICAL | Sleep silently dropped when heap full, thread stuck forever | scheduler.rs:507 |
+| 3 | CRITICAL | `wake_thread_slow` unbounded spin on Running target | scheduler.rs:561-574 |
+| 4 | CRITICAL | `thread_exit` does heavy cleanup with interrupts disabled | scheduler.rs:604-622 |
+| 5 | CRITICAL | `save_current_thread`/`context_switch_to` take `user.write()` in scheduler tick, priority inversion | scheduler.rs:303,367 |
+| 6 | HIGH | `get_percpu_data` returns multiple `&mut`, UB | per_cpu.rs:47 |
+| 7 | HIGH | `complete_wake` uses potentially stale CPU id | scheduler.rs:110 |
+| 8 | HIGH | `Broadcaster::cleanup` is a no-op | broadcast.rs:130 |
+| 9 | HIGH | `queue_spawn_thread` calls `pick_sched` twice | util.rs:142 |
+| 10 | HIGH | `pick_sched` takes read lock twice | util.rs:85 |
+| 11 | HIGH | `context_switch_to` locks `ctx` twice | scheduler.rs:357,391 |
+| 12 | MEDIUM | WaitQueue doesn't clean up tid on park-wake path | waitqueue.rs:137-141 |
+| 13 | MEDIUM | `Subscriber::recv` can permanently park non-owner threads | broadcast.rs:36 |
+| 14 | MEDIUM | Redundant state store in `context_switch_to` | scheduler.rs:327 |
+| 15 | MEDIUM | Reversed Ord for min-heap is fragile | scheduler.rs:684 |
+| 16 | MEDIUM | `earliest_deadline` update race in `thread_sleep` | scheduler.rs:510-514 |
+| 17 | LOW | No work-stealing between CPUs | scheduler design |
+| 18 | LOW | `recv_timeout` single-shot check | broadcast.rs:47 |
+| 19 | LOW | `SCHEDULERS` RwLock under interrupt-disabled context | scheduler.rs:55 |
