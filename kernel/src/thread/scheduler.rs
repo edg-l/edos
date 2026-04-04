@@ -115,10 +115,9 @@ impl Scheduler {
         without_interrupts(|| {
             thread.state.store(State::Ready as u8, Ordering::Release);
             // Enqueue on the waker's CPU for better cache locality.
+            // enqueue_ready marks the running thread NEED_RESCHED so the
+            // next timer tick will preempt into the woken thread.
             Self::enqueue_ready(self, thread, priority);
-            // Self-IPI to trigger a reschedule after the current interrupt
-            // returns, so the newly enqueued thread runs promptly.
-            self.send_reschedule_ipi(self.cpu);
         });
     }
 
