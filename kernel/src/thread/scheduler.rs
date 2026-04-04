@@ -499,11 +499,18 @@ impl Scheduler {
             //    Any wakeup arriving now will succeed via try_wake().
             if !should_park() {
                 // Condition is false — revert to Running.
-                if !cur.cas_state(State::Parked, State::Running) {
-                    // Wakeup arrived between step 1 and here (Parked -> Waking).
-                    // The waker already enqueued us. Just return.
+                if cur.cas_state(State::Parked, State::Running) {
                     return;
                 }
+                // CAS failed: a waker set us to Waking and enqueued us.
+                // We MUST context-switch so the scheduler properly handles
+                // the enqueued entry. Otherwise we'd be running on this CPU
+                // while also on a runqueue — another CPU could pick us up
+                // and we'd run on two CPUs simultaneously.
+                without_interrupts(|| unsafe {
+                    cur.mark_need_resched();
+                    context_switch();
+                });
                 return;
             }
 
