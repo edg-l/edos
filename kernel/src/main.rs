@@ -362,6 +362,38 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     // Note: do not add complex calls or memory read or scheduler reads, otherwise recursive faults can happen.
     println!("KERNEL PANIC:");
     println!("{info:#?}");
+
+    // Walk the frame pointer chain to print a backtrace.
+    // With force-frame-pointers = true, RBP forms a linked list:
+    //   [RBP] -> saved_rbp | [RBP+8] -> return_address
+    const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+    const MAX_FRAMES: usize = 32;
+
+    let mut rbp: u64;
+    unsafe { core::arch::asm!("mov {}, rbp", out(reg) rbp) };
+
+    println!("Backtrace:");
+    for i in 0..MAX_FRAMES {
+        if rbp == 0 || rbp < KERNEL_BASE {
+            break;
+        }
+        let frame_ptr = rbp as *const u64;
+        // Validate the pointer is in kernel space and aligned
+        if (frame_ptr as u64) < KERNEL_BASE || !frame_ptr.is_aligned() {
+            break;
+        }
+        let ret_addr = unsafe { *frame_ptr.add(1) };
+        if ret_addr == 0 {
+            break;
+        }
+        println!("  #{i:>2}: {ret_addr:#018x}");
+        let next_rbp = unsafe { *frame_ptr };
+        if next_rbp <= rbp {
+            break; // Stack must grow downward; prevent infinite loops
+        }
+        rbp = next_rbp;
+    }
+
     loop {
         hlt();
     }
