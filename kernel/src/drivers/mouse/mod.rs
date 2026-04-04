@@ -139,9 +139,10 @@ pub fn init() {
 pub fn handle_interrupt() {
     let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
 
-    // Read status to check if data is from mouse (bit 5 set = aux data)
+    // Read status: bit 0 = data available, bit 5 = aux (mouse) data.
+    // Only read if both bits are set — this is mouse data, not keyboard.
     let status: u8 = unsafe { Port::new(CMD_PORT).read() };
-    if status & 0x01 != 0 {
+    if status & 0x21 == 0x21 {
         let byte: u8 = unsafe { Port::new(DATA_PORT).read() };
         let _ = queue.push(byte);
 

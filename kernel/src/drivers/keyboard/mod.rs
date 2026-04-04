@@ -44,12 +44,16 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
     let mut status_port = Port::new(0x64);
     let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
 
-    // Drain all bytes currently buffered by the controller. Limit the loop so the ISR
-    // cannot monopolize the CPU if the device misbehaves.
+    // Drain keyboard bytes from the controller buffer. Check bit 5 of the
+    // status register to distinguish keyboard (bit 5 clear) from mouse
+    // (bit 5 set) data — they share the same 8042 controller and data port.
     for _ in 0..8 {
         let status: u8 = unsafe { status_port.read() };
         if status & 0x01 == 0 {
-            break;
+            break; // no data available
+        }
+        if status & 0x20 != 0 {
+            break; // mouse data, not ours
         }
 
         let scancode: u8 = unsafe { data_port.read() };
