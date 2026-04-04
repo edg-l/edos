@@ -1,6 +1,7 @@
-use core::{array, cmp};
+use core::{array, cmp, sync::atomic::Ordering};
 
-use alloc::{collections::VecDeque, sync::Arc};
+use alloc::sync::Arc;
+use intrusive_list::IntrusiveList;
 
 use crate::thread::thread::Thread;
 
@@ -11,25 +12,20 @@ const BOOST_STREAK_LIMIT: usize = 2;
 pub const DEFAULT_PRIORITY: u8 = 7;
 pub const IO_PRIORITY: u8 = 8;
 
-#[derive(Clone)]
-struct RunQueueEntry {
-    thread: Arc<Thread>,
-    boosted: bool,
-}
-
 pub(crate) struct RunQueue {
-    queues: [VecDeque<RunQueueEntry>; PRIORITY_LEVELS],
+    queues: [IntrusiveList<Thread>; PRIORITY_LEVELS],
     boosted_streak: usize,
 }
 
 impl RunQueue {
     pub(crate) fn new() -> Self {
         Self {
-            queues: array::from_fn(|_| VecDeque::new()),
+            queues: array::from_fn(|_| IntrusiveList::new()),
             boosted_streak: 0,
         }
     }
 
+    /// Enqueue a thread. Consumes one Arc refcount into the list.
     pub(crate) fn enqueue(&mut self, thread: Arc<Thread>, priority: u8, boosted: bool) {
         let base_idx = priority.min((PRIORITY_LEVELS - 1) as u8) as usize;
         let target_idx = if boosted {
@@ -37,21 +33,27 @@ impl RunQueue {
         } else {
             base_idx
         };
-        let entry = RunQueueEntry {
-            boosted: boosted && target_idx != base_idx,
-            thread,
-        };
-        self.queues[target_idx].push_back(entry);
+        thread
+            .rq_boosted
+            .store(boosted && target_idx != base_idx, Ordering::Relaxed);
+
+        let ptr = Arc::into_raw(thread) as *mut Thread;
+        unsafe { self.queues[target_idx].push_back(ptr) };
     }
 
+    /// Pop the highest-priority thread. Returns an Arc (reclaims the refcount).
     pub(crate) fn pop_next(&mut self) -> Option<Arc<Thread>> {
         for idx in (0..PRIORITY_LEVELS).rev() {
-            if let Some(entry) = self.queues[idx].pop_front() {
-                if entry.boosted {
+            if let Some(ptr) = self.queues[idx].pop_front() {
+                let thread = unsafe { Arc::from_raw(ptr) };
+                let boosted = thread.rq_boosted.load(Ordering::Relaxed);
+                if boosted {
                     self.boosted_streak += 1;
                     if self.boosted_streak > BOOST_STREAK_LIMIT {
                         if let Some(lower) = self.pop_lower_than(idx) {
-                            self.queues[idx].push_front(entry);
+                            // Re-enqueue the boosted thread at the front.
+                            let requeue_ptr = Arc::into_raw(thread) as *mut Thread;
+                            unsafe { self.queues[idx].push_front(requeue_ptr) };
                             return Some(lower);
                         }
                         self.boosted_streak = BOOST_STREAK_LIMIT;
@@ -59,7 +61,7 @@ impl RunQueue {
                 } else {
                     self.boosted_streak = 0;
                 }
-                return Some(entry.thread);
+                return Some(thread);
             }
         }
         self.boosted_streak = 0;
@@ -68,13 +70,15 @@ impl RunQueue {
 
     fn pop_lower_than(&mut self, upper_idx: usize) -> Option<Arc<Thread>> {
         for idx in (0..upper_idx).rev() {
-            if let Some(entry) = self.queues[idx].pop_front() {
-                if entry.boosted {
+            if let Some(ptr) = self.queues[idx].pop_front() {
+                let thread = unsafe { Arc::from_raw(ptr) };
+                let boosted = thread.rq_boosted.load(Ordering::Relaxed);
+                if boosted {
                     self.boosted_streak = 1;
                 } else {
                     self.boosted_streak = 0;
                 }
-                return Some(entry.thread);
+                return Some(thread);
             }
         }
         None

@@ -1,6 +1,6 @@
 use core::{
     ops::Deref,
-    sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec::Vec};
@@ -11,6 +11,8 @@ use x86_64::{
     registers::control::Cr3,
     structures::paging::{OffsetPageTable, PageTableFlags},
 };
+
+use intrusive_list::Link;
 
 use crate::{
     boot::boot_info,
@@ -114,7 +116,13 @@ pub struct Thread {
     // Context and kernel stack pointer:
     pub ctx: Mutex<CpuContext>, // only scheduler touches ctx under lock
     pub kstack_top: u64,
+
+    // Intrusive runqueue link — only touched while the runqueue lock is held.
+    pub rq_link: Link,
+    pub rq_boosted: AtomicBool,
 }
+
+intrusive_list::impl_linked!(Thread, rq_link);
 
 // For now kernel threads and user share id
 static THREAD_ID_NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -365,6 +373,8 @@ impl Thread {
             tls_base: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
+            rq_link: Link::new(),
+            rq_boosted: AtomicBool::new(false),
         });
 
         THREADS.insert(thread.clone());
@@ -486,6 +496,8 @@ impl Thread {
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
             user: Some(user_state),
+            rq_link: Link::new(),
+            rq_boosted: AtomicBool::new(false),
         });
 
         THREADS.insert(thread.clone());

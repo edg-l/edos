@@ -1,11 +1,12 @@
 use core::{
     arch::naked_asm,
-    sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
     time::Duration,
 };
 
 use alloc::vec;
 use alloc::{format, string::ToString, sync::Arc, vec::Vec};
+use intrusive_list::Link;
 use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
@@ -1073,6 +1074,8 @@ fn sys_clone(
         cpu: AtomicU32::new(0),
         exit_code: AtomicI32::new(0),
         user: Some(child_user),
+        rq_link: Link::new(),
+        rq_boosted: AtomicBool::new(false),
     });
 
     // Clone parent's UserThreadInfo - share fd_table

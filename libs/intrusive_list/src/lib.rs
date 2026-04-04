@@ -69,6 +69,14 @@ impl Default for Link {
     }
 }
 
+impl core::fmt::Debug for Link {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Link")
+            .field("linked", &self.linked)
+            .finish()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Linked trait
 // ---------------------------------------------------------------------------
