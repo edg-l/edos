@@ -1049,8 +1049,6 @@ fn sys_clone(
         memory_regions: parent_process_regions,
         owned_regions: child_owned_regions,
         tls: tls_runtime,
-        fpu_init: false,
-        fpu: crate::drivers::fpu::FpuState::default(),
         heap_break: parent_heap_break,
         address_space_refs,
         process_stack_top,
@@ -1076,6 +1074,8 @@ fn sys_clone(
         user: Some(child_user),
         rq_link: Link::new(),
         rq_boosted: AtomicBool::new(false),
+        fpu: core::cell::UnsafeCell::new(crate::drivers::fpu::FpuState::default()),
+        fpu_init: AtomicBool::new(false),
     });
 
     // Clone parent's UserThreadInfo - share fd_table

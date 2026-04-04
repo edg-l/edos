@@ -300,14 +300,13 @@ impl Scheduler {
             current.end_run(end_tick);
             unsafe {
                 *current.ctx.lock() = (*context).clone();
-                if let Some(user) = &current.user {
-                    let mut user = user.write();
-
-                    if !user.fpu_init {
-                        init_fpu_state(&mut user.fpu);
-                        user.fpu_init = true;
+                if current.user.is_some() {
+                    let fpu = &mut *current.fpu.get();
+                    if !current.fpu_init.load(Ordering::Relaxed) {
+                        init_fpu_state(fpu);
+                        current.fpu_init.store(true, Ordering::Relaxed);
                     } else {
-                        save_fpu_state(&mut user.fpu);
+                        save_fpu_state(fpu);
                     }
                 }
             }
@@ -354,7 +353,9 @@ impl Scheduler {
         if !context.is_aligned() {
             panic!("cw: Misaligned context: {context:p}");
         }
-        unsafe { *context = next.ctx.lock().clone() };
+        let ctx_snapshot = next.ctx.lock().clone();
+        let user_rsp = ctx_snapshot.interrupt_stack_frame.stack_pointer.as_u64();
+        unsafe { *context = ctx_snapshot };
 
         // Switch address space
         next.switch_to_page();
@@ -363,14 +364,14 @@ impl Scheduler {
 
         FsBase::write(VirtAddr::new(next_fs_base));
 
-        if let Some(user) = &next.user {
-            let mut user = user.write();
+        if next.user.is_some() {
             unsafe {
-                if !user.fpu_init {
-                    init_fpu_state(&mut user.fpu);
-                    user.fpu_init = true;
+                let fpu = &mut *next.fpu.get();
+                if !next.fpu_init.load(Ordering::Relaxed) {
+                    init_fpu_state(fpu);
+                    next.fpu_init.store(true, Ordering::Relaxed);
                 } else {
-                    restore_fpu_state(&user.fpu);
+                    restore_fpu_state(fpu);
                 }
             }
         }
@@ -388,7 +389,7 @@ impl Scheduler {
 
         // set kernel gs stack
         cpu.kernel_rsp = next.kstack_top;
-        cpu.user_rsp = next.ctx.lock().interrupt_stack_frame.stack_pointer.as_u64();
+        cpu.user_rsp = user_rsp;
         // return handles context switch
     }
 
@@ -445,17 +446,22 @@ impl Scheduler {
         };
 
         loop {
-            if cur
-                .state
-                .compare_exchange(
-                    State::Running as u8,
-                    State::Parked as u8,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                break;
+            let state = cur.state.load(Ordering::Acquire);
+            if state == State::Running as u8 {
+                if cur
+                    .state
+                    .compare_exchange(
+                        State::Running as u8,
+                        State::Parked as u8,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
+            } else {
+                break; // not Running (Dying, Waking, etc.) — bail out
             }
         }
 
@@ -496,14 +502,17 @@ impl Scheduler {
             let deadline_tick = (now + dt).tick();
             cur.sleep_deadline.store(deadline_tick, Ordering::Release);
 
-            // Add to sleepers heap - this was missing!
             {
                 let mut sleepers = self.sleepers.lock();
                 let sleep_entry = SleepEntry {
                     deadline: deadline_tick,
                     thread: cur.clone(),
                 };
-                sleepers.push(sleep_entry).ok(); // ignore if heap is full
+                if sleepers.push(sleep_entry).is_err() {
+                    // Heap full — revert to Running so the thread isn't stuck forever.
+                    cur.state.store(State::Running as u8, Ordering::Release);
+                    return;
+                }
             }
 
             // Update earliest deadline if this sleep is sooner
@@ -541,6 +550,9 @@ impl Scheduler {
     }
 
     fn wake_thread_slow(&self, thread: Arc<Thread>, priority: WakePriority) {
+        const MAX_RETRIES: usize = 64;
+        let mut retries = 0;
+
         loop {
             if thread.try_wake() {
                 self.complete_wake(&thread, priority);
@@ -567,10 +579,21 @@ impl Scheduler {
                             self.send_reschedule_ipi(cpu);
                         }
                     });
+                    retries += 1;
+                    if retries >= MAX_RETRIES {
+                        // IPI sent, the target CPU will preempt eventually.
+                        return;
+                    }
                     spin_loop();
                 }
                 State::Dying => return,
-                _ => spin_loop(),
+                _ => {
+                    retries += 1;
+                    if retries >= MAX_RETRIES {
+                        return;
+                    }
+                    spin_loop();
+                }
             }
         }
     }
@@ -604,16 +627,23 @@ impl Scheduler {
     pub fn thread_exit(&self, code: i32) -> ! {
         let tid = self.current_thread_id().unwrap();
 
+        // Do heavy cleanup with interrupts enabled. The thread is marked Dying
+        // and removed from THREADS so no scheduler will pick it up.
+        let thread = THREADS.remove(tid).or_else(|| get_thread_by_id(tid));
+        if let Some(t) = &thread {
+            t.exit_code.store(code, Ordering::Release);
+            t.state.store(State::Dying as u8, Ordering::Release);
+            t.free();
+            record_thread_exit(tid, code);
+            let _ = THREADS.remove_info(tid);
+            self.thread_count.fetch_sub(1, Ordering::Relaxed);
+        }
+
+        // Detach from per-CPU slot before context_switch so
+        // save_current_thread won't touch the freed thread.
         without_interrupts(|| unsafe {
-            if let Some(t) = THREADS.remove(tid).or_else(|| get_thread_by_id(tid)) {
-                t.exit_code.store(code, Ordering::Release);
-                t.state.store(State::Dying as u8, Ordering::Release);
-                t.mark_need_resched();
-                t.free();
-                record_thread_exit(tid, code);
-                let _ = THREADS.remove_info(tid);
-                self.thread_count.fetch_sub(1, Ordering::Relaxed);
-            }
+            self.current.store(0, Ordering::Release);
+            get_percpu_data().current_thread = None;
             context_switch();
         });
         loop {

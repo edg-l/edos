@@ -11,7 +11,6 @@ use x86_64::{
 };
 
 use crate::{
-    drivers::fpu::FpuState,
     fs::path::Path,
     loader::TlsTemplate,
     memory::{STACK_ALIGNMENT, USER_STACK_SIZE, mapper::MemoryManager},
@@ -45,9 +44,6 @@ pub struct UserThread {
     pub memory_regions: Arc<Vec<MemoryRegion>>,
     pub owned_regions: Vec<MemoryRegion>,
     pub tls: Option<UserThreadTls>,
-    // Whether the fpu has been initialized for this thread.
-    pub fpu_init: bool,
-    pub fpu: FpuState,
     pub heap_break: u64,
     pub address_space_refs: Arc<AtomicUsize>,
     pub process_stack_top: Arc<AtomicU64>,

@@ -1,4 +1,5 @@
 use core::{
+    cell::UnsafeCell,
     ops::Deref,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
@@ -120,9 +121,19 @@ pub struct Thread {
     // Intrusive runqueue link — only touched while the runqueue lock is held.
     pub rq_link: Link,
     pub rq_boosted: AtomicBool,
+
+    // FPU state — only the running CPU touches this during context switch.
+    // UnsafeCell because it's accessed without a lock (only current CPU writes).
+    pub fpu: UnsafeCell<FpuState>,
+    pub fpu_init: AtomicBool,
 }
 
 intrusive_list::impl_linked!(Thread, rq_link);
+
+// SAFETY: The UnsafeCell<FpuState> field is only accessed by the CPU currently
+// running this thread (during save_current_thread / context_switch_to), never
+// concurrently from multiple CPUs.
+unsafe impl Sync for Thread {}
 
 // For now kernel threads and user share id
 static THREAD_ID_NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -375,6 +386,8 @@ impl Thread {
             exit_code: AtomicI32::new(0),
             rq_link: Link::new(),
             rq_boosted: AtomicBool::new(false),
+            fpu: UnsafeCell::new(FpuState::default()),
+            fpu_init: AtomicBool::new(false),
         });
 
         THREADS.insert(thread.clone());
@@ -472,8 +485,6 @@ impl Thread {
             memory_regions: Arc::clone(&process_regions),
             owned_regions,
             tls: tls_runtime,
-            fpu_init: false,
-            fpu: FpuState::default(),
             heap_break,
             address_space_refs,
             process_stack_top,
@@ -498,6 +509,8 @@ impl Thread {
             user: Some(user_state),
             rq_link: Link::new(),
             rq_boosted: AtomicBool::new(false),
+            fpu: UnsafeCell::new(FpuState::default()),
+            fpu_init: AtomicBool::new(false),
         });
 
         THREADS.insert(thread.clone());
