@@ -116,7 +116,15 @@ fn main() {
         let input_chars = terminal.take_input();
         if !input_chars.is_empty() {
             if let Some(ref child) = child {
-                // Send input to shell; the shell/PTY handles echo.
+                // Local echo: the shell doesn't echo input back through the pipe.
+                for ch in &input_chars {
+                    if *ch == '\r' {
+                        terminal.write_char('\n');
+                    } else {
+                        terminal.write_char(*ch);
+                    }
+                }
+                // Send input to shell
                 let input_str: String = input_chars.iter().collect();
                 child.write_str(&input_str);
             } else {
