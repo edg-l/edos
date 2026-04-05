@@ -255,21 +255,19 @@ impl Scheduler {
             // Exponential backoff: attempt every 1, 2, 4, 8, 16 ticks.
             let steal_interval = 1u32 << cmp::min(steal_backoff, 4);
             if idle_ticks % steal_interval == 0 {
-                let mut stole = false;
-                without_interrupts(|| {
-                    if self.try_steal_and_run(context) {
-                        stole = true;
-                    } else {
-                        steal_backoff = steal_backoff.saturating_add(1);
-                    }
-                });
-                if stole {
-                    // context_switch_to already ran: context now points
-                    // to the stolen thread's frame. Caller must return
-                    // immediately so the interrupt handler iretq's into it.
-                    disable();
+                // Manually disable interrupts instead of without_interrupts
+                // so that on a successful steal, interrupts stay disabled
+                // all the way through the return path. If without_interrupts
+                // were used, it would restore IF=1 after the closure, opening
+                // a window where a timer interrupt re-enters the scheduler
+                // and corrupts the stolen context.
+                disable();
+                if self.try_steal_and_run(context) {
+                    // Interrupts are disabled. Return immediately.
                     return true;
                 }
+                steal_backoff = steal_backoff.saturating_add(1);
+                enable();
             }
 
             without_interrupts(|| {
@@ -322,6 +320,12 @@ impl Scheduler {
         // Clear request and pick another.
         cur.flags
             .fetch_and(!Flags::NEED_RESCHED.bits(), Ordering::AcqRel);
+
+        // Save context BEFORE enqueue so work-stealers see valid ctx.
+        // Without this, a stealer could pop the thread and read stale
+        // register state (the ctx from the thread's last save, not the
+        // current interrupt frame).
+        self.save_current_thread(context);
 
         // Requeue current if still runnable.
         let state_now: State = cur.state.load(Ordering::Acquire).into();
@@ -409,6 +413,18 @@ impl Scheduler {
             let end_tick = Instant::now().tick();
             current.end_run(end_tick);
             unsafe {
+                let rip = (*context)
+                    .interrupt_stack_frame
+                    .instruction_pointer
+                    .as_u64();
+                // Kernel thread must have kernel-space RIP.
+                // User thread can have either (kernel RIP during syscall).
+                if current.user.is_none() && rip < 0xFFFF_0000_0000_0000 && rip != 0 {
+                    panic!(
+                        "save_current_thread: kernel thread {} (name={}) saving user-space RIP 0x{:x}, cpu={}",
+                        current.id.0, current.name, rip, self.cpu,
+                    );
+                }
                 *current.ctx.lock() = (*context).clone();
                 if current.user.is_some() {
                     let fpu = &mut *current.fpu.get();
@@ -423,6 +439,7 @@ impl Scheduler {
 
             let fs_base = FsBase::read();
             current.tls_base.store(fs_base.as_u64(), Ordering::Release);
+            current.context_saved.store(true, Ordering::Release);
         }
     }
 
@@ -442,6 +459,7 @@ impl Scheduler {
         // Set as current
         self.current.store(next.id.0, Ordering::Release);
         unsafe { get_percpu_data().set_current_thread(Some(next.clone())) };
+        next.context_saved.store(false, Ordering::Release);
         next.cpu.store(self.cpu, Ordering::Release);
 
         let now = Instant::now();
@@ -473,6 +491,22 @@ impl Scheduler {
             panic!("cw: Misaligned context: {context:p}");
         }
         let ctx_snapshot = next.ctx.lock().clone();
+        let rip = ctx_snapshot
+            .interrupt_stack_frame
+            .instruction_pointer
+            .as_u64();
+        // Catch obviously corrupt RIP: valid addresses are either in kernel
+        // space (0xFFFF...) or user space (>= 0x1000). Near-zero values
+        // indicate a stale or corrupted context.
+        if rip != 0 && rip < 0x1000 {
+            panic!(
+                "context_switch_to: thread {} (name={}) has bad RIP 0x{:x}, context_saved={}",
+                next.id.0,
+                next.name,
+                rip,
+                next.context_saved.load(Ordering::Relaxed),
+            );
+        }
         let user_rsp = ctx_snapshot.interrupt_stack_frame.stack_pointer.as_u64();
         unsafe { *context = ctx_snapshot };
 
@@ -588,6 +622,14 @@ impl Scheduler {
 
             // pop_back_any takes the lowest-priority tail thread.
             if let Some(thread) = rq.pop_back_any() {
+                // Skip threads whose context hasn't been saved yet.
+                // This happens when a thread is enqueued (e.g. yield,
+                // park abort) before context_switch saves its registers.
+                if !thread.context_saved.load(Ordering::Acquire) {
+                    let prio = thread.priority();
+                    rq.enqueue(thread, prio, false);
+                    continue;
+                }
                 let affinity = thread.cpu_affinity.load(Ordering::Acquire);
                 if affinity != 0 && (affinity & (1u32 << self.cpu)) == 0 {
                     // Thread can't run on this CPU -- push it back.

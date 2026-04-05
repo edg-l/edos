@@ -1074,6 +1074,7 @@ fn sys_clone(
         user: Some(child_user),
         rq_link: Link::new(),
         rq_boosted: AtomicBool::new(false),
+        context_saved: AtomicBool::new(true),
         fpu: core::cell::UnsafeCell::new(crate::drivers::fpu::FpuState::default()),
         fpu_init: AtomicBool::new(false),
     });

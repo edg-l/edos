@@ -314,7 +314,7 @@ Since `sched_for_cpu` and `pick_sched` acquire `SCHEDULERS.read()`, and these ca
 | 14 | MEDIUM | Redundant state store in `context_switch_to` | DONE |
 | 15 | MEDIUM | Reversed Ord for min-heap is fragile | DONE (switched to Min) |
 | 16 | MEDIUM | `earliest_deadline` update race in `thread_sleep` | DONE |
-| 17 | LOW | No work-stealing between CPUs | TODO (design project) |
+| 17 | LOW | No work-stealing between CPUs | DONE |
 | 18 | LOW | `recv_timeout` single-shot check | DONE (owner assert added) |
 | 19 | LOW | `SCHEDULERS` RwLock under interrupt-disabled context | TODO (low risk) |
 

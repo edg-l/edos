@@ -148,6 +148,11 @@ pub struct Thread {
     pub rq_link: Link,
     pub rq_boosted: AtomicBool,
 
+    // Set after save_current_thread writes valid ctx, cleared when the
+    // thread starts running via context_switch_to. Work-stealing skips
+    // threads where this is false to avoid loading stale register state.
+    pub context_saved: AtomicBool,
+
     // FPU state — only the running CPU touches this during context switch.
     // UnsafeCell because it's accessed without a lock (only current CPU writes).
     pub fpu: UnsafeCell<FpuState>,
@@ -412,6 +417,7 @@ impl Thread {
             exit_code: AtomicI32::new(0),
             rq_link: Link::new(),
             rq_boosted: AtomicBool::new(false),
+            context_saved: AtomicBool::new(true),
             fpu: UnsafeCell::new(FpuState::default()),
             fpu_init: AtomicBool::new(false),
         });
@@ -535,6 +541,7 @@ impl Thread {
             user: Some(user_state),
             rq_link: Link::new(),
             rq_boosted: AtomicBool::new(false),
+            context_saved: AtomicBool::new(true),
             fpu: UnsafeCell::new(FpuState::default()),
             fpu_init: AtomicBool::new(false),
         });
