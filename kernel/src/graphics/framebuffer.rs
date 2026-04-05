@@ -1,8 +1,8 @@
-use alloc::{sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 
 use crate::{
     fs::{DevFsDevice, DevFsError, register_device_str},
-    graphics::api::{self, DrawRequest},
+    graphics::DISPLAY,
 };
 
 pub const FB_IOCTL_DRAW_RECT: u64 = 0x4642_0001;
@@ -51,30 +51,30 @@ impl DevFsDevice for FramebufferDevice {
     fn ioctl(&self, request: u64, arg: u64) -> Result<u64, DevFsError> {
         match request {
             FB_IOCTL_RENDER => {
-                api::render();
+                // No-op: we write directly to the framebuffer in draw/draw_rect.
                 Ok(0)
             }
             FB_IOCTL_DRAW_RECT => {
                 if arg == 0 {
                     return Err(DevFsError::IoError);
                 }
-                let rect_ptr = arg as *const FramebufferRect;
-                if rect_ptr.is_null() {
-                    return Err(DevFsError::IoError);
-                }
-                let rect = unsafe { &*rect_ptr };
-                api::draw_rect(rect.x, rect.y, rect.width, rect.height, rect.color);
+                // arg points to kernel-copied ioctl buffer (safe to read)
+                let rect = unsafe { &*(arg as *const FramebufferRect) };
+
+                let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
+                display
+                    .lock()
+                    .draw_rect(rect.x, rect.y, rect.width, rect.height, rect.color);
                 Ok(0)
             }
             FB_IOCTL_DRAW => {
+                // The generic ioctl layer has already copied the entire user buffer
+                // (header + pixel data) into a kernel Vec<u8>. The `arg` pointer
+                // points into that kernel buffer, so it is safe to read.
                 if arg == 0 {
                     return Err(DevFsError::IoError);
                 }
-                let draw_ptr = arg as *const FramebufferDraw;
-                if draw_ptr.is_null() {
-                    return Err(DevFsError::IoError);
-                }
-                let header = unsafe { *draw_ptr };
+                let header = unsafe { *(arg as *const FramebufferDraw) };
 
                 if header.width == 0 || header.height == 0 {
                     return Err(DevFsError::IoError);
@@ -89,44 +89,30 @@ impl DevFsDevice for FramebufferDevice {
                     return Err(DevFsError::IoError);
                 }
 
-                let expected_len = header
-                    .pixel_count
-                    .checked_mul(4)
-                    .ok_or(DevFsError::IoError)? as usize;
-
+                // Pixel data follows the header in the same kernel buffer.
                 let data_ptr =
                     unsafe { (arg as *const u8).add(core::mem::size_of::<FramebufferDraw>()) };
-                let pixels_slice = unsafe {
+                let pixels = unsafe {
                     core::slice::from_raw_parts(data_ptr as *const u32, header.pixel_count as usize)
                 };
 
-                if core::mem::size_of_val(pixels_slice) != expected_len {
-                    return Err(DevFsError::IoError);
-                }
-
-                let mut pixels = Vec::with_capacity(pixels_slice.len());
-                pixels.extend_from_slice(pixels_slice);
-
-                let request = DrawRequest {
-                    pixels: pixels.into_boxed_slice(),
-                    x: header.x,
-                    y: header.y,
-                    width: header.width,
-                    height: header.height,
-                };
-
-                api::draw(request);
+                let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
+                display.lock().draw(
+                    pixels,
+                    header.x,
+                    header.y,
+                    header.width as usize,
+                    header.height as usize,
+                );
                 Ok(0)
             }
             FB_IOCTL_SCREEN_INFO => {
                 if arg == 0 {
                     return Err(DevFsError::IoError);
                 }
+                let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
+                let info = display.lock().screen_info();
                 let info_ptr = arg as *mut FramebufferInfo;
-                if info_ptr.is_null() {
-                    return Err(DevFsError::IoError);
-                }
-                let info = api::screen_info();
                 unsafe {
                     (*info_ptr).width = info.width as u32;
                     (*info_ptr).height = info.height as u32;

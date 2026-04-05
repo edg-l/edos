@@ -98,6 +98,7 @@ impl<T, R> Mailbox<T, R> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn reply(req: Request<T, R>, val: R) {
         {
             let mut slot = req.resp.value.lock();

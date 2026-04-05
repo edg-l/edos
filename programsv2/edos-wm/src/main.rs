@@ -1,6 +1,6 @@
 //! EDOS Window Manager - User-space compositor.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use edos_render::graphics::Screen;
 use edos_render::window::{
@@ -92,6 +92,8 @@ fn main() {
 
     // Main compositor loop
     loop {
+        let frame_start = Instant::now();
+
         // Get mouse state (position + buttons), default to (0, 0, 0) if unavailable
         let (mx, my, buttons) = read_mouse_state(&mut mouse_file).unwrap_or((0, 0, 0));
 
@@ -174,99 +176,93 @@ fn main() {
 
         // Handle resizing
         if let Some(ref resize) = resize_state {
+            let dx = mx - resize.start_x;
+            let dy = my - resize.start_y;
+
+            // Calculate new position and dimensions based on which region is being dragged
+            let (mut new_x, mut new_y, mut new_w, mut new_h) = (
+                resize.orig_win_x,
+                resize.orig_win_y,
+                resize.orig_win_w as i32,
+                resize.orig_win_h as i32,
+            );
+
+            match resize.region {
+                HitRegion::ResizeRight => {
+                    new_w += dx;
+                }
+                HitRegion::ResizeBottom => {
+                    new_h += dy;
+                }
+                HitRegion::ResizeLeft => {
+                    new_x += dx;
+                    new_w -= dx;
+                }
+                HitRegion::ResizeTop => {
+                    new_y += dy;
+                    new_h -= dy;
+                }
+                HitRegion::ResizeBottomRight => {
+                    new_w += dx;
+                    new_h += dy;
+                }
+                HitRegion::ResizeTopLeft => {
+                    new_x += dx;
+                    new_y += dy;
+                    new_w -= dx;
+                    new_h -= dy;
+                }
+                HitRegion::ResizeTopRight => {
+                    new_y += dy;
+                    new_w += dx;
+                    new_h -= dy;
+                }
+                HitRegion::ResizeBottomLeft => {
+                    new_x += dx;
+                    new_w -= dx;
+                    new_h += dy;
+                }
+                _ => {}
+            }
+
+            // Enforce minimum window size
+            if new_w < MIN_WINDOW_WIDTH as i32 {
+                if matches!(
+                    resize.region,
+                    HitRegion::ResizeLeft
+                        | HitRegion::ResizeTopLeft
+                        | HitRegion::ResizeBottomLeft
+                ) {
+                    new_x = resize.orig_win_x + resize.orig_win_w as i32 - MIN_WINDOW_WIDTH as i32;
+                }
+                new_w = MIN_WINDOW_WIDTH as i32;
+            }
+            if new_h < MIN_WINDOW_HEIGHT as i32 {
+                if matches!(
+                    resize.region,
+                    HitRegion::ResizeTop | HitRegion::ResizeTopLeft | HitRegion::ResizeTopRight
+                ) {
+                    new_y = resize.orig_win_y + resize.orig_win_h as i32 - MIN_WINDOW_HEIGHT as i32;
+                }
+                new_h = MIN_WINDOW_HEIGHT as i32;
+            }
+
             if left_held {
-                let dx = mx - resize.start_x;
-                let dy = my - resize.start_y;
-
-                // Calculate new position and dimensions based on which region is being dragged
-                let (mut new_x, mut new_y, mut new_w, mut new_h) = (
-                    resize.orig_win_x,
-                    resize.orig_win_y,
-                    resize.orig_win_w as i32,
-                    resize.orig_win_h as i32,
-                );
-
-                match resize.region {
-                    HitRegion::ResizeRight => {
-                        new_w += dx;
-                    }
-                    HitRegion::ResizeBottom => {
-                        new_h += dy;
-                    }
-                    HitRegion::ResizeLeft => {
-                        new_x += dx;
-                        new_w -= dx;
-                    }
-                    HitRegion::ResizeTop => {
-                        new_y += dy;
-                        new_h -= dy;
-                    }
-                    HitRegion::ResizeBottomRight => {
-                        new_w += dx;
-                        new_h += dy;
-                    }
-                    HitRegion::ResizeTopLeft => {
-                        new_x += dx;
-                        new_y += dy;
-                        new_w -= dx;
-                        new_h -= dy;
-                    }
-                    HitRegion::ResizeTopRight => {
-                        new_y += dy;
-                        new_w += dx;
-                        new_h -= dy;
-                    }
-                    HitRegion::ResizeBottomLeft => {
-                        new_x += dx;
-                        new_w -= dx;
-                        new_h += dy;
-                    }
-                    _ => {}
-                }
-
-                // Enforce minimum window size
-                if new_w < MIN_WINDOW_WIDTH as i32 {
-                    // Adjust position if resizing from left side
-                    if matches!(
-                        resize.region,
-                        HitRegion::ResizeLeft
-                            | HitRegion::ResizeTopLeft
-                            | HitRegion::ResizeBottomLeft
-                    ) {
-                        new_x = resize.orig_win_x + resize.orig_win_w as i32 - MIN_WINDOW_WIDTH as i32;
-                    }
-                    new_w = MIN_WINDOW_WIDTH as i32;
-                }
-                if new_h < MIN_WINDOW_HEIGHT as i32 {
-                    // Adjust position if resizing from top side
-                    if matches!(
-                        resize.region,
-                        HitRegion::ResizeTop | HitRegion::ResizeTopLeft | HitRegion::ResizeTopRight
-                    ) {
-                        new_y = resize.orig_win_y + resize.orig_win_h as i32 - MIN_WINDOW_HEIGHT as i32;
-                    }
-                    new_h = MIN_WINDOW_HEIGHT as i32;
-                }
-
                 // Apply the new dimensions
                 let _ = window_set(resize.window_id, property::X, new_x as i64 as u64);
                 let _ = window_set(resize.window_id, property::Y, new_y as i64 as u64);
                 let _ = window_set(resize.window_id, property::WIDTH, new_w as i64 as u64);
                 let _ = window_set(resize.window_id, property::HEIGHT, new_h as i64 as u64);
             } else {
-                // Mouse released - stop resizing
-                // Send resize event to the window with final dimensions
-                // First get the current dimensions from kernel
-                if let Some(win) = windows.iter().find(|w| w.id == resize.window_id) {
-                    let resize_event = WindowEvent {
-                        event_type: 10, // WindowEventType::Resize
-                        x: win.width as i32,
-                        y: win.height as i32,
-                        code: 0,
-                        data: 0,
-                    };
-                    let _ = window_send_event(resize.window_id, &resize_event);
-                }
+                // Mouse released - send resize event with final clamped dimensions
+                let resize_event = WindowEvent {
+                    event_type: 10, // WindowEventType::Resize
+                    x: new_w,
+                    y: new_h,
+                    code: 0,
+                    data: 0,
+                };
+                let _ = window_send_event(resize.window_id, &resize_event);
                 resize_state = None;
             }
         }
@@ -280,6 +276,18 @@ fn main() {
         };
 
         let windows = &entries[..window_count];
+
+        // Invalidate drag/resize state if target window was destroyed
+        if let Some(ref drag) = drag_state {
+            if !windows.iter().any(|w| w.id == drag.window_id) {
+                drag_state = None;
+            }
+        }
+        if let Some(ref resize) = resize_state {
+            if !windows.iter().any(|w| w.id == resize.window_id) {
+                resize_state = None;
+            }
+        }
 
         // Validate focused window still exists
         if let Some(fid) = focused_window_id {
@@ -297,7 +305,11 @@ fn main() {
         compositor::composite(&mut screen, windows, &cursor, focused_window_id, &mut shm_cache);
         let _ = screen.render();
 
-        // Sleep to maintain frame rate
-        std::thread::sleep(Duration::from_millis(FRAME_TIME_MS));
+        // Sleep remainder of frame budget to maintain frame rate
+        let frame_target = Duration::from_millis(FRAME_TIME_MS);
+        let elapsed = frame_start.elapsed();
+        if elapsed < frame_target {
+            std::thread::sleep(frame_target - elapsed);
+        }
     }
 }

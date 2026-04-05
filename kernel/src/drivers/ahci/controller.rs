@@ -14,8 +14,8 @@ use crate::{
             AhciError, DeviceType,
             port::AhciPort,
             structures::{
-                GHC_AE, GHC_IE, HbaMemory, HbaPort, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE,
-                PORT_CMD_POD, PORT_CMD_ST, PORT_CMD_SUD, SATA_SIG_ATA, SATA_SIG_ATAPI,
+                GHC_AE, GHC_IE, HbaMemory, HbaPort, PORT_CMD_CR, PORT_CMD_POD, PORT_CMD_ST,
+                PORT_CMD_SUD, SATA_SIG_ATA, SATA_SIG_ATAPI,
             },
         },
         msi,

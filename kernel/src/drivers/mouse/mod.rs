@@ -16,7 +16,7 @@ use crate::{
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
         register_device_str,
     },
-    graphics::api::screen_info,
+    graphics::DISPLAY,
     log,
     memory::mapper::MemoryManager,
     thread::{
@@ -270,7 +270,7 @@ pub extern "C" fn driver_main() -> ! {
     thread.set_priority(10); // High priority for input
 
     // Get screen dimensions and center the mouse
-    let info = screen_info();
+    let info = DISPLAY.get().unwrap().lock().screen_info();
     set_screen_bounds(info.width as i32, info.height as i32);
     MOUSE_POSITION
         .0
