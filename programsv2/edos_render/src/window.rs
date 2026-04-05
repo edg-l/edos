@@ -503,11 +503,14 @@ impl Window {
         })
     }
 
-    /// Set the window title.
+    /// Set the window title (max 255 chars, truncated if longer).
+    /// Uses a stack buffer so the pointer is valid for the synchronous syscall.
     pub fn set_title(&self, title: &str) -> Result<(), i64> {
-        let mut title_bytes: Vec<u8> = title.bytes().collect();
-        title_bytes.push(0); // null terminator
-        window_set(self.id, property::TITLE_PTR, title_bytes.as_ptr() as u64)
+        let mut buf = [0u8; 256];
+        let len = title.len().min(255);
+        buf[..len].copy_from_slice(&title.as_bytes()[..len]);
+        buf[len] = 0;
+        window_set(self.id, property::TITLE_PTR, buf.as_ptr() as u64)
     }
 
     /// Show the window.
@@ -543,15 +546,21 @@ impl Window {
         let new_shm_id = shm_create(buffer_size)?;
         let new_buffer = shm_map(new_shm_id, PROT_READ | PROT_WRITE)?;
 
+        // Detach old buffer before attaching new one, so the compositor
+        // can unmap the old shm before we destroy it (avoids shm leak).
+        let old_shm = self.shm_id.take();
+        let old_ptr = self.buffer.take();
+        if let Some(ptr) = old_ptr {
+            let _ = shm_unmap(ptr as *mut u8);
+        }
+
         // Attach new buffer to window
         window_set(self.id, property::BUFFER_SHM, new_shm_id)?;
 
-        // Clean up old buffer
-        if let Some(old_ptr) = self.buffer.take() {
-            let _ = shm_unmap(old_ptr as *mut u8);
-        }
-        if let Some(old_shm) = self.shm_id.take() {
-            let _ = shm_destroy(old_shm);
+        // Now destroy old shm -- compositor's ShmCache will unmap on next
+        // frame when it sees the new shm_id.
+        if let Some(shm) = old_shm {
+            let _ = shm_destroy(shm);
         }
 
         // Update state
