@@ -1,7 +1,7 @@
 use core::{
     cmp,
     hint::spin_loop,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -99,6 +99,8 @@ pub struct Scheduler {
     pub thread_count: AtomicU64,
 
     has_work: AtomicBool,
+    steal_count: AtomicU64,
+    steal_scan_start: AtomicU32,
 }
 
 impl Scheduler {
@@ -151,6 +153,8 @@ impl Scheduler {
             thread_count: AtomicU64::new(0),
             earliest_deadline: AtomicU64::new(u64::MAX),
             has_work: AtomicBool::new(false),
+            steal_count: AtomicU64::new(0),
+            steal_scan_start: AtomicU32::new(0),
         }
     }
 
@@ -227,7 +231,10 @@ impl Scheduler {
         get_thread_by_id(id)
     }
 
-    fn run_idle(&self) {
+    /// Enter the idle loop. Returns true if a work-steal context switch
+    /// was performed (caller must return immediately). Returns false when
+    /// local work appeared and the caller should pop from its own runqueue.
+    fn run_idle(&self, context: *mut CpuContext) -> bool {
         // Mark CPU idle
         self.current.store(0, Ordering::Release);
         unsafe { get_percpu_data().set_current_thread(None) };
@@ -236,11 +243,33 @@ impl Scheduler {
         enable();
 
         let mut idle_ticks: u32 = 0;
+        let mut steal_backoff: u32 = 0;
 
         loop {
-            // Break out if any work is available
+            // Break out if any work is available on our own runqueue.
             if self.has_work.load(Ordering::Acquire) {
                 break;
+            }
+
+            // Try to steal work from another CPU before halting.
+            // Exponential backoff: attempt every 1, 2, 4, 8, 16 ticks.
+            let steal_interval = 1u32 << cmp::min(steal_backoff, 4);
+            if idle_ticks % steal_interval == 0 {
+                let mut stole = false;
+                without_interrupts(|| {
+                    if self.try_steal_and_run(context) {
+                        stole = true;
+                    } else {
+                        steal_backoff = steal_backoff.saturating_add(1);
+                    }
+                });
+                if stole {
+                    // context_switch_to already ran: context now points
+                    // to the stolen thread's frame. Caller must return
+                    // immediately so the interrupt handler iretq's into it.
+                    disable();
+                    return true;
+                }
             }
 
             without_interrupts(|| {
@@ -254,8 +283,6 @@ impl Scheduler {
                         dl.duration_since(now)
                     }
                 } else {
-                    // Fallback: always configure a periodic tick so the CPU
-                    // doesn't halt forever when there are no sleepers.
                     Duration::from_millis(100)
                 };
                 set_apic_timer(dur);
@@ -265,17 +292,18 @@ impl Scheduler {
             x86_64::instructions::interrupts::enable_and_hlt();
 
             idle_ticks += 1;
-            // Warn if this CPU has been idle for ~5s (50 × 100ms)
             if idle_ticks == 50 {
                 println!(
-                    "WARNING: cpu {} idle for ~5s, thread_count={}",
+                    "WARNING: cpu {} idle for ~5s, thread_count={}, steals={}",
                     self.cpu,
-                    self.thread_count.load(Ordering::Relaxed)
+                    self.thread_count.load(Ordering::Relaxed),
+                    self.steal_count.load(Ordering::Relaxed),
                 );
             }
         }
 
         disable();
+        false
     }
 
     pub fn maybe_preempt(&self, context: *mut CpuContext) {
@@ -351,8 +379,11 @@ impl Scheduler {
                     }
                 }
                 None => {
-                    self.run_idle();
-                    // after idle returns, loop and try again
+                    if self.run_idle(context) {
+                        // Work-steal context switch already done.
+                        return;
+                    }
+                    // Local work appeared, loop and pop from our rq.
                     continue;
                 }
             }
@@ -514,6 +545,103 @@ impl Scheduler {
                 sched().send_reschedule_ipi(self.cpu);
             }
         })
+    }
+
+    /// Attempt to steal a thread from another CPU's runqueue.
+    /// Only pops the thread; bookkeeping (thread_count) is handled by
+    /// the caller after confirming the thread can be run.
+    fn try_steal(&self) -> Option<Arc<Thread>> {
+        let keys: heapless::Vec<u32, 128> = {
+            let schedulers = SCHEDULERS.read();
+            schedulers.keys().copied().collect()
+        };
+        let count = keys.len();
+        if count <= 1 {
+            return None;
+        }
+
+        let start = self.steal_scan_start.fetch_add(1, Ordering::Relaxed) as usize % count;
+
+        for i in 0..count {
+            let idx = (start + i) % count;
+            let victim_cpu = keys[idx];
+            if victim_cpu == self.cpu {
+                continue;
+            }
+
+            let victim = sched_for_cpu(victim_cpu);
+
+            // Fast check: skip if victim has no work.
+            if !victim.has_work.load(Ordering::Acquire) {
+                continue;
+            }
+
+            // Try to lock victim's runqueue without blocking.
+            let Some(mut rq) = victim.rq.try_lock() else {
+                continue;
+            };
+
+            // Don't steal the victim's only thread.
+            if rq.total_len() < 2 {
+                continue;
+            }
+
+            // pop_back_any takes the lowest-priority tail thread.
+            if let Some(thread) = rq.pop_back_any() {
+                let affinity = thread.cpu_affinity.load(Ordering::Acquire);
+                if affinity != 0 && (affinity & (1u32 << self.cpu)) == 0 {
+                    // Thread can't run on this CPU -- push it back.
+                    let prio = thread.priority();
+                    rq.enqueue(thread, prio, false);
+                    continue;
+                }
+                // Don't touch victim.has_work or thread_count here --
+                // the victim updates has_work on its own next tick,
+                // and thread_count is adjusted by the caller after CAS.
+                drop(rq);
+                return Some(thread);
+            }
+        }
+
+        None
+    }
+
+    /// Attempt to steal a thread from another CPU and switch to it.
+    /// Called from run_idle with interrupts disabled.
+    /// Returns true if a thread was stolen and context_switch_to was called.
+    /// Returns false if no steal occurred.
+    fn try_steal_and_run(&self, context: *mut CpuContext) -> bool {
+        let Some(thread) = self.try_steal() else {
+            return false;
+        };
+
+        // The thread was in Ready state on the victim's runqueue.
+        // Transition to Running on this CPU.
+        if !thread.cas_state(State::Ready, State::Running) {
+            // CAS failed: thread state changed between pop and CAS
+            // (e.g. a waker moved it to Waking). Re-enqueue on its
+            // home CPU so it isn't lost.
+            let home_cpu = thread.cpu.load(Ordering::Acquire);
+            let home = sched_for_cpu(home_cpu);
+            thread.state.store(State::Ready as u8, Ordering::Release);
+            let mut rq = home.rq.lock();
+            let prio = thread.priority();
+            rq.enqueue(thread, prio, false);
+            home.has_work.store(true, Ordering::Release);
+            return false;
+        }
+
+        // Adjust thread_count now that the steal is committed.
+        let victim_cpu = thread.cpu.load(Ordering::Acquire);
+        sched_for_cpu(victim_cpu)
+            .thread_count
+            .fetch_sub(1, Ordering::Relaxed);
+        self.thread_count.fetch_add(1, Ordering::Relaxed);
+        self.steal_count.fetch_add(1, Ordering::Relaxed);
+
+        // context_switch_to overwrites the interrupt frame in-place.
+        unsafe { self.context_switch_to(thread, context) };
+        true
     }
 
     #[inline]

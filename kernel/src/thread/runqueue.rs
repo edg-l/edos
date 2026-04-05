@@ -104,4 +104,31 @@ impl RunQueue {
     pub(crate) fn is_empty(&self) -> bool {
         self.queues.iter().all(|q| q.is_empty())
     }
+
+    pub(crate) fn total_len(&self) -> usize {
+        self.queues.iter().map(|q| q.len()).sum()
+    }
+
+    /// Pop the lowest-priority thread from the back of the queue.
+    /// Used by work-stealing: take the least important thread to minimize
+    /// impact on the victim CPU.
+    pub(crate) fn pop_back_any(&mut self) -> Option<Arc<Thread>> {
+        for idx in 0..PRIORITY_LEVELS {
+            if let Some(ptr) = self.queues[idx].pop_back() {
+                let thread = unsafe { Arc::from_raw(ptr) };
+                debug_assert!(
+                    !thread.rq_link.is_linked(),
+                    "runqueue::pop_back_any: thread {} still linked after pop",
+                    thread.id.0
+                );
+                // If we stole a boosted thread, reset the streak since
+                // we're disrupting the queue order.
+                if thread.rq_boosted.load(Ordering::Relaxed) {
+                    self.boosted_streak = 0;
+                }
+                return Some(thread);
+            }
+        }
+        None
+    }
 }
