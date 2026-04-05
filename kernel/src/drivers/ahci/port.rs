@@ -246,11 +246,7 @@ impl AhciPort {
                     dbc: (buffer_size - 1) as u32, // Byte count - 1 (0-based)
                 };
 
-                // Write PRDT entry right after the CommandTable
-                let prdt_ptr = (table as *mut CommandTable as *mut u8)
-                    .add(core::mem::size_of::<CommandTable>())
-                    as *mut PrdtEntry;
-                ptr::write_volatile(prdt_ptr, prdt_entry);
+                ptr::write_volatile(&raw mut (*table).prdt[0], prdt_entry);
             }
         }
 
@@ -577,9 +573,11 @@ impl AhciPort {
             cmd_header.reserved = [0; 4];
         }
 
-        // Issue command by setting bit in Command Issue register
+        // Issue command by setting bit in Command Issue register (read-modify-write
+        // to preserve other in-flight command bits).
         unsafe {
-            ptr::write_volatile(&raw mut (*self.port_regs).ci, 1 << slot);
+            let ci = ptr::read_volatile(&raw const (*self.port_regs).ci);
+            ptr::write_volatile(&raw mut (*self.port_regs).ci, ci | (1 << slot));
         }
 
         Ok(())
@@ -724,11 +722,7 @@ impl AhciPort {
                 dbc: (buffer_size - 1) as u32, // Byte count - 1 (0-based)
             };
 
-            // Write PRDT entry right after the CommandTable
-            let prdt_ptr = (table as *mut CommandTable as *mut u8)
-                .add(core::mem::size_of::<CommandTable>())
-                as *mut PrdtEntry;
-            ptr::write_volatile(prdt_ptr, prdt_entry);
+            ptr::write_volatile(&raw mut (*table).prdt[0], prdt_entry);
         }
 
         Ok(())

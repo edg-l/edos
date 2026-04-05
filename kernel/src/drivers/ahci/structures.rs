@@ -78,14 +78,21 @@ pub struct CommandHeader {
 }
 
 // Command Table - contains the actual SATA command
+// AHCI spec: PRDT entries start at offset 0x80 from command table base.
+// We embed one entry since all current commands use a single PRDT entry.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct CommandTable {
     pub cfis: [u8; 64], // Command FIS
     pub acmd: [u8; 16], // ATAPI Command
     pub reserved: [u8; 48],
-    // PRDT entries follow (variable length)
+    pub prdt: [PrdtEntry; 1], // PRDT entries (at offset 0x80)
 }
+
+const _: () = {
+    assert!(core::mem::offset_of!(CommandTable, prdt) == 0x80);
+    assert!(core::mem::size_of::<CommandTable>() == 0x80 + core::mem::size_of::<PrdtEntry>());
+};
 
 // Physical Region Descriptor Table Entry - describes DMA scatter-gather
 #[repr(C)]

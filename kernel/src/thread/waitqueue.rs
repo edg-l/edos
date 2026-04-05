@@ -1,5 +1,5 @@
-use alloc::{collections::vec_deque::VecDeque, vec::Vec};
 use core::time::Duration;
+use heapless::Deque;
 use spin::Mutex;
 use x86_64::instructions::interrupts::{self, without_interrupts};
 
@@ -7,6 +7,9 @@ use crate::thread::{
     scheduler::{WakePriority, sched},
     thread::ThreadId,
 };
+
+/// Maximum number of threads that can wait on a single WaitQueue.
+const WAITQUEUE_CAP: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitOutcome {
@@ -20,13 +23,13 @@ pub enum WaitOutcome {
 
 #[derive(Debug)]
 pub struct WaitQueue {
-    inner: Mutex<VecDeque<ThreadId>>,
+    inner: Mutex<Deque<ThreadId, WAITQUEUE_CAP>>,
 }
 
 impl WaitQueue {
     pub const fn new() -> Self {
         Self {
-            inner: Mutex::new(VecDeque::new()),
+            inner: Mutex::new(Deque::new()),
         }
     }
 
@@ -64,13 +67,11 @@ impl WaitQueue {
     #[expect(unused)]
     pub fn wake_all(&self) -> usize {
         without_interrupts(|| {
-            let tids = {
-                let mut q = self.inner.lock();
-                q.drain(..).collect::<Vec<_>>()
-            };
-            let n = tids.len();
-            for tid in tids {
+            let mut q = self.inner.lock();
+            let mut n = 0;
+            while let Some(tid) = q.pop_front() {
                 sched().wake_thread(tid, WakePriority::Normal);
+                n += 1;
             }
             n
         })
@@ -95,18 +96,18 @@ impl WaitQueue {
         let tid = sched().current_thread_id().unwrap();
         let mut action: Option<SleepAction> = None;
 
-        // Push tid with interrupts enabled so VecDeque can allocate safely.
-        {
-            let mut q = self.inner.lock();
-            q.push_back(tid);
-        }
-
+        // Enqueue and check readiness inside without_interrupts to close the
+        // lost-wakeup window: heapless::Deque does not allocate, so this is safe.
         interrupts::without_interrupts(|| {
+            {
+                let mut q = self.inner.lock();
+                q.push_back(tid)
+                    .expect("WaitQueue overflow: too many waiters");
+            }
+
             if ready() {
                 let mut q = self.inner.lock();
-                if let Some(pos) = q.iter().position(|&id| id == tid) {
-                    q.remove(pos);
-                }
+                q.retain(|&id| id != tid);
                 return;
             }
 
@@ -131,9 +132,7 @@ impl WaitQueue {
         // regardless of how we were woken (park, sleep, or timeout).
         interrupts::without_interrupts(|| {
             let mut q = self.inner.lock();
-            if let Some(pos) = q.iter().position(|&id| id == tid) {
-                q.remove(pos);
-            }
+            q.retain(|&id| id != tid);
         });
 
         let Some(action) = action else {
