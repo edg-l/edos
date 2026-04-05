@@ -305,8 +305,12 @@ extern "C" fn input_routing_thread() -> ! {
 fn handle_mouse_event(event: MouseEvent) {
     let registry = WINDOW_REGISTRY.read();
 
-    // Find window whose CLIENT area contains the cursor (excludes decorations)
+    // Find window whose CLIENT area contains the cursor (for event routing)
     let window_under_cursor = registry.window_at_client(event.x, event.y);
+
+    // Find window under cursor including decorations (for focus changes).
+    // Clicking a title bar should change focus even though it's not client area.
+    let window_under_decorated = registry.window_at(event.x, event.y);
 
     // Get currently focused window
     let focused = registry.focused_window();
@@ -319,12 +323,12 @@ fn handle_mouse_event(event: MouseEvent) {
     *last_buttons = event.buttons;
     drop(last_buttons);
 
-    // Handle focus change on mouse button press
+    // Handle focus change on mouse button press (uses decorated bounds so
+    // clicking title bars, borders, and resize handles also changes focus).
     if button_pressed != 0 {
-        if let Some(target_window) = window_under_cursor {
+        if let Some(target_window) = window_under_decorated {
             if focused != Some(target_window) {
-                // Drop read lock, take write lock for the entire focus transaction
-                // to avoid TOCTOU (window destroyed between lock acquisitions).
+                // Capture client-area coords before dropping the lock (for click event).
                 let window_coords = registry.get_window(target_window).map(|w| (w.x, w.y));
                 drop(registry);
 
@@ -342,17 +346,19 @@ fn handle_mouse_event(event: MouseEvent) {
                 }
                 send_event(target_window, WindowEvent::focus_gained());
 
-                // Send click event using coordinates captured before lock drop
-                if let Some((wx, wy)) = window_coords {
-                    let local_x = event.x - wx - decoration::BORDER_WIDTH;
-                    let local_y = event.y - wy - decoration::TITLE_HEIGHT;
+                // Send click event only if the click was in the client area
+                if window_under_cursor == Some(target_window) {
+                    if let Some((wx, wy)) = window_coords {
+                        let local_x = event.x - wx - decoration::BORDER_WIDTH;
+                        let local_y = event.y - wy - decoration::TITLE_HEIGHT;
 
-                    for bit in 0..3 {
-                        if button_pressed & (1 << bit) != 0 {
-                            send_event(
-                                target_window,
-                                WindowEvent::mouse_button(local_x, local_y, bit, true),
-                            );
+                        for bit in 0..3 {
+                            if button_pressed & (1 << bit) != 0 {
+                                send_event(
+                                    target_window,
+                                    WindowEvent::mouse_button(local_x, local_y, bit, true),
+                                );
+                            }
                         }
                     }
                 }

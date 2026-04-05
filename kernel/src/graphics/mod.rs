@@ -85,7 +85,8 @@ impl DirectFramebuffer {
             red_lut,
             green_lut,
             blue_lut,
-            converted_row_buffer: Vec::new(),
+            // Pre-allocate to screen width so draw() never allocates under the lock.
+            converted_row_buffer: alloc::vec![0u32; width],
         }
     }
 
@@ -165,9 +166,12 @@ impl DirectFramebuffer {
                 src_row += 1;
             }
         } else {
-            // Slow path: per-pixel LUT color conversion
-            self.converted_row_buffer.clear();
-            self.converted_row_buffer.resize(row_len, 0);
+            // Slow path: per-pixel LUT color conversion.
+            // converted_row_buffer is pre-allocated to screen width in new().
+            let red_lut = &self.red_lut;
+            let green_lut = &self.green_lut;
+            let blue_lut = &self.blue_lut;
+            let conv = &mut self.converted_row_buffer[..row_len];
 
             let mut src_row = src_offset_y;
             for dst_y in start_y..end_y {
@@ -175,16 +179,16 @@ impl DirectFramebuffer {
                 let dst_start = dst_y * pixels_per_row + start_x;
 
                 for i in 0..row_len {
-                    self.converted_row_buffer[i] = self.convert_color(src[src_start + i]);
+                    let rgb = src[src_start + i];
+                    let r = ((rgb >> 16) & 0xFF) as usize;
+                    let g = ((rgb >> 8) & 0xFF) as usize;
+                    let b = (rgb & 0xFF) as usize;
+                    conv[i] = red_lut[r] | green_lut[g] | blue_lut[b];
                 }
 
                 unsafe {
                     let fb_ptr = fb.addr() as *mut u32;
-                    core::ptr::copy_nonoverlapping(
-                        self.converted_row_buffer.as_ptr(),
-                        fb_ptr.add(dst_start),
-                        row_len,
-                    );
+                    core::ptr::copy_nonoverlapping(conv.as_ptr(), fb_ptr.add(dst_start), row_len);
                 }
 
                 src_row += 1;
@@ -216,14 +220,15 @@ impl DirectFramebuffer {
             self.convert_color(color)
         };
 
+        // Fill one row in the pre-allocated buffer, then memcpy to each scanline.
+        let row_buf = &mut self.converted_row_buffer[..row_len];
+        row_buf.fill(native_color);
+
         for dst_y in start_y..end_y {
             let dst_start = dst_y * pixels_per_row + start_x;
             unsafe {
                 let fb_ptr = fb.addr() as *mut u32;
-                let dst_ptr = fb_ptr.add(dst_start);
-                for i in 0..row_len {
-                    dst_ptr.add(i).write_volatile(native_color);
-                }
+                core::ptr::copy_nonoverlapping(row_buf.as_ptr(), fb_ptr.add(dst_start), row_len);
             }
         }
     }
