@@ -94,12 +94,13 @@ fn is_valid_transition(from: State, to: State) -> bool {
 impl From<u8> for State {
     fn from(v: u8) -> Self {
         match v {
+            0 => State::Ready,
             1 => State::Running,
             2 => State::Sleeping,
             3 => State::Parked,
             4 => State::Waking,
             5 => State::Dying,
-            _ => State::Ready,
+            _ => unreachable!("invalid thread state: {v}"),
         }
     }
 }
@@ -390,14 +391,14 @@ impl Thread {
 
         let id = ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed));
 
-        let name = Arc::new(name);
+        let name = Arc::new(name.unwrap_or_default());
 
         let thread = Arc::new(Self {
             id,
             kstack_top: initial_kstack_top,
             ctx: Mutex::new(context),
             state: AtomicU8::new(State::Ready as u8),
-            name: Arc::new(name.as_ref().clone().unwrap_or(String::new())),
+            name,
             user: None,
             cpu_affinity: AtomicU32::new(0),
             flags: AtomicU32::new(0),
@@ -496,7 +497,7 @@ impl Thread {
         context.rsi = argv_ptr;
         context.rdx = 0;
 
-        let name = Arc::new(name);
+        let name = Arc::new(name.unwrap_or_default());
 
         let mm = Arc::new(Mutex::new(process_memory_manager));
 
@@ -520,7 +521,7 @@ impl Thread {
             kstack_top: kernel_stack_top,
             ctx: Mutex::new(context),
             state: AtomicU8::new(State::Ready as u8),
-            name: Arc::new(name.as_ref().clone().unwrap_or(String::new())),
+            name,
             cpu_affinity: AtomicU32::new(0),
             flags: AtomicU32::new(0),
             slice_deadline: AtomicU64::new(0),
