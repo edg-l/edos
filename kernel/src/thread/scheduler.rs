@@ -126,6 +126,11 @@ impl Scheduler {
 
     fn complete_wake(&self, thread: &Arc<Thread>, priority: WakePriority) {
         without_interrupts(|| {
+            // SAFETY INVARIANT: Must enqueue on the thread's last CPU.
+            // thread_park_while's abort path relies on this -- if the thread
+            // were enqueued on a different CPU, that CPU could pop and run it
+            // while the original CPU still executes the abort path, causing
+            // two CPUs to run the same thread simultaneously.
             let cpu = thread.cpu.load(Ordering::Acquire);
             let sc = sched_for_cpu(cpu);
             thread.state.store(State::Ready as u8, Ordering::Release);
@@ -163,9 +168,16 @@ impl Scheduler {
 
     pub fn on_tick(&self, context: *mut CpuContext) {
         without_interrupts(|| {
-            //self.earliest_deadline.store(u64::MAX, Ordering::Release);
             self.wake_sleepers();
-            self.maybe_preempt(context);
+            // When idle (current==0) and no work queued, skip maybe_preempt
+            // to prevent recursive run_idle (on_tick -> pick_and_run -> run_idle
+            // -> enable IRQs -> on_tick -> pick_and_run -> run_idle -> ...).
+            // When idle WITH work, we must call maybe_preempt so pick_and_run
+            // can pop the thread from the runqueue.
+            let idle = self.current.load(Ordering::Acquire) == 0;
+            if !idle || self.has_work.load(Ordering::Acquire) {
+                self.maybe_preempt(context);
+            }
         })
     }
 
@@ -581,12 +593,15 @@ impl Scheduler {
                 if cur.cas_state(State::Parked, State::Running) {
                     return;
                 }
-                // CAS failed: a waker set Parked → Waking → Ready and
+                // CAS failed: a waker set Parked -> Waking -> Ready and
                 // enqueued us on our last CPU (this CPU). Context-switch
                 // so the scheduler properly pops and unlinks us from the
-                // runqueue. This is safe because complete_wake enqueues
-                // on the thread's last CPU, which is this CPU — no
-                // cross-CPU context race.
+                // runqueue.
+                // SAFETY: depends on complete_wake enqueueing on the
+                // thread's last CPU (see invariant comment there). If
+                // complete_wake is ever changed to enqueue elsewhere,
+                // this path must be redesigned to prevent two CPUs from
+                // running the same thread.
                 without_interrupts(|| unsafe {
                     cur.mark_need_resched();
                     context_switch();

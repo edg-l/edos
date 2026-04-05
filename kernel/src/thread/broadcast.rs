@@ -1,3 +1,4 @@
+use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use core::time::Duration;
 
 use alloc::{
@@ -67,12 +68,14 @@ impl<T> Subscriber<T> {
 /// Broadcaster with many subscribers
 pub struct Broadcaster<T> {
     subs: RwLock<BTreeMap<ThreadId, Arc<Subscriber<T>>>>,
+    broadcast_count: AtomicU32,
 }
 
 impl<T: Clone> Broadcaster<T> {
     pub const fn new() -> Self {
         Self {
             subs: RwLock::new(BTreeMap::new()),
+            broadcast_count: AtomicU32::new(0),
         }
     }
 
@@ -100,6 +103,9 @@ impl<T: Clone> Broadcaster<T> {
     }
 
     pub fn broadcast(&self, msg: T) {
+        if self.broadcast_count.fetch_add(1, AtomicOrdering::Relaxed) % 128 == 0 {
+            self.cleanup();
+        }
         let sched = sched();
         let targets: Vec<Arc<Subscriber<T>>> = {
             let subs = self.subs.read();
@@ -118,7 +124,9 @@ impl<T: Clone> Broadcaster<T> {
         if msgs.is_empty() {
             return;
         }
-
+        if self.broadcast_count.fetch_add(1, AtomicOrdering::Relaxed) % 128 == 0 {
+            self.cleanup();
+        }
         let sched = sched();
         let targets: Vec<Arc<Subscriber<T>>> = {
             let subs = self.subs.read();

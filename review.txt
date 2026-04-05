@@ -812,11 +812,11 @@ x86-64 TSO.
 | 20 | CRITICAL | `Link::linked` not atomic, read outside lock = data race | DONE |
 | 21 | CRITICAL | `SleepEntry` holds Arc, dead threads trapped in sleepers heap | DONE |
 | 22 | CRITICAL | `thread_exit` THREADS.remove fallback path is racy | DONE |
-| 23 | HIGH | `run_idle` enables IRQs, recursive on_tick/pick_and_run possible | TODO |
-| 24 | HIGH | `BlockingMutex::lock` deadlocks with interrupts disabled | TODO |
-| 25 | HIGH | `WaitQueue` VecDeque allocates inside `without_interrupts` | TODO |
-| 26 | HIGH | `thread_park_while` abort relies on same-CPU enqueue invariant | TODO |
-| 27 | HIGH | Dead broadcaster subscribers leak memory, waste CPU | TODO |
+| 23 | HIGH | `run_idle` enables IRQs, recursive on_tick/pick_and_run possible | DONE |
+| 24 | HIGH | `BlockingMutex::lock` deadlocks with interrupts disabled | DONE |
+| 25 | HIGH | `WaitQueue` VecDeque allocates inside `without_interrupts` | DONE |
+| 26 | HIGH | `thread_park_while` abort relies on same-CPU enqueue invariant | DONE |
+| 27 | HIGH | Dead broadcaster subscribers leak memory, waste CPU | DONE |
 | 28 | MEDIUM | `State::from(u8)` silent fallback to Ready | TODO |
 | 29 | MEDIUM | Early-woken sleep leaves stale SleepEntry in heap | TODO |
 | 30 | MEDIUM | Double CpuContext copy + Mutex overhead per context switch | TODO |

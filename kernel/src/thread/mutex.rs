@@ -45,6 +45,10 @@ impl<T> BlockingMutex<T> {
             if self.try_acquire() {
                 return BlockingMutexGuard { lock: self };
             }
+            debug_assert!(
+                x86_64::instructions::interrupts::are_enabled(),
+                "BlockingMutex::lock contended with interrupts disabled"
+            );
             let _ = self
                 .waiters
                 .wait_until(|| !self.locked.load(Ordering::Acquire));

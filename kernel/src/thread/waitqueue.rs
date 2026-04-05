@@ -95,16 +95,13 @@ impl WaitQueue {
         let tid = sched().current_thread_id().unwrap();
         let mut action: Option<SleepAction> = None;
 
+        // Push tid with interrupts enabled so VecDeque can allocate safely.
+        {
+            let mut q = self.inner.lock();
+            q.push_back(tid);
+        }
+
         interrupts::without_interrupts(|| {
-            if ready() {
-                return;
-            }
-
-            {
-                let mut q = self.inner.lock();
-                q.push_back(tid);
-            }
-
             if ready() {
                 let mut q = self.inner.lock();
                 if let Some(pos) = q.iter().position(|&id| id == tid) {
