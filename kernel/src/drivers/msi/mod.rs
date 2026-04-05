@@ -132,11 +132,22 @@ fn pci_read_u16(addr: PciAddress, offset: u8) -> u16 {
 }
 
 fn pci_write_u16(addr: PciAddress, offset: u8, value: u16) {
-    let current = pci_read_u32(addr, offset & !3);
+    // Single lock for the read-modify-write to avoid TOCTOU with other CPUs.
+    let _guard = PCI_CONFIG_LOCK.lock();
+    let mut cfg_addr: Port<u32> = Port::new(0xCF8);
+    let mut cfg_data: Port<u32> = Port::new(0xCFC);
+    let config_addr = pci_config_address(addr, offset & !3);
     let shift = ((offset & 2) as u32) * 8;
+    let current = unsafe {
+        cfg_addr.write(config_addr);
+        cfg_data.read()
+    };
     let mask = !(0xFFFFu32 << shift);
     let new_val = (current & mask) | ((value as u32) << shift);
-    pci_write_u32(addr, offset & !3, new_val);
+    unsafe {
+        cfg_addr.write(config_addr);
+        cfg_data.write(new_val);
+    }
 }
 
 fn pci_read_u8(addr: PciAddress, offset: u8) -> u8 {
