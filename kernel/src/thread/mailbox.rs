@@ -103,7 +103,11 @@ impl<T, R> Mailbox<T, R> {
             let mut slot = req.resp.value.lock();
             *slot = Some(val);
         }
-        req.resp.ready.store(true, Ordering::Release);
+        // Fence ensures the value write is globally visible before ready flag.
+        // The BlockingMutex release and ready store are on different atomics,
+        // so without this fence they are not ordered with respect to each other.
+        core::sync::atomic::fence(Ordering::Release);
+        req.resp.ready.store(true, Ordering::Relaxed);
         req.resp.waitq.wake_one();
     }
 

@@ -148,7 +148,11 @@ pub fn init() {
 
 /// Called from the IRQ12 interrupt handler
 pub fn handle_interrupt() {
-    let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
+    // Use .get() instead of .call_once() to avoid allocating in interrupt context.
+    // Queue is initialized by init() before interrupts are enabled.
+    let Some(queue) = SCANCODE_QUEUE.get() else {
+        return;
+    };
 
     // Read status: bit 0 = data available, bit 5 = aux (mouse) data.
     // Only read if both bits are set — this is mouse data, not keyboard.

@@ -42,7 +42,12 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
 
     let mut data_port = Port::new(0x60);
     let mut status_port = Port::new(0x64);
-    let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
+    // Use .get() instead of .call_once() to avoid allocating in interrupt context.
+    // Queue is initialized by driver_main before interrupts are enabled.
+    let Some(queue) = SCANCODE_QUEUE.get() else {
+        unsafe { get_lapic().end_of_interrupt() };
+        return;
+    };
 
     // Drain keyboard bytes from the controller buffer. Check bit 5 of the
     // status register to distinguish keyboard (bit 5 clear) from mouse

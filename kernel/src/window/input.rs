@@ -248,9 +248,10 @@ pub fn remove_event_queue(window_id: WindowId) {
 
 /// Poll events for a window, returns up to `max` events.
 pub fn poll_events(window_id: WindowId, max: usize) -> Vec<WindowEvent> {
+    // Pre-allocate outside the lock to avoid heap allocation under spinlock.
+    let mut events = Vec::with_capacity(max.min(EVENT_QUEUE_SIZE));
     let queues = WINDOW_EVENTS.read();
     if let Some(queue) = queues.get(&window_id) {
-        let mut events = Vec::with_capacity(max.min(EVENT_QUEUE_SIZE));
         while events.len() < max {
             if let Some(event) = queue.pop() {
                 events.push(event);
@@ -258,10 +259,8 @@ pub fn poll_events(window_id: WindowId, max: usize) -> Vec<WindowEvent> {
                 break;
             }
         }
-        events
-    } else {
-        Vec::new()
     }
+    events
 }
 
 /// Send an event to a specific window.
@@ -319,28 +318,29 @@ fn handle_mouse_event(event: MouseEvent) {
     if button_pressed != 0 {
         if let Some(target_window) = window_under_cursor {
             if focused != Some(target_window) {
-                // Need to drop read lock before taking write lock
+                // Drop read lock, take write lock for the entire focus transaction
+                // to avoid TOCTOU (window destroyed between lock acquisitions).
+                let window_coords = registry.get_window(target_window).map(|w| (w.x, w.y));
                 drop(registry);
 
-                // Send focus lost to old window
+                {
+                    let mut registry = WINDOW_REGISTRY.write();
+                    // Re-verify window still exists under write lock
+                    if registry.get_window(target_window).is_some() {
+                        registry.set_focused(target_window);
+                    }
+                }
+
+                // Send focus events outside the lock
                 if let Some(old_focused) = focused {
                     send_event(old_focused, WindowEvent::focus_lost());
                 }
-
-                // Change focus
-                WINDOW_REGISTRY.write().set_focused(target_window);
-
-                // Send focus gained to new window
                 send_event(target_window, WindowEvent::focus_gained());
 
-                // Re-acquire read lock
-                let registry = WINDOW_REGISTRY.read();
-
-                // Send the click event to the new focused window
-                if let Some(window) = registry.get_window(target_window) {
-                    // Calculate coordinates relative to client area (excluding decorations)
-                    let local_x = event.x - window.x - decoration::BORDER_WIDTH;
-                    let local_y = event.y - window.y - decoration::TITLE_HEIGHT;
+                // Send click event using coordinates captured before lock drop
+                if let Some((wx, wy)) = window_coords {
+                    let local_x = event.x - wx - decoration::BORDER_WIDTH;
+                    let local_y = event.y - wy - decoration::TITLE_HEIGHT;
 
                     for bit in 0..3 {
                         if button_pressed & (1 << bit) != 0 {

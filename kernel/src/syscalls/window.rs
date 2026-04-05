@@ -61,9 +61,9 @@ pub fn sys_window_destroy(window_id: WindowId) -> u64 {
 
     let pid = info.lock().pid;
 
-    // Check ownership
+    // Check ownership and destroy in a single write lock to avoid TOCTOU.
     {
-        let registry = WINDOW_REGISTRY.read();
+        let mut registry = WINDOW_REGISTRY.write();
         if let Some(window) = registry.get_window(window_id) {
             if window.pid != pid {
                 info.lock().errno = Errno::EPERM;
@@ -73,18 +73,16 @@ pub fn sys_window_destroy(window_id: WindowId) -> u64 {
             info.lock().errno = Errno::ENOENT;
             return !0u64;
         }
+        if !registry.destroy_window(window_id) {
+            info.lock().errno = Errno::ENOENT;
+            return !0u64;
+        }
     }
 
-    // Remove event queue
+    // Remove event queue after the window is destroyed.
     remove_event_queue(window_id);
 
-    // Destroy the window
-    if WINDOW_REGISTRY.write().destroy_window(window_id) {
-        0
-    } else {
-        info.lock().errno = Errno::ENOENT;
-        !0u64
-    }
+    0
 }
 
 /// Set a window property.
@@ -101,6 +99,31 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
     info.lock().errno = Errno::Clear;
 
     let pid = info.lock().pid;
+
+    // For TITLE_PTR: read user memory and allocate BEFORE taking the write lock,
+    // so we don't do slow user reads or heap allocation under spinlock.
+    let mut title_string: Option<String> = None;
+    if prop == property::TITLE_PTR {
+        let ptr = value as *const u8;
+        if ptr.is_null() {
+            title_string = Some(String::new());
+        } else {
+            let mut title_bytes = [0u8; 256];
+            for (i, byte) in title_bytes.iter_mut().enumerate() {
+                if let Some(b) = unsafe { try_read_user(ptr.add(i)) } {
+                    if b == 0 {
+                        break;
+                    }
+                    *byte = b;
+                } else {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+            }
+            let len = title_bytes.iter().position(|&b| b == 0).unwrap_or(256);
+            title_string = Some(String::from_utf8_lossy(&title_bytes[..len]).into_owned());
+        }
+    }
 
     let mut registry = WINDOW_REGISTRY.write();
 
@@ -150,27 +173,7 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
             window.height = value as u32;
         }
         property::TITLE_PTR => {
-            // value is a pointer to a null-terminated string
-            let ptr = value as *const u8;
-            if ptr.is_null() {
-                window.title = String::new();
-            } else {
-                // Read title from user space (max 256 chars)
-                let mut title_bytes = [0u8; 256];
-                for (i, byte) in title_bytes.iter_mut().enumerate() {
-                    if let Some(b) = unsafe { try_read_user(ptr.add(i)) } {
-                        if b == 0 {
-                            break;
-                        }
-                        *byte = b;
-                    } else {
-                        info.lock().errno = Errno::EFAULT;
-                        return !0u64;
-                    }
-                }
-                let len = title_bytes.iter().position(|&b| b == 0).unwrap_or(256);
-                window.title = String::from_utf8_lossy(&title_bytes[..len]).into_owned();
-            }
+            window.title = title_string.unwrap();
         }
         property::BUFFER_SHM => {
             window.buffer_shm_id = if value == 0 { None } else { Some(value) };
@@ -318,7 +321,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
     }
 
     let copy_count = total_count.min(max as usize);
-    let entry_size = 56; // Size of WindowListEntry
+    let entry_size = core::mem::size_of::<WindowListEntry>();
 
     for (i, window) in windows.iter().take(copy_count).enumerate() {
         let offset = i * entry_size;
