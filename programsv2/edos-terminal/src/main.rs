@@ -73,8 +73,12 @@ fn main() {
     // Event buffer
     let mut events = [WindowEvent::default(); 16];
 
+    let mut term_frame: u64 = 0;
+
     // Main loop
     loop {
+        term_frame += 1;
+
         // Poll window events
         if let Ok(count) = window.poll_events(&mut events) {
             for event in &events[..count] {
@@ -102,9 +106,11 @@ fn main() {
                         terminal.on_key(event.code, false);
                     }
                     Some(WindowEventType::FocusGained) => {
+                        eprintln!("[Term] FocusGained");
                         terminal.set_focused(true);
                     }
                     Some(WindowEventType::FocusLost) => {
+                        eprintln!("[Term] FocusLost");
                         terminal.set_focused(false);
                     }
                     _ => {}

@@ -17,7 +17,7 @@ use crate::{
     thread::{
         broadcast::{Broadcaster, Subscriber},
         mutex::BlockingMutex,
-        scheduler::{WakePriority, sched},
+        scheduler::sched,
         thread::ThreadId,
     },
 };
@@ -28,47 +28,11 @@ static KEYBOARD_POLLERS: BlockingMutex<
 > = BlockingMutex::new(Vec::new());
 static KEYBOARD_NEXT_POLL_KEY: AtomicU64 = AtomicU64::new(1);
 
-static SCANCODE_QUEUE: Once<ArrayQueue<u8>> = Once::new();
+pub(crate) static SCANCODE_QUEUE: Once<ArrayQueue<u8>> = Once::new();
 const QUEUE_SIZE: usize = 2048;
 
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    use x86_64::instructions::port::Port;
-
-    let mut data_port = Port::new(0x60);
-    let mut status_port = Port::new(0x64);
-    // Use .get() instead of .call_once() to avoid allocating in interrupt context.
-    // Queue is initialized by driver_main before interrupts are enabled.
-    let Some(queue) = SCANCODE_QUEUE.get() else {
-        // Drain data port to unblock future IRQs even if we can't process yet.
-        let _: u8 = unsafe { data_port.read() };
-        unsafe { get_lapic().end_of_interrupt() };
-        return;
-    };
-
-    // Drain keyboard bytes from the controller buffer. Check bit 5 of the
-    // status register to distinguish keyboard (bit 5 clear) from mouse
-    // (bit 5 set) data — they share the same 8042 controller and data port.
-    for _ in 0..8 {
-        let status: u8 = unsafe { status_port.read() };
-        if status & 0x01 == 0 {
-            break; // no data available
-        }
-        if status & 0x20 != 0 {
-            // Mouse byte — read and forward to the mouse driver so it
-            // doesn't block subsequent keyboard bytes in the buffer.
-            let byte: u8 = unsafe { data_port.read() };
-            crate::drivers::mouse::push_mouse_byte(byte);
-            continue;
-        }
-
-        let scancode: u8 = unsafe { data_port.read() };
-        queue.force_push(scancode);
-    }
-
-    if let Some(tid) = KEYBOARD_THREAD_ID.get() {
-        sched().wake_thread_irq(*tid, WakePriority::Interrupt);
-    }
-
+    crate::drivers::ps2_drain_buffer();
     unsafe { get_lapic().end_of_interrupt() };
 }
 

@@ -5,7 +5,6 @@ use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU64, Ordering};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
 use spin::Once;
-use x86_64::instructions::port::Port;
 
 use crate::{
     fs::{
@@ -23,10 +22,6 @@ use crate::{
         thread::ThreadId,
     },
 };
-
-// PS/2 ports (used by IRQ handler)
-const DATA_PORT: u16 = 0x60;
-const CMD_PORT: u16 = 0x64;
 
 // Mouse packet bits
 const PACKET_X_SIGN: u8 = 0x10;
@@ -131,27 +126,7 @@ pub fn init() {
     SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
 }
 
-/// Called from the IRQ12 interrupt handler
-pub fn handle_interrupt() {
-    // Use .get() instead of .call_once() to avoid allocating in interrupt context.
-    // Queue is initialized by init() before interrupts are enabled.
-    let Some(queue) = SCANCODE_QUEUE.get() else {
-        return;
-    };
-
-    // Read status: bit 0 = data available, bit 5 = aux (mouse) data.
-    // Only read if both bits are set — this is mouse data, not keyboard.
-    let status: u8 = unsafe { Port::new(CMD_PORT).read() };
-    if status & 0x21 == 0x21 {
-        let byte: u8 = unsafe { Port::new(DATA_PORT).read() };
-        let _ = queue.push(byte);
-
-        // Wake the driver thread
-        if let Some(tid) = MOUSE_THREAD_ID.get() {
-            sched().wake_thread_irq(*tid, WakePriority::Interrupt);
-        }
-    }
-}
+// IRQ12 handling is now done by ps2_drain_buffer() in drivers/mod.rs.
 
 /// Main driver thread
 pub extern "C" fn driver_main() -> ! {

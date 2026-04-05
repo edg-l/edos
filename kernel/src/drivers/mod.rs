@@ -1,8 +1,75 @@
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use crate::{graphics, thread::util::queue_spawn_kthread_named};
 
 pub mod ahci;
 pub mod dma;
 pub mod fpu;
+
+/// Spinlock for serializing 8042 PS/2 controller data port access.
+///
+/// IRQ1 (keyboard) and IRQ12 (mouse) can fire simultaneously on different
+/// CPUs. Both need to read the status register (0x64) and data port (0x60)
+/// on the same 8042 controller. Without serialization, one handler can
+/// consume a byte intended for the other, corrupting the PS/2 byte stream.
+///
+/// Both IRQ handlers call ps2_drain_buffer() which spin-acquires this lock,
+/// drains ALL pending bytes (both keyboard and mouse), and routes each byte
+/// to the correct queue based on the status register's bit 5.
+static PS2_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// Drain all pending bytes from the 8042 PS/2 controller buffer.
+/// Routes keyboard bytes to the keyboard queue and mouse bytes to the mouse queue.
+/// Called from both IRQ1 (keyboard) and IRQ12 (mouse) handlers.
+pub fn ps2_drain_buffer() {
+    use x86_64::instructions::port::Port;
+
+    // Spin-acquire: brief spin is acceptable in IRQ context since the
+    // critical section is just a few port reads (~microseconds).
+    while PS2_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+
+    let mut got_keyboard = false;
+    let mut got_mouse = false;
+
+    for _ in 0..8 {
+        let status: u8 = unsafe { Port::<u8>::new(0x64).read() };
+        if status & 0x01 == 0 {
+            break; // No data available
+        }
+        let byte: u8 = unsafe { Port::<u8>::new(0x60).read() };
+        if status & 0x20 != 0 {
+            // Mouse byte (bit 5 set)
+            mouse::push_mouse_byte(byte);
+            got_mouse = true;
+        } else {
+            // Keyboard byte
+            if let Some(queue) = keyboard::SCANCODE_QUEUE.get() {
+                queue.force_push(byte);
+                got_keyboard = true;
+            }
+        }
+    }
+
+    PS2_LOCK.store(false, Ordering::Release);
+
+    // Wake driver threads outside the lock
+    let sched = crate::thread::scheduler::sched();
+    if got_keyboard {
+        if let Some(tid) = keyboard::KEYBOARD_THREAD_ID.get() {
+            sched.wake_thread_irq(*tid, crate::thread::scheduler::WakePriority::Interrupt);
+        }
+    }
+    if got_mouse {
+        if let Some(tid) = mouse::MOUSE_THREAD_ID.get() {
+            sched.wake_thread_irq(*tid, crate::thread::scheduler::WakePriority::Interrupt);
+        }
+    }
+}
 pub mod hpet;
 pub mod keyboard;
 pub mod mouse;
