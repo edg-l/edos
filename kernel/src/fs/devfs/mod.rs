@@ -398,6 +398,27 @@ pub fn register_device_str(path: &str, device: Arc<dyn DevFsDevice>) -> Result<(
     register_device(&path, device)
 }
 
+/// Look up a device by its devfs-relative path (e.g. "/fb", "/mouse").
+/// Returns a cloned Arc to the device if found.
+/// This allows callers to bypass the FS Mailbox for devfs operations.
+pub fn lookup_device(path: &Path) -> Option<Arc<dyn DevFsDevice>> {
+    let devfs = DEVFS_INSTANCE.get()?;
+    let devfs = devfs.read();
+    let normalized = path.normalize();
+    devfs.get_device(&normalized).map(|d| d.device.clone())
+}
+
+/// Try to look up a device from a full VFS path (e.g. "/dev/fb").
+/// Returns None if the path doesn't start with "/dev/" or the device doesn't exist.
+pub fn try_lookup_from_full_path(full_path: &Path) -> Option<Arc<dyn DevFsDevice>> {
+    let dev_prefix = Path::parse("/dev").ok()?;
+    if !full_path.starts_with(&dev_prefix) {
+        return None;
+    }
+    let relative = full_path.strip_prefix(&dev_prefix);
+    lookup_device(&relative)
+}
+
 /// Remove an existing device node if present.
 pub fn unregister_device(path: &Path) -> Result<(), DevFsError> {
     let normalized = path.normalize();

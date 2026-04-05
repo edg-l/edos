@@ -1,7 +1,7 @@
 use alloc::{vec, vec::Vec};
 
 use crate::{
-    fs::api as fs_api,
+    fs::{api as fs_api, devfs},
     syscalls::Errno,
     thread::{pipe::FileDescriptor, scheduler::sched},
     util::uaccess::{try_copy_from_user, try_copy_to_user},
@@ -32,6 +32,10 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
     let copy_out = flags & IOCTL_FLAG_WRITE != 0;
     let need_buffer = arg_len > 0 && (copy_in || copy_out);
 
+    // Fast path: bypass the FS Mailbox for devfs devices.
+    // DevFsDevice::ioctl is thread-safe (behind Arc) and doesn't need the FS thread.
+    let devfs_device = devfs::try_lookup_from_full_path(&file.path);
+
     if need_buffer {
         if arg == 0 {
             info.lock().errno = Errno::EFAULT;
@@ -55,7 +59,16 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
 
         interrupts::enable();
 
-        match fs_api::ioctl(&file.path, request, buffer.as_mut_ptr() as u64) {
+        let result = if let Some(ref device) = devfs_device {
+            device
+                .ioctl(request, buffer.as_mut_ptr() as u64)
+                .map(|v| v as i64)
+                .map_err(|e| crate::fs::Error::from(e))
+        } else {
+            fs_api::ioctl(&file.path, request, buffer.as_mut_ptr() as u64).map(|v| v as i64)
+        };
+
+        match result {
             Ok(value) => {
                 if copy_out {
                     if !unsafe { try_copy_to_user(user_ptr, buffer.as_ptr(), arg_len) } {
@@ -63,7 +76,7 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
                         return -1;
                     }
                 }
-                value as i64
+                value
             }
             Err(err) => {
                 info.lock().errno = Errno::from(err);
@@ -72,8 +85,18 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
         }
     } else {
         interrupts::enable();
-        match fs_api::ioctl(&file.path, request, arg) {
-            Ok(value) => value as i64,
+
+        let result = if let Some(ref device) = devfs_device {
+            device
+                .ioctl(request, arg)
+                .map(|v| v as i64)
+                .map_err(|e| crate::fs::Error::from(e))
+        } else {
+            fs_api::ioctl(&file.path, request, arg).map(|v| v as i64)
+        };
+
+        match result {
+            Ok(value) => value,
             Err(err) => {
                 info.lock().errno = Errno::from(err);
                 -1

@@ -266,12 +266,23 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             }
         }
         Some(FileDescriptor::FsFile(file)) => {
-            // FS reads still need intermediate buffer (worker thread in different context)
-            let data = match fs_api::read_bytes(&file.path, file.offset as usize, count) {
-                Ok(data) => data,
-                Err(_) => {
-                    info.lock().errno = Errno::EINVAL;
-                    return -1;
+            // Fast path: devfs devices can be read directly without the FS Mailbox.
+            let data = if let Some(device) = crate::fs::devfs::try_lookup_from_full_path(&file.path)
+            {
+                match device.read(file.offset as usize, count) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        info.lock().errno = Errno::EIO;
+                        return -1;
+                    }
+                }
+            } else {
+                match fs_api::read_bytes(&file.path, file.offset as usize, count) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        info.lock().errno = Errno::EINVAL;
+                        return -1;
+                    }
                 }
             };
 
