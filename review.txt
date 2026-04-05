@@ -821,7 +821,7 @@ x86-64 TSO.
 | 29 | MEDIUM | Early-woken sleep leaves stale SleepEntry in heap | DONE |
 | 30 | MEDIUM | Double CpuContext copy + Mutex overhead per context switch | WONTFIX (negligible) |
 | 31 | MEDIUM | `reaper_enqueue` takes SCHEDULERS RwLock with IRQs disabled | DONE |
-| 32 | MEDIUM | `kthread_stack_free` uses allocating SegQueue | WONTFIX (reaper only) |
+| 32 | MEDIUM | `kthread_stack_free` uses allocating SegQueue | DONE |
 | 33 | MEDIUM | Unnecessary Arc<Option<String>> wrapping in thread creation | DONE |
 | 34 | MEDIUM | `ThreadRegistry` BTreeMap allocates inside `without_interrupts` | DONE |
 | 35 | LOW | Overly broad `unsafe` block in `thread_yield` | DONE |

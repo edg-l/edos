@@ -3,7 +3,8 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::{string::ToString, sync::Arc};
-use crossbeam_queue::SegQueue;
+use crossbeam_queue::ArrayQueue;
+use spin::Once;
 use x86_64::{VirtAddr, instructions::hlt, structures::paging::PageTableFlags};
 
 use crate::{
@@ -21,14 +22,18 @@ use crate::{
     },
 };
 
-static KTHREAD_FREED_STACKS: SegQueue<u64> = SegQueue::new();
+static KTHREAD_FREED_STACKS: Once<ArrayQueue<u64>> = Once::new();
+
+fn freed_stacks() -> &'static ArrayQueue<u64> {
+    KTHREAD_FREED_STACKS.call_once(|| ArrayQueue::new(256))
+}
 
 /// Returns the stack top of a kthread or a kernel stack for a user process.
 ///
 /// Note: When used in a iretq, the stack must be 8 byte aligned as to emulate a call.
 /// Thus called must decrement the stack top by 8 bytes.
 pub fn kthread_stack_alloc() -> u64 {
-    if let Some(region_bottom) = KTHREAD_FREED_STACKS.pop() {
+    if let Some(region_bottom) = freed_stacks().pop() {
         // Reuse existing region: region_bottom points to start of guard page
         // Stack top = region_bottom + stack_size
         return region_bottom + KTHREAD_STACK_SIZE;
@@ -53,7 +58,11 @@ pub fn kthread_stack_alloc() -> u64 {
 pub fn kthread_stack_free(stack_top: u64) {
     // Calculate the original region bottom (including guard page)
     let region_bottom = stack_top - KTHREAD_STACK_SIZE;
-    KTHREAD_FREED_STACKS.push(region_bottom);
+    if freed_stacks().push(region_bottom).is_err() {
+        // Queue full -- stack region leaked. Not critical since the virtual
+        // memory is still mapped and can't be reused anyway.
+        println!("WARNING: kthread freed stack queue full, leaking stack region");
+    }
 }
 
 pub fn queue_spawn_kthread(entry: u64) -> ThreadId {
