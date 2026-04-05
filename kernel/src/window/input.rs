@@ -236,8 +236,13 @@ pub fn get_or_create_event_queue(window_id: WindowId) -> Arc<WindowEventQueue> {
         }
     }
 
+    // Re-check under write lock: another CPU may have inserted while we dropped the read lock.
+    let mut queues = WINDOW_EVENTS.write();
+    if let Some(queue) = queues.get(&window_id) {
+        return queue.clone();
+    }
     let queue = Arc::new(WindowEventQueue::new());
-    WINDOW_EVENTS.write().insert(window_id, queue.clone());
+    queues.insert(window_id, queue.clone());
     queue
 }
 

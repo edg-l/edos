@@ -45,6 +45,8 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
     // Use .get() instead of .call_once() to avoid allocating in interrupt context.
     // Queue is initialized by driver_main before interrupts are enabled.
     let Some(queue) = SCANCODE_QUEUE.get() else {
+        // Drain data port to unblock future IRQs even if we can't process yet.
+        let _: u8 = unsafe { data_port.read() };
         unsafe { get_lapic().end_of_interrupt() };
         return;
     };

@@ -131,7 +131,8 @@ impl<T, R> Request<T, R> {
             let mut slot = self.resp.value.lock();
             *slot = Some(val);
         }
-        self.resp.ready.store(true, Ordering::Release);
+        core::sync::atomic::fence(Ordering::Release);
+        self.resp.ready.store(true, Ordering::Relaxed);
         self.resp.waitq.wake_one();
     }
 }

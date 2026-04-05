@@ -17,19 +17,18 @@ pub fn init() {
 /// Destroy all windows owned by a process and clean up their event queues.
 /// Called during process exit.
 pub fn cleanup_process_windows(pid: u64) {
-    // Get the list of window IDs to destroy
+    // Get window IDs then destroy windows first, so the input thread can't
+    // send events to windows whose queues we're about to remove.
     let window_ids: alloc::vec::Vec<WindowId> = {
         let registry = registry::WINDOW_REGISTRY.read();
         registry.windows_for_pid(pid)
     };
 
-    // Remove event queues for each window
-    for &id in &window_ids {
-        input::remove_event_queue(id);
-    }
-
-    // Destroy the windows
     registry::WINDOW_REGISTRY
         .write()
         .destroy_windows_for_pid(pid);
+
+    for &id in &window_ids {
+        input::remove_event_queue(id);
+    }
 }
