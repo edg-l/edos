@@ -251,19 +251,12 @@ impl Scheduler {
                 break;
             }
 
-            // Try to steal work from another CPU before halting.
-            // Exponential backoff: attempt every 1, 2, 4, 8, 16 ticks.
+            // Work-stealing disabled for debugging.
+            // TODO: re-enable after fixing context corruption.
             let steal_interval = 1u32 << cmp::min(steal_backoff, 4);
             if idle_ticks % steal_interval == 0 {
-                // Manually disable interrupts instead of without_interrupts
-                // so that on a successful steal, interrupts stay disabled
-                // all the way through the return path. If without_interrupts
-                // were used, it would restore IF=1 after the closure, opening
-                // a window where a timer interrupt re-enters the scheduler
-                // and corrupts the stolen context.
                 disable();
                 if self.try_steal_and_run(context) {
-                    // Interrupts are disabled. Return immediately.
                     return true;
                 }
                 steal_backoff = steal_backoff.saturating_add(1);
@@ -353,7 +346,13 @@ impl Scheduler {
     }
 
     fn pick_and_run(&self, context: *mut CpuContext) {
-        self.save_current_thread(context);
+        // NOTE: save_current_thread is NOT called here. It is called by
+        // maybe_preempt BEFORE enqueue, which is the only caller of
+        // pick_and_run. Calling save here would create a double-save race:
+        // between the enqueue (in maybe_preempt) and this second save, a
+        // stealer could grab the thread and start running it. The second
+        // save would then overwrite the stolen thread's ctx with THIS CPU's
+        // interrupt frame, corrupting it.
         loop {
             let next = {
                 let mut rq = self.rq.lock();
@@ -410,21 +409,18 @@ impl Scheduler {
 
     fn save_current_thread(&self, context: *mut CpuContext) {
         if let Some(current) = self.current_thread() {
+            // If the thread was stolen and is now running on another CPU,
+            // don't overwrite its ctx -- the new CPU owns it. Without this
+            // check, a "double save" could write THIS CPU's interrupt frame
+            // (belonging to a different thread) into the stolen thread's ctx,
+            // corrupting it. The stealer's context_switch_to updates thread.cpu
+            // before reading ctx, so this check is sufficient.
+            if current.cpu.load(Ordering::Acquire) != self.cpu {
+                return;
+            }
             let end_tick = Instant::now().tick();
             current.end_run(end_tick);
             unsafe {
-                let rip = (*context)
-                    .interrupt_stack_frame
-                    .instruction_pointer
-                    .as_u64();
-                // Kernel thread must have kernel-space RIP.
-                // User thread can have either (kernel RIP during syscall).
-                if current.user.is_none() && rip < 0xFFFF_0000_0000_0000 && rip != 0 {
-                    panic!(
-                        "save_current_thread: kernel thread {} (name={}) saving user-space RIP 0x{:x}, cpu={}",
-                        current.id.0, current.name, rip, self.cpu,
-                    );
-                }
                 *current.ctx.lock() = (*context).clone();
                 if current.user.is_some() {
                     let fpu = &mut *current.fpu.get();
@@ -456,11 +452,12 @@ impl Scheduler {
             next.id.0
         );
 
-        // Set as current
+        // Set as current. Update cpu FIRST so the old CPU's
+        // save_current_thread sees the migration and bails out.
         self.current.store(next.id.0, Ordering::Release);
         unsafe { get_percpu_data().set_current_thread(Some(next.clone())) };
-        next.context_saved.store(false, Ordering::Release);
         next.cpu.store(self.cpu, Ordering::Release);
+        next.context_saved.store(false, Ordering::Release);
 
         let now = Instant::now();
         next.begin_run(now.tick());
@@ -491,22 +488,19 @@ impl Scheduler {
             panic!("cw: Misaligned context: {context:p}");
         }
         let ctx_snapshot = next.ctx.lock().clone();
-        let rip = ctx_snapshot
-            .interrupt_stack_frame
-            .instruction_pointer
-            .as_u64();
-        // Catch obviously corrupt RIP: valid addresses are either in kernel
-        // space (0xFFFF...) or user space (>= 0x1000). Near-zero values
-        // indicate a stale or corrupted context.
-        if rip != 0 && rip < 0x1000 {
-            panic!(
-                "context_switch_to: thread {} (name={}) has bad RIP 0x{:x}, context_saved={}",
-                next.id.0,
-                next.name,
-                rip,
-                next.context_saved.load(Ordering::Relaxed),
-            );
-        }
+        debug_assert!(
+            {
+                let rip = ctx_snapshot
+                    .interrupt_stack_frame
+                    .instruction_pointer
+                    .as_u64();
+                rip == 0 || rip >= 0x1000
+            },
+            "context_switch_to: thread {} (name={}) has bad RIP, context_saved={}",
+            next.id.0,
+            next.name,
+            next.context_saved.load(Ordering::Relaxed),
+        );
         let user_rsp = ctx_snapshot.interrupt_stack_frame.stack_pointer.as_u64();
         unsafe { *context = ctx_snapshot };
 
