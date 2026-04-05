@@ -34,18 +34,56 @@ struct TestHarness {
     // park-while test
     park_while_tid: AtomicU64,
     park_while_condition: AtomicBool,
+    // ping-pong test
+    ping_tid: AtomicU64,
+    pong_tid: AtomicU64,
+    ping_pong_count: AtomicU32,
+    // spawn-exit stress
+    spawn_exit_done: AtomicU32,
+    // multi-wake
+    multi_wake_tids: [AtomicU64; 4],
+    multi_wake_gate: AtomicBool,
+    // abort-race
+    abort_race_tid: AtomicU64,
+    abort_race_condition: AtomicBool,
+    abort_race_rounds: AtomicU32,
+    // wake-before-park
+    wbp_tid: AtomicU64,
+    wbp_parked: AtomicBool,
+    // sleep-interrupt
+    sleep_int_tid: AtomicU64,
 }
 
+const TOTAL_TESTS: u32 = 22;
+
 pub fn run_sched_tests() {
-    println!("[sched-test] Starting scheduler tests...");
+    println!("[sched-test] Starting scheduler tests ({TOTAL_TESTS} expected)...");
     let harness = Arc::new(TestHarness {
         done_count: AtomicU32::new(0),
-        total: 8,
+        total: TOTAL_TESTS,
         wake_target_tid: AtomicU64::new(0),
         park_while_tid: AtomicU64::new(0),
         park_while_condition: AtomicBool::new(false),
+        ping_tid: AtomicU64::new(0),
+        pong_tid: AtomicU64::new(0),
+        ping_pong_count: AtomicU32::new(0),
+        spawn_exit_done: AtomicU32::new(0),
+        multi_wake_tids: [
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+        ],
+        multi_wake_gate: AtomicBool::new(false),
+        abort_race_tid: AtomicU64::new(0),
+        abort_race_condition: AtomicBool::new(false),
+        abort_race_rounds: AtomicU32::new(0),
+        wbp_tid: AtomicU64::new(0),
+        wbp_parked: AtomicBool::new(false),
+        sleep_int_tid: AtomicU64::new(0),
     });
 
+    // --- Basic tests (8) ---
     spawn_test(&harness, "test-park-a", test_park_a);
     spawn_test(&harness, "test-park-b", test_park_b);
     spawn_test(&harness, "test-sleep", test_sleep);
@@ -54,6 +92,27 @@ pub fn run_sched_tests() {
     spawn_test(&harness, "test-pw-c", test_park_while_c);
     spawn_test(&harness, "test-pw-d", test_park_while_d);
     spawn_test(&harness, "test-ctxsaved", test_context_saved);
+
+    // --- Stress tests ---
+    // Rapid park/wake ping-pong between two threads (2 completions)
+    spawn_test(&harness, "test-ping", test_ping);
+    spawn_test(&harness, "test-pong", test_pong);
+    // Spawn+exit storm: spawn 50 threads that immediately exit (1 completion)
+    spawn_test(&harness, "test-spawn-exit", test_spawn_exit);
+    // Multi-wake: 4 threads park, 1 waker wakes all at once (5 completions)
+    for _ in 0..4 {
+        spawn_test(&harness, "test-mw-sleeper", test_multi_wake_sleeper);
+    }
+    spawn_test(&harness, "test-mw-waker", test_multi_wake_waker);
+    // Abort-race: waker fires immediately to hit the park_while abort path (2)
+    spawn_test(&harness, "test-abort-parker", test_abort_race_parker);
+    spawn_test(&harness, "test-abort-waker", test_abort_race_waker);
+    // Wake-before-park: waker fires before thread parks (2)
+    spawn_test(&harness, "test-wbp-parker", test_wbp_parker);
+    spawn_test(&harness, "test-wbp-waker", test_wbp_waker);
+    // Sleep interrupted by early wake (1)
+    spawn_test(&harness, "test-sleep-int-s", test_sleep_interrupt_sleeper);
+    spawn_test(&harness, "test-sleep-int-w", test_sleep_interrupt_waker);
 
     // Coordinator thread: waits for all tests, then exits QEMU.
     let boxed = Box::into_raw(Box::new(harness.clone())) as *mut u8;
@@ -177,6 +236,322 @@ extern "C" fn test_context_saved(arg: *mut u8) -> ! {
     test_done(&h, "context-saved");
     sched().thread_exit(0);
 }
+
+// ---------------------------------------------------------------------------
+// Stress: rapid park/wake ping-pong (tests waker-CPU enqueue under contention)
+// ---------------------------------------------------------------------------
+
+const PING_PONG_ROUNDS: u32 = 500;
+
+extern "C" fn test_ping(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    let tid = sched().current_thread_id().unwrap();
+    h.ping_tid.store(tid.0, Ordering::Release);
+
+    // Wait for pong to register
+    while h.pong_tid.load(Ordering::Acquire) == 0 {
+        sched().thread_yield();
+    }
+    let pong = ThreadId(h.pong_tid.load(Ordering::Acquire));
+
+    for _ in 0..PING_PONG_ROUNDS {
+        sched().thread_park();
+        // Woken by pong. Wake pong back.
+        sched().wake_thread(pong, WakePriority::Normal);
+    }
+    // Final park - pong will wake us one last time
+    sched().thread_park();
+
+    let count = h.ping_pong_count.load(Ordering::Acquire);
+    assert!(
+        count == PING_PONG_ROUNDS,
+        "[sched-test] ping-pong count mismatch: {count} != {PING_PONG_ROUNDS}"
+    );
+    test_done(&h, "ping-pong-ping");
+    sched().thread_exit(0);
+}
+
+extern "C" fn test_pong(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    let tid = sched().current_thread_id().unwrap();
+    h.pong_tid.store(tid.0, Ordering::Release);
+
+    // Wait for ping to register
+    while h.ping_tid.load(Ordering::Acquire) == 0 {
+        sched().thread_yield();
+    }
+    let ping = ThreadId(h.ping_tid.load(Ordering::Acquire));
+
+    // Give ping time to enter its first park
+    sched().thread_sleep(Duration::from_millis(5));
+
+    for _ in 0..PING_PONG_ROUNDS {
+        // Wake ping
+        sched().wake_thread(ping, WakePriority::Normal);
+        h.ping_pong_count.fetch_add(1, Ordering::AcqRel);
+        // Park, wait for ping to wake us back
+        sched().thread_park();
+    }
+    // Wake ping one final time so it can finish
+    sched().wake_thread(ping, WakePriority::Normal);
+
+    test_done(&h, "ping-pong-pong");
+    sched().thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Stress: spawn 50 threads that immediately exit (tests reaper + thread_exit)
+// ---------------------------------------------------------------------------
+
+const SPAWN_EXIT_COUNT: u32 = 50;
+
+extern "C" fn test_spawn_exit(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+
+    for _ in 0..SPAWN_EXIT_COUNT {
+        let boxed = Box::into_raw(Box::new(h.clone())) as *mut u8;
+        queue_spawn_kthread_named_arg(
+            "test-ephemeral",
+            test_ephemeral_thread as *const () as u64,
+            boxed,
+        );
+    }
+
+    // Wait for all ephemeral threads to finish
+    let start = Instant::now();
+    loop {
+        let done = h.spawn_exit_done.load(Ordering::Acquire);
+        if done >= SPAWN_EXIT_COUNT {
+            break;
+        }
+        assert!(
+            start.elapsed().as_secs() < 5,
+            "[sched-test] spawn-exit timeout: {done}/{SPAWN_EXIT_COUNT} done"
+        );
+        sched().thread_sleep(Duration::from_millis(10));
+    }
+
+    test_done(&h, "spawn-exit");
+    sched().thread_exit(0);
+}
+
+extern "C" fn test_ephemeral_thread(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    // Do a yield to exercise the scheduler, then exit
+    sched().thread_yield();
+    h.spawn_exit_done.fetch_add(1, Ordering::AcqRel);
+    sched().thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Stress: 4 threads park, 1 waker wakes all at once (tests multi-wake)
+// ---------------------------------------------------------------------------
+
+extern "C" fn test_multi_wake_sleeper(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    let tid = sched().current_thread_id().unwrap();
+
+    // Register in the first free slot
+    for slot in &h.multi_wake_tids {
+        if slot
+            .compare_exchange(0, tid.0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            break;
+        }
+    }
+
+    // Park until the waker opens the gate
+    sched().thread_park_while(|| !h.multi_wake_gate.load(Ordering::Acquire));
+
+    assert!(
+        h.multi_wake_gate.load(Ordering::Acquire),
+        "[sched-test] multi-wake gate not open after resume"
+    );
+    test_done(&h, "multi-wake-sleeper");
+    sched().thread_exit(0);
+}
+
+extern "C" fn test_multi_wake_waker(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+
+    // Wait for all 4 sleepers to register
+    loop {
+        let registered = h
+            .multi_wake_tids
+            .iter()
+            .filter(|t| t.load(Ordering::Acquire) != 0)
+            .count();
+        if registered == 4 {
+            break;
+        }
+        sched().thread_yield();
+    }
+
+    // Give sleepers time to actually park
+    sched().thread_sleep(Duration::from_millis(20));
+
+    // Open the gate and wake all 4
+    h.multi_wake_gate.store(true, Ordering::Release);
+    for slot in &h.multi_wake_tids {
+        let tid = slot.load(Ordering::Acquire);
+        if tid != 0 {
+            sched().wake_thread(ThreadId(tid), WakePriority::Normal);
+        }
+    }
+
+    test_done(&h, "multi-wake-waker");
+    sched().thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Stress: park_while abort path race
+// The waker fires with NO delay to maximize the chance of hitting the
+// window between CAS Running->Parked and the condition check inside
+// transition_park_while. When the waker wins the race, the parker's
+// CAS Parked->Running fails and it must switch away (abort path).
+// Repeated 200 times to increase the probability.
+// ---------------------------------------------------------------------------
+
+const ABORT_RACE_ROUNDS: u32 = 200;
+
+extern "C" fn test_abort_race_parker(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    let tid = sched().current_thread_id().unwrap();
+    h.abort_race_tid.store(tid.0, Ordering::Release);
+
+    for _ in 0..ABORT_RACE_ROUNDS {
+        h.abort_race_condition.store(true, Ordering::Release);
+        // Park while condition is true. The waker will set it to false
+        // and wake us. If the waker is fast enough, it wakes us before
+        // we even check the condition, triggering the abort path.
+        sched().thread_park_while(|| h.abort_race_condition.load(Ordering::Acquire));
+    }
+
+    let rounds = h.abort_race_rounds.load(Ordering::Acquire);
+    assert!(
+        rounds == ABORT_RACE_ROUNDS,
+        "[sched-test] abort-race round mismatch: {rounds} != {ABORT_RACE_ROUNDS}"
+    );
+    test_done(&h, "abort-race-parker");
+    sched().thread_exit(0);
+}
+
+extern "C" fn test_abort_race_waker(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+
+    // Wait for parker to register
+    while h.abort_race_tid.load(Ordering::Acquire) == 0 {
+        sched().thread_yield();
+    }
+    let parker = ThreadId(h.abort_race_tid.load(Ordering::Acquire));
+
+    for _ in 0..ABORT_RACE_ROUNDS {
+        // Spin until condition is set (parker is about to park or has parked)
+        while !h.abort_race_condition.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+        // Immediately flip condition and wake -- NO sleep, race the parker
+        h.abort_race_condition.store(false, Ordering::Release);
+        sched().wake_thread(parker, WakePriority::Normal);
+        h.abort_race_rounds.fetch_add(1, Ordering::AcqRel);
+        // Yield to give parker a chance to run its next iteration
+        sched().thread_yield();
+    }
+
+    test_done(&h, "abort-race-waker");
+    sched().thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Stress: wake-before-park
+// The waker calls wake_thread while the target is still Running (hasn't
+// parked yet). wake_thread_slow must handle this by spinning/retrying.
+// ---------------------------------------------------------------------------
+
+extern "C" fn test_wbp_parker(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    let tid = sched().current_thread_id().unwrap();
+    h.wbp_tid.store(tid.0, Ordering::Release);
+
+    // Signal that we're about to park, then park.
+    // The waker will wake us BEFORE we actually enter park.
+    h.wbp_parked.store(true, Ordering::Release);
+    sched().thread_park();
+
+    // If we get here, the wake eventually succeeded
+    test_done(&h, "wake-before-park-parker");
+    sched().thread_exit(0);
+}
+
+extern "C" fn test_wbp_waker(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+
+    // Wait for parker TID
+    while h.wbp_tid.load(Ordering::Acquire) == 0 {
+        sched().thread_yield();
+    }
+    let parker = ThreadId(h.wbp_tid.load(Ordering::Acquire));
+
+    // Wait for the "about to park" signal, then wake IMMEDIATELY.
+    // The parker might not have called thread_park yet -- wake_thread_slow
+    // must handle the Running state by retrying.
+    while !h.wbp_parked.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+    // No sleep! Wake immediately while parker might still be Running.
+    sched().wake_thread(parker, WakePriority::Normal);
+
+    test_done(&h, "wake-before-park-waker");
+    sched().thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Stress: sleep interrupted by early wake
+// Thread sleeps for 10 seconds, waker wakes it after 5ms.
+// Tests the Sleeping -> Waking transition and early wakeup path.
+// ---------------------------------------------------------------------------
+
+extern "C" fn test_sleep_interrupt_sleeper(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    let tid = sched().current_thread_id().unwrap();
+    h.sleep_int_tid.store(tid.0, Ordering::Release);
+
+    let start = Instant::now();
+    // Sleep for 10 seconds (will be woken early)
+    sched().thread_sleep(Duration::from_secs(10));
+    let elapsed = start.elapsed();
+
+    // Should have been woken well before 10 seconds
+    assert!(
+        elapsed.as_millis() < 1000,
+        "[sched-test] sleep-interrupt: slept too long ({}ms), wake failed?",
+        elapsed.as_millis()
+    );
+    test_done(&h, "sleep-interrupt-sleeper");
+    sched().thread_exit(0);
+}
+
+extern "C" fn test_sleep_interrupt_waker(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+
+    while h.sleep_int_tid.load(Ordering::Acquire) == 0 {
+        sched().thread_yield();
+    }
+    let sleeper = ThreadId(h.sleep_int_tid.load(Ordering::Acquire));
+
+    // Give sleeper time to enter sleep
+    sched().thread_sleep(Duration::from_millis(5));
+    // Wake the sleeping thread early
+    sched().wake_thread(sleeper, WakePriority::Normal);
+
+    test_done(&h, "sleep-interrupt-waker");
+    sched().thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Coordinator
+// ---------------------------------------------------------------------------
 
 const TIMEOUT_SECS: u64 = 10;
 
