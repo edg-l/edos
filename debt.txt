@@ -19,41 +19,16 @@ Possible causes:
 Needs investigation with GDB (make run-gdb) to capture the actual
 deadlock state and identify which locks are contended.
 
-## Save-before-publish + waker-CPU enqueue
+## Per-CPU scheduler stack
 
-Goal: save thread context BEFORE transitioning state to Parked/Sleeping,
-so wakers can safely enqueue on any CPU (cache locality optimization).
+The scheduler (pick_and_run, context_switch_to) currently runs on the
+outgoing thread's kernel stack. With save-before-publish + waker-CPU
+enqueue, there is a bounded window where the old CPU is still in the
+scheduler on the thread's stack while another CPU resumes the thread.
+The stack regions don't overlap on x86 (scheduler frame is below the
+resume point), but this is fragile.
 
-### Failed approach: setjmp-style save_context() -> bool
-
-Tried splitting context_switch into save_context() (returns false on
-save, true on resume via iretq) + switch_away(). This is fundamentally
-broken: when the thread resumes via iretq, it re-enters a compiler-
-generated function mid-body. The function's epilogue (pop callee-saved
-regs from prologue pushes) overwrites the iretq-restored register
-values with stale stack data, corrupting pointers.
-
-### Correct approach: per-CPU scheduler stack
-
-The root blocker for save-before-publish is that the scheduler runs on
-the outgoing thread's kernel stack. If context is saved and the thread
-is published (Parked) while the scheduler still uses its stack, another
-CPU can resume the thread and collide on the same stack.
-
-The fix is a per-CPU scheduler/trampoline stack (like Linux's idle
-stack). The voluntary switch path would:
-1. Save context into thread.ctx on the thread's stack
-2. Switch RSP to the per-CPU scheduler stack
-3. Transition state (Parked/Sleeping/Ready)
-4. Run pick_and_run on the scheduler stack
-
-The thread's stack is free after step 2, so any CPU can safely resume
-it after step 3. This also eliminates the stack-sharing window that
-exists in the current work-stealing implementation.
-
-## complete_wake locality (blocked on save-before-publish)
-
-Currently complete_wake enqueues on the thread's last CPU + IPI.
-Enqueueing on the waker's CPU would give better cache locality.
-Requires save-before-publish (above) so the thread's context is
-valid before any CPU can pop it.
+The proper fix is a per-CPU scheduler/trampoline stack (like Linux's
+idle stack). save_transition_switch would switch RSP to the per-CPU
+stack before calling the transition + pick_and_run, so the thread's
+stack is completely free before it becomes wakeable.
