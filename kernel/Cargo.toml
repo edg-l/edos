@@ -7,6 +7,7 @@ edition = "2024"
 default = []
 test = []
 trace = []
+sched-test = []
 
 [dependencies]
 limine = "0.5"

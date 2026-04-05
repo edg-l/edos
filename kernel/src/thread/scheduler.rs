@@ -133,12 +133,18 @@ impl Scheduler {
 
     fn complete_wake(&self, thread: &Arc<Thread>, priority: WakePriority) {
         without_interrupts(|| {
-            // Enqueue on the waker's CPU (self) for cache locality.
-            // Safe because save_transition_switch saves context BEFORE the
-            // state transition, so any thread that's wakeable has valid
-            // saved context that any CPU can load.
+            // Enqueue on the thread's last CPU. Save-before-publish ensures
+            // the context is valid, but the scheduler still runs on the
+            // outgoing thread's kernel stack after publishing. A remote CPU
+            // could resume the thread and collide on the same stack.
+            // Waker-CPU enqueue requires per-CPU scheduler stacks (debt.txt).
+            let cpu = thread.cpu.load(Ordering::Acquire);
+            let sc = sched_for_cpu(cpu);
             thread.state.store(State::Ready as u8, Ordering::Release);
-            Self::enqueue_ready(self, thread, priority);
+            Self::enqueue_ready(sc, thread, priority);
+            if cpu != self.cpu {
+                self.send_reschedule_ipi(cpu);
+            }
         });
     }
 

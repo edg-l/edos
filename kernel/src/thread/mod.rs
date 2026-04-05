@@ -34,6 +34,9 @@ pub mod thread;
 pub mod util;
 pub mod waitqueue;
 
+#[cfg(feature = "sched-test")]
+pub mod sched_test;
+
 #[derive(Debug)]
 pub struct UserThread {
     /// Same as thread id for now.

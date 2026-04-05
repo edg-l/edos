@@ -76,6 +76,16 @@ run-trace: programs programsv2 limine/limine ovmf/ovmf-code-$(KARCH).fd ovmf/ovm
 	$(MAKE) $(IMAGE_NAME).iso
 	$(call run_qemu_uefi,iso,4,-accel kvm -m 2G)
 
+.PHONY: test
+test: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
+	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features sched-test"
+	$(call run_qemu_uefi,iso,4,-accel kvm -display none)
+
+.PHONY: test-single
+test-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
+	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features sched-test"
+	$(call run_qemu_uefi,iso,1,-display none)
+
 .PHONY: run-kvm
 run-emu: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
 	$(call run_qemu_uefi,iso,4,-accel tcg)
@@ -118,7 +128,7 @@ limine/limine:
 
 .PHONY: kernel
 kernel: programs programsv2
-	$(MAKE) -C kernel
+	$(MAKE) -C kernel CARGO_FLAGS="$(CARGO_FLAGS)"
 
 .PHONY: check
 check: programs programsv2

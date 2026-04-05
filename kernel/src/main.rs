@@ -129,6 +129,17 @@ fn main() -> ! {
     thread::scheduler::init();
     thread::scheduler::init_reaper();
 
+    #[cfg(feature = "sched-test")]
+    {
+        crate::thread::sched_test::run_sched_tests();
+        // In test mode, skip normal boot (drivers, userland, etc.).
+        // The coordinator thread will exit QEMU when tests complete.
+        loop {
+            x86_64::instructions::interrupts::enable_and_hlt();
+        }
+    }
+
+    #[allow(unreachable_code)]
     let now = Instant::now();
 
     while now.elapsed() < Duration::from_millis(100) {
