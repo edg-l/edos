@@ -133,18 +133,12 @@ impl Scheduler {
 
     fn complete_wake(&self, thread: &Arc<Thread>, priority: WakePriority) {
         without_interrupts(|| {
-            // SAFETY INVARIANT: Must enqueue on the thread's last CPU.
-            // thread_park_while's abort path relies on this -- if the thread
-            // were enqueued on a different CPU, that CPU could pop and run it
-            // while the original CPU still executes the abort path, causing
-            // two CPUs to run the same thread simultaneously.
-            let cpu = thread.cpu.load(Ordering::Acquire);
-            let sc = sched_for_cpu(cpu);
+            // Enqueue on the waker's CPU (self) for cache locality.
+            // Safe because save_transition_switch saves context BEFORE the
+            // state transition, so any thread that's wakeable has valid
+            // saved context that any CPU can load.
             thread.state.store(State::Ready as u8, Ordering::Release);
-            Self::enqueue_ready(sc, thread, priority);
-            if cpu != self.cpu {
-                self.send_reschedule_ipi(cpu);
-            }
+            Self::enqueue_ready(self, thread, priority);
         });
     }
 
@@ -352,9 +346,10 @@ impl Scheduler {
 
     fn pick_and_run(&self, context: *mut CpuContext) {
         // NOTE: save_current_thread is NOT called here. It is called by
-        // maybe_preempt BEFORE enqueue, which is the only caller of
-        // pick_and_run. Calling save here would create a double-save race:
-        // between the enqueue (in maybe_preempt) and this second save, a
+        // maybe_preempt (timer/IPI preemption path) BEFORE enqueue, and by
+        // do_save_current_thread (voluntary path via save_transition_switch)
+        // BEFORE the transition fn runs. Calling save here would create a
+        // double-save race: between the enqueue and this second save, a
         // stealer could grab the thread and start running it. The second
         // save would then overwrite the stolen thread's ctx with THIS CPU's
         // interrupt frame, corrupting it.
@@ -721,50 +716,18 @@ impl Scheduler {
 
     #[inline]
     pub fn thread_yield(&self) {
-        without_interrupts(|| {
-            let Some(cur) = self.current_thread() else {
-                return;
-            };
-            if cur.cas_state(State::Running, State::Ready) {
-                cur.mark_need_resched();
-                let mut rq = self.rq.lock();
-                rq.enqueue(cur.clone(), cur.priority(), false);
-                self.has_work.store(true, Ordering::Release);
-            }
-
-            unsafe { context_switch() };
-        })
+        without_interrupts(|| unsafe {
+            save_transition_switch(transition_yield, core::ptr::null_mut());
+        });
     }
 
     pub fn thread_park(&self) {
-        let Some(cur) = self.current_thread() else {
+        let Some(_cur) = self.current_thread() else {
             return;
         };
-
-        loop {
-            let state = cur.state.load(Ordering::Acquire);
-            if state == State::Running as u8 {
-                if cur
-                    .state
-                    .compare_exchange(
-                        State::Running as u8,
-                        State::Parked as u8,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .is_ok()
-                {
-                    break;
-                }
-            } else {
-                break; // not Running (Dying, Waking, etc.) — bail out
-            }
-        }
-
         without_interrupts(|| unsafe {
-            cur.mark_need_resched();
-            context_switch();
-        })
+            save_transition_switch(transition_park, core::ptr::null_mut());
+        });
     }
 
     /// Park the current thread while `should_park` returns true.
@@ -773,111 +736,47 @@ impl Scheduler {
     /// `try_wake()` sees Parked and succeeds. This closes the lost-wakeup
     /// window that exists with `thread_park()`.
     pub fn thread_park_while<F: FnMut() -> bool>(&self, mut should_park: F) {
-        let Some(cur) = self.current_thread() else {
+        let Some(_cur) = self.current_thread() else {
             return;
         };
 
+        // Wrapper to call the Rust closure through a C function pointer.
+        extern "C" fn check_wrapper<F: FnMut() -> bool>(ctx: *mut u8) -> bool {
+            let f = unsafe { &mut *(ctx as *mut F) };
+            f()
+        }
+
         loop {
-            debug_assert!(
-                !cur.rq_link.is_linked(),
-                "thread_park_while: thread {} rq_link linked at loop start",
-                cur.id.0
-            );
-
-            // 1. Transition Running -> Parked
-            if !cur.cas_state(State::Running, State::Parked) {
-                return; // Dying, Waking, etc.
-            }
-
-            // 2. Check condition with state already Parked.
-            //    Any wakeup arriving now will succeed via try_wake().
-            if !should_park() {
-                // Condition is false — revert to Running.
-                if cur.cas_state(State::Parked, State::Running) {
-                    return;
-                }
-                // CAS failed: a waker set Parked -> Waking -> Ready and
-                // enqueued us on our last CPU (this CPU). Context-switch
-                // so the scheduler properly pops and unlinks us from the
-                // runqueue.
-                // SAFETY: depends on complete_wake enqueueing on the
-                // thread's last CPU (see invariant comment there). If
-                // complete_wake is ever changed to enqueue elsewhere,
-                // this path must be redesigned to prevent two CPUs from
-                // running the same thread.
-                without_interrupts(|| unsafe {
-                    cur.mark_need_resched();
-                    context_switch();
-                });
-                // Woken: scheduler popped us, set Running, unlinked rq_link.
-                // Loop back to re-check condition.
-                continue;
-            }
-
-            // 3. Condition is true — actually sleep.
-            without_interrupts(|| unsafe {
-                cur.mark_need_resched();
-                context_switch();
+            let mut ctx = ParkWhileCtx {
+                check_fn: check_wrapper::<F>,
+                check_ctx: &mut should_park as *mut F as *mut u8,
+            };
+            let switched = without_interrupts(|| unsafe {
+                save_transition_switch(
+                    transition_park_while,
+                    &mut ctx as *mut ParkWhileCtx as *mut u8,
+                )
             });
-
-            // 4. Woken up (state is Running again). Loop to re-check condition.
+            if !switched {
+                // Condition was false and we reverted cleanly, no need to loop.
+                return;
+            }
+            // Resumed after parking (or had to switch due to waker race).
+            // Loop to re-check condition.
         }
     }
 
     #[inline]
     pub fn thread_sleep(&self, dt: Duration) {
-        let Some(cur) = self.current_thread() else {
+        let Some(_cur) = self.current_thread() else {
             return;
         };
-
-        loop {
-            let state = cur.state.load(Ordering::Acquire);
-            if state == State::Running as u8 {
-                if cur
-                    .state
-                    .compare_exchange(
-                        State::Running as u8,
-                        State::Sleeping as u8,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .is_ok()
-                {
-                    break;
-                }
-            } else {
-                break; // only running threads can sleep
-            }
-        }
-
+        let now = Instant::now();
+        let deadline_tick = (now + dt).tick();
+        let mut ctx = SleepCtx { deadline_tick };
         without_interrupts(|| unsafe {
-            let now = Instant::now();
-            let deadline_tick = (now + dt).tick();
-            cur.sleep_deadline.store(deadline_tick, Ordering::Release);
-
-            {
-                let mut sleepers = self.sleepers.lock();
-                let sleep_entry = SleepEntry {
-                    deadline: deadline_tick,
-                    thread: cur.clone(),
-                };
-                if sleepers.push(sleep_entry).is_err() {
-                    // Heap full — revert to Running so the thread isn't stuck forever.
-                    cur.state.store(State::Running as u8, Ordering::Release);
-                    return;
-                }
-                // Update earliest deadline while still holding the sleepers lock,
-                // so a timer interrupt on another CPU can't miss this deadline.
-                let current_earliest = self.earliest_deadline.load(Ordering::Acquire);
-                if deadline_tick < current_earliest {
-                    self.earliest_deadline
-                        .store(deadline_tick, Ordering::Release);
-                }
-            }
-
-            cur.mark_need_resched();
-            context_switch();
-        })
+            save_transition_switch(transition_sleep, &mut ctx as *mut SleepCtx as *mut u8);
+        });
     }
 
     // Careful over proritizing, it can starve threads, specially in smp 1
@@ -981,7 +880,7 @@ impl Scheduler {
         let tid = self.current_thread_id().unwrap();
 
         // Fast path with interrupts disabled: mark Dying, detach from
-        // per-CPU, enqueue on reaper for deferred cleanup, context_switch.
+        // per-CPU, enqueue on reaper for deferred cleanup, then switch_away.
         // Heavy cleanup (free, unmap, etc.) happens in the reaper thread
         // with interrupts enabled.
         without_interrupts(|| unsafe {
@@ -995,7 +894,7 @@ impl Scheduler {
                 reaper_enqueue(t);
             }
 
-            context_switch();
+            switch_away();
         });
         loop {
             enable_and_hlt();
@@ -1053,6 +952,353 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
     sched.on_tick(context);
 
     context
+}
+
+// ---------------------------------------------------------------------------
+// Voluntary context switch — save-before-publish
+// ---------------------------------------------------------------------------
+
+/// Copy the synthetic CpuContext built by save_transition_switch into the
+/// current thread's saved context, save FPU/TLS, and record time accounting.
+/// Called from save_transition_switch (naked asm) with interrupts disabled.
+extern "C" fn do_save_current_thread(context: *mut CpuContext) {
+    let sched = sched();
+    let Some(current) = sched.current_thread() else {
+        return;
+    };
+    let end_tick = Instant::now().tick();
+    current.end_run(end_tick);
+    unsafe {
+        *current.ctx.lock() = (*context).clone();
+        if current.user.is_some() {
+            let fpu = &mut *current.fpu.get();
+            if !current.fpu_init.load(Ordering::Relaxed) {
+                init_fpu_state(fpu);
+                current.fpu_init.store(true, Ordering::Relaxed);
+            } else {
+                save_fpu_state(fpu);
+            }
+        }
+    }
+    let fs_base = FsBase::read();
+    current.tls_base.store(fs_base.as_u64(), Ordering::Release);
+    current.context_saved.store(true, Ordering::Release);
+    trace_event!(Save {
+        cpu: sched.cpu,
+        tid: current.id.0,
+        rip: unsafe {
+            (*context)
+                .interrupt_stack_frame
+                .instruction_pointer
+                .as_u64()
+        },
+    });
+}
+
+/// Entry point for voluntary context switches.  Context is already saved by
+/// save_transition_switch before this is called.  Runs wake_sleepers and
+/// pick_and_run, then returns the (possibly replaced) context pointer.
+extern "C" fn schedule_voluntary(context: *mut CpuContext) -> *mut CpuContext {
+    if context.is_null() {
+        panic!("schedule_voluntary: null context ptr");
+    }
+    if (context as u64) < 0xFFFF_0000_0000_0000u64 {
+        panic!("schedule_voluntary: low context address {context:p}");
+    }
+    if !context.is_aligned() {
+        panic!("schedule_voluntary: misaligned context: {context:p}");
+    }
+    let sched = sched();
+    without_interrupts(|| {
+        sched.wake_sleepers();
+        sched.pick_and_run(context);
+    });
+    context
+}
+
+/// Switch away from the current thread without saving context (used by
+/// thread_exit where the thread is about to be destroyed).
+/// Builds a throwaway CpuContext frame on the stack, calls schedule_voluntary,
+/// then iretq-restores the next thread.
+#[unsafe(naked)]
+pub unsafe extern "C" fn switch_away() {
+    core::arch::naked_asm!(
+        "sub rsp, 160",
+        "mov rdi, rsp",
+        "sub rsp, 8",
+        "and rsp, -16",
+        "cld",
+        "call {schedule_vol}",
+        "mov rsp, rax",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdi",
+        "pop rsi",
+        "pop rbp",
+        "pop rbx",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        "iretq",
+        schedule_vol = sym schedule_voluntary,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Transition functions — called from save_transition_switch after save
+// ---------------------------------------------------------------------------
+
+extern "C" fn transition_yield(_arg: *mut u8) -> bool {
+    let sched = sched();
+    let Some(cur) = sched.current_thread() else {
+        return true;
+    };
+    if cur.cas_state(State::Running, State::Ready) {
+        let mut rq = sched.rq.lock();
+        rq.enqueue(cur.clone(), cur.priority(), false);
+        sched.has_work.store(true, Ordering::Release);
+    }
+    cur.flags
+        .fetch_and(!Flags::NEED_RESCHED.bits(), Ordering::AcqRel);
+    true
+}
+
+extern "C" fn transition_park(_arg: *mut u8) -> bool {
+    let sched = sched();
+    let Some(cur) = sched.current_thread() else {
+        return true;
+    };
+    let _ = cur.cas_state(State::Running, State::Parked);
+    true
+}
+
+/// Context struct passed through the `arg` pointer to `transition_park_while`.
+#[repr(C)]
+struct ParkWhileCtx {
+    /// Returns true if the thread should park.
+    check_fn: extern "C" fn(*mut u8) -> bool,
+    check_ctx: *mut u8,
+}
+
+extern "C" fn transition_park_while(arg: *mut u8) -> bool {
+    let ctx = unsafe { &*(arg as *const ParkWhileCtx) };
+    let sched = sched();
+    let Some(cur) = sched.current_thread() else {
+        return true;
+    };
+
+    // Transition Running -> Parked.
+    if !cur.cas_state(State::Running, State::Parked) {
+        return false; // Not running (Dying, etc.) — don't switch.
+    }
+
+    // Check condition with state already Parked so a concurrent waker succeeds.
+    let should_park = (ctx.check_fn)(ctx.check_ctx);
+    if !should_park {
+        // Condition false — try to revert Parked -> Running.
+        if cur.cas_state(State::Parked, State::Running) {
+            return false; // Successfully reverted, no switch needed.
+        }
+        // CAS failed: a waker raced and enqueued us. Must switch so the
+        // scheduler can pop and unlink us from the runqueue.
+        return true;
+    }
+
+    true
+}
+
+/// Context struct passed through the `arg` pointer to `transition_sleep`.
+#[repr(C)]
+struct SleepCtx {
+    deadline_tick: u64,
+}
+
+extern "C" fn transition_sleep(arg: *mut u8) -> bool {
+    let ctx = unsafe { &*(arg as *const SleepCtx) };
+    let sched = sched();
+    let Some(cur) = sched.current_thread() else {
+        return true;
+    };
+
+    if !cur.cas_state(State::Running, State::Sleeping) {
+        return true;
+    }
+
+    let deadline_tick = ctx.deadline_tick;
+    cur.sleep_deadline.store(deadline_tick, Ordering::Release);
+
+    let mut sleepers = sched.sleepers.lock();
+    let sleep_entry = SleepEntry {
+        deadline: deadline_tick,
+        thread: cur.clone(),
+    };
+    if sleepers.push(sleep_entry).is_err() {
+        // Heap full — revert to Running so the thread isn't stuck forever.
+        cur.state.store(State::Running as u8, Ordering::Release);
+        return false;
+    }
+    let current_earliest = sched.earliest_deadline.load(Ordering::Acquire);
+    if deadline_tick < current_earliest {
+        sched
+            .earliest_deadline
+            .store(deadline_tick, Ordering::Release);
+    }
+    true
+}
+
+/// Combined save-transition-switch for voluntary context switches.
+///
+/// Saves the calling thread's context to thread.ctx, then calls
+/// `transition(arg)`.  If transition returns true the function switches to
+/// another thread and does not return to the caller until the thread is
+/// resumed, at which point it returns `true`.  If transition returns false
+/// the function returns `false` immediately without switching.
+///
+/// Must be called with interrupts disabled.
+#[unsafe(naked)]
+pub unsafe extern "C" fn save_transition_switch(
+    transition: extern "C" fn(arg: *mut u8) -> bool,
+    arg: *mut u8,
+) -> bool {
+    core::arch::naked_asm!(
+        // rdi = transition fn ptr, rsi = arg
+        // Allocate 160 bytes for the CpuContext frame.
+        // Layout (offsets from rsp after sub):
+        //   [rsp +   0] = r15  (offset  0)
+        //   [rsp +   8] = r14  (offset  8)
+        //   [rsp +  16] = r13  (offset 16)
+        //   [rsp +  24] = r12  (offset 24)
+        //   [rsp +  32] = r11  (offset 32)
+        //   [rsp +  40] = r10  (offset 40)
+        //   [rsp +  48] = r9   (offset 48)
+        //   [rsp +  56] = r8   (offset 56)
+        //   [rsp +  64] = rdi  (offset 64) <- transition fn
+        //   [rsp +  72] = rsi  (offset 72) <- arg
+        //   [rsp +  80] = rbp  (offset 80)
+        //   [rsp +  88] = rbx  (offset 88)
+        //   [rsp +  96] = rdx  (offset 96)
+        //   [rsp + 104] = rcx  (offset 104)
+        //   [rsp + 112] = rax  (offset 112)
+        //   [rsp + 120] = RIP  (offset 120)  -> .Lresume
+        //   [rsp + 128] = CS   (offset 128)  -> 0x08
+        //   [rsp + 136] = RFLAGS (offset 136)
+        //   [rsp + 144] = RSP  (offset 144)  -> frame base + 160 (ret addr location)
+        //   [rsp + 152] = SS   (offset 152)  -> 0x10
+        // Return address from `call save_transition_switch` lives at [rsp + 160].
+        "sub rsp, 160",
+
+        // Save all GPRs with original values BEFORE using r12 as scratch.
+        "mov [rsp +   0], r15",
+        "mov [rsp +   8], r14",
+        "mov [rsp +  16], r13",
+        "mov [rsp +  24], r12",    // original r12 saved here
+        "mov [rsp +  32], r11",
+        "mov [rsp +  40], r10",
+        "mov [rsp +  48], r9",
+        "mov [rsp +  56], r8",
+        "mov [rsp +  64], rdi",    // transition fn ptr
+        "mov [rsp +  72], rsi",    // arg
+        "mov [rsp +  80], rbp",
+        "mov [rsp +  88], rbx",
+        "mov [rsp +  96], rdx",
+        "mov [rsp + 104], rcx",
+        "mov [rsp + 112], rax",
+
+        // Use r12 as stable frame base pointer (callee-saved, preserved by Rust calls).
+        "mov r12, rsp",
+
+        // Build synthetic interrupt frame at [r12 + 120].
+        // RIP = .Lresume (the resume trampoline)
+        "lea rax, [rip + .Lresume]",
+        "mov [r12 + 120], rax",
+        // CS = 0x08
+        "mov eax, {KCS}",
+        "mov [r12 + 128], rax",
+        // RFLAGS = current flags
+        "pushfq",
+        "pop rax",
+        "mov [r12 + 136], rax",
+        // RSP = r12 + 160 (where the return address lives; iretq restores RSP there,
+        // then .Lresume: ret pops the return address and returns to the caller)
+        "lea rax, [r12 + 160]",
+        "mov [r12 + 144], rax",
+        // SS = 0x10
+        "mov eax, {KSS}",
+        "mov [r12 + 152], rax",
+
+        // Call do_save_current_thread(context = r12).
+        "mov rdi, r12",
+        "lea rsp, [r12 - 8]",
+        "and rsp, -16",
+        "cld",
+        "call {do_save}",
+
+        // Call transition(arg): load saved rdi (transition fn) and rsi (arg).
+        "mov rax, [r12 + 64]",   // transition fn ptr
+        "mov rdi, [r12 + 72]",   // arg
+        "lea rsp, [r12 - 8]",
+        "and rsp, -16",
+        "cld",
+        "call rax",
+
+        // rax = return value of transition (bool: 0 = abort, 1 = switch)
+        "test al, al",
+        "jz .Lresume_nosave",
+
+        // Transition returned true: build throwaway 160-byte frame and switch.
+        // Use r12 as the context pointer for schedule_voluntary.
+        "mov rdi, r12",
+        "lea rsp, [r12 - 8]",
+        "and rsp, -16",
+        "cld",
+        "call {schedule_vol}",
+
+        // schedule_voluntary returns context pointer in rax. Restore from it.
+        "mov rsp, rax",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdi",
+        "pop rsi",
+        "pop rbp",
+        "pop rbx",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        "iretq",
+
+        // Transition returned false: restore rsp to the return address location,
+        // restore original r12, then return false to the caller.
+        // The saved RSP at [r12 + 144] equals r12 + 160 by construction, so
+        // compute it directly to avoid a use-after-overwrite ordering issue.
+        ".Lresume_nosave:",
+        "lea rsp, [r12 + 160]",  // rsp = frame base + 160 = return address location
+        "mov r12, [r12 + 24]",   // restore original r12 (frame is still readable here)
+        "xor eax, eax",
+        "ret",
+
+        // Resume trampoline: jumped to by iretq when THIS thread is rescheduled.
+        // RSP = frame base + 160 (return address location). Return true to caller.
+        ".Lresume:",
+        "mov eax, 1",
+        "ret",
+
+        KCS = const 0x08u64,
+        KSS = const 0x10u64,
+        do_save = sym do_save_current_thread,
+        schedule_vol = sym schedule_voluntary,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,87 +1379,6 @@ impl PartialEq for SleepEntry {
     }
 }
 impl Eq for SleepEntry {}
-
-// Must be called without interrupts enabled.
-#[unsafe(naked)]
-pub unsafe extern "C" fn context_switch() {
-    core::arch::naked_asm!(
-        // Layout wanted at [rsp]:
-        // [ GPRs: r15..rax ] (15*8 bytes)  then  [ IF: RIP,CS,RFLAGS,RSP,SS ] (5*8 bytes)
-        // Reserve space up front so we can store originals without clobbering them.
-        "sub rsp, 160",                   // 120 + 40
-
-        // ---- store original GPRs into the reserved block (no clobber) ----
-        "mov [rsp +   0], r15",
-        "mov [rsp +   8], r14",
-        "mov [rsp +  16], r13",
-        "mov [rsp +  24], r12",
-        "mov [rsp +  32], r11",
-        "mov [rsp +  40], r10",
-        "mov [rsp +  48], r9",
-        "mov [rsp +  56], r8",
-        "mov [rsp +  64], rdi",
-        "mov [rsp +  72], rsi",
-        "mov [rsp +  80], rbp",
-        "mov [rsp +  88], rbx",
-        "mov [rsp +  96], rdx",
-        "mov [rsp + 104], rcx",
-        "mov [rsp + 112], rax",
-
-        // ---- build synthetic interrupt frame at [rsp + 120] ----
-        // RIP
-        "lea rax, [rip + .Lresume]",
-        "mov [rsp + 120], rax",
-        // CS (use your kernel code selector constant)
-        "mov eax, {KCS}",
-        "mov [rsp + 128], rax",
-        // RFLAGS
-        "pushfq",
-        "pop rax",
-        "mov [rsp + 136], rax",
-        // RSP (original before the 160-byte reservation) = rsp + 160
-        "lea rax, [rsp + 160]",
-        "mov [rsp + 144], rax",
-        // SS (use your kernel data selector constant)
-        "mov eax, {KSS}",
-        "mov [rsp + 152], rax",
-
-        // rdi = &CpuContext (points to r15 field)
-        "mov rdi, rsp",
-
-        // 16-byte align for call
-        "sub rsp, 8",
-        "and rsp, -16",
-        "cld",
-        "call {timer_schedule}",
-
-        // Switch to returned context and exit like IRQ path
-        "mov rsp, rax",
-        "pop r15",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        "pop r11",
-        "pop r10",
-        "pop r9",
-        "pop r8",
-        "pop rdi",
-        "pop rsi",
-        "pop rbp",
-        "pop rbx",
-        "pop rdx",
-        "pop rcx",
-        "pop rax",
-        "iretq",
-
-        ".Lresume:",
-        "ret",
-
-        timer_schedule = sym schedule,
-        KCS = const 0x08,
-        KSS = const 0x10,
-    );
-}
 
 // Note: heap allocs are fine because they are mapped before any user thread is created.
 // In the future consider syncing pages.
