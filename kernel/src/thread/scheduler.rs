@@ -824,35 +824,32 @@ pub fn exit_thread(tid: ThreadId) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
-    unsafe {
-        /*
-            User -> User:       Update RSP0 to new process's kernel stack
-            User -> Kernel:     RSP0 doesn't matter
-            Kernel -> User:     Must update RSP0 to user's kernel stack
-            Kernel -> Kernel:   RSP0 doesn't matter
-        */
+    /*
+        User -> User:       Update RSP0 to new process's kernel stack
+        User -> Kernel:     RSP0 doesn't matter
+        Kernel -> User:     Must update RSP0 to user's kernel stack
+        Kernel -> Kernel:   RSP0 doesn't matter
+    */
 
-        if context.is_null() {
-            panic!("null context ptr");
-        }
-
-        if (context as u64) < 0xFFFF_0000_0000_0000u64 {
-            panic!("Low context address {context:p}");
-        }
-
-        if !context.is_aligned() {
-            panic!("Misaligned context: {context:p}");
-        }
-
-        let cpu = get_percpu_data();
-        // let sched = cpu.scheduler.as_mut().expect("failed to get scheduler");
-
-        let sched: &'static Scheduler = unsafe { cpu.scheduler.get().as_ref().unwrap() };
-
-        sched.on_tick(context);
-
-        context
+    if context.is_null() {
+        panic!("null context ptr");
     }
+
+    if (context as u64) < 0xFFFF_0000_0000_0000u64 {
+        panic!("Low context address {context:p}");
+    }
+
+    if !context.is_aligned() {
+        panic!("Misaligned context: {context:p}");
+    }
+
+    let cpu = get_percpu_data();
+
+    let sched: &'static Scheduler = unsafe { cpu.scheduler.get().as_ref().unwrap() };
+
+    sched.on_tick(context);
+
+    context
 }
 
 // ---------------------------------------------------------------------------

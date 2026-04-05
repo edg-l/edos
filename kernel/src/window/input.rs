@@ -12,10 +12,7 @@ use crate::{
     },
     log,
     thread::{
-        broadcast::Subscriber,
-        scheduler::{WakePriority, sched},
-        thread::ThreadId,
-        util::queue_spawn_kthread_named,
+        broadcast::Subscriber, scheduler::sched, thread::ThreadId, util::queue_spawn_kthread_named,
     },
 };
 
@@ -27,6 +24,7 @@ const EVENT_QUEUE_SIZE: usize = 256;
 /// Window event types.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
+#[allow(dead_code)]
 pub enum WindowEventType {
     /// Mouse moved within the window.
     MouseMove = 1,
@@ -66,6 +64,7 @@ pub struct WindowEvent {
     pub data: u32,
 }
 
+#[allow(dead_code)]
 impl WindowEvent {
     /// Create a mouse move event.
     pub fn mouse_move(x: i32, y: i32) -> Self {
@@ -183,6 +182,7 @@ pub struct WindowEventQueue {
     queue: ArrayQueue<WindowEvent>,
 }
 
+#[allow(dead_code)]
 impl WindowEventQueue {
     /// Create a new event queue.
     pub fn new() -> Self {

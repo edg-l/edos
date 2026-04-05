@@ -5,8 +5,8 @@
 pub mod input;
 pub mod registry;
 
-pub use input::{WindowEvent, WindowEventType};
-pub use registry::{WINDOW_REGISTRY, WindowId, WindowInfo, WindowRegistry, property};
+pub use input::WindowEvent;
+pub use registry::WindowId;
 
 /// Initialize the window server.
 pub fn init() {

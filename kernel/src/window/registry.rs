@@ -40,6 +40,7 @@ pub struct WindowInfo {
     pub flags: u64,
 }
 
+#[allow(dead_code)]
 impl WindowInfo {
     /// Create a new window with the given parameters.
     pub fn new(pid: u64, x: i32, y: i32, width: u32, height: u32) -> Self {
@@ -118,6 +119,7 @@ pub struct WindowRegistry {
     focused_window: Option<WindowId>,
 }
 
+#[allow(dead_code)]
 impl WindowRegistry {
     /// Create a new empty registry.
     pub const fn new() -> Self {
