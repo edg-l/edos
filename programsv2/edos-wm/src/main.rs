@@ -251,8 +251,8 @@ fn main() {
                 // Apply the new dimensions
                 let _ = window_set(resize.window_id, property::X, new_x as i64 as u64);
                 let _ = window_set(resize.window_id, property::Y, new_y as i64 as u64);
-                let _ = window_set(resize.window_id, property::WIDTH, new_w as u64);
-                let _ = window_set(resize.window_id, property::HEIGHT, new_h as u64);
+                let _ = window_set(resize.window_id, property::WIDTH, new_w as i64 as u64);
+                let _ = window_set(resize.window_id, property::HEIGHT, new_h as i64 as u64);
             } else {
                 // Mouse released - stop resizing
                 // Send resize event to the window with final dimensions

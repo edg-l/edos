@@ -616,8 +616,8 @@ impl AhciPort {
 
             // Task File Error Status - indicates command failed
             if is & PORT_IS_TFES != 0 {
-                // Clear the error interrupt
-                unsafe { ptr::write_volatile(&raw mut (*self.port_regs).is, is) };
+                // Clear only the TFES bit to preserve other pending interrupt status.
+                unsafe { ptr::write_volatile(&raw mut (*self.port_regs).is, PORT_IS_TFES) };
 
                 // Get detailed error information from task file data
                 let tfd = unsafe { ptr::read_volatile(&raw const (*self.port_regs).tfd) };

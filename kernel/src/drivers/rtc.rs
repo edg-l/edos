@@ -70,7 +70,8 @@ pub fn read_rtc() -> RtcDateTime {
 
 unsafe fn read_rtc_register(reg: u16) -> u8 {
     unsafe {
-        Port::new(0x70).write(reg as u8);
+        // Bit 7 keeps NMI disabled during RTC access.
+        Port::new(0x70).write(reg as u8 | 0x80);
         Port::new(0x71).read()
     }
 }
