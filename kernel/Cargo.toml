@@ -33,4 +33,3 @@ intrusive-list = { path = "../libs/intrusive_list" }
 
 [profile.dev]
 opt-level = 2
-force-frame-pointers = true

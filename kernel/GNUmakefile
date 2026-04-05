@@ -31,13 +31,13 @@ endif
 # Default target.
 .PHONY: all
 all:
-	RUSTFLAGS="-C relocation-model=static" cargo build --target $(RUST_TARGET) --profile $(RUST_PROFILE) $(CARGO_FLAGS)
+	RUSTFLAGS="-C relocation-model=static -C force-frame-pointers=yes" cargo build --target $(RUST_TARGET) --profile $(RUST_PROFILE) $(CARGO_FLAGS)
 	cp target/$(RUST_TARGET)/$(RUST_PROFILE_SUBDIR)/edos-kernel kernel
 
 
 .PHONY: check
 check:
-	RUSTFLAGS="-C relocation-model=static" cargo check --target $(RUST_TARGET)
+	RUSTFLAGS="-C relocation-model=static -C force-frame-pointers=yes" cargo check --target $(RUST_TARGET)
 
 # Remove object files and the final executable.
 .PHONY: clean
