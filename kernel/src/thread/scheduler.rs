@@ -904,7 +904,7 @@ fn reaper_enqueue(thread: Arc<Thread>) {
     // Wake the reaper thread.
     let reaper_tid = REAPER_TID.load(Ordering::Acquire);
     if reaper_tid != 0 {
-        sched().wake_thread(ThreadId(reaper_tid), WakePriority::Normal);
+        sched().wake_thread_irq(ThreadId(reaper_tid), WakePriority::Normal);
     }
 }
 
