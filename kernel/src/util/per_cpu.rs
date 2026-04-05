@@ -27,6 +27,11 @@ pub struct PerCpuData {
     pub scheduler: Cell<*mut Scheduler>,
     current_thread: UnsafeCell<Option<Arc<Thread>>>,
     pub uaccess: UAccessState,
+    /// Top of the per-CPU scheduler stack. The voluntary context-switch
+    /// trampoline pivots RSP here before calling the transition fn and
+    /// pick_and_run, so the outgoing thread's kernel stack is free as
+    /// soon as the thread's state is published.
+    pub scheduler_stack_top: Cell<u64>,
 }
 
 // SAFETY: PerCpuData is only accessed by its owning CPU via GS base.
@@ -46,6 +51,7 @@ impl PerCpuData {
             scheduler: Cell::new(core::ptr::null_mut()),
             current_thread: UnsafeCell::new(None),
             uaccess: UAccessState::new(),
+            scheduler_stack_top: Cell::new(0),
         }
     }
 

@@ -15,12 +15,17 @@ use x86_64::{
     registers::{control::Cr3, model_specific::FsBase},
 };
 
+use x86_64::structures::paging::PageTableFlags;
+
 use crate::trace_event;
 use crate::{
     apic::{get_lapic, set_apic_timer, set_apic_timer_and_enable},
     boot::boot_info,
     drivers::fpu::{init_fpu_state, restore_fpu_state, save_fpu_state},
     interrupts::InterruptIndex,
+    memory::{
+        KTHREAD_STACK_REGION_SIZE, KTHREAD_STACK_SIZE, mapper::memory_mapper, valloc::vmalloc,
+    },
     println,
     smp::tlb_flush_all_including_global,
     thread::{
@@ -46,6 +51,23 @@ pub fn init() {
     get_percpu_data().scheduler.set(ptr);
     let _ = SCHEDULERS.write().insert(lapic_id, ptr);
     println!("Saved scheduler on percpu");
+
+    // Allocate a per-CPU scheduler stack. The voluntary context-switch
+    // trampoline (save_transition_switch) pivots RSP here before calling
+    // the transition fn and pick_and_run, so the outgoing thread's kernel
+    // stack is completely free before any waker can resume it.
+    let region = vmalloc(KTHREAD_STACK_REGION_SIZE);
+    memory_mapper()
+        .map_memory(
+            region,
+            KTHREAD_STACK_SIZE,
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
+        )
+        .expect("failed to map scheduler stack");
+    let stack_top = region.as_u64() + KTHREAD_STACK_SIZE;
+    get_percpu_data().scheduler_stack_top.set(stack_top);
+    println!("Scheduler stack allocated at 0x{stack_top:x}");
+
     // Enable apic timer
     set_apic_timer_and_enable(Duration::from_millis(100));
 }
@@ -133,18 +155,15 @@ impl Scheduler {
 
     fn complete_wake(&self, thread: &Arc<Thread>, priority: WakePriority) {
         without_interrupts(|| {
-            // Enqueue on the thread's last CPU. Save-before-publish ensures
-            // the context is valid, but the scheduler still runs on the
-            // outgoing thread's kernel stack after publishing. A remote CPU
-            // could resume the thread and collide on the same stack.
-            // Waker-CPU enqueue requires per-CPU scheduler stacks (debt.txt).
-            let cpu = thread.cpu.load(Ordering::Acquire);
-            let sc = sched_for_cpu(cpu);
+            // Enqueue on the waker's CPU for cache locality. Safe because
+            // save_transition_switch pivots to the per-CPU scheduler stack
+            // before publishing the thread, so the thread's kernel stack is
+            // free when any CPU resumes it.
+            // Update thread.cpu so wake_thread_slow's Ready arm IPIs the
+            // correct CPU.
+            thread.cpu.store(self.cpu, Ordering::Release);
             thread.state.store(State::Ready as u8, Ordering::Release);
-            Self::enqueue_ready(sc, thread, priority);
-            if cpu != self.cpu {
-                self.send_reschedule_ipi(cpu);
-            }
+            Self::enqueue_ready(self, thread, priority);
         });
     }
 
@@ -967,10 +986,13 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
 /// Copy the synthetic CpuContext built by save_transition_switch into the
 /// current thread's saved context, save FPU/TLS, and record time accounting.
 /// Called from save_transition_switch (naked asm) with interrupts disabled.
-extern "C" fn do_save_current_thread(context: *mut CpuContext) {
+/// Returns the per-CPU scheduler stack top so the asm trampoline can pivot RSP.
+extern "C" fn do_save_current_thread(context: *mut CpuContext) -> u64 {
     let sched = sched();
     let Some(current) = sched.current_thread() else {
-        return;
+        let sched_stack = get_percpu_data().scheduler_stack_top.get();
+        debug_assert!(sched_stack != 0, "scheduler stack not initialized");
+        return sched_stack;
     };
     let end_tick = Instant::now().tick();
     current.end_run(end_tick);
@@ -989,6 +1011,8 @@ extern "C" fn do_save_current_thread(context: *mut CpuContext) {
     let fs_base = FsBase::read();
     current.tls_base.store(fs_base.as_u64(), Ordering::Release);
     current.context_saved.store(true, Ordering::Release);
+    let sched_stack = get_percpu_data().scheduler_stack_top.get();
+    debug_assert!(sched_stack != 0, "scheduler stack not initialized");
     trace_event!(Save {
         cpu: sched.cpu,
         tid: current.id.0,
@@ -999,6 +1023,7 @@ extern "C" fn do_save_current_thread(context: *mut CpuContext) {
                 .as_u64()
         },
     });
+    sched_stack
 }
 
 /// Entry point for voluntary context switches.  Context is already saved by
@@ -1239,28 +1264,41 @@ pub unsafe extern "C" fn save_transition_switch(
         "mov [r12 + 152], rax",
 
         // Call do_save_current_thread(context = r12).
+        // Returns scheduler stack top in rax.
         "mov rdi, r12",
         "lea rsp, [r12 - 8]",
         "and rsp, -16",
         "cld",
         "call {do_save}",
 
-        // Call transition(arg): load saved rdi (transition fn) and rsi (arg).
-        "mov rax, [r12 + 64]",   // transition fn ptr
-        "mov rdi, [r12 + 72]",   // arg
-        "lea rsp, [r12 - 8]",
+        // rax = scheduler stack top (returned by do_save_current_thread).
+        // Pivot RSP to the per-CPU scheduler stack. The thread's kernel stack
+        // is now free — no further reads from [rsp] below this point.
+        // r12 still points to the CpuContext frame on the old stack;
+        // it is callee-saved and survives all subsequent calls.
+        "mov rsp, rax",
+
+        // Load transition fn + arg from the old stack frame via r12.
+        // Safe: the thread is still Running (transition hasn't changed state),
+        // so no other CPU can touch its stack yet.
+        "mov rax, [r12 + 64]",   // transition fn ptr (saved rdi)
+        "mov rdi, [r12 + 72]",   // arg (saved rsi)
+        "sub rsp, 8",
         "and rsp, -16",
         "cld",
-        "call rax",
+        "call rax",               // transition(arg) on scheduler stack
 
         // rax = return value of transition (bool: 0 = abort, 1 = switch)
         "test al, al",
         "jz .Lresume_nosave",
 
-        // Transition returned true: build throwaway 160-byte frame and switch.
-        // Use r12 as the context pointer for schedule_voluntary.
-        "mov rdi, r12",
-        "lea rsp, [r12 - 8]",
+        // Transition returned true: build a throwaway 160-byte CpuContext on
+        // the scheduler stack (not the thread's stack). schedule_voluntary
+        // overwrites all 160 bytes with the next thread's saved context before
+        // the pops+iretq, so the initial content here doesn't matter.
+        "sub rsp, 160",
+        "mov rdi, rsp",
+        "sub rsp, 8",
         "and rsp, -16",
         "cld",
         "call {schedule_vol}",
@@ -1284,10 +1322,9 @@ pub unsafe extern "C" fn save_transition_switch(
         "pop rax",
         "iretq",
 
-        // Transition returned false: restore rsp to the return address location,
-        // restore original r12, then return false to the caller.
-        // The saved RSP at [r12 + 144] equals r12 + 160 by construction, so
-        // compute it directly to avoid a use-after-overwrite ordering issue.
+        // Transition returned false: state never changed from Running.
+        // The old thread stack is exclusively owned by this CPU; safe to
+        // switch back to it.
         ".Lresume_nosave:",
         "lea rsp, [r12 + 160]",  // rsp = frame base + 160 = return address location
         "mov r12, [r12 + 24]",   // restore original r12 (frame is still readable here)

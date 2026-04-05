@@ -19,16 +19,8 @@ Possible causes:
 Needs investigation with GDB (make run-gdb) to capture the actual
 deadlock state and identify which locks are contended.
 
-## Per-CPU scheduler stack
+## Per-CPU scheduler stack — DONE
 
-The scheduler (pick_and_run, context_switch_to) currently runs on the
-outgoing thread's kernel stack. With save-before-publish + waker-CPU
-enqueue, there is a bounded window where the old CPU is still in the
-scheduler on the thread's stack while another CPU resumes the thread.
-The stack regions don't overlap on x86 (scheduler frame is below the
-resume point), but this is fragile.
-
-The proper fix is a per-CPU scheduler/trampoline stack (like Linux's
-idle stack). save_transition_switch would switch RSP to the per-CPU
-stack before calling the transition + pick_and_run, so the thread's
-stack is completely free before it becomes wakeable.
+Implemented in scheduler::init() (stack allocation) and
+save_transition_switch (RSP pivot after do_save_current_thread).
+complete_wake now enqueues on the waker's CPU for cache locality.
