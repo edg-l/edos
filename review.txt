@@ -824,7 +824,7 @@ x86-64 TSO.
 | 32 | MEDIUM | `kthread_stack_free` uses allocating SegQueue | WONTFIX (reaper only) |
 | 33 | MEDIUM | Unnecessary Arc<Option<String>> wrapping in thread creation | DONE |
 | 34 | MEDIUM | `ThreadRegistry` BTreeMap allocates inside `without_interrupts` | DONE |
-| 35 | LOW | Overly broad `unsafe` block in `thread_yield` | TODO |
-| 36 | LOW | Scheduler fields unnecessarily `pub` | TODO |
-| 37 | LOW | `sched()` uses `as_mut()` where `as_ref()` suffices | TODO |
-| 38 | LOW | Thread ID uses `Relaxed` ordering | TODO |
+| 35 | LOW | Overly broad `unsafe` block in `thread_yield` | DONE |
+| 36 | LOW | Scheduler fields unnecessarily `pub` | WONTFIX (refactor risk) |
+| 37 | LOW | `sched()` uses `as_mut()` where `as_ref()` suffices | DONE |
+| 38 | LOW | Thread ID uses `Relaxed` ordering | WONTFIX (x86-only) |

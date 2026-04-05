@@ -55,7 +55,7 @@ pub fn sched() -> &'static Scheduler {
         get_percpu_data()
             .scheduler
             .get()
-            .as_mut()
+            .as_ref()
             .unwrap_unchecked()
     }
 }
@@ -518,7 +518,7 @@ impl Scheduler {
 
     #[inline]
     pub fn thread_yield(&self) {
-        without_interrupts(|| unsafe {
+        without_interrupts(|| {
             let Some(cur) = self.current_thread() else {
                 return;
             };
@@ -529,7 +529,7 @@ impl Scheduler {
                 self.has_work.store(true, Ordering::Release);
             }
 
-            context_switch();
+            unsafe { context_switch() };
         })
     }
 
