@@ -172,11 +172,22 @@ impl Scheduler {
     fn wake_sleepers(&self) {
         let now = Instant::now().tick();
         let mut sl = self.sleepers.lock();
+        // Drain dead entries from the top of the heap so they don't waste slots.
+        while let Some(top) = sl.peek() {
+            if top.thread.state() == State::Dying {
+                sl.pop();
+                continue;
+            }
+            break;
+        }
         while let Some(top) = sl.peek() {
             if top.deadline > now {
                 break;
             }
             let t = sl.pop().unwrap().thread;
+            if t.state() == State::Dying {
+                continue;
+            }
             if t.try_wake() {
                 debug_assert!(
                     !t.rq_link.is_linked(),
@@ -759,11 +770,13 @@ impl Scheduler {
             self.current.store(0, Ordering::Release);
             get_percpu_data().set_current_thread(None);
 
-            if let Some(t) = THREADS.remove(tid).or_else(|| get_thread_by_id(tid)) {
+            if let Some(t) = THREADS.remove(tid) {
                 t.exit_code.store(code, Ordering::Release);
                 t.state.store(State::Dying as u8, Ordering::Release);
                 self.thread_count.fetch_sub(1, Ordering::Relaxed);
                 reaper_enqueue(t);
+            } else {
+                println!("WARNING: thread_exit: tid {} already removed", tid.0);
             }
 
             context_switch();

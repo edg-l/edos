@@ -22,6 +22,7 @@
 
 use core::marker::PhantomData;
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // Link node
@@ -38,7 +39,7 @@ use core::ptr;
 pub struct Link {
     next: *mut Link,
     prev: *mut Link,
-    linked: bool,
+    linked: AtomicBool,
 }
 
 // Link is Send: the raw pointers it contains reference nodes that the caller
@@ -52,14 +53,14 @@ impl Link {
         Self {
             next: ptr::null_mut(),
             prev: ptr::null_mut(),
-            linked: false,
+            linked: AtomicBool::new(false),
         }
     }
 
     /// Returns `true` if this node is currently part of a list.
     #[inline]
     pub fn is_linked(&self) -> bool {
-        self.linked
+        self.linked.load(Ordering::Relaxed)
     }
 }
 
@@ -72,7 +73,7 @@ impl Default for Link {
 impl core::fmt::Debug for Link {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Link")
-            .field("linked", &self.linked)
+            .field("linked", &self.linked.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -162,14 +163,14 @@ impl<T: Linked> IntrusiveList<T> {
         debug_assert!(!ptr.is_null());
         let link = unsafe { T::links(ptr) };
         debug_assert!(
-            !unsafe { (*link).linked },
+            !unsafe { (*link).linked.load(Ordering::Relaxed) },
             "push_back: node is already linked"
         );
 
         unsafe {
             (*link).prev = self.tail;
             (*link).next = ptr::null_mut();
-            (*link).linked = true;
+            (*link).linked.store(true, Ordering::Relaxed);
         }
 
         if self.tail.is_null() {
@@ -190,14 +191,14 @@ impl<T: Linked> IntrusiveList<T> {
         debug_assert!(!ptr.is_null());
         let link = unsafe { T::links(ptr) };
         debug_assert!(
-            !unsafe { (*link).linked },
+            !unsafe { (*link).linked.load(Ordering::Relaxed) },
             "push_front: node is already linked"
         );
 
         unsafe {
             (*link).next = self.head;
             (*link).prev = ptr::null_mut();
-            (*link).linked = true;
+            (*link).linked.store(true, Ordering::Relaxed);
         }
 
         if self.head.is_null() {
@@ -243,7 +244,7 @@ impl<T: Linked> IntrusiveList<T> {
     pub unsafe fn remove(&mut self, ptr: *mut T) {
         let link = unsafe { T::links(ptr) };
         debug_assert!(
-            unsafe { (*link).linked },
+            unsafe { (*link).linked.load(Ordering::Relaxed) },
             "remove: node is not in a list"
         );
         unsafe { self.unlink(link) };
@@ -273,7 +274,7 @@ impl<T: Linked> IntrusiveList<T> {
 
             (*link).next = ptr::null_mut();
             (*link).prev = ptr::null_mut();
-            (*link).linked = false;
+            (*link).linked.store(false, Ordering::Relaxed);
         }
         self.len -= 1;
     }

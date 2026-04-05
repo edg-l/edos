@@ -1,6 +1,6 @@
-## Scheduler & Thread System Review
+## Scheduler & Thread System Review (Round 1)
 
-### CRITICAL — Likely Deadlocks / Hangs
+### CRITICAL -- Likely Deadlocks / Hangs
 
 #### 1. `thread_park()` infinite loop if state is not `Running` (`scheduler.rs:442-466`)
 
@@ -11,13 +11,13 @@ pub fn thread_park(&self) {
         if cur.state.compare_exchange(Running, Parked, ...).is_ok() {
             break;
         }
-        // NO exit for non-Running states → infinite loop
+        // NO exit for non-Running states -> infinite loop
     }
 ```
 
 If another CPU marks the thread `Dying` (e.g., via `exit_thread`), or a wakeup transitions it to `Waking`, this CAS never succeeds and **loops forever**. Unlike `thread_sleep()` which has an `else { break; }`, `thread_park` has no escape hatch.
 
-**Fix:** Add a match on the current state — bail out if `Dying`, and handle `Waking` explicitly.
+**Fix:** Add a match on the current state -- bail out if `Dying`, and handle `Waking` explicitly.
 
 ---
 
@@ -82,17 +82,17 @@ fn save_current_thread(&self, context: *mut CpuContext) {
 }
 ```
 
-This runs inside `on_tick` → `maybe_preempt` → `pick_and_run`, all under `without_interrupts`. If a syscall on another CPU holds a **read lock** on this same thread's `user` RwLock (e.g., reading `cr3` for page table access), `user.write()` here will **spin with interrupts disabled** waiting for the reader. The reader on the other CPU may itself be waiting for something that requires this CPU's scheduler to run — classic priority inversion / deadlock.
+This runs inside `on_tick` -> `maybe_preempt` -> `pick_and_run`, all under `without_interrupts`. If a syscall on another CPU holds a **read lock** on this same thread's `user` RwLock (e.g., reading `cr3` for page table access), `user.write()` here will **spin with interrupts disabled** waiting for the reader. The reader on the other CPU may itself be waiting for something that requires this CPU's scheduler to run -- classic priority inversion / deadlock.
 
 Same issue in `context_switch_to` at line 367 which also takes `user.write()` for FPU restore.
 
-**Fix:** Move FPU save/restore out of the RwLock. Store FPU state in per-CPU data or in a separate lock from the `UserThread`. The FPU state is inherently per-CPU — only the currently running CPU touches it.
+**Fix:** Move FPU save/restore out of the RwLock. Store FPU state in per-CPU data or in a separate lock from the `UserThread`. The FPU state is inherently per-CPU -- only the currently running CPU touches it.
 
 ---
 
-### HIGH — Data Races / Logic Bugs
+### HIGH -- Data Races / Logic Bugs
 
-#### 6. `PerCpuData` is `&'static mut` returned to any caller — no Send/Sync safety (`per_cpu.rs:47-51`)
+#### 6. `PerCpuData` is `&'static mut` returned to any caller -- no Send/Sync safety (`per_cpu.rs:47-51`)
 
 ```rust
 pub fn get_percpu_data() -> &'static mut PerCpuData {
@@ -101,7 +101,7 @@ pub fn get_percpu_data() -> &'static mut PerCpuData {
 }
 ```
 
-Multiple callers on the **same CPU** can hold `&'static mut` references to the same `PerCpuData` simultaneously. This is immediate UB. For example, `schedule()` calls `get_percpu_data()`, and `context_switch_to()` also calls `get_percpu_data()` — both hold `&mut` to the same data. In Rust's aliasing model, this is unsound.
+Multiple callers on the **same CPU** can hold `&'static mut` references to the same `PerCpuData` simultaneously. This is immediate UB. For example, `schedule()` calls `get_percpu_data()`, and `context_switch_to()` also calls `get_percpu_data()` -- both hold `&mut` to the same data. In Rust's aliasing model, this is unsound.
 
 **Fix:** Return `*mut PerCpuData` or use a wrapper type that returns `&PerCpuData` (shared ref) with interior mutability for mutable fields.
 
@@ -133,13 +133,13 @@ pub fn cleanup(&self) {
     for sub in subs.iter() {
         if ... { to_remove.push(*sub.0); }
     }
-    // to_remove is NEVER USED — dead subscribers are never removed
+    // to_remove is NEVER USED -- dead subscribers are never removed
 }
 ```
 
 Dead subscribers accumulate forever. Every `broadcast()` call iterates them, wasting time and attempting to wake non-existent threads.
 
-**Fix:** Actually use `to_remove` — drop the read lock, take a write lock, and remove the dead entries.
+**Fix:** Actually use `to_remove` -- drop the read lock, take a write lock, and remove the dead entries.
 
 ---
 
@@ -183,15 +183,15 @@ unsafe { *context = next.ctx.lock().clone() };   // line 357
 cpu.user_rsp = next.ctx.lock().interrupt_stack_frame.stack_pointer.as_u64();  // line 391
 ```
 
-The second lock is taken after a page table switch. Between the two locks, nothing should modify `ctx` (the thread is transitioning to Running on this CPU), but it's fragile. If the thread is somehow woken on another CPU between these points (shouldn't happen, but...), the `ctx` could be stale.
+The second lock is taken after a page table switch. Between the two locks, nothing should modify `ctx` (the thread is transitioning to Running on this CPU), but it's fragile. If the thread is somehow woken on another CPU between these points (shouldn't happen with interrupts disabled), the `ctx` could be stale.
 
 **Fix:** Take the lock once, extract both values.
 
 ---
 
-### MEDIUM — Correctness Concerns
+### MEDIUM -- Correctness Concerns
 
-#### 12. `WaitQueue::wait_internal` — timeout path doesn't remove from queue on Park wake (`waitqueue.rs:84-154`)
+#### 12. `WaitQueue::wait_internal` -- timeout path doesn't remove from queue on Park wake (`waitqueue.rs:84-154`)
 
 ```rust
 fn wait_internal<F>(&self, ready: F, timeout: Option<Duration>) -> WaitOutcome {
@@ -229,7 +229,7 @@ pub fn recv(&self) -> T {
 }
 ```
 
-`broadcast()` wakes `sub.owner` — the thread that originally subscribed. If a different thread calls `recv()` on this subscriber (possible since it's `Arc`), it parks itself but **nobody will ever wake it** since the broadcaster wakes the owner, not the caller.
+`broadcast()` wakes `sub.owner` -- the thread that originally subscribed. If a different thread calls `recv()` on this subscriber (possible since it's `Arc`), it parks itself but **nobody will ever wake it** since the broadcaster wakes the owner, not the caller.
 
 ---
 
@@ -258,7 +258,7 @@ impl Ord for SleepEntry {
 }
 ```
 
-Using `BinaryHeap<_, Max>` with reversed `Ord` to get min-heap behavior. This works but is error-prone — any future code that assumes natural ordering will break. Consider using `BinaryHeap<_, Min>` if available, or documenting heavily.
+Using `BinaryHeap<_, Max>` with reversed `Ord` to get min-heap behavior. This works but is error-prone -- any future code that assumes natural ordering will break. Consider using `BinaryHeap<_, Min>` if available, or documenting heavily.
 
 ---
 
@@ -268,7 +268,7 @@ The `earliest_deadline` is updated after releasing the `sleepers` lock. A timer 
 
 ---
 
-### LOW — Style / Robustness
+### LOW -- Style / Robustness
 
 #### 17. No work-stealing between CPUs
 
@@ -294,26 +294,537 @@ Since `sched_for_cpu` and `pick_sched` acquire `SCHEDULERS.read()`, and these ca
 
 ---
 
-### Summary Table
+### Round 1 Summary Table
 
-| # | Severity | Issue | File:Line |
-|---|----------|-------|-----------|
-| 1 | CRITICAL | `thread_park` infinite loop on non-Running state | scheduler.rs:447-459 |
-| 2 | CRITICAL | Sleep silently dropped when heap full, thread stuck forever | scheduler.rs:507 |
-| 3 | CRITICAL | `wake_thread_slow` unbounded spin on Running target | scheduler.rs:561-574 |
-| 4 | CRITICAL | `thread_exit` does heavy cleanup with interrupts disabled | scheduler.rs:604-622 |
-| 5 | CRITICAL | `save_current_thread`/`context_switch_to` take `user.write()` in scheduler tick, priority inversion | scheduler.rs:303,367 |
-| 6 | HIGH | `get_percpu_data` returns multiple `&mut`, UB | per_cpu.rs:47 |
-| 7 | HIGH | `complete_wake` uses potentially stale CPU id | scheduler.rs:110 |
-| 8 | HIGH | `Broadcaster::cleanup` is a no-op | broadcast.rs:130 |
-| 9 | HIGH | `queue_spawn_thread` calls `pick_sched` twice | util.rs:142 |
-| 10 | HIGH | `pick_sched` takes read lock twice | util.rs:85 |
-| 11 | HIGH | `context_switch_to` locks `ctx` twice | scheduler.rs:357,391 |
-| 12 | MEDIUM | WaitQueue doesn't clean up tid on park-wake path | waitqueue.rs:137-141 |
-| 13 | MEDIUM | `Subscriber::recv` can permanently park non-owner threads | broadcast.rs:36 |
-| 14 | MEDIUM | Redundant state store in `context_switch_to` | scheduler.rs:327 |
-| 15 | MEDIUM | Reversed Ord for min-heap is fragile | scheduler.rs:684 |
-| 16 | MEDIUM | `earliest_deadline` update race in `thread_sleep` | scheduler.rs:510-514 |
-| 17 | LOW | No work-stealing between CPUs | scheduler design |
-| 18 | LOW | `recv_timeout` single-shot check | broadcast.rs:47 |
-| 19 | LOW | `SCHEDULERS` RwLock under interrupt-disabled context | scheduler.rs:55 |
+| # | Severity | Issue | Status |
+|---|----------|-------|--------|
+| 1 | CRITICAL | `thread_park` infinite loop on non-Running state | DONE |
+| 2 | CRITICAL | Sleep silently dropped when heap full, thread stuck forever | DONE |
+| 3 | CRITICAL | `wake_thread_slow` unbounded spin on Running target | DONE |
+| 4 | CRITICAL | `thread_exit` does heavy cleanup with interrupts disabled | DONE (reaper thread) |
+| 5 | CRITICAL | `save_current_thread`/`context_switch_to` take `user.write()` in scheduler tick | DONE (FPU moved to Thread) |
+| 6 | HIGH | `get_percpu_data` returns multiple `&mut`, UB | DONE (Cell/UnsafeCell refactor) |
+| 7 | HIGH | `complete_wake` uses potentially stale CPU id | DONE (kept last-CPU for correctness) |
+| 8 | HIGH | `Broadcaster::cleanup` is a no-op | DONE (fixed in code) |
+| 9 | HIGH | `queue_spawn_thread` calls `pick_sched` twice | DONE |
+| 10 | HIGH | `pick_sched` takes read lock twice | DONE |
+| 11 | HIGH | `context_switch_to` locks `ctx` twice | DONE |
+| 12 | MEDIUM | WaitQueue doesn't clean up tid on park-wake path | DONE |
+| 13 | MEDIUM | `Subscriber::recv` can permanently park non-owner threads | DONE (debug_assert) |
+| 14 | MEDIUM | Redundant state store in `context_switch_to` | DONE |
+| 15 | MEDIUM | Reversed Ord for min-heap is fragile | DONE (switched to Min) |
+| 16 | MEDIUM | `earliest_deadline` update race in `thread_sleep` | DONE |
+| 17 | LOW | No work-stealing between CPUs | TODO (design project) |
+| 18 | LOW | `recv_timeout` single-shot check | DONE (owner assert added) |
+| 19 | LOW | `SCHEDULERS` RwLock under interrupt-disabled context | TODO (low risk) |
+
+---
+---
+
+## Scheduler & Thread System Review (Round 2)
+
+Second pass focusing on thread lifetimes, Arc management, allocation in
+scheduler paths, and correctness of the intrusive list integration.
+
+### CRITICAL
+
+#### 20. `Link::linked` field is not atomic -- data race when read outside runqueue lock (`intrusive_list/src/lib.rs:38-42`)
+
+```rust
+pub struct Link {
+    next: *mut Link,
+    prev: *mut Link,
+    linked: bool,       // plain bool, not AtomicBool
+}
+```
+
+`rq_link.is_linked()` is called as a `debug_assert` from multiple CPUs concurrently
+(e.g. `enqueue_ready`, `wake_sleepers`, `thread_park_while`, `spawn_thread`, `free`).
+While `debug_assert`s compile out in release, `is_linked()` is a public method and
+any future non-debug usage would be an immediate data race.
+
+More importantly: the `linked` field is written by `push_back`/`unlink` under the
+runqueue lock, but the `unsafe impl Sync for Link` safety argument says "externally
+synchronised" -- yet the reads via `is_linked()` happen outside that lock. Under
+Miri/strict provenance this is UB even for debug_assert reads.
+
+**Fix:** Make `linked` an `AtomicBool` with `Relaxed` ordering. The `next`/`prev`
+pointers are fine since they're only touched under the runqueue lock.
+
+---
+
+#### 21. `SleepEntry` holds `Arc<Thread>` -- dead threads trapped in sleepers heap (`scheduler.rs:886-889`)
+
+```rust
+struct SleepEntry {
+    deadline: u64,
+    thread: Arc<Thread>,
+}
+```
+
+When a thread calls `thread_sleep`, a `SleepEntry` with `cur.clone()` is pushed onto
+the sleepers heap. If the thread exits or is killed before the sleep deadline:
+
+1. `thread_exit` removes it from `THREADS` and enqueues on the reaper.
+2. The reaper calls `t.free()` which deallocates the kernel stack via
+   `kthread_stack_free`, unmaps user memory, and frees the PML4 frame.
+3. **But** the `Arc<Thread>` in the sleepers heap keeps the `Thread` struct alive.
+4. When the deadline expires, `wake_sleepers` pops it and calls `t.try_wake()`.
+   `try_wake` reads `t.state` (Dying) and returns false -- harmless.
+
+The problem: the `Thread` struct (with its freed kernel stack pointer `kstack_top`,
+freed user page tables via `cr3`, etc.) stays alive in memory until the sleep
+deadline. With many short-lived threads doing timed waits, this delays memory
+reclamation. The freed kernel stack cannot be reused by `kthread_stack_alloc` because
+the `kthread_stack_free` push already happened, but if a new thread reuses that stack
+region while the old Thread struct still references it via `kstack_top`, there's a
+semantic (though not memory-safety) inconsistency.
+
+Additionally, if the sleepers heap is near capacity (1024 entries), dead-but-not-yet-
+expired entries waste slots and could cause live `thread_sleep` calls to fail (heap
+full, thread reverts to Running instead of sleeping).
+
+**Fix:** In `wake_sleepers`, before checking `top.deadline > now`, also check
+`top.thread.state() == Dying` and discard those entries. Or add a "cancelled"
+`AtomicBool` to `SleepEntry` that `thread_exit` sets, so `wake_sleepers` can skip
+and drop them.
+
+---
+
+#### 22. `thread_exit` THREADS.remove fallback path is racy (`scheduler.rs:762`)
+
+```rust
+if let Some(t) = THREADS.remove(tid).or_else(|| get_thread_by_id(tid)) {
+```
+
+`THREADS.remove(tid)` takes `map.write()` inside `without_interrupts`. If it returns
+`None`, the fallback calls `get_thread_by_id(tid)` which calls `THREADS.get(tid)`,
+which takes `map.read()` inside its own nested `without_interrupts`. Between the
+write-lock release and the read-lock acquire, another CPU could process this thread.
+
+If remove returns None, the thread was already removed by someone else (e.g. the
+standalone `exit_thread` function at line 784). Processing it again risks double-free
+of the kernel stack or double `record_thread_exit`.
+
+**Fix:** Remove the `or_else` fallback. If `THREADS.remove` returns None, the thread
+was already cleaned up -- just set current to 0, clear percpu, and context_switch.
+Log a warning if this happens unexpectedly.
+
+---
+
+### HIGH
+
+#### 23. `run_idle` enables interrupts -- recursive `on_tick`/`pick_and_run` possible (`scheduler.rs:207-256`)
+
+`pick_and_run` is called from `on_tick` inside `without_interrupts`. When the
+runqueue is empty, `pick_and_run` calls `run_idle()` which calls `enable()` at
+line 213, then loops checking `has_work`.
+
+Between `enable()` and the `without_interrupts` block at line 223, or between
+the `without_interrupts` block ending (line 239) and `enable_and_hlt()` (line 242),
+a timer interrupt can fire. This calls `schedule()` -> `on_tick()` ->
+`maybe_preempt()`. Since `current` is 0 (idle), `maybe_preempt` calls
+`pick_and_run()` again -- recursive re-entry.
+
+If the runqueue is still empty, this recurses into `run_idle` again, growing the
+stack. With a fast enough timer (e.g. the 1us fallback when deadline is past),
+this could overflow the kernel stack.
+
+Even if it doesn't overflow, the outer `run_idle` loop continues after the inner
+interrupt returns, potentially double-processing work.
+
+**Fix:** Add a per-CPU `in_idle` flag. In `on_tick`, if already idle, just wake
+sleepers and return without calling `pick_and_run`. Or check `self.current == 0`
+at the start of `on_tick` and skip `maybe_preempt` when idle (only wake sleepers).
+
+---
+
+#### 24. `BlockingMutex::lock()` can deadlock when called with interrupts disabled (`mutex.rs:43-52`)
+
+```rust
+pub fn lock(&self) -> BlockingMutexGuard<'_, T> {
+    loop {
+        if self.try_acquire() {
+            return BlockingMutexGuard { lock: self };
+        }
+        let _ = self.waiters.wait_until(|| !self.locked.load(Ordering::Acquire));
+    }
+}
+```
+
+`wait_until` calls `thread_park_while` which calls `context_switch`. If the caller
+had interrupts disabled, `context_switch` builds a synthetic interrupt frame
+capturing RFLAGS with IF=0. When this thread is later resumed via `iretq`, RFLAGS
+is restored with IF=0 -- the thread runs with **interrupts permanently disabled**.
+
+If the mutex holder is on the same CPU, it will never be scheduled to release the
+mutex. If on another CPU, the waiting thread resumes but spins with IF=0, preventing
+timer interrupts and eventually hanging the CPU.
+
+`BlockingMutex` is used by `UserThreadInfo` (fd_table, memory_mappings, cwd) which
+could be accessed from contexts where interrupts are disabled.
+
+**Fix:** Add `debug_assert!(interrupts::are_enabled(), "BlockingMutex::lock called
+with interrupts disabled")` at the top of `lock()`.
+
+---
+
+#### 25. `WaitQueue` inner `VecDeque` allocates -- used inside `without_interrupts` (`waitqueue.rs:1-9, 98-131`)
+
+```rust
+pub struct WaitQueue {
+    inner: Mutex<VecDeque<ThreadId>>,  // VecDeque allocates on grow
+}
+```
+
+`wait_internal` runs inside `without_interrupts` and calls `q.push_back(tid)`. If the
+`VecDeque` needs to grow its backing buffer, it calls the global allocator. This
+violates the no-allocator-in-scheduler-paths invariant.
+
+`WaitQueue` is used by `BlockingMutex` which is used throughout the kernel. Under
+contention with many waiters, the VecDeque will eventually need to reallocate.
+
+**Fix:** Replace `VecDeque<ThreadId>` with `heapless::Deque<ThreadId, N>` for a
+bounded capacity, or use an intrusive wait list. Alternatively, move the push_back
+outside the `without_interrupts` block (check condition, push tid, then disable
+interrupts for the park).
+
+---
+
+#### 26. `thread_park_while` abort path relies on same-CPU enqueue invariant (`scheduler.rs:568-585`)
+
+```rust
+// CAS Parked->Running failed: waker set Parked->Waking->Ready and enqueued us.
+// Context-switch so the scheduler properly pops and unlinks us.
+// "safe because complete_wake enqueues on the thread's last CPU, which is this CPU"
+without_interrupts(|| unsafe {
+    cur.mark_need_resched();
+    context_switch();
+});
+```
+
+When the CAS at line 570 fails, the thread is in state Ready and on the runqueue.
+We're still executing as this thread on this CPU. The comment says this is safe
+because `complete_wake` enqueues on the thread's last CPU (this CPU), so only this
+CPU's scheduler will pop it.
+
+**However**, if the `complete_wake` locality optimization from `debt.txt` is ever
+implemented (enqueue on waker's CPU), another CPU could pop this thread from its
+runqueue and try to context-switch to it while we're still executing here. This
+would cause two CPUs to run the same thread simultaneously.
+
+This is not a bug today, but it's a **correctness landmine** that will silently
+break if `complete_wake` is changed.
+
+**Fix:** Add a prominent comment and/or a `debug_assert` in `complete_wake` that
+documents this dependency. Consider adding a per-thread `context_saved` AtomicBool
+that must be set before the thread can be popped by another CPU, future-proofing
+the abort path.
+
+---
+
+#### 27. Dead `Broadcaster` subscribers leak memory and waste CPU (`broadcast.rs:102-115`)
+
+```rust
+pub fn broadcast(&self, msg: T) {
+    let targets: Vec<Arc<Subscriber<T>>> = {
+        let subs = self.subs.read();
+        subs.values().cloned().collect()  // clones all subscriber Arcs
+    };
+    for sub in targets {
+        sub.queue.lock().push_back(msg.clone());  // pushes to dead queues
+        sched.wake_thread(sub.owner, ...);        // wakes non-existent threads
+    }
+}
+```
+
+When a subscriber's owner thread exits, the subscriber entry remains in the
+`Broadcaster`. Every `broadcast()` call:
+1. Clones the dead subscriber's `Arc` (refcount bump)
+2. Locks its queue mutex
+3. Pushes a cloned message (memory allocation for VecDeque growth)
+4. Calls `wake_thread` which does a `THREADS` lookup (returns None, no-op)
+
+The subscriber's queue grows unbounded since no one consumes from it. With
+frequent broadcasts (e.g. mouse events at 125 Hz), this is a steady memory leak.
+
+`cleanup()` exists and works correctly now (fixed in round 1), but it's never
+called automatically from `broadcast()`.
+
+**Fix:** Call `self.cleanup()` periodically from `broadcast()` (e.g. every 128
+broadcasts using a counter), or check `get_thread_by_id(sub.owner).is_some()`
+before pushing to the queue.
+
+---
+
+### MEDIUM
+
+#### 28. `State::from(u8)` uses `_ => State::Ready` -- silent fallback to default (`thread.rs:94-105`)
+
+```rust
+impl From<u8> for State {
+    fn from(v: u8) -> Self {
+        match v {
+            1 => State::Running,
+            2 => State::Sleeping,
+            3 => State::Parked,
+            4 => State::Waking,
+            5 => State::Dying,
+            _ => State::Ready,   // silent fallback
+        }
+    }
+}
+```
+
+A corrupt or invalid state byte silently becomes `Ready`. Per project convention
+(use `unreachable!()` for invalid enum conversions), this should panic to surface
+bugs immediately rather than allowing a thread with corrupt state to be treated
+as Ready and potentially scheduled.
+
+**Fix:** Change `_ => State::Ready` to `_ => unreachable!("invalid thread state: {v}")`.
+
+---
+
+#### 29. Early-woken sleep leaves stale `SleepEntry` in heap, wasting capacity (`scheduler.rs:599-652, 172-201`)
+
+When `wake_thread` is called on a sleeping thread:
+1. `try_wake` transitions Sleeping -> Waking
+2. `complete_wake` sets Ready and enqueues on runqueue
+3. Thread resumes and returns from `thread_sleep`
+
+But the `SleepEntry { deadline, thread: Arc<Thread> }` remains in the sleepers heap.
+`wake_sleepers` won't pop it until `deadline <= now`. When it does, `try_wake` fails
+(thread is Running/Ready/Parked) and the entry is discarded.
+
+Until then:
+- The entry occupies one of 1024 heap slots
+- The `Arc<Thread>` keeps a reference alive (minor memory overhead)
+- With I/O-heavy workloads where threads sleep with timeouts but are woken early
+  by I/O completion, stale entries accumulate
+
+If stale entries fill the heap, live `thread_sleep` calls will fail and revert to
+Running (the heap-full fallback from round 1 fix), effectively breaking timed waits.
+
+**Fix:** Add a generation counter or `AtomicBool cancelled` to `SleepEntry`. When
+a sleeping thread is woken early (via `try_wake`), mark its sleep entry as cancelled.
+In `wake_sleepers`, skip cancelled entries. Alternatively, in `wake_sleepers`, peek
+and discard entries where `thread.state() != Sleeping` before the deadline check.
+
+---
+
+#### 30. Double `CpuContext` copy per context switch + unnecessary `Mutex` (`scheduler.rs:353-423`)
+
+```rust
+// save_current_thread:
+*current.ctx.lock() = (*context).clone();       // copy 1: interrupt frame -> thread.ctx
+
+// context_switch_to:
+let ctx_snapshot = next.ctx.lock().clone();      // copy 2: thread.ctx -> local
+unsafe { *context = ctx_snapshot };              // copy 3: local -> interrupt frame
+```
+
+Each context switch does 3 copies of `CpuContext` (15 GPRs + 5 interrupt frame
+fields = 160 bytes each). The `Mutex<CpuContext>` exists to synchronize access, but
+the context is only ever accessed by:
+- The CPU saving the outgoing thread (in `save_current_thread`)
+- The CPU loading the incoming thread (in `context_switch_to`, after popping from rq)
+
+These never overlap for the same thread: a thread's context is saved before it goes
+on the runqueue, and loaded after it's popped. The mutex is uncontended overhead.
+
+**Fix:** Replace `ctx: Mutex<CpuContext>` with `ctx: UnsafeCell<CpuContext>`. The
+safety argument: access is serialized by the scheduler -- save happens before enqueue,
+load happens after dequeue. This eliminates the lock and allows direct pointer writes
+instead of clone-and-copy.
+
+---
+
+#### 31. `reaper_enqueue` calls `wake_thread` (slow path) inside `without_interrupts` (`scheduler.rs:870-882`)
+
+```rust
+fn reaper_enqueue(thread: Arc<Thread>) {
+    // ... push to queue ...
+    let reaper_tid = REAPER_TID.load(Ordering::Acquire);
+    if reaper_tid != 0 {
+        sched().wake_thread(ThreadId(reaper_tid), WakePriority::Normal);
+    }
+}
+```
+
+Called from `thread_exit` inside `without_interrupts`. `wake_thread` calls
+`wake_thread_internal` with `from_irq: false`, which dispatches to
+`wake_thread_slow`. The slow path may:
+- Spin up to 64 times on a Running target
+- Call `sched_for_cpu` -> `SCHEDULERS.read()` (takes RwLock with IRQs disabled)
+- Call `complete_wake` -> `SCHEDULERS.read()` again
+
+This is unnecessary overhead in an interrupt-disabled fast path.
+
+**Fix:** Use `sched().wake_thread_irq(ThreadId(reaper_tid), WakePriority::Normal)`
+since we know we're in an IRQ-disabled context. The IRQ path is simpler and avoids
+the spin loop.
+
+---
+
+#### 32. `kthread_stack_free` uses allocating `SegQueue` (`util.rs:24, 53-57`)
+
+```rust
+static KTHREAD_FREED_STACKS: SegQueue<u64> = SegQueue::new();
+
+pub fn kthread_stack_free(stack_top: u64) {
+    let region_bottom = stack_top - KTHREAD_STACK_SIZE;
+    KTHREAD_FREED_STACKS.push(region_bottom);   // crossbeam SegQueue may allocate
+}
+```
+
+`crossbeam_queue::SegQueue` allocates new segments when the current segment is full.
+Currently called from the reaper thread (interrupts enabled), so this is safe.
+
+But if `free()` or `kthread_stack_free` is ever called from a scheduler path or with
+interrupts disabled, the allocation could deadlock. Worth documenting or replacing
+with a bounded `ArrayQueue`.
+
+---
+
+#### 33. Unnecessary `Arc<Option<String>>` wrapping in thread creation (`thread.rs:393-400, 499-500`)
+
+```rust
+// new_kernel:
+let name = Arc::new(name);                                          // Arc<Option<String>>
+let thread = Arc::new(Self {
+    name: Arc::new(name.as_ref().clone().unwrap_or(String::new())), // clones, unwraps, re-wraps
+    ...
+});
+
+// new_user:
+let name = Arc::new(name);                                          // same pattern
+```
+
+Creates a throwaway `Arc<Option<String>>`, clones the inner `Option<String>`,
+unwraps it, then wraps in a new `Arc<String>`. The first Arc is never shared or
+used for reference counting.
+
+**Fix:** Remove the intermediate Arc:
+```rust
+let name = Arc::new(name.unwrap_or_default());
+```
+
+---
+
+#### 34. `ThreadRegistry` `BTreeMap` allocates inside `without_interrupts` (`thread.rs:722-766`)
+
+```rust
+impl ThreadRegistry {
+    pub fn insert(&self, t: Arc<Thread>) {
+        without_interrupts(|| {
+            self.map.write().insert(t.id, t);   // BTreeMap::insert may allocate
+        })
+    }
+
+    pub fn remove(&self, tid: ThreadId) -> Option<Arc<Thread>> {
+        without_interrupts(|| self.map.write().remove(&tid))  // may deallocate
+    }
+}
+```
+
+`BTreeMap::insert` allocates new nodes. Called from `Thread::new_kernel` and
+`Thread::new_user` (which themselves allocate, so this is less critical), but also
+from `insert_thread` which could be called from various contexts.
+
+`BTreeMap::remove` may deallocate freed nodes. Called from `thread_exit` inside
+`without_interrupts` at `scheduler.rs:762`.
+
+This violates the no-allocator-in-scheduler-paths invariant for the remove path.
+
+**Fix:** Defer `THREADS.remove` to the reaper thread (which runs with interrupts
+enabled). In `thread_exit`, only mark Dying and enqueue on the reaper -- don't
+remove from THREADS. The reaper already calls `THREADS.remove_info`, just add
+the `THREADS.remove` there too (it's already done via `exit_thread` in the reaper
+path at `scheduler.rs:785`). Or replace BTreeMap with a fixed-size slab/hashmap.
+
+---
+
+### LOW / STYLE
+
+#### 35. Overly broad `unsafe` block in `thread_yield` (`scheduler.rs:497-511`)
+
+```rust
+without_interrupts(|| unsafe {    // entire closure is unsafe
+    let Some(cur) = self.current_thread() else { return; };
+    if cur.cas_state(State::Running, State::Ready) {
+        // ... safe code ...
+    }
+    context_switch();              // only this needs unsafe
+})
+```
+
+**Fix:** Narrow the `unsafe` block to just the `context_switch()` call.
+
+---
+
+#### 36. `Scheduler` fields unnecessarily `pub` (`scheduler.rs:82-102`)
+
+`cpu`, `current`, `default_timeslice`, `earliest_deadline`, `thread_count`, `has_work`
+are all `pub`. External code should use accessor methods, not reach into scheduler
+internals directly.
+
+**Fix:** Change to `pub(crate)` or private with accessor methods where needed.
+
+---
+
+#### 37. `sched()` uses `as_mut()` where `as_ref()` suffices (`scheduler.rs:53-61`)
+
+```rust
+pub fn sched() -> &'static Scheduler {
+    unsafe {
+        get_percpu_data()
+            .scheduler
+            .get()
+            .as_mut()           // returns Option<&mut T>, but we only need &T
+            .unwrap_unchecked()
+    }
+}
+```
+
+**Fix:** Change `as_mut()` to `as_ref()` since the return type is `&'static Scheduler`.
+
+---
+
+#### 38. Thread ID allocation uses `Ordering::Relaxed` (`thread.rs:391, 461`)
+
+```rust
+let id = ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, Ordering::Relaxed));
+```
+
+`Relaxed` is sufficient for uniqueness on x86-64 (total store order), but not
+portable to weaker architectures. If this kernel is ever ported or if tests run
+on non-x86, IDs could be duplicated.
+
+**Fix:** Use `Ordering::AcqRel` or at minimum document that `Relaxed` relies on
+x86-64 TSO.
+
+---
+
+### Round 2 Summary Table
+
+| # | Severity | Issue | Status |
+|---|----------|-------|--------|
+| 20 | CRITICAL | `Link::linked` not atomic, read outside lock = data race | DONE |
+| 21 | CRITICAL | `SleepEntry` holds Arc, dead threads trapped in sleepers heap | DONE |
+| 22 | CRITICAL | `thread_exit` THREADS.remove fallback path is racy | DONE |
+| 23 | HIGH | `run_idle` enables IRQs, recursive on_tick/pick_and_run possible | TODO |
+| 24 | HIGH | `BlockingMutex::lock` deadlocks with interrupts disabled | TODO |
+| 25 | HIGH | `WaitQueue` VecDeque allocates inside `without_interrupts` | TODO |
+| 26 | HIGH | `thread_park_while` abort relies on same-CPU enqueue invariant | TODO |
+| 27 | HIGH | Dead broadcaster subscribers leak memory, waste CPU | TODO |
+| 28 | MEDIUM | `State::from(u8)` silent fallback to Ready | TODO |
+| 29 | MEDIUM | Early-woken sleep leaves stale SleepEntry in heap | TODO |
+| 30 | MEDIUM | Double CpuContext copy + Mutex overhead per context switch | TODO |
+| 31 | MEDIUM | `reaper_enqueue` takes SCHEDULERS RwLock with IRQs disabled | TODO |
+| 32 | MEDIUM | `kthread_stack_free` uses allocating SegQueue | TODO |
+| 33 | MEDIUM | Unnecessary Arc<Option<String>> wrapping in thread creation | TODO |
+| 34 | MEDIUM | `ThreadRegistry` BTreeMap allocates inside `without_interrupts` | TODO |
+| 35 | LOW | Overly broad `unsafe` block in `thread_yield` | TODO |
+| 36 | LOW | Scheduler fields unnecessarily `pub` | TODO |
+| 37 | LOW | `sched()` uses `as_mut()` where `as_ref()` suffices | TODO |
+| 38 | LOW | Thread ID uses `Relaxed` ordering | TODO |
