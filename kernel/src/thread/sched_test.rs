@@ -54,7 +54,7 @@ struct TestHarness {
     sleep_int_tid: AtomicU64,
 }
 
-const TOTAL_TESTS: u32 = 22;
+const TOTAL_TESTS: u32 = 30;
 
 pub fn run_sched_tests() {
     println!("[sched-test] Starting scheduler tests ({TOTAL_TESTS} expected)...");
@@ -110,9 +110,18 @@ pub fn run_sched_tests() {
     // Wake-before-park: waker fires before thread parks (2)
     spawn_test(&harness, "test-wbp-parker", test_wbp_parker);
     spawn_test(&harness, "test-wbp-waker", test_wbp_waker);
-    // Sleep interrupted by early wake (1)
+    // Sleep interrupted by early wake (2)
     spawn_test(&harness, "test-sleep-int-s", test_sleep_interrupt_sleeper);
     spawn_test(&harness, "test-sleep-int-w", test_sleep_interrupt_waker);
+    // Compute-across-yield: verify register/stack preservation (8)
+    for i in 0..8u64 {
+        let boxed = Box::into_raw(Box::new((harness.clone(), i))) as *mut u8;
+        queue_spawn_kthread_named_arg(
+            "test-compute",
+            test_compute_across_yields as *const () as u64,
+            boxed,
+        );
+    }
 
     // Coordinator thread: waits for all tests, then exits QEMU.
     let boxed = Box::into_raw(Box::new(harness.clone())) as *mut u8;
@@ -546,6 +555,102 @@ extern "C" fn test_sleep_interrupt_waker(arg: *mut u8) -> ! {
     sched().wake_thread(sleeper, WakePriority::Normal);
 
     test_done(&h, "sleep-interrupt-waker");
+    sched().thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Compute-across-yields: verify register and stack integrity
+//
+// Each thread computes a known-answer checksum across 500 yields. If a
+// context switch corrupts any register or stack slot, the final checksum
+// will be wrong. Uses multiple local variables to pressure the compiler
+// into using callee-saved registers (rbx, r12-r15) and stack spills.
+// 8 instances run concurrently to stress cross-CPU migration.
+// ---------------------------------------------------------------------------
+
+/// Simple non-inlineable hash step so the compiler can't constant-fold it away.
+#[inline(never)]
+fn hash_step(state: u64, input: u64) -> u64 {
+    state.wrapping_mul(6364136223846793005).wrapping_add(input)
+}
+
+extern "C" fn test_compute_across_yields(arg: *mut u8) -> ! {
+    let (h, seed) = unsafe { *Box::from_raw(arg as *mut (Arc<TestHarness>, u64)) };
+
+    // Use many locals to force register pressure + stack spills.
+    let mut a: u64 = seed.wrapping_add(1);
+    let mut b: u64 = seed.wrapping_add(2);
+    let mut c: u64 = seed.wrapping_add(3);
+    let mut d: u64 = seed.wrapping_add(4);
+    let mut e: u64 = seed.wrapping_add(5);
+    let mut f: u64 = seed.wrapping_add(6);
+    let mut checksum: u64 = 0;
+
+    // Also use a stack-allocated array to detect stack corruption.
+    let mut stack_canary: [u64; 8] = [0; 8];
+    for i in 0..8 {
+        stack_canary[i] = 0xDEAD_BEEF_0000_0000u64 + seed * 8 + i as u64;
+    }
+
+    for i in 0u64..500 {
+        // Compute between yields - uses all locals
+        a = hash_step(a, b);
+        b = hash_step(b, c);
+        c = hash_step(c, d);
+        d = hash_step(d, e);
+        e = hash_step(e, f);
+        f = hash_step(f, a);
+        checksum = checksum.wrapping_add(a ^ b ^ c ^ d ^ e ^ f);
+
+        // Alternate between yield, sleep, and park_while to exercise
+        // different context switch paths.
+        match i % 4 {
+            0 => sched().thread_yield(),
+            1 => sched().thread_sleep(Duration::from_micros(1)),
+            2 => {
+                // park_while with immediate false -> abort path (no switch)
+                sched().thread_park_while(|| false);
+            }
+            _ => sched().thread_yield(),
+        }
+    }
+
+    // Verify stack canary wasn't corrupted
+    for i in 0..8 {
+        let expected = 0xDEAD_BEEF_0000_0000u64 + seed * 8 + i as u64;
+        assert!(
+            stack_canary[i] == expected,
+            "[sched-test] compute: stack canary corrupted at [{i}]: got {:#x}, expected {:#x}",
+            stack_canary[i],
+            expected
+        );
+    }
+
+    // Recompute the expected checksum from scratch (no yields)
+    let mut ea = seed.wrapping_add(1);
+    let mut eb = seed.wrapping_add(2);
+    let mut ec = seed.wrapping_add(3);
+    let mut ed = seed.wrapping_add(4);
+    let mut ee = seed.wrapping_add(5);
+    let mut ef = seed.wrapping_add(6);
+    let mut expected_checksum: u64 = 0;
+
+    for _ in 0u64..500 {
+        ea = hash_step(ea, eb);
+        eb = hash_step(eb, ec);
+        ec = hash_step(ec, ed);
+        ed = hash_step(ed, ee);
+        ee = hash_step(ee, ef);
+        ef = hash_step(ef, ea);
+        expected_checksum = expected_checksum.wrapping_add(ea ^ eb ^ ec ^ ed ^ ee ^ ef);
+    }
+
+    assert!(
+        checksum == expected_checksum,
+        "[sched-test] compute: checksum mismatch for seed {seed}: got {checksum:#x}, expected {expected_checksum:#x}"
+    );
+
+    test_done(&h, "compute-across-yields");
     sched().thread_exit(0);
 }
 
