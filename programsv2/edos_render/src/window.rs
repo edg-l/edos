@@ -605,13 +605,22 @@ pub fn get_mouse_position() -> Option<(i32, i32)> {
 
 /// Get the current mouse state (position and buttons) by reading from /dev/mouse.
 /// Returns (x, y, buttons) where buttons is a bitmask (bit 0 = left, bit 1 = right, bit 2 = middle).
+///
+/// NOTE: Opens /dev/mouse on every call. For hot loops, use [`read_mouse_state`] with
+/// a pre-opened file handle instead.
 pub fn get_mouse_state() -> Option<(i32, i32, u8)> {
     use std::fs::File;
+    let mut file = File::open("/dev/mouse").ok()?;
+    read_mouse_state(&mut file)
+}
+
+/// Read mouse state from an already-opened /dev/mouse file handle.
+/// Use this in hot loops (e.g. compositor) to avoid opening the device every frame.
+pub fn read_mouse_state(file: &mut std::fs::File) -> Option<(i32, i32, u8)> {
     use std::io::Read;
 
     // MouseEvent structure from kernel is 16 bytes:
     // x (i32), y (i32), dx (i16), dy (i16), buttons (u8), scroll (i8), padding (2)
-    let mut file = File::open("/dev/mouse").ok()?;
     let mut buf = [0u8; 16];
     file.read_exact(&mut buf).ok()?;
 

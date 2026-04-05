@@ -1,37 +1,36 @@
 use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use core::time::Duration;
 
-use alloc::{
-    collections::{btree_map::BTreeMap, vec_deque::VecDeque},
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::{collections::btree_map::BTreeMap, sync::Arc};
+use crossbeam_queue::ArrayQueue;
 use spin::RwLock;
 
 use crate::thread::{
-    mutex::BlockingMutex,
     scheduler::{WakePriority, sched},
     thread::{State, ThreadId, get_thread_by_id},
 };
 
-/// A single subscriber queue
+/// Default capacity for subscriber queues. Events are dropped when full.
+const SUBSCRIBER_QUEUE_CAP: usize = 256;
+
+/// A single subscriber queue (lock-free).
 pub struct Subscriber<T> {
     owner: ThreadId,
-    queue: BlockingMutex<VecDeque<T>>,
+    queue: ArrayQueue<T>,
 }
 
 impl<T> Subscriber<T> {
     pub fn try_recv(&self) -> Option<T> {
-        self.queue.lock().pop_front()
+        self.queue.pop()
     }
 
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
-        self.queue.lock().len()
+        self.queue.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.queue.lock().is_empty()
+        self.queue.is_empty()
     }
 
     pub fn recv(&self) -> T {
@@ -41,10 +40,10 @@ impl<T> Subscriber<T> {
             "Subscriber::recv called from non-owner thread"
         );
         loop {
-            if let Some(msg) = self.queue.lock().pop_front() {
+            if let Some(msg) = self.queue.pop() {
                 return msg;
             }
-            sched().thread_park_while(|| self.queue.lock().is_empty());
+            sched().thread_park_while(|| self.queue.is_empty());
         }
     }
 
@@ -56,12 +55,12 @@ impl<T> Subscriber<T> {
             "Subscriber::recv_timeout called from non-owner thread"
         );
 
-        if let Some(msg) = self.queue.lock().pop_front() {
+        if let Some(msg) = self.queue.pop() {
             return Some(msg);
         }
         // Sleep until either wake or timeout, then re-check.
         sched().thread_sleep(dur);
-        self.queue.lock().pop_front()
+        self.queue.pop()
     }
 }
 
@@ -81,18 +80,16 @@ impl<T: Clone> Broadcaster<T> {
 
     pub fn subscribe(&self) -> Arc<Subscriber<T>> {
         let owner = sched().current_thread_id().unwrap();
-        {
-            let subs = self.subs.read();
-            if let Some(existing) = subs.get(&owner) {
-                return existing.clone();
-            }
+        // Single write lock: check-and-insert to avoid TOCTOU race (M7).
+        let mut subs = self.subs.write();
+        if let Some(existing) = subs.get(&owner) {
+            return existing.clone();
         }
-
         let sub = Arc::new(Subscriber {
             owner,
-            queue: BlockingMutex::new(VecDeque::new()),
+            queue: ArrayQueue::new(SUBSCRIBER_QUEUE_CAP),
         });
-        self.subs.write().insert(owner, sub.clone());
+        subs.insert(owner, sub.clone());
         sub
     }
 
@@ -103,19 +100,25 @@ impl<T: Clone> Broadcaster<T> {
     }
 
     pub fn broadcast(&self, msg: T) {
-        if self.broadcast_count.fetch_add(1, AtomicOrdering::Relaxed) % 128 == 0 {
+        let count = self.broadcast_count.fetch_add(1, AtomicOrdering::Relaxed);
+        if count > 0 && count % 128 == 0 {
             self.cleanup();
         }
         let sched = sched();
-        let targets: Vec<Arc<Subscriber<T>>> = {
+        // Collect into stack-allocated buffer to avoid heap allocation.
+        let mut targets: heapless::Vec<Arc<Subscriber<T>>, 32> = heapless::Vec::new();
+        {
             let subs = self.subs.read();
-            subs.values().cloned().collect()
-        };
-        for sub in targets {
-            {
-                let mut q = sub.queue.lock();
-                q.push_back(msg.clone());
+            for sub in subs.values() {
+                debug_assert!(
+                    targets.push(sub.clone()).is_ok(),
+                    "broadcast: too many subscribers"
+                );
             }
+        }
+        for sub in &targets {
+            // ArrayQueue::push is lock-free; drop event if queue is full.
+            let _ = sub.queue.push(msg.clone());
             sched.wake_thread(sub.owner, WakePriority::Normal);
         }
     }
@@ -124,52 +127,34 @@ impl<T: Clone> Broadcaster<T> {
         if msgs.is_empty() {
             return;
         }
-        if self.broadcast_count.fetch_add(1, AtomicOrdering::Relaxed) % 128 == 0 {
+        let count = self.broadcast_count.fetch_add(1, AtomicOrdering::Relaxed);
+        if count > 0 && count % 128 == 0 {
             self.cleanup();
         }
         let sched = sched();
-        let targets: Vec<Arc<Subscriber<T>>> = {
+        let mut targets: heapless::Vec<Arc<Subscriber<T>>, 32> = heapless::Vec::new();
+        {
             let subs = self.subs.read();
-            subs.values().cloned().collect()
-        };
-        for sub in targets {
-            {
-                let mut q = sub.queue.lock();
-                for msg in msgs {
-                    q.push_back(msg.clone());
-                }
+            for sub in subs.values() {
+                debug_assert!(
+                    targets.push(sub.clone()).is_ok(),
+                    "broadcast_many: too many subscribers"
+                );
+            }
+        }
+        for sub in &targets {
+            for msg in msgs {
+                let _ = sub.queue.push(msg.clone());
             }
             sched.wake_thread(sub.owner, WakePriority::Normal);
         }
     }
 
     pub fn cleanup(&self) {
-        let to_remove = {
-            let subs = self.subs.read();
-
-            if subs.is_empty() {
-                return;
-            }
-
-            let mut to_remove = Vec::new();
-            for sub in subs.iter() {
-                if let Some(thread) = get_thread_by_id(*sub.0) {
-                    if thread.state() == State::Dying {
-                        to_remove.push(*sub.0);
-                    }
-                } else {
-                    to_remove.push(*sub.0);
-                }
-            }
-            to_remove
-        };
-
-        // Actually remove dead subscribers
-        if !to_remove.is_empty() {
-            let mut subs = self.subs.write();
-            for tid in to_remove {
-                subs.remove(&tid);
-            }
-        }
+        // Single write lock with retain avoids heap allocation.
+        let mut subs = self.subs.write();
+        subs.retain(|_, sub| {
+            get_thread_by_id(sub.owner).is_some_and(|t| t.state() != State::Dying)
+        });
     }
 }

@@ -382,8 +382,20 @@ fn mouse_poll_state(subscriber: &Subscriber<MouseEvent>) -> PollState {
 }
 
 fn notify_mouse_pollers() {
-    let pollers = MOUSE_POLLERS.lock();
-    for (_, entry, subscriber) in pollers.iter() {
+    // Snapshot poller entries under lock, then notify outside to avoid
+    // holding BlockingMutex while wake_thread spins (priority inversion).
+    let snapshot: heapless::Vec<(Arc<PollEntry>, Arc<Subscriber<MouseEvent>>), 16> = {
+        let pollers = MOUSE_POLLERS.lock();
+        let mut v = heapless::Vec::new();
+        for (_, entry, subscriber) in pollers.iter() {
+            debug_assert!(
+                v.push((entry.clone(), subscriber.clone())).is_ok(),
+                "too many mouse pollers"
+            );
+        }
+        v
+    };
+    for (entry, subscriber) in &snapshot {
         let state = mouse_poll_state(subscriber);
         entry.update(state);
     }

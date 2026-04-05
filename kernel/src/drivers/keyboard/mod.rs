@@ -178,8 +178,20 @@ fn keyboard_poll_state(subscriber: &Subscriber<DecodedKey>) -> PollState {
 }
 
 fn notify_keyboard_pollers() {
-    let pollers = KEYBOARD_POLLERS.lock();
-    for (_, entry, subscriber) in pollers.iter() {
+    // Snapshot poller entries under lock, then notify outside to avoid
+    // holding BlockingMutex while wake_thread spins (priority inversion).
+    let snapshot: heapless::Vec<(Arc<PollEntry>, Arc<Subscriber<DecodedKey>>), 16> = {
+        let pollers = KEYBOARD_POLLERS.lock();
+        let mut v = heapless::Vec::new();
+        for (_, entry, subscriber) in pollers.iter() {
+            debug_assert!(
+                v.push((entry.clone(), subscriber.clone())).is_ok(),
+                "too many keyboard pollers"
+            );
+        }
+        v
+    };
+    for (entry, subscriber) in &snapshot {
         let state = keyboard_poll_state(subscriber);
         entry.update(state);
     }

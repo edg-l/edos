@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use edos_render::graphics::Screen;
 use edos_render::window::{
-    get_mouse_state, property, window_list, window_send_event, window_set, WindowEvent,
+    property, read_mouse_state, window_list, window_send_event, window_set, WindowEvent,
     WindowListEntry,
 };
 
@@ -87,10 +87,13 @@ fn main() {
     // Shared memory mapping cache
     let mut shm_cache = ShmCache::new();
 
+    // Open mouse device once (not every frame)
+    let mut mouse_file = std::fs::File::open("/dev/mouse").expect("failed to open /dev/mouse");
+
     // Main compositor loop
     loop {
         // Get mouse state (position + buttons), default to (0, 0, 0) if unavailable
-        let (mx, my, buttons) = get_mouse_state().unwrap_or((0, 0, 0));
+        let (mx, my, buttons) = read_mouse_state(&mut mouse_file).unwrap_or((0, 0, 0));
 
         cursor.set_position(mx, my);
 
