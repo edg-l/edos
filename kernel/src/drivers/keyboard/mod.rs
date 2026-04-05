@@ -1,16 +1,10 @@
-use core::{
-    hint::spin_loop,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
 use spin::{Mutex, Once};
-use x86_64::{
-    instructions::{interrupts::without_interrupts, port::Port},
-    structures::idt::InterruptStackFrame,
-};
+use x86_64::structures::idt::InterruptStackFrame;
 
 use crate::{
     apic::get_lapic,
@@ -80,14 +74,17 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
 
 pub static KEYBOARD_THREAD_ID: Once<ThreadId> = Once::new();
 
-pub extern "C" fn driver_main() -> ! {
-    without_interrupts(|| unsafe {
-        enable_ps2_keyboard();
+/// Early init: create the scancode queue before IRQs are enabled.
+pub fn init() {
+    SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
+}
 
-        let thread = sched().current_thread().unwrap();
-        KEYBOARD_THREAD_ID.call_once(|| thread.id);
-        thread.set_priority(10); // Priority 10, input should be handled asap
-    });
+pub extern "C" fn driver_main() -> ! {
+    // PS/2 hardware init is done by ps2::init_ps2_controller() before
+    // this thread is spawned. We only set up the driver thread state here.
+    let thread = sched().current_thread().unwrap();
+    KEYBOARD_THREAD_ID.call_once(|| thread.id);
+    thread.set_priority(10);
 
     let mut keyboard = Keyboard::new(
         ScancodeSet1::new(),
@@ -119,53 +116,6 @@ pub extern "C" fn driver_main() -> ! {
 
         KEYBOARD_BROADCAST.cleanup();
     }
-}
-
-unsafe fn enable_ps2_keyboard() {
-    // Disable both PS/2 ports
-    let mut command_port = Port::new(0x64);
-    let mut data_port = Port::new(0x60);
-
-    unsafe {
-        command_port.write(0xAD_u8); // Disable first PS/2 port
-        command_port.write(0xA7_u8); // Disable second PS/2 port
-
-        // Flush output buffer
-        data_port.read();
-
-        // Set controller configuration
-        command_port.write(0x20_u8); // Read configuration byte
-        let mut config = data_port.read();
-        config |= 0x01; // Enable first port interrupt
-        config &= !0x10; // Clear bit 4 (enable first port clock)
-
-        command_port.write(0x60_u8); // Write configuration byte
-        data_port.write(config);
-
-        // Enable first PS/2 port
-        command_port.write(0xAE_u8);
-
-        // Reset keyboard
-        data_port.write(0xFF_u8);
-
-        // Consume the expected ACK (0xFA) and self-test pass (0xAA) bytes so they don't
-        // appear as spurious key events for user-space on the first read.
-        let _ = read_data_with_timeout(&mut command_port, &mut data_port);
-        let _ = read_data_with_timeout(&mut command_port, &mut data_port);
-    }
-}
-
-unsafe fn read_data_with_timeout(
-    command_port: &mut Port<u8>,
-    data_port: &mut Port<u8>,
-) -> Option<u8> {
-    for _ in 0..1_000 {
-        if unsafe { command_port.read() } & 0x01 != 0 {
-            return Some(unsafe { data_port.read() });
-        }
-        spin_loop();
-    }
-    None
 }
 
 #[derive(Debug)]

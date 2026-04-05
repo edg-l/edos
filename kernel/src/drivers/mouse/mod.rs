@@ -1,9 +1,6 @@
 //! PS/2 mouse driver with event broadcasting and DevFS interface.
 
-use core::{
-    hint::spin_loop,
-    sync::atomic::{AtomicI32, AtomicU8, AtomicU64, Ordering},
-};
+use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU64, Ordering};
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
@@ -27,21 +24,9 @@ use crate::{
     },
 };
 
-// PS/2 ports
+// PS/2 ports (used by IRQ handler)
 const DATA_PORT: u16 = 0x60;
 const CMD_PORT: u16 = 0x64;
-
-// Commands to controller (write to 0x64)
-const CMD_ENABLE_AUX: u8 = 0xA8; // Enable auxiliary (mouse) port
-const CMD_GET_CONFIG: u8 = 0x20; // Read config byte
-const CMD_SET_CONFIG: u8 = 0x60; // Write config byte
-const CMD_WRITE_AUX: u8 = 0xD4; // Send next byte to mouse
-
-// Commands to mouse (write to 0x60 after CMD_WRITE_AUX)
-const MOUSE_SET_DEFAULTS: u8 = 0xF6;
-const MOUSE_ENABLE_STREAMING: u8 = 0xF4;
-const MOUSE_SET_SAMPLE_RATE: u8 = 0xF3;
-const MOUSE_GET_DEVICE_ID: u8 = 0xF2;
 
 // Mouse packet bits
 const PACKET_X_SIGN: u8 = 0x10;
@@ -99,8 +84,8 @@ const QUEUE_SIZE: usize = 256;
 static SCREEN_WIDTH: AtomicI32 = AtomicI32::new(800);
 static SCREEN_HEIGHT: AtomicI32 = AtomicI32::new(600);
 
-// Whether the mouse has a scroll wheel
-static HAS_WHEEL: AtomicU8 = AtomicU8::new(0);
+// Whether the mouse has a scroll wheel (set by ps2::init_ps2_controller)
+pub(crate) static HAS_WHEEL: AtomicU8 = AtomicU8::new(0);
 
 // Driver thread ID for waking
 pub static MOUSE_THREAD_ID: Once<ThreadId> = Once::new();
@@ -168,106 +153,15 @@ pub fn handle_interrupt() {
     }
 }
 
-unsafe fn enable_ps2_mouse() {
-    let mut command_port = Port::<u8>::new(CMD_PORT);
-    let mut data_port = Port::<u8>::new(DATA_PORT);
-
-    unsafe {
-        // 1. Enable auxiliary (mouse) port
-        wait_write();
-        command_port.write(CMD_ENABLE_AUX);
-
-        // 2. Enable interrupts for aux port
-        wait_write();
-        command_port.write(CMD_GET_CONFIG);
-        wait_read();
-        let mut config: u8 = data_port.read();
-        config |= 0x02; // Enable IRQ12 (aux port interrupt)
-        config &= !0x20; // Enable aux port clock
-
-        wait_write();
-        command_port.write(CMD_SET_CONFIG);
-        wait_write();
-        data_port.write(config);
-    }
-
-    // 3. Reset mouse to defaults
-    mouse_write(MOUSE_SET_DEFAULTS);
-    let _ = mouse_read_timeout(); // ACK
-
-    // 4. Try to enable scroll wheel (magic sequence)
-    // Set sample rate: 200, 100, 80 to enable wheel
-    for rate in [200u8, 100, 80] {
-        mouse_write(MOUSE_SET_SAMPLE_RATE);
-        let _ = mouse_read_timeout(); // ACK
-        mouse_write(rate);
-        let _ = mouse_read_timeout(); // ACK
-    }
-
-    // Check device ID (3 = wheel mouse, 4 = 5-button)
-    mouse_write(MOUSE_GET_DEVICE_ID);
-    let _ = mouse_read_timeout(); // ACK
-    if let Some(device_id) = mouse_read_timeout() {
-        let has_wheel = device_id >= 3;
-        HAS_WHEEL.store(has_wheel as u8, Ordering::Relaxed);
-        log!("Mouse device ID: {}, has wheel: {}", device_id, has_wheel);
-    }
-
-    // 5. Set sample rate to 100 for responsive input
-    mouse_write(MOUSE_SET_SAMPLE_RATE);
-    let _ = mouse_read_timeout();
-    mouse_write(100);
-    let _ = mouse_read_timeout();
-
-    // 6. Enable streaming mode
-    mouse_write(MOUSE_ENABLE_STREAMING);
-    let _ = mouse_read_timeout(); // ACK
-
-    log!("PS/2 mouse initialized");
-}
-
-fn wait_write() {
-    for _ in 0..10000 {
-        if unsafe { Port::<u8>::new(CMD_PORT).read() } & 0x02 == 0 {
-            return;
-        }
-        spin_loop();
-    }
-}
-
-fn wait_read() {
-    for _ in 0..10000 {
-        if unsafe { Port::<u8>::new(CMD_PORT).read() } & 0x01 != 0 {
-            return;
-        }
-        spin_loop();
-    }
-}
-
-fn mouse_write(byte: u8) {
-    wait_write();
-    unsafe { Port::new(CMD_PORT).write(CMD_WRITE_AUX) };
-    wait_write();
-    unsafe { Port::new(DATA_PORT).write(byte) };
-}
-
-fn mouse_read_timeout() -> Option<u8> {
-    for _ in 0..10000 {
-        if unsafe { Port::<u8>::new(CMD_PORT).read() } & 0x01 != 0 {
-            return Some(unsafe { Port::new(DATA_PORT).read() });
-        }
-        spin_loop();
-    }
-    None
-}
-
 /// Main driver thread
 pub extern "C" fn driver_main() -> ! {
-    log!("Initializing PS/2 mouse driver");
+    // PS/2 hardware init is done by ps2::init_ps2_controller() before
+    // this thread is spawned. We only set up the driver thread state here.
+    log!("Mouse driver thread started");
 
     let thread = sched().current_thread().unwrap();
     MOUSE_THREAD_ID.call_once(|| thread.id);
-    thread.set_priority(10); // High priority for input
+    thread.set_priority(10);
 
     // Get screen dimensions and center the mouse
     let info = DISPLAY.get().unwrap().lock().screen_info();
@@ -278,11 +172,6 @@ pub extern "C" fn driver_main() -> ! {
     MOUSE_POSITION
         .1
         .store(info.height as i32 / 2, Ordering::Relaxed);
-
-    // Initialize PS/2 mouse hardware
-    unsafe {
-        enable_ps2_mouse();
-    }
 
     // Register the device
     let device = Arc::new(MouseDevice);
