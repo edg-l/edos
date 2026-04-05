@@ -1,5 +1,7 @@
 //! Terminal widget for displaying text with cursor and scrolling support.
 
+use std::collections::VecDeque;
+
 use super::{char_width, draw_rect, draw_text, text_height, Rect, Widget, WidgetEvent, WidgetId};
 
 /// Default terminal colors
@@ -20,7 +22,7 @@ pub struct Terminal {
     height: u32,
 
     // Text buffer (rows x cols of characters)
-    buffer: Vec<Vec<char>>,
+    buffer: VecDeque<Vec<char>>,
     cols: usize,
     rows: usize,
 
@@ -32,7 +34,7 @@ pub struct Terminal {
 
     // Scroll position
     scroll_offset: usize,
-    history: Vec<Vec<char>>,
+    history: VecDeque<Vec<char>>,
     max_history: usize,
 
     // State
@@ -53,7 +55,7 @@ impl Terminal {
         let height = (rows as u32) * char_h;
 
         // Initialize buffer with empty rows
-        let buffer: Vec<Vec<char>> = (0..rows).map(|_| vec![' '; cols]).collect();
+        let buffer: VecDeque<Vec<char>> = (0..rows).map(|_| vec![' '; cols]).collect();
 
         Self {
             id,
@@ -69,7 +71,7 @@ impl Terminal {
             cursor_visible: true,
             cursor_blink_counter: 0,
             scroll_offset: 0,
-            history: Vec::new(),
+            history: VecDeque::new(),
             max_history: 1000,
             focused: false,
             bg_color: terminal_colors::BACKGROUND,
@@ -176,16 +178,15 @@ impl Terminal {
 
     /// Scroll the buffer up by one line.
     fn scroll_up(&mut self) {
-        if !self.buffer.is_empty() {
+        if let Some(line) = self.buffer.pop_front() {
             // Move top line to history
-            let line = self.buffer.remove(0);
             if self.history.len() >= self.max_history {
-                self.history.remove(0);
+                self.history.pop_front();
             }
-            self.history.push(line);
+            self.history.push_back(line);
 
             // Add new empty line at bottom
-            self.buffer.push(vec![' '; self.cols]);
+            self.buffer.push_back(vec![' '; self.cols]);
         }
     }
 

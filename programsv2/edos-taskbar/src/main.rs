@@ -75,16 +75,6 @@ fn main() {
 
     // Main loop
     loop {
-        // Poll window events for the taskbar
-        if let Ok(count) = window.poll_events(&mut events) {
-            for event in &events[..count] {
-                if let Some(WindowEventType::CloseRequested) = event.event_type() {
-                    println!("[Taskbar] Close requested, exiting.");
-                    return;
-                }
-            }
-        }
-
         // Get current window list
         let window_count = match window_list(&mut entries) {
             Ok(count) => count.min(MAX_WINDOWS),

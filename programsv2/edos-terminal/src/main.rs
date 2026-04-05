@@ -116,16 +116,7 @@ fn main() {
         let input_chars = terminal.take_input();
         if !input_chars.is_empty() {
             if let Some(ref child) = child {
-                // Echo input locally so user can see what they're typing
-                for ch in &input_chars {
-                    // Convert CR to LF for proper line advance on Enter
-                    if *ch == '\r' {
-                        terminal.write_char('\n');
-                    } else {
-                        terminal.write_char(*ch);
-                    }
-                }
-                // Send input to shell
+                // Send input to shell; the shell/PTY handles echo.
                 let input_str: String = input_chars.iter().collect();
                 child.write_str(&input_str);
             } else {

@@ -1,6 +1,6 @@
 use core::time::Duration;
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::vec::Vec;
 
 use crate::{
     drivers::ahci::{
@@ -10,7 +10,7 @@ use crate::{
     thread::scheduler::sched,
 };
 
-pub(super) fn send_request(request: AhciRequest, timeout: Duration) -> AhciResponse {
+pub(super) fn send_request(request: AhciRequest, _timeout: Duration) -> AhciResponse {
     let requests = {
         loop {
             if let Some(req) = AHCI_REQUESTS.get() {

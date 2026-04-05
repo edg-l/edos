@@ -1,17 +1,11 @@
-#![expect(unused)]
+#![allow(dead_code)]
 
 use core::{ptr, time::Duration};
 
-use alloc::{
-    boxed::Box,
-    collections::btree_map::BTreeMap,
-    format,
-    sync::Arc,
-    vec::{self, Vec},
-};
+use alloc::{collections::btree_map::BTreeMap, format, sync::Arc, vec::Vec};
 use spin::{Mutex, Once};
 use thiserror::Error;
-use x86_64::instructions::{hlt, interrupts::without_interrupts};
+use x86_64::instructions::hlt;
 
 use crate::{
     drivers::{
@@ -25,9 +19,9 @@ use crate::{
             structures::{PciAddress, PciDevice},
         },
     },
-    log, println,
+    log,
     thread::{
-        mailbox::{Mailbox, Request},
+        mailbox::Mailbox,
         runqueue::IO_PRIORITY,
         scheduler::{WakePriority, sched},
         thread::ThreadId,
@@ -133,7 +127,7 @@ type PortMailbox = Mailbox<Command, AhciResponse>;
 pub extern "C" fn ahci_driver_main() -> ! {
     let thread = sched().current_thread().unwrap();
     thread.set_priority(IO_PRIORITY);
-    let tid = thread.id;
+    let _tid = thread.id;
 
     let requests = AHCI_REQUESTS.call_once(Mailbox::new);
 
@@ -275,7 +269,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
             }
             AhciRequest::GetDevicePort(worker_tid) => {
                 let mut found = false;
-                let info = port_map.get(&worker_tid);
+                let _info = port_map.get(&worker_tid);
 
                 if let Some(info) = port_map.get(&worker_tid) {
                     let device = &detected_devices[*info as usize];

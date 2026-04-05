@@ -1,4 +1,4 @@
-#![expect(unused)]
+#![allow(dead_code)]
 
 use alloc::{
     format,
@@ -7,7 +7,7 @@ use alloc::{
 };
 use bytemuck::{Pod, Zeroable};
 
-use crate::{drivers::ahci::DeviceType, log, println, thread::scheduler::sched};
+use crate::log;
 
 // Compile-time structure size assertions
 const _: () = {

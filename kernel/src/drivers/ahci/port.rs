@@ -1,5 +1,5 @@
 use core::{
-    ptr::{self, null_mut},
+    ptr::{self},
     time::Duration,
 };
 
@@ -18,9 +18,9 @@ use crate::{
                 PORT_CMD_ST, PORT_IS_TFES, PrdtEntry, ScsiInquiry, ScsiRead10, ScsiReadCapacity10,
             },
         },
-        dma::{DmaAllocator, DmaRegion, dma},
+        dma::{DmaRegion, dma},
     },
-    log, println,
+    log,
     thread::scheduler::sched,
 };
 

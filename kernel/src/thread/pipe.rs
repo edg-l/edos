@@ -49,31 +49,34 @@ impl Pipe {
         }
     }
 
-    pub fn close_writer(&mut self) {
+    pub fn close_writer(&mut self) -> PipeNotifications {
         self.writers = self.writers.saturating_sub(1);
         if self.writers == 0 {
             self.closed = true;
         }
-        self.notify_pollers();
+        self.notify_pollers()
     }
 
-    pub fn close_reader(&mut self) {
+    pub fn close_reader(&mut self) -> PipeNotifications {
         self.readers = self.readers.saturating_sub(1);
-        self.notify_pollers();
+        self.notify_pollers()
     }
 
-    pub fn write(&mut self, data: &[u8]) -> usize {
+    pub fn write(&mut self, data: &[u8]) -> (usize, PipeNotifications) {
         self.buffer.extend_from_slice(data);
         let written = data.len();
-        self.notify_pollers();
-        written
+        (written, self.notify_pollers())
     }
 
     /// Write directly from user space into pipe buffer.
     /// Returns bytes written, or None on fault.
-    pub fn write_from_user(&mut self, user_ptr: *const u8, len: usize) -> Option<usize> {
+    pub fn write_from_user(
+        &mut self,
+        user_ptr: *const u8,
+        len: usize,
+    ) -> (Option<usize>, PipeNotifications) {
         if len == 0 {
-            return Some(0);
+            return (Some(0), PipeNotifications::EMPTY);
         }
 
         // Reserve space in buffer
@@ -84,45 +87,47 @@ impl Pipe {
         if !unsafe { try_copy_from_user(self.buffer[start..].as_mut_ptr(), user_ptr, len) } {
             // Rollback on fault
             self.buffer.truncate(start);
-            return None;
+            return (None, PipeNotifications::EMPTY);
         }
 
-        self.notify_pollers();
-        Some(len)
+        (Some(len), self.notify_pollers())
     }
 
-    pub fn read(&mut self, count: usize) -> Vec<u8> {
+    pub fn read(&mut self, count: usize) -> (Vec<u8>, PipeNotifications) {
         let available = count.min(self.buffer.len());
         let mut out = self.buffer[..available].to_vec();
         self.buffer.drain(..available);
-        self.notify_pollers();
+        let notif = self.notify_pollers();
         if available == 0 {
             out.clear();
         }
-        out
+        (out, notif)
     }
 
     /// Read directly from pipe buffer to user space.
     /// Returns bytes read, or None on fault.
-    pub fn read_to_user(&mut self, user_ptr: *mut u8, count: usize) -> Option<usize> {
+    pub fn read_to_user(
+        &mut self,
+        user_ptr: *mut u8,
+        count: usize,
+    ) -> (Option<usize>, PipeNotifications) {
         if count == 0 {
-            return Some(0);
+            return (Some(0), PipeNotifications::EMPTY);
         }
 
         let available = count.min(self.buffer.len());
         if available == 0 {
-            return Some(0);
+            return (Some(0), PipeNotifications::EMPTY);
         }
 
         // Copy directly from pipe buffer to user space
         if !unsafe { try_copy_to_user(user_ptr, self.buffer.as_ptr(), available) } {
-            return None;
+            return (None, PipeNotifications::EMPTY);
         }
 
         // Remove copied bytes from buffer
         self.buffer.drain(..available);
-        self.notify_pollers();
-        Some(available)
+        (Some(available), self.notify_pollers())
     }
 
     fn poll_state(&self) -> PollState {
@@ -158,13 +163,38 @@ impl Pipe {
         self.pollers.retain(|(stored, _)| *stored != key);
     }
 
-    fn notify_pollers(&mut self) {
+    /// Snapshot poller entries + state. Callers must pass the result to
+    /// `Pipe::flush_notifications` AFTER dropping the pipe lock to avoid
+    /// holding BlockingMutex while wake_thread spins (priority inversion).
+    fn notify_pollers(&mut self) -> PipeNotifications {
         if self.pollers.is_empty() {
-            return;
+            return PipeNotifications::EMPTY;
         }
         let state = self.poll_state();
+        let mut entries: heapless::Vec<Arc<PollEntry>, 8> = heapless::Vec::new();
         for (_, entry) in self.pollers.iter() {
-            entry.update(state);
+            let _ = entries.push(entry.clone());
+        }
+        PipeNotifications { entries, state }
+    }
+}
+
+/// Deferred poll notifications to be flushed after releasing the pipe lock.
+pub struct PipeNotifications {
+    entries: heapless::Vec<Arc<PollEntry>, 8>,
+    state: PollState,
+}
+
+impl PipeNotifications {
+    const EMPTY: Self = Self {
+        entries: heapless::Vec::new(),
+        state: PollState::none(),
+    };
+
+    /// Send notifications. Call this after dropping the pipe lock.
+    pub fn flush(self) {
+        for entry in &self.entries {
+            entry.update(self.state);
         }
     }
 }

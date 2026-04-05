@@ -127,9 +127,13 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             }
         },
         Some(FileDescriptor::Pipe(pipe)) => {
-            // Direct copy from user to pipe
-            let mut pipe = pipe.lock();
-            match pipe.write_from_user(buffer_ptr, count) {
+            // Direct copy from user to pipe, flush notifications after dropping lock.
+            let (result, notif) = {
+                let mut pipe = pipe.lock();
+                pipe.write_from_user(buffer_ptr, count)
+            };
+            notif.flush();
+            match result {
                 Some(n) => n as u64,
                 None => {
                     info.lock().errno = Errno::EFAULT;
@@ -188,8 +192,11 @@ pub fn sys_close(fd: u64) -> i32 {
     let result = info.lock().fd_table.lock().close_fd(fd);
     match result {
         Some(FileDescriptor::Pipe(pipe)) => {
-            let mut guard = pipe.lock();
-            guard.close_reader();
+            let notif = {
+                let mut guard = pipe.lock();
+                guard.close_reader()
+            };
+            notif.flush();
             0
         }
         Some(_) => 0,
@@ -244,9 +251,13 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             }
         },
         Some(FileDescriptor::Pipe(pipe)) => {
-            // Direct copy from pipe to user space
-            let mut pipe = pipe.lock();
-            match pipe.read_to_user(buffer_ptr, count) {
+            // Direct copy from pipe to user space, flush notifications after dropping lock.
+            let (result, notif) = {
+                let mut pipe = pipe.lock();
+                pipe.read_to_user(buffer_ptr, count)
+            };
+            notif.flush();
+            match result {
                 Some(n) => n as i64,
                 None => {
                     info.lock().errno = Errno::EFAULT;
