@@ -70,6 +70,12 @@ run-gdb-4: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).i
 run-gdb-kvm: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
 	$(call run_qemu_uefi,iso,4,-no-shutdown -accel kvm -s -S)
 
+.PHONY: run-trace
+run-trace: programs programsv2 limine/limine ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
+	$(MAKE) -C kernel CARGO_FLAGS="--features trace"
+	$(MAKE) $(IMAGE_NAME).iso
+	$(call run_qemu_uefi,iso,4,-accel kvm -m 2G)
+
 .PHONY: run-kvm
 run-emu: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
 	$(call run_qemu_uefi,iso,4,-accel tcg)

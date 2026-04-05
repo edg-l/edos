@@ -31,7 +31,7 @@ endif
 # Default target.
 .PHONY: all
 all:
-	RUSTFLAGS="-C relocation-model=static" cargo build --target $(RUST_TARGET) --profile $(RUST_PROFILE)
+	RUSTFLAGS="-C relocation-model=static" cargo build --target $(RUST_TARGET) --profile $(RUST_PROFILE) $(CARGO_FLAGS)
 	cp target/$(RUST_TARGET)/$(RUST_PROFILE_SUBDIR)/edos-kernel kernel
 
 

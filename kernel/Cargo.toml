@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = []
 test = []
+trace = []
 
 [dependencies]
 limine = "0.5"

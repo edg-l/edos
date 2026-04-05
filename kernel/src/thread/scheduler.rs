@@ -15,6 +15,7 @@ use x86_64::{
     registers::{control::Cr3, model_specific::FsBase},
 };
 
+use crate::trace_event;
 use crate::{
     apic::{get_lapic, set_apic_timer, set_apic_timer_and_enable},
     boot::boot_info,
@@ -121,6 +122,10 @@ impl Scheduler {
             let mut rq = sc.rq.lock();
             rq.enqueue(thread.clone(), thread.priority(), priority.is_boosted());
             sc.has_work.store(true, Ordering::Release);
+            trace_event!(Enqueue {
+                cpu: sc.cpu,
+                tid: thread.id.0
+            });
             drop(rq);
             sc.mark_running_thread_need_resched();
         })
@@ -436,6 +441,16 @@ impl Scheduler {
             let fs_base = FsBase::read();
             current.tls_base.store(fs_base.as_u64(), Ordering::Release);
             current.context_saved.store(true, Ordering::Release);
+            trace_event!(Save {
+                cpu: self.cpu,
+                tid: current.id.0,
+                rip: unsafe {
+                    (*context)
+                        .interrupt_stack_frame
+                        .instruction_pointer
+                        .as_u64()
+                },
+            });
         }
     }
 
@@ -454,6 +469,21 @@ impl Scheduler {
 
         // Set as current. Update cpu FIRST so the old CPU's
         // save_current_thread sees the migration and bails out.
+        #[cfg(feature = "trace")]
+        {
+            let old_tid = self.current.load(Ordering::Relaxed);
+            trace_event!(Switch {
+                cpu: self.cpu,
+                from_tid: old_tid,
+                to_tid: next.id.0,
+                to_rip: next
+                    .ctx
+                    .lock()
+                    .interrupt_stack_frame
+                    .instruction_pointer
+                    .as_u64(),
+            });
+        }
         self.current.store(next.id.0, Ordering::Release);
         unsafe { get_percpu_data().set_current_thread(Some(next.clone())) };
         next.cpu.store(self.cpu, Ordering::Release);
@@ -620,6 +650,10 @@ impl Scheduler {
                 // This happens when a thread is enqueued (e.g. yield,
                 // park abort) before context_switch saves its registers.
                 if !thread.context_saved.load(Ordering::Acquire) {
+                    trace_event!(StealSkip {
+                        cpu: self.cpu,
+                        tid: thread.id.0
+                    });
                     let prio = thread.priority();
                     rq.enqueue(thread, prio, false);
                     continue;
@@ -669,6 +703,11 @@ impl Scheduler {
 
         // Adjust thread_count now that the steal is committed.
         let victim_cpu = thread.cpu.load(Ordering::Acquire);
+        trace_event!(Steal {
+            thief_cpu: self.cpu,
+            victim_cpu: victim_cpu,
+            tid: thread.id.0,
+        });
         sched_for_cpu(victim_cpu)
             .thread_count
             .fetch_sub(1, Ordering::Relaxed);

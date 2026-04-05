@@ -364,6 +364,9 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     println!("KERNEL PANIC:");
     println!("{info:#?}");
 
+    #[cfg(feature = "trace")]
+    crate::util::trace::dump_all_cpus();
+
     // Walk the frame pointer chain to print a backtrace.
     // With force-frame-pointers = true, RBP forms a linked list:
     //   [RBP] -> saved_rbp | [RBP+8] -> return_address
