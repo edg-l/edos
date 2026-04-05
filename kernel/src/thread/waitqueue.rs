@@ -66,15 +66,21 @@ impl WaitQueue {
     /// Wake all threads
     #[expect(unused)]
     pub fn wake_all(&self) -> usize {
-        without_interrupts(|| {
+        // Drain into stack buffer under lock, then wake outside to avoid
+        // holding the lock while wake_thread_slow spins.
+        let tids: heapless::Vec<ThreadId, WAITQUEUE_CAP> = without_interrupts(|| {
             let mut q = self.inner.lock();
-            let mut n = 0;
+            let mut v = heapless::Vec::new();
             while let Some(tid) = q.pop_front() {
-                sched().wake_thread(tid, WakePriority::Normal);
-                n += 1;
+                let _ = v.push(tid);
             }
-            n
-        })
+            v
+        });
+        let n = tids.len();
+        for tid in tids {
+            sched().wake_thread(tid, WakePriority::Normal);
+        }
+        n
     }
 
     /// Check whether the queue currently has any waiters.
@@ -98,6 +104,8 @@ impl WaitQueue {
 
         // Enqueue and check readiness inside without_interrupts to close the
         // lost-wakeup window: heapless::Deque does not allocate, so this is safe.
+        // Park/sleep must happen OUTSIDE without_interrupts since context switching
+        // requires interrupts to be re-enabled.
         interrupts::without_interrupts(|| {
             {
                 let mut q = self.inner.lock();
@@ -111,13 +119,16 @@ impl WaitQueue {
                 return;
             }
 
-            let chosen = match timeout {
+            action = Some(match timeout {
                 Some(dt) => SleepAction::Sleep(dt),
                 None => SleepAction::Park,
-            };
+            });
+        });
 
-            action = Some(chosen);
-
+        // Perform the actual park/sleep with interrupts enabled.
+        // thread_park_while sets Parked before checking the closure, so a waker
+        // that fires after IRQs re-enable but before park will still succeed.
+        if let Some(chosen) = action {
             match chosen {
                 SleepAction::Park => {
                     sched().thread_park_while(|| !ready());
@@ -126,7 +137,7 @@ impl WaitQueue {
                     sched().thread_sleep(dt);
                 }
             }
-        });
+        }
 
         // Always remove our tid from the wait queue after waking,
         // regardless of how we were woken (park, sleep, or timeout).

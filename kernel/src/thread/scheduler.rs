@@ -927,10 +927,10 @@ impl Scheduler {
     }
 
     pub fn current_thread_info(&self) -> Arc<IrqSpinlock<UserThreadInfo>> {
+        let tid = self.current_thread_id().unwrap();
         THREADS
-            .get_info(self.current_thread_id().unwrap())
-            .clone()
-            .unwrap()
+            .get_info(tid)
+            .unwrap_or_else(|| panic!("current_thread_info: no UserThreadInfo for tid {}", tid.0))
     }
 }
 
