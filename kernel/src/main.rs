@@ -370,7 +370,7 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     // Walk the frame pointer chain to print a backtrace.
     // With force-frame-pointers = true, RBP forms a linked list:
     //   [RBP] -> saved_rbp | [RBP+8] -> return_address
-    const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+    const KERNEL_BASE: u64 = 0xFFFF_8000_0000_0000;
     const MAX_FRAMES: usize = 32;
 
     let mut rbp: u64;
