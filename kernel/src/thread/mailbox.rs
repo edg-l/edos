@@ -67,6 +67,15 @@ impl<T, R> Mailbox<T, R> {
         }
     }
 
+    /// Create a mailbox with pre-allocated queue capacity to avoid
+    /// heap allocation under the queue lock during `send()`.
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            queue: BlockingMutex::new(VecDeque::with_capacity(cap)),
+            not_empty: WaitQueue::new(),
+        }
+    }
+
     pub fn send(&self, payload: T) -> Response<R> {
         let inner = Arc::new(ResponseInner {
             ready: AtomicBool::new(false),
@@ -91,9 +100,14 @@ impl<T, R> Mailbox<T, R> {
 
     pub fn recv(&self) -> Request<T, R> {
         loop {
-            if let Some(req) = self.queue.lock().pop_front() {
-                return req;
+            {
+                let mut q = self.queue.lock();
+                if let Some(req) = q.pop_front() {
+                    return req;
+                }
             }
+            // Park until a sender wakes us. The closure re-checks under lock
+            // to avoid lost wakeups.
             let _ = self.not_empty.wait_until(|| !self.queue.lock().is_empty());
         }
     }

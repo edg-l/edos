@@ -1,5 +1,3 @@
-use core::time::Duration;
-
 use alloc::vec::Vec;
 
 use crate::{
@@ -10,7 +8,7 @@ use crate::{
     thread::scheduler::sched,
 };
 
-pub(super) fn send_request(request: AhciRequest, _timeout: Duration) -> AhciResponse {
+pub(super) fn send_request(request: AhciRequest) -> AhciResponse {
     let requests = {
         loop {
             if let Some(req) = AHCI_REQUESTS.get() {
@@ -25,9 +23,7 @@ pub(super) fn send_request(request: AhciRequest, _timeout: Duration) -> AhciResp
 }
 
 pub fn list_devices() -> Vec<DetectedDevice> {
-    let AhciResponse::Devices(devices) =
-        send_request(AhciRequest::ListDevices, Duration::from_secs(1))
-    else {
+    let AhciResponse::Devices(devices) = send_request(AhciRequest::ListDevices) else {
         unreachable!()
     };
     devices
@@ -55,10 +51,7 @@ pub fn read_sectors(
         buffer,
     };
 
-    let response = send_request(
-        AhciRequest::DeviceRequest { device_id, command },
-        Duration::from_secs(10),
-    );
+    let response = send_request(AhciRequest::DeviceRequest { device_id, command });
 
     match response {
         AhciResponse::ReadResult { data } => data,
@@ -81,10 +74,7 @@ pub fn write_sectors(
 ) -> Result<Vec<u8>, AhciError> {
     let command = Command::Write { lba, data, sectors };
 
-    let response = send_request(
-        AhciRequest::DeviceRequest { device_id, command },
-        Duration::from_secs(10),
-    );
+    let response = send_request(AhciRequest::DeviceRequest { device_id, command });
 
     match response {
         AhciResponse::WriteResult { data } => data,
@@ -99,10 +89,7 @@ pub fn write_sectors(
 pub fn flush_cache(device_id: u64) -> Result<(), AhciError> {
     let command = Command::Flush;
 
-    let response = send_request(
-        AhciRequest::DeviceRequest { device_id, command },
-        Duration::from_secs(5),
-    );
+    let response = send_request(AhciRequest::DeviceRequest { device_id, command });
 
     match response {
         AhciResponse::Result(result) => result,
@@ -120,10 +107,7 @@ pub fn flush_cache(device_id: u64) -> Result<(), AhciError> {
 pub fn identify_device(device_id: u64) -> Result<DeviceIdentifyInfo, AhciError> {
     let command = Command::Identify;
 
-    let response = send_request(
-        AhciRequest::DeviceRequest { device_id, command },
-        Duration::from_secs(5),
-    );
+    let response = send_request(AhciRequest::DeviceRequest { device_id, command });
 
     match response {
         AhciResponse::IdentifyResult { info } => info,

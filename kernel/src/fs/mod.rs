@@ -592,7 +592,7 @@ pub extern "C" fn fs_main_thread() -> ! {
     let devices = list_devices();
     log!("Listed devices");
 
-    let requests = FS_REQUESTS.call_once(|| Arc::new(Mailbox::new()));
+    let requests = FS_REQUESTS.call_once(|| Arc::new(Mailbox::with_capacity(16)));
 
     let mut partitions: Vec<Partition> = Vec::new();
 
@@ -922,12 +922,10 @@ extern "C" fn start_partition_fs_thread(partition: *mut Partition) -> ! {
     // Get our mailbox from the FS main
     let mailbox = {
         use crate::fs::api::send_request as send;
-        use core::time::Duration;
         loop {
-            let resp = send(
-                FsRequest::GetPartitionMailbox(sched().current_thread_id().unwrap()),
-                Duration::from_secs(5),
-            );
+            let resp = send(FsRequest::GetPartitionMailbox(
+                sched().current_thread_id().unwrap(),
+            ));
             if let FsResponse::PartitionMailbox(Some(mb)) = resp {
                 break mb;
             }
@@ -1003,12 +1001,10 @@ fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
     // Get our mailbox from the FS main
     let mailbox = {
         use crate::fs::api::send_request as send;
-        use core::time::Duration;
         loop {
-            let resp = send(
-                FsRequest::GetPartitionMailbox(sched().current_thread_id().unwrap()),
-                Duration::from_secs(5),
-            );
+            let resp = send(FsRequest::GetPartitionMailbox(
+                sched().current_thread_id().unwrap(),
+            ));
             if let FsResponse::PartitionMailbox(Some(mb)) = resp {
                 break mb;
             }

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use core::{ptr, time::Duration};
+use core::ptr;
 
 use alloc::{collections::btree_map::BTreeMap, format, sync::Arc, vec::Vec};
 use spin::{Mutex, Once};
@@ -129,7 +129,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
     thread.set_priority(IO_PRIORITY);
     let _tid = thread.id;
 
-    let requests = AHCI_REQUESTS.call_once(Mailbox::new);
+    let requests = AHCI_REQUESTS.call_once(|| Mailbox::with_capacity(8));
 
     let devices: Vec<PciDevice> = pci_manager().read().get_devices().to_vec();
 
@@ -254,6 +254,8 @@ pub extern "C" fn ahci_driver_main() -> ! {
                 if let Some(mb) = device_mailboxes.get((device_id) as usize) {
                     mb.forward(req, command);
                     continue;
+                } else {
+                    req.reply(AhciResponse::Result(Err(AhciError::InvalidDevice)));
                 }
             }
             AhciRequest::GetDeviceMailbox(thread_id) => {
@@ -299,7 +301,7 @@ extern "C" fn port_worker_thread() -> ! {
 
     let mailbox = {
         loop {
-            let mailbox = send_request(AhciRequest::GetDeviceMailbox(tid), Duration::from_secs(10));
+            let mailbox = send_request(AhciRequest::GetDeviceMailbox(tid));
 
             if let AhciResponse::DeviceMailbox(Some(mailbox)) = mailbox {
                 break mailbox;
@@ -309,7 +311,7 @@ extern "C" fn port_worker_thread() -> ! {
 
     let port = {
         loop {
-            let port = send_request(AhciRequest::GetDevicePort(tid), Duration::from_secs(10));
+            let port = send_request(AhciRequest::GetDevicePort(tid));
 
             if let AhciResponse::DevicePort(Some(port)) = port {
                 break port;
