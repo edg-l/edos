@@ -56,6 +56,11 @@ mod inner {
             cpu: u32,
             tid: u64,
         },
+        Rebalance {
+            thief_cpu: u32,
+            victim_cpu: u32,
+            tid: u64,
+        },
         Enqueue {
             cpu: u32,
             tid: u64,
@@ -87,6 +92,11 @@ mod inner {
                 TraceEvent::StealSkip { cpu, tid } => {
                     write!(f, "StealSkip cpu={cpu} tid={tid}")
                 }
+                TraceEvent::Rebalance {
+                    thief_cpu,
+                    victim_cpu,
+                    tid,
+                } => write!(f, "Rebalance {victim_cpu}->{thief_cpu} tid={tid}"),
                 TraceEvent::Enqueue { cpu, tid } => write!(f, "Enqueue cpu={cpu} tid={tid}"),
                 TraceEvent::StateChange { tid, old, new } => {
                     write!(f, "State tid={tid} {old}->{new}")

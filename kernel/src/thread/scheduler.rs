@@ -39,6 +39,11 @@ use crate::{
     util::per_cpu::get_percpu_data,
 };
 
+/// Rebalance every N timer ticks (~50ms at 5ms timeslice).
+const REBALANCE_INTERVAL: u32 = 10;
+/// Only steal if the busiest CPU has this many more threads than us.
+const REBALANCE_THRESHOLD: u64 = 2;
+
 pub fn init() {
     println!("Initializing scheduler");
     // TODO: refactor queue, so it isnt limited to 65k? maybe iterate on the storage threads
@@ -124,6 +129,7 @@ pub struct Scheduler {
     has_work: AtomicBool,
     steal_count: AtomicU64,
     steal_scan_start: AtomicU32,
+    rebalance_tick: AtomicU32,
 }
 
 impl Scheduler {
@@ -179,6 +185,7 @@ impl Scheduler {
             has_work: AtomicBool::new(false),
             steal_count: AtomicU64::new(0),
             steal_scan_start: AtomicU32::new(0),
+            rebalance_tick: AtomicU32::new(0),
         }
     }
 
@@ -197,6 +204,7 @@ impl Scheduler {
     pub fn on_tick(&self, context: *mut CpuContext) {
         without_interrupts(|| {
             self.wake_sleepers();
+            self.try_rebalance();
             // When idle (current==0) and no work queued, skip maybe_preempt
             // to prevent recursive run_idle (on_tick -> pick_and_run -> run_idle
             // -> enable IRQs -> on_tick -> pick_and_run -> run_idle -> ...).
@@ -777,6 +785,66 @@ impl Scheduler {
         }
 
         None
+    }
+
+    /// Periodic rebalancing: if another CPU has significantly more threads
+    /// than us, steal one and enqueue it locally. Called from on_tick.
+    fn try_rebalance(&self) {
+        let tick = self.rebalance_tick.fetch_add(1, Ordering::Relaxed);
+        if tick % REBALANCE_INTERVAL != 0 {
+            return;
+        }
+
+        // Snapshot thread counts from all CPUs in one short locked pass.
+        let mut counts: heapless::Vec<(u32, u64), 128> = heapless::Vec::new();
+        {
+            let schedulers = SCHEDULERS.read();
+            for (&cpu_id, &sched) in schedulers.iter() {
+                let _ = counts.push((cpu_id, sched.thread_count.load(Ordering::Relaxed)));
+            }
+        }
+        // Lock dropped.
+
+        let self_count = counts
+            .iter()
+            .find(|(c, _)| *c == self.cpu)
+            .map(|(_, n)| *n)
+            .unwrap_or(0);
+        let max_count = counts.iter().map(|(_, n)| *n).max().unwrap_or(0);
+
+        if max_count.saturating_sub(self_count) < REBALANCE_THRESHOLD {
+            return;
+        }
+
+        let Some(thread) = self.try_steal() else {
+            return;
+        };
+
+        // Thread is in Ready state on the victim's runqueue.
+        // Migrate it to our runqueue without changing state.
+        let victim_cpu = thread.cpu.load(Ordering::Acquire);
+        thread.cpu.store(self.cpu, Ordering::Release);
+
+        let prio = thread.priority();
+        {
+            let mut rq = self.rq.lock();
+            rq.enqueue(thread.clone(), prio, false);
+        }
+        self.has_work.store(true, Ordering::Release);
+
+        sched_for_cpu(victim_cpu)
+            .thread_count
+            .fetch_sub(1, Ordering::Relaxed);
+        self.thread_count.fetch_add(1, Ordering::Relaxed);
+        self.steal_count.fetch_add(1, Ordering::Relaxed);
+
+        trace_event!(Rebalance {
+            thief_cpu: self.cpu,
+            victim_cpu: victim_cpu,
+            tid: thread.id.0,
+        });
+
+        self.mark_running_thread_need_resched();
     }
 
     /// Attempt to steal a thread from another CPU and switch to it.
