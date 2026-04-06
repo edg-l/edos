@@ -38,7 +38,10 @@ pub struct Alignment {
 impl Alignment {
     /// Create a new alignment with specified horizontal and vertical values.
     pub fn new(horizontal: HAlign, vertical: VAlign) -> Self {
-        Self { horizontal, vertical }
+        Self {
+            horizontal,
+            vertical,
+        }
     }
 
     /// Top-left alignment.

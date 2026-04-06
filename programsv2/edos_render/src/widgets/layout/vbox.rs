@@ -1,6 +1,6 @@
 //! Vertical box layout - stacks widgets vertically.
 
-use super::{HAlign, Insets, LayoutItem, SizePolicy, Sizable, VAlign};
+use super::{HAlign, Insets, LayoutItem, Sizable, SizePolicy, VAlign};
 use crate::widgets::{Rect, WidgetContainer, WidgetId};
 
 /// A layout that stacks widgets vertically from top to bottom.
@@ -184,7 +184,8 @@ impl VBoxLayout {
                                 + (available_width.saturating_sub(widget_width) / 2) as i32
                         }
                         HAlign::End => {
-                            content_x + item.margin.left as i32
+                            content_x
+                                + item.margin.left as i32
                                 + available_width.saturating_sub(widget_width) as i32
                         }
                         HAlign::Stretch => content_x + item.margin.left as i32,

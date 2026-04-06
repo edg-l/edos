@@ -74,7 +74,12 @@ impl Insets {
 
     /// Create insets with individual values for each side.
     pub fn new(top: u32, right: u32, bottom: u32, left: u32) -> Self {
-        Self { top, right, bottom, left }
+        Self {
+            top,
+            right,
+            bottom,
+            left,
+        }
     }
 
     /// Total horizontal insets (left + right).

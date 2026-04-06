@@ -1,8 +1,8 @@
 //! Single-line text input widget.
 
 use super::{
-    char_width, colors, draw_rect, draw_rect_outline, draw_text, text_height, Rect, Widget,
-    WidgetEvent, WidgetId,
+    Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_rect, draw_rect_outline,
+    draw_text, text_height,
 };
 
 /// A single-line text input field.

@@ -52,7 +52,12 @@ pub struct SizeHint {
 
 impl SizeHint {
     /// Create a new size hint with all values set.
-    pub fn new(min_width: u32, preferred_width: u32, min_height: u32, preferred_height: u32) -> Self {
+    pub fn new(
+        min_width: u32,
+        preferred_width: u32,
+        min_height: u32,
+        preferred_height: u32,
+    ) -> Self {
         Self {
             min_width,
             preferred_width,
@@ -96,7 +101,11 @@ pub struct Sizing {
 impl Sizing {
     /// Create a new sizing with all values set.
     pub fn new(policy: SizePolicy, min: u32, preferred: u32) -> Self {
-        Self { policy, min, preferred }
+        Self {
+            policy,
+            min,
+            preferred,
+        }
     }
 
     /// Create a fixed sizing.

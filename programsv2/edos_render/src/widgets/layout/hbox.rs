@@ -1,6 +1,6 @@
 //! Horizontal box layout - arranges widgets horizontally.
 
-use super::{HAlign, Insets, LayoutItem, SizePolicy, Sizable, VAlign};
+use super::{HAlign, Insets, LayoutItem, Sizable, SizePolicy, VAlign};
 use crate::widgets::{Rect, WidgetContainer, WidgetId};
 
 /// A layout that arranges widgets horizontally from left to right.
@@ -184,7 +184,8 @@ impl HBoxLayout {
                                 + (available_height.saturating_sub(widget_height) / 2) as i32
                         }
                         VAlign::End => {
-                            content_y + item.margin.top as i32
+                            content_y
+                                + item.margin.top as i32
                                 + available_height.saturating_sub(widget_height) as i32
                         }
                         VAlign::Stretch => content_y + item.margin.top as i32,

@@ -1,6 +1,6 @@
 //! Horizontal slider widget.
 
-use super::{colors, draw_rect, draw_rect_outline, Rect, Widget, WidgetEvent, WidgetId};
+use super::{Rect, Widget, WidgetEvent, WidgetId, colors, draw_rect, draw_rect_outline};
 
 /// A horizontal value slider.
 pub struct Slider {
@@ -39,7 +39,15 @@ impl Slider {
     }
 
     /// Create a slider with an initial value.
-    pub fn with_value(id: WidgetId, x: i32, y: i32, width: u32, min: i32, max: i32, value: i32) -> Self {
+    pub fn with_value(
+        id: WidgetId,
+        x: i32,
+        y: i32,
+        width: u32,
+        min: i32,
+        max: i32,
+        value: i32,
+    ) -> Self {
         let clamped = value.clamp(min, max);
         Self {
             id,

@@ -1,6 +1,6 @@
 //! Simple text label widget.
 
-use super::{colors, draw_text, Rect, Widget, WidgetEvent, WidgetId};
+use super::{Rect, Widget, WidgetEvent, WidgetId, colors, draw_text};
 
 /// A simple text display widget.
 pub struct Label {
@@ -66,7 +66,15 @@ impl Widget for Label {
     }
 
     fn draw(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
-        draw_text(buffer, buffer_width, buffer_height, self.x, self.y, &self.text, self.color);
+        draw_text(
+            buffer,
+            buffer_width,
+            buffer_height,
+            self.x,
+            self.y,
+            &self.text,
+            self.color,
+        );
     }
 
     fn on_mouse_move(&mut self, _x: i32, _y: i32) {

@@ -1,6 +1,6 @@
 //! Grid layout - arranges widgets in rows and columns.
 
-use super::{Alignment, HAlign, Insets, SizePolicy, Sizable, VAlign};
+use super::{Alignment, HAlign, Insets, Sizable, SizePolicy, VAlign};
 use crate::widgets::{Rect, WidgetContainer, WidgetId};
 
 /// Configuration for a grid column.

@@ -1,8 +1,8 @@
 //! Checkbox widget with label.
 
 use super::{
-    char_width, colors, draw_rect, draw_rect_outline, draw_text, text_height, Rect, Widget,
-    WidgetEvent, WidgetId,
+    Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_rect, draw_rect_outline,
+    draw_text, text_height,
 };
 
 /// A toggleable checkbox with a label.
@@ -70,7 +70,6 @@ impl Checkbox {
     pub fn set_label(&mut self, label: &str) {
         self.label = label.to_string();
     }
-
 }
 
 impl Widget for Checkbox {

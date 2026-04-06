@@ -316,7 +316,10 @@ fn format_bytes(bytes: u64, human: bool) -> String {
 
 /// Show process list from /proc/processes.
 pub fn cmd_ps(args: &[String]) {
-    let path = args.first().map(String::as_str).unwrap_or("/proc/processes");
+    let path = args
+        .first()
+        .map(String::as_str)
+        .unwrap_or("/proc/processes");
 
     match fs::read_to_string(path) {
         Ok(text) => {

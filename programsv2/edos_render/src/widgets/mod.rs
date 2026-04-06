@@ -32,7 +32,12 @@ pub struct Rect {
 impl Rect {
     /// Create a new rectangle.
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// Check if a point is inside the rectangle.
@@ -194,7 +199,7 @@ pub(crate) fn draw_text(
     color: u32,
 ) {
     use crate::graphics::Color;
-    use noto_sans_mono_bitmap::{get_raster, get_raster_width, FontWeight, RasterHeight};
+    use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
 
     let font_size = RasterHeight::Size16;
     let char_width = get_raster_width(FontWeight::Regular, font_size);
@@ -236,9 +241,12 @@ pub(crate) fn draw_text(
                                 let alpha = intensity as u32;
                                 let inv_alpha = 255 - alpha;
 
-                                let r = (fg.red() as u32 * alpha + bg.red() as u32 * inv_alpha) / 255;
-                                let g = (fg.green() as u32 * alpha + bg.green() as u32 * inv_alpha) / 255;
-                                let b = (fg.blue() as u32 * alpha + bg.blue() as u32 * inv_alpha) / 255;
+                                let r =
+                                    (fg.red() as u32 * alpha + bg.red() as u32 * inv_alpha) / 255;
+                                let g = (fg.green() as u32 * alpha + bg.green() as u32 * inv_alpha)
+                                    / 255;
+                                let b =
+                                    (fg.blue() as u32 * alpha + bg.blue() as u32 * inv_alpha) / 255;
 
                                 buffer[idx] = Color::from_rgb(r as u8, g as u8, b as u8).raw();
                             }
@@ -254,7 +262,7 @@ pub(crate) fn draw_text(
 
 /// Get the width of a character in the default font.
 pub(crate) fn char_width() -> u32 {
-    use noto_sans_mono_bitmap::{get_raster_width, FontWeight, RasterHeight};
+    use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster_width};
     get_raster_width(FontWeight::Regular, RasterHeight::Size16) as u32
 }
 

@@ -1,8 +1,8 @@
 //! Clickable button widget.
 
 use super::{
-    char_width, colors, draw_rect, draw_rect_outline, draw_text, text_height, Rect, Widget,
-    WidgetEvent, WidgetId,
+    Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_rect, draw_rect_outline,
+    draw_text, text_height,
 };
 
 /// A clickable button with a label.

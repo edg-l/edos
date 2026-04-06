@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use super::{char_width, draw_rect, draw_text, text_height, Rect, Widget, WidgetEvent, WidgetId};
+use super::{Rect, Widget, WidgetEvent, WidgetId, char_width, draw_rect, draw_text, text_height};
 
 /// Default terminal colors
 pub mod terminal_colors {
