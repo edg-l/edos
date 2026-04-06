@@ -22,6 +22,7 @@ pub fn cmd_help() {
     println!("  clear             - Clear screen");
     println!("  echo [args...]    - Print arguments");
     println!("  exit              - Exit shell");
+    println!("  cmd1 | cmd2       - Pipe output of cmd1 to cmd2");
 }
 
 /// Print current working directory.

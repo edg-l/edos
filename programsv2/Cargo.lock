@@ -7,6 +7,14 @@ name = "alloctest"
 version = "0.1.0"
 
 [[package]]
+name = "cat"
+version = "0.1.0"
+
+[[package]]
+name = "echo"
+version = "0.1.0"
+
+[[package]]
 name = "edos-sh"
 version = "0.1.0"
 

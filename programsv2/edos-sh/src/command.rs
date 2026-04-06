@@ -43,6 +43,61 @@ pub fn parse_command(input: &str) -> Vec<String> {
     args
 }
 
+/// Split input into pipeline stages on unquoted `|` characters.
+pub fn split_pipeline(input: &str) -> Vec<String> {
+    let mut stages = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut quote_char = '"';
+
+    for ch in input.chars() {
+        match ch {
+            '"' | '\'' if !in_quotes => {
+                in_quotes = true;
+                quote_char = ch;
+                current.push(ch);
+            }
+            q if in_quotes && q == quote_char => {
+                in_quotes = false;
+                current.push(ch);
+            }
+            '|' if !in_quotes => {
+                stages.push(current.trim().to_string());
+                current = String::new();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        stages.push(trimmed);
+    }
+    stages
+}
+
+/// Check if a command is a builtin.
+pub fn is_builtin(command: &str) -> bool {
+    matches!(
+        command,
+        "exit"
+            | "help"
+            | "pwd"
+            | "cd"
+            | "ls"
+            | "cat"
+            | "write"
+            | "stat"
+            | "free"
+            | "ps"
+            | "dmesg"
+            | "mkdir"
+            | "rmdir"
+            | "rm"
+            | "clear"
+            | "echo"
+    )
+}
+
 /// Execute a command. Returns false if shell should exit.
 pub fn execute_command(command: &str, args: &[String]) -> bool {
     match command {
