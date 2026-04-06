@@ -3,10 +3,11 @@
 use std::collections::HashMap;
 
 use edos_render::graphics::{Color, RasterHeight, Screen, TextStyle};
+use edos_render::theme::Theme;
 use edos_render::window::{PROT_READ, WindowListEntry, flags::FLAG_DOCK, shm_map, shm_unmap};
 
 use crate::cursor::Cursor;
-use crate::decorations::{self, BORDER_WIDTH, TITLE_HEIGHT};
+use crate::decorations::{self, BORDER_WIDTH, SHADOW_SIZE, TITLE_HEIGHT};
 
 /// Cache for shared memory mappings to avoid map/unmap on every frame.
 pub struct ShmCache {
@@ -70,21 +71,6 @@ impl ShmCache {
     }
 }
 
-/// Desktop background color.
-pub const DESKTOP_COLOR: Color = Color::from_rgb(0x30, 0x30, 0x40);
-
-/// Title bar color for active windows.
-const COLOR_TITLE_ACTIVE: Color = Color::from_rgb(0x40, 0x60, 0x90);
-
-/// Title bar color for inactive windows.
-const COLOR_TITLE_INACTIVE: Color = Color::from_rgb(0x50, 0x50, 0x60);
-
-/// Border color.
-const COLOR_BORDER: Color = Color::from_rgb(0x20, 0x20, 0x20);
-
-/// Close button color.
-const COLOR_CLOSE_BUTTON: Color = Color::from_rgb(0xE0, 0x40, 0x40);
-
 /// Composite all visible windows onto the screen.
 pub fn composite(
     screen: &mut Screen,
@@ -92,9 +78,18 @@ pub fn composite(
     cursor: &Cursor,
     focused_id: Option<u64>,
     shm_cache: &mut ShmCache,
+    hovered_close_window: Option<u64>,
 ) {
-    // Clear to desktop background
-    let _ = screen.fill(DESKTOP_COLOR);
+    // Draw desktop background gradient
+    edos_render::theme::draw_gradient_v_screen(
+        screen,
+        0,
+        0,
+        screen.width() as u64,
+        screen.height() as u64,
+        Theme::DEFAULT.desktop_bg_top,
+        Theme::DEFAULT.desktop_bg_bottom,
+    );
 
     // Collect active shm_ids for cache cleanup
     let active_shm_ids: Vec<u64> = windows
@@ -109,7 +104,13 @@ pub fn composite(
     // Draw windows back-to-front (already sorted by z_order from kernel)
     for window in windows.iter() {
         if window.visible != 0 {
-            draw_window_direct(screen, window, focused_id == Some(window.id), shm_cache);
+            draw_window_direct(
+                screen,
+                window,
+                focused_id == Some(window.id),
+                shm_cache,
+                hovered_close_window,
+            );
         }
     }
 
@@ -125,6 +126,7 @@ fn draw_window_direct(
     window: &WindowListEntry,
     is_focused: bool,
     shm_cache: &mut ShmCache,
+    hovered_close_window: Option<u64>,
 ) {
     // Check if this is a dock window (no decorations)
     let is_dock = (window.flags & FLAG_DOCK) != 0;
@@ -190,64 +192,131 @@ fn draw_window_direct(
             }
         };
 
-    // Draw border (outer rectangle) - as 4 separate edges for proper clipping
     let bw = BORDER_WIDTH as i64;
     let th = TITLE_HEIGHT as i64;
 
-    // Top edge
-    draw_clipped_rect(screen, 0, 0, total_w, bw, COLOR_BORDER);
-    // Bottom edge
-    draw_clipped_rect(screen, 0, total_h - bw, total_w, bw, COLOR_BORDER);
-    // Left edge
-    draw_clipped_rect(screen, 0, bw, bw, total_h - 2 * bw, COLOR_BORDER);
-    // Right edge
-    draw_clipped_rect(screen, total_w - bw, bw, bw, total_h - 2 * bw, COLOR_BORDER);
+    // --- 3D border ---
+    // Top and left edges use highlight; bottom and right use shadow.
+    // Full 2px width drawn as two 1px passes for clarity.
+    let highlight = Theme::DEFAULT.window_border_highlight;
+    let shadow = Theme::DEFAULT.window_border_shadow;
 
-    // Draw title bar
-    let title_color = if is_focused {
-        COLOR_TITLE_ACTIVE
+    // Outer ring (pixel 0)
+    draw_clipped_rect(screen, 0, 0, total_w, 1, highlight); // top
+    draw_clipped_rect(screen, 0, 0, 1, total_h, highlight); // left
+    draw_clipped_rect(screen, 0, total_h - 1, total_w, 1, shadow); // bottom
+    draw_clipped_rect(screen, total_w - 1, 0, 1, total_h, shadow); // right
+
+    // Inner ring (pixel 1)
+    draw_clipped_rect(screen, 1, 1, total_w - 2, 1, highlight); // top
+    draw_clipped_rect(screen, 1, 1, 1, total_h - 2, highlight); // left
+    draw_clipped_rect(screen, 1, total_h - 2, total_w - 2, 1, shadow); // bottom
+    draw_clipped_rect(screen, total_w - 2, 1, 1, total_h - 2, shadow); // right
+
+    // --- Gradient title bar ---
+    let (title_top, title_bottom) = if is_focused {
+        (
+            Theme::DEFAULT.title_active_top,
+            Theme::DEFAULT.title_active_bottom,
+        )
     } else {
-        COLOR_TITLE_INACTIVE
+        (
+            Theme::DEFAULT.title_inactive_top,
+            Theme::DEFAULT.title_inactive_bottom,
+        )
     };
-    draw_clipped_rect(screen, bw, bw, w, th - bw, title_color);
+    let title_bar_h = th - bw;
+    for row in 0..title_bar_h {
+        let t = ((row * 255) / (title_bar_h - 1).max(1)) as u8;
+        let color = edos_render::theme::lerp_color(title_top, title_bottom, t);
+        draw_clipped_rect(screen, bw, bw + row, w, 1, color);
+    }
 
-    // Draw title text
+    // --- Title text ---
     let title = window.title_str();
     if !title.is_empty() {
         let text_x = window.x as i64 + bw + 6;
         let text_y = window.y as i64 + bw + 3;
         if text_x >= 0 && text_y >= 0 && text_x < screen_w && text_y < screen_h {
-            let style = TextStyle::new(Color::from_rgb(0xFF, 0xFF, 0xFF))
-                .with_size(RasterHeight::Size16);
+            let style =
+                TextStyle::new(Color::from_rgb(0xFF, 0xFF, 0xFF)).with_size(RasterHeight::Size16);
             let _ = screen.draw_text(text_x as u64, text_y as u64, title, &style);
         }
     }
 
-    // Draw close button (right side of title bar)
-    let close_rx = bw + w - 20;
-    let close_ry = bw + 2;
-    draw_clipped_rect(
-        screen,
-        close_rx,
-        close_ry,
-        18,
-        th - bw - 4,
-        COLOR_CLOSE_BUTTON,
-    );
+    // --- Close button (16x16, rounded corners) ---
+    // Positioned 4px from the right border, vertically centered in the title bar.
+    let btn_size: i64 = 16;
+    let close_rx = bw + w - 4 - btn_size;
+    let close_ry = bw + (title_bar_h - btn_size) / 2;
 
-    // Draw X symbol on close button (only if visible)
-    let close_abs_x = window.x as i64 + close_rx + 4;
-    let close_abs_y = window.y as i64 + close_ry + 3;
-    if close_abs_x >= 0
-        && close_abs_y >= 0
-        && close_abs_x + 10 <= screen_w
-        && close_abs_y + 10 <= screen_h
-    {
-        draw_close_x(screen, close_abs_x as u64, close_abs_y as u64);
+    let btn_color = if hovered_close_window == Some(window.id) {
+        Theme::DEFAULT.close_button_hover
+    } else {
+        Theme::DEFAULT.close_button_normal
+    };
+
+    // Draw button background
+    draw_clipped_rect(screen, close_rx, close_ry, btn_size, btn_size, btn_color);
+
+    // Cut the 4 corner pixels to simulate rounding (replace with title bar color at that row).
+    // Corner rows are 0 and btn_size-1 relative to the button.
+    for &corner_row in &[0i64, btn_size - 1] {
+        let title_row = (close_ry - bw) + corner_row; // row index within the title gradient
+        let t_corner = ((title_row * 255) / (title_bar_h - 1).max(1)).min(255) as u8;
+        let corner_color = edos_render::theme::lerp_color(title_top, title_bottom, t_corner);
+        draw_clipped_rect(screen, close_rx, close_ry + corner_row, 1, 1, corner_color);
+        draw_clipped_rect(
+            screen,
+            close_rx + btn_size - 1,
+            close_ry + corner_row,
+            1,
+            1,
+            corner_color,
+        );
     }
 
-    // Draw content area background
+    // Draw 8x8 X glyph centered inside the 16x16 button.
+    let x_offset_x = close_rx + (btn_size - 8) / 2;
+    let x_offset_y = close_ry + (btn_size - 8) / 2;
+    let close_abs_x = window.x as i64 + x_offset_x;
+    let close_abs_y = window.y as i64 + x_offset_y;
+    if close_abs_x >= 0
+        && close_abs_y >= 0
+        && close_abs_x + 8 <= screen_w
+        && close_abs_y + 8 <= screen_h
+    {
+        draw_close_x(
+            screen,
+            close_abs_x as u64,
+            close_abs_y as u64,
+            Theme::DEFAULT.close_button_x,
+        );
+    }
+
+    // --- Content area background ---
     draw_clipped_rect(screen, bw, th, w, h, Color::from_rgb(0x30, 0x30, 0x30));
+
+    // --- Drop shadow (drawn outside the decorated rect) ---
+    let shadow_color = Theme::DEFAULT.window_shadow;
+    // Right shadow strip: 2px wide, full height of decorated window
+    draw_clipped_rect(
+        screen,
+        total_w,
+        0,
+        SHADOW_SIZE as i64,
+        total_h,
+        shadow_color,
+    );
+    // Bottom shadow strip: full decorated width + shadow width
+    draw_clipped_rect(
+        screen,
+        0,
+        total_h,
+        total_w + SHADOW_SIZE as i64,
+        SHADOW_SIZE as i64,
+        shadow_color,
+    );
 
     // Blit client buffer content with clipping
     if window.buffer_shm_id != 0 {
@@ -369,25 +438,17 @@ fn draw_cursor(screen: &mut Screen, cursor: &Cursor) {
     let _ = screen.draw_texture_transparent(&cursor.texture, cx, cy);
 }
 
-/// Draw an X symbol for the close button.
-fn draw_close_x(screen: &mut Screen, x: u64, y: u64) {
-    let color = Color::WHITE;
-    // Draw a 10x10 X
-    for i in 0..10u64 {
+/// Draw an 8x8 X symbol for the close button with the given color.
+fn draw_close_x(screen: &mut Screen, x: u64, y: u64, color: Color) {
+    for i in 0..8u64 {
         // Main diagonal (top-left to bottom-right)
         let _ = screen.set_pixel(x + i, y + i, color);
         // Anti-diagonal (top-right to bottom-left)
-        let _ = screen.set_pixel(x + 9 - i, y + i, color);
-        // Thicker lines
-        if i > 0 {
-            let _ = screen.set_pixel(x + i - 1, y + i, color);
-            let _ = screen.set_pixel(x + 9 - i + 1, y + i, color);
+        let _ = screen.set_pixel(x + 7 - i, y + i, color);
+        // Thicken by one extra pixel on each diagonal
+        if i + 1 < 8 {
+            let _ = screen.set_pixel(x + i + 1, y + i, color);
+            let _ = screen.set_pixel(x + 7 - i - 1, y + i, color);
         }
     }
-}
-
-/// Simple frame buffer clear (used for partial updates in future).
-#[allow(dead_code)]
-pub fn clear_region(screen: &mut Screen, x: u64, y: u64, width: u64, height: u64) {
-    let _ = screen.draw_rect(x, y, width, height, DESKTOP_COLOR);
 }

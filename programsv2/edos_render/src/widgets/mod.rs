@@ -95,36 +95,37 @@ pub trait Widget {
     fn set_focused(&mut self, focused: bool);
 }
 
-/// Color constants for widget rendering.
+/// Color constants for widget rendering. Values are read from `Theme::DEFAULT`.
 pub mod colors {
+    use crate::theme::Theme;
     /// Light gray background.
-    pub const BACKGROUND: u32 = 0xFFE0E0E0;
+    pub const BACKGROUND: u32 = Theme::DEFAULT.background.raw();
     /// Button normal state.
-    pub const BUTTON_NORMAL: u32 = 0xFFD0D0D0;
+    pub const BUTTON_NORMAL: u32 = Theme::DEFAULT.button_normal.raw();
     /// Button hover state.
-    pub const BUTTON_HOVER: u32 = 0xFFC0C0C0;
+    pub const BUTTON_HOVER: u32 = Theme::DEFAULT.button_hover.raw();
     /// Button pressed state.
-    pub const BUTTON_PRESSED: u32 = 0xFFB0B0B0;
+    pub const BUTTON_PRESSED: u32 = Theme::DEFAULT.button_pressed.raw();
     /// Focus ring color.
-    pub const FOCUS_RING: u32 = 0xFF4080F0;
+    pub const FOCUS_RING: u32 = Theme::DEFAULT.focus_ring.raw();
     /// Primary text color.
-    pub const TEXT: u32 = 0xFF202020;
+    pub const TEXT: u32 = Theme::DEFAULT.text_primary.raw();
     /// Placeholder text color.
-    pub const TEXT_PLACEHOLDER: u32 = 0xFF808080;
+    pub const TEXT_PLACEHOLDER: u32 = Theme::DEFAULT.text_placeholder.raw();
     /// Text input background.
-    pub const INPUT_BG: u32 = 0xFFFFFFFF;
+    pub const INPUT_BG: u32 = Theme::DEFAULT.input_bg.raw();
     /// Text input border.
-    pub const INPUT_BORDER: u32 = 0xFF606060;
+    pub const INPUT_BORDER: u32 = Theme::DEFAULT.input_border.raw();
     /// Slider track color.
-    pub const SLIDER_TRACK: u32 = 0xFFA0A0A0;
+    pub const SLIDER_TRACK: u32 = Theme::DEFAULT.slider_track.raw();
     /// Slider thumb color.
-    pub const SLIDER_THUMB: u32 = 0xFF4080F0;
+    pub const SLIDER_THUMB: u32 = Theme::DEFAULT.slider_thumb.raw();
     /// Checkbox check mark color.
-    pub const CHECKBOX_CHECK: u32 = 0xFF4080F0;
+    pub const CHECKBOX_CHECK: u32 = Theme::DEFAULT.checkbox_check.raw();
 }
 
 /// Helper function to draw a filled rectangle in a buffer.
-pub(crate) fn draw_rect(
+pub fn draw_rect(
     buffer: &mut [u32],
     buffer_width: u32,
     buffer_height: u32,
@@ -150,7 +151,7 @@ pub(crate) fn draw_rect(
 }
 
 /// Helper function to draw a rectangle outline.
-pub(crate) fn draw_rect_outline(
+pub fn draw_rect_outline(
     buffer: &mut [u32],
     buffer_width: u32,
     buffer_height: u32,
@@ -189,7 +190,7 @@ pub(crate) fn draw_rect_outline(
 }
 
 /// Helper function to draw text into a buffer.
-pub(crate) fn draw_text(
+pub fn draw_text(
     buffer: &mut [u32],
     buffer_width: u32,
     buffer_height: u32,
@@ -261,12 +262,12 @@ pub(crate) fn draw_text(
 }
 
 /// Get the width of a character in the default font.
-pub(crate) fn char_width() -> u32 {
+pub fn char_width() -> u32 {
     use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster_width};
     get_raster_width(FontWeight::Regular, RasterHeight::Size16) as u32
 }
 
 /// Get the height of text in the default font.
-pub(crate) fn text_height() -> u32 {
+pub fn text_height() -> u32 {
     16
 }

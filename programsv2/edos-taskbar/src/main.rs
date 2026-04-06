@@ -1,10 +1,10 @@
 //! EDOS Taskbar - Shows running windows and allows switching between them.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use edos_render::graphics::{Framebuffer, ScreenInfo};
-use edos_render::widgets::layout::{HBoxLayout, Insets};
-use edos_render::widgets::{Button, Label, Rect, WidgetContainer, WidgetEvent};
+use edos_render::theme::{Theme, draw_gradient_v};
+use edos_render::widgets::{char_width, draw_rect, draw_text};
 use edos_render::window::{
     flags::FLAG_DOCK, property, window_list, window_send_event, window_set, Window, WindowEvent,
     WindowEventType, WindowListEntry,
@@ -70,8 +70,11 @@ fn main() {
     // Window list buffer
     let mut entries = [WindowListEntry::default(); MAX_WINDOWS];
 
-    // Track which windows we're showing buttons for
-    let mut displayed_windows: Vec<(u64, u32)> = Vec::new(); // (window_id, button_id)
+    // Track which windows we're showing buttons for: (window_id, btn_x)
+    let mut displayed_windows: Vec<(u64, i32)> = Vec::new();
+
+    // Used for clock display
+    let start_time = Instant::now();
 
     // Main loop
     loop {
@@ -90,42 +93,11 @@ fn main() {
             .filter(|w| w.id != my_window_id && w.visible != 0)
             .collect();
 
-        // Create widget container
-        let mut widgets = WidgetContainer::new();
-
-        // Create layout
-        let mut layout = HBoxLayout::new();
-        layout.set_padding(Insets::new(4, 8, 4, 8));
-        layout.set_spacing(4);
-        layout.set_bounds(Rect::new(0, 0, screen_width, TASKBAR_HEIGHT));
-
-        // Add "Start" label
-        let start_label = widgets.add(Label::with_color(0, 0, 0, "EDOS", 0xFF4080F0));
-        layout.add(start_label);
-
-        // Update displayed_windows list
-        displayed_windows.clear();
-
-        // Add button for each visible window
-        for win_entry in &visible_windows {
-            // Use window title, fall back to "Win N" if empty
-            let title = win_entry.title_str();
-            let label = if title.is_empty() {
-                format!("Win {}", win_entry.id)
-            } else if title.len() > 12 {
-                format!("{}...", &title[..9])
-            } else {
-                title.to_string()
-            };
-
-            let button_id = widgets.add(Button::with_size(0, 0, 0, BUTTON_WIDTH, 24, &label));
-            layout.add(button_id);
-
-            displayed_windows.push((win_entry.id, button_id));
-        }
-
-        // Apply layout
-        layout.layout(&mut widgets);
+        // Determine focused window (highest z_order among visible windows)
+        let focused_window_id = visible_windows
+            .iter()
+            .max_by_key(|w| w.z_order)
+            .map(|w| w.id);
 
         // Handle taskbar events
         if let Ok(count) = window.poll_events(&mut events) {
@@ -141,48 +113,160 @@ fn main() {
                             eprintln!("[Taskbar] Failed to resize");
                         }
                     }
-                    _ => {}
-                }
+                    Some(WindowEventType::MouseButton) => {
+                        if event.data == 1 {
+                            // Button press
+                            let click_x = event.x;
+                            let click_y = event.y;
+                            let h = window.height;
+                            let btn_h = 24i32;
+                            let btn_y = (h as i32 - btn_h) / 2;
 
-                // Handle widget events
-                for (button_id, widget_event) in widgets.handle_event(event) {
-                    if let WidgetEvent::Clicked = widget_event {
-                        // Find which window this button corresponds to
-                        if let Some((target_window_id, _)) = displayed_windows
-                            .iter()
-                            .find(|(_, btn_id)| *btn_id == button_id)
-                        {
-                            // Send a FocusGained event to try to raise the window
-                            let focus_event = WindowEvent {
-                                event_type: WindowEventType::FocusGained as u32,
-                                x: 0,
-                                y: 0,
-                                code: 0,
-                                data: 0,
-                            };
-                            let _ = window_send_event(*target_window_id, &focus_event);
-                            println!("[Taskbar] Clicked on window {}", target_window_id);
+                            for (win_id, bx) in &displayed_windows {
+                                if click_x >= *bx
+                                    && click_x < *bx + BUTTON_WIDTH as i32
+                                    && click_y >= btn_y
+                                    && click_y < btn_y + btn_h
+                                {
+                                    let focus_event = WindowEvent {
+                                        event_type: WindowEventType::FocusGained as u32,
+                                        x: 0,
+                                        y: 0,
+                                        code: 0,
+                                        data: 0,
+                                    };
+                                    let _ = window_send_event(*win_id, &focus_event);
+                                    println!("[Taskbar] Clicked on window {}", win_id);
+                                    break;
+                                }
+                            }
                         }
                     }
+                    _ => {}
                 }
             }
         }
 
-        // Draw taskbar background
-        let bg_color = 0xFF2D2D2D; // Dark gray
-        window.fill(bg_color);
-
-        // Draw widgets
+        // Draw taskbar
         let w = window.width;
         let h = window.height;
         if let Some(buf) = window.buffer_mut() {
-            widgets.draw_all(buf, w, h);
+            // Gradient background
+            draw_gradient_v(
+                buf,
+                w,
+                h,
+                0,
+                0,
+                w,
+                h,
+                Theme::DEFAULT.taskbar_bg_top,
+                Theme::DEFAULT.taskbar_bg_bottom,
+            );
 
-            // Draw top border (separator line)
-            let border_color = 0xFF505050;
+            // Top separator line
             for x in 0..w {
-                buf[x as usize] = border_color;
+                buf[x as usize] = Theme::DEFAULT.taskbar_separator.raw();
             }
+
+            // EDOS branding: colored accent bar then text
+            let branding_x = 8i32;
+            let accent_y = (h as i32 - 20) / 2;
+            draw_rect(
+                buf,
+                w,
+                h,
+                branding_x,
+                accent_y,
+                4,
+                20,
+                Theme::DEFAULT.taskbar_branding_accent.raw(),
+            );
+            draw_text(
+                buf,
+                w,
+                h,
+                branding_x + 8,
+                (h as i32 - 16) / 2,
+                "EDOS",
+                Theme::DEFAULT.taskbar_branding_text.raw(),
+            );
+
+            // Window buttons
+            let cw = char_width();
+            let btn_h = 24u32;
+            let btn_y = (h as i32 - btn_h as i32) / 2;
+            let mut btn_x = 60i32;
+
+            displayed_windows.clear();
+
+            for win_entry in &visible_windows {
+                let title = win_entry.title_str();
+                let label = if title.is_empty() {
+                    format!("Win {}", win_entry.id)
+                } else if title.len() > 12 {
+                    format!("{}...", &title[..9])
+                } else {
+                    title.to_string()
+                };
+
+                let is_focused = focused_window_id == Some(win_entry.id);
+                let btn_color = if is_focused {
+                    Theme::DEFAULT.taskbar_button_active
+                } else {
+                    Theme::DEFAULT.taskbar_button_normal
+                };
+
+                // Button background
+                draw_rect(buf, w, h, btn_x, btn_y, BUTTON_WIDTH, btn_h, btn_color.raw());
+
+                // 1px top highlight on button
+                draw_rect(
+                    buf,
+                    w,
+                    h,
+                    btn_x,
+                    btn_y,
+                    BUTTON_WIDTH,
+                    1,
+                    Theme::DEFAULT.taskbar_separator.raw(),
+                );
+
+                // Button text centered
+                let text_w = label.len() as i32 * cw as i32;
+                let text_x = btn_x + (BUTTON_WIDTH as i32 - text_w) / 2;
+                let text_y = btn_y + (btn_h as i32 - 16) / 2;
+                draw_text(
+                    buf,
+                    w,
+                    h,
+                    text_x,
+                    text_y,
+                    &label,
+                    Theme::DEFAULT.taskbar_text.raw(),
+                );
+
+                displayed_windows.push((win_entry.id, btn_x));
+                btn_x += BUTTON_WIDTH as i32 + 4;
+            }
+
+            // Clock display (right-aligned)
+            let elapsed = start_time.elapsed().as_secs();
+            let hours = (elapsed / 3600) % 24;
+            let minutes = (elapsed / 60) % 60;
+            let clock_text = format!("{:02}:{:02}", hours, minutes);
+            let clock_w = clock_text.len() as u32 * cw;
+            let clock_x = w as i32 - clock_w as i32 - 12;
+            let clock_y = (h as i32 - 16) / 2;
+            draw_text(
+                buf,
+                w,
+                h,
+                clock_x,
+                clock_y,
+                &clock_text,
+                Theme::DEFAULT.taskbar_clock_text.raw(),
+            );
         }
 
         window.swap_buffers();

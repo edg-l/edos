@@ -8,6 +8,9 @@ pub const TITLE_HEIGHT: u64 = 24;
 /// Width of the window border.
 pub const BORDER_WIDTH: u64 = 2;
 
+/// Size of the drop shadow in pixels (drawn outside the decorated area).
+pub const SHADOW_SIZE: u64 = 2;
+
 /// Size of the resize grab zone in pixels.
 pub const RESIZE_BORDER: i64 = 8;
 
@@ -38,21 +41,21 @@ pub fn decorated_height(window_height: u32) -> u64 {
     window_height as u64 + TITLE_HEIGHT + BORDER_WIDTH
 }
 
-/// Calculate the total width for a window considering its flags.
+/// Calculate the total width for a window considering its flags (includes shadow).
 pub fn effective_width(window: &WindowListEntry) -> u64 {
     if (window.flags & FLAG_DOCK) != 0 {
         window.width as u64
     } else {
-        decorated_width(window.width)
+        decorated_width(window.width) + SHADOW_SIZE
     }
 }
 
-/// Calculate the total height for a window considering its flags.
+/// Calculate the total height for a window considering its flags (includes shadow).
 pub fn effective_height(window: &WindowListEntry) -> u64 {
     if (window.flags & FLAG_DOCK) != 0 {
         window.height as u64
     } else {
-        decorated_height(window.height)
+        decorated_height(window.height) + SHADOW_SIZE
     }
 }
 
@@ -61,7 +64,7 @@ pub fn effective_width_raw(flags: u64, width: u32) -> u64 {
     if (flags & FLAG_DOCK) != 0 {
         width as u64
     } else {
-        decorated_width(width)
+        decorated_width(width) + SHADOW_SIZE
     }
 }
 
@@ -70,7 +73,7 @@ pub fn effective_height_raw(flags: u64, height: u32) -> u64 {
     if (flags & FLAG_DOCK) != 0 {
         height as u64
     } else {
-        decorated_height(height)
+        decorated_height(height) + SHADOW_SIZE
     }
 }
 

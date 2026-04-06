@@ -120,6 +120,7 @@ fn main() {
     let mut drag_state: Option<DragState> = None;
     let mut resize_state: Option<ResizeState> = None;
     let mut last_mouse_buttons: u8 = 0;
+    let mut hovered_close_window: Option<u64> = None;
 
     // Shared memory mapping cache
     let mut shm_cache = ShmCache::new();
@@ -394,6 +395,18 @@ fn main() {
             }
         }
 
+        // Compute which window's close button the cursor is hovering over.
+        // Windows are sorted back-to-front by z_order, so iterate in reverse
+        // (front-to-back) and take the first close-button hit.
+        hovered_close_window = windows
+            .iter()
+            .filter(|w| w.visible != 0)
+            .rev()
+            .find(|w| {
+                decorations::hit_test(w, cursor.x, cursor.y) == decorations::HitRegion::CloseButton
+            })
+            .map(|w| w.id);
+
         // Composite all windows into back buffer (always full composite).
         compositor::composite(
             &mut screen,
@@ -401,6 +414,7 @@ fn main() {
             &cursor,
             focused_window_id,
             &mut shm_cache,
+            hovered_close_window,
         );
 
         // Send full back buffer to kernel framebuffer and flip.

@@ -6,10 +6,11 @@ use super::{Rect, Widget, WidgetEvent, WidgetId, char_width, draw_rect, draw_tex
 
 /// Default terminal colors
 pub mod terminal_colors {
-    pub const BACKGROUND: u32 = 0xFF1E1E1E;
-    pub const FOREGROUND: u32 = 0xFFCCCCCC;
-    pub const CURSOR: u32 = 0xFFFFFFFF;
-    pub const SELECTION: u32 = 0xFF264F78;
+    use crate::theme::Theme;
+    pub const BACKGROUND: u32 = Theme::DEFAULT.terminal_bg.raw();
+    pub const FOREGROUND: u32 = Theme::DEFAULT.terminal_fg.raw();
+    pub const CURSOR: u32 = Theme::DEFAULT.terminal_cursor.raw();
+    pub const SELECTION: u32 = Theme::DEFAULT.terminal_selection.raw();
 }
 
 /// A terminal widget that displays a text buffer with cursor.

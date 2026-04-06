@@ -1,9 +1,7 @@
 //! Clickable button widget.
 
-use super::{
-    Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_rect, draw_rect_outline,
-    draw_text, text_height,
-};
+use super::{Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_rect, draw_rect_outline, draw_text, text_height};
+use crate::theme::{Theme, draw_3d_rect, draw_3d_rect_inset};
 
 /// A clickable button with a label.
 pub struct Button {
@@ -115,16 +113,15 @@ impl Widget for Button {
         }
 
         // Draw border
-        draw_rect_outline(
-            buffer,
-            buffer_width,
-            buffer_height,
-            self.x,
-            self.y,
-            self.width,
-            self.height,
-            colors::INPUT_BORDER,
-        );
+        if self.pressed {
+            draw_3d_rect_inset(buffer, buffer_width, buffer_height,
+                self.x, self.y, self.width, self.height,
+                Theme::DEFAULT.button_border_highlight, Theme::DEFAULT.button_border_shadow);
+        } else {
+            draw_3d_rect(buffer, buffer_width, buffer_height,
+                self.x, self.y, self.width, self.height,
+                Theme::DEFAULT.button_border_highlight, Theme::DEFAULT.button_border_shadow);
+        }
 
         // Center the text
         let text_width = (self.label.len() as u32) * char_width();
