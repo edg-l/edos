@@ -188,9 +188,16 @@ impl Widget for Slider {
             THUMB_HEIGHT,
             thumb_color,
         );
-        draw_rect_outline(buffer, buffer_width, buffer_height,
-            self.thumb_x(), self.y, THUMB_WIDTH, THUMB_HEIGHT,
-            colors::INPUT_BORDER);
+        draw_rect_outline(
+            buffer,
+            buffer_width,
+            buffer_height,
+            self.thumb_x(),
+            self.y,
+            THUMB_WIDTH,
+            THUMB_HEIGHT,
+            colors::INPUT_BORDER,
+        );
     }
 
     fn on_mouse_move(&mut self, x: i32, y: i32) {

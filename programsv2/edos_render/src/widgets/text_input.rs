@@ -186,8 +186,16 @@ impl Widget for TextInput {
         } else {
             colors::INPUT_BORDER
         };
-        draw_rect_outline(buffer, buffer_width, buffer_height,
-            self.x, self.y, self.width, INPUT_HEIGHT, border_color);
+        draw_rect_outline(
+            buffer,
+            buffer_width,
+            buffer_height,
+            self.x,
+            self.y,
+            self.width,
+            INPUT_HEIGHT,
+            border_color,
+        );
 
         let text_x = self.x + PADDING as i32;
         let text_y = self.y + (INPUT_HEIGHT as i32 - text_height() as i32) / 2;

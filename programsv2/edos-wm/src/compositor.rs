@@ -237,10 +237,10 @@ fn draw_window_direct(
         }
     }
 
-    // --- Close button (20x20, rounded corners) ---
-    // Positioned 4px from the right border, vertically centered in the title bar.
-    let btn_size: i64 = 20;
-    let close_rx = bw + w - 4 - btn_size;
+    // --- Close button (rounded corners) ---
+    // Positioned from the right border, vertically centered in the title bar.
+    let btn_size = decorations::CLOSE_BUTTON_SIZE as i64;
+    let close_rx = bw + w - decorations::CLOSE_BUTTON_MARGIN as i64 - btn_size;
     let close_ry = bw + (title_bar_h - btn_size) / 2;
 
     let btn_color = if hovered_close_window == Some(window.id) {

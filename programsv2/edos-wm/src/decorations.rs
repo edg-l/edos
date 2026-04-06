@@ -11,6 +11,12 @@ pub const BORDER_WIDTH: u64 = 1;
 /// Size of the drop shadow in pixels (drawn outside the decorated area).
 pub const SHADOW_SIZE: u64 = 2;
 
+/// Close button size in pixels (square).
+pub const CLOSE_BUTTON_SIZE: u64 = 20;
+
+/// Close button margin from the right border in pixels.
+pub const CLOSE_BUTTON_MARGIN: u64 = 4;
+
 /// Size of the resize grab zone in pixels.
 pub const RESIZE_BORDER: i64 = 8;
 
@@ -83,10 +89,11 @@ fn is_in_close_button(window: &WindowListEntry, screen_x: i32, screen_y: i32) ->
     let win_y = window.y as i64;
     let w = window.width as i64;
 
-    let close_x = win_x + BORDER_WIDTH as i64 + w - 4 - 20;
+    let close_x =
+        win_x + BORDER_WIDTH as i64 + w - CLOSE_BUTTON_MARGIN as i64 - CLOSE_BUTTON_SIZE as i64;
     let close_y = win_y + BORDER_WIDTH as i64 + 2;
-    let close_w = 20i64;
-    let close_h = 20i64;
+    let close_w = CLOSE_BUTTON_SIZE as i64;
+    let close_h = CLOSE_BUTTON_SIZE as i64;
 
     let px = screen_x as i64;
     let py = screen_y as i64;
@@ -102,7 +109,7 @@ fn is_in_title_bar(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> bo
 
     let title_x = win_x + BORDER_WIDTH as i64;
     let title_y = win_y + BORDER_WIDTH as i64;
-    let title_w = w - 4 - 20; // Exclude close button area
+    let title_w = w - CLOSE_BUTTON_MARGIN as i64 - CLOSE_BUTTON_SIZE as i64;
     let title_h = TITLE_HEIGHT as i64 - BORDER_WIDTH as i64;
 
     let px = screen_x as i64;

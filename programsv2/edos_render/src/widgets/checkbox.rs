@@ -127,8 +127,16 @@ impl Widget for Checkbox {
         } else {
             colors::INPUT_BORDER
         };
-        draw_rect_outline(buffer, buffer_width, buffer_height,
-            self.x, self.y, BOX_SIZE, BOX_SIZE, border_color);
+        draw_rect_outline(
+            buffer,
+            buffer_width,
+            buffer_height,
+            self.x,
+            self.y,
+            BOX_SIZE,
+            BOX_SIZE,
+            border_color,
+        );
 
         // Draw check mark if checked
         if self.checked {

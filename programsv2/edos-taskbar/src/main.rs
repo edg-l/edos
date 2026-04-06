@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use edos_render::graphics::{Framebuffer, ScreenInfo};
-use edos_render::theme::{Theme, draw_gradient_v};
+use edos_render::process::spawn;
+use edos_render::theme::{draw_gradient_v, Theme};
 use edos_render::widgets::{char_width, draw_rect, draw_rect_outline, draw_text};
 use edos_render::window::{
     flags::FLAG_DOCK, property, window_list, window_send_event, window_set, Window, WindowEvent,
@@ -18,6 +19,18 @@ const MAX_WINDOWS: usize = 32;
 
 /// Button width for each window entry.
 const BUTTON_WIDTH: u32 = 120;
+
+/// Launcher button label.
+const LAUNCHER_LABEL: &str = "+ Term";
+
+/// Launcher button width in pixels.
+const LAUNCHER_WIDTH: u32 = 64;
+
+/// X position where the launcher button starts (after EDOS branding).
+const LAUNCHER_X: i32 = 60;
+
+/// X position where window buttons start (after launcher + gap).
+const WINDOW_BUTTONS_X: i32 = LAUNCHER_X + LAUNCHER_WIDTH as i32 + 8;
 
 /// Get screen dimensions.
 fn get_screen_info() -> Option<ScreenInfo> {
@@ -121,6 +134,15 @@ fn main() {
                             let btn_h = 24i32;
                             let btn_y = (h as i32 - btn_h) / 2;
 
+                            // Check launcher button click
+                            if click_x >= LAUNCHER_X
+                                && click_x < LAUNCHER_X + LAUNCHER_WIDTH as i32
+                                && click_y >= btn_y
+                                && click_y < btn_y + btn_h
+                            {
+                                let _ = spawn("/bin/terminal", &[], 0, 1, 2);
+                            }
+
                             for (win_id, bx) in &displayed_windows {
                                 if click_x >= *bx
                                     && click_x < *bx + BUTTON_WIDTH as i32
@@ -191,11 +213,57 @@ fn main() {
                 Theme::DEFAULT.taskbar_branding_text.raw(),
             );
 
-            // Window buttons
+            // Launcher button
             let cw = char_width();
             let btn_h = 24u32;
             let btn_y = (h as i32 - btn_h as i32) / 2;
-            let mut btn_x = 60i32;
+
+            draw_rect(
+                buf,
+                w,
+                h,
+                LAUNCHER_X,
+                btn_y,
+                LAUNCHER_WIDTH,
+                btn_h,
+                Theme::DEFAULT.taskbar_button_normal.raw(),
+            );
+            draw_rect_outline(
+                buf,
+                w,
+                h,
+                LAUNCHER_X,
+                btn_y,
+                LAUNCHER_WIDTH,
+                btn_h,
+                Theme::DEFAULT.taskbar_button_border.raw(),
+            );
+            // 1px top highlight
+            draw_rect(
+                buf,
+                w,
+                h,
+                LAUNCHER_X,
+                btn_y,
+                LAUNCHER_WIDTH,
+                1,
+                Theme::DEFAULT.taskbar_separator.raw(),
+            );
+            let launcher_text_w = LAUNCHER_LABEL.len() as i32 * cw as i32;
+            let launcher_text_x = LAUNCHER_X + (LAUNCHER_WIDTH as i32 - launcher_text_w) / 2;
+            let launcher_text_y = btn_y + (btn_h as i32 - 16) / 2;
+            draw_text(
+                buf,
+                w,
+                h,
+                launcher_text_x,
+                launcher_text_y,
+                LAUNCHER_LABEL,
+                Theme::DEFAULT.taskbar_text.raw(),
+            );
+
+            // Window buttons
+            let mut btn_x = WINDOW_BUTTONS_X;
 
             displayed_windows.clear();
 
@@ -218,7 +286,16 @@ fn main() {
                 };
 
                 // Button background
-                draw_rect(buf, w, h, btn_x, btn_y, BUTTON_WIDTH, btn_h, btn_color.raw());
+                draw_rect(
+                    buf,
+                    w,
+                    h,
+                    btn_x,
+                    btn_y,
+                    BUTTON_WIDTH,
+                    btn_h,
+                    btn_color.raw(),
+                );
 
                 // 1px border outline for unfocused buttons
                 if !is_focused {
