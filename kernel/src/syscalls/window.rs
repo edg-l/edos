@@ -420,6 +420,13 @@ pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent)
         }
     };
 
+    // If this is a FocusGained event, update the kernel's focused window
+    // so input routing sends keyboard events to the correct window.
+    if event.event_type == crate::window::input::WindowEventType::FocusGained as u32 {
+        let mut registry = WINDOW_REGISTRY.write();
+        registry.set_focused(window_id);
+    }
+
     // Send the event to the window's event queue
     crate::window::input::send_event(window_id, event);
 

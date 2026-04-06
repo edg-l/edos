@@ -280,11 +280,23 @@ fn validate_window_state(
     }
     if let Some(fid) = *focused_window_id {
         if !windows.iter().any(|w| w.id == fid) {
-            *focused_window_id = windows
+            // Focused window was destroyed, pick new top window and notify it
+            let new_focus = windows
                 .iter()
                 .filter(|w| w.visible != 0)
                 .max_by_key(|w| w.z_order)
                 .map(|w| w.id);
+            if let Some(new_id) = new_focus {
+                let focus_event = WindowEvent {
+                    event_type: WindowEventType::FocusGained as u32,
+                    x: 0,
+                    y: 0,
+                    code: 0,
+                    data: 0,
+                };
+                let _ = window_send_event(new_id, &focus_event);
+            }
+            *focused_window_id = new_focus;
         }
     }
 }
