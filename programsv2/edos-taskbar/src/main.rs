@@ -85,10 +85,12 @@ fn main() {
 
         // Filter out our own window and hidden windows
         let my_window_id = window.id;
-        let visible_windows: Vec<&WindowListEntry> = windows
+        let mut visible_windows: Vec<&WindowListEntry> = windows
             .iter()
             .filter(|w| w.id != my_window_id && w.visible != 0)
             .collect();
+        // Sort by window ID for stable taskbar order (not z_order which changes on focus)
+        visible_windows.sort_by_key(|w| w.id);
 
         // Determine focused window (highest z_order among visible windows)
         let focused_window_id = visible_windows

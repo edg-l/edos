@@ -81,7 +81,7 @@ impl Theme {
         taskbar_text: Color::from_rgb(0xB8, 0xC4, 0xD0),
         taskbar_button_normal: Color::from_rgb(0x1A, 0x1F, 0x29),
         taskbar_button_hover: Color::from_rgb(0x22, 0x28, 0x34),
-        taskbar_button_active: Color::from_rgb(0x39, 0xBA, 0xE6), // Ayu blue
+        taskbar_button_active: Color::from_rgb(0x1E, 0x3A, 0x50), // Muted blue highlight
         taskbar_button_border: Color::from_rgb(0x27, 0x2D, 0x38),
         taskbar_separator: Color::from_rgb(0x27, 0x2D, 0x38),
         taskbar_clock_text: Color::from_rgb(0x6C, 0x73, 0x80),
