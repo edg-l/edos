@@ -111,7 +111,21 @@ fn handle_mouse_press(
 ) {
     let window = match find_window_at(windows, mx, my) {
         Some(w) => w,
-        None => return,
+        None => {
+            // Clicked on desktop background: unfocus current window
+            if let Some(old_id) = *focused_window_id {
+                let lost_event = WindowEvent {
+                    event_type: WindowEventType::FocusLost as u32,
+                    x: 0,
+                    y: 0,
+                    code: 0,
+                    data: 0,
+                };
+                let _ = window_send_event(old_id, &lost_event);
+            }
+            *focused_window_id = None;
+            return;
+        }
     };
     let window_id = window.id;
     let region = decorations::hit_test(window, mx, my);

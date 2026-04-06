@@ -329,7 +329,9 @@ fn handle_mouse_event(event: MouseEvent) {
         if let Some(target_window) = window_under_decorated {
             if focused != Some(target_window) {
                 // Capture client-area coords before dropping the lock (for click event).
-                let window_info = registry.get_window(target_window).map(|w| (w.x, w.y, w.flags));
+                let window_info = registry
+                    .get_window(target_window)
+                    .map(|w| (w.x, w.y, w.flags));
                 drop(registry);
 
                 {
@@ -350,8 +352,10 @@ fn handle_mouse_event(event: MouseEvent) {
                 if window_under_cursor == Some(target_window) {
                     if let Some((wx, wy, wflags)) = window_info {
                         let is_dock = (wflags & flags::FLAG_DOCK) != 0;
-                        let local_x = event.x - wx - if is_dock { 0 } else { decoration::BORDER_WIDTH };
-                        let local_y = event.y - wy - if is_dock { 0 } else { decoration::TITLE_HEIGHT };
+                        let local_x =
+                            event.x - wx - if is_dock { 0 } else { decoration::BORDER_WIDTH };
+                        let local_y =
+                            event.y - wy - if is_dock { 0 } else { decoration::TITLE_HEIGHT };
 
                         for bit in 0..3 {
                             if button_pressed & (1 << bit) != 0 {

@@ -73,8 +73,16 @@ impl WindowInfo {
             return false;
         }
         let is_dock = (self.flags & flags::FLAG_DOCK) != 0;
-        let client_x = if is_dock { self.x } else { self.x + decoration::BORDER_WIDTH };
-        let client_y = if is_dock { self.y } else { self.y + decoration::TITLE_HEIGHT };
+        let client_x = if is_dock {
+            self.x
+        } else {
+            self.x + decoration::BORDER_WIDTH
+        };
+        let client_y = if is_dock {
+            self.y
+        } else {
+            self.y + decoration::TITLE_HEIGHT
+        };
         let client_w = self.width as i32;
         let client_h = self.height as i32;
 
@@ -193,6 +201,11 @@ impl WindowRegistry {
         } else {
             false
         }
+    }
+
+    /// Clear focus (no window focused).
+    pub fn clear_focus(&mut self) {
+        self.focused_window = None;
     }
 
     /// Get the currently focused window ID.

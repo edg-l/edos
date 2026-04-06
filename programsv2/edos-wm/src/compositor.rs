@@ -65,9 +65,7 @@ impl ShmCache {
         let stale: Vec<u64> = self
             .mappings
             .keys()
-            .filter(|id| {
-                !active_shm_ids.contains(id) && !self.prev_active.contains(id)
-            })
+            .filter(|id| !active_shm_ids.contains(id) && !self.prev_active.contains(id))
             .copied()
             .collect();
 
