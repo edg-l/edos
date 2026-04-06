@@ -140,7 +140,7 @@ fn main() {
                                 && click_y >= btn_y
                                 && click_y < btn_y + btn_h
                             {
-                                let _ = spawn("/bin/terminal", &[], 0, 1, 2);
+                                let _ = spawn("/bin/edos-terminal", &[], 0, 1, 2);
                             }
 
                             for (win_id, bx) in &displayed_windows {

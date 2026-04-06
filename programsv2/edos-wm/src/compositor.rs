@@ -13,12 +13,17 @@ use crate::decorations::{self, BORDER_WIDTH, SHADOW_SIZE, TITLE_HEIGHT};
 pub struct ShmCache {
     /// Maps shm_id to (mapped_ptr, original_width, original_height).
     mappings: HashMap<u64, (*mut u8, u32, u32)>,
+    /// SHM ids that were active in the previous frame.
+    /// Kept to avoid unmapping the "back buffer" of double-buffered windows,
+    /// since `buffer_shm_id` alternates between two ids each frame.
+    prev_active: Vec<u64>,
 }
 
 impl ShmCache {
     pub fn new() -> Self {
         Self {
             mappings: HashMap::new(),
+            prev_active: Vec::new(),
         }
     }
 
@@ -38,9 +43,6 @@ impl ShmCache {
         height: u32,
     ) -> Option<(*mut u8, u32, u32)> {
         if let Some(&(ptr, cached_w, cached_h)) = self.mappings.get(&shm_id) {
-            // Always return cached mapping with its ACTUAL dimensions.
-            // Don't try to remap - the buffer size is fixed at creation.
-            // If window dimensions changed, client will create new shm_id.
             return Some((ptr, cached_w, cached_h));
         }
 
@@ -54,12 +56,18 @@ impl ShmCache {
     }
 
     /// Remove mappings for shm_ids that are no longer in use.
-    /// Call this with the set of currently active shm_ids.
+    ///
+    /// A cached SHM is only removed if it is absent from BOTH the current
+    /// and previous frame's active sets.  This prevents the compositor from
+    /// unmapping/remapping the "back buffer" of double-buffered windows
+    /// every frame (the visible `buffer_shm_id` alternates between two ids).
     pub fn cleanup(&mut self, active_shm_ids: &[u64]) {
         let stale: Vec<u64> = self
             .mappings
             .keys()
-            .filter(|id| !active_shm_ids.contains(id))
+            .filter(|id| {
+                !active_shm_ids.contains(id) && !self.prev_active.contains(id)
+            })
             .copied()
             .collect();
 
@@ -68,6 +76,8 @@ impl ShmCache {
                 let _ = shm_unmap(ptr);
             }
         }
+
+        self.prev_active = active_shm_ids.to_vec();
     }
 }
 
