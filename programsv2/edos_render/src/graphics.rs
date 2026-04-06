@@ -1507,6 +1507,11 @@ impl Screen {
     /// Render all pending operations
     pub fn render(&mut self) -> Result<()> {
         if self.vram.is_some() {
+            // Ensure all VRAM writes are visible before flipping pages.
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                core::arch::asm!("sfence", options(nostack, preserves_flags));
+            }
             let offset = self.framebuffer.flip();
             if let Some(ref mut vram) = self.vram {
                 vram.update_back_offset(offset);
