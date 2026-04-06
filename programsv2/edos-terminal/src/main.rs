@@ -84,7 +84,6 @@ fn main() {
             for event in &events[..count] {
                 match event.event_type() {
                     Some(WindowEventType::CloseRequested) => {
-                        println!("[Terminal] Close requested, exiting.");
                         return;
                     }
                     Some(WindowEventType::Resize) => {

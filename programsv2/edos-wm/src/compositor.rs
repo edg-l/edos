@@ -102,7 +102,7 @@ pub fn composite(
     shm_cache.cleanup(&active_shm_ids);
 
     // Draw windows back-to-front (already sorted by z_order from kernel)
-    for window in windows.iter() {
+    for (_i, window) in windows.iter().enumerate() {
         if window.visible != 0 {
             draw_window_direct(
                 screen,

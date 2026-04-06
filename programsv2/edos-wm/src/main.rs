@@ -550,11 +550,18 @@ fn main() {
         // userspace so the compositor writes directly to the back page.
         let _ = screen.render();
 
-        // Sleep remainder of frame budget to maintain frame rate
+        // Sleep remainder of frame budget to maintain frame rate.
+        // Use a minimum sleep of 1ms to avoid sub-microsecond sleeps that
+        // can interact badly with the scheduler.
         let frame_target = Duration::from_millis(FRAME_TIME_MS);
         let elapsed = frame_start.elapsed();
         if elapsed < frame_target {
-            std::thread::sleep(frame_target - elapsed);
+            let remaining = frame_target - elapsed;
+            if remaining > Duration::from_millis(1) {
+                std::thread::sleep(remaining);
+            } else {
+                std::thread::yield_now();
+            }
         }
     }
 }

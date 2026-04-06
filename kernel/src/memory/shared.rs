@@ -154,8 +154,8 @@ impl Drop for SharedMemory {
                 allocator.deallocate_frame(*frame);
             }
         }
-
-        // Remove from registry if still present (defensive)
-        SHARED_MEMORY_REGISTRY.write().remove(&self.id);
+        // Note: do NOT touch SHARED_MEMORY_REGISTRY here.
+        // destroy() already removes the entry under the write lock,
+        // and calling .write() again from Drop would deadlock (re-entrant).
     }
 }

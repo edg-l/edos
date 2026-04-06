@@ -142,6 +142,13 @@ unsafe extern "C" fn syscall_entry() {
 
         // 16 * 8 = 0x80
 
+        // Re-enable interrupts now that we're safely on the kernel stack.
+        // SFMASK clears IF on SYSCALL entry for atomic swapgs+stack switch,
+        // but the handler itself must run with interrupts enabled so the
+        // APIC timer can preempt long syscalls (prevents spinlock deadlocks
+        // when a preempted thread holds a lock another syscall needs).
+        "sti",
+
         // Call handler with pointer to SyscallContext
         "mov rdi, rsp",            // Pass pointer to SyscallContext
         "call {handler}",
@@ -160,6 +167,11 @@ unsafe extern "C" fn syscall_entry() {
         "pop rsi",
         "pop rdi",
         "pop rax",
+
+        // Disable interrupts for the swapgs+rsp restore sequence.
+        // Must be atomic: an interrupt between swapgs and sysretq would
+        // see wrong GS base or user RSP on kernel stack.
+        "cli",
 
         "pop rcx", // RIP
         "pop r11", // RFLAGS
