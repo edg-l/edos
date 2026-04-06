@@ -430,5 +430,35 @@ pub fn cmd_clear() {
 
 /// Echo arguments to stdout.
 pub fn cmd_echo(args: &[String]) {
-    println!("{}", args.join(" "));
+    // Support -e flag for escape sequences
+    if args.first().map(|s| s.as_str()) == Some("-e") {
+        let text = args[1..].join(" ");
+        print!("{}\n", expand_escapes(&text));
+    } else {
+        println!("{}", args.join(" "));
+    }
+}
+
+/// Expand backslash escape sequences in a string.
+fn expand_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('e') => out.push('\x1B'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }

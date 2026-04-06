@@ -20,6 +20,44 @@ pub mod terminal_colors {
     pub const SELECTION: u32 = Theme::DEFAULT.terminal_selection.raw();
 }
 
+/// Standard 16 ANSI colors (Ayu Dark palette).
+const ANSI_COLORS: [u32; 16] = [
+    0xFF0A0E14, // 0: Black
+    0xFFF07178, // 1: Red
+    0xFFAAD94C, // 2: Green
+    0xFFE6B450, // 3: Yellow
+    0xFF59C2FF, // 4: Blue
+    0xFFD2A6FF, // 5: Magenta
+    0xFF95E6CB, // 6: Cyan
+    0xFFBFBDB6, // 7: White
+    0xFF565B66, // 8: Bright Black
+    0xFFFF6B6B, // 9: Bright Red
+    0xFFC2E78C, // 10: Bright Green
+    0xFFFFB454, // 11: Bright Yellow
+    0xFF73D0FF, // 12: Bright Blue
+    0xFFDFBFFF, // 13: Bright Magenta
+    0xFFB8E4C9, // 14: Bright Cyan
+    0xFFFFFFFF, // 15: Bright White
+];
+
+/// A single terminal cell with character and color attributes.
+#[derive(Clone, Copy)]
+struct Cell {
+    ch: char,
+    fg: u32,
+    bg: u32,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self {
+            ch: ' ',
+            fg: terminal_colors::FOREGROUND,
+            bg: terminal_colors::BACKGROUND,
+        }
+    }
+}
+
 /// A terminal widget that displays a text buffer with cursor.
 #[allow(dead_code)]
 pub struct Terminal {
@@ -29,8 +67,8 @@ pub struct Terminal {
     width: u32,
     height: u32,
 
-    // Text buffer (rows x cols of characters)
-    buffer: VecDeque<Vec<char>>,
+    // Text buffer (rows x cols of cells)
+    buffer: VecDeque<Vec<Cell>>,
     cols: usize,
     rows: usize,
 
@@ -42,13 +80,18 @@ pub struct Terminal {
 
     // Scroll position
     scroll_offset: usize,
-    history: VecDeque<Vec<char>>,
+    history: VecDeque<Vec<Cell>>,
     max_history: usize,
 
     // State
     focused: bool,
     bg_color: u32,
     fg_color: u32,
+
+    // Current pen attributes (applied to new cells)
+    current_fg: u32,
+    current_bg: u32,
+    bold: bool,
 
     // Input buffer for characters to send
     input_buffer: Vec<char>,
@@ -68,7 +111,7 @@ impl Terminal {
         let height = (rows as u32) * char_h;
 
         // Initialize buffer with empty rows
-        let buffer: VecDeque<Vec<char>> = (0..rows).map(|_| vec![' '; cols]).collect();
+        let buffer: VecDeque<Vec<Cell>> = (0..rows).map(|_| vec![Cell::default(); cols]).collect();
 
         Self {
             id,
@@ -89,6 +132,9 @@ impl Terminal {
             focused: false,
             bg_color: terminal_colors::BACKGROUND,
             fg_color: terminal_colors::FOREGROUND,
+            current_fg: terminal_colors::FOREGROUND,
+            current_bg: terminal_colors::BACKGROUND,
+            bold: false,
             input_buffer: Vec::new(),
             esc_state: EscState::Normal,
             esc_buf: [0; 32],
@@ -184,7 +230,7 @@ impl Terminal {
                 // DEL: move cursor left and erase
                 if self.cursor_col > 0 {
                     self.cursor_col -= 1;
-                    self.buffer[self.cursor_row][self.cursor_col] = ' ';
+                    self.buffer[self.cursor_row][self.cursor_col] = Cell::default();
                 }
             }
             '\t' => {
@@ -200,9 +246,13 @@ impl Terminal {
                     return; // Ignore other control characters
                 }
 
-                // Write the character
+                // Write the character with current pen attributes
                 if self.cursor_row < self.rows && self.cursor_col < self.cols {
-                    self.buffer[self.cursor_row][self.cursor_col] = ch;
+                    self.buffer[self.cursor_row][self.cursor_col] = Cell {
+                        ch,
+                        fg: self.current_fg,
+                        bg: self.current_bg,
+                    };
                     self.cursor_col += 1;
 
                     // Wrap to next line if needed
@@ -254,11 +304,11 @@ impl Terminal {
                     0 => {
                         // Erase from cursor to end of screen
                         for c in self.cursor_col..self.cols {
-                            self.buffer[self.cursor_row][c] = ' ';
+                            self.buffer[self.cursor_row][c] = Cell::default();
                         }
                         for row in (self.cursor_row + 1)..self.rows {
                             for c in 0..self.cols {
-                                self.buffer[row][c] = ' ';
+                                self.buffer[row][c] = Cell::default();
                             }
                         }
                     }
@@ -266,11 +316,11 @@ impl Terminal {
                         // Erase from start to cursor
                         for row in 0..self.cursor_row {
                             for c in 0..self.cols {
-                                self.buffer[row][c] = ' ';
+                                self.buffer[row][c] = Cell::default();
                             }
                         }
                         for c in 0..=self.cursor_col.min(self.cols - 1) {
-                            self.buffer[self.cursor_row][c] = ' ';
+                            self.buffer[self.cursor_row][c] = Cell::default();
                         }
                     }
                     2 => {
@@ -287,26 +337,66 @@ impl Terminal {
                     0 => {
                         // Erase from cursor to end of line
                         for c in self.cursor_col..self.cols {
-                            self.buffer[self.cursor_row][c] = ' ';
+                            self.buffer[self.cursor_row][c] = Cell::default();
                         }
                     }
                     1 => {
                         // Erase from start to cursor
                         for c in 0..=self.cursor_col.min(self.cols - 1) {
-                            self.buffer[self.cursor_row][c] = ' ';
+                            self.buffer[self.cursor_row][c] = Cell::default();
                         }
                     }
                     2 => {
                         // Erase entire line
                         for c in 0..self.cols {
-                            self.buffer[self.cursor_row][c] = ' ';
+                            self.buffer[self.cursor_row][c] = Cell::default();
                         }
                     }
                     _ => {}
                 }
             }
             'm' => {
-                // SGR (Select Graphic Rendition) - color/style attributes, silently consumed
+                // SGR (Select Graphic Rendition) - color/style attributes
+                let params = if params.is_empty() {
+                    vec![0]
+                } else {
+                    params.clone()
+                };
+                for &p in &params {
+                    match p {
+                        0 => {
+                            self.current_fg = terminal_colors::FOREGROUND;
+                            self.current_bg = terminal_colors::BACKGROUND;
+                            self.bold = false;
+                        }
+                        1 => {
+                            self.bold = true;
+                        }
+                        22 => {
+                            self.bold = false;
+                        }
+                        30..=37 => {
+                            let idx = (p - 30) + if self.bold { 8 } else { 0 };
+                            self.current_fg = ANSI_COLORS[idx];
+                        }
+                        39 => {
+                            self.current_fg = terminal_colors::FOREGROUND;
+                        }
+                        40..=47 => {
+                            self.current_bg = ANSI_COLORS[p - 40];
+                        }
+                        49 => {
+                            self.current_bg = terminal_colors::BACKGROUND;
+                        }
+                        90..=97 => {
+                            self.current_fg = ANSI_COLORS[p - 90 + 8];
+                        }
+                        100..=107 => {
+                            self.current_bg = ANSI_COLORS[p - 100 + 8];
+                        }
+                        _ => {} // Unknown SGR param, ignore
+                    }
+                }
             }
             _ => {
                 // Unknown CSI command, ignore
@@ -339,7 +429,7 @@ impl Terminal {
         // Build new buffer, preserving existing content where it fits
         let mut new_buffer = VecDeque::new();
         for r in 0..new_rows {
-            let mut row = vec![' '; new_cols];
+            let mut row = vec![Cell::default(); new_cols];
             if r < self.buffer.len() {
                 let old_row = &self.buffer[r];
                 let copy_cols = old_row.len().min(new_cols);
@@ -385,15 +475,15 @@ impl Terminal {
             self.history.push_back(line);
 
             // Add new empty line at bottom
-            self.buffer.push_back(vec![' '; self.cols]);
+            self.buffer.push_back(vec![Cell::default(); self.cols]);
         }
     }
 
     /// Clear the entire terminal.
     pub fn clear(&mut self) {
         for row in &mut self.buffer {
-            for ch in row.iter_mut() {
-                *ch = ' ';
+            for cell in row.iter_mut() {
+                *cell = Cell::default();
             }
         }
         self.cursor_row = 0;
@@ -404,7 +494,7 @@ impl Terminal {
     pub fn clear_to_eol(&mut self) {
         if self.cursor_row < self.rows {
             for col in self.cursor_col..self.cols {
-                self.buffer[self.cursor_row][col] = ' ';
+                self.buffer[self.cursor_row][col] = Cell::default();
             }
         }
     }
@@ -414,7 +504,7 @@ impl Terminal {
         self.clear_to_eol();
         for row in (self.cursor_row + 1)..self.rows {
             for col in 0..self.cols {
-                self.buffer[row][col] = ' ';
+                self.buffer[row][col] = Cell::default();
             }
         }
     }
@@ -430,7 +520,8 @@ impl Terminal {
     }
 
     /// Get the text content of a specific row.
-    pub fn get_row(&self, row: usize) -> Option<&[char]> {
+    #[allow(private_interfaces, dead_code)]
+    pub(crate) fn get_row(&self, row: usize) -> Option<&[Cell]> {
         self.buffer.get(row).map(|v| v.as_slice())
     }
 
@@ -485,22 +576,41 @@ impl Widget for Terminal {
         let char_w = char_width() as i32;
         let char_h = text_height() as i32;
 
-        // Draw each row of text
+        // Draw each row of cells
         for (row_idx, row) in self.buffer.iter().enumerate() {
             let row_y = self.y + (row_idx as i32) * char_h;
 
-            // Convert chars to string for drawing
-            let line: String = row.iter().collect();
+            for (col_idx, cell) in row.iter().enumerate() {
+                let cell_x = self.x + (col_idx as i32) * char_w;
 
-            draw_text(
-                buffer,
-                buffer_width,
-                buffer_height,
-                self.x,
-                row_y,
-                &line,
-                self.fg_color,
-            );
+                // Draw cell background if it differs from terminal background
+                if cell.bg != self.bg_color {
+                    draw_rect(
+                        buffer,
+                        buffer_width,
+                        buffer_height,
+                        cell_x,
+                        row_y,
+                        char_w as u32,
+                        char_h as u32,
+                        cell.bg,
+                    );
+                }
+
+                // Draw character if not a space
+                if cell.ch != ' ' {
+                    let ch_str = cell.ch.to_string();
+                    draw_text(
+                        buffer,
+                        buffer_width,
+                        buffer_height,
+                        cell_x,
+                        row_y,
+                        &ch_str,
+                        cell.fg,
+                    );
+                }
+            }
         }
 
         // Draw cursor if focused and visible
@@ -521,7 +631,7 @@ impl Widget for Terminal {
 
             // Draw the character under cursor in inverted color if there is one
             if self.cursor_row < self.rows && self.cursor_col < self.cols {
-                let ch = self.buffer[self.cursor_row][self.cursor_col];
+                let ch = self.buffer[self.cursor_row][self.cursor_col].ch;
                 if ch != ' ' {
                     let ch_str = ch.to_string();
                     draw_text(

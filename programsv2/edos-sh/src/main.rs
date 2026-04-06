@@ -159,7 +159,7 @@ fn main() {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "?".to_string());
-        print!("{} $ ", cwd);
+        print!("\x1B[32m{}\x1B[0m \x1B[1;34m$\x1B[0m ", cwd);
 
         // Flush stdout (important for piped I/O)
         if stdout.flush().is_err() {
