@@ -111,8 +111,7 @@ impl DirectFramebuffer {
             let second_page_phys = fb_phys + (height * pitch) as u64;
             let second_page_virt = fb.addr() as u64 + (height * pitch) as u64;
             let second_page_size = (height * pitch) as u64;
-            let flags =
-                PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE | PageTableFlags::NO_CACHE;
+            let flags = PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
 
             let mut mapper = memory_mapper();
             let page_size = 4096u64;

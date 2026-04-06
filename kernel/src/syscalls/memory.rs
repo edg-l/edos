@@ -51,8 +51,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
         let phys_flags = PageTableFlags::PRESENT
             | PageTableFlags::WRITABLE
             | PageTableFlags::USER_ACCESSIBLE
-            | PageTableFlags::NO_EXECUTE
-            | PageTableFlags::NO_CACHE;
+            | PageTableFlags::NO_EXECUTE;
 
         let page_count = (length + 0xFFF) / 4096;
         let memory_manager = info.lock().memory_manager.clone();
