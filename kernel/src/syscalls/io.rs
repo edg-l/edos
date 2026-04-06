@@ -112,7 +112,6 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
     match fdinfo {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
             StandardStream::Stdout | StandardStream::Stderr => {
-                // Direct copy from user to TTY
                 match tty::write_from_user(buffer_ptr, count) {
                     Some(n) => n as u64,
                     None => {
@@ -265,17 +264,27 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             }
         },
         Some(FileDescriptor::PipeRead(pipe)) => {
-            // Direct copy from pipe to user space, flush notifications after dropping lock.
-            let (result, notif) = {
-                let mut pipe = pipe.lock();
-                pipe.read_to_user(buffer_ptr, count)
-            };
-            notif.flush();
-            match result {
-                Some(n) => n as i64,
-                None => {
-                    info.lock().errno = Errno::EFAULT;
-                    -1
+            // Block until data is available or all writers are closed (EOF).
+            loop {
+                let (result, closed, notif) = {
+                    let mut guard = pipe.lock();
+                    let (r, n) = guard.read_to_user(buffer_ptr, count);
+                    (r, guard.closed && guard.buffer.is_empty(), n)
+                };
+                notif.flush();
+
+                match result {
+                    Some(n) if n > 0 => break n as i64,
+                    Some(_) if closed => break 0, // EOF: no data and all writers closed
+                    Some(_) => {
+                        // No data but writer still open: block and retry
+                        sched.thread_sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    None => {
+                        info.lock().errno = Errno::EFAULT;
+                        break -1;
+                    }
                 }
             }
         }

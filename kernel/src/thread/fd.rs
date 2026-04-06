@@ -56,6 +56,14 @@ impl FileDescriptorTable {
         self.fds.insert(fd, descriptor);
     }
 
+    /// Remove and return all file descriptors (for process exit cleanup).
+    pub fn drain_all(&mut self) -> alloc::vec::Vec<(u64, FileDescriptor)> {
+        let entries: alloc::vec::Vec<(u64, FileDescriptor)> =
+            self.fds.iter().map(|(&k, v)| (k, v.clone())).collect();
+        self.fds.clear();
+        entries
+    }
+
     /// Atomically find the lowest free fd and insert the descriptor.
     pub fn allocate_lowest_fd(&mut self, descriptor: FileDescriptor) -> u64 {
         let mut candidate = 0u64;

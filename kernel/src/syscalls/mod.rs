@@ -599,28 +599,46 @@ fn sys_getpid() -> u64 {
 }
 
 fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
+    use crate::thread::thread::EXITED_THREADS;
+
     let sched = sched();
     let info = sched.current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    if block {
-        log!("blocking waitpid not supported yet");
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
-    }
+    let target = ThreadId(pid);
 
-    let tid = ThreadId(pid);
-
-    if let Some(code) = take_thread_exit_code(tid) {
-        if !status_ptr.is_null() {
-            if !unsafe { try_write_user(status_ptr, code) } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
-            }
+    // Fast path: already exited
+    if let Some(code) = take_thread_exit_code(target) {
+        if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, code) } {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
         }
         return pid;
     }
 
+    if !block {
+        return 0;
+    }
+
+    // Register as waiter so record_thread_exit wakes us
+    let current_tid = sched.current_thread().unwrap().id;
+    EXITED_THREADS.register_waiter(target, current_tid);
+
+    // Park until the target has exited (peek, don't consume)
+    sched.thread_park_while(|| !EXITED_THREADS.has_exited(target));
+
+    EXITED_THREADS.unregister_waiter(target);
+
+    // Now consume the exit code
+    if let Some(code) = take_thread_exit_code(target) {
+        if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, code) } {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
+        }
+        return pid;
+    }
+
+    // Should not happen - we were woken because it exited
     0
 }
 

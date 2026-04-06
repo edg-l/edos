@@ -628,6 +628,25 @@ impl Thread {
         }
 
         if is_last_thread {
+            // Close all file descriptors (pipes need proper shutdown for EOF)
+            if let Some(info) = THREADS.get_info(self.id) {
+                let fds: alloc::vec::Vec<(u64, super::pipe::FileDescriptor)> =
+                    info.lock().fd_table.lock().drain_all();
+                for (_fd_num, descriptor) in fds {
+                    match descriptor {
+                        super::pipe::FileDescriptor::PipeRead(pipe) => {
+                            let notif = pipe.lock().close_reader();
+                            notif.flush();
+                        }
+                        super::pipe::FileDescriptor::PipeWrite(pipe) => {
+                            let notif = pipe.lock().close_writer();
+                            notif.flush();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
             // Clean up windows owned by this process
             window::cleanup_process_windows(user.pid);
 
@@ -791,12 +810,15 @@ pub(super) static THREADS: ThreadRegistry = ThreadRegistry::new();
 
 pub struct ThreadExitRegistry {
     map: RwLock<BTreeMap<ThreadId, i32>>,
+    /// Threads waiting for another thread to exit: child_tid -> waiter_tid.
+    waiters: RwLock<BTreeMap<ThreadId, ThreadId>>,
 }
 
 impl ThreadExitRegistry {
     pub const fn new() -> Self {
         Self {
             map: RwLock::new(BTreeMap::new()),
+            waiters: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -809,12 +831,41 @@ impl ThreadExitRegistry {
     pub fn take(&self, tid: ThreadId) -> Option<i32> {
         without_interrupts(|| self.map.write().remove(&tid))
     }
+
+    /// Check if an exit code exists without consuming it.
+    pub fn has_exited(&self, tid: ThreadId) -> bool {
+        without_interrupts(|| self.map.read().contains_key(&tid))
+    }
+
+    /// Register that `waiter` wants to be woken when `target` exits.
+    pub fn register_waiter(&self, target: ThreadId, waiter: ThreadId) {
+        without_interrupts(|| {
+            self.waiters.write().insert(target, waiter);
+        })
+    }
+
+    /// Remove a waiter registration.
+    pub fn unregister_waiter(&self, target: ThreadId) {
+        without_interrupts(|| {
+            self.waiters.write().remove(&target);
+        })
+    }
+
+    /// Take and wake the waiter for a given target thread, if any.
+    pub fn wake_waiter(&self, target: ThreadId) {
+        let waiter = without_interrupts(|| self.waiters.write().remove(&target));
+        if let Some(waiter_tid) = waiter {
+            use crate::thread::scheduler::{WakePriority, sched};
+            sched().wake_thread_irq(waiter_tid, WakePriority::Normal);
+        }
+    }
 }
 
-pub(super) static EXITED_THREADS: ThreadExitRegistry = ThreadExitRegistry::new();
+pub static EXITED_THREADS: ThreadExitRegistry = ThreadExitRegistry::new();
 
 pub fn record_thread_exit(tid: ThreadId, code: i32) {
     EXITED_THREADS.insert(tid, code);
+    EXITED_THREADS.wake_waiter(tid);
 }
 
 pub fn take_thread_exit_code(tid: ThreadId) -> Option<i32> {
