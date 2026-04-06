@@ -41,6 +41,7 @@ define run_qemu_uefi
 		-no-reboot \
 		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
 		-device ide-hd,drive=sata0,bus=ide.1 \
+		-device VGA,vgamem_mb=32 \
 		-smp $(2) \
 		$(3) \
 		$(QEMUFLAGS)

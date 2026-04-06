@@ -34,6 +34,7 @@ const FB_IOCTL_DRAW_RECT: u64 = 0x4642_0001;
 const FB_IOCTL_RENDER: u64 = 0x4642_0002;
 const FB_IOCTL_DRAW: u64 = 0x4642_0003;
 const FB_IOCTL_SCREEN_INFO: u64 = 0x4642_0004;
+const FB_IOCTL_FLIP: u64 = 0x4642_0005;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -106,6 +107,12 @@ impl Framebuffer {
     /// Render all pending draw operations to the screen
     pub fn render(&self) {
         self.fd.ioctl(FB_IOCTL_RENDER, 0, 0, 0).unwrap();
+    }
+
+    /// Flip the display to show the back page (double buffering).
+    /// When double buffering is disabled in the kernel this is a no-op.
+    pub fn flip(&self) {
+        self.fd.ioctl(FB_IOCTL_FLIP, 0, 0, 0).unwrap();
     }
 
     /// Get screen information
@@ -1305,6 +1312,7 @@ impl Screen {
 
         // Always call the final render syscall to present to screen
         self.framebuffer.render();
+        self.framebuffer.flip();
         Ok(())
     }
 
@@ -1354,9 +1362,17 @@ impl Screen {
         Ok(())
     }
 
-    /// DEBUG: Only call the present syscall, skip the back_buffer draw
+    /// Only call the present and flip syscalls, skip the back_buffer draw.
+    /// Used by the WM after all dirty regions have been sent via render_region().
     pub fn render_present_only(&mut self) {
         self.framebuffer.render();
+        self.framebuffer.flip();
+    }
+
+    /// Flip the display to present the back page.
+    /// Call this after all render_region() calls in a frame are done.
+    pub fn flip(&mut self) {
+        self.framebuffer.flip();
     }
 
     /// Create a new DrawRequest that fits entirely on screen

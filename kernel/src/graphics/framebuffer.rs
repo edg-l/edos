@@ -9,6 +9,7 @@ pub const FB_IOCTL_DRAW_RECT: u64 = 0x4642_0001;
 pub const FB_IOCTL_RENDER: u64 = 0x4642_0002;
 pub const FB_IOCTL_DRAW: u64 = 0x4642_0003;
 pub const FB_IOCTL_SCREEN_INFO: u64 = 0x4642_0004;
+pub const FB_IOCTL_FLIP: u64 = 0x4642_0005;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -117,6 +118,11 @@ impl DevFsDevice for FramebufferDevice {
                     (*info_ptr).width = info.width as u32;
                     (*info_ptr).height = info.height as u32;
                 }
+                Ok(0)
+            }
+            FB_IOCTL_FLIP => {
+                let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
+                display.lock().flip();
                 Ok(0)
             }
             _ => Err(DevFsError::Unsupported),

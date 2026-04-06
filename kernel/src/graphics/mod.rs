@@ -6,7 +6,14 @@ pub mod framebuffer;
 
 use spin::{Mutex, Once};
 
-use crate::{boot::boot_info, println};
+use crate::{
+    boot::boot_info,
+    drivers::vga::controller::{
+        DISPI_INDEX_VIDEO_MEMORY_64K, DISPI_INDEX_VIRT_HEIGHT, DISPI_INDEX_Y_OFFSET, dispi_read,
+        dispi_write,
+    },
+    println,
+};
 
 /// Global framebuffer, initialized once and accessed directly from ioctl handlers.
 /// No render thread or Mailbox -- callers write to the framebuffer in their own
@@ -32,6 +39,8 @@ pub struct DirectFramebuffer {
     width: usize,
     height: usize,
     pitch: usize,
+    /// Base virtual address of the framebuffer (page 0).
+    fb_base: *mut u32,
     /// True when the framebuffer pixel format is 32-bit 0x00RRGGBB
     /// (R=8 bits at shift 16, G=8 bits at shift 8, B=8 bits at shift 0,
     /// pitch aligned to 4 bytes). In this case we can memcpy rows directly
@@ -41,7 +50,12 @@ pub struct DirectFramebuffer {
     green_lut: [u32; 256],
     blue_lut: [u32; 256],
     converted_row_buffer: Vec<u32>,
+    double_buffered: bool,
+    /// Y offset in pixels of the back page (the page we draw into).
+    back_page_y_offset: usize,
 }
+
+unsafe impl Send for DirectFramebuffer {}
 
 impl DirectFramebuffer {
     pub fn new() -> Self {
@@ -49,6 +63,7 @@ impl DirectFramebuffer {
         let width = fb.width() as usize;
         let height = fb.height() as usize;
         let pitch = fb.pitch() as usize;
+        let fb_base = fb.addr() as *mut u32;
 
         let red_lut = Self::build_channel_lut(fb.red_mask_size(), fb.red_mask_shift());
         let green_lut = Self::build_channel_lut(fb.green_mask_size(), fb.green_mask_shift());
@@ -77,16 +92,40 @@ impl DirectFramebuffer {
             fb.blue_mask_shift(),
         );
 
+        let two_page_bytes = 2 * height * pitch;
+        let vram_64k = dispi_read(DISPI_INDEX_VIDEO_MEMORY_64K) as usize;
+        let vram_bytes = vram_64k * 64 * 1024;
+        let double_buffered = vram_bytes >= two_page_bytes && pitch % 4 == 0;
+
+        if double_buffered {
+            dispi_write(DISPI_INDEX_VIRT_HEIGHT, (2 * height) as u16);
+            dispi_write(DISPI_INDEX_Y_OFFSET, 0);
+            println!(
+                "Framebuffer: double buffering enabled (VRAM={}KB, need={}KB)",
+                vram_bytes / 1024,
+                two_page_bytes / 1024
+            );
+        } else {
+            println!(
+                "Framebuffer: double buffering disabled (VRAM={}KB, need={}KB)",
+                vram_bytes / 1024,
+                two_page_bytes / 1024
+            );
+        }
+
         Self {
             width,
             height,
             pitch,
+            fb_base,
             is_identity,
             red_lut,
             green_lut,
             blue_lut,
             // Pre-allocate to screen width so draw() never allocates under the lock.
             converted_row_buffer: alloc::vec![0u32; width],
+            double_buffered,
+            back_page_y_offset: if double_buffered { height } else { 0 },
         }
     }
 
@@ -134,11 +173,11 @@ impl DirectFramebuffer {
             return;
         }
 
-        let fb = &boot_info().framebuffer;
         let pixels_per_row = self.pitch / 4;
         let src_offset_x = start_x - x as usize;
         let src_offset_y = start_y - y as usize;
         let row_len = end_x - start_x;
+        let back_y = self.back_page_y_offset;
 
         // Bounds-check: verify the last row we'll read is within src
         let last_src_row = src_offset_y + (end_y - start_y) - 1;
@@ -152,13 +191,12 @@ impl DirectFramebuffer {
             let mut src_row = src_offset_y;
             for dst_y in start_y..end_y {
                 let src_start = src_row * src_width + src_offset_x;
-                let dst_start = dst_y * pixels_per_row + start_x;
+                let dst_start = (back_y + dst_y) * pixels_per_row + start_x;
 
                 unsafe {
-                    let fb_ptr = fb.addr() as *mut u32;
                     core::ptr::copy_nonoverlapping(
                         src[src_start..].as_ptr(),
-                        fb_ptr.add(dst_start),
+                        self.fb_base.add(dst_start),
                         row_len,
                     );
                 }
@@ -176,7 +214,7 @@ impl DirectFramebuffer {
             let mut src_row = src_offset_y;
             for dst_y in start_y..end_y {
                 let src_start = src_row * src_width + src_offset_x;
-                let dst_start = dst_y * pixels_per_row + start_x;
+                let dst_start = (back_y + dst_y) * pixels_per_row + start_x;
 
                 for i in 0..row_len {
                     let rgb = src[src_start + i];
@@ -187,8 +225,11 @@ impl DirectFramebuffer {
                 }
 
                 unsafe {
-                    let fb_ptr = fb.addr() as *mut u32;
-                    core::ptr::copy_nonoverlapping(conv.as_ptr(), fb_ptr.add(dst_start), row_len);
+                    core::ptr::copy_nonoverlapping(
+                        conv.as_ptr(),
+                        self.fb_base.add(dst_start),
+                        row_len,
+                    );
                 }
 
                 src_row += 1;
@@ -211,9 +252,9 @@ impl DirectFramebuffer {
             return;
         }
 
-        let fb = &boot_info().framebuffer;
         let pixels_per_row = self.pitch / 4;
         let row_len = end_x - start_x;
+        let back_y = self.back_page_y_offset;
         let native_color = if self.is_identity {
             color
         } else {
@@ -225,11 +266,32 @@ impl DirectFramebuffer {
         row_buf.fill(native_color);
 
         for dst_y in start_y..end_y {
-            let dst_start = dst_y * pixels_per_row + start_x;
+            let dst_start = (back_y + dst_y) * pixels_per_row + start_x;
             unsafe {
-                let fb_ptr = fb.addr() as *mut u32;
-                core::ptr::copy_nonoverlapping(row_buf.as_ptr(), fb_ptr.add(dst_start), row_len);
+                core::ptr::copy_nonoverlapping(
+                    row_buf.as_ptr(),
+                    self.fb_base.add(dst_start),
+                    row_len,
+                );
             }
+        }
+    }
+
+    /// Flip the display to show the back page. When double buffering is active
+    /// this writes the current `front_y` to the Bochs VBE Y_OFFSET register,
+    /// making the just-drawn page visible, then swaps front and back.
+    pub fn flip(&mut self) {
+        if !self.double_buffered {
+            return;
+        }
+        // Show the back page (the one we just drew to).
+        let show_y = self.back_page_y_offset as u16;
+        dispi_write(DISPI_INDEX_Y_OFFSET, show_y);
+        // The old front page becomes the new back page.
+        if self.back_page_y_offset == 0 {
+            self.back_page_y_offset = self.height;
+        } else {
+            self.back_page_y_offset = 0;
         }
     }
 }
