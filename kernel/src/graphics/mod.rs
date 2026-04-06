@@ -15,7 +15,7 @@ use crate::{
         dispi_write,
     },
     graphics::framebuffer::FramebufferMmapInfo,
-    memory::mapper::memory_mapper,
+    memory::{mapper::memory_mapper, pat},
     println,
 };
 
@@ -111,7 +111,8 @@ impl DirectFramebuffer {
             let second_page_phys = fb_phys + (height * pitch) as u64;
             let second_page_virt = fb.addr() as u64 + (height * pitch) as u64;
             let second_page_size = (height * pitch) as u64;
-            let flags = PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+            let flags =
+                PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE | pat::WRITE_COMBINING;
 
             let mut mapper = memory_mapper();
             let page_size = 4096u64;
@@ -143,6 +144,18 @@ impl DirectFramebuffer {
                 vram_bytes / 1024,
                 two_page_bytes / 1024
             );
+        }
+
+        // Re-map the first framebuffer page (Limine HHDM) with Write-Combining.
+        {
+            let first_page_virt = VirtAddr::new(fb.addr() as u64);
+            let first_page_size = (height * pitch) as u64;
+            let wc_flags =
+                PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE | pat::WRITE_COMBINING;
+            let mut mapper = memory_mapper();
+            if let Err(e) = mapper.change_flags(first_page_virt, first_page_size, wc_flags) {
+                println!("Framebuffer: failed to set WC on first page: {:?}", e);
+            }
         }
 
         Self {

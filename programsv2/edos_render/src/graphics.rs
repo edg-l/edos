@@ -44,6 +44,7 @@ const PROT_READ: u32 = 0x1;
 const PROT_WRITE: u32 = 0x2;
 const MAP_PRIVATE: u32 = 0x02;
 const MAP_PHYSICAL: u32 = 0x40;
+const MAP_WRITE_COMBINING: u32 = 0x80;
 
 #[inline(always)]
 unsafe fn syscall5(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
@@ -187,7 +188,7 @@ impl Framebuffer {
                 0,
                 info.total_size,
                 (PROT_READ | PROT_WRITE) as u64,
-                (MAP_PRIVATE | MAP_PHYSICAL) as u64,
+                (MAP_PRIVATE | MAP_PHYSICAL | MAP_WRITE_COMBINING) as u64,
                 info.phys_addr,
             )
         } as *mut u32;

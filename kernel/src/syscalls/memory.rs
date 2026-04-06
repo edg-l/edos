@@ -8,7 +8,7 @@ use x86_64::{
 
 use crate::{
     log,
-    memory::mapper::memory_mapper,
+    memory::{mapper::memory_mapper, pat},
     println,
     syscalls::Errno,
     thread::{MappingType, MemoryMapping, UserThreadInfo, mutex::BlockingMutex, scheduler::sched},
@@ -24,6 +24,7 @@ const PROT_EXEC: u32 = 0x4;
 const MAP_ANONYMOUS: u32 = 0x20;
 const MAP_PRIVATE: u32 = 0x02;
 const MAP_PHYSICAL: u32 = 0x40;
+const MAP_WRITE_COMBINING: u32 = 0x80;
 
 pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -> u64 {
     log!("MMap: {addr} {length} {prot} {flags} {phys_addr}");
@@ -48,10 +49,13 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
             VirtAddr::new(addr)
         };
 
-        let phys_flags = PageTableFlags::PRESENT
+        let mut phys_flags = PageTableFlags::PRESENT
             | PageTableFlags::WRITABLE
             | PageTableFlags::USER_ACCESSIBLE
             | PageTableFlags::NO_EXECUTE;
+        if (flags & MAP_WRITE_COMBINING) != 0 {
+            phys_flags |= pat::WRITE_COMBINING;
+        }
 
         let page_count = (length + 0xFFF) / 4096;
         let memory_manager = info.lock().memory_manager.clone();

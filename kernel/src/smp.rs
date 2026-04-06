@@ -50,6 +50,7 @@ pub fn init() {
 pub unsafe extern "C" fn ap_start(cpu: &MpCpu) -> ! {
     // Per-CPU data and core-local tables
     switch_to_kernel_page();
+    crate::memory::pat::init_pat();
     tlb_flush_all_including_global();
     unsafe { init_gs_for_this_cpu(cpu.lapic_id) };
     gdt::init_current_cpu();

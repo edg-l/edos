@@ -4,6 +4,7 @@ use crate::boot::boot_info;
 
 pub mod frame_allocator;
 pub mod mapper;
+pub mod pat;
 pub mod shared;
 pub mod valloc;
 

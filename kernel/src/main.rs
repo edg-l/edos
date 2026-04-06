@@ -90,6 +90,7 @@ fn init() {
 
     println!("Initializing heap");
     init_heap();
+    memory::pat::init_pat();
     println!("Initializing acpi tables");
     init_acpi();
     println!("Initializing gdt");
