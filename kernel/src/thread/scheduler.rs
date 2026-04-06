@@ -206,28 +206,54 @@ impl Scheduler {
             if !idle || self.has_work.load(Ordering::Acquire) {
                 self.maybe_preempt(context);
             }
+
+            // Re-arm the one-shot APIC timer. context_switch_to arms it when
+            // switching threads, and run_idle arms it while halted, but if
+            // on_tick fires and neither preempts nor goes idle (single thread
+            // running, no work to steal), the timer would stay dead. This
+            // ensures the next earliest_deadline and timeslice are honored.
+            if !idle {
+                let now = Instant::now();
+                let ed = self.earliest_deadline.load(Ordering::Acquire);
+                // Re-arm to the sooner of: a default timeslice, or the
+                // earliest sleeper deadline.
+                let mut next = now + self.default_timeslice;
+                if ed != u64::MAX && ed != 0 {
+                    let dl = Instant::from_tick(ed);
+                    if dl < next {
+                        next = dl;
+                    }
+                }
+                let dur = next.duration_since(now);
+                // Clamp to at least 1us to avoid zero-length timers.
+                set_apic_timer(if dur.is_zero() {
+                    Duration::from_micros(1)
+                } else {
+                    dur
+                });
+            }
         })
     }
 
     fn wake_sleepers(&self) {
         let now = Instant::now().tick();
         let mut sl = self.sleepers.lock();
-        // Drain stale entries (dead or already woken) from the top of the heap.
-        while let Some(top) = sl.peek() {
+        // Drain stale and expired entries from the heap.
+        // Stale = not Sleeping (already woken, died, etc.).
+        // We drain all stale entries at the top first, then process expired ones,
+        // continuing to skip stale entries encountered along the way.
+        loop {
+            let Some(top) = sl.peek() else { break };
+            // Drain stale entries regardless of deadline.
             if top.thread.state() != State::Sleeping {
                 sl.pop();
                 continue;
             }
-            break;
-        }
-        while let Some(top) = sl.peek() {
+            // First non-stale entry with a future deadline: we're done.
             if top.deadline > now {
                 break;
             }
             let t = sl.pop().unwrap().thread;
-            if t.state() == State::Dying {
-                continue;
-            }
             if t.try_wake() {
                 debug_assert!(
                     !t.rq_link.is_linked(),
@@ -1158,7 +1184,8 @@ extern "C" fn transition_sleep(arg: *mut u8) -> bool {
     };
 
     if !cur.cas_state(State::Running, State::Sleeping) {
-        return true;
+        // Interrupts are disabled and we own the Running state -- CAS cannot fail.
+        unreachable!("transition_sleep: CAS Running->Sleeping failed");
     }
 
     let deadline_tick = ctx.deadline_tick;
