@@ -6,12 +6,15 @@ pub mod framebuffer;
 
 use spin::{Mutex, Once};
 
+use x86_64::{PhysAddr, VirtAddr, structures::paging::PageTableFlags};
+
 use crate::{
     boot::boot_info,
     drivers::vga::controller::{
         DISPI_INDEX_VIDEO_MEMORY_64K, DISPI_INDEX_VIRT_HEIGHT, DISPI_INDEX_Y_OFFSET, dispi_read,
         dispi_write,
     },
+    memory::mapper::memory_mapper,
     println,
 };
 
@@ -98,6 +101,35 @@ impl DirectFramebuffer {
         let double_buffered = vram_bytes >= two_page_bytes && pitch % 4 == 0;
 
         if double_buffered {
+            // Map the second VRAM page into the kernel's address space.
+            // Limine's HHDM only maps the first framebuffer page. The second
+            // page at fb_base + page_size is unmapped MMIO that needs explicit
+            // page table entries.
+            let hhdm_offset = boot_info().physical_memory_offset.as_u64();
+            let fb_phys = fb.addr() as u64 - hhdm_offset;
+            let second_page_phys = fb_phys + (height * pitch) as u64;
+            let second_page_virt = fb.addr() as u64 + (height * pitch) as u64;
+            let second_page_size = (height * pitch) as u64;
+            let flags =
+                PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE | PageTableFlags::NO_CACHE;
+
+            let mut mapper = memory_mapper();
+            let page_size = 4096u64;
+            let mut offset = 0u64;
+            while offset < second_page_size {
+                let virt = VirtAddr::new(second_page_virt + offset);
+                let phys = PhysAddr::new(second_page_phys + offset);
+                if let Err(e) = mapper.map_address(virt, phys, flags) {
+                    println!(
+                        "Framebuffer: failed to map second page at {:#x}: {:?}",
+                        phys.as_u64(),
+                        e
+                    );
+                    break;
+                }
+                offset += page_size;
+            }
+
             dispi_write(DISPI_INDEX_VIRT_HEIGHT, (2 * height) as u16);
             dispi_write(DISPI_INDEX_Y_OFFSET, 0);
             println!(
