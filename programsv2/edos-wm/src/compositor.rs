@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use edos_render::graphics::{Color, Screen};
-use edos_render::window::{flags::FLAG_DOCK, shm_map, shm_unmap, WindowListEntry, PROT_READ};
+use edos_render::window::{PROT_READ, WindowListEntry, flags::FLAG_DOCK, shm_map, shm_unmap};
 
 use crate::cursor::Cursor;
 use crate::decorations::{self, BORDER_WIDTH, TITLE_HEIGHT};
@@ -30,7 +30,12 @@ impl ShmCache {
     /// buffer yet. We return the cached (actual) dimensions to avoid
     /// reading beyond the buffer's real size. Once the client creates a
     /// new shm_id, cleanup() will remove the old mapping.
-    pub fn get_or_map(&mut self, shm_id: u64, width: u32, height: u32) -> Option<(*mut u8, u32, u32)> {
+    pub fn get_or_map(
+        &mut self,
+        shm_id: u64,
+        width: u32,
+        height: u32,
+    ) -> Option<(*mut u8, u32, u32)> {
         if let Some(&(ptr, cached_w, cached_h)) = self.mappings.get(&shm_id) {
             // Always return cached mapping with its ACTUAL dimensions.
             // Don't try to remap - the buffer size is fixed at creation.
@@ -115,7 +120,12 @@ pub fn composite(
 /// Draw a single window with decorations directly to the screen buffer.
 /// This avoids per-frame allocations by drawing directly.
 /// Handles windows partially off-screen by clipping to visible region.
-fn draw_window_direct(screen: &mut Screen, window: &WindowListEntry, is_focused: bool, shm_cache: &mut ShmCache) {
+fn draw_window_direct(
+    screen: &mut Screen,
+    window: &WindowListEntry,
+    is_focused: bool,
+    shm_cache: &mut ShmCache,
+) {
     // Check if this is a dock window (no decorations)
     let is_dock = (window.flags & FLAG_DOCK) != 0;
 
@@ -156,28 +166,29 @@ fn draw_window_direct(screen: &mut Screen, window: &WindowListEntry, is_focused:
 
     // Helper to draw a rect with clipping applied
     // Takes coordinates relative to window origin (before decoration offset)
-    let draw_clipped_rect = |screen: &mut Screen, rx: i64, ry: i64, rw: i64, rh: i64, color: Color| {
-        // Convert to absolute screen coordinates
-        let abs_x = window.x as i64 + rx;
-        let abs_y = window.y as i64 + ry;
+    let draw_clipped_rect =
+        |screen: &mut Screen, rx: i64, ry: i64, rw: i64, rh: i64, color: Color| {
+            // Convert to absolute screen coordinates
+            let abs_x = window.x as i64 + rx;
+            let abs_y = window.y as i64 + ry;
 
-        // Skip if completely off-screen
-        if abs_x + rw <= 0 || abs_y + rh <= 0 || abs_x >= screen_w || abs_y >= screen_h {
-            return;
-        }
+            // Skip if completely off-screen
+            if abs_x + rw <= 0 || abs_y + rh <= 0 || abs_x >= screen_w || abs_y >= screen_h {
+                return;
+            }
 
-        // Clip to screen bounds
-        let clipped_x = abs_x.max(0) as u64;
-        let clipped_y = abs_y.max(0) as u64;
-        let clip_l = (-abs_x).max(0) as u64;
-        let clip_t = (-abs_y).max(0) as u64;
-        let clipped_w = ((rw as u64).saturating_sub(clip_l)).min(screen_w as u64 - clipped_x);
-        let clipped_h = ((rh as u64).saturating_sub(clip_t)).min(screen_h as u64 - clipped_y);
+            // Clip to screen bounds
+            let clipped_x = abs_x.max(0) as u64;
+            let clipped_y = abs_y.max(0) as u64;
+            let clip_l = (-abs_x).max(0) as u64;
+            let clip_t = (-abs_y).max(0) as u64;
+            let clipped_w = ((rw as u64).saturating_sub(clip_l)).min(screen_w as u64 - clipped_x);
+            let clipped_h = ((rh as u64).saturating_sub(clip_t)).min(screen_h as u64 - clipped_y);
 
-        if clipped_w > 0 && clipped_h > 0 {
-            let _ = screen.draw_rect(clipped_x, clipped_y, clipped_w, clipped_h, color);
-        }
-    };
+            if clipped_w > 0 && clipped_h > 0 {
+                let _ = screen.draw_rect(clipped_x, clipped_y, clipped_w, clipped_h, color);
+            }
+        };
 
     // Draw border (outer rectangle) - as 4 separate edges for proper clipping
     let bw = BORDER_WIDTH as i64;
@@ -203,13 +214,23 @@ fn draw_window_direct(screen: &mut Screen, window: &WindowListEntry, is_focused:
     // Draw close button (right side of title bar)
     let close_rx = bw + w - 20;
     let close_ry = bw + 2;
-    draw_clipped_rect(screen, close_rx, close_ry, 18, th - bw - 4, COLOR_CLOSE_BUTTON);
+    draw_clipped_rect(
+        screen,
+        close_rx,
+        close_ry,
+        18,
+        th - bw - 4,
+        COLOR_CLOSE_BUTTON,
+    );
 
     // Draw X symbol on close button (only if visible)
     let close_abs_x = window.x as i64 + close_rx + 4;
     let close_abs_y = window.y as i64 + close_ry + 3;
-    if close_abs_x >= 0 && close_abs_y >= 0 &&
-       close_abs_x + 10 <= screen_w && close_abs_y + 10 <= screen_h {
+    if close_abs_x >= 0
+        && close_abs_y >= 0
+        && close_abs_x + 10 <= screen_w
+        && close_abs_y + 10 <= screen_h
+    {
         draw_close_x(screen, close_abs_x as u64, close_abs_y as u64);
     }
 
@@ -218,7 +239,9 @@ fn draw_window_direct(screen: &mut Screen, window: &WindowListEntry, is_focused:
 
     // Blit client buffer content with clipping
     if window.buffer_shm_id != 0 {
-        if let Some((ptr, buf_w, buf_h)) = shm_cache.get_or_map(window.buffer_shm_id, window.width, window.height) {
+        if let Some((ptr, buf_w, buf_h)) =
+            shm_cache.get_or_map(window.buffer_shm_id, window.width, window.height)
+        {
             let pixel_count = (buf_w as usize) * (buf_h as usize);
             let pixels = unsafe { std::slice::from_raw_parts(ptr as *const u32, pixel_count) };
 
@@ -231,8 +254,11 @@ fn draw_window_direct(screen: &mut Screen, window: &WindowListEntry, is_focused:
             let content_abs_y = window.y as i64 + content_ry;
 
             // Skip if content is completely off-screen
-            if content_abs_x + (buf_w as i64) > 0 && content_abs_y + (buf_h as i64) > 0 &&
-               content_abs_x < screen_w && content_abs_y < screen_h {
+            if content_abs_x + (buf_w as i64) > 0
+                && content_abs_y + (buf_h as i64) > 0
+                && content_abs_x < screen_w
+                && content_abs_y < screen_h
+            {
                 // Calculate source offset (how much to skip in the buffer)
                 let src_off_x = (-content_abs_x).max(0) as u64;
                 let src_off_y = (-content_abs_y).max(0) as u64;
@@ -278,7 +304,9 @@ fn draw_dock_window(screen: &mut Screen, window: &WindowListEntry, shm_cache: &m
 
     // Blit client buffer content with clipping
     if window.buffer_shm_id != 0 {
-        if let Some((ptr, buf_w, buf_h)) = shm_cache.get_or_map(window.buffer_shm_id, window.width, window.height) {
+        if let Some((ptr, buf_w, buf_h)) =
+            shm_cache.get_or_map(window.buffer_shm_id, window.width, window.height)
+        {
             let pixel_count = (buf_w as usize) * (buf_h as usize);
             let pixels = unsafe { std::slice::from_raw_parts(ptr as *const u32, pixel_count) };
 
@@ -287,8 +315,11 @@ fn draw_dock_window(screen: &mut Screen, window: &WindowListEntry, shm_cache: &m
             let content_abs_y = window.y as i64;
 
             // Skip if content is completely off-screen
-            if content_abs_x + (buf_w as i64) > 0 && content_abs_y + (buf_h as i64) > 0 &&
-               content_abs_x < screen_w && content_abs_y < screen_h {
+            if content_abs_x + (buf_w as i64) > 0
+                && content_abs_y + (buf_h as i64) > 0
+                && content_abs_x < screen_w
+                && content_abs_y < screen_h
+            {
                 // Calculate source offset (how much to skip in the buffer)
                 let src_off_x = (-content_abs_x).max(0) as u64;
                 let src_off_y = (-content_abs_y).max(0) as u64;

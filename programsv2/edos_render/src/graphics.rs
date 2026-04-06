@@ -126,6 +126,62 @@ impl Framebuffer {
         })
     }
 
+    /// Draw a raw pixel slice to the screen at (x, y) with dimensions (width, height).
+    /// The caller must ensure `pixels.len() == width * height`.
+    pub fn draw_pixels(
+        &mut self,
+        x: u64,
+        y: u64,
+        width: u64,
+        height: u64,
+        pixels: &[u32],
+    ) -> Result<()> {
+        let pixel_count = width
+            .checked_mul(height)
+            .ok_or(GraphicsError::InvalidInput)?;
+
+        if pixel_count == 0 {
+            return Ok(());
+        }
+
+        let header = FramebufferDraw {
+            x,
+            y,
+            width,
+            height,
+            pixel_count,
+        };
+
+        let header_bytes = core::mem::size_of::<FramebufferDraw>();
+        let pixel_bytes = (pixel_count as usize)
+            .checked_mul(core::mem::size_of::<u32>())
+            .ok_or(GraphicsError::InvalidInput)?;
+
+        self.buffer.clear();
+        self.buffer.reserve(header_bytes + pixel_bytes);
+
+        self.buffer.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(
+                (&header as *const FramebufferDraw) as *const u8,
+                header_bytes,
+            )
+        });
+        self.buffer.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixel_bytes)
+        });
+
+        self.fd
+            .ioctl(
+                FB_IOCTL_DRAW,
+                self.buffer.as_mut_ptr() as u64,
+                self.buffer.len(),
+                IOCTL_ARG_IN,
+            )
+            .unwrap();
+
+        Ok(())
+    }
+
     /// Draw this request to the screen
     pub fn draw(&mut self, request: &DrawRequest) -> Result<()> {
         let pixel_count = request
@@ -1158,6 +1214,8 @@ pub struct Screen {
     info: ScreenInfo,
     back_buffer: Option<DrawRequest>,
     dirty: bool,
+    /// Pre-allocated scratch buffer for render_region to avoid per-call allocation.
+    region_scratch: Vec<u32>,
 }
 
 impl Screen {
@@ -1170,6 +1228,7 @@ impl Screen {
             info,
             back_buffer: None,
             dirty: false,
+            region_scratch: Vec::new(),
         })
     }
 
@@ -1246,6 +1305,52 @@ impl Screen {
 
         // Always call the final render syscall to present to screen
         self.framebuffer.render();
+        Ok(())
+    }
+
+    /// Render a sub-rectangle of the back buffer to the framebuffer.
+    /// `x`, `y`, `w`, `h` are in screen coordinates. The region is clipped to
+    /// the back buffer dimensions before sending.
+    pub fn render_region(&mut self, x: u64, y: u64, w: u64, h: u64) -> Result<()> {
+        let buf = match self.back_buffer {
+            Some(ref b) => b,
+            None => return Ok(()),
+        };
+
+        let screen_w = buf.width;
+        let screen_h = buf.height;
+
+        if x >= screen_w || y >= screen_h || w == 0 || h == 0 {
+            return Ok(());
+        }
+
+        let actual_w = w.min(screen_w - x);
+        let actual_h = h.min(screen_h - y);
+
+        let pixel_count = (actual_w * actual_h) as usize;
+
+        // Reuse scratch buffer; only grow, never shrink, to avoid repeated allocs.
+        if self.region_scratch.len() < pixel_count {
+            self.region_scratch.resize(pixel_count, 0);
+        }
+
+        // Pack rows from back buffer into contiguous scratch buffer.
+        for row in 0..actual_h {
+            let src_start = ((y + row) * screen_w + x) as usize;
+            let dst_start = (row * actual_w) as usize;
+            self.region_scratch[dst_start..dst_start + actual_w as usize]
+                .copy_from_slice(&buf.pixels[src_start..src_start + actual_w as usize]);
+        }
+
+        self.framebuffer.draw_pixels(
+            x,
+            y,
+            actual_w,
+            actual_h,
+            &self.region_scratch[..pixel_count],
+        )?;
+
+        self.dirty = false;
         Ok(())
     }
 
@@ -1493,12 +1598,8 @@ impl Screen {
             }
 
             // Clamp copy dimensions to available source and destination space
-            let actual_w = copy_w
-                .min(src_width - src_x)
-                .min(screen_width - dst_x);
-            let actual_h = copy_h
-                .min(src_height - src_y)
-                .min(screen_height - dst_y);
+            let actual_w = copy_w.min(src_width - src_x).min(screen_width - dst_x);
+            let actual_h = copy_h.min(src_height - src_y).min(screen_height - dst_y);
 
             // Copy row by row
             for row in 0..actual_h {
@@ -1509,9 +1610,7 @@ impl Screen {
                 let dst_start = (dst_row * screen_width + dst_x) as usize;
                 let width = actual_w as usize;
 
-                if src_start + width <= pixels.len()
-                    && dst_start + width <= buffer.pixels.len()
-                {
+                if src_start + width <= pixels.len() && dst_start + width <= buffer.pixels.len() {
                     buffer.pixels[dst_start..dst_start + width]
                         .copy_from_slice(&pixels[src_start..src_start + width]);
                 }

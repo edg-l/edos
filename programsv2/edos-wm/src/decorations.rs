@@ -1,6 +1,6 @@
 //! Window decorations for the window manager.
 
-use edos_render::window::{flags::FLAG_DOCK, WindowListEntry};
+use edos_render::window::{WindowListEntry, flags::FLAG_DOCK};
 
 /// Height of the title bar.
 pub const TITLE_HEIGHT: u64 = 24;
@@ -53,6 +53,24 @@ pub fn effective_height(window: &WindowListEntry) -> u64 {
         window.height as u64
     } else {
         decorated_height(window.height)
+    }
+}
+
+/// Calculate effective width from raw flags and width values (no WindowListEntry needed).
+pub fn effective_width_raw(flags: u64, width: u32) -> u64 {
+    if (flags & FLAG_DOCK) != 0 {
+        width as u64
+    } else {
+        decorated_width(width)
+    }
+}
+
+/// Calculate effective height from raw flags and height values (no WindowListEntry needed).
+pub fn effective_height_raw(flags: u64, height: u32) -> u64 {
+    if (flags & FLAG_DOCK) != 0 {
+        height as u64
+    } else {
+        decorated_height(height)
     }
 }
 

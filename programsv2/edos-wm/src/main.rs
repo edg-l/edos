@@ -4,17 +4,19 @@ use std::time::{Duration, Instant};
 
 use edos_render::graphics::Screen;
 use edos_render::window::{
-    property, read_mouse_state, window_list, window_send_event, window_set, WindowEvent,
-    WindowListEntry,
+    WindowEvent, WindowListEntry, property, read_mouse_state, window_list, window_send_event,
+    window_set,
 };
 
 mod compositor;
 mod cursor;
 mod decorations;
+mod dirty;
 
 use compositor::ShmCache;
 use cursor::Cursor;
 use decorations::HitRegion;
+use dirty::{DirtyRect, DirtyRegion};
 
 /// Maximum number of windows to track.
 const MAX_WINDOWS: usize = 64;
@@ -45,6 +47,41 @@ struct ResizeState {
     orig_win_y: i32,
     orig_win_w: u32,
     orig_win_h: u32,
+}
+
+/// Cursor size for dirty rect marking.
+const CURSOR_SIZE: u32 = 16;
+
+/// Snapshot of a window's position/size/visibility from the previous frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PrevWindowState {
+    id: u64,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    visible: u32,
+    flags: u64,
+}
+
+impl PrevWindowState {
+    fn from_entry(w: &WindowListEntry) -> Self {
+        Self {
+            id: w.id,
+            x: w.x,
+            y: w.y,
+            width: w.width,
+            height: w.height,
+            visible: w.visible,
+            flags: w.flags,
+        }
+    }
+
+    fn dirty_rect(&self) -> DirtyRect {
+        let eff_w = decorations::effective_width_raw(self.flags, self.width);
+        let eff_h = decorations::effective_height_raw(self.flags, self.height);
+        DirtyRect::new(self.x, self.y, eff_w as u32, eff_h as u32)
+    }
 }
 
 /// Find the topmost window under the cursor.
@@ -89,6 +126,19 @@ fn main() {
 
     // Open mouse device once (not every frame)
     let mut mouse_file = std::fs::File::open("/dev/mouse").expect("failed to open /dev/mouse");
+
+    // Dirty region tracking
+    let mut dirty = DirtyRegion::new();
+    // Force full screen on the first frame.
+    dirty.mark_full_screen();
+
+    // Previous frame window snapshots for change detection.
+    let mut prev_windows: [Option<PrevWindowState>; MAX_WINDOWS] = [None; MAX_WINDOWS];
+    let mut prev_window_count: usize = 0;
+
+    // Previous cursor position for dirty rect invalidation.
+    let mut prev_cursor_x: i32 = 0;
+    let mut prev_cursor_y: i32 = 0;
 
     // Main compositor loop
     loop {
@@ -229,9 +279,7 @@ fn main() {
             if new_w < MIN_WINDOW_WIDTH as i32 {
                 if matches!(
                     resize.region,
-                    HitRegion::ResizeLeft
-                        | HitRegion::ResizeTopLeft
-                        | HitRegion::ResizeBottomLeft
+                    HitRegion::ResizeLeft | HitRegion::ResizeTopLeft | HitRegion::ResizeBottomLeft
                 ) {
                     new_x = resize.orig_win_x + resize.orig_win_w as i32 - MIN_WINDOW_WIDTH as i32;
                 }
@@ -301,9 +349,87 @@ fn main() {
             }
         }
 
-        // Composite all windows and present
-        compositor::composite(&mut screen, windows, &cursor, focused_window_id, &mut shm_cache);
-        let _ = screen.render();
+        // Detect dirty regions from window changes relative to previous frame.
+        let screen_w = screen.width() as u32;
+        let screen_h = screen.height() as u32;
+
+        if !dirty.full_screen {
+            // Mark all visible window rects dirty unconditionally.
+            // We have no damage signal from clients, so any window could have
+            // repainted its shared memory buffer without changing geometry.
+            for w in windows.iter() {
+                if w.visible != 0 {
+                    let s = PrevWindowState::from_entry(w);
+                    if let Some(r) = s.dirty_rect().clipped(screen_w, screen_h) {
+                        dirty.mark_dirty(r);
+                    }
+                }
+            }
+
+            // Mark old rects of moved or disappeared windows (exposes background).
+            for slot in prev_windows[..prev_window_count].iter().flatten() {
+                let still_here = windows
+                    .iter()
+                    .any(|w| w.id == slot.id && w.x == slot.x && w.y == slot.y);
+                if !still_here {
+                    if let Some(r) = slot.dirty_rect().clipped(screen_w, screen_h) {
+                        dirty.mark_dirty(r);
+                    }
+                }
+            }
+
+            // Mark cursor regions dirty when cursor moved.
+            if prev_cursor_x != cursor.x || prev_cursor_y != cursor.y {
+                if let Some(r) =
+                    DirtyRect::new(prev_cursor_x, prev_cursor_y, CURSOR_SIZE, CURSOR_SIZE)
+                        .clipped(screen_w, screen_h)
+                {
+                    dirty.mark_dirty(r);
+                }
+                if let Some(r) = DirtyRect::new(cursor.x, cursor.y, CURSOR_SIZE, CURSOR_SIZE)
+                    .clipped(screen_w, screen_h)
+                {
+                    dirty.mark_dirty(r);
+                }
+            }
+        }
+
+        // Composite all windows into back buffer (always full composite).
+        compositor::composite(
+            &mut screen,
+            windows,
+            &cursor,
+            focused_window_id,
+            &mut shm_cache,
+        );
+
+        // Flush only the dirty regions to the kernel framebuffer.
+        if dirty.full_screen {
+            let _ = screen.render();
+        } else if !dirty.is_empty() {
+            for rect in dirty.rects() {
+                let _ = screen.render_region(
+                    rect.x as u64,
+                    rect.y as u64,
+                    rect.w as u64,
+                    rect.h as u64,
+                );
+            }
+            screen.render_present_only();
+        }
+
+        // Save window state for next frame comparison.
+        prev_window_count = window_count;
+        for (i, w) in windows.iter().enumerate() {
+            prev_windows[i] = Some(PrevWindowState::from_entry(w));
+        }
+        // Clear slots beyond current window count.
+        for slot in prev_windows[window_count..].iter_mut() {
+            *slot = None;
+        }
+        prev_cursor_x = cursor.x;
+        prev_cursor_y = cursor.y;
+        dirty.clear();
 
         // Sleep remainder of frame budget to maintain frame rate
         let frame_target = Duration::from_millis(FRAME_TIME_MS);
