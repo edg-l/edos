@@ -5,6 +5,8 @@ pub use noto_sans_mono_bitmap::{FontWeight, RasterHeight};
 use noto_sans_mono_bitmap::{get_raster, get_raster_width};
 use thiserror::Error;
 
+use std::arch::asm;
+
 /// Graphics operation error type
 #[derive(Debug, Error, Clone, Copy)]
 pub enum GraphicsError {
@@ -35,6 +37,34 @@ const FB_IOCTL_RENDER: u64 = 0x4642_0002;
 const FB_IOCTL_DRAW: u64 = 0x4642_0003;
 const FB_IOCTL_SCREEN_INFO: u64 = 0x4642_0004;
 const FB_IOCTL_FLIP: u64 = 0x4642_0005;
+const FB_IOCTL_MMAP_INFO: u64 = 0x4642_0006;
+
+const SYS_MMAP: u64 = 9;
+const PROT_READ: u32 = 0x1;
+const PROT_WRITE: u32 = 0x2;
+const MAP_PRIVATE: u32 = 0x02;
+const MAP_PHYSICAL: u32 = 0x40;
+
+#[inline(always)]
+unsafe fn syscall5(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "syscall",
+            in("rax") num,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            in("r10") a4,
+            in("r8") a5,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +92,20 @@ struct FramebufferDraw {
 struct FramebufferInfo {
     width: u32,
     height: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FramebufferMmapInfo {
+    pub phys_addr: u64,
+    pub total_size: u64,
+    pub page_size: u64,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub double_buffered: u8,
+    pub is_identity: u8,
+    pub _padding: u16,
 }
 
 #[derive(Debug)]
@@ -110,9 +154,61 @@ impl Framebuffer {
     }
 
     /// Flip the display to show the back page (double buffering).
-    /// When double buffering is disabled in the kernel this is a no-op.
-    pub fn flip(&self) {
-        self.fd.ioctl(FB_IOCTL_FLIP, 0, 0, 0).unwrap();
+    /// Returns the new back page byte offset.
+    pub fn flip(&self) -> u64 {
+        self.fd.ioctl(FB_IOCTL_FLIP, 0, 0, 0).unwrap()
+    }
+
+    /// Get framebuffer mmap info for direct VRAM access.
+    pub fn mmap_info(&self) -> Result<FramebufferMmapInfo> {
+        let mut info = FramebufferMmapInfo::default();
+        self.fd
+            .ioctl(
+                FB_IOCTL_MMAP_INFO,
+                (&mut info as *mut FramebufferMmapInfo) as u64,
+                core::mem::size_of::<FramebufferMmapInfo>(),
+                IOCTL_ARG_OUT,
+            )
+            .map_err(|_| GraphicsError::Unknown)?;
+        Ok(info)
+    }
+
+    /// Map the framebuffer VRAM directly into userspace.
+    pub fn mmap_vram(&self) -> Result<VramMapping> {
+        let info = self.mmap_info()?;
+
+        if info.is_identity == 0 {
+            return Err(GraphicsError::Unknown);
+        }
+
+        let ptr = unsafe {
+            syscall5(
+                SYS_MMAP,
+                0,
+                info.total_size,
+                (PROT_READ | PROT_WRITE) as u64,
+                (MAP_PRIVATE | MAP_PHYSICAL) as u64,
+                info.phys_addr,
+            )
+        } as *mut u32;
+
+        if ptr.is_null() || (ptr as u64) >= u64::MAX - 1 {
+            return Err(GraphicsError::Fault);
+        }
+
+        let page_pixels = info.page_size as usize / core::mem::size_of::<u32>();
+        let pitch_pixels = info.pitch as usize / core::mem::size_of::<u32>();
+
+        Ok(VramMapping {
+            base: ptr,
+            total_size: info.total_size as usize,
+            page_pixels,
+            width: info.width as usize,
+            height: info.height as usize,
+            pitch_pixels,
+            double_buffered: info.double_buffered != 0,
+            back_offset: 0,
+        })
     }
 
     /// Get screen information
@@ -240,6 +336,41 @@ impl Framebuffer {
 }
 
 pub type Result<T> = std::result::Result<T, GraphicsError>;
+
+/// Direct VRAM mapping for zero-copy framebuffer access.
+pub struct VramMapping {
+    base: *mut u32,
+    #[allow(dead_code)]
+    total_size: usize,
+    /// Pixels per page (page_size / 4).
+    page_pixels: usize,
+    pub width: usize,
+    pub height: usize,
+    /// Row stride in u32 units (pitch / 4).
+    pub pitch_pixels: usize,
+    pub double_buffered: bool,
+    /// Current back page offset in u32 units.
+    back_offset: usize,
+}
+
+impl VramMapping {
+    /// Returns a mutable slice of the current back page pixels.
+    pub fn back_page(&mut self) -> &mut [u32] {
+        let len = if self.double_buffered {
+            self.page_pixels
+        } else {
+            self.width * self.height
+        };
+        unsafe { core::slice::from_raw_parts_mut(self.base.add(self.back_offset), len) }
+    }
+
+    /// Update the back page offset from a byte offset returned by flip.
+    pub fn update_back_offset(&mut self, byte_offset: u64) {
+        self.back_offset = byte_offset as usize / core::mem::size_of::<u32>();
+    }
+}
+
+unsafe impl Send for VramMapping {}
 
 /// Type-safe color representation (RGB format)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1223,20 +1354,53 @@ pub struct Screen {
     dirty: bool,
     /// Pre-allocated scratch buffer for render_region to avoid per-call allocation.
     region_scratch: Vec<u32>,
+    vram: Option<VramMapping>,
+    /// Row stride in u32 units. Equals width for Vec-backed, pitch/4 for VRAM-backed.
+    pitch_pixels: usize,
 }
 
 impl Screen {
-    /// Get the global screen instance
-    pub fn get() -> Result<Screen> {
+    /// Try to create a VRAM-backed screen instance.
+    fn new_vram() -> Result<Screen> {
         let fb = Framebuffer::new();
         let info = fb.screen_info()?;
+        let mapping = fb.mmap_vram()?;
+        let pitch_pixels = mapping.pitch_pixels;
         Ok(Screen {
             framebuffer: fb,
             info,
             back_buffer: None,
             dirty: false,
             region_scratch: Vec::new(),
+            vram: Some(mapping),
+            pitch_pixels,
         })
+    }
+
+    /// Get the global screen instance.
+    /// Tries VRAM-backed mode first, falls back to legacy ioctl mode.
+    pub fn get() -> Result<Screen> {
+        match Self::new_vram() {
+            Ok(s) => {
+                eprintln!("screen: VRAM mmap mode");
+                Ok(s)
+            }
+            Err(_) => {
+                eprintln!("screen: legacy ioctl mode");
+                let fb = Framebuffer::new();
+                let info = fb.screen_info()?;
+                let pitch_pixels = info.width;
+                Ok(Screen {
+                    framebuffer: fb,
+                    info,
+                    back_buffer: None,
+                    dirty: false,
+                    region_scratch: Vec::new(),
+                    vram: None,
+                    pitch_pixels,
+                })
+            }
+        }
     }
 
     /// Get screen width
@@ -1254,14 +1418,28 @@ impl Screen {
         &self.info
     }
 
-    /// Ensure the back buffer is initialized
+    /// Ensure the back buffer is initialized (only used in non-VRAM mode).
     fn ensure_back_buffer(&mut self) -> Result<()> {
-        if self.back_buffer.is_none() {
+        if self.vram.is_none() && self.back_buffer.is_none() {
             let mut buffer = DrawRequest::new(self.width() as u64, self.height() as u64)?;
-            buffer.clear(); // Initialize with black background
+            buffer.clear();
             self.back_buffer = Some(buffer);
         }
         Ok(())
+    }
+
+    /// Returns a mutable pixel slice and row stride (in u32 units).
+    /// In VRAM mode, returns the current back page slice and pitch_pixels.
+    /// In Vec mode, returns the back buffer pixels and width.
+    fn pixels_mut(&mut self) -> Option<(&mut [u32], usize)> {
+        let stride = self.pitch_pixels;
+        if let Some(ref mut vram) = self.vram {
+            Some((vram.back_page(), stride))
+        } else if let Some(ref mut buf) = self.back_buffer {
+            Some((&mut buf.pixels, stride))
+        } else {
+            None
+        }
     }
 
     /// Draw a rectangle on the screen
@@ -1275,8 +1453,18 @@ impl Screen {
     ) -> Result<()> {
         self.ensure_back_buffer()?;
 
-        if let Some(ref mut buffer) = self.back_buffer {
-            buffer.fill_rect(x, y, width, height, color)?;
+        let screen_w = self.info.width as u64;
+        let screen_h = self.info.height as u64;
+
+        if let Some((pixels, stride)) = self.pixels_mut() {
+            let end_x = (x + width).min(screen_w);
+            let end_y = (y + height).min(screen_h);
+            let raw = color.raw();
+            for py in y..end_y {
+                for px in x..end_x {
+                    pixels[(py as usize) * stride + (px as usize)] = raw;
+                }
+            }
             self.dirty = true;
         }
 
@@ -1287,8 +1475,16 @@ impl Screen {
     pub fn fill(&mut self, color: Color) -> Result<()> {
         self.ensure_back_buffer()?;
 
-        if let Some(ref mut buffer) = self.back_buffer {
-            buffer.fill(color);
+        let screen_w = self.info.width;
+        let screen_h = self.info.height;
+
+        if let Some((pixels, stride)) = self.pixels_mut() {
+            let raw = color.raw();
+            for row in 0..screen_h {
+                for col in 0..screen_w {
+                    pixels[row * stride + col] = raw;
+                }
+            }
             self.dirty = true;
         }
 
@@ -1302,17 +1498,22 @@ impl Screen {
 
     /// Render all pending operations
     pub fn render(&mut self) -> Result<()> {
-        // Only render if we have a dirty back buffer
-        if self.dirty
-            && let Some(ref buffer) = self.back_buffer
-        {
-            self.framebuffer.draw(buffer)?;
+        if self.vram.is_some() {
+            let offset = self.framebuffer.flip();
+            if let Some(ref mut vram) = self.vram {
+                vram.update_back_offset(offset);
+            }
             self.dirty = false;
+        } else {
+            if self.dirty
+                && let Some(ref buffer) = self.back_buffer
+            {
+                self.framebuffer.draw(buffer)?;
+                self.dirty = false;
+            }
+            self.framebuffer.render();
+            self.framebuffer.flip();
         }
-
-        // Always call the final render syscall to present to screen
-        self.framebuffer.render();
-        self.framebuffer.flip();
         Ok(())
     }
 
@@ -1366,13 +1567,19 @@ impl Screen {
     /// Used by the WM after all dirty regions have been sent via render_region().
     pub fn render_present_only(&mut self) {
         self.framebuffer.render();
-        self.framebuffer.flip();
+        let offset = self.framebuffer.flip();
+        if let Some(ref mut vram) = self.vram {
+            vram.update_back_offset(offset);
+        }
     }
 
     /// Flip the display to present the back page.
     /// Call this after all render_region() calls in a frame are done.
     pub fn flip(&mut self) {
-        self.framebuffer.flip();
+        let offset = self.framebuffer.flip();
+        if let Some(ref mut vram) = self.vram {
+            vram.update_back_offset(offset);
+        }
     }
 
     /// Create a new DrawRequest that fits entirely on screen
@@ -1399,10 +1606,10 @@ impl Screen {
     pub fn draw_texture_transparent(&mut self, texture: &Texture, x: u64, y: u64) -> Result<()> {
         self.ensure_back_buffer()?;
 
-        if let Some(ref mut buffer) = self.back_buffer {
-            let screen_width = buffer.width;
-            let screen_height = buffer.height;
+        let screen_width = self.info.width as u64;
+        let screen_height = self.info.height as u64;
 
+        if let Some((dst_pixels, stride)) = self.pixels_mut() {
             for src_y in 0..texture.height {
                 for src_x in 0..texture.width {
                     let dst_x = x + src_x;
@@ -1415,13 +1622,12 @@ impl Screen {
                     let src_idx = (src_y * texture.width + src_x) as usize;
                     let src_pixel = texture.pixels[src_idx];
 
-                    // Skip fully transparent pixels (value = 0, i.e. unset)
                     if src_pixel == 0 {
                         continue;
                     }
 
-                    let dst_idx = (dst_y * screen_width + dst_x) as usize;
-                    buffer.pixels[dst_idx] = src_pixel;
+                    let dst_idx = (dst_y as usize) * stride + (dst_x as usize);
+                    dst_pixels[dst_idx] = src_pixel;
                 }
             }
 
@@ -1519,8 +1725,15 @@ impl Screen {
     pub fn set_pixel(&mut self, x: u64, y: u64, color: Color) -> Result<()> {
         self.ensure_back_buffer()?;
 
-        if let Some(ref mut buffer) = self.back_buffer {
-            buffer.set_pixel(x, y, color)?;
+        let screen_w = self.info.width as u64;
+        let screen_h = self.info.height as u64;
+
+        if x >= screen_w || y >= screen_h {
+            return Err(GraphicsError::OutOfBounds);
+        }
+
+        if let Some((pixels, stride)) = self.pixels_mut() {
+            pixels[(y as usize) * stride + (x as usize)] = color.raw();
             self.dirty = true;
         }
 
@@ -1539,19 +1752,17 @@ impl Screen {
     ) -> Result<()> {
         self.ensure_back_buffer()?;
 
-        if let Some(ref mut buffer) = self.back_buffer {
-            let screen_width = buffer.width;
-            let screen_height = buffer.height;
+        let screen_width = self.info.width as u64;
+        let screen_height = self.info.height as u64;
 
-            // Clip to screen bounds
-            let end_x = (dst_x + src_width).min(screen_width);
-            let end_y = (dst_y + src_height).min(screen_height);
+        let end_x = (dst_x + src_width).min(screen_width);
+        let end_y = (dst_y + src_height).min(screen_height);
 
-            if dst_x >= screen_width || dst_y >= screen_height {
-                return Ok(());
-            }
+        if dst_x >= screen_width || dst_y >= screen_height {
+            return Ok(());
+        }
 
-            // Copy row by row
+        if let Some((dst_pixels, stride)) = self.pixels_mut() {
             for src_y in 0..src_height {
                 let screen_y = dst_y + src_y;
                 if screen_y >= end_y {
@@ -1559,13 +1770,13 @@ impl Screen {
                 }
 
                 let src_row_start = (src_y * src_width) as usize;
-                let dst_row_start = (screen_y * screen_width + dst_x) as usize;
+                let dst_row_start = (screen_y as usize) * stride + (dst_x as usize);
                 let copy_width = (end_x - dst_x) as usize;
 
                 if src_row_start + copy_width <= pixels.len()
-                    && dst_row_start + copy_width <= buffer.pixels.len()
+                    && dst_row_start + copy_width <= dst_pixels.len()
                 {
-                    buffer.pixels[dst_row_start..dst_row_start + copy_width]
+                    dst_pixels[dst_row_start..dst_row_start + copy_width]
                         .copy_from_slice(&pixels[src_row_start..src_row_start + copy_width]);
                 }
             }
@@ -1598,36 +1809,33 @@ impl Screen {
     ) -> Result<()> {
         self.ensure_back_buffer()?;
 
-        if let Some(ref mut buffer) = self.back_buffer {
-            let screen_width = buffer.width;
-            let screen_height = buffer.height;
+        let screen_width = self.info.width as u64;
+        let screen_height = self.info.height as u64;
 
-            // Validate inputs
-            if src_x >= src_width || src_y >= src_height {
-                return Ok(());
-            }
-            if dst_x >= screen_width || dst_y >= screen_height {
-                return Ok(());
-            }
-            if copy_w == 0 || copy_h == 0 {
-                return Ok(());
-            }
+        if src_x >= src_width || src_y >= src_height {
+            return Ok(());
+        }
+        if dst_x >= screen_width || dst_y >= screen_height {
+            return Ok(());
+        }
+        if copy_w == 0 || copy_h == 0 {
+            return Ok(());
+        }
 
-            // Clamp copy dimensions to available source and destination space
-            let actual_w = copy_w.min(src_width - src_x).min(screen_width - dst_x);
-            let actual_h = copy_h.min(src_height - src_y).min(screen_height - dst_y);
+        let actual_w = copy_w.min(src_width - src_x).min(screen_width - dst_x);
+        let actual_h = copy_h.min(src_height - src_y).min(screen_height - dst_y);
 
-            // Copy row by row
+        if let Some((dst_pixels, stride)) = self.pixels_mut() {
             for row in 0..actual_h {
                 let src_row = src_y + row;
                 let dst_row = dst_y + row;
 
                 let src_start = (src_row * src_width + src_x) as usize;
-                let dst_start = (dst_row * screen_width + dst_x) as usize;
+                let dst_start = (dst_row as usize) * stride + (dst_x as usize);
                 let width = actual_w as usize;
 
-                if src_start + width <= pixels.len() && dst_start + width <= buffer.pixels.len() {
-                    buffer.pixels[dst_start..dst_start + width]
+                if src_start + width <= pixels.len() && dst_start + width <= dst_pixels.len() {
+                    dst_pixels[dst_start..dst_start + width]
                         .copy_from_slice(&pixels[src_start..src_start + width]);
                 }
             }
