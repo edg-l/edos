@@ -618,12 +618,12 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
         .lock()
         .fd_table
         .lock()
-        .allocate_fd(FileDescriptor::Pipe(pipe.clone()));
+        .allocate_fd(FileDescriptor::PipeRead(pipe.clone()));
     let write_fd = info
         .lock()
         .fd_table
         .lock()
-        .allocate_fd(FileDescriptor::Pipe(pipe));
+        .allocate_fd(FileDescriptor::PipeWrite(pipe));
 
     // Copy file descriptor numbers to user space
     let pipefd = [read_fd, write_fd];

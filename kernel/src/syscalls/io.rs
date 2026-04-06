@@ -126,7 +126,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 !0u64
             }
         },
-        Some(FileDescriptor::Pipe(pipe)) => {
+        Some(FileDescriptor::PipeWrite(pipe)) => {
             // Direct copy from user to pipe, flush notifications after dropping lock.
             let (result, notif) = {
                 let mut pipe = pipe.lock();
@@ -140,6 +140,10 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                     !0u64
                 }
             }
+        }
+        Some(FileDescriptor::PipeRead(_)) => {
+            info.lock().errno = Errno::EINVAL;
+            !0u64
         }
         Some(FileDescriptor::FsFile(file)) => {
             // FS still needs intermediate buffer (worker thread in different context)
@@ -191,10 +195,18 @@ pub fn sys_close(fd: u64) -> i32 {
     interrupts::enable();
     let result = info.lock().fd_table.lock().close_fd(fd);
     match result {
-        Some(FileDescriptor::Pipe(pipe)) => {
+        Some(FileDescriptor::PipeRead(pipe)) => {
             let notif = {
                 let mut guard = pipe.lock();
                 guard.close_reader()
+            };
+            notif.flush();
+            0
+        }
+        Some(FileDescriptor::PipeWrite(pipe)) => {
+            let notif = {
+                let mut guard = pipe.lock();
+                guard.close_writer()
             };
             notif.flush();
             0
@@ -250,7 +262,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 -1
             }
         },
-        Some(FileDescriptor::Pipe(pipe)) => {
+        Some(FileDescriptor::PipeRead(pipe)) => {
             // Direct copy from pipe to user space, flush notifications after dropping lock.
             let (result, notif) = {
                 let mut pipe = pipe.lock();
@@ -264,6 +276,10 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     -1
                 }
             }
+        }
+        Some(FileDescriptor::PipeWrite(_)) => {
+            info.lock().errno = Errno::EINVAL;
+            -1
         }
         Some(FileDescriptor::FsFile(file)) => {
             // Fast path: devfs devices can be read directly without the FS Mailbox.
@@ -644,7 +660,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                 entry.result.error = true;
                 base_ready += 1;
             }
-            Some(FileDescriptor::Pipe(pipe)) => {
+            Some(FileDescriptor::PipeRead(pipe) | FileDescriptor::PipeWrite(pipe)) => {
                 let pollable: Box<dyn Pollable> = Box::new(PollablePipe::new(pipe.clone()));
                 let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
                 let registration = pollable.register(poll_entry.clone());

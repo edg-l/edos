@@ -13,7 +13,9 @@ use alloc::{sync::Arc, vec::Vec};
 pub enum FileDescriptor {
     StandardStream(StandardStream),
     #[allow(unused)]
-    Pipe(Arc<BlockingMutex<Pipe>>),
+    PipeRead(Arc<BlockingMutex<Pipe>>),
+    #[allow(unused)]
+    PipeWrite(Arc<BlockingMutex<Pipe>>),
     // Filesystem-backed file descriptor with maintained offset
     FsFile(FsFile),
 }

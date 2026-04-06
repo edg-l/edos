@@ -540,7 +540,7 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
                 kind: 3, // Special file
             }
         }
-        FileDescriptor::Pipe(_) => {
+        FileDescriptor::PipeRead(_) | FileDescriptor::PipeWrite(_) => {
             FstatEntry {
                 size: 0,
                 created: 0,
