@@ -1,37 +1,23 @@
 //! echo - print arguments to stdout
 
 use std::env;
-
-fn raw_write(fd: u64, buf: &[u8]) -> isize {
-    let result: u64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") 1u64, // SYS_WRITE
-            in("rdi") fd,
-            in("rsi") buf.as_ptr(),
-            in("rdx") buf.len(),
-            lateout("rax") result,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack)
-        );
-    }
-    result as isize
-}
+use std::io::{self, Write};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let args = &args[1..]; // skip program name
+    let args = &args[1..];
 
     let output = if args.first().map(|s| s.as_str()) == Some("-e") {
-        let text = args[1..].join(" ");
-        format!("{}\n", expand_escapes(&text))
+        expand_escapes(&args[1..].join(" "))
     } else {
-        format!("{}\n", args.join(" "))
+        args.join(" ")
     };
 
-    raw_write(1, output.as_bytes());
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let _ = out.write_all(output.as_bytes());
+    let _ = out.write_all(b"\n");
+    let _ = out.flush();
 }
 
 fn expand_escapes(s: &str) -> String {
