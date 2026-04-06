@@ -310,19 +310,26 @@ impl Scheduler {
                 );
             }
         }
-        // Also dump this CPU's sleepers heap stats.
-        let sl = self.sleepers.lock();
-        let ed = self.earliest_deadline.load(Ordering::Relaxed);
-        println!(
-            "  cpu {} sleepers: {} entries, earliest_deadline={}",
-            self.cpu,
-            sl.len(),
-            if ed == u64::MAX {
-                "NONE".into()
-            } else {
-                alloc::format!("{}", ed)
-            }
-        );
+        // Dump ALL CPUs' sleepers heap stats and earliest_deadline.
+        let schedulers = SCHEDULERS.read();
+        for (&cpu_id, &sched) in schedulers.iter() {
+            let sl = sched.sleepers.lock();
+            let ed = sched.earliest_deadline.load(Ordering::Relaxed);
+            let current = sched.current.load(Ordering::Relaxed);
+            let has_work = sched.has_work.load(Ordering::Relaxed);
+            println!(
+                "  cpu {} sleepers={}, earliest_deadline={}, current={}, has_work={}",
+                cpu_id,
+                sl.len(),
+                if ed == u64::MAX {
+                    "NONE".into()
+                } else {
+                    alloc::format!("{}", ed)
+                },
+                current,
+                has_work
+            );
+        }
         println!("=== End thread dump ===");
     }
 
