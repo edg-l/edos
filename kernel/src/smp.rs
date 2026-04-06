@@ -50,7 +50,6 @@ pub fn init() {
 pub unsafe extern "C" fn ap_start(cpu: &MpCpu) -> ! {
     // Per-CPU data and core-local tables
     switch_to_kernel_page();
-    crate::memory::pat::init_pat();
     tlb_flush_all_including_global();
     unsafe { init_gs_for_this_cpu(cpu.lapic_id) };
     gdt::init_current_cpu();
@@ -58,6 +57,9 @@ pub unsafe extern "C" fn ap_start(cpu: &MpCpu) -> ! {
 
     // Enable LAPIC
     unsafe { enable_lapic() };
+
+    // PAT must come after GDT/IDT/GS init since it uses println
+    crate::memory::pat::init_pat();
 
     unsafe { setup_syscall() };
 
