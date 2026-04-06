@@ -615,9 +615,11 @@ impl Window {
 
 impl Drop for Window {
     fn drop(&mut self) {
+        // Destroy window first so the WM stops referencing our SHM buffers,
+        // then free the buffers. Reverse order causes the WM to read freed memory.
+        let _ = window_destroy(self.id);
         free_buffer(self.buffers[0].0, self.buffers[0].1);
         free_buffer(self.buffers[1].0, self.buffers[1].1);
-        let _ = window_destroy(self.id);
     }
 }
 
