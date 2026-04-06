@@ -316,27 +316,12 @@ impl DirectFramebuffer {
         if !self.double_buffered {
             return;
         }
-        // Show the back page (the one we just drew to).
-        let old_back = self.back_page_y_offset;
-        let show_y = old_back as u16;
+        let show_y = self.back_page_y_offset as u16;
         dispi_write(DISPI_INDEX_Y_OFFSET, show_y);
-        // Swap pages.
-        let new_back = if old_back == 0 { self.height } else { 0 };
-        self.back_page_y_offset = new_back;
-
-        // Copy the now-visible front page to the new back page so it starts
-        // with the current frame's content. Without this, dirty-rect updates
-        // leave stale regions from 2 frames ago on the back page, causing
-        // ghost artifacts.
-        let pixels_per_page = self.height * (self.pitch / 4);
-        let src = old_back * (self.pitch / 4);
-        let dst = new_back * (self.pitch / 4);
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                self.fb_base.add(src),
-                self.fb_base.add(dst),
-                pixels_per_page,
-            );
+        if self.back_page_y_offset == 0 {
+            self.back_page_y_offset = self.height;
+        } else {
+            self.back_page_y_offset = 0;
         }
     }
 }

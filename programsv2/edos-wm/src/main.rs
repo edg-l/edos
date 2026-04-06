@@ -403,33 +403,12 @@ fn main() {
             &mut shm_cache,
         );
 
-        // Flush only the dirty regions to the kernel framebuffer.
-        if dirty.full_screen {
-            let _ = screen.render();
-        } else if !dirty.is_empty() {
-            for rect in dirty.rects() {
-                let _ = screen.render_region(
-                    rect.x as u64,
-                    rect.y as u64,
-                    rect.w as u64,
-                    rect.h as u64,
-                );
-            }
-            screen.render_present_only();
-        }
-
-        // Save window state for next frame comparison.
-        prev_window_count = window_count;
-        for (i, w) in windows.iter().enumerate() {
-            prev_windows[i] = Some(PrevWindowState::from_entry(w));
-        }
-        // Clear slots beyond current window count.
-        for slot in prev_windows[window_count..].iter_mut() {
-            *slot = None;
-        }
-        prev_cursor_x = cursor.x;
-        prev_cursor_y = cursor.y;
-        dirty.clear();
+        // Send full back buffer to kernel framebuffer and flip.
+        // Dirty-rect partial updates are disabled while double buffering is
+        // active because the front-to-back page sync needed after each flip
+        // costs as much as a full draw. The proper fix is mmap'ing VRAM into
+        // userspace so the compositor writes directly to the back page.
+        let _ = screen.render();
 
         // Sleep remainder of frame budget to maintain frame rate
         let frame_target = Duration::from_millis(FRAME_TIME_MS);
