@@ -699,7 +699,8 @@ impl Widget for Terminal {
         }
 
         // Track shift state for both press and release
-        if scancode == 42 || scancode == 54 {
+        // KeyCode values: LShift=76, RShift=87
+        if scancode == 76 || scancode == 87 {
             self.shift_held = pressed;
             return None;
         }
@@ -712,35 +713,21 @@ impl Widget for Terminal {
         self.cursor_visible = true;
         self.cursor_blink_counter = 0;
 
-        // Handle special keys by adding escape sequences to input buffer
+        // Handle special keys by adding escape sequences to input buffer.
+        // Scancodes are pc_keyboard::KeyCode as u32 (no high bit).
+        // KeyCode enum values (0-based #[repr(u8)]):
+        //   ArrowUp=88, ArrowDown=102, ArrowLeft=101, ArrowRight=103
+        //   Home=32, End=54, PageUp=33, PageDown=55, Delete=53
+        //   LShift=76, RShift=87
         match scancode {
-            // Arrow keys - send ANSI escape sequences
-            72 => {
-                // Up
-                self.input_buffer.extend("\x1B[A".chars());
-            }
-            80 => {
-                // Down
-                self.input_buffer.extend("\x1B[B".chars());
-            }
-            77 => {
-                // Right
-                self.input_buffer.extend("\x1B[C".chars());
-            }
-            75 => {
-                // Left
-                self.input_buffer.extend("\x1B[D".chars());
-            }
-            71 => {
-                // Home
-                self.input_buffer.extend("\x1B[H".chars());
-            }
-            79 => {
-                // End
-                self.input_buffer.extend("\x1B[F".chars());
-            }
-            73 => {
-                // Page Up
+            88 => self.input_buffer.extend("\x1B[A".chars()),  // ArrowUp
+            102 => self.input_buffer.extend("\x1B[B".chars()), // ArrowDown
+            103 => self.input_buffer.extend("\x1B[C".chars()), // ArrowRight
+            101 => self.input_buffer.extend("\x1B[D".chars()), // ArrowLeft
+            32 => self.input_buffer.extend("\x1B[H".chars()),  // Home
+            54 => self.input_buffer.extend("\x1B[F".chars()),  // End
+            33 => {
+                // PageUp
                 if self.shift_held {
                     self.scroll_offset =
                         (self.scroll_offset + self.rows / 2).min(self.history.len());
@@ -748,18 +735,15 @@ impl Widget for Terminal {
                     self.input_buffer.extend("\x1B[5~".chars());
                 }
             }
-            81 => {
-                // Page Down
+            55 => {
+                // PageDown
                 if self.shift_held {
                     self.scroll_offset = self.scroll_offset.saturating_sub(self.rows / 2);
                 } else {
                     self.input_buffer.extend("\x1B[6~".chars());
                 }
             }
-            83 => {
-                // Delete
-                self.input_buffer.extend("\x1B[3~".chars());
-            }
+            53 => self.input_buffer.extend("\x1B[3~".chars()), // Delete
             _ => {}
         }
 
