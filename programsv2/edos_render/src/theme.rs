@@ -59,56 +59,56 @@ pub struct Theme {
 impl Theme {
     /// The default dark blue-gray theme.
     pub const DEFAULT: Theme = Theme {
-        // Desktop
-        desktop_bg_top: Color::from_rgb(0x28, 0x2C, 0x3E),
-        desktop_bg_bottom: Color::from_rgb(0x1A, 0x1C, 0x2A),
+        // Desktop (Ayu Dark inspired -- warm dark tones)
+        desktop_bg_top: Color::from_rgb(0x0F, 0x14, 0x19),
+        desktop_bg_bottom: Color::from_rgb(0x0A, 0x0E, 0x12),
 
         // Window decorations
-        title_active_top: Color::from_rgb(0x3A, 0x5A, 0x8C),
-        title_active_bottom: Color::from_rgb(0x2A, 0x42, 0x66),
-        title_inactive_top: Color::from_rgb(0x38, 0x38, 0x48),
-        title_inactive_bottom: Color::from_rgb(0x28, 0x28, 0x34),
-        window_border_highlight: Color::from_rgb(0x58, 0x58, 0x68),
-        window_border_shadow: Color::from_rgb(0x18, 0x18, 0x20),
-        window_shadow: Color::from_rgb(0x08, 0x08, 0x10),
-        close_button_normal: Color::from_rgb(0xC0, 0x3A, 0x3A),
-        close_button_hover: Color::from_rgb(0xE0, 0x50, 0x50),
+        title_active_top: Color::from_rgb(0x1A, 0x1F, 0x29),
+        title_active_bottom: Color::from_rgb(0x13, 0x17, 0x1F),
+        title_inactive_top: Color::from_rgb(0x16, 0x1A, 0x22),
+        title_inactive_bottom: Color::from_rgb(0x10, 0x14, 0x1A),
+        window_border_highlight: Color::from_rgb(0x2A, 0x30, 0x3C),
+        window_border_shadow: Color::from_rgb(0x0B, 0x0E, 0x14),
+        window_shadow: Color::from_rgb(0x05, 0x07, 0x0A),
+        close_button_normal: Color::from_rgb(0xF0, 0x71, 0x78), // Ayu red
+        close_button_hover: Color::from_rgb(0xFF, 0x88, 0x8E),
         close_button_x: Color::from_rgb(0xFF, 0xFF, 0xFF),
 
         // Taskbar
-        taskbar_bg_top: Color::from_rgb(0x2A, 0x2A, 0x36),
-        taskbar_bg_bottom: Color::from_rgb(0x22, 0x22, 0x2C),
-        taskbar_text: Color::from_rgb(0xCC, 0xCC, 0xCC),
-        taskbar_button_normal: Color::from_rgb(0x38, 0x38, 0x46),
-        taskbar_button_hover: Color::from_rgb(0x48, 0x48, 0x58),
-        taskbar_button_active: Color::from_rgb(0x3A, 0x5A, 0x8C),
-        taskbar_button_border: Color::from_rgb(0x50, 0x50, 0x60),
-        taskbar_separator: Color::from_rgb(0x50, 0x50, 0x60),
-        taskbar_clock_text: Color::from_rgb(0x99, 0x99, 0xAA),
-        taskbar_branding_accent: Color::from_rgb(0x4A, 0x7A, 0xC0),
-        taskbar_branding_text: Color::from_rgb(0x80, 0xB0, 0xE0),
+        taskbar_bg_top: Color::from_rgb(0x13, 0x17, 0x1F),
+        taskbar_bg_bottom: Color::from_rgb(0x0D, 0x10, 0x17),
+        taskbar_text: Color::from_rgb(0xB8, 0xC4, 0xD0),
+        taskbar_button_normal: Color::from_rgb(0x1A, 0x1F, 0x29),
+        taskbar_button_hover: Color::from_rgb(0x22, 0x28, 0x34),
+        taskbar_button_active: Color::from_rgb(0x39, 0xBA, 0xE6), // Ayu blue
+        taskbar_button_border: Color::from_rgb(0x27, 0x2D, 0x38),
+        taskbar_separator: Color::from_rgb(0x27, 0x2D, 0x38),
+        taskbar_clock_text: Color::from_rgb(0x6C, 0x73, 0x80),
+        taskbar_branding_accent: Color::from_rgb(0xE6, 0xB4, 0x50), // Ayu orange/yellow
+        taskbar_branding_text: Color::from_rgb(0xE6, 0xB4, 0x50),
 
-        // Widgets (dark theme)
-        background: Color::from_rgb(0x2B, 0x2B, 0x30),
-        button_normal: Color::from_rgb(0x3A, 0x3A, 0x42),
-        button_hover: Color::from_rgb(0x46, 0x46, 0x50),
-        button_pressed: Color::from_rgb(0x30, 0x30, 0x38),
-        input_bg: Color::from_rgb(0x1E, 0x1E, 0x24),
-        input_border: Color::from_rgb(0x50, 0x50, 0x5A),
-        text_primary: Color::from_rgb(0xD8, 0xD8, 0xDC),
-        text_placeholder: Color::from_rgb(0x68, 0x68, 0x72),
-        focus_ring: Color::from_rgb(0x4A, 0x88, 0xE0),
-        checkbox_check: Color::from_rgb(0x4A, 0x88, 0xE0),
-        slider_track: Color::from_rgb(0x44, 0x44, 0x4C),
-        slider_thumb: Color::from_rgb(0x4A, 0x88, 0xE0),
-        slider_thumb_hover: Color::from_rgb(0x5A, 0x98, 0xF0),
-        label_text: Color::from_rgb(0xD8, 0xD8, 0xDC),
+        // Widgets (Ayu Dark)
+        background: Color::from_rgb(0x0B, 0x0E, 0x14),
+        button_normal: Color::from_rgb(0x1A, 0x1F, 0x29),
+        button_hover: Color::from_rgb(0x22, 0x28, 0x34),
+        button_pressed: Color::from_rgb(0x14, 0x18, 0x20),
+        input_bg: Color::from_rgb(0x0D, 0x10, 0x17),
+        input_border: Color::from_rgb(0x27, 0x2D, 0x38),
+        text_primary: Color::from_rgb(0xCB, 0xCC, 0xC6), // Ayu fg
+        text_placeholder: Color::from_rgb(0x5C, 0x63, 0x70),
+        focus_ring: Color::from_rgb(0x39, 0xBA, 0xE6), // Ayu blue
+        checkbox_check: Color::from_rgb(0x39, 0xBA, 0xE6),
+        slider_track: Color::from_rgb(0x1A, 0x1F, 0x29),
+        slider_thumb: Color::from_rgb(0x39, 0xBA, 0xE6),
+        slider_thumb_hover: Color::from_rgb(0x59, 0xCA, 0xF6),
+        label_text: Color::from_rgb(0xCB, 0xCC, 0xC6),
 
-        // Terminal
-        terminal_bg: Color::from_rgb(0x1E, 0x1E, 0x1E),
-        terminal_fg: Color::from_rgb(0xCC, 0xCC, 0xCC),
-        terminal_cursor: Color::from_rgb(0xFF, 0xFF, 0xFF),
-        terminal_selection: Color::from_rgb(0x26, 0x4F, 0x78),
+        // Terminal (Ayu Dark)
+        terminal_bg: Color::from_rgb(0x0B, 0x0E, 0x14),
+        terminal_fg: Color::from_rgb(0xCB, 0xCC, 0xC6),
+        terminal_cursor: Color::from_rgb(0xE6, 0xB4, 0x50), // Ayu orange cursor
+        terminal_selection: Color::from_rgb(0x27, 0x2D, 0x38),
     };
 }
 
