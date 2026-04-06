@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-use super::registry::{WINDOW_REGISTRY, WindowId, decoration};
+use super::registry::{WINDOW_REGISTRY, WindowId, decoration, flags};
 
 /// Maximum number of queued events per window.
 const EVENT_QUEUE_SIZE: usize = 256;
@@ -329,7 +329,7 @@ fn handle_mouse_event(event: MouseEvent) {
         if let Some(target_window) = window_under_decorated {
             if focused != Some(target_window) {
                 // Capture client-area coords before dropping the lock (for click event).
-                let window_coords = registry.get_window(target_window).map(|w| (w.x, w.y));
+                let window_info = registry.get_window(target_window).map(|w| (w.x, w.y, w.flags));
                 drop(registry);
 
                 {
@@ -348,9 +348,10 @@ fn handle_mouse_event(event: MouseEvent) {
 
                 // Send click event only if the click was in the client area
                 if window_under_cursor == Some(target_window) {
-                    if let Some((wx, wy)) = window_coords {
-                        let local_x = event.x - wx - decoration::BORDER_WIDTH;
-                        let local_y = event.y - wy - decoration::TITLE_HEIGHT;
+                    if let Some((wx, wy, wflags)) = window_info {
+                        let is_dock = (wflags & flags::FLAG_DOCK) != 0;
+                        let local_x = event.x - wx - if is_dock { 0 } else { decoration::BORDER_WIDTH };
+                        let local_y = event.y - wy - if is_dock { 0 } else { decoration::TITLE_HEIGHT };
 
                         for bit in 0..3 {
                             if button_pressed & (1 << bit) != 0 {
@@ -371,8 +372,9 @@ fn handle_mouse_event(event: MouseEvent) {
     if let Some(target) = window_under_cursor {
         if let Some(window) = registry.get_window(target) {
             // Calculate coordinates relative to client area (excluding decorations)
-            let local_x = event.x - window.x - decoration::BORDER_WIDTH;
-            let local_y = event.y - window.y - decoration::TITLE_HEIGHT;
+            let is_dock = (window.flags & flags::FLAG_DOCK) != 0;
+            let local_x = event.x - window.x - if is_dock { 0 } else { decoration::BORDER_WIDTH };
+            let local_y = event.y - window.y - if is_dock { 0 } else { decoration::TITLE_HEIGHT };
 
             // Always send move events if there's movement
             if event.dx != 0 || event.dy != 0 {

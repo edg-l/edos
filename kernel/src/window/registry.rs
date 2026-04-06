@@ -72,9 +72,9 @@ impl WindowInfo {
         if !self.visible {
             return false;
         }
-        // Client area starts at (x + BORDER_WIDTH, y + TITLE_HEIGHT)
-        let client_x = self.x + decoration::BORDER_WIDTH;
-        let client_y = self.y + decoration::TITLE_HEIGHT;
+        let is_dock = (self.flags & flags::FLAG_DOCK) != 0;
+        let client_x = if is_dock { self.x } else { self.x + decoration::BORDER_WIDTH };
+        let client_y = if is_dock { self.y } else { self.y + decoration::TITLE_HEIGHT };
         let client_w = self.width as i32;
         let client_h = self.height as i32;
 
@@ -86,8 +86,15 @@ impl WindowInfo {
         if !self.visible {
             return false;
         }
-        let total_w = self.width as i32 + decoration::BORDER_WIDTH * 2;
-        let total_h = self.height as i32 + decoration::TITLE_HEIGHT + decoration::BORDER_WIDTH;
+        let is_dock = (self.flags & flags::FLAG_DOCK) != 0;
+        let (total_w, total_h) = if is_dock {
+            (self.width as i32, self.height as i32)
+        } else {
+            (
+                self.width as i32 + decoration::BORDER_WIDTH * 2,
+                self.height as i32 + decoration::TITLE_HEIGHT + decoration::BORDER_WIDTH,
+            )
+        };
 
         px >= self.x && px < self.x + total_w && py >= self.y && py < self.y + total_h
     }
@@ -103,6 +110,12 @@ pub mod property {
     pub const TITLE_PTR: u64 = 6;
     pub const BUFFER_SHM: u64 = 7;
     pub const FLAGS: u64 = 8;
+}
+
+/// Window flags.
+pub mod flags {
+    /// Dock window: no decorations, not draggable.
+    pub const FLAG_DOCK: u64 = 1;
 }
 
 /// Window decoration constants (must match WM).
