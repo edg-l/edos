@@ -1694,13 +1694,11 @@ impl Screen {
 
     /// Draw text directly to the screen
     pub fn draw_text(&mut self, x: u64, y: u64, text: &str, style: &TextStyle) -> Result<()> {
-        self.ensure_back_buffer()?;
-
-        if let Some(ref mut buffer) = self.back_buffer {
-            buffer.draw_text(x, y, text, style)?;
+        let height = self.info.height as u64;
+        if let Some((pixels, stride)) = self.pixels_mut() {
+            render_string_at(pixels, stride as u64, height, x, y, text, style)?;
             self.dirty = true;
         }
-
         Ok(())
     }
 
@@ -1713,32 +1711,26 @@ impl Screen {
         style: &TextStyle,
         wrap_width: u64,
     ) -> Result<()> {
-        self.ensure_back_buffer()?;
-
-        if let Some(ref mut buffer) = self.back_buffer {
-            buffer.draw_text_wrapped(x, y, text, style, wrap_width)?;
+        let height = self.info.height as u64;
+        if let Some((pixels, stride)) = self.pixels_mut() {
+            render_text_wrapped(pixels, stride as u64, height, x, y, text, style, wrap_width)?;
             self.dirty = true;
         }
-
         Ok(())
     }
 
     /// Draw a single character directly to the screen
     pub fn draw_char(&mut self, x: u64, y: u64, character: char, style: &TextStyle) -> Result<()> {
-        self.ensure_back_buffer()?;
-
-        if let Some(ref mut buffer) = self.back_buffer {
-            buffer.draw_char(x, y, character, style)?;
+        let height = self.info.height as u64;
+        if let Some((pixels, stride)) = self.pixels_mut() {
+            render_character_at(pixels, stride as u64, height, x, y, character, style)?;
             self.dirty = true;
         }
-
         Ok(())
     }
 
     /// Set a single pixel in the back buffer.
     pub fn set_pixel(&mut self, x: u64, y: u64, color: Color) -> Result<()> {
-        self.ensure_back_buffer()?;
-
         let screen_w = self.info.width as u64;
         let screen_h = self.info.height as u64;
 
