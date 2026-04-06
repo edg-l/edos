@@ -214,7 +214,8 @@ pub fn sys_window_get(window_id: WindowId, prop: u64) -> u64 {
             property::BUFFER_SHM => window.buffer_shm_id.unwrap_or(0),
             property::FLAGS => window.flags,
             property::TITLE_PTR => {
-                // Can't return a pointer for title; use a separate syscall if needed
+                // Can't return a string through u64; titles are available
+                // via the WindowListEntry.title field in sys_window_list.
                 info.lock().errno = Errno::EINVAL;
                 !0u64
             }
@@ -327,6 +328,11 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
         let offset = i * entry_size;
 
         // Build entry inline
+        let mut title = [0u8; TITLE_MAX];
+        let title_bytes = window.title.as_bytes();
+        let copy_len = title_bytes.len().min(TITLE_MAX - 1);
+        title[..copy_len].copy_from_slice(&title_bytes[..copy_len]);
+
         let entry = WindowListEntry {
             id: window.id,
             pid: window.pid,
@@ -338,6 +344,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
             visible: window.visible as u32,
             buffer_shm_id: window.buffer_shm_id.unwrap_or(0),
             flags: window.flags,
+            title,
         };
 
         let entry_bytes = unsafe {
@@ -353,6 +360,9 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
     total_count as u64
 }
 
+/// Maximum title length in WindowListEntry (including null terminator).
+pub const TITLE_MAX: usize = 64;
+
 /// Entry in the window list returned by sys_window_list.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -367,6 +377,7 @@ pub struct WindowListEntry {
     pub visible: u32,
     pub buffer_shm_id: u64,
     pub flags: u64,
+    pub title: [u8; TITLE_MAX],
 }
 
 /// Send an event to a window.

@@ -115,8 +115,11 @@ impl WindowEvent {
     }
 }
 
+/// Maximum title length in WindowListEntry (including null terminator).
+pub const TITLE_MAX: usize = 64;
+
 /// Entry in the window list returned by window_list syscall.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct WindowListEntry {
     pub id: u64,
@@ -129,6 +132,24 @@ pub struct WindowListEntry {
     pub visible: u32,
     pub buffer_shm_id: u64,
     pub flags: u64,
+    pub title: [u8; TITLE_MAX],
+}
+
+impl WindowListEntry {
+    /// Get the title as a string slice.
+    pub fn title_str(&self) -> &str {
+        let len = self.title.iter().position(|&b| b == 0).unwrap_or(TITLE_MAX);
+        core::str::from_utf8(&self.title[..len]).unwrap_or("")
+    }
+}
+
+impl core::fmt::Debug for WindowListEntry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WindowListEntry")
+            .field("id", &self.id)
+            .field("title", &self.title_str())
+            .finish()
+    }
 }
 
 impl Default for WindowListEntry {
@@ -144,6 +165,7 @@ impl Default for WindowListEntry {
             visible: 0,
             buffer_shm_id: 0,
             flags: 0,
+            title: [0; TITLE_MAX],
         }
     }
 }

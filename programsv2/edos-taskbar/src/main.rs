@@ -108,12 +108,14 @@ fn main() {
 
         // Add button for each visible window
         for win_entry in &visible_windows {
-            // Create label text (truncate if needed)
-            let label = format!("Win {}", win_entry.id);
-            let label = if label.len() > 12 {
-                format!("{}...", &label[..9])
+            // Use window title, fall back to "Win N" if empty
+            let title = win_entry.title_str();
+            let label = if title.is_empty() {
+                format!("Win {}", win_entry.id)
+            } else if title.len() > 12 {
+                format!("{}...", &title[..9])
             } else {
-                label
+                title.to_string()
             };
 
             let button_id = widgets.add(Button::with_size(0, 0, 0, BUTTON_WIDTH, 24, &label));

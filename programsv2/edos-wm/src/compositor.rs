@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use edos_render::graphics::{Color, Screen};
+use edos_render::graphics::{Color, RasterHeight, Screen, TextStyle};
 use edos_render::window::{PROT_READ, WindowListEntry, flags::FLAG_DOCK, shm_map, shm_unmap};
 
 use crate::cursor::Cursor;
@@ -210,6 +210,18 @@ fn draw_window_direct(
         COLOR_TITLE_INACTIVE
     };
     draw_clipped_rect(screen, bw, bw, w, th - bw, title_color);
+
+    // Draw title text
+    let title = window.title_str();
+    if !title.is_empty() {
+        let text_x = window.x as i64 + bw + 6;
+        let text_y = window.y as i64 + bw + 3;
+        if text_x >= 0 && text_y >= 0 && text_x < screen_w && text_y < screen_h {
+            let style = TextStyle::new(Color::from_rgb(0xFF, 0xFF, 0xFF))
+                .with_size(RasterHeight::Size16);
+            let _ = screen.draw_text(text_x as u64, text_y as u64, title, &style);
+        }
+    }
 
     // Draw close button (right side of title bar)
     let close_rx = bw + w - 20;
