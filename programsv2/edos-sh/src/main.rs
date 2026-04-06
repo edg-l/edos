@@ -116,6 +116,8 @@ fn read_line() -> Option<String> {
         // Treat both '\r' (carriage return) and '\n' (newline) as line terminators.
         // Terminal sends '\r' for Enter key; normalize to '\n'.
         if ch == b'\n' || ch == b'\r' {
+            print!("\n");
+            let _ = std::io::stdout().flush();
             line.push('\n');
             return Some(line);
         }

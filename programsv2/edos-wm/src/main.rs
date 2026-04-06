@@ -258,7 +258,6 @@ fn main() {
                 match region {
                     HitRegion::CloseButton => {
                         // Send close request to the window
-                        println!("[WM] Sending CloseRequested to window {}", window_id);
                         let event = WindowEvent::close_requested();
                         let _ = window_send_event(window_id, &event);
                     }
