@@ -199,6 +199,14 @@ impl Framebuffer {
         let page_pixels = info.page_size as usize / core::mem::size_of::<u32>();
         let pitch_pixels = info.pitch as usize / core::mem::size_of::<u32>();
 
+        // The kernel starts with back_page_y_offset = height (page 1 is the
+        // back page, page 0 is displayed). Match that initial state.
+        let initial_back_offset = if info.double_buffered != 0 {
+            (info.height as usize) * pitch_pixels
+        } else {
+            0
+        };
+
         Ok(VramMapping {
             base: ptr,
             total_size: info.total_size as usize,
@@ -207,7 +215,7 @@ impl Framebuffer {
             height: info.height as usize,
             pitch_pixels,
             double_buffered: info.double_buffered != 0,
-            back_offset: 0,
+            back_offset: initial_back_offset,
         })
     }
 
