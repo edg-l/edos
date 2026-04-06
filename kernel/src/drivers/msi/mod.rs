@@ -42,7 +42,7 @@ pub fn enable_msi_for_device(dev: &PciDevice, vector: u8) -> Result<(), MsiError
 
     // Program message address and data
     let lapic_id = unsafe { get_lapic().id() } as u32;
-    let msg_addr_low: u32 = 0xFEE0_0000 | (lapic_id << 12);
+    let msg_addr_low: u32 = 0xFEE0_0000 | ((lapic_id & 0xFF) << 12);
     let msg_addr_high: u32 = 0; // xAPIC mode
 
     // Fixed delivery mode, edge triggered, deassert: data is just the vector in bits 7:0

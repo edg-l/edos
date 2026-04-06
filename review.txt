@@ -44,37 +44,36 @@ Fix: Close both FDs on the error path before returning.
 
 ### H1. sys_poll unbounded heap allocation from untrusted count
 File: kernel/src/syscalls/io.rs:608
-Status: OPEN
+Status: DONE
 `vec![...; count]` with no cap. User can pass huge values to exhaust kernel heap.
 Fix: Cap at e.g. 1024 and return EINVAL above that.
 
 ### H2. Block device cache miss coalescing assumes contiguous misses
 File: kernel/src/fs/block_device.rs:52-53
-Status: OPEN
+Status: DONE
 Non-consecutive cache misses (e.g., LBA 5 and 7 both missing, 6 cached) are read as a single contiguous range from the first miss. LBA 7's buffer position gets wrong data.
 Fix: Group miss ranges into contiguous sub-ranges, or issue one read per miss.
 
 ### H3. memfs remove_dir has inverted kind check
 File: kernel/src/fs/memfs/mod.rs:239
-Status: OPEN
+Status: DONE
 Checks `kind != File` and returns `NotAFile`, meaning it rejects directories and would delete files. Completely backwards.
 Fix: `if child.file.kind != FileKind::Directory { return Err(Error::NotADir); }`
 
 ### H4. DMA buffer recycling: stale cached physical address
 File: kernel/src/drivers/dma.rs:107
-Status: OPEN
-`phys_addr` is a `spin::Once` populated lazily. Recycled buffers keep the old value. If virtual-to-physical mapping ever differs on reuse, DMA targets wrong memory.
-Fix: Store `phys_addr` as a plain `PhysAddr` filled at allocation time, or clear Once on recycle.
+Status: WONTFIX
+Recycled buffers retain their virtual-to-physical mapping (not unmapped/remapped), so the cached phys_addr remains correct. Not a real bug with current code.
 
 ### H5. HPET ticks_to_nanos overflows u64 for large tick deltas
 File: kernel/src/drivers/hpet/instant.rs:15-16
-Status: OPEN
+Status: DONE
 `ticks * self.frequency` overflows u64 silently for large deltas (~2^63 ticks at 70M fs/tick), producing wrong timeout/sleep durations.
 Fix: Use u128 for the intermediate product: `((ticks as u128 * self.frequency as u128) / 1_000_000) as u64`
 
 ### H6. MSI address encodes LAPIC ID without masking
 File: kernel/src/drivers/msi/mod.rs:45
-Status: OPEN
+Status: DONE
 `lapic_id << 12` can corrupt the 0xFEE prefix if the ID exceeds 8 bits (x2APIC mode). MSI goes to wrong CPU or nowhere.
 Fix: `(lapic_id & 0xFF) << 12`
 
@@ -86,21 +85,20 @@ Fix: Write only PORT_IS_TFES.
 
 ### H8. sys_shm_map no validation on addr_hint
 File: kernel/src/syscalls/shm.rs:67-143
-Status: OPEN
+Status: DONE
 User-supplied address is used directly without alignment or kernel-space range check. User can map shared memory into kernel space.
 Fix: Validate page alignment and addr_hint < KERNEL_SPACE_BASE.
 
 ### H9. MAP_PHYSICAL no alignment check, no rollback on partial failure
 File: kernel/src/syscalls/memory.rs:42-88
-Status: OPEN
+Status: DONE
 Unaligned phys_addr causes wrong frame mapping. Partial mapping failure leaks already-mapped pages (no MemoryMapping recorded).
 Fix: Check phys_addr & 0xFFF == 0, and roll back on error like sys_shm_map does.
 
 ### H10. sys_window_send_event allows any process to inject events into any window
 File: kernel/src/syscalls/window.rs:393-425
-Status: OPEN
-No ownership or privilege check. Any process can inject arbitrary events into other processes' windows.
-Fix: Enforce caller ownership or WM privilege.
+Status: WONTFIX
+No ownership check possible without a WM privilege system -- the WM and taskbar both send events to windows they don't own. Part of the broader M4 design gap (deferred).
 
 ## MEDIUM
 

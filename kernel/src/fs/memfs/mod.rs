@@ -236,8 +236,8 @@ impl FileSystem for Memfs {
                 if child.file.name == name {
                     idx = Some((i, *id));
 
-                    if child.file.kind != FileKind::File {
-                        return Err(Error::NotAFile);
+                    if child.file.kind != FileKind::Directory {
+                        return Err(Error::NotADir);
                     }
                     break;
                 }
@@ -245,10 +245,6 @@ impl FileSystem for Memfs {
 
             if let Some((i, id)) = idx {
                 let child_ids = self.get_all_child_ids(id)?;
-
-                {
-                    let current = self.get_node(id);
-                }
 
                 {
                     let parent_node = self.get_node_mut(parent_node_id)?;

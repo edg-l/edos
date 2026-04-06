@@ -13,7 +13,8 @@ pub struct HpetTimer {
 impl HpetTimer {
     pub fn ticks_to_nanos(&self, ticks: u64) -> u64 {
         // Convert femtoseconds to nanoseconds: divide by 1,000,000
-        (ticks * self.frequency) / 1_000_000
+        // Use u128 to avoid overflow for large tick deltas
+        ((ticks as u128 * self.frequency as u128) / 1_000_000) as u64
     }
 
     pub fn nanos_to_ticks(&self, nanos: u128) -> u64 {

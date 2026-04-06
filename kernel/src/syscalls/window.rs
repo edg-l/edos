@@ -401,6 +401,8 @@ pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent)
     }
 
     // Check that the target window exists
+    // NOTE: no ownership check -- the WM and taskbar send events to windows they
+    // don't own. Requires a WM privilege system to restrict properly (see M4).
     {
         let registry = WINDOW_REGISTRY.read();
         if registry.get_window(window_id).is_none() {

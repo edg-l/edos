@@ -85,6 +85,11 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
         let guard = info.lock();
         find_free_virtual_address_atomic(&guard.memory_mappings, &guard.next_mmap_addr, size)
     } else {
+        // Validate user-supplied address: must be page-aligned and in user space
+        if addr_hint & 0xFFF != 0 || addr_hint >= 0x0000_8000_0000_0000 {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
         VirtAddr::new(addr_hint)
     };
 

@@ -596,6 +596,12 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
         return 0;
     }
 
+    const MAX_POLL_FDS: usize = 1024;
+    if count > MAX_POLL_FDS {
+        sched.current_thread_info().lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
     let mut fds = vec![
         SelectFd {
             fd: 0,

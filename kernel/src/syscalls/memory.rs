@@ -41,6 +41,12 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
     let is_physical = (flags & MAP_PHYSICAL) != 0;
 
     if is_physical {
+        // Validate physical address alignment
+        if phys_addr & 0xFFF != 0 {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+
         // Physical mapping: map MMIO/VRAM pages directly without allocating frames
         let map_addr = if addr == 0 {
             let guard = info.lock();
@@ -67,6 +73,14 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
                 .map_address(virt, phys, phys_flags & !PageTableFlags::PRESENT)
                 .is_err()
             {
+                // Rollback already-mapped pages
+                for j in 0..i {
+                    let rollback_virt = VirtAddr::new(map_addr.as_u64() + j * 4096);
+                    let page: Page<Size4KiB> = Page::containing_address(rollback_virt);
+                    if let Ok((_, flush)) = mm.mapper.unmap(page) {
+                        flush.flush();
+                    }
+                }
                 log!("Error mapping physical page");
                 drop(mm);
                 info.lock().errno = Errno::ENOMEM;

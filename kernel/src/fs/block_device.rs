@@ -49,31 +49,39 @@ impl BlockDevice {
         }
 
         if !miss_ranges.is_empty() {
-            let first = miss_ranges[0].0;
-            let count = miss_ranges.len() as u16;
+            // Group misses into contiguous sub-ranges to avoid reading wrong sectors
+            let mut i = 0;
+            while i < miss_ranges.len() {
+                let run_start = i;
+                let first_lba = miss_ranges[run_start].0;
+                // Extend run while LBAs are consecutive
+                while i + 1 < miss_ranges.len() && miss_ranges[i + 1].0 == miss_ranges[i].0 + 1 {
+                    i += 1;
+                }
+                let run_count = (i - run_start + 1) as u16;
 
-            self.scratch.resize(count as usize * SECTOR_SIZE, 0);
+                self.scratch.resize(run_count as usize * SECTOR_SIZE, 0);
 
-            let mut data = read_sectors(
-                self.device_id,
-                first,
-                count,
-                core::mem::take(&mut self.scratch),
-            )?;
-            // now `data` holds the backend-owned buffer
+                let data = read_sectors(
+                    self.device_id,
+                    first_lba,
+                    run_count,
+                    core::mem::take(&mut self.scratch),
+                )?;
 
-            for (j, (lba_i, idx)) in miss_ranges.iter().enumerate() {
-                let start = j * SECTOR_SIZE;
-                let end = start + SECTOR_SIZE;
-                buffer[*idx..*idx + SECTOR_SIZE].copy_from_slice(&data[start..end]);
+                for (j, (lba_j, idx)) in miss_ranges[run_start..=i].iter().enumerate() {
+                    let start = j * SECTOR_SIZE;
+                    buffer[*idx..*idx + SECTOR_SIZE]
+                        .copy_from_slice(&data[start..start + SECTOR_SIZE]);
 
-                let mut sector = [0u8; SECTOR_SIZE];
-                sector.copy_from_slice(&data[start..end]);
-                self.cache.put(*lba_i, sector);
+                    let mut sector = [0u8; SECTOR_SIZE];
+                    sector.copy_from_slice(&data[start..start + SECTOR_SIZE]);
+                    self.cache.put(*lba_j, sector);
+                }
+
+                self.scratch = data;
+                i += 1;
             }
-
-            // save `data` back for reuse
-            self.scratch = data;
         }
 
         Ok(buffer)
