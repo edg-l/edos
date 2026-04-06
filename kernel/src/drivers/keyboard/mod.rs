@@ -2,7 +2,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
-use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1, layouts};
+use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+
+mod es105;
 use spin::{Mutex, Once};
 use x86_64::structures::idt::InterruptStackFrame;
 
@@ -50,11 +52,7 @@ pub extern "C" fn driver_main() -> ! {
     KEYBOARD_THREAD_ID.call_once(|| thread.id);
     thread.set_priority(10);
 
-    let mut keyboard = Keyboard::new(
-        ScancodeSet1::new(),
-        layouts::De105Key,
-        HandleControl::Ignore,
-    );
+    let mut keyboard = Keyboard::new(ScancodeSet1::new(), es105::Es105Key, HandleControl::Ignore);
 
     let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
     let device = Arc::new(KeyboardDevice);
