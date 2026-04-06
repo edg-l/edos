@@ -10,6 +10,7 @@ pub const FB_IOCTL_RENDER: u64 = 0x4642_0002;
 pub const FB_IOCTL_DRAW: u64 = 0x4642_0003;
 pub const FB_IOCTL_SCREEN_INFO: u64 = 0x4642_0004;
 pub const FB_IOCTL_FLIP: u64 = 0x4642_0005;
+pub const FB_IOCTL_MMAP_INFO: u64 = 0x4642_0006;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -37,6 +38,20 @@ pub struct FramebufferDraw {
 pub struct FramebufferInfo {
     pub width: u32,
     pub height: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FramebufferMmapInfo {
+    pub phys_addr: u64,
+    pub total_size: u64,
+    pub page_size: u64,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub double_buffered: u8,
+    pub is_identity: u8,
+    pub _padding: [u8; 2],
 }
 
 pub struct FramebufferDevice;
@@ -122,7 +137,18 @@ impl DevFsDevice for FramebufferDevice {
             }
             FB_IOCTL_FLIP => {
                 let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
-                display.lock().flip();
+                Ok(display.lock().flip())
+            }
+            FB_IOCTL_MMAP_INFO => {
+                if arg == 0 {
+                    return Err(DevFsError::IoError);
+                }
+                let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
+                let info = display.lock().mmap_info();
+                let info_ptr = arg as *mut FramebufferMmapInfo;
+                unsafe {
+                    *info_ptr = info;
+                }
                 Ok(0)
             }
             _ => Err(DevFsError::Unsupported),

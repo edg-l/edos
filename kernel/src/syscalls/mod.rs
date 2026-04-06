@@ -316,8 +316,9 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let length = ctx.rsi;
             let prot = ctx.rdx as u32;
             let flags = ctx.r10 as u32;
+            let phys_addr = ctx.r8;
 
-            ctx.rax = sys_mmap(addr, length, prot, flags);
+            ctx.rax = sys_mmap(addr, length, prot, flags, phys_addr);
         }
         SYS_MUNMAP => {
             let addr = ctx.rdi;

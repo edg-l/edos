@@ -656,6 +656,19 @@ impl Thread {
                                 shm.dec_ref();
                             }
                         }
+                        MappingType::Physical(_phys_base) => {
+                            // Physical (MMIO/VRAM) mapping: unmap pages but DON'T
+                            // deallocate frames -- they are not owned by the frame allocator.
+                            use x86_64::structures::paging::{Mapper, Page, Size4KiB};
+                            let page_count = (mapping.size + 0xFFF) / 4096;
+                            for i in 0..page_count {
+                                let virt_addr = VirtAddr::new(addr.as_u64() + i * 4096);
+                                let page: Page<Size4KiB> = Page::containing_address(virt_addr);
+                                if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
+                                    flush.flush();
+                                }
+                            }
+                        }
                     }
                 }
             }

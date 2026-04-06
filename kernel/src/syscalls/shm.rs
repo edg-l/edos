@@ -184,7 +184,7 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
 
                     0
                 }
-                MappingType::Anonymous => {
+                MappingType::Anonymous | MappingType::Physical(_) => {
                     // Not a shared memory mapping, restore and return error
                     info.lock().memory_mappings.lock().insert(map_addr, mapping);
                     info.lock().errno = Errno::EINVAL;

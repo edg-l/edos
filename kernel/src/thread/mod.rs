@@ -181,7 +181,8 @@ pub struct MemoryMapping {
 #[derive(Debug, Clone)]
 pub enum MappingType {
     Anonymous,
-    Shared(u64), // shm_id
+    Shared(u64),   // shm_id
+    Physical(u64), // physical base address (MMIO/VRAM, frames not owned by allocator)
 }
 
 #[expect(unused)]

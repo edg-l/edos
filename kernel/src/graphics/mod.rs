@@ -14,6 +14,7 @@ use crate::{
         DISPI_INDEX_VIDEO_MEMORY_64K, DISPI_INDEX_VIRT_HEIGHT, DISPI_INDEX_Y_OFFSET, dispi_read,
         dispi_write,
     },
+    graphics::framebuffer::FramebufferMmapInfo,
     memory::mapper::memory_mapper,
     println,
 };
@@ -168,6 +169,28 @@ impl DirectFramebuffer {
         }
     }
 
+    pub fn mmap_info(&self) -> FramebufferMmapInfo {
+        let hhdm_offset = boot_info().physical_memory_offset.as_u64();
+        let phys_addr = self.fb_base as u64 - hhdm_offset;
+        let page_size = (self.height * self.pitch) as u64;
+        let total_size = if self.double_buffered {
+            2 * page_size
+        } else {
+            page_size
+        };
+        FramebufferMmapInfo {
+            phys_addr,
+            total_size,
+            page_size,
+            width: self.width as u32,
+            height: self.height as u32,
+            pitch: self.pitch as u32,
+            double_buffered: self.double_buffered as u8,
+            is_identity: self.is_identity as u8,
+            _padding: [0; 2],
+        }
+    }
+
     fn build_channel_lut(mask_size: u8, shift: u8) -> [u32; 256] {
         let mask = if mask_size == 0 {
             0
@@ -312,9 +335,11 @@ impl DirectFramebuffer {
     /// Flip the display to show the back page. When double buffering is active
     /// this writes the current `front_y` to the Bochs VBE Y_OFFSET register,
     /// making the just-drawn page visible, then swaps front and back.
-    pub fn flip(&mut self) {
+    /// Returns the byte offset of the NEW back page (the one to write to next),
+    /// or 0 when not double buffered.
+    pub fn flip(&mut self) -> u64 {
         if !self.double_buffered {
-            return;
+            return 0;
         }
         let show_y = self.back_page_y_offset as u16;
         dispi_write(DISPI_INDEX_Y_OFFSET, show_y);
@@ -323,5 +348,6 @@ impl DirectFramebuffer {
         } else {
             self.back_page_y_offset = 0;
         }
+        (self.back_page_y_offset * self.pitch) as u64
     }
 }
