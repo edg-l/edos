@@ -4,6 +4,13 @@ use std::collections::VecDeque;
 
 use super::{Rect, Widget, WidgetEvent, WidgetId, char_width, draw_rect, draw_text, text_height};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EscState {
+    Normal,
+    Escape, // saw ESC (0x1B)
+    Csi,    // saw ESC [
+}
+
 /// Default terminal colors
 pub mod terminal_colors {
     use crate::theme::Theme;
@@ -45,6 +52,11 @@ pub struct Terminal {
 
     // Input buffer for characters to send
     input_buffer: Vec<char>,
+
+    // ANSI escape sequence parser state
+    esc_state: EscState,
+    esc_buf: [u8; 32],
+    esc_len: usize,
 }
 
 impl Terminal {
@@ -78,6 +90,9 @@ impl Terminal {
             bg_color: terminal_colors::BACKGROUND,
             fg_color: terminal_colors::FOREGROUND,
             input_buffer: Vec::new(),
+            esc_state: EscState::Normal,
+            esc_buf: [0; 32],
+            esc_len: 0,
         }
     }
 
@@ -117,6 +132,41 @@ impl Terminal {
 
     /// Write a character at the current cursor position.
     pub fn write_char(&mut self, ch: char) {
+        match self.esc_state {
+            EscState::Escape => {
+                if ch == '[' {
+                    self.esc_state = EscState::Csi;
+                    self.esc_len = 0;
+                } else {
+                    // Unknown escape sequence, discard
+                    self.esc_state = EscState::Normal;
+                }
+                return;
+            }
+            EscState::Csi => {
+                let b = ch as u8;
+                if b >= 0x30 && b <= 0x3F {
+                    // Parameter byte (digits, semicolons)
+                    if self.esc_len < self.esc_buf.len() {
+                        self.esc_buf[self.esc_len] = b;
+                        self.esc_len += 1;
+                    }
+                } else if b >= 0x40 && b <= 0x7E {
+                    // Final byte - execute the command
+                    self.execute_csi(ch);
+                    self.esc_state = EscState::Normal;
+                } else {
+                    // Intermediate byte - accumulate
+                    if self.esc_len < self.esc_buf.len() {
+                        self.esc_buf[self.esc_len] = b;
+                        self.esc_len += 1;
+                    }
+                }
+                return;
+            }
+            EscState::Normal => {} // fall through to normal char handling
+        }
+
         match ch {
             '\n' => {
                 self.newline();
@@ -143,7 +193,7 @@ impl Terminal {
                 self.cursor_col = next_tab.min(self.cols - 1);
             }
             '\x1B' => {
-                // Escape - could be start of ANSI sequence, ignore for now
+                self.esc_state = EscState::Escape;
             }
             _ => {
                 if ch.is_control() {
@@ -163,6 +213,148 @@ impl Terminal {
                 }
             }
         }
+    }
+
+    /// Execute a CSI (Control Sequence Introducer) command.
+    fn execute_csi(&mut self, final_byte: char) {
+        let params = self.parse_csi_params();
+
+        match final_byte {
+            'H' | 'f' => {
+                // Cursor position: CSI row ; col H
+                let row = params.get(0).copied().unwrap_or(1).max(1) - 1;
+                let col = params.get(1).copied().unwrap_or(1).max(1) - 1;
+                self.cursor_row = row.min(self.rows - 1);
+                self.cursor_col = col.min(self.cols - 1);
+            }
+            'A' => {
+                // Cursor up
+                let n = params.get(0).copied().unwrap_or(1).max(1);
+                self.cursor_row = self.cursor_row.saturating_sub(n);
+            }
+            'B' => {
+                // Cursor down
+                let n = params.get(0).copied().unwrap_or(1).max(1);
+                self.cursor_row = (self.cursor_row + n).min(self.rows - 1);
+            }
+            'C' => {
+                // Cursor forward (right)
+                let n = params.get(0).copied().unwrap_or(1).max(1);
+                self.cursor_col = (self.cursor_col + n).min(self.cols - 1);
+            }
+            'D' => {
+                // Cursor back (left)
+                let n = params.get(0).copied().unwrap_or(1).max(1);
+                self.cursor_col = self.cursor_col.saturating_sub(n);
+            }
+            'J' => {
+                // Erase in display
+                let n = params.get(0).copied().unwrap_or(0);
+                match n {
+                    0 => {
+                        // Erase from cursor to end of screen
+                        for c in self.cursor_col..self.cols {
+                            self.buffer[self.cursor_row][c] = ' ';
+                        }
+                        for row in (self.cursor_row + 1)..self.rows {
+                            for c in 0..self.cols {
+                                self.buffer[row][c] = ' ';
+                            }
+                        }
+                    }
+                    1 => {
+                        // Erase from start to cursor
+                        for row in 0..self.cursor_row {
+                            for c in 0..self.cols {
+                                self.buffer[row][c] = ' ';
+                            }
+                        }
+                        for c in 0..=self.cursor_col.min(self.cols - 1) {
+                            self.buffer[self.cursor_row][c] = ' ';
+                        }
+                    }
+                    2 => {
+                        // Erase entire screen
+                        self.clear();
+                    }
+                    _ => {}
+                }
+            }
+            'K' => {
+                // Erase in line
+                let n = params.get(0).copied().unwrap_or(0);
+                match n {
+                    0 => {
+                        // Erase from cursor to end of line
+                        for c in self.cursor_col..self.cols {
+                            self.buffer[self.cursor_row][c] = ' ';
+                        }
+                    }
+                    1 => {
+                        // Erase from start to cursor
+                        for c in 0..=self.cursor_col.min(self.cols - 1) {
+                            self.buffer[self.cursor_row][c] = ' ';
+                        }
+                    }
+                    2 => {
+                        // Erase entire line
+                        for c in 0..self.cols {
+                            self.buffer[self.cursor_row][c] = ' ';
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            'm' => {
+                // SGR (Select Graphic Rendition) - color/style attributes, silently consumed
+            }
+            _ => {
+                // Unknown CSI command, ignore
+            }
+        }
+    }
+
+    /// Parse the accumulated CSI parameter bytes into a list of numeric values.
+    fn parse_csi_params(&self) -> Vec<usize> {
+        let param_str = core::str::from_utf8(&self.esc_buf[..self.esc_len]).unwrap_or("");
+        if param_str.is_empty() {
+            return Vec::new();
+        }
+        param_str
+            .split(';')
+            .map(|s| s.parse::<usize>().unwrap_or(0))
+            .collect()
+    }
+
+    /// Resize the terminal to fit the given pixel dimensions.
+    pub fn resize_to_pixels(&mut self, pixel_width: u32, pixel_height: u32) {
+        let char_w = char_width();
+        let char_h = text_height();
+        let new_cols = (pixel_width / char_w) as usize;
+        let new_rows = (pixel_height / char_h) as usize;
+        if new_cols == 0 || new_rows == 0 || (new_cols == self.cols && new_rows == self.rows) {
+            return;
+        }
+
+        // Build new buffer, preserving existing content where it fits
+        let mut new_buffer = VecDeque::new();
+        for r in 0..new_rows {
+            let mut row = vec![' '; new_cols];
+            if r < self.buffer.len() {
+                let old_row = &self.buffer[r];
+                let copy_cols = old_row.len().min(new_cols);
+                row[..copy_cols].copy_from_slice(&old_row[..copy_cols]);
+            }
+            new_buffer.push_back(row);
+        }
+
+        self.buffer = new_buffer;
+        self.cols = new_cols;
+        self.rows = new_rows;
+        self.cursor_row = self.cursor_row.min(new_rows.saturating_sub(1));
+        self.cursor_col = self.cursor_col.min(new_cols.saturating_sub(1));
+        self.width = pixel_width;
+        self.height = pixel_height;
     }
 
     /// Write a string to the terminal.

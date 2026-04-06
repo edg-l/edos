@@ -90,7 +90,9 @@ fn main() {
                     Some(WindowEventType::Resize) => {
                         let new_w = event.x as u32;
                         let new_h = event.y as u32;
-                        if window.resize(new_w, new_h).is_err() {
+                        if window.resize(new_w, new_h).is_ok() {
+                            terminal.resize_to_pixels(new_w, new_h);
+                        } else {
                             eprintln!("[Terminal] Failed to resize window");
                         }
                     }

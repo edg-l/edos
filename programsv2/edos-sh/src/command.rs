@@ -20,7 +20,8 @@ pub fn parse_command(input: &str) -> Vec<String> {
             q if in_quotes && q == quote_char => {
                 in_quotes = false;
             }
-            '\\' if in_quotes => {
+            '\\' => {
+                // Backslash escapes the next character (inside or outside quotes)
                 if let Some(escaped) = chars.next() {
                     current.push(escaped);
                 }

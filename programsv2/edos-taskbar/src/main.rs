@@ -201,8 +201,9 @@ fn main() {
                 let title = win_entry.title_str();
                 let label = if title.is_empty() {
                     format!("Win {}", win_entry.id)
-                } else if title.len() > 12 {
-                    format!("{}...", &title[..9])
+                } else if title.chars().count() > 12 {
+                    let truncated: String = title.chars().take(9).collect();
+                    format!("{}...", truncated)
                 } else {
                     title.to_string()
                 };

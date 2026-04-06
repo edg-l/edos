@@ -229,6 +229,9 @@ fn main() {
                             alt_held = false;
                             continue;
                         }
+
+                        // Unrecognized key while Alt held: clear Alt state
+                        alt_held = false;
                     }
                 }
             }
@@ -389,7 +392,7 @@ fn main() {
             } else {
                 // Mouse released - send resize event with final clamped dimensions
                 let resize_event = WindowEvent {
-                    event_type: 10, // WindowEventType::Resize
+                    event_type: WindowEventType::Resize as u32,
                     x: new_w,
                     y: new_h,
                     code: 0,
