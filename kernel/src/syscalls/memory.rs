@@ -55,21 +55,22 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
             | PageTableFlags::NO_CACHE;
 
         let page_count = (length + 0xFFF) / 4096;
-        let mut mapper = memory_mapper();
+        let memory_manager = info.lock().memory_manager.clone();
+        let mut mm = memory_manager.lock();
         for i in 0..page_count {
             let virt = VirtAddr::new(map_addr.as_u64() + i * 4096);
             let phys = PhysAddr::new(phys_addr + i * 4096);
-            if mapper
+            if mm
                 .map_address(virt, phys, phys_flags & !PageTableFlags::PRESENT)
                 .is_err()
             {
                 log!("Error mapping physical page");
-                drop(mapper);
+                drop(mm);
                 info.lock().errno = Errno::ENOMEM;
                 return !0u64;
             }
         }
-        drop(mapper);
+        drop(mm);
 
         info.lock().memory_mappings.lock().insert(
             map_addr,
