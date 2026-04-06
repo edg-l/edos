@@ -24,6 +24,7 @@ fn main() {
             return;
         }
     };
+    let _ = window.set_title("Widgets");
 
     // Create widget container
     let mut widgets = WidgetContainer::new();

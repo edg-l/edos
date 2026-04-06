@@ -1,6 +1,6 @@
 //! EDOS Taskbar - Shows running windows and allows switching between them.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use edos_render::graphics::{Framebuffer, ScreenInfo};
 use edos_render::theme::{Theme, draw_gradient_v};
@@ -72,9 +72,6 @@ fn main() {
 
     // Track which windows we're showing buttons for: (window_id, btn_x)
     let mut displayed_windows: Vec<(u64, i32)> = Vec::new();
-
-    // Used for clock display
-    let start_time = Instant::now();
 
     // Main loop
     loop {
@@ -251,9 +248,11 @@ fn main() {
             }
 
             // Clock display (right-aligned)
-            let elapsed = start_time.elapsed().as_secs();
-            let hours = (elapsed / 3600) % 24;
-            let minutes = (elapsed / 60) % 60;
+            let (hours, minutes) = if let Some(t) = edos_render::time::clock_gettime() {
+                (t.hour as u64, t.minute as u64)
+            } else {
+                (0, 0)
+            };
             let clock_text = format!("{:02}:{:02}", hours, minutes);
             let clock_w = clock_text.len() as u32 * cw;
             let clock_x = w as i32 - clock_w as i32 - 12;

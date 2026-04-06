@@ -37,12 +37,8 @@ pub struct Theme {
     pub button_normal: Color,
     pub button_hover: Color,
     pub button_pressed: Color,
-    pub button_border_highlight: Color,
-    pub button_border_shadow: Color,
     pub input_bg: Color,
     pub input_border: Color,
-    pub input_border_highlight: Color,
-    pub input_border_shadow: Color,
     pub text_primary: Color,
     pub text_placeholder: Color,
     pub focus_ring: Color,
@@ -95,12 +91,8 @@ impl Theme {
         button_normal: Color::from_rgb(0xD0, 0xD0, 0xD0),
         button_hover: Color::from_rgb(0xC0, 0xC0, 0xC0),
         button_pressed: Color::from_rgb(0xB0, 0xB0, 0xB0),
-        button_border_highlight: Color::from_rgb(0xF0, 0xF0, 0xF0),
-        button_border_shadow: Color::from_rgb(0x80, 0x80, 0x80),
         input_bg: Color::from_rgb(0xFF, 0xFF, 0xFF),
         input_border: Color::from_rgb(0x60, 0x60, 0x60),
-        input_border_highlight: Color::from_rgb(0xA0, 0xA0, 0xA0),
-        input_border_shadow: Color::from_rgb(0x40, 0x40, 0x40),
         text_primary: Color::from_rgb(0x20, 0x20, 0x20),
         text_placeholder: Color::from_rgb(0x80, 0x80, 0x80),
         focus_ring: Color::from_rgb(0x40, 0x80, 0xF0),
@@ -126,75 +118,6 @@ pub const fn lerp_color(a: Color, b: Color, t: u8) -> Color {
     let g = (a.green() as u32 * inv + b.green() as u32 * t) / 255;
     let b_ch = (a.blue() as u32 * inv + b.blue() as u32 * t) / 255;
     Color::from_rgb(r as u8, g as u8, b_ch as u8)
-}
-
-/// Draw a 3D-style raised border: 1px light top+left edges, 1px dark bottom+right edges.
-pub fn draw_3d_rect(
-    buffer: &mut [u32],
-    buffer_width: u32,
-    buffer_height: u32,
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-    highlight: Color,
-    shadow: Color,
-) {
-    use crate::widgets::draw_rect;
-    let hl = highlight.raw();
-    let sh = shadow.raw();
-    // Top edge (highlight)
-    draw_rect(buffer, buffer_width, buffer_height, x, y, w, 1, hl);
-    // Left edge (highlight)
-    draw_rect(buffer, buffer_width, buffer_height, x, y, 1, h, hl);
-    // Bottom edge (shadow)
-    draw_rect(
-        buffer,
-        buffer_width,
-        buffer_height,
-        x,
-        y + h as i32 - 1,
-        w,
-        1,
-        sh,
-    );
-    // Right edge (shadow)
-    draw_rect(
-        buffer,
-        buffer_width,
-        buffer_height,
-        x + w as i32 - 1,
-        y,
-        1,
-        h,
-        sh,
-    );
-}
-
-/// Draw a 3D-style sunken/inset border: 1px dark top+left edges, 1px light bottom+right edges.
-pub fn draw_3d_rect_inset(
-    buffer: &mut [u32],
-    buffer_width: u32,
-    buffer_height: u32,
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-    highlight: Color,
-    shadow: Color,
-) {
-    // Invert: shadow on top+left, highlight on bottom+right
-    draw_3d_rect(
-        buffer,
-        buffer_width,
-        buffer_height,
-        x,
-        y,
-        w,
-        h,
-        shadow,
-        highlight,
-    );
 }
 
 /// Fill a rectangle with a vertical gradient from `top_color` to `bottom_color`.

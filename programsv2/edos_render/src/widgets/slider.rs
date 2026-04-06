@@ -1,7 +1,7 @@
 //! Horizontal slider widget.
 
 use super::{Rect, Widget, WidgetEvent, WidgetId, colors, draw_rect, draw_rect_outline};
-use crate::theme::{Theme, draw_3d_rect};
+use crate::theme::Theme;
 
 /// A horizontal value slider.
 pub struct Slider {
@@ -188,9 +188,9 @@ impl Widget for Slider {
             THUMB_HEIGHT,
             thumb_color,
         );
-        draw_3d_rect(buffer, buffer_width, buffer_height,
+        draw_rect_outline(buffer, buffer_width, buffer_height,
             self.thumb_x(), self.y, THUMB_WIDTH, THUMB_HEIGHT,
-            Theme::DEFAULT.button_border_highlight, Theme::DEFAULT.button_border_shadow);
+            0xFF2060A0);
     }
 
     fn on_mouse_move(&mut self, x: i32, y: i32) {

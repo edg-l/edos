@@ -241,6 +241,7 @@ const SYS_WINDOW_GET: u64 = 222;
 const SYS_WINDOW_POLL: u64 = 223;
 const SYS_WINDOW_LIST: u64 = 224;
 const SYS_WINDOW_SEND_EVENT: u64 = 225;
+const SYS_CLOCK_GETTIME: u64 = 226;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -483,6 +484,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let event_ptr = ctx.rsi as *const crate::window::WindowEvent;
             ctx.rax = window::sys_window_send_event(window_id, event_ptr);
         }
+        SYS_CLOCK_GETTIME => {
+            let buf_ptr = ctx.rdi as *mut u8;
+            ctx.rax = sys_clock_gettime(buf_ptr);
+        }
         _ => {
             ctx.rax = !0u64;
         }
@@ -492,6 +497,36 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
 pub fn sys_errno() -> u64 {
     let sched = sched();
     sched.current_thread_info().lock().errno as u64
+}
+
+fn sys_clock_gettime(buf_ptr: *mut u8) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if buf_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    let rtc = crate::drivers::rtc::read_rtc();
+    let data: [u8; 8] = [
+        rtc.hour,
+        rtc.minute,
+        rtc.second,
+        0,
+        rtc.day,
+        rtc.month,
+        (rtc.year & 0xFF) as u8,
+        ((rtc.year >> 8) & 0xFF) as u8,
+    ];
+
+    if !unsafe { try_copy_to_user(buf_ptr, data.as_ptr(), 8) } {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

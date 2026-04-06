@@ -195,23 +195,16 @@ fn draw_window_direct(
     let bw = BORDER_WIDTH as i64;
     let th = TITLE_HEIGHT as i64;
 
-    // --- 3D border ---
-    // Top and left edges use highlight; bottom and right use shadow.
-    // Full 2px width drawn as two 1px passes for clarity.
-    let highlight = Theme::DEFAULT.window_border_highlight;
-    let shadow = Theme::DEFAULT.window_border_shadow;
-
-    // Outer ring (pixel 0)
-    draw_clipped_rect(screen, 0, 0, total_w, 1, highlight); // top
-    draw_clipped_rect(screen, 0, 0, 1, total_h, highlight); // left
-    draw_clipped_rect(screen, 0, total_h - 1, total_w, 1, shadow); // bottom
-    draw_clipped_rect(screen, total_w - 1, 0, 1, total_h, shadow); // right
-
-    // Inner ring (pixel 1)
-    draw_clipped_rect(screen, 1, 1, total_w - 2, 1, highlight); // top
-    draw_clipped_rect(screen, 1, 1, 1, total_h - 2, highlight); // left
-    draw_clipped_rect(screen, 1, total_h - 2, total_w - 2, 1, shadow); // bottom
-    draw_clipped_rect(screen, total_w - 2, 1, 1, total_h - 2, shadow); // right
+    // --- Flat border ---
+    let border_color = if is_focused {
+        Theme::DEFAULT.window_border_highlight
+    } else {
+        Theme::DEFAULT.window_border_shadow
+    };
+    draw_clipped_rect(screen, 0, 0, total_w, bw, border_color); // top
+    draw_clipped_rect(screen, 0, total_h - bw, total_w, bw, border_color); // bottom
+    draw_clipped_rect(screen, 0, bw, bw, total_h - 2 * bw, border_color); // left
+    draw_clipped_rect(screen, total_w - bw, bw, bw, total_h - 2 * bw, border_color); // right
 
     // --- Gradient title bar ---
     let (title_top, title_bottom) = if is_focused {

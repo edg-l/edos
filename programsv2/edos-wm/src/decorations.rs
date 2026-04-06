@@ -6,7 +6,7 @@ use edos_render::window::{WindowListEntry, flags::FLAG_DOCK};
 pub const TITLE_HEIGHT: u64 = 24;
 
 /// Width of the window border.
-pub const BORDER_WIDTH: u64 = 2;
+pub const BORDER_WIDTH: u64 = 1;
 
 /// Size of the drop shadow in pixels (drawn outside the decorated area).
 pub const SHADOW_SIZE: u64 = 2;

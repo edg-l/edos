@@ -4,7 +4,6 @@ use super::{
     Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_rect, draw_rect_outline,
     draw_text, text_height,
 };
-use crate::theme::{Theme, draw_3d_rect_inset};
 
 /// A single-line text input field.
 pub struct TextInput {
@@ -182,9 +181,13 @@ impl Widget for TextInput {
         }
 
         // Draw border
-        draw_3d_rect_inset(buffer, buffer_width, buffer_height,
-            self.x, self.y, self.width, INPUT_HEIGHT,
-            Theme::DEFAULT.input_border_highlight, Theme::DEFAULT.input_border_shadow);
+        let border_color = if self.focused {
+            colors::FOCUS_RING
+        } else {
+            colors::INPUT_BORDER
+        };
+        draw_rect_outline(buffer, buffer_width, buffer_height,
+            self.x, self.y, self.width, INPUT_HEIGHT, border_color);
 
         let text_x = self.x + PADDING as i32;
         let text_y = self.y + (INPUT_HEIGHT as i32 - text_height() as i32) / 2;

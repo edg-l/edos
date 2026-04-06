@@ -4,7 +4,6 @@ use super::{
     Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_rect, draw_rect_outline,
     draw_text, text_height,
 };
-use crate::theme::{Theme, draw_3d_rect_inset};
 
 /// A toggleable checkbox with a label.
 pub struct Checkbox {
@@ -123,9 +122,13 @@ impl Widget for Checkbox {
         }
 
         // Draw border
-        draw_3d_rect_inset(buffer, buffer_width, buffer_height,
-            self.x, self.y, BOX_SIZE, BOX_SIZE,
-            Theme::DEFAULT.input_border_highlight, Theme::DEFAULT.input_border_shadow);
+        let border_color = if self.focused {
+            colors::FOCUS_RING
+        } else {
+            colors::INPUT_BORDER
+        };
+        draw_rect_outline(buffer, buffer_width, buffer_height,
+            self.x, self.y, BOX_SIZE, BOX_SIZE, border_color);
 
         // Draw check mark if checked
         if self.checked {
