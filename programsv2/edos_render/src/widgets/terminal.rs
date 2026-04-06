@@ -543,6 +543,15 @@ impl Terminal {
         self.fg_color = color;
     }
 
+    /// Scroll the terminal view by the given delta (positive = up into history).
+    pub fn scroll(&mut self, delta: i32) {
+        if delta > 0 {
+            self.scroll_offset = (self.scroll_offset + delta as usize).min(self.history.len());
+        } else {
+            self.scroll_offset = self.scroll_offset.saturating_sub((-delta) as usize);
+        }
+    }
+
     /// Update cursor blink state (call periodically).
     pub fn tick(&mut self) {
         self.cursor_blink_counter += 1;

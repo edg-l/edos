@@ -106,6 +106,10 @@ fn main() {
                     Some(WindowEventType::KeyRelease) => {
                         terminal.on_key(event.code, false);
                     }
+                    Some(WindowEventType::MouseScroll) => {
+                        let delta = -(event.data as i32);
+                        terminal.scroll(delta);
+                    }
                     Some(WindowEventType::FocusGained) => {
                         eprintln!("[Term] FocusGained");
                         terminal.set_focused(true);
