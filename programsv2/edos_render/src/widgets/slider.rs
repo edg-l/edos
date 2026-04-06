@@ -190,7 +190,7 @@ impl Widget for Slider {
         );
         draw_rect_outline(buffer, buffer_width, buffer_height,
             self.thumb_x(), self.y, THUMB_WIDTH, THUMB_HEIGHT,
-            0xFF2060A0);
+            colors::INPUT_BORDER);
     }
 
     fn on_mouse_move(&mut self, x: i32, y: i32) {

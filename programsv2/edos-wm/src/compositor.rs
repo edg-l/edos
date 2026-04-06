@@ -288,7 +288,7 @@ fn draw_window_direct(
     }
 
     // --- Content area background ---
-    draw_clipped_rect(screen, bw, th, w, h, Color::from_rgb(0x30, 0x30, 0x30));
+    draw_clipped_rect(screen, bw, th, w, h, Theme::DEFAULT.background);
 
     // --- Drop shadow (drawn outside the decorated rect) ---
     let shadow_color = Theme::DEFAULT.window_shadow;

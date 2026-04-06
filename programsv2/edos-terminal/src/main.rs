@@ -36,7 +36,7 @@ fn main() {
     terminal.set_focused(true);
 
     // Pre-render before showing window to avoid black frame
-    window.fill(0xFF1E1E1E);
+    window.fill(edos_render::widgets::terminal::terminal_colors::BACKGROUND);
     {
         let w = window.width;
         let h = window.height;
@@ -152,7 +152,7 @@ fn main() {
         terminal.tick();
 
         // Draw
-        window.fill(0xFF1E1E1E);
+        window.fill(edos_render::widgets::terminal::terminal_colors::BACKGROUND);
 
         let w = window.width;
         let h = window.height;

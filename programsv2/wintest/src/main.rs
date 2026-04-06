@@ -35,7 +35,7 @@ fn main() {
         0,
         0,
         "Widget Toolkit Demo",
-        0xFF000080,
+        edos_render::widgets::colors::FOCUS_RING,
     ));
 
     // Button section
@@ -272,9 +272,9 @@ fn main() {
             }
         }
 
-        // Choose background color based on dark mode
-        let bg_color = if dark_mode { 0xFF303030 } else { 0xFFE8E8E8 };
-        let text_color = if dark_mode { 0xFFE0E0E0 } else { 0xFF202020 };
+        // Use theme background color (dark mode is now always-on via theme)
+        let bg_color = edos_render::widgets::colors::BACKGROUND;
+        let text_color = edos_render::widgets::colors::TEXT;
 
         // Clear and draw
         window.fill(bg_color);
