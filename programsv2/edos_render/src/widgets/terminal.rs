@@ -124,8 +124,14 @@ impl Terminal {
             '\r' => {
                 self.cursor_col = 0;
             }
-            '\x08' | '\x7F' => {
-                // Backspace
+            '\x08' => {
+                // Backspace: move cursor left (standard terminal behavior)
+                if self.cursor_col > 0 {
+                    self.cursor_col -= 1;
+                }
+            }
+            '\x7F' => {
+                // DEL: move cursor left and erase
                 if self.cursor_col > 0 {
                     self.cursor_col -= 1;
                     self.buffer[self.cursor_row][self.cursor_col] = ' ';

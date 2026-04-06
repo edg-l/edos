@@ -111,16 +111,35 @@ fn read_line() -> Option<String> {
             continue;
         }
 
-        let ch = buf[0] as char;
+        let ch = buf[0];
 
         // Treat both '\r' (carriage return) and '\n' (newline) as line terminators.
         // Terminal sends '\r' for Enter key; normalize to '\n'.
-        if ch == '\n' || ch == '\r' {
+        if ch == b'\n' || ch == b'\r' {
             line.push('\n');
             return Some(line);
         }
 
-        line.push(ch);
+        // Handle backspace: remove last character if any
+        if ch == 0x08 || ch == 0x7F {
+            if !line.is_empty() {
+                line.pop();
+                // Send backspace sequence to terminal: move back, overwrite with space, move back
+                print!("\x08 \x08");
+                let _ = std::io::stdout().flush();
+            }
+            continue;
+        }
+
+        // Skip other control characters
+        if ch < 0x20 && ch != b'\t' {
+            continue;
+        }
+
+        line.push(ch as char);
+        // Echo the character
+        print!("{}", ch as char);
+        let _ = std::io::stdout().flush();
     }
 }
 

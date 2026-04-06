@@ -118,23 +118,15 @@ fn main() {
             }
         }
 
-        // Get input from terminal and send to shell or echo
+        // Get input from terminal and send to shell
         let input_chars = terminal.take_input();
         if !input_chars.is_empty() {
             if let Some(ref child) = child {
-                // Local echo: the shell doesn't echo input back through the pipe.
-                for ch in &input_chars {
-                    if *ch == '\r' {
-                        terminal.write_char('\n');
-                    } else {
-                        terminal.write_char(*ch);
-                    }
-                }
-                // Send input to shell
+                // Send input to shell (shell handles its own echo via stdout)
                 let input_str: String = input_chars.iter().collect();
                 child.write_str(&input_str);
             } else {
-                // Echo mode - display typed characters
+                // Echo mode (no shell) - display typed characters
                 for ch in &input_chars {
                     if *ch == '\n' || *ch == '\r' {
                         terminal.write_str("\n> ");
