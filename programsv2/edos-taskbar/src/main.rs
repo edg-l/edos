@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use edos_render::graphics::{Framebuffer, ScreenInfo};
 use edos_render::theme::{Theme, draw_gradient_v};
-use edos_render::widgets::{char_width, draw_rect, draw_text};
+use edos_render::widgets::{char_width, draw_rect, draw_rect_outline, draw_text};
 use edos_render::window::{
     flags::FLAG_DOCK, property, window_list, window_send_event, window_set, Window, WindowEvent,
     WindowEventType, WindowListEntry,
@@ -216,6 +216,20 @@ fn main() {
 
                 // Button background
                 draw_rect(buf, w, h, btn_x, btn_y, BUTTON_WIDTH, btn_h, btn_color.raw());
+
+                // 1px border outline for unfocused buttons
+                if !is_focused {
+                    draw_rect_outline(
+                        buf,
+                        w,
+                        h,
+                        btn_x,
+                        btn_y,
+                        BUTTON_WIDTH,
+                        btn_h,
+                        Theme::DEFAULT.taskbar_button_border.raw(),
+                    );
+                }
 
                 // 1px top highlight on button
                 draw_rect(

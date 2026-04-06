@@ -1,11 +1,12 @@
 //! EDOS Window Manager - User-space compositor.
 
+use std::io::Read;
 use std::time::{Duration, Instant};
 
 use edos_render::graphics::Screen;
 use edos_render::window::{
-    WindowEvent, WindowListEntry, property, read_mouse_state, window_list, window_send_event,
-    window_set,
+    WindowEvent, WindowEventType, WindowListEntry, flags::FLAG_DOCK, property, read_mouse_state,
+    window_list, window_send_event, window_set,
 };
 
 mod compositor;
@@ -14,7 +15,7 @@ mod decorations;
 mod dirty;
 
 use compositor::ShmCache;
-use cursor::Cursor;
+use cursor::{Cursor, CursorShape};
 use decorations::HitRegion;
 use dirty::{DirtyRect, DirtyRegion};
 
@@ -125,8 +126,14 @@ fn main() {
     // Shared memory mapping cache
     let mut shm_cache = ShmCache::new();
 
+    // Keyboard modifier state
+    let mut alt_held = false;
+
     // Open mouse device once (not every frame)
     let mut mouse_file = std::fs::File::open("/dev/mouse").expect("failed to open /dev/mouse");
+
+    // Open keyboard device (non-fatal if unavailable)
+    let mut kbd_file = std::fs::File::open("/dev/kbd").ok();
 
     // Dirty region tracking
     let mut dirty = DirtyRegion::new();
@@ -149,6 +156,83 @@ fn main() {
         let (mx, my, buttons) = read_mouse_state(&mut mouse_file).unwrap_or((0, 0, 0));
 
         cursor.set_position(mx, my);
+
+        // Read keyboard events (non-blocking: drains whatever is buffered)
+        if let Some(ref mut kbd) = kbd_file {
+            let mut kbd_buf = [0u8; 64]; // room for 16 key events
+            if let Ok(n) = kbd.read(&mut kbd_buf) {
+                const RAW_LALT: u32 = 0x8000_005F;
+                const RAW_F4: u32 = 0x8000_0004;
+
+                let mut i = 0;
+                while i + 4 <= n {
+                    let key = u32::from_le_bytes([
+                        kbd_buf[i],
+                        kbd_buf[i + 1],
+                        kbd_buf[i + 2],
+                        kbd_buf[i + 3],
+                    ]);
+                    i += 4;
+
+                    if key == RAW_LALT {
+                        alt_held = true;
+                        continue;
+                    }
+
+                    if alt_held {
+                        if key == RAW_F4 {
+                            // Alt+F4: send close request to focused window
+                            if let Some(fid) = focused_window_id {
+                                let close_event = WindowEvent {
+                                    event_type: WindowEventType::CloseRequested as u32,
+                                    x: 0,
+                                    y: 0,
+                                    code: 0,
+                                    data: 0,
+                                };
+                                let _ = window_send_event(fid, &close_event);
+                            }
+                            alt_held = false;
+                            continue;
+                        }
+
+                        if key == 0x09 {
+                            // Alt+Tab: cycle focus to next visible non-dock window
+                            let mut tab_entries = [WindowListEntry::default(); MAX_WINDOWS];
+                            let tab_count = match window_list(&mut tab_entries) {
+                                Ok(c) => c.min(MAX_WINDOWS),
+                                Err(_) => 0,
+                            };
+                            let visible: Vec<u64> = tab_entries[..tab_count]
+                                .iter()
+                                .filter(|w| w.visible != 0 && (w.flags & FLAG_DOCK) == 0)
+                                .map(|w| w.id)
+                                .collect();
+
+                            if !visible.is_empty() {
+                                let current_idx = focused_window_id
+                                    .and_then(|fid| visible.iter().position(|&id| id == fid))
+                                    .unwrap_or(0);
+                                let next_idx = (current_idx + 1) % visible.len();
+                                let next_id = visible[next_idx];
+
+                                let focus_event = WindowEvent {
+                                    event_type: WindowEventType::FocusGained as u32,
+                                    x: 0,
+                                    y: 0,
+                                    code: 0,
+                                    data: 0,
+                                };
+                                let _ = window_send_event(next_id, &focus_event);
+                                focused_window_id = Some(next_id);
+                            }
+                            alt_held = false;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
 
         // Get current window list from kernel
         let window_count = match window_list(&mut entries) {
@@ -406,6 +490,46 @@ fn main() {
                 decorations::hit_test(w, cursor.x, cursor.y) == decorations::HitRegion::CloseButton
             })
             .map(|w| w.id);
+
+        // Determine cursor shape based on what's under the cursor.
+        let cursor_shape = if drag_state.is_some() {
+            // Keep arrow during drag
+            CursorShape::Arrow
+        } else if let Some(ref rs) = resize_state {
+            // During active resize, keep the resize cursor for the active region
+            match rs.region {
+                HitRegion::ResizeLeft | HitRegion::ResizeRight => CursorShape::ResizeH,
+                HitRegion::ResizeTop | HitRegion::ResizeBottom => CursorShape::ResizeV,
+                HitRegion::ResizeTopLeft | HitRegion::ResizeBottomRight => CursorShape::ResizeFDiag,
+                HitRegion::ResizeTopRight | HitRegion::ResizeBottomLeft => CursorShape::ResizeBDiag,
+                _ => CursorShape::Arrow,
+            }
+        } else {
+            // Check which hit region the cursor is hovering over
+            let mut shape = CursorShape::Arrow;
+            for window in windows.iter().rev() {
+                if window.visible == 0 {
+                    continue;
+                }
+                let region = decorations::hit_test(window, cursor.x, cursor.y);
+                if region != HitRegion::None {
+                    shape = match region {
+                        HitRegion::ResizeLeft | HitRegion::ResizeRight => CursorShape::ResizeH,
+                        HitRegion::ResizeTop | HitRegion::ResizeBottom => CursorShape::ResizeV,
+                        HitRegion::ResizeTopLeft | HitRegion::ResizeBottomRight => {
+                            CursorShape::ResizeFDiag
+                        }
+                        HitRegion::ResizeTopRight | HitRegion::ResizeBottomLeft => {
+                            CursorShape::ResizeBDiag
+                        }
+                        _ => CursorShape::Arrow,
+                    };
+                    break;
+                }
+            }
+            shape
+        };
+        cursor.set_shape(cursor_shape);
 
         // Composite all windows into back buffer (always full composite).
         compositor::composite(

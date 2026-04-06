@@ -237,9 +237,9 @@ fn draw_window_direct(
         }
     }
 
-    // --- Close button (16x16, rounded corners) ---
+    // --- Close button (20x20, rounded corners) ---
     // Positioned 4px from the right border, vertically centered in the title bar.
-    let btn_size: i64 = 16;
+    let btn_size: i64 = 20;
     let close_rx = bw + w - 4 - btn_size;
     let close_ry = bw + (title_bar_h - btn_size) / 2;
 
@@ -269,15 +269,15 @@ fn draw_window_direct(
         );
     }
 
-    // Draw 8x8 X glyph centered inside the 16x16 button.
-    let x_offset_x = close_rx + (btn_size - 8) / 2;
-    let x_offset_y = close_ry + (btn_size - 8) / 2;
+    // Draw 10x10 X glyph centered inside the 20x20 button.
+    let x_offset_x = close_rx + (btn_size - 10) / 2;
+    let x_offset_y = close_ry + (btn_size - 10) / 2;
     let close_abs_x = window.x as i64 + x_offset_x;
     let close_abs_y = window.y as i64 + x_offset_y;
     if close_abs_x >= 0
         && close_abs_y >= 0
-        && close_abs_x + 8 <= screen_w
-        && close_abs_y + 8 <= screen_h
+        && close_abs_x + 10 <= screen_w
+        && close_abs_y + 10 <= screen_h
     {
         draw_close_x(
             screen,
@@ -428,20 +428,20 @@ fn draw_dock_window(screen: &mut Screen, window: &WindowListEntry, shm_cache: &m
 fn draw_cursor(screen: &mut Screen, cursor: &Cursor) {
     let cx = cursor.x.max(0) as u64;
     let cy = cursor.y.max(0) as u64;
-    let _ = screen.draw_texture_transparent(&cursor.texture, cx, cy);
+    let _ = screen.draw_texture_transparent(cursor.current_texture(), cx, cy);
 }
 
-/// Draw an 8x8 X symbol for the close button with the given color.
+/// Draw a 10x10 X symbol for the close button with the given color.
 fn draw_close_x(screen: &mut Screen, x: u64, y: u64, color: Color) {
-    for i in 0..8u64 {
-        // Main diagonal (top-left to bottom-right)
+    for i in 0..10u64 {
+        // Main diagonal
         let _ = screen.set_pixel(x + i, y + i, color);
-        // Anti-diagonal (top-right to bottom-left)
-        let _ = screen.set_pixel(x + 7 - i, y + i, color);
-        // Thicken by one extra pixel on each diagonal
-        if i + 1 < 8 {
-            let _ = screen.set_pixel(x + i + 1, y + i, color);
-            let _ = screen.set_pixel(x + 7 - i - 1, y + i, color);
+        // Anti-diagonal
+        let _ = screen.set_pixel(x + 9 - i, y + i, color);
+        // Thicken: extra pixel on each diagonal
+        if i > 0 {
+            let _ = screen.set_pixel(x + i - 1, y + i, color);
+            let _ = screen.set_pixel(x + 10 - i, y + i, color);
         }
     }
 }
