@@ -635,6 +635,9 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
             pipefd_bytes,
         )
     } {
+        // Close both FDs to avoid leaking unreachable pipe ends
+        info.lock().fd_table.lock().close_fd(read_fd);
+        info.lock().fd_table.lock().close_fd(write_fd);
         info.lock().errno = Errno::EFAULT;
         return !0u64;
     }

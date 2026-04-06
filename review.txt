@@ -1,830 +1,197 @@
-## Scheduler & Thread System Review (Round 1)
-
-### CRITICAL -- Likely Deadlocks / Hangs
-
-#### 1. `thread_park()` infinite loop if state is not `Running` (`scheduler.rs:442-466`)
-
-```rust
-pub fn thread_park(&self) {
-    let Some(cur) = self.current_thread() else { return; };
-    loop {
-        if cur.state.compare_exchange(Running, Parked, ...).is_ok() {
-            break;
-        }
-        // NO exit for non-Running states -> infinite loop
-    }
-```
-
-If another CPU marks the thread `Dying` (e.g., via `exit_thread`), or a wakeup transitions it to `Waking`, this CAS never succeeds and **loops forever**. Unlike `thread_sleep()` which has an `else { break; }`, `thread_park` has no escape hatch.
-
-**Fix:** Add a match on the current state -- bail out if `Dying`, and handle `Waking` explicitly.
-
----
-
-#### 2. `thread_sleep()` silently drops sleep if heap is full (`scheduler.rs:500-507`)
-
-```rust
-sleepers.push(sleep_entry).ok(); // ignore if heap is full
-```
-
-The `sleepers` heap is capped at 1024 entries. If full, the thread transitions to `Sleeping` state but is **never added to the sleepers heap**. It will never be woken by `wake_sleepers()`. The thread is **permanently stuck** unless something else explicitly wakes it. On a system with many threads doing timed waits, this will silently hang threads.
-
-**Fix:** Either grow the heap dynamically (use a `BinaryHeap` from `alloc`), or return an error / fall back to parking with a check.
-
----
-
-#### 3. `wake_thread_slow()` can livelock (`scheduler.rs:543-576`)
-
-```rust
-State::Running => {
-    thread.mark_need_resched();
-    let cpu = thread.cpu.load(Ordering::Acquire);
-    if cpu != self.cpu { self.send_reschedule_ipi(cpu); }
-    spin_loop();  // loops back to top
-}
-```
-
-If the target thread is `Running` on another CPU and that CPU's timer interrupt is somehow delayed or broken (e.g., APIC timer misconfigured), this **spins forever** on the calling CPU, blocking the calling thread. There's no iteration limit or fallback.
-
-**Fix:** Add a bounded retry count, and after N iterations, just enqueue a deferred wake and yield.
-
----
-
-#### 4. `thread_exit()` does heavy work with interrupts disabled (`scheduler.rs:604-622`)
-
-```rust
-without_interrupts(|| unsafe {
-    t.free();                    // Unmaps memory, deallocates frames, cleans up windows
-    record_thread_exit(tid, code);
-    let _ = THREADS.remove_info(tid);
-    ...
-    context_switch();
-});
-```
-
-`t.free()` (`thread.rs:543-607`) does **massive work**: acquires `user.write()` (spinning RwLock), locks `memory_manager` (spin Mutex), iterates and unmaps all memory regions, deallocates shared memory, cleans up windows, deallocates the PML4 frame, and calls `switch_to_kernel_page()` with a global TLB flush. All of this runs with **interrupts disabled**, blocking the APIC timer on this CPU for potentially milliseconds. Other CPUs sending IPIs to this CPU will be ignored.
-
-**Fix:** Do the heavy cleanup with interrupts enabled. Only disable interrupts for the state transition and context switch. Consider deferring cleanup to a reaper thread.
-
----
-
-#### 5. Nested lock acquisition: `save_current_thread` takes `user.write()` during scheduler tick (`scheduler.rs:297-317`)
-
-```rust
-fn save_current_thread(&self, context: *mut CpuContext) {
-    if let Some(current) = self.current_thread() {
-        *current.ctx.lock() = (*context).clone();       // spin::Mutex
-        if let Some(user) = &current.user {
-            let mut user = user.write();                  // spin::RwLock
-            save_fpu_state(&mut user.fpu);
-        }
-    }
-}
-```
-
-This runs inside `on_tick` -> `maybe_preempt` -> `pick_and_run`, all under `without_interrupts`. If a syscall on another CPU holds a **read lock** on this same thread's `user` RwLock (e.g., reading `cr3` for page table access), `user.write()` here will **spin with interrupts disabled** waiting for the reader. The reader on the other CPU may itself be waiting for something that requires this CPU's scheduler to run -- classic priority inversion / deadlock.
-
-Same issue in `context_switch_to` at line 367 which also takes `user.write()` for FPU restore.
-
-**Fix:** Move FPU save/restore out of the RwLock. Store FPU state in per-CPU data or in a separate lock from the `UserThread`. The FPU state is inherently per-CPU -- only the currently running CPU touches it.
-
----
-
-### HIGH -- Data Races / Logic Bugs
-
-#### 6. `PerCpuData` is `&'static mut` returned to any caller -- no Send/Sync safety (`per_cpu.rs:47-51`)
-
-```rust
-pub fn get_percpu_data() -> &'static mut PerCpuData {
-    let base = GsBase::read().as_u64() as *mut PerCpuData;
-    unsafe { &mut *base }
-}
-```
-
-Multiple callers on the **same CPU** can hold `&'static mut` references to the same `PerCpuData` simultaneously. This is immediate UB. For example, `schedule()` calls `get_percpu_data()`, and `context_switch_to()` also calls `get_percpu_data()` -- both hold `&mut` to the same data. In Rust's aliasing model, this is unsound.
-
-**Fix:** Return `*mut PerCpuData` or use a wrapper type that returns `&PerCpuData` (shared ref) with interior mutability for mutable fields.
-
----
-
-#### 7. `complete_wake` reads `thread.cpu` which may be stale (`scheduler.rs:108-118`)
-
-```rust
-fn complete_wake(&self, thread: &Arc<Thread>, priority: WakePriority) {
-    without_interrupts(|| {
-        let cpu = thread.cpu.load(Ordering::Acquire);
-        let sc = sched_for_cpu(cpu);
-        thread.state.store(State::Ready as u8, Ordering::Release);
-        Self::enqueue_ready(sc, thread, priority);
-```
-
-The thread's `cpu` field reflects which CPU it **last ran on**, not where it should be enqueued. After being parked and woken, the CPU affinity should ideally determine placement. More critically: the thread is enqueued on CPU X's runqueue, but if CPU X is busy, no one migrates it. There's no work-stealing.
-
-Also, between reading `cpu` and enqueuing, the thread could theoretically be picked up by another scheduler (if it was already on a runqueue). The `without_interrupts` prevents this on the local CPU but not on remote CPUs.
-
----
-
-#### 8. `Broadcaster::cleanup()` is a no-op (`broadcast.rs:130-148`)
-
-```rust
-pub fn cleanup(&self) {
-    let subs = self.subs.read();
-    let mut to_remove = Vec::new();
-    for sub in subs.iter() {
-        if ... { to_remove.push(*sub.0); }
-    }
-    // to_remove is NEVER USED -- dead subscribers are never removed
-}
-```
-
-Dead subscribers accumulate forever. Every `broadcast()` call iterates them, wasting time and attempting to wake non-existent threads.
-
-**Fix:** Actually use `to_remove` -- drop the read lock, take a write lock, and remove the dead entries.
-
----
-
-#### 9. `queue_spawn_thread` calls `pick_sched()` twice (`util.rs:142-148`)
-
-```rust
-pub fn queue_spawn_thread(thread: Arc<Thread>) -> ThreadId {
-    let sched = pick_sched();  // UNUSED, wasted work
-    let id = thread.id;
-    let sched = pick_sched();  // shadows the first
-    sched.spawn_thread(thread);
-    id
-}
-```
-
-Copy-paste bug. The first `pick_sched()` acquires `SCHEDULERS.read()` for nothing.
-
----
-
-#### 10. `pick_sched` acquires `SCHEDULERS.read()` twice (`util.rs:85-108`)
-
-```rust
-pub fn pick_sched() -> &'static Scheduler {
-    let schedulers = SCHEDULERS.read();    // first lock
-    // ... find best CPU ...
-    let sched = *SCHEDULERS.read()         // second lock, map could change
-        .get(&(id as u32))...;
-    sched
-}
-```
-
-Takes the read lock twice. Between the two, the map could theoretically change. Should use one lock for the entire operation.
-
----
-
-#### 11. `context_switch_to` acquires `ctx.lock()` twice (`scheduler.rs:357, 391`)
-
-```rust
-unsafe { *context = next.ctx.lock().clone() };   // line 357
-// ... page table switch, FPU restore ...
-cpu.user_rsp = next.ctx.lock().interrupt_stack_frame.stack_pointer.as_u64();  // line 391
-```
-
-The second lock is taken after a page table switch. Between the two locks, nothing should modify `ctx` (the thread is transitioning to Running on this CPU), but it's fragile. If the thread is somehow woken on another CPU between these points (shouldn't happen with interrupts disabled), the `ctx` could be stale.
-
-**Fix:** Take the lock once, extract both values.
-
----
-
-### MEDIUM -- Correctness Concerns
-
-#### 12. `WaitQueue::wait_internal` -- timeout path doesn't remove from queue on Park wake (`waitqueue.rs:84-154`)
-
-```rust
-fn wait_internal<F>(&self, ready: F, timeout: Option<Duration>) -> WaitOutcome {
-    // ... add tid to queue, then park or sleep ...
-
-    let Some(action) = action else { return WaitOutcome::Ready; };
-
-    if ready() { return WaitOutcome::Parked; }  // tid may still be in the queue!
-
-    match action {
-        SleepAction::Park => WaitOutcome::Parked,  // tid still in queue!
-        SleepAction::Sleep(_) => {
-            // removes from queue only for sleep timeout
-        }
-    }
-}
-```
-
-When a parked thread is woken (not timed out), it returns `WaitOutcome::Parked` but **never removes its tid from the wait queue**. If the `WaitQueue` is later used for `wake_one()`, it will try to wake this (already awake) thread again, causing spurious wake attempts. Over time the queue fills with stale tids.
-
-**Fix:** Always remove the tid from the queue after waking, regardless of path.
-
----
-
-#### 13. `Subscriber::recv()` can park a non-owner thread permanently (`broadcast.rs:36-44`)
-
-```rust
-pub fn recv(&self) -> T {
-    loop {
-        if let Some(msg) = self.queue.lock().pop_front() {
-            return msg;
-        }
-        sched.thread_park();  // parks the CALLING thread
-    }
-}
-```
-
-`broadcast()` wakes `sub.owner` -- the thread that originally subscribed. If a different thread calls `recv()` on this subscriber (possible since it's `Arc`), it parks itself but **nobody will ever wake it** since the broadcaster wakes the owner, not the caller.
-
----
-
-#### 14. State set redundancy in `context_switch_to` (`scheduler.rs:327`)
-
-```rust
-// In pick_and_run:
-if t.cas_state(State::Ready, State::Running) {  // sets Running
-    self.context_switch_to(t, context);
-
-// In context_switch_to:
-next.state.store(State::Running as u8, ...);     // redundant store
-```
-
-Minor but could mask bugs. The redundant store means even if something changed the state between the CAS and here (which shouldn't happen with interrupts disabled), it would be silently overwritten.
-
----
-
-#### 15. `SleepEntry` Ord reversal for min-heap is fragile (`scheduler.rs:684-698`)
-
-```rust
-impl Ord for SleepEntry {
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        other.deadline.cmp(&self.deadline)  // reversed for min-heap via Max
-    }
-}
-```
-
-Using `BinaryHeap<_, Max>` with reversed `Ord` to get min-heap behavior. This works but is error-prone -- any future code that assumes natural ordering will break. Consider using `BinaryHeap<_, Min>` if available, or documenting heavily.
-
----
-
-#### 16. `earliest_deadline` update race in `thread_sleep` (`scheduler.rs:510-514`)
-
-The `earliest_deadline` is updated after releasing the `sleepers` lock. A timer interrupt on another CPU could read `earliest_deadline` (still the old value) and miss this closer deadline, causing the sleep to wake late. The update should happen while still holding the sleepers lock, or atomically with a CAS loop.
-
----
-
-### LOW -- Style / Robustness
-
-#### 17. No work-stealing between CPUs
-
-Threads are always enqueued on the CPU they last ran on (`complete_wake` uses `thread.cpu`). There's no mechanism for an idle CPU to steal work from a busy CPU's runqueue. This can lead to load imbalance.
-
-#### 18. `Subscriber::recv_timeout` has a single-shot check (`broadcast.rs:47-56`)
-
-```rust
-pub fn recv_timeout(&self, dur: Duration) -> Option<T> {
-    if let Some(msg) = self.queue.lock().pop_front() {
-        return Some(msg);
-    }
-    sched.thread_sleep(dur);
-    return self.queue.lock().pop_front();  // only checks once after wake
-}
-```
-
-After waking from sleep, it checks the queue exactly once. If the message arrived and was consumed by a spurious check, or if the wake was for a different reason, this returns `None` even though more time could remain.
-
-#### 19. `SCHEDULERS` uses `RwLock` (spinning) accessed from interrupt-disabled contexts
-
-Since `sched_for_cpu` and `pick_sched` acquire `SCHEDULERS.read()`, and these can be called from `without_interrupts` blocks, a writer (adding a new scheduler during SMP init) could cause other CPUs to spin with interrupts disabled.
-
----
-
-### Round 1 Summary Table
-
-| # | Severity | Issue | Status |
-|---|----------|-------|--------|
-| 1 | CRITICAL | `thread_park` infinite loop on non-Running state | DONE |
-| 2 | CRITICAL | Sleep silently dropped when heap full, thread stuck forever | DONE |
-| 3 | CRITICAL | `wake_thread_slow` unbounded spin on Running target | DONE |
-| 4 | CRITICAL | `thread_exit` does heavy cleanup with interrupts disabled | DONE (reaper thread) |
-| 5 | CRITICAL | `save_current_thread`/`context_switch_to` take `user.write()` in scheduler tick | DONE (FPU moved to Thread) |
-| 6 | HIGH | `get_percpu_data` returns multiple `&mut`, UB | DONE (Cell/UnsafeCell refactor) |
-| 7 | HIGH | `complete_wake` uses potentially stale CPU id | DONE (kept last-CPU for correctness) |
-| 8 | HIGH | `Broadcaster::cleanup` is a no-op | DONE (fixed in code) |
-| 9 | HIGH | `queue_spawn_thread` calls `pick_sched` twice | DONE |
-| 10 | HIGH | `pick_sched` takes read lock twice | DONE |
-| 11 | HIGH | `context_switch_to` locks `ctx` twice | DONE |
-| 12 | MEDIUM | WaitQueue doesn't clean up tid on park-wake path | DONE |
-| 13 | MEDIUM | `Subscriber::recv` can permanently park non-owner threads | DONE (debug_assert) |
-| 14 | MEDIUM | Redundant state store in `context_switch_to` | DONE |
-| 15 | MEDIUM | Reversed Ord for min-heap is fragile | DONE (switched to Min) |
-| 16 | MEDIUM | `earliest_deadline` update race in `thread_sleep` | DONE |
-| 17 | LOW | No work-stealing between CPUs | DONE |
-| 18 | LOW | `recv_timeout` single-shot check | DONE (owner assert added) |
-| 19 | LOW | `SCHEDULERS` RwLock under interrupt-disabled context | TODO (low risk) |
-
----
----
-
-## Scheduler & Thread System Review (Round 2)
-
-Second pass focusing on thread lifetimes, Arc management, allocation in
-scheduler paths, and correctness of the intrusive list integration.
-
-### CRITICAL
-
-#### 20. `Link::linked` field is not atomic -- data race when read outside runqueue lock (`intrusive_list/src/lib.rs:38-42`)
-
-```rust
-pub struct Link {
-    next: *mut Link,
-    prev: *mut Link,
-    linked: bool,       // plain bool, not AtomicBool
-}
-```
-
-`rq_link.is_linked()` is called as a `debug_assert` from multiple CPUs concurrently
-(e.g. `enqueue_ready`, `wake_sleepers`, `thread_park_while`, `spawn_thread`, `free`).
-While `debug_assert`s compile out in release, `is_linked()` is a public method and
-any future non-debug usage would be an immediate data race.
-
-More importantly: the `linked` field is written by `push_back`/`unlink` under the
-runqueue lock, but the `unsafe impl Sync for Link` safety argument says "externally
-synchronised" -- yet the reads via `is_linked()` happen outside that lock. Under
-Miri/strict provenance this is UB even for debug_assert reads.
-
-**Fix:** Make `linked` an `AtomicBool` with `Relaxed` ordering. The `next`/`prev`
-pointers are fine since they're only touched under the runqueue lock.
-
----
-
-#### 21. `SleepEntry` holds `Arc<Thread>` -- dead threads trapped in sleepers heap (`scheduler.rs:886-889`)
-
-```rust
-struct SleepEntry {
-    deadline: u64,
-    thread: Arc<Thread>,
-}
-```
-
-When a thread calls `thread_sleep`, a `SleepEntry` with `cur.clone()` is pushed onto
-the sleepers heap. If the thread exits or is killed before the sleep deadline:
-
-1. `thread_exit` removes it from `THREADS` and enqueues on the reaper.
-2. The reaper calls `t.free()` which deallocates the kernel stack via
-   `kthread_stack_free`, unmaps user memory, and frees the PML4 frame.
-3. **But** the `Arc<Thread>` in the sleepers heap keeps the `Thread` struct alive.
-4. When the deadline expires, `wake_sleepers` pops it and calls `t.try_wake()`.
-   `try_wake` reads `t.state` (Dying) and returns false -- harmless.
-
-The problem: the `Thread` struct (with its freed kernel stack pointer `kstack_top`,
-freed user page tables via `cr3`, etc.) stays alive in memory until the sleep
-deadline. With many short-lived threads doing timed waits, this delays memory
-reclamation. The freed kernel stack cannot be reused by `kthread_stack_alloc` because
-the `kthread_stack_free` push already happened, but if a new thread reuses that stack
-region while the old Thread struct still references it via `kstack_top`, there's a
-semantic (though not memory-safety) inconsistency.
-
-Additionally, if the sleepers heap is near capacity (1024 entries), dead-but-not-yet-
-expired entries waste slots and could cause live `thread_sleep` calls to fail (heap
-full, thread reverts to Running instead of sleeping).
-
-**Fix:** In `wake_sleepers`, before checking `top.deadline > now`, also check
-`top.thread.state() == Dying` and discard those entries. Or add a "cancelled"
-`AtomicBool` to `SleepEntry` that `thread_exit` sets, so `wake_sleepers` can skip
-and drop them.
-
----
-
-#### 22. `thread_exit` THREADS.remove fallback path is racy (`scheduler.rs:762`)
-
-```rust
-if let Some(t) = THREADS.remove(tid).or_else(|| get_thread_by_id(tid)) {
-```
-
-`THREADS.remove(tid)` takes `map.write()` inside `without_interrupts`. If it returns
-`None`, the fallback calls `get_thread_by_id(tid)` which calls `THREADS.get(tid)`,
-which takes `map.read()` inside its own nested `without_interrupts`. Between the
-write-lock release and the read-lock acquire, another CPU could process this thread.
-
-If remove returns None, the thread was already removed by someone else (e.g. the
-standalone `exit_thread` function at line 784). Processing it again risks double-free
-of the kernel stack or double `record_thread_exit`.
-
-**Fix:** Remove the `or_else` fallback. If `THREADS.remove` returns None, the thread
-was already cleaned up -- just set current to 0, clear percpu, and context_switch.
-Log a warning if this happens unexpectedly.
-
----
-
-### HIGH
-
-#### 23. `run_idle` enables interrupts -- recursive `on_tick`/`pick_and_run` possible (`scheduler.rs:207-256`)
-
-`pick_and_run` is called from `on_tick` inside `without_interrupts`. When the
-runqueue is empty, `pick_and_run` calls `run_idle()` which calls `enable()` at
-line 213, then loops checking `has_work`.
-
-Between `enable()` and the `without_interrupts` block at line 223, or between
-the `without_interrupts` block ending (line 239) and `enable_and_hlt()` (line 242),
-a timer interrupt can fire. This calls `schedule()` -> `on_tick()` ->
-`maybe_preempt()`. Since `current` is 0 (idle), `maybe_preempt` calls
-`pick_and_run()` again -- recursive re-entry.
-
-If the runqueue is still empty, this recurses into `run_idle` again, growing the
-stack. With a fast enough timer (e.g. the 1us fallback when deadline is past),
-this could overflow the kernel stack.
-
-Even if it doesn't overflow, the outer `run_idle` loop continues after the inner
-interrupt returns, potentially double-processing work.
-
-**Fix:** Add a per-CPU `in_idle` flag. In `on_tick`, if already idle, just wake
-sleepers and return without calling `pick_and_run`. Or check `self.current == 0`
-at the start of `on_tick` and skip `maybe_preempt` when idle (only wake sleepers).
-
----
-
-#### 24. `BlockingMutex::lock()` can deadlock when called with interrupts disabled (`mutex.rs:43-52`)
-
-```rust
-pub fn lock(&self) -> BlockingMutexGuard<'_, T> {
-    loop {
-        if self.try_acquire() {
-            return BlockingMutexGuard { lock: self };
-        }
-        let _ = self.waiters.wait_until(|| !self.locked.load(Ordering::Acquire));
-    }
-}
-```
-
-`wait_until` calls `thread_park_while` which calls `context_switch`. If the caller
-had interrupts disabled, `context_switch` builds a synthetic interrupt frame
-capturing RFLAGS with IF=0. When this thread is later resumed via `iretq`, RFLAGS
-is restored with IF=0 -- the thread runs with **interrupts permanently disabled**.
-
-If the mutex holder is on the same CPU, it will never be scheduled to release the
-mutex. If on another CPU, the waiting thread resumes but spins with IF=0, preventing
-timer interrupts and eventually hanging the CPU.
-
-`BlockingMutex` is used by `UserThreadInfo` (fd_table, memory_mappings, cwd) which
-could be accessed from contexts where interrupts are disabled.
-
-**Fix:** Add `debug_assert!(interrupts::are_enabled(), "BlockingMutex::lock called
-with interrupts disabled")` at the top of `lock()`.
-
----
-
-#### 25. `WaitQueue` inner `VecDeque` allocates -- used inside `without_interrupts` (`waitqueue.rs:1-9, 98-131`)
-
-```rust
-pub struct WaitQueue {
-    inner: Mutex<VecDeque<ThreadId>>,  // VecDeque allocates on grow
-}
-```
-
-`wait_internal` runs inside `without_interrupts` and calls `q.push_back(tid)`. If the
-`VecDeque` needs to grow its backing buffer, it calls the global allocator. This
-violates the no-allocator-in-scheduler-paths invariant.
-
-`WaitQueue` is used by `BlockingMutex` which is used throughout the kernel. Under
-contention with many waiters, the VecDeque will eventually need to reallocate.
-
-**Fix:** Replace `VecDeque<ThreadId>` with `heapless::Deque<ThreadId, N>` for a
-bounded capacity, or use an intrusive wait list. Alternatively, move the push_back
-outside the `without_interrupts` block (check condition, push tid, then disable
-interrupts for the park).
-
----
-
-#### 26. `thread_park_while` abort path relies on same-CPU enqueue invariant (`scheduler.rs:568-585`)
-
-```rust
-// CAS Parked->Running failed: waker set Parked->Waking->Ready and enqueued us.
-// Context-switch so the scheduler properly pops and unlinks us.
-// "safe because complete_wake enqueues on the thread's last CPU, which is this CPU"
-without_interrupts(|| unsafe {
-    cur.mark_need_resched();
-    context_switch();
-});
-```
-
-When the CAS at line 570 fails, the thread is in state Ready and on the runqueue.
-We're still executing as this thread on this CPU. The comment says this is safe
-because `complete_wake` enqueues on the thread's last CPU (this CPU), so only this
-CPU's scheduler will pop it.
-
-**However**, if the `complete_wake` locality optimization from `debt.txt` is ever
-implemented (enqueue on waker's CPU), another CPU could pop this thread from its
-runqueue and try to context-switch to it while we're still executing here. This
-would cause two CPUs to run the same thread simultaneously.
-
-This is not a bug today, but it's a **correctness landmine** that will silently
-break if `complete_wake` is changed.
-
-**Fix:** Add a prominent comment and/or a `debug_assert` in `complete_wake` that
-documents this dependency. Consider adding a per-thread `context_saved` AtomicBool
-that must be set before the thread can be popped by another CPU, future-proofing
-the abort path.
-
----
-
-#### 27. Dead `Broadcaster` subscribers leak memory and waste CPU (`broadcast.rs:102-115`)
-
-```rust
-pub fn broadcast(&self, msg: T) {
-    let targets: Vec<Arc<Subscriber<T>>> = {
-        let subs = self.subs.read();
-        subs.values().cloned().collect()  // clones all subscriber Arcs
-    };
-    for sub in targets {
-        sub.queue.lock().push_back(msg.clone());  // pushes to dead queues
-        sched.wake_thread(sub.owner, ...);        // wakes non-existent threads
-    }
-}
-```
-
-When a subscriber's owner thread exits, the subscriber entry remains in the
-`Broadcaster`. Every `broadcast()` call:
-1. Clones the dead subscriber's `Arc` (refcount bump)
-2. Locks its queue mutex
-3. Pushes a cloned message (memory allocation for VecDeque growth)
-4. Calls `wake_thread` which does a `THREADS` lookup (returns None, no-op)
-
-The subscriber's queue grows unbounded since no one consumes from it. With
-frequent broadcasts (e.g. mouse events at 125 Hz), this is a steady memory leak.
-
-`cleanup()` exists and works correctly now (fixed in round 1), but it's never
-called automatically from `broadcast()`.
-
-**Fix:** Call `self.cleanup()` periodically from `broadcast()` (e.g. every 128
-broadcasts using a counter), or check `get_thread_by_id(sub.owner).is_some()`
-before pushing to the queue.
-
----
-
-### MEDIUM
-
-#### 28. `State::from(u8)` uses `_ => State::Ready` -- silent fallback to default (`thread.rs:94-105`)
-
-```rust
-impl From<u8> for State {
-    fn from(v: u8) -> Self {
-        match v {
-            1 => State::Running,
-            2 => State::Sleeping,
-            3 => State::Parked,
-            4 => State::Waking,
-            5 => State::Dying,
-            _ => State::Ready,   // silent fallback
-        }
-    }
-}
-```
-
-A corrupt or invalid state byte silently becomes `Ready`. Per project convention
-(use `unreachable!()` for invalid enum conversions), this should panic to surface
-bugs immediately rather than allowing a thread with corrupt state to be treated
-as Ready and potentially scheduled.
-
-**Fix:** Change `_ => State::Ready` to `_ => unreachable!("invalid thread state: {v}")`.
-
----
-
-#### 29. Early-woken sleep leaves stale `SleepEntry` in heap, wasting capacity (`scheduler.rs:599-652, 172-201`)
-
-When `wake_thread` is called on a sleeping thread:
-1. `try_wake` transitions Sleeping -> Waking
-2. `complete_wake` sets Ready and enqueues on runqueue
-3. Thread resumes and returns from `thread_sleep`
-
-But the `SleepEntry { deadline, thread: Arc<Thread> }` remains in the sleepers heap.
-`wake_sleepers` won't pop it until `deadline <= now`. When it does, `try_wake` fails
-(thread is Running/Ready/Parked) and the entry is discarded.
-
-Until then:
-- The entry occupies one of 1024 heap slots
-- The `Arc<Thread>` keeps a reference alive (minor memory overhead)
-- With I/O-heavy workloads where threads sleep with timeouts but are woken early
-  by I/O completion, stale entries accumulate
-
-If stale entries fill the heap, live `thread_sleep` calls will fail and revert to
-Running (the heap-full fallback from round 1 fix), effectively breaking timed waits.
-
-**Fix:** Add a generation counter or `AtomicBool cancelled` to `SleepEntry`. When
-a sleeping thread is woken early (via `try_wake`), mark its sleep entry as cancelled.
-In `wake_sleepers`, skip cancelled entries. Alternatively, in `wake_sleepers`, peek
-and discard entries where `thread.state() != Sleeping` before the deadline check.
-
----
-
-#### 30. Double `CpuContext` copy per context switch + unnecessary `Mutex` (`scheduler.rs:353-423`)
-
-```rust
-// save_current_thread:
-*current.ctx.lock() = (*context).clone();       // copy 1: interrupt frame -> thread.ctx
-
-// context_switch_to:
-let ctx_snapshot = next.ctx.lock().clone();      // copy 2: thread.ctx -> local
-unsafe { *context = ctx_snapshot };              // copy 3: local -> interrupt frame
-```
-
-Each context switch does 3 copies of `CpuContext` (15 GPRs + 5 interrupt frame
-fields = 160 bytes each). The `Mutex<CpuContext>` exists to synchronize access, but
-the context is only ever accessed by:
-- The CPU saving the outgoing thread (in `save_current_thread`)
-- The CPU loading the incoming thread (in `context_switch_to`, after popping from rq)
-
-These never overlap for the same thread: a thread's context is saved before it goes
-on the runqueue, and loaded after it's popped. The mutex is uncontended overhead.
-
-**Fix:** Replace `ctx: Mutex<CpuContext>` with `ctx: UnsafeCell<CpuContext>`. The
-safety argument: access is serialized by the scheduler -- save happens before enqueue,
-load happens after dequeue. This eliminates the lock and allows direct pointer writes
-instead of clone-and-copy.
-
----
-
-#### 31. `reaper_enqueue` calls `wake_thread` (slow path) inside `without_interrupts` (`scheduler.rs:870-882`)
-
-```rust
-fn reaper_enqueue(thread: Arc<Thread>) {
-    // ... push to queue ...
-    let reaper_tid = REAPER_TID.load(Ordering::Acquire);
-    if reaper_tid != 0 {
-        sched().wake_thread(ThreadId(reaper_tid), WakePriority::Normal);
-    }
-}
-```
-
-Called from `thread_exit` inside `without_interrupts`. `wake_thread` calls
-`wake_thread_internal` with `from_irq: false`, which dispatches to
-`wake_thread_slow`. The slow path may:
-- Spin up to 64 times on a Running target
-- Call `sched_for_cpu` -> `SCHEDULERS.read()` (takes RwLock with IRQs disabled)
-- Call `complete_wake` -> `SCHEDULERS.read()` again
-
-This is unnecessary overhead in an interrupt-disabled fast path.
-
-**Fix:** Use `sched().wake_thread_irq(ThreadId(reaper_tid), WakePriority::Normal)`
-since we know we're in an IRQ-disabled context. The IRQ path is simpler and avoids
-the spin loop.
-
----
-
-#### 32. `kthread_stack_free` uses allocating `SegQueue` (`util.rs:24, 53-57`)
-
-```rust
-static KTHREAD_FREED_STACKS: SegQueue<u64> = SegQueue::new();
-
-pub fn kthread_stack_free(stack_top: u64) {
-    let region_bottom = stack_top - KTHREAD_STACK_SIZE;
-    KTHREAD_FREED_STACKS.push(region_bottom);   // crossbeam SegQueue may allocate
-}
-```
-
-`crossbeam_queue::SegQueue` allocates new segments when the current segment is full.
-Currently called from the reaper thread (interrupts enabled), so this is safe.
-
-But if `free()` or `kthread_stack_free` is ever called from a scheduler path or with
-interrupts disabled, the allocation could deadlock. Worth documenting or replacing
-with a bounded `ArrayQueue`.
-
----
-
-#### 33. Unnecessary `Arc<Option<String>>` wrapping in thread creation (`thread.rs:393-400, 499-500`)
-
-```rust
-// new_kernel:
-let name = Arc::new(name);                                          // Arc<Option<String>>
-let thread = Arc::new(Self {
-    name: Arc::new(name.as_ref().clone().unwrap_or(String::new())), // clones, unwraps, re-wraps
-    ...
-});
-
-// new_user:
-let name = Arc::new(name);                                          // same pattern
-```
-
-Creates a throwaway `Arc<Option<String>>`, clones the inner `Option<String>`,
-unwraps it, then wraps in a new `Arc<String>`. The first Arc is never shared or
-used for reference counting.
-
-**Fix:** Remove the intermediate Arc:
-```rust
-let name = Arc::new(name.unwrap_or_default());
-```
-
----
-
-#### 34. `ThreadRegistry` `BTreeMap` allocates inside `without_interrupts` (`thread.rs:722-766`)
-
-```rust
-impl ThreadRegistry {
-    pub fn insert(&self, t: Arc<Thread>) {
-        without_interrupts(|| {
-            self.map.write().insert(t.id, t);   // BTreeMap::insert may allocate
-        })
-    }
-
-    pub fn remove(&self, tid: ThreadId) -> Option<Arc<Thread>> {
-        without_interrupts(|| self.map.write().remove(&tid))  // may deallocate
-    }
-}
-```
-
-`BTreeMap::insert` allocates new nodes. Called from `Thread::new_kernel` and
-`Thread::new_user` (which themselves allocate, so this is less critical), but also
-from `insert_thread` which could be called from various contexts.
-
-`BTreeMap::remove` may deallocate freed nodes. Called from `thread_exit` inside
-`without_interrupts` at `scheduler.rs:762`.
-
-This violates the no-allocator-in-scheduler-paths invariant for the remove path.
-
-**Fix:** Defer `THREADS.remove` to the reaper thread (which runs with interrupts
-enabled). In `thread_exit`, only mark Dying and enqueue on the reaper -- don't
-remove from THREADS. The reaper already calls `THREADS.remove_info`, just add
-the `THREADS.remove` there too (it's already done via `exit_thread` in the reaper
-path at `scheduler.rs:785`). Or replace BTreeMap with a fixed-size slab/hashmap.
-
----
-
-### LOW / STYLE
-
-#### 35. Overly broad `unsafe` block in `thread_yield` (`scheduler.rs:497-511`)
-
-```rust
-without_interrupts(|| unsafe {    // entire closure is unsafe
-    let Some(cur) = self.current_thread() else { return; };
-    if cur.cas_state(State::Running, State::Ready) {
-        // ... safe code ...
-    }
-    context_switch();              // only this needs unsafe
-})
-```
-
-**Fix:** Narrow the `unsafe` block to just the `context_switch()` call.
-
----
-
-#### 36. `Scheduler` fields unnecessarily `pub` (`scheduler.rs:82-102`)
-
-`cpu`, `current`, `default_timeslice`, `earliest_deadline`, `thread_count`, `has_work`
-are all `pub`. External code should use accessor methods, not reach into scheduler
-internals directly.
-
-**Fix:** Change to `pub(crate)` or private with accessor methods where needed.
-
----
-
-#### 37. `sched()` uses `as_mut()` where `as_ref()` suffices (`scheduler.rs:53-61`)
-
-```rust
-pub fn sched() -> &'static Scheduler {
-    unsafe {
-        get_percpu_data()
-            .scheduler
-            .get()
-            .as_mut()           // returns Option<&mut T>, but we only need &T
-            .unwrap_unchecked()
-    }
-}
-```
-
-**Fix:** Change `as_mut()` to `as_ref()` since the return type is `&'static Scheduler`.
-
----
-
-#### 38. Thread ID allocation uses `Ordering::Relaxed` (`thread.rs:391, 461`)
-
-```rust
-let id = ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, Ordering::Relaxed));
-```
-
-`Relaxed` is sufficient for uniqueness on x86-64 (total store order), but not
-portable to weaker architectures. If this kernel is ever ported or if tests run
-on non-x86, IDs could be duplicated.
-
-**Fix:** Use `Ordering::AcqRel` or at minimum document that `Relaxed` relies on
-x86-64 TSO.
-
----
-
-### Round 2 Summary Table
-
-| # | Severity | Issue | Status |
-|---|----------|-------|--------|
-| 20 | CRITICAL | `Link::linked` not atomic, read outside lock = data race | DONE |
-| 21 | CRITICAL | `SleepEntry` holds Arc, dead threads trapped in sleepers heap | DONE |
-| 22 | CRITICAL | `thread_exit` THREADS.remove fallback path is racy | DONE |
-| 23 | HIGH | `run_idle` enables IRQs, recursive on_tick/pick_and_run possible | DONE |
-| 24 | HIGH | `BlockingMutex::lock` deadlocks with interrupts disabled | DONE |
-| 25 | HIGH | `WaitQueue` VecDeque allocates inside `without_interrupts` | DONE |
-| 26 | HIGH | `thread_park_while` abort relies on same-CPU enqueue invariant | DONE |
-| 27 | HIGH | Dead broadcaster subscribers leak memory, waste CPU | DONE |
-| 28 | MEDIUM | `State::from(u8)` silent fallback to Ready | DONE |
-| 29 | MEDIUM | Early-woken sleep leaves stale SleepEntry in heap | DONE |
-| 30 | MEDIUM | Double CpuContext copy + Mutex overhead per context switch | WONTFIX (negligible) |
-| 31 | MEDIUM | `reaper_enqueue` takes SCHEDULERS RwLock with IRQs disabled | DONE |
-| 32 | MEDIUM | `kthread_stack_free` uses allocating SegQueue | DONE |
-| 33 | MEDIUM | Unnecessary Arc<Option<String>> wrapping in thread creation | DONE |
-| 34 | MEDIUM | `ThreadRegistry` BTreeMap allocates inside `without_interrupts` | DONE |
-| 35 | LOW | Overly broad `unsafe` block in `thread_yield` | DONE |
-| 36 | LOW | Scheduler fields unnecessarily `pub` | WONTFIX (refactor risk) |
-| 37 | LOW | `sched()` uses `as_mut()` where `as_ref()` suffices | DONE |
-| 38 | LOW | Thread ID uses `Relaxed` ordering | WONTFIX (x86-only) |
+# EDOS Code Review: Drivers, DMA, Syscalls, FS/DevFS
+# Date: 2026-04-06
+# Status: NEW
+
+## CRITICAL
+
+### C1. FAT32 get_fat_entry returns unmasked raw cluster value
+File: kernel/src/fs/fat32/traverse.rs:325
+Status: DONE
+Returns `raw` (includes reserved high nibble) instead of `val` (masked). Every FAT32 cluster-chain walk computes wrong LBAs, corrupting reads/writes.
+Fix: `Ok(Some(val))` instead of `Ok(Some(raw))`
+
+### C2. FAT32 alloc_cluster uses FAT32 byte stride for all variants
+File: kernel/src/fs/fat32/write.rs:222-272
+Status: DONE
+The search closure computes `byte_index = cluster * 4` unconditionally. FAT16 uses stride 2, FAT12 uses 1.5 bytes. On FAT12/16 this reads wrong sectors, producing garbage free-cluster detection (and can panic on out-of-bounds reads).
+Fix: Branch on `self.variant` inside the closure, matching `get_fat_entry`'s approach.
+
+### C3. FAT12/16 find_dir_entry returns LBA as cluster number
+File: kernel/src/fs/fat32/traverse.rs:128
+Status: DONE
+For FAT12/16 root directories, an absolute LBA is stored in the "cluster" field. When `remove_file` passes this to `cluster_to_lba()`, it applies the data-area translation to an already-translated value, corrupting an arbitrary sector on delete.
+Fix: Store a sentinel for root-dir entries and skip `cluster_to_lba` in callers.
+
+### C4. FAT32 free_cluster_chain uses fat_size_32 for all variants
+File: kernel/src/fs/fat32/write.rs:667-672
+Status: DONE
+On FAT12/16, `fat_size_32` is 0, so the loop guard fires immediately and returns `Err(IoError)`. Every file/dir deletion on FAT12/16 leaks all clusters.
+Fix: Use `fat_size_16` for FAT12/16 variants.
+
+### C5. AHCI setup_command_table underflow when buffer_size == 0
+File: kernel/src/drivers/ahci/port.rs:722
+Status: DONE
+`(buffer_size - 1) as u32` wraps to `0xFFFF_FFFF` in release (panic in debug). Called with `buffer_size = 0` for `flush_cache`. Tells the HBA to DMA ~4 GB.
+Fix: Guard PRDT setup on `buffer_size > 0`, set `prdtl = 0` when no data buffer.
+
+### C6. sys_pipe FD leak on copy-out failure
+File: kernel/src/syscalls/mod.rs:617-640
+Status: DONE
+Both FDs are inserted into the table before `try_copy_to_user`. If the write faults, the function returns error but leaves two unreachable pipe ends in the FD table forever.
+Fix: Close both FDs on the error path before returning.
+
+## HIGH
+
+### H1. sys_poll unbounded heap allocation from untrusted count
+File: kernel/src/syscalls/io.rs:608
+Status: OPEN
+`vec![...; count]` with no cap. User can pass huge values to exhaust kernel heap.
+Fix: Cap at e.g. 1024 and return EINVAL above that.
+
+### H2. Block device cache miss coalescing assumes contiguous misses
+File: kernel/src/fs/block_device.rs:52-53
+Status: OPEN
+Non-consecutive cache misses (e.g., LBA 5 and 7 both missing, 6 cached) are read as a single contiguous range from the first miss. LBA 7's buffer position gets wrong data.
+Fix: Group miss ranges into contiguous sub-ranges, or issue one read per miss.
+
+### H3. memfs remove_dir has inverted kind check
+File: kernel/src/fs/memfs/mod.rs:239
+Status: OPEN
+Checks `kind != File` and returns `NotAFile`, meaning it rejects directories and would delete files. Completely backwards.
+Fix: `if child.file.kind != FileKind::Directory { return Err(Error::NotADir); }`
+
+### H4. DMA buffer recycling: stale cached physical address
+File: kernel/src/drivers/dma.rs:107
+Status: OPEN
+`phys_addr` is a `spin::Once` populated lazily. Recycled buffers keep the old value. If virtual-to-physical mapping ever differs on reuse, DMA targets wrong memory.
+Fix: Store `phys_addr` as a plain `PhysAddr` filled at allocation time, or clear Once on recycle.
+
+### H5. HPET ticks_to_nanos overflows u64 for large tick deltas
+File: kernel/src/drivers/hpet/instant.rs:15-16
+Status: OPEN
+`ticks * self.frequency` overflows u64 silently for large deltas (~2^63 ticks at 70M fs/tick), producing wrong timeout/sleep durations.
+Fix: Use u128 for the intermediate product: `((ticks as u128 * self.frequency as u128) / 1_000_000) as u64`
+
+### H6. MSI address encodes LAPIC ID without masking
+File: kernel/src/drivers/msi/mod.rs:45
+Status: OPEN
+`lapic_id << 12` can corrupt the 0xFEE prefix if the ID exceeds 8 bits (x2APIC mode). MSI goes to wrong CPU or nowhere.
+Fix: `(lapic_id & 0xFF) << 12`
+
+### H7. AHCI check_errors clears all IS bits, not just TFES
+File: kernel/src/drivers/ahci/port.rs:666-683
+Status: DONE
+Writes back full `is` value, clearing DHRS/DSS/etc. that `wait_for_command_completion` needs. Follow-on commands see IS=0 and time out instead of fast error return.
+Fix: Write only PORT_IS_TFES.
+
+### H8. sys_shm_map no validation on addr_hint
+File: kernel/src/syscalls/shm.rs:67-143
+Status: OPEN
+User-supplied address is used directly without alignment or kernel-space range check. User can map shared memory into kernel space.
+Fix: Validate page alignment and addr_hint < KERNEL_SPACE_BASE.
+
+### H9. MAP_PHYSICAL no alignment check, no rollback on partial failure
+File: kernel/src/syscalls/memory.rs:42-88
+Status: OPEN
+Unaligned phys_addr causes wrong frame mapping. Partial mapping failure leaks already-mapped pages (no MemoryMapping recorded).
+Fix: Check phys_addr & 0xFFF == 0, and roll back on error like sys_shm_map does.
+
+### H10. sys_window_send_event allows any process to inject events into any window
+File: kernel/src/syscalls/window.rs:393-425
+Status: OPEN
+No ownership or privilege check. Any process can inject arbitrary events into other processes' windows.
+Fix: Enforce caller ownership or WM privilege.
+
+## MEDIUM
+
+### M1. sys_dup TOCTOU: scan and insert under separate locks
+File: kernel/src/syscalls/mod.rs:661-666
+Status: OPEN
+Another thread sharing the FD table can race between the lowest-free scan and insert.
+Fix: Single lock hold with allocate_lowest_fd.
+
+### M2. sys_open ignores O_TRUNC and access mode flags
+File: kernel/src/syscalls/io.rs:444-445
+Status: OPEN
+Only O_APPEND and O_CREAT recognized. O_TRUNC, O_WRONLY, O_RDONLY silently ignored. Truncation doesn't happen; writes can go to read-only files.
+Fix: Handle O_TRUNC at minimum; track read/write mode on FsFile.
+
+### M3. memfs write_bytes panics when partial write within existing content
+File: kernel/src/fs/memfs/mod.rs:144-148
+Status: OPEN
+`copy_from_slice(&data[..slice.len()])` panics if data.len() < slice.len().
+Fix: `let n = slice.len().min(data.len())`.
+
+### M4. AHCI stop_port and initialize_port missing &raw const on volatile reads
+File: kernel/src/drivers/ahci/port.rs:121, kernel/src/drivers/ahci/controller.rs:308
+Status: DONE
+Creates Rust references to MMIO registers (UB). All other accesses use &raw const/mut.
+Fix: Change to &raw const.
+
+### M5. memfs next_id overflow
+File: kernel/src/fs/memfs/mod.rs:174
+Status: OPEN
+u32 wraps after 4B creations, silently reusing IDs.
+Fix: checked_add with error return.
+
+### M6. sys_write unbounded kernel buffer allocation
+File: kernel/src/syscalls/io.rs:95-186
+Status: OPEN
+`vec![0u8; count]` where count is user-controlled with no cap.
+Fix: Cap at e.g. 1 MiB.
+
+### M7. sys_spawn argv cap off-by-one
+File: kernel/src/syscalls/mod.rs:804
+Status: OPEN
+argv_storage is pre-seeded with argv[0], so the == MAX_ARGC check allows one extra arg.
+Fix: Remove the redundant && argv_storage.len() == MAX_ARGC condition; rely on terminated flag.
+
+### M8. PS/2 force_push drops oldest scancode
+File: kernel/src/drivers/mod.rs:52
+Status: OPEN
+Under sustained input, oldest scancodes are lost, which can cause stuck modifier keys (missed key-up).
+Fix: Use push (drop newest) or increase queue size.
+
+### M9. FAT32 write.rs redundant FileTime::now() call
+File: kernel/src/fs/fat32/write.rs:160
+Status: OPEN
+Dead code shadowing the previous binding. Wastes an RTC read.
+Fix: Remove the second `let current_time = FileTime::now()`.
+
+### M10. BlockDevice constructed twice in Fatfs::new
+File: kernel/src/fs/fat32/mod.rs:82
+Status: OPEN
+First one (with its LRU cache) is thrown away.
+Fix: Construct once, reuse for both boot sector read and storage.
+
+## LOW
+
+### L1. Path::parse accepts relative paths and never returns Err
+File: kernel/src/fs/path.rs:22-29
+Status: OPEN
+ParseError is dead code. Relative paths silently accepted. "../" components handled by normalize() but contract is unclear.
+Fix: Validate leading '/' at minimum.
+
+### L2. VFS startup loop in fs_main_thread iterates empty FS_WORKER_MAILBOXES
+File: kernel/src/fs/mod.rs:633-651
+Status: OPEN
+Dead code -- no mounts exist at that point.
+Fix: Remove the loop.
+
+### L3. FAT32 generate_short_name loop has no iteration bound
+File: kernel/src/fs/fat32/write.rs
+Status: OPEN
+The counter loop for numeric suffix generation has no termination guard.
+Fix: Bound at e.g. 999999 and return error.
+
+### L4. procfs try_lock silently omits thread info on contention
+File: kernel/src/fs/procfs/mod.rs:474
+Status: OPEN
+If ThreadInfo lock is held, user info is silently omitted from /proc/<tid>/status.
+Fix: Document the behavior or retry.
+
+### L5. AHCI driver main loop busy-polls with no sleep/park
+File: kernel/src/drivers/ahci/mod.rs:205-245
+Status: OPEN
+Polls HBA IS register in a tight loop. On quiescent system wastes CPU time.
+Fix: Park until woken by AHCI interrupt.

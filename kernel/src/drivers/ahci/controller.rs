@@ -155,7 +155,7 @@ impl AhciController {
     fn enable_controller_interrupts(hba: *mut HbaMemory) -> Result<(), AhciError> {
         unsafe {
             // Enable global interrupts
-            let mut ghc = ptr::read_volatile(&(*hba).ghc);
+            let mut ghc = ptr::read_volatile(&raw const (*hba).ghc);
             ghc |= GHC_IE;
             ptr::write_volatile(&raw mut (*hba).ghc, ghc);
         }
@@ -200,7 +200,7 @@ impl AhciController {
     }
 
     fn discover_ports(&mut self) -> Result<(), AhciError> {
-        let pi = unsafe { ptr::read_volatile(&(*self.hba).pi) };
+        let pi = unsafe { ptr::read_volatile(&raw const (*self.hba).pi) };
         self.ports.resize_with(32, || None);
 
         for i in 0..32 {
@@ -305,7 +305,7 @@ impl AhciController {
             ptr::write_volatile(&raw mut (*port_ptr).is, 0xFFFFFFFF);
 
             // Set up power management: Power On Device + Spin-Up Device
-            cmd = ptr::read_volatile(&(*port_ptr).cmd);
+            cmd = ptr::read_volatile(&raw const (*port_ptr).cmd);
             cmd |= PORT_CMD_POD | PORT_CMD_SUD;
             ptr::write_volatile(&raw mut (*port_ptr).cmd, cmd);
 

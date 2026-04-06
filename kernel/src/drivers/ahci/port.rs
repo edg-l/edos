@@ -118,7 +118,7 @@ impl AhciPort {
     fn stop_port(port_regs: *mut HbaPort) -> Result<(), AhciError> {
         unsafe {
             // Clear ST (start) bit if set
-            let mut cmd = ptr::read_volatile(&(*port_regs).cmd);
+            let mut cmd = ptr::read_volatile(&raw const (*port_regs).cmd);
             if cmd & PORT_CMD_ST != 0 {
                 cmd &= !PORT_CMD_ST;
                 ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
@@ -189,7 +189,7 @@ impl AhciPort {
         self.setup_atapi_command_table(slot, scsi_cmd, buffer_addr, buffer_size)?;
 
         // Issue and wait - ATAPI needs special command header flags
-        self.issue_command(slot, CMD_HEADER_ATAPI)?;
+        self.issue_command(slot, CMD_HEADER_ATAPI, if buffer_size > 0 { 1 } else { 0 })?;
         let result = self.wait_for_command_completion(slot, timeout);
 
         // Always free the slot
@@ -537,7 +537,7 @@ impl AhciPort {
     /// # Arguments
     /// * `slot` - Command slot number (0-31)
     /// * `flags` - Additional command header flags (write direction, etc.)
-    pub fn issue_command(&mut self, slot: usize, flags: u16) -> Result<(), AhciError> {
+    pub fn issue_command(&mut self, slot: usize, flags: u16, prdtl: u16) -> Result<(), AhciError> {
         if slot >= AHCI_CMD_SLOTS {
             return Err(AhciError::InvalidSlot);
         }
@@ -557,7 +557,7 @@ impl AhciPort {
             let cmd_header = &mut cmd_list[slot];
 
             cmd_header.flags = 5 | flags; // FIS length = 5 DWORDs + additional flags
-            cmd_header.prdtl = 1; // One PRDT entry (could be parameterized)
+            cmd_header.prdtl = prdtl;
             cmd_header.prdbc = 0; // Will be updated by hardware
             cmd_header.ctba = self.command_tables[slot]
                 .as_ref()
@@ -665,8 +665,8 @@ impl AhciPort {
         let is = unsafe { ptr::read_volatile(&raw const (*self.port_regs).is) };
 
         if is & PORT_IS_TFES != 0 {
-            // Clear the error
-            unsafe { ptr::write_volatile(&raw mut (*self.port_regs).is, is) };
+            // Clear only the TFES bit to preserve other pending interrupt status
+            unsafe { ptr::write_volatile(&raw mut (*self.port_regs).is, PORT_IS_TFES) };
 
             let tfd = unsafe { ptr::read_volatile(&raw const (*self.port_regs).tfd) };
             let status = (tfd & 0xFF) as u8;
@@ -702,6 +702,8 @@ impl AhciPort {
             self.command_tables[slot] = Some(dma().allocate()?);
         }
 
+        let has_data = buffer_size > 0;
+
         unsafe {
             let table = self.command_tables[slot]
                 .as_ref()
@@ -714,15 +716,17 @@ impl AhciPort {
             let fis_bytes = bytemuck::bytes_of(fis);
             table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
 
-            // Setup PRDT (Physical Region Descriptor Table)
-            let prdt_entry = PrdtEntry {
-                dba: buffer_addr.as_u64() as u32,
-                dbau: (buffer_addr.as_u64() >> 32) as u32,
-                reserved: 0,
-                dbc: (buffer_size - 1) as u32, // Byte count - 1 (0-based)
-            };
+            // Setup PRDT only when there is a data transfer
+            if has_data {
+                let prdt_entry = PrdtEntry {
+                    dba: buffer_addr.as_u64() as u32,
+                    dbau: (buffer_addr.as_u64() >> 32) as u32,
+                    reserved: 0,
+                    dbc: (buffer_size - 1) as u32, // Byte count - 1 (0-based)
+                };
 
-            ptr::write_volatile(&raw mut (*table).prdt[0], prdt_entry);
+                ptr::write_volatile(&raw mut (*table).prdt[0], prdt_entry);
+            }
         }
 
         Ok(())
@@ -745,7 +749,8 @@ impl AhciPort {
         self.setup_command_table(slot, fis, buffer_addr, buffer_size)?;
 
         // Issue and wait
-        self.issue_command(slot, flags)?;
+        let prdtl = if buffer_size > 0 { 1 } else { 0 };
+        self.issue_command(slot, flags, prdtl)?;
         let result = self.wait_for_command_completion(slot, timeout);
 
         // Always free the slot

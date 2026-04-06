@@ -125,7 +125,10 @@ impl Fatfs {
                         || short_name == *name;
 
                     if matches {
-                        return Ok(Some((de, (root_dir_lba + sector) as u32, off)));
+                        // Return sentinel cluster 0 for FAT12/16 root dir.
+                        // Offset is absolute within the root dir region.
+                        let abs_off = sector as usize * 512 + off;
+                        return Ok(Some((de, 0, abs_off)));
                     }
 
                     off += 32;
@@ -322,7 +325,7 @@ impl Fatfs {
                     return Err(Error::IoError);
                 }
 
-                Ok(Some(raw))
+                Ok(Some(val))
             }
             FatVariant::Fat16 => {
                 let byte_off = (cluster_number as u64) * 2;
@@ -378,6 +381,22 @@ impl Fatfs {
 
                 Ok(Some(val))
             }
+        }
+    }
+
+    /// Resolve a directory entry location (cluster, byte_offset) as returned by `find_dir_entry`
+    /// into (base_lba, sector_count) suitable for reading/writing.
+    /// For FAT12/16 root dir entries (cluster==0), returns the root dir region.
+    /// For cluster-based dirs, returns the cluster's LBA and sectors_per_cluster.
+    pub fn dir_entry_region(&self, entry_cluster: u32) -> (u64, u16) {
+        if entry_cluster == 0 && matches!(self.variant, FatVariant::Fat12 | FatVariant::Fat16) {
+            let root_dir_lba = self.root_dir_lba();
+            let root_dir_sectors =
+                (self.boot_info.root_entry_count as u64 * 32).div_ceil(512) as u16;
+            (root_dir_lba, root_dir_sectors)
+        } else {
+            let spc = self.boot_info.sectors_per_cluster as u16;
+            (self.cluster_to_lba(entry_cluster), spc)
         }
     }
 

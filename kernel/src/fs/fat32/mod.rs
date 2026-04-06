@@ -287,15 +287,14 @@ impl FileSystem for Fatfs {
         }
 
         // Mark the directory entry deleted (0xE5)
-        let spc = self.boot_info.sectors_per_cluster as u16;
-        let base_lba = self.cluster_to_lba(dir_cluster);
+        let (base_lba, sectors) = self.dir_entry_region(dir_cluster);
         let mut buf = Vec::new();
-        buf = self.device.read_sectors(base_lba, spc, buf)?;
+        buf = self.device.read_sectors(base_lba, sectors, buf)?;
         if entry_off + 32 > buf.len() {
             return Err(Error::IoError);
         }
         buf[entry_off] = 0xE5;
-        self.device.write_sectors(base_lba, buf, spc)?;
+        self.device.write_sectors(base_lba, buf, sectors)?;
 
         self.delete_long_name_sequence(
             parent_cluster,
@@ -370,16 +369,15 @@ impl FileSystem for Fatfs {
         }
 
         // Mark the parent directory entry deleted (0xE5)
-        let spc = self.boot_info.sectors_per_cluster as u16;
-        let base_lba = self.cluster_to_lba(dir_cluster);
+        let (base_lba, sectors) = self.dir_entry_region(dir_cluster);
 
         read_buffer.clear();
-        read_buffer = self.device.read_sectors(base_lba, spc, read_buffer)?;
+        read_buffer = self.device.read_sectors(base_lba, sectors, read_buffer)?;
         if entry_off + 32 > read_buffer.len() {
             return Err(Error::IoError);
         }
         read_buffer[entry_off] = 0xE5;
-        read_buffer = self.device.write_sectors(base_lba, read_buffer, spc)?;
+        read_buffer = self.device.write_sectors(base_lba, read_buffer, sectors)?;
 
         self.delete_long_name_sequence(
             parent_cluster,

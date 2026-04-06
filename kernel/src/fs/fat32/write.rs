@@ -72,8 +72,10 @@ impl Fatfs {
             }
 
             // Patch on-disk entry with new head
-            let base_lba = self.cluster_to_lba(dir_cluster);
-            let mut dirbuf = self.device.read_sectors(base_lba, spc_u16, Vec::new())?;
+            let (base_lba, region_sectors) = self.dir_entry_region(dir_cluster);
+            let mut dirbuf = self
+                .device
+                .read_sectors(base_lba, region_sectors, Vec::new())?;
             if entry_off + 32 > dirbuf.len() {
                 return Err(Error::IoError);
             }
@@ -82,7 +84,8 @@ impl Fatfs {
             de.first_cluster_low = (head & 0xFFFF) as u16;
             let bytes: [u8; 32] = bytemuck::cast(de);
             dirbuf[entry_off..entry_off + 32].copy_from_slice(&bytes);
-            self.device.write_sectors(base_lba, dirbuf, spc_u16)?;
+            self.device
+                .write_sectors(base_lba, dirbuf, region_sectors)?;
 
             // Update in-memory copy
             entry.first_cluster_high = ((head >> 16) & 0xFFFF) as u16;
@@ -218,17 +221,21 @@ impl Fatfs {
             start_cluster = 2;
         }
 
-        // Search helper
+        // Search helper: scan FAT entries for a free cluster, mark it EOF.
+        let variant = self.variant;
         let mut search = |start: u32, _end_exclusive: u32| -> Option<u32> {
             let mut current_cluster = start;
+            let max_clusters = entries_per_sector as u64 * fat_sectors;
             let mut sec = Vec::new();
-            while (current_cluster as u64) < (entries_per_sector as u64 * fat_sectors) {
-                // Compute sector and offset
-                let byte_index = (current_cluster as usize) * 4;
+            while (current_cluster as u64) < max_clusters {
+                // Read the FAT entry for current_cluster using variant-aware addressing
+                let (byte_index, entry_size) = match variant {
+                    FatVariant::Fat32 => ((current_cluster as usize) * 4, 4usize),
+                    FatVariant::Fat16 => ((current_cluster as usize) * 2, 2usize),
+                    FatVariant::Fat12 => ((current_cluster as usize * 3) / 2, 2usize),
+                };
                 let sector_index = (byte_index / bytes_per_sector) as u64;
                 let within = byte_index % bytes_per_sector;
-
-                // Read FAT sector
 
                 sec.clear();
                 sec = self
@@ -236,17 +243,51 @@ impl Fatfs {
                     .read_sectors(self.first_fat_lba() + sector_index, 1, sec)
                     .ok()?;
 
-                let val = u32::from_le_bytes([
-                    sec[within],
-                    sec[within + 1],
-                    sec[within + 2],
-                    sec[within + 3],
-                ]) & FAT32_MASK;
+                if within + entry_size > sec.len() {
+                    current_cluster += 1;
+                    continue;
+                }
+
+                let val = match variant {
+                    FatVariant::Fat32 => {
+                        u32::from_le_bytes(sec[within..within + 4].try_into().ok()?) & FAT32_MASK
+                    }
+                    FatVariant::Fat16 => {
+                        u16::from_le_bytes(sec[within..within + 2].try_into().ok()?) as u32
+                            & FAT16_MASK
+                    }
+                    FatVariant::Fat12 => {
+                        let raw = u16::from_le_bytes(sec[within..within + 2].try_into().ok()?);
+                        if current_cluster & 1 == 0 {
+                            (raw & 0x0FFF) as u32
+                        } else {
+                            ((raw >> 4) & 0x0FFF) as u32
+                        }
+                    }
+                };
 
                 if val == crate::fs::fat32::structures::CLUSTER_FREE {
-                    // mark as EOF in both FATs
-                    let newv = crate::fs::fat32::structures::CLUSTER_EOF;
-                    sec[within..within + 4].copy_from_slice(&newv.to_le_bytes());
+                    // Mark as EOF using variant-aware write
+                    match variant {
+                        FatVariant::Fat32 => {
+                            let eof = crate::fs::fat32::structures::CLUSTER_EOF;
+                            sec[within..within + 4].copy_from_slice(&eof.to_le_bytes());
+                        }
+                        FatVariant::Fat16 => {
+                            let eof: u16 = 0xFFFF;
+                            sec[within..within + 2].copy_from_slice(&eof.to_le_bytes());
+                        }
+                        FatVariant::Fat12 => {
+                            let existing =
+                                u16::from_le_bytes(sec[within..within + 2].try_into().ok()?);
+                            let new_val = if current_cluster & 1 == 0 {
+                                (existing & 0xF000) | 0x0FFF
+                            } else {
+                                (existing & 0x000F) | (0xFFF << 4)
+                            };
+                            sec[within..within + 2].copy_from_slice(&new_val.to_le_bytes());
+                        }
+                    }
 
                     self.device
                         .write_sectors(self.first_fat_lba() + sector_index, sec.clone(), 1)
@@ -375,16 +416,13 @@ impl Fatfs {
     pub fn patch_dir_entry_at(
         &mut self,
         entry_cluster: u32,
-        entry_offset: usize, // byte offset within the cluster
+        entry_offset: usize, // byte offset within the region
         patch: impl FnOnce(&mut DirectoryEntry),
     ) -> Result<(), Error> {
-        let spc = self.boot_info.sectors_per_cluster as u16;
-        let bps = self.boot_info.bytes_per_sector as usize;
-        let cluster_bytes = bps * spc as usize;
+        let (base_lba, sectors) = self.dir_entry_region(entry_cluster);
 
-        let base_lba = self.cluster_to_lba(entry_cluster);
-        let mut buf = self.device.read_sectors(base_lba, spc, Vec::new())?;
-        if buf.len() < cluster_bytes || entry_offset + 32 > buf.len() {
+        let mut buf = self.device.read_sectors(base_lba, sectors, Vec::new())?;
+        if entry_offset + 32 > buf.len() {
             return Err(Error::IoError);
         }
 
@@ -393,7 +431,7 @@ impl Fatfs {
         let bytes: [u8; 32] = bytemuck::cast(de);
         buf[entry_offset..entry_offset + 32].copy_from_slice(&bytes);
 
-        self.device.write_sectors(base_lba, buf, spc)?;
+        self.device.write_sectors(base_lba, buf, sectors)?;
         Ok(())
     }
 
@@ -586,19 +624,14 @@ impl Fatfs {
         }
     }
 
-    fn mark_entry_deleted(
-        &mut self,
-        cluster: u32,
-        entry_offset: usize,
-        spc: u16,
-    ) -> Result<(), Error> {
-        let base_lba = self.cluster_to_lba(cluster);
-        let mut buf = self.device.read_sectors(base_lba, spc, Vec::new())?;
+    fn mark_entry_deleted(&mut self, cluster: u32, entry_offset: usize) -> Result<(), Error> {
+        let (base_lba, sectors) = self.dir_entry_region(cluster);
+        let mut buf = self.device.read_sectors(base_lba, sectors, Vec::new())?;
         if entry_offset + 32 > buf.len() {
             return Err(Error::IoError);
         }
         buf[entry_offset] = 0xE5;
-        self.device.write_sectors(base_lba, buf, spc)?;
+        self.device.write_sectors(base_lba, buf, sectors)?;
         Ok(())
     }
 
@@ -645,7 +678,7 @@ impl Fatfs {
                 if cluster == target_cluster && off == target_offset {
                     for (lfn_cluster, lfn_off, lfn_entry) in pending.iter().rev() {
                         if lfn_entry.checksum == checksum {
-                            self.mark_entry_deleted(*lfn_cluster, *lfn_off, spc)?;
+                            self.mark_entry_deleted(*lfn_cluster, *lfn_off)?;
                         }
                     }
                     return Ok(());
@@ -668,8 +701,16 @@ impl Fatfs {
         }
 
         // Hard guard to avoid infinite loops on corrupted chains
-        let fat_entries =
-            (self.boot_info.fat_size_32 as usize * self.boot_info.bytes_per_sector as usize) / 4;
+        let fat_size = match self.variant {
+            FatVariant::Fat32 => self.boot_info.fat_size_32 as usize,
+            FatVariant::Fat12 | FatVariant::Fat16 => self.boot_info.fat_size_16 as usize,
+        };
+        let entry_stride = match self.variant {
+            FatVariant::Fat32 => 4,
+            FatVariant::Fat16 => 2,
+            FatVariant::Fat12 => 2, // approximate (1.5 bytes), conservative bound
+        };
+        let fat_entries = (fat_size * self.boot_info.bytes_per_sector as usize) / entry_stride;
 
         let mut freed: u32 = 0;
         let mut cur = start;
