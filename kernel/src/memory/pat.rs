@@ -32,14 +32,9 @@ fn cpuid_supports_pat() -> bool {
 
 /// Program the PAT MSR to replace entry 1 (WT) with WC.
 ///
-/// Follows the Intel SDM Vol. 3A Section 11.12 sequence:
-/// 1. Disable caching (CR0.CD=1)
-/// 2. Flush caches (WBINVD)
-/// 3. Flush TLBs (reload CR3)
-/// 4. Write PAT MSR
-/// 5. Flush caches again
-/// 6. Flush TLBs again
-/// 7. Re-enable caching (CR0.CD=0)
+/// Uses a simplified sequence (WRMSR + TLB flush) that works under KVM.
+/// Called at boot before any WC mappings exist, so no stale TLB entries
+/// can conflict.
 pub fn init_pat() {
     if !cpuid_supports_pat() {
         println!("PAT: not supported by CPU, skipping");
@@ -47,36 +42,22 @@ pub fn init_pat() {
     }
 
     unsafe {
+        // The full SDM Section 11.12 sequence (CR0.CD=1, WBINVD, etc.) causes
+        // triple faults under KVM because setting CR0.CD disables caching on
+        // the host core. On KVM, WRMSR to PAT is intercepted and handled
+        // safely by the hypervisor. On bare metal at boot (before any WC
+        // mappings exist), no stale TLB entries can conflict, so a simple
+        // WRMSR + TLB flush suffices.
         core::arch::asm!(
-            // 1. Disable caching: set CR0.CD (bit 30)
-            "mov {tmp}, cr0",
-            "or {tmp}, {cd_bit}",
-            "mov cr0, {tmp}",
-            // 2. Flush all caches
-            "wbinvd",
-            // 3. Flush TLBs by reloading CR3
-            "mov {tmp}, cr3",
-            "mov cr3, {tmp}",
-            // 4. Write PAT MSR
             "wrmsr",
-            // 5. Flush caches again
-            "wbinvd",
-            // 6. Flush TLBs again
             "mov {tmp}, cr3",
             "mov cr3, {tmp}",
-            // 7. Re-enable caching: clear CR0.CD
-            "mov {tmp}, cr0",
-            "and {tmp}, {cd_clear}",
-            "mov cr0, {tmp}",
-            // 8. Serialize
             "mfence",
             tmp = out(reg) _,
-            cd_bit = const 1u64 << 30,
-            cd_clear = const !(1u64 << 30),
             in("ecx") PAT_MSR,
             in("edx") (TARGET_PAT >> 32) as u32,
             in("eax") TARGET_PAT as u32,
-            options(nostack, preserves_flags),
+            options(nostack),
         );
     }
 
