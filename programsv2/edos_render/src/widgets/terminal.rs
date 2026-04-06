@@ -93,6 +93,9 @@ pub struct Terminal {
     current_bg: u32,
     bold: bool,
 
+    // Modifier key state
+    shift_held: bool,
+
     // Input buffer for characters to send
     input_buffer: Vec<char>,
 
@@ -135,6 +138,7 @@ impl Terminal {
             current_fg: terminal_colors::FOREGROUND,
             current_bg: terminal_colors::BACKGROUND,
             bold: false,
+            shift_held: false,
             input_buffer: Vec::new(),
             esc_state: EscState::Normal,
             esc_buf: [0; 32],
@@ -263,6 +267,9 @@ impl Terminal {
                 }
             }
         }
+
+        // New output snaps back to live view
+        self.scroll_offset = 0;
     }
 
     /// Execute a CSI (Control Sequence Introducer) command.
@@ -445,6 +452,7 @@ impl Terminal {
         self.cursor_col = self.cursor_col.min(new_cols.saturating_sub(1));
         self.width = pixel_width;
         self.height = pixel_height;
+        self.scroll_offset = 0;
     }
 
     /// Write a string to the terminal.
@@ -576,45 +584,59 @@ impl Widget for Terminal {
         let char_w = char_width() as i32;
         let char_h = text_height() as i32;
 
-        // Draw each row of cells
-        for (row_idx, row) in self.buffer.iter().enumerate() {
-            let row_y = self.y + (row_idx as i32) * char_h;
+        // Draw each row of cells, accounting for scroll offset into history
+        let history_len = self.history.len();
+        let total_lines = history_len + self.buffer.len();
+        let viewport_bottom = total_lines.saturating_sub(self.scroll_offset);
+        let viewport_top = viewport_bottom.saturating_sub(self.rows);
 
-            for (col_idx, cell) in row.iter().enumerate() {
-                let cell_x = self.x + (col_idx as i32) * char_w;
+        for display_row in 0..self.rows {
+            let line_idx = viewport_top + display_row;
+            let row_y = self.y + (display_row as i32) * char_h;
 
-                // Draw cell background if it differs from terminal background
-                if cell.bg != self.bg_color {
-                    draw_rect(
-                        buffer,
-                        buffer_width,
-                        buffer_height,
-                        cell_x,
-                        row_y,
-                        char_w as u32,
-                        char_h as u32,
-                        cell.bg,
-                    );
-                }
+            let row_data: Option<&Vec<Cell>> = if line_idx < history_len {
+                self.history.get(line_idx)
+            } else {
+                self.buffer.get(line_idx - history_len)
+            };
 
-                // Draw character if not a space
-                if cell.ch != ' ' {
-                    let ch_str = cell.ch.to_string();
-                    draw_text(
-                        buffer,
-                        buffer_width,
-                        buffer_height,
-                        cell_x,
-                        row_y,
-                        &ch_str,
-                        cell.fg,
-                    );
+            if let Some(row) = row_data {
+                for (col_idx, cell) in row.iter().enumerate() {
+                    let cell_x = self.x + (col_idx as i32) * char_w;
+
+                    // Draw cell background if it differs from terminal background
+                    if cell.bg != self.bg_color {
+                        draw_rect(
+                            buffer,
+                            buffer_width,
+                            buffer_height,
+                            cell_x,
+                            row_y,
+                            char_w as u32,
+                            char_h as u32,
+                            cell.bg,
+                        );
+                    }
+
+                    // Draw character if not a space
+                    if cell.ch != ' ' {
+                        let ch_str = cell.ch.to_string();
+                        draw_text(
+                            buffer,
+                            buffer_width,
+                            buffer_height,
+                            cell_x,
+                            row_y,
+                            &ch_str,
+                            cell.fg,
+                        );
+                    }
                 }
             }
         }
 
-        // Draw cursor if focused and visible
-        if self.focused && self.cursor_visible {
+        // Draw cursor if focused, visible, and not scrolled back
+        if self.scroll_offset == 0 && self.focused && self.cursor_visible {
             let cursor_x = self.x + (self.cursor_col as i32) * char_w;
             let cursor_y = self.y + (self.cursor_row as i32) * char_h;
 
@@ -672,7 +694,17 @@ impl Widget for Terminal {
     }
 
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent> {
-        if !self.focused || !pressed {
+        if !self.focused {
+            return None;
+        }
+
+        // Track shift state for both press and release
+        if scancode == 42 || scancode == 54 {
+            self.shift_held = pressed;
+            return None;
+        }
+
+        if !pressed {
             return None;
         }
 
@@ -709,11 +741,20 @@ impl Widget for Terminal {
             }
             73 => {
                 // Page Up
-                self.input_buffer.extend("\x1B[5~".chars());
+                if self.shift_held {
+                    self.scroll_offset =
+                        (self.scroll_offset + self.rows / 2).min(self.history.len());
+                } else {
+                    self.input_buffer.extend("\x1B[5~".chars());
+                }
             }
             81 => {
                 // Page Down
-                self.input_buffer.extend("\x1B[6~".chars());
+                if self.shift_held {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(self.rows / 2);
+                } else {
+                    self.input_buffer.extend("\x1B[6~".chars());
+                }
             }
             83 => {
                 // Delete
