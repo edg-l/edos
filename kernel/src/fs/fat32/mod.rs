@@ -31,8 +31,7 @@ pub struct Fatfs {
 impl Fatfs {
     pub fn new(partition: Partition) -> Result<Self, Error> {
         let mut device = BlockDevice::new(partition.device_id, 128);
-        let mut read_buffer = Vec::new();
-        let boot_bytes = device.read_sectors(partition.starting_lba, 1, read_buffer)?;
+        let boot_bytes = device.read_sectors(partition.starting_lba, 1, Vec::new())?;
 
         if boot_bytes.len() != 512 {
             return Err(Error::MissingCriticalSectors);
@@ -51,12 +50,10 @@ impl Fatfs {
                     return Err(Error::InvalidFs);
                 }
 
-                read_buffer = boot_bytes;
-                read_buffer.clear();
                 let fs_info_bytes = device.read_sectors(
                     partition.starting_lba + boot_info.fs_info as u64,
                     1,
-                    read_buffer,
+                    boot_bytes,
                 )?;
 
                 let fs_info: FsInfo =
@@ -79,7 +76,7 @@ impl Fatfs {
             boot_info,
             fs_info,
             variant,
-            device: BlockDevice::new(partition.device_id, 128),
+            device,
             partition,
         })
     }
@@ -156,8 +153,6 @@ impl FileSystem for Fatfs {
             de.write_date = current_time.date;
             de.write_time = current_time.time;
         })?;
-
-        let current_time = crate::fs::FileTime::now();
 
         Ok(written)
     }

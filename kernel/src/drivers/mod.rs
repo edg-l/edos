@@ -49,7 +49,7 @@ pub fn ps2_drain_buffer() {
         } else {
             // Keyboard byte
             if let Some(queue) = keyboard::SCANCODE_QUEUE.get() {
-                queue.force_push(byte);
+                let _ = queue.push(byte);
                 got_keyboard = true;
             }
         }

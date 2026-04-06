@@ -141,11 +141,10 @@ impl FileSystem for Memfs {
                 node.content.extend(data);
                 return Ok(data.len() as u64);
             } else {
-                let slice = &mut node.content[offset..];
-
-                slice.copy_from_slice(&data[..(slice.len())]);
-                let data_slice = &data[slice.len()..];
-                node.content.extend(data_slice);
+                let tail = &mut node.content[offset..];
+                let overwrite_len = tail.len().min(data.len());
+                tail[..overwrite_len].copy_from_slice(&data[..overwrite_len]);
+                node.content.extend_from_slice(&data[overwrite_len..]);
             }
 
             Ok(data.len() as u64)
@@ -161,7 +160,8 @@ impl FileSystem for Memfs {
         };
 
         if let Some(parent_node) = self.find_node(&parent)? {
-            let id = self.next_id;
+            let current_id = self.next_id;
+            let next_id = current_id.checked_add(1).ok_or(Error::IoError)?;
             let parent_node = self.get_node_mut(parent_node)?;
 
             if parent_node.file.kind != FileKind::Directory {
@@ -170,10 +170,10 @@ impl FileSystem for Memfs {
 
             let name = path.filename();
 
-            let node = Node::new(id, name, FileKind::File);
+            let node = Node::new(current_id, name, FileKind::File);
             parent_node.childs.push(node.id);
-            self.next_id += 1;
-            self.nodes.insert(id, node);
+            self.next_id = next_id;
+            self.nodes.insert(node.id, node);
 
             Ok(())
         } else {
@@ -188,7 +188,8 @@ impl FileSystem for Memfs {
         };
 
         if let Some(parent_node) = self.find_node(&parent)? {
-            let id = self.next_id;
+            let current_id = self.next_id;
+            let next_id = current_id.checked_add(1).ok_or(Error::IoError)?;
             let parent_node = self.get_node_mut(parent_node)?;
 
             if parent_node.file.kind != FileKind::Directory {
@@ -197,10 +198,10 @@ impl FileSystem for Memfs {
 
             let name = path.filename();
 
-            let node = Node::new(id, name, FileKind::Directory);
+            let node = Node::new(current_id, name, FileKind::Directory);
             parent_node.childs.push(node.id);
-            self.next_id += 1;
-            self.nodes.insert(id, node);
+            self.next_id = next_id;
+            self.nodes.insert(node.id, node);
 
             Ok(())
         } else {

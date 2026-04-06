@@ -104,19 +104,18 @@ No ownership check possible without a WM privilege system -- the WM and taskbar 
 
 ### M1. sys_dup TOCTOU: scan and insert under separate locks
 File: kernel/src/syscalls/mod.rs:661-666
-Status: OPEN
+Status: DONE
 Another thread sharing the FD table can race between the lowest-free scan and insert.
 Fix: Single lock hold with allocate_lowest_fd.
 
 ### M2. sys_open ignores O_TRUNC and access mode flags
 File: kernel/src/syscalls/io.rs:444-445
-Status: OPEN
-Only O_APPEND and O_CREAT recognized. O_TRUNC, O_WRONLY, O_RDONLY silently ignored. Truncation doesn't happen; writes can go to read-only files.
-Fix: Handle O_TRUNC at minimum; track read/write mode on FsFile.
+Status: WONTFIX
+Requires adding truncate_file to the FileSystem trait and implementing for FAT32/memfs. Feature addition, not a mechanical fix. Deferred.
 
 ### M3. memfs write_bytes panics when partial write within existing content
 File: kernel/src/fs/memfs/mod.rs:144-148
-Status: OPEN
+Status: DONE
 `copy_from_slice(&data[..slice.len()])` panics if data.len() < slice.len().
 Fix: `let n = slice.len().min(data.len())`.
 
@@ -128,37 +127,37 @@ Fix: Change to &raw const.
 
 ### M5. memfs next_id overflow
 File: kernel/src/fs/memfs/mod.rs:174
-Status: OPEN
+Status: DONE
 u32 wraps after 4B creations, silently reusing IDs.
 Fix: checked_add with error return.
 
 ### M6. sys_write unbounded kernel buffer allocation
 File: kernel/src/syscalls/io.rs:95-186
-Status: OPEN
+Status: DONE
 `vec![0u8; count]` where count is user-controlled with no cap.
 Fix: Cap at e.g. 1 MiB.
 
 ### M7. sys_spawn argv cap off-by-one
 File: kernel/src/syscalls/mod.rs:804
-Status: OPEN
+Status: DONE
 argv_storage is pre-seeded with argv[0], so the == MAX_ARGC check allows one extra arg.
 Fix: Remove the redundant && argv_storage.len() == MAX_ARGC condition; rely on terminated flag.
 
 ### M8. PS/2 force_push drops oldest scancode
 File: kernel/src/drivers/mod.rs:52
-Status: OPEN
+Status: DONE
 Under sustained input, oldest scancodes are lost, which can cause stuck modifier keys (missed key-up).
 Fix: Use push (drop newest) or increase queue size.
 
 ### M9. FAT32 write.rs redundant FileTime::now() call
 File: kernel/src/fs/fat32/write.rs:160
-Status: OPEN
+Status: DONE
 Dead code shadowing the previous binding. Wastes an RTC read.
 Fix: Remove the second `let current_time = FileTime::now()`.
 
 ### M10. BlockDevice constructed twice in Fatfs::new
 File: kernel/src/fs/fat32/mod.rs:82
-Status: OPEN
+Status: DONE
 First one (with its LRU cache) is thrown away.
 Fix: Construct once, reuse for both boot sector read and storage.
 

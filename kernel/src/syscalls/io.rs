@@ -148,8 +148,10 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
         Some(FileDescriptor::FsFile(file)) => {
             // FS still needs intermediate buffer (worker thread in different context)
             // But we pass ownership to avoid the to_vec() copy in fs_api
-            let mut buffer = vec![0u8; count];
-            if !unsafe { try_copy_from_user(buffer.as_mut_ptr(), buffer_ptr, count) } {
+            const MAX_WRITE_SIZE: usize = 1024 * 1024; // 1 MiB
+            let capped_count = count.min(MAX_WRITE_SIZE);
+            let mut buffer = vec![0u8; capped_count];
+            if !unsafe { try_copy_from_user(buffer.as_mut_ptr(), buffer_ptr, capped_count) } {
                 info.lock().errno = Errno::EFAULT;
                 return !0u64;
             }

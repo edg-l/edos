@@ -55,4 +55,14 @@ impl FileDescriptorTable {
     pub fn insert_fd(&mut self, fd: u64, descriptor: FileDescriptor) {
         self.fds.insert(fd, descriptor);
     }
+
+    /// Atomically find the lowest free fd and insert the descriptor.
+    pub fn allocate_lowest_fd(&mut self, descriptor: FileDescriptor) -> u64 {
+        let mut candidate = 0u64;
+        while self.fds.contains_key(&candidate) {
+            candidate += 1;
+        }
+        self.fds.insert(candidate, descriptor);
+        candidate
+    }
 }

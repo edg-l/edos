@@ -652,23 +652,18 @@ fn sys_dup(oldfd: u64) -> u64 {
     info.lock().errno = Errno::Clear;
 
     let fd_table = info.lock().fd_table.clone();
+    let mut table = fd_table.lock();
 
-    let old_fd_descriptor = match fd_table.lock().get_fd(oldfd) {
+    let old_fd_descriptor = match table.get_fd(oldfd) {
         Some(fd) => fd.clone(),
         None => {
+            drop(table);
             info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
     };
 
-    let mut candidate = 0;
-    while fd_table.lock().get_fd(candidate).is_some() {
-        candidate += 1;
-    }
-
-    fd_table.lock().insert_fd(candidate, old_fd_descriptor);
-
-    candidate
+    table.allocate_lowest_fd(old_fd_descriptor)
 }
 
 fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
@@ -804,7 +799,7 @@ fn sys_spawn(
             argv_storage.push(arg);
         }
 
-        if !terminated && argv_storage.len() == MAX_ARGC {
+        if !terminated {
             info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
