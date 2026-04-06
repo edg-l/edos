@@ -402,7 +402,6 @@ fn main() {
     // Main compositor loop
     loop {
         let frame_start = Instant::now();
-
         // Read mouse state
         let (mx, my, buttons) = input.read_mouse();
         cursor.set_position(mx, my);
@@ -550,7 +549,6 @@ fn main() {
         // costs as much as a full draw. The proper fix is mmap'ing VRAM into
         // userspace so the compositor writes directly to the back page.
         let _ = screen.render();
-
         // Sleep remainder of frame budget to maintain frame rate.
         // Use a minimum sleep of 1ms to avoid sub-microsecond sleeps that
         // can interact badly with the scheduler.
