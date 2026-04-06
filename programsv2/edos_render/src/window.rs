@@ -306,21 +306,13 @@ pub fn window_create(x: i32, y: i32, width: u32, height: u32) -> Result<WindowId
 /// Destroy a window.
 pub fn window_destroy(id: WindowId) -> Result<(), i64> {
     let result = unsafe { syscall1(SYS_WINDOW_DESTROY, id) };
-    if is_error(result) {
-        Err(-1)
-    } else {
-        Ok(())
-    }
+    if is_error(result) { Err(-1) } else { Ok(()) }
 }
 
 /// Set a window property.
 pub fn window_set(id: WindowId, prop: u64, value: u64) -> Result<(), i64> {
     let result = unsafe { syscall3(SYS_WINDOW_SET, id, prop, value) };
-    if is_error(result) {
-        Err(-1)
-    } else {
-        Ok(())
-    }
+    if is_error(result) { Err(-1) } else { Ok(()) }
 }
 
 /// Get a window property.
@@ -388,12 +380,14 @@ pub fn window_list(buffer: &mut [WindowListEntry]) -> Result<usize, i64> {
 /// * `id` - Window ID
 /// * `event` - Event to send
 pub fn window_send_event(id: WindowId, event: &WindowEvent) -> Result<(), i64> {
-    let result = unsafe { syscall2(SYS_WINDOW_SEND_EVENT, id, event as *const WindowEvent as u64) };
-    if is_error(result) {
-        Err(-1)
-    } else {
-        Ok(())
-    }
+    let result = unsafe {
+        syscall2(
+            SYS_WINDOW_SEND_EVENT,
+            id,
+            event as *const WindowEvent as u64,
+        )
+    };
+    if is_error(result) { Err(-1) } else { Ok(()) }
 }
 
 /// Create a shared memory region.
@@ -436,11 +430,7 @@ pub fn shm_map(shm_id: u64, prot: u64) -> Result<*mut u8, i64> {
 /// * `addr` - Address of the mapped region
 pub fn shm_unmap(addr: *mut u8) -> Result<(), i64> {
     let result = unsafe { syscall1(SYS_SHM_UNMAP, addr as u64) };
-    if result as i64 == -1 {
-        Err(-1)
-    } else {
-        Ok(())
-    }
+    if result as i64 == -1 { Err(-1) } else { Ok(()) }
 }
 
 /// Destroy a shared memory region.
@@ -449,58 +439,76 @@ pub fn shm_unmap(addr: *mut u8) -> Result<(), i64> {
 /// * `shm_id` - Shared memory ID
 pub fn shm_destroy(shm_id: u64) -> Result<(), i64> {
     let result = unsafe { syscall1(SYS_SHM_DESTROY, shm_id) };
-    if result as i64 == -1 {
-        Err(-1)
-    } else {
-        Ok(())
-    }
+    if result as i64 == -1 { Err(-1) } else { Ok(()) }
 }
 
-/// Helper struct for managing a window with its shared memory buffer.
+/// Helper struct for managing a window with double-buffered shared memory.
+///
+/// Two shm buffers are maintained: the client draws to the back buffer, then
+/// calls `swap_buffers()` to atomically make it visible to the compositor.
 pub struct Window {
     pub id: WindowId,
     pub width: u32,
     pub height: u32,
-    pub shm_id: Option<u64>,
-    pub buffer: Option<*mut u32>,
+    /// (shm_id, mapped_ptr) for each of the two buffers.
+    buffers: [(u64, *mut u32); 2],
+    /// Index into `buffers` of the buffer currently being drawn to.
+    back_index: usize,
+}
+
+fn alloc_buffer(width: u32, height: u32) -> Result<(u64, *mut u32), i64> {
+    let size = (width as usize) * (height as usize) * 4;
+    let shm_id = shm_create(size)?;
+    let ptr = shm_map(shm_id, PROT_READ | PROT_WRITE)?;
+    Ok((shm_id, ptr as *mut u32))
+}
+
+fn free_buffer(shm_id: u64, ptr: *mut u32) {
+    let _ = shm_unmap(ptr as *mut u8);
+    let _ = shm_destroy(shm_id);
 }
 
 impl Window {
-    /// Create a new window with an attached buffer.
+    /// Create a new window with two attached shm buffers.
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Result<Self, i64> {
         let id = window_create(x, y, width, height)?;
 
-        // Create shared memory for the window buffer
-        let buffer_size = (width as usize) * (height as usize) * 4; // 4 bytes per pixel
-        let shm_id = shm_create(buffer_size)?;
+        let buf0 = alloc_buffer(width, height)?;
+        let buf1 = alloc_buffer(width, height).map_err(|e| {
+            free_buffer(buf0.0, buf0.1);
+            e
+        })?;
 
-        // Map the shared memory
-        let buffer_ptr = shm_map(shm_id, PROT_READ | PROT_WRITE)?;
-
-        // Attach buffer to window
-        window_set(id, property::BUFFER_SHM, shm_id)?;
+        // Point the compositor at buffer 0 initially.
+        window_set(id, property::BUFFER_SHM, buf0.0)?;
 
         Ok(Self {
             id,
             width,
             height,
-            shm_id: Some(shm_id),
-            buffer: Some(buffer_ptr as *mut u32),
+            buffers: [buf0, buf1],
+            back_index: 1,
         })
     }
 
-    /// Get a mutable slice to the window buffer.
+    /// Get a mutable slice to the back (draw) buffer.
     pub fn buffer_mut(&mut self) -> Option<&mut [u32]> {
-        self.buffer.map(|ptr| unsafe {
-            std::slice::from_raw_parts_mut(ptr, (self.width * self.height) as usize)
-        })
+        let ptr = self.buffers[self.back_index].1;
+        Some(unsafe { std::slice::from_raw_parts_mut(ptr, (self.width * self.height) as usize) })
     }
 
-    /// Get a slice to the window buffer.
+    /// Get a slice to the back (draw) buffer.
     pub fn buffer(&self) -> Option<&[u32]> {
-        self.buffer.map(|ptr| unsafe {
-            std::slice::from_raw_parts(ptr, (self.width * self.height) as usize)
-        })
+        let ptr = self.buffers[self.back_index].1;
+        Some(unsafe { std::slice::from_raw_parts(ptr, (self.width * self.height) as usize) })
+    }
+
+    /// Swap back and front buffers: makes the current back buffer visible to
+    /// the compositor, then flips so the old front is now the back.
+    pub fn swap_buffers(&mut self) {
+        let back_shm_id = self.buffers[self.back_index].0;
+        let _ = window_set(self.id, property::BUFFER_SHM, back_shm_id);
+        self.back_index = 1 - self.back_index;
     }
 
     /// Set the window title (max 255 chars, truncated if longer).
@@ -513,8 +521,9 @@ impl Window {
         window_set(self.id, property::TITLE_PTR, buf.as_ptr() as u64)
     }
 
-    /// Show the window.
-    pub fn show(&self) -> Result<(), i64> {
+    /// Show the window and present the first frame.
+    pub fn show(&mut self) -> Result<(), i64> {
+        self.swap_buffers();
         window_set(self.id, property::VISIBLE, 1)
     }
 
@@ -535,44 +544,34 @@ impl Window {
     }
 
     /// Resize the window buffer to new dimensions.
-    /// This reallocates the shared memory and updates the window property.
+    /// Allocates two new shm buffers and frees the old pair.
     pub fn resize(&mut self, new_width: u32, new_height: u32) -> Result<(), i64> {
         if new_width == 0 || new_height == 0 {
             return Err(-1);
         }
 
-        // Create new shared memory
-        let buffer_size = (new_width as usize) * (new_height as usize) * 4;
-        let new_shm_id = shm_create(buffer_size)?;
-        let new_buffer = shm_map(new_shm_id, PROT_READ | PROT_WRITE)?;
+        let new_buf0 = alloc_buffer(new_width, new_height)?;
+        let new_buf1 = alloc_buffer(new_width, new_height).map_err(|e| {
+            free_buffer(new_buf0.0, new_buf0.1);
+            e
+        })?;
 
-        // Detach old buffer before attaching new one, so the compositor
-        // can unmap the old shm before we destroy it (avoids shm leak).
-        let old_shm = self.shm_id.take();
-        let old_ptr = self.buffer.take();
-        if let Some(ptr) = old_ptr {
-            let _ = shm_unmap(ptr as *mut u8);
-        }
+        // Point the compositor at the new buffer 0 before destroying the old ones.
+        window_set(self.id, property::BUFFER_SHM, new_buf0.0)?;
 
-        // Attach new buffer to window
-        window_set(self.id, property::BUFFER_SHM, new_shm_id)?;
-
-        // Now destroy old shm -- compositor's ShmCache will unmap on next
-        // frame when it sees the new shm_id.
-        if let Some(shm) = old_shm {
-            let _ = shm_destroy(shm);
-        }
-
-        // Update state
+        let old = self.buffers;
+        self.buffers = [new_buf0, new_buf1];
+        self.back_index = 1;
         self.width = new_width;
         self.height = new_height;
-        self.shm_id = Some(new_shm_id);
-        self.buffer = Some(new_buffer as *mut u32);
+
+        free_buffer(old[0].0, old[0].1);
+        free_buffer(old[1].0, old[1].1);
 
         Ok(())
     }
 
-    /// Fill the buffer with a color.
+    /// Fill the back buffer with a solid color.
     pub fn fill(&mut self, color: u32) {
         if let Some(buffer) = self.buffer_mut() {
             for pixel in buffer.iter_mut() {
@@ -581,7 +580,7 @@ impl Window {
         }
     }
 
-    /// Set a pixel in the buffer.
+    /// Set a pixel in the back buffer.
     pub fn set_pixel(&mut self, x: u32, y: u32, color: u32) {
         if x < self.width && y < self.height {
             let width = self.width;
@@ -594,14 +593,8 @@ impl Window {
 
 impl Drop for Window {
     fn drop(&mut self) {
-        // Unmap and destroy shared memory
-        if let Some(ptr) = self.buffer.take() {
-            let _ = shm_unmap(ptr as *mut u8);
-        }
-        if let Some(shm_id) = self.shm_id.take() {
-            let _ = shm_destroy(shm_id);
-        }
-        // Destroy the window
+        free_buffer(self.buffers[0].0, self.buffers[0].1);
+        free_buffer(self.buffers[1].0, self.buffers[1].1);
         let _ = window_destroy(self.id);
     }
 }

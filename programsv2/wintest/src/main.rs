@@ -29,7 +29,13 @@ fn main() {
     let mut widgets = WidgetContainer::new();
 
     // Create all widgets (positions will be set by layout)
-    let title_label = widgets.add(Label::with_color(0, 0, 0, "Widget Toolkit Demo", 0xFF000080));
+    let title_label = widgets.add(Label::with_color(
+        0,
+        0,
+        0,
+        "Widget Toolkit Demo",
+        0xFF000080,
+    ));
 
     // Button section
     let btn_label = widgets.add(Label::new(0, 0, 0, "Buttons:"));
@@ -109,19 +115,25 @@ fn main() {
     let mut vol_row = HBoxLayout::new();
     vol_row.set_spacing(10);
     vol_row.set_bounds(Rect::new(20, 195, 300, 30));
-    vol_row.add(vol_label).set_alignment(Alignment::center_left());
+    vol_row
+        .add(vol_label)
+        .set_alignment(Alignment::center_left());
     vol_row.add(slider_vol);
 
     let mut bright_row = HBoxLayout::new();
     bright_row.set_spacing(10);
     bright_row.set_bounds(Rect::new(20, 235, 300, 30));
-    bright_row.add(bright_label).set_alignment(Alignment::center_left());
+    bright_row
+        .add(bright_label)
+        .set_alignment(Alignment::center_left());
     bright_row.add(slider_bright);
 
     let mut speed_row = HBoxLayout::new();
     speed_row.set_spacing(10);
     speed_row.set_bounds(Rect::new(20, 275, 300, 30));
-    speed_row.add(speed_label).set_alignment(Alignment::center_left());
+    speed_row
+        .add(speed_label)
+        .set_alignment(Alignment::center_left());
     speed_row.add(slider_speed);
 
     // Status row
@@ -224,16 +236,11 @@ fn main() {
                                 let enabled = value == 1;
                                 status_message =
                                     format!("Sound: {}", if enabled { "ON" } else { "OFF" });
-                                println!(
-                                    "Sound: {}",
-                                    if enabled { "enabled" } else { "disabled" }
-                                );
+                                println!("Sound: {}", if enabled { "enabled" } else { "disabled" });
                             } else if id == chk_dark {
                                 dark_mode = value == 1;
-                                status_message = format!(
-                                    "Dark mode: {}",
-                                    if dark_mode { "ON" } else { "OFF" }
-                                );
+                                status_message =
+                                    format!("Dark mode: {}", if dark_mode { "ON" } else { "OFF" });
                                 println!(
                                     "Dark mode: {}",
                                     if dark_mode { "enabled" } else { "disabled" }
@@ -311,6 +318,7 @@ fn main() {
             .draw(buf, w, h);
         }
 
+        window.swap_buffers();
         std::thread::sleep(Duration::from_millis(16));
     }
 }

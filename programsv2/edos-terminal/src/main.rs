@@ -166,6 +166,7 @@ fn main() {
             terminal.draw(buf, w, h);
         }
 
+        window.swap_buffers();
         std::thread::sleep(Duration::from_millis(16));
     }
 }

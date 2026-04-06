@@ -116,8 +116,7 @@ fn main() {
                 label
             };
 
-            let button_id =
-                widgets.add(Button::with_size(0, 0, 0, BUTTON_WIDTH, 24, &label));
+            let button_id = widgets.add(Button::with_size(0, 0, 0, BUTTON_WIDTH, 24, &label));
             layout.add(button_id);
 
             displayed_windows.push((win_entry.id, button_id));
@@ -184,6 +183,7 @@ fn main() {
             }
         }
 
+        window.swap_buffers();
         std::thread::sleep(Duration::from_millis(50));
     }
 }
