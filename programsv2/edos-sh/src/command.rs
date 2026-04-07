@@ -196,25 +196,7 @@ pub fn split_chain(input: &str) -> Vec<(String, Option<ChainOp>)> {
 
 /// Check if a command is a builtin.
 pub fn is_builtin(command: &str) -> bool {
-    matches!(
-        command,
-        "exit"
-            | "help"
-            | "pwd"
-            | "cd"
-            | "ls"
-            | "cat"
-            | "write"
-            | "stat"
-            | "free"
-            | "ps"
-            | "dmesg"
-            | "mkdir"
-            | "rmdir"
-            | "rm"
-            | "clear"
-            | "echo"
-    )
+    matches!(command, "exit" | "help" | "pwd" | "cd" | "clear" | "echo")
 }
 
 /// Command execution result.
@@ -234,16 +216,6 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
         "help" => builtins::cmd_help(),
         "pwd" => builtins::cmd_pwd(),
         "cd" => builtins::cmd_cd(args),
-        "ls" => builtins::cmd_ls(args),
-        "cat" => builtins::cmd_cat(args),
-        "write" => builtins::cmd_write(args),
-        "stat" => builtins::cmd_stat(args),
-        "free" => builtins::cmd_free(args),
-        "ps" => builtins::cmd_ps(args),
-        "dmesg" => builtins::cmd_dmesg(args),
-        "mkdir" => builtins::cmd_mkdir(args),
-        "rmdir" => builtins::cmd_rmdir(args),
-        "rm" => builtins::cmd_rm(args),
         "clear" => builtins::cmd_clear(),
         "echo" => builtins::cmd_echo(args),
         _ => {

@@ -11,6 +11,10 @@ name = "cat"
 version = "0.1.0"
 
 [[package]]
+name = "dmesg"
+version = "0.1.0"
+
+[[package]]
 name = "echo"
 version = "0.1.0"
 
@@ -58,11 +62,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "free"
+version = "0.1.0"
+
+[[package]]
 name = "hello"
 version = "0.1.0"
 dependencies = [
  "edos_render",
 ]
+
+[[package]]
+name = "ls"
+version = "0.1.0"
+
+[[package]]
+name = "mkdir"
+version = "0.1.0"
+
+[[package]]
+name = "mv"
+version = "0.1.0"
 
 [[package]]
 name = "noto-sans-mono-bitmap"
@@ -80,6 +100,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ps"
+version = "0.1.0"
+
+[[package]]
 name = "quote"
 version = "1.0.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -87,6 +111,18 @@ checksum = "ce25767e7b499d1b604768e7cde645d14cc8584231ea6b295e9c9eb22c02e1d1"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "rm"
+version = "0.1.0"
+
+[[package]]
+name = "rmdir"
+version = "0.1.0"
+
+[[package]]
+name = "stat"
+version = "0.1.0"
 
 [[package]]
 name = "syn"
@@ -131,3 +167,7 @@ version = "0.1.0"
 dependencies = [
  "edos_render",
 ]
+
+[[package]]
+name = "write"
+version = "0.1.0"

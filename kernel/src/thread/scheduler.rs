@@ -285,6 +285,7 @@ impl Scheduler {
         }
     }
 
+    #[allow(dead_code)]
     fn dump_all_threads(&self) {
         let threads = THREADS.list();
         let now = Instant::now();
@@ -397,15 +398,6 @@ impl Scheduler {
             x86_64::instructions::interrupts::enable_and_hlt();
 
             idle_ticks += 1;
-            if idle_ticks == 50 {
-                println!(
-                    "WARNING: cpu {} idle for ~5s, thread_count={}, steals={}",
-                    self.cpu,
-                    self.thread_count.load(Ordering::Relaxed),
-                    self.steal_count.load(Ordering::Relaxed),
-                );
-                self.dump_all_threads();
-            }
         }
 
         disable();
