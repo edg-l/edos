@@ -258,6 +258,7 @@ const SYS_WINDOW_POLL: u64 = 223;
 const SYS_WINDOW_LIST: u64 = 224;
 const SYS_WINDOW_SEND_EVENT: u64 = 225;
 const SYS_CLOCK_GETTIME: u64 = 226;
+const SYS_OPENPTY: u64 = 227;
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -523,6 +524,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_CLOCK_GETTIME => {
             let buf_ptr = ctx.rdi as *mut u8;
             ctx.rax = sys_clock_gettime(buf_ptr);
+        }
+        SYS_OPENPTY => {
+            let pipefd_ptr = ctx.rdi as *mut [u64; 2];
+            ctx.rax = io::sys_openpty(pipefd_ptr);
         }
         _ => {
             ctx.rax = !0u64;

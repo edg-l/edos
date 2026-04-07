@@ -4,7 +4,7 @@ use crate::{
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
         path::Path,
     },
-    thread::{mutex::BlockingMutex, waitqueue::WaitQueue},
+    thread::{mutex::BlockingMutex, pty::Pty, waitqueue::WaitQueue},
     util::uaccess::{try_copy_from_user, try_copy_to_user},
 };
 use alloc::{sync::Arc, vec::Vec};
@@ -18,6 +18,8 @@ pub enum FileDescriptor {
     PipeWrite(Arc<BlockingMutex<Pipe>>),
     // Filesystem-backed file descriptor with maintained offset
     FsFile(FsFile),
+    PtyMaster(Arc<BlockingMutex<Pty>>),
+    PtySlave(Arc<BlockingMutex<Pty>>),
 }
 
 #[derive(Debug, Clone)]

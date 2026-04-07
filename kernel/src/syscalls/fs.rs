@@ -550,6 +550,16 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
                 kind: 3, // Special file
             }
         }
+        FileDescriptor::PtyMaster(_) | FileDescriptor::PtySlave(_) => {
+            FstatEntry {
+                size: 0,
+                created: 0,
+                accessed: 0,
+                modified: 0,
+                attrs: 0,
+                kind: 3, // Special file
+            }
+        }
     };
 
     if !unsafe { try_write_user(fstat_buf, fstat_entry) } {

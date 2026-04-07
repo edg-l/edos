@@ -21,6 +21,7 @@ pub const SYS_WAIT_PID: u64 = 40;
 pub const SYS_SPAWN: u64 = 57;
 pub const SYS_RENAME: u64 = 82;
 pub const SYS_CLOCK_GETTIME: u64 = 226;
+pub const SYS_OPENPTY: u64 = 227;
 
 /// Raw syscall with 1 argument.
 #[inline(always)]

@@ -24,6 +24,7 @@ pub mod interrupt;
 pub mod mailbox;
 pub mod paging;
 pub mod pipe;
+pub mod pty;
 //pub mod scheduler;
 pub mod irqlock;
 pub mod mutex;

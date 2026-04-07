@@ -3,6 +3,18 @@
 use crate::sys;
 use std::ffi::CString;
 
+/// Create a PTY pair for terminal emulation.
+/// Returns (master_fd, slave_fd) on success, or None on error.
+pub fn openpty() -> Option<(u64, u64)> {
+    let mut ptyfd = [0u64; 2];
+    let result = unsafe { sys::syscall1(sys::SYS_OPENPTY, ptyfd.as_mut_ptr() as u64) };
+    if result == 0 {
+        Some((ptyfd[0], ptyfd[1]))
+    } else {
+        None
+    }
+}
+
 /// Create a pipe for inter-process communication.
 /// Returns (read_fd, write_fd) on success, or None on error.
 pub fn pipe() -> Option<(u64, u64)> {
@@ -103,18 +115,16 @@ pub fn waitpid(pid: u64) -> u64 {
     unsafe { sys::syscall2(sys::SYS_WAIT_PID, pid, 1) }
 }
 
-/// A child process with connected I/O pipes.
+/// A child process connected via a PTY master fd.
 pub struct ChildProcess {
     /// Process ID
     pub pid: u64,
-    /// Write to this to send data to the child's stdin
-    pub stdin_write: u64,
-    /// Read from this to receive data from the child's stdout
-    pub stdout_read: u64,
+    /// PTY master fd - read output from and write input to the child through this
+    pub master_fd: u64,
 }
 
 impl ChildProcess {
-    /// Spawn a shell and connect pipes.
+    /// Spawn a shell connected via a PTY.
     ///
     /// # Arguments
     /// * `shell_path` - Path to the shell executable (e.g., "/bin/sh")
@@ -122,53 +132,41 @@ impl ChildProcess {
     /// # Returns
     /// A ChildProcess on success, or None on error.
     pub fn spawn_shell(shell_path: &str) -> Option<Self> {
-        // Create pipes for stdin and stdout
-        let (stdin_read, stdin_write) = pipe()?;
-        let (stdout_read, stdout_write) = pipe()?;
+        let (master_fd, slave_fd) = openpty()?;
 
-        // Spawn the shell
         let pid = spawn(
             shell_path,
             &[],
-            stdin_read,   // shell reads from this
-            stdout_write, // shell writes to this
-            stdout_write, // stderr also goes to stdout
+            slave_fd, // shell's stdin
+            slave_fd, // shell's stdout
+            slave_fd, // shell's stderr
         );
 
+        // Parent closes the slave end regardless of spawn outcome
+        close(slave_fd);
+
         if pid == u64::MAX {
-            // Spawn failed - clean up pipes
-            close(stdin_read);
-            close(stdin_write);
-            close(stdout_read);
-            close(stdout_write);
+            close(master_fd);
             return None;
         }
 
-        // Close the ends we don't use in the parent
-        close(stdin_read);
-        close(stdout_write);
-
-        Some(Self {
-            pid,
-            stdin_write,
-            stdout_read,
-        })
+        Some(Self { pid, master_fd })
     }
 
-    /// Write data to the child's stdin.
+    /// Write data to the child's stdin via the PTY master.
     pub fn write(&self, data: &[u8]) -> isize {
-        write(self.stdin_write, data)
+        write(self.master_fd, data)
     }
 
-    /// Write a string to the child's stdin.
+    /// Write a string to the child's stdin via the PTY master.
     pub fn write_str(&self, s: &str) -> isize {
         self.write(s.as_bytes())
     }
 
-    /// Read data from the child's stdout (non-blocking).
+    /// Read data from the child's stdout via the PTY master (non-blocking).
     /// Returns the number of bytes read, 0 if no data available, or negative on error.
     pub fn read(&self, buf: &mut [u8]) -> isize {
-        read(self.stdout_read, buf)
+        read(self.master_fd, buf)
     }
 
     /// Try to read available output as a string.
@@ -185,8 +183,7 @@ impl ChildProcess {
 
 impl Drop for ChildProcess {
     fn drop(&mut self) {
-        close(self.stdin_write);
-        close(self.stdout_read);
+        close(self.master_fd);
         // Note: we don't wait for the child or kill it here
     }
 }

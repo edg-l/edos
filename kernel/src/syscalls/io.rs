@@ -10,6 +10,7 @@ use crate::fs::handle::{PollEntry, PollKey, Pollable};
 use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
 use crate::thread::pipe::PollablePipe;
 use crate::thread::poll::PollWaiter;
+use crate::thread::pty::{PollablePtyMaster, PollablePtySlave};
 use crate::util::uaccess::{
     UAccessError, try_copy_from_user, try_copy_string_from_user, try_copy_to_user, try_write_user,
 };
@@ -17,7 +18,9 @@ use crate::{
     drivers::{keyboard::KEY_EVENT_BROADCAST, random, tty},
     syscalls::Errno,
     thread::{
+        mutex::BlockingMutex,
         pipe::{FileDescriptor, FsFile, StandardStream},
+        pty::Pty,
         scheduler::sched,
     },
     timer::Instant,
@@ -144,6 +147,34 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             info.lock().errno = Errno::EINVAL;
             !0u64
         }
+        Some(FileDescriptor::PtyMaster(pty)) => {
+            let (result, notif) = {
+                let mut guard = pty.lock();
+                guard.master_write_from_user(buffer_ptr, count)
+            };
+            notif.flush();
+            match result {
+                Some(n) => n as u64,
+                None => {
+                    info.lock().errno = Errno::EFAULT;
+                    !0u64
+                }
+            }
+        }
+        Some(FileDescriptor::PtySlave(pty)) => {
+            let (result, notif) = {
+                let mut guard = pty.lock();
+                guard.slave_write_from_user(buffer_ptr, count)
+            };
+            notif.flush();
+            match result {
+                Some(n) => n as u64,
+                None => {
+                    info.lock().errno = Errno::EFAULT;
+                    !0u64
+                }
+            }
+        }
         Some(FileDescriptor::FsFile(file)) => {
             // FS still needs intermediate buffer (worker thread in different context)
             // But we pass ownership to avoid the to_vec() copy in fs_api
@@ -209,6 +240,16 @@ pub fn sys_close(fd: u64) -> i32 {
                 let mut guard = pipe.lock();
                 guard.close_writer()
             };
+            notif.flush();
+            0
+        }
+        Some(FileDescriptor::PtyMaster(pty)) => {
+            let notif = pty.lock().close_master();
+            notif.flush();
+            0
+        }
+        Some(FileDescriptor::PtySlave(pty)) => {
+            let notif = pty.lock().close_slave();
             notif.flush();
             0
         }
@@ -295,6 +336,64 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
         Some(FileDescriptor::PipeWrite(_)) => {
             info.lock().errno = Errno::EINVAL;
             -1
+        }
+        Some(FileDescriptor::PtyMaster(pty)) => {
+            // Clone the output_wq Arc before entering the loop (avoids holding lock while blocking).
+            let output_wq = pty.lock().output_wq();
+            loop {
+                let (result, eof, notif) = {
+                    let mut guard = pty.lock();
+                    let (r, n) = guard.master_read_to_user(buffer_ptr, count);
+                    let eof = guard.closed_slave && guard.output_buf.is_empty();
+                    (r, eof, n)
+                };
+                notif.flush();
+
+                match result {
+                    Some(n) if n > 0 => break n as i64,
+                    Some(_) if eof => break 0,
+                    Some(_) => {
+                        output_wq.wait_until(|| {
+                            let guard = pty.lock();
+                            !guard.output_buf.is_empty() || guard.closed_slave
+                        });
+                        continue;
+                    }
+                    None => {
+                        info.lock().errno = Errno::EFAULT;
+                        break -1;
+                    }
+                }
+            }
+        }
+        Some(FileDescriptor::PtySlave(pty)) => {
+            // Clone the input_wq Arc before entering the loop (avoids holding lock while blocking).
+            let input_wq = pty.lock().input_wq();
+            loop {
+                let (result, eof, notif) = {
+                    let mut guard = pty.lock();
+                    let (r, n) = guard.slave_read_to_user(buffer_ptr, count);
+                    let eof = guard.closed_master && guard.input_buf.is_empty();
+                    (r, eof, n)
+                };
+                notif.flush();
+
+                match result {
+                    Some(n) if n > 0 => break n as i64,
+                    Some(_) if eof => break 0,
+                    Some(_) => {
+                        input_wq.wait_until(|| {
+                            let guard = pty.lock();
+                            !guard.input_buf.is_empty() || guard.closed_master
+                        });
+                        continue;
+                    }
+                    None => {
+                        info.lock().errno = Errno::EFAULT;
+                        break -1;
+                    }
+                }
+            }
         }
         Some(FileDescriptor::FsFile(file)) => {
             // Fast path: devfs devices can be read directly without the FS Mailbox.
@@ -734,6 +833,32 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                     key: registration.key,
                 });
             }
+            Some(FileDescriptor::PtyMaster(pty)) => {
+                let pollable: Box<dyn Pollable> = Box::new(PollablePtyMaster::new(pty.clone()));
+                let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
+                let registration = pollable.register(poll_entry.clone());
+                fds[idx].result = registration.initial;
+                contexts.push(PollContext {
+                    index: idx,
+                    interests,
+                    pollable,
+                    entry: poll_entry,
+                    key: registration.key,
+                });
+            }
+            Some(FileDescriptor::PtySlave(pty)) => {
+                let pollable: Box<dyn Pollable> = Box::new(PollablePtySlave::new(pty.clone()));
+                let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
+                let registration = pollable.register(poll_entry.clone());
+                fds[idx].result = registration.initial;
+                contexts.push(PollContext {
+                    index: idx,
+                    interests,
+                    pollable,
+                    entry: poll_entry,
+                    key: registration.key,
+                });
+            }
             Some(FileDescriptor::FsFile(file)) => match fs_api::poll(&file.path) {
                 Ok(pollable) => {
                     let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
@@ -1022,6 +1147,7 @@ pub fn sys_isatty(fd: u64) -> u64 {
     let fd_table = guard.fd_table.lock();
     match fd_table.get_fd(fd) {
         Some(FileDescriptor::StandardStream(_)) => 1,
+        Some(FileDescriptor::PtySlave(_)) => 1,
         _ => 0,
     }
 }
@@ -1147,4 +1273,45 @@ pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {
             -1
         }
     }
+}
+
+/// Opens a PTY master/slave pair and writes the two fd numbers to user space.
+///
+/// The user pointer must point to a `[u64; 2]` buffer that receives
+/// `[master_fd, slave_fd]`.  Returns 0 on success, `!0u64` on error.
+pub fn sys_openpty(pipefd_ptr: *mut [u64; 2]) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+
+    info.lock().errno = Errno::Clear;
+
+    if pipefd_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    let pty = Arc::new(BlockingMutex::new(Pty::new()));
+
+    let master_fd = info
+        .lock()
+        .fd_table
+        .lock()
+        .allocate_fd(FileDescriptor::PtyMaster(pty.clone()));
+
+    let slave_fd = info
+        .lock()
+        .fd_table
+        .lock()
+        .allocate_fd(FileDescriptor::PtySlave(pty));
+
+    let fds = [master_fd, slave_fd];
+    let fds_bytes = core::mem::size_of_val(&fds);
+    if !unsafe { try_copy_to_user(pipefd_ptr as *mut u8, fds.as_ptr() as *const u8, fds_bytes) } {
+        info.lock().fd_table.lock().close_fd(master_fd);
+        info.lock().fd_table.lock().close_fd(slave_fd);
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    0
 }
