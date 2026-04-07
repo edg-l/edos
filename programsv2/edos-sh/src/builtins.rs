@@ -117,6 +117,142 @@ pub fn cmd_env() {
     }
 }
 
+/// Evaluate the `test` / `[` builtin expression.
+///
+/// Returns 0 for true, 1 for false, 2 for a usage error.
+pub fn cmd_test(args: &[String]) -> i32 {
+    match args {
+        [] => 1, // no expression → false
+        [flag, operand] if flag == "!" => {
+            // Negate a unary expression: `! EXPR` where EXPR is a single word
+            // Treat a non-empty string as true (mirrors `test STRING`)
+            let inner = cmd_test(&[operand.clone()]);
+            if inner == 2 {
+                2
+            } else if inner == 0 {
+                1
+            } else {
+                0
+            }
+        }
+        [flag, operand] => match flag.as_str() {
+            "-f" => {
+                if std::fs::metadata(operand)
+                    .map(|m| m.is_file())
+                    .unwrap_or(false)
+                {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-d" => {
+                if std::fs::metadata(operand)
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false)
+                {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-e" => {
+                if std::fs::metadata(operand).is_ok() {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-z" => {
+                if operand.is_empty() {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-n" => {
+                if !operand.is_empty() {
+                    0
+                } else {
+                    1
+                }
+            }
+            _ => {
+                // Single argument (no flag): true if non-empty string
+                // The flag here is actually the only argument; operand is a second word.
+                // This arm won't match single-arg invocations; fall through to the
+                // three-argument arm below.
+                2
+            }
+        },
+        [lhs, op, rhs] => match op.as_str() {
+            "=" => {
+                if lhs == rhs {
+                    0
+                } else {
+                    1
+                }
+            }
+            "!=" => {
+                if lhs != rhs {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-eq" | "-ne" | "-lt" | "-gt" | "-le" | "-ge" => {
+                let a: i64 = match lhs.parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        eprintln!("test: {}: integer expression expected", lhs);
+                        return 2;
+                    }
+                };
+                let b: i64 = match rhs.parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        eprintln!("test: {}: integer expression expected", rhs);
+                        return 2;
+                    }
+                };
+                let result = match op.as_str() {
+                    "-eq" => a == b,
+                    "-ne" => a != b,
+                    "-lt" => a < b,
+                    "-gt" => a > b,
+                    "-le" => a <= b,
+                    "-ge" => a >= b,
+                    _ => unreachable!(),
+                };
+                if result { 0 } else { 1 }
+            }
+            _ => {
+                eprintln!("test: unknown operator: {}", op);
+                2
+            }
+        },
+        [flag, operand, ..] if flag == "!" => {
+            // `! unary_flag operand` — negate a unary test
+            let inner = cmd_test(&args[1..]);
+            if inner == 2 {
+                2
+            } else if inner == 0 {
+                1
+            } else {
+                0
+            }
+        }
+        [single] => {
+            // Single non-flag argument: true if non-empty
+            if !single.is_empty() { 0 } else { 1 }
+        }
+        _ => {
+            eprintln!("test: too many arguments");
+            2
+        }
+    }
+}
+
 /// Expand backslash escape sequences in a string.
 fn expand_escapes(s: &str) -> String {
     let mut out = String::with_capacity(s.len());

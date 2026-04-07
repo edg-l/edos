@@ -646,6 +646,8 @@ pub enum Errno {
     EIO,
     /// System call interrupted (e.g. by a signal or kill).
     EINTR,
+    /// File format is not recognized as an executable.
+    ENOEXEC,
     /// Placeholder for unknown or unmapped kernel error codes.
     UNKNOWN,
 }
@@ -886,6 +888,8 @@ fn parse_user_string_array(
 ///
 /// `argv_storage` must already contain argv[0] as the first element (the resolved path).
 /// `envp_storage` contains the environment strings (may be empty).
+/// `depth` is the shebang recursion depth; pass 0 from callers. Shebang interpretation
+/// is only performed at depth 0 to prevent infinite recursion.
 fn do_spawn(
     path: &crate::fs::path::Path,
     path_str: &str,
@@ -894,6 +898,7 @@ fn do_spawn(
     stdin_fd: u64,
     stdout_fd: u64,
     stderr_fd: u64,
+    depth: u32,
 ) -> u64 {
     use crate::{fs::api as fs_api, thread::util::queue_spawn_thread};
 
@@ -914,7 +919,7 @@ fn do_spawn(
         }
     };
 
-    let elf_data = match fs_api::read_bytes(path, 0, finfo.size as usize) {
+    let file_data = match fs_api::read_bytes(path, 0, finfo.size as usize) {
         Ok(data) => data,
         Err(_) => {
             x86_64::instructions::interrupts::disable();
@@ -922,6 +927,84 @@ fn do_spawn(
             return !0u64;
         }
     };
+
+    // Detect shebang (#!) at depth 0. Only recurse once to avoid infinite loops.
+    if depth == 0 && file_data.starts_with(b"#!") {
+        // Parse the first line (up to newline or 256 bytes)
+        let first_line_end = file_data[2..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| p + 2)
+            .unwrap_or_else(|| core::cmp::min(file_data.len(), 258));
+        let shebang_line = core::str::from_utf8(&file_data[2..first_line_end])
+            .unwrap_or("")
+            .trim();
+
+        // Split into interpreter path and optional argument
+        let mut tokens = shebang_line.splitn(2, |c: char| c == ' ' || c == '\t');
+        let interp_path_str = match tokens.next() {
+            Some(s) if !s.is_empty() => s.trim(),
+            _ => {
+                x86_64::instructions::interrupts::disable();
+                info.lock().errno = Errno::ENOEXEC;
+                return !0u64;
+            }
+        };
+        let interp_arg: Option<&str> = tokens.next().map(|s| s.trim()).filter(|s| !s.is_empty());
+
+        let resolve_path = |p: &str, cwd: &crate::fs::path::Path| {
+            if p.starts_with('/') {
+                crate::fs::path::Path::parse(p).map(|parsed| parsed.normalize())
+            } else {
+                Ok(cwd.join(p).normalize())
+            }
+        };
+
+        let interp_path = match resolve_path(interp_path_str, &child_cwd) {
+            Ok(p) => p,
+            Err(_) => {
+                x86_64::instructions::interrupts::disable();
+                info.lock().errno = Errno::ENOEXEC;
+                return !0u64;
+            }
+        };
+
+        // Build new argv: [interpreter, optional_arg, script_path, original_args...]
+        // argv_storage[0] is the resolved script path (argv[0]); original user args start at [1].
+        let mut new_argv: Vec<Vec<u8>> = Vec::new();
+        // argv[0] = interpreter path
+        new_argv.push(format!("{interp_path}").as_bytes().to_vec());
+        // optional interpreter argument
+        if let Some(arg) = interp_arg {
+            new_argv.push(arg.as_bytes().to_vec());
+        }
+        // script path (the original argv[0], i.e., the script being executed)
+        new_argv.push(argv_storage[0].clone());
+        // remaining original arguments (argv[1..])
+        new_argv.extend_from_slice(&argv_storage[1..]);
+
+        x86_64::instructions::interrupts::disable();
+
+        return do_spawn(
+            &interp_path,
+            interp_path_str,
+            new_argv,
+            envp_storage,
+            stdin_fd,
+            stdout_fd,
+            stderr_fd,
+            1, // depth = 1: do not interpret shebang in the interpreter itself
+        );
+    }
+
+    // Reject files that are neither ELF nor shebang
+    if !file_data.starts_with(b"\x7fELF") {
+        x86_64::instructions::interrupts::disable();
+        info.lock().errno = Errno::ENOEXEC;
+        return !0u64;
+    }
+
+    let elf_data = file_data;
 
     x86_64::instructions::interrupts::disable();
 
@@ -1085,6 +1168,7 @@ fn sys_spawn(
         stdin_fd,
         stdout_fd,
         stderr_fd,
+        0,
     )
 }
 
@@ -1192,6 +1276,7 @@ fn sys_spawn2(args_ptr: *const SpawnArgs) -> u64 {
         args.stdin_fd,
         args.stdout_fd,
         args.stderr_fd,
+        0,
     )
 }
 

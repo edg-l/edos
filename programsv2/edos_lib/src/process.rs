@@ -110,9 +110,11 @@ pub fn spawn(path: &str, args: &[&str], stdin_fd: u64, stdout_fd: u64, stderr_fd
 }
 
 /// Wait for a process to exit (blocking).
-/// Returns the exit status on success, u64::MAX on failure.
-pub fn waitpid(pid: u64) -> u64 {
-    unsafe { sys::syscall2(sys::SYS_WAIT_PID, pid, 1) }
+/// Returns the exit code of the child process, or -1 on failure.
+pub fn waitpid(pid: u64) -> i32 {
+    let mut status: i32 = -1;
+    let ret = unsafe { sys::syscall3(sys::SYS_WAIT_PID, pid, 1, &mut status as *mut i32 as u64) };
+    if ret == u64::MAX { -1 } else { status }
 }
 
 /// A child process connected via a PTY master fd.

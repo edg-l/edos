@@ -11,6 +11,10 @@ name = "cat"
 version = "0.1.0"
 
 [[package]]
+name = "cp"
+version = "0.1.0"
+
+[[package]]
 name = "dmesg"
 version = "0.1.0"
 
@@ -65,11 +69,23 @@ name = "free"
 version = "0.1.0"
 
 [[package]]
+name = "grep"
+version = "0.1.0"
+
+[[package]]
+name = "head"
+version = "0.1.0"
+
+[[package]]
 name = "hello"
 version = "0.1.0"
 dependencies = [
  "edos_render",
 ]
+
+[[package]]
+name = "hexdump"
+version = "0.1.0"
 
 [[package]]
 name = "ls"
@@ -106,6 +122,22 @@ version = "0.1.0"
 
 [[package]]
 name = "stat"
+version = "0.1.0"
+
+[[package]]
+name = "tail"
+version = "0.1.0"
+
+[[package]]
+name = "touch"
+version = "0.1.0"
+
+[[package]]
+name = "uname"
+version = "0.1.0"
+
+[[package]]
+name = "wc"
 version = "0.1.0"
 
 [[package]]

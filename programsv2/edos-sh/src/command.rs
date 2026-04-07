@@ -3,14 +3,127 @@
 use crate::builtins;
 use crate::spawn;
 
-/// Expand `$VAR` and `${VAR}` references in a string segment.
+// ---------------------------------------------------------------------------
+// Positional parameters ($0, $1, ..., $#, $@) and last exit code ($?)
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+/// The last exit code, updated after every command runs.
+static LAST_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
+
+/// Exit-on-error flag (set -e / set +e).
+static EXIT_ON_ERROR: AtomicBool = AtomicBool::new(false);
+
+/// Set the exit-on-error flag.
+pub fn set_exit_on_error(val: bool) {
+    EXIT_ON_ERROR.store(val, Ordering::Relaxed);
+}
+
+/// Get the current exit-on-error flag value.
+pub fn exit_on_error() -> bool {
+    EXIT_ON_ERROR.load(Ordering::Relaxed)
+}
+
+/// Update the last exit code.
+pub fn set_last_exit_code(code: i32) {
+    LAST_EXIT_CODE.store(code, Ordering::Relaxed);
+}
+
+/// Return the last exit code (used for `$?` expansion).
+pub fn last_exit_code() -> i32 {
+    LAST_EXIT_CODE.load(Ordering::Relaxed)
+}
+
+/// Script/shell positional arguments ($0, $1, ...).
+static SCRIPT_ARGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Set positional parameters (call once at startup with argv).
+pub fn set_script_args(args: &[String]) {
+    *SCRIPT_ARGS.lock().unwrap() = args.to_vec();
+}
+
+/// Return the nth positional parameter, or None if out of range.
+pub fn get_script_arg(n: usize) -> Option<String> {
+    SCRIPT_ARGS.lock().unwrap().get(n).cloned()
+}
+
+/// Return the number of positional parameters excluding $0.
+pub fn script_arg_count() -> usize {
+    SCRIPT_ARGS.lock().unwrap().len().saturating_sub(1)
+}
+
+/// Return all positional parameters except $0, space-joined (for `$@`).
+pub fn script_args_all() -> String {
+    let args = SCRIPT_ARGS.lock().unwrap();
+    if args.len() > 1 {
+        args[1..].join(" ")
+    } else {
+        String::new()
+    }
+}
+
+/// Capture the stdout of a shell command by running it in a subprocess with a pipe.
+/// Trailing newlines are stripped from the result.
+fn capture_command_output(cmd: &str) -> String {
+    let (read_fd, write_fd) = match edos_lib::process::pipe() {
+        Some(fds) => fds,
+        None => return String::new(),
+    };
+
+    // Parse cmd into program + args
+    let parts = parse_command(cmd);
+    if parts.is_empty() {
+        edos_lib::process::close(read_fd);
+        edos_lib::process::close(write_fd);
+        return String::new();
+    }
+    let program = &parts[0];
+    let args: Vec<String> = parts[1..].to_vec();
+
+    let pid = spawn::spawn_program_with_fds(program, &args, 0, write_fd, 2);
+
+    // Parent closes write end so read end gets EOF when child exits
+    edos_lib::process::close(write_fd);
+
+    let output = match pid {
+        Some(child_pid) => {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 512];
+            loop {
+                let n = edos_lib::process::read(read_fd, &mut chunk);
+                if n <= 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n as usize]);
+            }
+            edos_lib::process::close(read_fd);
+            edos_lib::process::waitpid(child_pid);
+            let s = String::from_utf8_lossy(&buf).into_owned();
+            // Strip trailing newlines
+            s.trim_end_matches('\n').to_string()
+        }
+        None => {
+            edos_lib::process::close(read_fd);
+            String::new()
+        }
+    };
+
+    output
+}
+
+/// Expand `$VAR`, `${VAR}`, `$(cmd)`, and special parameters in a string segment.
 ///
 /// Rules:
 /// - `$$` expands to a literal `$`
 /// - `${VAR}` and `$VAR` expand to the environment value (empty string if unset)
+/// - `$(cmd)` expands to the stdout of cmd with trailing newlines stripped
+/// - `$?` expands to the last command's exit code
+/// - `$0`–`$9` expand to positional parameters
+/// - `$#` expands to the count of positional parameters (excluding `$0`)
+/// - `$@` expands to all positional parameters space-joined (excluding `$0`)
 /// - Characters inside single-quoted regions are left unexpanded
 /// - Characters inside double-quoted regions are expanded
-/// - `$?` is left as-is (not supported)
 pub fn expand_variables(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -30,6 +143,53 @@ pub fn expand_variables(input: &str) -> String {
                     Some(&'$') => {
                         chars.next();
                         out.push('$');
+                    }
+                    Some(&'?') => {
+                        chars.next();
+                        out.push_str(&last_exit_code().to_string());
+                    }
+                    Some(&'#') => {
+                        chars.next();
+                        out.push_str(&script_arg_count().to_string());
+                    }
+                    Some(&'@') => {
+                        chars.next();
+                        out.push_str(&script_args_all());
+                    }
+                    Some(&d) if d.is_ascii_digit() => {
+                        chars.next();
+                        let n = (d as u8 - b'0') as usize;
+                        let val = get_script_arg(n).unwrap_or_default();
+                        out.push_str(&val);
+                    }
+                    Some(&'(') => {
+                        chars.next(); // consume '('
+                        // Collect the inner command, tracking paren depth and quotes
+                        // so nested $() and quoted parens are handled correctly.
+                        let mut inner = String::new();
+                        let mut depth: usize = 1;
+                        let mut sq = false; // inside single quotes
+                        let mut dq = false; // inside double quotes
+                        for c in chars.by_ref() {
+                            match c {
+                                '\'' if !dq => sq = !sq,
+                                '"' if !sq => dq = !dq,
+                                '(' if !sq && !dq => {
+                                    depth += 1;
+                                    inner.push(c);
+                                }
+                                ')' if !sq && !dq => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                    inner.push(c);
+                                }
+                                _ => inner.push(c),
+                            }
+                        }
+                        let result = capture_command_output(&inner);
+                        out.push_str(&result);
                     }
                     Some(&'{') => {
                         chars.next(); // consume '{'
@@ -66,6 +226,32 @@ pub fn expand_variables(input: &str) -> String {
         }
     }
     out
+}
+
+/// Remove a `#` comment from a line.
+///
+/// A `#` starts a comment when it appears at the start of the line or is
+/// preceded by whitespace, and is not inside single or double quotes.
+/// Returns the portion of the line before the comment, with trailing
+/// whitespace trimmed.
+pub fn strip_comment(line: &str) -> &str {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut prev_was_space = true; // treat start-of-line as "preceded by space"
+    let bytes = line.as_bytes();
+
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'#' if !in_single && !in_double && prev_was_space => {
+                return line[..i].trim_end();
+            }
+            _ => {}
+        }
+        prev_was_space = !in_single && !in_double && (b == b' ' || b == b'\t');
+    }
+    line
 }
 
 /// Expand a leading `~` to the HOME directory in a path token.
@@ -275,45 +461,123 @@ pub fn split_chain(input: &str) -> Vec<(String, Option<ChainOp>)> {
 pub fn is_builtin(command: &str) -> bool {
     matches!(
         command,
-        "exit" | "help" | "pwd" | "cd" | "clear" | "echo" | "export" | "unset" | "env" | "history"
+        "exit"
+            | "help"
+            | "pwd"
+            | "cd"
+            | "clear"
+            | "echo"
+            | "export"
+            | "unset"
+            | "env"
+            | "history"
+            | "test"
+            | "["
+            | "break"
+            | "continue"
+            | "set"
     )
 }
 
 /// Command execution result.
 pub enum ExecResult {
-    /// Command ran (builtins always succeed for now).
-    Ok,
+    /// Command ran successfully with the given exit code.
+    Success(i32),
+    /// Command failed with the given exit code (non-zero), or was not found (127).
+    Failed(i32),
     /// Shell should exit.
     Exit,
-    /// Command not found.
-    NotFound,
 }
 
 /// Execute a command.
 pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
     match command {
         "exit" => return ExecResult::Exit,
-        "help" => builtins::cmd_help(),
-        "pwd" => builtins::cmd_pwd(),
-        "cd" => builtins::cmd_cd(args),
-        "clear" => builtins::cmd_clear(),
-        "echo" => builtins::cmd_echo(args),
-        "export" => builtins::cmd_export(args),
-        "unset" => builtins::cmd_unset(args),
-        "env" => builtins::cmd_env(),
+        "help" => {
+            builtins::cmd_help();
+            return ExecResult::Success(0);
+        }
+        "pwd" => {
+            builtins::cmd_pwd();
+            return ExecResult::Success(0);
+        }
+        "cd" => {
+            builtins::cmd_cd(args);
+            return ExecResult::Success(0);
+        }
+        "clear" => {
+            builtins::cmd_clear();
+            return ExecResult::Success(0);
+        }
+        "echo" => {
+            builtins::cmd_echo(args);
+            return ExecResult::Success(0);
+        }
+        "export" => {
+            builtins::cmd_export(args);
+            return ExecResult::Success(0);
+        }
+        "unset" => {
+            builtins::cmd_unset(args);
+            return ExecResult::Success(0);
+        }
+        "env" => {
+            builtins::cmd_env();
+            return ExecResult::Success(0);
+        }
+        "test" => {
+            let code = builtins::cmd_test(args);
+            return if code == 0 {
+                ExecResult::Success(0)
+            } else {
+                ExecResult::Failed(code)
+            };
+        }
+        "[" => {
+            // Strip trailing ']' argument
+            let test_args: Vec<String> =
+                args.iter().filter(|a| a.as_str() != "]").cloned().collect();
+            let code = builtins::cmd_test(&test_args);
+            return if code == 0 {
+                ExecResult::Success(0)
+            } else {
+                ExecResult::Failed(code)
+            };
+        }
+        "break" => {
+            // Flow control handled by the script executor; return success here
+            // so the executor can detect "break" was the command.
+            return ExecResult::Success(0);
+        }
+        "continue" => {
+            // Flow control handled by the script executor; return success here
+            // so the executor can detect "continue" was the command.
+            return ExecResult::Success(0);
+        }
+        "set" => {
+            match args.first().map(|s| s.as_str()) {
+                Some("-e") => set_exit_on_error(true),
+                Some("+e") => set_exit_on_error(false),
+                _ => {} // Ignore unrecognized set flags
+            }
+            return ExecResult::Success(0);
+        }
         _ => {
             // Restore canonical mode for child (echo + line buffering)
             edos_lib::io::pty_set_canonical(0);
             if let Some(pid) = spawn::spawn_program_with_fds(command, args, 0, 1, 2) {
-                edos_lib::process::waitpid(pid);
+                let code = edos_lib::process::waitpid(pid);
+                edos_lib::io::pty_set_raw(0);
+                return if code == 0 {
+                    ExecResult::Success(0)
+                } else {
+                    ExecResult::Failed(code)
+                };
             } else {
                 eprintln!("Command not found: {}", command);
                 edos_lib::io::pty_set_raw(0);
-                return ExecResult::NotFound;
+                return ExecResult::Failed(127);
             }
-            // Back to raw mode for shell's own line editing
-            edos_lib::io::pty_set_raw(0);
         }
     }
-    ExecResult::Ok
 }

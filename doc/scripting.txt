@@ -1,0 +1,232 @@
+EDOS Shell Scripting Guide
+==========================
+
+The EDOS shell supports scripting with a clean, modern syntax.
+Control flow uses "end" as the universal block terminator -- no fi,
+done, or esac.
+
+
+Running Scripts
+---------------
+
+There are three ways to run a script:
+
+  sh script.sh              Run a script file
+  sh script.sh arg1 arg2    Run with arguments
+  sh -c "echo hello"        Run a single command
+  sh -e script.sh           Exit on first error (set -e)
+  ./script.sh               Direct execution (requires shebang)
+
+For direct execution, the script must start with a shebang line:
+
+  #!/bin/sh
+
+and have executable permissions (not yet enforced in EDOS).
+
+
+Variables
+---------
+
+Set and use environment variables:
+
+  export NAME=value         Set a variable
+  echo $NAME                Use a variable
+  unset NAME                Remove a variable
+  env                       List all variables
+
+Special variables:
+
+  $?    Exit code of the last command (0 = success)
+  $0    Name of the script (or "sh" in interactive mode)
+  $1-9  Positional arguments passed to the script
+  $#    Number of positional arguments
+  $@    All positional arguments joined by spaces
+
+Variable expansion happens inside double quotes but not single quotes:
+
+  echo "$HOME"              Expands to /
+  echo '$HOME'              Prints literal $HOME
+
+Tilde expansion:
+
+  cd ~                      Go to $HOME
+  ls ~/bin                  List $HOME/bin
+
+
+Command Substitution
+--------------------
+
+Capture the output of a command:
+
+  echo "Today is $(uname -a)"
+  FILES=$(ls /bin)
+
+Nested substitution works:
+
+  echo "count: $(echo $(ls /bin | wc -w))"
+
+
+Comments
+--------
+
+Lines starting with # are comments. Inline comments work too:
+
+  # This is a comment
+  echo hello   # This prints hello
+
+
+Operators
+---------
+
+Chain commands:
+
+  cmd1 && cmd2              Run cmd2 only if cmd1 succeeds
+  cmd1 || cmd2              Run cmd2 only if cmd1 fails
+  cmd1 ; cmd2               Run cmd2 regardless
+
+Pipes:
+
+  ls /bin | grep sh         Pipe stdout to next command
+
+Redirects:
+
+  echo hello > file.txt     Write stdout to file (create/truncate)
+  echo more >> file.txt     Append to file
+  cat < file.txt            Read stdin from file
+
+
+Control Flow
+------------
+
+Control flow is only available in scripts, not interactive mode.
+
+IF / ELIF / ELSE / END
+
+  if test -f /bin/sh
+      echo "Shell exists"
+  elif test -f /bin/bash
+      echo "Bash exists"
+  else
+      echo "No shell found"
+  end
+
+The condition is any command. Exit code 0 means true, non-zero means
+false.
+
+WHILE / END
+
+  while test -f /tmp/lock
+      echo "Waiting..."
+      sleep 1
+  end
+
+FOR / END
+
+  for f in one two three
+      echo "Item: $f"
+  end
+
+  for file in $(ls /bin)
+      echo "Program: $file"
+  end
+
+BREAK and CONTINUE
+
+  for i in 1 2 3 4 5
+      if test $i = 3
+          break
+      end
+      echo $i
+  end
+
+  Output: 1 2
+
+
+Test Expressions
+----------------
+
+The "test" command (also available as "[") evaluates expressions.
+Returns exit code 0 for true, 1 for false.
+
+File tests:
+
+  test -f FILE              True if FILE exists and is a regular file
+  test -d DIR               True if DIR exists and is a directory
+  test -e PATH              True if PATH exists (file or directory)
+
+String tests:
+
+  test -z STRING            True if STRING is empty
+  test -n STRING            True if STRING is non-empty
+  test STR1 = STR2          True if strings are equal
+  test STR1 != STR2         True if strings are not equal
+
+Integer tests:
+
+  test NUM1 -eq NUM2        Equal
+  test NUM1 -ne NUM2        Not equal
+  test NUM1 -lt NUM2        Less than
+  test NUM1 -gt NUM2        Greater than
+  test NUM1 -le NUM2        Less than or equal
+  test NUM1 -ge NUM2        Greater than or equal
+
+Negation:
+
+  test ! -f /tmp/foo        True if file does NOT exist
+
+Bracket syntax (must have spaces around brackets):
+
+  if [ -f /bin/sh ]
+      echo "exists"
+  end
+
+
+Set Options
+-----------
+
+  set -e                    Exit script on first error
+  set +e                    Disable exit-on-error
+
+
+Builtin Commands
+----------------
+
+  echo [args...]            Print arguments
+  cd [dir]                  Change directory (default: $HOME)
+  pwd                       Print working directory
+  export NAME=VALUE         Set environment variable
+  unset NAME                Remove environment variable
+  env                       List all environment variables
+  history                   Show command history
+  test EXPR / [ EXPR ]      Evaluate expression
+  set -e / set +e           Toggle exit-on-error
+  exit                      Exit the shell
+  clear                     Clear the terminal
+  help                      Show help
+
+
+Example Script
+--------------
+
+  #!/bin/sh
+  # greet.sh - Greet each user in a list
+
+  set -e
+
+  if test $# -eq 0
+      echo "Usage: greet.sh NAME..."
+      exit
+  end
+
+  for name in $@
+      echo "Hello, $name!"
+  end
+
+  echo "Greeted $# people."
+
+Run with:  sh greet.sh Alice Bob Charlie
+Output:
+  Hello, Alice!
+  Hello, Bob!
+  Hello, Charlie!
+  Greeted 3 people.

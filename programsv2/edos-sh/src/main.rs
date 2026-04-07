@@ -3,23 +3,26 @@
 mod builtins;
 mod command;
 mod complete;
+mod script;
 mod spawn;
 
 use std::io::Write;
 
 use edos_lib::io::{poll_stdin, sys_read};
 
-enum SegmentResult {
-    Ok,
-    Failed,
+pub enum SegmentResult {
+    /// Command ran with the given exit code (0 = success, non-zero = failure).
+    Done(i32),
+    /// Shell should exit.
     Exit,
 }
 
 /// Run a single command segment (may be a pipeline or single command with redirects).
-fn run_segment(segment: &str) -> SegmentResult {
+/// Returns a `SegmentResult` carrying the exit code.
+pub fn run_segment(segment: &str) -> SegmentResult {
     let stages = command::split_pipeline(segment);
     if stages.is_empty() {
-        return SegmentResult::Ok;
+        return SegmentResult::Done(0);
     }
 
     if stages.len() > 1 {
@@ -40,14 +43,15 @@ fn run_segment(segment: &str) -> SegmentResult {
         if !parsed.is_empty() {
             spawn::spawn_pipeline(&parsed);
         }
-        return SegmentResult::Ok;
+        // Pipeline exit code is not tracked; treat as success
+        return SegmentResult::Done(0);
     }
 
     // Single command with possible redirects
     let expanded = command::expand_variables(&stages[0]);
     let args = command::parse_command(&expanded);
     if args.is_empty() {
-        return SegmentResult::Ok;
+        return SegmentResult::Done(0);
     }
     let (cmd, rest) = args.split_first().unwrap();
     let (rest, redirects) = command::extract_redirects(rest);
@@ -62,7 +66,7 @@ fn run_segment(segment: &str) -> SegmentResult {
         let fd = edos_lib::io::open(path, flags);
         if fd < 0 {
             eprintln!("{}: cannot open for writing", path);
-            return SegmentResult::Failed;
+            return SegmentResult::Done(1);
         }
         Some(fd as u64)
     } else {
@@ -76,14 +80,14 @@ fn run_segment(segment: &str) -> SegmentResult {
             if let Some(fd) = stdout_fd {
                 edos_lib::process::close(fd);
             }
-            return SegmentResult::Failed;
+            return SegmentResult::Done(1);
         }
         Some(fd as u64)
     } else {
         None
     };
 
-    let result = if stdout_fd.is_some() || stdin_fd.is_some() {
+    let exec_result = if stdout_fd.is_some() || stdin_fd.is_some() {
         if command::is_builtin(cmd) {
             let saved_stdout = stdout_fd.map(|fd| {
                 let saved = edos_lib::process::dup(1) as u64;
@@ -116,11 +120,15 @@ fn run_segment(segment: &str) -> SegmentResult {
             let result = if let Some(pid) =
                 edos_lib::process::spawn_program_with_fds(cmd, &rest, in_fd, out_fd, 2)
             {
-                edos_lib::process::waitpid(pid);
-                command::ExecResult::Ok
+                let code = edos_lib::process::waitpid(pid);
+                if code == 0 {
+                    command::ExecResult::Success(0)
+                } else {
+                    command::ExecResult::Failed(code)
+                }
             } else {
                 eprintln!("Command not found: {}", cmd);
-                command::ExecResult::NotFound
+                command::ExecResult::Failed(127)
             };
             edos_lib::io::pty_set_raw(0);
             result
@@ -137,11 +145,60 @@ fn run_segment(segment: &str) -> SegmentResult {
         edos_lib::process::close(fd);
     }
 
-    match result {
-        command::ExecResult::Ok => SegmentResult::Ok,
-        command::ExecResult::NotFound => SegmentResult::Failed,
+    match exec_result {
+        command::ExecResult::Success(code) => SegmentResult::Done(code),
+        command::ExecResult::Failed(code) => SegmentResult::Done(code),
         command::ExecResult::Exit => SegmentResult::Exit,
     }
+}
+
+/// Run a full command chain (handles `&&`, `||`, `;` operators).
+///
+/// Returns the exit code of the last command executed, or -1 if the shell
+/// should exit (e.g. the `exit` builtin was called).
+pub fn run_chain(input: &str) -> i32 {
+    // Strip comments before processing
+    let input = command::strip_comment(input).to_string();
+    let trimmed_input = input.trim();
+    if trimmed_input.is_empty() {
+        return 0;
+    }
+
+    let chain = command::split_chain(&input);
+    if chain.is_empty() {
+        return 0;
+    }
+
+    let mut prev_op: Option<command::ChainOp> = None;
+    let mut last_exit: i32 = 0;
+
+    for (segment, next_op) in &chain {
+        match prev_op {
+            Some(command::ChainOp::And) if last_exit != 0 => {
+                prev_op = *next_op;
+                continue;
+            }
+            Some(command::ChainOp::Or) if last_exit == 0 => {
+                prev_op = *next_op;
+                continue;
+            }
+            _ => {}
+        }
+
+        match run_segment(segment) {
+            SegmentResult::Done(code) => {
+                last_exit = code;
+                command::set_last_exit_code(code);
+            }
+            SegmentResult::Exit => {
+                return -1;
+            }
+        }
+
+        prev_op = *next_op;
+    }
+
+    last_exit
 }
 
 /// Redraw the current input line after history navigation.
@@ -385,6 +442,8 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
 }
 
 fn main() {
+    let argv: Vec<String> = std::env::args().collect();
+
     // Set default environment variables if not already inherited.
     // SAFETY: single-threaded at this point; no other threads exist yet.
     unsafe {
@@ -400,6 +459,57 @@ fn main() {
             }
         }
     }
+
+    // Check invocation mode based on arguments
+    // argv[0] is the shell itself
+    let mut idx = 1usize;
+    let mut exit_on_error = false;
+
+    // Parse leading flags (-e, -c)
+    while idx < argv.len() && argv[idx].starts_with('-') && argv[idx].len() > 1 {
+        match argv[idx].as_str() {
+            "-e" => {
+                exit_on_error = true;
+                idx += 1;
+            }
+            "-c" => {
+                // -c "command" [args...]
+                idx += 1;
+                if idx >= argv.len() {
+                    eprintln!("sh: -c: option requires an argument");
+                    std::process::exit(1);
+                }
+                let cmd = argv[idx].clone();
+                // Positional params: $0 = "sh", rest are additional args
+                let mut params = vec!["sh".to_string()];
+                params.extend_from_slice(&argv[idx + 1..]);
+                command::set_script_args(&params);
+                let code = run_chain(&cmd);
+                std::process::exit(if code == -1 { 0 } else { code });
+            }
+            _ => {
+                // Unknown flag: stop flag parsing and treat rest as script path
+                break;
+            }
+        }
+    }
+
+    if exit_on_error {
+        command::set_exit_on_error(true);
+    }
+
+    if idx < argv.len() {
+        // Script mode: sh [script.sh] [args...]
+        let script_path = argv[idx].clone();
+        let mut script_params = vec![script_path.clone()];
+        script_params.extend_from_slice(&argv[idx + 1..]);
+        command::set_script_args(&script_params);
+        let code = script::run_script(&script_path, &script_params);
+        std::process::exit(code);
+    }
+
+    // Interactive mode
+    command::set_script_args(&argv);
 
     edos_lib::io::pty_set_raw(0);
 
@@ -462,43 +572,8 @@ fn main() {
             continue;
         }
 
-        // Split on `&&`, `||`, `;`
-        let chain = command::split_chain(&input);
-        if chain.is_empty() {
-            continue;
-        }
-
-        let mut prev_op: Option<command::ChainOp> = None;
-        let mut last_ok = true;
-        let mut should_exit = false;
-
-        for (segment, next_op) in &chain {
-            // Skip based on previous chain operator
-            match prev_op {
-                Some(command::ChainOp::And) if !last_ok => {
-                    prev_op = *next_op;
-                    continue;
-                }
-                Some(command::ChainOp::Or) if last_ok => {
-                    prev_op = *next_op;
-                    continue;
-                }
-                _ => {}
-            }
-
-            match run_segment(segment) {
-                SegmentResult::Ok => last_ok = true,
-                SegmentResult::Failed => last_ok = false,
-                SegmentResult::Exit => {
-                    should_exit = true;
-                    break;
-                }
-            }
-
-            prev_op = *next_op;
-        }
-
-        if should_exit {
+        let result = run_chain(&input);
+        if result == -1 {
             break;
         }
     }
