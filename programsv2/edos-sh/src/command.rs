@@ -130,6 +130,70 @@ pub fn extract_redirects(args: &[String]) -> (Vec<String>, Redirects) {
     (remaining, redirects)
 }
 
+/// A conditional operator between commands.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChainOp {
+    /// `&&` -- run next only if previous succeeded
+    And,
+    /// `||` -- run next only if previous failed
+    Or,
+    /// `;` -- run next unconditionally
+    Semi,
+}
+
+/// Split input into command chains on unquoted `&&`, `||`, and `;`.
+/// Returns pairs of (command_string, operator_after) where the last has None.
+pub fn split_chain(input: &str) -> Vec<(String, Option<ChainOp>)> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut quote_char = '"';
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' | '\'' if !in_quotes => {
+                in_quotes = true;
+                quote_char = ch;
+                current.push(ch);
+            }
+            q if in_quotes && q == quote_char => {
+                in_quotes = false;
+                current.push(ch);
+            }
+            '&' if !in_quotes && chars.peek() == Some(&'&') => {
+                chars.next(); // consume second '&'
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    result.push((trimmed, Some(ChainOp::And)));
+                }
+                current = String::new();
+            }
+            '|' if !in_quotes && chars.peek() == Some(&'|') => {
+                chars.next(); // consume second '|'
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    result.push((trimmed, Some(ChainOp::Or)));
+                }
+                current = String::new();
+            }
+            ';' if !in_quotes => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    result.push((trimmed, Some(ChainOp::Semi)));
+                }
+                current = String::new();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        result.push((trimmed, None));
+    }
+    result
+}
+
 /// Check if a command is a builtin.
 pub fn is_builtin(command: &str) -> bool {
     matches!(
@@ -153,10 +217,20 @@ pub fn is_builtin(command: &str) -> bool {
     )
 }
 
-/// Execute a command. Returns false if shell should exit.
-pub fn execute_command(command: &str, args: &[String]) -> bool {
+/// Command execution result.
+pub enum ExecResult {
+    /// Command ran (builtins always succeed for now).
+    Ok,
+    /// Shell should exit.
+    Exit,
+    /// Command not found.
+    NotFound,
+}
+
+/// Execute a command.
+pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
     match command {
-        "exit" => return false,
+        "exit" => return ExecResult::Exit,
         "help" => builtins::cmd_help(),
         "pwd" => builtins::cmd_pwd(),
         "cd" => builtins::cmd_cd(args),
@@ -172,7 +246,14 @@ pub fn execute_command(command: &str, args: &[String]) -> bool {
         "rm" => builtins::cmd_rm(args),
         "clear" => builtins::cmd_clear(),
         "echo" => builtins::cmd_echo(args),
-        _ => spawn::spawn_program(command, args),
+        _ => {
+            if let Some(pid) = spawn::spawn_program_with_fds(command, args, 0, 1, 2) {
+                edos_lib::process::waitpid(pid);
+            } else {
+                eprintln!("Command not found: {}", command);
+                return ExecResult::NotFound;
+            }
+        }
     }
-    true
+    ExecResult::Ok
 }
