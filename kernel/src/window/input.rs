@@ -2,12 +2,12 @@
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
-use pc_keyboard::{DecodedKey, KeyEvent, KeyState};
+use pc_keyboard::{KeyEvent, KeyState};
 use spin::{Once, RwLock};
 
 use crate::{
     drivers::{
-        keyboard::{KEY_EVENT_BROADCAST, KEYBOARD_BROADCAST},
+        keyboard::KEY_EVENT_BROADCAST,
         mouse::{MOUSE_BROADCAST, MouseEvent},
     },
     log,
@@ -286,24 +286,17 @@ extern "C" fn input_routing_thread() -> ! {
 
     // Subscribe to input broadcasts
     let mouse_sub: Arc<Subscriber<MouseEvent>> = MOUSE_BROADCAST.subscribe();
-    let keyboard_sub: Arc<Subscriber<DecodedKey>> = KEYBOARD_BROADCAST.subscribe();
-    let raw_key_sub: Arc<Subscriber<KeyEvent>> = KEY_EVENT_BROADCAST.subscribe();
+    let key_sub: Arc<Subscriber<KeyEvent>> = KEY_EVENT_BROADCAST.subscribe();
 
     loop {
-        sched().thread_park_while(|| {
-            mouse_sub.is_empty() && keyboard_sub.is_empty() && raw_key_sub.is_empty()
-        });
+        sched().thread_park_while(|| mouse_sub.is_empty() && key_sub.is_empty());
 
         while let Some(mouse_event) = mouse_sub.try_recv() {
             handle_mouse_event(mouse_event);
         }
 
-        while let Some(key_event) = keyboard_sub.try_recv() {
+        while let Some(key_event) = key_sub.try_recv() {
             handle_keyboard_event(key_event);
-        }
-
-        while let Some(raw_event) = raw_key_sub.try_recv() {
-            handle_raw_key_event(raw_event);
         }
     }
 }
@@ -421,20 +414,8 @@ fn handle_mouse_event(event: MouseEvent) {
     }
 }
 
-/// Handle a decoded keyboard event (Unicode characters only) and route to focused window.
-fn handle_keyboard_event(key: DecodedKey) {
-    let registry = WINDOW_REGISTRY.read();
-
-    if let Some(focused_id) = registry.focused_window() {
-        if let DecodedKey::Unicode(ch) = key {
-            send_event(focused_id, WindowEvent::character(ch));
-        }
-        // RawKey events are handled by handle_raw_key_event with proper press/release
-    }
-}
-
 /// Handle a raw key event (press/release) and route to focused window.
-fn handle_raw_key_event(event: KeyEvent) {
+fn handle_keyboard_event(event: KeyEvent) {
     let registry = WINDOW_REGISTRY.read();
 
     if let Some(focused_id) = registry.focused_window() {

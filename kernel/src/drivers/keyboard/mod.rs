@@ -2,9 +2,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
-use pc_keyboard::{DecodedKey, HandleControl, KeyEvent, Keyboard, ScancodeSet1};
-
-mod es105;
+use pc_keyboard::{HandleControl, KeyEvent, Keyboard, ScancodeSet1, layouts};
 use spin::{Mutex, Once};
 use x86_64::structures::idt::InterruptStackFrame;
 
@@ -24,12 +22,9 @@ use crate::{
     },
 };
 
-pub static KEYBOARD_BROADCAST: Broadcaster<DecodedKey> = Broadcaster::new();
-/// Raw key events (press + release) for window input routing.
 pub static KEY_EVENT_BROADCAST: Broadcaster<KeyEvent> = Broadcaster::new();
-static KEYBOARD_POLLERS: BlockingMutex<
-    Vec<(PollKey, Arc<PollEntry>, Arc<Subscriber<DecodedKey>>)>,
-> = BlockingMutex::new(Vec::new());
+static KEYBOARD_POLLERS: BlockingMutex<Vec<(PollKey, Arc<PollEntry>, Arc<Subscriber<KeyEvent>>)>> =
+    BlockingMutex::new(Vec::new());
 static KEYBOARD_NEXT_POLL_KEY: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) static SCANCODE_QUEUE: Once<ArrayQueue<u8>> = Once::new();
@@ -54,38 +49,34 @@ pub extern "C" fn driver_main() -> ! {
     KEYBOARD_THREAD_ID.call_once(|| thread.id);
     thread.set_priority(10);
 
-    let mut keyboard = Keyboard::new(ScancodeSet1::new(), es105::Es105Key, HandleControl::Ignore);
+    // Layout doesn't matter -- we only use add_byte() for scancode→KeyCode,
+    // not process_keyevent() for character decoding. Decoding is done in userspace.
+    let mut keyboard = Keyboard::new(
+        ScancodeSet1::new(),
+        layouts::Us104Key,
+        HandleControl::Ignore,
+    );
 
     let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
     let device = Arc::new(KeyboardDevice);
     register_device_str("/kbd", device).expect("Error registering device");
 
-    let mut decoded_events: Vec<DecodedKey> = Vec::new();
     let mut raw_events: Vec<KeyEvent> = Vec::new();
     loop {
         sched().thread_park_while(|| queue.is_empty());
 
         while let Some(scancode) = queue.pop() {
             if let Ok(Some(event)) = keyboard.add_byte(scancode) {
-                raw_events.push(event.clone());
-                if let Some(key_event) = keyboard.process_keyevent(event) {
-                    decoded_events.push(key_event);
-                }
+                raw_events.push(event);
             }
         }
 
         if !raw_events.is_empty() {
             KEY_EVENT_BROADCAST.broadcast_many(&raw_events);
+            notify_keyboard_pollers();
             raw_events.clear();
         }
 
-        if !decoded_events.is_empty() {
-            KEYBOARD_BROADCAST.broadcast_many(&decoded_events);
-            notify_keyboard_pollers();
-            decoded_events.clear();
-        }
-
-        KEYBOARD_BROADCAST.cleanup();
         KEY_EVENT_BROADCAST.cleanup();
     }
 }
@@ -96,7 +87,7 @@ pub struct KeyboardDevice;
 #[derive(Debug)]
 struct KeyboardPoll;
 
-fn keyboard_poll_state(subscriber: &Subscriber<DecodedKey>) -> PollState {
+fn keyboard_poll_state(subscriber: &Subscriber<KeyEvent>) -> PollState {
     PollState {
         readable: !subscriber.is_empty(),
         writable: false,
@@ -109,7 +100,7 @@ fn keyboard_poll_state(subscriber: &Subscriber<DecodedKey>) -> PollState {
 fn notify_keyboard_pollers() {
     // Snapshot poller entries under lock, then notify outside to avoid
     // holding BlockingMutex while wake_thread spins (priority inversion).
-    let snapshot: heapless::Vec<(Arc<PollEntry>, Arc<Subscriber<DecodedKey>>), 16> = {
+    let snapshot: heapless::Vec<(Arc<PollEntry>, Arc<Subscriber<KeyEvent>>), 16> = {
         let pollers = KEYBOARD_POLLERS.lock();
         let mut v = heapless::Vec::new();
         for (_, entry, subscriber) in pollers.iter() {
@@ -128,7 +119,7 @@ fn notify_keyboard_pollers() {
 
 impl Pollable for KeyboardPoll {
     fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
-        let subscriber = KEYBOARD_BROADCAST.subscribe();
+        let subscriber = KEY_EVENT_BROADCAST.subscribe();
         let state = keyboard_poll_state(&subscriber);
         entry.update(state);
 
@@ -156,14 +147,13 @@ impl Pollable for KeyboardPoll {
 
 impl DevFsDevice for KeyboardDevice {
     fn read(&self, _offset: usize, count: usize) -> Result<Vec<u8>, DevFsError> {
-        let rx = KEYBOARD_BROADCAST.subscribe();
+        let rx = KEY_EVENT_BROADCAST.subscribe();
         let mut buffer = Vec::new();
 
-        // fill remaining
         while buffer.len() + 3 < count
-            && let Some(key) = rx.try_recv()
+            && let Some(event) = rx.try_recv()
         {
-            let bytes = convert_key(key).to_le_bytes();
+            let bytes = convert_key_event(event).to_le_bytes();
             buffer.extend(bytes);
         }
 
@@ -198,9 +188,11 @@ impl DevFsDevice for KeyboardDevice {
     }
 }
 
-fn convert_key(key: DecodedKey) -> u32 {
-    match key {
-        DecodedKey::Unicode(c) => c as u32,
-        DecodedKey::RawKey(scancode) => scancode as u32 | 0x80000000, // Set high bit for raw
+/// Encode a KeyEvent as u32: keycode in low bits, bit 31 set for release.
+fn convert_key_event(event: KeyEvent) -> u32 {
+    let code = event.code as u32;
+    match event.state {
+        pc_keyboard::KeyState::Up => code | 0x8000_0000,
+        _ => code,
     }
 }

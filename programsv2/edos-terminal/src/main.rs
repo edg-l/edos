@@ -95,11 +95,6 @@ fn main() {
                             eprintln!("[Terminal] Failed to resize window");
                         }
                     }
-                    Some(WindowEventType::Character) => {
-                        if let Some(ch) = event.character() {
-                            terminal.on_char(ch);
-                        }
-                    }
                     Some(WindowEventType::KeyPress) => {
                         terminal.on_key(event.code, true);
                     }

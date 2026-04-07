@@ -94,7 +94,7 @@ pub struct Terminal {
     bold: bool,
 
     // Modifier key state
-    shift_held: bool,
+    modifiers: crate::keymap::Modifiers,
 
     // Input buffer for characters to send
     input_buffer: Vec<char>,
@@ -138,7 +138,7 @@ impl Terminal {
             current_fg: terminal_colors::FOREGROUND,
             current_bg: terminal_colors::BACKGROUND,
             bold: false,
-            shift_held: false,
+            modifiers: crate::keymap::Modifiers::default(),
             input_buffer: Vec::new(),
             esc_state: EscState::Normal,
             esc_buf: [0; 32],
@@ -687,30 +687,15 @@ impl Widget for Terminal {
         None
     }
 
-    fn on_char(&mut self, ch: char) -> Option<WidgetEvent> {
-        if !self.focused {
-            return None;
-        }
-
-        // Add to input buffer for external processing
-        self.input_buffer.push(ch);
-
-        // Reset cursor blink
-        self.cursor_visible = true;
-        self.cursor_blink_counter = 0;
-
-        None
-    }
-
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent> {
+        use crate::keymap::{keycode, map_keycode, update_modifiers};
+
         if !self.focused {
             return None;
         }
 
-        // Track shift state for both press and release
-        // KeyCode values: LShift=76, RShift=87
-        if scancode == 76 || scancode == 87 {
-            self.shift_held = pressed;
+        // Update modifier state (shift, altgr, ctrl, caps lock)
+        if update_modifiers(&mut self.modifiers, scancode, pressed) {
             return None;
         }
 
@@ -722,40 +707,43 @@ impl Widget for Terminal {
         self.cursor_visible = true;
         self.cursor_blink_counter = 0;
 
-        // Handle special keys by adding escape sequences to input buffer.
-        // Scancodes are pc_keyboard::KeyCode as u32 (no high bit).
-        // KeyCode enum values (0-based #[repr(u8)]):
-        //   ArrowUp=88, ArrowDown=102, ArrowLeft=101, ArrowRight=103
-        //   Home=32, End=54, PageUp=33, PageDown=55, Delete=53
-        //   LShift=76, RShift=87
+        // Handle special keys (escape sequences, scrollback)
         match scancode {
-            88 => self.input_buffer.extend("\x1B[A".chars()),  // ArrowUp
-            102 => self.input_buffer.extend("\x1B[B".chars()), // ArrowDown
-            103 => self.input_buffer.extend("\x1B[C".chars()), // ArrowRight
-            101 => self.input_buffer.extend("\x1B[D".chars()), // ArrowLeft
-            32 => self.input_buffer.extend("\x1B[H".chars()),  // Home
-            54 => self.input_buffer.extend("\x1B[F".chars()),  // End
-            33 => {
-                // PageUp
-                if self.shift_held {
+            keycode::ARROW_UP => self.input_buffer.extend("\x1B[A".chars()),
+            keycode::ARROW_DOWN => self.input_buffer.extend("\x1B[B".chars()),
+            keycode::ARROW_RIGHT => self.input_buffer.extend("\x1B[C".chars()),
+            keycode::ARROW_LEFT => self.input_buffer.extend("\x1B[D".chars()),
+            keycode::HOME => self.input_buffer.extend("\x1B[H".chars()),
+            keycode::END => self.input_buffer.extend("\x1B[F".chars()),
+            keycode::PAGE_UP => {
+                if self.modifiers.shift {
                     self.scroll_offset =
                         (self.scroll_offset + self.rows / 2).min(self.history.len());
                 } else {
                     self.input_buffer.extend("\x1B[5~".chars());
                 }
             }
-            55 => {
-                // PageDown
-                if self.shift_held {
+            keycode::PAGE_DOWN => {
+                if self.modifiers.shift {
                     self.scroll_offset = self.scroll_offset.saturating_sub(self.rows / 2);
                 } else {
                     self.input_buffer.extend("\x1B[6~".chars());
                 }
             }
-            53 => self.input_buffer.extend("\x1B[3~".chars()), // Delete
-            _ => {}
+            keycode::DELETE => self.input_buffer.extend("\x1B[3~".chars()),
+            _ => {
+                // Try to decode keycode to a character via the layout
+                if let Some(ch) = map_keycode(scancode, &self.modifiers) {
+                    self.input_buffer.push(ch);
+                }
+            }
         }
 
+        None
+    }
+
+    fn on_char(&mut self, _ch: char) -> Option<WidgetEvent> {
+        // Character decoding is handled in on_key via the keymap.
         None
     }
 

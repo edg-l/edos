@@ -14,7 +14,7 @@ use crate::util::uaccess::{
     UAccessError, try_copy_from_user, try_copy_string_from_user, try_copy_to_user, try_write_user,
 };
 use crate::{
-    drivers::{keyboard::KEYBOARD_BROADCAST, random, tty},
+    drivers::{keyboard::KEY_EVENT_BROADCAST, random, tty},
     syscalls::Errno,
     thread::{
         pipe::{FileDescriptor, FsFile, StandardStream},
@@ -374,37 +374,77 @@ pub fn sys_getrandom(buffer_ptr: *mut u8, count: usize, flags: u64) -> i64 {
 
 fn read_from_stdin(max_count: usize) -> Result<alloc::vec::Vec<u8>, i64> {
     use alloc::vec::Vec;
-    use pc_keyboard::DecodedKey;
+    use pc_keyboard::{KeyCode, KeyState};
 
-    let rx = KEYBOARD_BROADCAST.subscribe();
+    let rx = KEY_EVENT_BROADCAST.subscribe();
     let mut kernel_buffer = Vec::new();
 
-    // Read until we get a newline or reach max count
+    // Simple keycode→ASCII for raw stdin (no layout, no modifiers).
+    // This is a fallback path; the terminal handles real keyboard input.
     while kernel_buffer.len() < max_count {
-        match rx.recv() {
-            DecodedKey::Unicode('\n') => {
+        let event = rx.recv();
+        if event.state != KeyState::Down {
+            continue;
+        }
+        match event.code {
+            KeyCode::Return | KeyCode::NumpadEnter => {
                 kernel_buffer.push(b'\n');
                 break;
             }
-            DecodedKey::Unicode('\r') => {
-                kernel_buffer.push(b'\n');
-                break;
-            }
-            DecodedKey::Unicode(c) if c.is_ascii() => {
-                kernel_buffer.push(c as u8);
-            }
-            DecodedKey::Unicode('\u{8}') => {
-                // Backspace - remove last character if any
+            KeyCode::Backspace => {
                 kernel_buffer.pop();
             }
-            _ => {
-                // Ignore non-ASCII keys and raw keys
-                continue;
+            KeyCode::Spacebar => kernel_buffer.push(b' '),
+            code => {
+                // Basic letter/digit mapping (lowercase only)
+                let ch = match code {
+                    KeyCode::A => b'a',
+                    KeyCode::B => b'b',
+                    KeyCode::C => b'c',
+                    KeyCode::D => b'd',
+                    KeyCode::E => b'e',
+                    KeyCode::F => b'f',
+                    KeyCode::G => b'g',
+                    KeyCode::H => b'h',
+                    KeyCode::I => b'i',
+                    KeyCode::J => b'j',
+                    KeyCode::K => b'k',
+                    KeyCode::L => b'l',
+                    KeyCode::M => b'm',
+                    KeyCode::N => b'n',
+                    KeyCode::O => b'o',
+                    KeyCode::P => b'p',
+                    KeyCode::Q => b'q',
+                    KeyCode::R => b'r',
+                    KeyCode::S => b's',
+                    KeyCode::T => b't',
+                    KeyCode::U => b'u',
+                    KeyCode::V => b'v',
+                    KeyCode::W => b'w',
+                    KeyCode::X => b'x',
+                    KeyCode::Y => b'y',
+                    KeyCode::Z => b'z',
+                    KeyCode::Key0 | KeyCode::Numpad0 => b'0',
+                    KeyCode::Key1 | KeyCode::Numpad1 => b'1',
+                    KeyCode::Key2 | KeyCode::Numpad2 => b'2',
+                    KeyCode::Key3 | KeyCode::Numpad3 => b'3',
+                    KeyCode::Key4 | KeyCode::Numpad4 => b'4',
+                    KeyCode::Key5 | KeyCode::Numpad5 => b'5',
+                    KeyCode::Key6 | KeyCode::Numpad6 => b'6',
+                    KeyCode::Key7 | KeyCode::Numpad7 => b'7',
+                    KeyCode::Key8 | KeyCode::Numpad8 => b'8',
+                    KeyCode::Key9 | KeyCode::Numpad9 => b'9',
+                    KeyCode::Oem2 => b'-',
+                    KeyCode::OemComma => b',',
+                    KeyCode::OemPeriod => b'.',
+                    _ => continue,
+                };
+                kernel_buffer.push(ch);
             }
         }
     }
 
-    KEYBOARD_BROADCAST.unsubscribe();
+    KEY_EVENT_BROADCAST.unsubscribe();
 
     Ok(kernel_buffer)
 }

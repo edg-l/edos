@@ -4,14 +4,17 @@ use std::io::Read;
 
 use edos_render::window::{WindowListEntry, flags::FLAG_DOCK, read_mouse_state};
 
-/// Raw scancode for Left Alt key (extended HID-style code from keyboard driver).
-pub const RAW_LALT: u32 = 0x8000_005F;
+/// KeyCode for Left Alt (pc_keyboard::KeyCode::LAlt = 95).
+pub const RAW_LALT: u32 = 95;
 
-/// Raw scancode for F4 key (extended HID-style code from keyboard driver).
-pub const RAW_F4: u32 = 0x8000_0004;
+/// KeyCode for F4 (pc_keyboard::KeyCode::F4 = 4).
+pub const RAW_F4: u32 = 4;
 
-/// Raw key code for Tab (ASCII-range code from keyboard driver).
-pub const RAW_TAB: u32 = 0x09;
+/// KeyCode for Tab (pc_keyboard::KeyCode::Tab = 38).
+pub const RAW_TAB: u32 = 38;
+
+/// Bit 31 set in /dev/kbd encoding means key release.
+const KEY_RELEASE_BIT: u32 = 0x8000_0000;
 
 /// Size of the keyboard read buffer in bytes (4 bytes per key event).
 const KBD_BUF_SIZE: usize = 64;
@@ -85,12 +88,21 @@ impl InputState {
 
         let mut i = 0;
         while i + 4 <= n {
-            let key =
+            let raw =
                 u32::from_le_bytes([kbd_buf[i], kbd_buf[i + 1], kbd_buf[i + 2], kbd_buf[i + 3]]);
             i += 4;
 
+            let is_release = raw & KEY_RELEASE_BIT != 0;
+            let key = raw & !KEY_RELEASE_BIT;
+
+            // Track Alt press/release
             if key == RAW_LALT {
-                self.alt_held = true;
+                self.alt_held = !is_release;
+                continue;
+            }
+
+            // Only process key-down events for shortcuts
+            if is_release {
                 continue;
             }
 
