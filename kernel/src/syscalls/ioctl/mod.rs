@@ -24,9 +24,14 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
     };
 
     match descriptor {
-        FileDescriptor::PtyMaster(_) | FileDescriptor::PtySlave(_) => {
-            // PTY ioctls are accepted and return 0 (Phase 2 will add real handling).
-            0
+        FileDescriptor::PtyMaster(pty_arc) | FileDescriptor::PtySlave(pty_arc) => {
+            match pty_arc.lock().ioctl(request) {
+                Ok(val) => val as i64,
+                Err(()) => {
+                    info.lock().errno = Errno::EINVAL;
+                    -1
+                }
+            }
         }
         FileDescriptor::FsFile(file) => {
             let copy_in = flags & IOCTL_FLAG_READ != 0;

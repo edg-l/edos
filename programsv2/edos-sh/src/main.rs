@@ -263,6 +263,8 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
 }
 
 fn main() {
+    edos_lib::io::pty_set_raw(0);
+
     println!("EDOS Shell v0.1");
     println!("Type 'help' for commands.\n");
 

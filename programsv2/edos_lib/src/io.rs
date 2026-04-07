@@ -60,6 +60,20 @@ pub fn ioctl(fd: u64, request: u64, arg: u64) -> i64 {
     unsafe { sys::syscall3(sys::SYS_IOCTL, fd, request, arg) as i64 }
 }
 
+pub const PTY_IOCTL_SET_RAW: u64 = 0x5001;
+pub const PTY_IOCTL_SET_CANONICAL: u64 = 0x5002;
+pub const PTY_IOCTL_GET_MODE: u64 = 0x5003;
+
+/// Switch the PTY slave fd to raw mode (no echo, no line buffering).
+pub fn pty_set_raw(fd: u64) {
+    ioctl(fd, PTY_IOCTL_SET_RAW, 0);
+}
+
+/// Switch the PTY slave fd to canonical mode (echo enabled, line buffering).
+pub fn pty_set_canonical(fd: u64) {
+    ioctl(fd, PTY_IOCTL_SET_CANONICAL, 0);
+}
+
 /// Map memory. Returns the mapped virtual address, or `!0` on error.
 pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, phys_addr: u64) -> u64 {
     unsafe { sys::syscall5(sys::SYS_MMAP, addr, length, prot, flags, phys_addr) }

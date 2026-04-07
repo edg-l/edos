@@ -8,6 +8,117 @@ use crate::{
 };
 use alloc::{sync::Arc, vec::Vec};
 
+pub const PTY_IOCTL_SET_RAW: u64 = 0x5001;
+pub const PTY_IOCTL_SET_CANONICAL: u64 = 0x5002;
+pub const PTY_IOCTL_GET_MODE: u64 = 0x5003;
+
+#[derive(Debug)]
+pub enum LineAction {
+    None,
+    Eof,
+    Interrupt,
+}
+
+#[derive(Debug)]
+struct LineDiscipline {
+    canonical: bool,
+    echo: bool,
+    line_buf: Vec<u8>,
+}
+
+impl LineDiscipline {
+    fn new() -> Self {
+        Self {
+            canonical: true,
+            echo: true,
+            line_buf: Vec::new(),
+        }
+    }
+
+    fn process_input(
+        &mut self,
+        byte: u8,
+        input_buf: &mut Vec<u8>,
+        output_buf: &mut Vec<u8>,
+    ) -> LineAction {
+        if !self.canonical {
+            input_buf.push(byte);
+            if self.echo {
+                output_buf.push(byte);
+            }
+            return LineAction::None;
+        }
+
+        // Canonical mode
+        match byte {
+            // Enter / carriage return
+            b'\r' | b'\n' => {
+                self.line_buf.push(b'\n');
+                input_buf.extend_from_slice(&self.line_buf);
+                self.line_buf.clear();
+                if self.echo {
+                    output_buf.push(b'\n');
+                }
+                LineAction::None
+            }
+            // Backspace (DEL or BS)
+            0x7F | 0x08 => {
+                if !self.line_buf.is_empty() {
+                    self.line_buf.pop();
+                    if self.echo {
+                        output_buf.extend_from_slice(b"\x08 \x08");
+                    }
+                }
+                LineAction::None
+            }
+            // Ctrl+D (EOF)
+            0x04 => {
+                if self.line_buf.is_empty() {
+                    LineAction::Eof
+                } else {
+                    input_buf.extend_from_slice(&self.line_buf);
+                    self.line_buf.clear();
+                    LineAction::None
+                }
+            }
+            // Ctrl+C (interrupt)
+            0x03 => {
+                self.line_buf.clear();
+                if self.echo {
+                    output_buf.extend_from_slice(b"^C\n");
+                }
+                LineAction::Interrupt
+            }
+            // Tab
+            b'\t' => {
+                self.line_buf.push(byte);
+                if self.echo {
+                    output_buf.push(byte);
+                }
+                LineAction::None
+            }
+            // Escape (start of escape sequences)
+            0x1B => {
+                self.line_buf.push(byte);
+                if self.echo {
+                    output_buf.push(byte);
+                }
+                LineAction::None
+            }
+            // Printable bytes
+            byte if byte >= 0x20 => {
+                self.line_buf.push(byte);
+                if self.echo {
+                    output_buf.push(byte);
+                }
+                LineAction::None
+            }
+            // Other control characters: drop silently
+            _ => LineAction::None,
+        }
+    }
+}
+
 #[derive(Debug)]
 #[allow(unused)]
 pub struct Pty {
@@ -27,6 +138,8 @@ pub struct Pty {
     output_wq: Arc<WaitQueue>,
     pollers: Vec<(PollKey, Arc<PollEntry>)>,
     next_poll_key: PollKey,
+    line_disc: LineDiscipline,
+    eof_pending: bool,
 }
 
 #[allow(unused)]
@@ -43,6 +156,25 @@ impl Pty {
             output_wq: Arc::new(WaitQueue::new()),
             pollers: Vec::new(),
             next_poll_key: 1,
+            line_disc: LineDiscipline::new(),
+            eof_pending: false,
+        }
+    }
+
+    pub fn ioctl(&mut self, request: u64) -> Result<u64, ()> {
+        match request {
+            PTY_IOCTL_SET_RAW => {
+                self.line_disc.canonical = false;
+                self.line_disc.echo = false;
+                Ok(0)
+            }
+            PTY_IOCTL_SET_CANONICAL => {
+                self.line_disc.canonical = true;
+                self.line_disc.echo = true;
+                Ok(0)
+            }
+            PTY_IOCTL_GET_MODE => Ok(if self.line_disc.canonical { 1 } else { 0 }),
+            _ => Err(()),
         }
     }
 
@@ -66,12 +198,28 @@ impl Pty {
             return (Some(0), PtyNotifications::EMPTY);
         }
 
-        let start = self.input_buf.len();
-        self.input_buf.resize(start + len, 0);
-
-        if !unsafe { try_copy_from_user(self.input_buf[start..].as_mut_ptr(), user_ptr, len) } {
-            self.input_buf.truncate(start);
+        // Copy from user space into a temporary buffer first.
+        let mut tmp = alloc::vec![0u8; len];
+        if !unsafe { try_copy_from_user(tmp.as_mut_ptr(), user_ptr, len) } {
             return (None, PtyNotifications::EMPTY);
+        }
+
+        // Process each byte through the line discipline.
+        for byte in tmp {
+            // Borrow fields separately to satisfy the borrow checker.
+            let action =
+                self.line_disc
+                    .process_input(byte, &mut self.input_buf, &mut self.output_buf);
+            match action {
+                LineAction::Eof => {
+                    self.eof_pending = true;
+                }
+                LineAction::Interrupt => {
+                    // Phase 3 will send SIGINT to the foreground process.
+                    // For now, the line was already cleared by process_input.
+                }
+                LineAction::None => {}
+            }
         }
 
         (Some(len), self.notify_pollers())
@@ -131,6 +279,12 @@ impl Pty {
             return (Some(0), PtyNotifications::EMPTY);
         }
 
+        // Deliver EOF once when input is empty and eof_pending is set.
+        if self.input_buf.is_empty() && self.eof_pending {
+            self.eof_pending = false;
+            return (Some(0), self.notify_pollers());
+        }
+
         let available = count.min(self.input_buf.len());
         if available == 0 {
             return (Some(0), PtyNotifications::EMPTY);
@@ -183,7 +337,7 @@ impl Pty {
     fn poll_state_slave(&self) -> PollState {
         let mut state = PollState::none();
 
-        if !self.input_buf.is_empty() || self.closed_master {
+        if !self.input_buf.is_empty() || self.closed_master || self.eof_pending {
             state.readable = true;
         }
 
