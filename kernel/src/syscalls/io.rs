@@ -957,3 +957,59 @@ pub fn sys_chdir(path_ptr: *const u8) -> i64 {
     *info.lock().cwd.lock() = new_path;
     0
 }
+
+const SEEK_SET: u32 = 0;
+const SEEK_CUR: u32 = 1;
+const SEEK_END: u32 = 2;
+
+pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let file = {
+        let guard = info.lock();
+        let fd_table = guard.fd_table.lock();
+        match fd_table.get_fd(fd) {
+            Some(FileDescriptor::FsFile(f)) => f.clone(),
+            _ => {
+                drop(fd_table);
+                drop(guard);
+                info.lock().errno = Errno::EINVAL;
+                return -1;
+            }
+        }
+    };
+
+    let new_offset = match whence {
+        SEEK_SET => offset,
+        SEEK_CUR => file.offset as i64 + offset,
+        SEEK_END => {
+            let size = match fs_api::file_info(&file.path) {
+                Ok(finfo) => finfo.size as i64,
+                Err(_) => {
+                    info.lock().errno = Errno::EINVAL;
+                    return -1;
+                }
+            };
+            size + offset
+        }
+        _ => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    if new_offset < 0 {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let new_fd = FileDescriptor::FsFile(FsFile {
+        offset: new_offset as u64,
+        ..file
+    });
+    info.lock().fd_table.lock().replace_fd(fd, new_fd);
+
+    new_offset
+}

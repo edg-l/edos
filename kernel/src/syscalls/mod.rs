@@ -219,6 +219,7 @@ const SYS_FSTAT: u64 = 8;
 const SYS_MMAP: u64 = 9;
 const SYS_STAT: u64 = 10;
 const SYS_MUNMAP: u64 = 11;
+const SYS_LSEEK: u64 = 12;
 const SYS_IOCTL: u64 = 16;
 #[allow(unused)]
 const SYS_PIPE: u64 = 22;
@@ -291,6 +292,12 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_CLOSE => {
             let fd = ctx.rdi;
             ctx.rax = sys_close(fd) as u64;
+        }
+        SYS_LSEEK => {
+            let fd = ctx.rdi;
+            let offset = ctx.rsi as i64;
+            let whence = ctx.rdx as u32;
+            ctx.rax = io::sys_lseek(fd, offset, whence) as u64;
         }
         SYS_LIST_DIR => {
             let path_ptr = ctx.rdi as *const u8;
