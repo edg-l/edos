@@ -109,7 +109,8 @@ fn run_segment(segment: &str) -> SegmentResult {
         } else {
             let in_fd = stdin_fd.unwrap_or(0);
             let out_fd = stdout_fd.unwrap_or(1);
-            if let Some(pid) =
+            edos_lib::io::pty_set_canonical(0);
+            let result = if let Some(pid) =
                 edos_lib::process::spawn_program_with_fds(cmd, &rest, in_fd, out_fd, 2)
             {
                 edos_lib::process::waitpid(pid);
@@ -117,7 +118,9 @@ fn run_segment(segment: &str) -> SegmentResult {
             } else {
                 eprintln!("Command not found: {}", cmd);
                 command::ExecResult::NotFound
-            }
+            };
+            edos_lib::io::pty_set_raw(0);
+            result
         }
     } else {
         command::execute_command(cmd, &rest)

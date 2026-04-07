@@ -219,12 +219,17 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
         "clear" => builtins::cmd_clear(),
         "echo" => builtins::cmd_echo(args),
         _ => {
+            // Restore canonical mode for child (echo + line buffering)
+            edos_lib::io::pty_set_canonical(0);
             if let Some(pid) = spawn::spawn_program_with_fds(command, args, 0, 1, 2) {
                 edos_lib::process::waitpid(pid);
             } else {
                 eprintln!("Command not found: {}", command);
+                edos_lib::io::pty_set_raw(0);
                 return ExecResult::NotFound;
             }
+            // Back to raw mode for shell's own line editing
+            edos_lib::io::pty_set_raw(0);
         }
     }
     ExecResult::Ok

@@ -696,6 +696,10 @@ impl Widget for Terminal {
 
         // Update modifier state (shift, altgr, ctrl, caps lock)
         if update_modifiers(&mut self.modifiers, scancode, pressed) {
+            // Debug: show when ctrl is toggled
+            if scancode == keycode::LCONTROL || scancode == keycode::RCONTROL {
+                eprintln!("[term] ctrl={} (scancode={})", self.modifiers.ctrl, scancode);
+            }
             return None;
         }
 
