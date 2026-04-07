@@ -47,18 +47,24 @@ fn main() {
 
     for (i, (name, is_dir)) in items.iter().enumerate() {
         if i > 0 && i % cols == 0 {
-            print!("\n");
+            println!();
         }
         let display = if *is_dir {
             format!("{}/", name)
         } else {
             name.clone()
         };
-        // Color: blue for dirs, default for files
-        // ANSI escapes don't count toward padding width
+        // Don't pad the last item on a row (avoids wrapping at exactly terminal width)
+        let is_last_col = (i + 1) % cols == 0 || i + 1 == items.len();
         if *is_dir {
-            let padded = format!("{:<width$}", display, width = col_width);
-            print!("\x1B[1;34m{}\x1B[0m", padded);
+            if is_last_col {
+                print!("\x1B[1;34m{}\x1B[0m", display);
+            } else {
+                let padded = format!("{:<width$}", display, width = col_width);
+                print!("\x1B[1;34m{}\x1B[0m", padded);
+            }
+        } else if is_last_col {
+            print!("{}", display);
         } else {
             print!("{:<width$}", display, width = col_width);
         }
