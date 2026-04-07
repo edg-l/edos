@@ -219,6 +219,14 @@ pub trait FileSystem {
     ) -> Result<MmapRegion, Error> {
         Err(Error::IoError)
     }
+
+    fn truncate(&mut self, _path: &Path, _size: u64) -> Result<(), Error> {
+        Err(Error::IoError)
+    }
+
+    fn rename(&mut self, _old_path: &Path, _new_path: &Path) -> Result<(), Error> {
+        Err(Error::IoError)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -416,6 +424,12 @@ pub(super) enum PathOp {
         length: usize,
         memory: Arc<Mutex<MemoryManager>>,
     },
+    Truncate {
+        size: u64,
+    },
+    Rename {
+        new_path: Path,
+    },
 }
 
 // TODO: Add rmdir recursive in a atomic command
@@ -467,6 +481,14 @@ pub(super) enum FsThreadCommand {
     },
     AddVirtualInfo {
         paths: Vec<Path>,
+    },
+    Truncate {
+        path: Path,
+        size: u64,
+    },
+    Rename {
+        old_path: Path,
+        new_path: Path,
     },
 }
 
@@ -536,6 +558,14 @@ fn pathop_to_partition_command(op: PathOp, path: Path, real_path: Path) -> FsThr
             offset,
             length,
             memory,
+        },
+        PathOp::Truncate { size } => FsThreadCommand::Truncate {
+            path: real_path,
+            size,
+        },
+        PathOp::Rename { new_path } => FsThreadCommand::Rename {
+            old_path: real_path,
+            new_path,
         },
     }
 }
@@ -854,7 +884,16 @@ pub extern "C" fn fs_main_thread() -> ! {
                         find_mount_at_path(&mount_check_path, &mount_points)
                     {
                         // relative  path to the mount point.
-                        let mut rel = path.strip_prefix(mount_path).normalize();
+                        let rel = path.strip_prefix(mount_path).normalize();
+
+                        // For Rename, strip the mount prefix from new_path as well.
+                        let op = if let PathOp::Rename { new_path } = op {
+                            PathOp::Rename {
+                                new_path: new_path.strip_prefix(mount_path).normalize(),
+                            }
+                        } else {
+                            op
+                        };
 
                         let cmd = pathop_to_partition_command(
                             op.clone(),
@@ -1095,6 +1134,14 @@ fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
                         let file = create_virtual_file(path.components().last().unwrap().clone());
                         virtual_files.insert(path.clone(), file);
                     }
+                }
+                FsThreadCommand::Truncate { path, size } => {
+                    let res = fs.truncate(&path, size);
+                    req.reply(FsResponse::Ok(res));
+                }
+                FsThreadCommand::Rename { old_path, new_path } => {
+                    let res = fs.rename(&old_path, &new_path);
+                    req.reply(FsResponse::Ok(res));
                 }
             }
         }

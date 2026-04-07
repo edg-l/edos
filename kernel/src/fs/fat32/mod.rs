@@ -401,4 +401,72 @@ impl FileSystem for Fatfs {
 
         Ok(())
     }
+
+    fn truncate(&mut self, path: &Path, size: u64) -> Result<(), Error> {
+        let (mut entry, ec, eo) = match self.find_dir_entry(path)? {
+            Some((e, c, o)) if !e.is_directory() => (e, c, o),
+            Some(_) => return Err(Error::NotAFile),
+            None => return Err(Error::FileNotFound),
+        };
+
+        if size == 0 {
+            // Free all clusters if there are any
+            let start = entry.first_cluster();
+            if start >= 2 {
+                self.free_cluster_chain(start)?;
+            }
+            // Zero out cluster pointer and file size in directory entry
+            self.patch_dir_entry_at(ec, eo, |de| {
+                de.file_size = 0;
+                de.first_cluster_high = 0;
+                de.first_cluster_low = 0;
+            })?;
+        } else {
+            // For non-zero truncate, update the directory entry size.
+            // Clusters beyond the new size are left allocated but inaccessible.
+            self.patch_dir_entry_at(ec, eo, |de| {
+                de.file_size = size as u32;
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn rename(&mut self, old_path: &Path, new_path: &Path) -> Result<(), Error> {
+        let old_path = old_path.normalize();
+        let new_path = new_path.normalize();
+
+        // Only support same-directory renames
+        let old_parent = old_path.parent().ok_or(Error::IoError)?;
+        let new_parent = new_path.parent().ok_or(Error::IoError)?;
+        if old_parent != new_parent {
+            return Err(Error::Unsupported);
+        }
+
+        let new_name = new_path.components().last().ok_or(Error::IoError)?.clone();
+
+        let (entry, dir_cluster, entry_off) = match self.find_dir_entry(&old_path)? {
+            Some(x) => x,
+            None => return Err(Error::FileNotFound),
+        };
+
+        let (short_name, needs_lfn) = self.generate_short_name(dir_cluster, &new_name)?;
+
+        // Delete old LFN entries before rewriting the short entry with the new name
+        let checksum = entry.short_name_checksum();
+        let (parent_cluster, _) = self.resolve_parent_and_name(&old_path)?;
+        self.delete_long_name_sequence(parent_cluster, dir_cluster, entry_off, checksum)?;
+
+        // Patch the short directory entry with the new name
+        self.patch_dir_entry_at(dir_cluster, entry_off, |de| {
+            de.set_name_from_string(&short_name);
+        })?;
+
+        // If the new name requires LFN entries, append them.
+        // For simplicity, only the short name rename is fully supported here.
+        // LFN creation on rename is not yet implemented.
+        let _ = needs_lfn;
+
+        Ok(())
+    }
 }

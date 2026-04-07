@@ -333,4 +333,76 @@ impl FileSystem for Memfs {
     fn flush(&mut self) -> Result<(), Error> {
         Ok(())
     }
+
+    fn truncate(&mut self, path: &Path, size: u64) -> Result<(), Error> {
+        let path = path.normalize();
+        if let Some(node_id) = self.find_node(&path)? {
+            let node = self.get_node_mut(node_id)?;
+            if node.file.kind != FileKind::File {
+                return Err(Error::NotAFile);
+            }
+            let new_size = size as usize;
+            if new_size <= node.content.len() {
+                node.content.truncate(new_size);
+            } else {
+                node.content.resize(new_size, 0u8);
+            }
+            node.file.size = node.content.len() as u64;
+            Ok(())
+        } else {
+            Err(Error::FileNotFound)
+        }
+    }
+
+    fn rename(&mut self, old_path: &Path, new_path: &Path) -> Result<(), Error> {
+        let old_path = old_path.normalize();
+        let new_path = new_path.normalize();
+
+        if old_path.is_root() || new_path.is_root() {
+            return Err(Error::IoError);
+        }
+
+        let old_parent = old_path.parent().ok_or(Error::IoError)?;
+        let new_parent = new_path.parent().ok_or(Error::IoError)?;
+
+        let old_parent_id = self.find_node(&old_parent)?.ok_or(Error::FileNotFound)?;
+        let new_parent_id = self.find_node(&new_parent)?.ok_or(Error::FileNotFound)?;
+
+        let old_name = old_path.filename();
+        let new_name = new_path.filename();
+
+        // Find the node id to move
+        let node_id = {
+            let parent = self.get_node(old_parent_id)?;
+            let mut found = None;
+            for &child_id in &parent.childs {
+                let child = self.get_node(child_id)?;
+                if child.file.name == old_name {
+                    found = Some(child_id);
+                    break;
+                }
+            }
+            found.ok_or(Error::FileNotFound)?
+        };
+
+        // Remove from old parent
+        {
+            let parent = self.get_node_mut(old_parent_id)?;
+            parent.childs.retain(|&id| id != node_id);
+        }
+
+        // Update the node's name
+        {
+            let node = self.get_node_mut(node_id)?;
+            node.file.name = new_name;
+        }
+
+        // Add to new parent
+        {
+            let parent = self.get_node_mut(new_parent_id)?;
+            parent.childs.push(node_id);
+        }
+
+        Ok(())
+    }
 }

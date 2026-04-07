@@ -1013,3 +1013,126 @@ pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> i64 {
 
     new_offset
 }
+
+pub fn sys_ftruncate(fd: u64, size: u64) -> i32 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let path = {
+        let guard = info.lock();
+        let fd_table = guard.fd_table.lock();
+        match fd_table.get_fd(fd) {
+            Some(FileDescriptor::FsFile(f)) => f.path.clone(),
+            _ => {
+                drop(fd_table);
+                drop(guard);
+                info.lock().errno = Errno::EINVAL;
+                return -1;
+            }
+        }
+    };
+
+    interrupts::enable();
+    match fs_api::truncate(&path, size) {
+        Ok(()) => 0,
+        Err(_) => {
+            info.lock().errno = Errno::EINVAL;
+            -1
+        }
+    }
+}
+
+pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if old_path_ptr.is_null() || new_path_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+
+    let mut buf = vec![0u8; MAX_PATH_LEN];
+
+    let old_len =
+        match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), old_path_ptr, MAX_PATH_LEN) } {
+            Ok(len) => len,
+            Err(UAccessError::TooLong) => {
+                info.lock().errno = Errno::EINVAL;
+                return -1;
+            }
+            Err(UAccessError::Fault) => {
+                info.lock().errno = Errno::EFAULT;
+                return -1;
+            }
+        };
+
+    if old_len == 0 {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
+    buf.truncate(old_len);
+    let old_path_str = match core::str::from_utf8(&buf) {
+        Ok(s) => s,
+        Err(_) => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    let old_path = match resolve_path(old_path_str, &info.lock().cwd.lock()) {
+        Ok(p) => p,
+        Err(_) => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    let mut buf2 = vec![0u8; MAX_PATH_LEN];
+
+    let new_len =
+        match unsafe { try_copy_string_from_user(buf2.as_mut_ptr(), new_path_ptr, MAX_PATH_LEN) } {
+            Ok(len) => len,
+            Err(UAccessError::TooLong) => {
+                info.lock().errno = Errno::EINVAL;
+                return -1;
+            }
+            Err(UAccessError::Fault) => {
+                info.lock().errno = Errno::EFAULT;
+                return -1;
+            }
+        };
+
+    if new_len == 0 {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
+    buf2.truncate(new_len);
+    let new_path_str = match core::str::from_utf8(&buf2) {
+        Ok(s) => s,
+        Err(_) => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    let new_path = match resolve_path(new_path_str, &info.lock().cwd.lock()) {
+        Ok(p) => p,
+        Err(_) => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+    match fs_api::rename(&old_path, &new_path) {
+        Ok(()) => 0,
+        Err(_) => {
+            info.lock().errno = Errno::EINVAL;
+            -1
+        }
+    }
+}

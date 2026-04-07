@@ -218,3 +218,25 @@ pub fn mmap(
     };
     r
 }
+
+pub fn truncate(path: &Path, size: u64) -> Result<(), Error> {
+    let FsResponse::Ok(r) = send_request(FsRequest::PathRequest {
+        path: path.clone(),
+        op: PathOp::Truncate { size },
+    }) else {
+        return Err(Error::IoError);
+    };
+    r
+}
+
+pub fn rename(old_path: &Path, new_path: &Path) -> Result<(), Error> {
+    let FsResponse::Ok(r) = send_request(FsRequest::PathRequest {
+        path: old_path.clone(),
+        op: PathOp::Rename {
+            new_path: new_path.clone(),
+        },
+    }) else {
+        return Err(Error::IoError);
+    };
+    r
+}

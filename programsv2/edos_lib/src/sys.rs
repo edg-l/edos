@@ -7,6 +7,7 @@ pub const SYS_WRITE: u64 = 1;
 pub const SYS_CLOSE: u64 = 3;
 pub const SYS_POLL: u64 = 7;
 pub const SYS_LSEEK: u64 = 12;
+pub const SYS_FTRUNCATE: u64 = 13;
 pub const SYS_MMAP: u64 = 9;
 pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_IOCTL: u64 = 16;
@@ -16,6 +17,7 @@ pub const SYS_DUP2: u64 = 33;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_WAIT_PID: u64 = 40;
 pub const SYS_SPAWN: u64 = 57;
+pub const SYS_RENAME: u64 = 82;
 pub const SYS_CLOCK_GETTIME: u64 = 226;
 
 /// Raw syscall with 1 argument.
