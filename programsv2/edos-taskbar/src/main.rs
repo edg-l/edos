@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
+use edos_lib::process::spawn;
 use edos_render::graphics::{Framebuffer, ScreenInfo};
-use edos_render::process::spawn;
 use edos_render::theme::{draw_gradient_v, Theme};
 use edos_render::widgets::{char_width, draw_rect, draw_rect_outline, draw_text};
 use edos_render::window::{
@@ -342,7 +342,7 @@ fn main() {
             }
 
             // Clock display (right-aligned)
-            let (hours, minutes) = if let Some(t) = edos_render::time::clock_gettime() {
+            let (hours, minutes) = if let Some(t) = edos_lib::time::clock_gettime() {
                 (t.hour as u64, t.minute as u64)
             } else {
                 (0, 0)

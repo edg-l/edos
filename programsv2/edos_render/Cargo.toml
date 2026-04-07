@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+edos_lib = { path = "../edos_lib" }
 noto-sans-mono-bitmap = { version = "0.3.1", features = [
     "bold",
     "size_24",

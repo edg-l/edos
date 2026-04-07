@@ -6,77 +6,7 @@ mod spawn;
 
 use std::io::Write;
 
-// Syscall numbers
-const SYS_READ: u64 = 0;
-const SYS_POLL: u64 = 7;
-
-/// Poll interest/result state for a file descriptor.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct PollState {
-    readable: bool,
-    writable: bool,
-    error: bool,
-    hangup: bool,
-    invalid: bool,
-}
-
-/// A file descriptor to poll with its interests and results.
-#[repr(C)]
-struct SelectFd {
-    fd: u64,
-    interests: PollState,
-    result: PollState,
-}
-
-/// Poll stdin for readability with the given timeout.
-/// Returns true if stdin has data available.
-fn poll_stdin(timeout_ms: u64) -> bool {
-    let mut fds = [SelectFd {
-        fd: 0, // stdin
-        interests: PollState {
-            readable: true,
-            ..Default::default()
-        },
-        result: PollState::default(),
-    }];
-
-    let result: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") SYS_POLL,
-            in("rdi") fds.as_mut_ptr(),
-            in("rsi") 1usize,
-            in("rdx") timeout_ms,
-            lateout("rax") result,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack)
-        );
-    }
-    result > 0 && fds[0].result.readable
-}
-
-/// Read from a file descriptor using raw syscall.
-/// Returns bytes read, 0 for no data available, or negative for error/EOF.
-fn sys_read(fd: u64, buf: &mut [u8]) -> isize {
-    let result: u64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") SYS_READ,
-            in("rdi") fd,
-            in("rsi") buf.as_mut_ptr(),
-            in("rdx") buf.len(),
-            lateout("rax") result,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack)
-        );
-    }
-    result as isize
-}
+use edos_lib::io::{poll_stdin, sys_read};
 
 /// Redraw the current input line after history navigation.
 fn redraw_line(prompt: &str, line: &str) {

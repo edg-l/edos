@@ -1,8 +1,6 @@
 //! Wall-clock time via the RTC syscall.
 
-use std::arch::asm;
-
-const SYS_CLOCK_GETTIME: u64 = 226;
+use crate::sys;
 
 /// Wall-clock time read from the hardware RTC.
 #[derive(Debug, Clone, Copy)]
@@ -20,18 +18,7 @@ pub struct ClockTime {
 /// Returns `None` if the syscall fails.
 pub fn clock_gettime() -> Option<ClockTime> {
     let mut buf = [0u8; 8];
-    let ret: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") SYS_CLOCK_GETTIME,
-            in("rdi") buf.as_mut_ptr() as u64,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
+    let ret = unsafe { sys::syscall1(sys::SYS_CLOCK_GETTIME, buf.as_mut_ptr() as u64) };
     if ret == !0u64 {
         return None;
     }

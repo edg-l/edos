@@ -1,99 +1,13 @@
-//! Process management and pipe support for terminal applications.
+//! Process management, pipe support, and program spawning.
 
-use std::arch::asm;
-
-// Syscall numbers
-const SYS_READ: u64 = 0;
-const SYS_WRITE: u64 = 1;
-const SYS_CLOSE: u64 = 3;
-const SYS_PIPE: u64 = 22;
-const SYS_SPAWN: u64 = 57;
-
-/// Raw syscall with 1 argument.
-#[inline(always)]
-unsafe fn syscall1(num: u64, arg1: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg1,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Raw syscall with 2 arguments.
-#[inline(always)]
-#[allow(dead_code)]
-unsafe fn syscall2(num: u64, arg1: u64, arg2: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg1,
-            in("rsi") arg2,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Raw syscall with 3 arguments.
-#[inline(always)]
-unsafe fn syscall3(num: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg1,
-            in("rsi") arg2,
-            in("rdx") arg3,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Raw syscall with 5 arguments.
-#[inline(always)]
-unsafe fn syscall5(num: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg1,
-            in("rsi") arg2,
-            in("rdx") arg3,
-            in("r10") arg4,
-            in("r8") arg5,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
+use crate::sys;
+use std::ffi::CString;
 
 /// Create a pipe for inter-process communication.
 /// Returns (read_fd, write_fd) on success, or None on error.
 pub fn pipe() -> Option<(u64, u64)> {
     let mut pipefd = [0u64; 2];
-    let result = unsafe { syscall1(SYS_PIPE, pipefd.as_mut_ptr() as u64) };
+    let result = unsafe { sys::syscall1(sys::SYS_PIPE, pipefd.as_mut_ptr() as u64) };
     if result == 0 {
         Some((pipefd[0], pipefd[1]))
     } else {
@@ -103,19 +17,19 @@ pub fn pipe() -> Option<(u64, u64)> {
 
 /// Close a file descriptor.
 pub fn close(fd: u64) -> i32 {
-    unsafe { syscall1(SYS_CLOSE, fd) as i32 }
+    unsafe { sys::syscall1(sys::SYS_CLOSE, fd) as i32 }
 }
 
 /// Read from a file descriptor.
 /// Returns the number of bytes read, or a negative error code.
 pub fn read(fd: u64, buf: &mut [u8]) -> isize {
-    unsafe { syscall3(SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) as isize }
+    unsafe { sys::syscall3(sys::SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) as isize }
 }
 
 /// Write to a file descriptor.
 /// Returns the number of bytes written, or a negative error code.
 pub fn write(fd: u64, buf: &[u8]) -> isize {
-    unsafe { syscall3(SYS_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64) as isize }
+    unsafe { sys::syscall3(sys::SYS_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64) as isize }
 }
 
 /// Spawn a new process with redirected I/O.
@@ -155,8 +69,8 @@ pub fn spawn(path: &str, args: &[&str], stdin_fd: u64, stdout_fd: u64, stderr_fd
     };
 
     unsafe {
-        syscall5(
-            SYS_SPAWN,
+        sys::syscall5(
+            sys::SYS_SPAWN,
             path_buf.as_ptr() as u64,
             argv_ptr as u64,
             stdin_fd,
@@ -164,6 +78,12 @@ pub fn spawn(path: &str, args: &[&str], stdin_fd: u64, stdout_fd: u64, stderr_fd
             stderr_fd,
         )
     }
+}
+
+/// Wait for a process to exit (blocking).
+/// Returns the exit status on success, u64::MAX on failure.
+pub fn waitpid(pid: u64) -> u64 {
+    unsafe { sys::syscall2(sys::SYS_WAIT_PID, pid, 1) }
 }
 
 /// A child process with connected I/O pipes.
@@ -251,5 +171,125 @@ impl Drop for ChildProcess {
         close(self.stdin_write);
         close(self.stdout_read);
         // Note: we don't wait for the child or kill it here
+    }
+}
+
+/// Spawn a program with custom fd redirections. Returns Some(pid) on success.
+pub fn spawn_program_with_fds(
+    command: &str,
+    args: &[String],
+    stdin_fd: u64,
+    stdout_fd: u64,
+    stderr_fd: u64,
+) -> Option<u64> {
+    let candidates = [
+        format!("/bin/{}", command),
+        format!("./{}", command),
+        format!("/usr/bin/{}", command),
+        format!("/{}", command),
+    ];
+
+    // Build argv as C strings (don't include command name - kernel adds path as argv[0])
+    let mut c_args: Vec<CString> = Vec::with_capacity(args.len());
+    for arg in args {
+        if let Ok(c) = CString::new(arg.as_str()) {
+            c_args.push(c);
+        }
+    }
+
+    // Build argv pointer array (null-terminated)
+    let mut argv_ptrs: Vec<*const u8> = c_args.iter().map(|c| c.as_ptr() as *const u8).collect();
+    argv_ptrs.push(std::ptr::null());
+
+    for path in &candidates {
+        let Ok(c_path) = CString::new(path.as_str()) else {
+            continue;
+        };
+        let pid = unsafe {
+            sys::syscall5(
+                sys::SYS_SPAWN,
+                c_path.as_ptr() as u64,
+                argv_ptrs.as_ptr() as u64,
+                stdin_fd,
+                stdout_fd,
+                stderr_fd,
+            )
+        };
+        if pid != u64::MAX {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+/// Try to spawn an external program and wait for it to complete.
+pub fn spawn_program(command: &str, args: &[String]) {
+    if let Some(pid) = spawn_program_with_fds(command, args, 0, 1, 2) {
+        waitpid(pid);
+    } else {
+        eprintln!("Command not found: {}", command);
+    }
+}
+
+/// Spawn a pipeline of commands connected by pipes.
+/// Each stage is (command_name, args_vec).
+pub fn spawn_pipeline(stages: &[(String, Vec<String>)]) {
+    if stages.len() == 1 {
+        spawn_program(&stages[0].0, &stages[0].1);
+        return;
+    }
+
+    let mut prev_read_fd: Option<u64> = None;
+    let mut last_pid: Option<u64> = None;
+
+    for (i, (cmd, args)) in stages.iter().enumerate() {
+        let is_last = i == stages.len() - 1;
+
+        // Create pipe for this stage's output (except the last stage)
+        let (read_fd, write_fd) = if !is_last {
+            match pipe() {
+                Some((r, w)) => (Some(r), Some(w)),
+                None => {
+                    eprintln!("Failed to create pipe");
+                    // Close any still-open read end from the previous stage
+                    if let Some(fd) = prev_read_fd {
+                        close(fd);
+                    }
+                    return;
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        let stdin_fd = prev_read_fd.unwrap_or(0);
+        let stdout_fd = write_fd.unwrap_or(1);
+
+        let pid = spawn_program_with_fds(cmd, args, stdin_fd, stdout_fd, 2);
+
+        // Close pipe ends the parent no longer needs after spawning
+        if let Some(fd) = prev_read_fd {
+            close(fd);
+        }
+        if let Some(fd) = write_fd {
+            close(fd);
+        }
+
+        if pid.is_none() {
+            eprintln!("Command not found: {}", cmd);
+            // Close the read end of the pipe we just created (if any)
+            if let Some(fd) = read_fd {
+                close(fd);
+            }
+            return;
+        }
+
+        last_pid = pid;
+        prev_read_fd = read_fd;
+    }
+
+    // Wait for the last process in the pipeline
+    if let Some(pid) = last_pid {
+        waitpid(pid);
     }
 }

@@ -8,3 +8,4 @@ name = "sh"
 path = "src/main.rs"
 
 [dependencies]
+edos_lib = { path = "../edos_lib" }

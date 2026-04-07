@@ -17,11 +17,15 @@ version = "0.1.0"
 [[package]]
 name = "edos-sh"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "edos-taskbar"
 version = "0.1.0"
 dependencies = [
+ "edos_lib",
  "edos_render",
 ]
 
@@ -29,6 +33,7 @@ dependencies = [
 name = "edos-terminal"
 version = "0.1.0"
 dependencies = [
+ "edos_lib",
  "edos_render",
 ]
 
@@ -40,9 +45,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "edos_lib"
+version = "0.1.0"
+
+[[package]]
 name = "edos_render"
 version = "0.1.0"
 dependencies = [
+ "edos_lib",
  "noto-sans-mono-bitmap",
  "thiserror",
 ]

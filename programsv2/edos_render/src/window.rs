@@ -1,6 +1,6 @@
 //! Window and shared memory syscall wrappers for the EDOS window server.
 
-use std::arch::asm;
+use edos_lib::sys::{syscall1, syscall2, syscall3, syscall4};
 
 /// Window identifier type.
 pub type WindowId = u64;
@@ -213,84 +213,6 @@ const SYS_WINDOW_SEND_EVENT: u64 = 225;
 pub const PROT_READ: u64 = 0x1;
 pub const PROT_WRITE: u64 = 0x2;
 pub const PROT_EXEC: u64 = 0x4;
-
-/// Raw syscall with 4 arguments.
-#[inline(always)]
-unsafe fn syscall4(num: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg1,
-            in("rsi") arg2,
-            in("rdx") arg3,
-            in("r10") arg4,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Raw syscall with 3 arguments.
-#[inline(always)]
-unsafe fn syscall3(num: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg1,
-            in("rsi") arg2,
-            in("rdx") arg3,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Raw syscall with 2 arguments.
-#[inline(always)]
-unsafe fn syscall2(num: u64, arg1: u64, arg2: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg1,
-            in("rsi") arg2,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Raw syscall with 1 argument.
-#[inline(always)]
-unsafe fn syscall1(num: u64, arg1: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg1,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
 
 /// Check if a syscall result indicates an error.
 #[inline]

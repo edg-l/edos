@@ -94,7 +94,7 @@ pub struct Terminal {
     bold: bool,
 
     // Modifier key state
-    modifiers: crate::keymap::Modifiers,
+    modifiers: edos_lib::keymap::Modifiers,
 
     // Input buffer for characters to send
     input_buffer: Vec<char>,
@@ -138,7 +138,7 @@ impl Terminal {
             current_fg: terminal_colors::FOREGROUND,
             current_bg: terminal_colors::BACKGROUND,
             bold: false,
-            modifiers: crate::keymap::Modifiers::default(),
+            modifiers: edos_lib::keymap::Modifiers::default(),
             input_buffer: Vec::new(),
             esc_state: EscState::Normal,
             esc_buf: [0; 32],
@@ -688,7 +688,7 @@ impl Widget for Terminal {
     }
 
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent> {
-        use crate::keymap::{keycode, map_keycode, update_modifiers};
+        use edos_lib::keymap::{keycode, map_keycode, update_modifiers};
 
         if !self.focused {
             return None;

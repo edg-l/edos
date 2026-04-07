@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use edos_render::process::ChildProcess;
+use edos_lib::process::ChildProcess;
 use edos_render::widgets::{Terminal, Widget};
 use edos_render::window::{Window, WindowEvent, WindowEventType};
 
