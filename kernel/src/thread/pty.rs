@@ -228,7 +228,6 @@ impl Pty {
                     self.eof_pending = true;
                 }
                 LineAction::Interrupt => {
-                    // Record the foreground PID; kill_pid will be consumed in flush().
                     kill_pid = self.foreground_pid;
                 }
                 LineAction::None => {}

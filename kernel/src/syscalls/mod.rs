@@ -959,22 +959,19 @@ fn sys_spawn(
         let info = get_thread_info_by_id(user_thread.id).unwrap();
         let user_thread_info = info.lock();
 
-        // Copy parent's file descriptors to child's standard streams
-        // For stdin, only override if caller specified a non-default FD
-        // (passing 0 means "use default stdin")
-        if stdin_fd != 0
-            && let Some(stdin_desc) = sched
-                .current_thread_info()
-                .lock()
-                .fd_table
-                .lock()
-                .get_fd(stdin_fd)
-                .cloned()
+        // Copy parent's file descriptors to child's standard streams.
+        // Always copy so the child inherits the parent's PTY/pipe fds.
+        if let Some(stdin_desc) = sched
+            .current_thread_info()
+            .lock()
+            .fd_table
+            .lock()
+            .get_fd(stdin_fd)
+            .cloned()
         {
             user_thread_info.fd_table.lock().insert_fd(0, stdin_desc);
         }
 
-        // For stdout/stderr, always copy parent's FD so output goes to the right place
         if let Some(stdout_desc) = sched
             .current_thread_info()
             .lock()
