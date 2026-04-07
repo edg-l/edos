@@ -4,6 +4,7 @@ use core::arch::asm;
 
 pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
+pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
 pub const SYS_POLL: u64 = 7;
 pub const SYS_LSEEK: u64 = 12;

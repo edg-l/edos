@@ -75,6 +75,61 @@ pub fn split_pipeline(input: &str) -> Vec<String> {
     stages
 }
 
+/// Parsed redirections from a command line.
+#[derive(Default)]
+pub struct Redirects {
+    /// File to redirect stdin from (`< file`)
+    pub stdin_file: Option<String>,
+    /// File to redirect stdout to (`> file` or `>> file`)
+    pub stdout_file: Option<String>,
+    /// Whether stdout redirect is append mode (`>>`)
+    pub stdout_append: bool,
+}
+
+/// Extract `>`, `>>`, `<` redirections from args, returning remaining args and redirects.
+pub fn extract_redirects(args: &[String]) -> (Vec<String>, Redirects) {
+    let mut remaining = Vec::new();
+    let mut redirects = Redirects::default();
+    let mut i = 0;
+
+    while i < args.len() {
+        if args[i] == ">" || args[i] == ">>" {
+            redirects.stdout_append = args[i] == ">>";
+            if i + 1 < args.len() {
+                redirects.stdout_file = Some(args[i + 1].clone());
+                i += 2;
+            } else {
+                eprintln!("syntax error: expected filename after {}", args[i]);
+                i += 1;
+            }
+        } else if args[i] == "<" {
+            if i + 1 < args.len() {
+                redirects.stdin_file = Some(args[i + 1].clone());
+                i += 2;
+            } else {
+                eprintln!("syntax error: expected filename after <");
+                i += 1;
+            }
+        } else if args[i].starts_with(">>") {
+            redirects.stdout_append = true;
+            redirects.stdout_file = Some(args[i][2..].to_string());
+            i += 1;
+        } else if args[i].starts_with('>') {
+            redirects.stdout_append = false;
+            redirects.stdout_file = Some(args[i][1..].to_string());
+            i += 1;
+        } else if args[i].starts_with('<') {
+            redirects.stdin_file = Some(args[i][1..].to_string());
+            i += 1;
+        } else {
+            remaining.push(args[i].clone());
+            i += 1;
+        }
+    }
+
+    (remaining, redirects)
+}
+
 /// Check if a command is a builtin.
 pub fn is_builtin(command: &str) -> bool {
     matches!(

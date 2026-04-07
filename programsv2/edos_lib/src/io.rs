@@ -34,6 +34,15 @@ pub fn poll(fds: &mut [SelectFd], timeout_ms: u64) -> i64 {
     }
 }
 
+/// Open a file. Returns a file descriptor on success, or negative on error.
+/// Flags: 0x40 = O_CREAT, 0x400 = O_APPEND.
+pub fn open(path: &str, flags: u64) -> i64 {
+    let mut path_buf = std::vec::Vec::with_capacity(path.len() + 1);
+    path_buf.extend_from_slice(path.as_bytes());
+    path_buf.push(0);
+    unsafe { sys::syscall2(sys::SYS_OPEN, path_buf.as_ptr() as u64, flags) as i64 }
+}
+
 /// Read from a file descriptor using a raw syscall.
 /// Returns bytes read, 0 for no data available, or negative for error/EOF.
 pub fn sys_read(fd: u64, buf: &mut [u8]) -> isize {

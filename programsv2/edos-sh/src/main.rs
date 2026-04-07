@@ -179,8 +179,101 @@ fn main() {
                 continue;
             }
             let (cmd, rest) = args.split_first().unwrap();
-            if !command::execute_command(cmd, rest) {
-                // execute_command returns false for exit
+
+            // Extract redirections from args
+            let (rest, redirects) = command::extract_redirects(rest);
+
+            // Open redirect files
+            let stdout_fd = if let Some(ref path) = redirects.stdout_file {
+                let flags: u64 = if redirects.stdout_append {
+                    0x40 | 0x400 // O_CREAT | O_APPEND
+                } else {
+                    0x40 // O_CREAT
+                };
+                let fd = edos_lib::io::open(path, flags);
+                if fd < 0 {
+                    eprintln!("{}: cannot open for writing", path);
+                    continue;
+                }
+                Some(fd as u64)
+            } else {
+                None
+            };
+
+            let stdin_fd = if let Some(ref path) = redirects.stdin_file {
+                let fd = edos_lib::io::open(path, 0);
+                if fd < 0 {
+                    eprintln!("{}: cannot open for reading", path);
+                    if let Some(fd) = stdout_fd {
+                        edos_lib::process::close(fd);
+                    }
+                    continue;
+                }
+                Some(fd as u64)
+            } else {
+                None
+            };
+
+            if stdout_fd.is_some() || stdin_fd.is_some() {
+                // Redirect: for builtins, use dup2 to swap fds; for externals, pass fds
+                if command::is_builtin(cmd) {
+                    // Save original fds and swap
+                    let saved_stdout = stdout_fd
+                        .map(|fd| {
+                            let saved = edos_lib::process::dup(1) as u64;
+                            edos_lib::process::dup2(fd, 1);
+                            saved
+                        });
+                    let saved_stdin = stdin_fd
+                        .map(|fd| {
+                            let saved = edos_lib::process::dup(0) as u64;
+                            edos_lib::process::dup2(fd, 0);
+                            saved
+                        });
+
+                    let should_continue = command::execute_command(cmd, &rest);
+
+                    // Restore original fds
+                    if let Some(saved) = saved_stdout {
+                        edos_lib::process::dup2(saved, 1);
+                        edos_lib::process::close(saved);
+                    }
+                    if let Some(saved) = saved_stdin {
+                        edos_lib::process::dup2(saved, 0);
+                        edos_lib::process::close(saved);
+                    }
+
+                    // Close redirect file fds
+                    if let Some(fd) = stdout_fd {
+                        edos_lib::process::close(fd);
+                    }
+                    if let Some(fd) = stdin_fd {
+                        edos_lib::process::close(fd);
+                    }
+
+                    if !should_continue {
+                        break;
+                    }
+                } else {
+                    // External program: pass redirect fds directly
+                    let in_fd = stdin_fd.unwrap_or(0);
+                    let out_fd = stdout_fd.unwrap_or(1);
+                    if let Some(pid) =
+                        edos_lib::process::spawn_program_with_fds(cmd, &rest, in_fd, out_fd, 2)
+                    {
+                        edos_lib::process::waitpid(pid);
+                    } else {
+                        eprintln!("Command not found: {}", cmd);
+                    }
+                    if let Some(fd) = stdout_fd {
+                        edos_lib::process::close(fd);
+                    }
+                    if let Some(fd) = stdin_fd {
+                        edos_lib::process::close(fd);
+                    }
+                }
+            } else if !command::execute_command(cmd, &rest) {
+                // No redirects, normal dispatch
                 break;
             }
         } else {
