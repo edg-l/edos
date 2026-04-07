@@ -1,0 +1,16 @@
+# Missing syscalls
+
+## Implemented this session
+- [x] SYS_LSEEK (12) - File seeking. std::fs::File::seek() works.
+- [x] SYS_FTRUNCATE (13) - Set file length. std::fs::File::set_len() works.
+- [x] SYS_ISATTY (15) - Check if fd is a terminal. Used by ls for color.
+- [x] SYS_RENAME (82) - Move/rename files. std::fs::rename() works.
+- [x] SYS_OPENPTY (227) - Create PTY master/slave pair. Terminal uses this.
+
+## Nice to have
+- [ ] SYS_GETENV / SYS_SETENV - Environment variables. PATH, HOME, TERM for the shell.
+- [ ] SYS_READDIR - Return one directory entry at a time (vs SYS_LIST_DIR which returns all at once).
+
+## Would unblock features
+- [ ] SYS_EXEC - Replace current process image. Needed for proper shell job control.
+- [ ] SYS_SIGNAL / SYS_KILL - General signal delivery (Ctrl+C via PTY works, but no general kill).
