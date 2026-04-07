@@ -35,10 +35,20 @@ pub fn cmd_pwd() {
 
 /// Change current directory.
 pub fn cmd_cd(args: &[String]) {
-    let target = args.first().map(String::as_str).unwrap_or("/");
+    let target = match args.first() {
+        Some(path) => path.clone(),
+        None => std::env::var("HOME").unwrap_or_else(|_| "/".to_string()),
+    };
 
-    if let Err(e) = std::env::set_current_dir(target) {
-        eprintln!("cd: {}: {}", target, e);
+    match std::env::set_current_dir(&target) {
+        Ok(()) => {
+            // Keep PWD in sync so child processes inherit the correct directory
+            match std::env::current_dir() {
+                Ok(abs) => unsafe { std::env::set_var("PWD", abs) },
+                Err(_) => unsafe { std::env::set_var("PWD", &target) },
+            }
+        }
+        Err(e) => eprintln!("cd: {}: {}", target, e),
     }
 }
 
@@ -56,6 +66,54 @@ pub fn cmd_echo(args: &[String]) {
         print!("{}\n", expand_escapes(&text));
     } else {
         println!("{}", args.join(" "));
+    }
+}
+
+/// Set or display environment variables.
+///
+/// With no args: print all env vars.
+/// With `NAME=VALUE`: set the variable.
+/// With `NAME` (no `=`): print that variable's value.
+pub fn cmd_export(args: &[String]) {
+    if args.is_empty() {
+        for (key, val) in std::env::vars() {
+            println!("{}={}", key, val);
+        }
+        return;
+    }
+    for arg in args {
+        if let Some(eq_pos) = arg.find('=') {
+            let key = &arg[..eq_pos];
+            let val = &arg[eq_pos + 1..];
+            unsafe { std::env::set_var(key, val) };
+        } else {
+            // No `=`: print current value of that variable
+            match std::env::var(arg) {
+                Ok(val) => println!("{}={}", arg, val),
+                Err(_) => eprintln!("export: {}: not set", arg),
+            }
+        }
+    }
+}
+
+/// Remove environment variables.
+pub fn cmd_unset(args: &[String]) {
+    for arg in args {
+        unsafe { std::env::remove_var(arg) };
+    }
+}
+
+/// Print command history with numbered entries.
+pub fn cmd_history(history: &[String]) {
+    for (i, cmd) in history.iter().enumerate() {
+        println!("  {}  {}", i + 1, cmd);
+    }
+}
+
+/// Print all environment variables in KEY=VALUE format.
+pub fn cmd_env() {
+    for (key, val) in std::env::vars() {
+        println!("{}={}", key, val);
     }
 }
 

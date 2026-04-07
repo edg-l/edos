@@ -2,6 +2,7 @@
 
 mod builtins;
 mod command;
+mod complete;
 mod spawn;
 
 use std::io::Write;
@@ -26,7 +27,8 @@ fn run_segment(segment: &str) -> SegmentResult {
         let parsed: Vec<(String, Vec<String>)> = stages
             .iter()
             .filter_map(|s| {
-                let args = command::parse_command(s);
+                let expanded = command::expand_variables(s);
+                let args = command::parse_command(&expanded);
                 if args.is_empty() {
                     None
                 } else {
@@ -42,7 +44,8 @@ fn run_segment(segment: &str) -> SegmentResult {
     }
 
     // Single command with possible redirects
-    let args = command::parse_command(&stages[0]);
+    let expanded = command::expand_variables(&stages[0]);
+    let args = command::parse_command(&expanded);
     if args.is_empty() {
         return SegmentResult::Ok;
     }
@@ -287,7 +290,73 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
             continue;
         }
 
-        if ch < 0x20 && ch != b'\t' {
+        if ch == b'\t' {
+            // Tab completion: find the current word under the cursor
+            let line_before_cursor = &line[..cursor];
+            // Find start of the current word (scan back to last space)
+            let word_start = line_before_cursor
+                .rfind(|c: char| c == ' ')
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            let word = &line[word_start..cursor];
+
+            // Determine if this is command position (first token on line)
+            let is_command_pos = line_before_cursor[..word_start].trim().is_empty();
+
+            let candidates = if is_command_pos {
+                complete::complete_command(word)
+            } else {
+                complete::complete_path(word)
+            };
+
+            if candidates.is_empty() {
+                // No matches: ring bell
+                print!("\x07");
+                let _ = std::io::stdout().flush();
+            } else if candidates.len() == 1 {
+                // Single match: replace the current word with the completion
+                let completion = &candidates[0];
+                // Remove the current word from the line
+                line.drain(word_start..cursor);
+                line.insert_str(word_start, completion);
+                // Add a trailing space if the completion is not a directory
+                let add_space = !completion.ends_with('/');
+                if add_space {
+                    line.insert(word_start + completion.len(), ' ');
+                }
+                cursor = word_start + completion.len() + usize::from(add_space);
+                redraw_line(prompt, &line);
+                // Move cursor to end (redraw_line goes to end of line)
+            } else {
+                // Multiple matches: fill common prefix, print candidates
+                let common = complete::longest_common_prefix(&candidates);
+                if common.len() > word.len() {
+                    // We can extend the current word to the common prefix
+                    line.drain(word_start..cursor);
+                    line.insert_str(word_start, &common);
+                    cursor = word_start + common.len();
+                }
+                // Print candidates on a new line, then reprint prompt and line
+                print!("\r\n");
+                for (i, c) in candidates.iter().enumerate() {
+                    if i > 0 {
+                        print!("  ");
+                    }
+                    print!("{}", c);
+                }
+                print!("\r\n");
+                redraw_line(prompt, &line);
+                // redraw_line puts cursor at end; reposition to `cursor`
+                let chars_after = line.len() - cursor;
+                if chars_after > 0 {
+                    print!("\x1B[{}D", chars_after);
+                }
+                let _ = std::io::stdout().flush();
+            }
+            continue;
+        }
+
+        if ch < 0x20 {
             continue;
         }
 
@@ -314,6 +383,22 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
 }
 
 fn main() {
+    // Set default environment variables if not already inherited.
+    // SAFETY: single-threaded at this point; no other threads exist yet.
+    unsafe {
+        if std::env::var("PATH").is_err() {
+            std::env::set_var("PATH", "/bin");
+        }
+        if std::env::var("HOME").is_err() {
+            std::env::set_var("HOME", "/");
+        }
+        if std::env::var("PWD").is_err() {
+            if let Ok(cwd) = std::env::current_dir() {
+                std::env::set_var("PWD", cwd);
+            }
+        }
+    }
+
     edos_lib::io::pty_set_raw(0);
 
     println!("EDOS Shell v0.1");
@@ -325,6 +410,18 @@ fn main() {
     let _ = stdout.flush();
 
     let mut history: Vec<String> = Vec::new();
+    // Load history from file
+    if let Ok(content) = std::fs::read_to_string("/tmp/.sh_history") {
+        for line in content.lines() {
+            if !line.is_empty() {
+                history.push(line.to_string());
+            }
+        }
+        // Cap at 1000 entries
+        if history.len() > 1000 {
+            history.drain(..history.len() - 1000);
+        }
+    }
 
     loop {
         // Build prompt with current directory
@@ -346,7 +443,21 @@ fn main() {
         // Push non-empty, non-duplicate commands to history
         let trimmed = input.trim().to_string();
         if !trimmed.is_empty() && history.last().map(|h| h != &trimmed).unwrap_or(true) {
-            history.push(trimmed);
+            history.push(trimmed.clone());
+            // Append to history file
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/.sh_history")
+            {
+                let _ = writeln!(f, "{}", trimmed);
+            }
+        }
+
+        // Handle `history` builtin before splitting (needs access to history vec)
+        if trimmed == "history" {
+            builtins::cmd_history(&history);
+            continue;
         }
 
         // Split on `&&`, `||`, `;`

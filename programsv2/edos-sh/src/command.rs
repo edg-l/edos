@@ -3,6 +3,83 @@
 use crate::builtins;
 use crate::spawn;
 
+/// Expand `$VAR` and `${VAR}` references in a string segment.
+///
+/// Rules:
+/// - `$$` expands to a literal `$`
+/// - `${VAR}` and `$VAR` expand to the environment value (empty string if unset)
+/// - Characters inside single-quoted regions are left unexpanded
+/// - Characters inside double-quoted regions are expanded
+/// - `$?` is left as-is (not supported)
+pub fn expand_variables(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_single_quote = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => {
+                in_single_quote = !in_single_quote;
+                // Don't include the quote character itself in expanded output;
+                // the caller (parse_command) handles quoting around token boundaries.
+                // We push it so parse_command's quote-stripping still works correctly.
+                out.push(ch);
+            }
+            '$' if !in_single_quote => {
+                match chars.peek() {
+                    Some(&'$') => {
+                        chars.next();
+                        out.push('$');
+                    }
+                    Some(&'{') => {
+                        chars.next(); // consume '{'
+                        let mut name = String::new();
+                        for c in chars.by_ref() {
+                            if c == '}' {
+                                break;
+                            }
+                            name.push(c);
+                        }
+                        let val = std::env::var(&name).unwrap_or_default();
+                        out.push_str(&val);
+                    }
+                    Some(&c) if c.is_alphanumeric() || c == '_' => {
+                        let mut name = String::new();
+                        while let Some(&c) = chars.peek() {
+                            if c.is_alphanumeric() || c == '_' {
+                                name.push(c);
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        let val = std::env::var(&name).unwrap_or_default();
+                        out.push_str(&val);
+                    }
+                    _ => {
+                        // Bare `$` with no recognizable expansion — pass through
+                        out.push('$');
+                    }
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Expand a leading `~` to the HOME directory in a path token.
+pub fn expand_tilde(input: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    if input == "~" {
+        home
+    } else if let Some(rest) = input.strip_prefix("~/") {
+        format!("{}/{}", home, rest)
+    } else {
+        input.to_string()
+    }
+}
+
 /// Parse a command line into arguments, handling quotes and escapes.
 pub fn parse_command(input: &str) -> Vec<String> {
     let mut args = Vec::new();
@@ -28,7 +105,7 @@ pub fn parse_command(input: &str) -> Vec<String> {
             }
             ' ' | '\t' | '\n' | '\r' if !in_quotes => {
                 if !current.is_empty() {
-                    args.push(current);
+                    args.push(expand_tilde(&current));
                     current = String::new();
                 }
             }
@@ -37,7 +114,7 @@ pub fn parse_command(input: &str) -> Vec<String> {
     }
 
     if !current.is_empty() {
-        args.push(current);
+        args.push(expand_tilde(&current));
     }
 
     args
@@ -196,7 +273,10 @@ pub fn split_chain(input: &str) -> Vec<(String, Option<ChainOp>)> {
 
 /// Check if a command is a builtin.
 pub fn is_builtin(command: &str) -> bool {
-    matches!(command, "exit" | "help" | "pwd" | "cd" | "clear" | "echo")
+    matches!(
+        command,
+        "exit" | "help" | "pwd" | "cd" | "clear" | "echo" | "export" | "unset" | "env" | "history"
+    )
 }
 
 /// Command execution result.
@@ -218,6 +298,9 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
         "cd" => builtins::cmd_cd(args),
         "clear" => builtins::cmd_clear(),
         "echo" => builtins::cmd_echo(args),
+        "export" => builtins::cmd_export(args),
+        "unset" => builtins::cmd_unset(args),
+        "env" => builtins::cmd_env(),
         _ => {
             // Restore canonical mode for child (echo + line buffering)
             edos_lib::io::pty_set_canonical(0);

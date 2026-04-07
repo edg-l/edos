@@ -3,30 +3,38 @@ use std::{fs::File, os::edos::io::FileExt};
 // Re-export noto-sans-mono-bitmap types for user programs
 pub use noto_sans_mono_bitmap::{FontWeight, RasterHeight};
 use noto_sans_mono_bitmap::{get_raster, get_raster_width};
-use thiserror::Error;
-
 use std::arch::asm;
+use std::fmt;
 
 /// Graphics operation error type
-#[derive(Debug, Error, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum GraphicsError {
-    #[error("Invalid argument or coordinates")]
     InvalidInput,
-    #[error("Out of memory")]
     OutOfMemory,
-    #[error("Bad address/fault")]
     Fault,
-    #[error("Unknown graphics error")]
     Unknown,
-    #[error("Invalid color value")]
     InvalidColor,
-    #[error("Coordinates out of bounds")]
     OutOfBounds,
-    #[error("Unsupported character")]
     UnsupportedCharacter,
-    #[error("Text rendering error")]
     TextError,
 }
+
+impl fmt::Display for GraphicsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInput => write!(f, "Invalid argument or coordinates"),
+            Self::OutOfMemory => write!(f, "Out of memory"),
+            Self::Fault => write!(f, "Bad address/fault"),
+            Self::Unknown => write!(f, "Unknown graphics error"),
+            Self::InvalidColor => write!(f, "Invalid color value"),
+            Self::OutOfBounds => write!(f, "Coordinates out of bounds"),
+            Self::UnsupportedCharacter => write!(f, "Unsupported character"),
+            Self::TextError => write!(f, "Text rendering error"),
+        }
+    }
+}
+
+impl std::error::Error for GraphicsError {}
 
 // Ioctl buffer flags
 pub const IOCTL_ARG_IN: u64 = 1;

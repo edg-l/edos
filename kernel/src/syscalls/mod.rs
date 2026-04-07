@@ -279,6 +279,24 @@ const SYS_WINDOW_LIST: u64 = 224;
 const SYS_WINDOW_SEND_EVENT: u64 = 225;
 const SYS_CLOCK_GETTIME: u64 = 226;
 const SYS_OPENPTY: u64 = 227;
+const SYS_SPAWN2: u64 = 228;
+
+/// Arguments struct for SYS_SPAWN2. Passed as a single pointer from userspace.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SpawnArgs {
+    path: *const u8,
+    argv: *const *const u8,
+    envp: *const *const u8,
+    stdin_fd: u64,
+    stdout_fd: u64,
+    stderr_fd: u64,
+}
+
+// SAFETY: SpawnArgs only holds raw pointers read from userspace; we never
+// dereference them outside of the syscall handler on the calling CPU.
+unsafe impl Send for SpawnArgs {}
+unsafe impl Sync for SpawnArgs {}
 
 extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     let ctx = unsafe { ctx.as_mut().unwrap() };
@@ -549,6 +567,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let pipefd_ptr = ctx.rdi as *mut [u64; 2];
             ctx.rax = io::sys_openpty(pipefd_ptr);
         }
+        SYS_SPAWN2 => {
+            let args_ptr = ctx.rdi as *const SpawnArgs;
+            ctx.rax = sys_spawn2(args_ptr);
+        }
         _ => {
             ctx.rax = !0u64;
         }
@@ -812,6 +834,171 @@ fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
     newfd // Success - return the new fd number
 }
 
+/// Parse a null-terminated pointer array from userspace into a Vec of byte strings.
+/// Returns Err with the appropriate errno on failure.
+fn parse_user_string_array(
+    ptr: *const *const u8,
+    max_count: usize,
+    max_item_len: usize,
+    max_total: usize,
+) -> Result<Vec<Vec<u8>>, Errno> {
+    let mut storage: Vec<Vec<u8>> = Vec::new();
+
+    if ptr.is_null() {
+        return Ok(storage);
+    }
+
+    let mut total_bytes = 0usize;
+    let mut terminated = false;
+
+    for index in 0..max_count {
+        let current_ptr = match unsafe { try_read_user(ptr.add(index)) } {
+            Some(p) => p,
+            None => return Err(Errno::EFAULT),
+        };
+        if current_ptr.is_null() {
+            terminated = true;
+            break;
+        }
+
+        let item = match copy_user_c_string(current_ptr, max_item_len) {
+            Ok(bytes) => bytes,
+            Err(UAccessError::Fault) => return Err(Errno::EFAULT),
+            Err(UAccessError::TooLong) => return Err(Errno::EINVAL),
+        };
+
+        total_bytes += item.len() + 1;
+        if total_bytes > max_total {
+            return Err(Errno::EINVAL);
+        }
+
+        storage.push(item);
+    }
+
+    if !terminated {
+        return Err(Errno::EINVAL);
+    }
+
+    Ok(storage)
+}
+
+/// Core spawn logic shared by sys_spawn and sys_spawn2.
+///
+/// `argv_storage` must already contain argv[0] as the first element (the resolved path).
+/// `envp_storage` contains the environment strings (may be empty).
+fn do_spawn(
+    path: &crate::fs::path::Path,
+    path_str: &str,
+    argv_storage: Vec<Vec<u8>>,
+    envp_storage: Vec<Vec<u8>>,
+    stdin_fd: u64,
+    stdout_fd: u64,
+    stderr_fd: u64,
+) -> u64 {
+    use crate::{fs::api as fs_api, thread::util::queue_spawn_thread};
+
+    let sched = sched();
+    let info = sched.current_thread_info();
+
+    // Save current cwd for child process
+    let child_cwd = info.lock().cwd.lock().clone();
+
+    x86_64::instructions::interrupts::enable();
+
+    let finfo = match fs_api::file_info(path) {
+        Ok(fi) => fi,
+        Err(_) => {
+            x86_64::instructions::interrupts::disable();
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    let elf_data = match fs_api::read_bytes(path, 0, finfo.size as usize) {
+        Ok(data) => data,
+        Err(_) => {
+            x86_64::instructions::interrupts::disable();
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    x86_64::instructions::interrupts::disable();
+
+    let cr3 = Cr3::read();
+    switch_to_kernel_page();
+
+    let argv_slices: Vec<&[u8]> = argv_storage.iter().map(|arg| arg.as_slice()).collect();
+    let envp_slices: Vec<&[u8]> = envp_storage.iter().map(|e| e.as_slice()).collect();
+
+    let user_thread = match Thread::new_user(
+        &elf_data,
+        Some(path_str.to_string()),
+        &argv_slices,
+        &envp_slices,
+        0,
+        0,
+        child_cwd,
+    ) {
+        Ok(thread) => {
+            log!("UserThread created successfully");
+            thread
+        }
+        Err(e) => {
+            log!("UserThread creation failed: {:?}", e);
+            info.lock().errno = Errno::EINVAL;
+            unsafe { Cr3::write(cr3.0, cr3.1) };
+            return !0u64;
+        }
+    };
+
+    // Set up file descriptor redirections for stdin/stdout/stderr
+    {
+        let child_info = get_thread_info_by_id(user_thread.id).unwrap();
+        let user_thread_info = child_info.lock();
+
+        // Copy parent's file descriptors to child's standard streams.
+        // Always copy so the child inherits the parent's PTY/pipe fds.
+        // Use `info` (captured before interrupts were enabled) rather than
+        // sched.current_thread_info(), since the thread may have migrated CPUs.
+        let parent_fd_table = info.lock().fd_table.clone();
+        let parent_fds = parent_fd_table.lock();
+
+        if let Some(stdin_desc) = parent_fds.get_fd(stdin_fd).cloned() {
+            stdin_desc.inc_refcount();
+            user_thread_info.fd_table.lock().insert_fd(0, stdin_desc);
+        }
+
+        if let Some(stdout_desc) = parent_fds.get_fd(stdout_fd).cloned() {
+            stdout_desc.inc_refcount();
+            user_thread_info.fd_table.lock().insert_fd(1, stdout_desc);
+        }
+
+        if let Some(stderr_desc) = parent_fds.get_fd(stderr_fd).cloned() {
+            stderr_desc.inc_refcount();
+            user_thread_info.fd_table.lock().insert_fd(2, stderr_desc);
+        }
+    }
+
+    let child_pid = user_thread.id.0;
+
+    // If the child's stdin (fd 0) is a PTY slave, register this child as the
+    // foreground process so Ctrl+C signals are delivered to it.
+    {
+        let child_info = get_thread_info_by_id(user_thread.id).unwrap();
+        let child_fd_table = child_info.lock().fd_table.clone();
+        if let Some(FileDescriptor::PtySlave(pty)) = child_fd_table.lock().get_fd(0).cloned() {
+            pty.lock().foreground_pid = Some(child_pid);
+        }
+    }
+
+    queue_spawn_thread(user_thread);
+
+    unsafe { Cr3::write(cr3.0, cr3.1) };
+
+    child_pid
+}
+
 fn sys_spawn(
     path_ptr: *const u8,
     argv_ptr: *const *const u8,
@@ -819,7 +1006,7 @@ fn sys_spawn(
     stdout_fd: u64,
     stderr_fd: u64,
 ) -> u64 {
-    use crate::{fs::api as fs_api, fs::path::Path, thread::util::queue_spawn_thread};
+    use crate::fs::path::Path;
 
     const MAX_PATH_LEN: usize = 1024;
     const MAX_ARGC: usize = 64;
@@ -860,7 +1047,6 @@ fn sys_spawn(
         }
     };
 
-    // Resolve path relative to current working directory
     let resolve_path = |path_str: &str, cwd: &Path| -> Result<Path, crate::fs::path::ParseError> {
         if path_str.starts_with('/') {
             Path::parse(path_str).map(|p| p.normalize())
@@ -881,149 +1067,132 @@ fn sys_spawn(
     let mut argv_storage: Vec<Vec<u8>> = Vec::new();
     argv_storage.push(format!("{path}").as_bytes().to_vec());
 
-    if !argv_ptr.is_null() {
-        let mut total_bytes = 0usize;
-        let mut terminated = false;
+    match parse_user_string_array(argv_ptr, MAX_ARGC, MAX_ARG_LEN, MAX_ARG_TOTAL) {
+        Ok(args) => argv_storage.extend(args),
+        Err(errno) => {
+            info.lock().errno = errno;
+            return !0u64;
+        }
+    }
 
-        for index in 0..MAX_ARGC {
-            let current_ptr = match unsafe { try_read_user(argv_ptr.add(index)) } {
-                Some(ptr) => ptr,
-                None => {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
-                }
-            };
-            if current_ptr.is_null() {
-                terminated = true;
-                break;
-            }
+    // path_str lifetime ends with path_bytes; copy it as an owned string before calling do_spawn
+    let path_str_owned = path_str.to_string();
+    do_spawn(
+        &path,
+        &path_str_owned,
+        argv_storage,
+        Vec::new(),
+        stdin_fd,
+        stdout_fd,
+        stderr_fd,
+    )
+}
 
-            let arg = match copy_user_c_string(current_ptr, MAX_ARG_LEN) {
-                Ok(bytes) => bytes,
-                Err(UAccessError::Fault) => {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
-                }
-                Err(UAccessError::TooLong) => {
-                    info.lock().errno = Errno::EINVAL;
-                    return !0u64;
-                }
-            };
+fn sys_spawn2(args_ptr: *const SpawnArgs) -> u64 {
+    use crate::fs::path::Path;
 
-            total_bytes += arg.len() + 1;
-            if total_bytes > MAX_ARG_TOTAL {
-                info.lock().errno = Errno::EINVAL;
+    const MAX_PATH_LEN: usize = 1024;
+    const MAX_ARGC: usize = 64;
+    const MAX_ARG_LEN: usize = 4096;
+    const MAX_ARG_TOTAL: usize = 16 * 1024;
+    const MAX_ENVC: usize = 256;
+    const MAX_ENV_LEN: usize = 4096;
+    const MAX_ENV_TOTAL: usize = 64 * 1024;
+
+    let sched = sched();
+    let info = sched.current_thread_info();
+
+    info.lock().errno = Errno::Clear;
+
+    if args_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    let args: SpawnArgs = match unsafe { try_read_user(args_ptr) } {
+        Some(a) => a,
+        None => {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
+        }
+    };
+
+    if args.path.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    let path_bytes = match copy_user_c_string(args.path, MAX_PATH_LEN) {
+        Ok(bytes) if !bytes.is_empty() => bytes,
+        Ok(_) => {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+        Err(UAccessError::Fault) => {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
+        }
+        Err(UAccessError::TooLong) => {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    let path_str = match core::str::from_utf8(&path_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    let resolve_path = |path_str: &str, cwd: &Path| -> Result<Path, crate::fs::path::ParseError> {
+        if path_str.starts_with('/') {
+            Path::parse(path_str).map(|p| p.normalize())
+        } else {
+            let joined = cwd.join(path_str);
+            Ok(joined.normalize())
+        }
+    };
+
+    let path = match resolve_path(path_str, &info.lock().cwd.lock()) {
+        Ok(path) => path,
+        Err(_) => {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    let mut argv_storage: Vec<Vec<u8>> = Vec::new();
+    argv_storage.push(format!("{path}").as_bytes().to_vec());
+
+    match parse_user_string_array(args.argv, MAX_ARGC, MAX_ARG_LEN, MAX_ARG_TOTAL) {
+        Ok(args_vec) => argv_storage.extend(args_vec),
+        Err(errno) => {
+            info.lock().errno = errno;
+            return !0u64;
+        }
+    }
+
+    let envp_storage =
+        match parse_user_string_array(args.envp, MAX_ENVC, MAX_ENV_LEN, MAX_ENV_TOTAL) {
+            Ok(env) => env,
+            Err(errno) => {
+                info.lock().errno = errno;
                 return !0u64;
             }
+        };
 
-            argv_storage.push(arg);
-        }
-
-        if !terminated {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
-        }
-    }
-
-    // Save current cwd for child process
-    let child_cwd = info.lock().cwd.lock().clone();
-
-    // Load ELF file from filesystem
-
-    x86_64::instructions::interrupts::enable();
-
-    let mut elf_data = Vec::new();
-    let finfo = match fs_api::file_info(&path) {
-        Ok(info) => info,
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
-        }
-    };
-
-    match fs_api::read_bytes(&path, elf_data.len(), finfo.size as usize) {
-        Ok(data) => {
-            elf_data = data;
-        }
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
-        }
-    }
-
-    x86_64::instructions::interrupts::disable();
-
-    let cr3 = Cr3::read();
-    switch_to_kernel_page();
-
-    let argv_slices: Vec<&[u8]> = argv_storage.iter().map(|arg| arg.as_slice()).collect();
-
-    // Create new user thread from ELF data
-    let user_thread = match Thread::new_user(
-        &elf_data,
-        Some(path_str.to_string()),
-        &argv_slices,
-        0,
-        0,
-        child_cwd,
-    ) {
-        Ok(thread) => {
-            log!("UserThread created successfully");
-            thread
-        }
-        Err(e) => {
-            log!("UserThread creation failed: {:?}", e);
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
-        }
-    };
-
-    // Create thread info and set up file descriptor redirections
-    {
-        let child_info = get_thread_info_by_id(user_thread.id).unwrap();
-        let user_thread_info = child_info.lock();
-
-        // Copy parent's file descriptors to child's standard streams.
-        // Always copy so the child inherits the parent's PTY/pipe fds.
-        // Use `info` (captured before interrupts were enabled) rather than
-        // sched.current_thread_info(), since the thread may have migrated CPUs.
-        let parent_fd_table = info.lock().fd_table.clone();
-        let parent_fds = parent_fd_table.lock();
-
-        if let Some(stdin_desc) = parent_fds.get_fd(stdin_fd).cloned() {
-            stdin_desc.inc_refcount();
-            user_thread_info.fd_table.lock().insert_fd(0, stdin_desc);
-        }
-
-        if let Some(stdout_desc) = parent_fds.get_fd(stdout_fd).cloned() {
-            stdout_desc.inc_refcount();
-            user_thread_info.fd_table.lock().insert_fd(1, stdout_desc);
-        }
-
-        if let Some(stderr_desc) = parent_fds.get_fd(stderr_fd).cloned() {
-            stderr_desc.inc_refcount();
-            user_thread_info.fd_table.lock().insert_fd(2, stderr_desc);
-        }
-    }
-
-    let child_pid = user_thread.id.0;
-
-    // If the child's stdin (fd 0) is a PTY slave, register this child as the
-    // foreground process so Ctrl+C signals are delivered to it.
-    {
-        let child_info = get_thread_info_by_id(user_thread.id).unwrap();
-        let child_fd_table = child_info.lock().fd_table.clone();
-        if let Some(FileDescriptor::PtySlave(pty)) = child_fd_table.lock().get_fd(0).cloned() {
-            pty.lock().foreground_pid = Some(child_pid);
-        }
-    }
-
-    // Queue the new thread for execution
-    queue_spawn_thread(user_thread);
-
-    unsafe { Cr3::write(cr3.0, cr3.1) };
-
-    child_pid
+    let path_str_owned = path_str.to_string();
+    do_spawn(
+        &path,
+        &path_str_owned,
+        argv_storage,
+        envp_storage,
+        args.stdin_fd,
+        args.stdout_fd,
+        args.stderr_fd,
+    )
 }
 
 fn sys_clone(

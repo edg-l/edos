@@ -88,14 +88,34 @@ pub enum StackSetupError {
 pub fn setup_user_stack(
     stack_top: u64,
     argv: &[&[u8]],
-) -> Result<(u64, u64, usize), StackSetupError> {
+    envp: &[&[u8]],
+) -> Result<(u64, u64, usize, u64), StackSetupError> {
     let stack_bottom = stack_top
         .checked_sub(USER_STACK_SIZE)
         .ok_or(StackSetupError::StackOverflow)?;
 
     let mut sp = stack_top;
-    let mut arg_ptrs = Vec::with_capacity(argv.len());
 
+    // Push env strings (top of stack, reversed order)
+    let mut env_ptrs = Vec::with_capacity(envp.len());
+    for env in envp.iter().rev() {
+        let len = env.len() as u64;
+        sp = sp
+            .checked_sub(len + 1)
+            .ok_or(StackSetupError::StackOverflow)?;
+        if sp < stack_bottom {
+            return Err(StackSetupError::StackOverflow);
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(env.as_ptr(), sp as *mut u8, len as usize);
+            ((sp + len) as *mut u8).write(0);
+        }
+        env_ptrs.push(sp);
+    }
+    env_ptrs.reverse();
+
+    // Push argv strings
+    let mut arg_ptrs = Vec::with_capacity(argv.len());
     for arg in argv.iter().rev() {
         let len = arg.len() as u64;
         sp = sp
@@ -120,7 +140,11 @@ pub fn setup_user_stack(
 
     let argc = arg_ptrs.len();
 
-    if argc % 2 == 0 {
+    // Alignment padding: total pointer slots = 1(argc) + argc(argv ptrs) + 1(null) + envc(env ptrs) + 1(null) + 1(envp_ptr) + 1(argv_ptr) = argc + envc + 5
+    // We push them in reverse (null-terminated envp, envp_ptr, null-terminated argv, argv_ptr, argc).
+    // The existing logic pads to keep alignment before the pointer arrays.
+    let total_pointers = 1 + argc + 1 + env_ptrs.len() + 1; // argc value + argv ptrs + null + env ptrs + null
+    if total_pointers % 2 != 0 {
         sp = sp.checked_sub(8).ok_or(StackSetupError::StackOverflow)?;
         if sp < stack_bottom {
             return Err(StackSetupError::StackOverflow);
@@ -128,6 +152,25 @@ pub fn setup_user_stack(
         unsafe { (sp as *mut u64).write(0) };
     }
 
+    // Push null terminator for envp
+    sp = sp.checked_sub(8).ok_or(StackSetupError::StackOverflow)?;
+    if sp < stack_bottom {
+        return Err(StackSetupError::StackOverflow);
+    }
+    unsafe { (sp as *mut u64).write(0) };
+
+    // Push env pointers in reverse so first env is at lowest address
+    for &ptr_value in env_ptrs.iter().rev() {
+        sp = sp.checked_sub(8).ok_or(StackSetupError::StackOverflow)?;
+        if sp < stack_bottom {
+            return Err(StackSetupError::StackOverflow);
+        }
+        unsafe { (sp as *mut u64).write(ptr_value) };
+    }
+
+    let envp_ptr = sp;
+
+    // Push null terminator for argv
     sp = sp.checked_sub(8).ok_or(StackSetupError::StackOverflow)?;
     if sp < stack_bottom {
         return Err(StackSetupError::StackOverflow);
@@ -150,7 +193,7 @@ pub fn setup_user_stack(
     }
     unsafe { (sp as *mut u64).write(argc as u64) };
 
-    Ok((sp, argv_ptr, argc))
+    Ok((sp, argv_ptr, argc, envp_ptr))
 }
 
 #[expect(unused)]

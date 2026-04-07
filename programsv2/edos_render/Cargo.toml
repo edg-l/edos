@@ -10,4 +10,4 @@ noto-sans-mono-bitmap = { version = "0.3.1", features = [
     "size_24",
     "size_32",
 ] }
-thiserror = { version = "2.0.17" }
+

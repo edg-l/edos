@@ -188,7 +188,20 @@ impl Drop for ChildProcess {
     }
 }
 
+/// Arguments structure for SYS_SPAWN2. Must match the kernel's layout exactly:
+/// path, argv, envp, stdin_fd, stdout_fd, stderr_fd.
+#[repr(C)]
+struct SpawnArgs {
+    path: *const u8,
+    argv: *const *const u8,
+    envp: *const *const u8,
+    stdin_fd: u64,
+    stdout_fd: u64,
+    stderr_fd: u64,
+}
+
 /// Spawn a program with custom fd redirections. Returns Some(pid) on success.
+/// Uses SYS_SPAWN2 to pass the current process environment to the child.
 pub fn spawn_program_with_fds(
     command: &str,
     args: &[String],
@@ -215,20 +228,38 @@ pub fn spawn_program_with_fds(
     let mut argv_ptrs: Vec<*const u8> = c_args.iter().map(|c| c.as_ptr() as *const u8).collect();
     argv_ptrs.push(std::ptr::null());
 
+    // Build envp from current process environment as "KEY=VALUE\0" byte strings
+    let mut env_strings: Vec<Vec<u8>> = Vec::new();
+    for (key, val) in std::env::vars_os() {
+        let key_bytes = key.as_encoded_bytes();
+        let val_bytes = val.as_encoded_bytes();
+        // Skip entries that contain NUL bytes since they can't be represented as C strings
+        if key_bytes.contains(&0) || val_bytes.contains(&0) {
+            continue;
+        }
+        let mut entry = Vec::with_capacity(key_bytes.len() + 1 + val_bytes.len() + 1);
+        entry.extend_from_slice(key_bytes);
+        entry.push(b'=');
+        entry.extend_from_slice(val_bytes);
+        entry.push(0); // NUL terminator
+        env_strings.push(entry);
+    }
+    let mut envp_ptrs: Vec<*const u8> = env_strings.iter().map(|s| s.as_ptr()).collect();
+    envp_ptrs.push(std::ptr::null());
+
     for path in &candidates {
         let Ok(c_path) = CString::new(path.as_str()) else {
             continue;
         };
-        let pid = unsafe {
-            sys::syscall5(
-                sys::SYS_SPAWN,
-                c_path.as_ptr() as u64,
-                argv_ptrs.as_ptr() as u64,
-                stdin_fd,
-                stdout_fd,
-                stderr_fd,
-            )
+        let spawn_args = SpawnArgs {
+            path: c_path.as_ptr() as *const u8,
+            argv: argv_ptrs.as_ptr(),
+            envp: envp_ptrs.as_ptr(),
+            stdin_fd,
+            stdout_fd,
+            stderr_fd,
         };
+        let pid = unsafe { sys::syscall1(sys::SYS_SPAWN2, &spawn_args as *const SpawnArgs as u64) };
         if pid != u64::MAX {
             return Some(pid);
         }

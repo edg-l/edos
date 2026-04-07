@@ -312,12 +312,15 @@ pub fn mount_system_fs() -> ! {
     }
 
     without_interrupts(|| {
+        let default_env: [&[u8]; 3] = [b"PATH=/bin", b"HOME=/", b"PWD=/"];
+
         let wm_path = root.join("bin/edos-wm").normalize();
         let wm_argv: [&[u8]; 1] = [b"edos-wm"];
         let user_thread = Thread::new_user_from_path(
             &wm_path,
             Some("edos-wm".to_string()),
             &wm_argv,
+            &default_env,
             0,
             0,
             root.clone(),
@@ -331,6 +334,7 @@ pub fn mount_system_fs() -> ! {
             &taskbar_path,
             Some("edos-taskbar".to_string()),
             &taskbar_argv,
+            &default_env,
             0,
             0,
             root.clone(),
@@ -344,6 +348,7 @@ pub fn mount_system_fs() -> ! {
             &terminal_path,
             Some("edos-terminal".to_string()),
             &terminal_argv,
+            &default_env,
             0,
             0,
             root.clone(),

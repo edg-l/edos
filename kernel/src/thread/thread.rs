@@ -438,6 +438,7 @@ impl Thread {
         elf_data: &[u8],
         name: Option<String>,
         argv: &[&[u8]],
+        envp: &[&[u8]],
         user: u32,
         group: u32,
         cwd: Path,
@@ -464,8 +465,8 @@ impl Thread {
         // call align
         let stack_top = thread_stack_alloc(&mut process_memory_manager);
 
-        let (user_stack_pointer, argv_ptr, argc) =
-            setup_user_stack(stack_top, argv).map_err(|_| ElfLoadError::MappingFailed)?;
+        let (user_stack_pointer, argv_ptr, argc, envp_ptr) =
+            setup_user_stack(stack_top, argv, envp).map_err(|_| ElfLoadError::MappingFailed)?;
 
         let mut load_info = load_elf(elf_data, &mut process_memory_manager)?;
 
@@ -505,7 +506,7 @@ impl Thread {
         let mut context = CpuContext::new_user_thread(entry_point.as_u64(), user_stack_pointer);
         context.rdi = argc as u64;
         context.rsi = argv_ptr;
-        context.rdx = 0;
+        context.rdx = envp_ptr;
 
         let name = Arc::new(name.unwrap_or_default());
 
@@ -577,6 +578,7 @@ impl Thread {
         path: &Path,
         name: Option<String>,
         argv: &[&[u8]],
+        envp: &[&[u8]],
         user: u32,
         group: u32,
         cwd: Path,
@@ -600,7 +602,7 @@ impl Thread {
         })?;
 
         // Call the existing new_user with the loaded data
-        Self::new_user(&elf_data, name, argv, user, group, cwd)
+        Self::new_user(&elf_data, name, argv, envp, user, group, cwd)
     }
 
     pub fn free(&self) {
