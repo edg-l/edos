@@ -4,7 +4,7 @@ use crate::{
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
         path::Path,
     },
-    thread::mutex::BlockingMutex,
+    thread::{mutex::BlockingMutex, waitqueue::WaitQueue},
     util::uaccess::{try_copy_from_user, try_copy_to_user},
 };
 use alloc::{sync::Arc, vec::Vec};
@@ -36,6 +36,8 @@ pub struct Pipe {
     pub closed: bool,
     pollers: Vec<(PollKey, Arc<PollEntry>)>,
     next_poll_key: PollKey,
+    /// Wakes threads blocked in sys_read waiting for data or EOF.
+    pub reader_wq: Arc<WaitQueue>,
 }
 
 #[allow(unused)]
@@ -48,6 +50,7 @@ impl Pipe {
             closed: false,
             pollers: Vec::new(),
             next_poll_key: 1,
+            reader_wq: Arc::new(WaitQueue::new()),
         }
     }
 
@@ -169,15 +172,29 @@ impl Pipe {
     /// `Pipe::flush_notifications` AFTER dropping the pipe lock to avoid
     /// holding BlockingMutex while wake_thread spins (priority inversion).
     fn notify_pollers(&mut self) -> PipeNotifications {
-        if self.pollers.is_empty() {
-            return PipeNotifications::EMPTY;
-        }
         let state = self.poll_state();
+        let wake_reader = state.readable || state.hangup;
+        let reader_wq = if wake_reader {
+            Some(self.reader_wq.clone())
+        } else {
+            None
+        };
+        if self.pollers.is_empty() {
+            return PipeNotifications {
+                entries: heapless::Vec::new(),
+                state,
+                reader_wq,
+            };
+        }
         let mut entries: heapless::Vec<Arc<PollEntry>, 8> = heapless::Vec::new();
         for (_, entry) in self.pollers.iter() {
             let _ = entries.push(entry.clone());
         }
-        PipeNotifications { entries, state }
+        PipeNotifications {
+            entries,
+            state,
+            reader_wq,
+        }
     }
 }
 
@@ -185,18 +202,23 @@ impl Pipe {
 pub struct PipeNotifications {
     entries: heapless::Vec<Arc<PollEntry>, 8>,
     state: PollState,
+    reader_wq: Option<Arc<WaitQueue>>,
 }
 
 impl PipeNotifications {
     const EMPTY: Self = Self {
         entries: heapless::Vec::new(),
         state: PollState::none(),
+        reader_wq: None,
     };
 
     /// Send notifications. Call this after dropping the pipe lock.
     pub fn flush(self) {
         for entry in &self.entries {
             entry.update(self.state);
+        }
+        if let Some(wq) = &self.reader_wq {
+            wq.wake_one();
         }
     }
 }

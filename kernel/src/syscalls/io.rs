@@ -264,6 +264,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             }
         },
         Some(FileDescriptor::PipeRead(pipe)) => {
+            let reader_wq = pipe.lock().reader_wq.clone();
             // Block until data is available or all writers are closed (EOF).
             loop {
                 let (result, closed, notif) = {
@@ -277,8 +278,11 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     Some(n) if n > 0 => break n as i64,
                     Some(_) if closed => break 0, // EOF: no data and all writers closed
                     Some(_) => {
-                        // No data but writer still open: block and retry
-                        sched.thread_sleep(Duration::from_millis(1));
+                        // No data but writer still open: park until woken by write/close
+                        reader_wq.wait_until(|| {
+                            let guard = pipe.lock();
+                            !guard.buffer.is_empty() || guard.closed
+                        });
                         continue;
                     }
                     None => {
