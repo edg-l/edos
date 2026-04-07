@@ -140,6 +140,8 @@ pub struct Pty {
     next_poll_key: PollKey,
     line_disc: LineDiscipline,
     eof_pending: bool,
+    /// PID of the foreground process that should receive Ctrl+C signals.
+    pub foreground_pid: Option<u64>,
 }
 
 #[allow(unused)]
@@ -158,6 +160,7 @@ impl Pty {
             next_poll_key: 1,
             line_disc: LineDiscipline::new(),
             eof_pending: false,
+            foreground_pid: None,
         }
     }
 
@@ -205,6 +208,7 @@ impl Pty {
         }
 
         // Process each byte through the line discipline.
+        let mut kill_pid: Option<u64> = None;
         for byte in tmp {
             // Borrow fields separately to satisfy the borrow checker.
             let action =
@@ -215,14 +219,16 @@ impl Pty {
                     self.eof_pending = true;
                 }
                 LineAction::Interrupt => {
-                    // Phase 3 will send SIGINT to the foreground process.
-                    // For now, the line was already cleared by process_input.
+                    // Record the foreground PID; kill_pid will be consumed in flush().
+                    kill_pid = self.foreground_pid;
                 }
                 LineAction::None => {}
             }
         }
 
-        (Some(len), self.notify_pollers())
+        let mut notif = self.notify_pollers();
+        notif.kill_pid = kill_pid;
+        (Some(len), notif)
     }
 
     /// Master reads program output from output_buf (slave wrote this).
@@ -389,6 +395,7 @@ impl Pty {
                 slave_state,
                 input_wq,
                 output_wq,
+                kill_pid: None,
             };
         }
 
@@ -403,6 +410,7 @@ impl Pty {
             slave_state,
             input_wq,
             output_wq,
+            kill_pid: None,
         }
     }
 }
@@ -414,6 +422,8 @@ pub struct PtyNotifications {
     slave_state: PollState,
     input_wq: Option<Arc<WaitQueue>>,
     output_wq: Option<Arc<WaitQueue>>,
+    /// If set, kill this process after releasing the PTY lock.
+    pub kill_pid: Option<u64>,
 }
 
 impl PtyNotifications {
@@ -423,6 +433,7 @@ impl PtyNotifications {
         slave_state: PollState::none(),
         input_wq: None,
         output_wq: None,
+        kill_pid: None,
     };
 
     /// Send all notifications. Call this after dropping the PTY lock.
@@ -449,6 +460,9 @@ impl PtyNotifications {
         }
         if let Some(wq) = &self.output_wq {
             wq.wake_one();
+        }
+        if let Some(pid) = self.kill_pid {
+            crate::thread::thread::kill_process(pid);
         }
     }
 }

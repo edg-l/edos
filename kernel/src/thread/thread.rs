@@ -137,6 +137,9 @@ pub struct Thread {
     pub tls_base: AtomicU64,
 
     pub exit_code: AtomicI32,
+    /// Set when the process has been killed (e.g. by Ctrl+C). Sleeping syscalls
+    /// check this flag on wakeup and return EINTR to unblock the process.
+    pub killed: AtomicBool,
 
     pub user: Option<Arc<RwLock<UserThread>>>,
 
@@ -415,6 +418,7 @@ impl Thread {
             tls_base: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
+            killed: AtomicBool::new(false),
             rq_link: Link::new(),
             rq_boosted: AtomicBool::new(false),
             context_saved: AtomicBool::new(true),
@@ -538,6 +542,7 @@ impl Thread {
             tls_base: AtomicU64::new(tls_fs_base),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
+            killed: AtomicBool::new(false),
             user: Some(user_state),
             rq_link: Link::new(),
             rq_boosted: AtomicBool::new(false),
@@ -641,6 +646,13 @@ impl Thread {
                         super::pipe::FileDescriptor::PipeWrite(pipe) => {
                             let notif = pipe.lock().close_writer();
                             notif.flush();
+                        }
+                        super::pipe::FileDescriptor::PtySlave(pty) => {
+                            // Clear foreground PID if this process was the foreground process.
+                            let mut guard = pty.lock();
+                            if guard.foreground_pid == Some(self.id.0) {
+                                guard.foreground_pid = None;
+                            }
                         }
                         _ => {}
                     }
@@ -895,4 +907,23 @@ pub fn insert_thread_info(tid: ThreadId, info: Arc<IrqSpinlock<UserThreadInfo>>)
 
 pub fn allocate_thread_id() -> ThreadId {
     ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed))
+}
+
+/// Mark a process as killed and wake it so it can exit.
+///
+/// The target thread will observe `killed == true` after waking from any
+/// blocking syscall (e.g. `sys_read` on a PTY slave) and return an error,
+/// causing the process to exit.  The exit code is set to 130 (SIGINT
+/// convention: 128 + signal number 2).
+pub fn kill_process(pid: u64) -> bool {
+    use crate::thread::scheduler::{WakePriority, sched};
+
+    if let Some(thread) = THREADS.get(ThreadId(pid)) {
+        thread.killed.store(true, Ordering::Release);
+        thread.exit_code.store(130, Ordering::Release);
+        sched().wake_thread(ThreadId(pid), WakePriority::Normal);
+        true
+    } else {
+        false
+    }
 }

@@ -602,6 +602,8 @@ pub enum Errno {
     EROFS,
     /// Generic I/O failure surfaced from the filesystem or storage layer.
     EIO,
+    /// System call interrupted (e.g. by a signal or kill).
+    EINTR,
     /// Placeholder for unknown or unmapped kernel error codes.
     UNKNOWN,
 }
@@ -997,6 +999,17 @@ fn sys_spawn(
     }
 
     let child_pid = user_thread.id.0;
+
+    // If the child's stdin (fd 0) is a PTY slave, register this child as the
+    // foreground process so Ctrl+C signals are delivered to it.
+    {
+        let child_info = get_thread_info_by_id(user_thread.id).unwrap();
+        let child_fd_table = child_info.lock().fd_table.clone();
+        if let Some(FileDescriptor::PtySlave(pty)) = child_fd_table.lock().get_fd(0).cloned() {
+            pty.lock().foreground_pid = Some(child_pid);
+        }
+    }
+
     // Queue the new thread for execution
     queue_spawn_thread(user_thread);
 
@@ -1164,6 +1177,7 @@ fn sys_clone(
         tls_base: AtomicU64::new(tls_fs_base),
         cpu: AtomicU32::new(0),
         exit_code: AtomicI32::new(0),
+        killed: AtomicBool::new(false),
         user: Some(child_user),
         rq_link: Link::new(),
         rq_boosted: AtomicBool::new(false),

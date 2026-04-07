@@ -370,6 +370,15 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             // Clone the input_wq Arc before entering the loop (avoids holding lock while blocking).
             let input_wq = pty.lock().input_wq();
             loop {
+                // Check if this thread has been killed before blocking.
+                let is_killed = sched.current_thread().map_or(false, |t| {
+                    t.killed.load(core::sync::atomic::Ordering::Acquire)
+                });
+                if is_killed {
+                    info.lock().errno = Errno::EINTR;
+                    break -1;
+                }
+
                 let (result, eof, notif) = {
                     let mut guard = pty.lock();
                     let (r, n) = guard.slave_read_to_user(buffer_ptr, count);
@@ -384,7 +393,10 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     Some(_) => {
                         input_wq.wait_until(|| {
                             let guard = pty.lock();
-                            !guard.input_buf.is_empty() || guard.closed_master
+                            let killed = sched.current_thread().map_or(false, |t| {
+                                t.killed.load(core::sync::atomic::Ordering::Acquire)
+                            });
+                            !guard.input_buf.is_empty() || guard.closed_master || killed
                         });
                         continue;
                     }

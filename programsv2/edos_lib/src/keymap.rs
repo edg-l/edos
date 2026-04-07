@@ -140,6 +140,42 @@ pub fn update_modifiers(mods: &mut Modifiers, code: u32, pressed: bool) -> bool 
 pub fn map_keycode(code: u32, mods: &Modifiers) -> Option<char> {
     use keycode::*;
 
+    // Ctrl+letter generates control characters 0x01-0x1A.
+    if mods.ctrl {
+        let ctrl_char = match code {
+            A => Some('\x01'),
+            B => Some('\x02'),
+            C => Some('\x03'),
+            D => Some('\x04'),
+            E => Some('\x05'),
+            F => Some('\x06'),
+            G => Some('\x07'),
+            H => Some('\x08'),
+            I => Some('\x09'),
+            J => Some('\x0A'),
+            K => Some('\x0B'),
+            L => Some('\x0C'),
+            M => Some('\x0D'),
+            N => Some('\x0E'),
+            O => Some('\x0F'),
+            P => Some('\x10'),
+            Q => Some('\x11'),
+            R => Some('\x12'),
+            S => Some('\x13'),
+            T => Some('\x14'),
+            U => Some('\x15'),
+            V => Some('\x16'),
+            W => Some('\x17'),
+            X => Some('\x18'),
+            Y => Some('\x19'),
+            Z => Some('\x1A'),
+            _ => None,
+        };
+        if ctrl_char.is_some() {
+            return ctrl_char;
+        }
+    }
+
     match code {
         ESCAPE => Some('\x1B'),
         BACKSPACE => Some('\x08'),
