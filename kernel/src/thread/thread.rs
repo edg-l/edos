@@ -648,11 +648,17 @@ impl Thread {
                             notif.flush();
                         }
                         super::pipe::FileDescriptor::PtySlave(pty) => {
-                            // Clear foreground PID if this process was the foreground process.
                             let mut guard = pty.lock();
                             if guard.foreground_pid == Some(self.id.0) {
                                 guard.foreground_pid = None;
                             }
+                            let notif = guard.close_slave();
+                            drop(guard);
+                            notif.flush();
+                        }
+                        super::pipe::FileDescriptor::PtyMaster(pty) => {
+                            let notif = pty.lock().close_master();
+                            notif.flush();
                         }
                         _ => {}
                     }

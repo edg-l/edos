@@ -185,7 +185,8 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
         let n = sys_read(0, &mut buf);
 
         if n < 0 {
-            return if line.is_empty() { None } else { Some(line) };
+            // EINTR from Ctrl+C or error: discard partial input, re-prompt
+            return None;
         }
         if n == 0 {
             continue;

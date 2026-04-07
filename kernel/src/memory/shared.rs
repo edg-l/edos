@@ -147,16 +147,14 @@ impl SharedMemory {
     /// Otherwise, marks for deferred removal: the last `dec_ref()` that brings
     /// ref_count to 0 will remove the entry (like Linux `IPC_RMID`).
     pub fn destroy(id: u64) -> Result<(), SharedMemoryError> {
-        let registry = SHARED_MEMORY_REGISTRY.read();
+        let mut registry = SHARED_MEMORY_REGISTRY.write();
         let shm = registry.get(&id).ok_or(SharedMemoryError::NotFound)?;
         shm.destroyed.store(true, Ordering::Release);
         if shm.ref_count() > 0 {
             // Deferred: dec_ref() will clean up when ref_count reaches 0
             return Ok(());
         }
-        drop(registry);
-
-        SHARED_MEMORY_REGISTRY.write().remove(&id);
+        registry.remove(&id);
         Ok(())
     }
 }

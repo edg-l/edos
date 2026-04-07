@@ -90,14 +90,7 @@ impl LineDiscipline {
                     LineAction::None
                 }
             }
-            // Ctrl+C (interrupt)
-            0x03 => {
-                self.line_buf.clear();
-                if self.echo {
-                    output_buf.extend_from_slice(b"^C\n");
-                }
-                LineAction::Interrupt
-            }
+            // Ctrl+C is handled above (before the canonical/raw check)
             // Tab
             b'\t' => {
                 self.line_buf.push(byte);
