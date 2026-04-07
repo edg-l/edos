@@ -325,19 +325,6 @@ pub fn mount_system_fs() -> ! {
         .unwrap();
         queue_spawn_thread(user_thread);
 
-        let wintest_path = root.join("bin/wintest").normalize();
-        let wintest_argv: [&[u8]; 1] = [b"wintest"];
-        let wintest_thread = Thread::new_user_from_path(
-            &wintest_path,
-            Some("wintest".to_string()),
-            &wintest_argv,
-            0,
-            0,
-            root.clone(),
-        )
-        .unwrap();
-        queue_spawn_thread(wintest_thread);
-
         let taskbar_path = root.join("bin/edos-taskbar").normalize();
         let taskbar_argv: [&[u8]; 1] = [b"edos-taskbar"];
         let taskbar_thread = Thread::new_user_from_path(
