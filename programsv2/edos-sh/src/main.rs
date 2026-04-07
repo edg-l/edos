@@ -362,7 +362,7 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
 
             let candidates = if word.starts_with('$') {
                 complete::complete_env_var(word)
-            } else if is_command_pos {
+            } else if is_command_pos && !word.contains('/') {
                 complete::complete_command(word)
             } else {
                 complete::complete_path(word)
