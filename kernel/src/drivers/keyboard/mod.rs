@@ -2,7 +2,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
-use pc_keyboard::{DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+use pc_keyboard::{DecodedKey, HandleControl, KeyEvent, Keyboard, ScancodeSet1};
 
 mod es105;
 use spin::{Mutex, Once};
@@ -25,6 +25,8 @@ use crate::{
 };
 
 pub static KEYBOARD_BROADCAST: Broadcaster<DecodedKey> = Broadcaster::new();
+/// Raw key events (press + release) for window input routing.
+pub static KEY_EVENT_BROADCAST: Broadcaster<KeyEvent> = Broadcaster::new();
 static KEYBOARD_POLLERS: BlockingMutex<
     Vec<(PollKey, Arc<PollEntry>, Arc<Subscriber<DecodedKey>>)>,
 > = BlockingMutex::new(Vec::new());
@@ -59,15 +61,22 @@ pub extern "C" fn driver_main() -> ! {
     register_device_str("/kbd", device).expect("Error registering device");
 
     let mut decoded_events: Vec<DecodedKey> = Vec::new();
+    let mut raw_events: Vec<KeyEvent> = Vec::new();
     loop {
         sched().thread_park_while(|| queue.is_empty());
 
         while let Some(scancode) = queue.pop() {
-            if let Ok(Some(event)) = keyboard.add_byte(scancode)
-                && let Some(key_event) = keyboard.process_keyevent(event)
-            {
-                decoded_events.push(key_event);
+            if let Ok(Some(event)) = keyboard.add_byte(scancode) {
+                raw_events.push(event.clone());
+                if let Some(key_event) = keyboard.process_keyevent(event) {
+                    decoded_events.push(key_event);
+                }
             }
+        }
+
+        if !raw_events.is_empty() {
+            KEY_EVENT_BROADCAST.broadcast_many(&raw_events);
+            raw_events.clear();
         }
 
         if !decoded_events.is_empty() {
@@ -77,6 +86,7 @@ pub extern "C" fn driver_main() -> ! {
         }
 
         KEYBOARD_BROADCAST.cleanup();
+        KEY_EVENT_BROADCAST.cleanup();
     }
 }
 
