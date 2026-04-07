@@ -20,15 +20,15 @@ fn main() {
         }
     };
 
-    let file_type = if meta.is_dir() {
-        "directory"
+    let (file_type, type_color) = if meta.is_dir() {
+        ("directory", "\x1B[1;34m")
     } else if meta.is_symlink() {
-        "symbolic link"
+        ("symbolic link", "\x1B[1;36m")
     } else {
-        "regular file"
+        ("regular file", "\x1B[0m")
     };
 
-    println!("  File: {}", path);
-    println!("  Type: {}", file_type);
-    println!("  Size: {}", meta.len());
+    println!("  File: \x1B[1m{}\x1B[0m", path);
+    println!("  Type: {}{}\x1B[0m", type_color, file_type);
+    println!("  Size: \x1B[33m{}\x1B[0m bytes", meta.len());
 }

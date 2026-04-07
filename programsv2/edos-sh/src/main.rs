@@ -152,42 +152,44 @@ fn redraw_line(prompt: &str, line: &str) {
 /// miss events.
 ///
 /// Up/Down arrow keys navigate command history.
+/// Redraw the line from the cursor position to the end, then reposition cursor.
+fn redraw_from_cursor(line: &str, cursor: usize, prompt_len: usize) {
+    // Save cursor, clear from cursor to end of line, print remaining chars, restore cursor
+    let remaining = &line[cursor..];
+    // Clear from cursor to end of line, print remaining, move cursor back
+    print!("\x1B[K{}", remaining);
+    // Move cursor back to correct position
+    let chars_after = line.len() - cursor;
+    if chars_after > 0 {
+        print!("\x1B[{}D", chars_after);
+    }
+    let _ = std::io::stdout().flush();
+}
+
 fn read_line(history: &[String], prompt: &str) -> Option<String> {
     print!("{}", prompt);
     let _ = std::io::stdout().flush();
 
     let mut line = String::new();
+    let mut cursor: usize = 0; // byte position in line
     let mut buf = [0u8; 1];
-    let mut history_index = history.len(); // start past end = "new line"
-    let mut saved_line = String::new(); // saves current input when browsing history
+    let mut history_index = history.len();
+    let mut saved_line = String::new();
+    let prompt_len = prompt.len(); // approximate (ANSI codes make this inaccurate but OK)
 
     loop {
-        // Try poll first with short timeout for efficiency
         let poll_ready = poll_stdin(100);
-
-        // Always try to read (non-blocking) regardless of poll result.
-        // This provides resilience against poll edge cases/races.
         let n = sys_read(0, &mut buf);
 
         if n < 0 {
-            // Error
             return if line.is_empty() { None } else { Some(line) };
         }
-
         if n == 0 {
-            // No data available
-            if !poll_ready {
-                // Poll timed out and no data - continue polling
-                continue;
-            }
-            // Poll said readable but no data - spurious, retry
             continue;
         }
 
         let ch = buf[0];
 
-        // Treat both '\r' (carriage return) and '\n' (newline) as line terminators.
-        // Terminal sends '\r' for Enter key; normalize to '\n'.
         if ch == b'\n' || ch == b'\r' {
             print!("\n");
             let _ = std::io::stdout().flush();
@@ -195,42 +197,40 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
             return Some(line);
         }
 
-        // Handle backspace: remove last character if any
         if ch == 0x08 || ch == 0x7F {
-            if !line.is_empty() {
-                line.pop();
-                // Send backspace sequence to terminal: move back, overwrite with space, move back
-                print!("\x08 \x08");
-                let _ = std::io::stdout().flush();
+            if cursor > 0 {
+                cursor -= 1;
+                line.remove(cursor);
+                // Move cursor back, then redraw from there
+                print!("\x08");
+                redraw_from_cursor(&line, cursor, prompt_len);
             }
             continue;
         }
 
         if ch == 0x1B {
-            // Try to read escape sequence
             let mut seq = [0u8; 2];
-            // Short poll + read for the bracket
             if poll_stdin(20) {
                 let n = sys_read(0, &mut seq[..1]);
                 if n == 1 && seq[0] == b'[' {
-                    // Read the final byte
                     if poll_stdin(20) {
                         let n = sys_read(0, &mut seq[1..2]);
                         if n == 1 {
                             match seq[1] {
                                 b'A' => {
-                                    // Up arrow: go back in history
+                                    // Up arrow
                                     if history_index > 0 {
                                         if history_index == history.len() {
                                             saved_line = line.clone();
                                         }
                                         history_index -= 1;
                                         line = history[history_index].clone();
+                                        cursor = line.len();
                                         redraw_line(prompt, &line);
                                     }
                                 }
                                 b'B' => {
-                                    // Down arrow: go forward in history
+                                    // Down arrow
                                     if history_index < history.len() {
                                         history_index += 1;
                                         if history_index == history.len() {
@@ -238,10 +238,43 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
                                         } else {
                                             line = history[history_index].clone();
                                         }
+                                        cursor = line.len();
                                         redraw_line(prompt, &line);
                                     }
                                 }
-                                _ => {} // ignore other sequences
+                                b'C' => {
+                                    // Right arrow
+                                    if cursor < line.len() {
+                                        cursor += 1;
+                                        print!("\x1B[C");
+                                        let _ = std::io::stdout().flush();
+                                    }
+                                }
+                                b'D' => {
+                                    // Left arrow
+                                    if cursor > 0 {
+                                        cursor -= 1;
+                                        print!("\x1B[D");
+                                        let _ = std::io::stdout().flush();
+                                    }
+                                }
+                                b'H' => {
+                                    // Home
+                                    if cursor > 0 {
+                                        print!("\x1B[{}D", cursor);
+                                        cursor = 0;
+                                        let _ = std::io::stdout().flush();
+                                    }
+                                }
+                                b'F' => {
+                                    // End
+                                    if cursor < line.len() {
+                                        print!("\x1B[{}C", line.len() - cursor);
+                                        cursor = line.len();
+                                        let _ = std::io::stdout().flush();
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -250,15 +283,29 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
             continue;
         }
 
-        // Skip other control characters
         if ch < 0x20 && ch != b'\t' {
             continue;
         }
 
-        line.push(ch as char);
-        // Echo the character
-        print!("{}", ch as char);
-        let _ = std::io::stdout().flush();
+        // Insert character at cursor position
+        if cursor == line.len() {
+            // Append (common case)
+            line.push(ch as char);
+            cursor += 1;
+            print!("{}", ch as char);
+            let _ = std::io::stdout().flush();
+        } else {
+            // Insert in middle
+            line.insert(cursor, ch as char);
+            cursor += 1;
+            // Print from insertion point to end, then move cursor back
+            print!("{}", &line[cursor - 1..]);
+            let chars_after = line.len() - cursor;
+            if chars_after > 0 {
+                print!("\x1B[{}D", chars_after);
+            }
+            let _ = std::io::stdout().flush();
+        }
     }
 }
 
