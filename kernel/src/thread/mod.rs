@@ -140,15 +140,25 @@ pub fn setup_user_stack(
 
     let argc = arg_ptrs.len();
 
-    // x86_64 ABI: RSP must be 16-byte aligned *before* a `call` instruction.
-    // Since `_start` is entered directly (not via `call`), we simulate the effect
-    // of a `call` by making RSP ≡ 8 (mod 16) -- i.e., the "return address" slot
-    // is implicit. After pushing all pointer slots (each 8 bytes), the final SP
-    // must satisfy SP % 16 == 8.
-    let total_pointers = 1 + argc + 1 + env_ptrs.len() + 1; // argc value + argv ptrs + null + env ptrs + null
-    // sp is currently 16-aligned (from the & mask above).
-    // After pushing total_pointers * 8 bytes, sp % 16 == (total_pointers % 2) * 8.
-    // We want sp % 16 == 8, so pad when total_pointers is even (not odd).
+    // CRITICAL: x86_64 System V ABI stack alignment for `_start`.
+    //
+    // The ABI requires RSP % 16 == 0 *before* a `call` instruction. After
+    // `call` pushes the 8-byte return address, RSP % 16 == 8 inside the
+    // callee. The callee's prologue (`push rbp`) then restores 16-alignment.
+    //
+    // `_start` is entered directly via iretq (no `call`), so we must set
+    // RSP as if a `call` just happened: RSP % 16 == 8. If we get this
+    // wrong, `_start`'s `push rbp` makes RSP % 16 == 0 instead of 8,
+    // and the subsequent `call main` produces RSP % 16 == 8 inside main
+    // instead of 0. The compiler emits `movaps` (requires 16-byte aligned
+    // operands) for stack spills, which GPFs on the misaligned stack.
+    //
+    // Math: sp is 16-aligned here (from the & mask above). We push
+    // total_pointers * 8 bytes below. After that:
+    //   sp % 16 == (total_pointers % 2) * 8
+    // We need sp % 16 == 8, so we add 8 bytes of padding when
+    // total_pointers is EVEN (would give sp % 16 == 0 without padding).
+    let total_pointers = 1 + argc + 1 + env_ptrs.len() + 1; // argc + argv ptrs + null + env ptrs + null
     if total_pointers % 2 == 0 {
         sp = sp.checked_sub(8).ok_or(StackSetupError::StackOverflow)?;
         if sp < stack_bottom {
