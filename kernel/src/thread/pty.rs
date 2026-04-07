@@ -41,6 +41,15 @@ impl LineDiscipline {
         input_buf: &mut Vec<u8>,
         output_buf: &mut Vec<u8>,
     ) -> LineAction {
+        // Ctrl+C generates interrupt in both raw and canonical mode
+        if byte == 0x03 {
+            self.line_buf.clear();
+            if self.echo {
+                output_buf.extend_from_slice(b"^C\n");
+            }
+            return LineAction::Interrupt;
+        }
+
         if !self.canonical {
             input_buf.push(byte);
             if self.echo {
