@@ -7,7 +7,9 @@ use std::process;
 fn main() {
     let args: Vec<String> = env::args().collect();
     let path = args.get(1).map(|s| s.as_str()).unwrap_or(".");
-    let color = edos_lib::io::isatty(1);
+    // Always color for now: EDOS terminal supports ANSI colors, and there's no
+    // real TTY distinction yet (shell stdout goes through a pipe to the terminal).
+    let color = true;
 
     let entries = match fs::read_dir(path) {
         Ok(e) => e,
