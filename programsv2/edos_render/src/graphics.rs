@@ -1448,7 +1448,7 @@ impl Screen {
     /// Returns a mutable pixel slice and row stride (in u32 units).
     /// In VRAM mode, returns the current back page slice and pitch_pixels.
     /// In Vec mode, returns the back buffer pixels and width.
-    fn pixels_mut(&mut self) -> Option<(&mut [u32], usize)> {
+    pub fn pixels_mut(&mut self) -> Option<(&mut [u32], usize)> {
         let stride = self.pitch_pixels;
         if let Some(ref mut vram) = self.vram {
             Some((vram.back_page(), stride))

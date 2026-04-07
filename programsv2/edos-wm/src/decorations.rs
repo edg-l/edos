@@ -9,7 +9,7 @@ pub const TITLE_HEIGHT: u64 = 24;
 pub const BORDER_WIDTH: u64 = 1;
 
 /// Size of the drop shadow in pixels (drawn outside the decorated area).
-pub const SHADOW_SIZE: u64 = 2;
+pub const SHADOW_SIZE: u64 = 5;
 
 /// Close button size in pixels (square).
 pub const CLOSE_BUTTON_SIZE: u64 = 20;

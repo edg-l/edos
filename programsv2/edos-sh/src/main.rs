@@ -303,7 +303,9 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
             // Determine if this is command position (first token on line)
             let is_command_pos = line_before_cursor[..word_start].trim().is_empty();
 
-            let candidates = if is_command_pos {
+            let candidates = if word.starts_with('$') {
+                complete::complete_env_var(word)
+            } else if is_command_pos {
                 complete::complete_command(word)
             } else {
                 complete::complete_path(word)

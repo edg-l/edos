@@ -71,9 +71,9 @@ impl Theme {
         window_border_highlight: Color::from_rgb(0x2A, 0x30, 0x3C),
         window_border_shadow: Color::from_rgb(0x0B, 0x0E, 0x14),
         window_shadow: Color::from_rgb(0x05, 0x07, 0x0A),
-        close_button_normal: Color::from_rgb(0xF0, 0x71, 0x78), // Ayu red
-        close_button_hover: Color::from_rgb(0xFF, 0x88, 0x8E),
-        close_button_x: Color::from_rgb(0xFF, 0xFF, 0xFF),
+        close_button_normal: Color::from_rgb(0x90, 0x3A, 0x3E), // Subdued red
+        close_button_hover: Color::from_rgb(0xC0, 0x50, 0x55),
+        close_button_x: Color::from_rgb(0xC0, 0xC0, 0xC0),
 
         // Taskbar
         taskbar_bg_top: Color::from_rgb(0x13, 0x17, 0x1F),

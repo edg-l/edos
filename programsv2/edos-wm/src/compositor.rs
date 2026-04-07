@@ -298,26 +298,49 @@ fn draw_window_direct(
     // --- Content area background ---
     draw_clipped_rect(screen, bw, th, w, h, Theme::DEFAULT.background);
 
-    // --- Drop shadow (drawn outside the decorated rect) ---
-    let shadow_color = Theme::DEFAULT.window_shadow;
-    // Right shadow strip: 2px wide, full height of decorated window
-    draw_clipped_rect(
-        screen,
-        total_w,
-        0,
-        SHADOW_SIZE as i64,
-        total_h,
-        shadow_color,
-    );
-    // Bottom shadow strip: full decorated width + shadow width
-    draw_clipped_rect(
-        screen,
-        0,
-        total_h,
-        total_w + SHADOW_SIZE as i64,
-        SHADOW_SIZE as i64,
-        shadow_color,
-    );
+    // --- Drop shadow (alpha-blended, fades out over SHADOW_SIZE pixels) ---
+    {
+        let shadow_layers = SHADOW_SIZE as i64;
+        let base_alpha = 80u32; // starting opacity (out of 255)
+
+        let blend_shadow_rect =
+            |screen: &mut Screen, rx: i64, ry: i64, rw: i64, rh: i64, alpha: u32| {
+                let abs_x = window.x as i64 + rx;
+                let abs_y = window.y as i64 + ry;
+                if abs_x + rw <= 0 || abs_y + rh <= 0 || abs_x >= screen_w || abs_y >= screen_h {
+                    return;
+                }
+                let x0 = abs_x.max(0) as u64;
+                let y0 = abs_y.max(0) as u64;
+                let x1 = ((abs_x + rw) as u64).min(screen_w as u64);
+                let y1 = ((abs_y + rh) as u64).min(screen_h as u64);
+                if let Some((pixels, stride)) = screen.pixels_mut() {
+                    let inv = 255 - alpha;
+                    for py in y0..y1 {
+                        for px in x0..x1 {
+                            let idx = py as usize * stride + px as usize;
+                            let dst = pixels[idx];
+                            let dr = (dst >> 16) & 0xFF;
+                            let dg = (dst >> 8) & 0xFF;
+                            let db = dst & 0xFF;
+                            // Blend toward black (shadow color)
+                            let r = (dr * inv) / 255;
+                            let g = (dg * inv) / 255;
+                            let b = (db * inv) / 255;
+                            pixels[idx] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                        }
+                    }
+                }
+            };
+
+        for i in 0..shadow_layers {
+            let alpha = base_alpha * (shadow_layers - i) as u32 / shadow_layers as u32;
+            // Right edge
+            blend_shadow_rect(screen, total_w + i, i + 1, 1, total_h - i, alpha);
+            // Bottom edge
+            blend_shadow_rect(screen, i + 1, total_h + i, total_w - i, 1, alpha);
+        }
+    }
 
     // Blit client buffer content with clipping
     if window.buffer_shm_id != 0 {

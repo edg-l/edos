@@ -1,10 +1,12 @@
 .PHONY: build
 build:
 	cargo +edos build -Z unstable-options --artifact-dir=../filesystem/bin/ --target x86_64-unknown-edos
+	rm -f ../filesystem/bin/*.rlib ../filesystem/bin/*.a
 
 .PHONY: build-release
 build-release:
 	cargo +edos build -Z unstable-options --artifact-dir=../filesystem/bin/ --release --target x86_64-unknown-edos
+	rm -f ../filesystem/bin/*.rlib ../filesystem/bin/*.a
 
 .PHONY: wm
 wm:

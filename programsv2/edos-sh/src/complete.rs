@@ -67,6 +67,19 @@ pub fn complete_path(prefix: &str) -> Vec<String> {
     matches
 }
 
+/// Complete an environment variable name. `prefix` includes the leading `$`.
+pub fn complete_env_var(prefix: &str) -> Vec<String> {
+    let var_prefix = &prefix[1..]; // strip the $
+    let mut matches = Vec::new();
+    for (key, _) in env::vars() {
+        if key.starts_with(var_prefix) {
+            matches.push(format!("${}", key));
+        }
+    }
+    matches.sort();
+    matches
+}
+
 /// Find the longest common prefix among a slice of strings.
 pub fn longest_common_prefix(strings: &[String]) -> String {
     if strings.is_empty() {
