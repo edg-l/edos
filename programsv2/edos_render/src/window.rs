@@ -416,13 +416,11 @@ impl Window {
     /// Create a new window with two attached shm buffers.
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Result<Self, i64> {
         let id = window_create(x, y, width, height)?;
-
         let buf0 = alloc_buffer(width, height)?;
         let buf1 = alloc_buffer(width, height).map_err(|e| {
             free_buffer(buf0.0, buf0.1);
             e
         })?;
-
         // Point the compositor at buffer 0 initially.
         window_set(id, property::BUFFER_SHM, buf0.0)?;
 

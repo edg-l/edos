@@ -140,11 +140,16 @@ pub fn setup_user_stack(
 
     let argc = arg_ptrs.len();
 
-    // Alignment padding: total pointer slots = 1(argc) + argc(argv ptrs) + 1(null) + envc(env ptrs) + 1(null) + 1(envp_ptr) + 1(argv_ptr) = argc + envc + 5
-    // We push them in reverse (null-terminated envp, envp_ptr, null-terminated argv, argv_ptr, argc).
-    // The existing logic pads to keep alignment before the pointer arrays.
+    // x86_64 ABI: RSP must be 16-byte aligned *before* a `call` instruction.
+    // Since `_start` is entered directly (not via `call`), we simulate the effect
+    // of a `call` by making RSP ≡ 8 (mod 16) -- i.e., the "return address" slot
+    // is implicit. After pushing all pointer slots (each 8 bytes), the final SP
+    // must satisfy SP % 16 == 8.
     let total_pointers = 1 + argc + 1 + env_ptrs.len() + 1; // argc value + argv ptrs + null + env ptrs + null
-    if total_pointers % 2 != 0 {
+    // sp is currently 16-aligned (from the & mask above).
+    // After pushing total_pointers * 8 bytes, sp % 16 == (total_pointers % 2) * 8.
+    // We want sp % 16 == 8, so pad when total_pointers is even (not odd).
+    if total_pointers % 2 == 0 {
         sp = sp.checked_sub(8).ok_or(StackSetupError::StackOverflow)?;
         if sp < stack_bottom {
             return Err(StackSetupError::StackOverflow);
