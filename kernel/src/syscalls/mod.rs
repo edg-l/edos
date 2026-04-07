@@ -64,6 +64,26 @@ mod window;
 use self::ioctl::sys_ioctl;
 use self::sync::{sys_futex_wait, sys_futex_wake};
 
+/// Properly decrement refcounts when a FileDescriptor is removed from a table
+/// without going through sys_close (e.g. dup2 replacing an existing fd).
+fn close_fd_refcount(desc: FileDescriptor) {
+    match desc {
+        FileDescriptor::PipeRead(pipe) => {
+            pipe.lock().close_reader().flush();
+        }
+        FileDescriptor::PipeWrite(pipe) => {
+            pipe.lock().close_writer().flush();
+        }
+        FileDescriptor::PtyMaster(pty) => {
+            pty.lock().close_master().flush();
+        }
+        FileDescriptor::PtySlave(pty) => {
+            pty.lock().close_slave().flush();
+        }
+        _ => {}
+    }
+}
+
 /// # Safety
 /// Must be called once per core
 pub unsafe fn setup_syscall() {
@@ -759,7 +779,8 @@ fn sys_dup(oldfd: u64) -> u64 {
         }
     };
 
-    table.allocate_lowest_fd(old_fd_descriptor)
+    old_fd_descriptor.inc_refcount();
+    table.allocate_fd(old_fd_descriptor)
 }
 
 fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
@@ -779,10 +800,13 @@ fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
         }
     };
 
-    // Close the newfd if it's already in use (but don't fail if it doesn't exist)
-    let _ = fd_table.lock().close_fd(newfd);
+    // Close the newfd if it's already in use (properly decrement refcounts)
+    if let Some(old_desc) = fd_table.lock().close_fd(newfd) {
+        close_fd_refcount(old_desc);
+    }
 
     // Insert the duplicated descriptor at newfd
+    old_fd_descriptor.inc_refcount();
     fd_table.lock().insert_fd(newfd, old_fd_descriptor);
 
     newfd // Success - return the new fd number
@@ -969,6 +993,7 @@ fn sys_spawn(
             .get_fd(stdin_fd)
             .cloned()
         {
+            stdin_desc.inc_refcount();
             user_thread_info.fd_table.lock().insert_fd(0, stdin_desc);
         }
 
@@ -980,6 +1005,7 @@ fn sys_spawn(
             .get_fd(stdout_fd)
             .cloned()
         {
+            stdout_desc.inc_refcount();
             user_thread_info.fd_table.lock().insert_fd(1, stdout_desc);
         }
 
@@ -991,6 +1017,7 @@ fn sys_spawn(
             .get_fd(stderr_fd)
             .cloned()
         {
+            stderr_desc.inc_refcount();
             user_thread_info.fd_table.lock().insert_fd(2, stderr_desc);
         }
     }

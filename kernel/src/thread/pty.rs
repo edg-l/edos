@@ -12,6 +12,13 @@ pub const PTY_IOCTL_SET_RAW: u64 = 0x5001;
 pub const PTY_IOCTL_SET_CANONICAL: u64 = 0x5002;
 pub const PTY_IOCTL_GET_MODE: u64 = 0x5003;
 
+/// Which side of the PTY a poller is registered from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtySide {
+    Master,
+    Slave,
+}
+
 #[derive(Debug)]
 pub enum LineAction {
     None,
@@ -138,7 +145,7 @@ pub struct Pty {
     input_wq: Arc<WaitQueue>,
     /// Wakes master readers when output_buf gets data or slave closes.
     output_wq: Arc<WaitQueue>,
-    pollers: Vec<(PollKey, Arc<PollEntry>)>,
+    pollers: Vec<(PollKey, PtySide, Arc<PollEntry>)>,
     next_poll_key: PollKey,
     line_disc: LineDiscipline,
     eof_pending: bool,
@@ -186,11 +193,6 @@ impl Pty {
     /// Clone the input WaitQueue Arc so callers can wait outside the lock.
     pub fn input_wq(&self) -> Arc<WaitQueue> {
         self.input_wq.clone()
-    }
-
-    /// Clone the output WaitQueue Arc so callers can wait outside the lock.
-    pub fn output_wq(&self) -> Arc<WaitQueue> {
-        self.output_wq.clone()
     }
 
     /// Master writes keyboard input into input_buf (slave reads this).
@@ -359,15 +361,15 @@ impl Pty {
         state
     }
 
-    pub fn add_poller(&mut self, entry: Arc<PollEntry>) -> PollKey {
+    pub fn add_poller(&mut self, side: PtySide, entry: Arc<PollEntry>) -> PollKey {
         let key = self.next_poll_key;
         self.next_poll_key = self.next_poll_key.wrapping_add(1).max(1);
-        self.pollers.push((key, entry));
+        self.pollers.push((key, side, entry));
         key
     }
 
     pub fn remove_poller(&mut self, key: PollKey) {
-        self.pollers.retain(|(stored, _)| *stored != key);
+        self.pollers.retain(|(stored, _, _)| *stored != key);
     }
 
     /// Snapshot pollers + current state for deferred notification after lock drop.
@@ -400,9 +402,9 @@ impl Pty {
             };
         }
 
-        let mut entries: heapless::Vec<Arc<PollEntry>, 8> = heapless::Vec::new();
-        for (_, entry) in self.pollers.iter() {
-            let _ = entries.push(entry.clone());
+        let mut entries: heapless::Vec<(PtySide, Arc<PollEntry>), 8> = heapless::Vec::new();
+        for (_, side, entry) in self.pollers.iter() {
+            let _ = entries.push((*side, entry.clone()));
         }
 
         PtyNotifications {
@@ -418,7 +420,7 @@ impl Pty {
 
 /// Deferred PTY notifications flushed after releasing the PTY lock.
 pub struct PtyNotifications {
-    entries: heapless::Vec<Arc<PollEntry>, 8>,
+    entries: heapless::Vec<(PtySide, Arc<PollEntry>), 8>,
     master_state: PollState,
     slave_state: PollState,
     input_wq: Option<Arc<WaitQueue>>,
@@ -439,20 +441,10 @@ impl PtyNotifications {
 
     /// Send all notifications. Call this after dropping the PTY lock.
     pub fn flush(self) {
-        for entry in &self.entries {
-            // Update each poller with the appropriate state depending on whether
-            // it is a master or slave poller. Since we cannot distinguish here,
-            // we merge both states for simplicity -- callers use separate
-            // PollablePtyMaster / PollablePtySlave that register separately.
-            // The state stored on the PollEntry is set at register time from the
-            // correct side, so we send whichever is non-zero.
-            let state = if self.master_state.readable
-                || self.master_state.writable
-                || self.master_state.hangup
-            {
-                self.master_state
-            } else {
-                self.slave_state
+        for (side, entry) in &self.entries {
+            let state = match side {
+                PtySide::Master => self.master_state,
+                PtySide::Slave => self.slave_state,
             };
             entry.update(state);
         }
@@ -495,7 +487,7 @@ impl Pollable for PollablePtyMaster {
                 key: None,
             }
         } else {
-            let key = pty.add_poller(entry);
+            let key = pty.add_poller(PtySide::Master, entry);
             PollRegistration {
                 initial: state,
                 key: Some(key),
@@ -531,7 +523,7 @@ impl Pollable for PollablePtySlave {
                 key: None,
             }
         } else {
-            let key = pty.add_poller(entry);
+            let key = pty.add_poller(PtySide::Slave, entry);
             PollRegistration {
                 initial: state,
                 key: Some(key),

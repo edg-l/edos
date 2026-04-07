@@ -22,6 +22,28 @@ pub enum FileDescriptor {
     PtySlave(Arc<BlockingMutex<Pty>>),
 }
 
+impl FileDescriptor {
+    /// Increment internal refcounts for types that track them (pipes, PTYs).
+    /// Must be called whenever a FileDescriptor is duplicated (dup, dup2, spawn fd inheritance).
+    pub fn inc_refcount(&self) {
+        match self {
+            FileDescriptor::PipeRead(pipe) => {
+                pipe.lock().readers += 1;
+            }
+            FileDescriptor::PipeWrite(pipe) => {
+                pipe.lock().writers += 1;
+            }
+            FileDescriptor::PtyMaster(pty) => {
+                pty.lock().masters += 1;
+            }
+            FileDescriptor::PtySlave(pty) => {
+                pty.lock().slaves += 1;
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum StandardStream {
     Stdin,

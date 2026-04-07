@@ -6,7 +6,6 @@ use crate::thread::pipe::{FileDescriptor, StandardStream};
 #[derive(Debug, Clone)]
 pub struct FileDescriptorTable {
     fds: BTreeMap<u64, FileDescriptor>,
-    next_fd: u64,
 }
 
 #[allow(unused)]
@@ -14,7 +13,6 @@ impl FileDescriptorTable {
     pub fn new() -> Self {
         let mut table = Self {
             fds: BTreeMap::new(),
-            next_fd: 3, // Start after stdin/stdout/stderr
         };
 
         // Initialize standard streams
@@ -31,11 +29,14 @@ impl FileDescriptorTable {
         table
     }
 
+    /// Allocate the lowest available fd number for the given descriptor.
     pub fn allocate_fd(&mut self, fd: FileDescriptor) -> u64 {
-        let fd_num = self.next_fd;
-        self.fds.insert(fd_num, fd);
-        self.next_fd += 1;
-        fd_num
+        let mut candidate = 0u64;
+        while self.fds.contains_key(&candidate) {
+            candidate += 1;
+        }
+        self.fds.insert(candidate, fd);
+        candidate
     }
 
     pub fn get_fd(&self, fd: u64) -> Option<&FileDescriptor> {
@@ -62,15 +63,5 @@ impl FileDescriptorTable {
             self.fds.iter().map(|(&k, v)| (k, v.clone())).collect();
         self.fds.clear();
         entries
-    }
-
-    /// Atomically find the lowest free fd and insert the descriptor.
-    pub fn allocate_lowest_fd(&mut self, descriptor: FileDescriptor) -> u64 {
-        let mut candidate = 0u64;
-        while self.fds.contains_key(&candidate) {
-            candidate += 1;
-        }
-        self.fds.insert(candidate, descriptor);
-        candidate
     }
 }

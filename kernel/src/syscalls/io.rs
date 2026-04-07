@@ -338,31 +338,25 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             -1
         }
         Some(FileDescriptor::PtyMaster(pty)) => {
-            // Clone the output_wq Arc before entering the loop (avoids holding lock while blocking).
-            let output_wq = pty.lock().output_wq();
-            loop {
-                let (result, eof, notif) = {
-                    let mut guard = pty.lock();
-                    let (r, n) = guard.master_read_to_user(buffer_ptr, count);
-                    let eof = guard.closed_slave && guard.output_buf.is_empty();
-                    (r, eof, n)
-                };
-                notif.flush();
+            // Master reads are non-blocking: return 0 immediately when no data
+            // is available. The master side is typically used in a poll loop
+            // (e.g. the terminal emulator) and must not block, or it cannot
+            // forward keyboard input to the slave -- causing a deadlock.
+            let (result, eof, notif) = {
+                let mut guard = pty.lock();
+                let (r, n) = guard.master_read_to_user(buffer_ptr, count);
+                let eof = guard.closed_slave && guard.output_buf.is_empty();
+                (r, eof, n)
+            };
+            notif.flush();
 
-                match result {
-                    Some(n) if n > 0 => break n as i64,
-                    Some(_) if eof => break 0,
-                    Some(_) => {
-                        output_wq.wait_until(|| {
-                            let guard = pty.lock();
-                            !guard.output_buf.is_empty() || guard.closed_slave
-                        });
-                        continue;
-                    }
-                    None => {
-                        info.lock().errno = Errno::EFAULT;
-                        break -1;
-                    }
+            match result {
+                Some(n) if n > 0 => n as i64,
+                Some(_) if eof => 0,
+                Some(_) => 0, // No data yet, return immediately
+                None => {
+                    info.lock().errno = Errno::EFAULT;
+                    -1
                 }
             }
         }
