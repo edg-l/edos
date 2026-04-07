@@ -1014,6 +1014,18 @@ pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> i64 {
     new_offset
 }
 
+/// Returns 1 if the fd refers to a terminal (StandardStream), 0 otherwise.
+pub fn sys_isatty(fd: u64) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    let guard = info.lock();
+    let fd_table = guard.fd_table.lock();
+    match fd_table.get_fd(fd) {
+        Some(FileDescriptor::StandardStream(_)) => 1,
+        _ => 0,
+    }
+}
+
 pub fn sys_ftruncate(fd: u64, size: u64) -> i32 {
     let sched = sched();
     let info = sched.current_thread_info();

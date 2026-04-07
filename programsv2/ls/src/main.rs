@@ -7,6 +7,7 @@ use std::process;
 fn main() {
     let args: Vec<String> = env::args().collect();
     let path = args.get(1).map(|s| s.as_str()).unwrap_or(".");
+    let color = edos_lib::io::isatty(1);
 
     let entries = match fs::read_dir(path) {
         Ok(e) => e,
@@ -37,9 +38,8 @@ fn main() {
         return;
     }
 
-    // Calculate column layout
-    // Display width includes the "/" suffix for directories
-    let display_width = |item: &(String, bool)| -> usize { item.0.len() + if item.1 { 1 } else { 0 } };
+    let display_width =
+        |item: &(String, bool)| -> usize { item.0.len() + if item.1 { 1 } else { 0 } };
     let max_name = items.iter().map(display_width).max().unwrap_or(0);
     let col_width = max_name + 2;
     let term_width = 80usize;
@@ -54,14 +54,12 @@ fn main() {
         } else {
             name.clone()
         };
-        // Don't pad the last item on a row (avoids wrapping at exactly terminal width)
         let is_last_col = (i + 1) % cols == 0 || i + 1 == items.len();
-        if *is_dir {
+        if *is_dir && color {
             if is_last_col {
                 print!("\x1B[1;34m{}\x1B[0m", display);
             } else {
-                let padded = format!("{:<width$}", display, width = col_width);
-                print!("\x1B[1;34m{}\x1B[0m", padded);
+                print!("\x1B[1;34m{:<width$}\x1B[0m", display, width = col_width);
             }
         } else if is_last_col {
             print!("{}", display);

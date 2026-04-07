@@ -222,6 +222,7 @@ const SYS_MUNMAP: u64 = 11;
 const SYS_LSEEK: u64 = 12;
 const SYS_FTRUNCATE: u64 = 13;
 const SYS_RENAME: u64 = 82;
+const SYS_ISATTY: u64 = 15;
 const SYS_IOCTL: u64 = 16;
 #[allow(unused)]
 const SYS_PIPE: u64 = 22;
@@ -294,6 +295,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_CLOSE => {
             let fd = ctx.rdi;
             ctx.rax = sys_close(fd) as u64;
+        }
+        SYS_ISATTY => {
+            let fd = ctx.rdi;
+            ctx.rax = io::sys_isatty(fd);
         }
         SYS_LSEEK => {
             let fd = ctx.rdi;

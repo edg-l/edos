@@ -34,6 +34,11 @@ pub fn poll(fds: &mut [SelectFd], timeout_ms: u64) -> i64 {
     }
 }
 
+/// Returns true if the file descriptor refers to a terminal.
+pub fn isatty(fd: u64) -> bool {
+    unsafe { sys::syscall1(sys::SYS_ISATTY, fd) == 1 }
+}
+
 /// Open a file. Returns a file descriptor on success, or negative on error.
 /// Flags: 0x40 = O_CREAT, 0x400 = O_APPEND.
 pub fn open(path: &str, flags: u64) -> i64 {
