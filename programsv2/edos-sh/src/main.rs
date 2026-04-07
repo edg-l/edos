@@ -233,6 +233,9 @@ fn main() {
 
                     let should_continue = command::execute_command(cmd, &rest);
 
+                    // Flush stdout before restoring fd so buffered data goes to the file
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+
                     // Restore original fds
                     if let Some(saved) = saved_stdout {
                         edos_lib::process::dup2(saved, 1);
