@@ -32,6 +32,23 @@ pub fn write(fd: u64, buf: &[u8]) -> isize {
     unsafe { sys::syscall3(sys::SYS_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64) as isize }
 }
 
+/// Duplicate a file descriptor, assigning the lowest unused fd.
+/// Returns the new fd, or -1 on error.
+pub fn dup(fd: u64) -> i64 {
+    unsafe { sys::syscall1(sys::SYS_DUP, fd) as i64 }
+}
+
+/// Duplicate a file descriptor to a specific target fd.
+/// Returns the new fd, or -1 on error.
+pub fn dup2(old_fd: u64, new_fd: u64) -> i64 {
+    unsafe { sys::syscall2(sys::SYS_DUP2, old_fd, new_fd) as i64 }
+}
+
+/// Get the current process ID.
+pub fn getpid() -> u64 {
+    unsafe { sys::syscall1(sys::SYS_GETPID, 0) }
+}
+
 /// Spawn a new process with redirected I/O.
 ///
 /// # Arguments
