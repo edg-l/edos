@@ -131,8 +131,22 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
         }
     }
 
-    // Increment reference count
-    shm.inc_ref();
+    // Increment reference count (fails if region is marked for destruction)
+    if shm.inc_ref().is_err() {
+        // Rollback: unmap all pages we just mapped
+        let memory_manager = info.lock().memory_manager.clone();
+        let mut manager = memory_manager.lock();
+        let page_count = (size + 0xFFF) / 4096;
+        for i in 0..page_count {
+            let virt_addr = VirtAddr::new(map_addr.as_u64() + i * 4096);
+            let page: Page<Size4KiB> = Page::containing_address(virt_addr);
+            if let Ok((_, flush)) = manager.mapper.unmap(page) {
+                flush.flush();
+            }
+        }
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    }
 
     // Record the mapping
     info.lock().memory_mappings.lock().insert(
@@ -225,10 +239,9 @@ pub fn sys_shm_destroy(shm_id: u64) -> i64 {
             info.lock().errno = Errno::EINVAL;
             -1
         }
-        Err(SharedMemoryError::StillMapped) => {
-            // Still has active mappings
-            info.lock().errno = Errno::EACCES;
-            -1
+        Err(SharedMemoryError::Destroyed) => {
+            // Already marked for destruction
+            0
         }
         Err(_) => {
             info.lock().errno = Errno::EINVAL;

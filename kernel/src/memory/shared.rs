@@ -3,7 +3,7 @@
 //! Provides shared memory regions that can be mapped into multiple process address spaces.
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::RwLock;
 use x86_64::structures::paging::{FrameAllocator, PhysFrame};
 
@@ -27,6 +27,8 @@ pub struct SharedMemory {
     id: u64,
     /// Number of active mappings
     ref_count: AtomicUsize,
+    /// Marked for destruction (like Linux IPC_RMID); auto-removed when ref_count hits 0
+    destroyed: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -37,8 +39,8 @@ pub enum SharedMemoryError {
     NotFound,
     /// Invalid size (zero or not page-aligned)
     InvalidSize,
-    /// Cannot destroy - still has active mappings
-    StillMapped,
+    /// Region has been marked for destruction; no new mappings allowed
+    Destroyed,
 }
 
 impl SharedMemory {
@@ -81,6 +83,7 @@ impl SharedMemory {
             size: aligned_size,
             id,
             ref_count: AtomicUsize::new(0),
+            destroyed: AtomicBool::new(false),
         });
 
         // Register in global registry
@@ -104,14 +107,28 @@ impl SharedMemory {
         self.ref_count.load(Ordering::Acquire)
     }
 
-    /// Increment the reference count
-    pub fn inc_ref(&self) {
-        self.ref_count.fetch_add(1, Ordering::AcqRel);
+    /// Returns true if this region has been marked for destruction.
+    pub fn is_destroyed(&self) -> bool {
+        self.destroyed.load(Ordering::Acquire)
     }
 
-    /// Decrement the reference count
+    /// Increment the reference count.
+    /// Returns error if the region is marked for destruction.
+    pub fn inc_ref(&self) -> Result<(), SharedMemoryError> {
+        if self.is_destroyed() {
+            return Err(SharedMemoryError::Destroyed);
+        }
+        self.ref_count.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// Decrement the reference count.
+    /// If ref_count reaches 0 and the entry was marked destroyed, removes it from the registry.
     pub fn dec_ref(&self) {
-        self.ref_count.fetch_sub(1, Ordering::AcqRel);
+        let prev = self.ref_count.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 && self.destroyed.load(Ordering::Acquire) {
+            SHARED_MEMORY_REGISTRY.write().remove(&self.id);
+        }
     }
 
     /// Get the physical frames backing this shared memory
@@ -124,22 +141,21 @@ impl SharedMemory {
         SHARED_MEMORY_REGISTRY.read().get(&id).cloned()
     }
 
-    /// Destroy a shared memory region (removes from registry)
+    /// Mark a shared memory region for destruction.
     ///
-    /// Returns error if there are still active mappings.
+    /// If no active mappings remain, removes immediately from the registry.
+    /// Otherwise, marks for deferred removal: the last `dec_ref()` that brings
+    /// ref_count to 0 will remove the entry (like Linux `IPC_RMID`).
     pub fn destroy(id: u64) -> Result<(), SharedMemoryError> {
         let registry = SHARED_MEMORY_REGISTRY.read();
-        if let Some(shm) = registry.get(&id) {
-            if shm.ref_count() > 0 {
-                return Err(SharedMemoryError::StillMapped);
-            }
-        } else {
-            return Err(SharedMemoryError::NotFound);
+        let shm = registry.get(&id).ok_or(SharedMemoryError::NotFound)?;
+        shm.destroyed.store(true, Ordering::Release);
+        if shm.ref_count() > 0 {
+            // Deferred: dec_ref() will clean up when ref_count reaches 0
+            return Ok(());
         }
         drop(registry);
 
-        // Remove from registry - this will drop the Arc
-        // When the last Arc is dropped, the frames will be deallocated
         SHARED_MEMORY_REGISTRY.write().remove(&id);
         Ok(())
     }
