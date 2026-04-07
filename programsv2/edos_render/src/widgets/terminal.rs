@@ -103,6 +103,9 @@ pub struct Terminal {
     selection_start: Option<(usize, usize)>, // (absolute_line_idx, col)
     selection_end: Option<(usize, usize)>,   // (absolute_line_idx, col)
     selecting: bool,                         // true while mouse button held during drag
+    last_click_cell: Option<(usize, usize)>, // for double-click detection
+    last_click_tick: u32,                    // frame counter at last click
+    tick_counter: u32,                       // monotonic frame counter
 
     // ANSI escape sequence parser state
     esc_state: EscState,
@@ -148,6 +151,9 @@ impl Terminal {
             selection_start: None,
             selection_end: None,
             selecting: false,
+            last_click_cell: None,
+            last_click_tick: 0,
+            tick_counter: 0,
             esc_state: EscState::Normal,
             esc_buf: [0; 32],
             esc_len: 0,
@@ -633,6 +639,34 @@ impl Terminal {
         }
     }
 
+    /// Find the word boundaries around the given cell. Returns (start_col, end_col) inclusive.
+    fn word_bounds_at(&self, abs_line: usize, col: usize) -> (usize, usize) {
+        let row = if abs_line < self.history.len() {
+            self.history.get(abs_line)
+        } else {
+            self.buffer.get(abs_line - self.history.len())
+        };
+        let row = match row {
+            Some(r) if !r.is_empty() => r,
+            _ => return (col, col),
+        };
+        let col = col.min(row.len() - 1);
+        let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-' || c == '.';
+        let ch = row[col].ch;
+        if !is_word(ch) {
+            return (col, col);
+        }
+        let mut start = col;
+        while start > 0 && is_word(row[start - 1].ch) {
+            start -= 1;
+        }
+        let mut end = col;
+        while end + 1 < row.len() && is_word(row[end + 1].ch) {
+            end += 1;
+        }
+        (start, end)
+    }
+
     /// Clear the current selection.
     pub fn clear_selection(&mut self) {
         self.selection_start = None;
@@ -716,6 +750,7 @@ impl Terminal {
 
     /// Update cursor blink state (call periodically).
     pub fn tick(&mut self) {
+        self.tick_counter = self.tick_counter.wrapping_add(1);
         self.cursor_blink_counter += 1;
         if self.cursor_blink_counter >= 30 {
             // Toggle every ~500ms at 60fps
@@ -857,9 +892,22 @@ impl Widget for Terminal {
     fn on_mouse_button(&mut self, x: i32, y: i32, pressed: bool) -> Option<WidgetEvent> {
         if pressed {
             let cell = self.pixel_to_cell(x, y);
-            self.selection_start = Some(cell);
-            self.selection_end = Some(cell);
-            self.selecting = true;
+            let is_double = self.last_click_cell == Some(cell)
+                && self.tick_counter.wrapping_sub(self.last_click_tick) < 20;
+            self.last_click_cell = Some(cell);
+            self.last_click_tick = self.tick_counter;
+
+            if is_double {
+                // Double-click: select word
+                let (start_col, end_col) = self.word_bounds_at(cell.0, cell.1);
+                self.selection_start = Some((cell.0, start_col));
+                self.selection_end = Some((cell.0, end_col));
+                self.selecting = false;
+            } else {
+                self.selection_start = Some(cell);
+                self.selection_end = Some(cell);
+                self.selecting = true;
+            }
         } else {
             self.selecting = false;
         }
