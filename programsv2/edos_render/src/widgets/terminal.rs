@@ -99,6 +99,11 @@ pub struct Terminal {
     // Input buffer for characters to send
     input_buffer: Vec<char>,
 
+    // Text selection state
+    selection_start: Option<(usize, usize)>, // (absolute_line_idx, col)
+    selection_end: Option<(usize, usize)>,   // (absolute_line_idx, col)
+    selecting: bool,                         // true while mouse button held during drag
+
     // ANSI escape sequence parser state
     esc_state: EscState,
     esc_buf: [u8; 32],
@@ -140,6 +145,9 @@ impl Terminal {
             bold: false,
             modifiers: edos_lib::keymap::Modifiers::default(),
             input_buffer: Vec::new(),
+            selection_start: None,
+            selection_end: None,
+            selecting: false,
             esc_state: EscState::Normal,
             esc_buf: [0; 32],
             esc_len: 0,
@@ -453,6 +461,7 @@ impl Terminal {
         self.width = pixel_width;
         self.height = pixel_height;
         self.scroll_offset = 0;
+        self.clear_selection();
     }
 
     /// Write a string to the terminal.
@@ -479,6 +488,23 @@ impl Terminal {
             // Move top line to history
             if self.history.len() >= self.max_history {
                 self.history.pop_front();
+                // A line was evicted from the front of history; adjust selection indices.
+                // Only history-resident endpoints shift; buffer-resident ones stay put
+                // because history.len() decreased by 1, keeping their absolute index correct.
+                let history_len = self.history.len(); // post-pop length
+                let start_gone = self.selection_start.map(|(l, _)| l == 0).unwrap_or(false);
+                let end_gone = self.selection_end.map(|(l, _)| l == 0).unwrap_or(false);
+                if start_gone || end_gone {
+                    self.clear_selection();
+                } else {
+                    for opt in [&mut self.selection_start, &mut self.selection_end] {
+                        if let Some((line_idx, _)) = opt {
+                            if *line_idx < history_len {
+                                *line_idx -= 1;
+                            }
+                        }
+                    }
+                }
             }
             self.history.push_back(line);
 
@@ -552,6 +578,142 @@ impl Terminal {
         }
     }
 
+    /// Convert pixel coordinates to (absolute_line_index, col).
+    fn pixel_to_cell(&self, px: i32, py: i32) -> (usize, usize) {
+        let char_w = char_width() as i32;
+        let char_h = text_height() as i32;
+
+        let col = ((px - self.x) / char_w).clamp(0, (self.cols as i32) - 1) as usize;
+        let display_row = ((py - self.y) / char_h).clamp(0, (self.rows as i32) - 1) as usize;
+
+        let total_lines = self.history.len() + self.buffer.len();
+        let viewport_bottom = total_lines.saturating_sub(self.scroll_offset);
+        let viewport_top = viewport_bottom.saturating_sub(self.rows);
+        let abs_line = viewport_top + display_row;
+
+        (abs_line, col)
+    }
+
+    /// Returns selection (start, end) sorted so start <= end, or None if no selection.
+    fn selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
+        let start = self.selection_start?;
+        let end = self.selection_end?;
+
+        if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
+            Some((start, end))
+        } else {
+            Some((end, start))
+        }
+    }
+
+    /// Returns true if the given cell is part of the current selection.
+    fn is_cell_selected(&self, abs_line: usize, col: usize) -> bool {
+        let Some(((start_line, start_col), (end_line, end_col))) = self.selection_range() else {
+            return false;
+        };
+
+        // Empty selection (click without drag)
+        if start_line == end_line && start_col == end_col {
+            return false;
+        }
+
+        if abs_line < start_line || abs_line > end_line {
+            return false;
+        }
+
+        if start_line == end_line {
+            // Single-line selection: inclusive on both ends
+            col >= start_col && col <= end_col
+        } else if abs_line == start_line {
+            col >= start_col
+        } else if abs_line == end_line {
+            col <= end_col
+        } else {
+            true
+        }
+    }
+
+    /// Clear the current selection.
+    pub fn clear_selection(&mut self) {
+        self.selection_start = None;
+        self.selection_end = None;
+        self.selecting = false;
+    }
+
+    /// Get the text covered by the current selection, or None if no selection.
+    pub fn get_selected_text(&self) -> Option<String> {
+        let ((start_line, start_col), (end_line, end_col)) = self.selection_range()?;
+
+        // Empty selection (click without drag)
+        if start_line == end_line && start_col == end_col {
+            return None;
+        }
+
+        let get_row = |abs_line: usize| -> Option<&Vec<Cell>> {
+            if abs_line < self.history.len() {
+                self.history.get(abs_line)
+            } else {
+                self.buffer.get(abs_line - self.history.len())
+            }
+        };
+
+        let mut lines: Vec<String> = Vec::new();
+
+        for abs_line in start_line..=end_line {
+            let Some(row) = get_row(abs_line) else {
+                continue;
+            };
+
+            if row.is_empty() {
+                lines.push(String::new());
+                continue;
+            }
+
+            let (col_start, col_end) = if start_line == end_line {
+                (start_col, end_col)
+            } else if abs_line == start_line {
+                (start_col, row.len().saturating_sub(1))
+            } else if abs_line == end_line {
+                (0, end_col)
+            } else {
+                (0, row.len().saturating_sub(1))
+            };
+
+            let col_end_clamped = col_end.min(row.len().saturating_sub(1));
+            let text: String = if col_start <= col_end_clamped {
+                row[col_start..=col_end_clamped]
+                    .iter()
+                    .map(|c| c.ch)
+                    .collect()
+            } else {
+                String::new()
+            };
+
+            lines.push(text.trim_end().to_string());
+        }
+
+        let result = lines.join("\n");
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
+    /// Copy the current selection to the clipboard file /tmp/clipboard.
+    pub fn copy_selection(&self) {
+        if let Some(text) = self.get_selected_text() {
+            let _ = std::fs::write("/tmp/clipboard", text);
+        }
+    }
+
+    /// Paste from the clipboard file /tmp/clipboard into the input buffer.
+    pub fn paste_clipboard(&mut self) {
+        if let Ok(text) = std::fs::read_to_string("/tmp/clipboard") {
+            self.input_buffer.extend(text.chars());
+        }
+    }
+
     /// Update cursor blink state (call periodically).
     pub fn tick(&mut self) {
         self.cursor_blink_counter += 1;
@@ -612,9 +774,16 @@ impl Widget for Terminal {
             if let Some(row) = row_data {
                 for (col_idx, cell) in row.iter().enumerate() {
                     let cell_x = self.x + (col_idx as i32) * char_w;
+                    let selected = self.is_cell_selected(line_idx, col_idx);
 
-                    // Draw cell background if it differs from terminal background
-                    if cell.bg != self.bg_color {
+                    // Draw cell background: selection color takes priority
+                    let bg = if selected {
+                        terminal_colors::SELECTION
+                    } else {
+                        cell.bg
+                    };
+
+                    if bg != self.bg_color || selected {
                         draw_rect(
                             buffer,
                             buffer_width,
@@ -623,7 +792,7 @@ impl Widget for Terminal {
                             row_y,
                             char_w as u32,
                             char_h as u32,
-                            cell.bg,
+                            bg,
                         );
                     }
 
@@ -679,11 +848,21 @@ impl Widget for Terminal {
         }
     }
 
-    fn on_mouse_move(&mut self, _x: i32, _y: i32) {
-        // Could implement text selection here
+    fn on_mouse_move(&mut self, x: i32, y: i32) {
+        if self.selecting {
+            self.selection_end = Some(self.pixel_to_cell(x, y));
+        }
     }
 
-    fn on_mouse_button(&mut self, _x: i32, _y: i32, _pressed: bool) -> Option<WidgetEvent> {
+    fn on_mouse_button(&mut self, x: i32, y: i32, pressed: bool) -> Option<WidgetEvent> {
+        if pressed {
+            let cell = self.pixel_to_cell(x, y);
+            self.selection_start = Some(cell);
+            self.selection_end = Some(cell);
+            self.selecting = true;
+        } else {
+            self.selecting = false;
+        }
         None
     }
 
@@ -703,18 +882,51 @@ impl Widget for Terminal {
             return None;
         }
 
+        // Ctrl+Shift+C/V: copy/paste -- intercept before map_keycode turns them into control chars.
+        if self.modifiers.ctrl && self.modifiers.shift {
+            match scancode {
+                keycode::C => {
+                    self.copy_selection();
+                    return None;
+                }
+                keycode::V => {
+                    self.paste_clipboard();
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
         // Reset cursor blink
         self.cursor_visible = true;
         self.cursor_blink_counter = 0;
 
         // Handle special keys (escape sequences, scrollback)
         match scancode {
-            keycode::ARROW_UP => self.input_buffer.extend("\x1B[A".chars()),
-            keycode::ARROW_DOWN => self.input_buffer.extend("\x1B[B".chars()),
-            keycode::ARROW_RIGHT => self.input_buffer.extend("\x1B[C".chars()),
-            keycode::ARROW_LEFT => self.input_buffer.extend("\x1B[D".chars()),
-            keycode::HOME => self.input_buffer.extend("\x1B[H".chars()),
-            keycode::END => self.input_buffer.extend("\x1B[F".chars()),
+            keycode::ARROW_UP => {
+                self.clear_selection();
+                self.input_buffer.extend("\x1B[A".chars());
+            }
+            keycode::ARROW_DOWN => {
+                self.clear_selection();
+                self.input_buffer.extend("\x1B[B".chars());
+            }
+            keycode::ARROW_RIGHT => {
+                self.clear_selection();
+                self.input_buffer.extend("\x1B[C".chars());
+            }
+            keycode::ARROW_LEFT => {
+                self.clear_selection();
+                self.input_buffer.extend("\x1B[D".chars());
+            }
+            keycode::HOME => {
+                self.clear_selection();
+                self.input_buffer.extend("\x1B[H".chars());
+            }
+            keycode::END => {
+                self.clear_selection();
+                self.input_buffer.extend("\x1B[F".chars());
+            }
             keycode::PAGE_UP => {
                 if self.modifiers.shift {
                     self.scroll_offset =
@@ -730,10 +942,14 @@ impl Widget for Terminal {
                     self.input_buffer.extend("\x1B[6~".chars());
                 }
             }
-            keycode::DELETE => self.input_buffer.extend("\x1B[3~".chars()),
+            keycode::DELETE => {
+                self.clear_selection();
+                self.input_buffer.extend("\x1B[3~".chars());
+            }
             _ => {
                 // Try to decode keycode to a character via the layout
                 if let Some(ch) = map_keycode(scancode, &self.modifiers) {
+                    self.clear_selection();
                     self.input_buffer.push(ch);
                 }
             }

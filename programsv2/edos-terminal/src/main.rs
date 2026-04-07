@@ -101,6 +101,18 @@ fn main() {
                     Some(WindowEventType::KeyRelease) => {
                         terminal.on_key(event.code, false);
                     }
+                    Some(WindowEventType::MouseButton) => {
+                        if event.code == 0 {
+                            terminal.on_mouse_button(
+                                event.x as i32,
+                                event.y as i32,
+                                event.data != 0,
+                            );
+                        }
+                    }
+                    Some(WindowEventType::MouseMove) => {
+                        terminal.on_mouse_move(event.x as i32, event.y as i32);
+                    }
                     Some(WindowEventType::MouseScroll) => {
                         let delta = -(event.data as i32);
                         terminal.scroll(delta);
