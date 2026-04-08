@@ -400,7 +400,6 @@ impl XhciController {
                     }
                 }
 
-                // Log port status changes that arrive while we wait for the command to complete.
                 if event.trb_type() == TRB_TYPE_PORT_STATUS_CHANGE {
                     let port_id = ((event.parameter >> 24) & 0xFF) as u8;
                     println!("xhci: port {} status change during command", port_id);
@@ -1061,6 +1060,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
         TransferRing,
         TransferRing,
     )> = None;
+    let mut pending_usb_partition: Option<(u64, usize)> = None; // (block_count, index)
     // Counter used to generate unique /dev/usbN names for mass storage devices.
     let mut usb_storage_count: usize = 0;
 
@@ -1296,43 +1296,17 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                                         &data,
                                                     );
 
-                                                    let is_first = mass_storage_device.is_none();
-
-                                                    // Store the MSC device and rings for use in
-                                                    // the main loop block I/O handler.
-                                                    // Only the first storage device is used for
-                                                    // block I/O; later ones are dropped here.
-                                                    mass_storage_device =
-                                                        Some((msc, in_ring, out_ring));
-
-                                                    // Initialize the block I/O mailbox and
-                                                    // register the partition only for the first
-                                                    // USB storage device.
-                                                    if is_first {
+                                                    if mass_storage_device.is_none() {
                                                         USB_BLOCK_MAILBOX.call_once(|| {
                                                             Arc::new(Mailbox::with_capacity(4))
                                                         });
-
-                                                        // Register the partition in the FS layer
-                                                        // so it can be mounted.
-                                                        let device_id =
-                                                            1000 + usb_storage_count as u64;
-                                                        let partition = crate::fs::gpt::Partition {
-                                                            index: 0,
-                                                            starting_lba: 0,
-                                                            ending_lba: block_count.saturating_sub(1),
-                                                            size_sectors: block_count,
-                                                            partition_type: crate::fs::gpt::PartitionType::Fat32,
-                                                            name: alloc::format!("USB Storage {}", usb_storage_count),
-                                                            filesystem: Some(crate::fs::gpt::FilesystemType::Fat32),
-                                                            device_id,
-                                                            unique_partition_guid: [0; 16],
-                                                        };
-                                                        if let Err(e) = crate::drivers::usb::block_api::register_usb_partition(partition) {
-                                                            println!("xhci: failed to register USB partition: {:?}", e);
-                                                        }
+                                                        // Save info for deferred partition registration
+                                                        // (done after port scan to avoid blocking during enumeration)
+                                                        pending_usb_partition = Some((block_count, usb_storage_count));
                                                     }
 
+                                                    mass_storage_device =
+                                                        Some((msc, in_ring, out_ring));
                                                     usb_storage_count += 1;
                                                 }
                                                 Err(e) => {
@@ -1361,6 +1335,26 @@ pub extern "C" fn xhci_driver_main() -> ! {
     }
 
     println!("xhci: initial enumeration complete");
+
+    // Register USB partition now that all ports are scanned (deferred to avoid
+    // blocking the xHCI thread during port enumeration).
+    if let Some((block_count, idx)) = pending_usb_partition {
+        let device_id = 1000 + idx as u64;
+        let partition = crate::fs::gpt::Partition {
+            index: 0,
+            starting_lba: 0,
+            ending_lba: block_count.saturating_sub(1),
+            size_sectors: block_count,
+            partition_type: crate::fs::gpt::PartitionType::Fat32,
+            name: alloc::format!("USB Storage {}", idx),
+            filesystem: Some(crate::fs::gpt::FilesystemType::Fat32),
+            device_id,
+            unique_partition_guid: [0; 16],
+        };
+        if let Err(e) = crate::drivers::usb::block_api::register_usb_partition(partition) {
+            println!("xhci: failed to register USB partition: {:?}", e);
+        }
+    }
 
     // Allocate DMA buffers for HID reports and pre-fill the interrupt rings.
     // Keyboard: 8-byte boot report; mouse: 4-byte boot report (3 bytes + wheel).
