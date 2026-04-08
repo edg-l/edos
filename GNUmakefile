@@ -104,7 +104,7 @@ usb-test.img:
 	qemu-img create -f raw usb-test.img 16M
 
 .PHONY: run-trace
-run-trace: programs programsv2 limine/limine ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
+run-trace: programsv2 limine/limine ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 	$(MAKE) -C kernel CARGO_FLAGS="--features trace"
 	$(MAKE) $(IMAGE_NAME).iso
 	$(call run_qemu_uefi,iso,4,-accel kvm -m 2G)
@@ -160,11 +160,11 @@ limine/limine:
 	$(MAKE) -C limine
 
 .PHONY: kernel
-kernel: programs programsv2
+kernel: programsv2
 	$(MAKE) -C kernel CARGO_FLAGS="$(CARGO_FLAGS)"
 
 .PHONY: check
-check: programs programsv2
+check: programsv2
 	$(MAKE) -C kernel check
 
 $(IMAGE_NAME).iso: limine/limine kernel
@@ -201,7 +201,6 @@ $(IMAGE_NAME).hdd: limine/limine kernel
 .PHONY: clean
 clean:
 	$(MAKE) -C kernel clean
-	$(MAKE) -C programs clean
 	$(MAKE) -C programsv2 clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
 
@@ -214,11 +213,6 @@ distclean: clean clean-sata
 .PHONY: fmt
 fmt:
 	$(MAKE) -C kernel fmt
-	$(MAKE) -C programs fmt
-
-.PHONY: programs
-programs: programsv2
-	$(MAKE) -C programs build
 
 .PHONY: programsv2
 programsv2:
