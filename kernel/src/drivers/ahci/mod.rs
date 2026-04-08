@@ -21,10 +21,7 @@ use crate::{
     },
     log,
     thread::{
-        mailbox::Mailbox,
-        runqueue::IO_PRIORITY,
-        scheduler::{WakePriority, sched},
-        thread::ThreadId,
+        mailbox::Mailbox, runqueue::IO_PRIORITY, scheduler::sched, thread::ThreadId,
         util::queue_spawn_kthread_named,
     },
 };
@@ -202,92 +199,81 @@ pub extern "C" fn ahci_driver_main() -> ! {
     // The AHCI main thread job is to route requests to ports.
 
     loop {
-        // Check and wake relevant port worker threads.
-        for controller in &controllers {
-            // Read HBA interrupt status register
-            let hba_is = unsafe { ptr::read_volatile(&(*controller.hba).is) };
+        // Sleep until an MSI interrupt or mailbox request arrives.
+        sched().thread_park_while(|| {
+            let any_interrupt = controllers.iter().any(|c| {
+                let hba_is = unsafe { ptr::read_volatile(&raw const (*c.hba).is) };
+                hba_is != 0
+            });
+            let has_request = !requests.is_empty();
+            !any_interrupt && !has_request
+        });
 
+        // Dispatch HBA interrupts to port workers.
+        for controller in &controllers {
+            let hba_is = unsafe { ptr::read_volatile(&(*controller.hba).is) };
             if hba_is == 0 {
-                continue; // No interrupts on this controller
+                continue;
             }
 
-            // Process only ports with pending interrupts using bit manipulation
             let mut pending_ports = hba_is;
             while pending_ports != 0 {
-                // Find the lowest set bit (next port with interrupt)
                 let port_idx = pending_ports.trailing_zeros() as usize;
-
-                // Clear this bit for next iteration
                 pending_ports &= pending_ports - 1;
 
-                // Process this port's interrupt
                 let port_regs = unsafe { &mut (*controller.hba).ports[port_idx] };
                 let port_is = unsafe { ptr::read_volatile(&port_regs.is) };
-
                 if port_is != 0 {
-                    // Clear the port interrupt status
                     unsafe { ptr::write_volatile(&mut port_regs.is, port_is) };
 
-                    // Find the device for this controller+port combination
-                    if let Some(device) = detected_devices.iter().find(|d| {
-                        d.controller_pci_address == controller.pci_device.address
-                            && d.port_idx == port_idx
-                    }) {
-                        // Wake the worker thread for this device
-                        if let Some(worker_tid) = port_map_reverse.get(&device.id) {
-                            sched().wake_thread(*worker_tid, WakePriority::Interrupt);
-                        }
+                    // Wake the port worker's WaitQueue so wait_for_command_completion unblocks.
+                    if let Some(port) = controller.ports.get(port_idx).and_then(|p| p.as_ref()) {
+                        port.lock().wake_command_waiters();
                     }
                 }
             }
 
-            // Clear HBA interrupt status for processed ports
             unsafe { ptr::write_volatile(&mut (*controller.hba).is, hba_is) };
         }
 
-        let mut req = requests.recv();
-        match req.payload.take().unwrap() {
-            AhciRequest::ListDevices => {
-                req.reply(AhciResponse::Devices(detected_devices.clone()));
-            }
-            AhciRequest::DeviceRequest { device_id, command } => {
-                if let Some(mb) = device_mailboxes.get((device_id) as usize) {
-                    mb.forward(req, command);
-                    continue;
-                } else {
-                    req.reply(AhciResponse::Result(Err(AhciError::InvalidDevice)));
+        // Drain all pending requests.
+        while let Some(mut req) = requests.try_recv() {
+            match req.payload.take().unwrap() {
+                AhciRequest::ListDevices => {
+                    req.reply(AhciResponse::Devices(detected_devices.clone()));
                 }
-            }
-            AhciRequest::GetDeviceMailbox(thread_id) => {
-                let id = port_map.get(&thread_id);
-
-                if let Some(id) = id {
-                    let mailbox = (device_mailboxes.get((*id) as usize)).cloned();
-
-                    req.reply(AhciResponse::DeviceMailbox(mailbox));
-                } else {
-                    req.reply(AhciResponse::DeviceMailbox(None));
-                }
-            }
-            AhciRequest::GetDevicePort(worker_tid) => {
-                let mut found = false;
-                let _info = port_map.get(&worker_tid);
-
-                if let Some(info) = port_map.get(&worker_tid) {
-                    let device = &detected_devices[*info as usize];
-
-                    for controller in &controllers {
-                        if controller.pci_device.address == device.controller_pci_address {
-                            let port = controller.ports.get(device.port_idx).cloned().flatten();
-                            req.reply(AhciResponse::DevicePort(port));
-                            found = true;
-                            break;
-                        }
+                AhciRequest::DeviceRequest { device_id, command } => {
+                    if let Some(mb) = device_mailboxes.get(device_id as usize) {
+                        mb.forward(req, command);
+                    } else {
+                        req.reply(AhciResponse::Result(Err(AhciError::InvalidDevice)));
                     }
                 }
-
-                if !found {
-                    req.reply(AhciResponse::DevicePort(None));
+                AhciRequest::GetDeviceMailbox(thread_id) => {
+                    let id = port_map.get(&thread_id);
+                    if let Some(id) = id {
+                        let mailbox = device_mailboxes.get((*id) as usize).cloned();
+                        req.reply(AhciResponse::DeviceMailbox(mailbox));
+                    } else {
+                        req.reply(AhciResponse::DeviceMailbox(None));
+                    }
+                }
+                AhciRequest::GetDevicePort(worker_tid) => {
+                    let mut found = false;
+                    if let Some(info) = port_map.get(&worker_tid) {
+                        let device = &detected_devices[*info as usize];
+                        for controller in &controllers {
+                            if controller.pci_device.address == device.controller_pci_address {
+                                let port = controller.ports.get(device.port_idx).cloned().flatten();
+                                req.reply(AhciResponse::DevicePort(port));
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !found {
+                        req.reply(AhciResponse::DevicePort(None));
+                    }
                 }
             }
         }
@@ -302,20 +288,20 @@ extern "C" fn port_worker_thread() -> ! {
     let mailbox = {
         loop {
             let mailbox = send_request(AhciRequest::GetDeviceMailbox(tid));
-
             if let AhciResponse::DeviceMailbox(Some(mailbox)) = mailbox {
                 break mailbox;
             }
+            sched().thread_sleep(core::time::Duration::from_millis(10));
         }
     };
 
     let port = {
         loop {
             let port = send_request(AhciRequest::GetDevicePort(tid));
-
             if let AhciResponse::DevicePort(Some(port)) = port {
                 break port;
             }
+            sched().thread_sleep(core::time::Duration::from_millis(10));
         }
     };
 

@@ -12,19 +12,10 @@ use crate::{
         path::Path,
     },
     memory::mapper::MemoryManager,
-    thread::scheduler::sched,
 };
 
 pub(super) fn send_request(request: FsRequest) -> FsResponse {
-    let requests = {
-        loop {
-            if let Some(req) = FS_REQUESTS.get() {
-                break req;
-            }
-            sched().thread_yield();
-        }
-    };
-
+    let requests = FS_REQUESTS.wait();
     let response = requests.send(request);
     response.wait()
 }

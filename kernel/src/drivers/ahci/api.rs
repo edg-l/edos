@@ -2,23 +2,19 @@ use alloc::vec::Vec;
 
 use crate::{
     drivers::ahci::{
-        AHCI_REQUESTS, AhciError, AhciRequest, AhciResponse, Command, DetectedDevice,
-        structures::DeviceIdentifyInfo,
+        AHCI_DRIVER_THREAD_ID, AHCI_REQUESTS, AhciError, AhciRequest, AhciResponse, Command,
+        DetectedDevice, structures::DeviceIdentifyInfo,
     },
-    thread::scheduler::sched,
+    thread::scheduler::{WakePriority, sched},
 };
 
 pub(super) fn send_request(request: AhciRequest) -> AhciResponse {
-    let requests = {
-        loop {
-            if let Some(req) = AHCI_REQUESTS.get() {
-                break req;
-            }
-            sched().thread_yield();
-        }
-    };
-
+    let requests = AHCI_REQUESTS.wait();
     let response = requests.send(request);
+    // Wake the AHCI main thread so it processes the request promptly.
+    if let Some(tid) = AHCI_DRIVER_THREAD_ID.get() {
+        sched().wake_thread(*tid, WakePriority::Normal);
+    }
     response.wait()
 }
 

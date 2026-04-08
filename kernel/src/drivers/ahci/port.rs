@@ -21,7 +21,7 @@ use crate::{
         dma::{DmaRegion, dma},
     },
     log,
-    thread::scheduler::sched,
+    thread::{scheduler::sched, waitqueue::WaitQueue},
 };
 
 const AHCI_CMD_SLOTS: usize = 32;
@@ -40,6 +40,9 @@ pub struct AhciPort {
 
     // Command slot tracking
     pub free_slots: u32, // Bitmap of free command slots
+
+    // Waitqueue for command completion notifications
+    pub cmd_complete: WaitQueue,
 }
 
 unsafe impl Send for AhciPort {}
@@ -112,6 +115,7 @@ impl AhciPort {
             fis_area,
             command_tables: [const { None }; AHCI_CMD_SLOTS],
             free_slots: 0xFFFFFFFF, // All slots initially free
+            cmd_complete: WaitQueue::new(),
         })
     }
 
@@ -171,6 +175,10 @@ impl AhciPort {
 
     pub fn set_device_type(&mut self, device_type: DeviceType) {
         self.device_type = device_type;
+    }
+
+    pub fn wake_command_waiters(&self) {
+        self.cmd_complete.wake_all();
     }
 
     /// Execute ATAPI command (SCSI packet command)
@@ -602,39 +610,31 @@ impl AhciPort {
         }
 
         let start_time = crate::timer::Instant::now();
+        let port_regs = self.port_regs;
 
         loop {
             // Check if command completed (slot bit cleared in CI register)
-            let ci = unsafe { ptr::read_volatile(&raw const (*self.port_regs).ci) };
+            let ci = unsafe { ptr::read_volatile(&raw const (*port_regs).ci) };
             if ci & (1 << slot) == 0 {
-                // Command completed successfully
-                break;
+                return Ok(());
             }
 
-            // Check for errors before waiting
-            let is = unsafe { ptr::read_volatile(&raw const (*self.port_regs).is) };
-
-            // Task File Error Status - indicates command failed
+            // Check for errors
+            let is = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
             if is & PORT_IS_TFES != 0 {
-                // Clear only the TFES bit to preserve other pending interrupt status.
                 unsafe { ptr::write_volatile(&raw mut (*self.port_regs).is, PORT_IS_TFES) };
-
-                // Get detailed error information from task file data
-                let tfd = unsafe { ptr::read_volatile(&raw const (*self.port_regs).tfd) };
+                let tfd = unsafe { ptr::read_volatile(&raw const (*port_regs).tfd) };
                 let status = (tfd & 0xFF) as u8;
                 let error = ((tfd >> 8) & 0xFF) as u8;
-
                 log!(
                     "AHCI port {}: Command error - Status: {:#x}, Error: {:#x}",
                     self.port_idx,
                     status,
                     error
                 );
-
                 return Err(AhciError::IoError);
             }
 
-            // Check for timeout
             if start_time.elapsed() >= timeout {
                 log!(
                     "AHCI port {}: Command timeout on slot {}",
@@ -644,11 +644,14 @@ impl AhciPort {
                 return Err(AhciError::CommandTimeout);
             }
 
-            // Yield to scheduler while waiting (interrupt-wakeable)
-            sched().thread_sleep(core::time::Duration::from_millis(5));
+            // Park until the AHCI main thread signals command completion.
+            // Falls through immediately if the condition is already met.
+            let _ = self.cmd_complete.wait_until(|| {
+                let ci = unsafe { ptr::read_volatile(&raw const (*port_regs).ci) };
+                let is = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
+                ci & (1 << slot) == 0 || is & PORT_IS_TFES != 0 || start_time.elapsed() >= timeout
+            });
         }
-
-        Ok(())
     }
 
     /// Check if any commands have completed (non-blocking)
