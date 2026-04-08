@@ -8,8 +8,11 @@ override USER_VARIABLE = $(if $(filter $(origin $(1)),default undefined),$(eval 
 # Target architecture to build for. Default to x86_64.
 $(call USER_VARIABLE,KARCH,x86_64)
 
+# Guest memory size (used by both -m and memory-backend-memfd for blob=on)
+$(call USER_VARIABLE,QEMU_MEM,2G)
+
 # Default user QEMU flags. These are appended to the QEMU command calls.
-$(call USER_VARIABLE,QEMUFLAGS,-m 2G)
+$(call USER_VARIABLE,QEMUFLAGS,-m $(QEMU_MEM))
 
 override IMAGE_NAME := edos-$(KARCH)
 
@@ -26,11 +29,10 @@ run: run-$(KARCH)
 run-hdd: run-hdd-$(KARCH)
 
 # Display device configurations
-# TODO: Add blob=on to virtio-vga once host kernel has CONFIG_UDMABUF=y
-# (enables zero-copy display: no TRANSFER_TO_HOST_2D, just RESOURCE_FLUSH)
+# blob=on enables zero-copy display (requires host CONFIG_UDMABUF=y + memfd backend)
 DISPLAY_VGA := -device VGA,vgamem_mb=32
-DISPLAY_VIRTIO := -vga none -device virtio-vga,xres=1920,yres=1080 -display sdl
-DISPLAY_VIRTIO_GTK := -vga none -device virtio-vga,xres=1920,yres=1080 -display gtk,zoom-to-fit=off
+DISPLAY_VIRTIO := -vga none -device virtio-vga,xres=1920,yres=1080,blob=on -display sdl
+DISPLAY_VIRTIO_GTK := -vga none -device virtio-vga,xres=1920,yres=1080,blob=on -display gtk,zoom-to-fit=off
 
 # QEMU runner function
 # $(1) = boot media type (iso/hdd)
@@ -41,6 +43,8 @@ define run_qemu_uefi
 	qemu-system-$(KARCH) \
 		-M q35 \
 		-cpu qemu64,+sse4.1,+sse4.2,+x2apic \
+		-object memory-backend-memfd,id=mem1,size=$(QEMU_MEM) \
+		-machine memory-backend=mem1 \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		$(if $(filter iso,$(1)),-cdrom $(IMAGE_NAME).iso,-hda $(IMAGE_NAME).hdd) \

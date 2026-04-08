@@ -11,8 +11,8 @@ const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
 const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
 const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
-const VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB: u32 = 0x0108;
-const VIRTIO_GPU_CMD_SET_SCANOUT_BLOB: u32 = 0x0109;
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB: u32 = 0x010c;
+const VIRTIO_GPU_CMD_SET_SCANOUT_BLOB: u32 = 0x010d;
 const VIRTIO_GPU_CMD_GET_EDID: u32 = 0x010a;
 
 // Cursor commands
@@ -214,7 +214,7 @@ impl VirtioGpu {
         // Without it QEMU treats the driver as legacy and may not resolve
         // DMA addresses correctly in RESOURCE_ATTACH_BACKING.
         const VIRTIO_GPU_F_EDID: u64 = 1 << 1;
-        const VIRTIO_GPU_F_RESOURCE_BLOB: u64 = 1 << 28;
+        const VIRTIO_GPU_F_RESOURCE_BLOB: u64 = 1 << 3;
         const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 
         let device_features = transport.read_device_features();
