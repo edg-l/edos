@@ -1029,6 +1029,8 @@ pub extern "C" fn xhci_driver_main() -> ! {
         ring.push(trb);
         unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
         println!("xhci: HID keyboard interrupt transfer queued");
+        crate::drivers::keyboard::USB_KEYBOARD_ACTIVE
+            .store(true, core::sync::atomic::Ordering::Relaxed);
     }
 
     if let Some((ref mut dev, ref mut ring)) = mouse_device {
@@ -1041,6 +1043,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
         ring.push(trb);
         unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
         println!("xhci: HID mouse interrupt transfer queued");
+        crate::drivers::mouse::USB_MOUSE_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
     }
 
     // Main event loop: handle runtime events (hot-plug, transfer completions, etc.)

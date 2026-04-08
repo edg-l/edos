@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
@@ -23,6 +23,8 @@ use crate::{
 };
 
 pub static KEY_EVENT_BROADCAST: Broadcaster<KeyEvent> = Broadcaster::new();
+/// Set to true when a USB HID keyboard is active; suppresses PS/2 keyboard broadcasting.
+pub static USB_KEYBOARD_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_POLLERS: BlockingMutex<Vec<(PollKey, Arc<PollEntry>, Arc<Subscriber<KeyEvent>>)>> =
     BlockingMutex::new(Vec::new());
 static KEYBOARD_NEXT_POLL_KEY: AtomicU64 = AtomicU64::new(1);
@@ -71,9 +73,11 @@ pub extern "C" fn driver_main() -> ! {
             }
         }
 
-        if !raw_events.is_empty() {
+        if !raw_events.is_empty() && !USB_KEYBOARD_ACTIVE.load(Ordering::Relaxed) {
             KEY_EVENT_BROADCAST.broadcast_many(&raw_events);
             notify_keyboard_pollers();
+            raw_events.clear();
+        } else {
             raw_events.clear();
         }
 

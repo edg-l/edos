@@ -1,6 +1,6 @@
 //! PS/2 mouse driver with event broadcasting and DevFS interface.
 
-use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
@@ -66,6 +66,8 @@ impl MouseEvent {
 
 /// Broadcaster for mouse events
 pub static MOUSE_BROADCAST: Broadcaster<MouseEvent> = Broadcaster::new();
+/// Set to true when a USB HID mouse is active; suppresses PS/2 mouse broadcasting.
+pub static USB_MOUSE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 // Current mouse state
 static MOUSE_POSITION: (AtomicI32, AtomicI32) = (AtomicI32::new(0), AtomicI32::new(0));
@@ -266,8 +268,10 @@ fn process_packet(packet: &[u8]) {
         _padding: [0; 2],
     };
 
-    MOUSE_BROADCAST.broadcast(event);
-    notify_mouse_pollers();
+    if !USB_MOUSE_ACTIVE.load(Ordering::Relaxed) {
+        MOUSE_BROADCAST.broadcast(event);
+        notify_mouse_pollers();
+    }
 }
 
 fn mouse_poll_state(subscriber: &Subscriber<MouseEvent>) -> PollState {
