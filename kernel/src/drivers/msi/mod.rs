@@ -4,10 +4,10 @@ use crate::{
     apic::get_lapic,
     drivers::pci::{
         config::{
-            find_capability, pci_read_u8, pci_read_u16, pci_read_u32, pci_write_u16, pci_write_u32,
+            find_capability, pci_read_u16, pci_read_u32, pci_write_u16, pci_write_u32,
             read_bar_phys,
         },
-        structures::{PciAddress, PciDevice},
+        structures::PciDevice,
     },
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
 };
@@ -31,7 +31,6 @@ const MSI_ENABLE: u16 = 1 << 0;
 const MSI_MULTIPLE_MESSAGE_CAPABLE_SHIFT: u16 = 1; // 3 bits
 const MSI_MULTIPLE_MESSAGE_ENABLE_SHIFT: u16 = 4; // 3 bits
 const MSI_64BIT_CAPABLE: u16 = 1 << 7;
-const MSI_PER_VECTOR_MASKING: u16 = 1 << 8; // not used yet
 
 /// Enable MSI for a given PCI device to a specific APIC vector.
 /// Falls back to returning an error if MSI capability is missing.
@@ -72,8 +71,6 @@ pub fn enable_msi_for_device(dev: &PciDevice, vector: u8) -> Result<(), MsiError
     }
 
     // Enable only a single message for now
-    let mmc = (ctrl >> MSI_MULTIPLE_MESSAGE_CAPABLE_SHIFT) & 0x7; // supported count as 2^mmc
-    let _supported_irqs = 1u16 << mmc;
     ctrl &= !(0x7 << MSI_MULTIPLE_MESSAGE_ENABLE_SHIFT);
     ctrl |= 0 << MSI_MULTIPLE_MESSAGE_ENABLE_SHIFT; // enable 1 message
 

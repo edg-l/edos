@@ -18,7 +18,7 @@ use crate::{
             structures::PciAddress,
         },
     },
-    interrupts::{InterruptIndex, io::XHCI_DRIVER_THREAD_ID},
+    interrupts::InterruptIndex,
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
     println,
     thread::{mailbox::Mailbox, scheduler::sched},
@@ -28,7 +28,8 @@ use self::{
     device::{
         ConfigDescriptor, DESC_CONFIGURATION, DESC_DEVICE, DESC_ENDPOINT, DESC_INTERFACE,
         DeviceDescriptor, EndpointDescriptor, HID_PROTOCOL_KEYBOARD, HID_PROTOCOL_MOUSE,
-        InterfaceDescriptor, SetupPacket, USB_CLASS_HID, UsbDevice, UsbSpeed,
+        InterfaceDescriptor, SetupPacket, USB_CLASS_HID, USB_CLASS_MASS_STORAGE, UsbDevice,
+        UsbSpeed,
     },
     registers::{XhciRegisters, reg_read, reg_write},
     rings::{
@@ -117,8 +118,6 @@ impl XhciController {
                 continue;
             }
 
-            println!("xhci: BAR0 at {:#x}", bar_phys.as_u64());
-
             // Enable PCI bus mastering (Command register bit 2)
             let cmd = pci_read_u16(dev.address, 0x04);
             pci_write_u16(dev.address, 0x04, cmd | (1 << 2));
@@ -197,8 +196,6 @@ impl XhciController {
         let max_ports = ((hcsparams1 >> 24) & 0xFF) as u8;
         self.context_size = if hccparams1 & (1 << 2) != 0 { 64 } else { 32 };
 
-        println!("xhci: context size = {} bytes", self.context_size);
-
         // 5. Set MaxSlotsEn in CONFIG register
         unsafe {
             reg_write(&mut (*self.regs.op()).config, max_slots as u32);
@@ -219,8 +216,6 @@ impl XhciController {
         let scratch_hi = ((hcsparams2 >> 27) & 0x1F) as u32;
         let num_scratch = (scratch_hi << 5) | scratch_lo;
         if num_scratch > 0 {
-            println!("xhci: allocating {} scratchpad buffers", num_scratch);
-
             let scratch_array = DmaBuffer::allocate_sized((num_scratch as usize) * 8)
                 .map_err(|_| "xhci: failed to allocate scratchpad array")?;
 
@@ -602,7 +597,6 @@ impl XhciController {
         if slot_id == 0 {
             return Err(XhciError::SlotsFull);
         }
-        println!("xhci: assigned slot {}", slot_id);
 
         // Step 2 — Allocate the Input Context.
         // Layout: InputControlContext (1 × context_size) + SlotContext (1 × context_size)
@@ -671,8 +665,6 @@ impl XhciController {
                 println!("xhci: address device failed: {:?}", e);
                 XhciError::InvalidDevice
             })?;
-
-        println!("xhci: device addressed on slot {}", slot_id);
 
         Ok(UsbDevice {
             slot_id,
@@ -1004,8 +996,7 @@ impl XhciController {
                 if event.trb_type() == TRB_TYPE_TRANSFER {
                     let event_slot = ((event.control >> 24) & 0xFF) as u8;
                     if event_slot != slot_id {
-                        // Resubmit HID TRBs for consumed events so they keep working
-                        continue; // not our event, skip
+                        continue;
                     }
                     let comp_code = ((event.status >> 24) & 0xFF) as u8;
                     let residual = event.status & 0x00FF_FFFF;
@@ -1043,8 +1034,6 @@ impl XhciController {
 
 /// Main xHCI driver entry point, run as a kernel thread.
 pub extern "C" fn xhci_driver_main() -> ! {
-    println!("xhci: driver thread started");
-
     let mut controller = match XhciController::find_and_init() {
         Some(c) => c,
         None => {
@@ -1085,7 +1074,6 @@ pub extern "C" fn xhci_driver_main() -> ! {
         let portsc = unsafe { reg_read(&(*controller.regs.port(port - 1)).portsc) };
         let ccs = portsc & 1; // Current Connect Status
         if ccs != 0 {
-            println!("xhci: device detected on port {}", port);
             match controller.handle_port_status_change(port) {
                 Ok(mut device) => {
                     // Read device descriptor
@@ -1110,8 +1098,6 @@ pub extern "C" fn xhci_driver_main() -> ! {
                     // Read config descriptor
                     match controller.get_config_descriptor(&mut device, 0) {
                         Ok(config_data) => {
-                            parse_and_log_config(&config_data);
-
                             if config_data.len() >= 9 {
                                 let config_value = config_data[5]; // bConfigurationValue
                                 if let Err(e) =
@@ -1134,8 +1120,6 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             .and_then(|d| find_hid_interface(d, HID_PROTOCOL_KEYBOARD));
 
                         if let Some((iface, ep)) = kbd_info {
-                            println!("xhci: configuring HID keyboard on slot {}", device.slot_id);
-
                             // Switch to boot protocol (0 = boot, 1 = report)
                             if let Err(e) = controller.set_hid_protocol(
                                 &mut device,
@@ -1181,8 +1165,6 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             .and_then(|d| find_hid_interface(d, HID_PROTOCOL_MOUSE));
 
                         if let Some((iface, ep)) = mouse_info {
-                            println!("xhci: configuring HID mouse on slot {}", device.slot_id);
-
                             // Switch to boot protocol (0 = boot, 1 = report)
                             if let Err(e) = controller.set_hid_protocol(
                                 &mut device,
@@ -1317,7 +1299,8 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                                         });
                                                         // Save info for deferred partition registration
                                                         // (done after port scan to avoid blocking during enumeration)
-                                                        pending_usb_partition = Some((block_count, usb_storage_count));
+                                                        pending_usb_partition =
+                                                            Some((block_count, usb_storage_count));
                                                     }
 
                                                     mass_storage_device =
@@ -1390,7 +1373,6 @@ pub extern "C" fn xhci_driver_main() -> ! {
         };
         ring.push(trb);
         unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
-        println!("xhci: HID keyboard interrupt transfer queued");
         crate::drivers::keyboard::USB_KEYBOARD_ACTIVE
             .store(true, core::sync::atomic::Ordering::Relaxed);
     }
@@ -1403,7 +1385,6 @@ pub extern "C" fn xhci_driver_main() -> ! {
         };
         ring.push(trb);
         unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
-        println!("xhci: HID mouse interrupt transfer queued");
         crate::drivers::mouse::USB_MOUSE_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
     }
 
@@ -1419,9 +1400,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
         let er = controller.event_ring.as_mut().unwrap() as *mut EventRing;
         sched().thread_park_while(|| {
             let has_event = unsafe { (*er).peek() };
-            let has_mailbox = USB_BLOCK_MAILBOX
-                .get()
-                .is_some_and(|mb| !mb.is_empty());
+            let has_mailbox = USB_BLOCK_MAILBOX.get().is_some_and(|mb| !mb.is_empty());
             !has_event && !has_mailbox
         });
 
@@ -1654,48 +1633,6 @@ impl<'a> Iterator for DescriptorIter<'a> {
     }
 }
 
-/// Parse a configuration descriptor blob and log the interfaces and endpoints found.
-fn parse_and_log_config(data: &[u8]) {
-    for (desc_type, bytes) in DescriptorIter::new(data) {
-        if desc_type == DESC_INTERFACE && bytes.len() >= 9 {
-            let iface =
-                unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const InterfaceDescriptor) };
-            println!(
-                "xhci:   interface {}: class={} subclass={} protocol={} endpoints={}",
-                iface.b_interface_number,
-                iface.b_interface_class,
-                iface.b_interface_sub_class,
-                iface.b_interface_protocol,
-                iface.b_num_endpoints
-            );
-        } else if desc_type == DESC_ENDPOINT && bytes.len() >= 7 {
-            let ep =
-                unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const EndpointDescriptor) };
-            let dir = if ep.b_endpoint_address & 0x80 != 0 {
-                "IN"
-            } else {
-                "OUT"
-            };
-            let ep_type = match ep.bm_attributes & 0x3 {
-                0 => "Control",
-                1 => "Isochronous",
-                2 => "Bulk",
-                3 => "Interrupt",
-                _ => unreachable!(),
-            };
-            // Copy packed field to local before passing to println.
-            let max_pkt = ep.w_max_packet_size;
-            println!(
-                "xhci:     EP{} {} {} maxpkt={}",
-                ep.b_endpoint_address & 0x0F,
-                dir,
-                ep_type,
-                max_pkt
-            );
-        }
-    }
-}
-
 /// Search a configuration descriptor blob for a HID interface with the given boot protocol
 /// and its interrupt IN endpoint.
 ///
@@ -1738,7 +1675,6 @@ fn find_hid_interface(
 fn find_mass_storage(
     config_data: &[u8],
 ) -> Option<(InterfaceDescriptor, EndpointDescriptor, EndpointDescriptor)> {
-    const USB_CLASS_MASS_STORAGE: u8 = 0x08;
     const USB_SUBCLASS_SCSI: u8 = 0x06;
     const USB_PROTOCOL_BOT: u8 = 0x50;
 

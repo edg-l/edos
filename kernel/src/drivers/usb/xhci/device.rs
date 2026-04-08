@@ -93,7 +93,6 @@ pub const DESC_DEVICE: u8 = 1;
 pub const DESC_CONFIGURATION: u8 = 2;
 pub const DESC_INTERFACE: u8 = 4;
 pub const DESC_ENDPOINT: u8 = 5;
-pub const DESC_HID: u8 = 0x21;
 
 // ---------------------------------------------------------------------------
 // USB class codes
