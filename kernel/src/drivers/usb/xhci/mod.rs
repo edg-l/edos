@@ -849,6 +849,140 @@ impl XhciController {
 
         Ok(ring)
     }
+
+    /// Configure both bulk IN and bulk OUT endpoints in one Configure Endpoint command.
+    ///
+    /// Returns `(in_ring, out_ring)`.
+    pub fn configure_bulk_endpoints(
+        &mut self,
+        device: &mut UsbDevice,
+        ep_in_addr: u8,
+        ep_in_maxpkt: u16,
+        ep_out_addr: u8,
+        ep_out_maxpkt: u16,
+    ) -> Result<(TransferRing, TransferRing), XhciError> {
+        let ep_in_num = ep_in_addr & 0x0F;
+        let ep_out_num = ep_out_addr & 0x0F;
+        // xHCI DCI: ep_num * 2 + (1 if IN, 0 if OUT)
+        let ep_in_dci = ep_in_num * 2 + 1;
+        let ep_out_dci = ep_out_num * 2;
+
+        let ctx_size = self.context_size;
+        let in_ring = TransferRing::new(64);
+        let out_ring = TransferRing::new(64);
+
+        let input_ctx = &device.input_ctx;
+        let icc = input_ctx.as_ptr() as *mut u32;
+        unsafe {
+            // Drop Context Flags = 0
+            core::ptr::write_volatile(icc, 0);
+            // Add Context Flags: slot (bit 0) + EP IN (bit ep_in_dci) + EP OUT (bit ep_out_dci)
+            core::ptr::write_volatile(icc.add(1), (1 << 0) | (1 << ep_in_dci) | (1 << ep_out_dci));
+        }
+
+        // Update Slot Context: Context Entries must cover the highest DCI used
+        let slot_ctx = unsafe { input_ctx.as_ptr().add(ctx_size) as *mut u32 };
+        unsafe {
+            let dword0 = core::ptr::read_volatile(slot_ctx);
+            let current_entries = (dword0 >> 27) & 0x1F;
+            let new_entries = current_entries.max(ep_in_dci as u32).max(ep_out_dci as u32);
+            core::ptr::write_volatile(slot_ctx, (dword0 & !(0x1F << 27)) | (new_entries << 27));
+        }
+
+        // EP Context for bulk IN (type 6)
+        let ep_in_ctx =
+            unsafe { input_ctx.as_ptr().add((ep_in_dci as usize + 1) * ctx_size) as *mut u32 };
+        unsafe {
+            core::ptr::write_volatile(ep_in_ctx, 0); // Dword 0
+            // Dword 1: EP Type=6 (Bulk IN), Max Packet Size, CErr=3
+            let dword1 = (6u32 << 3) | ((ep_in_maxpkt as u32) << 16) | (3 << 1);
+            core::ptr::write_volatile(ep_in_ctx.add(1), dword1);
+            // Dwords 2-3: TR Dequeue Pointer with DCS=1
+            let tr_phys = in_ring.phys_addr() | 1;
+            core::ptr::write_volatile(ep_in_ctx.add(2), tr_phys as u32);
+            core::ptr::write_volatile(ep_in_ctx.add(3), (tr_phys >> 32) as u32);
+            // Dword 4: Average TRB Length
+            core::ptr::write_volatile(ep_in_ctx.add(4), ep_in_maxpkt as u32);
+        }
+
+        // EP Context for bulk OUT (type 2)
+        let ep_out_ctx =
+            unsafe { input_ctx.as_ptr().add((ep_out_dci as usize + 1) * ctx_size) as *mut u32 };
+        unsafe {
+            core::ptr::write_volatile(ep_out_ctx, 0); // Dword 0
+            // Dword 1: EP Type=2 (Bulk OUT), Max Packet Size, CErr=3
+            let dword1 = (2u32 << 3) | ((ep_out_maxpkt as u32) << 16) | (3 << 1);
+            core::ptr::write_volatile(ep_out_ctx.add(1), dword1);
+            // Dwords 2-3: TR Dequeue Pointer with DCS=1
+            let tr_phys = out_ring.phys_addr() | 1;
+            core::ptr::write_volatile(ep_out_ctx.add(2), tr_phys as u32);
+            core::ptr::write_volatile(ep_out_ctx.add(3), (tr_phys >> 32) as u32);
+            // Dword 4: Average TRB Length
+            core::ptr::write_volatile(ep_out_ctx.add(4), ep_out_maxpkt as u32);
+        }
+
+        let input_ctx_phys = input_ctx.phys_addr().as_u64();
+        self.submit_command(Trb::configure_endpoint(input_ctx_phys, device.slot_id))?;
+
+        println!(
+            "xhci: configured EP{} IN / EP{} OUT bulk, maxpkt IN={} OUT={}",
+            ep_in_num, ep_out_num, ep_in_maxpkt, ep_out_maxpkt
+        );
+
+        Ok((in_ring, out_ring))
+    }
+
+    /// Perform a bulk transfer (IN or OUT) on a device endpoint.
+    ///
+    /// For OUT transfers the caller fills the DMA buffer before calling.
+    /// For IN transfers the controller fills the DMA buffer on completion.
+    /// Returns the number of bytes transferred.
+    pub fn bulk_transfer(
+        &mut self,
+        slot_id: u8,
+        ring: &mut TransferRing,
+        ep_dci: u32,
+        buf_phys: u64,
+        length: u32,
+        _direction_in: bool,
+    ) -> Result<usize, XhciError> {
+        let trb = Trb {
+            parameter: buf_phys,
+            status: length,
+            control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
+        };
+        ring.push(trb);
+
+        // Ring the doorbell for this slot/endpoint
+        unsafe {
+            reg_write(self.regs.doorbell(slot_id), ep_dci);
+        }
+
+        // Poll for a Transfer Event completion
+        for _ in 0..10_000_000u32 {
+            if let Some(event) = self.event_ring.as_mut().unwrap().poll() {
+                let erdp = self.event_ring.as_ref().unwrap().dequeue_phys();
+                let intr = self.regs.interrupter(0);
+                unsafe {
+                    reg_write(&mut (*intr).erdp_lo, (erdp as u32) | (1 << 3));
+                    reg_write(&mut (*intr).erdp_hi, (erdp >> 32) as u32);
+                }
+
+                if event.trb_type() == TRB_TYPE_TRANSFER {
+                    let comp_code = ((event.status >> 24) & 0xFF) as u8;
+                    let residual = event.status & 0x00FF_FFFF;
+                    if comp_code == COMP_SUCCESS || comp_code == COMP_SHORT_PACKET {
+                        return Ok((length.saturating_sub(residual)) as usize);
+                    }
+                    return Err(XhciError::TransferError(comp_code));
+                }
+                // Consume non-transfer events (port status changes, etc.)
+            }
+            core::hint::spin_loop();
+        }
+
+        Err(XhciError::CommandTimeout)
+    }
 }
 
 /// Main xHCI driver entry point, run as a kernel thread.
@@ -876,6 +1010,8 @@ pub extern "C" fn xhci_driver_main() -> ! {
     let mut keyboard_device: Option<(UsbDevice, TransferRing)> = None;
     // mouse_device holds the active HID mouse device and its interrupt IN transfer ring.
     let mut mouse_device: Option<(UsbDevice, TransferRing)> = None;
+    // Counter used to generate unique /dev/usbN names for mass storage devices.
+    let mut usb_storage_count: usize = 0;
 
     // Scan all ports for already-connected devices.
     let max_ports = controller.regs.max_ports();
@@ -996,6 +1132,119 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                 }
                                 Err(e) => {
                                     println!("xhci: configure mouse endpoint failed: {:?}", e);
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Check if this is a USB mass storage device (BOT/SCSI).
+                    {
+                        let msc_info = device.config_data.as_deref().and_then(find_mass_storage);
+
+                        if let Some((_iface, ep_in, ep_out)) = msc_info {
+                            println!("xhci: USB mass storage detected on slot {}", device.slot_id);
+
+                            // Copy packed fields before mutable borrows.
+                            let ep_in_addr = ep_in.b_endpoint_address;
+                            let ep_in_maxpkt = ep_in.w_max_packet_size;
+                            let ep_out_addr = ep_out.b_endpoint_address;
+                            let ep_out_maxpkt = ep_out.w_max_packet_size;
+
+                            match controller.configure_bulk_endpoints(
+                                &mut device,
+                                ep_in_addr,
+                                ep_in_maxpkt,
+                                ep_out_addr,
+                                ep_out_maxpkt,
+                            ) {
+                                Ok((mut in_ring, mut out_ring)) => {
+                                    let slot_id = device.slot_id;
+                                    let mut msc =
+                                        crate::drivers::usb::mass_storage::UsbMassStorage::new(
+                                            slot_id,
+                                            ep_in_addr,
+                                            ep_out_addr,
+                                        );
+
+                                    // INQUIRY
+                                    match msc.inquiry(&mut controller, &mut in_ring, &mut out_ring)
+                                    {
+                                        Ok(data) => {
+                                            // Vendor: bytes 8-15, Product: bytes 16-31 (ASCII, space-padded)
+                                            let vendor = core::str::from_utf8(&data[8..16])
+                                                .unwrap_or("????????")
+                                                .trim();
+                                            let product = core::str::from_utf8(&data[16..32])
+                                                .unwrap_or("????????????????")
+                                                .trim();
+                                            println!(
+                                                "xhci: USB storage: vendor='{}' product='{}'",
+                                                vendor, product
+                                            );
+
+                                            // TEST UNIT READY
+                                            match msc.test_unit_ready(
+                                                &mut controller,
+                                                &mut in_ring,
+                                                &mut out_ring,
+                                            ) {
+                                                Ok(ready) => {
+                                                    println!(
+                                                        "xhci: USB storage: unit ready={}",
+                                                        ready
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    println!(
+                                                        "xhci: USB storage: TEST UNIT READY failed: {:?}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+
+                                            // READ CAPACITY
+                                            match msc.read_capacity(
+                                                &mut controller,
+                                                &mut in_ring,
+                                                &mut out_ring,
+                                            ) {
+                                                Ok((last_lba, block_size)) => {
+                                                    let block_count = last_lba as u64 + 1;
+                                                    let size_mb = block_count * block_size as u64
+                                                        / (1024 * 1024);
+                                                    println!(
+                                                        "xhci: USB storage: {} blocks x {} bytes = {} MiB",
+                                                        block_count, block_size, size_mb
+                                                    );
+                                                    msc.block_size = block_size;
+                                                    msc.block_count = block_count;
+
+                                                    // Register in devfs
+                                                    crate::drivers::usb::mass_storage::register_usb_storage(
+                                                        usb_storage_count,
+                                                        slot_id,
+                                                        block_size,
+                                                        block_count,
+                                                        &data,
+                                                    );
+                                                    usb_storage_count += 1;
+                                                }
+                                                Err(e) => {
+                                                    println!(
+                                                        "xhci: USB storage: READ CAPACITY failed: {:?}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            println!("xhci: USB storage: INQUIRY failed: {:?}", e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("xhci: configure bulk endpoints failed: {:?}", e);
                                 }
                             }
                         }
@@ -1294,6 +1543,74 @@ fn find_hid_mouse(config_data: &[u8]) -> Option<(InterfaceDescriptor, EndpointDe
                 // Accept only IN interrupt endpoints
                 if ep.b_endpoint_address & 0x80 != 0 && ep.bm_attributes & 0x03 == 3 {
                     return Some((iface, ep));
+                }
+            }
+        }
+
+        offset += length;
+    }
+    None
+}
+
+/// Search a configuration descriptor blob for a USB Mass Storage interface
+/// (class=0x08, subclass=0x06 SCSI, protocol=0x50 BOT) and its bulk IN and OUT endpoints.
+///
+/// Returns `(InterfaceDescriptor, ep_in, ep_out)` for the first matching interface,
+/// or `None` if no mass storage interface is found.
+fn find_mass_storage(
+    config_data: &[u8],
+) -> Option<(InterfaceDescriptor, EndpointDescriptor, EndpointDescriptor)> {
+    const USB_CLASS_MASS_STORAGE: u8 = 0x08;
+    const USB_SUBCLASS_SCSI: u8 = 0x06;
+    const USB_PROTOCOL_BOT: u8 = 0x50;
+
+    let mut offset = 0;
+    let mut current_iface: Option<InterfaceDescriptor> = None;
+    let mut ep_in: Option<EndpointDescriptor> = None;
+    let mut ep_out: Option<EndpointDescriptor> = None;
+
+    while offset + 2 <= config_data.len() {
+        let length = config_data[offset] as usize;
+        let desc_type = config_data[offset + 1];
+
+        if length == 0 || offset + length > config_data.len() {
+            break;
+        }
+
+        if desc_type == DESC_INTERFACE && length >= 9 {
+            // Starting a new interface; reset endpoint state.
+            let iface = unsafe {
+                core::ptr::read(config_data[offset..].as_ptr() as *const InterfaceDescriptor)
+            };
+            if iface.b_interface_class == USB_CLASS_MASS_STORAGE
+                && iface.b_interface_sub_class == USB_SUBCLASS_SCSI
+                && iface.b_interface_protocol == USB_PROTOCOL_BOT
+            {
+                current_iface = Some(iface);
+                ep_in = None;
+                ep_out = None;
+            } else {
+                current_iface = None;
+                ep_in = None;
+                ep_out = None;
+            }
+        } else if desc_type == DESC_ENDPOINT && length >= 7 {
+            if current_iface.is_some() {
+                let ep = unsafe {
+                    core::ptr::read(config_data[offset..].as_ptr() as *const EndpointDescriptor)
+                };
+                // Only accept bulk endpoints (bmAttributes bits [1:0] == 2)
+                if ep.bm_attributes & 0x03 == 2 {
+                    if ep.b_endpoint_address & 0x80 != 0 {
+                        ep_in = Some(ep);
+                    } else {
+                        ep_out = Some(ep);
+                    }
+                }
+
+                // Return as soon as we have both endpoints for this interface.
+                if let (Some(iface), Some(ein), Some(eout)) = (current_iface, ep_in, ep_out) {
+                    return Some((iface, ein, eout));
                 }
             }
         }

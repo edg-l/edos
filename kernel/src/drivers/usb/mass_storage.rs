@@ -1,0 +1,438 @@
+#![expect(unused)]
+//! USB Mass Storage class driver - Bulk-Only Transport (BOT) with SCSI commands.
+//!
+//! Implements the USB Mass Storage Class specification using the Bulk-Only Transport
+//! protocol (BBB, subclass=0x06 SCSI transparent, protocol=0x50 BOT).
+
+use alloc::sync::Arc;
+
+use crate::{
+    drivers::dma::DmaBuffer,
+    fs::devfs::{self, DevFsDevice, DevFsError},
+    println,
+};
+
+use super::xhci::{XhciController, XhciError, rings::TransferRing};
+
+// ---------------------------------------------------------------------------
+// BOT constants
+// ---------------------------------------------------------------------------
+
+/// Command Block Wrapper signature "USBC" in little-endian.
+const CBW_SIGNATURE: u32 = 0x43425355;
+/// Command Status Wrapper signature "USBS" in little-endian.
+const CSW_SIGNATURE: u32 = 0x55534253;
+
+// ---------------------------------------------------------------------------
+// BOT structures
+// ---------------------------------------------------------------------------
+
+/// Command Block Wrapper (31 bytes) - sent on the bulk OUT endpoint.
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+pub struct Cbw {
+    pub d_cbw_signature: u32,
+    pub d_cbw_tag: u32,
+    pub d_cbw_data_transfer_length: u32,
+    /// bit 7: 0 = Data-Out (host-to-device), 1 = Data-In (device-to-host)
+    pub bm_cbw_flags: u8,
+    pub b_cbw_lun: u8,
+    /// Length of the SCSI command in cbwcb (1-16).
+    pub b_cbw_cb_length: u8,
+    /// The SCSI Command Descriptor Block.
+    pub cbwcb: [u8; 16],
+}
+
+/// Command Status Wrapper (13 bytes) - received on the bulk IN endpoint.
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+pub struct Csw {
+    pub d_csw_signature: u32,
+    pub d_csw_tag: u32,
+    pub d_csw_data_residue: u32,
+    /// 0 = command passed, 1 = command failed, 2 = phase error.
+    pub b_csw_status: u8,
+}
+
+// ---------------------------------------------------------------------------
+// UsbMassStorage
+// ---------------------------------------------------------------------------
+
+/// State for a detected USB mass storage device.
+pub struct UsbMassStorage {
+    pub slot_id: u8,
+    /// xHCI DCI for the bulk IN endpoint.
+    pub ep_in_dci: u32,
+    /// xHCI DCI for the bulk OUT endpoint.
+    pub ep_out_dci: u32,
+    /// Logical block size in bytes (filled by READ CAPACITY).
+    pub block_size: u32,
+    /// Total number of logical blocks (filled by READ CAPACITY).
+    pub block_count: u64,
+    tag: u32,
+}
+
+impl UsbMassStorage {
+    pub fn new(slot_id: u8, ep_in_addr: u8, ep_out_addr: u8) -> Self {
+        let ep_in_num = ep_in_addr & 0x0F;
+        let ep_out_num = ep_out_addr & 0x0F;
+        // xHCI DCI formula: ep_num * 2 + (1 if IN, 0 if OUT)
+        let ep_in_dci = (ep_in_num * 2 + 1) as u32;
+        let ep_out_dci = (ep_out_num * 2) as u32;
+        Self {
+            slot_id,
+            ep_in_dci,
+            ep_out_dci,
+            block_size: 512,
+            block_count: 0,
+            tag: 1,
+        }
+    }
+
+    fn next_tag(&mut self) -> u32 {
+        let t = self.tag;
+        self.tag = self.tag.wrapping_add(1);
+        t
+    }
+
+    // -----------------------------------------------------------------------
+    // SCSI commands
+    // -----------------------------------------------------------------------
+
+    /// SCSI INQUIRY (opcode 0x12) - identifies the device type and vendor strings.
+    ///
+    /// Returns the 36-byte standard INQUIRY data.
+    pub fn inquiry(
+        &mut self,
+        controller: &mut XhciController,
+        in_ring: &mut TransferRing,
+        out_ring: &mut TransferRing,
+    ) -> Result<[u8; 36], XhciError> {
+        let mut cmd = [0u8; 16];
+        cmd[0] = 0x12; // INQUIRY
+        cmd[4] = 36; // allocation length
+
+        let data_buf = DmaBuffer::allocate_sized(36).map_err(|_| XhciError::InvalidDevice)?;
+        let data_phys = data_buf.phys_addr().as_u64();
+
+        self.bot_transfer(
+            controller,
+            in_ring,
+            out_ring,
+            &cmd,
+            6,
+            Some(data_phys),
+            36,
+            true,
+        )?;
+
+        let mut result = [0u8; 36];
+        unsafe {
+            core::ptr::copy_nonoverlapping(data_buf.as_ptr(), result.as_mut_ptr(), 36);
+        }
+        Ok(result)
+    }
+
+    /// SCSI READ CAPACITY(10) (opcode 0x25).
+    ///
+    /// Returns `(last_lba, block_size)` where the total block count is `last_lba + 1`.
+    pub fn read_capacity(
+        &mut self,
+        controller: &mut XhciController,
+        in_ring: &mut TransferRing,
+        out_ring: &mut TransferRing,
+    ) -> Result<(u32, u32), XhciError> {
+        let mut cmd = [0u8; 16];
+        cmd[0] = 0x25; // READ CAPACITY(10)
+
+        let data_buf = DmaBuffer::allocate_sized(8).map_err(|_| XhciError::InvalidDevice)?;
+        let data_phys = data_buf.phys_addr().as_u64();
+
+        self.bot_transfer(
+            controller,
+            in_ring,
+            out_ring,
+            &cmd,
+            10,
+            Some(data_phys),
+            8,
+            true,
+        )?;
+
+        // Both fields are big-endian 32-bit integers.
+        let last_lba = unsafe { u32::from_be(core::ptr::read(data_buf.as_ptr() as *const u32)) };
+        let block_size =
+            unsafe { u32::from_be(core::ptr::read(data_buf.as_ptr().add(4) as *const u32)) };
+
+        Ok((last_lba, block_size))
+    }
+
+    /// SCSI TEST UNIT READY (opcode 0x00).
+    ///
+    /// Returns `true` if the device reports ready (command passed), `false` otherwise.
+    pub fn test_unit_ready(
+        &mut self,
+        controller: &mut XhciController,
+        in_ring: &mut TransferRing,
+        out_ring: &mut TransferRing,
+    ) -> Result<bool, XhciError> {
+        let cmd = [0u8; 16]; // opcode 0x00
+        match self.bot_transfer(controller, in_ring, out_ring, &cmd, 6, None, 0, false) {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// SCSI READ(10) (opcode 0x28) - read `count` sectors starting at `lba`.
+    ///
+    /// The caller must provide a DMA-safe physical address `buf_phys` pointing to a
+    /// buffer of at least `count * block_size` bytes.
+    pub fn read_sectors(
+        &mut self,
+        controller: &mut XhciController,
+        in_ring: &mut TransferRing,
+        out_ring: &mut TransferRing,
+        lba: u32,
+        count: u16,
+        buf_phys: u64,
+    ) -> Result<(), XhciError> {
+        let mut cmd = [0u8; 16];
+        cmd[0] = 0x28; // READ(10)
+        cmd[2] = (lba >> 24) as u8;
+        cmd[3] = (lba >> 16) as u8;
+        cmd[4] = (lba >> 8) as u8;
+        cmd[5] = lba as u8;
+        cmd[7] = (count >> 8) as u8;
+        cmd[8] = count as u8;
+
+        let transfer_len = count as u32 * self.block_size;
+        self.bot_transfer(
+            controller,
+            in_ring,
+            out_ring,
+            &cmd,
+            10,
+            Some(buf_phys),
+            transfer_len,
+            true,
+        )?;
+        Ok(())
+    }
+
+    /// SCSI WRITE(10) (opcode 0x2A) - write `count` sectors starting at `lba`.
+    ///
+    /// The caller must provide a DMA-safe physical address `buf_phys` containing the
+    /// data to write (`count * block_size` bytes).
+    pub fn write_sectors(
+        &mut self,
+        controller: &mut XhciController,
+        in_ring: &mut TransferRing,
+        out_ring: &mut TransferRing,
+        lba: u32,
+        count: u16,
+        buf_phys: u64,
+    ) -> Result<(), XhciError> {
+        let mut cmd = [0u8; 16];
+        cmd[0] = 0x2A; // WRITE(10)
+        cmd[2] = (lba >> 24) as u8;
+        cmd[3] = (lba >> 16) as u8;
+        cmd[4] = (lba >> 8) as u8;
+        cmd[5] = lba as u8;
+        cmd[7] = (count >> 8) as u8;
+        cmd[8] = count as u8;
+
+        let transfer_len = count as u32 * self.block_size;
+        self.bot_transfer(
+            controller,
+            in_ring,
+            out_ring,
+            &cmd,
+            10,
+            Some(buf_phys),
+            transfer_len,
+            false,
+        )?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // BOT core
+    // -----------------------------------------------------------------------
+
+    /// Execute one Bulk-Only Transport transaction: CBW -> [data phase] -> CSW.
+    ///
+    /// - `scsi_cmd`: 16-byte CDB (unused bytes must be zero).
+    /// - `cmd_len`: number of significant bytes in `scsi_cmd` (e.g. 6, 10, 12, 16).
+    /// - `data_phys`: physical address of the data buffer (or `None` for no data phase).
+    /// - `data_len`: byte count for the data phase.
+    /// - `direction_in`: `true` = device-to-host (read), `false` = host-to-device (write).
+    ///
+    /// Returns the CSW data residue on success.
+    fn bot_transfer(
+        &mut self,
+        controller: &mut XhciController,
+        in_ring: &mut TransferRing,
+        out_ring: &mut TransferRing,
+        scsi_cmd: &[u8; 16],
+        cmd_len: u8,
+        data_phys: Option<u64>,
+        data_len: u32,
+        direction_in: bool,
+    ) -> Result<u32, XhciError> {
+        let tag = self.next_tag();
+
+        // 1. Build and send CBW on bulk OUT.
+        let cbw_buf = DmaBuffer::allocate_sized(31).map_err(|_| XhciError::InvalidDevice)?;
+        unsafe {
+            let cbw = cbw_buf.as_ptr() as *mut Cbw;
+            core::ptr::write_bytes(cbw as *mut u8, 0, 31);
+            (*cbw).d_cbw_signature = CBW_SIGNATURE;
+            (*cbw).d_cbw_tag = tag;
+            (*cbw).d_cbw_data_transfer_length = data_len;
+            (*cbw).bm_cbw_flags = if direction_in { 0x80 } else { 0x00 };
+            (*cbw).b_cbw_lun = 0;
+            (*cbw).b_cbw_cb_length = cmd_len;
+            core::ptr::copy_nonoverlapping(scsi_cmd.as_ptr(), (*cbw).cbwcb.as_mut_ptr(), 16);
+        }
+
+        let cbw_phys = cbw_buf.phys_addr().as_u64();
+        controller.bulk_transfer(self.slot_id, out_ring, self.ep_out_dci, cbw_phys, 31, false)?;
+
+        // 2. Data phase (optional).
+        if data_len > 0 {
+            if let Some(phys) = data_phys {
+                if direction_in {
+                    controller.bulk_transfer(
+                        self.slot_id,
+                        in_ring,
+                        self.ep_in_dci,
+                        phys,
+                        data_len,
+                        true,
+                    )?;
+                } else {
+                    controller.bulk_transfer(
+                        self.slot_id,
+                        out_ring,
+                        self.ep_out_dci,
+                        phys,
+                        data_len,
+                        false,
+                    )?;
+                }
+            }
+        }
+
+        // 3. Read CSW on bulk IN.
+        let csw_buf = DmaBuffer::allocate_sized(13).map_err(|_| XhciError::InvalidDevice)?;
+        let csw_phys = csw_buf.phys_addr().as_u64();
+        controller.bulk_transfer(self.slot_id, in_ring, self.ep_in_dci, csw_phys, 13, true)?;
+
+        // Validate the CSW.
+        let csw = unsafe { core::ptr::read(csw_buf.as_ptr() as *const Csw) };
+        // Read packed fields into locals before use.
+        let sig = csw.d_csw_signature;
+        let csw_tag = csw.d_csw_tag;
+        let residue = csw.d_csw_data_residue;
+        let status = csw.b_csw_status;
+
+        if sig != CSW_SIGNATURE {
+            println!("usb-msc: invalid CSW signature {:#010x}", sig);
+            return Err(XhciError::InvalidDevice);
+        }
+        if csw_tag != tag {
+            println!(
+                "usb-msc: CSW tag mismatch: got {} expected {}",
+                csw_tag, tag
+            );
+            return Err(XhciError::InvalidDevice);
+        }
+        if status != 0 {
+            println!("usb-msc: SCSI command failed, CSW status={}", status);
+            return Err(XhciError::TransferError(status));
+        }
+
+        Ok(residue)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DevFS stub device
+// ---------------------------------------------------------------------------
+
+/// A devfs device node that represents a detected USB mass storage device.
+///
+/// Read and write operations are not yet wired to the xHCI driver thread
+/// because BOT transfers require mutable access to the controller and transfer
+/// rings owned by that thread. The node's presence at `/dev/usbN` confirms
+/// the device was detected and identified successfully.
+pub struct UsbStorageDevFsNode {
+    pub slot_id: u8,
+    pub block_size: u32,
+    pub block_count: u64,
+    pub vendor: [u8; 8],
+    pub product: [u8; 16],
+}
+
+impl UsbStorageDevFsNode {
+    pub fn new(slot_id: u8, block_size: u32, block_count: u64, inquiry_data: &[u8; 36]) -> Self {
+        let mut vendor = [0u8; 8];
+        let mut product = [0u8; 16];
+        // INQUIRY response: bytes 8-15 = vendor, bytes 16-31 = product
+        if inquiry_data.len() >= 16 {
+            vendor.copy_from_slice(&inquiry_data[8..16]);
+        }
+        if inquiry_data.len() >= 32 {
+            product.copy_from_slice(&inquiry_data[16..32]);
+        }
+        Self {
+            slot_id,
+            block_size,
+            block_count,
+            vendor,
+            product,
+        }
+    }
+}
+
+impl DevFsDevice for UsbStorageDevFsNode {
+    fn size(&self) -> u64 {
+        self.block_count * self.block_size as u64
+    }
+
+    fn read(&self, _offset: usize, _count: usize) -> Result<alloc::vec::Vec<u8>, DevFsError> {
+        Err(DevFsError::Unsupported)
+    }
+
+    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, DevFsError> {
+        Err(DevFsError::Unsupported)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registration helper
+// ---------------------------------------------------------------------------
+
+/// Register a detected USB storage device in devfs as `/dev/usbN`.
+///
+/// `index` distinguishes multiple storage devices (0 for the first one found).
+pub fn register_usb_storage(
+    index: usize,
+    slot_id: u8,
+    block_size: u32,
+    block_count: u64,
+    inquiry_data: &[u8; 36],
+) {
+    let node = Arc::new(UsbStorageDevFsNode::new(
+        slot_id,
+        block_size,
+        block_count,
+        inquiry_data,
+    ));
+
+    let path = alloc::format!("/dev/usb{}", index);
+    match devfs::register_device_str(&path, node) {
+        Ok(()) => println!("usb-msc: registered {}", path),
+        Err(e) => println!("usb-msc: failed to register {}: {:?}", path, e),
+    }
+}

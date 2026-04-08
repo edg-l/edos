@@ -1,4 +1,5 @@
 pub mod hid;
+pub mod mass_storage;
 pub mod xhci;
 
 use crate::{interrupts::io::XHCI_DRIVER_THREAD_ID, thread::util::queue_spawn_kthread_named};
