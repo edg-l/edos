@@ -1004,6 +1004,7 @@ impl XhciController {
                 if event.trb_type() == TRB_TYPE_TRANSFER {
                     let event_slot = ((event.control >> 24) & 0xFF) as u8;
                     if event_slot != slot_id {
+                        // Resubmit HID TRBs for consumed events so they keep working
                         continue; // not our event, skip
                     }
                     let comp_code = ((event.status >> 24) & 0xFF) as u8;
@@ -1018,6 +1019,20 @@ impl XhciController {
                     return Err(XhciError::TransferError(comp_code));
                 }
                 // Consume non-transfer events (port status changes, etc.)
+            } else {
+                // No event ready -- clear IMAN.IP and USBSTS.EINT so the controller
+                // can deliver new events.
+                unsafe {
+                    let intr = self.regs.interrupter(0);
+                    let iman = reg_read(&(*intr).iman);
+                    if iman & 1 != 0 {
+                        reg_write(&mut (*intr).iman, iman | 1);
+                    }
+                    let sts = reg_read(&(*self.regs.op()).usbsts);
+                    if sts & (1 << 3) != 0 {
+                        reg_write(&mut (*self.regs.op()).usbsts, 1 << 3);
+                    }
+                }
             }
             core::hint::spin_loop();
         }
@@ -1496,12 +1511,18 @@ pub extern "C" fn xhci_driver_main() -> ! {
             }
         }
 
-        // Clear IMAN IP bit (W1C) to allow new MSI-X interrupts
-        let intr = controller.regs.interrupter(0);
+        // Clear interrupt bits so the controller can deliver new MSI-X interrupts:
+        // - IMAN.IP (bit 0, W1C) on Interrupter 0
+        // - USBSTS.EINT (bit 3, W1C) on the controller
         unsafe {
+            let intr = controller.regs.interrupter(0);
             let iman = reg_read(&(*intr).iman);
             if iman & 1 != 0 {
                 reg_write(&mut (*intr).iman, iman | 1);
+            }
+            let sts = reg_read(&(*controller.regs.op()).usbsts);
+            if sts & (1 << 3) != 0 {
+                reg_write(&mut (*controller.regs.op()).usbsts, 1 << 3);
             }
         }
 
