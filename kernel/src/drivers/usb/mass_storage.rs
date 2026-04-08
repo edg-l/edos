@@ -193,10 +193,15 @@ impl UsbMassStorage {
         }
     }
 
+    /// Max bytes per single BOT data phase (xHCI Normal TRB Transfer Length is 17 bits,
+    /// but we cap conservatively at 64KB to stay within one TRB).
+    const MAX_TRANSFER_BYTES: u32 = 65536;
+
     /// SCSI READ(10) (opcode 0x28) - read `count` sectors starting at `lba`.
     ///
     /// The caller must provide a DMA-safe physical address `buf_phys` pointing to a
     /// buffer of at least `count * block_size` bytes.
+    /// Large reads are automatically split into multiple SCSI commands.
     pub fn read_sectors(
         &mut self,
         controller: &mut XhciController,
@@ -206,26 +211,39 @@ impl UsbMassStorage {
         count: u16,
         buf_phys: u64,
     ) -> Result<(), XhciError> {
-        let mut cmd = [0u8; 16];
-        cmd[0] = 0x28; // READ(10)
-        cmd[2] = (lba >> 24) as u8;
-        cmd[3] = (lba >> 16) as u8;
-        cmd[4] = (lba >> 8) as u8;
-        cmd[5] = lba as u8;
-        cmd[7] = (count >> 8) as u8;
-        cmd[8] = count as u8;
+        let max_sectors = (Self::MAX_TRANSFER_BYTES / self.block_size) as u16;
+        let mut remaining = count;
+        let mut cur_lba = lba;
+        let mut cur_phys = buf_phys;
 
-        let transfer_len = count as u32 * self.block_size;
-        self.bot_transfer(
-            controller,
-            in_ring,
-            out_ring,
-            &cmd,
-            10,
-            Some(buf_phys),
-            transfer_len,
-            true,
-        )?;
+        while remaining > 0 {
+            let chunk = remaining.min(max_sectors);
+
+            let mut cmd = [0u8; 16];
+            cmd[0] = 0x28; // READ(10)
+            cmd[2] = (cur_lba >> 24) as u8;
+            cmd[3] = (cur_lba >> 16) as u8;
+            cmd[4] = (cur_lba >> 8) as u8;
+            cmd[5] = cur_lba as u8;
+            cmd[7] = (chunk >> 8) as u8;
+            cmd[8] = chunk as u8;
+
+            let transfer_len = chunk as u32 * self.block_size;
+            self.bot_transfer(
+                controller,
+                in_ring,
+                out_ring,
+                &cmd,
+                10,
+                Some(cur_phys),
+                transfer_len,
+                true,
+            )?;
+
+            remaining -= chunk;
+            cur_lba += chunk as u32;
+            cur_phys += transfer_len as u64;
+        }
         Ok(())
     }
 
@@ -233,6 +251,7 @@ impl UsbMassStorage {
     ///
     /// The caller must provide a DMA-safe physical address `buf_phys` containing the
     /// data to write (`count * block_size` bytes).
+    /// Large writes are automatically split into multiple SCSI commands.
     pub fn write_sectors(
         &mut self,
         controller: &mut XhciController,
@@ -242,26 +261,39 @@ impl UsbMassStorage {
         count: u16,
         buf_phys: u64,
     ) -> Result<(), XhciError> {
-        let mut cmd = [0u8; 16];
-        cmd[0] = 0x2A; // WRITE(10)
-        cmd[2] = (lba >> 24) as u8;
-        cmd[3] = (lba >> 16) as u8;
-        cmd[4] = (lba >> 8) as u8;
-        cmd[5] = lba as u8;
-        cmd[7] = (count >> 8) as u8;
-        cmd[8] = count as u8;
+        let max_sectors = (Self::MAX_TRANSFER_BYTES / self.block_size) as u16;
+        let mut remaining = count;
+        let mut cur_lba = lba;
+        let mut cur_phys = buf_phys;
 
-        let transfer_len = count as u32 * self.block_size;
-        self.bot_transfer(
-            controller,
-            in_ring,
-            out_ring,
-            &cmd,
-            10,
-            Some(buf_phys),
-            transfer_len,
-            false,
-        )?;
+        while remaining > 0 {
+            let chunk = remaining.min(max_sectors);
+
+            let mut cmd = [0u8; 16];
+            cmd[0] = 0x2A; // WRITE(10)
+            cmd[2] = (cur_lba >> 24) as u8;
+            cmd[3] = (cur_lba >> 16) as u8;
+            cmd[4] = (cur_lba >> 8) as u8;
+            cmd[5] = cur_lba as u8;
+            cmd[7] = (chunk >> 8) as u8;
+            cmd[8] = chunk as u8;
+
+            let transfer_len = chunk as u32 * self.block_size;
+            self.bot_transfer(
+                controller,
+                in_ring,
+                out_ring,
+                &cmd,
+                10,
+                Some(cur_phys),
+                transfer_len,
+                false,
+            )?;
+
+            remaining -= chunk;
+            cur_lba += chunk as u32;
+            cur_phys += transfer_len as u64;
+        }
         Ok(())
     }
 

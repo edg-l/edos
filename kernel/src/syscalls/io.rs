@@ -739,10 +739,13 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
 }
 
 pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
-    let sched = sched();
+    // Cache info before interrupts::enable() to avoid stale per-CPU scheduler
+    // reference after thread migration. After enable, use `info` (Arc) directly
+    // and call sched() freshly for sleep/park operations.
+    let info = sched().current_thread_info();
 
     if fds_ptr.is_null() && count != 0 {
-        sched.current_thread_info().lock().errno = Errno::EFAULT;
+        info.lock().errno = Errno::EFAULT;
         return -1;
     }
 
@@ -758,7 +761,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
 
     const MAX_POLL_FDS: usize = 1024;
     if count > MAX_POLL_FDS {
-        sched.current_thread_info().lock().errno = Errno::EINVAL;
+        info.lock().errno = Errno::EINVAL;
         return -1;
     }
 
@@ -775,7 +778,6 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
 
     if !unsafe { try_copy_from_user(fds.as_mut_ptr() as *mut u8, fds_ptr as *const u8, fds_bytes) }
     {
-        let info = sched.current_thread_info();
         info.lock().errno = Errno::EFAULT;
         return -1;
     }
@@ -785,7 +787,6 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     };
 
     let descriptors = {
-        let info = sched.current_thread_info();
         let mut guard = info.lock();
         guard.errno = Errno::Clear;
         fds.iter()
@@ -793,10 +794,10 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
             .collect::<Vec<_>>()
     };
 
-    let thread_id = match sched.current_thread_id() {
+    let thread_id = match sched().current_thread_id() {
         Some(id) => id,
         None => {
-            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            info.lock().errno = Errno::EINVAL;
             return -1;
         }
     };
@@ -892,7 +893,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     if ready > 0 {
         cleanup_poll_contexts(&mut contexts);
         if !copy_back(&fds) {
-            sched.current_thread_info().lock().errno = Errno::EFAULT;
+            info.lock().errno = Errno::EFAULT;
             return -1;
         }
         return ready as i64;
@@ -930,14 +931,14 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                 } else {
                     remaining
                 };
-                sched.thread_sleep(sleep_dur);
+                sched().thread_sleep(sleep_dur);
             }
             None => {
                 if waiter.arm() {
                     continue;
                 }
 
-                sched.thread_park_while(|| {
+                sched().thread_park_while(|| {
                     base_ready + refresh_poll_contexts(&mut contexts, &mut fds) == 0
                 });
             }
@@ -949,7 +950,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     cleanup_poll_contexts(&mut contexts);
 
     if !copy_back(&fds) {
-        sched.current_thread_info().lock().errno = Errno::EFAULT;
+        info.lock().errno = Errno::EFAULT;
         return -1;
     }
 

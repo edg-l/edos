@@ -92,9 +92,9 @@ impl MemoryManager {
         let flags = PageTableFlags::PRESENT | extra_flags;
         {
             let mut frame_allocator = frame_allocator();
-            let mut frame = frame_allocator
+            let frame = frame_allocator
                 .allocate_contiguous_frames(page_range.count())
-                .unwrap();
+                .ok_or(MapToError::FrameAllocationFailed)?;
 
             for (i, page) in page_range.enumerate() {
                 let current_frame = PhysFrame::containing_address(

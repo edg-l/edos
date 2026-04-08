@@ -1388,6 +1388,10 @@ pub extern "C" fn xhci_driver_main() -> ! {
         crate::drivers::mouse::USB_MOUSE_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
     }
 
+    // Reusable DMA buffer for block I/O. Grown as needed, never freed.
+    // Avoids allocating and leaking a DMA buffer per request.
+    let mut io_buf: Option<DmaBuffer> = None;
+
     // Main event loop: handle runtime events (hot-plug, transfer completions, etc.)
     //
     // Two wake sources:
@@ -1524,10 +1528,12 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             mass_storage_device
                         {
                             let byte_count = sectors as usize * msc.block_size as usize;
-                            match DmaBuffer::allocate_sized(byte_count)
-                                .map_err(|_| XhciError::InvalidDevice)
-                            {
-                                Ok(buf) => {
+                            // Reallocate the shared I/O buffer only when it's too small.
+                            if io_buf.is_none() || io_buf.as_ref().unwrap().size < byte_count {
+                                io_buf = DmaBuffer::allocate_sized(byte_count).ok();
+                            }
+                            match io_buf {
+                                Some(ref buf) => {
                                     let phys = buf.phys_addr().as_u64();
                                     match msc.read_sectors(
                                         &mut controller,
@@ -1551,7 +1557,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                         Err(e) => Err(e),
                                     }
                                 }
-                                Err(e) => Err(e),
+                                None => Err(XhciError::InvalidDevice),
                             }
                         } else {
                             Err(XhciError::InvalidDevice)
@@ -1563,10 +1569,11 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             mass_storage_device
                         {
                             let byte_count = sectors as usize * msc.block_size as usize;
-                            match DmaBuffer::allocate_sized(byte_count)
-                                .map_err(|_| XhciError::InvalidDevice)
-                            {
-                                Ok(buf) => {
+                            if io_buf.is_none() || io_buf.as_ref().unwrap().size < byte_count {
+                                io_buf = DmaBuffer::allocate_sized(byte_count).ok();
+                            }
+                            match io_buf {
+                                Some(ref buf) => {
                                     let copy_len = byte_count.min(data.len());
                                     unsafe {
                                         core::ptr::copy_nonoverlapping(
@@ -1588,7 +1595,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                         Err(e) => Err(e),
                                     }
                                 }
-                                Err(e) => Err(e),
+                                None => Err(XhciError::InvalidDevice),
                             }
                         } else {
                             Err(XhciError::InvalidDevice)
