@@ -23,8 +23,13 @@ use crate::{
 };
 
 use self::{
+    device::{SetupPacket, UsbDevice, UsbSpeed},
     registers::{XhciRegisters, reg_read, reg_write},
-    rings::{CommandRing, EventRing},
+    rings::{
+        COMP_SHORT_PACKET, COMP_SUCCESS, CommandRing, EventRing, TRB_DIR_IN, TRB_IDT, TRB_IOC,
+        TRB_TYPE_COMMAND_COMPLETION, TRB_TYPE_DATA_STAGE, TRB_TYPE_PORT_STATUS_CHANGE,
+        TRB_TYPE_SETUP_STAGE, TRB_TYPE_STATUS_STAGE, TRB_TYPE_TRANSFER, TransferRing, Trb,
+    },
 };
 
 /// PCI class/subclass/prog-if identifying an xHCI controller.
@@ -323,5 +328,325 @@ impl XhciController {
             core::hint::spin_loop();
         }
         Err("xhci: reset timeout")
+    }
+
+    /// Submit a command TRB and wait (by polling) for the matching Command Completion Event.
+    ///
+    /// All commands and event ring polling happen in the driver thread; there are no cross-thread
+    /// races to worry about here.
+    pub fn submit_command(&mut self, trb: Trb) -> Result<Trb, XhciError> {
+        let cmd_phys = self.command_ring.as_mut().unwrap().push(trb);
+
+        // Ring doorbell 0 — Host Controller Command doorbell.
+        unsafe {
+            reg_write(self.regs.doorbell(0), 0);
+        }
+
+        // Poll the event ring until we see the Command Completion Event whose parameter
+        // field contains the physical address of the command TRB we just submitted.
+        for _ in 0..5_000_000u32 {
+            if let Some(event) = self.event_ring.as_mut().unwrap().poll() {
+                // Acknowledge the event by advancing the ERDP and clearing EHB (bit 3).
+                let erdp = self.event_ring.as_ref().unwrap().dequeue_phys();
+                let intr = self.regs.interrupter(0);
+                unsafe {
+                    reg_write(&mut (*intr).erdp_lo, (erdp as u32) | (1 << 3));
+                    reg_write(&mut (*intr).erdp_hi, (erdp >> 32) as u32);
+                }
+
+                if event.trb_type() == TRB_TYPE_COMMAND_COMPLETION {
+                    if event.parameter == cmd_phys {
+                        let comp_code = ((event.status >> 24) & 0xFF) as u8;
+                        if comp_code == COMP_SUCCESS {
+                            return Ok(event);
+                        } else {
+                            return Err(XhciError::TransferError(comp_code));
+                        }
+                    }
+                }
+
+                // Log port status changes that arrive while we wait for the command to complete.
+                if event.trb_type() == TRB_TYPE_PORT_STATUS_CHANGE {
+                    let port_id = ((event.parameter >> 24) & 0xFF) as u8;
+                    println!("xhci: port {} status change during command", port_id);
+                }
+            }
+            core::hint::spin_loop();
+        }
+
+        Err(XhciError::CommandTimeout)
+    }
+
+    /// Perform a USB control transfer on a device's EP0 (default control pipe).
+    ///
+    /// Builds Setup Stage + (optional) Data Stage + Status Stage TRBs, rings the doorbell,
+    /// then polls the event ring for the resulting Transfer Event.
+    ///
+    /// Returns the number of bytes actually transferred.
+    pub fn control_transfer(
+        &mut self,
+        device: &mut UsbDevice,
+        setup: SetupPacket,
+        data_buf_phys: Option<u64>,
+        data_len: u16,
+        direction_in: bool,
+    ) -> Result<usize, XhciError> {
+        let ring = &mut device.ep0_ring;
+
+        // Transfer Request Type field in the Setup Stage TRB:
+        //   0 = No Data stage, 2 = OUT Data stage, 3 = IN Data stage.
+        let trt: u32 = if data_len == 0 {
+            0
+        } else if direction_in {
+            3
+        } else {
+            2
+        };
+
+        // 1. Setup Stage TRB — the 8-byte setup packet is placed directly in the parameter
+        //    field (Immediate Data flag set), so no separate DMA buffer is needed for it.
+        let setup_bytes =
+            unsafe { core::slice::from_raw_parts(&setup as *const SetupPacket as *const u8, 8) };
+        let mut setup_param = [0u8; 8];
+        setup_param.copy_from_slice(setup_bytes);
+        let setup_trb = Trb {
+            parameter: u64::from_le_bytes(setup_param),
+            status: 8, // TRB Transfer Length = 8 (setup packet is always 8 bytes)
+            control: ((TRB_TYPE_SETUP_STAGE as u32) << 10) | TRB_IDT | (trt << 16),
+        };
+        ring.push(setup_trb);
+
+        // 2. Data Stage TRB (only present when there is a data phase).
+        if data_len > 0 {
+            if let Some(buf_phys) = data_buf_phys {
+                let dir_bit = if direction_in { TRB_DIR_IN } else { 0 };
+                let data_trb = Trb {
+                    parameter: buf_phys,
+                    status: data_len as u32,
+                    control: ((TRB_TYPE_DATA_STAGE as u32) << 10) | dir_bit,
+                };
+                ring.push(data_trb);
+            }
+        }
+
+        // 3. Status Stage TRB — direction is the complement of the data stage
+        //    (or IN when there is no data stage, per xHCI spec §4.11.2.2).
+        let status_dir = if data_len > 0 && direction_in {
+            0
+        } else {
+            TRB_DIR_IN
+        };
+        let status_trb = Trb {
+            parameter: 0,
+            status: 0,
+            control: ((TRB_TYPE_STATUS_STAGE as u32) << 10) | TRB_IOC | status_dir,
+        };
+        ring.push(status_trb);
+
+        // Ring doorbell for this slot, endpoint 0 (doorbell target = 1).
+        unsafe {
+            reg_write(self.regs.doorbell(device.slot_id), 1);
+        }
+
+        // Poll for the Transfer Event that corresponds to our Status Stage TRB.
+        for _ in 0..5_000_000u32 {
+            if let Some(event) = self.event_ring.as_mut().unwrap().poll() {
+                let erdp = self.event_ring.as_ref().unwrap().dequeue_phys();
+                let intr = self.regs.interrupter(0);
+                unsafe {
+                    reg_write(&mut (*intr).erdp_lo, (erdp as u32) | (1 << 3));
+                    reg_write(&mut (*intr).erdp_hi, (erdp >> 32) as u32);
+                }
+
+                if event.trb_type() == TRB_TYPE_TRANSFER {
+                    let comp_code = ((event.status >> 24) & 0xFF) as u8;
+                    let residual = event.status & 0x00FF_FFFF;
+                    if comp_code == COMP_SUCCESS || comp_code == COMP_SHORT_PACKET {
+                        return Ok((data_len as u32).saturating_sub(residual) as usize);
+                    } else {
+                        return Err(XhciError::TransferError(comp_code));
+                    }
+                }
+
+                // Stale command completion events can arrive here; just ignore them.
+                if event.trb_type() == TRB_TYPE_PORT_STATUS_CHANGE {
+                    let port_id = ((event.parameter >> 24) & 0xFF) as u8;
+                    println!("xhci: port {} status change during transfer", port_id);
+                }
+            }
+            core::hint::spin_loop();
+        }
+
+        Err(XhciError::CommandTimeout)
+    }
+
+    /// React to a Port Status Change event from the event ring.
+    ///
+    /// Clears the status change bits in PORTSC, resets the port if needed (USB 2.0),
+    /// and calls `enumerate_device` to produce a `UsbDevice`.
+    pub fn handle_port_status_change(&mut self, port_id: u8) -> Result<UsbDevice, XhciError> {
+        // port_id in xHCI events is 1-based; regs.port() takes a 0-based index.
+        let port = self.regs.port(port_id - 1);
+
+        let portsc = unsafe { reg_read(&(*port).portsc) };
+
+        // Preserve Port Power (bit 9).  Write 1 to the W1C status bits to clear them.
+        // Do NOT write 1 to PED (bit 1) — that would disable the port.
+        let pp_bit: u32 = 1 << 9;
+        let w1c_bits: u32 = (1 << 17) // CSC – Connect Status Change
+            | (1 << 18)               // PEC – Port Enabled/Disabled Change
+            | (1 << 19)               // WRC – Warm Port Reset Change
+            | (1 << 20)               // OCC – Over-current Change
+            | (1 << 21)               // PRC – Port Reset Change
+            | (1 << 22)               // PLC – Port Link State Change
+            | (1 << 23); // CEC – Port Config Error Change
+        unsafe {
+            reg_write(&mut (*port).portsc, (portsc & pp_bit) | w1c_bits);
+        }
+
+        let ccs = portsc & (1 << 0); // Current Connect Status
+        let ped = portsc & (1 << 1); // Port Enabled/Disabled
+        let speed = ((portsc >> 10) & 0xF) as u8;
+
+        if ccs == 0 {
+            // Nothing connected on this port — device disconnected event.
+            return Err(XhciError::InvalidDevice);
+        }
+
+        if ped == 0 {
+            // Port is connected but not yet enabled.  For USB 2.0 devices we must issue a
+            // port reset, which the controller performs and then sets PRC when done.
+            unsafe {
+                let sc = reg_read(&(*port).portsc);
+                reg_write(&mut (*port).portsc, (sc & pp_bit) | (1 << 4)); // PR – Port Reset
+            }
+
+            for _ in 0..1_000_000u32 {
+                let sc = unsafe { reg_read(&(*port).portsc) };
+                if sc & (1 << 21) != 0 {
+                    // Clear PRC (Port Reset Change) by writing 1 to it.
+                    unsafe { reg_write(&mut (*port).portsc, (sc & pp_bit) | (1 << 21)) };
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+
+            // Re-read PORTSC after the reset completes to get the updated speed and PED.
+            let portsc_new = unsafe { reg_read(&(*port).portsc) };
+            if portsc_new & (1 << 1) == 0 {
+                // Port still not enabled after reset.
+                return Err(XhciError::InvalidDevice);
+            }
+            let speed_new = ((portsc_new >> 10) & 0xF) as u8;
+            return self.enumerate_device(port_id, speed_new);
+        }
+
+        self.enumerate_device(port_id, speed)
+    }
+
+    /// Enumerate a USB device that has just been connected and reset on `port_id`.
+    ///
+    /// Performs: Enable Slot → allocate contexts → Address Device.
+    /// Returns a `UsbDevice` ready for further descriptor fetching.
+    fn enumerate_device(&mut self, port_id: u8, port_speed: u8) -> Result<UsbDevice, XhciError> {
+        let speed = UsbSpeed::from_port_speed(port_speed).ok_or(XhciError::UnsupportedSpeed)?;
+
+        println!(
+            "xhci: enumerating device on port {}, speed {:?}",
+            port_id, speed
+        );
+
+        // Step 1 — Enable Slot: ask the controller for a slot ID.
+        let completion = self.submit_command(Trb::enable_slot())?;
+        let slot_id = ((completion.status >> 24) & 0xFF) as u8;
+
+        if slot_id == 0 {
+            return Err(XhciError::SlotsFull);
+        }
+        println!("xhci: assigned slot {}", slot_id);
+
+        // Step 2 — Allocate the Input Context.
+        // Layout: InputControlContext (1 × context_size) + SlotContext (1 × context_size)
+        //         + 31 Endpoint Contexts = 33 × context_size bytes total.
+        let ctx_size = self.context_size;
+        let input_ctx =
+            DmaBuffer::allocate_sized(33 * ctx_size).map_err(|_| XhciError::InvalidDevice)?;
+
+        // Step 3 — Allocate EP0 Transfer Ring (64 TRBs is ample for control transfers).
+        let ep0_ring = TransferRing::new(64);
+
+        // Step 4 — Fill Input Control Context.
+        // Offset 0 = Drop Context Flags, offset 4 = Add Context Flags.
+        // We add Slot (bit 0) and EP0 (bit 1) → Add Flags = 0b11 = 0x3.
+        let icc_ptr = input_ctx.as_ptr() as *mut u32;
+        unsafe {
+            core::ptr::write_volatile(icc_ptr, 0); // Drop Context Flags = 0
+            core::ptr::write_volatile(icc_ptr.add(1), 0x3); // Add Context Flags: Slot + EP0
+        }
+
+        // Step 5 — Fill Slot Context (at offset 1 × context_size).
+        let slot_ctx_ptr = unsafe { input_ctx.as_ptr().add(ctx_size) as *mut u32 };
+        unsafe {
+            // Dword 0: Speed (bits [23:20]), Context Entries = 1 (bits [31:27]).
+            let dword0 = (speed.to_slot_speed() << 20) | (1 << 27);
+            core::ptr::write_volatile(slot_ctx_ptr, dword0);
+            // Dword 1: Root Hub Port Number in bits [23:16].
+            let dword1 = (port_id as u32) << 16;
+            core::ptr::write_volatile(slot_ctx_ptr.add(1), dword1);
+        }
+
+        // Step 6 — Fill EP0 Context (at offset 2 × context_size).
+        // EP Type 4 = Control Bidirectional.
+        let ep0_ctx_ptr = unsafe { input_ctx.as_ptr().add(2 * ctx_size) as *mut u32 };
+        let max_packet = speed.default_max_packet_size();
+        unsafe {
+            // Dword 1: EP Type (bits [5:3] = 4), Max Packet Size (bits [31:16]).
+            let dword1 = (4u32 << 3) | ((max_packet as u32) << 16);
+            core::ptr::write_volatile(ep0_ctx_ptr.add(1), dword1);
+            // Dwords 2-3: TR Dequeue Pointer with DCS=1 (bit 0 indicates initial cycle state).
+            let tr_phys = ep0_ring.phys_addr() | 1;
+            core::ptr::write_volatile(ep0_ctx_ptr.add(2), tr_phys as u32);
+            core::ptr::write_volatile(ep0_ctx_ptr.add(3), (tr_phys >> 32) as u32);
+            // Dword 4: Average TRB Length — 8 bytes is a reasonable default for control.
+            core::ptr::write_volatile(ep0_ctx_ptr.add(4), 8);
+        }
+
+        // Step 7 — Allocate Output Device Context and register it in the DCBAA.
+        // Layout: SlotContext + 31 EndpointContexts = 32 × context_size bytes.
+        let output_ctx =
+            DmaBuffer::allocate_sized(32 * ctx_size).map_err(|_| XhciError::InvalidDevice)?;
+        let output_ctx_phys = output_ctx.phys_addr().as_u64();
+
+        if let Some(ref dcbaa) = self.dcbaa {
+            unsafe {
+                let entry = (dcbaa.as_ptr() as *mut u64).add(slot_id as usize);
+                core::ptr::write_volatile(entry, output_ctx_phys);
+            }
+        }
+
+        // The Output Device Context must remain allocated as long as the device is active.
+        // We intentionally leak it here; a future device management layer will track it.
+        core::mem::forget(output_ctx);
+
+        // Step 8 — Address Device command: assigns the USB address and transitions the
+        // device to the Addressed state.
+        let input_ctx_phys = input_ctx.phys_addr().as_u64();
+        self.submit_command(Trb::address_device(input_ctx_phys, slot_id, false))
+            .map_err(|e| {
+                println!("xhci: address device failed: {:?}", e);
+                XhciError::InvalidDevice
+            })?;
+
+        println!("xhci: device addressed on slot {}", slot_id);
+
+        Ok(UsbDevice {
+            slot_id,
+            speed,
+            port_id,
+            ep0_ring,
+            input_ctx,
+            device_descriptor: None,
+            config_data: None,
+        })
     }
 }

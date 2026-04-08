@@ -19,6 +19,53 @@ impl Trb {
     pub fn cycle_bit(&self) -> bool {
         self.control & 1 != 0
     }
+
+    /// No-Op Command (type 8) — used to test the command ring.
+    pub fn no_op_command() -> Self {
+        Self {
+            parameter: 0,
+            status: 0,
+            control: (TRB_TYPE_NO_OP as u32) << 10,
+        }
+    }
+
+    /// Enable Slot Command (type 9).
+    /// The assigned slot ID is returned in bits [31:24] of the completion event's status field.
+    pub fn enable_slot() -> Self {
+        Self {
+            parameter: 0,
+            status: 0,
+            control: (TRB_TYPE_ENABLE_SLOT as u32) << 10,
+        }
+    }
+
+    /// Address Device Command (type 11).
+    ///
+    /// `input_ctx_phys` — physical address of the Input Context structure.
+    /// `slot_id` — slot ID received from the Enable Slot completion event.
+    /// `bsr` — Block Set address Request; when true the SET_ADDRESS USB request is
+    ///   not sent to the device (useful for reset-recovery flows).
+    pub fn address_device(input_ctx_phys: u64, slot_id: u8, bsr: bool) -> Self {
+        Self {
+            parameter: input_ctx_phys,
+            status: 0,
+            control: ((TRB_TYPE_ADDRESS_DEVICE as u32) << 10)
+                | ((slot_id as u32) << 24)
+                | if bsr { 1 << 9 } else { 0 },
+        }
+    }
+
+    /// Configure Endpoint Command (type 12).
+    ///
+    /// `input_ctx_phys` — physical address of the Input Context structure.
+    /// `slot_id` — slot ID of the device being configured.
+    pub fn configure_endpoint(input_ctx_phys: u64, slot_id: u8) -> Self {
+        Self {
+            parameter: input_ctx_phys,
+            status: 0,
+            control: ((TRB_TYPE_CONFIGURE_ENDPOINT as u32) << 10) | ((slot_id as u32) << 24),
+        }
+    }
 }
 
 // TRB type constants
@@ -35,6 +82,17 @@ pub const TRB_TYPE_PORT_STATUS_CHANGE: u8 = 34;
 pub const TRB_CYCLE: u32 = 1 << 0;
 pub const TRB_TOGGLE_CYCLE: u32 = 1 << 1; // For Link TRBs
 pub const TRB_CHAIN: u32 = 1 << 4;
+
+// Transfer-stage TRB types
+pub const TRB_TYPE_NORMAL: u8 = 1;
+pub const TRB_TYPE_SETUP_STAGE: u8 = 2;
+pub const TRB_TYPE_DATA_STAGE: u8 = 3;
+pub const TRB_TYPE_STATUS_STAGE: u8 = 4;
+
+// Transfer TRB flags
+pub const TRB_IDT: u32 = 1 << 6; // Immediate Data (setup packet bytes in parameter field)
+pub const TRB_IOC: u32 = 1 << 5; // Interrupt On Completion
+pub const TRB_DIR_IN: u32 = 1 << 16; // Direction: 1 = IN (device-to-host)
 
 // Completion codes
 pub const COMP_SUCCESS: u8 = 1;
