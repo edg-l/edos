@@ -28,6 +28,11 @@ pub fn init() {
     DISPLAY.call_once(|| {
         let display = DirectFramebuffer::new();
         framebuffer::FramebufferDevice::register();
+
+        // Register VRAM physical range as allowed for userspace MAP_PHYSICAL.
+        let info = display.mmap_info();
+        crate::memory::allow_physical_range(info.phys_addr, info.total_size);
+
         Mutex::new(display)
     });
 }

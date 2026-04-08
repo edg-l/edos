@@ -47,6 +47,13 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
             return !0u64;
         }
 
+        // Only allow mapping physical ranges that the kernel has explicitly registered
+        // (e.g. VRAM). Prevents userspace from mapping arbitrary physical memory.
+        if !crate::memory::is_physical_range_allowed(phys_addr, length) {
+            info.lock().errno = Errno::EPERM;
+            return !0u64;
+        }
+
         // Physical mapping: map MMIO/VRAM pages directly without allocating frames
         let map_addr = if addr == 0 {
             let guard = info.lock();

@@ -1,3 +1,4 @@
+use spin::RwLock;
 use x86_64::{PhysAddr, VirtAddr};
 
 use crate::boot::boot_info;
@@ -7,6 +8,26 @@ pub mod mapper;
 pub mod pat;
 pub mod shared;
 pub mod valloc;
+
+/// Allowlist of physical address ranges that userspace may map via MAP_PHYSICAL.
+/// Each entry is (start, end) inclusive of start, exclusive of end.
+static ALLOWED_PHYS_RANGES: RwLock<heapless::Vec<(u64, u64), 8>> =
+    RwLock::new(heapless::Vec::new());
+
+/// Register a physical address range as safe for userspace mapping.
+pub fn allow_physical_range(start: u64, size: u64) {
+    let mut ranges = ALLOWED_PHYS_RANGES.write();
+    let _ = ranges.push((start, start + size));
+}
+
+/// Check whether the entire range [start, start+size) is within an allowed range.
+pub fn is_physical_range_allowed(start: u64, size: u64) -> bool {
+    let end = start + size;
+    let ranges = ALLOWED_PHYS_RANGES.read();
+    ranges
+        .iter()
+        .any(|&(r_start, r_end)| start >= r_start && end <= r_end)
+}
 
 // physical offset is at 0xffff_8000_0000_0000
 
