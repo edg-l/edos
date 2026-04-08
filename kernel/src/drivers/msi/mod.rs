@@ -113,6 +113,9 @@ pub fn enable_msix_for_device(
     let table_offset = (table_dword & !0x7) as u64;
 
     // 4. Read BAR and compute table physical address
+    if bir > 5 {
+        return Err(MsiError::InvalidEntry);
+    }
     let bar_phys = read_bar_phys(addr, bir);
     let table_phys = bar_phys + table_offset;
 

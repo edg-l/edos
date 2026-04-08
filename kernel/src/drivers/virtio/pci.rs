@@ -155,6 +155,11 @@ impl VirtioTransport {
                 // Virtio PCI capability
                 let cap = VirtioPciCap::read_from_config(addr, cap_ptr);
 
+                if cap.bar > 5 {
+                    cap_ptr = cap_next;
+                    continue;
+                }
+
                 // Compute the BAR physical base and map it.
                 let bar_phys = read_bar_phys(addr, cap.bar);
                 if bar_phys.as_u64() != 0 {

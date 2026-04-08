@@ -1394,15 +1394,11 @@ pub extern "C" fn xhci_driver_main() -> ! {
 
     // Main event loop: handle runtime events (hot-plug, transfer completions, etc.)
     //
-    // We must respond to two wake sources:
-    // 1. MSI-X interrupt -> xHCI interrupt handler calls wake_thread_irq (HID events)
-    // 2. USB block mailbox -> FS thread sends a read/write request
-    //
-    // For (2), Mailbox::send() wakes via its WaitQueue, but we park via sched().
-    // To handle both, we use thread_park_timeout so we periodically check the mailbox
-    // even without an interrupt.
+    // Two wake sources:
+    // 1. MSI-X interrupt -> wake_thread_irq from interrupt handler (HID events)
+    // 2. USB block I/O -> wake_thread from block_api after mailbox send
     loop {
-        sched().thread_sleep(core::time::Duration::from_millis(1));
+        sched().thread_park();
 
         // Process all pending events.
         while let Some(event) = controller.event_ring.as_mut().unwrap().poll() {

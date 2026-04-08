@@ -10,7 +10,8 @@ use alloc::vec::Vec;
 use crate::{
     drivers::usb::xhci::{USB_BLOCK_MAILBOX, UsbBlockRequest, UsbBlockResponse, XhciError},
     fs::{Error as FsError, gpt::Partition},
-    thread::scheduler::sched,
+    interrupts::io::XHCI_DRIVER_THREAD_ID,
+    thread::scheduler::{WakePriority, sched},
 };
 
 /// Send a read request to the xHCI driver thread and wait for the result.
@@ -29,6 +30,10 @@ pub fn usb_read_sectors(lba: u64, sectors: u16, buffer: Vec<u8>) -> Result<Vec<u
         sectors,
         buffer,
     });
+    // Wake the xHCI driver thread so it processes the request.
+    if let Some(tid) = XHCI_DRIVER_THREAD_ID.get() {
+        sched().wake_thread(*tid, WakePriority::Normal);
+    }
     match response.wait() {
         UsbBlockResponse::ReadResult(result) => result,
         _ => unreachable!(),
@@ -47,6 +52,9 @@ pub fn usb_write_sectors(lba: u64, sectors: u16, data: Vec<u8>) -> Result<Vec<u8
     };
 
     let response = mailbox.send(UsbBlockRequest::Write { lba, sectors, data });
+    if let Some(tid) = XHCI_DRIVER_THREAD_ID.get() {
+        sched().wake_thread(*tid, WakePriority::Normal);
+    }
     match response.wait() {
         UsbBlockResponse::WriteResult(result) => result,
         _ => unreachable!(),
