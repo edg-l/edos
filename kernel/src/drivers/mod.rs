@@ -78,6 +78,7 @@ pub mod pci;
 pub mod random;
 pub mod rtc;
 pub mod tty;
+pub mod usb;
 pub mod vga;
 pub mod virtio;
 
