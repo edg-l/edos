@@ -64,6 +64,7 @@ impl WaitQueue {
     }
 
     /// Wake all threads
+    #[expect(unused)]
     pub fn wake_all(&self) -> usize {
         // Drain into stack buffer under lock, then wake outside to avoid
         // holding the lock while wake_thread_slow spins.

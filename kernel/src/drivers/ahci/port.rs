@@ -21,7 +21,7 @@ use crate::{
         dma::{DmaRegion, dma},
     },
     log,
-    thread::{scheduler::sched, waitqueue::WaitQueue},
+    thread::scheduler::sched,
 };
 
 const AHCI_CMD_SLOTS: usize = 32;
@@ -40,9 +40,6 @@ pub struct AhciPort {
 
     // Command slot tracking
     pub free_slots: u32, // Bitmap of free command slots
-
-    // Waitqueue for command completion notifications
-    pub cmd_complete: WaitQueue,
 }
 
 unsafe impl Send for AhciPort {}
@@ -115,7 +112,6 @@ impl AhciPort {
             fis_area,
             command_tables: [const { None }; AHCI_CMD_SLOTS],
             free_slots: 0xFFFFFFFF, // All slots initially free
-            cmd_complete: WaitQueue::new(),
         })
     }
 
@@ -175,10 +171,6 @@ impl AhciPort {
 
     pub fn set_device_type(&mut self, device_type: DeviceType) {
         self.device_type = device_type;
-    }
-
-    pub fn wake_command_waiters(&self) {
-        self.cmd_complete.wake_all();
     }
 
     /// Execute ATAPI command (SCSI packet command)
@@ -644,12 +636,12 @@ impl AhciPort {
                 return Err(AhciError::CommandTimeout);
             }
 
-            // Park until the AHCI main thread signals command completion.
-            // Falls through immediately if the condition is already met.
-            let _ = self.cmd_complete.wait_until(|| {
+            // Park until the AHCI main thread wakes us via wake_thread.
+            // The condition re-checks CI/IS/timeout so we don't miss events.
+            sched().thread_park_while(|| {
                 let ci = unsafe { ptr::read_volatile(&raw const (*port_regs).ci) };
                 let is = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
-                ci & (1 << slot) == 0 || is & PORT_IS_TFES != 0 || start_time.elapsed() >= timeout
+                ci & (1 << slot) != 0 && is & PORT_IS_TFES == 0 && start_time.elapsed() < timeout
             });
         }
     }

@@ -21,7 +21,10 @@ use crate::{
     },
     log,
     thread::{
-        mailbox::Mailbox, runqueue::IO_PRIORITY, scheduler::sched, thread::ThreadId,
+        mailbox::Mailbox,
+        runqueue::IO_PRIORITY,
+        scheduler::{WakePriority, sched},
+        thread::ThreadId,
         util::queue_spawn_kthread_named,
     },
 };
@@ -226,9 +229,14 @@ pub extern "C" fn ahci_driver_main() -> ! {
                 if port_is != 0 {
                     unsafe { ptr::write_volatile(&mut port_regs.is, port_is) };
 
-                    // Wake the port worker's WaitQueue so wait_for_command_completion unblocks.
-                    if let Some(port) = controller.ports.get(port_idx).and_then(|p| p.as_ref()) {
-                        port.lock().wake_command_waiters();
+                    // Wake the port worker thread so wait_for_command_completion unblocks.
+                    if let Some(device) = detected_devices.iter().find(|d| {
+                        d.controller_pci_address == controller.pci_device.address
+                            && d.port_idx == port_idx
+                    }) {
+                        if let Some(worker_tid) = port_map_reverse.get(&device.id) {
+                            sched().wake_thread(*worker_tid, WakePriority::Interrupt);
+                        }
                     }
                 }
             }
