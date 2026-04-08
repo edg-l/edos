@@ -1,18 +1,13 @@
-#![allow(dead_code)]
-
 use core::ptr;
 
-use alloc::{collections::btree_map::BTreeMap, format, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use spin::{Mutex, Once};
 use thiserror::Error;
 use x86_64::instructions::hlt;
 
 use crate::{
     drivers::{
-        ahci::{
-            api::send_request, controller::AhciController, port::AhciPort,
-            structures::DeviceIdentifyInfo,
-        },
+        ahci::{controller::AhciController, port::AhciPort, structures::DeviceIdentifyInfo},
         dma::DmaError,
         pci::{
             pci_manager,
@@ -21,7 +16,6 @@ use crate::{
     },
     log,
     thread::{
-        mailbox::Mailbox,
         runqueue::IO_PRIORITY,
         scheduler::{WakePriority, sched},
         thread::ThreadId,
@@ -63,6 +57,8 @@ pub enum DeviceType {
 
 pub static AHCI_DRIVER_THREAD_ID: Once<ThreadId> = Once::new();
 
+pub static DETECTED_DEVICES: Once<Vec<DetectedDevice>> = Once::new();
+
 pub fn init() {
     AHCI_DRIVER_THREAD_ID
         .call_once(|| queue_spawn_kthread_named("ahci", ahci_driver_main as *const () as u64));
@@ -77,60 +73,9 @@ pub struct DetectedDevice {
     pub device_type: DeviceType,
 }
 
-pub(super) static AHCI_REQUESTS: Once<Mailbox<AhciRequest, AhciResponse>> = Once::new();
-
-#[derive(Debug)]
-pub(super) enum AhciRequest {
-    ListDevices,
-    DeviceRequest { device_id: u64, command: Command },
-    // Used internally
-    GetDeviceMailbox(ThreadId), // thread id
-    GetDevicePort(ThreadId),    // thradid
-}
-
-#[derive(Debug, Clone)]
-pub(super) enum Command {
-    // todo: maybe accept a buffer ptr to fill instead of returning a vec
-    Read {
-        lba: u64,
-        sectors: u16,
-        buffer: Vec<u8>,
-    },
-    Write {
-        lba: u64,
-        data: Vec<u8>,
-        sectors: u16,
-    },
-    Flush,
-    Identify,
-}
-
-#[derive(Debug)]
-pub(super) enum AhciResponse {
-    Devices(Vec<DetectedDevice>),
-    ReadResult {
-        data: Result<Vec<u8>, AhciError>,
-    },
-    WriteResult {
-        /// The input buffer is returned so it can be reused.
-        data: Result<Vec<u8>, AhciError>,
-    },
-    IdentifyResult {
-        info: Result<DeviceIdentifyInfo, AhciError>,
-    },
-    Result(Result<(), AhciError>),
-    DeviceMailbox(Option<Arc<PortMailbox>>),
-    DevicePort(Option<Arc<Mutex<AhciPort>>>),
-}
-
-type PortMailbox = Mailbox<Command, AhciResponse>;
-
 pub extern "C" fn ahci_driver_main() -> ! {
     let thread = sched().current_thread().unwrap();
     thread.set_priority(IO_PRIORITY);
-    let _tid = thread.id;
-
-    let requests = AHCI_REQUESTS.call_once(|| Mailbox::with_capacity(8));
 
     let devices: Vec<PciDevice> = pci_manager().read().get_devices().to_vec();
 
@@ -160,8 +105,6 @@ pub extern "C" fn ahci_driver_main() -> ! {
 
     let mut detected_devices: Vec<DetectedDevice> = Vec::new();
 
-    let mut device_mailboxes: Vec<Arc<PortMailbox>> = Vec::new();
-
     let mut id = 0;
     for controller in &mut controllers {
         for port_idx in 0..controller.ports.len() {
@@ -187,18 +130,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
         }
     }
 
-    let mut port_map = BTreeMap::new();
-    let mut port_map_reverse = BTreeMap::new();
-
-    for device in &detected_devices {
-        let worker_tid = queue_spawn_kthread_named(
-            &format!("ahci-port-{}-{}", device.id, device.port_idx),
-            port_worker_thread as *const () as u64,
-        );
-        port_map.insert(worker_tid, device.id);
-        port_map_reverse.insert(device.id, worker_tid);
-        device_mailboxes.push(Arc::new(Mailbox::new()));
-    }
+    DETECTED_DEVICES.call_once(|| detected_devices.clone());
 
     // Initialize the direct-access layer with a flat port array and mapping.
     {
@@ -224,20 +156,16 @@ pub extern "C" fn ahci_driver_main() -> ! {
         direct::set_port_mapping(port_mapping);
     }
 
-    // The AHCI main thread job is to route requests to ports.
-
     loop {
-        // Sleep until an MSI interrupt or mailbox request arrives.
+        // Sleep until an MSI interrupt arrives.
         sched().thread_park_while(|| {
-            let any_interrupt = controllers.iter().any(|c| {
+            !controllers.iter().any(|c| {
                 let hba_is = unsafe { ptr::read_volatile(&raw const (*c.hba).is) };
                 hba_is != 0
-            });
-            let has_request = !requests.is_empty();
-            !any_interrupt && !has_request
+            })
         });
 
-        // Dispatch HBA interrupts to port workers.
+        // Dispatch HBA interrupts to direct callers.
         for controller in &controllers {
             let hba_is = unsafe { ptr::read_volatile(&(*controller.hba).is) };
             if hba_is == 0 {
@@ -254,15 +182,11 @@ pub extern "C" fn ahci_driver_main() -> ! {
                 if port_is != 0 {
                     unsafe { ptr::write_volatile(&mut port_regs.is, port_is) };
 
-                    // Wake the port worker thread so wait_for_command_completion unblocks.
+                    // Wake any thread blocked in direct::read_sectors / write_sectors.
                     if let Some(device) = detected_devices.iter().find(|d| {
                         d.controller_pci_address == controller.pci_device.address
                             && d.port_idx == port_idx
                     }) {
-                        if let Some(worker_tid) = port_map_reverse.get(&device.id) {
-                            sched().wake_thread(*worker_tid, WakePriority::Interrupt);
-                        }
-                        // Also wake any thread blocked in direct::read_sectors / write_sectors.
                         let waiter_tid = direct::get_waiter(device.id);
                         if waiter_tid != 0 {
                             sched().wake_thread(ThreadId(waiter_tid), WakePriority::Interrupt);
@@ -272,111 +196,6 @@ pub extern "C" fn ahci_driver_main() -> ! {
             }
 
             unsafe { ptr::write_volatile(&mut (*controller.hba).is, hba_is) };
-        }
-
-        // Drain all pending requests.
-        while let Some(mut req) = requests.try_recv() {
-            match req.payload.take().unwrap() {
-                AhciRequest::ListDevices => {
-                    req.reply(AhciResponse::Devices(detected_devices.clone()));
-                }
-                AhciRequest::DeviceRequest { device_id, command } => {
-                    if let Some(mb) = device_mailboxes.get(device_id as usize) {
-                        mb.forward(req, command);
-                    } else {
-                        req.reply(AhciResponse::Result(Err(AhciError::InvalidDevice)));
-                    }
-                }
-                AhciRequest::GetDeviceMailbox(thread_id) => {
-                    let id = port_map.get(&thread_id);
-                    if let Some(id) = id {
-                        let mailbox = device_mailboxes.get((*id) as usize).cloned();
-                        req.reply(AhciResponse::DeviceMailbox(mailbox));
-                    } else {
-                        req.reply(AhciResponse::DeviceMailbox(None));
-                    }
-                }
-                AhciRequest::GetDevicePort(worker_tid) => {
-                    let mut found = false;
-                    if let Some(info) = port_map.get(&worker_tid) {
-                        let device = &detected_devices[*info as usize];
-                        for controller in &controllers {
-                            if controller.pci_device.address == device.controller_pci_address {
-                                let port = controller.ports.get(device.port_idx).cloned().flatten();
-                                req.reply(AhciResponse::DevicePort(port));
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                    if !found {
-                        req.reply(AhciResponse::DevicePort(None));
-                    }
-                }
-            }
-        }
-    }
-}
-
-extern "C" fn port_worker_thread() -> ! {
-    let thread = sched().current_thread().unwrap();
-    thread.set_priority(IO_PRIORITY);
-    let tid = thread.id;
-
-    let mailbox = {
-        loop {
-            let mailbox = send_request(AhciRequest::GetDeviceMailbox(tid));
-            if let AhciResponse::DeviceMailbox(Some(mailbox)) = mailbox {
-                break mailbox;
-            }
-            sched().thread_sleep(core::time::Duration::from_millis(10));
-        }
-    };
-
-    let port = {
-        loop {
-            let port = send_request(AhciRequest::GetDevicePort(tid));
-            if let AhciResponse::DevicePort(Some(port)) = port {
-                break port;
-            }
-            sched().thread_sleep(core::time::Duration::from_millis(10));
-        }
-    };
-
-    loop {
-        let mut req = mailbox.recv();
-        match req.payload.take().unwrap() {
-            Command::Read {
-                lba,
-                sectors,
-                mut buffer,
-            } => {
-                log!("Got read request, lba={lba}, sectors={sectors}");
-                buffer.resize(sectors as usize * 512, 0);
-                let result = port.lock().read_sectors(lba, &mut buffer, sectors);
-
-                match result {
-                    Ok(_) => req.reply(AhciResponse::ReadResult { data: Ok(buffer) }),
-                    Err(e) => req.reply(AhciResponse::ReadResult { data: Err(e) }),
-                }
-            }
-            Command::Write { lba, data, sectors } => {
-                //log!(logger, "Got write request, lba={lba}, sectors={sectors}, data_len={}", data.len());
-                let result = port.lock().write_sectors(lba, &data, sectors);
-                req.reply(AhciResponse::WriteResult {
-                    data: result.map(|_| data),
-                });
-            }
-            Command::Flush => {
-                log!("Got flush request");
-                let result = port.lock().flush_cache();
-                req.reply(AhciResponse::Result(result));
-            }
-            Command::Identify => {
-                log!("Got identify request");
-                let result = port.lock().identify_device();
-                req.reply(AhciResponse::IdentifyResult { info: result });
-            }
         }
     }
 }

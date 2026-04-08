@@ -1,23 +1,8 @@
-#![expect(unused)]
-
-use core::{
-    ffi::{CStr, c_void},
-    time::Duration,
-};
-
-use alloc::{
-    boxed::Box,
-    collections::btree_map::BTreeMap,
-    format,
-    string::{String, ToString},
-    sync::Arc,
-    vec::Vec,
-};
-use spin::{Mutex, Once, RwLock};
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use spin::{Mutex, Once};
 use thiserror::Error;
 
 use crate::{
-    allocator::print_alloc_stats,
     drivers::ahci::{AhciError, api::list_devices},
     fs::{
         fat32::Fatfs,
@@ -31,11 +16,8 @@ use crate::{
     log,
     memory::mapper::MemoryManager,
     thread::{
-        mailbox::Mailbox,
-        runqueue::{DEFAULT_PRIORITY, IO_PRIORITY},
-        scheduler::sched,
-        thread::ThreadId,
-        util::{kthread_exit, queue_spawn_kthread_named, queue_spawn_kthread_named_arg},
+        mailbox::Mailbox, mutex::BlockingMutex, runqueue::IO_PRIORITY, scheduler::sched,
+        util::queue_spawn_kthread_named,
     },
 };
 
@@ -357,7 +339,6 @@ pub(super) static FS_REQUESTS: Once<Arc<Mailbox<FsRequest, FsResponse>>> = Once:
 pub(super) enum FsRequest {
     // Global
     ListPartitions,
-    ListMounts,
     Mount {
         device_id: usize,
         partition_index: usize,
@@ -371,254 +352,13 @@ pub(super) enum FsRequest {
     RegisterPartition {
         partition: Partition,
     },
-    // Path-based routing (global namespace)
-    PathRequest {
-        path: Path,
-        op: PathOp,
-    },
-    // Partition routing
-    FsThreadRequest {
-        device_id: usize,
-        partition_index: usize,
-        command: FsThreadCommand,
-    },
-    // Internal for worker bootstrap
-    GetPartitionMailbox(ThreadId), // threadid
 }
 
 #[derive(Debug)]
 pub(super) enum FsResponse {
     Partitions(Vec<Partition>),
-    Mounts(Vec<MountInfo>),
-    Files(Result<Vec<File>, Error>),
-    ReadBytes(Result<Vec<u8>, Error>),
-    Written(Result<u64, Error>),
-    File(Result<File, Error>),
     Ok(Result<(), Error>),
-    Ioctl(Result<u64, Error>),
-    Poll(Result<Box<dyn Pollable>, Error>),
-    Mmap(Result<MmapRegion, Error>),
-    // Internal
-    PartitionMailbox(Option<Arc<Mailbox<FsThreadCommand, FsResponse>>>),
 }
-
-#[derive(Debug, Clone)]
-pub(super) enum PathOp {
-    ListFiles,
-    ReadBytes {
-        offset: usize,
-        count: usize,
-    },
-    WriteBytes {
-        offset: usize,
-        data: Vec<u8>,
-    },
-    CreateFile,
-    CreateDir,
-    RemoveFile,
-    RemoveDir,
-    FileInfo,
-    Flush,
-    Ioctl {
-        request: u64,
-        arg: u64,
-    },
-    Poll,
-    Mmap {
-        offset: usize,
-        length: usize,
-        memory: Arc<Mutex<MemoryManager>>,
-    },
-    Truncate {
-        size: u64,
-    },
-    Rename {
-        new_path: Path,
-    },
-}
-
-// TODO: Add rmdir recursive in a atomic command
-
-#[derive(Debug, Clone)]
-pub(super) enum FsThreadCommand {
-    ListFiles {
-        path: Path,
-    },
-    ReadBytes {
-        path: Path,
-        offset: usize,
-        count: usize,
-    },
-    WriteBytes {
-        path: Path,
-        offset: usize,
-        data: Vec<u8>,
-    },
-    CreateFile {
-        path: Path,
-    },
-    CreateDir {
-        path: Path,
-    },
-    RemoveFile {
-        path: Path,
-    },
-    RemoveDir {
-        path: Path,
-    },
-    FileInfo {
-        path: Path,
-    },
-    Flush,
-    Ioctl {
-        path: Path,
-        request: u64,
-        arg: u64,
-    },
-    Poll {
-        path: Path,
-    },
-    Mmap {
-        path: Path,
-        offset: usize,
-        length: usize,
-        memory: Arc<Mutex<MemoryManager>>,
-    },
-    AddVirtualInfo {
-        paths: Vec<Path>,
-    },
-    Truncate {
-        path: Path,
-        size: u64,
-    },
-    Rename {
-        old_path: Path,
-        new_path: Path,
-    },
-}
-
-// Helper functions for mount point handling
-
-/// Find child mount points for a given path
-#[derive(Debug, Clone)]
-struct MountMetadata {
-    device_id: usize,
-    partition_index: usize,
-    filesystem: FilesystemType,
-}
-
-fn find_child_mount_points(
-    path: &Path,
-    mount_points: &BTreeMap<Path, MountMetadata>,
-) -> Vec<String> {
-    let parent_components = path.components();
-    let mut child_mount_points = Vec::new();
-
-    for child_mp in mount_points.keys() {
-        let child_components = child_mp.components();
-        // Check if this mount point is a direct child of the current path
-        if child_components.len() == parent_components.len() + 1 {
-            // Check if all parent components match
-            let mut is_child = true;
-            for (i, parent_comp) in parent_components.iter().enumerate() {
-                if child_components[i] != *parent_comp {
-                    is_child = false;
-                    break;
-                }
-            }
-            if is_child {
-                let dir_name = child_components[parent_components.len()].clone();
-                child_mount_points.push(dir_name);
-            }
-        }
-    }
-
-    child_mount_points
-}
-
-/// Convert PathOp to PartitionCommand
-fn pathop_to_partition_command(op: PathOp, path: Path, real_path: Path) -> FsThreadCommand {
-    match op {
-        PathOp::ListFiles => FsThreadCommand::ListFiles { path },
-        PathOp::ReadBytes { offset, count } => FsThreadCommand::ReadBytes {
-            path,
-            offset,
-            count,
-        },
-        PathOp::WriteBytes { offset, data } => FsThreadCommand::WriteBytes { path, offset, data },
-        PathOp::CreateFile => FsThreadCommand::CreateFile { path },
-        PathOp::CreateDir => FsThreadCommand::CreateDir { path },
-        PathOp::RemoveFile => FsThreadCommand::RemoveFile { path },
-        PathOp::RemoveDir => FsThreadCommand::RemoveDir { path },
-        PathOp::FileInfo => FsThreadCommand::FileInfo { path: real_path },
-        PathOp::Flush => FsThreadCommand::Flush,
-        PathOp::Ioctl { request, arg } => FsThreadCommand::Ioctl { path, request, arg },
-        PathOp::Poll => FsThreadCommand::Poll { path },
-        PathOp::Mmap {
-            offset,
-            length,
-            memory,
-        } => FsThreadCommand::Mmap {
-            path,
-            offset,
-            length,
-            memory,
-        },
-        PathOp::Truncate { size } => FsThreadCommand::Truncate {
-            path: real_path,
-            size,
-        },
-        PathOp::Rename { new_path } => FsThreadCommand::Rename {
-            old_path: real_path,
-            new_path,
-        },
-    }
-}
-
-/// Create a virtual directory file entry
-fn create_virtual_file(name: String) -> File {
-    File {
-        name,
-        kind: crate::fs::FileKind::Directory,
-        size: 0,
-        attrs: crate::fs::FileAttrs {
-            readonly: false,
-            hidden: false,
-            system: false,
-            archive: false,
-        },
-        created: None,
-        accessed: None,
-        modified: None,
-    }
-}
-
-/// Find the best mount point for a given path (longest prefix match)
-fn find_mount_at_path<'a>(
-    path: &Path,
-    mount_points: &'a BTreeMap<Path, MountMetadata>,
-) -> Option<(&'a Path, &'a MountMetadata)> {
-    let mut best: Option<(&'a Path, &'a MountMetadata)> = None;
-    for (mp, meta) in mount_points.iter() {
-        if mp.is_root() && best.is_none() {
-            best = Some((mp, meta));
-        } else if path.starts_with(mp) {
-            match best {
-                None => best = Some((mp, meta)),
-                Some((best_mp, _)) => {
-                    if mp.components().len() > best_mp.components().len() {
-                        best = Some((mp, meta));
-                    }
-                }
-            }
-        }
-    }
-    best
-}
-
-pub static FS_WORKER_MAILBOXES: RwLock<
-    BTreeMap<(usize, usize), Arc<Mailbox<FsThreadCommand, FsResponse>>>,
-> = RwLock::new(BTreeMap::new());
 
 pub extern "C" fn fs_main_thread() -> ! {
     log!("Started main fs");
@@ -658,513 +398,156 @@ pub extern "C" fn fs_main_thread() -> ! {
         }
     }
 
-    // Per-partition worker threads and their mailboxes
-    let mut worker_tid_map = BTreeMap::<ThreadId, (usize, usize)>::new();
-
-    // Mount table: map mount point to partition index
-    let mut mount_points: BTreeMap<Path, MountMetadata> = BTreeMap::new();
-    let mut mount_points_rev: BTreeMap<(usize, usize), Path> = BTreeMap::new();
-
-    for (mb_id, mb) in FS_WORKER_MAILBOXES.read().iter() {
-        let mut paths = Vec::new();
-        if let Some(base_path) = mount_points_rev.get(mb_id) {
-            for (path, meta) in &mount_points {
-                if (meta.device_id, meta.partition_index) != *mb_id
-                    && let Some(parent) = base_path.parent()
-                {
-                    let stripped = path.strip_prefix(&parent);
-
-                    if !stripped.is_root() {
-                        paths.push(path.clone());
-                    }
-                }
-            }
-
-            if !paths.is_empty() {
-                mb.send(FsThreadCommand::AddVirtualInfo { paths });
-            }
-        }
-    }
-
-    const SPECIAL_DEV_ID: usize = 9000;
-    let mut current_special_part = 0;
-
-    // Main loop: route and respond
+    // Main loop: handle management requests
     loop {
         let mut req = requests.recv();
         let payload = req.payload.take().unwrap();
-        {
-            match payload {
-                FsRequest::ListPartitions => {
-                    req.reply(FsResponse::Partitions(partitions.clone()));
+        match payload {
+            FsRequest::ListPartitions => {
+                req.reply(FsResponse::Partitions(partitions.clone()));
+            }
+            FsRequest::RegisterPartition { partition } => {
+                log!(
+                    "fs: registered partition: {} (device {})",
+                    partition.name,
+                    partition.device_id
+                );
+                partitions.push(partition);
+                req.reply(FsResponse::Ok(Ok(())));
+            }
+            FsRequest::Mount {
+                device_id,
+                partition_index,
+                mount_point,
+                fstype,
+            } => {
+                log!(
+                    "Mount request: {:?} ({fstype:?}) at {:?}",
+                    (device_id, partition_index),
+                    mount_point
+                );
+
+                if vfs::is_mount_point(&mount_point) {
+                    req.reply(FsResponse::Ok(Err(Error::IoError)));
+                    continue;
                 }
-                FsRequest::RegisterPartition { partition } => {
-                    log!(
-                        "fs: registered partition: {} (device {})",
-                        partition.name,
-                        partition.device_id
-                    );
-                    partitions.push(partition);
-                    req.reply(FsResponse::Ok(Ok(())));
-                }
-                FsRequest::ListMounts => {
-                    let mounts = mount_points
-                        .iter()
-                        .map(|(path, meta)| MountInfo {
-                            mount_point: path.clone(),
-                            device_id: meta.device_id,
-                            partition_index: meta.partition_index,
-                            filesystem: meta.filesystem.clone(),
-                        })
-                        .collect();
-                    req.reply(FsResponse::Mounts(mounts));
-                }
-                FsRequest::Mount {
-                    mut device_id,
-                    mut partition_index,
-                    mut mount_point,
-                    mut fstype,
-                } => {
-                    log!(
-                        "Mount request: {:?} ({fstype:?}) at {:?}",
-                        (device_id, partition_index),
-                        mount_point
-                    );
 
-                    if mount_points.contains_key(&mount_point) {
-                        req.reply(FsResponse::Ok(Err(Error::IoError)));
-                        continue;
-                    }
-
-                    match fstype {
-                        FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32 => {
-                            for partition in partitions.iter() {
-                                if partition.device_id as usize == device_id
-                                    && partition.index == partition_index
-                                    && let Some(filesystem) = &partition.filesystem
-                                {
-                                    let part = Box::new(partition.clone());
-                                    let part = &raw mut *Box::leak(part);
-
-                                    let name = match filesystem {
-                                        FilesystemType::Memfs => {
-                                            format!("fs-memfs-{}", partition.index)
-                                        }
-                                        FilesystemType::Fat32 => {
-                                            format!(
-                                                "fs-fat32-{}p{}",
-                                                partition.device_id, partition.index
-                                            )
-                                        }
-                                        _ => {
-                                            format!(
-                                                "fs-dev{}p{}",
-                                                partition.device_id, partition.index
-                                            )
-                                        }
-                                    };
-
-                                    let worker_tid = queue_spawn_kthread_named_arg(
-                                        &name,
-                                        start_partition_fs_thread as *const () as u64,
-                                        part.cast(),
-                                    );
-                                    worker_tid_map.insert(
-                                        worker_tid,
-                                        (partition.device_id as usize, partition.index),
-                                    );
-                                    FS_WORKER_MAILBOXES.write().insert(
-                                        (partition.device_id as usize, partition.index),
-                                        Mailbox::new().into(),
-                                    );
-                                    break;
+                match fstype {
+                    FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32 => {
+                        let mut mounted = false;
+                        for partition in partitions.iter() {
+                            if partition.device_id as usize == device_id
+                                && partition.index == partition_index
+                                && partition.filesystem.is_some()
+                            {
+                                match Fatfs::new(partition.clone()) {
+                                    Ok(fat_fs) => {
+                                        let fs: Box<dyn FileSystem + Send> = Box::new(fat_fs);
+                                        vfs::mount(
+                                            mount_point.clone(),
+                                            vfs::MountEntry {
+                                                fs: Arc::new(BlockingMutex::new(fs)),
+                                                device_id,
+                                                partition_index,
+                                                filesystem: fstype.clone(),
+                                            },
+                                        );
+                                        mounted = true;
+                                    }
+                                    Err(e) => {
+                                        log!("Failed to create FAT filesystem: {:?}", e);
+                                    }
                                 }
+                                break;
                             }
                         }
-                        FilesystemType::Memfs => {
-                            log!("Mounting memfs");
-                            let fs = Box::into_raw(Box::new(
-                                Memfs::new().expect("failed to create memfs"),
-                            ));
-                            let worker_tid = queue_spawn_kthread_named_arg(
-                                &format!("fs-{}", mount_point.filename()),
-                                start_memfs_thread as *const () as u64,
-                                fs.cast(),
-                            );
-                            device_id = SPECIAL_DEV_ID;
-                            partition_index = current_special_part;
-                            worker_tid_map
-                                .insert(worker_tid, (SPECIAL_DEV_ID, current_special_part));
-                            FS_WORKER_MAILBOXES.write().insert(
-                                (SPECIAL_DEV_ID, current_special_part),
-                                Mailbox::new().into(),
-                            );
-                            current_special_part += 1;
-                        }
-                        FilesystemType::Devfs => {
-                            log!("Mounting devfs");
-                            let fs = Box::into_raw(Box::new(
-                                DevFs::new().expect("failed to create devfs"),
-                            ));
-                            let worker_tid = queue_spawn_kthread_named_arg(
-                                &format!("devfs-{}", mount_point.filename()),
-                                start_devfs_thread as *const () as u64,
-                                fs.cast(),
-                            );
-                            device_id = SPECIAL_DEV_ID;
-                            partition_index = current_special_part;
-                            worker_tid_map
-                                .insert(worker_tid, (SPECIAL_DEV_ID, current_special_part));
-                            FS_WORKER_MAILBOXES.write().insert(
-                                (SPECIAL_DEV_ID, current_special_part),
-                                Mailbox::new().into(),
-                            );
-                            current_special_part += 1;
-                        }
-                        FilesystemType::Procfs => {
-                            log!("Mounting procfs");
-                            let fs = Box::into_raw(Box::new(
-                                Procfs::new().expect("failed to create procfs"),
-                            ));
-                            let worker_tid = queue_spawn_kthread_named_arg(
-                                &format!("procfs-{}", mount_point.filename()),
-                                start_procfs_thread as *const () as u64,
-                                fs.cast(),
-                            );
-                            device_id = SPECIAL_DEV_ID;
-                            partition_index = current_special_part;
-                            worker_tid_map
-                                .insert(worker_tid, (SPECIAL_DEV_ID, current_special_part));
-                            FS_WORKER_MAILBOXES.write().insert(
-                                (SPECIAL_DEV_ID, current_special_part),
-                                Mailbox::new().into(),
-                            );
-                            current_special_part += 1;
-                        }
-                        FilesystemType::Unknown
-                        | FilesystemType::Iso9660
-                        | FilesystemType::Ntfs => {
+                        if !mounted {
                             req.reply(FsResponse::Ok(Err(Error::IoError)));
                             continue;
                         }
                     }
-
-                    let meta = MountMetadata {
-                        device_id,
-                        partition_index,
-                        filesystem: fstype.clone(),
-                    };
-
-                    mount_points.insert(mount_point.clone(), meta.clone());
-                    mount_points_rev.insert((device_id, partition_index), mount_point.clone());
-
-                    if let Some(parent_path) = mount_point.parent()
-                        && let Some((_parent_mount, parent_meta)) =
-                            find_mount_at_path(&parent_path, &mount_points)
-                    {
-                        let parent_key = (parent_meta.device_id, parent_meta.partition_index);
-
-                        if let Some(mb) = FS_WORKER_MAILBOXES.read().get(&parent_key) {
-                            let paths = alloc::vec![mount_point.clone()];
-                            log!("Sending virtual info for {} to {parent_key:?}", mount_point);
-                            mb.send(FsThreadCommand::AddVirtualInfo { paths });
-                        }
-                    }
-
-                    req.reply(FsResponse::Ok(Ok(())));
-                }
-                FsRequest::Unmount { mount_point } => {
-                    let res = if let Some(meta) = mount_points.remove(&mount_point) {
-                        mount_points_rev.remove(&(meta.device_id, meta.partition_index));
-                        Ok(())
-                    } else {
-                        Err(Error::IoError)
-                    };
-                    req.reply(FsResponse::Ok(res));
-                }
-                FsRequest::PathRequest { path, op } => {
-                    let mut mount_check_path = path.clone();
-
-                    // If the op requests direct info of the given path, like file info, check the mount point at parent
-                    // This makes it so cd /dev/sda1p1 works.
-                    if matches!(op, PathOp::FileInfo)
-                        && let Some(p) = path.parent()
-                    {
-                        mount_check_path = p;
-                    }
-
-                    // find mount point device/partition to route
-                    if let Some((mount_path, meta)) =
-                        find_mount_at_path(&mount_check_path, &mount_points)
-                    {
-                        // relative  path to the mount point.
-                        let rel = path.strip_prefix(mount_path).normalize();
-
-                        // For Rename, strip the mount prefix from new_path as well.
-                        let op = if let PathOp::Rename { new_path } = op {
-                            PathOp::Rename {
-                                new_path: new_path.strip_prefix(mount_path).normalize(),
+                    FilesystemType::Memfs => {
+                        log!("Mounting memfs");
+                        match Memfs::new() {
+                            Ok(memfs) => {
+                                let fs: Box<dyn FileSystem + Send> = Box::new(memfs);
+                                vfs::mount(
+                                    mount_point.clone(),
+                                    vfs::MountEntry {
+                                        fs: Arc::new(BlockingMutex::new(fs)),
+                                        device_id: 0,
+                                        partition_index: 0,
+                                        filesystem: FilesystemType::Memfs,
+                                    },
+                                );
                             }
-                        } else {
-                            op
-                        };
-
-                        let cmd = pathop_to_partition_command(
-                            op.clone(),
-                            rel.clone(),
-                            if &path == mount_path {
-                                path.clone()
-                            } else {
-                                rel
-                            },
-                        );
-
-                        let mailbox_key = (meta.device_id, meta.partition_index);
-
-                        if let Some(mb) = FS_WORKER_MAILBOXES.read().get(&mailbox_key) {
-                            mb.forward(req, cmd);
-                        } else {
-                            req.reply(FsResponse::Ok(Err(Error::FileNotFound)));
+                            Err(e) => {
+                                log!("Failed to create memfs: {:?}", e);
+                                req.reply(FsResponse::Ok(Err(Error::IoError)));
+                                continue;
+                            }
                         }
-                    } else {
-                        req.reply(FsResponse::Ok(Err(Error::FileNotFound)));
                     }
-                }
-                FsRequest::FsThreadRequest {
-                    partition_index,
-                    device_id,
-                    command,
-                } => {
-                    if let Some(mb) = FS_WORKER_MAILBOXES
-                        .read()
-                        .get(&(device_id, partition_index))
-                    {
-                        mb.forward(req, command.clone());
-                    } else {
+                    FilesystemType::Devfs => {
+                        log!("Mounting devfs");
+                        match DevFs::new() {
+                            Ok(devfs) => {
+                                let fs: Box<dyn FileSystem + Send> = Box::new(devfs);
+                                vfs::mount(
+                                    mount_point.clone(),
+                                    vfs::MountEntry {
+                                        fs: Arc::new(BlockingMutex::new(fs)),
+                                        device_id: 0,
+                                        partition_index: 0,
+                                        filesystem: FilesystemType::Devfs,
+                                    },
+                                );
+                            }
+                            Err(e) => {
+                                log!("Failed to create devfs: {:?}", e);
+                                req.reply(FsResponse::Ok(Err(Error::IoError)));
+                                continue;
+                            }
+                        }
+                    }
+                    FilesystemType::Procfs => {
+                        log!("Mounting procfs");
+                        match Procfs::new() {
+                            Ok(procfs) => {
+                                let fs: Box<dyn FileSystem + Send> = Box::new(procfs);
+                                vfs::mount(
+                                    mount_point.clone(),
+                                    vfs::MountEntry {
+                                        fs: Arc::new(BlockingMutex::new(fs)),
+                                        device_id: 0,
+                                        partition_index: 0,
+                                        filesystem: FilesystemType::Procfs,
+                                    },
+                                );
+                            }
+                            Err(e) => {
+                                log!("Failed to create procfs: {:?}", e);
+                                req.reply(FsResponse::Ok(Err(Error::IoError)));
+                                continue;
+                            }
+                        }
+                    }
+                    FilesystemType::Unknown | FilesystemType::Iso9660 | FilesystemType::Ntfs => {
                         req.reply(FsResponse::Ok(Err(Error::IoError)));
+                        continue;
                     }
                 }
-                FsRequest::GetPartitionMailbox(tid) => {
-                    if let Some(index) = worker_tid_map.get(&tid) {
-                        let mb = FS_WORKER_MAILBOXES.read().get(index).cloned();
-                        req.reply(FsResponse::PartitionMailbox(mb));
-                    } else {
-                        req.reply(FsResponse::PartitionMailbox(None));
-                    }
-                }
+
+                req.reply(FsResponse::Ok(Ok(())));
             }
-        }
-    }
-}
-
-extern "C" fn start_partition_fs_thread(partition: *mut Partition) -> ! {
-    let partition = unsafe { Box::from_raw(partition) };
-
-    let path = if partition.filesystem == Some(FilesystemType::Memfs) {
-        Path::parse(&format!("/dev/memfs{}", partition.index)).expect("failed to parse path")
-    } else {
-        Path::parse(&format!(
-            "/dev/sd{}p{}",
-            partition.device_id, partition.index
-        ))
-        .expect("failed to parse path")
-    };
-
-    log!("Partition: {} ({})", path, partition.name);
-
-    // Get our mailbox from the FS main
-    let mailbox = {
-        use crate::fs::api::send_request as send;
-        loop {
-            let resp = send(FsRequest::GetPartitionMailbox(
-                sched().current_thread_id().unwrap(),
-            ));
-            if let FsResponse::PartitionMailbox(Some(mb)) = resp {
-                break mb;
-            }
-        }
-    };
-
-    let mut fs: Box<dyn FileSystem>;
-
-    match &partition.filesystem {
-        Some(ty) => match ty {
-            FilesystemType::Fat12 | FilesystemType::Fat16 | FilesystemType::Fat32 => {
-                let Ok(mut fat_fs) = Fatfs::new((*partition).clone()) else {
-                    log!("Failed to create FAT filesystem");
-                    kthread_exit(-1)
+            FsRequest::Unmount { mount_point } => {
+                let res = if vfs::unmount(&mount_point) {
+                    Ok(())
+                } else {
+                    Err(Error::IoError)
                 };
-                fs = Box::new(fat_fs);
-            }
-            FilesystemType::Memfs => {
-                let Ok(mut memfs) = Memfs::new() else {
-                    log!("Failed to create Memfs filesystem");
-                    kthread_exit(-1)
-                };
-                fs = Box::new(memfs);
-            }
-            FilesystemType::Devfs => {
-                log!("Devfs cannot be backed by a partition");
-                unsupported_fs(mailbox);
-            }
-            FilesystemType::Procfs => {
-                log!("Procfs cannot be backed by a partition");
-                unsupported_fs(mailbox);
-            }
-            FilesystemType::Ntfs => {
-                log!("NTFS not yet implemented");
-                unsupported_fs(mailbox);
-            }
-            FilesystemType::Iso9660 => {
-                log!("Iso9660 not yet implemented");
-                unsupported_fs(mailbox);
-            }
-            FilesystemType::Unknown => {
-                log!("Unknown fs type");
-                unsupported_fs(mailbox);
-            }
-        },
-        None => unsupported_fs(mailbox),
-    }
-
-    run_fs_thread(fs);
-}
-
-extern "C" fn start_memfs_thread(fs: *mut Memfs) -> ! {
-    let fs: Box<dyn FileSystem> = unsafe { Box::from_raw(fs) };
-    run_fs_thread(fs)
-}
-
-extern "C" fn start_devfs_thread(fs: *mut DevFs) -> ! {
-    let fs: Box<dyn FileSystem> = unsafe { Box::from_raw(fs) };
-    run_fs_thread(fs)
-}
-
-extern "C" fn start_procfs_thread(fs: *mut Procfs) -> ! {
-    let fs: Box<dyn FileSystem> = unsafe { Box::from_raw(fs) };
-    run_fs_thread(fs)
-}
-
-fn run_fs_thread(mut fs: Box<dyn FileSystem>) -> ! {
-    log!("Fs thread started");
-    let thread = sched().current_thread().unwrap();
-    thread.set_priority(IO_PRIORITY);
-    let mut virtual_files: BTreeMap<Path, File> = BTreeMap::new();
-
-    // Get our mailbox from the FS main
-    let mailbox = {
-        use crate::fs::api::send_request as send;
-        loop {
-            let resp = send(FsRequest::GetPartitionMailbox(
-                sched().current_thread_id().unwrap(),
-            ));
-            if let FsResponse::PartitionMailbox(Some(mb)) = resp {
-                break mb;
+                req.reply(FsResponse::Ok(res));
             }
         }
-    };
-
-    // Serve partition commands
-    loop {
-        let mut req = mailbox.recv();
-        let message = req.payload.take().unwrap();
-        {
-            match message {
-                FsThreadCommand::ListFiles { path } => {
-                    if let Some(file) = virtual_files.get(&path) {
-                        req.reply(FsResponse::Files(Ok(alloc::vec![file.clone()])));
-                    } else {
-                        let mut res = fs.list_files(&path);
-
-                        if let Ok(res) = &mut res {
-                            for f in &virtual_files {
-                                if path.is_direct_parent(f.0) {
-                                    res.push(f.1.clone());
-                                }
-                            }
-                        }
-                        req.reply(FsResponse::Files(res));
-                    }
-                }
-                FsThreadCommand::ReadBytes {
-                    path,
-                    offset,
-                    count,
-                } => {
-                    let res = fs.read_bytes(&path, offset, count);
-                    req.reply(FsResponse::ReadBytes(res));
-                }
-                FsThreadCommand::WriteBytes { path, offset, data } => {
-                    let res = fs.write_bytes(&path, offset, &data);
-                    req.reply(FsResponse::Written(res));
-                }
-                FsThreadCommand::CreateFile { path } => {
-                    let res = fs.create_file(&path);
-                    req.reply(FsResponse::Ok(res));
-                }
-                FsThreadCommand::CreateDir { path } => {
-                    let res = fs.create_dir(&path);
-                    req.reply(FsResponse::Ok(res));
-                }
-                FsThreadCommand::RemoveFile { path } => {
-                    let res = fs.remove_file(&path);
-                    req.reply(FsResponse::Ok(res));
-                }
-                FsThreadCommand::RemoveDir { path } => {
-                    let res = fs.remove_dir(&path);
-                    req.reply(FsResponse::Ok(res));
-                }
-                FsThreadCommand::FileInfo { path } => {
-                    if let Some(file) = virtual_files.get(&path) {
-                        req.reply(FsResponse::File(Ok(file.clone())));
-                    } else {
-                        let res = fs.file_info(&path);
-                        req.reply(FsResponse::File(res));
-                    }
-                }
-                FsThreadCommand::Flush => {
-                    let res = fs.flush();
-                    req.reply(FsResponse::Ok(res));
-                }
-                FsThreadCommand::Ioctl { path, request, arg } => {
-                    let res = fs.ioctl(&path, request, arg);
-                    req.reply(FsResponse::Ioctl(res));
-                }
-                FsThreadCommand::Poll { path } => {
-                    let res = fs.poll(&path);
-                    req.reply(FsResponse::Poll(res));
-                }
-                FsThreadCommand::Mmap {
-                    path,
-                    offset,
-                    length,
-                    memory,
-                } => {
-                    let res = fs.mmap(&path, offset, length, memory);
-                    req.reply(FsResponse::Mmap(res));
-                }
-                FsThreadCommand::AddVirtualInfo { paths } => {
-                    for path in paths {
-                        let file = create_virtual_file(path.components().last().unwrap().clone());
-                        virtual_files.insert(path.clone(), file);
-                    }
-                }
-                FsThreadCommand::Truncate { path, size } => {
-                    let res = fs.truncate(&path, size);
-                    req.reply(FsResponse::Ok(res));
-                }
-                FsThreadCommand::Rename { old_path, new_path } => {
-                    let res = fs.rename(&old_path, &new_path);
-                    req.reply(FsResponse::Ok(res));
-                }
-            }
-        }
-    }
-}
-
-fn unsupported_fs(mb: Arc<Mailbox<FsThreadCommand, FsResponse>>) -> ! {
-    loop {
-        let req = mb.recv();
-        req.reply(FsResponse::Ok(Err(Error::IoError)));
     }
 }

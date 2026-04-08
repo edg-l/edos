@@ -3,8 +3,19 @@ use crate::{
     fs::fat32::structures::Fat32BootSector,
     fs::gpt::{FilesystemType, Partition, PartitionType},
     log,
-    thread::scheduler::sched,
 };
+
+fn read_sectors_vec(
+    device_id: u64,
+    lba: u64,
+    sectors: u16,
+    _buf: Vec<u8>,
+) -> Result<Vec<u8>, ahci::AhciError> {
+    let byte_count = sectors as usize * 512;
+    let mut buf = alloc::vec![0u8; byte_count];
+    ahci::direct::read_sectors(device_id, lba, sectors, &mut buf)?;
+    Ok(buf)
+}
 use alloc::{
     format,
     string::{String, ToString},
@@ -107,7 +118,7 @@ impl MbrPartitionEntry {
 pub fn parse_mbr(device_id: u64) -> Result<Vec<Partition>, &'static str> {
     // Read MBR from LBA 0
     let mbr_data =
-        ahci::api::read_sectors(device_id, 0, 1, Vec::new()).map_err(|_| "Failed to read MBR")?;
+        read_sectors_vec(device_id, 0, 1, Vec::new()).map_err(|_| "Failed to read MBR")?;
 
     if mbr_data.len() < core::mem::size_of::<MbrHeader>() {
         return Err("MBR data too small");
@@ -153,7 +164,7 @@ fn detect_filesystem(
     partition_start_lba: u64,
 ) -> Result<Option<FilesystemType>, &'static str> {
     // Read first sector of partition
-    let sector_data = ahci::api::read_sectors(device_id, partition_start_lba, 1, Vec::new())
+    let sector_data = read_sectors_vec(device_id, partition_start_lba, 1, Vec::new())
         .map_err(|_| "Failed to read partition boot sector")?;
 
     if sector_data.len() < 512 {
@@ -229,7 +240,7 @@ fn detect_iso9660(
     );
 
     // Read sector 16 relative to partition start
-    let iso_sector = ahci::api::read_sectors(device_id, iso_check_lba, 1, Vec::new())
+    let iso_sector = read_sectors_vec(device_id, iso_check_lba, 1, Vec::new())
         .map_err(|_| "Failed to read ISO 9660 volume descriptor sector")?;
 
     if iso_sector.len() < 512 {
@@ -254,7 +265,7 @@ fn detect_iso9660(
         // Try reading ISO signature directly from partition start + common ISO offsets
         for offset in [0, 16, 32] {
             if let Ok(test_sector) =
-                ahci::api::read_sectors(device_id, partition_start_lba + offset, 1, Vec::new())
+                read_sectors_vec(device_id, partition_start_lba + offset, 1, Vec::new())
                 && test_sector.len() >= 6
                 && &test_sector[1..6] == b"CD001"
                 && test_sector[0] == 0x01

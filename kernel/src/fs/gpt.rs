@@ -1,4 +1,16 @@
-use crate::{drivers::ahci, fs::fat32::structures::Fat32BootSector, log, thread::scheduler::sched};
+use crate::{drivers::ahci, fs::fat32::structures::Fat32BootSector, log};
+
+fn read_sectors_vec(
+    device_id: u64,
+    lba: u64,
+    sectors: u16,
+    _buf: Vec<u8>,
+) -> Result<Vec<u8>, ahci::AhciError> {
+    let byte_count = sectors as usize * 512;
+    let mut buf = alloc::vec![0u8; byte_count];
+    ahci::direct::read_sectors(device_id, lba, sectors, &mut buf)?;
+    Ok(buf)
+}
 use alloc::{format, string::String, vec::Vec};
 use bytemuck::{Pod, Zeroable, try_from_bytes};
 
@@ -203,8 +215,8 @@ impl GptPartitionEntry {
 pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
     // Read GPT header from LBA 1
     log!("reading sector for gpt");
-    let gpt_data = ahci::api::read_sectors(device_id, 1, 1, Vec::new())
-        .map_err(|_| "Failed to read GPT header")?;
+    let gpt_data =
+        read_sectors_vec(device_id, 1, 1, Vec::new()).map_err(|_| "Failed to read GPT header")?;
 
     log!("read gpt sector");
     if gpt_data.len() < core::mem::size_of::<GptHeader>() {
@@ -223,7 +235,7 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
     let sectors_needed = (gpt_header.num_partition_entries as usize).div_ceil(entries_per_sector);
 
     // Read partition entries
-    let partition_data = ahci::api::read_sectors(
+    let partition_data = read_sectors_vec(
         device_id,
         gpt_header.partition_entry_lba,
         sectors_needed as u16,
@@ -276,7 +288,7 @@ fn detect_filesystem(
     partition_start_lba: u64,
 ) -> Result<Option<FilesystemType>, &'static str> {
     // Read first sector of partition
-    let sector_data = ahci::api::read_sectors(device_id, partition_start_lba, 1, Vec::new())
+    let sector_data = read_sectors_vec(device_id, partition_start_lba, 1, Vec::new())
         .map_err(|_| "Failed to read partition boot sector")?;
 
     if sector_data.len() < core::mem::size_of::<Fat32BootSector>() {

@@ -1,11 +1,6 @@
 // Public api methods to send requests transparently
 
-use alloc::{
-    boxed::Box,
-    string::{String, ToString},
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
 use spin::Mutex;
 
 use crate::{
