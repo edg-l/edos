@@ -11,15 +11,23 @@ pub fn cmd_help() {
     println!("  clear             - Clear screen");
     println!("  echo [args...]    - Print arguments");
     println!("  exit              - Exit shell");
+    println!("  kill [-SIGNAL] PID - Send signal to process");
     println!();
     println!("Operators:");
+    println!("  $((expr))         - Arithmetic expansion");
     println!("  cmd1 | cmd2       - Pipe output");
     println!("  cmd > file        - Redirect stdout (truncate)");
     println!("  cmd >> file       - Redirect stdout (append)");
     println!("  cmd < file        - Redirect stdin");
+    println!("  cmd <<MARKER      - Heredoc (input until MARKER)");
+    println!("  cmd <<'MARKER'    - Heredoc (no variable expansion)");
     println!("  cmd1 && cmd2      - Run cmd2 if cmd1 succeeds");
     println!("  cmd1 || cmd2      - Run cmd2 if cmd1 fails");
     println!("  cmd1 ; cmd2       - Run both unconditionally");
+    println!();
+    println!("Script control:");
+    println!("  function name/end - Define a function");
+    println!("  return [N]        - Return from function");
     println!();
     println!("External commands in /bin/:");
     println!("  ls cat stat free ps dmesg mkdir rmdir rm mv write echo");
@@ -250,6 +258,55 @@ pub fn cmd_test(args: &[String]) -> i32 {
             eprintln!("test: too many arguments");
             2
         }
+    }
+}
+
+/// Kill a process: kill [-SIGNAL] PID
+pub fn cmd_kill(args: &[String]) -> i32 {
+    if args.is_empty() {
+        eprintln!("usage: kill [-SIGNAL] PID");
+        return 1;
+    }
+
+    let (signal, pid_arg) = if args[0].starts_with('-') {
+        let sig_str = &args[0][1..];
+        let sig = match sig_str {
+            "INT" | "2" => 2u32,
+            "KILL" | "9" => 9,
+            "TERM" | "15" => 15,
+            "HUP" | "1" => 1,
+            other => {
+                if let Ok(n) = other.parse::<u32>() {
+                    n
+                } else {
+                    eprintln!("kill: unknown signal: {}", other);
+                    return 1;
+                }
+            }
+        };
+        if args.len() < 2 {
+            eprintln!("usage: kill [-SIGNAL] PID");
+            return 1;
+        }
+        (sig, &args[1])
+    } else {
+        (15u32, &args[0]) // Default: SIGTERM
+    };
+
+    let pid: u64 = match pid_arg.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("kill: invalid PID: {}", pid_arg);
+            return 1;
+        }
+    };
+
+    let result = edos_lib::process::sys_kill(pid, signal);
+    if result < 0 {
+        eprintln!("kill: no such process: {}", pid);
+        1
+    } else {
+        0
     }
 }
 

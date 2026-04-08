@@ -218,6 +218,21 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
     }
 }
 
+/// Get the size of a shared memory region in bytes.
+///
+/// # Arguments
+/// * `shm_id` - Shared memory ID
+///
+/// # Returns
+/// * Size in bytes on success
+/// * -1 on error
+pub fn sys_shm_size(shm_id: u64) -> i64 {
+    match SharedMemory::get(shm_id) {
+        Some(shm) => shm.size() as i64,
+        None => -1,
+    }
+}
+
 /// Destroy a shared memory region
 ///
 /// The region can only be destroyed if there are no active mappings.

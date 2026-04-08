@@ -8,6 +8,7 @@ use crate::run_chain;
 // ---------------------------------------------------------------------------
 
 /// A parsed shell script block.
+#[derive(Clone)]
 enum Block {
     /// A single command line.
     Simple(String),
@@ -26,6 +27,15 @@ enum Block {
         values: Vec<String>,
         body: Vec<Block>,
     },
+    /// A function definition.
+    FunctionDef { name: String, body: Vec<Block> },
+    /// A command with a heredoc body: the command line, the heredoc content,
+    /// and whether variable expansion is suppressed (raw=true for `<<'MARKER'`).
+    Heredoc {
+        line: String,
+        content: String,
+        raw: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -41,6 +51,51 @@ enum FlowControl {
     Continue,
     /// `exit` was called or set -e triggered; carries the exit code.
     Exit(i32),
+    /// `return` was called inside a function; carries the return code.
+    Return(i32),
+}
+
+// ---------------------------------------------------------------------------
+// Function registry
+// ---------------------------------------------------------------------------
+
+/// Registered shell functions: (name, body).
+/// Vec of tuples is used because HashMap::new() is not const on this target.
+static FUNCTIONS: std::sync::Mutex<Vec<(String, Vec<Block>)>> = std::sync::Mutex::new(Vec::new());
+
+/// Register a function, replacing any existing function with the same name.
+fn register_function(name: String, body: Vec<Block>) {
+    let mut fns = FUNCTIONS.lock().unwrap();
+    if let Some(entry) = fns.iter_mut().find(|(n, _)| n == &name) {
+        entry.1 = body;
+    } else {
+        fns.push((name, body));
+    }
+}
+
+/// Look up a function by name and return a clone of its body.
+fn lookup_function(name: &str) -> Option<Vec<Block>> {
+    FUNCTIONS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, body)| body.clone())
+}
+
+/// Check whether a function with the given name exists.
+pub fn is_function(name: &str) -> bool {
+    FUNCTIONS.lock().unwrap().iter().any(|(n, _)| n == name)
+}
+
+/// Return the names of all registered functions (for tab completion).
+pub fn function_names() -> Vec<String> {
+    FUNCTIONS
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(n, _)| n.clone())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -63,7 +118,15 @@ fn parse_block_list(lines: &[&str], idx: &mut usize, nested: bool) -> Result<Vec
     let mut blocks = Vec::new();
 
     while *idx < lines.len() {
-        let line = lines[*idx];
+        // Skip blank lines and comment-only lines.
+        // We do this here (rather than pre-filtering in run_script) so that
+        // raw heredoc body lines are preserved between the marker and its delimiter.
+        let stripped = command::strip_comment(lines[*idx]).trim();
+        if stripped.is_empty() {
+            *idx += 1;
+            continue;
+        }
+        let line = stripped;
         let first_word = line.split_whitespace().next().unwrap_or("");
 
         // Terminators that end nested blocks
@@ -161,6 +224,20 @@ fn parse_block_list(lines: &[&str], idx: &mut usize, nested: bool) -> Result<Vec
                 blocks.push(Block::For { var, values, body });
             }
 
+            "function" => {
+                let name = line["function".len()..].trim().to_string();
+                if name.is_empty() {
+                    return Err("function: missing name".to_string());
+                }
+                *idx += 1;
+                let body = parse_block_list(lines, idx, true)?;
+                if *idx >= lines.len() || lines[*idx].split_whitespace().next() != Some("end") {
+                    return Err(format!("function {}: missing 'end'", name));
+                }
+                *idx += 1; // consume end
+                blocks.push(Block::FunctionDef { name, body });
+            }
+
             "end" => {
                 if nested {
                     // Caller will handle this
@@ -179,8 +256,31 @@ fn parse_block_list(lines: &[&str], idx: &mut usize, nested: bool) -> Result<Vec
             }
 
             _ => {
-                blocks.push(Block::Simple(line.to_string()));
-                *idx += 1;
+                if let Some((cleaned_line, marker, raw)) = command::parse_heredoc_marker(line) {
+                    // Advance past the command line itself
+                    *idx += 1;
+                    // Consume raw lines until one matches the marker exactly.
+                    // We use the raw (un-stripped) lines so blank lines inside
+                    // the heredoc body are preserved.
+                    let mut content_lines: Vec<String> = Vec::new();
+                    while *idx < lines.len() {
+                        let raw_line = lines[*idx];
+                        *idx += 1;
+                        if raw_line.trim() == marker {
+                            break;
+                        }
+                        content_lines.push(raw_line.to_string());
+                    }
+                    let content = content_lines.join("\n");
+                    blocks.push(Block::Heredoc {
+                        line: cleaned_line,
+                        content,
+                        raw,
+                    });
+                } else {
+                    blocks.push(Block::Simple(line.to_string()));
+                    *idx += 1;
+                }
             }
         }
     }
@@ -246,6 +346,15 @@ fn execute_block(block: &Block) -> FlowControl {
             }
             if first_word == "continue" {
                 return FlowControl::Continue;
+            }
+            if first_word == "return" {
+                let rest = trimmed["return".len()..].trim();
+                let code: i32 = if rest.is_empty() {
+                    0
+                } else {
+                    rest.parse().unwrap_or(0)
+                };
+                return FlowControl::Return(code);
             }
 
             let code = run_chain(line);
@@ -336,6 +445,45 @@ fn execute_block(block: &Block) -> FlowControl {
             }
             FlowControl::Normal(last_code)
         }
+
+        Block::FunctionDef { name, body } => {
+            register_function(name.clone(), body.clone());
+            FlowControl::Normal(0)
+        }
+
+        Block::Heredoc { line, content, raw } => {
+            // Expand variables in the heredoc content unless the marker was quoted.
+            let expanded_content = if *raw {
+                content.clone()
+            } else {
+                command::expand_variables(content)
+            };
+
+            let (read_fd, write_fd) = match edos_lib::process::pipe() {
+                Some(fds) => fds,
+                None => {
+                    eprintln!("sh: pipe failed for heredoc");
+                    return FlowControl::Normal(1);
+                }
+            };
+
+            // Write content followed by a trailing newline into the write end.
+            if !expanded_content.is_empty() {
+                let bytes = format!("{}\n", expanded_content).into_bytes();
+                edos_lib::process::write(write_fd, &bytes);
+            }
+            edos_lib::process::close(write_fd);
+
+            // Run the command with the read end as its stdin.
+            let code = crate::run_segment_with_stdin(line, read_fd);
+            edos_lib::process::close(read_fd);
+
+            command::set_last_exit_code(code);
+            if code != 0 && command::exit_on_error() {
+                return FlowControl::Exit(code);
+            }
+            FlowControl::Normal(code)
+        }
     }
 }
 
@@ -360,7 +508,9 @@ pub fn run_script(path: &str, args: &[String]) -> i32 {
         }
     };
 
-    // Collect lines, stripping shebang and comments, skipping empty lines
+    // Collect all raw lines (blank lines and heredoc content must be preserved).
+    // Blank/comment filtering is done inside parse_block_list so heredoc body
+    // lines are not accidentally discarded.
     let raw_lines: Vec<&str> = source.lines().collect();
     let start = if raw_lines
         .first()
@@ -372,11 +522,7 @@ pub fn run_script(path: &str, args: &[String]) -> i32 {
         0
     };
 
-    let lines: Vec<&str> = raw_lines[start..]
-        .iter()
-        .map(|l| command::strip_comment(l).trim())
-        .filter(|l| !l.is_empty())
-        .collect();
+    let lines: Vec<&str> = raw_lines[start..].iter().copied().collect();
 
     let blocks = match parse_blocks(&lines) {
         Ok(b) => b,
@@ -389,6 +535,10 @@ pub fn run_script(path: &str, args: &[String]) -> i32 {
     match execute_blocks(&blocks) {
         FlowControl::Normal(code) => code,
         FlowControl::Exit(code) => code,
+        FlowControl::Return(_) => {
+            eprintln!("sh: return outside of function");
+            1
+        }
         FlowControl::Break => {
             eprintln!("sh: break outside of loop");
             1
@@ -398,4 +548,47 @@ pub fn run_script(path: &str, args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// Call a registered shell function with the given argument list.
+///
+/// Saves and restores positional parameters around the call.
+pub fn call_function(name: &str, args: &[String]) -> i32 {
+    let body = match lookup_function(name) {
+        Some(b) => b,
+        None => {
+            eprintln!("sh: {}: not a function", name);
+            return 127;
+        }
+    };
+    // Save positional params
+    let saved = command::get_all_script_args();
+    // Set function params: $0 = function name, $1.. = args
+    let mut func_args = vec![name.to_string()];
+    func_args.extend_from_slice(args);
+    command::set_script_args(&func_args);
+    // Execute body
+    let result = execute_blocks(&body);
+    // Restore positional params
+    command::set_script_args(&saved);
+    match result {
+        FlowControl::Normal(code) | FlowControl::Return(code) => code,
+        FlowControl::Exit(code) => code,
+        FlowControl::Break => {
+            eprintln!("sh: break outside of loop");
+            1
+        }
+        FlowControl::Continue => {
+            eprintln!("sh: continue outside of loop");
+            1
+        }
+    }
+}
+
+/// Parse body lines and register the function under `name`.
+pub fn parse_and_register_function(name: &str, body_lines: &[String]) -> Result<(), String> {
+    let lines: Vec<&str> = body_lines.iter().map(|s| s.as_str()).collect();
+    let blocks = parse_blocks(&lines)?;
+    register_function(name.to_string(), blocks);
+    Ok(())
 }

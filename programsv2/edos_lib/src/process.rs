@@ -340,3 +340,18 @@ pub fn spawn_pipeline(stages: &[(String, Vec<String>)]) {
         waitpid(pid);
     }
 }
+
+/// Send a signal to a process.
+///
+/// Returns 0 on success, or a negative value on error.
+pub fn sys_kill(pid: u64, signal: u32) -> i64 {
+    unsafe { sys::syscall2(sys::SYS_KILL, pid, signal as u64) as i64 }
+}
+
+/// Set the disposition for a signal on the calling thread.
+///
+/// `handler` should be 0 (SIG_DFL) or 1 (SIG_IGN).
+/// Returns the previous disposition on success, or a negative value on error.
+pub fn sys_sigaction(signal: u32, handler: u64) -> i64 {
+    unsafe { sys::syscall2(sys::SYS_SIGACTION, signal as u64, handler) as i64 }
+}

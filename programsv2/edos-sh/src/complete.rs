@@ -17,6 +17,13 @@ pub fn complete_command(prefix: &str) -> Vec<String> {
         }
     }
 
+    // Check registered shell functions
+    for name in crate::script::function_names() {
+        if name.starts_with(prefix) && !matches.contains(&name) {
+            matches.push(name);
+        }
+    }
+
     // Search PATH directories
     let path = env::var("PATH").unwrap_or_else(|_| "/bin".to_string());
     for dir in path.split(':') {

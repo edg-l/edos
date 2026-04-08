@@ -23,6 +23,13 @@ pub const SYS_RENAME: u64 = 82;
 pub const SYS_CLOCK_GETTIME: u64 = 226;
 pub const SYS_OPENPTY: u64 = 227;
 pub const SYS_SPAWN2: u64 = 228;
+pub const SYS_SHM_CREATE: u64 = 215;
+pub const SYS_SHM_MAP: u64 = 216;
+pub const SYS_SHM_UNMAP: u64 = 217;
+pub const SYS_SHM_DESTROY: u64 = 218;
+pub const SYS_SHM_SIZE: u64 = 231;
+pub const SYS_KILL: u64 = 229;
+pub const SYS_SIGACTION: u64 = 230;
 
 /// Raw syscall with 1 argument.
 #[inline(always)]

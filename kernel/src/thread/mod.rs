@@ -31,6 +31,7 @@ pub mod mutex;
 pub mod poll;
 pub mod runqueue;
 pub mod scheduler;
+pub mod signal;
 pub mod thread;
 pub mod util;
 pub mod waitqueue;

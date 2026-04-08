@@ -196,11 +196,7 @@ pub mod flags {
     pub const FLAG_DOCK: u64 = 1;
 }
 
-// Syscall numbers
-const SYS_SHM_CREATE: u64 = 215;
-const SYS_SHM_MAP: u64 = 216;
-const SYS_SHM_UNMAP: u64 = 217;
-const SYS_SHM_DESTROY: u64 = 218;
+// Syscall numbers (window-specific; SHM syscalls live in edos_lib::shm)
 const SYS_WINDOW_CREATE: u64 = 219;
 const SYS_WINDOW_DESTROY: u64 = 220;
 const SYS_WINDOW_SET: u64 = 221;
@@ -209,10 +205,10 @@ const SYS_WINDOW_POLL: u64 = 223;
 const SYS_WINDOW_LIST: u64 = 224;
 const SYS_WINDOW_SEND_EVENT: u64 = 225;
 
-// Protection flags for shm_map
-pub const PROT_READ: u64 = 0x1;
-pub const PROT_WRITE: u64 = 0x2;
-pub const PROT_EXEC: u64 = 0x4;
+// Re-export SHM functions and constants from edos_lib
+pub use edos_lib::shm::{
+    PROT_EXEC, PROT_READ, PROT_WRITE, shm_create, shm_destroy, shm_map, shm_size, shm_unmap,
+};
 
 /// Check if a syscall result indicates an error.
 #[inline]
@@ -332,58 +328,6 @@ pub fn window_send_event(id: WindowId, event: &WindowEvent) -> Result<(), i64> {
         )
     };
     if is_error(result) { Err(-1) } else { Ok(()) }
-}
-
-/// Create a shared memory region.
-///
-/// # Arguments
-/// * `size` - Size of the region in bytes
-///
-/// # Returns
-/// Shared memory ID on success.
-pub fn shm_create(size: usize) -> Result<u64, i64> {
-    let result = unsafe { syscall1(SYS_SHM_CREATE, size as u64) };
-    // shm_create returns -1 (i64) on error, which is 0xFFFFFFFFFFFFFFFF as u64
-    if result as i64 == -1 {
-        Err(-1)
-    } else {
-        Ok(result)
-    }
-}
-
-/// Map a shared memory region into this process.
-///
-/// # Arguments
-/// * `shm_id` - Shared memory ID
-/// * `prot` - Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
-///
-/// # Returns
-/// Pointer to the mapped memory.
-pub fn shm_map(shm_id: u64, prot: u64) -> Result<*mut u8, i64> {
-    let result = unsafe { syscall3(SYS_SHM_MAP, shm_id, 0, prot) };
-    if is_error(result) {
-        Err(-1)
-    } else {
-        Ok(result as *mut u8)
-    }
-}
-
-/// Unmap a shared memory region.
-///
-/// # Arguments
-/// * `addr` - Address of the mapped region
-pub fn shm_unmap(addr: *mut u8) -> Result<(), i64> {
-    let result = unsafe { syscall1(SYS_SHM_UNMAP, addr as u64) };
-    if result as i64 == -1 { Err(-1) } else { Ok(()) }
-}
-
-/// Destroy a shared memory region.
-///
-/// # Arguments
-/// * `shm_id` - Shared memory ID
-pub fn shm_destroy(shm_id: u64) -> Result<(), i64> {
-    let result = unsafe { syscall1(SYS_SHM_DESTROY, shm_id) };
-    if result as i64 == -1 { Err(-1) } else { Ok(()) }
 }
 
 /// Helper struct for managing a window with double-buffered shared memory.

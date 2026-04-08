@@ -38,6 +38,7 @@ use crate::{
         runqueue::{DEFAULT_PRIORITY, PRIORITY_LEVELS},
         scheduler::switch_to_kernel_page,
         setup_user_stack,
+        signal::SignalState,
         util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
     },
     timer::Instant,
@@ -140,6 +141,8 @@ pub struct Thread {
     /// Set when the process has been killed (e.g. by Ctrl+C). Sleeping syscalls
     /// check this flag on wakeup and return EINTR to unblock the process.
     pub killed: AtomicBool,
+    /// Signal state: pending bitmask and per-signal disposition.
+    pub signal: SignalState,
 
     pub user: Option<Arc<RwLock<UserThread>>>,
 
@@ -419,6 +422,7 @@ impl Thread {
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
             killed: AtomicBool::new(false),
+            signal: SignalState::new(),
             rq_link: Link::new(),
             rq_boosted: AtomicBool::new(false),
             context_saved: AtomicBool::new(true),
@@ -544,6 +548,7 @@ impl Thread {
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
             killed: AtomicBool::new(false),
+            signal: SignalState::new(),
             user: Some(user_state),
             rq_link: Link::new(),
             rq_boosted: AtomicBool::new(false),
@@ -919,16 +924,47 @@ pub fn allocate_thread_id() -> ThreadId {
 
 /// Mark a process as killed and wake it so it can exit.
 ///
-/// The target thread will observe `killed == true` after waking from any
-/// blocking syscall (e.g. `sys_read` on a PTY slave) and return an error,
-/// causing the process to exit.  The exit code is set to 130 (SIGINT
-/// convention: 128 + signal number 2).
+/// Sends SIGINT to the target process. The target thread will observe
+/// `killed == true` after waking from any blocking syscall (e.g. `sys_read`
+/// on a PTY slave) and return an error, causing the process to exit.
 pub fn kill_process(pid: u64) -> bool {
+    kill_process_with_signal(pid, crate::thread::signal::SIGINT)
+}
+
+/// Send a signal to a process by PID.
+///
+/// For signals whose default action is Terminate, also sets the `killed` flag
+/// (for backward compatibility with PTY slave read checks) and wakes the thread.
+pub fn kill_process_with_signal(pid: u64, signum: u32) -> bool {
     use crate::thread::scheduler::{WakePriority, sched};
+    use crate::thread::signal;
 
     if let Some(thread) = THREADS.get(ThreadId(pid)) {
-        thread.killed.store(true, Ordering::Release);
-        thread.exit_code.store(130, Ordering::Release);
+        // Check if signal is ignored (SIG_IGN)
+        if signum != signal::SIGKILL && thread.signal.get_handler(signum) == signal::SIG_IGN {
+            return true; // Signal was "sent" but ignored
+        }
+
+        // Set pending signal
+        thread.signal.send(signum);
+
+        // For default-terminate signals, set the killed flag and exit code
+        match signal::default_action(signum) {
+            signal::DefaultAction::Terminate => {
+                // Also set the old killed flag for backward compatibility
+                // (PTY slave read checks it)
+                thread.killed.store(true, Ordering::Release);
+                thread
+                    .exit_code
+                    .store(128 + signum as i32, Ordering::Release);
+            }
+            signal::DefaultAction::Ignore => {
+                // SIG_DFL for this signal is ignore (e.g. SIGCHLD)
+                return true;
+            }
+        }
+
+        // Wake the thread so it can observe the signal
         sched().wake_thread(ThreadId(pid), WakePriority::Normal);
         true
     } else {

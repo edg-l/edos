@@ -63,6 +63,11 @@ pub fn script_args_all() -> String {
     }
 }
 
+/// Return all positional parameters (including $0) as a Vec.
+pub fn get_all_script_args() -> Vec<String> {
+    SCRIPT_ARGS.lock().unwrap().clone()
+}
+
 /// Capture the stdout of a shell command by running it in a subprocess with a pipe.
 /// Trailing newlines are stripped from the result.
 fn capture_command_output(cmd: &str) -> String {
@@ -163,33 +168,70 @@ pub fn expand_variables(input: &str) -> String {
                         out.push_str(&val);
                     }
                     Some(&'(') => {
-                        chars.next(); // consume '('
-                        // Collect the inner command, tracking paren depth and quotes
-                        // so nested $() and quoted parens are handled correctly.
-                        let mut inner = String::new();
-                        let mut depth: usize = 1;
-                        let mut sq = false; // inside single quotes
-                        let mut dq = false; // inside double quotes
-                        for c in chars.by_ref() {
-                            match c {
-                                '\'' if !dq => sq = !sq,
-                                '"' if !sq => dq = !dq,
-                                '(' if !sq && !dq => {
-                                    depth += 1;
-                                    inner.push(c);
-                                }
-                                ')' if !sq && !dq => {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        break;
+                        chars.next(); // consume first '('
+                        // Check for arithmetic expansion $((expr))
+                        if chars.peek() == Some(&'(') {
+                            chars.next(); // consume second '('
+                            // Collect until matching '))'
+                            let mut expr = String::new();
+                            let mut depth = 0u32;
+                            loop {
+                                match chars.next() {
+                                    None => break,
+                                    Some(')') if depth == 0 => {
+                                        // Need another ')' to close '))'
+                                        if chars.peek() == Some(&')') {
+                                            chars.next();
+                                            break;
+                                        } else {
+                                            expr.push(')');
+                                        }
                                     }
-                                    inner.push(c);
+                                    Some('(') => {
+                                        depth += 1;
+                                        expr.push('(');
+                                    }
+                                    Some(')') => {
+                                        depth = depth.saturating_sub(1);
+                                        expr.push(')');
+                                    }
+                                    Some(c) => expr.push(c),
                                 }
-                                _ => inner.push(c),
                             }
+                            // Expand shell variables ($1, $VAR, etc.) before arithmetic eval
+                            let expanded_expr = expand_variables(&expr);
+                            match crate::arith::eval_arithmetic(&expanded_expr) {
+                                Ok(val) => out.push_str(&val.to_string()),
+                                Err(e) => eprintln!("sh: arithmetic error: {}", e),
+                            }
+                        } else {
+                            // Command substitution: collect inner command tracking paren depth and quotes
+                            // so nested $() and quoted parens are handled correctly.
+                            let mut inner = String::new();
+                            let mut depth: usize = 1;
+                            let mut sq = false; // inside single quotes
+                            let mut dq = false; // inside double quotes
+                            for c in chars.by_ref() {
+                                match c {
+                                    '\'' if !dq => sq = !sq,
+                                    '"' if !sq => dq = !dq,
+                                    '(' if !sq && !dq => {
+                                        depth += 1;
+                                        inner.push(c);
+                                    }
+                                    ')' if !sq && !dq => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            break;
+                                        }
+                                        inner.push(c);
+                                    }
+                                    _ => inner.push(c),
+                                }
+                            }
+                            let result = capture_command_output(&inner);
+                            out.push_str(&result);
                         }
-                        let result = capture_command_output(&inner);
-                        out.push_str(&result);
                     }
                     Some(&'{') => {
                         chars.next(); // consume '{'
@@ -349,6 +391,73 @@ pub struct Redirects {
     pub stdout_append: bool,
 }
 
+/// Detect `<<MARKER` or `<< MARKER` in a command line.
+///
+/// Returns `Some((line_without_heredoc, marker, raw))` where:
+/// - `line_without_heredoc` is the line with the `<<MARKER` portion removed
+/// - `marker` is the delimiter string
+/// - `raw` is true when the marker was quoted with single quotes (no variable expansion)
+///
+/// Returns `None` if no heredoc operator is found.
+/// `<<<` (herestring) is explicitly excluded.
+pub fn parse_heredoc_marker(line: &str) -> Option<(String, String, bool)> {
+    let bytes = line.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' if !in_double => {
+                in_single = !in_single;
+                i += 1;
+            }
+            b'"' if !in_single => {
+                in_double = !in_double;
+                i += 1;
+            }
+            b'<' if !in_single && !in_double => {
+                // Need at least two characters: <<
+                if i + 1 < bytes.len() && bytes[i + 1] == b'<' {
+                    // Reject <<< (herestring)
+                    if i + 2 < bytes.len() && bytes[i + 2] == b'<' {
+                        i += 1;
+                        continue;
+                    }
+                    // Found `<<` at position i
+                    let before = line[..i].trim_end().to_string();
+                    let after = line[i + 2..].trim_start();
+
+                    // Parse marker: may be single-quoted
+                    let (marker, raw) = if after.starts_with('\'') {
+                        // Single-quoted marker: strip quotes
+                        let rest = &after[1..];
+                        if let Some(close) = rest.find('\'') {
+                            (rest[..close].to_string(), true)
+                        } else {
+                            // Unclosed quote: treat entire rest as marker
+                            (rest.to_string(), true)
+                        }
+                    } else {
+                        // Unquoted marker: take until whitespace
+                        let marker = after.split_whitespace().next().unwrap_or("").to_string();
+                        (marker, false)
+                    };
+
+                    if marker.is_empty() {
+                        return None;
+                    }
+
+                    return Some((before, marker, raw));
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Extract `>`, `>>`, `<` redirections from args, returning remaining args and redirects.
 pub fn extract_redirects(args: &[String]) -> (Vec<String>, Redirects) {
     let mut remaining = Vec::new();
@@ -476,6 +585,8 @@ pub fn is_builtin(command: &str) -> bool {
             | "break"
             | "continue"
             | "set"
+            | "return"
+            | "kill"
     )
 }
 
@@ -554,6 +665,10 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
             // so the executor can detect "continue" was the command.
             return ExecResult::Success(0);
         }
+        "return" => {
+            // Flow control handled by the script executor.
+            return ExecResult::Success(0);
+        }
         "set" => {
             match args.first().map(|s| s.as_str()) {
                 Some("-e") => set_exit_on_error(true),
@@ -561,6 +676,52 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
                 _ => {} // Ignore unrecognized set flags
             }
             return ExecResult::Success(0);
+        }
+        "kill" => {
+            let code = builtins::cmd_kill(args);
+            return if code == 0 {
+                ExecResult::Success(0)
+            } else {
+                ExecResult::Failed(code)
+            };
+        }
+        _ if command.contains('=') && !command.starts_with('=') => {
+            // Bare VAR=value assignment
+            if let Some(eq_pos) = command.find('=') {
+                let key = &command[..eq_pos];
+                // Validate: key must be a valid identifier (alphanumeric + underscore, not starting with digit)
+                if !key.is_empty()
+                    && key.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && !key.starts_with(|c: char| c.is_ascii_digit())
+                {
+                    let val = &command[eq_pos + 1..];
+                    unsafe { std::env::set_var(key, val) };
+                    return ExecResult::Success(0);
+                }
+            }
+            // Not a valid assignment, fall through to external program
+            edos_lib::io::pty_set_canonical(0);
+            if let Some(pid) = spawn::spawn_program_with_fds(command, args, 0, 1, 2) {
+                let code = edos_lib::process::waitpid(pid);
+                edos_lib::io::pty_set_raw(0);
+                return if code == 0 {
+                    ExecResult::Success(0)
+                } else {
+                    ExecResult::Failed(code)
+                };
+            } else {
+                eprintln!("Command not found: {}", command);
+                edos_lib::io::pty_set_raw(0);
+                return ExecResult::Failed(127);
+            }
+        }
+        _ if crate::script::is_function(command) => {
+            let code = crate::script::call_function(command, args);
+            return if code == 0 {
+                ExecResult::Success(0)
+            } else {
+                ExecResult::Failed(code)
+            };
         }
         _ => {
             // Restore canonical mode for child (echo + line buffering)

@@ -2,9 +2,10 @@
 
 use std::collections::HashMap;
 
+use edos_lib::shm::{PROT_READ, shm_map, shm_size, shm_unmap};
 use edos_render::graphics::{Color, RasterHeight, Screen, TextStyle};
 use edos_render::theme::Theme;
-use edos_render::window::{PROT_READ, WindowListEntry, flags::FLAG_DOCK, shm_map, shm_unmap};
+use edos_render::window::{WindowListEntry, flags::FLAG_DOCK};
 
 use crate::cursor::Cursor;
 use crate::decorations::{self, BORDER_WIDTH, SHADOW_SIZE, TITLE_HEIGHT};
@@ -46,10 +47,30 @@ impl ShmCache {
             return Some((ptr, cached_w, cached_h));
         }
 
-        // Not cached, map fresh
+        // Not cached, map fresh.
+        // Use the SHM's actual allocated size to derive safe dimensions,
+        // not the window's current width/height which may have been updated
+        // by the WM during a resize before the client allocated a new buffer.
         if let Ok(ptr) = shm_map(shm_id, PROT_READ) {
-            self.mappings.insert(shm_id, (ptr, width, height));
-            Some((ptr, width, height))
+            let (safe_w, safe_h) = if let Ok(size) = shm_size(shm_id) {
+                let max_pixels = size / 4;
+                if (width as usize) * (height as usize) <= max_pixels {
+                    (width, height)
+                } else if width > 0 {
+                    let h = (max_pixels / width as usize) as u32;
+                    (width, h)
+                } else {
+                    (0, 0)
+                }
+            } else {
+                (width, height)
+            };
+            self.mappings.insert(shm_id, (ptr, safe_w, safe_h));
+            if safe_w > 0 && safe_h > 0 {
+                Some((ptr, safe_w, safe_h))
+            } else {
+                None
+            }
         } else {
             None
         }

@@ -42,9 +42,10 @@ use crate::{
         mutex::BlockingMutex,
         pipe::{FileDescriptor, Pipe},
         scheduler::{sched, switch_to_kernel_page},
+        signal::{self, SignalState},
         thread::{
             State, Thread, ThreadId, allocate_thread_id, get_thread_info_by_id, insert_thread,
-            insert_thread_info, take_thread_exit_code,
+            insert_thread_info, kill_process_with_signal, take_thread_exit_code,
         },
         util::{kthread_stack_alloc, kthread_stack_free},
     },
@@ -280,6 +281,9 @@ const SYS_WINDOW_SEND_EVENT: u64 = 225;
 const SYS_CLOCK_GETTIME: u64 = 226;
 const SYS_OPENPTY: u64 = 227;
 const SYS_SPAWN2: u64 = 228;
+const SYS_KILL: u64 = 229;
+const SYS_SIGACTION: u64 = 230;
+const SYS_SHM_SIZE: u64 = 231;
 
 /// Arguments struct for SYS_SPAWN2. Passed as a single pointer from userspace.
 #[repr(C)]
@@ -570,6 +574,41 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_SPAWN2 => {
             let args_ptr = ctx.rdi as *const SpawnArgs;
             ctx.rax = sys_spawn2(args_ptr);
+        }
+        SYS_KILL => {
+            let pid = ctx.rdi;
+            let signum = ctx.rsi as u32;
+            let sched = sched();
+            let info = sched.current_thread_info();
+            if signum == 0 || signum >= 32 {
+                info.lock().errno = Errno::EINVAL;
+                ctx.rax = !0u64;
+            } else if kill_process_with_signal(pid, signum) {
+                ctx.rax = 0;
+            } else {
+                info.lock().errno = Errno::EINVAL;
+                ctx.rax = !0u64;
+            }
+        }
+        SYS_SIGACTION => {
+            let signum = ctx.rdi as u32;
+            let handler = ctx.rsi as u32; // 0=SIG_DFL, 1=SIG_IGN
+            let sched = sched();
+            let info = sched.current_thread_info();
+            if signum == 0 || signum >= 32 || signum == signal::SIGKILL {
+                info.lock().errno = Errno::EINVAL;
+                ctx.rax = !0u64;
+            } else if let Some(cur_thread) = sched.current_thread() {
+                let prev = cur_thread.signal.set_handler(signum, handler);
+                ctx.rax = prev as u64;
+            } else {
+                info.lock().errno = Errno::EINVAL;
+                ctx.rax = !0u64;
+            }
+        }
+        SYS_SHM_SIZE => {
+            let shm_id = ctx.rdi;
+            ctx.rax = shm::sys_shm_size(shm_id) as u64;
         }
         _ => {
             ctx.rax = !0u64;
@@ -1440,6 +1479,7 @@ fn sys_clone(
         cpu: AtomicU32::new(0),
         exit_code: AtomicI32::new(0),
         killed: AtomicBool::new(false),
+        signal: SignalState::new(),
         user: Some(child_user),
         rq_link: Link::new(),
         rq_boosted: AtomicBool::new(false),

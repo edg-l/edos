@@ -1,5 +1,6 @@
 //! EDOS Shell - Command-line shell for EDOS GUI terminal.
 
+mod arith;
 mod builtins;
 mod command;
 mod complete;
@@ -149,6 +150,84 @@ pub fn run_segment(segment: &str) -> SegmentResult {
         command::ExecResult::Success(code) => SegmentResult::Done(code),
         command::ExecResult::Failed(code) => SegmentResult::Done(code),
         command::ExecResult::Exit => SegmentResult::Exit,
+    }
+}
+
+/// Run a single command segment with a caller-supplied stdin fd.
+///
+/// The caller is responsible for closing `stdin_fd` after this returns.
+/// This is used by heredoc execution so the pipe read end can be passed in
+/// as the command's standard input.
+pub fn run_segment_with_stdin(segment: &str, stdin_fd: u64) -> i32 {
+    let expanded = command::expand_variables(segment);
+    let args = command::parse_command(&expanded);
+    if args.is_empty() {
+        return 0;
+    }
+    let (cmd, rest) = args.split_first().unwrap();
+    let (rest, redirects) = command::extract_redirects(rest);
+
+    let stdout_fd = if let Some(ref path) = redirects.stdout_file {
+        let flags: u64 = if redirects.stdout_append {
+            0x40 | 0x400
+        } else {
+            0x40
+        };
+        let fd = edos_lib::io::open(path, flags);
+        if fd < 0 {
+            eprintln!("{}: cannot open for writing", path);
+            return 1;
+        }
+        fd as u64
+    } else {
+        1
+    };
+
+    if command::is_builtin(cmd) || crate::script::is_function(cmd) {
+        // Dup stdin_fd onto fd 0, run the builtin, then restore.
+        let saved_stdin = edos_lib::process::dup(0) as u64;
+        edos_lib::process::dup2(stdin_fd, 0);
+        let saved_stdout = if stdout_fd != 1 {
+            let s = edos_lib::process::dup(1) as u64;
+            edos_lib::process::dup2(stdout_fd, 1);
+            Some(s)
+        } else {
+            None
+        };
+
+        let result = command::execute_command(cmd, &rest);
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        edos_lib::process::dup2(saved_stdin, 0);
+        edos_lib::process::close(saved_stdin);
+        if let Some(saved) = saved_stdout {
+            edos_lib::process::dup2(saved, 1);
+            edos_lib::process::close(saved);
+        }
+        if stdout_fd != 1 {
+            edos_lib::process::close(stdout_fd);
+        }
+
+        match result {
+            command::ExecResult::Success(c) | command::ExecResult::Failed(c) => c,
+            command::ExecResult::Exit => -1,
+        }
+    } else {
+        // External command: pass stdin_fd directly.
+        edos_lib::io::pty_set_canonical(0);
+        let code = if let Some(pid) =
+            edos_lib::process::spawn_program_with_fds(cmd, &rest, stdin_fd, stdout_fd, 2)
+        {
+            edos_lib::process::waitpid(pid)
+        } else {
+            eprintln!("Command not found: {}", cmd);
+            127
+        };
+        edos_lib::io::pty_set_raw(0);
+        if stdout_fd != 1 {
+            edos_lib::process::close(stdout_fd);
+        }
+        code
     }
 }
 
@@ -536,6 +615,10 @@ fn main() {
 
     edos_lib::io::pty_set_raw(0);
 
+    // Ignore SIGINT so the shell doesn't die on Ctrl+C
+    // (the foreground child process gets killed instead)
+    edos_lib::process::sys_sigaction(2, 1); // SIGINT=2, SIG_IGN=1
+
     println!("EDOS Shell v0.1");
     println!("Type 'help' for commands.\n");
 
@@ -592,6 +675,76 @@ fn main() {
         // Handle `history` builtin before splitting (needs access to history vec)
         if trimmed == "history" {
             builtins::cmd_history(&history);
+            continue;
+        }
+
+        // Handle interactive function definition: collect lines until `end`
+        if trimmed.starts_with("function ") {
+            let func_name = trimmed["function ".len()..].trim().to_string();
+            if func_name.is_empty() {
+                eprintln!("sh: function: missing name");
+                continue;
+            }
+            let mut body_lines: Vec<String> = Vec::new();
+            let mut depth: usize = 1;
+            loop {
+                let Some(body_input) = read_line(&history, "> ") else {
+                    eprintln!("sh: unexpected EOF in function definition");
+                    break;
+                };
+                let body_line = body_input.trim_end_matches('\n').to_string();
+                let body_first = body_line.trim().split_whitespace().next().unwrap_or("");
+                match body_first {
+                    "if" | "while" | "for" | "function" => depth += 1,
+                    "end" => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                body_lines.push(body_line);
+            }
+            match script::parse_and_register_function(&func_name, &body_lines) {
+                Ok(()) => {}
+                Err(e) => eprintln!("sh: function {}: {}", func_name, e),
+            }
+            continue;
+        }
+
+        // Check for heredoc operator before running the command.
+        let trimmed_check = input.trim().trim_end_matches('\n');
+        if let Some((cleaned_line, marker, raw)) = command::parse_heredoc_marker(trimmed_check) {
+            // Collect heredoc body lines interactively until the marker is seen.
+            let mut heredoc_content: Vec<String> = Vec::new();
+            loop {
+                let Some(hline) = read_line(&[], "> ") else {
+                    break;
+                };
+                let hline_trimmed = hline.trim_end_matches('\n').to_string();
+                if hline_trimmed.trim() == marker {
+                    break;
+                }
+                heredoc_content.push(hline_trimmed);
+            }
+            let content = heredoc_content.join("\n");
+            let expanded = if raw {
+                content
+            } else {
+                command::expand_variables(&content)
+            };
+
+            if let Some((read_fd, write_fd)) = edos_lib::process::pipe() {
+                if !expanded.is_empty() {
+                    let bytes = format!("{}\n", expanded).into_bytes();
+                    edos_lib::process::write(write_fd, &bytes);
+                }
+                edos_lib::process::close(write_fd);
+                let code = run_segment_with_stdin(&cleaned_line, read_fd);
+                edos_lib::process::close(read_fd);
+                command::set_last_exit_code(code);
+            }
             continue;
         }
 
