@@ -392,10 +392,12 @@ fn main() {
     // Input device state (mouse + keyboard)
     let mut input = InputState::new();
 
+    // Pre-compute desktop gradient (avoids 1080 lerp+fill calls per frame).
+    let gradient_cache = compositor::build_gradient_cache(screen.width(), screen.height());
+
     // Dirty region tracking
     let mut dirty = DirtyRegion::new();
     // Force full screen on the first frame.
-    dirty.mark_full_screen();
     dirty.mark_full_screen();
 
     // Previous frame window snapshots for change detection.
@@ -572,6 +574,7 @@ fn main() {
             &mut shm_cache,
             hovered_close_window,
             hw_cursor,
+            &gradient_cache,
         );
 
         // Transfer the dirty region to the host and flush.

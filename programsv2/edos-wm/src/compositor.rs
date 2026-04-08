@@ -101,6 +101,23 @@ impl ShmCache {
 }
 
 /// Composite all visible windows onto the screen.
+/// Pre-compute the desktop gradient into a row buffer (one color per scanline).
+/// Returns a Vec of width*height pixels.
+pub fn build_gradient_cache(width: usize, height: usize) -> Vec<u32> {
+    use edos_render::theme::{Theme, lerp_color};
+
+    let mut buf = vec![0u32; width * height];
+    let top = Theme::DEFAULT.desktop_bg_top;
+    let bottom = Theme::DEFAULT.desktop_bg_bottom;
+    for row in 0..height {
+        let t = ((row as u64 * 255) / (height as u64 - 1).max(1)) as u8;
+        let color = lerp_color(top, bottom, t).raw();
+        let start = row * width;
+        buf[start..start + width].fill(color);
+    }
+    buf
+}
+
 pub fn composite(
     screen: &mut Screen,
     windows: &[WindowListEntry],
@@ -109,17 +126,23 @@ pub fn composite(
     shm_cache: &mut ShmCache,
     hovered_close_window: Option<u64>,
     hw_cursor: bool,
+    gradient_cache: &[u32],
 ) {
-    // Draw desktop background gradient
-    edos_render::theme::draw_gradient_v_screen(
-        screen,
-        0,
-        0,
-        screen.width() as u64,
-        screen.height() as u64,
-        Theme::DEFAULT.desktop_bg_top,
-        Theme::DEFAULT.desktop_bg_bottom,
-    );
+    // Blit cached desktop gradient background.
+    let screen_w = screen.width();
+    let screen_h = screen.height();
+    if let Some((pixels, stride)) = screen.pixels_mut() {
+        let w = screen_w.min(stride);
+        let h = screen_h;
+        for row in 0..h {
+            let src_start = row * w;
+            let dst_start = row * stride;
+            if src_start + w <= gradient_cache.len() {
+                pixels[dst_start..dst_start + w]
+                    .copy_from_slice(&gradient_cache[src_start..src_start + w]);
+            }
+        }
+    }
 
     // Collect active shm_ids for cache cleanup
     let active_shm_ids: Vec<u64> = windows
