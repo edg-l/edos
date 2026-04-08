@@ -112,6 +112,11 @@ impl<T, R> Mailbox<T, R> {
         }
     }
 
+    /// Check if the mailbox has pending requests without consuming them.
+    pub fn is_empty(&self) -> bool {
+        self.queue.lock().is_empty()
+    }
+
     /// Non-blocking receive: returns `Some(request)` if one is available, `None` otherwise.
     pub fn try_recv(&self) -> Option<Request<T, R>> {
         self.queue.lock().pop_front()

@@ -1413,7 +1413,17 @@ pub extern "C" fn xhci_driver_main() -> ! {
     // 1. MSI-X interrupt -> wake_thread_irq from interrupt handler (HID events)
     // 2. USB block I/O -> wake_thread from block_api after mailbox send
     loop {
-        sched().thread_park();
+        // Use thread_park_while so we only park if there's truly nothing to do.
+        // This avoids lost wakes when a mailbox request arrives between the
+        // mailbox check and the park call.
+        let er = controller.event_ring.as_mut().unwrap() as *mut EventRing;
+        sched().thread_park_while(|| {
+            let has_event = unsafe { (*er).peek() };
+            let has_mailbox = USB_BLOCK_MAILBOX
+                .get()
+                .is_some_and(|mb| !mb.is_empty());
+            !has_event && !has_mailbox
+        });
 
         // Process all pending events.
         while let Some(event) = controller.event_ring.as_mut().unwrap().poll() {

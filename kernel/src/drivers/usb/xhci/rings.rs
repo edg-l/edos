@@ -243,6 +243,12 @@ impl EventRing {
         }
     }
 
+    /// Check if an event TRB is ready without consuming it.
+    pub fn peek(&self) -> bool {
+        let trb = unsafe { core::ptr::read_volatile(self.trbs.add(self.dequeue_idx)) };
+        trb.cycle_bit() == self.cycle_bit
+    }
+
     /// Poll for the next event TRB. Returns `Some(trb)` if one is ready.
     pub fn poll(&mut self) -> Option<Trb> {
         let trb = unsafe { core::ptr::read_volatile(self.trbs.add(self.dequeue_idx)) };
