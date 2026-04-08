@@ -113,8 +113,12 @@ impl<T, R> Mailbox<T, R> {
     }
 
     /// Check if the mailbox has pending requests without consuming them.
+    /// Uses try_lock so it's safe to call with interrupts disabled.
     pub fn is_empty(&self) -> bool {
-        self.queue.lock().is_empty()
+        match self.queue.try_lock() {
+            Some(q) => q.is_empty(),
+            None => false, // lock contended, assume not empty to avoid missing a request
+        }
     }
 
     /// Non-blocking receive: returns `Some(request)` if one is available, `None` otherwise.
