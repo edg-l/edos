@@ -19,22 +19,280 @@ use crate::{
     println,
 };
 
-/// Global framebuffer, initialized once and accessed directly from ioctl handlers.
+/// Global display, initialized once and accessed directly from ioctl handlers.
 /// No render thread or Mailbox -- callers write to the framebuffer in their own
 /// thread context, serialized by this Mutex.
-pub static DISPLAY: Once<Mutex<DirectFramebuffer>> = Once::new();
+pub static DISPLAY: Once<Mutex<Display>> = Once::new();
 
 pub fn init() {
     DISPLAY.call_once(|| {
-        let display = DirectFramebuffer::new();
+        // Try virtio-gpu first, fall back to VBE.
+        let display = match try_init_virtio_gpu() {
+            Some(d) => d,
+            None => {
+                println!("virtio-gpu: not found, using VBE framebuffer");
+                Display::Vbe(DirectFramebuffer::new())
+            }
+        };
+
         framebuffer::FramebufferDevice::register();
 
-        // Register VRAM physical range as allowed for userspace MAP_PHYSICAL.
+        // Register display physical range as allowed for userspace MAP_PHYSICAL.
         let info = display.mmap_info();
         crate::memory::allow_physical_range(info.phys_addr, info.total_size);
 
         Mutex::new(display)
     });
+}
+
+fn try_init_virtio_gpu() -> Option<Display> {
+    use crate::drivers::pci::pci_manager;
+    use crate::drivers::virtio::gpu::VirtioGpu;
+    use crate::drivers::virtio::pci::VirtioTransport;
+
+    // Scan for virtio-gpu PCI device (vendor 0x1AF4, device 0x1050).
+    let manager = pci_manager().read();
+    let gpu_dev = manager
+        .get_devices()
+        .iter()
+        .find(|d| d.header.vendor_id == 0x1AF4 && d.header.device_id == 0x1050)?;
+    let gpu_dev = *gpu_dev; // copy before releasing the lock
+    drop(manager);
+
+    println!(
+        "virtio-gpu: found PCI device at {:02x}:{:02x}.{}",
+        gpu_dev.address.bus, gpu_dev.address.device, gpu_dev.address.function
+    );
+
+    let transport = VirtioTransport::new(&gpu_dev)?;
+    transport.init_device();
+
+    let mut gpu = match VirtioGpu::new(transport) {
+        Ok(g) => g,
+        Err(e) => {
+            println!("virtio-gpu: init failed: {}", e);
+            return None;
+        }
+    };
+
+    // Use the Limine framebuffer dimensions (from UEFI GOP). With virtio-vga
+    // the VGA compat mode provides GOP for Limine, so this is always available.
+    // Falls back to 1920x1080 if no framebuffer (e.g. bare virtio-gpu-pci).
+    let (width, height) = if let Some(fb) = &boot_info().framebuffer {
+        (fb.width() as u32, fb.height() as u32)
+    } else {
+        (1920, 1080)
+    };
+    println!("virtio-gpu: {}x{}", width, height);
+
+    let dma_buf = gpu.setup_framebuffer(width, height);
+
+    Some(Display::VirtioGpu(VirtioGpuDisplay::new(
+        gpu, dma_buf, width, height,
+    )))
+}
+
+// -------- Display enum --------
+
+pub enum Display {
+    Vbe(DirectFramebuffer),
+    VirtioGpu(VirtioGpuDisplay),
+}
+
+impl Display {
+    pub fn screen_info(&self) -> ScreenInfo {
+        match self {
+            Display::Vbe(fb) => fb.screen_info(),
+            Display::VirtioGpu(vg) => vg.screen_info(),
+        }
+    }
+
+    pub fn mmap_info(&self) -> FramebufferMmapInfo {
+        match self {
+            Display::Vbe(fb) => fb.mmap_info(),
+            Display::VirtioGpu(vg) => vg.mmap_info(),
+        }
+    }
+
+    pub fn draw(&mut self, src: &[u32], x: u64, y: u64, src_width: usize, src_height: usize) {
+        match self {
+            Display::Vbe(fb) => fb.draw(src, x, y, src_width, src_height),
+            Display::VirtioGpu(vg) => vg.draw(src, x, y, src_width, src_height),
+        }
+    }
+
+    pub fn draw_rect(&mut self, x: u64, y: u64, width: u64, height: u64, color: u32) {
+        match self {
+            Display::Vbe(fb) => fb.draw_rect(x, y, width, height, color),
+            Display::VirtioGpu(vg) => vg.draw_rect(x, y, width, height, color),
+        }
+    }
+
+    pub fn flip(&mut self) -> u64 {
+        match self {
+            Display::Vbe(fb) => fb.flip(),
+            Display::VirtioGpu(vg) => vg.flip(),
+        }
+    }
+}
+
+// -------- VirtioGpuDisplay --------
+
+pub struct VirtioGpuDisplay {
+    gpu: crate::drivers::virtio::gpu::VirtioGpu,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    /// Base virtual pointer to the DMA buffer (covers both pages).
+    fb_base: *mut u32,
+    /// Physical address of the DMA buffer.
+    phys_addr: u64,
+    /// Size of one page in bytes (width * height * 4).
+    page_size: u64,
+    /// Index of the current back buffer (0 or 1).
+    back_idx: usize,
+    /// Keep ownership of the DMA buffer so it isn't dropped.
+    _dma: crate::drivers::dma::DmaBuffer,
+}
+
+unsafe impl Send for VirtioGpuDisplay {}
+
+impl VirtioGpuDisplay {
+    fn new(
+        gpu: crate::drivers::virtio::gpu::VirtioGpu,
+        dma: crate::drivers::dma::DmaBuffer,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let pitch = width * 4;
+        let page_size = (height * pitch) as u64;
+        let fb_base = dma.as_ptr() as *mut u32;
+        let phys_addr = dma.phys_addr().as_u64();
+
+        Self {
+            gpu,
+            width,
+            height,
+            pitch,
+            fb_base,
+            phys_addr,
+            page_size,
+            back_idx: 1, // draw into buffer 1, buffer 0 is the initial front
+            _dma: dma,
+        }
+    }
+
+    pub fn screen_info(&self) -> ScreenInfo {
+        ScreenInfo {
+            width: self.width as usize,
+            height: self.height as usize,
+        }
+    }
+
+    pub fn mmap_info(&self) -> FramebufferMmapInfo {
+        FramebufferMmapInfo {
+            phys_addr: self.phys_addr,
+            total_size: self.page_size * 2,
+            page_size: self.page_size,
+            width: self.width,
+            height: self.height,
+            pitch: self.pitch,
+            double_buffered: 1,
+            is_identity: 1, // B8G8R8X8 = 0x00RRGGBB on little-endian x86
+            _padding: [0; 2],
+        }
+    }
+
+    pub fn draw(&mut self, src: &[u32], x: u64, y: u64, src_width: usize, src_height: usize) {
+        let page_offset_pixels = (self.back_idx as u64 * self.page_size / 4) as usize;
+        let fb = unsafe { self.fb_base.add(page_offset_pixels) };
+        let pixels_per_row = (self.pitch / 4) as usize;
+        let w = self.width as usize;
+        let h = self.height as usize;
+
+        let start_x = (x as usize).min(w);
+        let start_y = (y as usize).min(h);
+        let end_x = (x as usize + src_width).min(w);
+        let end_y = (y as usize + src_height).min(h);
+
+        if start_x >= end_x || start_y >= end_y {
+            return;
+        }
+
+        let src_offset_x = start_x - x as usize;
+        let src_offset_y = start_y - y as usize;
+        let row_len = end_x - start_x;
+
+        let last_src_row = src_offset_y + (end_y - start_y) - 1;
+        let last_src_index = last_src_row * src_width + src_offset_x + row_len;
+        if last_src_index > src.len() {
+            return;
+        }
+
+        let mut src_row = src_offset_y;
+        for dst_y in start_y..end_y {
+            let src_start = src_row * src_width + src_offset_x;
+            let dst_start = dst_y * pixels_per_row + start_x;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src[src_start..].as_ptr(),
+                    fb.add(dst_start),
+                    row_len,
+                );
+            }
+            src_row += 1;
+        }
+    }
+
+    pub fn draw_rect(&mut self, x: u64, y: u64, width: u64, height: u64, color: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let page_offset_pixels = (self.back_idx as u64 * self.page_size / 4) as usize;
+        let fb = unsafe { self.fb_base.add(page_offset_pixels) };
+        let pixels_per_row = (self.pitch / 4) as usize;
+        let w = self.width as usize;
+        let h = self.height as usize;
+
+        let start_x = (x as usize).min(w);
+        let start_y = (y as usize).min(h);
+        let end_x = (x as usize + width as usize).min(w);
+        let end_y = (y as usize + height as usize).min(h);
+
+        if start_x >= end_x || start_y >= end_y {
+            return;
+        }
+
+        let row_len = end_x - start_x;
+
+        for dst_y in start_y..end_y {
+            let dst_start = dst_y * pixels_per_row + start_x;
+            for i in 0..row_len {
+                unsafe {
+                    core::ptr::write_volatile(fb.add(dst_start + i), color);
+                }
+            }
+        }
+    }
+
+    /// Flip: transfer the back buffer to the host, switch scanout, swap.
+    /// Returns the byte offset of the NEW back buffer.
+    pub fn flip(&mut self) -> u64 {
+        let resource_id = (self.back_idx as u32) + 1; // resource IDs are 1 and 2
+        // SET_SCANOUT must come before RESOURCE_FLUSH: QEMU only flushes
+        // resources whose scanout_bitmask includes the target scanout.
+        self.gpu
+            .set_scanout(0, resource_id, self.width, self.height);
+        self.gpu
+            .transfer_and_flush(resource_id, self.width, self.height);
+
+        // Swap front/back
+        self.back_idx = 1 - self.back_idx;
+
+        // Return byte offset of new back buffer within the mmap region.
+        (self.back_idx as u64) * self.page_size
+    }
 }
 
 /// Screen dimensions, returned by the SCREEN_INFO ioctl.
@@ -68,7 +326,10 @@ unsafe impl Send for DirectFramebuffer {}
 
 impl DirectFramebuffer {
     pub fn new() -> Self {
-        let fb = &boot_info().framebuffer;
+        let fb = boot_info()
+            .framebuffer
+            .as_ref()
+            .expect("DirectFramebuffer requires a Limine framebuffer");
         let width = fb.width() as usize;
         let height = fb.height() as usize;
         let pitch = fb.pitch() as usize;

@@ -79,6 +79,7 @@ pub mod random;
 pub mod rtc;
 pub mod tty;
 pub mod vga;
+pub mod virtio;
 
 pub fn init_drivers() {
     hpet::driver::init();

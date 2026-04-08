@@ -2,6 +2,7 @@ use spin::{Once, RwLock};
 
 use crate::{drivers::pci::manager::PciManager, println};
 
+pub mod config;
 pub mod manager;
 pub mod structures;
 

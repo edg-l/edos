@@ -25,10 +25,15 @@ run: run-$(KARCH)
 .PHONY: run-hdd
 run-hdd: run-hdd-$(KARCH)
 
+# Display device configurations
+DISPLAY_VGA := -device VGA,vgamem_mb=32
+DISPLAY_VIRTIO := -vga none -device virtio-vga,xres=1920,yres=1080 -display gtk,zoom-to-fit=off
+
 # QEMU runner function
 # $(1) = boot media type (iso/hdd)
 # $(2) = smp cores
 # $(3) = extra flags
+# $(4) = display device flags (defaults to DISPLAY_VIRTIO)
 define run_qemu_uefi
 	qemu-system-$(KARCH) \
 		-M q35 \
@@ -41,7 +46,7 @@ define run_qemu_uefi
 		-no-reboot \
 		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
 		-device ide-hd,drive=sata0,bus=ide.1 \
-		-device VGA,vgamem_mb=32 \
+		$(if $(4),$(4),$(DISPLAY_VIRTIO)) \
 		-smp $(2) \
 		$(3) \
 		$(QEMUFLAGS)
@@ -50,6 +55,10 @@ endef
 .PHONY: run-x86_64
 run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
 	$(call run_qemu_uefi,iso,4,-accel kvm)
+
+.PHONY: run-vga
+run-vga: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+	$(call run_qemu_uefi,iso,4,-accel kvm,$(DISPLAY_VGA))
 
 .PHONY: run-single
 run-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img

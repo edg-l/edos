@@ -78,7 +78,7 @@ static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
 #[expect(unused)]
 pub struct BootInfo {
-    pub framebuffer: Framebuffer<'static>,
+    pub framebuffer: Option<Framebuffer<'static>>,
     pub memory_map: &'static MemoryMapResponse,
     pub physical_memory_offset: VirtAddr,
     pub memory_manager: IrqSpinlock<MemoryManager>,
@@ -107,10 +107,7 @@ unsafe extern "C" fn kmain() -> ! {
 
     let framebuffer = FRAMEBUFFER_REQUEST
         .get_response()
-        .expect("need a framebuffer")
-        .framebuffers()
-        .next()
-        .expect("need a framebuffer");
+        .and_then(|r| r.framebuffers().next());
 
     let memory_map = MEMORY_MAP_REQUEST
         .get_response()

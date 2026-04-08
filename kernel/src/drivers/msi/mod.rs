@@ -1,10 +1,11 @@
 #![expect(unused)]
 
-use x86_64::instructions::port::Port;
-
 use crate::{
     apic::get_lapic,
-    drivers::pci::structures::{PciAddress, PciDevice},
+    drivers::pci::{
+        config::{pci_read_u8, pci_read_u16, pci_read_u32, pci_write_u16, pci_write_u32},
+        structures::{PciAddress, PciDevice},
+    },
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -77,11 +78,9 @@ pub fn enable_msi_for_device(dev: &PciDevice, vector: u8) -> Result<(), MsiError
 }
 
 fn find_capability(addr: PciAddress, target_cap_id: u8) -> Option<u8> {
-    // Capability pointer usually at 0x34 for type-0 headers, but we trust caller to pass pointer
     let mut ptr = pci_read_u8(addr, 0x34);
     let mut guard = 0;
     while ptr != 0 && guard < 64 {
-        // simple loop guard
         let cap_id = pci_read_u8(addr, ptr);
         if cap_id == target_cap_id {
             return Some(ptr);
@@ -90,67 +89,4 @@ fn find_capability(addr: PciAddress, target_cap_id: u8) -> Option<u8> {
         guard += 1;
     }
     None
-}
-
-// -------- PCI config space access helpers --------
-
-/// Spinlock serializing PCI config space accesses (ports 0xCF8/0xCFC).
-/// The address+data sequence is non-atomic, so concurrent CPUs must not interleave.
-static PCI_CONFIG_LOCK: spin::Mutex<()> = spin::Mutex::new(());
-
-fn pci_config_address(addr: PciAddress, offset: u8) -> u32 {
-    0x8000_0000
-        | ((addr.bus as u32) << 16)
-        | ((addr.device as u32) << 11)
-        | ((addr.function as u32) << 8)
-        | ((offset & 0xFC) as u32)
-}
-
-fn pci_read_u32(addr: PciAddress, offset: u8) -> u32 {
-    let _guard = PCI_CONFIG_LOCK.lock();
-    let mut cfg_addr: Port<u32> = Port::new(0xCF8);
-    let mut cfg_data: Port<u32> = Port::new(0xCFC);
-    unsafe {
-        cfg_addr.write(pci_config_address(addr, offset));
-        cfg_data.read()
-    }
-}
-
-fn pci_write_u32(addr: PciAddress, offset: u8, value: u32) {
-    let _guard = PCI_CONFIG_LOCK.lock();
-    let mut cfg_addr: Port<u32> = Port::new(0xCF8);
-    let mut cfg_data: Port<u32> = Port::new(0xCFC);
-    unsafe {
-        cfg_addr.write(pci_config_address(addr, offset));
-        cfg_data.write(value);
-    }
-}
-
-fn pci_read_u16(addr: PciAddress, offset: u8) -> u16 {
-    let shift = ((offset & 2) as u32) * 8;
-    (pci_read_u32(addr, offset) >> shift) as u16
-}
-
-fn pci_write_u16(addr: PciAddress, offset: u8, value: u16) {
-    // Single lock for the read-modify-write to avoid TOCTOU with other CPUs.
-    let _guard = PCI_CONFIG_LOCK.lock();
-    let mut cfg_addr: Port<u32> = Port::new(0xCF8);
-    let mut cfg_data: Port<u32> = Port::new(0xCFC);
-    let config_addr = pci_config_address(addr, offset & !3);
-    let shift = ((offset & 2) as u32) * 8;
-    let current = unsafe {
-        cfg_addr.write(config_addr);
-        cfg_data.read()
-    };
-    let mask = !(0xFFFFu32 << shift);
-    let new_val = (current & mask) | ((value as u32) << shift);
-    unsafe {
-        cfg_addr.write(config_addr);
-        cfg_data.write(new_val);
-    }
-}
-
-fn pci_read_u8(addr: PciAddress, offset: u8) -> u8 {
-    let shift = ((offset & 3) as u32) * 8;
-    (pci_read_u32(addr, offset) >> shift) as u8
 }
