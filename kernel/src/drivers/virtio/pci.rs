@@ -209,6 +209,55 @@ impl VirtioTransport {
         })
     }
 
+    // ---- MMIO helpers (handle unaligned base pointers safely) ----
+
+    /// Volatile read a u32 from common_cfg at the given byte offset.
+    ///
+    /// Uses inline asm to avoid Rust's alignment UB check on `write_volatile`
+    /// when the pointer is derived from a `*mut u8` base (the VirtIO spec
+    /// guarantees DWORD alignment, but Rust's provenance tracking doesn't
+    /// carry that info through `u8` pointer arithmetic).
+    fn cfg_read_u32(&self, offset: usize) -> u32 {
+        let addr = self.common_cfg as usize + offset;
+        let val: u32;
+        unsafe {
+            core::arch::asm!("mov {0:e}, [{1}]", out(reg) val, in(reg) addr, options(nostack, readonly))
+        };
+        val
+    }
+
+    /// Volatile write a u32 to common_cfg at the given byte offset.
+    fn cfg_write_u32(&self, offset: usize, val: u32) {
+        let addr = self.common_cfg as usize + offset;
+        unsafe {
+            core::arch::asm!("mov [{1}], {0:e}", in(reg) val, in(reg) addr, options(nostack))
+        };
+    }
+
+    /// Volatile read a u16 from common_cfg at the given byte offset.
+    fn cfg_read_u16(&self, offset: usize) -> u16 {
+        let addr = self.common_cfg as usize + offset;
+        let val: u16;
+        unsafe {
+            core::arch::asm!("mov {0:x}, [{1}]", out(reg) val, in(reg) addr, options(nostack, readonly))
+        };
+        val
+    }
+
+    /// Volatile write a u16 to common_cfg at the given byte offset.
+    fn cfg_write_u16(&self, offset: usize, val: u16) {
+        let addr = self.common_cfg as usize + offset;
+        unsafe {
+            core::arch::asm!("mov [{1}], {0:x}", in(reg) val, in(reg) addr, options(nostack))
+        };
+    }
+
+    /// Volatile write a u64 to common_cfg at the given byte offset (two 32-bit writes).
+    fn cfg_write_u64(&self, offset: usize, val: u64) {
+        self.cfg_write_u32(offset, val as u32);
+        self.cfg_write_u32(offset + 4, (val >> 32) as u32);
+    }
+
     // ---- Common configuration accessors (volatile MMIO) ----
 
     pub fn read_status(&self) -> u8 {
@@ -224,37 +273,20 @@ impl VirtioTransport {
     }
 
     pub fn read_device_features(&self) -> u64 {
-        // Select low 32 bits
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_DFSELECT) as *mut u32, 0);
-        }
-        let low = unsafe { core::ptr::read_volatile(self.common_cfg.add(COMMON_DF) as *const u32) };
-
-        // Select high 32 bits
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_DFSELECT) as *mut u32, 1);
-        }
-        let high =
-            unsafe { core::ptr::read_volatile(self.common_cfg.add(COMMON_DF) as *const u32) };
-
+        self.cfg_write_u32(COMMON_DFSELECT, 0);
+        let low = self.cfg_read_u32(COMMON_DF);
+        self.cfg_write_u32(COMMON_DFSELECT, 1);
+        let high = self.cfg_read_u32(COMMON_DF);
         (high as u64) << 32 | low as u64
     }
 
     pub fn write_driver_features(&self, features: u64) {
         let low = features as u32;
         let high = (features >> 32) as u32;
-
-        // Write low 32 bits
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_GFSELECT) as *mut u32, 0);
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_GF) as *mut u32, low);
-        }
-
-        // Write high 32 bits
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_GFSELECT) as *mut u32, 1);
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_GF) as *mut u32, high);
-        }
+        self.cfg_write_u32(COMMON_GFSELECT, 0);
+        self.cfg_write_u32(COMMON_GF, low);
+        self.cfg_write_u32(COMMON_GFSELECT, 1);
+        self.cfg_write_u32(COMMON_GF, high);
     }
 
     pub fn reset(&self) {
@@ -265,65 +297,49 @@ impl VirtioTransport {
     }
 
     pub fn select_queue(&self, index: u16) {
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_QUEUE_SELECT) as *mut u16, index);
-        }
+        self.cfg_write_u16(COMMON_QUEUE_SELECT, index);
     }
 
     pub fn queue_size(&self) -> u16 {
-        unsafe { core::ptr::read_volatile(self.common_cfg.add(COMMON_QUEUE_SIZE) as *const u16) }
+        self.cfg_read_u16(COMMON_QUEUE_SIZE)
     }
 
     pub fn set_queue_size(&self, size: u16) {
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_QUEUE_SIZE) as *mut u16, size);
-        }
+        self.cfg_write_u16(COMMON_QUEUE_SIZE, size);
     }
 
     pub fn set_queue_desc(&self, addr: u64) {
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_QUEUE_DESC) as *mut u64, addr);
-        }
+        self.cfg_write_u64(COMMON_QUEUE_DESC, addr);
     }
 
     pub fn set_queue_avail(&self, addr: u64) {
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_QUEUE_AVAIL) as *mut u64, addr);
-        }
+        self.cfg_write_u64(COMMON_QUEUE_AVAIL, addr);
     }
 
     pub fn set_queue_used(&self, addr: u64) {
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_QUEUE_USED) as *mut u64, addr);
-        }
+        self.cfg_write_u64(COMMON_QUEUE_USED, addr);
     }
 
     pub fn enable_queue(&self) {
-        unsafe {
-            core::ptr::write_volatile(self.common_cfg.add(COMMON_QUEUE_ENABLE) as *mut u16, 1u16);
-        }
+        self.cfg_write_u16(COMMON_QUEUE_ENABLE, 1);
     }
 
     pub fn queue_notify_off(&self) -> u16 {
-        unsafe {
-            core::ptr::read_volatile(self.common_cfg.add(COMMON_QUEUE_NOTIFY_OFF) as *const u16)
-        }
+        self.cfg_read_u16(COMMON_QUEUE_NOTIFY_OFF)
     }
 
     #[expect(unused)]
     pub fn num_queues(&self) -> u16 {
-        unsafe { core::ptr::read_volatile(self.common_cfg.add(COMMON_NUM_QUEUES) as *const u16) }
+        self.cfg_read_u16(COMMON_NUM_QUEUES)
     }
 
     /// Send a queue notification to the device.
-    ///
-    /// Writes the queue index to the notify MMIO address calculated from the
-    /// queue's notify offset and the per-device notify_off_multiplier.
     pub fn notify_queue(&self, queue_index: u16, notify_off: u16) {
-        let offset = notify_off as usize * self.notify_off_multiplier as usize;
+        let addr =
+            self.notify_base as usize + notify_off as usize * self.notify_off_multiplier as usize;
         unsafe {
-            core::ptr::write_volatile(self.notify_base.add(offset) as *mut u16, queue_index);
-        }
+            core::arch::asm!("mov [{1}], {0:x}", in(reg) queue_index, in(reg) addr, options(nostack))
+        };
     }
 
     #[expect(unused)]
