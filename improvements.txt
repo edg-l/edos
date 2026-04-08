@@ -1,0 +1,37 @@
+# EDOS Performance Improvements
+
+## High impact, reasonable effort
+
+- [ ] 1. Frame allocator linear scan - allocate_contiguous_frames is O(n) over 500K+ frames
+      under a global IRQ lock. A buddy allocator or free-list with next-fit hint would fix this.
+      Files: kernel/src/memory/frame_allocator.rs
+
+- [ ] 2. Nested fd_table locks in every syscall - info.lock().fd_table.lock() on every
+      read/write/close. The fd_table could be an Arc grabbed once, avoiding double-lock per syscall.
+      Files: kernel/src/syscalls/io.rs, fs.rs, window.rs, shm.rs
+
+- [ ] 3. No read-ahead / sector batching in FAT32 - Each 4KB read is a separate AHCI command
+      through the mailbox. Sequential reads of a new file do one-sector-at-a-time round-trips.
+      Batching contiguous reads into single multi-sector AHCI commands would be a big win.
+      Files: kernel/src/fs/fat32/read.rs, kernel/src/fs/block_device.rs
+
+## High impact, large effort
+
+- [ ] 4. 2-tier mailbox FS architecture - Every file read goes: caller -> FS main thread ->
+      partition worker -> back. That's 4-6 context switches per I/O. Direct-dispatch model
+      (caller talks to partition worker directly) would cut this in half.
+      Files: kernel/src/fs/mod.rs, kernel/src/fs/api.rs
+
+- [ ] 5. Global Display mutex - The compositor holds it during pixel blitting. Multiple windows
+      updating simultaneously serialize on this single lock. A proper double-buffer swap would
+      eliminate contention.
+      Files: kernel/src/graphics/mod.rs, kernel/src/graphics/framebuffer.rs
+
+## Medium impact, easy fixes
+
+- [ ] 6. SHM inc_ref TOCTOU - check-then-increment without CAS. Fix with fetch_add + check-after.
+      Files: kernel/src/memory/shared.rs
+
+- [ ] 7. Frame allocator held under IRQ lock during SHM creation - Allocating 1000+ frames with
+      IRQs disabled. Could batch allocations or drop/reacquire the lock periodically.
+      Files: kernel/src/memory/shared.rs

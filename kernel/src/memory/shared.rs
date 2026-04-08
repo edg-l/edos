@@ -115,10 +115,12 @@ impl SharedMemory {
     /// Increment the reference count.
     /// Returns error if the region is marked for destruction.
     pub fn inc_ref(&self) -> Result<(), SharedMemoryError> {
+        // Increment first, then check destroyed to avoid TOCTOU race.
+        self.ref_count.fetch_add(1, Ordering::AcqRel);
         if self.is_destroyed() {
+            self.ref_count.fetch_sub(1, Ordering::AcqRel);
             return Err(SharedMemoryError::Destroyed);
         }
-        self.ref_count.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 

@@ -98,7 +98,11 @@ pub(super) fn resolve_path(
 pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    info.lock().errno = Errno::Clear;
+    let fd_table = {
+        let mut guard = info.lock();
+        guard.errno = Errno::Clear;
+        guard.fd_table.clone()
+    };
 
     if count == 0 {
         return 0;
@@ -110,7 +114,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
 
     interrupts::enable();
 
-    let fdinfo = info.lock().fd_table.lock().get_fd(fd).cloned();
+    let fdinfo = fd_table.lock().get_fd(fd).cloned();
 
     match fdinfo {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
@@ -202,7 +206,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                         offset: file.offset + written,
                         ..file
                     });
-                    info.lock().fd_table.lock().replace_fd(fd, new_fd);
+                    fd_table.lock().replace_fd(fd, new_fd);
                     written
                 }
                 Err(_) => {
@@ -222,10 +226,14 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
 pub fn sys_close(fd: u64) -> i32 {
     let sched = sched();
     let info = sched.current_thread_info();
-    info.lock().errno = Errno::Clear;
+    let fd_table = {
+        let mut guard = info.lock();
+        guard.errno = Errno::Clear;
+        guard.fd_table.clone()
+    };
 
     interrupts::enable();
-    let result = info.lock().fd_table.lock().close_fd(fd);
+    let result = fd_table.lock().close_fd(fd);
     match result {
         Some(FileDescriptor::PipeRead(pipe)) => {
             let notif = {
@@ -264,10 +272,12 @@ pub fn sys_close(fd: u64) -> i32 {
 pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    let fd_info = {
+    let (fd_info, fd_table) = {
         let mut guard = info.lock();
         guard.errno = Errno::Clear;
-        guard.fd_table.lock().get_fd(fd).cloned()
+        let ft = guard.fd_table.clone();
+        let fdi = ft.lock().get_fd(fd).cloned();
+        (fdi, ft)
     };
 
     if count == 0 {
@@ -437,7 +447,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 offset: file.offset + bytes_to_copy as u64,
                 ..file
             });
-            info.lock().fd_table.lock().replace_fd(fd, new_fd);
+            fd_table.lock().replace_fd(fd, new_fd);
             bytes_to_copy as i64
         }
         None => {
@@ -1097,16 +1107,18 @@ const SEEK_END: u32 = 2;
 pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> i64 {
     let sched = sched();
     let info = sched.current_thread_info();
-    info.lock().errno = Errno::Clear;
+    let fd_table = {
+        let mut guard = info.lock();
+        guard.errno = Errno::Clear;
+        guard.fd_table.clone()
+    };
 
     let file = {
-        let guard = info.lock();
-        let fd_table = guard.fd_table.lock();
-        match fd_table.get_fd(fd) {
+        let fd_guard = fd_table.lock();
+        match fd_guard.get_fd(fd) {
             Some(FileDescriptor::FsFile(f)) => f.clone(),
             _ => {
-                drop(fd_table);
-                drop(guard);
+                drop(fd_guard);
                 info.lock().errno = Errno::EINVAL;
                 return -1;
             }
@@ -1141,7 +1153,7 @@ pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> i64 {
         offset: new_offset as u64,
         ..file
     });
-    info.lock().fd_table.lock().replace_fd(fd, new_fd);
+    fd_table.lock().replace_fd(fd, new_fd);
 
     new_offset
 }
