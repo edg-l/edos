@@ -26,14 +26,15 @@ use crate::{
 use self::{
     device::{
         ConfigDescriptor, DESC_CONFIGURATION, DESC_DEVICE, DESC_ENDPOINT, DESC_INTERFACE,
-        DeviceDescriptor, EndpointDescriptor, InterfaceDescriptor, SetupPacket, UsbDevice,
-        UsbSpeed,
+        DeviceDescriptor, EndpointDescriptor, HID_PROTOCOL_KEYBOARD, InterfaceDescriptor,
+        SetupPacket, USB_CLASS_HID, UsbDevice, UsbSpeed,
     },
     registers::{XhciRegisters, reg_read, reg_write},
     rings::{
         COMP_SHORT_PACKET, COMP_SUCCESS, CommandRing, EventRing, TRB_DIR_IN, TRB_IDT, TRB_IOC,
-        TRB_TYPE_COMMAND_COMPLETION, TRB_TYPE_DATA_STAGE, TRB_TYPE_PORT_STATUS_CHANGE,
-        TRB_TYPE_SETUP_STAGE, TRB_TYPE_STATUS_STAGE, TRB_TYPE_TRANSFER, TransferRing, Trb,
+        TRB_TYPE_COMMAND_COMPLETION, TRB_TYPE_DATA_STAGE, TRB_TYPE_NORMAL,
+        TRB_TYPE_PORT_STATUS_CHANGE, TRB_TYPE_SETUP_STAGE, TRB_TYPE_STATUS_STAGE,
+        TRB_TYPE_TRANSFER, TransferRing, Trb,
     },
 };
 
@@ -753,6 +754,101 @@ impl XhciController {
         self.control_transfer(device, setup, None, 0, false)?;
         Ok(())
     }
+
+    /// Send SET_PROTOCOL to switch a HID device to boot protocol.
+    ///
+    /// Boot protocol provides fixed 8-byte keyboard reports or 3-byte mouse reports.
+    pub fn set_hid_protocol(
+        &mut self,
+        device: &mut UsbDevice,
+        interface: u8,
+        protocol: u8,
+    ) -> Result<(), XhciError> {
+        let setup = SetupPacket {
+            bm_request_type: 0x21, // Host-to-device, Class, Interface
+            b_request: 0x0B,       // SET_PROTOCOL
+            w_value: protocol as u16,
+            w_index: interface as u16,
+            w_length: 0,
+        };
+        self.control_transfer(device, setup, None, 0, false)?;
+        Ok(())
+    }
+
+    /// Set up an interrupt IN endpoint on a device.
+    ///
+    /// Returns the TransferRing for the endpoint.
+    pub fn configure_interrupt_endpoint(
+        &mut self,
+        device: &mut UsbDevice,
+        ep_addr: u8,
+        max_packet: u16,
+        interval: u8,
+    ) -> Result<TransferRing, XhciError> {
+        let ep_num = ep_addr & 0x0F;
+        let ep_dir_in = ep_addr & 0x80 != 0;
+        // xHCI Endpoint Index: EP1 IN = 3, EP1 OUT = 2, EP2 IN = 5, etc.
+        // Formula: ep_index = ep_num * 2 + (if IN then 1 else 0)
+        let ep_dci = ep_num * 2 + if ep_dir_in { 1 } else { 0 };
+
+        let ctx_size = self.context_size;
+        let ring = TransferRing::new(64);
+
+        let input_ctx = &device.input_ctx;
+
+        // Clear and set Input Control Context
+        let icc = input_ctx.as_ptr() as *mut u32;
+        unsafe {
+            // Drop Context Flags = 0
+            core::ptr::write_volatile(icc, 0);
+            // Add Context Flags: set bit for slot context (0) and the endpoint (ep_dci)
+            core::ptr::write_volatile(icc.add(1), (1 << 0) | (1 << ep_dci));
+        }
+
+        // Update Slot Context: set Context Entries to include this endpoint
+        let slot_ctx = unsafe { input_ctx.as_ptr().add(ctx_size) } as *mut u32;
+        unsafe {
+            let dword0 = core::ptr::read_volatile(slot_ctx);
+            // Context Entries is bits [31:27] - set to at least ep_dci
+            let new_entries = ep_dci as u32;
+            let dword0_new = (dword0 & !(0x1F << 27)) | (new_entries << 27);
+            core::ptr::write_volatile(slot_ctx, dword0_new);
+        }
+
+        // Set up Endpoint Context for the interrupt IN endpoint
+        let ep_ctx =
+            unsafe { input_ctx.as_ptr().add((ep_dci as usize + 1) * ctx_size) } as *mut u32;
+        unsafe {
+            // Dword 0: Interval (bits [23:16])
+            // For FS/HS interrupt endpoints the xHCI spec wants the exponent: bInterval-1
+            let interval_val = if interval > 0 { interval - 1 } else { 0 };
+            core::ptr::write_volatile(ep_ctx, (interval_val as u32) << 16);
+
+            // Dword 1: EP Type (bits [5:3]) = 7 (Interrupt IN), Max Packet Size (bits [31:16])
+            // CErr (bits [2:1]) = 3 (retry up to 3 times)
+            let dword1 = (7u32 << 3) | ((max_packet as u32) << 16) | (3 << 1);
+            core::ptr::write_volatile(ep_ctx.add(1), dword1);
+
+            // Dwords 2-3: TR Dequeue Pointer with DCS=1
+            let tr_phys = ring.phys_addr() | 1;
+            core::ptr::write_volatile(ep_ctx.add(2), tr_phys as u32);
+            core::ptr::write_volatile(ep_ctx.add(3), (tr_phys >> 32) as u32);
+
+            // Dword 4: Average TRB Length
+            core::ptr::write_volatile(ep_ctx.add(4), max_packet as u32);
+        }
+
+        // Submit Configure Endpoint command
+        let input_ctx_phys = input_ctx.phys_addr().as_u64();
+        self.submit_command(Trb::configure_endpoint(input_ctx_phys, device.slot_id))?;
+
+        println!(
+            "xhci: configured EP{} IN interrupt, maxpkt={}",
+            ep_num, max_packet
+        );
+
+        Ok(ring)
+    }
 }
 
 /// Main xHCI driver entry point, run as a kernel thread.
@@ -775,6 +871,9 @@ pub extern "C" fn xhci_driver_main() -> ! {
             sched().thread_park();
         }
     }
+
+    // keyboard_device holds the active HID keyboard device and its interrupt IN transfer ring.
+    let mut keyboard_device: Option<(UsbDevice, TransferRing)> = None;
 
     // Scan all ports for already-connected devices.
     let max_ports = controller.regs.max_ports();
@@ -822,6 +921,44 @@ pub extern "C" fn xhci_driver_main() -> ! {
                         }
                         Err(e) => println!("xhci: get config descriptor failed: {:?}", e),
                     }
+
+                    // Check if this is a HID keyboard and set it up (only use the first one found).
+                    if keyboard_device.is_none() {
+                        let kbd_info = device.config_data.as_deref().and_then(find_hid_keyboard);
+
+                        if let Some((iface, ep)) = kbd_info {
+                            println!("xhci: configuring HID keyboard on slot {}", device.slot_id);
+
+                            // Switch to boot protocol (0 = boot, 1 = report)
+                            if let Err(e) = controller.set_hid_protocol(
+                                &mut device,
+                                iface.b_interface_number,
+                                0,
+                            ) {
+                                println!("xhci: set boot protocol failed: {:?}", e);
+                            }
+
+                            // Copy packed fields before the mutable borrow
+                            let ep_addr = ep.b_endpoint_address;
+                            let ep_maxpkt = ep.w_max_packet_size;
+                            let ep_interval = ep.b_interval;
+
+                            // Configure the interrupt IN endpoint
+                            match controller.configure_interrupt_endpoint(
+                                &mut device,
+                                ep_addr,
+                                ep_maxpkt,
+                                ep_interval,
+                            ) {
+                                Ok(ring) => {
+                                    keyboard_device = Some((device, ring));
+                                }
+                                Err(e) => {
+                                    println!("xhci: configure endpoint failed: {:?}", e);
+                                }
+                            }
+                        }
+                    }
                 }
                 Err(e) => println!("xhci: enumeration failed on port {}: {:?}", port, e),
             }
@@ -830,12 +967,29 @@ pub extern "C" fn xhci_driver_main() -> ! {
 
     println!("xhci: initial enumeration complete");
 
-    // Main event loop: handle runtime events (hot-plug, etc.)
+    // Allocate an 8-byte DMA buffer for keyboard HID reports and pre-fill the interrupt ring.
+    let report_buf = DmaBuffer::allocate_sized(8).expect("xhci: failed to allocate HID report buf");
+    let report_phys = report_buf.phys_addr().as_u64();
+    let mut prev_report = [0u8; 8];
+
+    if let Some((ref mut dev, ref mut ring)) = keyboard_device {
+        let ep_dci = 3u32; // EP1 IN DCI = 1*2+1 = 3
+        let trb = Trb {
+            parameter: report_phys,
+            status: 8,
+            control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
+        };
+        ring.push(trb);
+        unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
+        println!("xhci: HID keyboard interrupt transfer queued");
+    }
+
+    // Main event loop: handle runtime events (hot-plug, transfer completions, etc.)
     loop {
-        // Park until interrupt wakes us.
+        // Park until an interrupt wakes us.
         sched().thread_park();
 
-        // Process any pending events.
+        // Process all pending events.
         while let Some(event) = controller.event_ring.as_mut().unwrap().poll() {
             let erdp = controller.event_ring.as_ref().unwrap().dequeue_phys();
             let intr = controller.regs.interrupter(0);
@@ -845,6 +999,45 @@ pub extern "C" fn xhci_driver_main() -> ! {
             }
 
             match event.trb_type() {
+                TRB_TYPE_TRANSFER => {
+                    let comp_code = ((event.status >> 24) & 0xFF) as u8;
+                    if comp_code == COMP_SUCCESS || comp_code == COMP_SHORT_PACKET {
+                        // Read the 8-byte report from the DMA buffer
+                        let mut report = [0u8; 8];
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                report_buf.as_ptr(),
+                                report.as_mut_ptr(),
+                                8,
+                            );
+                        }
+
+                        // Generate and broadcast key events
+                        let key_events = crate::drivers::usb::hid::process_boot_keyboard_report(
+                            &prev_report,
+                            &report,
+                        );
+                        if !key_events.is_empty() {
+                            crate::drivers::keyboard::KEY_EVENT_BROADCAST
+                                .broadcast_many(&key_events);
+                        }
+                        prev_report = report;
+
+                        // Resubmit the TRB to receive the next report
+                        if let Some((ref mut dev, ref mut ring)) = keyboard_device {
+                            let ep_dci = 3u32;
+                            let trb = Trb {
+                                parameter: report_phys,
+                                status: 8,
+                                control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
+                            };
+                            ring.push(trb);
+                            unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
+                        }
+                    } else {
+                        println!("xhci: transfer error, completion code={}", comp_code);
+                    }
+                }
                 TRB_TYPE_PORT_STATUS_CHANGE => {
                     let port_id = ((event.parameter >> 24) & 0xFF) as u8;
                     println!("xhci: port {} status change event", port_id);
@@ -852,6 +1045,15 @@ pub extern "C" fn xhci_driver_main() -> ! {
                 _ => {
                     println!("xhci: unhandled event type {}", event.trb_type());
                 }
+            }
+        }
+
+        // Clear IMAN IP bit (W1C) to allow new MSI-X interrupts
+        let intr = controller.regs.interrupter(0);
+        unsafe {
+            let iman = reg_read(&(*intr).iman);
+            if iman & 1 != 0 {
+                reg_write(&mut (*intr).iman, iman | 1);
             }
         }
     }
@@ -910,4 +1112,48 @@ fn parse_and_log_config(data: &[u8]) {
 
         offset += length;
     }
+}
+
+/// Search a configuration descriptor blob for a HID keyboard interface and its interrupt IN endpoint.
+///
+/// Returns `(InterfaceDescriptor, EndpointDescriptor)` for the first matching pair found,
+/// or `None` if the config data contains no HID keyboard.
+fn find_hid_keyboard(config_data: &[u8]) -> Option<(InterfaceDescriptor, EndpointDescriptor)> {
+    let mut offset = 0;
+    let mut current_iface: Option<InterfaceDescriptor> = None;
+
+    while offset + 2 <= config_data.len() {
+        let length = config_data[offset] as usize;
+        let desc_type = config_data[offset + 1];
+
+        if length == 0 || offset + length > config_data.len() {
+            break;
+        }
+
+        if desc_type == DESC_INTERFACE && length >= 9 {
+            let iface = unsafe {
+                core::ptr::read(config_data[offset..].as_ptr() as *const InterfaceDescriptor)
+            };
+            if iface.b_interface_class == USB_CLASS_HID
+                && iface.b_interface_protocol == HID_PROTOCOL_KEYBOARD
+            {
+                current_iface = Some(iface);
+            } else {
+                current_iface = None;
+            }
+        } else if desc_type == DESC_ENDPOINT && length >= 7 {
+            if let Some(iface) = current_iface {
+                let ep = unsafe {
+                    core::ptr::read(config_data[offset..].as_ptr() as *const EndpointDescriptor)
+                };
+                // Accept only IN interrupt endpoints
+                if ep.b_endpoint_address & 0x80 != 0 && ep.bm_attributes & 0x03 == 3 {
+                    return Some((iface, ep));
+                }
+            }
+        }
+
+        offset += length;
+    }
+    None
 }
