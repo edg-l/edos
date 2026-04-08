@@ -11,6 +11,8 @@ const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
 const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
 const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB: u32 = 0x0108;
+const VIRTIO_GPU_CMD_SET_SCANOUT_BLOB: u32 = 0x0109;
 const VIRTIO_GPU_CMD_GET_EDID: u32 = 0x010a;
 
 // Cursor commands
@@ -24,6 +26,10 @@ const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 const VIRTIO_GPU_RESP_OK_EDID: u32 = 0x1104;
 
 // -------- Pixel format --------
+
+// Blob resource constants
+const VIRTIO_GPU_BLOB_MEM_GUEST: u32 = 0x0001;
+const VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE: u32 = 0x0002;
 
 const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
@@ -121,6 +127,33 @@ struct VirtioGpuResourceFlush {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+struct VirtioGpuResourceCreateBlob {
+    hdr: VirtioGpuCtrlHdr,
+    resource_id: u32,
+    blob_mem: u32,
+    blob_flags: u32,
+    nr_entries: u32,
+    blob_id: u64,
+    size: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct VirtioGpuSetScanoutBlob {
+    hdr: VirtioGpuCtrlHdr,
+    rect: VirtioGpuRect,
+    scanout_id: u32,
+    resource_id: u32,
+    width: u32,
+    height: u32,
+    format: u32,
+    padding: u32,
+    strides: [u32; 4],
+    offsets: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 struct VirtioGpuCmdGetEdid {
     hdr: VirtioGpuCtrlHdr,
     scanout: u32,
@@ -166,6 +199,8 @@ pub struct VirtioGpu {
     scratch: DmaBuffer,
     /// Separate DMA buffer for cursor commands (no response needed, fire-and-forget).
     cursor_scratch: DmaBuffer,
+    /// True if RESOURCE_BLOB is available (zero-copy display path).
+    use_blob: bool,
 }
 
 impl VirtioGpu {
@@ -179,10 +214,13 @@ impl VirtioGpu {
         // Without it QEMU treats the driver as legacy and may not resolve
         // DMA addresses correctly in RESOURCE_ATTACH_BACKING.
         const VIRTIO_GPU_F_EDID: u64 = 1 << 1;
+        const VIRTIO_GPU_F_RESOURCE_BLOB: u64 = 1 << 28;
         const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 
         let device_features = transport.read_device_features();
-        let driver_features = device_features & (VIRTIO_F_VERSION_1 | VIRTIO_GPU_F_EDID);
+        let driver_features =
+            device_features & (VIRTIO_F_VERSION_1 | VIRTIO_GPU_F_EDID | VIRTIO_GPU_F_RESOURCE_BLOB);
+        let use_blob = device_features & VIRTIO_GPU_F_RESOURCE_BLOB != 0;
         println!(
             "virtio-gpu: device features={:#x}, negotiating {:#x}",
             device_features, driver_features
@@ -233,8 +271,8 @@ impl VirtioGpu {
             .map_err(|_| "virtio-gpu: failed to allocate cursor scratch buffer")?;
 
         println!(
-            "virtio-gpu: initialised, control queue size={}, cursor queue size={}",
-            size, cursor_size
+            "virtio-gpu: initialised, control={}, cursor={}, blob={}",
+            size, cursor_size, use_blob
         );
 
         Ok(Self {
@@ -243,6 +281,7 @@ impl VirtioGpu {
             cursor_queue,
             scratch,
             cursor_scratch,
+            use_blob,
         })
     }
 
@@ -531,10 +570,15 @@ impl VirtioGpu {
             .expect("virtio-gpu: failed to allocate framebuffer backing");
 
         let phys_base = dma_buf.phys_addr().as_u64();
-        self.create_resource(1, width, height, phys_base, buf_bytes as u32);
 
-        // Attach resource 1 to scanout 0.
-        self.set_scanout(0, 1, width, height);
+        if self.use_blob && self.create_resource_blob(1, width, height, phys_base, buf_bytes as u32)
+        {
+            self.set_scanout_blob(0, 1, width, height);
+        } else {
+            self.use_blob = false;
+            self.create_resource(1, width, height, phys_base, buf_bytes as u32);
+            self.set_scanout(0, 1, width, height);
+        }
 
         // Initial transfer + flush so the display shows something immediately.
         self.transfer_and_flush(
@@ -554,10 +598,21 @@ impl VirtioGpu {
     }
 
     /// Transfer pixel data from the backing buffer to the host and flush it to
-    /// the physical display.  Both commands are batched into a single virtqueue
-    /// notify + poll cycle (one KVM exit instead of two).
-    /// `stride` is the row pitch in bytes of the backing buffer (width * 4).
+    /// the physical display.
+    ///
+    /// With blob resources: only RESOURCE_FLUSH (QEMU reads DMA directly).
+    /// Without blob: batched TRANSFER_TO_HOST_2D + RESOURCE_FLUSH.
     pub fn transfer_and_flush(&mut self, resource_id: u32, rect: VirtioGpuRect, stride: u32) {
+        if self.use_blob {
+            // Zero-copy path: just flush, QEMU reads directly from guest memory.
+            let mut flush: VirtioGpuResourceFlush = unsafe { core::mem::zeroed() };
+            flush.hdr.type_ = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+            flush.rect = rect;
+            flush.resource_id = resource_id;
+            self.send_command(&flush, core::mem::size_of::<VirtioGpuCtrlHdr>());
+            return;
+        }
+
         let hdr_size = core::mem::size_of::<VirtioGpuCtrlHdr>();
         let xfer_size = core::mem::size_of::<VirtioGpuTransferToHost2d>();
         let flush_size = core::mem::size_of::<VirtioGpuResourceFlush>();
@@ -658,6 +713,88 @@ impl VirtioGpu {
         };
         cmd.scanout_id = scanout_id;
         cmd.resource_id = resource_id;
+        self.send_command(&cmd, core::mem::size_of::<VirtioGpuCtrlHdr>());
+    }
+
+    // ---- Blob resource (zero-copy) path ----
+
+    fn create_resource_blob(
+        &mut self,
+        resource_id: u32,
+        width: u32,
+        height: u32,
+        backing_phys: u64,
+        backing_len: u32,
+    ) -> bool {
+        let cmd_size = core::mem::size_of::<VirtioGpuResourceCreateBlob>();
+        let entry_size = core::mem::size_of::<VirtioGpuMemEntry>();
+
+        let mut cmd: VirtioGpuResourceCreateBlob = unsafe { core::mem::zeroed() };
+        cmd.hdr.type_ = VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB;
+        cmd.resource_id = resource_id;
+        cmd.blob_mem = VIRTIO_GPU_BLOB_MEM_GUEST;
+        cmd.blob_flags = VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE;
+        cmd.nr_entries = 1;
+        cmd.blob_id = 0;
+        cmd.size = backing_len as u64;
+
+        let mut entry: VirtioGpuMemEntry = unsafe { core::mem::zeroed() };
+        entry.addr = backing_phys;
+        entry.length = backing_len;
+
+        // Pack cmd + entry contiguously in scratch (same pattern as create_resource)
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &cmd as *const _ as *const u8,
+                self.scratch.as_ptr(),
+                cmd_size,
+            );
+            core::ptr::copy_nonoverlapping(
+                &entry as *const _ as *const u8,
+                self.scratch.as_ptr().add(cmd_size),
+                entry_size,
+            );
+        }
+
+        let total_cmd_size = cmd_size + entry_size;
+        let resp_offset = (total_cmd_size + 7) & !7;
+
+        let resp = self.execute_scratch(
+            total_cmd_size,
+            resp_offset,
+            core::mem::size_of::<VirtioGpuCtrlHdr>(),
+        );
+
+        if resp.type_ != VIRTIO_GPU_RESP_OK_NODATA {
+            println!(
+                "virtio-gpu: RESOURCE_CREATE_BLOB {} failed: {:#x}, falling back",
+                resource_id, resp.type_
+            );
+            false
+        } else {
+            println!(
+                "virtio-gpu: blob resource {} created ({}x{})",
+                resource_id, width, height
+            );
+            true
+        }
+    }
+
+    fn set_scanout_blob(&mut self, scanout_id: u32, resource_id: u32, width: u32, height: u32) {
+        let mut cmd: VirtioGpuSetScanoutBlob = unsafe { core::mem::zeroed() };
+        cmd.hdr.type_ = VIRTIO_GPU_CMD_SET_SCANOUT_BLOB;
+        cmd.rect = VirtioGpuRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        cmd.scanout_id = scanout_id;
+        cmd.resource_id = resource_id;
+        cmd.width = width;
+        cmd.height = height;
+        cmd.format = VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM;
+        cmd.strides[0] = width * 4;
         self.send_command(&cmd, core::mem::size_of::<VirtioGpuCtrlHdr>());
     }
 

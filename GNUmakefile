@@ -26,6 +26,8 @@ run: run-$(KARCH)
 run-hdd: run-hdd-$(KARCH)
 
 # Display device configurations
+# TODO: Add blob=on to virtio-vga once host kernel has CONFIG_UDMABUF=y
+# (enables zero-copy display: no TRANSFER_TO_HOST_2D, just RESOURCE_FLUSH)
 DISPLAY_VGA := -device VGA,vgamem_mb=32
 DISPLAY_VIRTIO := -vga none -device virtio-vga,xres=1920,yres=1080 -display sdl
 DISPLAY_VIRTIO_GTK := -vga none -device virtio-vga,xres=1920,yres=1080 -display gtk,zoom-to-fit=off
