@@ -8,3 +8,5 @@ out/
 sata-disk.img
 /filesystem
 .gdb_history
+run_log.txt
+usb-test.img

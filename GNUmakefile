@@ -104,7 +104,7 @@ usb-test.img:
 	qemu-img create -f raw usb-test.img 16M
 
 .PHONY: run-trace
-run-trace: programsv2 limine/limine ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
+run-trace: programs limine/limine ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 	$(MAKE) -C kernel CARGO_FLAGS="--features trace"
 	$(MAKE) $(IMAGE_NAME).iso
 	$(call run_qemu_uefi,iso,4,-accel kvm -m 2G)
@@ -160,11 +160,11 @@ limine/limine:
 	$(MAKE) -C limine
 
 .PHONY: kernel
-kernel: programsv2
+kernel: programs
 	$(MAKE) -C kernel CARGO_FLAGS="$(CARGO_FLAGS)"
 
 .PHONY: check
-check: programsv2
+check: programs
 	$(MAKE) -C kernel check
 
 $(IMAGE_NAME).iso: limine/limine kernel
@@ -201,7 +201,7 @@ $(IMAGE_NAME).hdd: limine/limine kernel
 .PHONY: clean
 clean:
 	$(MAKE) -C kernel clean
-	$(MAKE) -C programsv2 clean
+	$(MAKE) -C programs clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
 
 .PHONY: distclean
@@ -214,9 +214,9 @@ distclean: clean clean-sata
 fmt:
 	$(MAKE) -C kernel fmt
 
-.PHONY: programsv2
-programsv2:
-	$(MAKE) -C programsv2 build
+.PHONY: programs
+programs:
+	$(MAKE) -C programs build
 
 DISK_UUID := 12345678-1234-5678-9abc-123456789abc
 PARTITION_UUID := 87654321-4321-8765-cba9-987654321fed
