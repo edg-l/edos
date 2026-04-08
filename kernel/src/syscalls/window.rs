@@ -344,6 +344,8 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
             visible: window.visible as u32,
             buffer_shm_id: window.buffer_shm_id.unwrap_or(0),
             flags: window.flags,
+            damaged: window.damaged as u32,
+            _padding2: 0,
             title,
         };
 
@@ -354,6 +356,18 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
         if !unsafe { try_copy_to_user(buffer_ptr.add(offset), entry_bytes.as_ptr(), entry_size) } {
             info.lock().errno = Errno::EFAULT;
             return !0u64;
+        }
+    }
+
+    // Collect IDs of listed windows, then clear their damage flags.
+    let listed_ids: alloc::vec::Vec<u64> = windows.iter().take(copy_count).map(|w| w.id).collect();
+    drop(registry);
+    {
+        let mut registry = WINDOW_REGISTRY.write();
+        for id in listed_ids {
+            if let Some(w) = registry.get_window_mut(id) {
+                w.damaged = false;
+            }
         }
     }
 
@@ -377,6 +391,9 @@ pub struct WindowListEntry {
     pub visible: u32,
     pub buffer_shm_id: u64,
     pub flags: u64,
+    /// Set when the client has called SYS_WINDOW_DAMAGE since last list query.
+    pub damaged: u32,
+    pub _padding2: u32,
     pub title: [u8; TITLE_MAX],
 }
 
@@ -435,4 +452,20 @@ pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent)
     crate::window::input::send_event(window_id, event);
 
     0
+}
+
+/// Mark a window as damaged (client has repainted its buffer).
+///
+/// Arguments:
+/// - rdi: window ID
+///
+/// Returns: 0 on success, !0 on error.
+pub fn sys_window_damage(window_id: WindowId) -> u64 {
+    let mut registry = WINDOW_REGISTRY.write();
+    if let Some(w) = registry.get_window_mut(window_id) {
+        w.damaged = true;
+        0
+    } else {
+        !0u64
+    }
 }

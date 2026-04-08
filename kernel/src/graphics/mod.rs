@@ -135,6 +135,13 @@ impl Display {
         }
     }
 
+    pub fn flip_rect(&mut self, x: u32, y: u32, w: u32, h: u32) -> u64 {
+        match self {
+            Display::Vbe(fb) => fb.flip(), // VBE always flips full screen
+            Display::VirtioGpu(vg) => vg.flip_rect(x, y, w, h),
+        }
+    }
+
     pub fn set_cursor(&mut self, pixels: &[u32], hot_x: u32, hot_y: u32) {
         match self {
             Display::Vbe(_) => {} // VBE has no hardware cursor
@@ -294,18 +301,23 @@ impl VirtioGpuDisplay {
         }
     }
 
-    /// Transfer the buffer to the host and flush to display.
-    /// Single resource, no double-buffer swap. Returns 0 (no page offset).
+    /// Transfer the full buffer to the host and flush.
     pub fn flip(&mut self) -> u64 {
+        self.flip_rect(0, 0, self.width, self.height)
+    }
+
+    /// Transfer only a dirty rect to the host and flush.
+    pub fn flip_rect(&mut self, x: u32, y: u32, w: u32, h: u32) -> u64 {
         use crate::drivers::virtio::gpu::VirtioGpuRect;
         self.gpu.transfer_and_flush(
             1,
             VirtioGpuRect {
-                x: 0,
-                y: 0,
-                width: self.width,
-                height: self.height,
+                x,
+                y,
+                width: w,
+                height: h,
             },
+            self.pitch,
         );
         0
     }

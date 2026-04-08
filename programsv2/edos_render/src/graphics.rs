@@ -46,6 +46,7 @@ const FB_IOCTL_DRAW: u64 = 0x4642_0003;
 const FB_IOCTL_SCREEN_INFO: u64 = 0x4642_0004;
 const FB_IOCTL_FLIP: u64 = 0x4642_0005;
 const FB_IOCTL_MMAP_INFO: u64 = 0x4642_0006;
+const FB_IOCTL_FLIP_RECT: u64 = 0x4642_0009;
 const FB_IOCTL_SET_CURSOR: u64 = 0x4642_0007;
 const FB_IOCTL_MOVE_CURSOR: u64 = 0x4642_0008;
 
@@ -164,10 +165,34 @@ impl Framebuffer {
         self.fd.ioctl(FB_IOCTL_RENDER, 0, 0, 0).unwrap();
     }
 
-    /// Flip the display to show the back page (double buffering).
-    /// Returns the new back page byte offset.
+    /// Flip the display (full screen transfer).
     pub fn flip(&self) -> u64 {
         self.fd.ioctl(FB_IOCTL_FLIP, 0, 0, 0).unwrap()
+    }
+
+    /// Flip only a dirty rectangle (partial transfer).
+    pub fn flip_rect(&self, x: u32, y: u32, w: u32, h: u32) -> u64 {
+        #[repr(C)]
+        struct FlipRect {
+            x: u32,
+            y: u32,
+            width: u32,
+            height: u32,
+        }
+        let mut r = FlipRect {
+            x,
+            y,
+            width: w,
+            height: h,
+        };
+        self.fd
+            .ioctl(
+                FB_IOCTL_FLIP_RECT,
+                (&mut r as *mut FlipRect) as u64,
+                core::mem::size_of::<FlipRect>(),
+                IOCTL_ARG_IN,
+            )
+            .unwrap()
     }
 
     /// Get framebuffer mmap info for direct VRAM access.
@@ -1657,10 +1682,17 @@ impl Screen {
         }
     }
 
-    /// Flip the display to present the back page.
-    /// Call this after all render_region() calls in a frame are done.
+    /// Flip the display (full screen transfer).
     pub fn flip(&mut self) {
         let offset = self.framebuffer.flip();
+        if let Some(ref mut vram) = self.vram {
+            vram.update_back_offset(offset);
+        }
+    }
+
+    /// Flip only a dirty rectangle (partial transfer).
+    pub fn flip_rect(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        let offset = self.framebuffer.flip_rect(x, y, w, h);
         if let Some(ref mut vram) = self.vram {
             vram.update_back_offset(offset);
         }

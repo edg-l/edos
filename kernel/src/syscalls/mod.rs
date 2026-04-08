@@ -278,6 +278,7 @@ const SYS_WINDOW_GET: u64 = 222;
 const SYS_WINDOW_POLL: u64 = 223;
 const SYS_WINDOW_LIST: u64 = 224;
 const SYS_WINDOW_SEND_EVENT: u64 = 225;
+const SYS_WINDOW_DAMAGE: u64 = 232;
 const SYS_CLOCK_GETTIME: u64 = 226;
 const SYS_OPENPTY: u64 = 227;
 const SYS_SPAWN2: u64 = 228;
@@ -562,6 +563,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let window_id = ctx.rdi;
             let event_ptr = ctx.rsi as *const crate::window::WindowEvent;
             ctx.rax = window::sys_window_send_event(window_id, event_ptr);
+        }
+        SYS_WINDOW_DAMAGE => {
+            let window_id = ctx.rdi;
+            ctx.rax = window::sys_window_damage(window_id);
         }
         SYS_CLOCK_GETTIME => {
             let buf_ptr = ctx.rdi as *mut u8;

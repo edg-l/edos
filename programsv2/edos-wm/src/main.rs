@@ -396,14 +396,15 @@ fn main() {
     let mut dirty = DirtyRegion::new();
     // Force full screen on the first frame.
     dirty.mark_full_screen();
+    dirty.mark_full_screen();
 
     // Previous frame window snapshots for change detection.
-    let prev_windows: [Option<PrevWindowState>; MAX_WINDOWS] = [None; MAX_WINDOWS];
-    let prev_window_count: usize = 0;
+    let mut prev_windows: [Option<PrevWindowState>; MAX_WINDOWS] = [None; MAX_WINDOWS];
+    let mut prev_window_count: usize = 0;
 
     // Previous cursor position for dirty rect invalidation.
-    let prev_cursor_x: i32 = 0;
-    let prev_cursor_y: i32 = 0;
+    let mut prev_cursor_x: i32 = 0;
+    let mut prev_cursor_y: i32 = 0;
 
     // Main compositor loop
     loop {
@@ -483,11 +484,17 @@ fn main() {
         let screen_h = screen.height() as u32;
 
         if !dirty.full_screen {
-            // Mark all visible window rects dirty unconditionally.
-            // We have no damage signal from clients, so any window could have
-            // repainted its shared memory buffer without changing geometry.
+            // Mark windows that are damaged, newly appeared, or have a
+            // SHM buffer (active rendering clients like the terminal).
             for w in windows.iter() {
-                if w.visible != 0 {
+                if w.visible == 0 {
+                    continue;
+                }
+                let is_new = !prev_windows[..prev_window_count]
+                    .iter()
+                    .any(|slot| slot.as_ref().is_some_and(|s| s.id == w.id));
+                let has_buffer = w.buffer_shm_id != 0;
+                if w.damaged != 0 || is_new || has_buffer {
                     let s = PrevWindowState::from_entry(w);
                     if let Some(r) = s.dirty_rect().clipped(screen_w, screen_h) {
                         dirty.mark_dirty(r);
@@ -520,6 +527,18 @@ fn main() {
                 {
                     dirty.mark_dirty(r);
                 }
+            }
+            prev_cursor_x = cursor.x;
+            prev_cursor_y = cursor.y;
+
+            // Snapshot current windows for next frame's change detection.
+            prev_window_count = window_count;
+            for i in 0..MAX_WINDOWS {
+                prev_windows[i] = if i < window_count && windows[i].visible != 0 {
+                    Some(PrevWindowState::from_entry(&windows[i]))
+                } else {
+                    None
+                };
             }
         }
 
@@ -555,12 +574,25 @@ fn main() {
             hw_cursor,
         );
 
-        // Send full back buffer to kernel framebuffer and flip.
-        // Dirty-rect partial updates are disabled while double buffering is
-        // active because the front-to-back page sync needed after each flip
-        // costs as much as a full draw. The proper fix is mmap'ing VRAM into
-        // userspace so the compositor writes directly to the back page.
-        let _ = screen.render();
+        // Transfer the dirty region to the host and flush.
+        // With single-buffered virtio-gpu, we only need to transfer the
+        // pixels that changed, even though the compositor rewrites everything.
+        if dirty.full_screen {
+            screen.flip();
+        } else if let Some(bounds) = dirty.merged_bounds() {
+            if let Some(clipped) = bounds.clipped(
+                screen.width() as u32,
+                screen.height() as u32,
+            ) {
+                screen.flip_rect(
+                    clipped.x as u32,
+                    clipped.y as u32,
+                    clipped.w,
+                    clipped.h,
+                );
+            }
+        }
+        dirty.clear();
         // Sleep remainder of frame budget to maintain frame rate.
         // Use a minimum sleep of 1ms to avoid sub-microsecond sleeps that
         // can interact badly with the scheduler.

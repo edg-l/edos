@@ -132,6 +132,8 @@ pub struct WindowListEntry {
     pub visible: u32,
     pub buffer_shm_id: u64,
     pub flags: u64,
+    pub damaged: u32,
+    pub _padding2: u32,
     pub title: [u8; TITLE_MAX],
 }
 
@@ -165,6 +167,8 @@ impl Default for WindowListEntry {
             visible: 0,
             buffer_shm_id: 0,
             flags: 0,
+            damaged: 0,
+            _padding2: 0,
             title: [0; TITLE_MAX],
         }
     }
@@ -204,6 +208,7 @@ const SYS_WINDOW_GET: u64 = 222;
 const SYS_WINDOW_POLL: u64 = 223;
 const SYS_WINDOW_LIST: u64 = 224;
 const SYS_WINDOW_SEND_EVENT: u64 = 225;
+const SYS_WINDOW_DAMAGE: u64 = 232;
 
 // Re-export SHM functions and constants from edos_lib
 pub use edos_lib::shm::{
@@ -286,6 +291,17 @@ pub fn window_poll(id: WindowId, events: &mut [WindowEvent]) -> Result<usize, i6
         Err(-1)
     } else {
         Ok(result as usize)
+    }
+}
+
+/// Mark a window as damaged (client has repainted its buffer).
+/// The WM reads this flag via window_list and only redraws damaged windows.
+pub fn window_damage(id: WindowId) -> Result<(), i64> {
+    let result = unsafe { syscall1(SYS_WINDOW_DAMAGE, id) };
+    if is_error(result) {
+        Err(-1)
+    } else {
+        Ok(())
     }
 }
 
@@ -394,6 +410,7 @@ impl Window {
     pub fn swap_buffers(&mut self) {
         let back_shm_id = self.buffers[self.back_index].0;
         let _ = window_set(self.id, property::BUFFER_SHM, back_shm_id);
+        let _ = window_damage(self.id);
         self.back_index = 1 - self.back_index;
     }
 

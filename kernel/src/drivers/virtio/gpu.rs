@@ -466,6 +466,7 @@ impl VirtioGpu {
                 width,
                 height,
             },
+            width * 4,
         );
 
         println!("virtio-gpu: framebuffer ready ({}x{})", width, height);
@@ -476,7 +477,8 @@ impl VirtioGpu {
     /// Transfer pixel data from the backing buffer to the host and flush it to
     /// the physical display.  Both commands are batched into a single virtqueue
     /// notify + poll cycle (one KVM exit instead of two).
-    pub fn transfer_and_flush(&mut self, resource_id: u32, rect: VirtioGpuRect) {
+    /// `stride` is the row pitch in bytes of the backing buffer (width * 4).
+    pub fn transfer_and_flush(&mut self, resource_id: u32, rect: VirtioGpuRect, stride: u32) {
         let hdr_size = core::mem::size_of::<VirtioGpuCtrlHdr>();
         let xfer_size = core::mem::size_of::<VirtioGpuTransferToHost2d>();
         let flush_size = core::mem::size_of::<VirtioGpuResourceFlush>();
@@ -487,11 +489,13 @@ impl VirtioGpu {
         let flush_cmd_off = (xfer_resp_off + hdr_size + 7) & !7;
         let flush_resp_off = (flush_cmd_off + flush_size + 7) & !7;
 
-        // Write TRANSFER_TO_HOST_2D command
+        // Write TRANSFER_TO_HOST_2D command.
+        // offset = byte position in the backing buffer matching rect.y/rect.x,
+        // so QEMU reads the correct source pixels for the given rect.
         let mut xfer: VirtioGpuTransferToHost2d = unsafe { core::mem::zeroed() };
         xfer.hdr.type_ = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
         xfer.rect = rect;
-        xfer.offset = 0;
+        xfer.offset = (rect.y as u64) * (stride as u64) + (rect.x as u64) * 4;
         xfer.resource_id = resource_id;
         unsafe {
             core::ptr::copy_nonoverlapping(

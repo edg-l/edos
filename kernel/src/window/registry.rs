@@ -38,6 +38,8 @@ pub struct WindowInfo {
     pub buffer_shm_id: Option<u64>,
     /// Window flags (e.g., FLAG_DOCK for no decorations).
     pub flags: u64,
+    /// Damage flag: set by client via SYS_WINDOW_DAMAGE, cleared by WM via window_list.
+    pub damaged: bool,
 }
 
 #[allow(dead_code)]
@@ -59,6 +61,7 @@ impl WindowInfo {
             title: String::new(),
             buffer_shm_id: None,
             flags: 0,
+            damaged: true, // newly created windows are damaged
         }
     }
 

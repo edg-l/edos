@@ -13,6 +13,16 @@ pub const FB_IOCTL_FLIP: u64 = 0x4642_0005;
 pub const FB_IOCTL_MMAP_INFO: u64 = 0x4642_0006;
 pub const FB_IOCTL_SET_CURSOR: u64 = 0x4642_0007;
 pub const FB_IOCTL_MOVE_CURSOR: u64 = 0x4642_0008;
+pub const FB_IOCTL_FLIP_RECT: u64 = 0x4642_0009;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FramebufferFlipRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -171,6 +181,16 @@ impl DevFsDevice for FramebufferDevice {
                     *info_ptr = info;
                 }
                 Ok(0)
+            }
+            FB_IOCTL_FLIP_RECT => {
+                if arg == 0 {
+                    return Err(DevFsError::IoError);
+                }
+                let rect = unsafe { *(arg as *const FramebufferFlipRect) };
+                let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
+                Ok(display
+                    .lock()
+                    .flip_rect(rect.x, rect.y, rect.width, rect.height))
             }
             FB_IOCTL_SET_CURSOR => {
                 if arg == 0 {
