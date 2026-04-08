@@ -7,7 +7,7 @@ use std::process;
 fn main() {
     let args: Vec<String> = env::args().collect();
     let path = args.get(1).map(|s| s.as_str()).unwrap_or(".");
-    let color = edos_lib::io::isatty(1);
+    let is_tty = edos_lib::io::isatty(1);
 
     let entries = match fs::read_dir(path) {
         Ok(e) => e,
@@ -38,6 +38,18 @@ fn main() {
         return;
     }
 
+    if !is_tty {
+        // Piped output: one entry per line, no color, no padding
+        for (name, is_dir) in &items {
+            if *is_dir {
+                println!("{}/", name);
+            } else {
+                println!("{}", name);
+            }
+        }
+        return;
+    }
+
     let display_width =
         |item: &(String, bool)| -> usize { item.0.len() + if item.1 { 1 } else { 0 } };
     let max_name = items.iter().map(display_width).max().unwrap_or(0);
@@ -55,7 +67,7 @@ fn main() {
             name.clone()
         };
         let is_last_col = (i + 1) % cols == 0 || i + 1 == items.len();
-        if *is_dir && color {
+        if *is_dir {
             if is_last_col {
                 print!("\x1B[1;34m{}\x1B[0m", display);
             } else {

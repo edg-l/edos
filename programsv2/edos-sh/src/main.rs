@@ -201,6 +201,24 @@ pub fn run_chain(input: &str) -> i32 {
     last_exit
 }
 
+/// Find the byte offset of the previous character boundary before `pos`.
+fn prev_char_boundary(s: &str, pos: usize) -> usize {
+    let mut i = pos - 1;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Find the byte offset of the next character boundary after `pos`.
+fn next_char_boundary(s: &str, pos: usize) -> usize {
+    let mut i = pos + 1;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 /// Redraw the current input line after history navigation.
 fn redraw_line(prompt: &str, line: &str) {
     print!("\r\x1B[2K{}{}", prompt, line);
@@ -216,13 +234,12 @@ fn redraw_line(prompt: &str, line: &str) {
 ///
 /// Up/Down arrow keys navigate command history.
 /// Redraw the line from the cursor position to the end, then reposition cursor.
-fn redraw_from_cursor(line: &str, cursor: usize, prompt_len: usize) {
-    // Save cursor, clear from cursor to end of line, print remaining chars, restore cursor
-    let remaining = &line[cursor..];
+fn redraw_from_cursor(line: &str, cursor: usize, _prompt_len: usize) {
     // Clear from cursor to end of line, print remaining, move cursor back
+    let remaining = &line[cursor..];
     print!("\x1B[K{}", remaining);
-    // Move cursor back to correct position
-    let chars_after = line.len() - cursor;
+    // Move cursor back by character count (not byte count)
+    let chars_after = remaining.chars().count();
     if chars_after > 0 {
         print!("\x1B[{}D", chars_after);
     }
@@ -263,9 +280,11 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
 
         if ch == 0x08 || ch == 0x7F {
             if cursor > 0 {
-                cursor -= 1;
-                line.remove(cursor);
-                // Move cursor back, then redraw from there
+                // Move cursor back to previous char boundary
+                let prev = prev_char_boundary(&line, cursor);
+                line.drain(prev..cursor);
+                cursor = prev;
+                // Move terminal cursor back, then redraw from there
                 print!("\x08");
                 redraw_from_cursor(&line, cursor, prompt_len);
             }
@@ -309,7 +328,7 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
                                 b'C' => {
                                     // Right arrow
                                     if cursor < line.len() {
-                                        cursor += 1;
+                                        cursor = next_char_boundary(&line, cursor);
                                         print!("\x1B[C");
                                         let _ = std::io::stdout().flush();
                                     }
@@ -317,7 +336,7 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
                                 b'D' => {
                                     // Left arrow
                                     if cursor > 0 {
-                                        cursor -= 1;
+                                        cursor = prev_char_boundary(&line, cursor);
                                         print!("\x1B[D");
                                         let _ = std::io::stdout().flush();
                                     }
@@ -325,7 +344,8 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
                                 b'H' => {
                                     // Home
                                     if cursor > 0 {
-                                        print!("\x1B[{}D", cursor);
+                                        let chars_before = line[..cursor].chars().count();
+                                        print!("\x1B[{}D", chars_before);
                                         cursor = 0;
                                         let _ = std::io::stdout().flush();
                                     }
@@ -333,7 +353,8 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
                                 b'F' => {
                                     // End
                                     if cursor < line.len() {
-                                        print!("\x1B[{}C", line.len() - cursor);
+                                        let chars_after = line[cursor..].chars().count();
+                                        print!("\x1B[{}C", chars_after);
                                         cursor = line.len();
                                         let _ = std::io::stdout().flush();
                                     }
@@ -406,7 +427,7 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
                 print!("\r\n");
                 redraw_line(prompt, &line);
                 // redraw_line puts cursor at end; reposition to `cursor`
-                let chars_after = line.len() - cursor;
+                let chars_after = line[cursor..].chars().count();
                 if chars_after > 0 {
                     print!("\x1B[{}D", chars_after);
                 }
@@ -420,19 +441,21 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
         }
 
         // Insert character at cursor position
+        let ch = ch as char;
+        let char_len = ch.len_utf8();
         if cursor == line.len() {
             // Append (common case)
-            line.push(ch as char);
-            cursor += 1;
-            print!("{}", ch as char);
+            line.push(ch);
+            cursor += char_len;
+            print!("{}", ch);
             let _ = std::io::stdout().flush();
         } else {
             // Insert in middle
-            line.insert(cursor, ch as char);
-            cursor += 1;
+            line.insert(cursor, ch);
+            cursor += char_len;
             // Print from insertion point to end, then move cursor back
-            print!("{}", &line[cursor - 1..]);
-            let chars_after = line.len() - cursor;
+            print!("{}", &line[cursor - char_len..]);
+            let chars_after = line[cursor..].chars().count();
             if chars_after > 0 {
                 print!("\x1B[{}D", chars_after);
             }

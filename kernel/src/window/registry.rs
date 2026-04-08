@@ -129,7 +129,7 @@ pub mod flags {
 /// Window decoration constants (must match WM).
 pub mod decoration {
     pub const TITLE_HEIGHT: i32 = 24;
-    pub const BORDER_WIDTH: i32 = 2;
+    pub const BORDER_WIDTH: i32 = 1;
 }
 
 /// Global window registry.
