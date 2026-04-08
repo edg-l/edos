@@ -185,9 +185,10 @@ impl XhciController {
         let dcbaa_phys = self.dcbaa.as_ref().unwrap().phys_addr().as_u64();
 
         // 7. Handle scratchpad buffers if required by the controller.
-        //    HCSPARAMS2 bits [25:21] = hi, bits [31:27] = lo; count = (hi << 5) | lo
-        let scratch_hi = ((hcsparams2 >> 21) & 0x1F) as u32;
-        let scratch_lo = ((hcsparams2 >> 27) & 0x1F) as u32;
+        //    xHCI spec §5.3.3: HCSPARAMS2 bits [31:27] = Hi, bits [25:21] = Lo
+        //    count = (Hi << 5) | Lo
+        let scratch_lo = ((hcsparams2 >> 21) & 0x1F) as u32;
+        let scratch_hi = ((hcsparams2 >> 27) & 0x1F) as u32;
         let num_scratch = (scratch_hi << 5) | scratch_lo;
         if num_scratch > 0 {
             println!("xhci: allocating {} scratchpad buffers", num_scratch);
@@ -465,6 +466,10 @@ impl XhciController {
                 }
 
                 if event.trb_type() == TRB_TYPE_TRANSFER {
+                    let event_slot = ((event.control >> 24) & 0xFF) as u8;
+                    if event_slot != device.slot_id {
+                        continue; // not our event, skip
+                    }
                     let comp_code = ((event.status >> 24) & 0xFF) as u8;
                     let residual = event.status & 0x00FF_FFFF;
                     if comp_code == COMP_SUCCESS || comp_code == COMP_SHORT_PACKET {
@@ -631,10 +636,6 @@ impl XhciController {
             }
         }
 
-        // The Output Device Context must remain allocated as long as the device is active.
-        // We intentionally leak it here; a future device management layer will track it.
-        core::mem::forget(output_ctx);
-
         // Step 8 — Address Device command: assigns the USB address and transitions the
         // device to the Addressed state.
         let input_ctx_phys = input_ctx.phys_addr().as_u64();
@@ -652,6 +653,7 @@ impl XhciController {
             port_id,
             ep0_ring,
             input_ctx,
+            output_ctx,
             device_descriptor: None,
             config_data: None,
         })
@@ -690,15 +692,16 @@ impl XhciController {
 
     /// Read the full configuration descriptor (with all interfaces and endpoints).
     ///
-    /// First reads 9 bytes to get wTotalLength, then reads the full blob.
+    /// First reads 9 bytes to get wTotalLength, then reads the full blob into a
+    /// properly-sized buffer regardless of how large the descriptor is.
     pub fn get_config_descriptor(
         &mut self,
         device: &mut UsbDevice,
         config_index: u8,
     ) -> Result<Vec<u8>, XhciError> {
-        // Phase 1: Read just the config descriptor header (9 bytes) to get wTotalLength.
-        let buf = DmaBuffer::allocate_sized(256).map_err(|_| XhciError::InvalidDevice)?;
-        let buf_phys = buf.phys_addr().as_u64();
+        // Phase 1: Read just the 9-byte config descriptor header to get wTotalLength.
+        let hdr_buf = DmaBuffer::allocate_sized(9).map_err(|_| XhciError::InvalidDevice)?;
+        let hdr_phys = hdr_buf.phys_addr().as_u64();
 
         let setup = SetupPacket {
             bm_request_type: 0x80,
@@ -708,31 +711,33 @@ impl XhciController {
             w_length: 9,
         };
 
-        self.control_transfer(device, setup, Some(buf_phys), 9, true)?;
+        self.control_transfer(device, setup, Some(hdr_phys), 9, true)?;
 
-        let config_hdr = unsafe { core::ptr::read(buf.as_ptr() as *const ConfigDescriptor) };
+        let config_hdr = unsafe { core::ptr::read(hdr_buf.as_ptr() as *const ConfigDescriptor) };
         let total_len = config_hdr.w_total_length;
 
-        if total_len <= 9 || total_len > 256 {
-            // Just return what we have
-            let mut data = alloc::vec![0u8; total_len as usize];
-            unsafe {
-                core::ptr::copy_nonoverlapping(buf.as_ptr(), data.as_mut_ptr(), total_len as usize);
-            }
-            return Ok(data);
+        if total_len < 9 {
+            return Ok(alloc::vec![0u8; 0]);
         }
 
-        // Phase 2: Read the full descriptor.
+        // Phase 2: Allocate a buffer exactly the size of the full descriptor and read it.
+        let full_buf =
+            DmaBuffer::allocate_sized(total_len as usize).map_err(|_| XhciError::InvalidDevice)?;
+        let full_phys = full_buf.phys_addr().as_u64();
+
         let setup_full = SetupPacket {
             w_length: total_len,
             ..setup
         };
-
-        self.control_transfer(device, setup_full, Some(buf_phys), total_len, true)?;
+        self.control_transfer(device, setup_full, Some(full_phys), total_len, true)?;
 
         let mut data = alloc::vec![0u8; total_len as usize];
         unsafe {
-            core::ptr::copy_nonoverlapping(buf.as_ptr(), data.as_mut_ptr(), total_len as usize);
+            core::ptr::copy_nonoverlapping(
+                full_buf.as_ptr(),
+                data.as_mut_ptr(),
+                total_len as usize,
+            );
         }
         Ok(data)
     }
@@ -805,12 +810,13 @@ impl XhciController {
             core::ptr::write_volatile(icc.add(1), (1 << 0) | (1 << ep_dci));
         }
 
-        // Update Slot Context: set Context Entries to include this endpoint
+        // Update Slot Context: set Context Entries to the maximum of the current value and ep_dci
         let slot_ctx = unsafe { input_ctx.as_ptr().add(ctx_size) } as *mut u32;
         unsafe {
             let dword0 = core::ptr::read_volatile(slot_ctx);
-            // Context Entries is bits [31:27] - set to at least ep_dci
-            let new_entries = ep_dci as u32;
+            // Context Entries is bits [31:27] - must cover all configured endpoints
+            let current_entries = (dword0 >> 27) & 0x1F;
+            let new_entries = current_entries.max(ep_dci as u32);
             let dword0_new = (dword0 & !(0x1F << 27)) | (new_entries << 27);
             core::ptr::write_volatile(slot_ctx, dword0_new);
         }
@@ -969,6 +975,10 @@ impl XhciController {
                 }
 
                 if event.trb_type() == TRB_TYPE_TRANSFER {
+                    let event_slot = ((event.control >> 24) & 0xFF) as u8;
+                    if event_slot != slot_id {
+                        continue; // not our event, skip
+                    }
                     let comp_code = ((event.status >> 24) & 0xFF) as u8;
                     let residual = event.status & 0x00FF_FFFF;
                     if comp_code == COMP_SUCCESS || comp_code == COMP_SHORT_PACKET {
@@ -1010,10 +1020,12 @@ pub extern "C" fn xhci_driver_main() -> ! {
         }
     }
 
-    // keyboard_device holds the active HID keyboard device and its interrupt IN transfer ring.
-    let mut keyboard_device: Option<(UsbDevice, TransferRing)> = None;
-    // mouse_device holds the active HID mouse device and its interrupt IN transfer ring.
-    let mut mouse_device: Option<(UsbDevice, TransferRing)> = None;
+    // keyboard_device holds the active HID keyboard device, its interrupt IN transfer ring,
+    // and the endpoint's DCI (used for doorbell writes).
+    let mut keyboard_device: Option<(UsbDevice, TransferRing, u32)> = None;
+    // mouse_device holds the active HID mouse device, its interrupt IN transfer ring,
+    // and the endpoint's DCI (used for doorbell writes).
+    let mut mouse_device: Option<(UsbDevice, TransferRing, u32)> = None;
     // Counter used to generate unique /dev/usbN names for mass storage devices.
     let mut usb_storage_count: usize = 0;
 
@@ -1066,7 +1078,10 @@ pub extern "C" fn xhci_driver_main() -> ! {
 
                     // Check if this is a HID keyboard and set it up (only use the first one found).
                     if keyboard_device.is_none() {
-                        let kbd_info = device.config_data.as_deref().and_then(find_hid_keyboard);
+                        let kbd_info = device
+                            .config_data
+                            .as_deref()
+                            .and_then(|d| find_hid_interface(d, HID_PROTOCOL_KEYBOARD));
 
                         if let Some((iface, ep)) = kbd_info {
                             println!("xhci: configuring HID keyboard on slot {}", device.slot_id);
@@ -1085,6 +1100,11 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             let ep_maxpkt = ep.w_max_packet_size;
                             let ep_interval = ep.b_interval;
 
+                            // Compute DCI from the endpoint descriptor address field
+                            let ep_num = ep_addr & 0x0F;
+                            let ep_dir_in = ep_addr & 0x80 != 0;
+                            let ep_dci = (ep_num * 2 + if ep_dir_in { 1 } else { 0 }) as u32;
+
                             // Configure the interrupt IN endpoint
                             match controller.configure_interrupt_endpoint(
                                 &mut device,
@@ -1093,7 +1113,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                 ep_interval,
                             ) {
                                 Ok(ring) => {
-                                    keyboard_device = Some((device, ring));
+                                    keyboard_device = Some((device, ring, ep_dci));
                                 }
                                 Err(e) => {
                                     println!("xhci: configure endpoint failed: {:?}", e);
@@ -1105,7 +1125,10 @@ pub extern "C" fn xhci_driver_main() -> ! {
 
                     // Check if this is a HID mouse and set it up (only use the first one found).
                     if mouse_device.is_none() {
-                        let mouse_info = device.config_data.as_deref().and_then(find_hid_mouse);
+                        let mouse_info = device
+                            .config_data
+                            .as_deref()
+                            .and_then(|d| find_hid_interface(d, HID_PROTOCOL_MOUSE));
 
                         if let Some((iface, ep)) = mouse_info {
                             println!("xhci: configuring HID mouse on slot {}", device.slot_id);
@@ -1124,6 +1147,11 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             let ep_maxpkt = ep.w_max_packet_size;
                             let ep_interval = ep.b_interval;
 
+                            // Compute DCI from the endpoint descriptor address field
+                            let ep_num = ep_addr & 0x0F;
+                            let ep_dir_in = ep_addr & 0x80 != 0;
+                            let ep_dci = (ep_num * 2 + if ep_dir_in { 1 } else { 0 }) as u32;
+
                             // Configure the interrupt IN endpoint
                             match controller.configure_interrupt_endpoint(
                                 &mut device,
@@ -1132,7 +1160,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                 ep_interval,
                             ) {
                                 Ok(ring) => {
-                                    mouse_device = Some((device, ring));
+                                    mouse_device = Some((device, ring, ep_dci));
                                 }
                                 Err(e) => {
                                     println!("xhci: configure mouse endpoint failed: {:?}", e);
@@ -1272,8 +1300,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
         DmaBuffer::allocate_sized(4).expect("xhci: failed to allocate mouse HID report buf");
     let mouse_report_phys = mouse_report_buf.phys_addr().as_u64();
 
-    if let Some((ref mut dev, ref mut ring)) = keyboard_device {
-        let ep_dci = 3u32; // EP1 IN DCI = 1*2+1 = 3
+    if let Some((ref mut dev, ref mut ring, ep_dci)) = keyboard_device {
         let trb = Trb {
             parameter: kbd_report_phys,
             status: 8,
@@ -1286,8 +1313,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
             .store(true, core::sync::atomic::Ordering::Relaxed);
     }
 
-    if let Some((ref mut dev, ref mut ring)) = mouse_device {
-        let ep_dci = 3u32; // EP1 IN DCI = 1*2+1 = 3
+    if let Some((ref mut dev, ref mut ring, ep_dci)) = mouse_device {
         let trb = Trb {
             parameter: mouse_report_phys,
             status: 4,
@@ -1323,10 +1349,10 @@ pub extern "C" fn xhci_driver_main() -> ! {
                         // Determine which device this event belongs to by slot ID.
                         let is_keyboard = keyboard_device
                             .as_ref()
-                            .map_or(false, |(dev, _)| dev.slot_id == event_slot_id);
+                            .map_or(false, |(dev, _, _)| dev.slot_id == event_slot_id);
                         let is_mouse = mouse_device
                             .as_ref()
-                            .map_or(false, |(dev, _)| dev.slot_id == event_slot_id);
+                            .map_or(false, |(dev, _, _)| dev.slot_id == event_slot_id);
 
                         if is_keyboard {
                             // Read the 8-byte keyboard report from the DMA buffer
@@ -1343,15 +1369,14 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                 &prev_kbd_report,
                                 &report,
                             );
-                            if !key_events.is_empty() {
+                            if !key_events.as_slice().is_empty() {
                                 crate::drivers::keyboard::KEY_EVENT_BROADCAST
-                                    .broadcast_many(&key_events);
+                                    .broadcast_many(key_events.as_slice());
                             }
                             prev_kbd_report = report;
 
                             // Resubmit the TRB to receive the next keyboard report
-                            if let Some((ref mut dev, ref mut ring)) = keyboard_device {
-                                let ep_dci = 3u32;
+                            if let Some((ref mut dev, ref mut ring, ep_dci)) = keyboard_device {
                                 let trb = Trb {
                                     parameter: kbd_report_phys,
                                     status: 8,
@@ -1375,8 +1400,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             crate::drivers::usb::hid::process_boot_mouse_report(&report, 4);
 
                             // Resubmit the TRB to receive the next mouse report
-                            if let Some((ref mut dev, ref mut ring)) = mouse_device {
-                                let ep_dci = 3u32;
+                            if let Some((ref mut dev, ref mut ring, ep_dci)) = mouse_device {
                                 let trb = Trb {
                                     parameter: mouse_report_phys,
                                     status: 4,
@@ -1413,23 +1437,44 @@ pub extern "C" fn xhci_driver_main() -> ! {
     }
 }
 
+/// Iterator over descriptors in a USB configuration descriptor blob.
+///
+/// Each call to `next` returns `(descriptor_type, descriptor_bytes)` for one descriptor.
+struct DescriptorIter<'a> {
+    data: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> DescriptorIter<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, offset: 0 }
+    }
+}
+
+impl<'a> Iterator for DescriptorIter<'a> {
+    type Item = (u8, &'a [u8]); // (descriptor_type, descriptor_bytes)
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset + 2 > self.data.len() {
+            return None;
+        }
+        let length = self.data[self.offset] as usize;
+        let desc_type = self.data[self.offset + 1];
+        if length == 0 || self.offset + length > self.data.len() {
+            return None;
+        }
+        let bytes = &self.data[self.offset..self.offset + length];
+        self.offset += length;
+        Some((desc_type, bytes))
+    }
+}
+
 /// Parse a configuration descriptor blob and log the interfaces and endpoints found.
 fn parse_and_log_config(data: &[u8]) {
-    let mut offset = 0;
-    while offset + 2 <= data.len() {
-        let length = data[offset] as usize;
-        let desc_type = data[offset + 1];
-
-        if length == 0 {
-            break;
-        }
-        if offset + length > data.len() {
-            break;
-        }
-
-        if desc_type == DESC_INTERFACE && length >= 9 {
+    for (desc_type, bytes) in DescriptorIter::new(data) {
+        if desc_type == DESC_INTERFACE && bytes.len() >= 9 {
             let iface =
-                unsafe { core::ptr::read(data[offset..].as_ptr() as *const InterfaceDescriptor) };
+                unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const InterfaceDescriptor) };
             println!(
                 "xhci:   interface {}: class={} subclass={} protocol={} endpoints={}",
                 iface.b_interface_number,
@@ -1438,9 +1483,9 @@ fn parse_and_log_config(data: &[u8]) {
                 iface.b_interface_protocol,
                 iface.b_num_endpoints
             );
-        } else if desc_type == DESC_ENDPOINT && length >= 7 {
+        } else if desc_type == DESC_ENDPOINT && bytes.len() >= 7 {
             let ep =
-                unsafe { core::ptr::read(data[offset..].as_ptr() as *const EndpointDescriptor) };
+                unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const EndpointDescriptor) };
             let dir = if ep.b_endpoint_address & 0x80 != 0 {
                 "IN"
             } else {
@@ -1463,95 +1508,39 @@ fn parse_and_log_config(data: &[u8]) {
                 max_pkt
             );
         }
-
-        offset += length;
     }
 }
 
-/// Search a configuration descriptor blob for a HID keyboard interface and its interrupt IN endpoint.
+/// Search a configuration descriptor blob for a HID interface with the given boot protocol
+/// and its interrupt IN endpoint.
 ///
-/// Returns `(InterfaceDescriptor, EndpointDescriptor)` for the first matching pair found,
-/// or `None` if the config data contains no HID keyboard.
-fn find_hid_keyboard(config_data: &[u8]) -> Option<(InterfaceDescriptor, EndpointDescriptor)> {
-    let mut offset = 0;
+/// `protocol` should be `HID_PROTOCOL_KEYBOARD` or `HID_PROTOCOL_MOUSE`.
+///
+/// Returns `(InterfaceDescriptor, EndpointDescriptor)` for the first matching pair,
+/// or `None` if no matching interface is found.
+fn find_hid_interface(
+    config_data: &[u8],
+    protocol: u8,
+) -> Option<(InterfaceDescriptor, EndpointDescriptor)> {
     let mut current_iface: Option<InterfaceDescriptor> = None;
 
-    while offset + 2 <= config_data.len() {
-        let length = config_data[offset] as usize;
-        let desc_type = config_data[offset + 1];
-
-        if length == 0 || offset + length > config_data.len() {
-            break;
-        }
-
-        if desc_type == DESC_INTERFACE && length >= 9 {
-            let iface = unsafe {
-                core::ptr::read(config_data[offset..].as_ptr() as *const InterfaceDescriptor)
-            };
-            if iface.b_interface_class == USB_CLASS_HID
-                && iface.b_interface_protocol == HID_PROTOCOL_KEYBOARD
-            {
+    for (desc_type, bytes) in DescriptorIter::new(config_data) {
+        if desc_type == DESC_INTERFACE && bytes.len() >= 9 {
+            let iface =
+                unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const InterfaceDescriptor) };
+            if iface.b_interface_class == USB_CLASS_HID && iface.b_interface_protocol == protocol {
                 current_iface = Some(iface);
             } else {
                 current_iface = None;
             }
-        } else if desc_type == DESC_ENDPOINT && length >= 7 {
-            if let Some(iface) = current_iface {
-                let ep = unsafe {
-                    core::ptr::read(config_data[offset..].as_ptr() as *const EndpointDescriptor)
-                };
-                // Accept only IN interrupt endpoints
-                if ep.b_endpoint_address & 0x80 != 0 && ep.bm_attributes & 0x03 == 3 {
-                    return Some((iface, ep));
-                }
+        } else if desc_type == DESC_ENDPOINT && bytes.len() >= 7 && current_iface.is_some() {
+            let ep =
+                unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const EndpointDescriptor) };
+            // Accept only IN interrupt endpoints
+            if ep.b_endpoint_address & 0x80 != 0 && ep.bm_attributes & 0x03 == 3 {
+                return Some((current_iface.unwrap(), ep));
             }
         }
-
-        offset += length;
-    }
-    None
-}
-
-/// Search a configuration descriptor blob for a HID mouse interface and its interrupt IN endpoint.
-///
-/// Returns `(InterfaceDescriptor, EndpointDescriptor)` for the first matching pair found,
-/// or `None` if the config data contains no HID mouse.
-fn find_hid_mouse(config_data: &[u8]) -> Option<(InterfaceDescriptor, EndpointDescriptor)> {
-    let mut offset = 0;
-    let mut current_iface: Option<InterfaceDescriptor> = None;
-
-    while offset + 2 <= config_data.len() {
-        let length = config_data[offset] as usize;
-        let desc_type = config_data[offset + 1];
-
-        if length == 0 || offset + length > config_data.len() {
-            break;
-        }
-
-        if desc_type == DESC_INTERFACE && length >= 9 {
-            let iface = unsafe {
-                core::ptr::read(config_data[offset..].as_ptr() as *const InterfaceDescriptor)
-            };
-            if iface.b_interface_class == USB_CLASS_HID
-                && iface.b_interface_protocol == HID_PROTOCOL_MOUSE
-            {
-                current_iface = Some(iface);
-            } else {
-                current_iface = None;
-            }
-        } else if desc_type == DESC_ENDPOINT && length >= 7 {
-            if let Some(iface) = current_iface {
-                let ep = unsafe {
-                    core::ptr::read(config_data[offset..].as_ptr() as *const EndpointDescriptor)
-                };
-                // Accept only IN interrupt endpoints
-                if ep.b_endpoint_address & 0x80 != 0 && ep.bm_attributes & 0x03 == 3 {
-                    return Some((iface, ep));
-                }
-            }
-        }
-
-        offset += length;
     }
     None
 }
@@ -1568,24 +1557,15 @@ fn find_mass_storage(
     const USB_SUBCLASS_SCSI: u8 = 0x06;
     const USB_PROTOCOL_BOT: u8 = 0x50;
 
-    let mut offset = 0;
     let mut current_iface: Option<InterfaceDescriptor> = None;
     let mut ep_in: Option<EndpointDescriptor> = None;
     let mut ep_out: Option<EndpointDescriptor> = None;
 
-    while offset + 2 <= config_data.len() {
-        let length = config_data[offset] as usize;
-        let desc_type = config_data[offset + 1];
-
-        if length == 0 || offset + length > config_data.len() {
-            break;
-        }
-
-        if desc_type == DESC_INTERFACE && length >= 9 {
+    for (desc_type, bytes) in DescriptorIter::new(config_data) {
+        if desc_type == DESC_INTERFACE && bytes.len() >= 9 {
             // Starting a new interface; reset endpoint state.
-            let iface = unsafe {
-                core::ptr::read(config_data[offset..].as_ptr() as *const InterfaceDescriptor)
-            };
+            let iface =
+                unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const InterfaceDescriptor) };
             if iface.b_interface_class == USB_CLASS_MASS_STORAGE
                 && iface.b_interface_sub_class == USB_SUBCLASS_SCSI
                 && iface.b_interface_protocol == USB_PROTOCOL_BOT
@@ -1598,28 +1578,23 @@ fn find_mass_storage(
                 ep_in = None;
                 ep_out = None;
             }
-        } else if desc_type == DESC_ENDPOINT && length >= 7 {
-            if current_iface.is_some() {
-                let ep = unsafe {
-                    core::ptr::read(config_data[offset..].as_ptr() as *const EndpointDescriptor)
-                };
-                // Only accept bulk endpoints (bmAttributes bits [1:0] == 2)
-                if ep.bm_attributes & 0x03 == 2 {
-                    if ep.b_endpoint_address & 0x80 != 0 {
-                        ep_in = Some(ep);
-                    } else {
-                        ep_out = Some(ep);
-                    }
-                }
-
-                // Return as soon as we have both endpoints for this interface.
-                if let (Some(iface), Some(ein), Some(eout)) = (current_iface, ep_in, ep_out) {
-                    return Some((iface, ein, eout));
+        } else if desc_type == DESC_ENDPOINT && bytes.len() >= 7 && current_iface.is_some() {
+            let ep =
+                unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const EndpointDescriptor) };
+            // Only accept bulk endpoints (bmAttributes bits [1:0] == 2)
+            if ep.bm_attributes & 0x03 == 2 {
+                if ep.b_endpoint_address & 0x80 != 0 {
+                    ep_in = Some(ep);
+                } else {
+                    ep_out = Some(ep);
                 }
             }
-        }
 
-        offset += length;
+            // Return as soon as we have both endpoints for this interface.
+            if let (Some(iface), Some(ein), Some(eout)) = (current_iface, ep_in, ep_out) {
+                return Some((iface, ein, eout));
+            }
+        }
     }
     None
 }

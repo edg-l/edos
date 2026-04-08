@@ -50,7 +50,10 @@ pub fn enable_msi_for_device(dev: &PciDevice, vector: u8) -> Result<(), MsiError
     // Determine 64-bit capable
     let is_64 = (ctrl & MSI_64BIT_CAPABLE) != 0;
 
-    // Program message address and data
+    // Program message address and data.
+    // NOTE: The interrupt is targeted at the current CPU (the one running this init code).
+    // If the xHCI driver thread later runs on a different CPU, the interrupt still fires on
+    // this CPU and wake_thread_irq posts to the scheduler — that is safe across CPUs.
     let lapic_id = unsafe { get_lapic().id() } as u32;
     let msg_addr_low: u32 = 0xFEE0_0000 | ((lapic_id & 0xFF) << 12);
     let msg_addr_high: u32 = 0; // xAPIC mode
@@ -131,7 +134,10 @@ pub fn enable_msix_for_device(
         }
     }
 
-    // 6. Write the MSI-X table entry
+    // 6. Write the MSI-X table entry.
+    // NOTE: The interrupt is targeted at the current CPU (the one running this init code).
+    // If the xHCI driver thread later runs on a different CPU, the interrupt still fires on
+    // this CPU and wake_thread_irq posts to the scheduler — that is safe across CPUs.
     let entry_ptr = (table_virt.as_u64() + (table_entry as u64) * 16) as *mut u32;
     let lapic_id = unsafe { get_lapic().id() };
     unsafe {

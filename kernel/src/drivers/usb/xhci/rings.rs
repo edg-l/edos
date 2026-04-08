@@ -98,10 +98,11 @@ pub const TRB_DIR_IN: u32 = 1 << 16; // Direction: 1 = IN (device-to-host)
 pub const COMP_SUCCESS: u8 = 1;
 pub const COMP_SHORT_PACKET: u8 = 13;
 
-/// Command Ring - used to issue commands to the xHCI controller.
+/// Producer ring — used for both command and transfer rings.
 ///
 /// The last TRB in the ring is always a Link TRB pointing back to the start.
-pub struct CommandRing {
+/// Both `CommandRing` and `TransferRing` are type aliases for this type.
+pub struct ProducerRing {
     dma: DmaBuffer,
     trbs: *mut Trb,
     size: usize,
@@ -109,14 +110,14 @@ pub struct CommandRing {
     cycle_bit: bool,
 }
 
-// Safety: CommandRing owns its DMA region and is accessed only from the driver thread.
-unsafe impl Send for CommandRing {}
+// Safety: ProducerRing owns its DMA region and is accessed only from the driver thread.
+unsafe impl Send for ProducerRing {}
 
-impl CommandRing {
+impl ProducerRing {
     pub fn new(size: usize) -> Self {
         let byte_size = size * core::mem::size_of::<Trb>();
         let dma =
-            DmaBuffer::allocate_sized(byte_size).expect("xhci: failed to allocate command ring");
+            DmaBuffer::allocate_sized(byte_size).expect("xhci: failed to allocate producer ring");
         let trbs = dma.as_ptr() as *mut Trb;
         let phys = dma.phys_addr().as_u64();
 
@@ -142,7 +143,7 @@ impl CommandRing {
         }
     }
 
-    /// Push a TRB onto the command ring. Returns the physical address of the placed TRB.
+    /// Push a TRB onto the ring. Returns the physical address of the placed TRB.
     pub fn push(&mut self, mut trb: Trb) -> u64 {
         if self.cycle_bit {
             trb.control |= TRB_CYCLE;
@@ -158,14 +159,18 @@ impl CommandRing {
         // Advance enqueue pointer, wrapping through the Link TRB
         self.enqueue_idx += 1;
         if self.enqueue_idx >= self.size - 1 {
-            // Update the Link TRB's cycle bit to match the current producer cycle
+            // Update the Link TRB's cycle bit via volatile read-modify-write.
+            // The Link TRB control field is at byte offset 12 within the TRB (the 4th u32).
             unsafe {
-                let link = &mut *self.trbs.add(self.size - 1);
+                let link_ptr = self.trbs.add(self.size - 1) as *mut u32;
+                let ctrl_ptr = link_ptr.add(3); // control is the 4th u32 (offset 12)
+                let mut ctrl = core::ptr::read_volatile(ctrl_ptr);
                 if self.cycle_bit {
-                    link.control |= TRB_CYCLE;
+                    ctrl |= TRB_CYCLE;
                 } else {
-                    link.control &= !TRB_CYCLE;
+                    ctrl &= !TRB_CYCLE;
                 }
+                core::ptr::write_volatile(ctrl_ptr, ctrl);
             }
             self.cycle_bit = !self.cycle_bit;
             self.enqueue_idx = 0;
@@ -174,11 +179,17 @@ impl CommandRing {
         trb_phys
     }
 
-    /// Physical address of the ring base (write to CRCR).
+    /// Physical address of the ring base.
     pub fn phys_addr(&self) -> u64 {
         self.dma.phys_addr().as_u64()
     }
 }
+
+/// Command Ring — issues commands to the xHCI controller (type alias for ProducerRing).
+pub type CommandRing = ProducerRing;
+
+/// Transfer Ring — carries data transfers on device endpoints (type alias for ProducerRing).
+pub type TransferRing = ProducerRing;
 
 /// Event Ring Segment Table Entry (16 bytes, as specified by xHCI spec).
 #[repr(C)]
@@ -256,82 +267,5 @@ impl EventRing {
     /// Current dequeue pointer physical address (write to ERDP after consuming events).
     pub fn dequeue_phys(&self) -> u64 {
         self.ring_dma.phys_addr().as_u64() + (self.dequeue_idx * core::mem::size_of::<Trb>()) as u64
-    }
-}
-
-/// Transfer Ring - used for data transfers on device endpoints.
-///
-/// Identical structure to `CommandRing`; kept separate for clarity.
-pub struct TransferRing {
-    dma: DmaBuffer,
-    trbs: *mut Trb,
-    size: usize,
-    enqueue_idx: usize,
-    cycle_bit: bool,
-}
-
-// Safety: TransferRing owns its DMA region and is accessed only from the driver thread.
-unsafe impl Send for TransferRing {}
-
-impl TransferRing {
-    pub fn new(size: usize) -> Self {
-        let byte_size = size * core::mem::size_of::<Trb>();
-        let dma =
-            DmaBuffer::allocate_sized(byte_size).expect("xhci: failed to allocate transfer ring");
-        let trbs = dma.as_ptr() as *mut Trb;
-        let phys = dma.phys_addr().as_u64();
-
-        unsafe { core::ptr::write_bytes(trbs, 0, size) };
-
-        let link_idx = size - 1;
-        unsafe {
-            let link = &mut *trbs.add(link_idx);
-            link.parameter = phys;
-            link.status = 0;
-            link.control = ((TRB_TYPE_LINK as u32) << 10) | TRB_TOGGLE_CYCLE;
-        }
-
-        Self {
-            dma,
-            trbs,
-            size,
-            enqueue_idx: 0,
-            cycle_bit: true,
-        }
-    }
-
-    /// Push a TRB onto the transfer ring. Returns the physical address of the placed TRB.
-    pub fn push(&mut self, mut trb: Trb) -> u64 {
-        if self.cycle_bit {
-            trb.control |= TRB_CYCLE;
-        } else {
-            trb.control &= !TRB_CYCLE;
-        }
-
-        let idx = self.enqueue_idx;
-        unsafe { core::ptr::write_volatile(self.trbs.add(idx), trb) };
-
-        let trb_phys = self.dma.phys_addr().as_u64() + (idx * core::mem::size_of::<Trb>()) as u64;
-
-        self.enqueue_idx += 1;
-        if self.enqueue_idx >= self.size - 1 {
-            unsafe {
-                let link = &mut *self.trbs.add(self.size - 1);
-                if self.cycle_bit {
-                    link.control |= TRB_CYCLE;
-                } else {
-                    link.control &= !TRB_CYCLE;
-                }
-            }
-            self.cycle_bit = !self.cycle_bit;
-            self.enqueue_idx = 0;
-        }
-
-        trb_phys
-    }
-
-    /// Physical address of the ring base (write to endpoint context dequeue pointer).
-    pub fn phys_addr(&self) -> u64 {
-        self.dma.phys_addr().as_u64()
     }
 }

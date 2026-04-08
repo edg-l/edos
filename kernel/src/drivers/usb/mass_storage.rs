@@ -70,6 +70,10 @@ pub struct UsbMassStorage {
     /// Total number of logical blocks (filled by READ CAPACITY).
     pub block_count: u64,
     tag: u32,
+    /// Pre-allocated DMA buffer for Command Block Wrappers (31 bytes), reused per transfer.
+    cbw_buf: DmaBuffer,
+    /// Pre-allocated DMA buffer for Command Status Wrappers (13 bytes), reused per transfer.
+    csw_buf: DmaBuffer,
 }
 
 impl UsbMassStorage {
@@ -79,6 +83,10 @@ impl UsbMassStorage {
         // xHCI DCI formula: ep_num * 2 + (1 if IN, 0 if OUT)
         let ep_in_dci = (ep_in_num * 2 + 1) as u32;
         let ep_out_dci = (ep_out_num * 2) as u32;
+        let cbw_buf =
+            DmaBuffer::allocate_sized(31).expect("usb-msc: failed to allocate CBW buffer");
+        let csw_buf =
+            DmaBuffer::allocate_sized(13).expect("usb-msc: failed to allocate CSW buffer");
         Self {
             slot_id,
             ep_in_dci,
@@ -86,6 +94,8 @@ impl UsbMassStorage {
             block_size: 512,
             block_count: 0,
             tag: 1,
+            cbw_buf,
+            csw_buf,
         }
     }
 
@@ -281,10 +291,10 @@ impl UsbMassStorage {
     ) -> Result<u32, XhciError> {
         let tag = self.next_tag();
 
-        // 1. Build and send CBW on bulk OUT.
-        let cbw_buf = DmaBuffer::allocate_sized(31).map_err(|_| XhciError::InvalidDevice)?;
+        // 1. Build and send CBW on bulk OUT using the pre-allocated buffer.
+        let cbw_phys = self.cbw_buf.phys_addr().as_u64();
         unsafe {
-            let cbw = cbw_buf.as_ptr() as *mut Cbw;
+            let cbw = self.cbw_buf.as_ptr() as *mut Cbw;
             core::ptr::write_bytes(cbw as *mut u8, 0, 31);
             (*cbw).d_cbw_signature = CBW_SIGNATURE;
             (*cbw).d_cbw_tag = tag;
@@ -295,7 +305,6 @@ impl UsbMassStorage {
             core::ptr::copy_nonoverlapping(scsi_cmd.as_ptr(), (*cbw).cbwcb.as_mut_ptr(), 16);
         }
 
-        let cbw_phys = cbw_buf.phys_addr().as_u64();
         controller.bulk_transfer(self.slot_id, out_ring, self.ep_out_dci, cbw_phys, 31, false)?;
 
         // 2. Data phase (optional).
@@ -323,13 +332,15 @@ impl UsbMassStorage {
             }
         }
 
-        // 3. Read CSW on bulk IN.
-        let csw_buf = DmaBuffer::allocate_sized(13).map_err(|_| XhciError::InvalidDevice)?;
-        let csw_phys = csw_buf.phys_addr().as_u64();
+        // 3. Read CSW on bulk IN using the pre-allocated buffer.
+        let csw_phys = self.csw_buf.phys_addr().as_u64();
+        unsafe {
+            core::ptr::write_bytes(self.csw_buf.as_ptr() as *mut u8, 0, 13);
+        }
         controller.bulk_transfer(self.slot_id, in_ring, self.ep_in_dci, csw_phys, 13, true)?;
 
         // Validate the CSW.
-        let csw = unsafe { core::ptr::read(csw_buf.as_ptr() as *const Csw) };
+        let csw = unsafe { core::ptr::read(self.csw_buf.as_ptr() as *const Csw) };
         // Read packed fields into locals before use.
         let sig = csw.d_csw_signature;
         let csw_tag = csw.d_csw_tag;

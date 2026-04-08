@@ -95,7 +95,9 @@ pub fn read_bar_phys(addr: PciAddress, bar_index: u8) -> x86_64::PhysAddr {
     let base_low = (bar_low & !0xF) as u64;
 
     if bar_type == 2 {
-        // 64-bit BAR: upper 32 bits in next BAR register
+        // 64-bit BAR: upper 32 bits in next BAR register.
+        // A 64-bit BAR at index 5 would read past the BAR space (no BAR6), which is invalid.
+        assert!(bar_index <= 4, "64-bit BAR at index 5 is invalid");
         let bar_high = pci_read_u32(addr, bar_offset + 4) as u64;
         x86_64::PhysAddr::new(base_low | (bar_high << 32))
     } else {

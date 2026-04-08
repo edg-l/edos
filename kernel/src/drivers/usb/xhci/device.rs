@@ -166,6 +166,8 @@ pub struct UsbDevice {
     pub port_id: u8,
     pub ep0_ring: TransferRing,
     pub input_ctx: DmaBuffer,
+    /// Output Device Context buffer registered in the DCBAA. Must live as long as the device.
+    pub output_ctx: DmaBuffer,
     pub device_descriptor: Option<DeviceDescriptor>,
     /// Raw configuration descriptor blob (Configuration + Interface + Endpoint descriptors).
     pub config_data: Option<Vec<u8>>,

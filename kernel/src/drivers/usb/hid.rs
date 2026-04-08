@@ -1,4 +1,3 @@
-use alloc::vec::Vec;
 use pc_keyboard::{KeyCode, KeyEvent, KeyState};
 
 use crate::drivers::mouse::{MOUSE_BROADCAST, MouseEvent, apply_relative_move};
@@ -113,6 +112,36 @@ pub fn usb_hid_to_keycode(usage: u8) -> Option<KeyCode> {
     }
 }
 
+/// Fixed-capacity collection of keyboard events from one report comparison.
+///
+/// Maximum events per report: 8 modifiers + 6 keys = 14 key events.
+pub struct KeyEvents {
+    events: [KeyEvent; 14],
+    count: usize,
+}
+
+impl KeyEvents {
+    fn new() -> Self {
+        Self {
+            // KeyEvent does not implement Copy or Default, so initialise with from_fn.
+            events: core::array::from_fn(|_| KeyEvent::new(KeyCode::A, KeyState::Up)),
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, event: KeyEvent) {
+        if self.count < self.events.len() {
+            self.events[self.count] = event;
+            self.count += 1;
+        }
+    }
+
+    /// Returns the populated slice of key events.
+    pub fn as_slice(&self) -> &[KeyEvent] {
+        &self.events[..self.count]
+    }
+}
+
 /// Process an 8-byte USB HID boot keyboard report.
 ///
 /// Compares with previous report to generate key down/up events.
@@ -121,8 +150,8 @@ pub fn usb_hid_to_keycode(usage: u8) -> Option<KeyCode> {
 ///   byte 0: modifier keys (bit 0=LCtrl, 1=LShift, 2=LAlt, 3=LGui, 4=RCtrl, 5=RShift, 6=RAlt, 7=RGui)
 ///   byte 1: reserved
 ///   bytes 2-7: up to 6 simultaneous key usage codes (0 = no key)
-pub fn process_boot_keyboard_report(prev: &[u8; 8], current: &[u8; 8]) -> Vec<KeyEvent> {
-    let mut events = Vec::new();
+pub fn process_boot_keyboard_report(prev: &[u8; 8], current: &[u8; 8]) -> KeyEvents {
+    let mut events = KeyEvents::new();
 
     // Modifier key bit-to-usage-code mapping
     let modifier_map: [(u8, u8); 8] = [
