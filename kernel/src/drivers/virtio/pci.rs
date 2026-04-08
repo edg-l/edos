@@ -5,7 +5,7 @@ use x86_64::{
 
 use crate::{
     drivers::pci::{
-        config::{pci_read_u8, pci_read_u16, pci_read_u32, pci_write_u16},
+        config::{pci_read_u8, pci_read_u16, pci_read_u32, pci_write_u16, read_bar_phys},
         structures::{PciAddress, PciDevice},
     },
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
@@ -84,41 +84,17 @@ impl VirtioPciCap {
 
 // -------- BAR mapping helpers --------
 
-/// Read the 64-bit physical base address of a BAR.
-///
-/// For 64-bit BARs (type bits [2:1] == 0b10) the upper 32 bits come from
-/// the next BAR register.  For 32-bit BARs only the first register is used.
-/// The lower 4 bits are attribute/type flags and are masked off.
-fn read_bar_phys(addr: PciAddress, bar_index: u8) -> u64 {
-    // BAR registers start at PCI config offset 0x10; each is 4 bytes.
-    let bar_offset = 0x10 + bar_index * 4;
-    let bar_low = pci_read_u32(addr, bar_offset);
-
-    // Bits [2:1]: 00 = 32-bit, 10 = 64-bit
-    let bar_type = (bar_low >> 1) & 0x3;
-    let base_low = (bar_low & !0xF) as u64;
-
-    if bar_type == 0x2 {
-        // 64-bit BAR: combine with next register
-        let bar_high = pci_read_u32(addr, bar_offset + 4) as u64;
-        base_low | (bar_high << 32)
-    } else {
-        base_low
-    }
-}
-
 /// Map a BAR region into virtual address space using the HHDM offset.
 ///
 /// Already-mapped pages are silently accepted (same as the AHCI controller).
-fn map_bar(phys_base: u64, size: u32) -> *mut u8 {
-    let phys = PhysAddr::new(phys_base);
-    let virt = get_virt_addr_from_phys_offset(phys);
+fn map_bar(phys_base: PhysAddr, size: u32) -> *mut u8 {
+    let virt = get_virt_addr_from_phys_offset(phys_base);
 
     {
         let mut mapper = memory_mapper();
         let result = mapper.map_address_range(
             virt,
-            phys,
+            phys_base,
             size as usize,
             PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE | PageTableFlags::GLOBAL,
         );
@@ -181,7 +157,7 @@ impl VirtioTransport {
 
                 // Compute the BAR physical base and map it.
                 let bar_phys = read_bar_phys(addr, cap.bar);
-                if bar_phys != 0 {
+                if bar_phys.as_u64() != 0 {
                     let bar_virt = map_bar(bar_phys, cap.offset + cap.length);
                     let mmio_ptr = unsafe { bar_virt.add(cap.offset as usize) };
 

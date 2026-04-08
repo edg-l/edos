@@ -68,6 +68,41 @@ pub fn pci_read_u8(addr: PciAddress, offset: u8) -> u8 {
     (pci_read_u32(addr, offset) >> shift) as u8
 }
 
+/// Walk the PCI capability linked list and return the config-space offset of
+/// the first capability with the given ID, or `None` if not found.
+pub fn find_capability(addr: PciAddress, target_cap_id: u8) -> Option<u8> {
+    let mut ptr = pci_read_u8(addr, 0x34);
+    let mut guard = 0;
+    while ptr != 0 && guard < 64 {
+        let cap_id = pci_read_u8(addr, ptr);
+        if cap_id == target_cap_id {
+            return Some(ptr);
+        }
+        ptr = pci_read_u8(addr, ptr + 1);
+        guard += 1;
+    }
+    None
+}
+
+/// Read a PCI BAR register and return the physical base address.
+/// Handles both 32-bit and 64-bit BARs (type bits [2:1]).
+/// `bar_index` must be 0..5.
+pub fn read_bar_phys(addr: PciAddress, bar_index: u8) -> x86_64::PhysAddr {
+    assert!(bar_index <= 5, "BAR index {bar_index} out of range");
+    let bar_offset = 0x10 + bar_index * 4;
+    let bar_low = pci_read_u32(addr, bar_offset);
+    let bar_type = (bar_low >> 1) & 0x3;
+    let base_low = (bar_low & !0xF) as u64;
+
+    if bar_type == 2 {
+        // 64-bit BAR: upper 32 bits in next BAR register
+        let bar_high = pci_read_u32(addr, bar_offset + 4) as u64;
+        x86_64::PhysAddr::new(base_low | (bar_high << 32))
+    } else {
+        x86_64::PhysAddr::new(base_low)
+    }
+}
+
 #[expect(unused)]
 pub fn pci_write_u8(addr: PciAddress, offset: u8, value: u8) {
     let _guard = PCI_CONFIG_LOCK.lock();

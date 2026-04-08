@@ -3,19 +3,28 @@
 use crate::{
     apic::get_lapic,
     drivers::pci::{
-        config::{pci_read_u8, pci_read_u16, pci_read_u32, pci_write_u16, pci_write_u32},
+        config::{
+            find_capability, pci_read_u8, pci_read_u16, pci_read_u32, pci_write_u16, pci_write_u32,
+            read_bar_phys,
+        },
         structures::{PciAddress, PciDevice},
     },
+    memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
 };
+use x86_64::structures::paging::PageTableFlags;
 
 #[derive(Debug, Clone, Copy)]
 pub enum MsiError {
     NoCapabilities,
     NoMsiCapability,
+    NoMsixCapability,
+    MmioMapFailed,
+    InvalidEntry,
 }
 
 // PCI capability IDs
 const CAP_ID_MSI: u8 = 0x05;
+const CAP_ID_MSIX: u8 = 0x11;
 
 // MSI Control bits
 const MSI_ENABLE: u16 = 1 << 0;
@@ -77,16 +86,72 @@ pub fn enable_msi_for_device(dev: &PciDevice, vector: u8) -> Result<(), MsiError
     Ok(())
 }
 
-fn find_capability(addr: PciAddress, target_cap_id: u8) -> Option<u8> {
-    let mut ptr = pci_read_u8(addr, 0x34);
-    let mut guard = 0;
-    while ptr != 0 && guard < 64 {
-        let cap_id = pci_read_u8(addr, ptr);
-        if cap_id == target_cap_id {
-            return Some(ptr);
-        }
-        ptr = pci_read_u8(addr, ptr + 1);
-        guard += 1;
+pub fn enable_msix_for_device(
+    dev: &PciDevice,
+    vector: u8,
+    table_entry: u16,
+) -> Result<(), MsiError> {
+    let addr = dev.address;
+
+    // 1. Find MSI-X capability
+    let msix_offset = find_capability(addr, CAP_ID_MSIX).ok_or(MsiError::NoMsixCapability)?;
+
+    // 2. Read control register, extract table size
+    let ctrl = pci_read_u16(addr, msix_offset + 2);
+    let table_size = (ctrl & 0x7FF) + 1;
+
+    if table_entry >= table_size {
+        return Err(MsiError::InvalidEntry);
     }
-    None
+
+    // 3. Read table BIR and offset
+    let table_dword = pci_read_u32(addr, msix_offset + 4);
+    let bir = (table_dword & 0x7) as u8;
+    let table_offset = (table_dword & !0x7) as u64;
+
+    // 4. Read BAR and compute table physical address
+    let bar_phys = read_bar_phys(addr, bir);
+    let table_phys = bar_phys + table_offset;
+
+    // 5. Map the MSI-X table MMIO region
+    let table_virt = get_virt_addr_from_phys_offset(table_phys);
+    let table_size_bytes = (table_size as u64) * 16; // 16 bytes per entry
+    {
+        let mut mapper = memory_mapper();
+        let result = mapper.map_address_range(
+            table_virt,
+            table_phys,
+            table_size_bytes as usize,
+            PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE | PageTableFlags::GLOBAL,
+        );
+        match result {
+            Ok(_) => {}
+            Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => {}
+            Err(_) => return Err(MsiError::MmioMapFailed),
+        }
+    }
+
+    // 6. Write the MSI-X table entry
+    let entry_ptr = (table_virt.as_u64() + (table_entry as u64) * 16) as *mut u32;
+    let lapic_id = unsafe { get_lapic().id() };
+    unsafe {
+        // msg_addr_lo
+        core::ptr::write_volatile(entry_ptr, 0xFEE0_0000 | ((lapic_id & 0xFF) << 12));
+        // msg_addr_hi
+        core::ptr::write_volatile(entry_ptr.add(1), 0);
+        // msg_data = vector
+        core::ptr::write_volatile(entry_ptr.add(2), vector as u32);
+        // vector_control = 0 (unmask)
+        core::ptr::write_volatile(entry_ptr.add(3), 0);
+    }
+
+    // 7. Enable MSI-X, clear function mask
+    let ctrl = pci_read_u16(addr, msix_offset + 2);
+    pci_write_u16(addr, msix_offset + 2, (ctrl | (1 << 15)) & !(1 << 14));
+
+    // 8. Disable legacy INTx
+    let cmd = pci_read_u16(addr, 0x04);
+    pci_write_u16(addr, 0x04, cmd | (1 << 10));
+
+    Ok(())
 }
