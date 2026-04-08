@@ -54,6 +54,7 @@ define run_qemu_uefi
 		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
 		-device ide-hd,drive=sata0,bus=ide.1 \
 		$(if $(4),$(4),$(DISPLAY_VIRTIO)) \
+		-device qemu-xhci -device usb-kbd -device usb-mouse \
 		-smp $(2) \
 		$(3) \
 		$(QEMUFLAGS)
@@ -61,6 +62,10 @@ endef
 
 .PHONY: run-x86_64
 run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+	$(call run_qemu_uefi,iso,4,-accel kvm)
+
+.PHONY: run-usb
+run-usb: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
 	$(call run_qemu_uefi,iso,4,-accel kvm)
 
 .PHONY: run-vga

@@ -1,5 +1,3 @@
-#![expect(unused)]
-
 use core::ptr;
 
 /// xHCI Capability Registers (read-only, offsets from BAR base)

@@ -17,13 +17,18 @@ use crate::{
             structures::PciAddress,
         },
     },
-    interrupts::InterruptIndex,
+    interrupts::{InterruptIndex, io::XHCI_DRIVER_THREAD_ID},
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
     println,
+    thread::scheduler::sched,
 };
 
 use self::{
-    device::{SetupPacket, UsbDevice, UsbSpeed},
+    device::{
+        ConfigDescriptor, DESC_CONFIGURATION, DESC_DEVICE, DESC_ENDPOINT, DESC_INTERFACE,
+        DeviceDescriptor, EndpointDescriptor, InterfaceDescriptor, SetupPacket, UsbDevice,
+        UsbSpeed,
+    },
     registers::{XhciRegisters, reg_read, reg_write},
     rings::{
         COMP_SHORT_PACKET, COMP_SUCCESS, CommandRing, EventRing, TRB_DIR_IN, TRB_IDT, TRB_IOC,
@@ -648,5 +653,260 @@ impl XhciController {
             device_descriptor: None,
             config_data: None,
         })
+    }
+
+    /// Read the device descriptor from a USB device.
+    pub fn get_device_descriptor(
+        &mut self,
+        device: &mut UsbDevice,
+    ) -> Result<DeviceDescriptor, XhciError> {
+        let buf = DmaBuffer::allocate_sized(18).map_err(|_| XhciError::InvalidDevice)?;
+        let buf_phys = buf.phys_addr().as_u64();
+
+        let setup = SetupPacket {
+            bm_request_type: 0x80,              // Device-to-host, Standard, Device
+            b_request: 6,                       // GET_DESCRIPTOR
+            w_value: (DESC_DEVICE as u16) << 8, // Descriptor type = Device, index = 0
+            w_index: 0,
+            w_length: 18,
+        };
+
+        let transferred = self.control_transfer(device, setup, Some(buf_phys), 18, true)?;
+
+        if transferred < 18 {
+            // Try with smaller initial request (some low-speed devices need this)
+            let setup8 = SetupPacket {
+                w_length: 8,
+                ..setup
+            };
+            self.control_transfer(device, setup8, Some(buf_phys), 8, true)?;
+        }
+
+        let desc = unsafe { core::ptr::read(buf.as_ptr() as *const DeviceDescriptor) };
+        Ok(desc)
+    }
+
+    /// Read the full configuration descriptor (with all interfaces and endpoints).
+    ///
+    /// First reads 9 bytes to get wTotalLength, then reads the full blob.
+    pub fn get_config_descriptor(
+        &mut self,
+        device: &mut UsbDevice,
+        config_index: u8,
+    ) -> Result<Vec<u8>, XhciError> {
+        // Phase 1: Read just the config descriptor header (9 bytes) to get wTotalLength.
+        let buf = DmaBuffer::allocate_sized(256).map_err(|_| XhciError::InvalidDevice)?;
+        let buf_phys = buf.phys_addr().as_u64();
+
+        let setup = SetupPacket {
+            bm_request_type: 0x80,
+            b_request: 6, // GET_DESCRIPTOR
+            w_value: ((DESC_CONFIGURATION as u16) << 8) | (config_index as u16),
+            w_index: 0,
+            w_length: 9,
+        };
+
+        self.control_transfer(device, setup, Some(buf_phys), 9, true)?;
+
+        let config_hdr = unsafe { core::ptr::read(buf.as_ptr() as *const ConfigDescriptor) };
+        let total_len = config_hdr.w_total_length;
+
+        if total_len <= 9 || total_len > 256 {
+            // Just return what we have
+            let mut data = alloc::vec![0u8; total_len as usize];
+            unsafe {
+                core::ptr::copy_nonoverlapping(buf.as_ptr(), data.as_mut_ptr(), total_len as usize);
+            }
+            return Ok(data);
+        }
+
+        // Phase 2: Read the full descriptor.
+        let setup_full = SetupPacket {
+            w_length: total_len,
+            ..setup
+        };
+
+        self.control_transfer(device, setup_full, Some(buf_phys), total_len, true)?;
+
+        let mut data = alloc::vec![0u8; total_len as usize];
+        unsafe {
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), data.as_mut_ptr(), total_len as usize);
+        }
+        Ok(data)
+    }
+
+    /// Send SET_CONFIGURATION to activate a configuration.
+    pub fn set_configuration(
+        &mut self,
+        device: &mut UsbDevice,
+        config_value: u8,
+    ) -> Result<(), XhciError> {
+        let setup = SetupPacket {
+            bm_request_type: 0x00, // Host-to-device, Standard, Device
+            b_request: 9,          // SET_CONFIGURATION
+            w_value: config_value as u16,
+            w_index: 0,
+            w_length: 0,
+        };
+
+        self.control_transfer(device, setup, None, 0, false)?;
+        Ok(())
+    }
+}
+
+/// Main xHCI driver entry point, run as a kernel thread.
+pub extern "C" fn xhci_driver_main() -> ! {
+    println!("xhci: driver thread started");
+
+    let mut controller = match XhciController::find_and_init() {
+        Some(c) => c,
+        None => {
+            println!("xhci: no controller found");
+            loop {
+                sched().thread_park();
+            }
+        }
+    };
+
+    if let Err(e) = controller.init() {
+        println!("xhci: init failed: {}", e);
+        loop {
+            sched().thread_park();
+        }
+    }
+
+    // Scan all ports for already-connected devices.
+    let max_ports = controller.regs.max_ports();
+    for port in 1..=max_ports {
+        let portsc = unsafe { reg_read(&(*controller.regs.port(port - 1)).portsc) };
+        let ccs = portsc & 1; // Current Connect Status
+        if ccs != 0 {
+            println!("xhci: device detected on port {}", port);
+            match controller.handle_port_status_change(port) {
+                Ok(mut device) => {
+                    // Read device descriptor
+                    match controller.get_device_descriptor(&mut device) {
+                        Ok(desc) => {
+                            // Copy packed fields to locals before passing to println.
+                            let vendor = desc.id_vendor;
+                            let product = desc.id_product;
+                            println!(
+                                "xhci: device {:04x}:{:04x} class={} subclass={} protocol={}",
+                                vendor,
+                                product,
+                                desc.b_device_class,
+                                desc.b_device_sub_class,
+                                desc.b_device_protocol
+                            );
+                            device.device_descriptor = Some(desc);
+                        }
+                        Err(e) => println!("xhci: get device descriptor failed: {:?}", e),
+                    }
+
+                    // Read config descriptor
+                    match controller.get_config_descriptor(&mut device, 0) {
+                        Ok(config_data) => {
+                            parse_and_log_config(&config_data);
+
+                            if config_data.len() >= 9 {
+                                let config_value = config_data[5]; // bConfigurationValue
+                                if let Err(e) =
+                                    controller.set_configuration(&mut device, config_value)
+                                {
+                                    println!("xhci: set configuration failed: {:?}", e);
+                                }
+                            }
+
+                            device.config_data = Some(config_data);
+                        }
+                        Err(e) => println!("xhci: get config descriptor failed: {:?}", e),
+                    }
+                }
+                Err(e) => println!("xhci: enumeration failed on port {}: {:?}", port, e),
+            }
+        }
+    }
+
+    println!("xhci: initial enumeration complete");
+
+    // Main event loop: handle runtime events (hot-plug, etc.)
+    loop {
+        // Park until interrupt wakes us.
+        sched().thread_park();
+
+        // Process any pending events.
+        while let Some(event) = controller.event_ring.as_mut().unwrap().poll() {
+            let erdp = controller.event_ring.as_ref().unwrap().dequeue_phys();
+            let intr = controller.regs.interrupter(0);
+            unsafe {
+                reg_write(&mut (*intr).erdp_lo, (erdp as u32) | (1 << 3));
+                reg_write(&mut (*intr).erdp_hi, (erdp >> 32) as u32);
+            }
+
+            match event.trb_type() {
+                TRB_TYPE_PORT_STATUS_CHANGE => {
+                    let port_id = ((event.parameter >> 24) & 0xFF) as u8;
+                    println!("xhci: port {} status change event", port_id);
+                }
+                _ => {
+                    println!("xhci: unhandled event type {}", event.trb_type());
+                }
+            }
+        }
+    }
+}
+
+/// Parse a configuration descriptor blob and log the interfaces and endpoints found.
+fn parse_and_log_config(data: &[u8]) {
+    let mut offset = 0;
+    while offset + 2 <= data.len() {
+        let length = data[offset] as usize;
+        let desc_type = data[offset + 1];
+
+        if length == 0 {
+            break;
+        }
+        if offset + length > data.len() {
+            break;
+        }
+
+        if desc_type == DESC_INTERFACE && length >= 9 {
+            let iface =
+                unsafe { core::ptr::read(data[offset..].as_ptr() as *const InterfaceDescriptor) };
+            println!(
+                "xhci:   interface {}: class={} subclass={} protocol={} endpoints={}",
+                iface.b_interface_number,
+                iface.b_interface_class,
+                iface.b_interface_sub_class,
+                iface.b_interface_protocol,
+                iface.b_num_endpoints
+            );
+        } else if desc_type == DESC_ENDPOINT && length >= 7 {
+            let ep =
+                unsafe { core::ptr::read(data[offset..].as_ptr() as *const EndpointDescriptor) };
+            let dir = if ep.b_endpoint_address & 0x80 != 0 {
+                "IN"
+            } else {
+                "OUT"
+            };
+            let ep_type = match ep.bm_attributes & 0x3 {
+                0 => "Control",
+                1 => "Isochronous",
+                2 => "Bulk",
+                3 => "Interrupt",
+                _ => unreachable!(),
+            };
+            // Copy packed field to local before passing to println.
+            let max_pkt = ep.w_max_packet_size;
+            println!(
+                "xhci:     EP{} {} {} maxpkt={}",
+                ep.b_endpoint_address & 0x0F,
+                dir,
+                ep_type,
+                max_pkt
+            );
+        }
+
+        offset += length;
     }
 }

@@ -87,6 +87,7 @@ pub fn init_drivers() {
     unsafe { fpu::init_fpu() };
     pci::init(); // pci init is blocking
     ahci::init(); // must be after pci
+    usb::init(); // must be after pci
     vga::init();
     graphics::init();
     tty::init();
