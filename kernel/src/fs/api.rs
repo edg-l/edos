@@ -73,6 +73,14 @@ pub fn unmount(mount_point: Path) -> Result<(), Error> {
     result
 }
 
+/// Register a partition dynamically (e.g. a USB storage device discovered after boot).
+pub fn register_partition(partition: Partition) -> Result<(), Error> {
+    let FsResponse::Ok(result) = send_request(FsRequest::RegisterPartition { partition }) else {
+        unreachable!()
+    };
+    result
+}
+
 // Path-scoped APIs (resolve partition via mount table in FS main)
 
 pub fn list_files(path: &Path) -> Result<Vec<File>, Error> {

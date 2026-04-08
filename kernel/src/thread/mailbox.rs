@@ -112,6 +112,11 @@ impl<T, R> Mailbox<T, R> {
         }
     }
 
+    /// Non-blocking receive: returns `Some(request)` if one is available, `None` otherwise.
+    pub fn try_recv(&self) -> Option<Request<T, R>> {
+        self.queue.lock().pop_front()
+    }
+
     #[allow(dead_code)]
     pub fn reply(req: Request<T, R>, val: R) {
         {

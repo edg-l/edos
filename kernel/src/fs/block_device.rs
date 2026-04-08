@@ -12,6 +12,9 @@ use crate::drivers::ahci::{
 
 const SECTOR_SIZE: usize = 512;
 
+/// Device IDs >= this value are USB storage devices and route to the USB block API.
+const USB_DEVICE_ID_BASE: u64 = 1000;
+
 #[derive(Debug)]
 pub struct BlockDevice {
     pub device_id: u64,
@@ -26,6 +29,10 @@ impl BlockDevice {
             cache: LruCache::new(NonZero::new(cache_size).unwrap()),
             scratch: Vec::new(),
         }
+    }
+
+    fn is_usb_device(&self) -> bool {
+        self.device_id >= USB_DEVICE_ID_BASE
     }
 
     pub fn read_sectors(
@@ -61,13 +68,14 @@ impl BlockDevice {
                 let run_count = (i - run_start + 1) as u16;
 
                 self.scratch.resize(run_count as usize * SECTOR_SIZE, 0);
+                let scratch = core::mem::take(&mut self.scratch);
 
-                let data = read_sectors(
-                    self.device_id,
-                    first_lba,
-                    run_count,
-                    core::mem::take(&mut self.scratch),
-                )?;
+                let data = if self.is_usb_device() {
+                    crate::drivers::usb::block_api::usb_read_sectors(first_lba, run_count, scratch)
+                        .map_err(|_| AhciError::IoError)?
+                } else {
+                    read_sectors(self.device_id, first_lba, run_count, scratch)?
+                };
 
                 for (j, (lba_j, idx)) in miss_ranges[run_start..=i].iter().enumerate() {
                     let start = j * SECTOR_SIZE;
@@ -107,13 +115,22 @@ impl BlockDevice {
         let mut tmp = core::mem::take(&mut self.scratch);
         core::mem::swap(&mut tmp, &mut data);
 
-        let mut out = write_sectors(self.device_id, lba, tmp, sectors)?;
+        let out = if self.is_usb_device() {
+            crate::drivers::usb::block_api::usb_write_sectors(lba, sectors, tmp)
+                .map_err(|_| AhciError::IoError)?
+        } else {
+            write_sectors(self.device_id, lba, tmp, sectors)?
+        };
 
         self.scratch = out; // reclaim backend buffer
         Ok(data) // caller gets their Vec back
     }
 
     pub fn flush(&self) -> Result<(), AhciError> {
+        if self.is_usb_device() {
+            // USB mass storage has no flush command; treat as a no-op.
+            return Ok(());
+        }
         flush_cache(self.device_id)
     }
 }

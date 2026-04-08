@@ -4,7 +4,8 @@ pub mod device;
 pub mod registers;
 pub mod rings;
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
+use spin::Once;
 
 use x86_64::structures::paging::{PageTableFlags, mapper::MapToError};
 
@@ -20,7 +21,7 @@ use crate::{
     interrupts::{InterruptIndex, io::XHCI_DRIVER_THREAD_ID},
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
     println,
-    thread::scheduler::sched,
+    thread::{mailbox::Mailbox, scheduler::sched},
 };
 
 use self::{
@@ -53,6 +54,33 @@ pub enum XhciError {
     InvalidDevice,
     UnsupportedSpeed,
 }
+
+/// Request payload sent to the xHCI driver thread for block I/O.
+#[derive(Debug)]
+pub enum UsbBlockRequest {
+    Read {
+        lba: u64,
+        sectors: u16,
+        /// Scratch buffer; resized and filled by the driver thread, then returned.
+        buffer: Vec<u8>,
+    },
+    Write {
+        lba: u64,
+        sectors: u16,
+        data: Vec<u8>,
+    },
+}
+
+/// Response returned to the caller after block I/O completes.
+#[derive(Debug)]
+pub enum UsbBlockResponse {
+    ReadResult(Result<Vec<u8>, XhciError>),
+    WriteResult(Result<Vec<u8>, XhciError>),
+}
+
+/// Global mailbox for USB block I/O. Initialized once the first USB storage device
+/// has been fully configured. Callers must spin-yield until it is available.
+pub static USB_BLOCK_MAILBOX: Once<Arc<Mailbox<UsbBlockRequest, UsbBlockResponse>>> = Once::new();
 
 pub struct XhciController {
     regs: XhciRegisters,
@@ -1026,6 +1054,13 @@ pub extern "C" fn xhci_driver_main() -> ! {
     // mouse_device holds the active HID mouse device, its interrupt IN transfer ring,
     // and the endpoint's DCI (used for doorbell writes).
     let mut mouse_device: Option<(UsbDevice, TransferRing, u32)> = None;
+    // mass_storage_device holds the first USB mass storage device and its bulk transfer rings.
+    // Block I/O requests arrive via USB_BLOCK_MAILBOX and are executed here.
+    let mut mass_storage_device: Option<(
+        crate::drivers::usb::mass_storage::UsbMassStorage,
+        TransferRing,
+        TransferRing,
+    )> = None;
     // Counter used to generate unique /dev/usbN names for mass storage devices.
     let mut usb_storage_count: usize = 0;
 
@@ -1260,6 +1295,44 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                                         block_count,
                                                         &data,
                                                     );
+
+                                                    let is_first = mass_storage_device.is_none();
+
+                                                    // Store the MSC device and rings for use in
+                                                    // the main loop block I/O handler.
+                                                    // Only the first storage device is used for
+                                                    // block I/O; later ones are dropped here.
+                                                    mass_storage_device =
+                                                        Some((msc, in_ring, out_ring));
+
+                                                    // Initialize the block I/O mailbox and
+                                                    // register the partition only for the first
+                                                    // USB storage device.
+                                                    if is_first {
+                                                        USB_BLOCK_MAILBOX.call_once(|| {
+                                                            Arc::new(Mailbox::with_capacity(4))
+                                                        });
+
+                                                        // Register the partition in the FS layer
+                                                        // so it can be mounted.
+                                                        let device_id =
+                                                            1000 + usb_storage_count as u64;
+                                                        let partition = crate::fs::gpt::Partition {
+                                                            index: 0,
+                                                            starting_lba: 0,
+                                                            ending_lba: block_count.saturating_sub(1),
+                                                            size_sectors: block_count,
+                                                            partition_type: crate::fs::gpt::PartitionType::Fat32,
+                                                            name: alloc::format!("USB Storage {}", usb_storage_count),
+                                                            filesystem: Some(crate::fs::gpt::FilesystemType::Fat32),
+                                                            device_id,
+                                                            unique_partition_guid: [0; 16],
+                                                        };
+                                                        if let Err(e) = crate::drivers::usb::block_api::register_usb_partition(partition) {
+                                                            println!("xhci: failed to register USB partition: {:?}", e);
+                                                        }
+                                                    }
+
                                                     usb_storage_count += 1;
                                                 }
                                                 Err(e) => {
@@ -1432,6 +1505,90 @@ pub extern "C" fn xhci_driver_main() -> ! {
             let iman = reg_read(&(*intr).iman);
             if iman & 1 != 0 {
                 reg_write(&mut (*intr).iman, iman | 1);
+            }
+        }
+
+        // Process pending USB block I/O requests from FS threads.
+        if let Some(mailbox) = USB_BLOCK_MAILBOX.get() {
+            while let Some(mut req) = mailbox.try_recv() {
+                match req.payload.take().unwrap() {
+                    UsbBlockRequest::Read { lba, sectors, .. } => {
+                        let result = if let Some((ref mut msc, ref mut in_ring, ref mut out_ring)) =
+                            mass_storage_device
+                        {
+                            let byte_count = sectors as usize * msc.block_size as usize;
+                            match DmaBuffer::allocate_sized(byte_count)
+                                .map_err(|_| XhciError::InvalidDevice)
+                            {
+                                Ok(buf) => {
+                                    let phys = buf.phys_addr().as_u64();
+                                    match msc.read_sectors(
+                                        &mut controller,
+                                        in_ring,
+                                        out_ring,
+                                        lba as u32,
+                                        sectors,
+                                        phys,
+                                    ) {
+                                        Ok(()) => {
+                                            let mut out = alloc::vec![0u8; byte_count];
+                                            unsafe {
+                                                core::ptr::copy_nonoverlapping(
+                                                    buf.as_ptr(),
+                                                    out.as_mut_ptr(),
+                                                    byte_count,
+                                                );
+                                            }
+                                            Ok(out)
+                                        }
+                                        Err(e) => Err(e),
+                                    }
+                                }
+                                Err(e) => Err(e),
+                            }
+                        } else {
+                            Err(XhciError::InvalidDevice)
+                        };
+                        req.reply(UsbBlockResponse::ReadResult(result));
+                    }
+                    UsbBlockRequest::Write { lba, sectors, data } => {
+                        let result = if let Some((ref mut msc, ref mut in_ring, ref mut out_ring)) =
+                            mass_storage_device
+                        {
+                            let byte_count = sectors as usize * msc.block_size as usize;
+                            match DmaBuffer::allocate_sized(byte_count)
+                                .map_err(|_| XhciError::InvalidDevice)
+                            {
+                                Ok(buf) => {
+                                    let copy_len = byte_count.min(data.len());
+                                    unsafe {
+                                        core::ptr::copy_nonoverlapping(
+                                            data.as_ptr(),
+                                            buf.as_ptr() as *mut u8,
+                                            copy_len,
+                                        );
+                                    }
+                                    let phys = buf.phys_addr().as_u64();
+                                    match msc.write_sectors(
+                                        &mut controller,
+                                        in_ring,
+                                        out_ring,
+                                        lba as u32,
+                                        sectors,
+                                        phys,
+                                    ) {
+                                        Ok(()) => Ok(data),
+                                        Err(e) => Err(e),
+                                    }
+                                }
+                                Err(e) => Err(e),
+                            }
+                        } else {
+                            Err(XhciError::InvalidDevice)
+                        };
+                        req.reply(UsbBlockResponse::WriteResult(result));
+                    }
+                }
             }
         }
     }

@@ -1,3 +1,4 @@
+pub mod block_api;
 pub mod hid;
 pub mod mass_storage;
 pub mod xhci;

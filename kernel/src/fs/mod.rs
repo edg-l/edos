@@ -366,6 +366,10 @@ pub(super) enum FsRequest {
     Unmount {
         mount_point: Path,
     },
+    // Dynamically register a partition (e.g. USB storage discovered after boot)
+    RegisterPartition {
+        partition: Partition,
+    },
     // Path-based routing (global namespace)
     PathRequest {
         path: Path,
@@ -692,6 +696,15 @@ pub extern "C" fn fs_main_thread() -> ! {
             match payload {
                 FsRequest::ListPartitions => {
                     req.reply(FsResponse::Partitions(partitions.clone()));
+                }
+                FsRequest::RegisterPartition { partition } => {
+                    log!(
+                        "fs: registered partition: {} (device {})",
+                        partition.name,
+                        partition.device_id
+                    );
+                    partitions.push(partition);
+                    req.reply(FsResponse::Ok(Ok(())));
                 }
                 FsRequest::ListMounts => {
                     let mounts = mount_points
