@@ -120,6 +120,37 @@ pub fn get_buttons() -> u8 {
     MOUSE_BUTTONS.load(Ordering::Relaxed)
 }
 
+/// Update the global mouse position and button state with relative deltas.
+///
+/// Clamps the resulting position to the screen bounds.  Returns a `MouseEvent`
+/// with the new absolute position and the supplied deltas / button state.
+///
+/// Called by external drivers (e.g. USB HID) that produce relative motion.
+pub fn apply_relative_move(dx: i16, dy: i16, buttons: u8, scroll: i8) -> MouseEvent {
+    let max_x = SCREEN_WIDTH.load(Ordering::Relaxed);
+    let max_y = SCREEN_HEIGHT.load(Ordering::Relaxed);
+
+    let old_x = MOUSE_POSITION.0.load(Ordering::Relaxed);
+    let old_y = MOUSE_POSITION.1.load(Ordering::Relaxed);
+
+    let new_x = (old_x + dx as i32).clamp(0, max_x - 1);
+    let new_y = (old_y + dy as i32).clamp(0, max_y - 1);
+
+    MOUSE_POSITION.0.store(new_x, Ordering::Relaxed);
+    MOUSE_POSITION.1.store(new_y, Ordering::Relaxed);
+    MOUSE_BUTTONS.store(buttons, Ordering::Relaxed);
+
+    MouseEvent {
+        x: new_x,
+        y: new_y,
+        dx,
+        dy,
+        buttons,
+        scroll,
+        _padding: [0; 2],
+    }
+}
+
 /// Initialize the mouse driver (early init, no thread context required)
 pub fn init() {
     // Initialize the scancode queue early so interrupt handler can use it

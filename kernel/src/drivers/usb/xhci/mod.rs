@@ -26,8 +26,8 @@ use crate::{
 use self::{
     device::{
         ConfigDescriptor, DESC_CONFIGURATION, DESC_DEVICE, DESC_ENDPOINT, DESC_INTERFACE,
-        DeviceDescriptor, EndpointDescriptor, HID_PROTOCOL_KEYBOARD, InterfaceDescriptor,
-        SetupPacket, USB_CLASS_HID, UsbDevice, UsbSpeed,
+        DeviceDescriptor, EndpointDescriptor, HID_PROTOCOL_KEYBOARD, HID_PROTOCOL_MOUSE,
+        InterfaceDescriptor, SetupPacket, USB_CLASS_HID, UsbDevice, UsbSpeed,
     },
     registers::{XhciRegisters, reg_read, reg_write},
     rings::{
@@ -874,6 +874,8 @@ pub extern "C" fn xhci_driver_main() -> ! {
 
     // keyboard_device holds the active HID keyboard device and its interrupt IN transfer ring.
     let mut keyboard_device: Option<(UsbDevice, TransferRing)> = None;
+    // mouse_device holds the active HID mouse device and its interrupt IN transfer ring.
+    let mut mouse_device: Option<(UsbDevice, TransferRing)> = None;
 
     // Scan all ports for already-connected devices.
     let max_ports = controller.regs.max_ports();
@@ -957,6 +959,45 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                     println!("xhci: configure endpoint failed: {:?}", e);
                                 }
                             }
+                            continue;
+                        }
+                    }
+
+                    // Check if this is a HID mouse and set it up (only use the first one found).
+                    if mouse_device.is_none() {
+                        let mouse_info = device.config_data.as_deref().and_then(find_hid_mouse);
+
+                        if let Some((iface, ep)) = mouse_info {
+                            println!("xhci: configuring HID mouse on slot {}", device.slot_id);
+
+                            // Switch to boot protocol (0 = boot, 1 = report)
+                            if let Err(e) = controller.set_hid_protocol(
+                                &mut device,
+                                iface.b_interface_number,
+                                0,
+                            ) {
+                                println!("xhci: set mouse boot protocol failed: {:?}", e);
+                            }
+
+                            // Copy packed fields before the mutable borrow
+                            let ep_addr = ep.b_endpoint_address;
+                            let ep_maxpkt = ep.w_max_packet_size;
+                            let ep_interval = ep.b_interval;
+
+                            // Configure the interrupt IN endpoint
+                            match controller.configure_interrupt_endpoint(
+                                &mut device,
+                                ep_addr,
+                                ep_maxpkt,
+                                ep_interval,
+                            ) {
+                                Ok(ring) => {
+                                    mouse_device = Some((device, ring));
+                                }
+                                Err(e) => {
+                                    println!("xhci: configure mouse endpoint failed: {:?}", e);
+                                }
+                            }
                         }
                     }
                 }
@@ -967,21 +1008,39 @@ pub extern "C" fn xhci_driver_main() -> ! {
 
     println!("xhci: initial enumeration complete");
 
-    // Allocate an 8-byte DMA buffer for keyboard HID reports and pre-fill the interrupt ring.
-    let report_buf = DmaBuffer::allocate_sized(8).expect("xhci: failed to allocate HID report buf");
-    let report_phys = report_buf.phys_addr().as_u64();
-    let mut prev_report = [0u8; 8];
+    // Allocate DMA buffers for HID reports and pre-fill the interrupt rings.
+    // Keyboard: 8-byte boot report; mouse: 4-byte boot report (3 bytes + wheel).
+    let kbd_report_buf =
+        DmaBuffer::allocate_sized(8).expect("xhci: failed to allocate keyboard HID report buf");
+    let kbd_report_phys = kbd_report_buf.phys_addr().as_u64();
+    let mut prev_kbd_report = [0u8; 8];
+
+    let mouse_report_buf =
+        DmaBuffer::allocate_sized(4).expect("xhci: failed to allocate mouse HID report buf");
+    let mouse_report_phys = mouse_report_buf.phys_addr().as_u64();
 
     if let Some((ref mut dev, ref mut ring)) = keyboard_device {
         let ep_dci = 3u32; // EP1 IN DCI = 1*2+1 = 3
         let trb = Trb {
-            parameter: report_phys,
+            parameter: kbd_report_phys,
             status: 8,
             control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
         };
         ring.push(trb);
         unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
         println!("xhci: HID keyboard interrupt transfer queued");
+    }
+
+    if let Some((ref mut dev, ref mut ring)) = mouse_device {
+        let ep_dci = 3u32; // EP1 IN DCI = 1*2+1 = 3
+        let trb = Trb {
+            parameter: mouse_report_phys,
+            status: 4,
+            control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
+        };
+        ring.push(trb);
+        unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
+        println!("xhci: HID mouse interrupt transfer queued");
     }
 
     // Main event loop: handle runtime events (hot-plug, transfer completions, etc.)
@@ -1001,38 +1060,77 @@ pub extern "C" fn xhci_driver_main() -> ! {
             match event.trb_type() {
                 TRB_TYPE_TRANSFER => {
                     let comp_code = ((event.status >> 24) & 0xFF) as u8;
+                    // Slot ID is in bits [31:24] of the event control field.
+                    let event_slot_id = ((event.control >> 24) & 0xFF) as u8;
+
                     if comp_code == COMP_SUCCESS || comp_code == COMP_SHORT_PACKET {
-                        // Read the 8-byte report from the DMA buffer
-                        let mut report = [0u8; 8];
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                report_buf.as_ptr(),
-                                report.as_mut_ptr(),
-                                8,
+                        // Determine which device this event belongs to by slot ID.
+                        let is_keyboard = keyboard_device
+                            .as_ref()
+                            .map_or(false, |(dev, _)| dev.slot_id == event_slot_id);
+                        let is_mouse = mouse_device
+                            .as_ref()
+                            .map_or(false, |(dev, _)| dev.slot_id == event_slot_id);
+
+                        if is_keyboard {
+                            // Read the 8-byte keyboard report from the DMA buffer
+                            let mut report = [0u8; 8];
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    kbd_report_buf.as_ptr(),
+                                    report.as_mut_ptr(),
+                                    8,
+                                );
+                            }
+
+                            let key_events = crate::drivers::usb::hid::process_boot_keyboard_report(
+                                &prev_kbd_report,
+                                &report,
                             );
-                        }
+                            if !key_events.is_empty() {
+                                crate::drivers::keyboard::KEY_EVENT_BROADCAST
+                                    .broadcast_many(&key_events);
+                            }
+                            prev_kbd_report = report;
 
-                        // Generate and broadcast key events
-                        let key_events = crate::drivers::usb::hid::process_boot_keyboard_report(
-                            &prev_report,
-                            &report,
-                        );
-                        if !key_events.is_empty() {
-                            crate::drivers::keyboard::KEY_EVENT_BROADCAST
-                                .broadcast_many(&key_events);
-                        }
-                        prev_report = report;
+                            // Resubmit the TRB to receive the next keyboard report
+                            if let Some((ref mut dev, ref mut ring)) = keyboard_device {
+                                let ep_dci = 3u32;
+                                let trb = Trb {
+                                    parameter: kbd_report_phys,
+                                    status: 8,
+                                    control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
+                                };
+                                ring.push(trb);
+                                unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
+                            }
+                        } else if is_mouse {
+                            // Read the 4-byte mouse report from the DMA buffer.
+                            // Use report_len = 4 to enable scroll wheel support.
+                            let mut report = [0u8; 4];
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    mouse_report_buf.as_ptr(),
+                                    report.as_mut_ptr(),
+                                    4,
+                                );
+                            }
 
-                        // Resubmit the TRB to receive the next report
-                        if let Some((ref mut dev, ref mut ring)) = keyboard_device {
-                            let ep_dci = 3u32;
-                            let trb = Trb {
-                                parameter: report_phys,
-                                status: 8,
-                                control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
-                            };
-                            ring.push(trb);
-                            unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
+                            crate::drivers::usb::hid::process_boot_mouse_report(&report, 4);
+
+                            // Resubmit the TRB to receive the next mouse report
+                            if let Some((ref mut dev, ref mut ring)) = mouse_device {
+                                let ep_dci = 3u32;
+                                let trb = Trb {
+                                    parameter: mouse_report_phys,
+                                    status: 4,
+                                    control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
+                                };
+                                ring.push(trb);
+                                unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
+                            }
+                        } else {
+                            println!("xhci: transfer event from unknown slot {}", event_slot_id);
                         }
                     } else {
                         println!("xhci: transfer error, completion code={}", comp_code);
@@ -1136,6 +1234,50 @@ fn find_hid_keyboard(config_data: &[u8]) -> Option<(InterfaceDescriptor, Endpoin
             };
             if iface.b_interface_class == USB_CLASS_HID
                 && iface.b_interface_protocol == HID_PROTOCOL_KEYBOARD
+            {
+                current_iface = Some(iface);
+            } else {
+                current_iface = None;
+            }
+        } else if desc_type == DESC_ENDPOINT && length >= 7 {
+            if let Some(iface) = current_iface {
+                let ep = unsafe {
+                    core::ptr::read(config_data[offset..].as_ptr() as *const EndpointDescriptor)
+                };
+                // Accept only IN interrupt endpoints
+                if ep.b_endpoint_address & 0x80 != 0 && ep.bm_attributes & 0x03 == 3 {
+                    return Some((iface, ep));
+                }
+            }
+        }
+
+        offset += length;
+    }
+    None
+}
+
+/// Search a configuration descriptor blob for a HID mouse interface and its interrupt IN endpoint.
+///
+/// Returns `(InterfaceDescriptor, EndpointDescriptor)` for the first matching pair found,
+/// or `None` if the config data contains no HID mouse.
+fn find_hid_mouse(config_data: &[u8]) -> Option<(InterfaceDescriptor, EndpointDescriptor)> {
+    let mut offset = 0;
+    let mut current_iface: Option<InterfaceDescriptor> = None;
+
+    while offset + 2 <= config_data.len() {
+        let length = config_data[offset] as usize;
+        let desc_type = config_data[offset + 1];
+
+        if length == 0 || offset + length > config_data.len() {
+            break;
+        }
+
+        if desc_type == DESC_INTERFACE && length >= 9 {
+            let iface = unsafe {
+                core::ptr::read(config_data[offset..].as_ptr() as *const InterfaceDescriptor)
+            };
+            if iface.b_interface_class == USB_CLASS_HID
+                && iface.b_interface_protocol == HID_PROTOCOL_MOUSE
             {
                 current_iface = Some(iface);
             } else {

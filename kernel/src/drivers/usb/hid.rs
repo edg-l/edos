@@ -1,6 +1,8 @@
 use alloc::vec::Vec;
 use pc_keyboard::{KeyCode, KeyEvent, KeyState};
 
+use crate::drivers::mouse::{MOUSE_BROADCAST, MouseEvent, apply_relative_move};
+
 /// Map USB HID keyboard usage code (page 0x07) to pc_keyboard::KeyCode.
 /// Returns None for unmapped/reserved codes.
 pub fn usb_hid_to_keycode(usage: u8) -> Option<KeyCode> {
@@ -174,4 +176,29 @@ pub fn process_boot_keyboard_report(prev: &[u8; 8], current: &[u8; 8]) -> Vec<Ke
     }
 
     events
+}
+
+/// Process a USB HID boot mouse report (3-4 bytes) and broadcast a `MouseEvent`.
+///
+/// Boot mouse report format:
+///   byte 0: button state (bit 0=left, bit 1=right, bit 2=middle)
+///   byte 1: X displacement (signed, relative)
+///   byte 2: Y displacement (signed, relative)
+///   byte 3: scroll wheel delta (signed, optional — present when report_len >= 4)
+///
+/// Returns `Some(MouseEvent)` if the report was valid and an event was broadcast,
+/// `None` if the report is too short to be useful.
+pub fn process_boot_mouse_report(report: &[u8], report_len: usize) -> Option<MouseEvent> {
+    if report_len < 3 {
+        return None;
+    }
+
+    let buttons = report[0] & 0x07;
+    let dx = report[1] as i8 as i16;
+    let dy = report[2] as i8 as i16;
+    let scroll = if report_len >= 4 { report[3] as i8 } else { 0 };
+
+    let event = apply_relative_move(dx, dy, buttons, scroll);
+    MOUSE_BROADCAST.broadcast(event);
+    Some(event)
 }
