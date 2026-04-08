@@ -974,6 +974,10 @@ impl XhciController {
                     if comp_code == COMP_SUCCESS || comp_code == COMP_SHORT_PACKET {
                         return Ok((length.saturating_sub(residual)) as usize);
                     }
+                    println!(
+                        "xhci: bulk_transfer error: comp_code={}, slot={}, ep_dci={}",
+                        comp_code, slot_id, ep_dci
+                    );
                     return Err(XhciError::TransferError(comp_code));
                 }
                 // Consume non-transfer events (port status changes, etc.)

@@ -19,9 +19,9 @@ use super::xhci::{XhciController, XhciError, rings::TransferRing};
 // ---------------------------------------------------------------------------
 
 /// Command Block Wrapper signature "USBC" in little-endian.
-const CBW_SIGNATURE: u32 = 0x43425355;
+const CBW_SIGNATURE: u32 = u32::from_le_bytes(*b"USBC");
 /// Command Status Wrapper signature "USBS" in little-endian.
-const CSW_SIGNATURE: u32 = 0x55534253;
+const CSW_SIGNATURE: u32 = u32::from_le_bytes(*b"USBS");
 
 // ---------------------------------------------------------------------------
 // BOT structures
@@ -430,9 +430,9 @@ pub fn register_usb_storage(
         inquiry_data,
     ));
 
-    let path = alloc::format!("/dev/usb{}", index);
+    let path = alloc::format!("/usb{}", index);
     match devfs::register_device_str(&path, node) {
-        Ok(()) => println!("usb-msc: registered {}", path),
-        Err(e) => println!("usb-msc: failed to register {}: {:?}", path, e),
+        Ok(()) => println!("usb-msc: registered /dev{}", path),
+        Err(e) => println!("usb-msc: failed to register /dev{}: {:?}", path, e),
     }
 }
