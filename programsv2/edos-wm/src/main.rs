@@ -24,7 +24,7 @@ use input::{InputAction, InputState};
 const MAX_WINDOWS: usize = 64;
 
 /// Target frame time (approximately 60 FPS).
-const FRAME_TIME_MS: u64 = 16;
+const FRAME_TIME_MS_DEFAULT: u64 = 16;
 
 /// Minimum window width in pixels.
 const MIN_WINDOW_WIDTH: u32 = 100;
@@ -366,6 +366,15 @@ fn main() {
         }
     };
 
+    // Derive frame time from display refresh rate (from EDID).
+    let frame_time_ms = if screen.info().refresh_rate > 0 {
+        1000 / screen.info().refresh_rate as u64
+    } else {
+        FRAME_TIME_MS_DEFAULT
+    };
+    let frame_time_ms = frame_time_ms.max(1);
+    eprintln!("wm: refresh={}Hz frame_time={}ms", screen.info().refresh_rate, frame_time_ms);
+
     // Initialize cursor
     let mut cursor = Cursor::new();
 
@@ -408,9 +417,23 @@ fn main() {
     let mut prev_cursor_x: i32 = 0;
     let mut prev_cursor_y: i32 = 0;
 
+    // FPS counter
+    let mut fps_frame_count: u32 = 0;
+    let mut fps_last_report = Instant::now();
+
     // Main compositor loop
     loop {
         let frame_start = Instant::now();
+
+        // FPS counter: report every 2 seconds
+        fps_frame_count += 1;
+        let fps_elapsed = fps_last_report.elapsed();
+        if fps_elapsed >= Duration::from_secs(2) {
+            let fps = fps_frame_count as f64 / fps_elapsed.as_secs_f64();
+            eprintln!("[wm] {:.1} fps", fps);
+            fps_frame_count = 0;
+            fps_last_report = frame_start;
+        }
         // Read mouse state
         let (mx, my, buttons) = input.read_mouse();
         cursor.set_position(mx, my);
@@ -599,7 +622,7 @@ fn main() {
         // Sleep remainder of frame budget to maintain frame rate.
         // Use a minimum sleep of 1ms to avoid sub-microsecond sleeps that
         // can interact badly with the scheduler.
-        let frame_target = Duration::from_millis(FRAME_TIME_MS);
+        let frame_target = Duration::from_millis(frame_time_ms);
         let elapsed = frame_start.elapsed();
         if elapsed < frame_target {
             let remaining = frame_target - elapsed;

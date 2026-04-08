@@ -50,6 +50,8 @@ pub struct FramebufferDraw {
 pub struct FramebufferInfo {
     pub width: u32,
     pub height: u32,
+    pub refresh_rate: u32,
+    pub _padding: u32,
 }
 
 #[repr(C)]
@@ -163,6 +165,7 @@ impl DevFsDevice for FramebufferDevice {
                 unsafe {
                     (*info_ptr).width = info.width as u32;
                     (*info_ptr).height = info.height as u32;
+                    (*info_ptr).refresh_rate = info.refresh_rate;
                 }
                 Ok(0)
             }

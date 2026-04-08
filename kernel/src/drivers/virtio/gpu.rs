@@ -11,6 +11,7 @@ const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
 const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
 const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+const VIRTIO_GPU_CMD_GET_EDID: u32 = 0x010a;
 
 // Cursor commands
 const VIRTIO_GPU_CMD_UPDATE_CURSOR: u32 = 0x0300;
@@ -20,6 +21,7 @@ const VIRTIO_GPU_CMD_MOVE_CURSOR: u32 = 0x0301;
 
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+const VIRTIO_GPU_RESP_OK_EDID: u32 = 0x1104;
 
 // -------- Pixel format --------
 
@@ -119,6 +121,23 @@ struct VirtioGpuResourceFlush {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+struct VirtioGpuCmdGetEdid {
+    hdr: VirtioGpuCtrlHdr,
+    scanout: u32,
+    padding: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct VirtioGpuRespEdid {
+    hdr: VirtioGpuCtrlHdr,
+    size: u32,
+    padding: u32,
+    edid: [u8; 1024],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 struct VirtioGpuCursorPos {
     scanout_id: u32,
     x: u32,
@@ -159,10 +178,11 @@ impl VirtioGpu {
         // Must acknowledge VIRTIO_F_VERSION_1 (bit 32) for modern devices.
         // Without it QEMU treats the driver as legacy and may not resolve
         // DMA addresses correctly in RESOURCE_ATTACH_BACKING.
+        const VIRTIO_GPU_F_EDID: u64 = 1 << 1;
         const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 
         let device_features = transport.read_device_features();
-        let driver_features = device_features & VIRTIO_F_VERSION_1;
+        let driver_features = device_features & (VIRTIO_F_VERSION_1 | VIRTIO_GPU_F_EDID);
         println!(
             "virtio-gpu: device features={:#x}, negotiating {:#x}",
             device_features, driver_features
@@ -340,6 +360,65 @@ impl VirtioGpu {
 
         println!("virtio-gpu: no enabled display, using 1280x800 fallback");
         (1280, 800)
+    }
+
+    /// Query the EDID data and extract the display refresh rate in Hz.
+    /// Returns None if EDID is not supported or the data can't be parsed.
+    pub fn get_refresh_rate(&mut self) -> Option<u32> {
+        let mut cmd: VirtioGpuCmdGetEdid = unsafe { core::mem::zeroed() };
+        cmd.hdr.type_ = VIRTIO_GPU_CMD_GET_EDID;
+        cmd.scanout = 0;
+
+        let cmd_size = core::mem::size_of::<VirtioGpuCmdGetEdid>();
+        let resp_size = core::mem::size_of::<VirtioGpuRespEdid>();
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &cmd as *const _ as *const u8,
+                self.scratch.as_ptr(),
+                cmd_size,
+            );
+        }
+
+        let resp_offset = (cmd_size + 7) & !7;
+        self.execute_scratch(cmd_size, resp_offset, resp_size);
+
+        let resp = unsafe {
+            core::ptr::read_volatile(
+                self.scratch.as_ptr().add(resp_offset) as *const VirtioGpuRespEdid
+            )
+        };
+
+        if resp.hdr.type_ != VIRTIO_GPU_RESP_OK_EDID || resp.size < 128 {
+            return None;
+        }
+
+        // Parse first Detailed Timing Descriptor at EDID byte 54.
+        // Pixel clock in 10 kHz units (bytes 54-55, little-endian).
+        let edid = &resp.edid;
+        let pixel_clock_10khz = (edid[55] as u32) << 8 | edid[54] as u32;
+        if pixel_clock_10khz == 0 {
+            return None;
+        }
+
+        // Horizontal: active + blanking
+        let h_active = ((edid[58] as u32 & 0xF0) << 4) | edid[56] as u32;
+        let h_blanking = ((edid[58] as u32 & 0x0F) << 8) | edid[57] as u32;
+        let h_total = h_active + h_blanking;
+
+        // Vertical: active + blanking
+        let v_active = ((edid[61] as u32 & 0xF0) << 4) | edid[59] as u32;
+        let v_blanking = ((edid[61] as u32 & 0x0F) << 8) | edid[60] as u32;
+        let v_total = v_active + v_blanking;
+
+        if h_total == 0 || v_total == 0 {
+            return None;
+        }
+
+        // refresh = pixel_clock / (h_total * v_total)
+        // pixel_clock is in 10 kHz = 10_000 Hz units
+        let refresh = (pixel_clock_10khz as u64 * 10_000) / (h_total as u64 * v_total as u64);
+        Some(refresh as u32)
     }
 
     /// Send RESOURCE_CREATE_2D + RESOURCE_ATTACH_BACKING for a single resource.

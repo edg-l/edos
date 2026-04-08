@@ -83,12 +83,17 @@ fn try_init_virtio_gpu() -> Option<Display> {
     } else {
         (1920, 1080)
     };
-    println!("virtio-gpu: {}x{}", width, height);
+    let refresh_rate = gpu.get_refresh_rate().unwrap_or(60);
+    println!("virtio-gpu: {}x{} @ {}Hz", width, height, refresh_rate);
 
     let dma_buf = gpu.setup_framebuffer(width, height);
 
     Some(Display::VirtioGpu(VirtioGpuDisplay::new(
-        gpu, dma_buf, width, height,
+        gpu,
+        dma_buf,
+        width,
+        height,
+        refresh_rate,
     )))
 }
 
@@ -174,6 +179,7 @@ pub struct VirtioGpuDisplay {
     phys_addr: u64,
     /// Size of the buffer in bytes (width * height * 4).
     buf_size: u64,
+    refresh_rate: u32,
     /// Keep ownership of the DMA buffer so it isn't dropped.
     _dma: crate::drivers::dma::DmaBuffer,
 }
@@ -186,6 +192,7 @@ impl VirtioGpuDisplay {
         dma: crate::drivers::dma::DmaBuffer,
         width: u32,
         height: u32,
+        refresh_rate: u32,
     ) -> Self {
         let pitch = width * 4;
         let buf_size = (height * pitch) as u64;
@@ -200,6 +207,7 @@ impl VirtioGpuDisplay {
             fb_base,
             phys_addr,
             buf_size,
+            refresh_rate,
             _dma: dma,
         }
     }
@@ -208,6 +216,7 @@ impl VirtioGpuDisplay {
         ScreenInfo {
             width: self.width as usize,
             height: self.height as usize,
+            refresh_rate: self.refresh_rate,
         }
     }
 
@@ -328,6 +337,7 @@ impl VirtioGpuDisplay {
 pub struct ScreenInfo {
     pub width: usize,
     pub height: usize,
+    pub refresh_rate: u32,
 }
 
 pub struct DirectFramebuffer {
@@ -472,6 +482,7 @@ impl DirectFramebuffer {
         ScreenInfo {
             width: self.width,
             height: self.height,
+            refresh_rate: 60,
         }
     }
 

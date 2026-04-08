@@ -104,6 +104,8 @@ struct FramebufferDraw {
 struct FramebufferInfo {
     width: u32,
     height: u32,
+    refresh_rate: u32,
+    _padding: u32,
 }
 
 #[repr(C)]
@@ -270,6 +272,7 @@ impl Framebuffer {
         Ok(ScreenInfo {
             width: info.width as usize,
             height: info.height as usize,
+            refresh_rate: info.refresh_rate,
         })
     }
 
@@ -1068,6 +1071,7 @@ impl BlendMode {
 pub struct ScreenInfo {
     pub width: usize,
     pub height: usize,
+    pub refresh_rate: u32,
 }
 
 #[derive(Debug, Clone)]
