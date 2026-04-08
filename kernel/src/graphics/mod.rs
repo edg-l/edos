@@ -134,6 +134,24 @@ impl Display {
             Display::VirtioGpu(vg) => vg.flip(),
         }
     }
+
+    pub fn set_cursor(&mut self, pixels: &[u32], hot_x: u32, hot_y: u32) {
+        match self {
+            Display::Vbe(_) => {} // VBE has no hardware cursor
+            Display::VirtioGpu(vg) => vg.gpu.setup_cursor(pixels, hot_x, hot_y),
+        }
+    }
+
+    pub fn move_cursor(&mut self, x: u32, y: u32) {
+        match self {
+            Display::Vbe(_) => {} // VBE has no hardware cursor
+            Display::VirtioGpu(vg) => vg.gpu.move_cursor(x, y),
+        }
+    }
+
+    pub fn has_hardware_cursor(&self) -> bool {
+        matches!(self, Display::VirtioGpu(_))
+    }
 }
 
 // -------- VirtioGpuDisplay --------
@@ -143,14 +161,12 @@ pub struct VirtioGpuDisplay {
     width: u32,
     height: u32,
     pitch: u32,
-    /// Base virtual pointer to the DMA buffer (covers both pages).
+    /// Virtual pointer to the single DMA backing buffer.
     fb_base: *mut u32,
     /// Physical address of the DMA buffer.
     phys_addr: u64,
-    /// Size of one page in bytes (width * height * 4).
-    page_size: u64,
-    /// Index of the current back buffer (0 or 1).
-    back_idx: usize,
+    /// Size of the buffer in bytes (width * height * 4).
+    buf_size: u64,
     /// Keep ownership of the DMA buffer so it isn't dropped.
     _dma: crate::drivers::dma::DmaBuffer,
 }
@@ -165,7 +181,7 @@ impl VirtioGpuDisplay {
         height: u32,
     ) -> Self {
         let pitch = width * 4;
-        let page_size = (height * pitch) as u64;
+        let buf_size = (height * pitch) as u64;
         let fb_base = dma.as_ptr() as *mut u32;
         let phys_addr = dma.phys_addr().as_u64();
 
@@ -176,8 +192,7 @@ impl VirtioGpuDisplay {
             pitch,
             fb_base,
             phys_addr,
-            page_size,
-            back_idx: 1, // draw into buffer 1, buffer 0 is the initial front
+            buf_size,
             _dma: dma,
         }
     }
@@ -190,22 +205,23 @@ impl VirtioGpuDisplay {
     }
 
     pub fn mmap_info(&self) -> FramebufferMmapInfo {
+        // Single buffer, no double buffering. Virtio-gpu copies via
+        // TRANSFER_TO_HOST_2D so there's no tearing from direct VRAM access.
         FramebufferMmapInfo {
             phys_addr: self.phys_addr,
-            total_size: self.page_size * 2,
-            page_size: self.page_size,
+            total_size: self.buf_size,
+            page_size: self.buf_size,
             width: self.width,
             height: self.height,
             pitch: self.pitch,
-            double_buffered: 1,
+            double_buffered: 0,
             is_identity: 1, // B8G8R8X8 = 0x00RRGGBB on little-endian x86
             _padding: [0; 2],
         }
     }
 
     pub fn draw(&mut self, src: &[u32], x: u64, y: u64, src_width: usize, src_height: usize) {
-        let page_offset_pixels = (self.back_idx as u64 * self.page_size / 4) as usize;
-        let fb = unsafe { self.fb_base.add(page_offset_pixels) };
+        let fb = self.fb_base;
         let pixels_per_row = (self.pitch / 4) as usize;
         let w = self.width as usize;
         let h = self.height as usize;
@@ -249,8 +265,7 @@ impl VirtioGpuDisplay {
             return;
         }
 
-        let page_offset_pixels = (self.back_idx as u64 * self.page_size / 4) as usize;
-        let fb = unsafe { self.fb_base.add(page_offset_pixels) };
+        let fb = self.fb_base;
         let pixels_per_row = (self.pitch / 4) as usize;
         let w = self.width as usize;
         let h = self.height as usize;
@@ -266,32 +281,33 @@ impl VirtioGpuDisplay {
 
         let row_len = end_x - start_x;
 
-        for dst_y in start_y..end_y {
-            let dst_start = dst_y * pixels_per_row + start_x;
+        // Fill first row, then memcpy to remaining rows.
+        let first_dst = start_y * pixels_per_row + start_x;
+        unsafe {
             for i in 0..row_len {
-                unsafe {
-                    core::ptr::write_volatile(fb.add(dst_start + i), color);
-                }
+                fb.add(first_dst + i).write(color);
+            }
+            for dst_y in (start_y + 1)..end_y {
+                let dst_start = dst_y * pixels_per_row + start_x;
+                core::ptr::copy_nonoverlapping(fb.add(first_dst), fb.add(dst_start), row_len);
             }
         }
     }
 
-    /// Flip: transfer the back buffer to the host, switch scanout, swap.
-    /// Returns the byte offset of the NEW back buffer.
+    /// Transfer the buffer to the host and flush to display.
+    /// Single resource, no double-buffer swap. Returns 0 (no page offset).
     pub fn flip(&mut self) -> u64 {
-        let resource_id = (self.back_idx as u32) + 1; // resource IDs are 1 and 2
-        // SET_SCANOUT must come before RESOURCE_FLUSH: QEMU only flushes
-        // resources whose scanout_bitmask includes the target scanout.
-        self.gpu
-            .set_scanout(0, resource_id, self.width, self.height);
-        self.gpu
-            .transfer_and_flush(resource_id, self.width, self.height);
-
-        // Swap front/back
-        self.back_idx = 1 - self.back_idx;
-
-        // Return byte offset of new back buffer within the mmap region.
-        (self.back_idx as u64) * self.page_size
+        use crate::drivers::virtio::gpu::VirtioGpuRect;
+        self.gpu.transfer_and_flush(
+            1,
+            VirtioGpuRect {
+                x: 0,
+                y: 0,
+                width: self.width,
+                height: self.height,
+            },
+        );
+        0
     }
 }
 

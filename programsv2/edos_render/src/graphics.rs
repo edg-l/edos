@@ -46,6 +46,8 @@ const FB_IOCTL_DRAW: u64 = 0x4642_0003;
 const FB_IOCTL_SCREEN_INFO: u64 = 0x4642_0004;
 const FB_IOCTL_FLIP: u64 = 0x4642_0005;
 const FB_IOCTL_MMAP_INFO: u64 = 0x4642_0006;
+const FB_IOCTL_SET_CURSOR: u64 = 0x4642_0007;
+const FB_IOCTL_MOVE_CURSOR: u64 = 0x4642_0008;
 
 const SYS_MMAP: u64 = 9;
 const PROT_READ: u32 = 0x1;
@@ -244,6 +246,66 @@ impl Framebuffer {
             width: info.width as usize,
             height: info.height as usize,
         })
+    }
+
+    /// Set the hardware cursor image. `pixels` is WxH ARGB values.
+    /// Returns true if the hardware cursor was set, false if unsupported.
+    pub fn set_cursor(&self, width: u32, height: u32, hot_x: u32, hot_y: u32, pixels: &[u32]) -> bool {
+        #[repr(C)]
+        struct SetCursorHeader {
+            width: u32,
+            height: u32,
+            hot_x: u32,
+            hot_y: u32,
+            pixel_count: u32,
+            _padding: u32,
+        }
+
+        let header = SetCursorHeader {
+            width,
+            height,
+            hot_x,
+            hot_y,
+            pixel_count: pixels.len() as u32,
+            _padding: 0,
+        };
+
+        // Build buffer: header + pixel data
+        let header_bytes = core::mem::size_of::<SetCursorHeader>();
+        let total = header_bytes + pixels.len() * 4;
+        let mut buf = vec![0u8; total];
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &header as *const _ as *const u8,
+                buf.as_mut_ptr(),
+                header_bytes,
+            );
+            core::ptr::copy_nonoverlapping(
+                pixels.as_ptr() as *const u8,
+                buf.as_mut_ptr().add(header_bytes),
+                pixels.len() * 4,
+            );
+        }
+
+        self.fd
+            .ioctl(FB_IOCTL_SET_CURSOR, buf.as_ptr() as u64, total, IOCTL_ARG_IN)
+            .is_ok()
+    }
+
+    /// Move the hardware cursor. Very cheap (no frame redraw needed).
+    pub fn move_cursor(&self, x: u32, y: u32) {
+        #[repr(C)]
+        struct MoveCursor {
+            x: u32,
+            y: u32,
+        }
+        let mut cmd = MoveCursor { x, y };
+        let _ = self.fd.ioctl(
+            FB_IOCTL_MOVE_CURSOR,
+            (&mut cmd as *mut MoveCursor) as u64,
+            core::mem::size_of::<MoveCursor>(),
+            IOCTL_ARG_IN,
+        );
     }
 
     /// Draw a raw pixel slice to the screen at (x, y) with dimensions (width, height).
@@ -1474,13 +1536,13 @@ impl Screen {
         let screen_h = self.info.height as u64;
 
         if let Some((pixels, stride)) = self.pixels_mut() {
-            let end_x = (x + width).min(screen_w);
-            let end_y = (y + height).min(screen_h);
+            let end_x = (x + width).min(screen_w) as usize;
+            let end_y = (y + height).min(screen_h) as usize;
+            let x = x as usize;
             let raw = color.raw();
-            for py in y..end_y {
-                for px in x..end_x {
-                    pixels[(py as usize) * stride + (px as usize)] = raw;
-                }
+            for py in y as usize..end_y {
+                let row_start = py * stride + x;
+                pixels[row_start..row_start + (end_x - x)].fill(raw);
             }
             self.dirty = true;
         }
@@ -1602,6 +1664,16 @@ impl Screen {
         if let Some(ref mut vram) = self.vram {
             vram.update_back_offset(offset);
         }
+    }
+
+    /// Set hardware cursor image. Returns true if supported.
+    pub fn set_cursor(&self, width: u32, height: u32, hot_x: u32, hot_y: u32, pixels: &[u32]) -> bool {
+        self.framebuffer.set_cursor(width, height, hot_x, hot_y, pixels)
+    }
+
+    /// Move hardware cursor position.
+    pub fn move_cursor(&self, x: u32, y: u32) {
+        self.framebuffer.move_cursor(x, y);
     }
 
     /// Create a new DrawRequest that fits entirely on screen

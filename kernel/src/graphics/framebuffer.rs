@@ -11,6 +11,8 @@ pub const FB_IOCTL_DRAW: u64 = 0x4642_0003;
 pub const FB_IOCTL_SCREEN_INFO: u64 = 0x4642_0004;
 pub const FB_IOCTL_FLIP: u64 = 0x4642_0005;
 pub const FB_IOCTL_MMAP_INFO: u64 = 0x4642_0006;
+pub const FB_IOCTL_SET_CURSOR: u64 = 0x4642_0007;
+pub const FB_IOCTL_MOVE_CURSOR: u64 = 0x4642_0008;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -52,6 +54,25 @@ pub struct FramebufferMmapInfo {
     pub double_buffered: u8,
     pub is_identity: u8,
     pub _padding: [u8; 2],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FramebufferSetCursor {
+    pub width: u32,
+    pub height: u32,
+    pub hot_x: u32,
+    pub hot_y: u32,
+    pub pixel_count: u32,
+    pub _padding: u32,
+    // Followed by pixel_count u32 pixels (ARGB)
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FramebufferMoveCursor {
+    pub x: u32,
+    pub y: u32,
 }
 
 pub struct FramebufferDevice;
@@ -149,6 +170,35 @@ impl DevFsDevice for FramebufferDevice {
                 unsafe {
                     *info_ptr = info;
                 }
+                Ok(0)
+            }
+            FB_IOCTL_SET_CURSOR => {
+                if arg == 0 {
+                    return Err(DevFsError::IoError);
+                }
+                let header = unsafe { *(arg as *const FramebufferSetCursor) };
+                let expected = (header.width * header.height) as u64;
+                if header.pixel_count as u64 != expected {
+                    return Err(DevFsError::IoError);
+                }
+                let data_ptr =
+                    unsafe { (arg as *const u8).add(core::mem::size_of::<FramebufferSetCursor>()) };
+                let pixels = unsafe {
+                    core::slice::from_raw_parts(data_ptr as *const u32, header.pixel_count as usize)
+                };
+                let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
+                display
+                    .lock()
+                    .set_cursor(pixels, header.hot_x, header.hot_y);
+                Ok(0)
+            }
+            FB_IOCTL_MOVE_CURSOR => {
+                if arg == 0 {
+                    return Err(DevFsError::IoError);
+                }
+                let pos = unsafe { *(arg as *const FramebufferMoveCursor) };
+                let display = DISPLAY.get().ok_or(DevFsError::IoError)?;
+                display.lock().move_cursor(pos.x, pos.y);
                 Ok(0)
             }
             _ => Err(DevFsError::Unsupported),

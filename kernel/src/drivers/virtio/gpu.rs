@@ -12,6 +12,10 @@ const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
 const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 
+// Cursor commands
+const VIRTIO_GPU_CMD_UPDATE_CURSOR: u32 = 0x0300;
+const VIRTIO_GPU_CMD_MOVE_CURSOR: u32 = 0x0301;
+
 // -------- Virtio GPU response types --------
 
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
@@ -19,6 +23,7 @@ const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 
 // -------- Pixel format --------
 
+const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
 
 // -------- GPU command/response structures --------
@@ -36,11 +41,11 @@ struct VirtioGpuCtrlHdr {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct VirtioGpuRect {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
+pub struct VirtioGpuRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[repr(C)]
@@ -112,13 +117,36 @@ struct VirtioGpuResourceFlush {
     padding: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct VirtioGpuCursorPos {
+    scanout_id: u32,
+    x: u32,
+    y: u32,
+    padding: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct VirtioGpuUpdateCursor {
+    hdr: VirtioGpuCtrlHdr,
+    pos: VirtioGpuCursorPos,
+    resource_id: u32,
+    hot_x: u32,
+    hot_y: u32,
+    padding: u32,
+}
+
 // -------- VirtioGpu driver --------
 
 pub struct VirtioGpu {
     transport: VirtioTransport,
     control_queue: Virtqueue,
+    cursor_queue: Virtqueue,
     /// Scratch DMA buffer for command/response pairs (4096 bytes).
     scratch: DmaBuffer,
+    /// Separate DMA buffer for cursor commands (no response needed, fire-and-forget).
+    cursor_scratch: DmaBuffer,
 }
 
 impl VirtioGpu {
@@ -158,18 +186,43 @@ impl VirtioGpu {
         control_queue.notify_off = transport.queue_notify_off();
         transport.enable_queue();
 
+        // Set up cursor queue (index 1).
+        transport.select_queue(1);
+        let cursor_max = transport.queue_size();
+        let cursor_size = cursor_max.min(16);
+        transport.set_queue_size(cursor_size);
+
+        let mut cursor_queue = Virtqueue::new(cursor_size)
+            .map_err(|_| "virtio-gpu: failed to allocate cursor queue")?;
+
+        transport.set_queue_desc(cursor_queue.desc_phys_addr());
+        transport.set_queue_avail(cursor_queue.avail_phys_addr());
+        transport.set_queue_used(cursor_queue.used_phys_addr());
+
+        cursor_queue.notify_off = transport.queue_notify_off();
+        transport.enable_queue();
+
         transport.set_driver_ok();
 
         let scratch = dma()
             .allocate_sized(4096)
             .map_err(|_| "virtio-gpu: failed to allocate scratch buffer")?;
 
-        println!("virtio-gpu: initialised, control queue size={}", size);
+        let cursor_scratch = dma()
+            .allocate_sized(4096)
+            .map_err(|_| "virtio-gpu: failed to allocate cursor scratch buffer")?;
+
+        println!(
+            "virtio-gpu: initialised, control queue size={}, cursor queue size={}",
+            size, cursor_size
+        );
 
         Ok(Self {
             transport,
             control_queue,
+            cursor_queue,
             scratch,
+            cursor_scratch,
         })
     }
 
@@ -301,11 +354,30 @@ impl VirtioGpu {
         backing_phys: u64,
         backing_len: u32,
     ) {
+        self.create_resource_with_format(
+            resource_id,
+            VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
+            width,
+            height,
+            backing_phys,
+            backing_len,
+        );
+    }
+
+    fn create_resource_with_format(
+        &mut self,
+        resource_id: u32,
+        format: u32,
+        width: u32,
+        height: u32,
+        backing_phys: u64,
+        backing_len: u32,
+    ) {
         // RESOURCE_CREATE_2D
         let mut create: VirtioGpuResourceCreate2d = unsafe { core::mem::zeroed() };
         create.hdr.type_ = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
         create.resource_id = resource_id;
-        create.format = VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM;
+        create.format = format;
         create.width = width;
         create.height = height;
 
@@ -367,86 +439,128 @@ impl VirtioGpu {
 
     /// Set up a double-buffered framebuffer at the given dimensions.
     ///
-    /// Allocates a single contiguous DMA buffer large enough for two full
-    /// pages (so userspace can mmap the whole region).  Creates two GPU
-    /// resources (IDs 1 and 2) backed by the first and second halves.
-    /// Resource 1 is set as the initial scanout.
+    /// Allocates a DMA buffer and creates a single GPU resource backed by it.
+    /// Sets the resource as the active scanout. No double-buffering at the
+    /// virtio level -- TRANSFER_TO_HOST_2D copies a snapshot so tearing is
+    /// not an issue.
     ///
     /// Returns the DMA buffer (caller keeps ownership).
     pub fn setup_framebuffer(&mut self, width: u32, height: u32) -> DmaBuffer {
-        let page_bytes = (width * height * 4) as usize;
-        let total_bytes = page_bytes * 2;
+        let buf_bytes = (width * height * 4) as usize;
 
-        let dma_buf = DmaBuffer::allocate_sized(total_bytes)
+        let dma_buf = DmaBuffer::allocate_sized(buf_bytes)
             .expect("virtio-gpu: failed to allocate framebuffer backing");
 
         let phys_base = dma_buf.phys_addr().as_u64();
-
-        // Resource 1 = first half, resource 2 = second half.
-        self.create_resource(1, width, height, phys_base, page_bytes as u32);
-        self.create_resource(
-            2,
-            width,
-            height,
-            phys_base + page_bytes as u64,
-            page_bytes as u32,
-        );
+        self.create_resource(1, width, height, phys_base, buf_bytes as u32);
 
         // Attach resource 1 to scanout 0.
-        let mut scanout: VirtioGpuSetScanout = unsafe { core::mem::zeroed() };
-        scanout.hdr.type_ = VIRTIO_GPU_CMD_SET_SCANOUT;
-        scanout.rect = VirtioGpuRect {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        };
-        scanout.scanout_id = 0;
-        scanout.resource_id = 1;
-
-        let resp = self.send_command(&scanout, core::mem::size_of::<VirtioGpuCtrlHdr>());
-        if resp.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-            println!("virtio-gpu: SET_SCANOUT failed: {:#x}", resp.type_);
-        }
+        self.set_scanout(0, 1, width, height);
 
         // Initial transfer + flush so the display shows something immediately.
-        self.transfer_and_flush(1, width, height);
-
-        println!(
-            "virtio-gpu: framebuffer ready ({}x{}, double-buffered)",
-            width, height
+        self.transfer_and_flush(
+            1,
+            VirtioGpuRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
         );
+
+        println!("virtio-gpu: framebuffer ready ({}x{})", width, height);
 
         dma_buf
     }
 
     /// Transfer pixel data from the backing buffer to the host and flush it to
-    /// the physical display.
-    pub fn transfer_and_flush(&mut self, resource_id: u32, width: u32, height: u32) {
-        // TRANSFER_TO_HOST_2D
+    /// the physical display.  Both commands are batched into a single virtqueue
+    /// notify + poll cycle (one KVM exit instead of two).
+    pub fn transfer_and_flush(&mut self, resource_id: u32, rect: VirtioGpuRect) {
+        let hdr_size = core::mem::size_of::<VirtioGpuCtrlHdr>();
+        let xfer_size = core::mem::size_of::<VirtioGpuTransferToHost2d>();
+        let flush_size = core::mem::size_of::<VirtioGpuResourceFlush>();
+
+        // Layout in scratch buffer:
+        //   [xfer cmd | xfer resp | flush cmd | flush resp]
+        let xfer_resp_off = (xfer_size + 7) & !7;
+        let flush_cmd_off = (xfer_resp_off + hdr_size + 7) & !7;
+        let flush_resp_off = (flush_cmd_off + flush_size + 7) & !7;
+
+        // Write TRANSFER_TO_HOST_2D command
         let mut xfer: VirtioGpuTransferToHost2d = unsafe { core::mem::zeroed() };
         xfer.hdr.type_ = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
-        xfer.rect = VirtioGpuRect {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        };
+        xfer.rect = rect;
         xfer.offset = 0;
         xfer.resource_id = resource_id;
-        self.send_command(&xfer, core::mem::size_of::<VirtioGpuCtrlHdr>());
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &xfer as *const _ as *const u8,
+                self.scratch.as_ptr(),
+                xfer_size,
+            );
+            // Zero response area
+            core::ptr::write_bytes(self.scratch.as_ptr().add(xfer_resp_off), 0, hdr_size);
+        }
 
-        // RESOURCE_FLUSH
+        // Write RESOURCE_FLUSH command
         let mut flush: VirtioGpuResourceFlush = unsafe { core::mem::zeroed() };
         flush.hdr.type_ = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
-        flush.rect = VirtioGpuRect {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        };
+        flush.rect = rect;
         flush.resource_id = resource_id;
-        self.send_command(&flush, core::mem::size_of::<VirtioGpuCtrlHdr>());
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &flush as *const _ as *const u8,
+                self.scratch.as_ptr().add(flush_cmd_off),
+                flush_size,
+            );
+            core::ptr::write_bytes(self.scratch.as_ptr().add(flush_resp_off), 0, hdr_size);
+        }
+
+        let scratch_phys = self.scratch.phys_addr().as_u64();
+
+        // Push both descriptor chains before notifying
+        let xfer_bufs = [
+            (scratch_phys, xfer_size as u32, 0u16),
+            (
+                scratch_phys + xfer_resp_off as u64,
+                hdr_size as u32,
+                VIRTQ_DESC_F_WRITE,
+            ),
+        ];
+        let flush_bufs = [
+            (scratch_phys + flush_cmd_off as u64, flush_size as u32, 0u16),
+            (
+                scratch_phys + flush_resp_off as u64,
+                hdr_size as u32,
+                VIRTQ_DESC_F_WRITE,
+            ),
+        ];
+
+        self.control_queue
+            .push(&xfer_bufs)
+            .expect("virtio-gpu: queue full");
+        self.control_queue
+            .push(&flush_bufs)
+            .expect("virtio-gpu: queue full");
+
+        // Single notify for both commands
+        let notify_off = self.control_queue.notify_off;
+        self.transport.notify_queue(0, notify_off);
+
+        // Poll for both completions
+        let mut completed = 0u32;
+        for _ in 0..10_000_000u32 {
+            if let Some((head, _)) = self.control_queue.poll_used() {
+                self.control_queue.reclaim(head);
+                completed += 1;
+                if completed == 2 {
+                    return;
+                }
+            }
+            core::hint::spin_loop();
+        }
+        panic!("virtio-gpu: batched command timeout");
     }
 
     /// Switch scanout to a different resource.
@@ -462,6 +576,126 @@ impl VirtioGpu {
         cmd.scanout_id = scanout_id;
         cmd.resource_id = resource_id;
         self.send_command(&cmd, core::mem::size_of::<VirtioGpuCtrlHdr>());
+    }
+
+    // ---- Hardware cursor ----
+
+    /// Set up a hardware cursor from a 64x64 RGBA pixel buffer.
+    /// `pixels` must be exactly 64*64 = 4096 u32 values.
+    /// The cursor image is uploaded via the control queue (requires fencing),
+    /// then UPDATE_CURSOR is sent on the cursor queue.
+    pub fn setup_cursor(&mut self, pixels: &[u32], hot_x: u32, hot_y: u32) {
+        // Create cursor resource (id=100 to avoid collision with framebuffer)
+        let cursor_res_id = 100u32;
+        let cursor_hw_size = 64u32;
+        let byte_len = (cursor_hw_size * cursor_hw_size * 4) as usize;
+
+        // Allocate DMA buffer for cursor pixel data
+        let cursor_buf = DmaBuffer::allocate_sized(byte_len)
+            .expect("virtio-gpu: failed to allocate cursor buffer");
+
+        // Copy pixel data into 64x64 buffer, adding alpha.
+        // Source pixels: 0x00000000 = transparent, 0x00RRGGBB = opaque.
+        unsafe {
+            core::ptr::write_bytes(cursor_buf.as_ptr(), 0, byte_len);
+            let dst = cursor_buf.as_ptr() as *mut u32;
+            let src_w = if pixels.len() == 256 { 16 } else { 64 };
+            let src_h = pixels.len() / src_w.max(1);
+            for y in 0..src_h.min(64) {
+                for x in 0..src_w.min(64) {
+                    let px = pixels[y * src_w + x];
+                    let argb = if px & 0x00FFFFFF != 0 {
+                        px | 0xFF000000
+                    } else {
+                        0
+                    };
+                    *dst.add(y * 64 + x) = argb;
+                }
+            }
+        }
+
+        // Use B8G8R8A8 format (1) for cursor to support alpha transparency.
+        self.create_resource_with_format(
+            cursor_res_id,
+            VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+            cursor_hw_size,
+            cursor_hw_size,
+            cursor_buf.phys_addr().as_u64(),
+            byte_len as u32,
+        );
+
+        // Transfer cursor to host (must use control queue with FENCE for cursor)
+        let mut xfer: VirtioGpuTransferToHost2d = unsafe { core::mem::zeroed() };
+        xfer.hdr.type_ = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
+        xfer.hdr.flags = 1; // VIRTIO_GPU_FLAG_FENCE
+        xfer.hdr.fence_id = 1;
+        xfer.rect = VirtioGpuRect {
+            x: 0,
+            y: 0,
+            width: cursor_hw_size,
+            height: cursor_hw_size,
+        };
+        xfer.resource_id = cursor_res_id;
+        self.send_command(&xfer, core::mem::size_of::<VirtioGpuCtrlHdr>());
+
+        // Send UPDATE_CURSOR on cursor queue
+        let mut cmd: VirtioGpuUpdateCursor = unsafe { core::mem::zeroed() };
+        cmd.hdr.type_ = VIRTIO_GPU_CMD_UPDATE_CURSOR;
+        cmd.pos = VirtioGpuCursorPos {
+            scanout_id: 0,
+            x: 0,
+            y: 0,
+            padding: 0,
+        };
+        cmd.resource_id = cursor_res_id;
+        cmd.hot_x = hot_x;
+        cmd.hot_y = hot_y;
+        self.send_cursor_command(&cmd);
+
+        // Keep the DMA buffer alive (cursor lives forever)
+        core::mem::forget(cursor_buf);
+
+        println!("virtio-gpu: hardware cursor set up");
+    }
+
+    /// Move the hardware cursor to (x, y). Fire-and-forget on the cursor queue.
+    pub fn move_cursor(&mut self, x: u32, y: u32) {
+        // Drain any completed cursor commands first
+        while let Some((head, _)) = self.cursor_queue.poll_used() {
+            self.cursor_queue.reclaim(head);
+        }
+
+        let mut cmd: VirtioGpuUpdateCursor = unsafe { core::mem::zeroed() };
+        cmd.hdr.type_ = VIRTIO_GPU_CMD_MOVE_CURSOR;
+        cmd.pos = VirtioGpuCursorPos {
+            scanout_id: 0,
+            x,
+            y,
+            padding: 0,
+        };
+        // resource_id must be non-zero or QEMU's GTK backend hides the cursor
+        // (dpy_mouse_set uses it as the "on" flag).
+        cmd.resource_id = 100; // must match the cursor resource id from setup_cursor
+        self.send_cursor_command(&cmd);
+    }
+
+    /// Send a command on the cursor queue (fire-and-forget, no response).
+    fn send_cursor_command(&mut self, cmd: &VirtioGpuUpdateCursor) {
+        let cmd_size = core::mem::size_of::<VirtioGpuUpdateCursor>();
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                cmd as *const _ as *const u8,
+                self.cursor_scratch.as_ptr(),
+                cmd_size,
+            );
+        }
+        let phys = self.cursor_scratch.phys_addr().as_u64();
+        // Cursor queue: single device-readable descriptor, no response descriptor.
+        let bufs = [(phys, cmd_size as u32, 0u16)];
+        if self.cursor_queue.push(&bufs).is_some() {
+            let notify_off = self.cursor_queue.notify_off;
+            self.transport.notify_queue(1, notify_off);
+        }
     }
 
     /// Access the underlying transport (e.g. to read the PCI address).

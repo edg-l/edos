@@ -108,6 +108,7 @@ pub fn composite(
     focused_id: Option<u64>,
     shm_cache: &mut ShmCache,
     hovered_close_window: Option<u64>,
+    hw_cursor: bool,
 ) {
     // Draw desktop background gradient
     edos_render::theme::draw_gradient_v_screen(
@@ -143,8 +144,10 @@ pub fn composite(
         }
     }
 
-    // Draw cursor on top
-    draw_cursor(screen, cursor);
+    // Draw cursor on top (skip if hardware cursor is active)
+    if !hw_cursor {
+        draw_cursor(screen, cursor);
+    }
 }
 
 /// Draw a single window with decorations directly to the screen buffer.

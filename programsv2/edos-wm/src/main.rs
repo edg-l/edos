@@ -369,6 +369,12 @@ fn main() {
     // Initialize cursor
     let mut cursor = Cursor::new();
 
+    // Hardware cursor (virtio-gpu cursorq) is supported but requires absolute
+    // input mode (usb-tablet) to work with QEMU's GTK backend. With PS/2
+    // relative mouse, GTK hides the GDK cursor during input grab. Disabled
+    // until we have a USB HID driver or virtio-input support.
+    let hw_cursor = false;
+
     // Window list buffer
     let mut entries = [WindowListEntry::default(); MAX_WINDOWS];
 
@@ -405,6 +411,11 @@ fn main() {
         // Read mouse state
         let (mx, my, buttons) = input.read_mouse();
         cursor.set_position(mx, my);
+
+        // Update hardware cursor position (very cheap, no frame redraw).
+        if hw_cursor {
+            screen.move_cursor(mx.max(0) as u32, my.max(0) as u32);
+        }
 
         // Get current window list from kernel
         let window_count = match window_list(&mut entries) {
@@ -541,6 +552,7 @@ fn main() {
             focused_window_id,
             &mut shm_cache,
             hovered_close_window,
+            hw_cursor,
         );
 
         // Send full back buffer to kernel framebuffer and flip.
