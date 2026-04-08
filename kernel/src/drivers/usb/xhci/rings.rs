@@ -30,7 +30,7 @@ impl Trb {
     }
 
     /// Enable Slot Command (type 9).
-    /// The assigned slot ID is returned in bits [31:24] of the completion event's status field.
+    /// The assigned slot ID is returned in bits [31:24] of the completion event's control field.
     pub fn enable_slot() -> Self {
         Self {
             parameter: 0,

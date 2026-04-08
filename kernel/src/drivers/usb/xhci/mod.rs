@@ -563,7 +563,8 @@ impl XhciController {
 
         // Step 1 — Enable Slot: ask the controller for a slot ID.
         let completion = self.submit_command(Trb::enable_slot())?;
-        let slot_id = ((completion.status >> 24) & 0xFF) as u8;
+        // Slot ID is in bits [31:24] of the completion event's *control* field
+        let slot_id = ((completion.control >> 24) & 0xFF) as u8;
 
         if slot_id == 0 {
             return Err(XhciError::SlotsFull);
