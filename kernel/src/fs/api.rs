@@ -1,15 +1,21 @@
 // Public api methods to send requests transparently
-#![expect(unused)]
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 use spin::Mutex;
 
 use crate::{
     fs::{
-        Error, FS_REQUESTS, File, FsRequest, FsResponse, MmapRegion, MountInfo, PathOp, PollState,
+        Error, FS_REQUESTS, File, FileAttrs, FileKind, FsRequest, FsResponse, MmapRegion,
+        MountInfo,
         gpt::{FilesystemType, Partition},
         handle::Pollable,
         path::Path,
+        vfs,
     },
     memory::mapper::MemoryManager,
 };
@@ -31,10 +37,7 @@ pub fn list_partitions() -> Vec<Partition> {
 }
 
 pub fn list_mounts() -> Vec<MountInfo> {
-    let FsResponse::Mounts(mounts) = send_request(FsRequest::ListMounts) else {
-        unreachable!()
-    };
-    mounts
+    vfs::list_mounts()
 }
 
 /// If the filesystem is backed by a device, ensure device_id and partition_index are valid.
@@ -72,131 +75,110 @@ pub fn register_partition(partition: Partition) -> Result<(), Error> {
     result
 }
 
-// Path-scoped APIs (resolve partition via mount table in FS main)
+// Path-scoped APIs (resolve filesystem via VFS)
 
 pub fn list_files(path: &Path) -> Result<Vec<File>, Error> {
-    let res = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::ListFiles,
-    });
-    let FsResponse::Files(r) = res else {
-        return Err(Error::IoError);
-    };
-    r
+    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    let mut files = fs.lock().list_files(&rel_path)?;
+
+    // Append synthetic directory entries for child mount points.
+    for (name, _mount_path) in vfs::child_mount_points(path) {
+        // Only add if not already present (the underlying FS might list the dir).
+        if !files.iter().any(|f| f.name == name) {
+            files.push(File {
+                name,
+                kind: FileKind::Directory,
+                size: 0,
+                attrs: FileAttrs {
+                    readonly: false,
+                    hidden: false,
+                    system: false,
+                    archive: false,
+                },
+                created: None,
+                accessed: None,
+                modified: None,
+            });
+        }
+    }
+
+    Ok(files)
 }
 
 pub fn read_bytes(path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
-    let FsResponse::ReadBytes(r) = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::ReadBytes { offset, count },
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    fs.lock().read_bytes(&rel_path, offset, count)
 }
 
 pub fn write_bytes(path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
-    let FsResponse::Written(r) = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::WriteBytes {
-            offset,
-            data: data.to_vec(),
-        },
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    fs.lock().write_bytes(&rel_path, offset, data)
 }
 
 /// Variant that takes ownership of the Vec to avoid an extra to_vec() copy.
 pub fn write_bytes_owned(path: &Path, offset: usize, data: Vec<u8>) -> Result<u64, Error> {
-    let FsResponse::Written(r) = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::WriteBytes { offset, data },
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    fs.lock().write_bytes(&rel_path, offset, &data)
 }
 
 pub fn create_file(path: &Path) -> Result<(), Error> {
-    let FsResponse::Ok(r) = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::CreateFile,
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    fs.lock().create_file(&rel_path)
 }
 
 pub fn create_dir(path: &Path) -> Result<(), Error> {
-    let FsResponse::Ok(r) = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::CreateDir,
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    fs.lock().create_dir(&rel_path)
 }
 
 pub fn remove_file(path: &Path) -> Result<(), Error> {
-    let FsResponse::Ok(r) = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::RemoveFile,
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    fs.lock().remove_file(&rel_path)
 }
 
 pub fn remove_dir(path: &Path) -> Result<(), Error> {
-    let FsResponse::Ok(r) = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::RemoveDir,
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    fs.lock().remove_dir(&rel_path)
 }
 
 pub fn file_info(path: &Path) -> Result<File, Error> {
-    let FsResponse::File(r) = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::FileInfo,
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    // If path is a mount point, resolve through the parent filesystem so we
+    // get back the directory entry for the mount root itself.
+    if vfs::is_mount_point(path) {
+        // Return a synthetic directory entry for the mount point root.
+        let name = path.last_component().unwrap_or("").to_string();
+        return Ok(File {
+            name,
+            kind: FileKind::Directory,
+            size: 0,
+            attrs: FileAttrs {
+                readonly: false,
+                hidden: false,
+                system: false,
+                archive: false,
+            },
+            created: None,
+            accessed: None,
+            modified: None,
+        });
+    }
+    let (fs, rel_path) = vfs::lookup_for_info(path).ok_or(Error::FileNotFound)?;
+    fs.lock().file_info(&rel_path)
 }
 
 pub fn flush(path: &Path) -> Result<(), Error> {
-    let FsResponse::Ok(r) = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::Flush,
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    let (fs, _rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    fs.lock().flush()
 }
 
 pub fn ioctl(path: &Path, request: u64, arg: u64) -> Result<u64, Error> {
-    let FsResponse::Ioctl(r) = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::Ioctl { request, arg },
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    fs.lock().ioctl(&rel_path, request, arg)
 }
 
 pub fn poll(path: &Path) -> Result<Box<dyn Pollable>, Error> {
-    let FsResponse::Poll(r) = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::Poll,
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    fs.lock().poll(&rel_path)
 }
 
 pub fn mmap(
@@ -205,37 +187,23 @@ pub fn mmap(
     length: usize,
     memory: Arc<Mutex<MemoryManager>>,
 ) -> Result<MmapRegion, Error> {
-    let FsResponse::Mmap(r) = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::Mmap {
-            offset,
-            length,
-            memory,
-        },
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    fs.lock().mmap(&rel_path, offset, length, memory)
 }
 
 pub fn truncate(path: &Path, size: u64) -> Result<(), Error> {
-    let FsResponse::Ok(r) = send_request(FsRequest::PathRequest {
-        path: path.clone(),
-        op: PathOp::Truncate { size },
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    fs.lock().truncate(&rel_path, size)
 }
 
 pub fn rename(old_path: &Path, new_path: &Path) -> Result<(), Error> {
-    let FsResponse::Ok(r) = send_request(FsRequest::PathRequest {
-        path: old_path.clone(),
-        op: PathOp::Rename {
-            new_path: new_path.clone(),
-        },
-    }) else {
-        return Err(Error::IoError);
-    };
-    r
+    let (old_fs, old_rel) = vfs::lookup(old_path).ok_or(Error::FileNotFound)?;
+    let (new_fs, new_rel) = vfs::lookup(new_path).ok_or(Error::FileNotFound)?;
+
+    // Both paths must resolve to the same filesystem instance (same Arc pointer).
+    if !Arc::ptr_eq(&old_fs, &new_fs) {
+        return Err(Error::Unsupported);
+    }
+
+    old_fs.lock().rename(&old_rel, &new_rel)
 }

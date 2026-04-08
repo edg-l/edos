@@ -1,14 +1,9 @@
 use core::num::NonZero;
 
-use alloc::vec;
 use alloc::vec::Vec;
 use lru::LruCache;
-use spin::Mutex;
 
-use crate::drivers::ahci::{
-    AhciError,
-    api::{flush_cache, read_sectors, write_sectors},
-};
+use crate::drivers::ahci::{AhciError, direct};
 
 const SECTOR_SIZE: usize = 512;
 
@@ -68,26 +63,33 @@ impl BlockDevice {
                 let run_count = (i - run_start + 1) as u16;
 
                 self.scratch.resize(run_count as usize * SECTOR_SIZE, 0);
-                let scratch = core::mem::take(&mut self.scratch);
 
-                let data = if self.is_usb_device() {
-                    crate::drivers::usb::block_api::usb_read_sectors(first_lba, run_count, scratch)
-                        .map_err(|_| AhciError::IoError)?
+                if self.is_usb_device() {
+                    let scratch = core::mem::take(&mut self.scratch);
+                    let data = crate::drivers::usb::block_api::usb_read_sectors(
+                        first_lba, run_count, scratch,
+                    )
+                    .map_err(|_| AhciError::IoError)?;
+                    for (j, (lba_j, idx)) in miss_ranges[run_start..=i].iter().enumerate() {
+                        let start = j * SECTOR_SIZE;
+                        buffer[*idx..*idx + SECTOR_SIZE]
+                            .copy_from_slice(&data[start..start + SECTOR_SIZE]);
+                        let mut sector = [0u8; SECTOR_SIZE];
+                        sector.copy_from_slice(&data[start..start + SECTOR_SIZE]);
+                        self.cache.put(*lba_j, sector);
+                    }
+                    self.scratch = data;
                 } else {
-                    read_sectors(self.device_id, first_lba, run_count, scratch)?
-                };
-
-                for (j, (lba_j, idx)) in miss_ranges[run_start..=i].iter().enumerate() {
-                    let start = j * SECTOR_SIZE;
-                    buffer[*idx..*idx + SECTOR_SIZE]
-                        .copy_from_slice(&data[start..start + SECTOR_SIZE]);
-
-                    let mut sector = [0u8; SECTOR_SIZE];
-                    sector.copy_from_slice(&data[start..start + SECTOR_SIZE]);
-                    self.cache.put(*lba_j, sector);
+                    direct::read_sectors(self.device_id, first_lba, run_count, &mut self.scratch)?;
+                    for (j, (lba_j, idx)) in miss_ranges[run_start..=i].iter().enumerate() {
+                        let start = j * SECTOR_SIZE;
+                        buffer[*idx..*idx + SECTOR_SIZE]
+                            .copy_from_slice(&self.scratch[start..start + SECTOR_SIZE]);
+                        let mut sector = [0u8; SECTOR_SIZE];
+                        sector.copy_from_slice(&self.scratch[start..start + SECTOR_SIZE]);
+                        self.cache.put(*lba_j, sector);
+                    }
                 }
-
-                self.scratch = data;
                 i += 1;
             }
         }
@@ -112,17 +114,16 @@ impl BlockDevice {
             }
         }
 
-        let mut tmp = core::mem::take(&mut self.scratch);
-        core::mem::swap(&mut tmp, &mut data);
-
-        let out = if self.is_usb_device() {
-            crate::drivers::usb::block_api::usb_write_sectors(lba, sectors, tmp)
-                .map_err(|_| AhciError::IoError)?
+        if self.is_usb_device() {
+            let mut tmp = core::mem::take(&mut self.scratch);
+            core::mem::swap(&mut tmp, &mut data);
+            let out = crate::drivers::usb::block_api::usb_write_sectors(lba, sectors, tmp)
+                .map_err(|_| AhciError::IoError)?;
+            self.scratch = out; // reclaim backend buffer
         } else {
-            write_sectors(self.device_id, lba, tmp, sectors)?
-        };
+            direct::write_sectors(self.device_id, lba, &data, sectors)?;
+        }
 
-        self.scratch = out; // reclaim backend buffer
         Ok(data) // caller gets their Vec back
     }
 
@@ -131,6 +132,6 @@ impl BlockDevice {
             // USB mass storage has no flush command; treat as a no-op.
             return Ok(());
         }
-        flush_cache(self.device_id)
+        direct::flush_cache(self.device_id)
     }
 }

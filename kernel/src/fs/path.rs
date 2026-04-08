@@ -131,6 +131,16 @@ impl Path {
 
         stripped.components.len() == 1
     }
+
+    /// Return the number of path components.
+    pub fn component_count(&self) -> usize {
+        self.components.len()
+    }
+
+    /// Return the last path component as a string slice, or None for root.
+    pub fn last_component(&self) -> Option<&str> {
+        self.components.last().map(|s| s.as_str())
+    }
 }
 
 impl fmt::Display for Path {

@@ -31,6 +31,7 @@ use crate::{
 
 pub mod api;
 pub mod controller;
+pub mod direct;
 
 pub mod fis;
 pub mod port;
@@ -199,6 +200,30 @@ pub extern "C" fn ahci_driver_main() -> ! {
         device_mailboxes.push(Arc::new(Mailbox::new()));
     }
 
+    // Initialize the direct-access layer with a flat port array and mapping.
+    {
+        let mut direct_ports: Vec<Arc<Mutex<AhciPort>>> =
+            Vec::with_capacity(detected_devices.len());
+        let mut port_mapping: Vec<(usize, usize, u64)> = Vec::with_capacity(detected_devices.len());
+
+        for device in &detected_devices {
+            let controller_idx = controllers
+                .iter()
+                .position(|c| c.pci_device.address == device.controller_pci_address)
+                .expect("device refers to unknown controller");
+            let port = controllers[controller_idx]
+                .ports
+                .get(device.port_idx)
+                .and_then(|p| p.clone())
+                .expect("device port not found in controller");
+            direct_ports.push(port);
+            port_mapping.push((controller_idx, device.port_idx, device.id));
+        }
+
+        direct::init(direct_ports);
+        direct::set_port_mapping(port_mapping);
+    }
+
     // The AHCI main thread job is to route requests to ports.
 
     loop {
@@ -236,6 +261,11 @@ pub extern "C" fn ahci_driver_main() -> ! {
                     }) {
                         if let Some(worker_tid) = port_map_reverse.get(&device.id) {
                             sched().wake_thread(*worker_tid, WakePriority::Interrupt);
+                        }
+                        // Also wake any thread blocked in direct::read_sectors / write_sectors.
+                        let waiter_tid = direct::get_waiter(device.id);
+                        if waiter_tid != 0 {
+                            sched().wake_thread(ThreadId(waiter_tid), WakePriority::Interrupt);
                         }
                     }
                 }
