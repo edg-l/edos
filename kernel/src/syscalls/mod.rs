@@ -1050,6 +1050,19 @@ fn do_spawn(
 
     let elf_data = file_data;
 
+    // Clone parent FD entries while interrupts are still enabled (BlockingMutex
+    // requires interrupts for contention handling). We cache these before
+    // disabling interrupts for page table switching below.
+    let parent_stdin = {
+        let fd_table = info.lock().fd_table.clone();
+        let fds = fd_table.lock();
+        (
+            fds.get_fd(stdin_fd).cloned(),
+            fds.get_fd(stdout_fd).cloned(),
+            fds.get_fd(stderr_fd).cloned(),
+        )
+    };
+
     x86_64::instructions::interrupts::disable();
 
     let cr3 = Cr3::read();
@@ -1079,31 +1092,26 @@ fn do_spawn(
         }
     };
 
-    // Set up file descriptor redirections for stdin/stdout/stderr
+    // Set up file descriptor redirections for stdin/stdout/stderr.
+    // Uses parent FD entries cloned before interrupts were disabled.
     {
         let child_info = get_thread_info_by_id(user_thread.id).unwrap();
         let user_thread_info = child_info.lock();
+        let (stdin_desc, stdout_desc, stderr_desc) = parent_stdin;
 
-        // Copy parent's file descriptors to child's standard streams.
-        // Always copy so the child inherits the parent's PTY/pipe fds.
-        // Use `info` (captured before interrupts were enabled) rather than
-        // sched.current_thread_info(), since the thread may have migrated CPUs.
-        let parent_fd_table = info.lock().fd_table.clone();
-        let parent_fds = parent_fd_table.lock();
-
-        if let Some(stdin_desc) = parent_fds.get_fd(stdin_fd).cloned() {
-            stdin_desc.inc_refcount();
-            user_thread_info.fd_table.lock().insert_fd(0, stdin_desc);
+        if let Some(desc) = stdin_desc {
+            desc.inc_refcount();
+            user_thread_info.fd_table.lock().insert_fd(0, desc);
         }
 
-        if let Some(stdout_desc) = parent_fds.get_fd(stdout_fd).cloned() {
-            stdout_desc.inc_refcount();
-            user_thread_info.fd_table.lock().insert_fd(1, stdout_desc);
+        if let Some(desc) = stdout_desc {
+            desc.inc_refcount();
+            user_thread_info.fd_table.lock().insert_fd(1, desc);
         }
 
-        if let Some(stderr_desc) = parent_fds.get_fd(stderr_fd).cloned() {
-            stderr_desc.inc_refcount();
-            user_thread_info.fd_table.lock().insert_fd(2, stderr_desc);
+        if let Some(desc) = stderr_desc {
+            desc.inc_refcount();
+            user_thread_info.fd_table.lock().insert_fd(2, desc);
         }
     }
 
