@@ -357,6 +357,7 @@ impl VirtioGpu {
     ///
     /// Returns `(width, height)` of the first enabled scanout, or a 1280x800
     /// fallback if none is reported.
+    #[expect(unused)]
     pub fn get_display_info(&mut self) -> (u32, u32) {
         let mut hdr: VirtioGpuCtrlHdr = unsafe { core::mem::zeroed() };
         hdr.type_ = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
@@ -919,6 +920,7 @@ impl VirtioGpu {
     }
 
     /// Access the underlying transport (e.g. to read the PCI address).
+    #[expect(unused)]
     pub fn transport(&self) -> &VirtioTransport {
         &self.transport
     }

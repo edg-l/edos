@@ -68,6 +68,7 @@ pub fn pci_read_u8(addr: PciAddress, offset: u8) -> u8 {
     (pci_read_u32(addr, offset) >> shift) as u8
 }
 
+#[expect(unused)]
 pub fn pci_write_u8(addr: PciAddress, offset: u8, value: u8) {
     let _guard = PCI_CONFIG_LOCK.lock();
     let mut cfg_addr: Port<u32> = Port::new(0xCF8);

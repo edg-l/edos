@@ -278,7 +278,14 @@ impl Framebuffer {
 
     /// Set the hardware cursor image. `pixels` is WxH ARGB values.
     /// Returns true if the hardware cursor was set, false if unsupported.
-    pub fn set_cursor(&self, width: u32, height: u32, hot_x: u32, hot_y: u32, pixels: &[u32]) -> bool {
+    pub fn set_cursor(
+        &self,
+        width: u32,
+        height: u32,
+        hot_x: u32,
+        hot_y: u32,
+        pixels: &[u32],
+    ) -> bool {
         #[repr(C)]
         struct SetCursorHeader {
             width: u32,
@@ -316,7 +323,12 @@ impl Framebuffer {
         }
 
         self.fd
-            .ioctl(FB_IOCTL_SET_CURSOR, buf.as_ptr() as u64, total, IOCTL_ARG_IN)
+            .ioctl(
+                FB_IOCTL_SET_CURSOR,
+                buf.as_ptr() as u64,
+                total,
+                IOCTL_ARG_IN,
+            )
             .is_ok()
     }
 
@@ -1703,8 +1715,16 @@ impl Screen {
     }
 
     /// Set hardware cursor image. Returns true if supported.
-    pub fn set_cursor(&self, width: u32, height: u32, hot_x: u32, hot_y: u32, pixels: &[u32]) -> bool {
-        self.framebuffer.set_cursor(width, height, hot_x, hot_y, pixels)
+    pub fn set_cursor(
+        &self,
+        width: u32,
+        height: u32,
+        hot_x: u32,
+        hot_y: u32,
+        pixels: &[u32],
+    ) -> bool {
+        self.framebuffer
+            .set_cursor(width, height, hot_x, hot_y, pixels)
     }
 
     /// Move hardware cursor position.

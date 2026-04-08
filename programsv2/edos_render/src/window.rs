@@ -298,11 +298,7 @@ pub fn window_poll(id: WindowId, events: &mut [WindowEvent]) -> Result<usize, i6
 /// The WM reads this flag via window_list and only redraws damaged windows.
 pub fn window_damage(id: WindowId) -> Result<(), i64> {
     let result = unsafe { syscall1(SYS_WINDOW_DAMAGE, id) };
-    if is_error(result) {
-        Err(-1)
-    } else {
-        Ok(())
-    }
+    if is_error(result) { Err(-1) } else { Ok(()) }
 }
 
 /// List all windows.

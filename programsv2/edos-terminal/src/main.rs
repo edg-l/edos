@@ -73,12 +73,8 @@ fn main() {
     // Event buffer
     let mut events = [WindowEvent::default(); 16];
 
-    let mut term_frame: u64 = 0;
-
     // Main loop
     loop {
-        term_frame += 1;
-
         // Poll window events
         if let Ok(count) = window.poll_events(&mut events) {
             for event in &events[..count] {

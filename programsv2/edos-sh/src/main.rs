@@ -337,7 +337,7 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
     let prompt_len = prompt.len(); // approximate (ANSI codes make this inaccurate but OK)
 
     loop {
-        let poll_ready = poll_stdin(100);
+        let _poll_ready = poll_stdin(100);
         let n = sys_read(0, &mut buf);
 
         if n < 0 {

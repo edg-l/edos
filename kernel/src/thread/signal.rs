@@ -1,13 +1,17 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 // Signal numbers
+#[expect(unused)]
 pub const SIGHUP: u32 = 1;
 pub const SIGINT: u32 = 2;
 pub const SIGKILL: u32 = 9;
+#[expect(unused)]
 pub const SIGPIPE: u32 = 13;
+#[expect(unused)]
 pub const SIGTERM: u32 = 15;
 pub const SIGCHLD: u32 = 17;
 
+#[expect(unused)]
 pub const SIG_DFL: u32 = 0;
 pub const SIG_IGN: u32 = 1;
 
@@ -44,6 +48,7 @@ impl SignalState {
     }
 
     /// Check if any signal is pending.
+    #[expect(unused)]
     pub fn has_pending(&self) -> bool {
         self.pending.load(Ordering::Acquire) != 0
     }
@@ -73,6 +78,7 @@ impl SignalState {
     }
 
     /// Check if a specific signal is pending.
+    #[expect(unused)]
     pub fn is_pending(&self, signum: u32) -> bool {
         if signum == 0 || signum >= 32 {
             return false;
@@ -81,6 +87,7 @@ impl SignalState {
     }
 
     /// Clear a specific pending signal.
+    #[expect(unused)]
     pub fn clear(&self, signum: u32) {
         if signum == 0 || signum >= 32 {
             return;

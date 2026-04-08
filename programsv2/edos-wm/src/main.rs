@@ -255,8 +255,6 @@ fn handle_resize(resize_state: &mut Option<ResizeState>, mx: i32, my: i32, left_
     }
 
     let win_id = resize.window_id;
-    let region = resize.region;
-
     if left_held {
         let _ = window_set(win_id, property::X, new_x as i64 as u64);
         let _ = window_set(win_id, property::Y, new_y as i64 as u64);
@@ -373,7 +371,11 @@ fn main() {
         FRAME_TIME_MS_DEFAULT
     };
     let frame_time_ms = frame_time_ms.max(1);
-    eprintln!("wm: refresh={}Hz frame_time={}ms", screen.info().refresh_rate, frame_time_ms);
+    eprintln!(
+        "wm: refresh={}Hz frame_time={}ms",
+        screen.info().refresh_rate,
+        frame_time_ms
+    );
 
     // Initialize cursor
     let mut cursor = Cursor::new();
@@ -393,7 +395,7 @@ fn main() {
     // Interaction state
     let mut drag_state: Option<DragState> = None;
     let mut resize_state: Option<ResizeState> = None;
-    let mut hovered_close_window: Option<u64> = None;
+    let mut hovered_close_window: Option<u64>;
 
     // Shared memory mapping cache
     let mut shm_cache = ShmCache::new();
@@ -606,16 +608,8 @@ fn main() {
         if dirty.full_screen {
             screen.flip();
         } else if let Some(bounds) = dirty.merged_bounds() {
-            if let Some(clipped) = bounds.clipped(
-                screen.width() as u32,
-                screen.height() as u32,
-            ) {
-                screen.flip_rect(
-                    clipped.x as u32,
-                    clipped.y as u32,
-                    clipped.w,
-                    clipped.h,
-                );
+            if let Some(clipped) = bounds.clipped(screen.width() as u32, screen.height() as u32) {
+                screen.flip_rect(clipped.x as u32, clipped.y as u32, clipped.w, clipped.h);
             }
         }
         dirty.clear();

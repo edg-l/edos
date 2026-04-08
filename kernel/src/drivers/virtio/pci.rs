@@ -5,7 +5,7 @@ use x86_64::{
 
 use crate::{
     drivers::pci::{
-        config::{pci_read_u8, pci_read_u16, pci_read_u32, pci_write_u16, pci_write_u32},
+        config::{pci_read_u8, pci_read_u16, pci_read_u32, pci_write_u16},
         structures::{PciAddress, PciDevice},
     },
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
@@ -146,6 +146,7 @@ pub struct VirtioTransport {
     common_cfg: *mut u8,
     notify_base: *mut u8,
     notify_off_multiplier: u32,
+    #[expect(unused)]
     isr: *mut u8,
     device_cfg: *mut u8,
 }
@@ -328,6 +329,7 @@ impl VirtioTransport {
         }
     }
 
+    #[expect(unused)]
     pub fn num_queues(&self) -> u16 {
         unsafe { core::ptr::read_volatile(self.common_cfg.add(COMMON_NUM_QUEUES) as *const u16) }
     }
@@ -343,6 +345,7 @@ impl VirtioTransport {
         }
     }
 
+    #[expect(unused)]
     pub fn device_cfg_ptr(&self) -> *mut u8 {
         self.device_cfg
     }
@@ -373,6 +376,7 @@ impl VirtioTransport {
         self.set_status_bit(VIRTIO_STATUS_DRIVER_OK);
     }
 
+    #[expect(unused)]
     pub fn pci_addr(&self) -> PciAddress {
         self.pci_addr
     }

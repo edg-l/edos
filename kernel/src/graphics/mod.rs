@@ -161,6 +161,7 @@ impl Display {
         }
     }
 
+    #[expect(unused)]
     pub fn has_hardware_cursor(&self) -> bool {
         matches!(self, Display::VirtioGpu(_))
     }

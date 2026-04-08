@@ -71,6 +71,7 @@ impl DirtyRegion {
     }
 
     /// Returns true if there are no dirty regions.
+    #[allow(unused)]
     pub fn is_empty(&self) -> bool {
         !self.full_screen && self.count == 0
     }
