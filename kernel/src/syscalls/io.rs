@@ -8,6 +8,7 @@ use x86_64::instructions::interrupts;
 
 use crate::fs::handle::{PollEntry, PollKey, Pollable};
 use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
+use crate::net::socket::PollableSocket;
 use crate::thread::pipe::PollablePipe;
 use crate::thread::poll::PollWaiter;
 use crate::thread::pty::{PollablePtyMaster, PollablePtySlave};
@@ -341,9 +342,10 @@ pub fn sys_close(fd: u64) -> i32 {
             let mut s = sock.lock();
             s.refcount = s.refcount.saturating_sub(1);
             if s.refcount > 0 {
-                return 0; // Other fds still reference this socket
+                return 0;
             }
             s.closed = true;
+            let notif = s.notify_pollers();
             s.rx_wq.wake_all();
             if let Some(addr) = s.local_addr {
                 let proto = if s.sock_type == crate::net::socket::SOCK_DGRAM {
@@ -357,6 +359,7 @@ pub fn sys_close(fd: u64) -> i32 {
             }
             let tcp_conn = s.tcp_conn.clone();
             drop(s);
+            notif.flush();
             // For TCP sockets, send FIN to initiate graceful close
             if let Some(conn) = tcp_conn {
                 let fin = conn.lock().build_fin();
@@ -1050,36 +1053,17 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                 });
             }
             Some(FileDescriptor::Socket(sock)) => {
-                use crate::net::socket::SOCK_STREAM;
-                use crate::net::tcp::TcpState;
-
-                let s = sock.lock();
-                let entry = &mut fds[idx];
-                if s.sock_type == SOCK_STREAM {
-                    // TCP: check connection rx_buffer and EOF states
-                    if let Some(ref conn) = s.tcp_conn {
-                        let c = conn.lock();
-                        if !c.rx_buffer.is_empty()
-                            || c.state == TcpState::CloseWait
-                            || c.state == TcpState::Closed
-                            || c.state == TcpState::TimeWait
-                        {
-                            entry.result.readable = true;
-                        }
-                    }
-                } else {
-                    // UDP: check rx_queue
-                    if !s.rx_queue.is_empty() {
-                        entry.result.readable = true;
-                    }
-                }
-                entry.result.writable = true;
-                if s.closed {
-                    entry.result.hangup = true;
-                }
-                if entry.result.matches(interests) {
-                    base_ready += 1;
-                }
+                let pollable: Box<dyn Pollable> = Box::new(PollableSocket::new(sock.clone()));
+                let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
+                let registration = pollable.register(poll_entry.clone());
+                fds[idx].result = registration.initial;
+                contexts.push(PollContext {
+                    index: idx,
+                    interests,
+                    pollable,
+                    entry: poll_entry,
+                    key: registration.key,
+                });
             }
             Some(FileDescriptor::FsFile(file)) => match fs_api::poll(&file.path) {
                 Ok(pollable) => {

@@ -6,6 +6,7 @@ use crate::{drivers::e1000e::E1000e, log, thread::waitqueue::WaitQueue, timer::I
 
 use super::arp::ArpCache;
 use super::fragment::ReassemblyTable;
+use super::socket::SocketNotifications;
 use super::tcp::TcpConnection;
 use super::{arp, ethernet, icmp, ipv4, socket, tcp, udp};
 use socket::SocketAddr;
@@ -39,6 +40,8 @@ pub struct NetStack {
     loopback_queue: Vec<Vec<u8>>,
     /// True while we are draining the loopback queue (prevents nested drain).
     draining_loopback: bool,
+    /// Socket poll notifications accumulated during handle_rx, flushed after dropping lock.
+    pub pending_socket_notifs: Vec<SocketNotifications>,
 }
 
 impl NetStack {
@@ -55,6 +58,7 @@ impl NetStack {
             reassembly: ReassemblyTable::new(),
             loopback_queue: Vec::new(),
             draining_loopback: false,
+            pending_socket_notifs: Vec::new(),
         }
     }
 
@@ -132,9 +136,13 @@ impl NetStack {
         };
 
         const MAX_UDP_RX_QUEUE: usize = 128;
-        let port_table = socket::port_table().lock();
-        if let Some(sock) = port_table.get(&(17, udp_hdr.dst_port)) {
-            let mut s = sock.lock();
+        let sock_arc = {
+            let port_table = socket::port_table().lock();
+            port_table.get(&(17, udp_hdr.dst_port)).cloned()
+        };
+
+        if let Some(sock_arc) = sock_arc {
+            let mut s = sock_arc.lock();
             if !s.closed {
                 if s.rx_queue.len() >= MAX_UDP_RX_QUEUE {
                     return; // Drop packet: queue full
@@ -144,7 +152,11 @@ impl NetStack {
                     port: udp_hdr.src_port,
                 };
                 s.rx_queue.push_back((payload.to_vec(), src));
-                s.rx_wq.wake_one();
+                let wq = s.rx_wq.clone();
+                let notif = s.notify_pollers();
+                drop(s);
+                self.pending_socket_notifs.push(notif);
+                wq.wake_one();
             }
         } else {
             log!(
@@ -181,6 +193,19 @@ impl NetStack {
                 let _ = self.send_ip(remote.ip, ipv4::IpProtocol::Tcp, &seg);
             }
 
+            // Notify the owning socket's pollers after every handle_segment.
+            // This covers: data arrival, FIN (CloseWait), RST (Closed), state transitions.
+            {
+                let c = conn.lock();
+                if let Some(ref owner_weak) = c.owner {
+                    if let Some(owner) = owner_weak.upgrade() {
+                        drop(c);
+                        let notif = owner.lock().notify_pollers();
+                        self.pending_socket_notifs.push(notif);
+                    }
+                }
+            }
+
             // If this connection just became Established (passive open), update the
             // queued socket state and wake the listening socket so accept() can dequeue it.
             if conn.lock().state == tcp::TcpState::Established {
@@ -188,7 +213,7 @@ impl NetStack {
                 // Lock port_table first, then socket -- consistent order with sys_bind.
                 let pt = socket::port_table().lock();
                 if let Some(listen_sock) = pt.get(&(6u8, dst_port)) {
-                    let ls = listen_sock.lock();
+                    let mut ls = listen_sock.lock();
                     if ls.listening {
                         // Mark the matching queued socket as Connected
                         let wq = ls.rx_wq.clone();
@@ -201,8 +226,11 @@ impl NetStack {
                                 }
                             }
                         }
+                        // Notify listening socket's pollers (accept queue now has Connected entry)
+                        let notif = ls.notify_pollers();
                         drop(ls);
                         drop(pt);
+                        self.pending_socket_notifs.push(notif);
                         wq.wake_all();
                     }
                 }
@@ -270,9 +298,11 @@ impl NetStack {
                     let mut new_sock = socket::Socket::new_tcp();
                     new_sock.local_addr = Some(local_sa);
                     new_sock.remote_addr = Some(remote_sa);
-                    new_sock.tcp_conn = Some(conn_arc);
+                    new_sock.tcp_conn = Some(conn_arc.clone());
                     // State will be updated to Connected when ACK arrives (SynReceived -> Established)
                     let new_sock_arc = Arc::new(Mutex::new(new_sock));
+                    // Set backref from TcpConnection to owning Socket
+                    conn_arc.lock().owner = Some(Arc::downgrade(&new_sock_arc));
 
                     listen_sock.lock().accept_queue.push_back(new_sock_arc);
 

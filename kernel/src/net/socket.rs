@@ -4,7 +4,9 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
 use spin::Mutex;
 
-use crate::net::tcp::TcpConnection;
+use crate::fs::PollState;
+use crate::fs::handle::{PollEntry, PollKey, PollRegistration, Pollable};
+use crate::net::tcp::{TcpConnection, TcpState};
 use crate::thread::waitqueue::WaitQueue;
 
 pub const AF_INET: u32 = 2;
@@ -55,6 +57,15 @@ pub struct Socket {
     pub backlog: u32,
     /// Number of fd references. Close only tears down when this reaches 0.
     pub refcount: u32,
+    /// Registered poll entries for wakeup on state changes.
+    pollers: Vec<(PollKey, Arc<PollEntry>)>,
+    next_poll_key: PollKey,
+    /// Receive timeout for blocking operations.
+    pub recv_timeout: Option<core::time::Duration>,
+    /// Send timeout for blocking operations.
+    pub send_timeout: Option<core::time::Duration>,
+    /// TCP_NODELAY option (disable Nagle's algorithm).
+    pub nodelay: bool,
 }
 
 impl core::fmt::Debug for Socket {
@@ -86,6 +97,11 @@ impl Socket {
             listening: false,
             backlog: 0,
             refcount: 1,
+            pollers: Vec::new(),
+            next_poll_key: 1,
+            recv_timeout: None,
+            send_timeout: None,
+            nodelay: false,
         }
     }
 
@@ -103,7 +119,127 @@ impl Socket {
             listening: false,
             backlog: 0,
             refcount: 1,
+            pollers: Vec::new(),
+            next_poll_key: 1,
+            recv_timeout: None,
+            send_timeout: None,
+            nodelay: false,
         }
+    }
+
+    pub fn poll_state(&self) -> PollState {
+        let mut state = PollState::none();
+        if self.sock_type == SOCK_STREAM {
+            if self.listening {
+                // Listening socket: readable when accept_queue has a Connected entry
+                if self
+                    .accept_queue
+                    .iter()
+                    .any(|qs| qs.lock().state == SocketState::Connected)
+                {
+                    state.readable = true;
+                }
+            } else if let Some(ref conn) = self.tcp_conn {
+                let c = conn.lock();
+                if !c.rx_buffer.is_empty()
+                    || c.state == TcpState::CloseWait
+                    || c.state == TcpState::Closed
+                    || c.state == TcpState::TimeWait
+                {
+                    state.readable = true;
+                }
+            }
+        } else {
+            // UDP
+            if !self.rx_queue.is_empty() {
+                state.readable = true;
+            }
+        }
+        state.writable = true;
+        if self.closed {
+            state.hangup = true;
+        }
+        state
+    }
+
+    pub fn add_poller(&mut self, entry: Arc<PollEntry>) -> PollKey {
+        let key = self.next_poll_key;
+        self.next_poll_key = self.next_poll_key.wrapping_add(1).max(1);
+        self.pollers.push((key, entry));
+        key
+    }
+
+    pub fn remove_poller(&mut self, key: PollKey) {
+        self.pollers.retain(|(stored, _)| *stored != key);
+    }
+
+    /// Snapshot poller entries + state. Caller must flush the result AFTER
+    /// dropping all locks (NetStack, PORT_TABLE, Socket) to avoid priority inversion.
+    pub fn notify_pollers(&mut self) -> SocketNotifications {
+        let state = self.poll_state();
+        if self.pollers.is_empty() {
+            return SocketNotifications::EMPTY;
+        }
+        let mut entries: heapless::Vec<Arc<PollEntry>, 8> = heapless::Vec::new();
+        for (_, entry) in self.pollers.iter() {
+            let _ = entries.push(entry.clone());
+        }
+        SocketNotifications { entries, state }
+    }
+}
+
+/// Deferred poll notifications to be flushed after releasing all locks.
+pub struct SocketNotifications {
+    entries: heapless::Vec<Arc<PollEntry>, 8>,
+    state: PollState,
+}
+
+impl SocketNotifications {
+    pub const EMPTY: Self = Self {
+        entries: heapless::Vec::new(),
+        state: PollState::none(),
+    };
+
+    /// Send notifications. Call this after dropping all locks.
+    pub fn flush(self) {
+        for entry in &self.entries {
+            entry.update(self.state);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PollableSocket {
+    inner: Arc<Mutex<Socket>>,
+}
+
+impl PollableSocket {
+    pub fn new(sock: Arc<Mutex<Socket>>) -> Self {
+        Self { inner: sock }
+    }
+}
+
+impl Pollable for PollableSocket {
+    fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
+        let mut s = self.inner.lock();
+        let state = s.poll_state();
+        entry.update(state);
+        if state.matches(entry.interests()) {
+            PollRegistration {
+                initial: state,
+                key: None,
+            }
+        } else {
+            let key = s.add_poller(entry);
+            PollRegistration {
+                initial: state,
+                key: Some(key),
+            }
+        }
+    }
+
+    fn unregister(&self, key: PollKey) {
+        self.inner.lock().remove_poller(key);
     }
 }
 

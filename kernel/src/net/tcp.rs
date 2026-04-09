@@ -1,5 +1,5 @@
 use alloc::collections::VecDeque;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::time::Duration;
 
@@ -227,6 +227,8 @@ pub struct TcpConnection {
     // Close tracking
     pub fin_seq: Option<u32>, // Our FIN's sequence number (set when we send FIN)
     pub time_wait_until: Option<Instant>,
+    /// Weak reference back to the owning Socket for poll notifications.
+    pub owner: Option<Weak<spin::Mutex<super::socket::Socket>>>,
 }
 
 impl TcpConnection {
@@ -253,6 +255,7 @@ impl TcpConnection {
             state_wq: Arc::new(WaitQueue::new()),
             fin_seq: None,
             time_wait_until: None,
+            owner: None,
         }
     }
 

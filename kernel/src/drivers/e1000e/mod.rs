@@ -437,10 +437,12 @@ pub extern "C" fn e1000e_driver_main() -> ! {
         }
 
         // Receive all pending packets, copy data out, then dispatch.
+        // Socket poll notifications are accumulated in pending_socket_notifs
+        // and flushed after dropping the NetStack lock.
         loop {
-            let packet = {
+            let (packet, notifs) = {
                 let mut stack = crate::net::stack::net_stack().lock();
-                match stack.nic.receive() {
+                let pkt = match stack.nic.receive() {
                     Some((buf, len)) => {
                         let data =
                             unsafe { core::slice::from_raw_parts(buf.as_ptr(), len) }.to_vec();
@@ -448,12 +450,27 @@ pub extern "C" fn e1000e_driver_main() -> ! {
                         Some(data)
                     }
                     None => None,
-                }
+                };
+                // Drain any notifications from previous handle_rx calls in this burst
+                let n = core::mem::take(&mut stack.pending_socket_notifs);
+                (pkt, n)
             };
+
+            // Flush notifications outside the lock
+            for n in notifs {
+                n.flush();
+            }
 
             match packet {
                 Some(data) => {
-                    crate::net::stack::net_stack().lock().handle_rx(&data);
+                    let notifs = {
+                        let mut stack = crate::net::stack::net_stack().lock();
+                        stack.handle_rx(&data);
+                        core::mem::take(&mut stack.pending_socket_notifs)
+                    };
+                    for n in notifs {
+                        n.flush();
+                    }
                 }
                 None => break,
             }
