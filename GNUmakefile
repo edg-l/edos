@@ -54,7 +54,7 @@ define run_qemu_uefi
 		$(if $(filter iso,$(1)),-cdrom $(IMAGE_NAME).iso,-hda $(IMAGE_NAME).hdd) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio \
-		-no-reboot \
+		-no-reboot -d cpu_reset -D /tmp/qemu_reset.log \
 		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
 		-device ide-hd,drive=sata0,bus=ide.1 \
 		$(if $(4),$(4),$(DISPLAY_VIRTIO)) \
