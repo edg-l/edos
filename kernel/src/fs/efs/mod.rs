@@ -155,14 +155,13 @@ impl EfsDriver {
     fn write_block(&mut self, block: u64, data: &[u8]) -> Result<(), Error> {
         let lba = self.block_to_lba(block);
         let spb = self.sectors_per_block();
-        let mut buf = core::mem::take(&mut self.scratch);
+        // Use a separate buffer for writes to avoid competing with read_block
+        // for the scratch buffer (read_block's caller may not have recycled yet).
         let needed = spb as usize * 512;
-        buf.resize(needed, 0);
-        buf[..needed].fill(0);
+        let mut buf = vec![0u8; needed];
         let copy_len = data.len().min(needed);
         buf[..copy_len].copy_from_slice(&data[..copy_len]);
-        let returned = self.device.write_sectors(lba, buf, spb)?;
-        self.scratch = returned;
+        self.device.write_sectors(lba, buf, spb)?;
         Ok(())
     }
 
