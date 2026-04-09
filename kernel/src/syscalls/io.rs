@@ -215,6 +215,34 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 }
             }
         }
+        Some(FileDescriptor::Socket(sock)) => {
+            // Write on a connected socket: send to stored remote_addr
+            let remote = sock.lock().remote_addr;
+            match remote {
+                Some(dst) => {
+                    let mut data = vec![0u8; count];
+                    if !unsafe { try_copy_from_user(data.as_mut_ptr(), buffer_ptr, count) } {
+                        info.lock().errno = Errno::EFAULT;
+                        return !0u64;
+                    }
+                    let src_port = sock.lock().local_addr.map(|a| a.port).unwrap_or(0);
+                    match crate::net::stack::net_stack()
+                        .lock()
+                        .send_udp(src_port, dst.ip, dst.port, &data)
+                    {
+                        Ok(()) => count as u64,
+                        Err(_) => {
+                            info.lock().errno = Errno::EIO;
+                            !0u64
+                        }
+                    }
+                }
+                None => {
+                    info.lock().errno = Errno::EINVAL;
+                    !0u64
+                }
+            }
+        }
         None => {
             info.lock().errno = Errno::EINVAL;
             !0u64
@@ -259,6 +287,18 @@ pub fn sys_close(fd: u64) -> i32 {
         Some(FileDescriptor::PtySlave(pty)) => {
             let notif = pty.lock().close_slave();
             notif.flush();
+            0
+        }
+        Some(FileDescriptor::Socket(sock)) => {
+            let mut s = sock.lock();
+            s.closed = true;
+            s.rx_wq.wake_all();
+            if let Some(addr) = s.local_addr {
+                let proto = if s.sock_type == 2 { 17u8 } else { 6u8 };
+                crate::net::socket::port_table()
+                    .lock()
+                    .remove(&(proto, addr.port));
+            }
             0
         }
         Some(_) => 0,
@@ -449,6 +489,32 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             });
             fd_table.lock().replace_fd(fd, new_fd);
             bytes_to_copy as i64
+        }
+        Some(FileDescriptor::Socket(sock)) => {
+            // Blocking receive on a socket
+            let rx_wq = sock.lock().rx_wq.clone();
+            rx_wq.wait_until(|| {
+                let s = sock.lock();
+                !s.rx_queue.is_empty() || s.closed
+            });
+            let data_opt = {
+                let mut s = sock.lock();
+                if s.closed && s.rx_queue.is_empty() {
+                    return 0;
+                }
+                s.rx_queue.pop_front().map(|(d, _src)| d)
+            };
+            match data_opt {
+                Some(data) => {
+                    let bytes_to_copy = data.len().min(count);
+                    if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_copy) } {
+                        info.lock().errno = Errno::EFAULT;
+                        return -1;
+                    }
+                    bytes_to_copy as i64
+                }
+                None => 0,
+            }
         }
         None => {
             info.lock().errno = Errno::EINVAL;
@@ -875,6 +941,21 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                     entry: poll_entry,
                     key: registration.key,
                 });
+            }
+            Some(FileDescriptor::Socket(sock)) => {
+                let s = sock.lock();
+                let entry = &mut fds[idx];
+                if !s.rx_queue.is_empty() {
+                    entry.result.readable = true;
+                }
+                // UDP sockets are always writable
+                entry.result.writable = true;
+                if s.closed {
+                    entry.result.hangup = true;
+                }
+                if entry.result.matches(interests) {
+                    base_ready += 1;
+                }
             }
             Some(FileDescriptor::FsFile(file)) => match fs_api::poll(&file.path) {
                 Ok(pollable) => {

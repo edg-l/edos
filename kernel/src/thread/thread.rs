@@ -667,6 +667,17 @@ impl Thread {
                             let notif = pty.lock().close_master();
                             notif.flush();
                         }
+                        super::pipe::FileDescriptor::Socket(sock) => {
+                            let mut s = sock.lock();
+                            s.closed = true;
+                            s.rx_wq.wake_all();
+                            if let Some(addr) = s.local_addr {
+                                let proto = if s.sock_type == 2 { 17u8 } else { 6u8 };
+                                crate::net::socket::port_table()
+                                    .lock()
+                                    .remove(&(proto, addr.port));
+                            }
+                        }
                         _ => {}
                     }
                 }

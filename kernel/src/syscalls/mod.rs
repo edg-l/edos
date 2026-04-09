@@ -58,6 +58,7 @@ mod fs;
 mod io;
 mod ioctl;
 mod memory;
+mod net;
 mod shm;
 mod sync;
 mod window;
@@ -80,6 +81,17 @@ fn close_fd_refcount(desc: FileDescriptor) {
         }
         FileDescriptor::PtySlave(pty) => {
             pty.lock().close_slave().flush();
+        }
+        FileDescriptor::Socket(sock) => {
+            let mut s = sock.lock();
+            s.closed = true;
+            s.rx_wq.wake_all();
+            if let Some(addr) = s.local_addr {
+                let proto = if s.sock_type == 2 { 17u8 } else { 6u8 };
+                crate::net::socket::port_table()
+                    .lock()
+                    .remove(&(proto, addr.port));
+            }
         }
         _ => {}
     }
@@ -286,6 +298,11 @@ const SYS_KILL: u64 = 229;
 const SYS_SIGACTION: u64 = 230;
 const SYS_SHM_SIZE: u64 = 231;
 const SYS_PING: u64 = 249;
+const SYS_SOCKET: u64 = 240;
+const SYS_BIND: u64 = 241;
+const SYS_CONNECT: u64 = 242;
+const SYS_SENDTO: u64 = 245;
+const SYS_RECVFROM: u64 = 246;
 
 /// Arguments struct for SYS_SPAWN2. Passed as a single pointer from userspace.
 #[repr(C)]
@@ -622,6 +639,42 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let seq = ctx.rdx as u16;
             let timeout_ms = ctx.r10;
             ctx.rax = sys_ping(dst_ip_ptr, id, seq, timeout_ms);
+        }
+        SYS_SOCKET => {
+            let domain = ctx.rdi;
+            let sock_type = ctx.rsi;
+            let protocol = ctx.rdx;
+            ctx.rax = net::sys_socket(domain, sock_type, protocol);
+        }
+        SYS_BIND => {
+            let fd = ctx.rdi;
+            let addr_ptr = ctx.rsi as *const net::SockAddrIn;
+            let addr_len = ctx.rdx;
+            ctx.rax = net::sys_bind(fd, addr_ptr, addr_len);
+        }
+        SYS_CONNECT => {
+            let fd = ctx.rdi;
+            let addr_ptr = ctx.rsi as *const net::SockAddrIn;
+            let addr_len = ctx.rdx;
+            ctx.rax = net::sys_connect(fd, addr_ptr, addr_len);
+        }
+        SYS_SENDTO => {
+            let fd = ctx.rdi;
+            let buf_ptr = ctx.rsi as *const u8;
+            let len = ctx.rdx;
+            let flags = ctx.r10;
+            let addr_ptr = ctx.r8 as *const net::SockAddrIn;
+            let addr_len = ctx.r9;
+            ctx.rax = net::sys_sendto(fd, buf_ptr, len, flags, addr_ptr, addr_len);
+        }
+        SYS_RECVFROM => {
+            let fd = ctx.rdi;
+            let buf_ptr = ctx.rsi as *mut u8;
+            let len = ctx.rdx;
+            let flags = ctx.r10;
+            let addr_ptr = ctx.r8 as *mut net::SockAddrIn;
+            let addr_len_ptr = ctx.r9 as *mut u32;
+            ctx.rax = net::sys_recvfrom(fd, buf_ptr, len, flags, addr_ptr, addr_len_ptr);
         }
         _ => {
             ctx.rax = !0u64;

@@ -4,10 +4,12 @@ use crate::{
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
         path::Path,
     },
+    net::socket::Socket,
     thread::{mutex::BlockingMutex, pty::Pty, waitqueue::WaitQueue},
     util::uaccess::{try_copy_from_user, try_copy_to_user},
 };
 use alloc::{sync::Arc, vec::Vec};
+use spin::Mutex;
 
 #[derive(Debug, Clone)]
 pub enum FileDescriptor {
@@ -20,6 +22,7 @@ pub enum FileDescriptor {
     FsFile(FsFile),
     PtyMaster(Arc<BlockingMutex<Pty>>),
     PtySlave(Arc<BlockingMutex<Pty>>),
+    Socket(Arc<Mutex<Socket>>),
 }
 
 impl FileDescriptor {

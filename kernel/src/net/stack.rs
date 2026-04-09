@@ -5,7 +5,7 @@ use spin::Mutex;
 use crate::{drivers::e1000e::E1000e, log, thread::waitqueue::WaitQueue, timer::Instant};
 
 use super::arp::ArpCache;
-use super::{arp, ethernet, icmp, ipv4};
+use super::{arp, ethernet, icmp, ipv4, socket, udp};
 
 pub static NET_STACK: spin::Once<Mutex<NetStack>> = spin::Once::new();
 
@@ -81,6 +81,27 @@ impl NetStack {
 
         if ip_hdr.protocol == ipv4::IpProtocol::Icmp as u8 {
             self.handle_icmp(&ip_hdr, payload);
+        } else if ip_hdr.protocol == ipv4::IpProtocol::Udp as u8 {
+            self.handle_udp(&ip_hdr, payload);
+        }
+    }
+
+    fn handle_udp(&mut self, ip_hdr: &ipv4::Ipv4Header, data: &[u8]) {
+        let Some((udp_hdr, payload)) = udp::parse(data) else {
+            return;
+        };
+
+        let port_table = socket::port_table().lock();
+        if let Some(sock) = port_table.get(&(17, udp_hdr.dst_port)) {
+            let mut s = sock.lock();
+            if !s.closed {
+                let src = socket::SocketAddr {
+                    ip: ip_hdr.src_addr,
+                    port: udp_hdr.src_port,
+                };
+                s.rx_queue.push_back((payload.to_vec(), src));
+                s.rx_wq.wake_one();
+            }
         }
     }
 
@@ -190,6 +211,18 @@ impl NetStack {
         let id = self.ip_id_counter;
         self.ip_id_counter = self.ip_id_counter.wrapping_add(1);
         id
+    }
+
+    /// Send a UDP datagram to `dst_ip:dst_port` from `src_port`.
+    pub fn send_udp(
+        &mut self,
+        src_port: u16,
+        dst_ip: [u8; 4],
+        dst_port: u16,
+        data: &[u8],
+    ) -> Result<(), &'static str> {
+        let udp_pkt = udp::build(src_port, dst_port, self.local_ip, dst_ip, data);
+        self.send_ip(dst_ip, ipv4::IpProtocol::Udp, &udp_pkt)
     }
 
     /// Send an ICMP echo request to `dst`. The caller must register a
