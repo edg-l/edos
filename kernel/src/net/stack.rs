@@ -5,6 +5,7 @@ use spin::Mutex;
 use crate::{drivers::e1000e::E1000e, log, thread::waitqueue::WaitQueue, timer::Instant};
 
 use super::arp::ArpCache;
+use super::fragment::ReassemblyTable;
 use super::tcp::TcpConnection;
 use super::{arp, ethernet, icmp, ipv4, socket, tcp, udp};
 use socket::SocketAddr;
@@ -32,6 +33,8 @@ pub struct NetStack {
     /// Keyed by (local_addr, remote_addr).
     pub tcp_connections: BTreeMap<(SocketAddr, SocketAddr), Arc<Mutex<TcpConnection>>>,
     ip_id_counter: u16,
+    /// IP fragment reassembly table.
+    reassembly: ReassemblyTable,
     /// Queued loopback frames waiting to be processed (avoids infinite recursion).
     loopback_queue: Vec<Vec<u8>>,
     /// True while we are draining the loopback queue (prevents nested drain).
@@ -49,6 +52,7 @@ impl NetStack {
             ping_waiters: BTreeMap::new(),
             tcp_connections: BTreeMap::new(),
             ip_id_counter: 0,
+            reassembly: ReassemblyTable::new(),
             loopback_queue: Vec::new(),
             draining_loopback: false,
         }
@@ -108,12 +112,17 @@ impl NetStack {
             return;
         }
 
+        // Reassemble fragmented packets; non-fragments pass through directly.
+        let Some((ip_hdr, payload)) = self.reassembly.process(&ip_hdr, payload) else {
+            return; // Fragment buffered, waiting for more pieces.
+        };
+
         if ip_hdr.protocol == ipv4::IpProtocol::Icmp as u8 {
-            self.handle_icmp(&ip_hdr, payload);
+            self.handle_icmp(&ip_hdr, &payload);
         } else if ip_hdr.protocol == ipv4::IpProtocol::Udp as u8 {
-            self.handle_udp(&ip_hdr, payload);
+            self.handle_udp(&ip_hdr, &payload);
         } else if ip_hdr.protocol == ipv4::IpProtocol::Tcp as u8 {
-            self.handle_tcp(&ip_hdr, payload);
+            self.handle_tcp(&ip_hdr, &payload);
         }
     }
 

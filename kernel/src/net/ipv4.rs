@@ -65,13 +65,6 @@ pub fn parse(data: &[u8]) -> Option<(Ipv4Header, &[u8])> {
         return None;
     }
 
-    // Reject IP fragments (no reassembly support).
-    let frag_offset = hdr.flags_fragment & 0x1FFF;
-    let mf = hdr.flags_fragment & 0x2000 != 0;
-    if frag_offset != 0 || mf {
-        return None;
-    }
-
     let total = hdr.total_length as usize;
     if data.len() < total {
         return None;

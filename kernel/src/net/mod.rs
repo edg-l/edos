@@ -3,6 +3,7 @@ pub mod checksum;
 pub mod device;
 pub mod dhcp;
 pub mod ethernet;
+pub mod fragment;
 pub mod icmp;
 pub mod ipv4;
 pub mod socket;
