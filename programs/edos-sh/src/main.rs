@@ -4,12 +4,17 @@ mod arith;
 mod builtins;
 mod command;
 mod complete;
+mod jobs;
 mod script;
 mod spawn;
 
 use std::io::Write;
+use std::sync::Mutex;
 
 use edos_lib::io::{poll_stdin, sys_read};
+
+/// Global background job list.
+static JOB_LIST: Mutex<jobs::JobList> = Mutex::new(jobs::JobList::new());
 
 pub enum SegmentResult {
     /// Command ran with the given exit code (0 = success, non-zero = failure).
@@ -231,7 +236,33 @@ pub fn run_segment_with_stdin(segment: &str, stdin_fd: u64) -> i32 {
     }
 }
 
-/// Run a full command chain (handles `&&`, `||`, `;` operators).
+/// Check if a segment is a subshell expression `(...)` and return the inner content.
+fn extract_subshell(s: &str) -> Option<&str> {
+    let s = s.trim();
+    if !s.starts_with('(') {
+        return None;
+    }
+    let mut depth: usize = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    if i == s.len() - 1 {
+                        return Some(&s[1..i]);
+                    } else {
+                        return None; // closing paren is not at end
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Run a full command chain (handles `&&`, `||`, `;`, `&` operators, and subshells).
 ///
 /// Returns the exit code of the last command executed, or -1 if the shell
 /// should exit (e.g. the `exit` builtin was called).
@@ -262,6 +293,58 @@ pub fn run_chain(input: &str) -> i32 {
                 continue;
             }
             _ => {}
+        }
+
+        // Determine whether this segment should run in the background.
+        let background = *next_op == Some(command::ChainOp::Background);
+
+        // Subshell: run the inner commands in a forked child.
+        if let Some(inner) = extract_subshell(segment) {
+            let pid = edos_lib::process::fork();
+            if pid == 0 {
+                let code = run_chain(inner);
+                std::process::exit(if code < 0 { 1 } else { code });
+            } else if pid > 0 {
+                if background {
+                    let job_id = JOB_LIST
+                        .lock()
+                        .unwrap()
+                        .add(pid as u64, segment.to_string());
+                    command::set_last_bg_pid(pid as u64);
+                    println!("[{}] {}", job_id, pid);
+                    last_exit = 0;
+                    command::set_last_exit_code(0);
+                } else {
+                    let code = edos_lib::process::waitpid(pid as u64);
+                    last_exit = code;
+                    command::set_last_exit_code(code);
+                }
+            }
+            prev_op = *next_op;
+            continue;
+        }
+
+        // Background execution: fork and run the segment in a child process.
+        if background {
+            let pid = edos_lib::process::fork();
+            if pid == 0 {
+                let code = match run_segment(segment) {
+                    SegmentResult::Done(c) => c,
+                    SegmentResult::Exit => 0,
+                };
+                std::process::exit(code);
+            } else if pid > 0 {
+                let job_id = JOB_LIST
+                    .lock()
+                    .unwrap()
+                    .add(pid as u64, segment.to_string());
+                command::set_last_bg_pid(pid as u64);
+                println!("[{}] {}", job_id, pid);
+                last_exit = 0;
+                command::set_last_exit_code(0);
+            }
+            prev_op = *next_op;
+            continue;
         }
 
         match run_segment(segment) {
@@ -642,6 +725,12 @@ fn main() {
     }
 
     loop {
+        // Reap completed background jobs and print notices
+        let completed = JOB_LIST.lock().unwrap().reap();
+        for (id, cmd, code) in completed {
+            println!("[{}] Done({}) {}", id, code, cmd);
+        }
+
         // Build prompt with current directory
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())

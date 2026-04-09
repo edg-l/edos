@@ -7,13 +7,16 @@ use crate::spawn;
 // Positional parameters ($0, $1, ..., $#, $@) and last exit code ($?)
 // ---------------------------------------------------------------------------
 
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 /// The last exit code, updated after every command runs.
 static LAST_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 /// Exit-on-error flag (set -e / set +e).
 static EXIT_ON_ERROR: AtomicBool = AtomicBool::new(false);
+
+/// PID of the last background job (`$!`).
+static LAST_BG_PID: AtomicU64 = AtomicU64::new(0);
 
 /// Set the exit-on-error flag.
 pub fn set_exit_on_error(val: bool) {
@@ -23,6 +26,16 @@ pub fn set_exit_on_error(val: bool) {
 /// Get the current exit-on-error flag value.
 pub fn exit_on_error() -> bool {
     EXIT_ON_ERROR.load(Ordering::Relaxed)
+}
+
+/// Return the PID of the last background job (used for `$!` expansion).
+pub fn last_bg_pid() -> u64 {
+    LAST_BG_PID.load(Ordering::Relaxed)
+}
+
+/// Set the PID of the last background job.
+pub fn set_last_bg_pid(pid: u64) {
+    LAST_BG_PID.store(pid, Ordering::Relaxed);
 }
 
 /// Update the last exit code.
@@ -160,6 +173,13 @@ pub fn expand_variables(input: &str) -> String {
                     Some(&'@') => {
                         chars.next();
                         out.push_str(&script_args_all());
+                    }
+                    Some(&'!') => {
+                        chars.next();
+                        let pid = last_bg_pid();
+                        if pid > 0 {
+                            out.push_str(&pid.to_string());
+                        }
                     }
                     Some(&d) if d.is_ascii_digit() => {
                         chars.next();
@@ -511,15 +531,19 @@ pub enum ChainOp {
     Or,
     /// `;` -- run next unconditionally
     Semi,
+    /// `&` -- run in background
+    Background,
 }
 
-/// Split input into command chains on unquoted `&&`, `||`, and `;`.
+/// Split input into command chains on unquoted `&&`, `||`, `;`, and `&`.
 /// Returns pairs of (command_string, operator_after) where the last has None.
+/// Paren depth is tracked so operators inside `(...)` are not recognized.
 pub fn split_chain(input: &str) -> Vec<(String, Option<ChainOp>)> {
     let mut result = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
     let mut quote_char = '"';
+    let mut paren_depth: usize = 0;
     let mut chars = input.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -533,15 +557,32 @@ pub fn split_chain(input: &str) -> Vec<(String, Option<ChainOp>)> {
                 in_quotes = false;
                 current.push(ch);
             }
-            '&' if !in_quotes && chars.peek() == Some(&'&') => {
-                chars.next(); // consume second '&'
-                let trimmed = current.trim().to_string();
-                if !trimmed.is_empty() {
-                    result.push((trimmed, Some(ChainOp::And)));
-                }
-                current = String::new();
+            '(' if !in_quotes => {
+                paren_depth += 1;
+                current.push(ch);
             }
-            '|' if !in_quotes && chars.peek() == Some(&'|') => {
+            ')' if !in_quotes => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            '&' if !in_quotes && paren_depth == 0 => {
+                if chars.peek() == Some(&'&') {
+                    chars.next(); // consume second '&'
+                    let trimmed = current.trim().to_string();
+                    if !trimmed.is_empty() {
+                        result.push((trimmed, Some(ChainOp::And)));
+                    }
+                    current = String::new();
+                } else {
+                    // Single '&': background operator
+                    let trimmed = current.trim().to_string();
+                    if !trimmed.is_empty() {
+                        result.push((trimmed, Some(ChainOp::Background)));
+                    }
+                    current = String::new();
+                }
+            }
+            '|' if !in_quotes && paren_depth == 0 && chars.peek() == Some(&'|') => {
                 chars.next(); // consume second '|'
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
@@ -549,7 +590,7 @@ pub fn split_chain(input: &str) -> Vec<(String, Option<ChainOp>)> {
                 }
                 current = String::new();
             }
-            ';' if !in_quotes => {
+            ';' if !in_quotes && paren_depth == 0 => {
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
                     result.push((trimmed, Some(ChainOp::Semi)));
@@ -589,6 +630,8 @@ pub fn is_builtin(command: &str) -> bool {
             | "kill"
             | "ifconfig"
             | "ip"
+            | "jobs"
+            | "wait"
     )
 }
 
@@ -681,6 +724,28 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
         }
         "kill" => {
             let code = builtins::cmd_kill(args);
+            return if code == 0 {
+                ExecResult::Success(0)
+            } else {
+                ExecResult::Failed(code)
+            };
+        }
+        "jobs" => {
+            crate::JOB_LIST.lock().unwrap().print();
+            return ExecResult::Success(0);
+        }
+        "wait" => {
+            let code = if let Some(pid_str) = args.first() {
+                match pid_str.parse::<u64>() {
+                    Ok(pid) => crate::JOB_LIST.lock().unwrap().wait_pid(pid),
+                    Err(_) => {
+                        eprintln!("wait: invalid PID: {}", pid_str);
+                        1
+                    }
+                }
+            } else {
+                crate::JOB_LIST.lock().unwrap().wait_all()
+            };
             return if code == 0 {
                 ExecResult::Success(0)
             } else {

@@ -117,6 +117,18 @@ pub fn waitpid(pid: u64) -> i32 {
     if ret == u64::MAX { -1 } else { status }
 }
 
+/// Check if a process has exited without blocking.
+/// Returns `Some(exit_code)` if the child exited, `None` if still running.
+pub fn waitpid_nonblocking(pid: u64) -> Option<i32> {
+    let mut status: i32 = -1;
+    let ret = unsafe { sys::syscall3(sys::SYS_WAIT_PID, pid, 0, &mut status as *mut i32 as u64) };
+    if ret == pid {
+        Some(status)
+    } else {
+        None
+    }
+}
+
 /// A child process connected via a PTY master fd.
 pub struct ChildProcess {
     /// Process ID

@@ -12,6 +12,8 @@ pub fn cmd_help() {
     println!("  echo [args...]    - Print arguments");
     println!("  exit              - Exit shell");
     println!("  kill [-SIGNAL] PID - Send signal to process");
+    println!("  jobs              - List background jobs");
+    println!("  wait [PID]        - Wait for background job(s)");
     println!("  ifconfig          - Show network configuration");
     println!();
     println!("Operators:");
@@ -25,6 +27,8 @@ pub fn cmd_help() {
     println!("  cmd1 && cmd2      - Run cmd2 if cmd1 succeeds");
     println!("  cmd1 || cmd2      - Run cmd2 if cmd1 fails");
     println!("  cmd1 ; cmd2       - Run both unconditionally");
+    println!("  cmd &             - Run cmd in background");
+    println!("  (cmd1; cmd2)      - Run in subshell");
     println!();
     println!("Script control:");
     println!("  function name/end - Define a function");
