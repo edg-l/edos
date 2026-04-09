@@ -122,10 +122,14 @@ impl NetStack {
             return;
         };
 
+        const MAX_UDP_RX_QUEUE: usize = 128;
         let port_table = socket::port_table().lock();
         if let Some(sock) = port_table.get(&(17, udp_hdr.dst_port)) {
             let mut s = sock.lock();
             if !s.closed {
+                if s.rx_queue.len() >= MAX_UDP_RX_QUEUE {
+                    return; // Drop packet: queue full
+                }
                 let src = socket::SocketAddr {
                     ip: ip_hdr.src_addr,
                     port: udp_hdr.src_port,
@@ -172,11 +176,13 @@ impl NetStack {
             // queued socket state and wake the listening socket so accept() can dequeue it.
             if conn.lock().state == tcp::TcpState::Established {
                 let dst_port = tcp_hdr.dst_port;
+                // Lock port_table first, then socket -- consistent order with sys_bind.
                 let pt = socket::port_table().lock();
                 if let Some(listen_sock) = pt.get(&(6u8, dst_port)) {
                     let ls = listen_sock.lock();
                     if ls.listening {
                         // Mark the matching queued socket as Connected
+                        let wq = ls.rx_wq.clone();
                         for queued in ls.accept_queue.iter() {
                             let mut qs = queued.lock();
                             if let Some(ref qconn) = qs.tcp_conn {
@@ -186,7 +192,9 @@ impl NetStack {
                                 }
                             }
                         }
-                        ls.rx_wq.wake_all();
+                        drop(ls);
+                        drop(pt);
+                        wq.wake_all();
                     }
                 }
             }
@@ -512,12 +520,16 @@ pub extern "C" fn tcp_retransmit_main() -> ! {
             let now = Instant::now();
             stack.tcp_connections.retain(|_, conn| {
                 let c = conn.lock();
-                if c.state == super::tcp::TcpState::TimeWait {
-                    if let Some(until) = c.time_wait_until {
-                        return now < until;
-                    }
+                let remove = if c.state == super::tcp::TcpState::TimeWait {
+                    c.time_wait_until.is_none_or(|until| now >= until)
+                } else {
+                    c.state == super::tcp::TcpState::Closed
+                };
+                if remove {
+                    // Clean up ephemeral port from port table
+                    socket::port_table().lock().remove(&(6u8, c.local_port));
                 }
-                c.state != super::tcp::TcpState::Closed
+                !remove
             });
         }
     }

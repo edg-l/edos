@@ -18,6 +18,7 @@ pub const ACK: u8 = 0x10;
 
 pub const DEFAULT_MSS: u16 = 1460; // MTU 1500 - 20 IP - 20 TCP
 pub const DEFAULT_WINDOW: u16 = 16384;
+pub const MAX_RX_BUFFER: usize = 65535;
 
 #[derive(Debug, Clone)]
 pub struct TcpHeader {
@@ -359,16 +360,26 @@ impl TcpConnection {
                 }
 
                 // Process data
-                if !payload.is_empty() && hdr.seq_num == self.rcv_nxt {
-                    self.rx_buffer.extend(payload);
-                    self.rcv_nxt = self.rcv_nxt.wrapping_add(payload.len() as u32);
-                    self.rx_wq.wake_one();
-                    // Send ACK for data
-                    responses.push(self.build_ack());
-                }
+                let data_in_order = if !payload.is_empty() {
+                    if hdr.seq_num == self.rcv_nxt {
+                        self.rx_buffer.extend(payload);
+                        self.rcv_nxt = self.rcv_nxt.wrapping_add(payload.len() as u32);
+                        self.update_rcv_wnd();
+                        self.rx_wq.wake_one();
+                        // Send ACK for data
+                        responses.push(self.build_ack());
+                        true
+                    } else {
+                        // Out-of-order: send dup-ACK to trigger fast retransmit
+                        responses.push(self.build_ack());
+                        false
+                    }
+                } else {
+                    true // No data, treat as in-order for FIN processing
+                };
 
-                // Process FIN
-                if hdr.flags & FIN != 0 {
+                // Process FIN only if all prior data was received in order.
+                if hdr.flags & FIN != 0 && data_in_order {
                     self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
                     responses.push(self.build_ack());
 
@@ -424,6 +435,10 @@ impl TcpConnection {
         }
 
         responses
+    }
+
+    fn update_rcv_wnd(&mut self) {
+        self.rcv_wnd = MAX_RX_BUFFER.saturating_sub(self.rx_buffer.len()) as u16;
     }
 
     fn build_ack(&self) -> Vec<u8> {

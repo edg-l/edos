@@ -65,6 +65,13 @@ pub fn parse(data: &[u8]) -> Option<(Ipv4Header, &[u8])> {
         return None;
     }
 
+    // Reject IP fragments (no reassembly support).
+    let frag_offset = hdr.flags_fragment & 0x1FFF;
+    let mf = hdr.flags_fragment & 0x2000 != 0;
+    if frag_offset != 0 || mf {
+        return None;
+    }
+
     let total = hdr.total_length as usize;
     if data.len() < total {
         return None;
@@ -83,7 +90,7 @@ pub fn build(src: [u8; 4], dst: [u8; 4], protocol: IpProtocol, ttl: u8, payload:
     pkt.push(0x00); // dscp_ecn
     pkt.extend_from_slice(&total_length.to_be_bytes());
     pkt.extend_from_slice(&0u16.to_be_bytes()); // identification
-    pkt.extend_from_slice(&0u16.to_be_bytes()); // flags_fragment
+    pkt.extend_from_slice(&0x4000u16.to_be_bytes()); // flags: DF=1, MF=0, offset=0
     pkt.push(ttl);
     pkt.push(protocol as u8);
     pkt.extend_from_slice(&0u16.to_be_bytes()); // checksum placeholder

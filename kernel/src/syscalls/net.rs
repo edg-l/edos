@@ -76,15 +76,20 @@ pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
     let ip = addr.addr;
     let local_addr = SocketAddr { ip, port };
 
-    let mut s = sock_arc.lock();
-    if s.closed {
+    // Read socket state without holding the lock across port_table access.
+    let (closed, sock_type) = {
+        let s = sock_arc.lock();
+        (s.closed, s.sock_type)
+    };
+    if closed {
         info.lock().errno = Errno::EBADF;
         return !0u64;
     }
 
+    let proto = if sock_type == SOCK_DGRAM { 17u8 } else { 6u8 };
+
     // Auto-assign ephemeral port if port 0 is requested
     let bind_port = if port == 0 {
-        let proto = if s.sock_type == SOCK_DGRAM { 17u8 } else { 6u8 };
         match allocate_ephemeral_port(proto) {
             Some(p) => p,
             None => {
@@ -96,18 +101,17 @@ pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
         port
     };
 
-    let proto = if s.sock_type == SOCK_DGRAM { 17u8 } else { 6u8 };
-
-    // Register in port table
+    // Register in port table (lock port_table first, then socket -- consistent order).
     {
         let mut table = port_table().lock();
         if table.contains_key(&(proto, bind_port)) {
-            info.lock().errno = Errno::EINVAL;
+            info.lock().errno = Errno::EADDRINUSE;
             return !0u64;
         }
         table.insert((proto, bind_port), sock_arc.clone());
     }
 
+    let mut s = sock_arc.lock();
     s.local_addr = Some(SocketAddr {
         ip: local_addr.ip,
         port: bind_port,
@@ -328,7 +332,9 @@ pub fn sys_sendto(
         }
     };
 
-    // Copy data from userspace
+    // Copy data from userspace (cap to prevent OOM from malicious count)
+    const MAX_SENDTO_SIZE: usize = 65536; // 64 KiB
+    let count = count.min(MAX_SENDTO_SIZE);
     let mut data = alloc::vec![0u8; count];
     if !unsafe { crate::util::uaccess::try_copy_from_user(data.as_mut_ptr(), buf_ptr, count) } {
         info.lock().errno = Errno::EFAULT;

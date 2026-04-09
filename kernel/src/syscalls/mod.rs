@@ -89,7 +89,11 @@ fn close_fd_refcount(desc: FileDescriptor) {
                 s.closed = true;
                 s.rx_wq.wake_all();
                 if let Some(addr) = s.local_addr {
-                    let proto = if s.sock_type == 2 { 17u8 } else { 6u8 };
+                    let proto = if s.sock_type == crate::net::socket::SOCK_DGRAM {
+                        17u8
+                    } else {
+                        6u8
+                    };
                     crate::net::socket::port_table()
                         .lock()
                         .remove(&(proto, addr.port));
@@ -794,6 +798,10 @@ pub enum Errno {
     ENOTCONN,
     /// Connection was refused by the remote host.
     ECONNREFUSED,
+    /// Address already in use (bind).
+    EADDRINUSE,
+    /// Broken pipe: write to a closed connection.
+    EPIPE,
     /// Placeholder for unknown or unmapped kernel error codes.
     UNKNOWN,
 }

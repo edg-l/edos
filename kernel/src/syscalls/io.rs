@@ -217,7 +217,11 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
         }
         Some(FileDescriptor::Socket(sock)) => {
             use crate::net::socket::SOCK_STREAM;
+            use crate::net::tcp::TcpState;
             use crate::net::{ipv4, stack::net_stack};
+
+            const MAX_SOCKET_WRITE: usize = 1024 * 1024; // 1 MiB
+            let count = count.min(MAX_SOCKET_WRITE);
 
             let sock_type = sock.lock().sock_type;
             if sock_type == SOCK_STREAM {
@@ -229,6 +233,16 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                         return !0u64;
                     }
                 };
+
+                // Check connection state before writing
+                let state = conn.lock().state;
+                match state {
+                    TcpState::Established | TcpState::CloseWait => {}
+                    _ => {
+                        info.lock().errno = Errno::EPIPE;
+                        return !0u64;
+                    }
+                }
 
                 let mut data = vec![0u8; count];
                 if !unsafe { try_copy_from_user(data.as_mut_ptr(), buffer_ptr, count) } {
@@ -329,7 +343,11 @@ pub fn sys_close(fd: u64) -> i32 {
                 s.closed = true;
                 s.rx_wq.wake_all();
                 if let Some(addr) = s.local_addr {
-                    let proto = if s.sock_type == 2 { 17u8 } else { 6u8 };
+                    let proto = if s.sock_type == crate::net::socket::SOCK_DGRAM {
+                        17u8
+                    } else {
+                        6u8
+                    };
                     crate::net::socket::port_table()
                         .lock()
                         .remove(&(proto, addr.port));

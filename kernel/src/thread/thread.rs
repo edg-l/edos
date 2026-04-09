@@ -673,7 +673,11 @@ impl Thread {
                                 s.closed = true;
                                 s.rx_wq.wake_all();
                                 if let Some(addr) = s.local_addr {
-                                    let proto = if s.sock_type == 2 { 17u8 } else { 6u8 };
+                                    let proto = if s.sock_type == crate::net::socket::SOCK_DGRAM {
+                                        17u8
+                                    } else {
+                                        6u8
+                                    };
                                     crate::net::socket::port_table()
                                         .lock()
                                         .remove(&(proto, addr.port));
