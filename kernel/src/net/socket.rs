@@ -53,6 +53,8 @@ pub struct Socket {
     pub listening: bool,
     /// Maximum accept queue length.
     pub backlog: u32,
+    /// Number of fd references. Close only tears down when this reaches 0.
+    pub refcount: u32,
 }
 
 impl core::fmt::Debug for Socket {
@@ -83,6 +85,7 @@ impl Socket {
             accept_queue: VecDeque::new(),
             listening: false,
             backlog: 0,
+            refcount: 1,
         }
     }
 
@@ -99,6 +102,7 @@ impl Socket {
             accept_queue: VecDeque::new(),
             listening: false,
             backlog: 0,
+            refcount: 1,
         }
     }
 }

@@ -42,6 +42,9 @@ impl FileDescriptor {
             FileDescriptor::PtySlave(pty) => {
                 pty.lock().slaves += 1;
             }
+            FileDescriptor::Socket(sock) => {
+                sock.lock().refcount += 1;
+            }
             _ => {}
         }
     }

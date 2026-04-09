@@ -338,22 +338,25 @@ pub fn sys_close(fd: u64) -> i32 {
             0
         }
         Some(FileDescriptor::Socket(sock)) => {
-            let tcp_conn = {
-                let mut s = sock.lock();
-                s.closed = true;
-                s.rx_wq.wake_all();
-                if let Some(addr) = s.local_addr {
-                    let proto = if s.sock_type == crate::net::socket::SOCK_DGRAM {
-                        17u8
-                    } else {
-                        6u8
-                    };
-                    crate::net::socket::port_table()
-                        .lock()
-                        .remove(&(proto, addr.port));
-                }
-                s.tcp_conn.clone()
-            };
+            let mut s = sock.lock();
+            s.refcount = s.refcount.saturating_sub(1);
+            if s.refcount > 0 {
+                return 0; // Other fds still reference this socket
+            }
+            s.closed = true;
+            s.rx_wq.wake_all();
+            if let Some(addr) = s.local_addr {
+                let proto = if s.sock_type == crate::net::socket::SOCK_DGRAM {
+                    17u8
+                } else {
+                    6u8
+                };
+                crate::net::socket::port_table()
+                    .lock()
+                    .remove(&(proto, addr.port));
+            }
+            let tcp_conn = s.tcp_conn.clone();
+            drop(s);
             // For TCP sockets, send FIN to initiate graceful close
             if let Some(conn) = tcp_conn {
                 let fin = conn.lock().build_fin();
