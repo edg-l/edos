@@ -354,6 +354,10 @@ impl Scheduler {
         self.current.store(0, Ordering::Release);
         unsafe { get_percpu_data().set_current_thread(None) };
 
+        // Switch to the kernel page table so we don't idle with a stale
+        // user-process CR3 whose PML4 may be freed by another CPU.
+        switch_to_kernel_page();
+
         self.has_work.store(false, Ordering::Release);
         enable();
 
