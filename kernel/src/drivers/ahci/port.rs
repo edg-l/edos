@@ -18,7 +18,7 @@ use crate::{
                 PORT_CMD_ST, PORT_IS_TFES, PrdtEntry, ScsiInquiry, ScsiRead10, ScsiReadCapacity10,
             },
         },
-        dma::{DmaRegion, dma},
+        dma::{DmaBuffer, DmaRegion, dma},
     },
     log,
     thread::scheduler::sched,
@@ -40,6 +40,9 @@ pub struct AhciPort {
 
     // Command slot tracking
     pub free_slots: u32, // Bitmap of free command slots
+
+    // Reusable DMA buffer for ATA read/write. Allocated on first use, grown as needed.
+    io_dma: Option<DmaBuffer>,
 }
 
 unsafe impl Send for AhciPort {}
@@ -112,6 +115,7 @@ impl AhciPort {
             fis_area,
             command_tables: [const { None }; AHCI_CMD_SLOTS],
             free_slots: 0xFFFFFFFF, // All slots initially free
+            io_dma: None,
         })
     }
 
@@ -171,6 +175,16 @@ impl AhciPort {
 
     pub fn set_device_type(&mut self, device_type: DeviceType) {
         self.device_type = device_type;
+    }
+
+    /// Ensure the reusable I/O DMA buffer is at least `min_size` bytes.
+    /// Returns the physical address and a pointer to the buffer.
+    fn ensure_io_dma(&mut self, min_size: usize) -> Result<(PhysAddr, *mut u8), AhciError> {
+        if self.io_dma.is_none() || self.io_dma.as_ref().unwrap().size < min_size {
+            self.io_dma = Some(DmaBuffer::allocate_sized(min_size)?);
+        }
+        let buf = self.io_dma.as_ref().unwrap();
+        Ok((buf.phys_addr(), buf.as_ptr()))
     }
 
     /// Execute ATAPI command (SCSI packet command)
@@ -440,24 +454,19 @@ impl AhciPort {
             return Err(AhciError::IoError);
         }
 
-        // Allocate DMA buffer for read data (sized for multiple sectors)
-        let data_buffer = dma().allocate_sized(expected_size)?;
+        let (phys, dma_ptr) = self.ensure_io_dma(expected_size)?;
 
         self.execute_command(
             &FisRegH2D::new_read_dma_ext(lba, sectors),
-            data_buffer.phys_addr(),
+            phys,
             expected_size,
             0,
             Duration::from_secs(5),
         )?;
 
-        // Copy the read data to the output buffer
-        let bytes_to_copy = expected_size.min(buffer.len());
         unsafe {
-            ptr::copy_nonoverlapping(data_buffer.as_ptr(), buffer.as_mut_ptr(), bytes_to_copy);
+            ptr::copy_nonoverlapping(dma_ptr, buffer.as_mut_ptr(), expected_size);
         }
-
-        dma().dealloc(data_buffer);
 
         Ok(())
     }
@@ -492,23 +501,20 @@ impl AhciPort {
             return Err(AhciError::IoError);
         }
 
-        // Allocate DMA buffer for write data (sized for multiple sectors)
-        let data_buffer = dma().allocate_sized(expected_size)?;
+        let (phys, dma_ptr) = self.ensure_io_dma(expected_size)?;
 
-        // Copy input data to DMA buffer
         unsafe {
-            ptr::copy_nonoverlapping(buffer.as_ptr(), data_buffer.as_ptr(), expected_size);
+            ptr::copy_nonoverlapping(buffer.as_ptr(), dma_ptr, expected_size);
         }
 
         self.execute_command(
             &FisRegH2D::new_write_dma_ext(lba, sectors),
-            data_buffer.phys_addr(),
+            phys,
             expected_size,
             CMD_HEADER_WRITE,
             Duration::from_secs(5),
         )?;
 
-        dma().dealloc(data_buffer);
         Ok(())
     }
 
