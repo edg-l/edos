@@ -1710,9 +1710,12 @@ fn sys_netinfo(buf_ptr: *mut u8, buf_len: usize) -> u64 {
         use alloc::fmt::Write;
         let mut out = alloc::string::String::with_capacity(256);
 
+        // ANSI: \x1b[1m = bold, \x1b[32m = green, \x1b[31m = red,
+        //       \x1b[36m = cyan, \x1b[0m = reset
+
         // lo - loopback
-        let _ = write!(out, "1: lo: <LOOPBACK,UP>\n");
-        let _ = write!(out, "    inet 127.0.0.1/8\n");
+        let _ = write!(out, "1: \x1b[1mlo\x1b[0m: <LOOPBACK,\x1b[32mUP\x1b[0m>\n");
+        let _ = write!(out, "    inet \x1b[36m127.0.0.1/8\x1b[0m\n");
 
         // eth0 - e1000e
         if let Some(stack) = crate::net::stack::NET_STACK.get() {
@@ -1720,10 +1723,15 @@ fn sys_netinfo(buf_ptr: *mut u8, buf_len: usize) -> u64 {
             let mac = s.mac();
             let link = s.nic.link_up();
             let prefix = s.subnet_mask.iter().map(|b| b.count_ones()).sum::<u32>();
-            let flags = if link { "UP,LOWER_UP" } else { "NO-CARRIER" };
+            let (flags, state_color) = if link {
+                ("UP,LOWER_UP", "\x1b[32m") // green
+            } else {
+                ("NO-CARRIER", "\x1b[31m") // red
+            };
             let _ = write!(
                 out,
-                "2: eth0: <BROADCAST,MULTICAST,{}>\n    link/ether {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n    inet {}.{}.{}.{}/{}\n    gateway {}.{}.{}.{}\n",
+                "2: \x1b[1meth0\x1b[0m: <BROADCAST,MULTICAST,{}{}\x1b[0m>\n    link/ether {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n    inet \x1b[36m{}.{}.{}.{}/{}\x1b[0m\n    gateway {}.{}.{}.{}\n",
+                state_color,
                 flags,
                 mac[0],
                 mac[1],
