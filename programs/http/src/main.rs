@@ -11,7 +11,7 @@ fn main() {
         return;
     }
 
-    let ip = match parse_ip(&args[1]) {
+    let ip = match resolve_host(&args[1]) {
         Some(ip) => ip,
         None => {
             eprintln!("Invalid IP: {}", args[1]);
@@ -74,7 +74,10 @@ fn main() {
     net::close(fd);
 }
 
-fn parse_ip(s: &str) -> Option<[u8; 4]> {
+fn resolve_host(s: &str) -> Option<[u8; 4]> {
+    if s == "localhost" {
+        return Some([127, 0, 0, 1]);
+    }
     let parts: Vec<&str> = s.split('.').collect();
     if parts.len() != 4 {
         return None;
