@@ -132,9 +132,121 @@ impl NetStack {
             for seg in responses {
                 let _ = self.send_ip(remote.ip, ipv4::IpProtocol::Tcp, &seg);
             }
+
+            // If this connection just became Established (passive open), update the
+            // queued socket state and wake the listening socket so accept() can dequeue it.
+            if conn.lock().state == tcp::TcpState::Established {
+                let dst_port = tcp_hdr.dst_port;
+                let pt = socket::port_table().lock();
+                if let Some(listen_sock) = pt.get(&(6u8, dst_port)) {
+                    let ls = listen_sock.lock();
+                    if ls.listening {
+                        // Mark the matching queued socket as Connected
+                        for queued in ls.accept_queue.iter() {
+                            let mut qs = queued.lock();
+                            if let Some(ref qconn) = qs.tcp_conn {
+                                if Arc::ptr_eq(qconn, &conn) {
+                                    qs.state = socket::SocketState::Connected;
+                                    break;
+                                }
+                            }
+                        }
+                        ls.rx_wq.wake_all();
+                    }
+                }
+            }
+        } else if tcp_hdr.flags & tcp::SYN != 0 && tcp_hdr.flags & tcp::ACK == 0 {
+            // Incoming SYN: check for a listening socket on this port
+            let listen_sock_opt = {
+                let pt = socket::port_table().lock();
+                pt.get(&(6u8, tcp_hdr.dst_port)).cloned()
+            };
+
+            if let Some(listen_sock) = listen_sock_opt {
+                let (is_listening, backlog_ok) = {
+                    let ls = listen_sock.lock();
+                    (ls.listening, (ls.accept_queue.len() as u32) < ls.backlog)
+                };
+
+                if is_listening && backlog_ok {
+                    let local_ip = self.local_ip;
+
+                    // Build SYN-ACK
+                    let irs = tcp_hdr.seq_num;
+                    let rcv_nxt = irs.wrapping_add(1);
+                    let mut conn = TcpConnection::new(
+                        local_ip,
+                        tcp_hdr.dst_port,
+                        ip_hdr.src_addr,
+                        tcp_hdr.src_port,
+                    );
+                    conn.irs = irs;
+                    conn.rcv_nxt = rcv_nxt;
+                    if let Some(mss) = tcp::parse_mss(payload, tcp_hdr.data_offset) {
+                        conn.mss = mss;
+                    }
+                    conn.snd_wnd = tcp_hdr.window;
+                    conn.state = tcp::TcpState::SynReceived;
+
+                    let syn_ack = tcp::build(
+                        tcp_hdr.dst_port,
+                        tcp_hdr.src_port,
+                        conn.iss,
+                        conn.rcv_nxt,
+                        tcp::SYN | tcp::ACK,
+                        conn.rcv_wnd,
+                        local_ip,
+                        ip_hdr.src_addr,
+                        &tcp::mss_option(tcp::DEFAULT_MSS),
+                        &[],
+                    );
+                    conn.snd_nxt = conn.iss.wrapping_add(1);
+
+                    let conn_arc = Arc::new(Mutex::new(conn));
+                    let local_sa = socket::SocketAddr {
+                        ip: local_ip,
+                        port: tcp_hdr.dst_port,
+                    };
+                    let remote_sa = socket::SocketAddr {
+                        ip: ip_hdr.src_addr,
+                        port: tcp_hdr.src_port,
+                    };
+                    self.tcp_connections
+                        .insert((local_sa, remote_sa), conn_arc.clone());
+
+                    // Create a new Socket representing this incoming connection
+                    let mut new_sock = socket::Socket::new_tcp();
+                    new_sock.local_addr = Some(local_sa);
+                    new_sock.remote_addr = Some(remote_sa);
+                    new_sock.tcp_conn = Some(conn_arc);
+                    // State will be updated to Connected when ACK arrives (SynReceived -> Established)
+                    let new_sock_arc = Arc::new(Mutex::new(new_sock));
+
+                    listen_sock.lock().accept_queue.push_back(new_sock_arc);
+
+                    let _ = self.send_ip(ip_hdr.src_addr, ipv4::IpProtocol::Tcp, &syn_ack);
+                    return;
+                }
+            }
+
+            // No listening socket or backlog full: send RST
+            if tcp_hdr.flags & tcp::RST == 0 {
+                let rst = tcp::build(
+                    tcp_hdr.dst_port,
+                    tcp_hdr.src_port,
+                    tcp_hdr.ack_num,
+                    tcp_hdr.seq_num.wrapping_add(1),
+                    tcp::RST | tcp::ACK,
+                    0,
+                    ip_hdr.dst_addr,
+                    ip_hdr.src_addr,
+                    &[],
+                    &[],
+                );
+                let _ = self.send_ip(ip_hdr.src_addr, ipv4::IpProtocol::Tcp, &rst);
+            }
         } else {
-            // No connection found. If it's a SYN to a listening socket, handle that in Phase 4b.
-            // Send RST for unexpected segments (unless it's a RST itself).
+            // No connection found, not a SYN. Send RST for unexpected segments.
             if tcp_hdr.flags & tcp::RST == 0 {
                 let rst = tcp::build(
                     tcp_hdr.dst_port,
@@ -338,6 +450,7 @@ pub extern "C" fn tcp_retransmit_main() -> ! {
 /// `timeout` elapses.  Returns the round-trip time in microseconds, or `None`
 /// on timeout / ARP failure.
 pub fn syscall_ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout: Duration) -> Option<u64> {
+    #[allow(unused_imports)]
     use crate::thread::scheduler::sched;
 
     let wq = Arc::new(WaitQueue::new());

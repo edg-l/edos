@@ -216,30 +216,64 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             }
         }
         Some(FileDescriptor::Socket(sock)) => {
-            // Write on a connected socket: send to stored remote_addr
-            let remote = sock.lock().remote_addr;
-            match remote {
-                Some(dst) => {
-                    let mut data = vec![0u8; count];
-                    if !unsafe { try_copy_from_user(data.as_mut_ptr(), buffer_ptr, count) } {
-                        info.lock().errno = Errno::EFAULT;
+            use crate::net::socket::SOCK_STREAM;
+            use crate::net::{ipv4, stack::net_stack};
+
+            let sock_type = sock.lock().sock_type;
+            if sock_type == SOCK_STREAM {
+                // TCP write: segment data and send
+                let conn = match sock.lock().tcp_conn.clone() {
+                    Some(c) => c,
+                    None => {
+                        info.lock().errno = Errno::ENOTCONN;
                         return !0u64;
                     }
-                    let src_port = sock.lock().local_addr.map(|a| a.port).unwrap_or(0);
-                    match crate::net::stack::net_stack()
-                        .lock()
-                        .send_udp(src_port, dst.ip, dst.port, &data)
-                    {
-                        Ok(()) => count as u64,
-                        Err(_) => {
-                            info.lock().errno = Errno::EIO;
-                            !0u64
+                };
+
+                let mut data = vec![0u8; count];
+                if !unsafe { try_copy_from_user(data.as_mut_ptr(), buffer_ptr, count) } {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+
+                let segments = conn.lock().build_data_segments(&data);
+                if segments.is_empty() {
+                    // Window full: return 0 so caller can retry
+                    return 0;
+                }
+
+                let remote_ip = conn.lock().remote_ip;
+                let mut stack = net_stack().lock();
+                for seg in &segments {
+                    let _ = stack.send_ip(remote_ip, ipv4::IpProtocol::Tcp, seg);
+                }
+                count as u64
+            } else {
+                // UDP write: send to stored remote_addr
+                let remote = sock.lock().remote_addr;
+                match remote {
+                    Some(dst) => {
+                        let mut data = vec![0u8; count];
+                        if !unsafe { try_copy_from_user(data.as_mut_ptr(), buffer_ptr, count) } {
+                            info.lock().errno = Errno::EFAULT;
+                            return !0u64;
+                        }
+                        let src_port = sock.lock().local_addr.map(|a| a.port).unwrap_or(0);
+                        match net_stack()
+                            .lock()
+                            .send_udp(src_port, dst.ip, dst.port, &data)
+                        {
+                            Ok(()) => count as u64,
+                            Err(_) => {
+                                info.lock().errno = Errno::EIO;
+                                !0u64
+                            }
                         }
                     }
-                }
-                None => {
-                    info.lock().errno = Errno::EINVAL;
-                    !0u64
+                    None => {
+                        info.lock().errno = Errno::EINVAL;
+                        !0u64
+                    }
                 }
             }
         }
@@ -290,14 +324,29 @@ pub fn sys_close(fd: u64) -> i32 {
             0
         }
         Some(FileDescriptor::Socket(sock)) => {
-            let mut s = sock.lock();
-            s.closed = true;
-            s.rx_wq.wake_all();
-            if let Some(addr) = s.local_addr {
-                let proto = if s.sock_type == 2 { 17u8 } else { 6u8 };
-                crate::net::socket::port_table()
-                    .lock()
-                    .remove(&(proto, addr.port));
+            let tcp_conn = {
+                let mut s = sock.lock();
+                s.closed = true;
+                s.rx_wq.wake_all();
+                if let Some(addr) = s.local_addr {
+                    let proto = if s.sock_type == 2 { 17u8 } else { 6u8 };
+                    crate::net::socket::port_table()
+                        .lock()
+                        .remove(&(proto, addr.port));
+                }
+                s.tcp_conn.clone()
+            };
+            // For TCP sockets, send FIN to initiate graceful close
+            if let Some(conn) = tcp_conn {
+                let fin = conn.lock().build_fin();
+                if let Some(fin_seg) = fin {
+                    let remote_ip = conn.lock().remote_ip;
+                    if let Some(stack_mutex) = crate::net::stack::NET_STACK.get() {
+                        let mut stack = stack_mutex.lock();
+                        let _ =
+                            stack.send_ip(remote_ip, crate::net::ipv4::IpProtocol::Tcp, &fin_seg);
+                    }
+                }
             }
             0
         }
@@ -491,29 +540,66 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             bytes_to_copy as i64
         }
         Some(FileDescriptor::Socket(sock)) => {
-            // Blocking receive on a socket
-            let rx_wq = sock.lock().rx_wq.clone();
-            rx_wq.wait_until(|| {
-                let s = sock.lock();
-                !s.rx_queue.is_empty() || s.closed
-            });
-            let data_opt = {
-                let mut s = sock.lock();
-                if s.closed && s.rx_queue.is_empty() {
-                    return 0;
-                }
-                s.rx_queue.pop_front().map(|(d, _src)| d)
-            };
-            match data_opt {
-                Some(data) => {
-                    let bytes_to_copy = data.len().min(count);
-                    if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_copy) } {
-                        info.lock().errno = Errno::EFAULT;
+            use crate::net::socket::SOCK_STREAM;
+            use crate::net::tcp::TcpState;
+
+            let sock_type = sock.lock().sock_type;
+            if sock_type == SOCK_STREAM {
+                // TCP read: drain from TcpConnection rx_buffer
+                let conn = match sock.lock().tcp_conn.clone() {
+                    Some(c) => c,
+                    None => {
+                        info.lock().errno = Errno::ENOTCONN;
                         return -1;
                     }
-                    bytes_to_copy as i64
+                };
+                let rx_wq = conn.lock().rx_wq.clone();
+                rx_wq.wait_until(|| {
+                    let c = conn.lock();
+                    !c.rx_buffer.is_empty()
+                        || c.state == TcpState::Closed
+                        || c.state == TcpState::CloseWait
+                        || c.state == TcpState::TimeWait
+                });
+
+                let mut c = conn.lock();
+                if c.rx_buffer.is_empty() {
+                    return 0; // EOF
                 }
-                None => 0,
+                let bytes_to_read = count.min(c.rx_buffer.len());
+                let data: Vec<u8> = c.rx_buffer.drain(..bytes_to_read).collect();
+                drop(c);
+
+                if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_read) } {
+                    info.lock().errno = Errno::EFAULT;
+                    return -1;
+                }
+                bytes_to_read as i64
+            } else {
+                // UDP: blocking receive from rx_queue
+                let rx_wq = sock.lock().rx_wq.clone();
+                rx_wq.wait_until(|| {
+                    let s = sock.lock();
+                    !s.rx_queue.is_empty() || s.closed
+                });
+                let data_opt = {
+                    let mut s = sock.lock();
+                    if s.closed && s.rx_queue.is_empty() {
+                        return 0;
+                    }
+                    s.rx_queue.pop_front().map(|(d, _src)| d)
+                };
+                match data_opt {
+                    Some(data) => {
+                        let bytes_to_copy = data.len().min(count);
+                        if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_copy) } {
+                            info.lock().errno = Errno::EFAULT;
+                            return -1;
+                        }
+                        bytes_to_copy as i64
+                    }
+                    None => 0,
+                }
             }
         }
         None => {

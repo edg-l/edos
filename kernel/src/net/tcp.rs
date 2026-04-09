@@ -283,6 +283,20 @@ impl TcpConnection {
         let mut responses = Vec::new();
 
         match self.state {
+            TcpState::SynReceived => {
+                if hdr.flags & RST != 0 {
+                    self.state = TcpState::Closed;
+                    self.state_wq.wake_all();
+                    return responses;
+                }
+                if hdr.flags & ACK != 0 && hdr.ack_num == self.snd_nxt {
+                    self.snd_una = hdr.ack_num;
+                    self.snd_wnd = hdr.window;
+                    self.state = TcpState::Established;
+                    self.retransmit_queue.clear();
+                    self.state_wq.wake_all();
+                }
+            }
             TcpState::SynSent => {
                 // Expecting SYN-ACK
                 if hdr.flags & RST != 0 {

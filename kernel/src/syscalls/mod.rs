@@ -83,14 +83,29 @@ fn close_fd_refcount(desc: FileDescriptor) {
             pty.lock().close_slave().flush();
         }
         FileDescriptor::Socket(sock) => {
-            let mut s = sock.lock();
-            s.closed = true;
-            s.rx_wq.wake_all();
-            if let Some(addr) = s.local_addr {
-                let proto = if s.sock_type == 2 { 17u8 } else { 6u8 };
-                crate::net::socket::port_table()
-                    .lock()
-                    .remove(&(proto, addr.port));
+            let tcp_conn = {
+                let mut s = sock.lock();
+                s.closed = true;
+                s.rx_wq.wake_all();
+                if let Some(addr) = s.local_addr {
+                    let proto = if s.sock_type == 2 { 17u8 } else { 6u8 };
+                    crate::net::socket::port_table()
+                        .lock()
+                        .remove(&(proto, addr.port));
+                }
+                s.tcp_conn.clone()
+            };
+            // For TCP sockets, send FIN to initiate graceful close
+            if let Some(conn) = tcp_conn {
+                let fin = conn.lock().build_fin();
+                if let Some(fin_seg) = fin {
+                    let remote_ip = conn.lock().remote_ip;
+                    if let Some(stack_mutex) = crate::net::stack::NET_STACK.get() {
+                        let mut stack = stack_mutex.lock();
+                        let _ =
+                            stack.send_ip(remote_ip, crate::net::ipv4::IpProtocol::Tcp, &fin_seg);
+                    }
+                }
             }
         }
         _ => {}
@@ -301,6 +316,8 @@ const SYS_PING: u64 = 249;
 const SYS_SOCKET: u64 = 240;
 const SYS_BIND: u64 = 241;
 const SYS_CONNECT: u64 = 242;
+const SYS_LISTEN: u64 = 243;
+const SYS_ACCEPT: u64 = 244;
 const SYS_SENDTO: u64 = 245;
 const SYS_RECVFROM: u64 = 246;
 
@@ -658,6 +675,17 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let addr_len = ctx.rdx;
             ctx.rax = net::sys_connect(fd, addr_ptr, addr_len);
         }
+        SYS_LISTEN => {
+            let fd = ctx.rdi;
+            let backlog = ctx.rsi as u32;
+            ctx.rax = net::sys_listen(fd, backlog);
+        }
+        SYS_ACCEPT => {
+            let fd = ctx.rdi;
+            let addr_ptr = ctx.rsi as *mut net::SockAddrIn;
+            let addr_len_ptr = ctx.rdx as *mut u32;
+            ctx.rax = net::sys_accept(fd, addr_ptr, addr_len_ptr);
+        }
         SYS_SENDTO => {
             let fd = ctx.rdi;
             let buf_ptr = ctx.rsi as *const u8;
@@ -753,6 +781,12 @@ pub enum Errno {
     EINTR,
     /// File format is not recognized as an executable.
     ENOEXEC,
+    /// Resource temporarily unavailable; operation would block.
+    EAGAIN,
+    /// Socket is not connected.
+    ENOTCONN,
+    /// Connection was refused by the remote host.
+    ECONNREFUSED,
     /// Placeholder for unknown or unmapped kernel error codes.
     UNKNOWN,
 }

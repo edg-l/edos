@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
 use spin::Mutex;
 
+use crate::net::tcp::TcpConnection;
 use crate::thread::waitqueue::WaitQueue;
 
 pub const AF_INET: u32 = 2;
@@ -34,16 +35,37 @@ pub enum SocketState {
     Closed,
 }
 
-#[derive(Debug)]
 pub struct Socket {
     pub sock_type: u32, // SOCK_DGRAM or SOCK_STREAM
     pub state: SocketState,
     pub local_addr: Option<SocketAddr>,
     pub remote_addr: Option<SocketAddr>,
-    /// Received datagrams: each entry is (data, source_addr).
+    /// Received datagrams: each entry is (data, source_addr). Used for UDP only.
     pub rx_queue: VecDeque<(Vec<u8>, SocketAddr)>,
     pub rx_wq: Arc<WaitQueue>,
     pub closed: bool,
+    /// TCP connection state machine (only set for SOCK_STREAM).
+    pub tcp_conn: Option<Arc<Mutex<TcpConnection>>>,
+    /// Completed connections waiting for accept() (only for listening TCP sockets).
+    pub accept_queue: VecDeque<Arc<Mutex<Socket>>>,
+    /// Whether this socket is in listening state.
+    pub listening: bool,
+    /// Maximum accept queue length.
+    pub backlog: u32,
+}
+
+impl core::fmt::Debug for Socket {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Socket")
+            .field("sock_type", &self.sock_type)
+            .field("state", &self.state)
+            .field("local_addr", &self.local_addr)
+            .field("remote_addr", &self.remote_addr)
+            .field("closed", &self.closed)
+            .field("listening", &self.listening)
+            .field("backlog", &self.backlog)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Socket {
@@ -56,6 +78,26 @@ impl Socket {
             rx_queue: VecDeque::new(),
             rx_wq: Arc::new(WaitQueue::new()),
             closed: false,
+            tcp_conn: None,
+            accept_queue: VecDeque::new(),
+            listening: false,
+            backlog: 0,
+        }
+    }
+
+    pub fn new_tcp() -> Self {
+        Self {
+            sock_type: SOCK_STREAM,
+            state: SocketState::Unbound,
+            local_addr: None,
+            remote_addr: None,
+            rx_queue: VecDeque::new(),
+            rx_wq: Arc::new(WaitQueue::new()),
+            closed: false,
+            tcp_conn: None,
+            accept_queue: VecDeque::new(),
+            listening: false,
+            backlog: 0,
         }
     }
 }

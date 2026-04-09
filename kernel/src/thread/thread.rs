@@ -668,14 +668,32 @@ impl Thread {
                             notif.flush();
                         }
                         super::pipe::FileDescriptor::Socket(sock) => {
-                            let mut s = sock.lock();
-                            s.closed = true;
-                            s.rx_wq.wake_all();
-                            if let Some(addr) = s.local_addr {
-                                let proto = if s.sock_type == 2 { 17u8 } else { 6u8 };
-                                crate::net::socket::port_table()
-                                    .lock()
-                                    .remove(&(proto, addr.port));
+                            let tcp_conn = {
+                                let mut s = sock.lock();
+                                s.closed = true;
+                                s.rx_wq.wake_all();
+                                if let Some(addr) = s.local_addr {
+                                    let proto = if s.sock_type == 2 { 17u8 } else { 6u8 };
+                                    crate::net::socket::port_table()
+                                        .lock()
+                                        .remove(&(proto, addr.port));
+                                }
+                                s.tcp_conn.clone()
+                            };
+                            // For TCP sockets, send FIN to initiate graceful close
+                            if let Some(conn) = tcp_conn {
+                                let fin = conn.lock().build_fin();
+                                if let Some(fin_seg) = fin {
+                                    let remote_ip = conn.lock().remote_ip;
+                                    if let Some(stack_mutex) = crate::net::stack::NET_STACK.get() {
+                                        let mut stack = stack_mutex.lock();
+                                        let _ = stack.send_ip(
+                                            remote_ip,
+                                            crate::net::ipv4::IpProtocol::Tcp,
+                                            &fin_seg,
+                                        );
+                                    }
+                                }
                             }
                         }
                         _ => {}
