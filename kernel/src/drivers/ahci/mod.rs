@@ -70,7 +70,9 @@ pub struct DetectedDevice {
     pub id: u64,
     pub controller_pci_address: PciAddress,
     pub port_idx: usize,
+    #[expect(unused)]
     pub device_info: DeviceIdentifyInfo,
+    #[expect(unused)]
     pub device_type: DeviceType,
 }
 

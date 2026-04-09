@@ -1,7 +1,5 @@
 //! Device filesystem for exposing kernel devices to userspace.
 
-use core::time::Duration;
-
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, BTreeSet},
@@ -14,10 +12,9 @@ use thiserror::Error;
 
 use crate::{
     fs::{
-        self, File, FileAttrs, FileKind, FileSystem, MmapRegion, PollState, handle::Pollable,
+        self, File, FileAttrs, FileKind, FileSystem, MmapRegion, handle::Pollable,
         path::Path,
     },
-    log,
     memory::mapper::MemoryManager,
     println,
 };
@@ -70,7 +67,7 @@ pub trait DevFsDevice: Send + Sync {
         &self,
         _offset: usize,
         _length: usize,
-        memory: Arc<Mutex<MemoryManager>>,
+        _memory: Arc<Mutex<MemoryManager>>,
     ) -> Result<MmapRegion, DevFsError> {
         Err(DevFsError::Unsupported)
     }
@@ -428,6 +425,7 @@ pub fn unregister_device(path: &Path) -> Result<(), DevFsError> {
 }
 
 /// Convenience helper for unregistering devices via string paths.
+#[expect(unused)]
 pub fn unregister_device_str(path: &str) -> Result<(), DevFsError> {
     let path = Path::parse(path).map_err(|_| DevFsError::InvalidPath)?;
     unregister_device(&path)

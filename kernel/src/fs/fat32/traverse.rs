@@ -1,5 +1,4 @@
 use alloc::vec::Vec;
-use bytemuck::cast;
 
 use crate::fs::{
     Error,
@@ -7,11 +6,10 @@ use crate::fs::{
         Fatfs,
         structures::{
             ATTR_LONG_NAME, CLUSTER_BAD, CLUSTER_EOF, CLUSTER_FREE, DirectoryEntry,
-            DirectoryRecord, FAT12_MASK, FAT16_MASK, FAT32_MASK, FatVariant, LongFilenameEntry,
+            DirectoryRecord, FAT16_MASK, FAT32_MASK, FatVariant, LongFilenameEntry,
             decode_long_name,
         },
     },
-    path::Path,
 };
 
 impl Fatfs {
@@ -555,6 +553,7 @@ impl Fatfs {
         self.partition.starting_lba + reserved + (numfats * fatsz)
     }
 
+    #[expect(unused)]
     #[inline(always)]
     pub fn first_data_lba(&self) -> u64 {
         let reserved = self.boot_info.reserved_sector_count as u64;

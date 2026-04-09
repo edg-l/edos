@@ -140,6 +140,7 @@ impl<T, R> Mailbox<T, R> {
         req.resp.waitq.wake_one();
     }
 
+    #[expect(unused)]
     pub fn forward<U>(&self, req: Request<U, R>, payload: T) {
         let new_req = Request {
             payload: Some(payload),

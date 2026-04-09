@@ -55,6 +55,7 @@ impl Fatfs {
             Ok(buffer)
         }
     }
+    #[expect(unused)]
     pub fn read_file(&mut self, entry: &DirectoryEntry) -> Result<Vec<u8>, Error> {
         if entry.is_directory() {
             return Err(Error::NotAFile);

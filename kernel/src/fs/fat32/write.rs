@@ -3,7 +3,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use bytemuck::{bytes_of, cast, from_bytes};
+use bytemuck::{bytes_of, from_bytes};
 
 use crate::{
     fs::{
@@ -12,7 +12,7 @@ use crate::{
             Fatfs,
             structures::{
                 ATTR_LONG_NAME, CLUSTER_EOF, CLUSTER_FREE, DirectoryEntry, DirectoryRecord,
-                FAT12_MASK, FAT16_MASK, FAT32_MASK, FatVariant, LongFilenameEntry,
+                FAT16_MASK, FAT32_MASK, FatVariant, LongFilenameEntry,
             },
         },
         path::Path,
@@ -24,6 +24,7 @@ impl Fatfs {
     /// Overwrite file contents starting at offset 0.
     /// Extends the cluster chain if `buf` is larger than the current file.
     /// Does not shrink or update the on-disk directory entry size yet.
+    #[expect(unused)]
     pub fn write_file(
         &mut self,
         entry: &mut DirectoryEntry,
@@ -316,7 +317,7 @@ impl Fatfs {
         // First pass from hint
         if let Some(c) = search(
             start_cluster,
-            (entries_per_sector as u32 * fat_sectors as u32),
+            entries_per_sector as u32 * fat_sectors as u32,
         ) {
             return Ok(c);
         }
@@ -751,6 +752,7 @@ impl Fatfs {
     }
 
     /// Copy the entire primary FAT to the backup FAT.
+    #[expect(unused)]
     pub fn mirror_primary_fat_to_backup(&mut self) -> Result<(), Error> {
         let total: u64 = self.boot_info.fat_size_32 as u64; // sectors in one FAT
         let mut src_lba = self.first_fat_lba();

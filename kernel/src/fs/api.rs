@@ -55,6 +55,7 @@ pub fn mount_partition(
     result
 }
 
+#[expect(unused)]
 pub fn unmount(mount_point: Path) -> Result<(), Error> {
     let FsResponse::Ok(result) = send_request(FsRequest::Unmount { mount_point }) else {
         unreachable!()
@@ -105,6 +106,7 @@ pub fn read_bytes(path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, E
     fs.lock().read_bytes(&rel_path, offset, count)
 }
 
+#[expect(unused)]
 pub fn write_bytes(path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
     let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
     fs.lock().write_bytes(&rel_path, offset, data)
@@ -161,6 +163,7 @@ pub fn file_info(path: &Path) -> Result<File, Error> {
     fs.lock().file_info(&rel_path)
 }
 
+#[expect(unused)]
 pub fn flush(path: &Path) -> Result<(), Error> {
     let (fs, _rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
     fs.lock().flush()
@@ -176,6 +179,7 @@ pub fn poll(path: &Path) -> Result<Box<dyn Pollable>, Error> {
     fs.lock().poll(&rel_path)
 }
 
+#[expect(unused)]
 pub fn mmap(
     path: &Path,
     offset: usize,

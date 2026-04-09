@@ -4,14 +4,11 @@
 
 use alloc::{
     collections::btree_map::BTreeMap,
-    string::{String, ToString},
+    string::String,
     vec::Vec,
 };
 
-use crate::{
-    fs::{Error, FileSystem, memfs::node::Node, path::Path},
-    log,
-};
+use crate::fs::{Error, FileSystem, memfs::node::Node, path::Path};
 
 use super::FileKind;
 
@@ -67,7 +64,7 @@ impl Memfs {
 
     fn get_all_child_ids(&self, id: u32) -> Result<Vec<u32>, Error> {
         let mut ids = Vec::new();
-        let mut node = self.get_node(id)?;
+        let node = self.get_node(id)?;
 
         for child in &node.childs {
             ids.push(*child);

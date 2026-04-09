@@ -33,10 +33,7 @@ pub mod path;
 pub mod procfs;
 pub mod vfs;
 
-pub use devfs::{
-    DevFsDevice, DevFsError, DevFsHandle as DevFs, register_device, register_device_str,
-    unregister_device, unregister_device_str,
-};
+pub use devfs::{DevFsDevice, DevFsError, DevFsHandle as DevFs, register_device_str};
 
 pub fn init() {
     queue_spawn_kthread_named("fs", fs_main_thread as *const () as u64);
@@ -86,6 +83,7 @@ impl PollState {
         }
     }
 
+    #[expect(unused)]
     pub const fn with_readable() -> Self {
         Self {
             readable: true,
@@ -127,6 +125,7 @@ impl PollState {
         matched
     }
 
+    #[expect(unused)]
     pub fn merge(&mut self, other: Self) {
         self.readable |= other.readable;
         self.writable |= other.writable;
@@ -164,6 +163,7 @@ pub struct MmapRegion {
 }
 
 impl MmapRegion {
+    #[expect(unused)]
     pub const fn new(phys_addr: u64, length: usize) -> Self {
         Self {
             phys_addr,
@@ -198,7 +198,7 @@ pub trait FileSystem {
         _path: &Path,
         _offset: usize,
         _length: usize,
-        memory: Arc<Mutex<MemoryManager>>,
+        _memory: Arc<Mutex<MemoryManager>>,
     ) -> Result<MmapRegion, Error> {
         Err(Error::IoError)
     }
@@ -216,6 +216,7 @@ pub trait FileSystem {
 pub enum FileKind {
     File,
     Directory,
+    #[expect(unused)]
     Symlink,
     Special,
 }
