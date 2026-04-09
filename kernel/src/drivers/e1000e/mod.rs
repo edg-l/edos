@@ -1,0 +1,376 @@
+pub mod descriptors;
+pub mod regs;
+
+use alloc::boxed::Box;
+use x86_64::{
+    VirtAddr, structures::paging::PageTableFlags, structures::paging::mapper::MapToError,
+};
+
+use crate::{
+    drivers::{
+        dma::{DmaBuffer, dma},
+        msi,
+        pci::{
+            config::{pci_read_u16, pci_write_u16, read_bar_phys},
+            pci_manager,
+        },
+    },
+    interrupts::InterruptIndex,
+    log,
+    memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
+    net::device::NetDevice,
+    thread::{runqueue::IO_PRIORITY, scheduler::sched, util::queue_spawn_kthread_named},
+};
+
+use self::{
+    descriptors::{
+        RX_STATUS_DD, RxDescriptor, TX_CMD_EOP, TX_CMD_IFCS, TX_CMD_RS, TX_STATUS_DD, TxDescriptor,
+    },
+    regs::*,
+};
+
+pub const NUM_RX_DESC: usize = 256;
+pub const NUM_TX_DESC: usize = 256;
+pub const RX_BUFFER_SIZE: usize = 4096;
+
+pub struct E1000e {
+    mmio_base: VirtAddr,
+    rx_ring: DmaBuffer,
+    tx_ring: DmaBuffer,
+    rx_buffers: Box<[Option<DmaBuffer>; NUM_RX_DESC]>,
+    tx_buffers: Box<[Option<DmaBuffer>; NUM_TX_DESC]>,
+    rx_tail: usize,
+    tx_tail: usize,
+    tx_clean: usize,
+    pub mac_addr: [u8; 6],
+}
+
+impl E1000e {
+    fn read_reg(&self, offset: u32) -> u32 {
+        unsafe { core::ptr::read_volatile((self.mmio_base + offset as u64).as_ptr::<u32>()) }
+    }
+
+    fn write_reg(&self, offset: u32, val: u32) {
+        unsafe {
+            core::ptr::write_volatile((self.mmio_base + offset as u64).as_mut_ptr::<u32>(), val)
+        }
+    }
+
+    pub fn new(
+        pci_device: &crate::drivers::pci::structures::PciDevice,
+    ) -> Result<Self, alloc::string::String> {
+        use alloc::format;
+
+        // Enable PCI bus mastering
+        let mut cmd = pci_read_u16(pci_device.address, 0x04);
+        cmd |= 0x04;
+        pci_write_u16(pci_device.address, 0x04, cmd);
+
+        // Read BAR0
+        let bar0_phys = read_bar_phys(pci_device.address, 0);
+
+        // Map MMIO (128KB)
+        let mmio_virt = get_virt_addr_from_phys_offset(bar0_phys);
+        {
+            let mut mapper = memory_mapper();
+            match mapper.map_address_range(
+                mmio_virt,
+                bar0_phys,
+                0x20000,
+                PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::NO_CACHE
+                    | PageTableFlags::GLOBAL,
+            ) {
+                Ok(_) => {}
+                Err(MapToError::PageAlreadyMapped(_)) => {}
+                Err(e) => return Err(format!("MMIO map failed: {:?}", e)),
+            }
+        }
+
+        let mut nic = Self {
+            mmio_base: mmio_virt,
+            rx_ring: dma()
+                .allocate_sized(core::mem::size_of::<[RxDescriptor; NUM_RX_DESC]>())
+                .map_err(|e| format!("rx ring alloc: {:?}", e))?,
+            tx_ring: dma()
+                .allocate_sized(core::mem::size_of::<[TxDescriptor; NUM_TX_DESC]>())
+                .map_err(|e| format!("tx ring alloc: {:?}", e))?,
+            rx_buffers: Box::new(core::array::from_fn(|_| None)),
+            tx_buffers: Box::new(core::array::from_fn(|_| None)),
+            rx_tail: 0,
+            tx_tail: 0,
+            tx_clean: 0,
+            mac_addr: [0u8; 6],
+        };
+
+        // Software reset
+        let ctrl = nic.read_reg(CTRL);
+        nic.write_reg(CTRL, ctrl | CTRL_RST);
+
+        // Spin until RST clears (up to ~1s at ~1MHz polls)
+        let mut reset_ok = false;
+        for _ in 0..1_000_000 {
+            core::hint::spin_loop();
+            if nic.read_reg(CTRL) & CTRL_RST == 0 {
+                reset_ok = true;
+                break;
+            }
+        }
+        if !reset_ok {
+            return Err("e1000e: reset timed out".into());
+        }
+
+        // Read MAC from RAL0/RAH0
+        let ral = nic.read_reg(RAL0);
+        let rah = nic.read_reg(RAH0);
+        let ral_bytes = ral.to_le_bytes();
+        nic.mac_addr[0] = ral_bytes[0];
+        nic.mac_addr[1] = ral_bytes[1];
+        nic.mac_addr[2] = ral_bytes[2];
+        nic.mac_addr[3] = ral_bytes[3];
+        nic.mac_addr[4] = (rah & 0xFF) as u8;
+        nic.mac_addr[5] = ((rah >> 8) & 0xFF) as u8;
+
+        // Disable all interrupts
+        nic.write_reg(IMC, 0xFFFFFFFF);
+
+        // Set interrupt throttle rate (~10us coalescing, 0x28 * 256ns)
+        nic.write_reg(ITR, 0x0028);
+
+        // Zero-fill descriptor rings
+        unsafe {
+            core::ptr::write_bytes(nic.rx_ring.as_ptr(), 0, nic.rx_ring.size);
+            core::ptr::write_bytes(nic.tx_ring.as_ptr(), 0, nic.tx_ring.size);
+        }
+
+        // Allocate RX buffers and fill descriptors
+        let rx_descs = nic.rx_ring.as_ptr() as *mut RxDescriptor;
+        for i in 0..NUM_RX_DESC {
+            let buf = dma()
+                .allocate_sized(RX_BUFFER_SIZE)
+                .map_err(|e| format!("rx buf alloc: {:?}", e))?;
+            let phys = buf.phys_addr().as_u64();
+            unsafe {
+                let desc = &mut *rx_descs.add(i);
+                desc.buffer_addr = phys;
+                desc.status = 0;
+            }
+            nic.rx_buffers[i] = Some(buf);
+        }
+
+        // Program RX descriptor ring registers
+        let rx_phys = nic.rx_ring.phys_addr().as_u64();
+        nic.write_reg(RDBAL, (rx_phys & 0xFFFFFFFF) as u32);
+        nic.write_reg(RDBAH, (rx_phys >> 32) as u32);
+        nic.write_reg(
+            RDLEN,
+            (NUM_RX_DESC * core::mem::size_of::<RxDescriptor>()) as u32,
+        );
+        nic.write_reg(RDH, 0);
+        nic.write_reg(RDT, (NUM_RX_DESC - 1) as u32);
+
+        // Program TX descriptor ring registers
+        let tx_phys = nic.tx_ring.phys_addr().as_u64();
+        nic.write_reg(TDBAL, (tx_phys & 0xFFFFFFFF) as u32);
+        nic.write_reg(TDBAH, (tx_phys >> 32) as u32);
+        nic.write_reg(
+            TDLEN,
+            (NUM_TX_DESC * core::mem::size_of::<TxDescriptor>()) as u32,
+        );
+        nic.write_reg(TDH, 0);
+        nic.write_reg(TDT, 0);
+
+        // Enable RX: EN | BAM | BSIZE_4096 | SECRC
+        nic.write_reg(RCTL, RCTL_EN | RCTL_BAM | RCTL_BSIZE_4096 | RCTL_SECRC);
+
+        // Enable TX: EN | PSP | CT=0x0F | COLD=0x3F
+        nic.write_reg(
+            TCTL,
+            TCTL_EN | TCTL_PSP | (0x0F << TCTL_CT_SHIFT) | (0x3F << TCTL_COLD_SHIFT),
+        );
+
+        // Set link up
+        let ctrl = nic.read_reg(CTRL);
+        nic.write_reg(CTRL, ctrl | CTRL_SLU);
+
+        // Clear pending interrupts
+        let _ = nic.read_reg(ICR);
+
+        // Enable MSI
+        msi::enable_msi_for_device(pci_device, InterruptIndex::E1000e.as_u8())
+            .map_err(|e| format!("MSI setup failed: {:?}", e))?;
+
+        Ok(nic)
+    }
+
+    pub fn enable_interrupts(&self) {
+        self.write_reg(IMS, IMS_TXDW | IMS_LSC | IMS_RXT0);
+    }
+
+    pub fn handle_interrupt(&self) -> u32 {
+        self.read_reg(ICR)
+    }
+
+    pub fn receive(&mut self) -> Option<(DmaBuffer, usize)> {
+        let rx_descs = self.rx_ring.as_ptr() as *mut RxDescriptor;
+        let desc = unsafe { &mut *rx_descs.add(self.rx_tail) };
+
+        if desc.status & RX_STATUS_DD == 0 {
+            return None;
+        }
+
+        let length = desc.length as usize;
+
+        // Allocate replacement BEFORE taking the old buffer to avoid
+        // corrupting ring state if allocation fails.
+        let new_buffer = dma().allocate_sized(RX_BUFFER_SIZE).ok()?;
+        let old_buffer = self.rx_buffers[self.rx_tail].take()?;
+
+        desc.buffer_addr = new_buffer.phys_addr().as_u64();
+        desc.status = 0;
+        desc.length = 0;
+
+        self.rx_buffers[self.rx_tail] = Some(new_buffer);
+        let old_tail = self.rx_tail;
+        self.rx_tail = (old_tail + 1) % NUM_RX_DESC;
+        // Write old_tail (the refilled slot) to give it back to HW.
+        // The HW owns [RDH, RDT), so advancing RDT past old_tail expands the range.
+        self.write_reg(RDT, old_tail as u32);
+
+        Some((old_buffer, length))
+    }
+
+    pub fn reclaim_tx_buffers(&mut self) {
+        let tx_descs = self.tx_ring.as_ptr() as *mut TxDescriptor;
+        while self.tx_clean != self.tx_tail {
+            let desc = unsafe { &*tx_descs.add(self.tx_clean) };
+            if desc.status & TX_STATUS_DD == 0 {
+                break;
+            }
+            if let Some(buf) = self.tx_buffers[self.tx_clean].take() {
+                let _ = dma().dealloc(buf);
+            }
+            self.tx_clean = (self.tx_clean + 1) % NUM_TX_DESC;
+        }
+    }
+
+    pub fn transmit(&mut self, data: &[u8]) -> Result<(), &'static str> {
+        self.reclaim_tx_buffers();
+
+        if data.len() > 1518 {
+            return Err("packet too large");
+        }
+
+        let next = (self.tx_tail + 1) % NUM_TX_DESC;
+        if next == self.tx_clean {
+            return Err("tx ring full");
+        }
+
+        let buf = dma().allocate_sized(4096).map_err(|_| "dma alloc failed")?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), buf.as_ptr(), data.len());
+        }
+
+        let tx_descs = self.tx_ring.as_ptr() as *mut TxDescriptor;
+        let desc = unsafe { &mut *tx_descs.add(self.tx_tail) };
+        desc.buffer_addr = buf.phys_addr().as_u64();
+        desc.length = data.len() as u16;
+        desc.cmd = TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS;
+        desc.status = 0;
+
+        self.tx_buffers[self.tx_tail] = Some(buf);
+        self.tx_tail = next;
+        self.write_reg(TDT, self.tx_tail as u32);
+
+        Ok(())
+    }
+}
+
+impl NetDevice for E1000e {
+    fn send(&mut self, data: &[u8]) -> Result<(), &'static str> {
+        self.transmit(data)
+    }
+
+    fn mac_address(&self) -> [u8; 6] {
+        self.mac_addr
+    }
+
+    fn link_up(&self) -> bool {
+        self.read_reg(STATUS) & STATUS_LU != 0
+    }
+}
+
+pub extern "C" fn e1000e_driver_main() -> ! {
+    use crate::interrupts::io::E1000E_DRIVER_THREAD_ID;
+
+    let thread = sched().current_thread().unwrap();
+    thread.set_priority(IO_PRIORITY);
+    E1000E_DRIVER_THREAD_ID.call_once(|| thread.id);
+
+    let devices = pci_manager().read().get_devices().to_vec();
+    let pci_dev = devices
+        .iter()
+        .find(|d| d.header.vendor_id == 0x8086 && d.header.device_id == 0x10D3)
+        .copied();
+
+    let Some(pci_dev) = pci_dev else {
+        log!("e1000e: no device found");
+        loop {
+            sched().thread_park();
+        }
+    };
+
+    let mut nic = match E1000e::new(&pci_dev) {
+        Ok(nic) => nic,
+        Err(e) => {
+            log!("e1000e: init failed: {}", e);
+            loop {
+                sched().thread_park();
+            }
+        }
+    };
+
+    log!(
+        "e1000e: initialized, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        nic.mac_addr[0],
+        nic.mac_addr[1],
+        nic.mac_addr[2],
+        nic.mac_addr[3],
+        nic.mac_addr[4],
+        nic.mac_addr[5]
+    );
+
+    nic.enable_interrupts();
+
+    loop {
+        // Use thread_park_while to avoid lost wakeups: the condition is checked
+        // with interrupts disabled, so an IRQ between loop body and park cannot
+        // be missed.
+        let rx_descs = nic.rx_ring.as_ptr() as *const RxDescriptor;
+        let rx_tail = nic.rx_tail;
+        sched().thread_park_while(|| {
+            let desc = unsafe { &*rx_descs.add(rx_tail) };
+            desc.status & RX_STATUS_DD == 0
+        });
+
+        let icr = nic.handle_interrupt();
+
+        if icr & IMS_LSC != 0 {
+            let status = nic.read_reg(STATUS);
+            log!("e1000e: link status change, up={}", status & STATUS_LU != 0);
+        }
+
+        // Always try to receive, even if RXT0 not set (handles edge cases)
+        while let Some((buf, len)) = nic.receive() {
+            log!("e1000e: rx {} bytes", len);
+            let _ = dma().dealloc(buf);
+        }
+
+        nic.reclaim_tx_buffers();
+    }
+}
+
+pub fn init() {
+    queue_spawn_kthread_named("e1000e", e1000e_driver_main as *const () as u64);
+}

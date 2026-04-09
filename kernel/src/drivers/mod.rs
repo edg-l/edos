@@ -4,6 +4,7 @@ use crate::{graphics, thread::util::queue_spawn_kthread_named};
 
 pub mod ahci;
 pub mod dma;
+pub mod e1000e;
 pub mod fpu;
 
 /// Spinlock for serializing 8042 PS/2 controller data port access.
@@ -88,6 +89,7 @@ pub fn init_drivers() {
     pci::init(); // pci init is blocking
     ahci::init(); // must be after pci
     usb::init(); // must be after pci
+    e1000e::init(); // must be after pci
     vga::init();
     graphics::init();
     tty::init();

@@ -104,6 +104,10 @@ run-debug-fault: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_N
 run-storage: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img usb-test.img
 	$(call run_qemu_uefi,iso,4,-accel kvm -drive id=usbdisk0$(comma)if=none$(comma)format=raw$(comma)file=usb-test.img -device usb-storage$(comma)drive=usbdisk0)
 
+.PHONY: run-net
+run-net: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+	$(call run_qemu_uefi,iso,4,-accel kvm -netdev user$(comma)id=net0 -device e1000e$(comma)netdev=net0)
+
 usb-test.img:
 	qemu-img create -f raw usb-test.img 16M
 
