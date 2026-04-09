@@ -354,7 +354,7 @@ impl NetStack {
         let _ = self.nic.transmit(&frame);
     }
 
-    fn is_local_subnet(&self, ip: &[u8; 4]) -> bool {
+    pub fn is_local_subnet(&self, ip: &[u8; 4]) -> bool {
         for i in 0..4 {
             if (ip[i] & self.subnet_mask[i]) != (self.local_ip[i] & self.subnet_mask[i]) {
                 return false;

@@ -198,12 +198,28 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
         let syn_seg = conn.build_syn();
         let conn_arc = Arc::new(Mutex::new(conn));
 
+        // Send SYN, retrying once if ARP is pending
         {
             let mut stack = net_stack().lock();
             stack
                 .tcp_connections
                 .insert((local_sa, remote_sa), conn_arc.clone());
-            let _ = stack.send_ip(ip, ipv4::IpProtocol::Tcp, &syn_seg);
+            if stack.send_ip(ip, ipv4::IpProtocol::Tcp, &syn_seg).is_err() {
+                let resolve_ip = if stack.is_local_subnet(&ip) {
+                    ip
+                } else {
+                    stack.gateway_ip
+                };
+                let arp_wq = stack.arp_cache.get_or_create_waiter(resolve_ip);
+                drop(stack);
+                arp_wq.wait_until_timeout(
+                    || net_stack().lock().arp_cache.lookup(&resolve_ip).is_some(),
+                    Some(Duration::from_millis(200)),
+                );
+                let _ = net_stack()
+                    .lock()
+                    .send_ip(ip, ipv4::IpProtocol::Tcp, &syn_seg);
+            }
         }
 
         sock_arc.lock().tcp_conn = Some(conn_arc.clone());
@@ -349,18 +365,46 @@ pub fn sys_sendto(
         }
     };
 
-    // Send via network stack
-    let result = net_stack()
-        .lock()
-        .send_udp(src_port, dst.ip, dst.port, &data);
-
-    match result {
-        Ok(()) => count as u64,
-        Err(_) => {
-            info.lock().errno = Errno::EIO;
-            !0u64
+    // Send via network stack, retrying on ARP pending
+    for attempt in 0..3u32 {
+        let result = net_stack()
+            .lock()
+            .send_udp(src_port, dst.ip, dst.port, &data);
+        match result {
+            Ok(()) => return count as u64,
+            Err("arp pending") => {
+                // Wait for ARP resolution
+                let arp_wq = {
+                    let mut stack = net_stack().lock();
+                    let resolve_ip = if stack.is_local_subnet(&dst.ip) {
+                        dst.ip
+                    } else {
+                        stack.gateway_ip
+                    };
+                    stack.arp_cache.get_or_create_waiter(resolve_ip)
+                };
+                arp_wq.wait_until_timeout(
+                    || {
+                        let stack = net_stack().lock();
+                        let resolve_ip = if stack.is_local_subnet(&dst.ip) {
+                            dst.ip
+                        } else {
+                            stack.gateway_ip
+                        };
+                        stack.arp_cache.lookup(&resolve_ip).is_some()
+                    },
+                    Some(Duration::from_millis(100)),
+                );
+                crate::log!("net: sendto ARP attempt {}", attempt + 1);
+            }
+            Err(_) => {
+                info.lock().errno = Errno::EIO;
+                return !0u64;
+            }
         }
     }
+    info.lock().errno = Errno::EIO;
+    !0u64
 }
 
 pub fn sys_recvfrom(
