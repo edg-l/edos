@@ -197,19 +197,51 @@ impl E1000e {
         // Clear pending interrupts
         let _ = nic.read_reg(ICR);
 
-        // Enable MSI
-        msi::enable_msi_for_device(pci_device, InterruptIndex::E1000e.as_u8())
-            .map_err(|e| format!("MSI setup failed: {:?}", e))?;
+        // Configure IVAR: map RXQ0, TXQ0, and OTHER all to MSI-X vector 0.
+        // Each field: [2:0]=vector number, [3]=valid bit.
+        let ivar_entry = 0 | IVAR_VALID; // vector 0, valid
+        nic.write_reg(IVAR, ivar_entry | (ivar_entry << 8) | (ivar_entry << 16));
+
+        // Set EIAC to auto-clear ICR bits on MSI-X delivery. Without this,
+        // ICR bits accumulate (read doesn't clear with MSI-X) and the NIC
+        // stops firing new interrupts because raised_causes = IMS & ICR & ~old
+        // computes to 0 when old already has all bits set.
+        nic.write_reg(
+            EIAC,
+            IMS_TXDW | IMS_LSC | IMS_RXT0 | ICR_RXQ0 | ICR_TXQ0 | ICR_OTHER,
+        );
+
+        // Set CTRL_EXT.IAME to prevent IMS from being auto-cleared alongside
+        // ICR when EIAC triggers.
+        let ctrl_ext = nic.read_reg(CTRL_EXT);
+        nic.write_reg(CTRL_EXT, ctrl_ext | CTRL_EXT_IAME);
+
+        // Enable MSI-X (not plain MSI - QEMU e1000e routes all interrupts
+        // through MSI-X when both are available, ignoring plain MSI entirely).
+        msi::enable_msix_for_device(pci_device, InterruptIndex::E1000e.as_u8(), 0)
+            .map_err(|e| format!("MSI-X setup failed: {:?}", e))?;
 
         Ok(nic)
     }
 
     pub fn enable_interrupts(&self) {
-        self.write_reg(IMS, IMS_TXDW | IMS_LSC | IMS_RXT0);
+        // Enable both legacy cause bits (for ICR tracking) and MSI-X queue
+        // cause bits (which actually trigger MSI-X delivery via IVAR).
+        self.write_reg(
+            IMS,
+            IMS_TXDW | IMS_LSC | IMS_RXT0 | ICR_RXQ0 | ICR_TXQ0 | ICR_OTHER,
+        );
     }
 
     pub fn handle_interrupt(&self) -> u32 {
-        self.read_reg(ICR)
+        let icr = self.read_reg(ICR);
+        // With MSI-X, reading ICR does NOT auto-clear. EIAC handles the
+        // auto-clear on MSI-X delivery for the causes we configured, but
+        // we also write-clear here for any bits EIAC didn't cover.
+        if icr != 0 {
+            self.write_reg(ICR, icr);
+        }
+        icr
     }
 
     pub fn receive(&mut self) -> Option<(DmaBuffer, usize)> {
@@ -384,6 +416,7 @@ pub extern "C" fn e1000e_driver_main() -> ! {
     // Enable interrupts now that the stack is published.
     {
         let stack = crate::net::stack::net_stack().lock();
+        let _ = stack.nic.handle_interrupt(); // clear any stale ICR from DHCP
         stack.nic.enable_interrupts();
     }
 
@@ -400,9 +433,8 @@ pub extern "C" fn e1000e_driver_main() -> ! {
         // re-read it because it advances as packets are consumed.
         let rx_tail = crate::net::stack::net_stack().lock().nic.rx_tail;
 
-        // Use thread_park_while to avoid lost wakeups: the condition is checked
-        // with interrupts disabled, so an IRQ between loop body and park cannot
-        // be missed.
+        // Park until an MSI-X interrupt wakes us (indicating new RX/TX/LSC).
+        // The condition is checked with interrupts disabled to prevent lost wakeups.
         sched().thread_park_while(|| {
             let desc = unsafe { &*rx_descs_ptr.add(rx_tail) };
             desc.status & RX_STATUS_DD == 0

@@ -51,7 +51,21 @@ pub const TCTL_COLD_SHIFT: u32 = 12;
 // STATUS bits
 pub const STATUS_LU: u32 = 1 << 1;
 
-// IMS/ICR bits
+// MSI-X interrupt registers
+pub const CTRL_EXT: u32 = 0x0018;
+pub const CTRL_EXT_IAME: u32 = 0x0800_0000; // Interrupt Acknowledge Auto-Mask Enable
+pub const EIAC: u32 = 0x00DC; // Extended Interrupt Auto Clear
+pub const IVAR: u32 = 0x00E4; // Interrupt Vector Allocation Register
+// Each field is 8 bits: [2:0]=vector, [3]=valid
+// RXQ0 = bits [7:0], TXQ0 = bits [15:8], OTHER = bits [23:16]
+pub const IVAR_VALID: u32 = 0x08; // bit 3 = entry valid
+
+// IMS/ICR bits (legacy)
 pub const IMS_TXDW: u32 = 1 << 0;
 pub const IMS_LSC: u32 = 1 << 2;
 pub const IMS_RXT0: u32 = 1 << 7;
+
+// IMS/ICR bits for MSI-X queue interrupts
+pub const ICR_RXQ0: u32 = 1 << 20;
+pub const ICR_TXQ0: u32 = 1 << 22;
+pub const ICR_OTHER: u32 = 1 << 24;

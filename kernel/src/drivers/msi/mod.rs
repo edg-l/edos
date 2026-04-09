@@ -136,8 +136,8 @@ pub fn enable_msix_for_device(
 
     // 6. Write the MSI-X table entry.
     // NOTE: The interrupt is targeted at the current CPU (the one running this init code).
-    // If the xHCI driver thread later runs on a different CPU, the interrupt still fires on
-    // this CPU and wake_thread_irq posts to the scheduler — that is safe across CPUs.
+    // If the driver thread later runs on a different CPU, the interrupt still fires on
+    // this CPU and wake_thread_irq posts to the scheduler -- that is safe across CPUs.
     let entry_ptr = (table_virt.as_u64() + (table_entry as u64) * 16) as *mut u32;
     let lapic_id = unsafe { get_lapic().id() };
     unsafe {
