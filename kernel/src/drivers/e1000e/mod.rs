@@ -324,7 +324,7 @@ pub extern "C" fn e1000e_driver_main() -> ! {
         }
     };
 
-    let nic = match E1000e::new(&pci_dev) {
+    let mut nic = match E1000e::new(&pci_dev) {
         Ok(nic) => nic,
         Err(e) => {
             log!("e1000e: init failed: {}", e);
@@ -344,22 +344,36 @@ pub extern "C" fn e1000e_driver_main() -> ! {
         nic.mac_addr[5]
     );
 
+    // Run DHCP to acquire IP configuration before publishing the stack.
+    let mac = nic.mac_addr;
+    let lease = crate::net::dhcp::discover(&mut nic, mac);
+
     // Move the NIC into the NetStack and publish the global.
     NET_STACK.call_once(|| {
         let mut stack = NetStack::new(nic);
-        stack.local_ip = [10, 0, 2, 15];
-        stack.subnet_mask = [255, 255, 255, 0];
-        stack.gateway_ip = [10, 0, 2, 2];
+        if let Some(ref lease) = lease {
+            stack.local_ip = lease.ip;
+            stack.subnet_mask = lease.subnet_mask;
+            stack.gateway_ip = lease.gateway;
+        } else {
+            log!("e1000e: DHCP failed, using fallback 10.0.2.15");
+            stack.local_ip = [10, 0, 2, 15];
+            stack.subnet_mask = [255, 255, 255, 0];
+            stack.gateway_ip = [10, 0, 2, 2];
+        }
         spin::Mutex::new(stack)
     });
 
-    log!(
-        "e1000e: network stack ready, IP {}.{}.{}.{}",
-        10u8,
-        0u8,
-        2u8,
-        15u8
-    );
+    {
+        let s = crate::net::stack::net_stack().lock();
+        log!(
+            "e1000e: network ready, IP {}.{}.{}.{}",
+            s.local_ip[0],
+            s.local_ip[1],
+            s.local_ip[2],
+            s.local_ip[3]
+        );
+    }
 
     // Spawn the TCP retransmit timer thread.
     queue_spawn_kthread_named(
@@ -395,7 +409,7 @@ pub extern "C" fn e1000e_driver_main() -> ! {
         });
 
         {
-            let mut stack = crate::net::stack::net_stack().lock();
+            let stack = crate::net::stack::net_stack().lock();
             let icr = stack.nic.handle_interrupt();
 
             if icr & IMS_LSC != 0 {
