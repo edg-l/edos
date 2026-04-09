@@ -6,8 +6,8 @@ use edos_lib::net;
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: http <ip> [path]");
-        eprintln!("Example: http 93.184.216.34 /");
+        eprintln!("Usage: http <ip> [port] [path]");
+        eprintln!("Example: http 10.0.2.2 8888 /");
         return;
     }
 
@@ -19,7 +19,16 @@ fn main() {
         }
     };
 
-    let path = args.get(2).map(|s| s.as_str()).unwrap_or("/");
+    // Optional port (default 80) and path (default /)
+    let (port, path) = if args.len() >= 3 {
+        if let Ok(p) = args[2].parse::<u16>() {
+            (p, args.get(3).map(|s| s.as_str()).unwrap_or("/"))
+        } else {
+            (80, args[2].as_str())
+        }
+    } else {
+        (80, "/")
+    };
 
     let fd = match net::create_tcp_socket() {
         Ok(fd) => fd,
@@ -29,7 +38,7 @@ fn main() {
         }
     };
 
-    let addr = net::SockAddrIn::new(ip, 80);
+    let addr = net::SockAddrIn::new(ip, port);
     if net::connect(fd, &addr).is_err() {
         eprintln!("Connection failed");
         net::close(fd);
