@@ -14,7 +14,7 @@ pub enum IpProtocol {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct Ipv4Header {
     pub version_ihl: u8,
     pub dscp_ecn: u8,

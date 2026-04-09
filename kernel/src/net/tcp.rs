@@ -21,7 +21,7 @@ pub const DEFAULT_WINDOW: u16 = 16384;
 pub const MAX_RX_BUFFER: usize = 65535;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct TcpHeader {
     pub src_port: u16,
     pub dst_port: u16,
@@ -170,7 +170,7 @@ fn tcp_checksum(tcp_pkt: &[u8], src_ip: [u8; 4], dst_ip: [u8; 4]) -> u16 {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub enum TcpState {
     Closed,
     Listen,

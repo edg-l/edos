@@ -5,7 +5,7 @@ use super::checksum::internet_checksum;
 pub const HEADER_LEN: usize = 8;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct UdpHeader {
     pub src_port: u16,
     pub dst_port: u16,

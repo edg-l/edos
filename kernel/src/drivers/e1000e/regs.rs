@@ -1,5 +1,5 @@
 // e1000e register offsets
-#![allow(dead_code)]
+#![expect(dead_code)]
 pub const CTRL: u32 = 0x0000;
 pub const STATUS: u32 = 0x0008;
 pub const EERD: u32 = 0x0014;

@@ -28,7 +28,7 @@ pub struct SockAddrIn {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub enum SocketState {
     Unbound,
     Bound,
