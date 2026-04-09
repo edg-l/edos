@@ -5,7 +5,9 @@ use spin::Mutex;
 use crate::{drivers::e1000e::E1000e, log, thread::waitqueue::WaitQueue, timer::Instant};
 
 use super::arp::ArpCache;
-use super::{arp, ethernet, icmp, ipv4, socket, udp};
+use super::tcp::TcpConnection;
+use super::{arp, ethernet, icmp, ipv4, socket, tcp, udp};
+use socket::SocketAddr;
 
 pub static NET_STACK: spin::Once<Mutex<NetStack>> = spin::Once::new();
 
@@ -27,6 +29,8 @@ pub struct NetStack {
     pub arp_cache: ArpCache,
     /// Keyed by (id, seq).
     pub ping_waiters: BTreeMap<(u16, u16), PingWaiter>,
+    /// Keyed by (local_addr, remote_addr).
+    pub tcp_connections: BTreeMap<(SocketAddr, SocketAddr), Arc<Mutex<TcpConnection>>>,
     ip_id_counter: u16,
 }
 
@@ -39,6 +43,7 @@ impl NetStack {
             gateway_ip: [10, 0, 2, 2],
             arp_cache: ArpCache::new(),
             ping_waiters: BTreeMap::new(),
+            tcp_connections: BTreeMap::new(),
             ip_id_counter: 0,
         }
     }
@@ -83,6 +88,8 @@ impl NetStack {
             self.handle_icmp(&ip_hdr, payload);
         } else if ip_hdr.protocol == ipv4::IpProtocol::Udp as u8 {
             self.handle_udp(&ip_hdr, payload);
+        } else if ip_hdr.protocol == ipv4::IpProtocol::Tcp as u8 {
+            self.handle_tcp(&ip_hdr, payload);
         }
     }
 
@@ -101,6 +108,47 @@ impl NetStack {
                 };
                 s.rx_queue.push_back((payload.to_vec(), src));
                 s.rx_wq.wake_one();
+            }
+        }
+    }
+
+    fn handle_tcp(&mut self, ip_hdr: &ipv4::Ipv4Header, payload: &[u8]) {
+        let Some((tcp_hdr, tcp_payload)) = tcp::parse(payload, ip_hdr.src_addr, ip_hdr.dst_addr)
+        else {
+            return;
+        };
+
+        let local = SocketAddr {
+            ip: ip_hdr.dst_addr,
+            port: tcp_hdr.dst_port,
+        };
+        let remote = SocketAddr {
+            ip: ip_hdr.src_addr,
+            port: tcp_hdr.src_port,
+        };
+
+        if let Some(conn) = self.tcp_connections.get(&(local, remote)).cloned() {
+            let responses = conn.lock().handle_segment(&tcp_hdr, tcp_payload, payload);
+            for seg in responses {
+                let _ = self.send_ip(remote.ip, ipv4::IpProtocol::Tcp, &seg);
+            }
+        } else {
+            // No connection found. If it's a SYN to a listening socket, handle that in Phase 4b.
+            // Send RST for unexpected segments (unless it's a RST itself).
+            if tcp_hdr.flags & tcp::RST == 0 {
+                let rst = tcp::build(
+                    tcp_hdr.dst_port,
+                    tcp_hdr.src_port,
+                    tcp_hdr.ack_num,
+                    tcp_hdr.seq_num.wrapping_add(1),
+                    tcp::RST | tcp::ACK,
+                    0,
+                    ip_hdr.dst_addr,
+                    ip_hdr.src_addr,
+                    &[],
+                    &[],
+                );
+                let _ = self.send_ip(ip_hdr.src_addr, ipv4::IpProtocol::Tcp, &rst);
             }
         }
     }
@@ -232,6 +280,55 @@ impl NetStack {
         let _ = self.next_ip_id();
         let icmp_data = icmp::build_echo_request(id, seq, &[0u8; 32]);
         self.send_ip(dst, ipv4::IpProtocol::Icmp, &icmp_data)
+    }
+}
+
+/// Kernel thread that periodically checks TCP connections for retransmit timeouts
+/// and cleans up TIME_WAIT / Closed connections.
+pub extern "C" fn tcp_retransmit_main() -> ! {
+    use crate::thread::scheduler::sched;
+
+    let thread = sched().current_thread().unwrap();
+    thread.set_priority(crate::thread::runqueue::IO_PRIORITY);
+
+    loop {
+        sched().thread_sleep(Duration::from_millis(200));
+
+        let Some(stack_mutex) = NET_STACK.get() else {
+            continue;
+        };
+
+        // Collect connections to check (clone Arcs, not the connections themselves).
+        let connections: Vec<_> = {
+            let stack = stack_mutex.lock();
+            stack.tcp_connections.values().cloned().collect()
+        };
+
+        for conn in connections {
+            let resends = conn.lock().check_retransmit();
+            if !resends.is_empty() {
+                let remote_ip = conn.lock().remote_ip;
+                let mut stack = stack_mutex.lock();
+                for seg in resends {
+                    let _ = stack.send_ip(remote_ip, super::ipv4::IpProtocol::Tcp, &seg);
+                }
+            }
+        }
+
+        // Clean up TIME_WAIT and Closed connections.
+        {
+            let mut stack = stack_mutex.lock();
+            let now = Instant::now();
+            stack.tcp_connections.retain(|_, conn| {
+                let c = conn.lock();
+                if c.state == super::tcp::TcpState::TimeWait {
+                    if let Some(until) = c.time_wait_until {
+                        return now < until;
+                    }
+                }
+                c.state != super::tcp::TcpState::Closed
+            });
+        }
     }
 }
 

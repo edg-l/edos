@@ -361,6 +361,12 @@ pub extern "C" fn e1000e_driver_main() -> ! {
         15u8
     );
 
+    // Spawn the TCP retransmit timer thread.
+    queue_spawn_kthread_named(
+        "tcp-retransmit",
+        crate::net::stack::tcp_retransmit_main as *const () as u64,
+    );
+
     // Enable interrupts now that the stack is published.
     {
         let stack = crate::net::stack::net_stack().lock();
