@@ -253,60 +253,108 @@ impl BitmapFrameAllocator {
         }
     }
 
-    /// Find the next free frame starting from the hint
+    /// Find first free frame index at or after `start` using byte-level scan.
+    /// Returns None if no free frame exists from `start` to end of bitmap.
+    fn scan_free_from(&self, start: usize) -> Option<usize> {
+        if start >= self.frame_count {
+            return None;
+        }
+        let total_bytes = self.frame_count.div_ceil(8);
+        let byte_idx = start / 8;
+        let bit_offset = start % 8;
+
+        // Check partial first byte (mask lower bits as "allocated")
+        if byte_idx < total_bytes {
+            let mask = (1u8 << bit_offset) - 1;
+            let byte = self.bitmap[byte_idx] | mask;
+            if byte != 0xFF {
+                let index = byte_idx * 8 + (!byte).trailing_zeros() as usize;
+                if index < self.frame_count {
+                    return Some(index);
+                }
+            }
+        }
+
+        // Scan full bytes (8 frames per iteration)
+        for bi in (byte_idx + 1)..total_bytes {
+            if self.bitmap[bi] != 0xFF {
+                let index = bi * 8 + (!self.bitmap[bi]).trailing_zeros() as usize;
+                if index < self.frame_count {
+                    return Some(index);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Find the next free frame starting from the hint, with byte-level scan.
     fn find_free_frame(&mut self) -> Option<usize> {
-        // Start from hint and wrap around
-        for i in 0..self.frame_count {
-            let index = (self.next_free_hint + i) % self.frame_count;
-            if !self.is_frame_allocated(index) {
-                self.next_free_hint = index + 1;
-                return Some(index);
+        if let Some(idx) = self.scan_free_from(self.next_free_hint) {
+            self.next_free_hint = idx + 1;
+            return Some(idx);
+        }
+        // Wrap around: scan from beginning up to where we started
+        if self.next_free_hint > 0 {
+            if let Some(idx) = self.scan_free_from(0) {
+                self.next_free_hint = idx + 1;
+                return Some(idx);
             }
         }
         None
     }
 
-    /// Allocate contiguous frames for DMA operations
+    /// Allocate contiguous frames for DMA operations.
     ///
-    /// # Arguments
-    ///
-    /// * `count` - Number of contiguous frames needed
-    ///
-    /// # Returns
-    ///
-    /// Returns the first frame of the contiguous block, or None if not available
+    /// Uses byte-level scanning and skip-ahead: when an allocated frame is
+    /// found mid-run, jumps past it instead of retrying from the next index.
     pub fn allocate_contiguous_frames(&mut self, count: usize) -> Option<PhysFrame> {
         if count == 0 {
             return None;
         }
-
-        // For single frame, use regular allocation
         if count == 1 {
             return self.allocate_frame();
         }
 
-        // Search for contiguous free frames
-        for start_idx in 0..=(self.frame_count.saturating_sub(count)) {
-            let mut all_free = true;
+        let max_start = self.frame_count.saturating_sub(count);
+        let mut idx = 0;
 
-            // Check if all frames in range are free
-            for offset in 0..count {
-                if self.is_frame_allocated(start_idx + offset) {
-                    all_free = false;
-                    break;
-                }
+        while idx <= max_start {
+            // Byte-level fast skip: all-allocated bytes jump 8 frames
+            let byte_idx = idx / 8;
+            if idx % 8 == 0 && self.bitmap[byte_idx] == 0xFF {
+                idx += 8;
+                continue;
             }
 
-            if all_free {
-                // Mark all frames as allocated
-                for offset in 0..count {
-                    self.set_frame_allocated(start_idx + offset);
+            if self.is_frame_allocated(idx) {
+                idx += 1;
+                continue;
+            }
+
+            // Found a free frame at idx; verify `count` contiguous free frames
+            let mut run = 1;
+            while run < count {
+                let pos = idx + run;
+                // Byte-level fast check: 8 free frames at once when aligned
+                if pos % 8 == 0 && run + 8 <= count && self.bitmap[pos / 8] == 0x00 {
+                    run += 8;
+                    continue;
                 }
+                if self.is_frame_allocated(pos) {
+                    // Skip-ahead: jump past the allocated frame
+                    idx = pos + 1;
+                    break;
+                }
+                run += 1;
+            }
 
-                // Update hint
-                self.next_free_hint = start_idx + count;
-
-                return self.index_to_frame(start_idx);
+            if run >= count {
+                for offset in 0..count {
+                    self.set_frame_allocated(idx + offset);
+                }
+                self.next_free_hint = idx + count;
+                return self.index_to_frame(idx);
             }
         }
 
