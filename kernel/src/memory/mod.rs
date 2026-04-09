@@ -3,6 +3,7 @@ use x86_64::{PhysAddr, VirtAddr};
 
 use crate::boot::boot_info;
 
+pub mod cow;
 pub mod frame_allocator;
 pub mod mapper;
 pub mod pat;

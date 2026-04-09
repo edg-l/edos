@@ -17,7 +17,9 @@ use crate::{
             mouse_interrupt_handler, xhci_interrupt_handler,
         },
     },
-    log, println,
+    log,
+    memory::cow::handle_cow_fault,
+    println,
     thread::{interrupt::timer_interrupt_handler, scheduler::sched},
     util::uaccess::current_cpu_uaccess,
 };
@@ -201,6 +203,16 @@ extern "x86-interrupt" fn page_fault_handler(
 
         panic!("EXCEPTION: PAGE FAULT IN RING 0");
     } else {
+        let is_cow_candidate = error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+            && error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+            && error_code.contains(PageFaultErrorCode::USER_MODE);
+
+        if is_cow_candidate {
+            if unsafe { handle_cow_fault(address) } {
+                return;
+            }
+        }
+
         log!("Page fault");
         log!("Accessed Address: {address:?}");
         log!("Error Code: {error_code:?}");

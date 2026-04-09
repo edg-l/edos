@@ -23,20 +23,36 @@ pub fn frame_allocator() -> IrqLockGuard<'static, BitmapFrameAllocator> {
 
 /// Initialize the frame allocator using bootloader memory for bitmap storage
 pub fn init_frame_allocator(memory_regions: &'static MemoryMapResponse) {
-    // Calculate required bitmap size
-    let required_size = calculate_bitmap_size(memory_regions);
+    let (_, frame_count) = calculate_frame_range(memory_regions);
+    // Round bitmap_bytes up to 2-byte alignment so the refcount array (u16) is properly aligned
+    let bitmap_bytes = frame_count.div_ceil(8).next_multiple_of(2);
+    let refcount_bytes = frame_count * 2; // u16 per frame
+    let total_size = bitmap_bytes + refcount_bytes;
 
-    // Find a suitable region for the bitmap
-    let (bitmap_storage, storage_start_addr, storage_size) =
-        find_bitmap_storage(memory_regions, required_size)
+    // Find a suitable region for both the bitmap and refcount array
+    let (combined_storage, storage_start_addr, storage_size) =
+        find_bitmap_storage(memory_regions, total_size)
             .expect("No suitable memory region found for frame bitmap");
 
+    // Split storage: first bitmap_bytes for the bitmap, rest for refcounts
+    let (bitmap_storage, refcount_raw) = combined_storage.split_at_mut(bitmap_bytes);
+
+    // Reinterpret refcount_raw as &'static mut [u16]
+    let refcount_storage: &'static mut [u16] = unsafe {
+        core::slice::from_raw_parts_mut(refcount_raw.as_mut_ptr() as *mut u16, frame_count)
+    };
+
+    // Zero-initialize refcounts
+    for rc in refcount_storage.iter_mut() {
+        *rc = 0;
+    }
+
     // Create and initialize the allocator
-    let mut allocator = BitmapFrameAllocator::new(memory_regions, bitmap_storage);
+    let mut allocator = BitmapFrameAllocator::new(memory_regions, bitmap_storage, refcount_storage);
 
     // Mark bitmap storage frames as allocated
-    let frame_count = storage_size.div_ceil(4096); // Round up to frames
-    for i in 0..frame_count {
+    let frame_count_storage = storage_size.div_ceil(4096); // Round up to frames
+    for i in 0..frame_count_storage {
         let frame_addr = storage_start_addr + (i * 4096) as u64;
         let frame = PhysFrame::containing_address(PhysAddr::new(frame_addr));
 
@@ -114,6 +130,8 @@ fn find_bitmap_storage(
 pub struct BitmapFrameAllocator {
     /// Bitmap where each bit represents a frame (0 = free, 1 = allocated)
     bitmap: &'static mut [u8],
+    /// Reference counts per frame (one u16 per physical frame)
+    refcounts: &'static mut [u16],
     /// Physical address of the first frame managed by this allocator
     start_frame: PhysFrame,
     /// Total number of frames managed
@@ -137,6 +155,7 @@ impl BitmapFrameAllocator {
     pub fn new(
         memory_regions: &'static MemoryMapResponse,
         bitmap_storage: &'static mut [u8],
+        refcount_storage: &'static mut [u16],
     ) -> Self {
         let (start_frame, frame_count) = calculate_frame_range(memory_regions);
 
@@ -148,9 +167,16 @@ impl BitmapFrameAllocator {
             required_bytes,
             bitmap_storage.len()
         );
+        assert!(
+            refcount_storage.len() >= frame_count,
+            "Refcount storage too small: need {} entries, got {}",
+            frame_count,
+            refcount_storage.len()
+        );
 
         let mut allocator = Self {
             bitmap: bitmap_storage,
+            refcounts: refcount_storage,
             start_frame,
             frame_count,
             next_free_hint: 0,
@@ -352,6 +378,7 @@ impl BitmapFrameAllocator {
             if run >= count {
                 for offset in 0..count {
                     self.set_frame_allocated(idx + offset);
+                    self.refcounts[idx + offset] = 1;
                 }
                 self.next_free_hint = idx + count;
                 return self.index_to_frame(idx);
@@ -374,8 +401,14 @@ impl BitmapFrameAllocator {
     pub unsafe fn deallocate_contiguous_frames(&mut self, start_frame: PhysFrame, count: usize) {
         if let Some(start_idx) = self.frame_to_index(start_frame) {
             for offset in 0..count {
-                if start_idx + offset < self.frame_count {
-                    self.set_frame_free(start_idx + offset);
+                let idx = start_idx + offset;
+                if idx < self.frame_count {
+                    if self.refcounts[idx] > 1 {
+                        self.refcounts[idx] -= 1;
+                    } else {
+                        self.refcounts[idx] = 0;
+                        self.set_frame_free(idx);
+                    }
                 }
             }
         }
@@ -388,7 +421,45 @@ impl BitmapFrameAllocator {
     /// The frame must not be in use and must have been allocated by this allocator
     pub unsafe fn deallocate_frame(&mut self, frame: PhysFrame) {
         if let Some(index) = self.frame_to_index(frame) {
+            if self.refcounts[index] > 1 {
+                self.refcounts[index] -= 1;
+                return;
+            }
+            self.refcounts[index] = 0;
             self.set_frame_free(index);
+        }
+    }
+
+    /// Returns the reference count for a frame, or 0 if out of range.
+    pub fn refcount(&self, frame: PhysFrame) -> u16 {
+        match self.frame_to_index(frame) {
+            Some(idx) => self.refcounts[idx],
+            None => 0,
+        }
+    }
+
+    /// Increment the reference count for a frame. Panics on u16 overflow.
+    pub fn inc_refcount(&mut self, frame: PhysFrame) {
+        if let Some(idx) = self.frame_to_index(frame) {
+            self.refcounts[idx] = self.refcounts[idx]
+                .checked_add(1)
+                .expect("inc_refcount: refcount overflow");
+        }
+    }
+
+    /// Decrement the reference count for a frame and return the new value.
+    /// Panics if the refcount is already 0.
+    pub fn dec_refcount(&mut self, frame: PhysFrame) -> u16 {
+        if let Some(idx) = self.frame_to_index(frame) {
+            assert!(
+                self.refcounts[idx] > 0,
+                "dec_refcount: refcount is already 0 for frame {:?}",
+                frame
+            );
+            self.refcounts[idx] -= 1;
+            self.refcounts[idx]
+        } else {
+            0
         }
     }
 
@@ -430,15 +501,20 @@ fn calculate_frame_range(memory_regions: &MemoryMapResponse) -> (PhysFrame, usiz
     (start_frame, frame_count as usize)
 }
 
+/// Returns the total storage size needed for the bitmap and refcount array combined.
 pub fn calculate_bitmap_size(memory_regions: &MemoryMapResponse) -> usize {
     let (_, frame_count) = calculate_frame_range(memory_regions);
-    frame_count.div_ceil(8) // Round up to nearest byte
+    // Round bitmap_bytes up to 2-byte alignment so the refcount array (u16) is properly aligned
+    let bitmap_bytes = frame_count.div_ceil(8).next_multiple_of(2);
+    let refcount_bytes = frame_count * 2; // u16 per frame
+    bitmap_bytes + refcount_bytes
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         if let Some(index) = self.find_free_frame() {
             self.set_frame_allocated(index);
+            self.refcounts[index] = 1;
             self.index_to_frame(index)
         } else {
             None

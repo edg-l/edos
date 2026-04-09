@@ -29,6 +29,18 @@ impl FileDescriptorTable {
         table
     }
 
+    /// Create an empty table with no pre-inserted file descriptors.
+    pub fn new_empty() -> Self {
+        Self {
+            fds: BTreeMap::new(),
+        }
+    }
+
+    /// Iterate over all entries as (fd_number, &FileDescriptor).
+    pub fn iter_all(&self) -> impl Iterator<Item = (u64, &FileDescriptor)> {
+        self.fds.iter().map(|(&k, v)| (k, v))
+    }
+
     /// Allocate the lowest available fd number for the given descriptor.
     pub fn allocate_fd(&mut self, fd: FileDescriptor) -> u64 {
         let mut candidate = 0u64;

@@ -341,6 +341,14 @@ pub fn spawn_pipeline(stages: &[(String, Vec<String>)]) {
     }
 }
 
+/// Fork the calling process (COW).
+///
+/// Returns the child PID to the parent (positive), 0 to the child,
+/// or a negative value on error.
+pub fn fork() -> i64 {
+    unsafe { sys::syscall0(sys::SYS_FORK) as i64 }
+}
+
 /// Send a signal to a process.
 ///
 /// Returns 0 on success, or a negative value on error.

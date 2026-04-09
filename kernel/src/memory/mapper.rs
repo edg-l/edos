@@ -15,6 +15,9 @@ use crate::{
     thread::irqlock::IrqLockGuard,
 };
 
+/// OS-available PTE bit used to mark copy-on-write pages.
+pub const COW_BIT: PageTableFlags = PageTableFlags::BIT_9;
+
 pub unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut PageTable {
     use x86_64::registers::control::Cr3;
 

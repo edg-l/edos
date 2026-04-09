@@ -335,6 +335,7 @@ const SYS_GETSOCKOPT: u64 = 251;
 const SYS_GETPEERNAME: u64 = 252;
 const SYS_GETSOCKNAME: u64 = 253;
 const SYS_STATFS: u64 = 254;
+const SYS_FORK: u64 = 255;
 
 /// Arguments struct for SYS_SPAWN2. Passed as a single pointer from userspace.
 #[repr(C)]
@@ -767,6 +768,9 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
                 ctx.rsi as *mut net::SockAddrIn,
                 ctx.rdx as *mut u32,
             );
+        }
+        SYS_FORK => {
+            ctx.rax = sys_fork(ctx) as u64;
         }
         _ => {
             ctx.rax = !0u64;
@@ -1690,6 +1694,202 @@ fn sys_clone(
 
     // Parent returns child thread ID
     child_id.0
+}
+
+fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
+    use alloc::collections::BTreeMap;
+    use core::sync::atomic::AtomicUsize;
+    use x86_64::structures::paging::OffsetPageTable;
+
+    use crate::{
+        memory::{
+            cow::clone_user_page_tables_cow,
+            mapper::{MemoryManager, active_level_4_table},
+            shared::SharedMemory,
+        },
+        thread::{MappingType, MemoryMapping, fd::FileDescriptorTable},
+    };
+
+    let sched = sched();
+    let parent_thread = match sched.current_thread() {
+        Some(t) => t,
+        None => {
+            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    let parent_user = match &parent_thread.user {
+        Some(u) => u,
+        None => {
+            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    // Read parent address-space data before switching page tables.
+    let parent_user_read = parent_user.read();
+    let parent_cr3 = parent_user_read.cr3;
+    let parent_heap_break = parent_user_read.heap_break;
+    let parent_process_regions = parent_user_read.memory_regions.clone();
+    let parent_process_stack_top = parent_user_read.process_stack_top.load(Ordering::Acquire);
+    let parent_tls = parent_user_read.tls.clone();
+    let parent_fs_base = parent_thread.tls_base.load(Ordering::Acquire);
+    drop(parent_user_read);
+
+    // Read parent info before locking for COW (BlockingMutex requires interrupts).
+    let parent_info = sched.current_thread_info();
+    let parent_next_mmap = {
+        let guard = parent_info.lock();
+        guard.next_mmap_addr.load(Ordering::Acquire)
+    };
+    let parent_user_id;
+    let parent_group_id;
+    let parent_cwd_clone;
+    {
+        let guard = parent_info.lock();
+        parent_user_id = guard.user_id;
+        parent_group_id = guard.group_id;
+        parent_cwd_clone = guard.cwd.lock().clone();
+    }
+
+    // Deep-clone the fd_table: new table with cloned entries, refcounts bumped.
+    let child_fd_table = {
+        let guard = parent_info.lock();
+        let parent_fds = guard.fd_table.lock();
+        let mut new_table = FileDescriptorTable::new_empty();
+        for (fd_num, desc) in parent_fds.iter_all() {
+            desc.inc_refcount();
+            new_table.insert_fd(fd_num, desc.clone());
+        }
+        Arc::new(BlockingMutex::new(new_table))
+    };
+
+    // Deep-clone memory_mappings: copy the BTreeMap, inc_ref each SHM entry.
+    let child_memory_mappings: BTreeMap<VirtAddr, MemoryMapping> = {
+        let guard = parent_info.lock();
+        let parent_mappings = guard.memory_mappings.lock();
+        let mut cloned = BTreeMap::new();
+        for (&addr, mapping) in parent_mappings.iter() {
+            if let MappingType::Shared(shm_id) = &mapping.mapping_type {
+                if let Some(shm) = SharedMemory::get(*shm_id) {
+                    let _ = shm.inc_ref();
+                }
+            }
+            cloned.insert(addr, mapping.clone());
+        }
+        cloned
+    };
+
+    // Clone COW page tables. Must be called with parent's CR3 active so that
+    // flush_local_tlb() inside clone_user_page_tables_cow flushes the parent's
+    // now-read-only TLB entries on this CPU.
+    let child_pml4_frame = {
+        let guard = parent_info.lock();
+        let parent_mappings = guard.memory_mappings.lock();
+        unsafe { clone_user_page_tables_cow(parent_cr3.0, &parent_mappings) }
+    };
+
+    // Switch to kernel page table for the remaining setup.
+    switch_to_kernel_page();
+
+    let phys_offset = crate::boot::boot_info().physical_memory_offset;
+
+    // Build a MemoryManager for the child by temporarily activating its CR3.
+    let child_mm = {
+        unsafe { Cr3::write(child_pml4_frame, parent_cr3.1) };
+        let page_table = unsafe { active_level_4_table(phys_offset) };
+        let table = unsafe { OffsetPageTable::new(page_table, phys_offset) };
+        let mm = MemoryManager::new(table);
+        switch_to_kernel_page();
+        Arc::new(Mutex::new(mm))
+    };
+
+    // Allocate kernel stack for the child.
+    let kernel_stack_top = kthread_stack_alloc();
+
+    // Set up child CPU context: resume at the same userspace RIP with rax=0.
+    // new_user_thread uses INTERRUPT_FLAG for rflags; we override with the
+    // parent's saved user RFLAGS (parent_ctx.rflags is R11 = user RFLAGS at
+    // syscall entry), ensuring the IF bit stays set.
+    let mut child_ctx = CpuContext::new_user_thread(parent_ctx.rip, parent_ctx.rsp);
+    child_ctx.interrupt_stack_frame.cpu_flags =
+        RFlags::from_bits_truncate(parent_ctx.rflags) | RFlags::INTERRUPT_FLAG;
+    child_ctx.rax = 0; // fork returns 0 in child
+    child_ctx.rbx = parent_ctx.rbx;
+    child_ctx.rbp = parent_ctx.rbp;
+    child_ctx.r12 = parent_ctx.r12;
+    child_ctx.r13 = parent_ctx.r13;
+    child_ctx.r14 = parent_ctx.r14;
+    child_ctx.r15 = parent_ctx.r15;
+
+    let child_id = allocate_thread_id();
+
+    let child_user = Arc::new(RwLock::new(crate::thread::UserThread {
+        pid: child_id.0,
+        cr3: (child_pml4_frame, parent_cr3.1),
+        memory_manager: child_mm.clone(),
+        memory_regions: parent_process_regions,
+        owned_regions: Vec::new(),
+        tls: parent_tls,
+        heap_break: parent_heap_break,
+        address_space_refs: Arc::new(AtomicUsize::new(1)),
+        process_stack_top: Arc::new(AtomicU64::new(parent_process_stack_top)),
+    }));
+
+    let child_thread = Arc::new(Thread {
+        id: child_id,
+        kstack_top: kernel_stack_top,
+        ctx: Mutex::new(child_ctx),
+        state: AtomicU8::new(State::Ready as u8),
+        name: Arc::new(format!("{}-fork-{}", parent_thread.name, child_id.0)),
+        cpu_affinity: AtomicU32::new(0),
+        flags: AtomicU32::new(0),
+        slice_deadline: AtomicU64::new(0),
+        priority: AtomicU8::new(parent_thread.priority()),
+        sleep_deadline: AtomicU64::new(0),
+        cpu_time_ns: AtomicU64::new(0),
+        run_start_tick: AtomicU64::new(0),
+        tls_base: AtomicU64::new(parent_fs_base),
+        cpu: AtomicU32::new(0),
+        exit_code: AtomicI32::new(0),
+        killed: AtomicBool::new(false),
+        signal: SignalState::new(),
+        user: Some(child_user),
+        rq_link: Link::new(),
+        rq_boosted: AtomicBool::new(false),
+        context_saved: AtomicBool::new(true),
+        fpu: {
+            // Save parent's current FPU/SSE state and copy to child.
+            let mut fpu_state = crate::drivers::fpu::FpuState::default();
+            unsafe { crate::drivers::fpu::save_fpu_state(&mut fpu_state) };
+            core::cell::UnsafeCell::new(fpu_state)
+        },
+        fpu_init: AtomicBool::new(true),
+    });
+
+    insert_thread(child_thread.clone());
+    insert_thread_info(
+        child_id,
+        Arc::new(IrqSpinlock::new(UserThreadInfo {
+            pid: child_id.0,
+            errno: Errno::Clear,
+            fd_table: child_fd_table,
+            memory_mappings: Arc::new(BlockingMutex::new(child_memory_mappings)),
+            next_mmap_addr: Arc::new(AtomicU64::new(parent_next_mmap)),
+            memory_manager: child_mm,
+            cwd: Arc::new(BlockingMutex::new(parent_cwd_clone)),
+            user_id: parent_user_id,
+            group_id: parent_group_id,
+        })),
+    );
+
+    crate::thread::util::queue_spawn_thread(child_thread);
+
+    // Restore parent's address space before returning to userspace.
+    unsafe { Cr3::write(parent_cr3.0, parent_cr3.1) };
+
+    child_id.0 as i64
 }
 
 fn copy_user_c_string(ptr: *const u8, max_len: usize) -> Result<Vec<u8>, UAccessError> {

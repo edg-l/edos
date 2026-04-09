@@ -39,10 +39,28 @@ pub const SYS_SENDTO: u64 = 245;
 pub const SYS_RECVFROM: u64 = 246;
 pub const SYS_PING: u64 = 249;
 pub const SYS_NETINFO: u64 = 250;
+pub const SYS_FORK: u64 = 255;
 
 pub const AF_INET: u32 = 2;
 pub const SOCK_STREAM: u32 = 1;
 pub const SOCK_DGRAM: u32 = 2;
+
+/// Raw syscall with 0 arguments.
+#[inline(always)]
+pub unsafe fn syscall0(num: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "syscall",
+            in("rax") num,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
 
 /// Raw syscall with 1 argument.
 #[inline(always)]

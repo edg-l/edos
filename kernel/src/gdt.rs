@@ -25,7 +25,7 @@ fn init_tss_for_current_cpu() {
     let mut tss = TaskStateSegment::new();
 
     let page_fault_stack_end = {
-        let layout = Layout::from_size_align(1024 * 32, 4096).unwrap();
+        let layout = Layout::from_size_align(1024 * 64, 4096).unwrap();
         let stack_start = unsafe { alloc(layout) };
 
         if stack_start.is_null() {

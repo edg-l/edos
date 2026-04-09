@@ -1,72 +1,69 @@
 # EDOS Future Ideas
 
-## Network Stack (recommended next)
+## Done
 
-The single most impactful missing feature. The moment you can ping from your OS
-or fetch a page over HTTP, it feels like a real system.
+- **Network stack** - e1000e driver with MSI-X, ARP, ICMP, UDP, TCP (retransmit,
+  flow control), DHCP, DNS resolver, HTTP client, IP fragment reassembly
+- **std::net** - TcpStream, UdpSocket wired up in the Rust std fork
+- **Socket poll wakeup** - PollEntry registered, indefinite poll wakes on data arrival
+- **Custom filesystem (EFS)** - ext2-inspired with extents, replaces FAT32 as root FS.
+  Spec in doc/efs.md, shared crate in libs/efs-common/, kernel driver, host mkfs tool
+- **USB stack** - xHCI, HID (keyboard/mouse), mass storage with FAT32 mounting
+- **Virtio-GPU** - 2D driver, dirty-rect transfers, blob resources, hardware cursor
+- **Shell scripting** - Functions, control flow, heredocs, command substitution, tab completion
+- **PTY subsystem** - Line discipline, canonical/raw modes
+- **Graphics pipeline** - VRAM double buffering, SHM zero-copy compositing, Ayu Dark theme
 
-Path:
-1. virtio-net driver (easiest in QEMU, well-documented spec, already have virtio-gpu experience)
-2. Ethernet + ARP + IPv4 + ICMP - ping working, instant gratification
-3. UDP - simple, connectionless, useful for DNS
-4. TCP - the real challenge, incredibly educational (state machine, retransmit, flow control)
-5. DNS resolver + tiny HTTP client - download a file from the internet inside the OS
+## Network Stack Remaining
 
-### Real hardware NIC: e1000e
-
-Prefer e1000e over virtio-net as first driver:
-- QEMU emulates it faithfully, maps to real Intel I219/I218 NICs
-- Intel datasheets are public and thorough
-- TX/RX descriptor ring design almost identical to AHCI's command ring
-- Develop/test in QEMU: -netdev user,id=n -device e1000e,netdev=n
-- Same driver works on real Intel NICs on bare metal
-- Adding virtio-net later as second backend is straightforward once the stack exists
-
-Other NIC options:
-- RTL8139 - classic "baby's first NIC driver", extremely simple but ancient (100Mbps)
-- RTL8169/8111 - Realtek gigabit, very common in real hardware, less documented than Intel
-
-## Custom Filesystem (lower priority)
-
-B-tree based, more modern replacement for FAT32. Cool but FAT32 is functional and
-the VFS abstracts it away. Can swap it out later without changing userspace.
-
-### IPv6
-
-Full IPv6 support: different header format, NDP (replaces ARP), ICMPv6,
-SLAAC/DHCPv6 for address configuration, multicast. Source-only fragmentation
-(different model from IPv4). Not urgent since most targets work fine on v4,
-but needed for a complete real-hardware network stack.
-
-## Other Ideas
-
-### Sound (high fun-per-effort)
-AC97 or Intel HDA driver. Playing a WAV file from the shell is a great demo moment.
-AC97 is dead simple compared to networking.
-
-### Copy-on-Write Fork + Demand Paging
-Already have mmap and SHM. COW fork makes process spawning way cheaper.
-Demand paging means stop pre-faulting all pages.
-
-### Text Editor
-Even a minimal ed/nano clone. Being able to edit files inside the OS is a
-qualitative leap in self-sufficiency.
-
-### io_uring-style Async I/O
-Shared-memory submission/completion ring between userspace and kernel.
-Already have the SHM infrastructure. Very "modern OS" feature, unique among hobby OSes.
-
-## Fun-per-effort ranking
-
-networking > sound > text editor > async I/O > COW fork > custom FS
-
-## Remaining Network Stack Items
-
-- Wire up `std::net` in the Rust std fork (TcpStream, UdpSocket, etc.)
-- Socket poll wakeup: register PollEntry so indefinite poll wakes on data arrival
 - TCP: SACK, window scaling, Nagle's algorithm, adaptive RTO (SRTT/RTTVAR)
 - DHCP lease renewal
 - IPv6 (header format, NDP, ICMPv6, SLAAC/DHCPv6, source-only fragmentation)
 - DNS: proper resolver (currently hardcoded transaction ID, no caching)
 - `sys_recvfrom`: MSG_TRUNC support, validate caller's addr_len
 - Use `next_ip_id()` in IPv4 build (currently always id=0)
+
+## EFS Remaining
+
+- Extent tree depth > 0 (v1 limit, max file ~1.66GB with inline extents)
+- Journaling (feature flag reserved, significant complexity)
+- fsck tool
+- FileTime: VFS uses FAT-style packed date/time, EFS timestamps lossy-converted
+
+## Ideas
+
+### Sound (high fun-per-effort)
+AC97 or Intel HDA driver. Playing a WAV file from the shell is a great demo moment.
+AC97 is dead simple. Intel HDA is more complex but maps to real hardware.
+
+### Text Editor
+Even a minimal ed/nano clone. Being able to edit files inside the OS is a
+qualitative leap in self-sufficiency.
+
+### Copy-on-Write Fork + Demand Paging
+Already have mmap and SHM. COW fork makes process spawning way cheaper.
+Demand paging means stop pre-faulting all pages.
+
+### io_uring-style Async I/O
+Shared-memory submission/completion ring between userspace and kernel.
+Already have the SHM infrastructure. Very "modern OS" feature, unique among hobby OSes.
+
+### IPv6
+Full IPv6 support: different header format, NDP (replaces ARP), ICMPv6,
+SLAAC/DHCPv6 for address configuration, multicast. Source-only fragmentation
+(different model from IPv4). Not urgent since most targets work fine on v4,
+but needed for a complete real-hardware network stack.
+
+### virtio-net
+Second NIC backend. Straightforward now that the stack and e1000e exist.
+Useful for VMs where e1000e emulation is slower than paravirtual.
+
+### More userspace tools
+- wget/curl (HTTP client exists, just needs a CLI wrapper)
+- env/printenv (environment variable support exists)
+- sort, uniq, tee, tr, seq, yes, sleep
+- chmod/chown (once EFS has permission support)
+
+## Fun-per-effort ranking
+
+sound > text editor > more tools > COW fork > async I/O > IPv6
