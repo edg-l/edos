@@ -11,10 +11,7 @@ use spin::{Mutex, Once, RwLock};
 use thiserror::Error;
 
 use crate::{
-    fs::{
-        self, File, FileAttrs, FileKind, FileSystem, MmapRegion, handle::Pollable,
-        path::Path,
-    },
+    fs::{self, File, FileAttrs, FileKind, FileSystem, MmapRegion, handle::Pollable, path::Path},
     memory::mapper::MemoryManager,
     println,
 };

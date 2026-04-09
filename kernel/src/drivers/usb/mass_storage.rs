@@ -83,10 +83,12 @@ impl UsbMassStorage {
         // xHCI DCI formula: ep_num * 2 + (1 if IN, 0 if OUT)
         let ep_in_dci = (ep_in_num * 2 + 1) as u32;
         let ep_out_dci = (ep_out_num * 2) as u32;
-        let cbw_buf =
-            dma().allocate_sized(31).expect("usb-msc: failed to allocate CBW buffer");
-        let csw_buf =
-            dma().allocate_sized(13).expect("usb-msc: failed to allocate CSW buffer");
+        let cbw_buf = dma()
+            .allocate_sized(31)
+            .expect("usb-msc: failed to allocate CBW buffer");
+        let csw_buf = dma()
+            .allocate_sized(13)
+            .expect("usb-msc: failed to allocate CSW buffer");
         Self {
             slot_id,
             ep_in_dci,
@@ -122,7 +124,9 @@ impl UsbMassStorage {
         cmd[0] = 0x12; // INQUIRY
         cmd[4] = 36; // allocation length
 
-        let data_buf = dma().allocate_sized(36).map_err(|_| XhciError::InvalidDevice)?;
+        let data_buf = dma()
+            .allocate_sized(36)
+            .map_err(|_| XhciError::InvalidDevice)?;
         let data_phys = data_buf.phys_addr().as_u64();
 
         self.bot_transfer(
@@ -140,7 +144,9 @@ impl UsbMassStorage {
         unsafe {
             core::ptr::copy_nonoverlapping(data_buf.as_ptr(), result.as_mut_ptr(), 36);
         }
-        if let Err(e) = dma().dealloc(data_buf) { println!("usb-msc: dma dealloc failed: {e}"); }
+        if let Err(e) = dma().dealloc(data_buf) {
+            println!("usb-msc: dma dealloc failed: {e}");
+        }
         Ok(result)
     }
 
@@ -156,7 +162,9 @@ impl UsbMassStorage {
         let mut cmd = [0u8; 16];
         cmd[0] = 0x25; // READ CAPACITY(10)
 
-        let data_buf = dma().allocate_sized(8).map_err(|_| XhciError::InvalidDevice)?;
+        let data_buf = dma()
+            .allocate_sized(8)
+            .map_err(|_| XhciError::InvalidDevice)?;
         let data_phys = data_buf.phys_addr().as_u64();
 
         self.bot_transfer(
@@ -175,7 +183,9 @@ impl UsbMassStorage {
         let block_size =
             unsafe { u32::from_be(core::ptr::read(data_buf.as_ptr().add(4) as *const u32)) };
 
-        if let Err(e) = dma().dealloc(data_buf) { println!("usb-msc: dma dealloc failed: {e}"); }
+        if let Err(e) = dma().dealloc(data_buf) {
+            println!("usb-msc: dma dealloc failed: {e}");
+        }
         Ok((last_lba, block_size))
     }
 

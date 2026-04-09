@@ -116,8 +116,9 @@ unsafe impl Send for ProducerRing {}
 impl ProducerRing {
     pub fn new(size: usize) -> Self {
         let byte_size = size * core::mem::size_of::<Trb>();
-        let dma =
-            dma().allocate_sized(byte_size).expect("xhci: failed to allocate producer ring");
+        let dma = dma()
+            .allocate_sized(byte_size)
+            .expect("xhci: failed to allocate producer ring");
         let trbs = dma.as_ptr() as *mut Trb;
         let phys = dma.phys_addr().as_u64();
 
@@ -216,8 +217,9 @@ unsafe impl Send for EventRing {}
 impl EventRing {
     pub fn new(size: usize) -> Self {
         let ring_bytes = size * core::mem::size_of::<Trb>();
-        let ring_dma =
-            dma().allocate_sized(ring_bytes).expect("xhci: failed to allocate event ring");
+        let ring_dma = dma()
+            .allocate_sized(ring_bytes)
+            .expect("xhci: failed to allocate event ring");
         let trbs = ring_dma.as_ptr() as *mut Trb;
 
         // Zero all TRBs so cycle bits start as 0; we poll expecting cycle=1 first

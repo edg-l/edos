@@ -2,11 +2,7 @@
 //!
 //! Root has node id 0.
 
-use alloc::{
-    collections::btree_map::BTreeMap,
-    string::String,
-    vec::Vec,
-};
+use alloc::{collections::btree_map::BTreeMap, string::String, vec::Vec};
 
 use crate::fs::{Error, FileSystem, memfs::node::Node, path::Path};
 
