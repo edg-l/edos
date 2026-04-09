@@ -312,7 +312,6 @@ impl FsInfo {
     }
 
     /// Check if free count is known
-    #[expect(unused)]
     pub fn has_free_count(&self) -> bool {
         self.free_count != FSINFO_UNKNOWN
     }

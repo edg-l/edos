@@ -235,8 +235,6 @@ pub struct StatFs {
     pub free_inodes: u64,
     /// Volume label.
     pub volume_name: [u8; 64],
-    /// Volume name length in bytes.
-    pub volume_name_len: usize,
     /// Filesystem format version.
     pub version: u32,
     /// Number of block groups (0 if not applicable).

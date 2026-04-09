@@ -1668,10 +1668,6 @@ impl FileSystem for EfsDriver {
         let sb = &self.superblock;
         let mut volume_name = [0u8; 64];
         volume_name.copy_from_slice(&sb.volume_name);
-        let volume_name_len = volume_name
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(volume_name.len());
         Ok(super::StatFs {
             fs_type: "efs",
             block_size: 1u64 << sb.block_size_log2,
@@ -1680,7 +1676,6 @@ impl FileSystem for EfsDriver {
             total_inodes: sb.total_inodes,
             free_inodes: sb.free_inodes,
             volume_name,
-            volume_name_len,
             version: sb.version,
             block_groups: sb.block_group_count,
         })

@@ -504,7 +504,6 @@ impl FileSystem for Fatfs {
             total_inodes: 0,
             free_inodes: 0,
             volume_name,
-            volume_name_len: label_len,
             version: 0,
             block_groups: 0,
         })
