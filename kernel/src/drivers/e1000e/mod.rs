@@ -302,7 +302,10 @@ impl NetDevice for E1000e {
 }
 
 pub extern "C" fn e1000e_driver_main() -> ! {
-    use crate::interrupts::io::E1000E_DRIVER_THREAD_ID;
+    use crate::{
+        interrupts::io::E1000E_DRIVER_THREAD_ID,
+        net::stack::{NET_STACK, NetStack},
+    };
 
     let thread = sched().current_thread().unwrap();
     thread.set_priority(IO_PRIORITY);
@@ -321,7 +324,7 @@ pub extern "C" fn e1000e_driver_main() -> ! {
         }
     };
 
-    let mut nic = match E1000e::new(&pci_dev) {
+    let nic = match E1000e::new(&pci_dev) {
         Ok(nic) => nic,
         Err(e) => {
             log!("e1000e: init failed: {}", e);
@@ -341,33 +344,87 @@ pub extern "C" fn e1000e_driver_main() -> ! {
         nic.mac_addr[5]
     );
 
-    nic.enable_interrupts();
+    // Move the NIC into the NetStack and publish the global.
+    NET_STACK.call_once(|| {
+        let mut stack = NetStack::new(nic);
+        stack.local_ip = [10, 0, 2, 15];
+        stack.subnet_mask = [255, 255, 255, 0];
+        stack.gateway_ip = [10, 0, 2, 2];
+        spin::Mutex::new(stack)
+    });
+
+    log!(
+        "e1000e: network stack ready, IP {}.{}.{}.{}",
+        10u8,
+        0u8,
+        2u8,
+        15u8
+    );
+
+    // Enable interrupts now that the stack is published.
+    {
+        let stack = crate::net::stack::net_stack().lock();
+        stack.nic.enable_interrupts();
+    }
+
+    // Save a stable pointer to the RX ring descriptor memory.  The DMA buffer
+    // address never changes after allocation, so this pointer remains valid
+    // even though the NIC is now behind a Mutex.
+    let rx_descs_ptr: *const RxDescriptor = {
+        let stack = crate::net::stack::net_stack().lock();
+        stack.nic.rx_ring.as_ptr() as *const RxDescriptor
+    };
 
     loop {
+        // Read rx_tail from the stack before parking; each iteration we must
+        // re-read it because it advances as packets are consumed.
+        let rx_tail = crate::net::stack::net_stack().lock().nic.rx_tail;
+
         // Use thread_park_while to avoid lost wakeups: the condition is checked
         // with interrupts disabled, so an IRQ between loop body and park cannot
         // be missed.
-        let rx_descs = nic.rx_ring.as_ptr() as *const RxDescriptor;
-        let rx_tail = nic.rx_tail;
         sched().thread_park_while(|| {
-            let desc = unsafe { &*rx_descs.add(rx_tail) };
+            let desc = unsafe { &*rx_descs_ptr.add(rx_tail) };
             desc.status & RX_STATUS_DD == 0
         });
 
-        let icr = nic.handle_interrupt();
+        {
+            let mut stack = crate::net::stack::net_stack().lock();
+            let icr = stack.nic.handle_interrupt();
 
-        if icr & IMS_LSC != 0 {
-            let status = nic.read_reg(STATUS);
-            log!("e1000e: link status change, up={}", status & STATUS_LU != 0);
+            if icr & IMS_LSC != 0 {
+                let status = stack.nic.read_reg(STATUS);
+                log!("e1000e: link status change, up={}", status & STATUS_LU != 0);
+            }
         }
 
-        // Always try to receive, even if RXT0 not set (handles edge cases)
-        while let Some((buf, len)) = nic.receive() {
-            log!("e1000e: rx {} bytes", len);
-            let _ = dma().dealloc(buf);
+        // Receive all pending packets, copy data out, then dispatch.
+        loop {
+            let packet = {
+                let mut stack = crate::net::stack::net_stack().lock();
+                match stack.nic.receive() {
+                    Some((buf, len)) => {
+                        let data =
+                            unsafe { core::slice::from_raw_parts(buf.as_ptr(), len) }.to_vec();
+                        let _ = dma().dealloc(buf);
+                        Some(data)
+                    }
+                    None => None,
+                }
+            };
+
+            match packet {
+                Some(data) => {
+                    crate::net::stack::net_stack().lock().handle_rx(&data);
+                }
+                None => break,
+            }
         }
 
-        nic.reclaim_tx_buffers();
+        crate::net::stack::net_stack()
+            .lock()
+            .nic
+            .reclaim_tx_buffers();
     }
 }
 

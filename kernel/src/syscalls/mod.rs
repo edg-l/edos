@@ -285,6 +285,7 @@ const SYS_SPAWN2: u64 = 228;
 const SYS_KILL: u64 = 229;
 const SYS_SIGACTION: u64 = 230;
 const SYS_SHM_SIZE: u64 = 231;
+const SYS_PING: u64 = 249;
 
 /// Arguments struct for SYS_SPAWN2. Passed as a single pointer from userspace.
 #[repr(C)]
@@ -614,6 +615,13 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_SHM_SIZE => {
             let shm_id = ctx.rdi;
             ctx.rax = shm::sys_shm_size(shm_id) as u64;
+        }
+        SYS_PING => {
+            let dst_ip_ptr = ctx.rdi as *const [u8; 4];
+            let id = ctx.rsi as u16;
+            let seq = ctx.rdx as u16;
+            let timeout_ms = ctx.r10;
+            ctx.rax = sys_ping(dst_ip_ptr, id, seq, timeout_ms);
         }
         _ => {
             ctx.rax = !0u64;
@@ -1543,4 +1551,46 @@ fn copy_user_c_string(ptr: *const u8, max_len: usize) -> Result<Vec<u8>, UAccess
 
     buf.truncate(len);
     Ok(buf)
+}
+
+/// SYS_PING: send an ICMP echo request and wait for the reply.
+///
+/// Arguments:
+///   - rdi: pointer to [u8; 4] destination IP address in userspace
+///   - rsi: ICMP identifier (u16)
+///   - rdx: ICMP sequence number (u16)
+///   - r10: timeout in milliseconds (u64); 0 uses a default of 5000 ms
+///
+/// Returns RTT in microseconds on success, or u64::MAX on timeout / error.
+fn sys_ping(dst_ip_ptr: *const [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if dst_ip_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    let dst_ip = match unsafe { try_read_user(dst_ip_ptr) } {
+        Some(ip) => ip,
+        None => {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
+        }
+    };
+
+    // Check that the net stack is initialized.
+    if crate::net::stack::NET_STACK.get().is_none() {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    }
+
+    let timeout_ms = if timeout_ms == 0 { 5000 } else { timeout_ms };
+    let timeout = Duration::from_millis(timeout_ms);
+
+    match crate::net::stack::syscall_ping(dst_ip, id, seq, timeout) {
+        Some(rtt_us) => rtt_us,
+        None => !0u64,
+    }
 }
