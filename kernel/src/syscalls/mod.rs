@@ -329,6 +329,11 @@ const SYS_LISTEN: u64 = 243;
 const SYS_ACCEPT: u64 = 244;
 const SYS_SENDTO: u64 = 245;
 const SYS_RECVFROM: u64 = 246;
+const SYS_SHUTDOWN: u64 = 247;
+const SYS_SETSOCKOPT: u64 = 248;
+const SYS_GETSOCKOPT: u64 = 251;
+const SYS_GETPEERNAME: u64 = 252;
+const SYS_GETSOCKNAME: u64 = 253;
 
 /// Arguments struct for SYS_SPAWN2. Passed as a single pointer from userspace.
 #[repr(C)]
@@ -718,6 +723,41 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let buf_len = ctx.rsi as usize;
             ctx.rax = sys_netinfo(buf_ptr, buf_len);
         }
+        SYS_SHUTDOWN => {
+            ctx.rax = net::sys_shutdown(ctx.rdi, ctx.rsi);
+        }
+        SYS_SETSOCKOPT => {
+            ctx.rax = net::sys_setsockopt(
+                ctx.rdi,
+                ctx.rsi as i32,
+                ctx.rdx as i32,
+                ctx.r10 as *const u8,
+                ctx.r8 as u32,
+            );
+        }
+        SYS_GETSOCKOPT => {
+            ctx.rax = net::sys_getsockopt(
+                ctx.rdi,
+                ctx.rsi as i32,
+                ctx.rdx as i32,
+                ctx.r10 as *mut u8,
+                ctx.r8 as *mut u32,
+            );
+        }
+        SYS_GETPEERNAME => {
+            ctx.rax = net::sys_getpeername(
+                ctx.rdi,
+                ctx.rsi as *mut net::SockAddrIn,
+                ctx.rdx as *mut u32,
+            );
+        }
+        SYS_GETSOCKNAME => {
+            ctx.rax = net::sys_getsockname(
+                ctx.rdi,
+                ctx.rsi as *mut net::SockAddrIn,
+                ctx.rdx as *mut u32,
+            );
+        }
         _ => {
             ctx.rax = !0u64;
         }
@@ -805,6 +845,8 @@ pub enum Errno {
     EADDRINUSE,
     /// Broken pipe: write to a closed connection.
     EPIPE,
+    /// Address family not supported (e.g. IPv6 on IPv4-only system).
+    EAFNOSUPPORT,
     /// Placeholder for unknown or unmapped kernel error codes.
     UNKNOWN,
 }

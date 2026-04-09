@@ -223,6 +223,7 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
         }
 
         sock_arc.lock().tcp_conn = Some(conn_arc.clone());
+        conn_arc.lock().owner = Some(Arc::downgrade(&sock_arc));
 
         let state_wq = conn_arc.lock().state_wq.clone();
         state_wq.wait_until_timeout(
@@ -653,4 +654,374 @@ pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) ->
         .lock()
         .allocate_fd(FileDescriptor::Socket(new_sock_arc));
     new_fd as u64
+}
+
+/// Timeval struct matching the C layout for SO_RCVTIMEO/SO_SNDTIMEO.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Timeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+/// Linger struct matching the C layout for SO_LINGER.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LingerVal {
+    l_onoff: i32,
+    l_linger: i32,
+}
+
+// Socket option constants
+const SOL_SOCKET: i32 = 1;
+const IPPROTO_TCP: i32 = 6;
+const IPPROTO_IP: i32 = 0;
+const SO_RCVTIMEO: i32 = 20;
+const SO_SNDTIMEO: i32 = 21;
+const SO_LINGER: i32 = 13;
+const SO_ERROR: i32 = 4;
+const SO_REUSEADDR: i32 = 2;
+const SO_BROADCAST: i32 = 6;
+const TCP_NODELAY: i32 = 1;
+const IP_TTL: i32 = 2;
+
+pub fn sys_shutdown(fd: u64, how: u64) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let fd_table = info.lock().fd_table.clone();
+    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
+        Some(FileDescriptor::Socket(s)) => s,
+        _ => {
+            info.lock().errno = Errno::EBADF;
+            return !0u64;
+        }
+    };
+
+    let how = how as i32;
+    if how < 0 || how > 2 {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    }
+
+    let s = sock_arc.lock();
+    if s.closed {
+        info.lock().errno = Errno::EBADF;
+        return !0u64;
+    }
+
+    // For TCP, send FIN if shutting down write side
+    if s.sock_type == SOCK_STREAM && (how == 1 || how == 2) {
+        if let Some(ref conn) = s.tcp_conn {
+            let fin = conn.lock().build_fin();
+            if let Some(fin_seg) = fin {
+                let remote_ip = conn.lock().remote_ip;
+                drop(s);
+                if let Some(stack_mutex) = crate::net::stack::NET_STACK.get() {
+                    let mut stack = stack_mutex.lock();
+                    let _ = stack.send_ip(remote_ip, crate::net::ipv4::IpProtocol::Tcp, &fin_seg);
+                }
+                return 0;
+            }
+        }
+    }
+
+    0
+}
+
+pub fn sys_setsockopt(fd: u64, level: i32, optname: i32, val_ptr: *const u8, val_len: u32) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let fd_table = info.lock().fd_table.clone();
+    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
+        Some(FileDescriptor::Socket(s)) => s,
+        _ => {
+            info.lock().errno = Errno::EBADF;
+            return !0u64;
+        }
+    };
+
+    match (level, optname) {
+        (SOL_SOCKET, SO_RCVTIMEO) | (SOL_SOCKET, SO_SNDTIMEO) => {
+            if val_len < core::mem::size_of::<Timeval>() as u32 {
+                info.lock().errno = Errno::EINVAL;
+                return !0u64;
+            }
+            let tv: Timeval = match unsafe { try_read_user(val_ptr as *const Timeval) } {
+                Some(v) => v,
+                None => {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+            };
+            let dur = if tv.tv_sec == 0 && tv.tv_usec == 0 {
+                None
+            } else {
+                Some(Duration::new(tv.tv_sec as u64, (tv.tv_usec as u32) * 1000))
+            };
+            let mut s = sock_arc.lock();
+            if optname == SO_RCVTIMEO {
+                s.recv_timeout = dur;
+            } else {
+                s.send_timeout = dur;
+            }
+            0
+        }
+        (SOL_SOCKET, SO_LINGER) => {
+            if val_len < core::mem::size_of::<LingerVal>() as u32 {
+                info.lock().errno = Errno::EINVAL;
+                return !0u64;
+            }
+            // Accept but don't implement linger behavior
+            0
+        }
+        (IPPROTO_TCP, TCP_NODELAY) => {
+            if val_len < 4 {
+                info.lock().errno = Errno::EINVAL;
+                return !0u64;
+            }
+            let val: i32 = match unsafe { try_read_user(val_ptr as *const i32) } {
+                Some(v) => v,
+                None => {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+            };
+            sock_arc.lock().nodelay = val != 0;
+            0
+        }
+        // Accept SO_REUSEADDR and SO_BROADCAST silently (no-op)
+        (SOL_SOCKET, SO_REUSEADDR) | (SOL_SOCKET, SO_BROADCAST) => 0,
+        // Accept IP_TTL silently (no-op)
+        (IPPROTO_IP, IP_TTL) => 0,
+        _ => {
+            // Unknown option: return success to not break callers
+            0
+        }
+    }
+}
+
+pub fn sys_getsockopt(
+    fd: u64,
+    level: i32,
+    optname: i32,
+    val_ptr: *mut u8,
+    val_len_ptr: *mut u32,
+) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let fd_table = info.lock().fd_table.clone();
+    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
+        Some(FileDescriptor::Socket(s)) => s,
+        _ => {
+            info.lock().errno = Errno::EBADF;
+            return !0u64;
+        }
+    };
+
+    match (level, optname) {
+        (SOL_SOCKET, SO_RCVTIMEO) | (SOL_SOCKET, SO_SNDTIMEO) => {
+            let s = sock_arc.lock();
+            let dur = if optname == SO_RCVTIMEO {
+                s.recv_timeout
+            } else {
+                s.send_timeout
+            };
+            let tv = match dur {
+                Some(d) => Timeval {
+                    tv_sec: d.as_secs() as i64,
+                    tv_usec: d.subsec_micros() as i64,
+                },
+                None => Timeval {
+                    tv_sec: 0,
+                    tv_usec: 0,
+                },
+            };
+            drop(s);
+            if !unsafe { try_write_user(val_ptr as *mut Timeval, tv) } {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
+            }
+            if !val_len_ptr.is_null() {
+                if !unsafe { try_write_user(val_len_ptr, core::mem::size_of::<Timeval>() as u32) } {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+            }
+            0
+        }
+        (SOL_SOCKET, SO_LINGER) => {
+            let linger = LingerVal {
+                l_onoff: 0,
+                l_linger: 0,
+            };
+            if !unsafe { try_write_user(val_ptr as *mut LingerVal, linger) } {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
+            }
+            if !val_len_ptr.is_null() {
+                if !unsafe { try_write_user(val_len_ptr, core::mem::size_of::<LingerVal>() as u32) }
+                {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+            }
+            0
+        }
+        (IPPROTO_TCP, TCP_NODELAY) => {
+            let val: i32 = if sock_arc.lock().nodelay { 1 } else { 0 };
+            if !unsafe { try_write_user(val_ptr as *mut i32, val) } {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
+            }
+            if !val_len_ptr.is_null() {
+                if !unsafe { try_write_user(val_len_ptr, 4u32) } {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+            }
+            0
+        }
+        (SOL_SOCKET, SO_ERROR) => {
+            // Always return 0 (no pending error)
+            let val: i32 = 0;
+            if !unsafe { try_write_user(val_ptr as *mut i32, val) } {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
+            }
+            if !val_len_ptr.is_null() {
+                if !unsafe { try_write_user(val_len_ptr, 4u32) } {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+            }
+            0
+        }
+        _ => {
+            // Unknown: return 0 as value
+            let val: i32 = 0;
+            if !unsafe { try_write_user(val_ptr as *mut i32, val) } {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
+            }
+            if !val_len_ptr.is_null() {
+                if !unsafe { try_write_user(val_len_ptr, 4u32) } {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+            }
+            0
+        }
+    }
+}
+
+pub fn sys_getpeername(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let fd_table = info.lock().fd_table.clone();
+    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
+        Some(FileDescriptor::Socket(s)) => s,
+        _ => {
+            info.lock().errno = Errno::EBADF;
+            return !0u64;
+        }
+    };
+
+    let remote = sock_arc.lock().remote_addr;
+    match remote {
+        Some(addr) => {
+            let sockaddr = SockAddrIn {
+                family: AF_INET as u16,
+                port: addr.port.to_be(),
+                addr: addr.ip,
+                zero: [0u8; 8],
+            };
+            if !unsafe { try_write_user(addr_ptr, sockaddr) } {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
+            }
+            if !addr_len_ptr.is_null() {
+                if !unsafe {
+                    try_write_user(addr_len_ptr, core::mem::size_of::<SockAddrIn>() as u32)
+                } {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+            }
+            0
+        }
+        None => {
+            info.lock().errno = Errno::ENOTCONN;
+            !0u64
+        }
+    }
+}
+
+pub fn sys_getsockname(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let fd_table = info.lock().fd_table.clone();
+    let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
+        Some(FileDescriptor::Socket(s)) => s,
+        _ => {
+            info.lock().errno = Errno::EBADF;
+            return !0u64;
+        }
+    };
+
+    let local = sock_arc.lock().local_addr;
+    match local {
+        Some(addr) => {
+            let sockaddr = SockAddrIn {
+                family: AF_INET as u16,
+                port: addr.port.to_be(),
+                addr: addr.ip,
+                zero: [0u8; 8],
+            };
+            if !unsafe { try_write_user(addr_ptr, sockaddr) } {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
+            }
+            if !addr_len_ptr.is_null() {
+                if !unsafe {
+                    try_write_user(addr_len_ptr, core::mem::size_of::<SockAddrIn>() as u32)
+                } {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+            }
+            0
+        }
+        None => {
+            // Unbound socket: return zeroed address
+            let sockaddr = SockAddrIn {
+                family: AF_INET as u16,
+                port: 0,
+                addr: [0; 4],
+                zero: [0u8; 8],
+            };
+            if !unsafe { try_write_user(addr_ptr, sockaddr) } {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
+            }
+            if !addr_len_ptr.is_null() {
+                if !unsafe {
+                    try_write_user(addr_len_ptr, core::mem::size_of::<SockAddrIn>() as u32)
+                } {
+                    info.lock().errno = Errno::EFAULT;
+                    return !0u64;
+                }
+            }
+            0
+        }
+    }
 }
