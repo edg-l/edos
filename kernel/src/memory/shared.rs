@@ -56,16 +56,21 @@ impl SharedMemory {
         let aligned_size = (size + 0xFFF) & !0xFFF;
         let frame_count = aligned_size / 4096;
 
-        // Allocate physical frames
+        // Allocate physical frames in batches, releasing the IRQ lock between
+        // batches so timer/device interrupts aren't starved during large SHM
+        // allocations (e.g. 2048 frames for an 8MB framebuffer).
+        const BATCH_SIZE: usize = 64;
         let mut frames = Vec::with_capacity(frame_count);
-        {
+        while frames.len() < frame_count {
+            let batch = (frame_count - frames.len()).min(BATCH_SIZE);
             let mut allocator = frame_allocator();
-            for _ in 0..frame_count {
+            for _ in 0..batch {
                 let frame = allocator
                     .allocate_frame()
                     .ok_or(SharedMemoryError::AllocationFailed)?;
                 frames.push(frame);
             }
+            // Lock dropped here; IRQs re-enabled between batches.
         }
 
         // Zero the frames
@@ -163,11 +168,14 @@ impl SharedMemory {
 
 impl Drop for SharedMemory {
     fn drop(&mut self) {
-        // Deallocate all physical frames
-        let mut allocator = frame_allocator();
-        for frame in &self.frames {
-            unsafe {
-                allocator.deallocate_frame(*frame);
+        // Deallocate physical frames in batches to avoid holding IRQ lock too long.
+        const BATCH_SIZE: usize = 64;
+        for chunk in self.frames.chunks(BATCH_SIZE) {
+            let mut allocator = frame_allocator();
+            for frame in chunk {
+                unsafe {
+                    allocator.deallocate_frame(*frame);
+                }
             }
         }
         // Note: do NOT touch SHARED_MEMORY_REGISTRY here.

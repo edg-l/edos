@@ -143,7 +143,7 @@ pub fn file_info(path: &Path) -> Result<File, Error> {
     // get back the directory entry for the mount root itself.
     if vfs::is_mount_point(path) {
         // Return a synthetic directory entry for the mount point root.
-        let name = path.last_component().unwrap_or("").to_string();
+        let name = path.last_component().unwrap_or("/").to_string();
         return Ok(File {
             name,
             kind: FileKind::Directory,
