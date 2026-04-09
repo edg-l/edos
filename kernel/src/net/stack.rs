@@ -67,6 +67,24 @@ impl NetStack {
         };
 
         // Update ARP cache for the sender regardless of operation.
+        log!(
+            "net: arp {} {}.{}.{}.{} -> {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            if pkt.oper == arp::ARP_REQUEST {
+                "who-has"
+            } else {
+                "reply"
+            },
+            pkt.spa[0],
+            pkt.spa[1],
+            pkt.spa[2],
+            pkt.spa[3],
+            pkt.sha[0],
+            pkt.sha[1],
+            pkt.sha[2],
+            pkt.sha[3],
+            pkt.sha[4],
+            pkt.sha[5]
+        );
         self.arp_cache.insert(pkt.spa, pkt.sha);
 
         if pkt.oper == arp::ARP_REQUEST && pkt.tpa == self.local_ip {
@@ -109,6 +127,17 @@ impl NetStack {
                 s.rx_queue.push_back((payload.to_vec(), src));
                 s.rx_wq.wake_one();
             }
+        } else {
+            log!(
+                "net: udp no socket for port {}, dropping {} bytes from {}.{}.{}.{}:{}",
+                udp_hdr.dst_port,
+                payload.len(),
+                ip_hdr.src_addr[0],
+                ip_hdr.src_addr[1],
+                ip_hdr.src_addr[2],
+                ip_hdr.src_addr[3],
+                udp_hdr.src_port
+            );
         }
     }
 

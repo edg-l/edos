@@ -3,6 +3,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use crate::log;
 use crate::thread::waitqueue::WaitQueue;
 use crate::timer::Instant;
 
@@ -251,6 +252,22 @@ impl TcpConnection {
         }
     }
 
+    fn set_state(&mut self, new: TcpState) {
+        if self.state != new {
+            log!(
+                "net: tcp {}.{}.{}.{}:{} {:?} -> {:?}",
+                self.remote_ip[0],
+                self.remote_ip[1],
+                self.remote_ip[2],
+                self.remote_ip[3],
+                self.remote_port,
+                self.state,
+                new
+            );
+            self.state = new;
+        }
+    }
+
     /// Build and return a TCP segment to be sent. Does NOT send it.
     /// The caller (NetStack) is responsible for wrapping in IP and sending.
     pub fn build_segment(&self, flags: u8, payload: &[u8]) -> Vec<u8> {
@@ -285,14 +302,14 @@ impl TcpConnection {
         match self.state {
             TcpState::SynReceived => {
                 if hdr.flags & RST != 0 {
-                    self.state = TcpState::Closed;
+                    self.set_state(TcpState::Closed);
                     self.state_wq.wake_all();
                     return responses;
                 }
                 if hdr.flags & ACK != 0 && hdr.ack_num == self.snd_nxt {
                     self.snd_una = hdr.ack_num;
                     self.snd_wnd = hdr.window;
-                    self.state = TcpState::Established;
+                    self.set_state(TcpState::Established);
                     self.retransmit_queue.clear();
                     self.state_wq.wake_all();
                 }
@@ -300,7 +317,7 @@ impl TcpConnection {
             TcpState::SynSent => {
                 // Expecting SYN-ACK
                 if hdr.flags & RST != 0 {
-                    self.state = TcpState::Closed;
+                    self.set_state(TcpState::Closed);
                     self.state_wq.wake_all();
                     return responses;
                 }
@@ -320,7 +337,7 @@ impl TcpConnection {
                     // Clear retransmit queue (SYN was ACKed)
                     self.retransmit_queue.clear();
                     // Send ACK
-                    self.state = TcpState::Established;
+                    self.set_state(TcpState::Established);
                     let ack = self.build_ack();
                     responses.push(ack);
                     self.state_wq.wake_all();
@@ -328,7 +345,7 @@ impl TcpConnection {
             }
             TcpState::Established | TcpState::FinWait1 | TcpState::FinWait2 => {
                 if hdr.flags & RST != 0 {
-                    self.state = TcpState::Closed;
+                    self.set_state(TcpState::Closed);
                     self.state_wq.wake_all();
                     self.rx_wq.wake_all();
                     self.tx_wq.wake_all();
@@ -356,7 +373,7 @@ impl TcpConnection {
 
                     match self.state {
                         TcpState::Established => {
-                            self.state = TcpState::CloseWait;
+                            self.set_state(TcpState::CloseWait);
                             self.rx_wq.wake_all(); // Signal EOF to reader
                         }
                         TcpState::FinWait1 => {
@@ -364,7 +381,7 @@ impl TcpConnection {
                                 // Simultaneous close: FIN+ACK for our FIN
                                 self.enter_time_wait();
                             } else {
-                                self.state = TcpState::Closing;
+                                self.set_state(TcpState::Closing);
                             }
                         }
                         TcpState::FinWait2 => {
@@ -380,7 +397,7 @@ impl TcpConnection {
                     && hdr.flags & ACK != 0
                     && self.fin_acked(hdr.ack_num)
                 {
-                    self.state = TcpState::FinWait2;
+                    self.set_state(TcpState::FinWait2);
                     self.state_wq.wake_all();
                 }
             }
@@ -398,7 +415,7 @@ impl TcpConnection {
             }
             TcpState::LastAck => {
                 if hdr.flags & ACK != 0 && self.fin_acked(hdr.ack_num) {
-                    self.state = TcpState::Closed;
+                    self.set_state(TcpState::Closed);
                     self.state_wq.wake_all();
                 }
             }
@@ -446,13 +463,13 @@ impl TcpConnection {
     }
 
     fn enter_time_wait(&mut self) {
-        self.state = TcpState::TimeWait;
+        self.set_state(TcpState::TimeWait);
         self.time_wait_until = Some(Instant::now() + Duration::from_secs(5));
     }
 
     /// Build a SYN segment for active open. Caller sends it.
     pub fn build_syn(&mut self) -> Vec<u8> {
-        self.state = TcpState::SynSent;
+        self.set_state(TcpState::SynSent);
         let options = mss_option(DEFAULT_MSS);
         let seg = build(
             self.local_port,
@@ -481,10 +498,10 @@ impl TcpConnection {
     pub fn build_fin(&mut self) -> Option<Vec<u8>> {
         match self.state {
             TcpState::Established => {
-                self.state = TcpState::FinWait1;
+                self.set_state(TcpState::FinWait1);
             }
             TcpState::CloseWait => {
-                self.state = TcpState::LastAck;
+                self.set_state(TcpState::LastAck);
             }
             _ => return None,
         }
@@ -593,7 +610,7 @@ impl TcpConnection {
                 &[],
             );
             resends.push(rst);
-            self.state = TcpState::Closed;
+            self.set_state(TcpState::Closed);
             self.retransmit_queue.clear();
             self.state_wq.wake_all();
             self.rx_wq.wake_all();
