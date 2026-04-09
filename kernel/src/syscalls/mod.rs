@@ -1706,34 +1706,43 @@ fn sys_netinfo(buf_ptr: *mut u8, buf_len: usize) -> u64 {
         return !0u64;
     }
 
-    let text = if let Some(stack) = crate::net::stack::NET_STACK.get() {
-        let s = stack.lock();
-        let mac = s.mac();
-        let link = s.nic.link_up();
-        format!(
-            "IP: {}.{}.{}.{}\nMask: {}.{}.{}.{}\nGateway: {}.{}.{}.{}\nMAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\nLink: {}\n",
-            s.local_ip[0],
-            s.local_ip[1],
-            s.local_ip[2],
-            s.local_ip[3],
-            s.subnet_mask[0],
-            s.subnet_mask[1],
-            s.subnet_mask[2],
-            s.subnet_mask[3],
-            s.gateway_ip[0],
-            s.gateway_ip[1],
-            s.gateway_ip[2],
-            s.gateway_ip[3],
-            mac[0],
-            mac[1],
-            mac[2],
-            mac[3],
-            mac[4],
-            mac[5],
-            if link { "up" } else { "down" },
-        )
-    } else {
-        "No network interface\n".to_string()
+    let text = {
+        use alloc::fmt::Write;
+        let mut out = alloc::string::String::with_capacity(256);
+
+        // lo - loopback
+        let _ = write!(out, "1: lo: <LOOPBACK,UP>\n");
+        let _ = write!(out, "    inet 127.0.0.1/8\n");
+
+        // eth0 - e1000e
+        if let Some(stack) = crate::net::stack::NET_STACK.get() {
+            let s = stack.lock();
+            let mac = s.mac();
+            let link = s.nic.link_up();
+            let prefix = s.subnet_mask.iter().map(|b| b.count_ones()).sum::<u32>();
+            let flags = if link { "UP,LOWER_UP" } else { "NO-CARRIER" };
+            let _ = write!(
+                out,
+                "2: eth0: <BROADCAST,MULTICAST,{}>\n    link/ether {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n    inet {}.{}.{}.{}/{}\n    gateway {}.{}.{}.{}\n",
+                flags,
+                mac[0],
+                mac[1],
+                mac[2],
+                mac[3],
+                mac[4],
+                mac[5],
+                s.local_ip[0],
+                s.local_ip[1],
+                s.local_ip[2],
+                s.local_ip[3],
+                prefix,
+                s.gateway_ip[0],
+                s.gateway_ip[1],
+                s.gateway_ip[2],
+                s.gateway_ip[3],
+            );
+        }
+        out
     };
 
     let bytes = text.as_bytes();

@@ -588,6 +588,7 @@ pub fn is_builtin(command: &str) -> bool {
             | "return"
             | "kill"
             | "ifconfig"
+            | "ip"
     )
 }
 
@@ -686,7 +687,7 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
                 ExecResult::Failed(code)
             };
         }
-        "ifconfig" => {
+        "ifconfig" | "ip" => {
             builtins::cmd_ifconfig(args);
             return ExecResult::Success(0);
         }
