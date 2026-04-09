@@ -8,7 +8,8 @@ use alloc::vec::Vec;
 use efs_common::{
     DIR_ENTRY_HEADER_SIZE, EFS_ROOT_INO, EXTENT_MAGIC, EfsBlockGroupDesc, EfsDirEntryHeader,
     EfsExtent, EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, FT_REG_FILE, INODE_DATA_AREA_SIZE,
-    INODE_FLAG_INLINE_DATA, S_IFDIR, S_IFMT, S_IFREG, checksum_inode, dir_entry_min_size,
+    INODE_FLAG_INLINE_DATA, MAX_INLINE_EXTENTS, S_IFDIR, S_IFMT, S_IFREG, checksum_inode,
+    dir_entry_min_size,
 };
 
 use super::block_device::BlockDevice;
@@ -26,6 +27,33 @@ const BGD_SIZE: usize = core::mem::size_of::<EfsBlockGroupDesc>();
 
 /// Size of one inode on disk.
 const INODE_SIZE: usize = core::mem::size_of::<EfsInode>();
+
+/// Stack-allocated extent list (max 13 extents, no heap allocation).
+#[derive(Clone)]
+struct ExtentList {
+    extents: [EfsExtent; MAX_INLINE_EXTENTS],
+    len: usize,
+}
+
+impl ExtentList {
+    fn as_slice(&self) -> &[EfsExtent] {
+        &self.extents[..self.len]
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [EfsExtent] {
+        &mut self.extents[..self.len]
+    }
+
+    fn push(&mut self, ext: EfsExtent) -> bool {
+        if self.len < MAX_INLINE_EXTENTS {
+            self.extents[self.len] = ext;
+            self.len += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 // ---- Driver struct ------------------------------------------------------------
 
@@ -127,10 +155,14 @@ impl EfsDriver {
     fn write_block(&mut self, block: u64, data: &[u8]) -> Result<(), Error> {
         let lba = self.block_to_lba(block);
         let spb = self.sectors_per_block();
-        let mut buf = vec![0u8; spb as usize * 512];
-        let copy_len = data.len().min(buf.len());
+        let mut buf = core::mem::take(&mut self.scratch);
+        let needed = spb as usize * 512;
+        buf.resize(needed, 0);
+        buf[..needed].fill(0);
+        let copy_len = data.len().min(needed);
         buf[..copy_len].copy_from_slice(&data[..copy_len]);
-        self.device.write_sectors(lba, buf, spb)?;
+        let returned = self.device.write_sectors(lba, buf, spb)?;
+        self.scratch = returned;
         Ok(())
     }
 
@@ -242,25 +274,34 @@ impl EfsDriver {
         }
 
         let extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
+        let ext_slice = extents.as_slice();
         let block_size = self.block_size() as usize;
 
         let mut result = vec![0u8; count];
         let mut result_pos = 0usize;
         let mut remaining = count;
         let mut cur_byte = byte_offset;
+        let mut ext_idx = 0usize; // sequential scan: start from last found extent
 
         while remaining > 0 {
             let logical_block = (cur_byte / block_size) as u32;
             let offset_in_block = cur_byte % block_size;
 
-            // Find the extent covering logical_block.
-            let extent = extents.iter().find(|e| {
-                e.logical_block <= logical_block
-                    && logical_block < e.logical_block + e.length as u32
-            });
+            // Find the extent covering logical_block, starting from ext_idx.
+            let extent = ext_slice[ext_idx..]
+                .iter()
+                .chain(ext_slice[..ext_idx].iter())
+                .enumerate()
+                .find(|(_, e)| {
+                    e.logical_block <= logical_block
+                        && logical_block < e.logical_block + e.length as u32
+                });
 
             let extent = match extent {
-                Some(e) => e,
+                Some((i, e)) => {
+                    ext_idx = (ext_idx + i) % ext_slice.len();
+                    e
+                }
                 None => return Err(Error::Corrupted),
             };
 
@@ -286,21 +327,28 @@ impl EfsDriver {
         &self,
         data_area: &[u8; INODE_DATA_AREA_SIZE],
         count: usize,
-    ) -> Result<Vec<EfsExtent>, Error> {
+    ) -> Result<ExtentList, Error> {
         let header_size = core::mem::size_of::<EfsExtentHeader>();
         let extent_size = core::mem::size_of::<EfsExtent>();
         let max_count = (INODE_DATA_AREA_SIZE - header_size) / extent_size;
-        let count = count.min(max_count);
+        let count = count.min(max_count).min(MAX_INLINE_EXTENTS);
 
-        let mut extents = Vec::with_capacity(count);
+        let mut list = ExtentList {
+            extents: [EfsExtent {
+                logical_block: 0,
+                length: 0,
+                start_hi: 0,
+                start_lo: 0,
+            }; MAX_INLINE_EXTENTS],
+            len: count,
+        };
         for i in 0..count {
             let offset = header_size + i * extent_size;
-            let ext: EfsExtent = unsafe {
+            list.extents[i] = unsafe {
                 core::ptr::read_unaligned(data_area[offset..].as_ptr() as *const EfsExtent)
             };
-            extents.push(ext);
         }
-        Ok(extents)
+        Ok(list)
     }
 }
 
@@ -540,7 +588,7 @@ impl EfsDriver {
         let extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
 
         // Check if already mapped.
-        for ext in &extents {
+        for ext in extents.as_slice() {
             if ext.logical_block <= logical_block
                 && logical_block < ext.logical_block + ext.length as u32
             {
@@ -557,7 +605,7 @@ impl EfsDriver {
         // Can we extend an existing extent?
         let mut new_extents = extents.clone();
         let mut extended = false;
-        for ext in new_extents.iter_mut() {
+        for ext in new_extents.as_mut_slice().iter_mut() {
             if ext.logical_block + ext.length as u32 == logical_block
                 && ext.physical_start() + ext.length as u64 == phys_block
             {
@@ -568,16 +616,14 @@ impl EfsDriver {
         }
 
         if !extended {
-            // Add a new extent entry.
-            if new_extents.len() >= efs_common::MAX_INLINE_EXTENTS {
-                return Err(Error::Unsupported);
-            }
-            new_extents.push(EfsExtent {
+            if !new_extents.push(EfsExtent {
                 logical_block,
                 length: 1,
                 start_hi: (phys_block >> 32) as u16,
                 start_lo: phys_block as u32,
-            });
+            }) {
+                return Err(Error::Unsupported);
+            }
         }
 
         // Write back updated extents into inode.
@@ -586,7 +632,7 @@ impl EfsDriver {
         let ext_size = core::mem::size_of::<EfsExtent>();
         let new_hdr = EfsExtentHeader {
             magic: EXTENT_MAGIC,
-            entries: new_extents.len() as u16,
+            entries: new_extents.len as u16,
             max_entries: efs_common::MAX_INLINE_EXTENTS as u16,
             depth: 0,
             reserved: 0,
@@ -595,14 +641,14 @@ impl EfsDriver {
             core::slice::from_raw_parts(&new_hdr as *const EfsExtentHeader as *const u8, hdr_size)
         };
         updated.data_area[..hdr_size].copy_from_slice(hdr_bytes);
-        for (i, ext) in new_extents.iter().enumerate() {
+        for (i, ext) in new_extents.as_slice().iter().enumerate() {
             let off = hdr_size + i * ext_size;
             let ext_bytes: &[u8] = unsafe {
                 core::slice::from_raw_parts(ext as *const EfsExtent as *const u8, ext_size)
             };
             updated.data_area[off..off + ext_size].copy_from_slice(ext_bytes);
         }
-        updated.blocks = new_extents.iter().map(|e| e.length as u64).sum();
+        updated.blocks = new_extents.as_slice().iter().map(|e| e.length as u64).sum();
         updated.checksum = checksum_inode(&updated);
         self.write_inode(ino, &updated)?;
 
@@ -629,6 +675,7 @@ impl EfsDriver {
             if let Some(bit) = find_free_bit(&bitmap, bits_to_check) {
                 set_bit(&mut bitmap, bit);
                 self.write_block(bitmap_block, &bitmap)?;
+                self.recycle(bitmap);
 
                 self.bgd_table[g].free_blocks_count -= 1;
                 self.superblock.free_blocks -= 1;
@@ -636,6 +683,7 @@ impl EfsDriver {
                 let abs_block = g as u64 * blocks_per_group as u64 + bit as u64;
                 return Ok(abs_block);
             }
+            self.recycle(bitmap);
         }
         Err(Error::IoError)
     }
@@ -654,6 +702,7 @@ impl EfsDriver {
         let mut bitmap = self.read_block(bitmap_block)?;
         clear_bit(&mut bitmap, bit);
         self.write_block(bitmap_block, &bitmap)?;
+        self.recycle(bitmap);
 
         self.bgd_table[group].free_blocks_count += 1;
         self.superblock.free_blocks += 1;
@@ -676,6 +725,7 @@ impl EfsDriver {
             if let Some(bit) = find_free_bit(&bitmap, bits_to_check) {
                 set_bit(&mut bitmap, bit);
                 self.write_block(bitmap_block, &bitmap)?;
+                self.recycle(bitmap);
 
                 self.bgd_table[g].free_inodes_count -= 1;
                 self.superblock.free_inodes -= 1;
@@ -683,6 +733,7 @@ impl EfsDriver {
                 let ino = g as u64 * inodes_per_group as u64 + bit as u64 + 1;
                 return Ok(ino);
             }
+            self.recycle(bitmap);
         }
         Err(Error::IoError)
     }
@@ -702,6 +753,7 @@ impl EfsDriver {
         let mut bitmap = self.read_block(bitmap_block)?;
         clear_bit(&mut bitmap, bit);
         self.write_block(bitmap_block, &bitmap)?;
+        self.recycle(bitmap);
 
         self.bgd_table[group].free_inodes_count += 1;
         self.superblock.free_inodes += 1;
@@ -924,11 +976,12 @@ impl EfsDriver {
 
         // Extent mode: write block by block.
         let mut written = 0usize;
+        let mut buf = vec![0u8; block_size];
         while written < dir_data.len() {
             let logical_block = (written / block_size) as u32;
             let phys_block = self.ensure_block_for_logical(dir_ino, logical_block)?;
             let end = (written + block_size).min(dir_data.len());
-            let mut buf = vec![0u8; block_size];
+            buf.fill(0);
             buf[..end - written].copy_from_slice(&dir_data[written..end]);
             self.write_block(phys_block, &buf)?;
             written += block_size;
@@ -999,19 +1052,35 @@ fn find_prev_entry_len(data: &[u8], end_offset: usize, block_size: usize) -> usi
 }
 
 fn find_free_bit(bitmap: &[u8], max_bits: usize) -> Option<usize> {
-    for (byte_idx, &byte) in bitmap.iter().enumerate() {
+    // Scan 8 bytes (64 bits) at a time for speed.
+    let chunks = bitmap.chunks_exact(8);
+    let remainder = chunks.remainder();
+    for (chunk_idx, chunk) in chunks.enumerate() {
+        let val = u64::from_le_bytes(chunk.try_into().unwrap());
+        if val == u64::MAX {
+            continue;
+        }
+        let bit = val.trailing_ones() as usize;
+        let abs_bit = chunk_idx * 64 + bit;
+        return if abs_bit < max_bits {
+            Some(abs_bit)
+        } else {
+            None
+        };
+    }
+    // Handle remaining bytes.
+    let base = bitmap.len() - remainder.len();
+    for (byte_idx, &byte) in remainder.iter().enumerate() {
         if byte == 0xFF {
             continue;
         }
-        for bit in 0..8 {
-            let abs_bit = byte_idx * 8 + bit;
-            if abs_bit >= max_bits {
-                return None;
-            }
-            if byte & (1 << bit) == 0 {
-                return Some(abs_bit);
-            }
-        }
+        let bit = byte.trailing_ones() as usize;
+        let abs_bit = (base + byte_idx) * 8 + bit;
+        return if abs_bit < max_bits {
+            Some(abs_bit)
+        } else {
+            None
+        };
     }
     None
 }
@@ -1335,7 +1404,7 @@ impl FileSystem for EfsDriver {
             if hdr.magic == EXTENT_MAGIC && hdr.depth == 0 {
                 let extents =
                     self.parse_inline_extents(&file_inode.data_area, hdr.entries as usize)?;
-                for ext in extents {
+                for ext in extents.as_slice() {
                     for i in 0..ext.length as u64 {
                         self.free_block(ext.physical_start() + i)?;
                     }
@@ -1376,7 +1445,7 @@ impl FileSystem for EfsDriver {
         };
         if hdr.magic == EXTENT_MAGIC && hdr.depth == 0 {
             let extents = self.parse_inline_extents(&dir_inode.data_area, hdr.entries as usize)?;
-            for ext in extents {
+            for ext in extents.as_slice() {
                 for i in 0..ext.length as u64 {
                     self.free_block(ext.physical_start() + i)?;
                 }
@@ -1479,18 +1548,24 @@ impl FileSystem for EfsDriver {
             };
             if hdr.magic == EXTENT_MAGIC && hdr.depth == 0 {
                 let extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
-                let mut new_extents = Vec::new();
+                let mut new_extents = ExtentList {
+                    extents: [EfsExtent {
+                        logical_block: 0,
+                        length: 0,
+                        start_hi: 0,
+                        start_lo: 0,
+                    }; MAX_INLINE_EXTENTS],
+                    len: 0,
+                };
 
-                for ext in &extents {
+                for ext in extents.as_slice() {
                     let ext_start = ext.logical_block as u64;
                     let ext_end = ext_start + ext.length as u64;
                     if ext_start >= new_blocks {
-                        // Free all blocks in this extent.
                         for i in 0..ext.length as u64 {
                             self.free_block(ext.physical_start() + i)?;
                         }
                     } else if ext_end > new_blocks {
-                        // Partially free.
                         let keep = (new_blocks - ext_start) as u16;
                         let free_start = ext.physical_start() + keep as u64;
                         for i in 0..(ext.length - keep) as u64 {
@@ -1510,7 +1585,7 @@ impl FileSystem for EfsDriver {
                 let ext_size = core::mem::size_of::<EfsExtent>();
                 let new_hdr = EfsExtentHeader {
                     magic: EXTENT_MAGIC,
-                    entries: new_extents.len() as u16,
+                    entries: new_extents.len as u16,
                     max_entries: efs_common::MAX_INLINE_EXTENTS as u16,
                     depth: 0,
                     reserved: 0,
@@ -1522,14 +1597,14 @@ impl FileSystem for EfsDriver {
                     )
                 };
                 updated.data_area[..hdr_size].copy_from_slice(hdr_bytes);
-                for (i, ext) in new_extents.iter().enumerate() {
+                for (i, ext) in new_extents.as_slice().iter().enumerate() {
                     let off = hdr_size + i * ext_size;
                     let eb: &[u8] = unsafe {
                         core::slice::from_raw_parts(ext as *const EfsExtent as *const u8, ext_size)
                     };
                     updated.data_area[off..off + ext_size].copy_from_slice(eb);
                 }
-                updated.blocks = new_extents.iter().map(|e| e.length as u64).sum();
+                updated.blocks = new_extents.as_slice().iter().map(|e| e.length as u64).sum();
                 updated.size = size;
                 updated.mtime_sec = current_unix_time();
                 updated.checksum = checksum_inode(&updated);
