@@ -2,7 +2,6 @@ use alloc::vec::Vec;
 use bytemuck::{Zeroable, cast_ref};
 
 use crate::{
-    drivers::ahci::structures::DeviceIdentifyInfo,
     fs::{
         Error, File, FileSystem, FileTime,
         block_device::BlockDevice,
@@ -30,7 +29,7 @@ pub struct Fatfs {
 
 impl Fatfs {
     pub fn new(partition: Partition) -> Result<Self, Error> {
-        let mut device = BlockDevice::new(partition.device_id, 128);
+        let mut device = BlockDevice::new(partition.device_id, 4096);
         let boot_bytes = device.read_sectors(partition.starting_lba, 1, Vec::new())?;
 
         if boot_bytes.len() != 512 {
@@ -372,7 +371,7 @@ impl FileSystem for Fatfs {
             return Err(Error::IoError);
         }
         read_buffer[entry_off] = 0xE5;
-        read_buffer = self.device.write_sectors(base_lba, read_buffer, sectors)?;
+        let _read_buffer = self.device.write_sectors(base_lba, read_buffer, sectors)?;
 
         self.delete_long_name_sequence(
             parent_cluster,
@@ -403,7 +402,7 @@ impl FileSystem for Fatfs {
     }
 
     fn truncate(&mut self, path: &Path, size: u64) -> Result<(), Error> {
-        let (mut entry, ec, eo) = match self.find_dir_entry(path)? {
+        let (entry, ec, eo) = match self.find_dir_entry(path)? {
             Some((e, c, o)) if !e.is_directory() => (e, c, o),
             Some(_) => return Err(Error::NotAFile),
             None => return Err(Error::FileNotFound),
