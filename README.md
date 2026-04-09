@@ -1,45 +1,114 @@
-# edos
+# EDOS
 
+An x86_64 operating system written in Rust, featuring a graphical window manager, preemptive multitasking, TCP/IP networking, and a custom Rust standard library port.
 
-## Prebuilt Releases
+## Features
 
-You can run edos without building the project by downloading the assets that are produced for each tagged release (e.g. `v0.1.0-alpha.0`). Grab the following files from the release page and place them in the same directory:
+- **SMP kernel** with preemptive scheduler, work-stealing, per-CPU run queues
+- **Graphical window manager** with compositor, decorations, drag/resize, 60 FPS render loop
+- **Terminal emulator** with PTY support and ANSI escape codes
+- **Shell** with pipes, redirects, scripting (if/while/for/functions), job control
+- **FAT32 filesystem** on SATA/AHCI, plus memfs, procfs, devfs
+- **TCP/IP networking** with e1000e NIC driver, DHCP, DNS, HTTP
+- **Rust `std::net`** support (TcpStream, TcpListener, UdpSocket with DNS resolution)
+- **USB** via xHCI (keyboard, mouse, mass storage)
+- **Signals**, shared memory, futexes, pipes
 
-1. `edos-x86_64.iso` - bootable hybrid ISO
-2. `filesystem.tar.gz` - root filesystem contents
-3. `create-filesystem-image.sh` - helper script to build the writable disk image
+### Network Stack
 
-### Recreate the filesystem disk image
+Full TCP/IP stack in the kernel:
+- **e1000e NIC driver** with MSI-X interrupts (works on real Intel I219/I218 NICs)
+- **Ethernet, ARP, IPv4, ICMP** (ping works)
+- **UDP** with socket syscalls
+- **TCP** with full RFC 793 state machine, MSS negotiation, retransmit timer, dynamic receive window
+- **DHCP** client (auto-configures IP, mask, gateway, DNS)
+- **DNS** resolution (via `std::net` or standalone `dns` program)
+- **IP fragment reassembly** with interval merging and 30s timeout
+- **Loopback** (127.0.0.1) support
 
-The operating system expects a writable SATA disk that mirrors the layout produced during development. Run the helper script to rebuild it locally (requires `qemu-img`, `sgdisk`, and the `mtools` utilities):
+### User Programs
+
+- `edos-wm` -- Window manager/compositor
+- `edos-terminal` -- Terminal emulator
+- `edos-taskbar` -- System taskbar
+- `edos-sh` -- Shell with builtins (cd, ls, cat, echo, pwd, clear, ifconfig, etc.)
+- `http` -- curl-like HTTP client with DNS, URL parsing, `-i`/`-v` flags
+- `dns` -- DNS A-record lookup
+- `ping` -- ICMP ping with RTT stats
+- `wintest` -- Window system test app
+
+## Building
+
+### Dependencies
+
+- GNU make
+- Rust (custom toolchain, see below)
+- `xorriso` (ISO creation)
+- `sgdisk`, `mtools` (disk image creation)
+- QEMU with x86_64 support (for running)
+
+### Build and Run
 
 ```bash
-chmod +x create-filesystem-image.sh
-./create-filesystem-image.sh --output sata-disk.img
+# Build kernel, programs, and bootable ISO
+make all
+
+# Run in QEMU with KVM (4 cores, e1000e networking)
+make run
+
+# Run with network packet capture to /tmp/edos.pcap
+make run-capture
+
+# Run with single CPU
+make run-single
+
+# Run with GDB server
+make run-gdb
+
+# Build only kernel or programs
+make kernel
+make programs
+
+# Type check without building
+make check
+
+# Format code
+make fmt
 ```
 
-By default the script looks for `filesystem.tar.gz` next to the script and generates a 1 GiB image called `sata-disk.img`. Use `./create-filesystem-image.sh --help` for additional options if you want a different size or filesystem source.
+### Custom Rust Toolchain
 
-### Booting with QEMU
+EDOS uses a custom Rust toolchain with standard library support for the `x86_64-unknown-edos` target.
 
-Once the ISO and data disk are present, you can boot edos under QEMU (BIOS mode):
+- **Toolchain**: [github.com/edg-l/rust](https://github.com/edg-l/rust/tree/edos_std_v2) (branch `edos_std_v2`)
+- **Runtime library**: [github.com/edg-l/edos_rt](https://github.com/edg-l/edos_rt) (published on crates.io)
+- **Target triple**: `x86_64-unknown-edos`
+
+Programs are built with `cargo +edos build --target x86_64-unknown-edos`.
+
+#### Toolchain Setup
 
 ```bash
-qemu-system-x86_64 \
-  -M q35 \
-  -cpu qemu64,+x2apic \
-  -m 2G \
-  -smp 4 \
-  -cdrom edos-x86_64.iso \
-  -drive id=sata0,if=none,format=raw,file=sata-disk.img \
-  -device ide-hd,drive=sata0,bus=ide.1 \
-  -serial stdio \
-  -no-reboot
+# Clone the Rust fork
+git clone -b edos_std_v2 https://github.com/edg-l/rust.git
+
+# Build and install the toolchain
+cd rust
+./x install
 ```
 
-For a UEFI boot flow, add OVMF firmware (e.g. `-drive if=pflash,unit=0,format=raw,file=OVMF_CODE.fd,readonly=on`).
+The toolchain installs to the path configured in `bootstrap.toml`. Programs in `programs/` reference it via `rust-toolchain.toml`.
 
-### Running on real hardware
+#### Updating edos_rt
+
+1. Make changes in the edos_rt repo
+2. Bump version in `Cargo.toml`
+3. `cargo publish` (or `cargo publish --allow-dirty`)
+4. Update the version in the Rust fork's `library/std/Cargo.toml`
+5. Rebuild toolchain: `cd rust && ./x install`
+6. Rebuild programs: `cd edos-v2 && make all`
+
+## Running on Real Hardware
 
 The ISO is hybrid and can be written directly to a USB stick:
 
@@ -47,104 +116,61 @@ The ISO is hybrid and can be written directly to a USB stick:
 sudo dd if=edos-x86_64.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-Replace `/dev/sdX` with the correct device node (all existing data on the stick will be destroyed).
+The e1000e driver works on real Intel I219/I218/I217 NICs. DHCP will auto-configure networking if a DHCP server is available.
 
-If you also want the writable filesystem, generate it with the helper script and flash the resulting `sata-disk.img` to a spare drive or secondary USB device.
+For the writable filesystem, flash `sata-disk.img` to a spare drive.
 
-## How to use this?
+## Prebuilt Releases
 
-### Dependencies
-
-Any `make` command depends on GNU make (`gmake`) and is expected to be run using it. This usually means using `make` on most GNU/Linux distros, or `gmake` on other non-GNU systems.
-
-All `make all*` targets depend on Rust.
-
-Additionally, building an ISO with `make all` requires `xorriso`, and building a HDD/USB image with `make all-hdd` requires `sgdisk` (usually from `gdisk` or `gptfdisk` packages) and `mtools`.
-
-### Architectural targets
-
-The `KARCH` make variable determines the target architecture to build the kernel and image for.
-
-The default `KARCH` is `x86_64`. Other options include: `aarch64`, `riscv64`, and `loongarch64`.
-
-Other architectures will need to be enabled in kernel/rust-toolchain.toml
-
-### Makefile targets
-
-Running `make all` will compile the kernel (from the `kernel/` directory) and then generate a bootable ISO image.
-
-Running `make all-hdd` will compile the kernel and then generate a raw image suitable to be flashed onto a USB stick or hard drive/SSD.
-
-Running `make run` will build the kernel and a bootable ISO (equivalent to make all) and then run it using `qemu` (if installed).
-
-Running `make run-hdd` will build the kernel and a raw HDD image (equivalent to make all-hdd) and then run it using `qemu` (if installed).
-
-The `run-uefi` and `run-hdd-uefi` targets are equivalent to their non `-uefi` counterparts except that they boot `qemu` using a UEFI-compatible firmware.
-
-
-## Creating and using the Rust std
-
-Source: https://github.com/edg-l/rust/tree/edos_std
-
-```
-./x install
-./x install src
-```
-
-vscodejson ` "rust-analyzer.cargo.target": "/data2/edgar/rust/x86_64-unknown-edos.json"`
-
-
-```
-# bootstrap.toml
-profile = "compiler"  # Includes one of the default files in src/bootstrap/defaults
-change-id = 99999
-
-[build]
-host = ["x86_64-unknown-linux-gnu"]
-target = ["x86_64-unknown-edos"]
-tools = ["cargo", "clippy", "rustfmt"]
-docs = false
-extended = true
-
-[llvm]
-download-ci-llvm = true
-
-[install]
-prefix = "/data2/edgar/edos-programs/toolchain/edos"
-sysconfdir = "/data2/edgar/edos-programs/toolchain/etc"
-
-```
-
-
-```
-# rust-toolchain.toml
-[toolchain]
-path = "/data2/edgar/edos-programs/toolchain/edos"
-```
-
-
-Runtime: https://github.com/edg-l/edos_rt
-
-## Updating edos_rt
-
-When making changes to `edos_rt` (the Rust runtime library for EDOS), you need to rebuild and reinstall it for programs to pick up the changes:
+Download from the releases page:
+1. `edos-x86_64.iso` -- bootable hybrid ISO
+2. `filesystem.tar.gz` -- root filesystem contents
+3. `create-filesystem-image.sh` -- helper to build the writable disk image
 
 ```bash
-cd /data2/edgar/edos_rt
-cargo +edos build --release --target x86_64-unknown-edos
-cp target/x86_64-unknown-edos/release/libedos_rt.rlib /data2/edgar/edos-programs/toolchain/edos/lib/rustlib/x86_64-unknown-edos/lib/
+# Recreate the filesystem disk image
+chmod +x create-filesystem-image.sh
+./create-filesystem-image.sh --output sata-disk.img
 ```
 
-After updating edos_rt, rebuild any programs that depend on it (e.g., in `programsv2/`):
+## Debugging
 
 ```bash
-cd programsv2
-make build
+# Start QEMU paused with GDB server
+make run-gdb
+
+# In another terminal
+make gdb   # Uses pwndbg
+
+# Resolve kernel panic addresses
+addr2line -e kernel/target/x86_64-unknown-none/debug/edos-kernel -f 0xffffffff8009c422
+
+# Capture network traffic for Wireshark analysis
+make run-capture
+# Then: wireshark /tmp/edos.pcap
 ```
 
-Then rebuild the kernel to embed the updated binaries:
+## Architecture
 
-```bash
-cd kernel
-cargo build
+```
+kernel/src/
+  memory/     -- Physical frame allocator, page tables, virtual allocator, shared memory
+  thread/     -- Scheduler, context switching, mutexes, pipes, PTYs, polling
+  syscalls/   -- SYSCALL/SYSRET interface (file I/O, memory, windows, networking, sync)
+  fs/         -- VFS with FAT32, memfs, procfs, devfs
+  drivers/    -- AHCI/SATA, e1000e NIC, keyboard, mouse, HPET, xHCI USB
+  net/        -- TCP/IP stack (ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, sockets)
+  graphics/   -- Framebuffer rendering, draw request queue
+  window/     -- Window registry, input routing, focus management
+
+programs/
+  edos_render -- Shared rendering library (textures, widgets, window syscall wrappers)
+  edos_lib    -- Userspace utility library (net helpers, SHM, process, I/O)
+  edos-wm     -- Window manager/compositor
+  edos-terminal -- Terminal emulator with PTY
+  edos-taskbar  -- System taskbar
+  edos-sh     -- Command-line shell
+  http        -- HTTP client (uses std::net)
+  dns         -- DNS lookup tool
+  ping        -- ICMP ping tool
 ```
