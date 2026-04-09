@@ -97,8 +97,8 @@ impl NetStack {
             return;
         };
 
-        // Only process packets addressed to us.
-        if ip_hdr.dst_addr != self.local_ip {
+        // Only process packets addressed to us or loopback.
+        if ip_hdr.dst_addr != self.local_ip && ip_hdr.dst_addr[0] != 127 {
             return;
         }
 
@@ -326,6 +326,19 @@ impl NetStack {
         protocol: ipv4::IpProtocol,
         payload: &[u8],
     ) -> Result<(), &'static str> {
+        // Loopback: feed packet back into the stack without hitting the NIC.
+        if dst_ip[0] == 127 || dst_ip == self.local_ip {
+            let src_ip = if dst_ip[0] == 127 {
+                dst_ip
+            } else {
+                self.local_ip
+            };
+            let ip_pkt = ipv4::build(src_ip, dst_ip, protocol, 64, payload);
+            let frame = ethernet::build_frame([0; 6], [0; 6], ethernet::EtherType::Ipv4, &ip_pkt);
+            self.handle_rx(&frame);
+            return Ok(());
+        }
+
         let resolve_ip = if self.is_local_subnet(&dst_ip) {
             dst_ip
         } else {
