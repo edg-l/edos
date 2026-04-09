@@ -1,5 +1,6 @@
 // EFS kernel driver.
 
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -28,11 +29,18 @@ const INODE_SIZE: usize = core::mem::size_of::<EfsInode>();
 
 // ---- Driver struct ------------------------------------------------------------
 
+/// Maximum number of cached inodes.
+const INODE_CACHE_MAX: usize = 64;
+
 pub struct EfsDriver {
     device: BlockDevice,
     partition: Partition,
     superblock: EfsSuperblock,
     bgd_table: Vec<EfsBlockGroupDesc>,
+    /// Inode cache: maps inode number -> cached inode.
+    inode_cache: BTreeMap<u64, EfsInode>,
+    /// Reusable scratch buffer for block reads.
+    scratch: Vec<u8>,
 }
 
 // ---- Constructor --------------------------------------------------------------
@@ -75,11 +83,14 @@ impl EfsDriver {
             bgd_table.push(bgd);
         }
 
+        let bs = 1usize << superblock.block_size_log2;
         Ok(Self {
             device,
             partition,
             superblock,
             bgd_table,
+            inode_cache: BTreeMap::new(),
+            scratch: vec![0u8; bs],
         })
     }
 }
@@ -102,7 +113,15 @@ impl EfsDriver {
     fn read_block(&mut self, block: u64) -> Result<Vec<u8>, Error> {
         let lba = self.block_to_lba(block);
         let spb = self.sectors_per_block();
-        Ok(self.device.read_sectors(lba, spb, vec![])?)
+        // Reuse scratch buffer to avoid allocating a new Vec per read.
+        let buf = core::mem::take(&mut self.scratch);
+        let result = self.device.read_sectors(lba, spb, buf)?;
+        Ok(result)
+    }
+
+    /// Return the scratch buffer for reuse after a read_block() call.
+    fn recycle(&mut self, buf: Vec<u8>) {
+        self.scratch = buf;
     }
 
     fn write_block(&mut self, block: u64, data: &[u8]) -> Result<(), Error> {
@@ -123,6 +142,10 @@ impl EfsDriver {
     }
 
     fn read_inode(&mut self, ino: u64) -> Result<EfsInode, Error> {
+        if let Some(cached) = self.inode_cache.get(&ino) {
+            return Ok(*cached);
+        }
+
         let (group, idx) = self.inode_location(ino);
         if group >= self.bgd_table.len() {
             return Err(Error::Corrupted);
@@ -137,6 +160,15 @@ impl EfsDriver {
         let inode: EfsInode = unsafe {
             core::ptr::read_unaligned(block_data[offset_in_block..].as_ptr() as *const EfsInode)
         };
+        self.recycle(block_data);
+
+        // Evict oldest entry if cache is full.
+        if self.inode_cache.len() >= INODE_CACHE_MAX {
+            if let Some(&first_key) = self.inode_cache.keys().next() {
+                self.inode_cache.remove(&first_key);
+            }
+        }
+        self.inode_cache.insert(ino, inode);
         Ok(inode)
     }
 
@@ -157,7 +189,11 @@ impl EfsDriver {
             core::slice::from_raw_parts(inode as *const EfsInode as *const u8, INODE_SIZE)
         };
         dst.copy_from_slice(src);
-        self.write_block(inode_table_block + block_offset as u64, &block_data)
+        self.write_block(inode_table_block + block_offset as u64, &block_data)?;
+        self.recycle(block_data);
+        // Update cache with the new inode data.
+        self.inode_cache.insert(ino, *inode);
+        Ok(())
     }
 }
 
@@ -236,6 +272,7 @@ impl EfsDriver {
             let copy_len = remaining.min(bytes_available);
             result[result_pos..result_pos + copy_len]
                 .copy_from_slice(&block_data[offset_in_block..offset_in_block + copy_len]);
+            self.recycle(block_data);
 
             result_pos += copy_len;
             remaining -= copy_len;
@@ -307,6 +344,37 @@ impl EfsDriver {
         Ok(entries)
     }
 
+    /// Look up a single entry by name in a directory, without allocating Strings.
+    /// Returns (inode, file_type) on match.
+    fn lookup_in_dir(&mut self, dir_ino: u64, name: &str) -> Result<Option<(u64, u8)>, Error> {
+        let inode = self.read_inode(dir_ino)?;
+        if inode.mode & S_IFMT != S_IFDIR {
+            return Err(Error::NotADir);
+        }
+        let dir_data = self.read_file_data(&inode, 0, inode.size as usize)?;
+        let name_bytes = name.as_bytes();
+        let mut offset = 0usize;
+
+        while offset + DIR_ENTRY_HEADER_SIZE <= dir_data.len() {
+            let hdr: EfsDirEntryHeader = unsafe {
+                core::ptr::read_unaligned(dir_data[offset..].as_ptr() as *const EfsDirEntryHeader)
+            };
+            let rec_len = hdr.rec_len as usize;
+            if rec_len < DIR_ENTRY_HEADER_SIZE || offset + rec_len > dir_data.len() {
+                break;
+            }
+            if hdr.inode != 0 && hdr.name_len as usize == name_bytes.len() {
+                let ns = offset + DIR_ENTRY_HEADER_SIZE;
+                let ne = ns + hdr.name_len as usize;
+                if ne <= dir_data.len() && &dir_data[ns..ne] == name_bytes {
+                    return Ok(Some((hdr.inode, hdr.file_type)));
+                }
+            }
+            offset += rec_len;
+        }
+        Ok(None)
+    }
+
     /// Resolve a path to its inode number.
     fn resolve_path(&mut self, path: &Path) -> Result<u64, Error> {
         if path.is_root() {
@@ -315,12 +383,8 @@ impl EfsDriver {
 
         let mut current_ino = EFS_ROOT_INO;
         for component in path.components() {
-            let entries = self.read_dir_entries(current_ino)?;
-            let found = entries
-                .into_iter()
-                .find(|(name, _, _)| name == component.as_str());
-            match found {
-                Some((_, ino, _)) => current_ino = ino,
+            match self.lookup_in_dir(current_ino, component.as_str())? {
+                Some((ino, _)) => current_ino = ino,
                 None => return Err(Error::FileNotFound),
             }
         }
