@@ -11,8 +11,11 @@ fn main() {
 
     let hostname = &args[1];
 
-    // Build DNS query
-    let query = build_dns_query(hostname, 0x1234);
+    // Build DNS query with random transaction ID
+    let mut id_bytes = [0u8; 2];
+    edos_lib::getrandom(&mut id_bytes);
+    let id = u16::from_ne_bytes(id_bytes);
+    let query = build_dns_query(hostname, id);
 
     // Send to QEMU's DNS server at 10.0.2.3:53
     let dns_server = [10, 0, 2, 3];

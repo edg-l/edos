@@ -6,8 +6,8 @@ use edos_lib::net;
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: http <ip> [port] [path]");
-        eprintln!("Example: http 10.0.2.2 8888 /");
+        eprintln!("Usage: http <host> [port] [path]");
+        eprintln!("Example: http edgl.dev 80 /");
         return;
     }
 
@@ -46,10 +46,8 @@ fn main() {
     }
 
     // Send HTTP/1.0 request
-    let request = format!(
-        "GET {} HTTP/1.0\r\nHost: {}.{}.{}.{}\r\n\r\n",
-        path, ip[0], ip[1], ip[2], ip[3]
-    );
+    let host = &args[1];
+    let request = format!("GET {} HTTP/1.0\r\nHost: {}\r\n\r\n", path, host);
     if net::send(fd, request.as_bytes()).is_err() {
         eprintln!("Send failed");
         net::close(fd);
@@ -78,13 +76,21 @@ fn resolve_host(s: &str) -> Option<[u8; 4]> {
     if s == "localhost" {
         return Some([127, 0, 0, 1]);
     }
+    // Try dotted-quad IP first
     let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 4 {
-        return None;
+    if parts.len() == 4 {
+        let mut ip = [0u8; 4];
+        let mut ok = true;
+        for (i, part) in parts.iter().enumerate() {
+            match part.parse() {
+                Ok(v) => ip[i] = v,
+                Err(_) => { ok = false; break; }
+            }
+        }
+        if ok {
+            return Some(ip);
+        }
     }
-    let mut ip = [0u8; 4];
-    for (i, part) in parts.iter().enumerate() {
-        ip[i] = part.parse().ok()?;
-    }
-    Some(ip)
+    // Fall back to DNS
+    net::dns_resolve(s)
 }

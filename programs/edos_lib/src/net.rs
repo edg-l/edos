@@ -128,6 +128,85 @@ pub fn close(fd: u64) {
     unsafe { sys::syscall1(sys::SYS_CLOSE, fd) };
 }
 
+/// Resolve a hostname to an IPv4 address via DNS (using 10.0.2.3:53).
+/// Returns None if resolution fails.
+pub fn dns_resolve(hostname: &str) -> Option<[u8; 4]> {
+    let fd = create_udp_socket().ok()?;
+    let dns_server = SockAddrIn::new([10, 0, 2, 3], 53);
+
+    // Random transaction ID
+    let mut id_bytes = [0u8; 2];
+    crate::getrandom(&mut id_bytes);
+    let id = u16::from_ne_bytes(id_bytes);
+
+    // Build DNS query
+    let mut pkt = Vec::new();
+    pkt.extend_from_slice(&id.to_be_bytes());
+    pkt.extend_from_slice(&[0x01, 0x00]); // flags: recursion desired
+    pkt.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT=1
+    pkt.extend_from_slice(&[0; 6]); // ANCOUNT, NSCOUNT, ARCOUNT = 0
+    for label in hostname.split('.') {
+        let len = label.len().min(63);
+        pkt.push(len as u8);
+        pkt.extend_from_slice(&label.as_bytes()[..len]);
+    }
+    pkt.push(0); // root label
+    pkt.extend_from_slice(&1u16.to_be_bytes()); // QTYPE=A
+    pkt.extend_from_slice(&1u16.to_be_bytes()); // QCLASS=IN
+
+    if sendto(fd, &pkt, Some(&dns_server)).is_err() {
+        close(fd);
+        return None;
+    }
+
+    let mut resp = [0u8; 512];
+    let len = match recvfrom(fd, &mut resp) {
+        Ok(n) if n >= 12 => n,
+        _ => {
+            close(fd);
+            return None;
+        }
+    };
+    close(fd);
+
+    // Parse: skip header (12) + question section, find first A record
+    let data = &resp[..len];
+    let ancount = u16::from_be_bytes([data[6], data[7]]);
+    if ancount == 0 {
+        return None;
+    }
+    let mut pos = 12;
+    // Skip QNAME
+    while pos < data.len() {
+        let b = data[pos] as usize;
+        if b == 0 { pos += 1; break; }
+        if b >= 0xC0 { pos += 2; break; }
+        pos += 1 + b;
+    }
+    pos += 4; // QTYPE + QCLASS
+    // Parse answers
+    for _ in 0..ancount {
+        if pos + 12 > data.len() { break; }
+        if data[pos] & 0xC0 == 0xC0 { pos += 2; }
+        else {
+            while pos < data.len() {
+                let b = data[pos] as usize;
+                if b == 0 { pos += 1; break; }
+                pos += 1 + b;
+            }
+        }
+        if pos + 10 > data.len() { break; }
+        let rtype = u16::from_be_bytes([data[pos], data[pos + 1]]);
+        let rdlen = u16::from_be_bytes([data[pos + 8], data[pos + 9]]) as usize;
+        pos += 10;
+        if rtype == 1 && rdlen == 4 && pos + 4 <= data.len() {
+            return Some([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        }
+        pos += rdlen;
+    }
+    None
+}
+
 pub fn ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> Option<u64> {
     let rtt = unsafe {
         sys::syscall4(

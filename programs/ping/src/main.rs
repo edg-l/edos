@@ -75,12 +75,18 @@ fn resolve_host(s: &str) -> Option<[u8; 4]> {
         return Some([127, 0, 0, 1]);
     }
     let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 4 {
-        return None;
+    if parts.len() == 4 {
+        let mut ip = [0u8; 4];
+        let mut ok = true;
+        for (i, part) in parts.iter().enumerate() {
+            match part.parse() {
+                Ok(v) => ip[i] = v,
+                Err(_) => { ok = false; break; }
+            }
+        }
+        if ok {
+            return Some(ip);
+        }
     }
-    let mut ip = [0u8; 4];
-    for (i, part) in parts.iter().enumerate() {
-        ip[i] = part.parse().ok()?;
-    }
-    Some(ip)
+    edos_lib::net::dns_resolve(s)
 }

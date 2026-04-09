@@ -19,6 +19,13 @@ name = "dmesg"
 version = "0.1.0"
 
 [[package]]
+name = "dns"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "echo"
 version = "0.1.0"
 
@@ -89,6 +96,13 @@ name = "hexdump"
 version = "0.1.0"
 
 [[package]]
+name = "http"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "ls"
 version = "0.1.0"
 dependencies = [
@@ -112,6 +126,13 @@ name = "noto-sans-mono-bitmap"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1064d564ae026ae123bf5d607318b42a5b31d70a3c48e6ea7ee44cce4cdb095e"
+
+[[package]]
+name = "ping"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "ps"
