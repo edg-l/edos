@@ -71,7 +71,6 @@ pub fn init() {
         .expect("failed to map scheduler stack");
     let stack_top = region.as_u64() + KTHREAD_STACK_SIZE;
     get_percpu_data().scheduler_stack_top.set(stack_top);
-    println!("Scheduler stack allocated at 0x{stack_top:x}");
 
     // Enable apic timer
     set_apic_timer_and_enable(Duration::from_millis(100));

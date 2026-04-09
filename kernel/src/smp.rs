@@ -6,7 +6,7 @@ use crate::{
     apic::{get_lapic, init::enable_lapic},
     boot::MP_REQUEST,
     drivers::fpu,
-    gdt, interrupts, println,
+    gdt, interrupts, log, println,
     syscalls::setup_syscall,
     thread::{self, scheduler::switch_to_kernel_page},
     timer::Instant,
@@ -27,7 +27,7 @@ pub fn init() {
                 continue;
             }
 
-            println!("Initing: {:#?} (bsp: {bsp_lapic})", cpu.id);
+            log!("smp: booting AP {} (BSP={})", cpu.id, bsp_lapic);
 
             // Optionally pass data via `extra` if needed later.
             // cpu.extra.store(0, core::sync::atomic::Ordering::Relaxed);

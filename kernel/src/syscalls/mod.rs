@@ -334,6 +334,7 @@ const SYS_SETSOCKOPT: u64 = 248;
 const SYS_GETSOCKOPT: u64 = 251;
 const SYS_GETPEERNAME: u64 = 252;
 const SYS_GETSOCKNAME: u64 = 253;
+const SYS_STATFS: u64 = 254;
 
 /// Arguments struct for SYS_SPAWN2. Passed as a single pointer from userspace.
 #[repr(C)]
@@ -457,8 +458,11 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             ctx.rax = sys_munmap(addr, length) as u64;
         }
         SYS_EXIT => {
-            log!("Exit called with code {:?}", ctx.rdi as i32);
-            sched().thread_exit(ctx.rdi as i32);
+            let code = ctx.rdi as i32;
+            if code != 0 {
+                log!("exit: process exited with code {}", code);
+            }
+            sched().thread_exit(code);
         }
         SYS_GETPID => {
             ctx.rax = sys_getpid();
@@ -502,6 +506,12 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let buffer = ctx.rdi as *mut u8;
             let size = ctx.rsi as usize;
             ctx.rax = sys_list_mounts(buffer, size) as u64;
+        }
+        SYS_STATFS => {
+            let path_ptr = ctx.rdi as *const u8;
+            let buf = ctx.rsi as *mut u8;
+            let buf_len = ctx.rdx as usize;
+            ctx.rax = fs::sys_statfs(path_ptr, buf, buf_len) as u64;
         }
         SYS_SLEEP_MS => {
             let milliseconds = ctx.rdi;
@@ -1235,10 +1245,7 @@ fn do_spawn(
         0,
         child_cwd,
     ) {
-        Ok(thread) => {
-            log!("UserThread created successfully");
-            thread
-        }
+        Ok(thread) => thread,
         Err(e) => {
             log!("UserThread creation failed: {:?}", e);
             info.lock().errno = Errno::EINVAL;

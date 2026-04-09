@@ -12,6 +12,7 @@ use crate::{
         },
         gpt::FilesystemType,
         path::Path,
+        vfs,
     },
     syscalls::io::resolve_path,
     thread::{pipe::FileDescriptor, scheduler::sched},
@@ -125,6 +126,7 @@ fn filesystem_type_to_u32(fs: FilesystemType) -> u32 {
         FilesystemType::Memfs => 6,
         FilesystemType::Devfs => 7,
         FilesystemType::Procfs => 8,
+        FilesystemType::Efs => 9,
     }
 }
 
@@ -178,6 +180,7 @@ pub fn sys_mount(
 
     let fs_type = match fs_type.as_str() {
         "fat32" => FilesystemType::Fat32,
+        "efs" => FilesystemType::Efs,
         "memfs" => FilesystemType::Memfs,
         "devfs" => FilesystemType::Devfs,
         "procfs" => FilesystemType::Procfs,
@@ -611,6 +614,84 @@ pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut FstatEntry
     };
 
     if !unsafe { try_write_user(fstat_buf, fstat_entry) } {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+
+    0
+}
+
+/// statfs(path, buf, buf_len) -> 0 on success, -1 on error
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawStatFs {
+    fs_type: [u8; 16],
+    block_size: u64,
+    total_blocks: u64,
+    free_blocks: u64,
+    total_inodes: u64,
+    free_inodes: u64,
+    volume_name: [u8; 64],
+    version: u32,
+    block_groups: u16,
+    _pad: [u8; 2],
+}
+
+pub fn sys_statfs(path_ptr: *const u8, buf: *mut u8, buf_len: usize) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let cwd = info.lock().cwd.lock().clone();
+    let path = match read_user_path(path_ptr, &cwd) {
+        Ok(p) => p,
+        Err(err) => {
+            info.lock().errno = err;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    let fs = match vfs::lookup(&path) {
+        Some((fs, _)) => fs,
+        None => {
+            info.lock().errno = Errno::ENOENT;
+            return -1;
+        }
+    };
+
+    let stat = match fs.lock().statfs() {
+        Ok(s) => s,
+        Err(_) => {
+            info.lock().errno = Errno::EIO;
+            return -1;
+        }
+    };
+
+    let needed = core::mem::size_of::<RawStatFs>();
+    if buf_len < needed {
+        return needed as i64;
+    }
+
+    let mut raw = RawStatFs {
+        fs_type: [0u8; 16],
+        block_size: stat.block_size,
+        total_blocks: stat.total_blocks,
+        free_blocks: stat.free_blocks,
+        total_inodes: stat.total_inodes,
+        free_inodes: stat.free_inodes,
+        volume_name: stat.volume_name,
+        version: stat.version,
+        block_groups: stat.block_groups,
+        _pad: [0; 2],
+    };
+
+    let type_bytes = stat.fs_type.as_bytes();
+    let copy_len = type_bytes.len().min(15);
+    raw.fs_type[..copy_len].copy_from_slice(&type_bytes[..copy_len]);
+
+    if !unsafe { try_copy_to_user(buf, &raw as *const RawStatFs as *const u8, needed) } {
         info.lock().errno = Errno::EFAULT;
         return -1;
     }

@@ -5,6 +5,7 @@ use thiserror::Error;
 use crate::{
     drivers::ahci::{AhciError, api::list_devices},
     fs::{
+        efs::EfsDriver,
         fat32::Fatfs,
         gpt::{FilesystemType, Partition, parse_gpt, print_partitions},
         handle::Pollable,
@@ -24,6 +25,7 @@ use crate::{
 pub mod api;
 pub mod block_device;
 pub mod devfs;
+pub mod efs;
 pub mod fat32;
 pub mod gpt;
 pub mod handle;
@@ -210,6 +212,35 @@ pub trait FileSystem {
     fn rename(&mut self, _old_path: &Path, _new_path: &Path) -> Result<(), Error> {
         Err(Error::IoError)
     }
+
+    fn statfs(&mut self) -> Result<StatFs, Error> {
+        Err(Error::Unsupported)
+    }
+}
+
+/// Filesystem statistics returned by the `statfs` trait method.
+#[derive(Debug, Clone)]
+pub struct StatFs {
+    /// Filesystem type name (e.g. "efs", "fat32").
+    pub fs_type: &'static str,
+    /// Block size in bytes.
+    pub block_size: u64,
+    /// Total blocks.
+    pub total_blocks: u64,
+    /// Free blocks.
+    pub free_blocks: u64,
+    /// Total inodes (0 if not applicable).
+    pub total_inodes: u64,
+    /// Free inodes (0 if not applicable).
+    pub free_inodes: u64,
+    /// Volume label.
+    pub volume_name: [u8; 64],
+    /// Volume name length in bytes.
+    pub volume_name_len: usize,
+    /// Filesystem format version.
+    pub version: u32,
+    /// Number of block groups (0 if not applicable).
+    pub block_groups: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -531,6 +562,39 @@ pub extern "C" fn fs_main_thread() -> ! {
                                 req.reply(FsResponse::Ok(Err(Error::IoError)));
                                 continue;
                             }
+                        }
+                    }
+                    FilesystemType::Efs => {
+                        let mut mounted = false;
+                        for partition in partitions.iter() {
+                            if partition.device_id as usize == device_id
+                                && partition.index == partition_index
+                                && partition.filesystem.is_some()
+                            {
+                                match EfsDriver::new(partition.clone()) {
+                                    Ok(efs_fs) => {
+                                        let fs: Box<dyn FileSystem + Send> = Box::new(efs_fs);
+                                        vfs::mount(
+                                            mount_point.clone(),
+                                            vfs::MountEntry {
+                                                fs: Arc::new(BlockingMutex::new(fs)),
+                                                device_id,
+                                                partition_index,
+                                                filesystem: fstype.clone(),
+                                            },
+                                        );
+                                        mounted = true;
+                                    }
+                                    Err(e) => {
+                                        log!("Failed to mount EFS: {:?}", e);
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        if !mounted {
+                            req.reply(FsResponse::Ok(Err(Error::IoError)));
+                            continue;
                         }
                     }
                     FilesystemType::Unknown | FilesystemType::Iso9660 | FilesystemType::Ntfs => {

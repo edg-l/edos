@@ -8,12 +8,9 @@ use x86_64::{
     structures::paging::PageTableFlags,
 };
 
-use crate::{
-    log,
-    memory::{
-        mapper::memory_mapper,
-        valloc::{vfree, vmalloc},
-    },
+use crate::memory::{
+    mapper::memory_mapper,
+    valloc::{vfree, vmalloc},
 };
 
 static DMA_ALLOCATOR: DmaAllocator = DmaAllocator::new();
@@ -67,11 +64,6 @@ impl DmaBuffer {
         let aligned_size = (size as u64 + 0xfff) & !0xfff; // Round up to page boundary
 
         let virt_addr = vmalloc(aligned_size);
-
-        log!(
-            "Allocating dma buffer at: {virt_addr:?} {:?}",
-            virt_addr + aligned_size
-        );
 
         {
             without_interrupts(|| {
@@ -179,13 +171,11 @@ impl DmaAllocator {
             if let Some(buf) = self.buckets[bucket].pop() {
                 Ok(buf)
             } else {
-                log!("Allocating new {}KB dma buffer", alloc_size / 1024);
                 DmaBuffer::allocate_sized(alloc_size)
             }
         } else {
             // > 2MB: direct allocation, no pooling
             let alloc_size = align_up(size as u64, 4096) as usize;
-            log!("Allocating oversized {}KB dma buffer", alloc_size / 1024);
             DmaBuffer::allocate_sized(alloc_size)
         }
     }

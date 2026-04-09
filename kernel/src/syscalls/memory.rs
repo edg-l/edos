@@ -1,4 +1,4 @@
-use alloc::{collections::btree_map::BTreeMap, sync::Arc};
+use alloc::{collections::btree_map::BTreeMap, format, string::String, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use x86_64::{
@@ -27,7 +27,30 @@ const MAP_PHYSICAL: u32 = 0x40;
 const MAP_WRITE_COMBINING: u32 = 0x80;
 
 pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -> u64 {
-    log!("MMap: {addr} {length} {prot} {flags} {phys_addr}");
+    let prot_str = match (
+        prot & PROT_READ != 0,
+        prot & PROT_WRITE != 0,
+        prot & PROT_EXEC != 0,
+    ) {
+        (true, true, true) => "rwx",
+        (true, true, false) => "rw-",
+        (true, false, true) => "r-x",
+        (true, false, false) => "r--",
+        (false, true, false) => "-w-",
+        (false, false, true) => "--x",
+        _ => "---",
+    };
+    let kind = if flags & MAP_PHYSICAL != 0 {
+        format!("physical @ {phys_addr:#x}")
+    } else if flags & MAP_ANONYMOUS != 0 {
+        "anonymous".into()
+    } else {
+        "file-backed".into()
+    };
+    log!(
+        "mmap: addr={addr:#x} len={length:#x} ({} KiB) prot={prot_str} {kind}",
+        length / 1024
+    );
     let sched = sched();
     let info = sched.current_thread_info();
 
@@ -105,7 +128,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
             },
         );
 
-        log!("Returning physical {map_addr:p}");
+        log!("mmap: mapped physical at {map_addr:p}");
         map_addr.as_u64()
     } else {
         // Only support anonymous private mappings otherwise
@@ -147,7 +170,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
                 },
             );
 
-            log!("Returning {map_addr:p} {page_flags:?}");
+            log!("mmap: mapped at {map_addr:p}");
 
             map_addr.as_u64()
         } else {

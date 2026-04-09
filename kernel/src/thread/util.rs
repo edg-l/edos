@@ -139,7 +139,6 @@ pub fn thread_stack_alloc(manager: &mut MemoryManager) -> u64 {
 }
 
 pub fn thread_stack_free(manager: &mut MemoryManager, stack_top: u64) {
-    println!("freeing stack 0x{stack_top:x}");
     let stack_bottom = VirtAddr::new(stack_top - USER_STACK_SIZE);
     manager.unmap_memory(stack_bottom, USER_STACK_SIZE).ok();
 }

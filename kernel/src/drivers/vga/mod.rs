@@ -32,11 +32,12 @@ pub fn init() {
 
 extern "C" fn vga_thread(device: *mut PciDevice) {
     let device = unsafe { Box::from_raw(device) };
-    let capabilities: Vec<_> = pci_manager().write().capabilities(device.address).collect();
+    let _capabilities: Vec<_> = pci_manager().write().capabilities(device.address).collect();
     log!(
-        "Starting vga thread, address={:?}, caps={:?}",
-        device.address,
-        capabilities
+        "vga: starting (PCI {:02x}:{:02x}.{})",
+        device.address.bus,
+        device.address.device,
+        device.address.function
     );
 
     let controller = VgaController::new(*device).unwrap();

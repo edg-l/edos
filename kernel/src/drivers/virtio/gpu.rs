@@ -1,7 +1,7 @@
 use crate::drivers::dma::{DmaBuffer, dma};
 use crate::drivers::virtio::pci::VirtioTransport;
 use crate::drivers::virtio::queue::{VIRTQ_DESC_F_WRITE, Virtqueue};
-use crate::println;
+use crate::{log, println};
 
 // -------- Virtio GPU command types --------
 
@@ -221,10 +221,7 @@ impl VirtioGpu {
         let driver_features =
             device_features & (VIRTIO_F_VERSION_1 | VIRTIO_GPU_F_EDID | VIRTIO_GPU_F_RESOURCE_BLOB);
         let use_blob = device_features & VIRTIO_GPU_F_RESOURCE_BLOB != 0;
-        println!(
-            "virtio-gpu: device features={:#x}, negotiating {:#x}",
-            device_features, driver_features
-        );
+        log!("virtio-gpu: features negotiated");
         transport.write_driver_features(driver_features);
         transport.finish_init();
 

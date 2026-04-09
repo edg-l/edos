@@ -82,6 +82,7 @@ fn list_mounts() {
             6 => "memfs",
             7 => "devfs",
             8 => "procfs",
+            9 => "efs",
             _ => "unknown",
         };
 

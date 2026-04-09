@@ -468,4 +468,45 @@ impl FileSystem for Fatfs {
 
         Ok(())
     }
+
+    fn statfs(&mut self) -> Result<super::StatFs, Error> {
+        let bs = &self.boot_info;
+        let cluster_size = bs.bytes_per_sector as u64 * bs.sectors_per_cluster as u64;
+        let total_clusters = bs.calculate_cluster_count() as u64;
+        let total_size = total_clusters * cluster_size;
+        let total_blocks = total_size / cluster_size;
+
+        let free_clusters = match &self.fs_info {
+            Some(fi) if fi.has_free_count() => fi.free_count as u64,
+            _ => 0,
+        };
+
+        let variant_name = match self.variant {
+            FatVariant::Fat12 => "fat12",
+            FatVariant::Fat16 => "fat16",
+            FatVariant::Fat32 => "fat32",
+        };
+
+        let mut volume_name = [0u8; 64];
+        let label = &bs.volume_label;
+        let label_len = label
+            .iter()
+            .rposition(|&b| b != b' ' && b != 0)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        volume_name[..label_len].copy_from_slice(&label[..label_len]);
+
+        Ok(super::StatFs {
+            fs_type: variant_name,
+            block_size: cluster_size,
+            total_blocks,
+            free_blocks: free_clusters,
+            total_inodes: 0,
+            free_inodes: 0,
+            volume_name,
+            volume_name_len: label_len,
+            version: 0,
+            block_groups: 0,
+        })
+    }
 }

@@ -15,6 +15,7 @@ use crate::{
     acpi::apic_info,
     apic::get_lapic,
     interrupts::InterruptIndex,
+    log,
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
     println,
     util::per_cpu::get_percpu_data,
@@ -24,7 +25,7 @@ pub fn init() {
     let apic_info = apic_info();
 
     if apic_info.also_has_legacy_pics {
-        println!("need to disable old pic");
+        log!("apic: disabling legacy PIC");
         unsafe {
             let mut p = pic8259::ChainedPics::new(32, 64);
             p.initialize();

@@ -459,7 +459,6 @@ impl Thread {
 
         // Use process page to set mappings
         unsafe { Cr3::write(page, kernel_pml4.1) };
-        println!("Switched to new process page");
 
         let page_table = unsafe { active_level_4_table(physical_memory_offset) };
         let table = unsafe { OffsetPageTable::new(page_table, physical_memory_offset) };
@@ -496,16 +495,8 @@ impl Thread {
         }
         let process_regions = Arc::new(load_info.memory_regions);
 
-        println!("loaded elf, back to kernel page");
-
         // Back to kernel page
         unsafe { Cr3::write(kernel_pml4.0, kernel_pml4.1) };
-
-        println!(
-            "Creating CpuContext with entry_point: {:p}, stack_top: {:p}",
-            entry_point.as_u64() as *const u8,
-            user_stack_pointer as *const u8
-        );
 
         let mut context = CpuContext::new_user_thread(entry_point.as_u64(), user_stack_pointer);
         context.rdi = argc as u64;

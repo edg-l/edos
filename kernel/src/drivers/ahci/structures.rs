@@ -533,8 +533,6 @@ impl DeviceIdentifyInfo {
             self.capacity_gb
         );
         log!("LBA48 Support: {}", self.supports_lba48);
-        log!("Features word 83: {:#06x}", self.raw_features);
-
         if self.supports_lba48 {
             log!("  - 48-bit LBA supported");
         }

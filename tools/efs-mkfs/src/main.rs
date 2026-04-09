@@ -1,0 +1,222 @@
+mod alloc;
+mod disk;
+mod layout;
+mod mkfs;
+mod populate;
+
+use std::fs::OpenOptions;
+use std::path::PathBuf;
+use std::process;
+
+fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix("G").or_else(|| s.strip_suffix("g")) {
+        n.parse::<u64>().ok().map(|v| v * 1024 * 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix("M").or_else(|| s.strip_suffix("m")) {
+        n.parse::<u64>().ok().map(|v| v * 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix("K").or_else(|| s.strip_suffix("k")) {
+        n.parse::<u64>().ok().map(|v| v * 1024)
+    } else {
+        s.parse::<u64>().ok()
+    }
+}
+
+fn usage() -> ! {
+    eprintln!(
+        "Usage: efs-mkfs [OPTIONS] <OUTPUT>
+
+Arguments:
+  <OUTPUT>  Output image file path
+
+Options:
+  --size <SIZE>                  Image size (e.g. 1G, 512M, 64M). Required unless image already exists.
+  --block-size <BYTES>           Block size: 1024, 2048, 4096 (default), 8192
+  --populate <DIR>               Recursively copy files from DIR into the root
+  --partition-offset <BYTES>     Byte offset of EFS partition within the image (default: 0)
+  --label <NAME>                 Volume label (max 63 chars)
+  --help                         Show this help
+"
+    );
+    process::exit(1);
+}
+
+struct Args {
+    output: PathBuf,
+    size: Option<u64>,
+    block_size: u32,
+    populate: Option<PathBuf>,
+    partition_offset: u64,
+    label: Option<String>,
+}
+
+fn parse_args() -> Args {
+    let mut args = std::env::args().skip(1).peekable();
+    let mut output: Option<PathBuf> = None;
+    let mut size: Option<u64> = None;
+    let mut block_size: u32 = 4096;
+    let mut populate: Option<PathBuf> = None;
+    let mut partition_offset: u64 = 0;
+    let mut label: Option<String> = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => usage(),
+            "--size" => {
+                let val = args.next().unwrap_or_else(|| {
+                    eprintln!("--size requires a value");
+                    process::exit(1);
+                });
+                size = Some(parse_size(&val).unwrap_or_else(|| {
+                    eprintln!("invalid size: {val}");
+                    process::exit(1);
+                }));
+            }
+            "--block-size" => {
+                let val = args.next().unwrap_or_else(|| {
+                    eprintln!("--block-size requires a value");
+                    process::exit(1);
+                });
+                block_size = val.parse().unwrap_or_else(|_| {
+                    eprintln!("invalid block size: {val}");
+                    process::exit(1);
+                });
+                if !matches!(block_size, 1024 | 2048 | 4096 | 8192) {
+                    eprintln!("block size must be 1024, 2048, 4096, or 8192");
+                    process::exit(1);
+                }
+            }
+            "--populate" => {
+                let val = args.next().unwrap_or_else(|| {
+                    eprintln!("--populate requires a directory");
+                    process::exit(1);
+                });
+                populate = Some(PathBuf::from(val));
+            }
+            "--partition-offset" => {
+                let val = args.next().unwrap_or_else(|| {
+                    eprintln!("--partition-offset requires a value");
+                    process::exit(1);
+                });
+                partition_offset = val.parse().unwrap_or_else(|_| {
+                    eprintln!("invalid partition offset: {val}");
+                    process::exit(1);
+                });
+            }
+            "--label" => {
+                let val = args.next().unwrap_or_else(|| {
+                    eprintln!("--label requires a value");
+                    process::exit(1);
+                });
+                if val.len() > 63 {
+                    eprintln!("label too long (max 63 chars)");
+                    process::exit(1);
+                }
+                label = Some(val);
+            }
+            s if s.starts_with('-') => {
+                eprintln!("unknown option: {s}");
+                usage();
+            }
+            _ => {
+                if output.is_some() {
+                    eprintln!("unexpected argument: {arg}");
+                    process::exit(1);
+                }
+                output = Some(PathBuf::from(arg));
+            }
+        }
+    }
+
+    let output = output.unwrap_or_else(|| {
+        eprintln!("output path is required");
+        usage();
+    });
+
+    Args {
+        output,
+        size,
+        block_size,
+        populate,
+        partition_offset,
+        label,
+    }
+}
+
+fn main() {
+    let args = parse_args();
+
+    // Open or create the output file.
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&args.output)
+        .unwrap_or_else(|e| {
+            eprintln!("failed to open '{}': {e}", args.output.display());
+            process::exit(1);
+        });
+
+    // Determine partition size.
+    let partition_size: u64 = if let Some(sz) = args.size {
+        sz - args.partition_offset
+    } else {
+        // Infer from existing file size.
+        let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        if file_len <= args.partition_offset {
+            eprintln!(
+                "file '{}' is too small or empty; provide --size",
+                args.output.display()
+            );
+            process::exit(1);
+        }
+        file_len - args.partition_offset
+    };
+
+    if partition_size < args.block_size as u64 * 16 {
+        eprintln!("partition too small");
+        process::exit(1);
+    }
+
+    println!(
+        "Formatting {} (partition size {}, block size {}, offset {})...",
+        args.output.display(),
+        partition_size,
+        args.block_size,
+        args.partition_offset
+    );
+
+    let layout = layout::Layout::compute(partition_size, args.block_size, args.partition_offset);
+
+    println!(
+        "  {} blocks, {} groups, {} inodes",
+        layout.total_blocks, layout.block_group_count, layout.total_inodes,
+    );
+
+    let (mut allocator, mut bgds) = mkfs::format(&mut file, &layout, args.label.as_deref())
+        .unwrap_or_else(|e| {
+            eprintln!("format failed: {e}");
+            process::exit(1);
+        });
+
+    if let Some(ref pop_dir) = args.populate {
+        if !pop_dir.is_dir() {
+            eprintln!("--populate path is not a directory: {}", pop_dir.display());
+            process::exit(1);
+        }
+        println!("Populating from {}...", pop_dir.display());
+        populate::populate(&mut file, &mut allocator, &layout, &mut bgds, pop_dir).unwrap_or_else(
+            |e| {
+                eprintln!("populate failed: {e}");
+                process::exit(1);
+            },
+        );
+    }
+
+    mkfs::finalize(&mut file, &layout, &allocator, &mut bgds).unwrap_or_else(|e| {
+        eprintln!("finalize failed: {e}");
+        process::exit(1);
+    });
+
+    println!("Done.");
+}

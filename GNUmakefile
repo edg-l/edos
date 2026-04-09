@@ -55,7 +55,7 @@ define run_qemu_uefi
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio \
 		-no-reboot -d cpu_reset -D /tmp/qemu_reset.log \
-		-drive id=sata0,if=none,format=raw,file=sata-disk.img \
+		-drive id=sata0,if=none,format=qcow2,file=sata-disk.img \
 		-device ide-hd,drive=sata0,bus=ide.1 \
 		$(if $(4),$(4),$(DISPLAY_VIRTIO)) \
 		-device qemu-xhci -device usb-kbd -device usb-mouse \
@@ -231,19 +231,19 @@ programs:
 DISK_UUID := 12345678-1234-5678-9abc-123456789abc
 PARTITION_UUID := 87654321-4321-8765-cba9-987654321fed
 FILESYSTEM_SERIAL := 305419896
-FILESYSTEM_FILES := $(shell find filesystem -type f 2>/dev/null)
+FILESYSTEM_FILES := $(shell find filesystem -type f ! -name '*.rlib' ! -name '*.a' 2>/dev/null)
 
-sata-disk.img: $(FILESYSTEM_FILES)
-	qemu-img create -f raw sata-disk.img 1G
-	sgdisk sata-disk.img -n 1:2048 -t 1:0700 -c 1:"EDOS_DATA" --partition-guid=1:$(PARTITION_UUID)
-	mformat -F -i sata-disk.img@@1M -v EDOS
-	if [ -d filesystem ]; then \
-		mcopy -s -i sata-disk.img@@1M filesystem/* ::/; \
-	fi
+sata-disk.img: $(FILESYSTEM_FILES) tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
+	qemu-img create -f raw sata-disk.raw 5G
+	sgdisk sata-disk.raw -n 1:2048 -t 1:0700 -c 1:"EDOS_DATA" --partition-guid=1:$(PARTITION_UUID)
+	cargo build --release --manifest-path tools/efs-mkfs/Cargo.toml
+	tools/efs-mkfs/target/release/efs-mkfs --partition-offset 1048576 --populate filesystem/ --label EDOS sata-disk.raw
+	qemu-img convert -f raw -O qcow2 sata-disk.raw sata-disk.img
+	rm -f sata-disk.raw
 
 .PHONY: clean-sata
 clean-sata:
-	rm -f sata-disk.img
+	rm -f sata-disk.img sata-disk.raw
 
 .PHONY: filesystem
 filesystem:

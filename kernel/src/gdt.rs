@@ -15,7 +15,7 @@ use x86_64::{
     },
 };
 
-use crate::{memory::mapper::align_stack_pointer, println, util::per_cpu::get_percpu_data};
+use crate::{memory::mapper::align_stack_pointer, util::per_cpu::get_percpu_data};
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 pub const PAGE_FAULT_IST_INDEX: u16 = 1;
@@ -32,10 +32,6 @@ fn init_tss_for_current_cpu() {
             handle_alloc_error(layout)
         }
 
-        println!("Created page fault stack at : {:p}", unsafe {
-            stack_start.byte_add(layout.size())
-        });
-
         VirtAddr::from_ptr(unsafe { stack_start.byte_add(layout.size()) })
     };
 
@@ -46,10 +42,6 @@ fn init_tss_for_current_cpu() {
         if stack_start.is_null() {
             handle_alloc_error(layout)
         }
-
-        println!("Created double fault stack at : {:p}", unsafe {
-            stack_start.byte_add(layout.size())
-        });
 
         VirtAddr::from_ptr(unsafe { stack_start.byte_add(layout.size()) })
     };

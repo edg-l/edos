@@ -7,6 +7,7 @@ use x86_64::{
 };
 
 use crate::{
+    log,
     memory::mapper::MemoryManager,
     println,
     thread::{MemoryRegion, MemoryRegionType},
@@ -52,10 +53,6 @@ pub fn load_elf(
         let elf_file: ElfBytes<'_, LittleEndian> = ElfBytes::minimal_parse(data)?;
 
         let header = elf_file.ehdr;
-        println!(
-            "ELF: Architecture: 0x{:x}, Type: 0x{:x}",
-            header.e_machine, header.e_type
-        );
 
         if header.e_machine != elf::abi::EM_X86_64 {
             return Err(ElfLoadError::UnsupportedArchitecture);
@@ -71,17 +68,11 @@ pub fn load_elf(
         let load_base = match header.e_type {
             elf::abi::ET_EXEC => {
                 // Fixed address executable - use addresses from ELF
-                println!("ELF: Loading ET_EXEC (fixed address) executable");
                 VirtAddr::new(0)
             }
             elf::abi::ET_DYN => {
                 // Position Independent Executable - choose load base
-                let base = VirtAddr::new(0x400000);
-                println!(
-                    "ELF: Loading ET_DYN (PIC) executable at base 0x{:x}",
-                    base.as_u64()
-                );
-                base
+                VirtAddr::new(0x400000)
             }
             _ => return Err(ElfLoadError::UnsupportedArchitecture),
         };
@@ -170,12 +161,6 @@ pub fn load_elf(
                 if mem_size > file_size {
                     let bss_start = vaddr + file_size;
                     let bss_size = mem_size - file_size;
-                    println!(
-                        "ELF: Zeroing BSS section: 0x{:x}-0x{:x} (size: {})",
-                        bss_start.as_u64(),
-                        bss_start.as_u64() + bss_size,
-                        bss_size
-                    );
                     unsafe {
                         let dest = bss_start.as_u64() as *mut u8;
                         core::ptr::write_bytes(dest, 0, bss_size as usize);
@@ -202,7 +187,11 @@ pub fn load_elf(
                     continue;
                 }
 
-                println!("TLS segment found {:?}", header);
+                log!(
+                    "elf: TLS segment: filesz={} memsz={}",
+                    header.p_filesz,
+                    header.p_memsz
+                );
 
                 let align = header.p_align.max(1);
                 let init_data = if header.p_filesz == 0 {
@@ -293,15 +282,16 @@ pub fn load_elf(
 
         if max_addr == 0 {
             // No loadable segments found, fall back to constant
-            println!("ELF: No PT_LOAD segments found, using default heap start");
             max_addr = 0x10000000;
         }
 
         let actual_entry = VirtAddr::new(load_base.as_u64() + header.e_entry);
 
-        println!("ELF: header.e_entry = 0x{:x}", header.e_entry);
-        println!("ELF: load_base = {:p}", load_base.as_u64() as *const u8);
-        println!("ELF: calculated entry = {actual_entry:p}");
+        log!(
+            "elf: loaded at {:#x}, entry={:#x}",
+            load_base.as_u64(),
+            actual_entry.as_u64()
+        );
 
         Ok(LoadedInfo {
             entry_point: actual_entry,

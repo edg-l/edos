@@ -419,23 +419,10 @@ fn main() {
     let mut prev_cursor_x: i32 = 0;
     let mut prev_cursor_y: i32 = 0;
 
-    // FPS counter
-    let mut fps_frame_count: u32 = 0;
-    let mut fps_last_report = Instant::now();
-
     // Main compositor loop
     loop {
         let frame_start = Instant::now();
 
-        // FPS counter: report every 2 seconds
-        fps_frame_count += 1;
-        let fps_elapsed = fps_last_report.elapsed();
-        if fps_elapsed >= Duration::from_secs(2) {
-            let fps = fps_frame_count as f64 / fps_elapsed.as_secs_f64();
-            eprintln!("[wm] {:.1} fps", fps);
-            fps_frame_count = 0;
-            fps_last_report = frame_start;
-        }
         // Read mouse state
         let (mx, my, buttons) = input.read_mouse();
         cursor.set_position(mx, my);

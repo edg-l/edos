@@ -83,6 +83,7 @@ pub enum FilesystemType {
     Fat12,
     Fat16,
     Fat32,
+    Efs,
     Ntfs,
     Iso9660,
     Memfs,
@@ -282,11 +283,26 @@ pub fn parse_gpt(device_id: u64) -> Result<Vec<Partition>, &'static str> {
     Ok(partitions)
 }
 
+/// EFS superblock magic: "EFS!" in little-endian (0x45465321)
+const EFS_MAGIC: u32 = 0x45465321;
+
 /// Detect filesystem type by reading the first sector of a partition
 fn detect_filesystem(
     device_id: u64,
     partition_start_lba: u64,
 ) -> Result<Option<FilesystemType>, &'static str> {
+    // Check for EFS first: superblock is at block 1 (4 KiB blocks = 8 sectors).
+    // Read 8 sectors starting at partition_start_lba + 8.
+    let efs_lba = partition_start_lba + 8;
+    if let Ok(efs_data) = read_sectors_vec(device_id, efs_lba, 8, Vec::new()) {
+        if efs_data.len() >= 4 {
+            let magic = u32::from_le_bytes([efs_data[0], efs_data[1], efs_data[2], efs_data[3]]);
+            if magic == EFS_MAGIC {
+                return Ok(Some(FilesystemType::Efs));
+            }
+        }
+    }
+
     // Read first sector of partition
     let sector_data = read_sectors_vec(device_id, partition_start_lba, 1, Vec::new())
         .map_err(|_| "Failed to read partition boot sector")?;
@@ -346,6 +362,7 @@ pub fn print_partitions(partitions: &[Partition]) {
             Some(FilesystemType::Fat12) => "FAT12",
             Some(FilesystemType::Fat16) => "FAT16",
             Some(FilesystemType::Fat32) => "FAT32",
+            Some(FilesystemType::Efs) => "EFS",
             Some(FilesystemType::Ntfs) => "NTFS",
             Some(FilesystemType::Iso9660) => "ISO9660",
             Some(FilesystemType::Memfs) => "MEMFS",
