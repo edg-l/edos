@@ -25,6 +25,7 @@ pub struct TxDescriptor {
 
 // RX descriptor status bits
 pub const RX_STATUS_DD: u8 = 1 << 0;
+#[allow(dead_code)]
 pub const RX_STATUS_EOP: u8 = 1 << 1;
 
 // TX descriptor command bits

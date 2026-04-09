@@ -6,6 +6,7 @@ pub const ECHO_REQUEST: u8 = 8;
 pub const ECHO_REPLY: u8 = 0;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct IcmpHeader {
     pub type_: u8,
     pub code: u8,

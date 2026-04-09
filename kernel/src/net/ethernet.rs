@@ -10,6 +10,7 @@ pub enum EtherType {
     Arp = 0x0806,
 }
 
+#[allow(dead_code)]
 pub struct EthernetHeader {
     pub dst: [u8; 6],
     pub src: [u8; 6],

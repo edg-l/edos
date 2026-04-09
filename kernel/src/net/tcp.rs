@@ -21,6 +21,7 @@ pub const DEFAULT_WINDOW: u16 = 16384;
 pub const MAX_RX_BUFFER: usize = 65535;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TcpHeader {
     pub src_port: u16,
     pub dst_port: u16,
@@ -169,6 +170,7 @@ fn tcp_checksum(tcp_pkt: &[u8], src_ip: [u8; 4], dst_ip: [u8; 4]) -> u16 {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TcpState {
     Closed,
     Listen,
@@ -268,28 +270,6 @@ impl TcpConnection {
             );
             self.state = new;
         }
-    }
-
-    /// Build and return a TCP segment to be sent. Does NOT send it.
-    /// The caller (NetStack) is responsible for wrapping in IP and sending.
-    pub fn build_segment(&self, flags: u8, payload: &[u8]) -> Vec<u8> {
-        let options = if flags & SYN != 0 {
-            mss_option(DEFAULT_MSS).to_vec()
-        } else {
-            Vec::new()
-        };
-        build(
-            self.local_port,
-            self.remote_port,
-            self.snd_nxt,
-            self.rcv_nxt,
-            flags,
-            self.rcv_wnd,
-            self.local_ip,
-            self.remote_ip,
-            &options,
-            payload,
-        )
     }
 
     /// Handle an incoming TCP segment. Returns a list of segments to send in response.
