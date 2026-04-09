@@ -587,6 +587,7 @@ pub fn is_builtin(command: &str) -> bool {
             | "set"
             | "return"
             | "kill"
+            | "ifconfig"
     )
 }
 
@@ -684,6 +685,10 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
             } else {
                 ExecResult::Failed(code)
             };
+        }
+        "ifconfig" => {
+            builtins::cmd_ifconfig(args);
+            return ExecResult::Success(0);
         }
         _ if command.contains('=') && !command.starts_with('=') => {
             // Bare VAR=value assignment

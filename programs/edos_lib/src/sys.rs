@@ -30,6 +30,19 @@ pub const SYS_SHM_DESTROY: u64 = 218;
 pub const SYS_SHM_SIZE: u64 = 231;
 pub const SYS_KILL: u64 = 229;
 pub const SYS_SIGACTION: u64 = 230;
+pub const SYS_SOCKET: u64 = 240;
+pub const SYS_BIND: u64 = 241;
+pub const SYS_CONNECT: u64 = 242;
+pub const SYS_LISTEN: u64 = 243;
+pub const SYS_ACCEPT: u64 = 244;
+pub const SYS_SENDTO: u64 = 245;
+pub const SYS_RECVFROM: u64 = 246;
+pub const SYS_PING: u64 = 249;
+pub const SYS_NETINFO: u64 = 250;
+
+pub const AF_INET: u32 = 2;
+pub const SOCK_STREAM: u32 = 1;
+pub const SOCK_DGRAM: u32 = 2;
 
 /// Raw syscall with 1 argument.
 #[inline(always)]
@@ -122,6 +135,37 @@ pub unsafe fn syscall5(num: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg
             in("rdx") arg3,
             in("r10") arg4,
             in("r8") arg5,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Raw syscall with 6 arguments.
+#[inline(always)]
+pub unsafe fn syscall6(
+    num: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+    arg6: u64,
+) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "syscall",
+            in("rax") num,
+            in("rdi") arg1,
+            in("rsi") arg2,
+            in("rdx") arg3,
+            in("r10") arg4,
+            in("r8") arg5,
+            in("r9") arg6,
             lateout("rax") ret,
             lateout("rcx") _,
             lateout("r11") _,

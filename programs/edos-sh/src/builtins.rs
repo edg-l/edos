@@ -12,6 +12,7 @@ pub fn cmd_help() {
     println!("  echo [args...]    - Print arguments");
     println!("  exit              - Exit shell");
     println!("  kill [-SIGNAL] PID - Send signal to process");
+    println!("  ifconfig          - Show network configuration");
     println!();
     println!("Operators:");
     println!("  $((expr))         - Arithmetic expansion");
@@ -307,6 +308,24 @@ pub fn cmd_kill(args: &[String]) -> i32 {
         1
     } else {
         0
+    }
+}
+
+/// Print network interface configuration.
+pub fn cmd_ifconfig(_args: &[String]) {
+    let mut buf = [0u8; 512];
+    let len = unsafe {
+        edos_lib::sys::syscall2(
+            edos_lib::sys::SYS_NETINFO,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if len != u64::MAX {
+        let s = std::str::from_utf8(&buf[..len as usize]).unwrap_or("invalid");
+        print!("{}", s);
+    } else {
+        eprintln!("Failed to get network info");
     }
 }
 

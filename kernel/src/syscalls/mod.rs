@@ -23,6 +23,7 @@ use crate::{
     gdt::selectors,
     log,
     memory::STACK_ALIGNMENT,
+    net::device::NetDevice,
     println,
     syscalls::{
         fs::{
@@ -313,6 +314,7 @@ const SYS_KILL: u64 = 229;
 const SYS_SIGACTION: u64 = 230;
 const SYS_SHM_SIZE: u64 = 231;
 const SYS_PING: u64 = 249;
+const SYS_NETINFO: u64 = 250;
 const SYS_SOCKET: u64 = 240;
 const SYS_BIND: u64 = 241;
 const SYS_CONNECT: u64 = 242;
@@ -703,6 +705,11 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let addr_ptr = ctx.r8 as *mut net::SockAddrIn;
             let addr_len_ptr = ctx.r9 as *mut u32;
             ctx.rax = net::sys_recvfrom(fd, buf_ptr, len, flags, addr_ptr, addr_len_ptr);
+        }
+        SYS_NETINFO => {
+            let buf_ptr = ctx.rdi as *mut u8;
+            let buf_len = ctx.rsi as usize;
+            ctx.rax = sys_netinfo(buf_ptr, buf_len);
         }
         _ => {
             ctx.rax = !0u64;
@@ -1680,4 +1687,60 @@ fn sys_ping(dst_ip_ptr: *const [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> u
         Some(rtt_us) => rtt_us,
         None => !0u64,
     }
+}
+
+/// SYS_NETINFO: write network interface information as text into a user buffer.
+///
+/// Arguments:
+///   - rdi: pointer to user buffer
+///   - rsi: buffer length in bytes
+///
+/// Returns the number of bytes written on success, or u64::MAX on error.
+fn sys_netinfo(buf_ptr: *mut u8, buf_len: usize) -> u64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if buf_ptr.is_null() || buf_len == 0 {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    let text = if let Some(stack) = crate::net::stack::NET_STACK.get() {
+        let s = stack.lock();
+        let mac = s.mac();
+        let link = s.nic.link_up();
+        format!(
+            "IP: {}.{}.{}.{}\nMask: {}.{}.{}.{}\nGateway: {}.{}.{}.{}\nMAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\nLink: {}\n",
+            s.local_ip[0],
+            s.local_ip[1],
+            s.local_ip[2],
+            s.local_ip[3],
+            s.subnet_mask[0],
+            s.subnet_mask[1],
+            s.subnet_mask[2],
+            s.subnet_mask[3],
+            s.gateway_ip[0],
+            s.gateway_ip[1],
+            s.gateway_ip[2],
+            s.gateway_ip[3],
+            mac[0],
+            mac[1],
+            mac[2],
+            mac[3],
+            mac[4],
+            mac[5],
+            if link { "up" } else { "down" },
+        )
+    } else {
+        "No network interface\n".to_string()
+    };
+
+    let bytes = text.as_bytes();
+    let copy_len = bytes.len().min(buf_len);
+    if !unsafe { try_copy_to_user(buf_ptr, bytes.as_ptr(), copy_len) } {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+    copy_len as u64
 }

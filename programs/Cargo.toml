@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["edos_lib", "edos_render", "edos-wm", "edos-taskbar", "edos-terminal", "edos-sh", "hello", "alloctest", "wintest", "echo", "cat", "ls", "stat", "free", "ps", "dmesg", "mkdir", "rmdir", "rm", "mv", "write", "grep", "head", "tail", "wc", "touch", "cp", "uname", "hexdump", "mount"]
+members = ["edos_lib", "edos_render", "edos-wm", "edos-taskbar", "edos-terminal", "edos-sh", "hello", "alloctest", "wintest", "echo", "cat", "ls", "stat", "free", "ps", "dmesg", "mkdir", "rmdir", "rm", "mv", "write", "grep", "head", "tail", "wc", "touch", "cp", "uname", "hexdump", "mount", "ping", "dns", "http"]
 
 [profile.dev]
 opt-level = 3
