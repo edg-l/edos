@@ -1,22 +1,21 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::{Mutex, Once};
+use spin::Once;
 
-use crate::drivers::ahci::{AhciError, port::AhciPort};
+use crate::{
+    drivers::ahci::{AhciError, port::AhciPort},
+    thread::mutex::BlockingMutex,
+};
 
 /// Flat array of AHCI ports indexed by device_id.
-static AHCI_PORTS: Once<Vec<Arc<Mutex<AhciPort>>>> = Once::new();
+static AHCI_PORTS: Once<Vec<Arc<BlockingMutex<AhciPort>>>> = Once::new();
 
 /// Per-device_id atomic storing the TID of the thread currently waiting for DMA.
 /// 0 means no thread is waiting. Indexed by device_id.
 static AHCI_PORT_WAITERS: Once<Vec<AtomicU64>> = Once::new();
 
-/// Mapping from (controller_index, port_idx) to device_id.
-/// Used by the interrupt dispatcher to find the right waiter.
-static PORT_TO_DEVICE: Once<Vec<(usize, usize, u64)>> = Once::new();
-
 /// Initialize the direct access layer. Called once from ahci_driver_main after port discovery.
-pub fn init(ports: Vec<Arc<Mutex<AhciPort>>>) {
+pub fn init(ports: Vec<Arc<BlockingMutex<AhciPort>>>) {
     let count = ports.len();
     AHCI_PORTS.call_once(|| ports);
     AHCI_PORT_WAITERS.call_once(|| {
@@ -26,21 +25,6 @@ pub fn init(ports: Vec<Arc<Mutex<AhciPort>>>) {
         }
         v
     });
-}
-
-/// Set the port-to-device mapping for interrupt dispatch.
-pub fn set_port_mapping(mapping: Vec<(usize, usize, u64)>) {
-    PORT_TO_DEVICE.call_once(|| mapping);
-}
-
-/// Look up the device_id for a given (controller_index, port_idx) pair.
-/// Returns None if not found.
-pub fn device_id_for_port(controller_idx: usize, port_idx: usize) -> Option<u64> {
-    PORT_TO_DEVICE.get().and_then(|map| {
-        map.iter()
-            .find(|(cidx, pidx, _)| *cidx == controller_idx && *pidx == port_idx)
-            .map(|(_, _, did)| *did)
-    })
 }
 
 /// Get the waiter TID for a device. Returns 0 if nobody is waiting.

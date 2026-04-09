@@ -1,7 +1,6 @@
 use core::ptr;
 
 use alloc::{sync::Arc, vec::Vec};
-use spin::mutex::Mutex;
 use x86_64::{
     PhysAddr,
     structures::paging::{PageTableFlags, mapper::TranslateResult},
@@ -24,13 +23,13 @@ use crate::{
     interrupts::InterruptIndex,
     log,
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
-    thread::scheduler::sched,
+    thread::{mutex::BlockingMutex, scheduler::sched},
     timer::Instant,
 };
 
 pub struct AhciController {
     pub hba: *mut HbaMemory,
-    pub ports: Vec<Option<Arc<Mutex<AhciPort>>>>,
+    pub ports: Vec<Option<Arc<BlockingMutex<AhciPort>>>>,
     pub pci_device: PciDevice,
 }
 
@@ -249,14 +248,14 @@ impl AhciController {
                                 // Port was initialized with DeviceType::Ata, no change needed
                                 let mut port = port;
                                 port.set_device_type(DeviceType::Ata);
-                                self.ports[i] = Some(Arc::new(Mutex::new(port)));
+                                self.ports[i] = Some(Arc::new(BlockingMutex::new(port)));
                             }
                             SATA_SIG_ATAPI => {
                                 log!("Found ATAPI device on port {}", i);
                                 // Update device type to ATAPI
                                 let mut port = port;
                                 port.set_device_type(DeviceType::Atapi);
-                                self.ports[i] = Some(Arc::new(Mutex::new(port)));
+                                self.ports[i] = Some(Arc::new(BlockingMutex::new(port)));
                             }
                             sig => {
                                 log!("Port {} has unsupported/invalid signature: {:#x}", i, sig);

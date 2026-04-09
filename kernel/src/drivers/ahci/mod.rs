@@ -1,7 +1,7 @@
 use core::ptr;
 
 use alloc::{sync::Arc, vec::Vec};
-use spin::{Mutex, Once};
+use spin::Once;
 use thiserror::Error;
 use x86_64::instructions::hlt;
 
@@ -16,6 +16,7 @@ use crate::{
     },
     log,
     thread::{
+        mutex::BlockingMutex,
         runqueue::IO_PRIORITY,
         scheduler::{WakePriority, sched},
         thread::ThreadId,
@@ -132,28 +133,22 @@ pub extern "C" fn ahci_driver_main() -> ! {
 
     DETECTED_DEVICES.call_once(|| detected_devices.clone());
 
-    // Initialize the direct-access layer with a flat port array and mapping.
+    // Initialize the direct-access layer with a flat port array indexed by device_id.
     {
-        let mut direct_ports: Vec<Arc<Mutex<AhciPort>>> =
+        let mut direct_ports: Vec<Arc<BlockingMutex<AhciPort>>> =
             Vec::with_capacity(detected_devices.len());
-        let mut port_mapping: Vec<(usize, usize, u64)> = Vec::with_capacity(detected_devices.len());
 
         for device in &detected_devices {
-            let controller_idx = controllers
+            let port = controllers
                 .iter()
-                .position(|c| c.pci_device.address == device.controller_pci_address)
-                .expect("device refers to unknown controller");
-            let port = controllers[controller_idx]
-                .ports
-                .get(device.port_idx)
+                .find(|c| c.pci_device.address == device.controller_pci_address)
+                .and_then(|c| c.ports.get(device.port_idx))
                 .and_then(|p| p.clone())
                 .expect("device port not found in controller");
             direct_ports.push(port);
-            port_mapping.push((controller_idx, device.port_idx, device.id));
         }
 
         direct::init(direct_ports);
-        direct::set_port_mapping(port_mapping);
     }
 
     loop {

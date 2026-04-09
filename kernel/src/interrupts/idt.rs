@@ -123,10 +123,30 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) -> ! {
-    panic!(
-        "EXCEPTION: DOUBLE FAULT: ({error_code})\n{:#?}",
-        stack_frame
-    );
+    // Do NOT use panic!/println! here -- the serial lock or allocator lock
+    // may be held by the faulting code, which would deadlock and triple-fault.
+    crate::serial::emergency_write(b"\n!!! DOUBLE FAULT (error=");
+    // Write error code as decimal digits
+    let mut buf = [0u8; 20];
+    let s = crate::util::fmt_u64(error_code, &mut buf);
+    crate::serial::emergency_write(s);
+    crate::serial::emergency_write(b")\nRIP=0x");
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let s = crate::util::fmt_hex(rip, &mut buf);
+    crate::serial::emergency_write(s);
+    crate::serial::emergency_write(b"\nRSP=0x");
+    let rsp = stack_frame.stack_pointer.as_u64();
+    let s = crate::util::fmt_hex(rsp, &mut buf);
+    crate::serial::emergency_write(s);
+    crate::serial::emergency_write(b"\nCS=0x");
+    let cs = stack_frame.code_segment.0 as u64;
+    let s = crate::util::fmt_hex(cs, &mut buf);
+    crate::serial::emergency_write(s);
+    crate::serial::emergency_write(b"\n");
+
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 extern "x86-interrupt" fn apic_error_interrupt_handler(_stack_frame: InterruptStackFrame) {

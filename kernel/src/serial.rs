@@ -54,3 +54,18 @@ pub fn add_serial_log(text: &str) {
         .write_str(text)
         .expect("write_str failed in serial");
 }
+
+/// Emergency serial output that bypasses all locks. Use only in double fault
+/// or other unrecoverable handlers where the serial lock may already be held.
+/// Writes directly to the 0x3F8 UART data port.
+pub fn emergency_write(msg: &[u8]) {
+    for &byte in msg {
+        unsafe {
+            // Spin-wait for transmit buffer empty (LSR bit 5)
+            while x86_64::instructions::port::Port::<u8>::new(0x3FD).read() & 0x20 == 0 {
+                core::hint::spin_loop();
+            }
+            x86_64::instructions::port::Port::<u8>::new(0x3F8).write(byte);
+        }
+    }
+}
