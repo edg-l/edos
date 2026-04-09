@@ -1,6 +1,6 @@
 #![expect(unused)]
 
-use crate::drivers::dma::DmaBuffer;
+use crate::drivers::dma::{DmaBuffer, dma};
 
 /// Transfer Request Block - the fundamental xHCI data structure (16 bytes).
 #[repr(C)]
@@ -117,11 +117,11 @@ impl ProducerRing {
     pub fn new(size: usize) -> Self {
         let byte_size = size * core::mem::size_of::<Trb>();
         let dma =
-            DmaBuffer::allocate_sized(byte_size).expect("xhci: failed to allocate producer ring");
+            dma().allocate_sized(byte_size).expect("xhci: failed to allocate producer ring");
         let trbs = dma.as_ptr() as *mut Trb;
         let phys = dma.phys_addr().as_u64();
 
-        // Zero all TRBs (DmaBuffer::allocate_sized already zeros, but be explicit)
+        // Zero all TRBs (allocate_sized already zeros, but be explicit)
         unsafe { core::ptr::write_bytes(trbs, 0, size) };
 
         // Set up Link TRB in the last slot: points back to ring start, with Toggle Cycle.
@@ -217,14 +217,15 @@ impl EventRing {
     pub fn new(size: usize) -> Self {
         let ring_bytes = size * core::mem::size_of::<Trb>();
         let ring_dma =
-            DmaBuffer::allocate_sized(ring_bytes).expect("xhci: failed to allocate event ring");
+            dma().allocate_sized(ring_bytes).expect("xhci: failed to allocate event ring");
         let trbs = ring_dma.as_ptr() as *mut Trb;
 
         // Zero all TRBs so cycle bits start as 0; we poll expecting cycle=1 first
         unsafe { core::ptr::write_bytes(trbs, 0, size) };
 
         // Allocate ERST with one entry
-        let erst_dma = DmaBuffer::allocate_sized(core::mem::size_of::<ErstEntry>())
+        let erst_dma = dma()
+            .allocate_sized(core::mem::size_of::<ErstEntry>())
             .expect("xhci: failed to allocate ERST");
         let erst_entry = erst_dma.as_ptr() as *mut ErstEntry;
         unsafe {

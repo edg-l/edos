@@ -61,7 +61,9 @@ pub struct DmaBuffer {
 }
 
 impl DmaBuffer {
-    pub fn allocate_sized(size: usize) -> Result<Self, DmaError> {
+    /// Allocate a DMA buffer of the given size (rounded up to page boundary).
+    /// Private: all external callers must use `dma().allocate_sized()`.
+    fn allocate_sized(size: usize) -> Result<Self, DmaError> {
         let aligned_size = (size as u64 + 0xfff) & !0xfff; // Round up to page boundary
 
         let virt_addr = vmalloc(aligned_size);
@@ -132,22 +134,36 @@ impl DmaBuffer {
     }
 }
 
-#[derive(Debug, Default)]
+/// Power-of-two DMA buffer pool.
+///
+/// Buckets cover 4KB (2^12) through 2MB (2^21) = 10 size classes.
+/// Requests are rounded up to the next power-of-two page size and pooled
+/// at that tier, giving automatic "close enough" size matching.
+/// Sizes above 2MB are allocated directly and freed on dealloc (no pooling).
 pub struct DmaAllocator {
-    list_4096: SegQueue<DmaBuffer>,
-    list_8192: SegQueue<DmaBuffer>,
-    list_16384: SegQueue<DmaBuffer>,
-    // ahci may use up to 2mb
-    list_2mb: SegQueue<DmaBuffer>,
+    buckets: [SegQueue<DmaBuffer>; NUM_BUCKETS],
+}
+
+const NUM_BUCKETS: usize = 10; // 4KB..2MB
+const MIN_ORDER: usize = 12; // log2(4096)
+
+/// Map a requested size to a bucket index, or None if > 2MB.
+fn size_to_bucket(size: usize) -> Option<usize> {
+    let size = size.max(4096).next_power_of_two();
+    let order = size.trailing_zeros() as usize;
+    let idx = order.checked_sub(MIN_ORDER)?;
+    if idx < NUM_BUCKETS { Some(idx) } else { None }
+}
+
+/// The allocation size for a given bucket index.
+fn bucket_size(bucket: usize) -> usize {
+    1 << (bucket + MIN_ORDER)
 }
 
 impl DmaAllocator {
     pub const fn new() -> Self {
         Self {
-            list_4096: SegQueue::new(),
-            list_8192: SegQueue::new(),
-            list_16384: SegQueue::new(),
-            list_2mb: SegQueue::new(),
+            buckets: [const { SegQueue::new() }; NUM_BUCKETS],
         }
     }
 
@@ -158,62 +174,29 @@ impl DmaAllocator {
     }
 
     pub fn allocate_sized(&self, size: usize) -> Result<DmaBuffer, DmaError> {
-        // Since dma are page aligned we use page sizes.
-        if size <= 4096 {
-            if let Some(buf) = self.list_4096.pop() {
+        if let Some(bucket) = size_to_bucket(size) {
+            let alloc_size = bucket_size(bucket);
+            if let Some(buf) = self.buckets[bucket].pop() {
                 Ok(buf)
             } else {
-                log!("Allocating new 4kb dma buffer");
-                DmaBuffer::allocate_sized(4096)
-            }
-        } else if size <= 8192 {
-            if let Some(buf) = self.list_8192.pop() {
-                Ok(buf)
-            } else {
-                log!("Allocating new 8kb dma buffer");
-                DmaBuffer::allocate_sized(8192)
-            }
-        } else if size <= 16384 {
-            if let Some(buf) = self.list_16384.pop() {
-                Ok(buf)
-            } else {
-                log!("Allocating new 16kb dma buffer");
-                DmaBuffer::allocate_sized(16384)
-            }
-        } else if size == 2097152 {
-            // 2mb case, max dma region for our AHCI driver.
-            if let Some(buf) = self.list_2mb.pop() {
-                Ok(buf)
-            } else {
-                log!("Allocating new 2mb dma buffer");
-                DmaBuffer::allocate_sized(2097152)
+                log!("Allocating new {}KB dma buffer", alloc_size / 1024);
+                DmaBuffer::allocate_sized(alloc_size)
             }
         } else {
-            let size = align_up(size as u64, 4096);
-            log!("Allocating new big {size} dma buffer");
-            DmaBuffer::allocate_sized(size as usize)
+            // > 2MB: direct allocation, no pooling
+            let alloc_size = align_up(size as u64, 4096) as usize;
+            log!("Allocating oversized {}KB dma buffer", alloc_size / 1024);
+            DmaBuffer::allocate_sized(alloc_size)
         }
     }
 
     pub fn dealloc(&self, buffer: DmaBuffer) -> Result<(), DmaError> {
-        match buffer.size {
-            4096 => {
-                self.list_4096.push(buffer);
-            }
-            8192 => {
-                self.list_8192.push(buffer);
-            }
-            16384 => {
-                self.list_16384.push(buffer);
-            }
-            2097152 => {
-                self.list_2mb.push(buffer);
-            }
-            _ => {
-                buffer.dealloc()?;
-            }
+        if let Some(bucket) = size_to_bucket(buffer.size) {
+            self.buckets[bucket].push(buffer);
+            Ok(())
+        } else {
+            buffer.dealloc()
         }
-        Ok(())
     }
 }
 

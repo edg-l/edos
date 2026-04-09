@@ -11,7 +11,7 @@ use x86_64::structures::paging::{PageTableFlags, mapper::MapToError};
 
 use crate::{
     drivers::{
-        dma::DmaBuffer,
+        dma::{DmaBuffer, dma},
         pci::{
             config::{pci_read_u16, pci_write_u16, read_bar_phys},
             pci_manager,
@@ -205,7 +205,7 @@ impl XhciController {
         //    Array of (max_slots + 1) 64-bit pointers, 64-byte aligned.
         let dcbaa_size = (max_slots as usize + 1) * 8;
         self.dcbaa = Some(
-            DmaBuffer::allocate_sized(dcbaa_size).map_err(|_| "xhci: failed to allocate DCBAA")?,
+            dma().allocate_sized(dcbaa_size).map_err(|_| "xhci: failed to allocate DCBAA")?,
         );
         let dcbaa_phys = self.dcbaa.as_ref().unwrap().phys_addr().as_u64();
 
@@ -216,7 +216,7 @@ impl XhciController {
         let scratch_hi = ((hcsparams2 >> 27) & 0x1F) as u32;
         let num_scratch = (scratch_hi << 5) | scratch_lo;
         if num_scratch > 0 {
-            let scratch_array = DmaBuffer::allocate_sized((num_scratch as usize) * 8)
+            let scratch_array = dma().allocate_sized((num_scratch as usize) * 8)
                 .map_err(|_| "xhci: failed to allocate scratchpad array")?;
 
             let pagesize_reg = unsafe { reg_read(&(*self.regs.op()).pagesize) };
@@ -225,7 +225,7 @@ impl XhciController {
             let page_size = 1usize << ((pagesize_reg & 0xFFFF).trailing_zeros() + 12);
 
             for i in 0..num_scratch as usize {
-                let page = DmaBuffer::allocate_sized(page_size)
+                let page = dma().allocate_sized(page_size)
                     .map_err(|_| "xhci: failed to allocate scratchpad page")?;
                 let page_phys = page.phys_addr().as_u64();
                 unsafe {
@@ -603,7 +603,7 @@ impl XhciController {
         //         + 31 Endpoint Contexts = 33 × context_size bytes total.
         let ctx_size = self.context_size;
         let input_ctx =
-            DmaBuffer::allocate_sized(33 * ctx_size).map_err(|_| XhciError::InvalidDevice)?;
+            dma().allocate_sized(33 * ctx_size).map_err(|_| XhciError::InvalidDevice)?;
 
         // Step 3 — Allocate EP0 Transfer Ring (64 TRBs is ample for control transfers).
         let ep0_ring = TransferRing::new(64);
@@ -647,7 +647,7 @@ impl XhciController {
         // Step 7 — Allocate Output Device Context and register it in the DCBAA.
         // Layout: SlotContext + 31 EndpointContexts = 32 × context_size bytes.
         let output_ctx =
-            DmaBuffer::allocate_sized(32 * ctx_size).map_err(|_| XhciError::InvalidDevice)?;
+            dma().allocate_sized(32 * ctx_size).map_err(|_| XhciError::InvalidDevice)?;
         let output_ctx_phys = output_ctx.phys_addr().as_u64();
 
         if let Some(ref dcbaa) = self.dcbaa {
@@ -683,7 +683,7 @@ impl XhciController {
         &mut self,
         device: &mut UsbDevice,
     ) -> Result<DeviceDescriptor, XhciError> {
-        let buf = DmaBuffer::allocate_sized(18).map_err(|_| XhciError::InvalidDevice)?;
+        let buf = dma().allocate_sized(18).map_err(|_| XhciError::InvalidDevice)?;
         let buf_phys = buf.phys_addr().as_u64();
 
         let setup = SetupPacket {
@@ -706,6 +706,7 @@ impl XhciController {
         }
 
         let desc = unsafe { core::ptr::read(buf.as_ptr() as *const DeviceDescriptor) };
+        if let Err(e) = dma().dealloc(buf) { println!("xhci: dma dealloc failed: {e}"); }
         Ok(desc)
     }
 
@@ -719,7 +720,7 @@ impl XhciController {
         config_index: u8,
     ) -> Result<Vec<u8>, XhciError> {
         // Phase 1: Read just the 9-byte config descriptor header to get wTotalLength.
-        let hdr_buf = DmaBuffer::allocate_sized(9).map_err(|_| XhciError::InvalidDevice)?;
+        let hdr_buf = dma().allocate_sized(9).map_err(|_| XhciError::InvalidDevice)?;
         let hdr_phys = hdr_buf.phys_addr().as_u64();
 
         let setup = SetupPacket {
@@ -736,12 +737,13 @@ impl XhciController {
         let total_len = config_hdr.w_total_length;
 
         if total_len < 9 {
+            if let Err(e) = dma().dealloc(hdr_buf) { println!("xhci: dma dealloc failed: {e}"); }
             return Ok(alloc::vec![0u8; 0]);
         }
 
         // Phase 2: Allocate a buffer exactly the size of the full descriptor and read it.
         let full_buf =
-            DmaBuffer::allocate_sized(total_len as usize).map_err(|_| XhciError::InvalidDevice)?;
+            dma().allocate_sized(total_len as usize).map_err(|_| XhciError::InvalidDevice)?;
         let full_phys = full_buf.phys_addr().as_u64();
 
         let setup_full = SetupPacket {
@@ -758,6 +760,8 @@ impl XhciController {
                 total_len as usize,
             );
         }
+        if let Err(e) = dma().dealloc(hdr_buf) { println!("xhci: dma dealloc failed: {e}"); }
+        if let Err(e) = dma().dealloc(full_buf) { println!("xhci: dma dealloc failed: {e}"); }
         Ok(data)
     }
 
@@ -1357,12 +1361,12 @@ pub extern "C" fn xhci_driver_main() -> ! {
     // Allocate DMA buffers for HID reports and pre-fill the interrupt rings.
     // Keyboard: 8-byte boot report; mouse: 4-byte boot report (3 bytes + wheel).
     let kbd_report_buf =
-        DmaBuffer::allocate_sized(8).expect("xhci: failed to allocate keyboard HID report buf");
+        dma().allocate_sized(8).expect("xhci: failed to allocate keyboard HID report buf");
     let kbd_report_phys = kbd_report_buf.phys_addr().as_u64();
     let mut prev_kbd_report = [0u8; 8];
 
     let mouse_report_buf =
-        DmaBuffer::allocate_sized(4).expect("xhci: failed to allocate mouse HID report buf");
+        dma().allocate_sized(4).expect("xhci: failed to allocate mouse HID report buf");
     let mouse_report_phys = mouse_report_buf.phys_addr().as_u64();
 
     if let Some((ref mut dev, ref mut ring, ep_dci)) = keyboard_device {
@@ -1530,7 +1534,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
                             let byte_count = sectors as usize * msc.block_size as usize;
                             // Reallocate the shared I/O buffer only when it's too small.
                             if io_buf.is_none() || io_buf.as_ref().unwrap().size < byte_count {
-                                io_buf = DmaBuffer::allocate_sized(byte_count).ok();
+                                io_buf = dma().allocate_sized(byte_count).ok();
                             }
                             match io_buf {
                                 Some(ref buf) => {
@@ -1570,7 +1574,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
                         {
                             let byte_count = sectors as usize * msc.block_size as usize;
                             if io_buf.is_none() || io_buf.as_ref().unwrap().size < byte_count {
-                                io_buf = DmaBuffer::allocate_sized(byte_count).ok();
+                                io_buf = dma().allocate_sized(byte_count).ok();
                             }
                             match io_buf {
                                 Some(ref buf) => {

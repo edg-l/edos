@@ -567,7 +567,7 @@ impl VirtioGpu {
     pub fn setup_framebuffer(&mut self, width: u32, height: u32) -> DmaBuffer {
         let buf_bytes = (width * height * 4) as usize;
 
-        let dma_buf = DmaBuffer::allocate_sized(buf_bytes)
+        let dma_buf = dma().allocate_sized(buf_bytes)
             .expect("virtio-gpu: failed to allocate framebuffer backing");
 
         let phys_base = dma_buf.phys_addr().as_u64();
@@ -812,7 +812,7 @@ impl VirtioGpu {
         let byte_len = (cursor_hw_size * cursor_hw_size * 4) as usize;
 
         // Allocate DMA buffer for cursor pixel data
-        let cursor_buf = DmaBuffer::allocate_sized(byte_len)
+        let cursor_buf = dma().allocate_sized(byte_len)
             .expect("virtio-gpu: failed to allocate cursor buffer");
 
         // Copy pixel data into 64x64 buffer, adding alpha.

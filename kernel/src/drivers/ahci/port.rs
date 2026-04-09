@@ -181,7 +181,7 @@ impl AhciPort {
     /// Returns the physical address and a pointer to the buffer.
     fn ensure_io_dma(&mut self, min_size: usize) -> Result<(PhysAddr, *mut u8), AhciError> {
         if self.io_dma.is_none() || self.io_dma.as_ref().unwrap().size < min_size {
-            self.io_dma = Some(DmaBuffer::allocate_sized(min_size)?);
+            self.io_dma = Some(dma().allocate_sized(min_size)?);
         }
         let buf = self.io_dma.as_ref().unwrap();
         Ok((buf.phys_addr(), buf.as_ptr()))
