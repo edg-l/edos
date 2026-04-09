@@ -377,8 +377,14 @@ impl EfsDriver {
 
     /// Resolve a path to its inode number.
     fn resolve_path(&mut self, path: &Path) -> Result<u64, Error> {
+        Ok(self.resolve_path_inode(path)?.0)
+    }
+
+    /// Resolve a path to (inode_number, inode), avoiding a redundant read_inode after resolution.
+    fn resolve_path_inode(&mut self, path: &Path) -> Result<(u64, EfsInode), Error> {
         if path.is_root() {
-            return Ok(EFS_ROOT_INO);
+            let inode = self.read_inode(EFS_ROOT_INO)?;
+            return Ok((EFS_ROOT_INO, inode));
         }
 
         let mut current_ino = EFS_ROOT_INO;
@@ -388,7 +394,8 @@ impl EfsDriver {
                 None => return Err(Error::FileNotFound),
             }
         }
-        Ok(current_ino)
+        let inode = self.read_inode(current_ino)?;
+        Ok((current_ino, inode))
     }
 }
 
@@ -1162,8 +1169,7 @@ impl FileSystem for EfsDriver {
 
     fn read_bytes(&mut self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
         let path = path.normalize();
-        let ino = self.resolve_path(&path)?;
-        let inode = self.read_inode(ino)?;
+        let (_ino, inode) = self.resolve_path_inode(&path)?;
         if inode.mode & S_IFMT != S_IFREG {
             return Err(Error::NotAFile);
         }
@@ -1172,8 +1178,7 @@ impl FileSystem for EfsDriver {
 
     fn write_bytes(&mut self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
         let path = path.normalize();
-        let ino = self.resolve_path(&path)?;
-        let inode = self.read_inode(ino)?;
+        let (ino, inode) = self.resolve_path_inode(&path)?;
         if inode.mode & S_IFMT != S_IFREG {
             return Err(Error::NotAFile);
         }
@@ -1405,8 +1410,7 @@ impl FileSystem for EfsDriver {
         } else {
             path.last_component().unwrap_or("/").to_string()
         };
-        let ino = self.resolve_path(&path)?;
-        let inode = self.read_inode(ino)?;
+        let (_ino, inode) = self.resolve_path_inode(&path)?;
         Ok(inode_to_file(name, &inode))
     }
 
@@ -1451,8 +1455,7 @@ impl FileSystem for EfsDriver {
 
     fn truncate(&mut self, path: &Path, size: u64) -> Result<(), Error> {
         let path = path.normalize();
-        let ino = self.resolve_path(&path)?;
-        let inode = self.read_inode(ino)?;
+        let (ino, inode) = self.resolve_path_inode(&path)?;
         if inode.mode & S_IFMT != S_IFREG {
             return Err(Error::NotAFile);
         }
