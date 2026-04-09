@@ -72,6 +72,13 @@ impl ArpCache {
     }
 
     pub fn insert(&mut self, ip: [u8; 4], mac: [u8; 6]) {
+        const MAX_ARP_ENTRIES: usize = 256;
+        // Evict oldest entry if cache is full.
+        if self.entries.len() >= MAX_ARP_ENTRIES && !self.entries.contains_key(&ip) {
+            if let Some(&oldest_ip) = self.entries.keys().next() {
+                self.entries.remove(&oldest_ip);
+            }
+        }
         self.entries.insert(ip, mac);
         // Wake anyone waiting for this IP.
         if let Some(wq) = self.pending.remove(&ip) {

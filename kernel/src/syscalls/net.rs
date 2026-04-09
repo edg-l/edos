@@ -90,7 +90,7 @@ pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
 
     // Auto-assign ephemeral port if port 0 is requested
     let bind_port = if port == 0 {
-        match allocate_ephemeral_port(proto) {
+        match allocate_ephemeral_port(proto, sock_arc.clone()) {
             Some(p) => p,
             None => {
                 info.lock().errno = Errno::EINVAL;
@@ -98,18 +98,15 @@ pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
             }
         }
     } else {
-        port
-    };
-
-    // Register in port table (lock port_table first, then socket -- consistent order).
-    {
+        // Explicit port: register in port table.
         let mut table = port_table().lock();
-        if table.contains_key(&(proto, bind_port)) {
+        if table.contains_key(&(proto, port)) {
             info.lock().errno = Errno::EADDRINUSE;
             return !0u64;
         }
-        table.insert((proto, bind_port), sock_arc.clone());
-    }
+        table.insert((proto, port), sock_arc.clone());
+        port
+    };
 
     let mut s = sock_arc.lock();
     s.local_addr = Some(SocketAddr {
@@ -162,16 +159,15 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
     if sock_type == SOCK_STREAM {
         // TCP active open: auto-bind if needed, build SYN, wait for Established
         let local_port = {
-            let mut s = sock_arc.lock();
-            if s.state == SocketState::Unbound {
-                match allocate_ephemeral_port(6u8) {
+            let needs_bind = sock_arc.lock().state == SocketState::Unbound;
+            if needs_bind {
+                match allocate_ephemeral_port(6u8, sock_arc.clone()) {
                     Some(ep) => {
-                        let local_addr = SocketAddr {
+                        let mut s = sock_arc.lock();
+                        s.local_addr = Some(SocketAddr {
                             ip: [0u8; 4],
                             port: ep,
-                        };
-                        port_table().lock().insert((6u8, ep), sock_arc.clone());
-                        s.local_addr = Some(local_addr);
+                        });
                         s.state = SocketState::Bound;
                         ep
                     }
@@ -181,7 +177,7 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
                     }
                 }
             } else {
-                match s.local_addr {
+                match sock_arc.lock().local_addr {
                     Some(a) => a.port,
                     None => {
                         info.lock().errno = Errno::EINVAL;
@@ -253,16 +249,15 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
         }
     } else {
         // UDP connect: just set remote_addr
-        let mut s = sock_arc.lock();
-        if s.state == SocketState::Unbound {
-            match allocate_ephemeral_port(17u8) {
+        let needs_bind = sock_arc.lock().state == SocketState::Unbound;
+        if needs_bind {
+            match allocate_ephemeral_port(17u8, sock_arc.clone()) {
                 Some(ep) => {
-                    let local_addr = SocketAddr {
+                    let mut s = sock_arc.lock();
+                    s.local_addr = Some(SocketAddr {
                         ip: [0u8; 4],
                         port: ep,
-                    };
-                    port_table().lock().insert((17u8, ep), sock_arc.clone());
-                    s.local_addr = Some(local_addr);
+                    });
                     s.state = SocketState::Bound;
                 }
                 None => {
@@ -271,6 +266,7 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
                 }
             }
         }
+        let mut s = sock_arc.lock();
         s.remote_addr = Some(SocketAddr { ip, port });
         s.state = SocketState::Connected;
         0
@@ -343,21 +339,28 @@ pub fn sys_sendto(
 
     // Get source port, auto-binding if needed
     let src_port = {
-        let mut s = sock_arc.lock();
-        if s.closed {
+        let (closed, needs_bind, proto, existing_port) = {
+            let s = sock_arc.lock();
+            let proto = if s.sock_type == SOCK_DGRAM { 17u8 } else { 6u8 };
+            (
+                s.closed,
+                s.local_addr.is_none(),
+                proto,
+                s.local_addr.map(|a| a.port),
+            )
+        };
+        if closed {
             info.lock().errno = Errno::EBADF;
             return !0u64;
         }
-        if s.local_addr.is_none() {
-            let proto = if s.sock_type == SOCK_DGRAM { 17u8 } else { 6u8 };
-            match allocate_ephemeral_port(proto) {
+        if needs_bind {
+            match allocate_ephemeral_port(proto, sock_arc.clone()) {
                 Some(ep) => {
-                    let local_addr = SocketAddr {
+                    let mut s = sock_arc.lock();
+                    s.local_addr = Some(SocketAddr {
                         ip: [0u8; 4],
                         port: ep,
-                    };
-                    port_table().lock().insert((proto, ep), sock_arc.clone());
-                    s.local_addr = Some(local_addr);
+                    });
                     s.state = SocketState::Bound;
                     ep
                 }
@@ -367,7 +370,7 @@ pub fn sys_sendto(
                 }
             }
         } else {
-            s.local_addr.unwrap().port
+            existing_port.unwrap()
         }
     };
 

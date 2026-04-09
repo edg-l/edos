@@ -2,6 +2,7 @@ pub mod descriptors;
 pub mod regs;
 
 use alloc::boxed::Box;
+use core::sync::atomic::{Ordering, compiler_fence};
 use x86_64::{
     VirtAddr, structures::paging::PageTableFlags, structures::paging::mapper::MapToError,
 };
@@ -206,10 +207,7 @@ impl E1000e {
         // ICR bits accumulate (read doesn't clear with MSI-X) and the NIC
         // stops firing new interrupts because raised_causes = IMS & ICR & ~old
         // computes to 0 when old already has all bits set.
-        nic.write_reg(
-            EIAC,
-            IMS_TXDW | IMS_LSC | IMS_RXT0 | ICR_RXQ0 | ICR_TXQ0 | ICR_OTHER,
-        );
+        nic.write_reg(EIAC, ICR_RXQ0 | ICR_TXQ0 | ICR_OTHER);
 
         // Set CTRL_EXT.IAME to prevent IMS from being auto-cleared alongside
         // ICR when EIAC triggers.
@@ -266,6 +264,8 @@ impl E1000e {
         self.rx_buffers[self.rx_tail] = Some(new_buffer);
         let old_tail = self.rx_tail;
         self.rx_tail = (old_tail + 1) % NUM_RX_DESC;
+        // Ensure descriptor writes are visible before HW reads them via DMA.
+        compiler_fence(Ordering::Release);
         // Write old_tail (the refilled slot) to give it back to HW.
         // The HW owns [RDH, RDT), so advancing RDT past old_tail expands the range.
         self.write_reg(RDT, old_tail as u32);
@@ -290,7 +290,7 @@ impl E1000e {
     pub fn transmit(&mut self, data: &[u8]) -> Result<(), &'static str> {
         self.reclaim_tx_buffers();
 
-        if data.len() > 1518 {
+        if data.len() > 1514 {
             return Err("packet too large");
         }
 
@@ -313,6 +313,8 @@ impl E1000e {
 
         self.tx_buffers[self.tx_tail] = Some(buf);
         self.tx_tail = next;
+        // Ensure descriptor writes are visible before HW reads them via DMA.
+        compiler_fence(Ordering::Release);
         self.write_reg(TDT, self.tx_tail as u32);
 
         Ok(())
@@ -420,25 +422,9 @@ pub extern "C" fn e1000e_driver_main() -> ! {
         stack.nic.enable_interrupts();
     }
 
-    // Save a stable pointer to the RX ring descriptor memory.  The DMA buffer
-    // address never changes after allocation, so this pointer remains valid
-    // even though the NIC is now behind a Mutex.
-    let rx_descs_ptr: *const RxDescriptor = {
-        let stack = crate::net::stack::net_stack().lock();
-        stack.nic.rx_ring.as_ptr() as *const RxDescriptor
-    };
-
     loop {
-        // Read rx_tail from the stack before parking; each iteration we must
-        // re-read it because it advances as packets are consumed.
-        let rx_tail = crate::net::stack::net_stack().lock().nic.rx_tail;
-
-        // Park until an MSI-X interrupt wakes us (indicating new RX/TX/LSC).
-        // The condition is checked with interrupts disabled to prevent lost wakeups.
-        sched().thread_park_while(|| {
-            let desc = unsafe { &*rx_descs_ptr.add(rx_tail) };
-            desc.status & RX_STATUS_DD == 0
-        });
+        // Park until an MSI-X interrupt wakes us (RX, TX, or LSC).
+        sched().thread_park();
 
         {
             let stack = crate::net::stack::net_stack().lock();

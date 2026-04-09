@@ -63,10 +63,11 @@ fn build_dns_query(hostname: &str, id: u16) -> Vec<u8> {
     pkt.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
     pkt.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
 
-    // Question: encode hostname as labels
+    // Question: encode hostname as labels (RFC 1035: max 63 bytes per label)
     for label in hostname.split('.') {
-        pkt.push(label.len() as u8);
-        pkt.extend_from_slice(label.as_bytes());
+        let len = label.len().min(63);
+        pkt.push(len as u8);
+        pkt.extend_from_slice(&label.as_bytes()[..len]);
     }
     pkt.push(0); // root label
 

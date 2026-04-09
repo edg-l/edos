@@ -118,12 +118,15 @@ static EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(49152);
 const EPHEMERAL_START: u16 = 49152;
 const EPHEMERAL_RANGE: u16 = 65535 - EPHEMERAL_START + 1; // 16384
 
-pub fn allocate_ephemeral_port(protocol: u8) -> Option<u16> {
-    let table = port_table().lock();
+/// Allocate an ephemeral port and insert `sock` into the port table atomically.
+/// Returns the allocated port, or None if all ports are in use.
+pub fn allocate_ephemeral_port(protocol: u8, sock: Arc<Mutex<Socket>>) -> Option<u16> {
+    let mut table = port_table().lock();
     for _ in 0..1000 {
         let raw = EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed);
         let port = EPHEMERAL_START + (raw % EPHEMERAL_RANGE);
         if !table.contains_key(&(protocol, port)) {
+            table.insert((protocol, port), sock);
             return Some(port);
         }
     }

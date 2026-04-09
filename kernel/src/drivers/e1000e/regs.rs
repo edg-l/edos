@@ -57,8 +57,8 @@ pub const CTRL_EXT: u32 = 0x0018;
 pub const CTRL_EXT_IAME: u32 = 0x0800_0000; // Interrupt Acknowledge Auto-Mask Enable
 pub const EIAC: u32 = 0x00DC; // Extended Interrupt Auto Clear
 pub const IVAR: u32 = 0x00E4; // Interrupt Vector Allocation Register
-// Each field is 8 bits: [2:0]=vector, [3]=valid
-// RXQ0 = bits [7:0], TXQ0 = bits [15:8], OTHER = bits [23:16]
+// Each field is 4 bits: [2:0]=vector, [3]=valid
+// RXQ0 = bits [3:0], TXQ0 = bits [11:8], OTHER = bits [19:16]
 pub const IVAR_VALID: u32 = 0x08; // bit 3 = entry valid
 
 // IMS/ICR bits (legacy)
