@@ -236,7 +236,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                     return !0u64;
                 }
 
-                let segments = conn.lock().build_data_segments(&data);
+                let (segments, bytes_sent) = conn.lock().build_data_segments(&data);
                 if segments.is_empty() {
                     // Window full: return 0 so caller can retry
                     return 0;
@@ -247,7 +247,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 for seg in &segments {
                     let _ = stack.send_ip(remote_ip, ipv4::IpProtocol::Tcp, seg);
                 }
-                count as u64
+                bytes_sent as u64
             } else {
                 // UDP write: send to stored remote_addr
                 let remote = sock.lock().remote_addr;
@@ -1029,12 +1029,29 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                 });
             }
             Some(FileDescriptor::Socket(sock)) => {
+                use crate::net::socket::SOCK_STREAM;
+                use crate::net::tcp::TcpState;
+
                 let s = sock.lock();
                 let entry = &mut fds[idx];
-                if !s.rx_queue.is_empty() {
-                    entry.result.readable = true;
+                if s.sock_type == SOCK_STREAM {
+                    // TCP: check connection rx_buffer and EOF states
+                    if let Some(ref conn) = s.tcp_conn {
+                        let c = conn.lock();
+                        if !c.rx_buffer.is_empty()
+                            || c.state == TcpState::CloseWait
+                            || c.state == TcpState::Closed
+                            || c.state == TcpState::TimeWait
+                        {
+                            entry.result.readable = true;
+                        }
+                    }
+                } else {
+                    // UDP: check rx_queue
+                    if !s.rx_queue.is_empty() {
+                        entry.result.readable = true;
+                    }
                 }
-                // UDP sockets are always writable
                 entry.result.writable = true;
                 if s.closed {
                     entry.result.hangup = true;

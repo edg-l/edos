@@ -32,6 +32,10 @@ pub struct NetStack {
     /// Keyed by (local_addr, remote_addr).
     pub tcp_connections: BTreeMap<(SocketAddr, SocketAddr), Arc<Mutex<TcpConnection>>>,
     ip_id_counter: u16,
+    /// Queued loopback frames waiting to be processed (avoids infinite recursion).
+    loopback_queue: Vec<Vec<u8>>,
+    /// True while we are draining the loopback queue (prevents nested drain).
+    draining_loopback: bool,
 }
 
 impl NetStack {
@@ -45,6 +49,8 @@ impl NetStack {
             ping_waiters: BTreeMap::new(),
             tcp_connections: BTreeMap::new(),
             ip_id_counter: 0,
+            loopback_queue: Vec::new(),
+            draining_loopback: false,
         }
     }
 
@@ -326,7 +332,23 @@ impl NetStack {
         protocol: ipv4::IpProtocol,
         payload: &[u8],
     ) -> Result<(), &'static str> {
-        // Loopback: feed packet back into the stack without hitting the NIC.
+        let result = self.send_ip_inner(dst_ip, protocol, payload);
+
+        // Drain loopback queue at the outermost level only.
+        if !self.draining_loopback {
+            self.drain_loopback();
+        }
+
+        result
+    }
+
+    fn send_ip_inner(
+        &mut self,
+        dst_ip: [u8; 4],
+        protocol: ipv4::IpProtocol,
+        payload: &[u8],
+    ) -> Result<(), &'static str> {
+        // Loopback: queue for deferred processing instead of recursing.
         if dst_ip[0] == 127 || dst_ip == self.local_ip {
             let src_ip = if dst_ip[0] == 127 {
                 dst_ip
@@ -335,7 +357,7 @@ impl NetStack {
             };
             let ip_pkt = ipv4::build(src_ip, dst_ip, protocol, 64, payload);
             let frame = ethernet::build_frame([0; 6], [0; 6], ethernet::EtherType::Ipv4, &ip_pkt);
-            self.handle_rx(&frame);
+            self.loopback_queue.push(frame);
             return Ok(());
         }
 
@@ -356,7 +378,22 @@ impl NetStack {
         }
     }
 
+    fn drain_loopback(&mut self) {
+        self.draining_loopback = true;
+        while let Some(frame) = self.loopback_queue.pop() {
+            self.handle_rx(&frame);
+        }
+        self.draining_loopback = false;
+    }
+
     fn send_arp_request(&mut self, target_ip: [u8; 4]) {
+        log!(
+            "net: arp: requesting {}.{}.{}.{}",
+            target_ip[0],
+            target_ip[1],
+            target_ip[2],
+            target_ip[3]
+        );
         let pkt = arp::ArpPacket {
             htype: 1,      // Ethernet
             ptype: 0x0800, // IPv4

@@ -185,7 +185,8 @@ pub enum TcpState {
 #[derive(Debug, Clone)]
 pub struct RetransmitSegment {
     pub seq: u32,
-    pub data: Vec<u8>, // Full TCP segment (for retransmit)
+    pub payload_len: u32, // Sequence space consumed (payload bytes, or 1 for SYN/FIN)
+    pub data: Vec<u8>,    // Full TCP segment (for retransmit)
     pub sent_at: Instant,
     pub retries: u32,
 }
@@ -447,7 +448,7 @@ impl TcpConnection {
             self.snd_wnd = window;
             // Remove acknowledged segments from retransmit queue
             self.retransmit_queue.retain(|seg| {
-                let seg_end = seg.seq.wrapping_add(seg.data.len() as u32);
+                let seg_end = seg.seq.wrapping_add(seg.payload_len);
                 seq_gt(seg_end, ack_num)
             });
             self.tx_wq.wake_all();
@@ -487,6 +488,7 @@ impl TcpConnection {
         // Add to retransmit queue
         self.retransmit_queue.push(RetransmitSegment {
             seq: self.iss,
+            payload_len: 1, // SYN consumes 1 byte of sequence space
             data: seg.clone(),
             sent_at: Instant::now(),
             retries: 0,
@@ -522,6 +524,7 @@ impl TcpConnection {
         self.snd_nxt = self.snd_nxt.wrapping_add(1); // FIN consumes one seq
         self.retransmit_queue.push(RetransmitSegment {
             seq: fin_seq,
+            payload_len: 1, // FIN consumes 1 byte of sequence space
             data: seg.clone(),
             sent_at: Instant::now(),
             retries: 0,
@@ -530,8 +533,8 @@ impl TcpConnection {
     }
 
     /// Build data segments for transmission. Respects MSS and send window.
-    /// Returns a list of segments to send.
-    pub fn build_data_segments(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+    /// Returns (segments to send, bytes consumed from data).
+    pub fn build_data_segments(&mut self, data: &[u8]) -> (Vec<Vec<u8>>, usize) {
         let mut segments = Vec::new();
         let mut offset = 0;
 
@@ -563,6 +566,7 @@ impl TcpConnection {
 
             self.retransmit_queue.push(RetransmitSegment {
                 seq: self.snd_nxt,
+                payload_len: chunk_size as u32,
                 data: seg.clone(),
                 sent_at: Instant::now(),
                 retries: 0,
@@ -573,7 +577,7 @@ impl TcpConnection {
             segments.push(seg);
         }
 
-        segments
+        (segments, offset)
     }
 
     /// Check retransmit queue for timed-out segments. Returns segments to resend.
