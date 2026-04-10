@@ -40,6 +40,8 @@ pub const ATA_CMD_READ_DMA_EXT: u8 = 0x25;
 pub const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
 pub const ATA_CMD_IDENTIFY: u8 = 0xEC;
 pub const ATA_CMD_PACKET: u8 = 0xA0;
+pub const ATA_CMD_READ_FPDMA_QUEUED: u8 = 0x60;
+pub const ATA_CMD_WRITE_FPDMA_QUEUED: u8 = 0x61;
 pub const ATA_CMD_FLUSH_CACHE: u8 = 0xE7;
 pub const ATA_CMD_FLUSH_CACHE_EXT: u8 = 0xEA;
 pub const ATA_CMD_STANDBY_IMMEDIATE: u8 = 0xE0;
@@ -178,6 +180,55 @@ impl FisRegH2D {
         fis.fis_type = FIS_TYPE_REG_H2D;
         fis.pmport = 1 << 7;
         fis.command = ATA_CMD_STANDBY_IMMEDIATE;
+        fis
+    }
+
+    /// READ FPDMA QUEUED (NCQ read). Tag in count[7:3], sector count in feature.
+    pub fn new_read_fpdma_queued(lba: u64, sectors: u16, tag: u8) -> Self {
+        debug_assert!(tag < 32, "NCQ tag must be 0-31");
+        let mut fis = Self::zeroed();
+        fis.fis_type = FIS_TYPE_REG_H2D;
+        fis.pmport = 1 << 7;
+        fis.command = ATA_CMD_READ_FPDMA_QUEUED;
+        fis.device = 1 << 6; // LBA mode
+
+        // FPDMA: sector count in feature register
+        fis.featurel = (sectors & 0xFF) as u8;
+        fis.featureh = ((sectors >> 8) & 0xFF) as u8;
+
+        // FPDMA: NCQ tag in count register bits 7:3
+        fis.countl = tag << 3;
+
+        fis.lba0 = (lba & 0xFF) as u8;
+        fis.lba1 = ((lba >> 8) & 0xFF) as u8;
+        fis.lba2 = ((lba >> 16) & 0xFF) as u8;
+        fis.lba3 = ((lba >> 24) & 0xFF) as u8;
+        fis.lba4 = ((lba >> 32) & 0xFF) as u8;
+        fis.lba5 = ((lba >> 40) & 0xFF) as u8;
+
+        fis
+    }
+
+    /// WRITE FPDMA QUEUED (NCQ write). Tag in count[7:3], sector count in feature.
+    pub fn new_write_fpdma_queued(lba: u64, sectors: u16, tag: u8) -> Self {
+        debug_assert!(tag < 32, "NCQ tag must be 0-31");
+        let mut fis = Self::zeroed();
+        fis.fis_type = FIS_TYPE_REG_H2D;
+        fis.pmport = 1 << 7;
+        fis.command = ATA_CMD_WRITE_FPDMA_QUEUED;
+        fis.device = 1 << 6; // LBA mode
+
+        fis.featurel = (sectors & 0xFF) as u8;
+        fis.featureh = ((sectors >> 8) & 0xFF) as u8;
+        fis.countl = tag << 3;
+
+        fis.lba0 = (lba & 0xFF) as u8;
+        fis.lba1 = ((lba >> 8) & 0xFF) as u8;
+        fis.lba2 = ((lba >> 16) & 0xFF) as u8;
+        fis.lba3 = ((lba >> 24) & 0xFF) as u8;
+        fis.lba4 = ((lba >> 32) & 0xFF) as u8;
+        fis.lba5 = ((lba >> 40) & 0xFF) as u8;
+
         fis
     }
 

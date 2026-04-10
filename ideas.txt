@@ -17,6 +17,8 @@
   Shell background jobs (&), subshells (()), jobs/wait builtins
 - **Sound** - Intel HDA driver with CORB/RIRB codec commands, BDL DMA ring,
   /dev/dsp device node, userspace `play` command for WAV files
+- **AHCI NCQ** - FPDMA commands (32 concurrent slots), per-slot DMA pools,
+  lock-free slot allocation, mode exclusion for NCQ/non-NCQ coexistence
 
 ## Network Stack Remaining
 
@@ -57,11 +59,12 @@ but needed for a complete real-hardware network stack.
 Second NIC backend. Straightforward now that the stack and e1000e exist.
 Useful for VMs where e1000e emulation is slower than paravirtual.
 
-### AHCI NCQ (Native Command Queuing)
-AHCI supports 32 concurrent commands per port. Currently serialized with one
-slot + port mutex. NCQ would allow multiple in-flight reads/writes with drive
-reordering for optimal seek. Needs per-slot scatter-gather page sets and
-completion tracking. Scatter-gather PRDT is already done.
+### AHCI zero-copy DMA
+Currently AHCI reads/writes copy through intermediate per-slot DMA pool pages
+(248 x 4KB scatter-gather pages per slot). Linux avoids this entirely by building
+PRDT entries that point directly to page cache pages. Requires page-aligned
+buffers from the VFS/page cache layer. Would eliminate the copy-in/copy-out
+overhead and reduce DMA memory usage from ~31MB/port to just the command tables.
 
 ### More userspace tools
 - wget/curl (HTTP client exists, just needs a CLI wrapper)

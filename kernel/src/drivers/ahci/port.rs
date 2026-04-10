@@ -1,5 +1,6 @@
 use core::{
-    ptr::{self},
+    ptr,
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -14,44 +15,84 @@ use crate::{
             fis::FisRegH2D,
             structures::{
                 CMD_HEADER_ATAPI, CMD_HEADER_WRITE, CommandHeader, CommandTable,
-                DeviceIdentifyInfo, HbaFis, HbaPort, MAX_PRDT_ENTRIES, PORT_CMD_CR, PORT_CMD_FR,
-                PORT_CMD_FRE, PORT_CMD_ST, PORT_IS_TFES, PrdtEntry, ScsiInquiry, ScsiRead10,
-                ScsiReadCapacity10,
+                DeviceIdentifyInfo, HbaFis, HbaPort, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE,
+                PORT_CMD_ST, PORT_IS_TFES, PrdtEntry, ScsiInquiry, ScsiRead10, ScsiReadCapacity10,
             },
         },
         dma::{DmaBuffer, DmaRegion, dma},
     },
     log,
-    thread::scheduler::sched,
+    thread::{mutex::BlockingMutex, scheduler::sched, waitqueue::WaitQueue},
 };
 
 const AHCI_CMD_SLOTS: usize = 32;
-const DMA_POOL_PAGES: usize = MAX_PRDT_ENTRIES;
 
-#[expect(unused)]
-#[derive(Debug)]
+/// Number of 4KB pages per command slot for scatter-gather I/O.
+/// 248 pages = 992KB max per command (matches CommandTable PRDT capacity).
+/// With 32 NCQ slots that's ~31MB total per port.
+pub const NCQ_PAGES_PER_SLOT: usize = 248;
+
+/// Per-slot pre-allocated DMA page pool for scatter-gather I/O.
+struct SlotPool {
+    pages: Vec<DmaBuffer>,
+    phys: Vec<PhysAddr>,
+}
+
 pub struct AhciPort {
     pub port_idx: usize,
     pub port_regs: *mut HbaPort,
     pub device_type: DeviceType,
+    pub ncq_enabled: bool,
+    pub ncq_depth: u8,
 
-    // DMA regions
-    pub command_list: DmaRegion<[CommandHeader; AHCI_CMD_SLOTS]>,
-    pub fis_area: DmaRegion<HbaFis>,
-    pub command_tables: [Option<DmaRegion<CommandTable>>; AHCI_CMD_SLOTS],
+    // DMA regions (immutable after init)
+    command_list: DmaRegion<[CommandHeader; AHCI_CMD_SLOTS]>,
+    fis_area: DmaRegion<HbaFis>,
+    command_tables: [Option<DmaRegion<CommandTable>>; AHCI_CMD_SLOTS],
 
-    // Command slot tracking
-    pub free_slots: u32, // Bitmap of free command slots
+    // Per-slot scatter-gather page pools.
+    // For NCQ: ncq_depth slots allocated. For non-NCQ ATA: 1 slot (slot 0).
+    // For ATAPI: empty (ATAPI uses temporary DMA buffers, not scatter pools).
+    slot_pools: Vec<SlotPool>,
 
-    // Pre-allocated pool of 4KB DMA pages for scatter-gather I/O.
-    io_pool: Vec<DmaBuffer>,
-    // Cached physical addresses for each pool page (avoids page table walks per I/O).
-    io_pool_phys: Vec<PhysAddr>,
+    // Slot management -- atomic for lock-free NCQ slot allocation.
+    free_slots: AtomicU32,
+
+    // Brief spinlock for MMIO register writes (SACT + CI read-modify-write).
+    mmio_lock: spin::Mutex<()>,
+
+    // Per-slot waiter TIDs. The interrupt dispatch thread reads these to wake
+    // the correct I/O thread when a command completes. 0 = no waiter.
+    slot_waiters: [AtomicU64; AHCI_CMD_SLOTS],
+
+    // NCQ / non-NCQ mode exclusion (only meaningful when ncq_enabled).
+    //   > 0 : count of in-flight NCQ (FPDMA) commands
+    //    -1 : a legacy (non-NCQ) command is active
+    //     0 : idle
+    mode: AtomicI32,
+    mode_waitq: WaitQueue,
+
+    // Blocks when all NCQ slots are in use.
+    slot_waitq: WaitQueue,
+
+    // Guards restart_port so only one thread runs it after NCQ error.
+    restarting: AtomicBool,
+
+    // Serializes legacy (non-NCQ) commands among each other.
+    legacy_lock: BlockingMutex<()>,
 }
 
 unsafe impl Send for AhciPort {}
+// Safety: all mutable state is behind atomics, spin::Mutex, BlockingMutex, or WaitQueue.
+// Per-slot DMA regions (command_tables, slot_pools) are accessed only by the thread
+// that owns the slot (guaranteed by atomic free_slots allocation). The command_list
+// DMA region is written per-slot (disjoint offsets) and is NO_CACHE mapped.
+unsafe impl Sync for AhciPort {}
 
-#[expect(unused)]
+// ---------------------------------------------------------------------------
+// Construction and initialization
+// ---------------------------------------------------------------------------
+
 impl AhciPort {
     pub fn new(
         port_idx: usize,
@@ -60,14 +101,11 @@ impl AhciPort {
     ) -> Result<Self, AhciError> {
         log!("Initializing AHCI port {}", port_idx);
 
-        // Stop the port first
         Self::stop_port(port_regs)?;
 
-        // Allocate DMA regions
         let command_list = dma().allocate()?;
         let fis_area = dma().allocate()?;
 
-        // Set up the port registers
         unsafe {
             ptr::write_volatile(
                 &raw mut (*port_regs).clb,
@@ -89,205 +127,968 @@ impl AhciPort {
             // Clear interrupt status
             ptr::write_volatile(&raw mut (*port_regs).is, 0xFFFFFFFF);
 
-            // Enable FIS receive
+            // Enable FIS receive + start port
             let mut cmd = ptr::read_volatile(&raw const (*port_regs).cmd);
             cmd |= PORT_CMD_FRE;
             ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
-
-            // Start the port
             cmd |= PORT_CMD_ST;
             ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
         }
 
         unsafe {
-            // Enable specific interrupts we care about
-            let ie = (1 << 0) |  // DHRS - Device to Host Register FIS
-             (1 << 2) |  // DSS - DMA Setup FIS
-             (1 << 5) |  // DPS - Descriptor Processed
-             (1 << 30); // TFES - Task File Error
-
+            // Enable interrupts: DHRS, DSS, SDBS (NCQ completion), DPS, TFES.
+            let ie = (1 << 0)   // DHRS  - Device to Host Register FIS
+                   | (1 << 2)   // DSS   - DMA Setup FIS
+                   | (1 << 3)   // SDBS  - Set Device Bits FIS (NCQ completion)
+                   | (1 << 5)   // DPS   - Descriptor Processed
+                   | (1 << 30); // TFES  - Task File Error
             ptr::write_volatile(&raw mut (*port_regs).ie, ie);
         }
 
-        log!("Port {} initialized successfully", port_idx);
+        // Pre-allocate command table for slot 0 (needed for IDENTIFY during init).
+        let mut command_tables: [Option<DmaRegion<CommandTable>>; AHCI_CMD_SLOTS] =
+            [const { None }; AHCI_CMD_SLOTS];
+        command_tables[0] = Some(dma().allocate()?);
 
-        let mut io_pool = Vec::with_capacity(DMA_POOL_PAGES);
-        let mut io_pool_phys = Vec::with_capacity(DMA_POOL_PAGES);
-        for _ in 0..DMA_POOL_PAGES {
-            let buf = dma().allocate_sized(4096)?;
-            io_pool_phys.push(buf.phys_addr());
-            io_pool.push(buf);
-        }
+        log!("Port {} initialized successfully", port_idx);
 
         Ok(Self {
             port_idx,
             port_regs,
             device_type,
+            ncq_enabled: false,
+            ncq_depth: 0,
             command_list,
             fis_area,
-            command_tables: [const { None }; AHCI_CMD_SLOTS],
-            free_slots: 0xFFFFFFFF, // All slots initially free
-            io_pool,
-            io_pool_phys,
+            command_tables,
+            slot_pools: Vec::new(),
+            free_slots: AtomicU32::new(1), // Only slot 0 available until init_io_pools
+            mmio_lock: spin::Mutex::new(()),
+            slot_waiters: [const { AtomicU64::new(0) }; AHCI_CMD_SLOTS],
+            mode: AtomicI32::new(0),
+            mode_waitq: WaitQueue::new(),
+            slot_waitq: WaitQueue::new(),
+            restarting: AtomicBool::new(false),
+            legacy_lock: BlockingMutex::new(()),
         })
+    }
+
+    /// Post-identify initialization: allocate per-slot DMA pools and command tables.
+    ///
+    /// `ncq_depth`: effective NCQ queue depth (min of HBA and device). 0 if no NCQ.
+    /// Must be called exactly once, before the port is shared via Arc.
+    pub fn init_io_pools(&mut self, ncq_depth: u8) -> Result<(), AhciError> {
+        let use_ncq = ncq_depth > 0 && self.device_type == DeviceType::Ata;
+        self.ncq_depth = if use_ncq { ncq_depth } else { 0 };
+        self.ncq_enabled = use_ncq;
+
+        let num_slots = if use_ncq {
+            ncq_depth as usize
+        } else if self.device_type == DeviceType::Ata {
+            1 // Non-NCQ ATA: 1 slot for scatter-gather reads
+        } else {
+            0 // ATAPI: no scatter-gather pools
+        };
+
+        // Pre-allocate command tables and DMA page pools for all usable slots.
+        for slot in 0..num_slots {
+            if self.command_tables[slot].is_none() {
+                self.command_tables[slot] = Some(dma().allocate()?);
+            }
+
+            let mut pages = Vec::with_capacity(NCQ_PAGES_PER_SLOT);
+            let mut phys = Vec::with_capacity(NCQ_PAGES_PER_SLOT);
+            for _ in 0..NCQ_PAGES_PER_SLOT {
+                let buf = dma().allocate_sized(4096)?;
+                phys.push(buf.phys_addr());
+                pages.push(buf);
+            }
+            self.slot_pools.push(SlotPool { pages, phys });
+        }
+
+        // Set free_slots to include all usable slots.
+        let mask = if num_slots > 0 {
+            if num_slots >= 32 {
+                0xFFFF_FFFF
+            } else {
+                (1u32 << num_slots) - 1
+            }
+        } else {
+            // ATAPI: slot 0 only (for control commands)
+            1
+        };
+        self.free_slots.store(mask, Ordering::Release);
+
+        if use_ncq {
+            log!(
+                "Port {}: NCQ enabled, depth {}, {}MB DMA pools",
+                self.port_idx,
+                ncq_depth,
+                (num_slots * NCQ_PAGES_PER_SLOT * 4096) / (1024 * 1024)
+            );
+        } else if self.device_type == DeviceType::Ata {
+            log!(
+                "Port {}: legacy DMA, 1 slot, {}KB pool",
+                self.port_idx,
+                NCQ_PAGES_PER_SLOT * 4
+            );
+        }
+
+        Ok(())
     }
 
     fn stop_port(port_regs: *mut HbaPort) -> Result<(), AhciError> {
         unsafe {
-            // Clear ST (start) bit if set
             let mut cmd = ptr::read_volatile(&raw const (*port_regs).cmd);
             if cmd & PORT_CMD_ST != 0 {
                 cmd &= !PORT_CMD_ST;
                 ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
 
-                // Wait for CR (command list running) to clear
                 let start = crate::timer::Instant::now();
                 while ptr::read_volatile(&raw const (*port_regs).cmd) & PORT_CMD_CR != 0 {
                     if start.elapsed().as_millis() > 500 {
                         return Err(AhciError::CommandTimeout);
                     }
-                    sched().thread_sleep(core::time::Duration::from_millis(1));
+                    sched().thread_sleep(Duration::from_millis(1));
                 }
             }
 
-            // Clear FRE (FIS receive enable) if set
             cmd = ptr::read_volatile(&raw const (*port_regs).cmd);
             if cmd & PORT_CMD_FRE != 0 {
                 cmd &= !PORT_CMD_FRE;
                 ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
 
-                // Wait for FR (FIS receive running) to clear
                 let start = crate::timer::Instant::now();
                 while ptr::read_volatile(&raw const (*port_regs).cmd) & PORT_CMD_FR != 0 {
                     if start.elapsed().as_millis() > 500 {
                         return Err(AhciError::CommandTimeout);
                     }
-                    sched().thread_sleep(core::time::Duration::from_millis(1));
+                    sched().thread_sleep(Duration::from_millis(1));
                 }
             }
         }
-
         Ok(())
     }
 
-    pub fn allocate_command_slot(&mut self) -> Option<usize> {
-        if self.free_slots == 0 {
-            return None;
-        }
+    /// Restart port after error recovery. Re-programs CLB/FB from existing DMA regions.
+    fn restart_port(&self) -> Result<(), AhciError> {
+        Self::stop_port(self.port_regs)?;
+        unsafe {
+            // Clear error state
+            ptr::write_volatile(&raw mut (*self.port_regs).serr, 0xFFFFFFFF);
+            ptr::write_volatile(&raw mut (*self.port_regs).is, 0xFFFFFFFF);
 
-        let slot = self.free_slots.trailing_zeros() as usize;
-        self.free_slots &= !(1 << slot);
-        Some(slot)
-    }
+            // Re-program CLB/FB (already allocated)
+            ptr::write_volatile(
+                &raw mut (*self.port_regs).clb,
+                self.command_list.phys_addr().as_u64() as u32,
+            );
+            ptr::write_volatile(
+                &raw mut (*self.port_regs).clbu,
+                (self.command_list.phys_addr().as_u64() >> 32) as u32,
+            );
+            ptr::write_volatile(
+                &raw mut (*self.port_regs).fb,
+                self.fis_area.phys_addr().as_u64() as u32,
+            );
+            ptr::write_volatile(
+                &raw mut (*self.port_regs).fbu,
+                (self.fis_area.phys_addr().as_u64() >> 32) as u32,
+            );
 
-    pub fn free_command_slot(&mut self, slot: usize) {
-        if slot < AHCI_CMD_SLOTS {
-            self.free_slots |= 1 << slot;
+            // Enable FIS receive + start port
+            let mut cmd = ptr::read_volatile(&raw const (*self.port_regs).cmd);
+            cmd |= PORT_CMD_FRE;
+            ptr::write_volatile(&raw mut (*self.port_regs).cmd, cmd);
+            cmd |= PORT_CMD_ST;
+            ptr::write_volatile(&raw mut (*self.port_regs).cmd, cmd);
         }
+        Ok(())
     }
 
     pub fn set_device_type(&mut self, device_type: DeviceType) {
         self.device_type = device_type;
     }
+}
 
-    /// Execute ATAPI command (SCSI packet command)
-    fn execute_atapi_command(
-        &mut self,
-        scsi_cmd: &[u8],
-        buffer_addr: PhysAddr,
-        buffer_size: usize,
-        timeout: Duration,
-    ) -> Result<(), AhciError> {
-        let slot = self
-            .allocate_command_slot()
-            .ok_or(AhciError::PortNotReady)?;
+// ---------------------------------------------------------------------------
+// Slot management (lock-free via atomics)
+// ---------------------------------------------------------------------------
 
-        // Setup ATAPI command table
-        self.setup_atapi_command_table(slot, scsi_cmd, buffer_addr, buffer_size)?;
-
-        // Issue and wait - ATAPI needs special command header flags
-        self.issue_command(slot, CMD_HEADER_ATAPI, if buffer_size > 0 { 1 } else { 0 })?;
-        let result = self.wait_for_command_completion(slot, timeout);
-
-        // Always free the slot
-        self.free_command_slot(slot);
-
-        result
+impl AhciPort {
+    /// Allocate a free command slot. Returns None if all slots are in use.
+    fn allocate_slot(&self) -> Option<usize> {
+        loop {
+            let slots = self.free_slots.load(Ordering::Acquire);
+            if slots == 0 {
+                return None;
+            }
+            let slot = slots.trailing_zeros() as usize;
+            if self
+                .free_slots
+                .compare_exchange_weak(
+                    slots,
+                    slots & !(1 << slot),
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return Some(slot);
+            }
+        }
     }
 
-    /// Setup ATAPI command table with PACKET FIS and SCSI CDB
-    fn setup_atapi_command_table(
-        &mut self,
+    /// Allocate a slot, blocking if all are in use.
+    fn allocate_slot_blocking(&self) -> usize {
+        loop {
+            if let Some(slot) = self.allocate_slot() {
+                return slot;
+            }
+            self.slot_waitq
+                .wait_until(|| self.free_slots.load(Ordering::Acquire) != 0);
+        }
+    }
+
+    /// Return a slot to the free pool.
+    fn free_slot(&self, slot: usize) {
+        self.free_slots.fetch_or(1 << slot, Ordering::Release);
+        self.slot_waitq.wake_one();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NCQ / non-NCQ mode exclusion
+// ---------------------------------------------------------------------------
+
+impl AhciPort {
+    /// Enter NCQ mode (increment in-flight counter). Blocks if legacy mode is active.
+    fn enter_ncq_mode(&self) {
+        loop {
+            let current = self.mode.load(Ordering::Acquire);
+            if current >= 0 {
+                if self
+                    .mode
+                    .compare_exchange_weak(
+                        current,
+                        current + 1,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    return;
+                }
+                continue;
+            }
+            // Legacy mode active (-1), wait for it to finish.
+            self.mode_waitq
+                .wait_until(|| self.mode.load(Ordering::Acquire) >= 0);
+        }
+    }
+
+    /// Exit NCQ mode (decrement in-flight counter). Wakes legacy waiters if last.
+    fn exit_ncq_mode(&self) {
+        let prev = self.mode.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(prev > 0);
+        if prev == 1 {
+            // Last NCQ command finished, wake any thread waiting for legacy mode.
+            self.mode_waitq.wake_all();
+        }
+    }
+
+    /// Enter legacy mode (set mode to -1). Blocks until all NCQ commands drain.
+    fn enter_legacy_mode(&self) {
+        loop {
+            if self
+                .mode
+                .compare_exchange_weak(0, -1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+            // NCQ or other legacy active, wait.
+            self.mode_waitq
+                .wait_until(|| self.mode.load(Ordering::Acquire) == 0);
+        }
+    }
+
+    /// Exit legacy mode. Wakes NCQ waiters.
+    fn exit_legacy_mode(&self) {
+        self.mode.store(0, Ordering::Release);
+        self.mode_waitq.wake_all();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command setup
+// ---------------------------------------------------------------------------
+
+impl AhciPort {
+    /// Set up a command table with FIS and a single PRDT entry (for IDENTIFY, FLUSH, etc.).
+    fn setup_command_table(
+        &self,
         slot: usize,
-        scsi_cmd: &[u8],
+        fis: &FisRegH2D,
         buffer_addr: PhysAddr,
         buffer_size: usize,
     ) -> Result<(), AhciError> {
-        if slot >= AHCI_CMD_SLOTS {
-            return Err(AhciError::InvalidSlot);
-        }
+        let table_ref = self.command_tables[slot]
+            .as_ref()
+            .ok_or(AhciError::InvalidSlot)?;
 
-        if scsi_cmd.len() > 16 {
-            return Err(AhciError::IoError); // ATAPI command too long
-        }
-
-        // Allocate command table if needed
-        if self.command_tables[slot].is_none() {
-            self.command_tables[slot] = Some(dma().allocate()?);
-        }
+        let has_data = buffer_size > 0;
 
         unsafe {
-            let table = self.command_tables[slot]
-                .as_ref()
-                .expect("failed to get slot table")
-                .get();
+            let table = table_ref.get();
             table.write(core::mem::zeroed());
             let table = &mut *table;
 
-            // For ATAPI, we need both CFIS (PACKET command) and ACMD (SCSI command)
-
-            // 1. Setup Command FIS with PACKET command
-            let packet_fis = FisRegH2D::new_atapi_packet(buffer_size as u16);
-            let fis_bytes = bytemuck::bytes_of(&packet_fis);
+            let fis_bytes = bytemuck::bytes_of(fis);
             table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
 
-            // 2. Setup ATAPI Command (SCSI CDB) in ACMD field
-            table.acmd[..scsi_cmd.len()].copy_from_slice(scsi_cmd);
-
-            // 3. Setup PRDT (Physical Region Descriptor Table) if we have data transfer
-            if buffer_size > 0 {
-                let prdt_entry = PrdtEntry {
+            if has_data {
+                table.prdt[0] = PrdtEntry {
                     dba: buffer_addr.as_u64() as u32,
                     dbau: (buffer_addr.as_u64() >> 32) as u32,
                     reserved: 0,
-                    dbc: (buffer_size - 1) as u32, // Byte count - 1 (0-based)
+                    dbc: (buffer_size - 1) as u32,
                 };
-
-                ptr::write_volatile(&raw mut (*table).prdt[0], prdt_entry);
             }
         }
 
         Ok(())
     }
 
-    /// Execute SCSI INQUIRY command and convert to DeviceIdentifyInfo
-    fn execute_atapi_inquiry_as_identify(&mut self) -> Result<DeviceIdentifyInfo, AhciError> {
+    /// Set up a command table with scatter-gather PRDT entries from the per-slot pool.
+    fn setup_scatter_command(
+        &self,
+        slot: usize,
+        fis: &FisRegH2D,
+        total_bytes: usize,
+    ) -> Result<(), AhciError> {
+        let num_entries = total_bytes.div_ceil(4096);
+        debug_assert!(num_entries <= NCQ_PAGES_PER_SLOT);
+        debug_assert!(slot < self.slot_pools.len(), "slot {slot} has no pool");
+
+        let table_ref = self.command_tables[slot]
+            .as_ref()
+            .ok_or(AhciError::InvalidSlot)?;
+
+        unsafe {
+            let table = table_ref.get();
+            table.write(core::mem::zeroed());
+            let table = &mut *table;
+
+            let fis_bytes = bytemuck::bytes_of(fis);
+            table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
+
+            let pool = &self.slot_pools[slot];
+            let mut remaining = total_bytes;
+            for i in 0..num_entries {
+                let phys = pool.phys[i];
+                let chunk = remaining.min(4096);
+                table.prdt[i] = PrdtEntry {
+                    dba: phys.as_u64() as u32,
+                    dbau: (phys.as_u64() >> 32) as u32,
+                    reserved: 0,
+                    dbc: (chunk as u32) - 1,
+                };
+                remaining -= chunk;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Set up an ATAPI command table with PACKET FIS and SCSI CDB.
+    fn setup_atapi_command_table(
+        &self,
+        slot: usize,
+        scsi_cmd: &[u8],
+        buffer_addr: PhysAddr,
+        buffer_size: usize,
+    ) -> Result<(), AhciError> {
+        if scsi_cmd.len() > 16 {
+            return Err(AhciError::IoError);
+        }
+
+        let table_ref = self.command_tables[slot]
+            .as_ref()
+            .ok_or(AhciError::InvalidSlot)?;
+
+        unsafe {
+            let table = table_ref.get();
+            table.write(core::mem::zeroed());
+            let table = &mut *table;
+
+            let packet_fis = FisRegH2D::new_atapi_packet(buffer_size as u16);
+            let fis_bytes = bytemuck::bytes_of(&packet_fis);
+            table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
+
+            table.acmd[..scsi_cmd.len()].copy_from_slice(scsi_cmd);
+
+            if buffer_size > 0 {
+                table.prdt[0] = PrdtEntry {
+                    dba: buffer_addr.as_u64() as u32,
+                    dbau: (buffer_addr.as_u64() >> 32) as u32,
+                    reserved: 0,
+                    dbc: (buffer_size - 1) as u32,
+                };
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command issue and completion
+// ---------------------------------------------------------------------------
+
+impl AhciPort {
+    /// Write command header and issue a non-NCQ command (CI only).
+    fn issue_command(&self, slot: usize, flags: u16, prdtl: u16) -> Result<(), AhciError> {
+        let table_ref = self.command_tables[slot]
+            .as_ref()
+            .ok_or(AhciError::InvalidSlot)?;
+
+        // Write command header via raw pointer to avoid &mut aliasing over the full array.
+        unsafe {
+            let header = &raw mut (*self.command_list.get())[slot];
+            ptr::write_volatile(&raw mut (*header).flags, 5 | flags);
+            ptr::write_volatile(&raw mut (*header).prdtl, prdtl);
+            ptr::write_volatile(&raw mut (*header).prdbc, 0);
+            ptr::write_volatile(
+                &raw mut (*header).ctba,
+                table_ref.phys_addr().as_u64() as u32,
+            );
+            ptr::write_volatile(
+                &raw mut (*header).ctbau,
+                (table_ref.phys_addr().as_u64() >> 32) as u32,
+            );
+            ptr::write_volatile(&raw mut (*header).reserved, [0; 4]);
+        }
+
+        // Issue: write CI bit (read-modify-write under mmio_lock).
+        let _lock = self.mmio_lock.lock();
+        unsafe {
+            let ci = ptr::read_volatile(&raw const (*self.port_regs).ci);
+            ptr::write_volatile(&raw mut (*self.port_regs).ci, ci | (1 << slot));
+        }
+
+        Ok(())
+    }
+
+    /// Write command header and issue an NCQ (FPDMA) command (SACT then CI).
+    fn issue_ncq_command(&self, slot: usize, flags: u16, prdtl: u16) -> Result<(), AhciError> {
+        let table_ref = self.command_tables[slot]
+            .as_ref()
+            .ok_or(AhciError::InvalidSlot)?;
+
+        unsafe {
+            let header = &raw mut (*self.command_list.get())[slot];
+            ptr::write_volatile(&raw mut (*header).flags, 5 | flags);
+            ptr::write_volatile(&raw mut (*header).prdtl, prdtl);
+            ptr::write_volatile(&raw mut (*header).prdbc, 0);
+            ptr::write_volatile(
+                &raw mut (*header).ctba,
+                table_ref.phys_addr().as_u64() as u32,
+            );
+            ptr::write_volatile(
+                &raw mut (*header).ctbau,
+                (table_ref.phys_addr().as_u64() >> 32) as u32,
+            );
+            ptr::write_volatile(&raw mut (*header).reserved, [0; 4]);
+        }
+
+        // Issue: SACT MUST be written before CI for NCQ commands.
+        let _lock = self.mmio_lock.lock();
+        unsafe {
+            let sact = ptr::read_volatile(&raw const (*self.port_regs).sact);
+            ptr::write_volatile(&raw mut (*self.port_regs).sact, sact | (1 << slot));
+            let ci = ptr::read_volatile(&raw const (*self.port_regs).ci);
+            ptr::write_volatile(&raw mut (*self.port_regs).ci, ci | (1 << slot));
+        }
+
+        Ok(())
+    }
+
+    /// Wait for a non-NCQ command to complete (CI bit clears).
+    fn wait_for_completion(&self, slot: usize, timeout: Duration) -> Result<(), AhciError> {
+        let start = crate::timer::Instant::now();
+        let port_regs = self.port_regs;
+
+        loop {
+            let ci = unsafe { ptr::read_volatile(&raw const (*port_regs).ci) };
+            if ci & (1 << slot) == 0 {
+                return Ok(());
+            }
+
+            let is = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
+            if is & PORT_IS_TFES != 0 {
+                // Don't clear port IS here; the dispatch thread handles it.
+                let tfd = unsafe { ptr::read_volatile(&raw const (*port_regs).tfd) };
+                log!(
+                    "AHCI port {}: Command error - Status: {:#x}, Error: {:#x}",
+                    self.port_idx,
+                    tfd & 0xFF,
+                    (tfd >> 8) & 0xFF
+                );
+                return Err(AhciError::IoError);
+            }
+
+            if start.elapsed() >= timeout {
+                log!(
+                    "AHCI port {}: Command timeout on slot {}",
+                    self.port_idx,
+                    slot
+                );
+                return Err(AhciError::CommandTimeout);
+            }
+
+            sched().thread_park_while(|| {
+                let ci = unsafe { ptr::read_volatile(&raw const (*port_regs).ci) };
+                let is = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
+                ci & (1 << slot) != 0 && is & PORT_IS_TFES == 0 && start.elapsed() < timeout
+            });
+        }
+    }
+
+    /// Wait for an NCQ command to complete (SACT bit clears).
+    fn wait_for_ncq_completion(&self, slot: usize, timeout: Duration) -> Result<(), AhciError> {
+        let start = crate::timer::Instant::now();
+        let port_regs = self.port_regs;
+
+        loop {
+            let sact = unsafe { ptr::read_volatile(&raw const (*port_regs).sact) };
+            if sact & (1 << slot) == 0 {
+                return Ok(());
+            }
+
+            let is = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
+            if is & PORT_IS_TFES != 0 {
+                // Don't clear port IS here; the dispatch thread handles it.
+                let tfd = unsafe { ptr::read_volatile(&raw const (*port_regs).tfd) };
+                log!(
+                    "AHCI port {}: NCQ error on slot {} - Status: {:#x}, Error: {:#x}",
+                    self.port_idx,
+                    slot,
+                    tfd & 0xFF,
+                    (tfd >> 8) & 0xFF
+                );
+                // NCQ error aborts ALL in-flight commands. Wake other waiters
+                // so they observe the error and return IoError.
+                self.wake_all_slot_waiters();
+                // Only one thread runs restart_port; others just return the error.
+                // Wait for all other NCQ threads to exit before restarting so no
+                // thread issues a command to a stopped port.
+                if self
+                    .restarting
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    // mode reaches 0 after all threads (including us) call exit_ncq_mode.
+                    // We haven't exited yet, so wait for mode == 1 (just us left).
+                    self.mode_waitq
+                        .wait_until(|| self.mode.load(Ordering::Acquire) <= 1);
+                    let _ = self.restart_port();
+                    self.restarting.store(false, Ordering::Release);
+                }
+                return Err(AhciError::IoError);
+            }
+
+            if start.elapsed() >= timeout {
+                log!("AHCI port {}: NCQ timeout on slot {}", self.port_idx, slot);
+                return Err(AhciError::CommandTimeout);
+            }
+
+            sched().thread_park_while(|| {
+                let sact = unsafe { ptr::read_volatile(&raw const (*port_regs).sact) };
+                let is = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
+                sact & (1 << slot) != 0 && is & PORT_IS_TFES == 0 && start.elapsed() < timeout
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NCQ (FPDMA) read / write
+// ---------------------------------------------------------------------------
+
+impl AhciPort {
+    /// Read sectors using NCQ (READ FPDMA QUEUED). Concurrent-safe via &self.
+    fn ncq_read(&self, lba: u64, buffer: &mut [u8], sectors: u16) -> Result<(), AhciError> {
+        if sectors == 0 {
+            return Ok(());
+        }
+        let expected_size = sectors as usize * 512;
+        if buffer.len() < expected_size {
+            return Err(AhciError::IoError);
+        }
+        let num_pages = expected_size.div_ceil(4096);
+        if num_pages > NCQ_PAGES_PER_SLOT {
+            return Err(AhciError::IoError);
+        }
+
+        self.enter_ncq_mode();
+
+        let slot = self.allocate_slot_blocking();
+        let tid = sched().current_thread().unwrap().id;
+        self.slot_waiters[slot].store(tid.0, Ordering::Release);
+
+        let result = (|| -> Result<(), AhciError> {
+            self.setup_scatter_command(
+                slot,
+                &FisRegH2D::new_read_fpdma_queued(lba, sectors, slot as u8),
+                expected_size,
+            )?;
+
+            self.issue_ncq_command(slot, 0, num_pages as u16)?;
+            self.wait_for_ncq_completion(slot, Duration::from_secs(5))?;
+
+            // Copy from per-slot pool pages to caller buffer.
+            let pool = &self.slot_pools[slot];
+            let mut offset = 0;
+            for i in 0..num_pages {
+                let copy_len = (expected_size - offset).min(4096);
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        pool.pages[i].as_ptr(),
+                        buffer.as_mut_ptr().add(offset),
+                        copy_len,
+                    );
+                }
+                offset += copy_len;
+            }
+            Ok(())
+        })();
+
+        self.slot_waiters[slot].store(0, Ordering::Release);
+        self.free_slot(slot);
+        self.exit_ncq_mode();
+
+        result
+    }
+
+    /// Write sectors using NCQ (WRITE FPDMA QUEUED). Concurrent-safe via &self.
+    fn ncq_write(&self, lba: u64, buffer: &[u8], sectors: u16) -> Result<(), AhciError> {
+        if sectors == 0 {
+            return Ok(());
+        }
+        let expected_size = sectors as usize * 512;
+        if buffer.len() < expected_size {
+            return Err(AhciError::IoError);
+        }
+        let num_pages = expected_size.div_ceil(4096);
+        if num_pages > NCQ_PAGES_PER_SLOT {
+            return Err(AhciError::IoError);
+        }
+
+        self.enter_ncq_mode();
+
+        let slot = self.allocate_slot_blocking();
+        let tid = sched().current_thread().unwrap().id;
+        self.slot_waiters[slot].store(tid.0, Ordering::Release);
+
+        let result = (|| -> Result<(), AhciError> {
+            // Copy from caller buffer to per-slot pool pages.
+            let pool = &self.slot_pools[slot];
+            let mut offset = 0;
+            for i in 0..num_pages {
+                let copy_len = (expected_size - offset).min(4096);
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        buffer.as_ptr().add(offset),
+                        pool.pages[i].as_ptr(),
+                        copy_len,
+                    );
+                }
+                offset += copy_len;
+            }
+
+            self.setup_scatter_command(
+                slot,
+                &FisRegH2D::new_write_fpdma_queued(lba, sectors, slot as u8),
+                expected_size,
+            )?;
+
+            self.issue_ncq_command(slot, CMD_HEADER_WRITE, num_pages as u16)?;
+            self.wait_for_ncq_completion(slot, Duration::from_secs(5))
+        })();
+
+        self.slot_waiters[slot].store(0, Ordering::Release);
+        self.free_slot(slot);
+        self.exit_ncq_mode();
+
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy (non-NCQ) ATA read / write -- serialized by legacy_lock
+// ---------------------------------------------------------------------------
+
+impl AhciPort {
+    /// Read sectors using legacy DMA EXT with scatter-gather. Serialized.
+    fn legacy_ata_read(&self, lba: u64, buffer: &mut [u8], sectors: u16) -> Result<(), AhciError> {
+        if sectors == 0 {
+            return Ok(());
+        }
+        let expected_size = sectors as usize * 512;
+        if buffer.len() < expected_size {
+            return Err(AhciError::IoError);
+        }
+        let num_pages = expected_size.div_ceil(4096);
+        if num_pages > NCQ_PAGES_PER_SLOT {
+            return Err(AhciError::IoError);
+        }
+
+        let _guard = self.legacy_lock.lock();
+
+        let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
+        let tid = sched().current_thread().unwrap().id;
+        self.slot_waiters[slot].store(tid.0, Ordering::Release);
+
+        let result = (|| -> Result<(), AhciError> {
+            self.setup_scatter_command(
+                slot,
+                &FisRegH2D::new_read_dma_ext(lba, sectors),
+                expected_size,
+            )?;
+
+            self.issue_command(slot, 0, num_pages as u16)?;
+            self.wait_for_completion(slot, Duration::from_secs(5))?;
+
+            let pool = &self.slot_pools[slot];
+            let mut offset = 0;
+            for i in 0..num_pages {
+                let copy_len = (expected_size - offset).min(4096);
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        pool.pages[i].as_ptr(),
+                        buffer.as_mut_ptr().add(offset),
+                        copy_len,
+                    );
+                }
+                offset += copy_len;
+            }
+            Ok(())
+        })();
+
+        self.slot_waiters[slot].store(0, Ordering::Release);
+        self.free_slot(slot);
+
+        result
+    }
+
+    /// Write sectors using legacy DMA EXT with scatter-gather. Serialized.
+    fn legacy_ata_write(&self, lba: u64, buffer: &[u8], sectors: u16) -> Result<(), AhciError> {
+        if sectors == 0 {
+            return Ok(());
+        }
+        let expected_size = sectors as usize * 512;
+        if buffer.len() < expected_size {
+            return Err(AhciError::IoError);
+        }
+        let num_pages = expected_size.div_ceil(4096);
+        if num_pages > NCQ_PAGES_PER_SLOT {
+            return Err(AhciError::IoError);
+        }
+
+        let _guard = self.legacy_lock.lock();
+
+        let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
+        let tid = sched().current_thread().unwrap().id;
+        self.slot_waiters[slot].store(tid.0, Ordering::Release);
+
+        let result = (|| -> Result<(), AhciError> {
+            let pool = &self.slot_pools[slot];
+            let mut offset = 0;
+            for i in 0..num_pages {
+                let copy_len = (expected_size - offset).min(4096);
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        buffer.as_ptr().add(offset),
+                        pool.pages[i].as_ptr(),
+                        copy_len,
+                    );
+                }
+                offset += copy_len;
+            }
+
+            self.setup_scatter_command(
+                slot,
+                &FisRegH2D::new_write_dma_ext(lba, sectors),
+                expected_size,
+            )?;
+
+            self.issue_command(slot, CMD_HEADER_WRITE, num_pages as u16)?;
+            self.wait_for_completion(slot, Duration::from_secs(5))
+        })();
+
+        self.slot_waiters[slot].store(0, Ordering::Release);
+        self.free_slot(slot);
+
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Non-NCQ command execution (IDENTIFY, FLUSH, etc.)
+// ---------------------------------------------------------------------------
+
+impl AhciPort {
+    /// Execute a non-NCQ command with a single PRDT entry. Used for IDENTIFY and FLUSH.
+    /// Serialized by legacy_lock (caller must hold it for NCQ-enabled ports).
+    fn execute_command(
+        &self,
+        fis: &FisRegH2D,
+        buffer_addr: PhysAddr,
+        buffer_size: usize,
+        flags: u16,
+        timeout: Duration,
+    ) -> Result<(), AhciError> {
+        let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
+        let tid = sched().current_thread().unwrap().id;
+        self.slot_waiters[slot].store(tid.0, Ordering::Release);
+
+        let result = (|| -> Result<(), AhciError> {
+            self.setup_command_table(slot, fis, buffer_addr, buffer_size)?;
+            let prdtl = if buffer_size > 0 { 1 } else { 0 };
+            self.issue_command(slot, flags, prdtl)?;
+            self.wait_for_completion(slot, timeout)
+        })();
+
+        self.slot_waiters[slot].store(0, Ordering::Release);
+        self.free_slot(slot);
+
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// High-level dispatch (public API)
+// ---------------------------------------------------------------------------
+
+impl AhciPort {
+    /// Read sectors from the device. Dispatches to NCQ, legacy ATA, or ATAPI.
+    pub fn read_sectors(&self, lba: u64, buffer: &mut [u8], sectors: u16) -> Result<(), AhciError> {
+        match self.device_type {
+            DeviceType::Ata if self.ncq_enabled => self.ncq_read(lba, buffer, sectors),
+            DeviceType::Ata => self.legacy_ata_read(lba, buffer, sectors),
+            DeviceType::Atapi => {
+                let _guard = self.legacy_lock.lock();
+                self.atapi_read(lba, buffer, sectors)
+            }
+        }
+    }
+
+    /// Write sectors to the device. Dispatches to NCQ, legacy ATA, or ATAPI.
+    pub fn write_sectors(&self, lba: u64, buffer: &[u8], sectors: u16) -> Result<(), AhciError> {
+        match self.device_type {
+            DeviceType::Ata if self.ncq_enabled => self.ncq_write(lba, buffer, sectors),
+            DeviceType::Ata => self.legacy_ata_write(lba, buffer, sectors),
+            DeviceType::Atapi => Err(AhciError::ReadOnly),
+        }
+    }
+
+    /// Flush write cache to disk. Drains NCQ before issuing FLUSH CACHE EXT.
+    pub fn flush_cache(&self) -> Result<(), AhciError> {
+        match self.device_type {
+            DeviceType::Ata => {
+                let _guard = self.legacy_lock.lock();
+                if self.ncq_enabled {
+                    self.enter_legacy_mode();
+                }
+                let result = self.execute_command(
+                    &FisRegH2D::new_flush_cache(),
+                    PhysAddr::zero(),
+                    0,
+                    0,
+                    Duration::from_secs(5),
+                );
+                if self.ncq_enabled {
+                    self.exit_legacy_mode();
+                }
+                result
+            }
+            DeviceType::Atapi => Ok(()),
+        }
+    }
+
+    /// Issue IDENTIFY DEVICE. Called during init only (&mut self available).
+    pub fn identify_device(&mut self) -> Result<DeviceIdentifyInfo, AhciError> {
+        match self.device_type {
+            DeviceType::Ata => self.execute_ata_identify(),
+            DeviceType::Atapi => self.execute_atapi_inquiry_as_identify(),
+        }
+    }
+
+    fn execute_ata_identify(&self) -> Result<DeviceIdentifyInfo, AhciError> {
+        let data_buffer = dma().allocate_sized(512)?;
+
+        self.execute_command(
+            &FisRegH2D::new_identify(),
+            data_buffer.phys_addr(),
+            512,
+            0,
+            Duration::from_secs(5),
+        )?;
+
+        let result = unsafe { &*data_buffer.as_ptr().cast::<[u8; 512]>() };
+        let info = DeviceIdentifyInfo::from_identify_data(result);
+        dma().dealloc(data_buffer);
+
+        Ok(info)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ATAPI commands
+// ---------------------------------------------------------------------------
+
+impl AhciPort {
+    /// Execute an ATAPI (SCSI packet) command. Caller must hold legacy_lock.
+    fn execute_atapi_command(
+        &self,
+        scsi_cmd: &[u8],
+        buffer_addr: PhysAddr,
+        buffer_size: usize,
+        timeout: Duration,
+    ) -> Result<(), AhciError> {
+        let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
+        let tid = sched().current_thread().unwrap().id;
+        self.slot_waiters[slot].store(tid.0, Ordering::Release);
+
+        let result = (|| -> Result<(), AhciError> {
+            self.setup_atapi_command_table(slot, scsi_cmd, buffer_addr, buffer_size)?;
+            let prdtl = if buffer_size > 0 { 1 } else { 0 };
+            self.issue_command(slot, CMD_HEADER_ATAPI, prdtl)?;
+            self.wait_for_completion(slot, timeout)
+        })();
+
+        self.slot_waiters[slot].store(0, Ordering::Release);
+        self.free_slot(slot);
+
+        result
+    }
+
+    /// SCSI INQUIRY, converted to DeviceIdentifyInfo.
+    fn execute_atapi_inquiry_as_identify(&self) -> Result<DeviceIdentifyInfo, AhciError> {
         let inquiry_cmd = ScsiInquiry::new();
         let data_buffer = dma().allocate_sized(96)?;
 
-        let scsi_cmd_bytes = bytemuck::bytes_of(&inquiry_cmd);
         self.execute_atapi_command(
-            scsi_cmd_bytes,
+            bytemuck::bytes_of(&inquiry_cmd),
             data_buffer.phys_addr(),
             96,
             Duration::from_secs(5),
         )?;
 
-        // Convert SCSI INQUIRY data to DeviceIdentifyInfo
         let inquiry_data = unsafe { core::slice::from_raw_parts(data_buffer.as_ptr(), 96) };
         let mut device_info = DeviceIdentifyInfo::from_scsi_inquiry(inquiry_data);
 
-        // Try to get capacity information via READ_CAPACITY
         if let Ok(capacity) = self.execute_atapi_read_capacity() {
             device_info.sectors = capacity.0;
             device_info.capacity_mb = (capacity.0 * capacity.1 as u64) / (1024 * 1024);
@@ -298,54 +1099,61 @@ impl AhciPort {
         Ok(device_info)
     }
 
-    /// Execute SCSI READ_CAPACITY_10 to get device size
-    fn execute_atapi_read_capacity(&mut self) -> Result<(u64, u32), AhciError> {
+    fn execute_atapi_read_capacity(&self) -> Result<(u64, u32), AhciError> {
         let capacity_cmd = ScsiReadCapacity10::new();
         let data_buffer = dma().allocate_sized(8)?;
 
-        let scsi_cmd_bytes = bytemuck::bytes_of(&capacity_cmd);
         self.execute_atapi_command(
-            scsi_cmd_bytes,
+            bytemuck::bytes_of(&capacity_cmd),
             data_buffer.phys_addr(),
             8,
             Duration::from_secs(5),
         )?;
 
-        // Parse READ_CAPACITY response: [last_lba(4), block_size(4)]
-        let capacity_data = unsafe { core::slice::from_raw_parts(data_buffer.as_ptr(), 8) };
-
-        let last_lba = u32::from_be_bytes([
-            capacity_data[0],
-            capacity_data[1],
-            capacity_data[2],
-            capacity_data[3],
-        ]);
-        let block_size = u32::from_be_bytes([
-            capacity_data[4],
-            capacity_data[5],
-            capacity_data[6],
-            capacity_data[7],
-        ]);
+        let data = unsafe { core::slice::from_raw_parts(data_buffer.as_ptr(), 8) };
+        let last_lba = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        let block_size = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
 
         dma().dealloc(data_buffer);
 
-        // Total sectors = last_lba + 1 (last_lba is 0-based)
         Ok(((last_lba as u64) + 1, block_size))
     }
 
-    /// Execute SCSI READ_10 command for sector reading
+    /// ATAPI sector read via SCSI READ_10. Caller must hold legacy_lock.
+    fn atapi_read(&self, lba: u64, buffer: &mut [u8], sectors: u16) -> Result<(), AhciError> {
+        if sectors == 0 {
+            return Ok(());
+        }
+
+        // ATAPI sectors are 2048 bytes; the API uses 512-byte sectors.
+        let atapi_sectors = sectors.div_ceil(4);
+        let atapi_lba = lba / 4;
+
+        let atapi_buffer_size = atapi_sectors as usize * 2048;
+        let mut temp_buffer = vec![0u8; atapi_buffer_size];
+
+        self.execute_atapi_read_as_sectors(atapi_lba, &mut temp_buffer, atapi_sectors)?;
+
+        let start_offset = (lba % 4) as usize * 512;
+        let copy_size = (sectors as usize * 512).min(buffer.len());
+        let available_data = temp_buffer.len().saturating_sub(start_offset);
+        let actual_copy = copy_size.min(available_data);
+
+        buffer[..actual_copy]
+            .copy_from_slice(&temp_buffer[start_offset..start_offset + actual_copy]);
+        Ok(())
+    }
+
     fn execute_atapi_read_as_sectors(
-        &mut self,
+        &self,
         lba: u64,
         buffer: &mut [u8],
         sectors: u16,
     ) -> Result<(), AhciError> {
-        let expected_size = sectors as usize * 2048; // CD/DVD sectors are 2048 bytes
+        let expected_size = sectors as usize * 2048;
         if buffer.len() < expected_size {
             return Err(AhciError::IoError);
         }
-
-        // SCSI READ_10 uses 32-bit LBA
         if lba > u32::MAX as u64 {
             return Err(AhciError::IoError);
         }
@@ -353,15 +1161,13 @@ impl AhciPort {
         let read_cmd = ScsiRead10::new(lba as u32, sectors);
         let data_buffer = dma().allocate_sized(expected_size)?;
 
-        let scsi_cmd_bytes = bytemuck::bytes_of(&read_cmd);
         self.execute_atapi_command(
-            scsi_cmd_bytes,
+            bytemuck::bytes_of(&read_cmd),
             data_buffer.phys_addr(),
             expected_size,
-            Duration::from_secs(10), // Optical drives can be slower
+            Duration::from_secs(10),
         )?;
 
-        // Copy data to output buffer
         unsafe {
             ptr::copy_nonoverlapping(data_buffer.as_ptr(), buffer.as_mut_ptr(), expected_size);
         }
@@ -369,483 +1175,23 @@ impl AhciPort {
         dma().dealloc(data_buffer);
         Ok(())
     }
+}
 
-    /// Issue IDENTIFY command to get device information
-    pub fn identify_device(&mut self) -> Result<DeviceIdentifyInfo, AhciError> {
-        match self.device_type {
-            DeviceType::Ata => self.execute_ata_identify(),
-            DeviceType::Atapi => self.execute_atapi_inquiry_as_identify(),
-        }
-    }
+// ---------------------------------------------------------------------------
+// Interrupt helper
+// ---------------------------------------------------------------------------
 
-    /// Execute ATA IDENTIFY command
-    fn execute_ata_identify(&mut self) -> Result<DeviceIdentifyInfo, AhciError> {
-        // Allocate DMA buffer for identify data (512 bytes)
-        let data_buffer = dma().allocate_sized(512)?;
-
-        self.execute_command(
-            &FisRegH2D::new_identify(),
-            data_buffer.phys_addr(),
-            512,
-            0,
-            Duration::from_secs(5),
-        )?;
-        // Copy the identify data
-        let result = unsafe { &*data_buffer.as_ptr().cast::<[u8; 512]>() };
-
-        let info = DeviceIdentifyInfo::from_identify_data(result);
-
-        dma().dealloc(data_buffer);
-
-        Ok(info)
-    }
-
-    // Read sectors from the device
-    ///
-    /// # Arguments
-    /// * `lba` - Logical block address to start reading from
-    /// * `buffer` - Buffer to read data into (must be at least sectors * 512 bytes)
-    /// * `sectors` - Number of sectors to read (each sector is 512 bytes)
-    pub fn read_sectors(
-        &mut self,
-        lba: u64,
-        buffer: &mut [u8],
-        sectors: u16,
-    ) -> Result<(), AhciError> {
-        match self.device_type {
-            DeviceType::Ata => self.execute_ata_read(lba, buffer, sectors),
-            DeviceType::Atapi => {
-                // For ATAPI, need to handle different sector size (2048 vs 512)
-                // For now, translate request to ATAPI format
-                if sectors == 0 {
-                    return Ok(());
-                }
-
-                // ATAPI sectors are typically 2048 bytes, but the API expects 512-byte sectors
-                // We need to handle this translation
-                let atapi_sectors = sectors.div_ceil(4); // Round up: 4 x 512-byte = 1 x 2048-byte
-                let atapi_lba = lba / 4; // Each ATAPI sector contains 4 ATA sectors
-
-                // Allocate larger buffer for ATAPI
-                let atapi_buffer_size = atapi_sectors as usize * 2048;
-                let mut temp_buffer = vec![0u8; atapi_buffer_size];
-
-                self.execute_atapi_read_as_sectors(atapi_lba, &mut temp_buffer, atapi_sectors)?;
-
-                // Copy the relevant portion to output buffer
-                let start_offset = (lba % 4) as usize * 512;
-                let copy_size = (sectors as usize * 512).min(buffer.len());
-                let available_data = temp_buffer.len().saturating_sub(start_offset);
-                let actual_copy = copy_size.min(available_data);
-
-                buffer[..actual_copy]
-                    .copy_from_slice(&temp_buffer[start_offset..start_offset + actual_copy]);
-                Ok(())
-            }
-        }
-    }
-
-    /// Execute ATA read command using scatter-gather PRDT.
-    fn execute_ata_read(
-        &mut self,
-        lba: u64,
-        buffer: &mut [u8],
-        sectors: u16,
-    ) -> Result<(), AhciError> {
-        let expected_size = sectors as usize * 512;
-        if buffer.len() < expected_size {
-            return Err(AhciError::IoError);
-        }
-
-        let num_pages = expected_size.div_ceil(4096);
-        if num_pages > DMA_POOL_PAGES {
-            return Err(AhciError::IoError);
-        }
-
-        let slot = self
-            .allocate_command_slot()
-            .ok_or(AhciError::PortNotReady)?;
-
-        self.setup_scatter_command(
-            slot,
-            &FisRegH2D::new_read_dma_ext(lba, sectors),
-            expected_size,
-        )?;
-
-        let prdtl = num_pages as u16;
-        self.issue_command(slot, 0, prdtl)?;
-        let result = self.wait_for_command_completion(slot, Duration::from_secs(5));
-        self.free_command_slot(slot);
-        result?;
-
-        // Copy from pool pages to caller's buffer.
-        let mut offset = 0;
-        for i in 0..num_pages {
-            let copy_len = (expected_size - offset).min(4096);
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    self.io_pool[i].as_ptr(),
-                    buffer.as_mut_ptr().add(offset),
-                    copy_len,
+impl AhciPort {
+    /// Wake all threads waiting on any slot. Called by the interrupt dispatch thread.
+    pub fn wake_all_slot_waiters(&self) {
+        for waiter in &self.slot_waiters {
+            let tid = waiter.load(Ordering::Acquire);
+            if tid != 0 {
+                sched().wake_thread(
+                    crate::thread::thread::ThreadId(tid),
+                    crate::thread::scheduler::WakePriority::Interrupt,
                 );
             }
-            offset += copy_len;
         }
-
-        Ok(())
-    }
-
-    /// Write sectors to the device
-    ///
-    /// # Arguments
-    /// * `lba` - Logical block address to start writing to
-    /// * `buffer` - Buffer containing data to write (must be at least sectors * 512 bytes)
-    /// * `sectors` - Number of sectors to write (each sector is 512 bytes)
-    pub fn write_sectors(
-        &mut self,
-        lba: u64,
-        buffer: &[u8],
-        sectors: u16,
-    ) -> Result<(), AhciError> {
-        match self.device_type {
-            DeviceType::Ata => self.execute_ata_write(lba, buffer, sectors),
-            DeviceType::Atapi => Err(AhciError::ReadOnly), // ATAPI devices don't support sector writes
-        }
-    }
-
-    /// Execute ATA write command using scatter-gather PRDT.
-    fn execute_ata_write(
-        &mut self,
-        lba: u64,
-        buffer: &[u8],
-        sectors: u16,
-    ) -> Result<(), AhciError> {
-        let expected_size = sectors as usize * 512;
-        if buffer.len() < expected_size {
-            return Err(AhciError::IoError);
-        }
-
-        let num_pages = expected_size.div_ceil(4096);
-        if num_pages > DMA_POOL_PAGES {
-            return Err(AhciError::IoError);
-        }
-
-        // Copy from caller's buffer to pool pages.
-        let mut offset = 0;
-        for i in 0..num_pages {
-            let copy_len = (expected_size - offset).min(4096);
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    buffer.as_ptr().add(offset),
-                    self.io_pool[i].as_ptr(),
-                    copy_len,
-                );
-            }
-            offset += copy_len;
-        }
-
-        let slot = self
-            .allocate_command_slot()
-            .ok_or(AhciError::PortNotReady)?;
-
-        self.setup_scatter_command(
-            slot,
-            &FisRegH2D::new_write_dma_ext(lba, sectors),
-            expected_size,
-        )?;
-
-        let prdtl = num_pages as u16;
-        self.issue_command(slot, CMD_HEADER_WRITE, prdtl)?;
-        let result = self.wait_for_command_completion(slot, Duration::from_secs(5));
-        self.free_command_slot(slot);
-        result
-    }
-
-    pub fn flush_cache(&mut self) -> Result<(), AhciError> {
-        match self.device_type {
-            DeviceType::Ata => {
-                self.execute_command(
-                    &FisRegH2D::new_flush_cache(),
-                    PhysAddr::zero(),
-                    0,
-                    0,
-                    Duration::from_secs(5),
-                )?;
-                Ok(())
-            }
-            DeviceType::Atapi => {
-                // ATAPI devices typically don't need explicit cache flushing
-                // Most optical drives handle this automatically
-                Ok(())
-            }
-        }
-    }
-
-    /// Issue a command to the hardware
-    ///
-    /// # Arguments
-    /// * `slot` - Command slot number (0-31)
-    /// * `flags` - Additional command header flags (write direction, etc.)
-    pub fn issue_command(&mut self, slot: usize, flags: u16, prdtl: u16) -> Result<(), AhciError> {
-        if slot >= AHCI_CMD_SLOTS {
-            return Err(AhciError::InvalidSlot);
-        }
-
-        // Ensure command table is allocated for this slot
-        if self.command_tables[slot].is_none() {
-            return Err(AhciError::InvalidSlot);
-        }
-
-        // Setup command header in command list
-        unsafe {
-            let cmd_list = self
-                .command_list
-                .get()
-                .as_mut()
-                .expect("failed to get cmdlist");
-            let cmd_header = &mut cmd_list[slot];
-
-            cmd_header.flags = 5 | flags; // FIS length = 5 DWORDs + additional flags
-            cmd_header.prdtl = prdtl;
-            cmd_header.prdbc = 0; // Will be updated by hardware
-            cmd_header.ctba = self.command_tables[slot]
-                .as_ref()
-                .expect("failed to get table in ctba")
-                .phys_addr()
-                .as_u64() as u32;
-            cmd_header.ctbau = (self.command_tables[slot]
-                .as_ref()
-                .expect("failed to get table in ctbau")
-                .phys_addr()
-                .as_u64()
-                >> 32) as u32;
-            cmd_header.reserved = [0; 4];
-        }
-
-        // Issue command by setting bit in Command Issue register (read-modify-write
-        // to preserve other in-flight command bits).
-        unsafe {
-            let ci = ptr::read_volatile(&raw const (*self.port_regs).ci);
-            ptr::write_volatile(&raw mut (*self.port_regs).ci, ci | (1 << slot));
-        }
-
-        Ok(())
-    }
-
-    /// Wait for command completion with timeout
-    ///
-    /// # Arguments
-    /// * `slot` - Command slot to wait for
-    /// * `timeout` - Maximum time to wait
-    ///
-    /// # Returns
-    /// * `Ok(())` - Command completed successfully
-    /// * `Err(AhciError)` - Timeout, error, or other failure
-    pub fn wait_for_command_completion(
-        &mut self,
-        slot: usize,
-        timeout: core::time::Duration,
-    ) -> Result<(), AhciError> {
-        if slot >= AHCI_CMD_SLOTS {
-            return Err(AhciError::InvalidSlot);
-        }
-
-        let start_time = crate::timer::Instant::now();
-        let port_regs = self.port_regs;
-
-        loop {
-            // Check if command completed (slot bit cleared in CI register)
-            let ci = unsafe { ptr::read_volatile(&raw const (*port_regs).ci) };
-            if ci & (1 << slot) == 0 {
-                return Ok(());
-            }
-
-            // Check for errors
-            let is = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
-            if is & PORT_IS_TFES != 0 {
-                unsafe { ptr::write_volatile(&raw mut (*self.port_regs).is, PORT_IS_TFES) };
-                let tfd = unsafe { ptr::read_volatile(&raw const (*port_regs).tfd) };
-                let status = (tfd & 0xFF) as u8;
-                let error = ((tfd >> 8) & 0xFF) as u8;
-                log!(
-                    "AHCI port {}: Command error - Status: {:#x}, Error: {:#x}",
-                    self.port_idx,
-                    status,
-                    error
-                );
-                return Err(AhciError::IoError);
-            }
-
-            if start_time.elapsed() >= timeout {
-                log!(
-                    "AHCI port {}: Command timeout on slot {}",
-                    self.port_idx,
-                    slot
-                );
-                return Err(AhciError::CommandTimeout);
-            }
-
-            // Park until the AHCI main thread wakes us via wake_thread.
-            // The condition re-checks CI/IS/timeout so we don't miss events.
-            sched().thread_park_while(|| {
-                let ci = unsafe { ptr::read_volatile(&raw const (*port_regs).ci) };
-                let is = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
-                ci & (1 << slot) != 0 && is & PORT_IS_TFES == 0 && start_time.elapsed() < timeout
-            });
-        }
-    }
-
-    /// Check if any commands have completed (non-blocking)
-    /// Returns a bitmask of completed slots
-    pub fn check_completed_commands(&self) -> u32 {
-        let ci = unsafe { ptr::read_volatile(&raw const (*self.port_regs).ci) };
-        let issued_mask = (!self.free_slots); // Slots that were issued
-        // Issued slots that are no longer in CI
-        issued_mask & !ci
-    }
-
-    /// Check for any port errors (non-blocking)
-    pub fn check_errors(&mut self) -> Option<AhciError> {
-        let is = unsafe { ptr::read_volatile(&raw const (*self.port_regs).is) };
-
-        if is & PORT_IS_TFES != 0 {
-            // Clear only the TFES bit to preserve other pending interrupt status
-            unsafe { ptr::write_volatile(&raw mut (*self.port_regs).is, PORT_IS_TFES) };
-
-            let tfd = unsafe { ptr::read_volatile(&raw const (*self.port_regs).tfd) };
-            let status = (tfd & 0xFF) as u8;
-            let error = ((tfd >> 8) & 0xFF) as u8;
-
-            log!(
-                "AHCI port {}: Error detected - Status: {:#x}, Error: {:#x}",
-                self.port_idx,
-                status,
-                error
-            );
-
-            Some(AhciError::IoError)
-        } else {
-            None
-        }
-    }
-
-    /// Setup a command table with FIS and PRDT
-    pub fn setup_command_table(
-        &mut self,
-        slot: usize,
-        fis: &FisRegH2D,
-        buffer_addr: x86_64::PhysAddr,
-        buffer_size: usize,
-    ) -> Result<(), AhciError> {
-        if slot >= AHCI_CMD_SLOTS {
-            return Err(AhciError::InvalidSlot);
-        }
-
-        // Allocate command table if needed
-        if self.command_tables[slot].is_none() {
-            self.command_tables[slot] = Some(dma().allocate()?);
-        }
-
-        let has_data = buffer_size > 0;
-
-        unsafe {
-            let table = self.command_tables[slot]
-                .as_ref()
-                .expect("failed to get slot table")
-                .get();
-            table.write(core::mem::zeroed());
-            let table = &mut *table;
-
-            // Setup Command FIS
-            let fis_bytes = bytemuck::bytes_of(fis);
-            table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
-
-            // Setup PRDT only when there is a data transfer
-            if has_data {
-                let prdt_entry = PrdtEntry {
-                    dba: buffer_addr.as_u64() as u32,
-                    dbau: (buffer_addr.as_u64() >> 32) as u32,
-                    reserved: 0,
-                    dbc: (buffer_size - 1) as u32, // Byte count - 1 (0-based)
-                };
-
-                ptr::write_volatile(&raw mut (*table).prdt[0], prdt_entry);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Set up a command table with scatter-gather PRDT entries pointing to pool pages.
-    fn setup_scatter_command(
-        &mut self,
-        slot: usize,
-        fis: &FisRegH2D,
-        total_bytes: usize,
-    ) -> Result<(), AhciError> {
-        if slot >= AHCI_CMD_SLOTS {
-            return Err(AhciError::InvalidSlot);
-        }
-
-        let num_entries = total_bytes.div_ceil(4096);
-        assert!(num_entries <= DMA_POOL_PAGES);
-
-        // Allocate command table if needed.
-        if self.command_tables[slot].is_none() {
-            self.command_tables[slot] = Some(dma().allocate()?);
-        }
-
-        unsafe {
-            let table = self.command_tables[slot].as_ref().unwrap().get();
-            table.write(core::mem::zeroed());
-            let table = &mut *table;
-
-            // Write FIS.
-            let fis_bytes = bytemuck::bytes_of(fis);
-            table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
-
-            // Build PRDT entries - one per pool page.
-            let mut remaining = total_bytes;
-            for i in 0..num_entries {
-                let phys = self.io_pool_phys[i];
-                let chunk = remaining.min(4096);
-                table.prdt[i] = PrdtEntry {
-                    dba: phys.as_u64() as u32,
-                    dbau: (phys.as_u64() >> 32) as u32,
-                    reserved: 0,
-                    dbc: (chunk as u32) - 1, // byte count minus 1
-                };
-                remaining -= chunk;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// High-level command execution (setup + issue + wait)
-    pub fn execute_command(
-        &mut self,
-        fis: &FisRegH2D,
-        buffer_addr: x86_64::PhysAddr,
-        buffer_size: usize,
-        flags: u16,
-        timeout: core::time::Duration,
-    ) -> Result<(), AhciError> {
-        let slot = self
-            .allocate_command_slot()
-            .ok_or(AhciError::PortNotReady)?;
-
-        // Setup the command
-        self.setup_command_table(slot, fis, buffer_addr, buffer_size)?;
-
-        // Issue and wait
-        let prdtl = if buffer_size > 0 { 1 } else { 0 };
-        self.issue_command(slot, flags, prdtl)?;
-        let result = self.wait_for_command_completion(slot, timeout);
-
-        // Always free the slot
-        self.free_command_slot(slot);
-
-        result
     }
 }

@@ -1,6 +1,6 @@
 use core::ptr;
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::vec::Vec;
 use x86_64::{
     PhysAddr,
     structures::paging::{PageTableFlags, mapper::TranslateResult},
@@ -23,14 +23,17 @@ use crate::{
     interrupts::InterruptIndex,
     log,
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
-    thread::{mutex::BlockingMutex, scheduler::sched},
+    thread::scheduler::sched,
     timer::Instant,
 };
 
 pub struct AhciController {
     pub hba: *mut HbaMemory,
-    pub ports: Vec<Option<Arc<BlockingMutex<AhciPort>>>>,
+    /// Ports owned until they are moved into Arc<AhciPort> by the direct layer.
+    pub ports: Vec<Option<AhciPort>>,
     pub pci_device: PciDevice,
+    pub supports_ncq: bool,
+    pub num_command_slots: u8, // 1-32
 }
 
 impl AhciController {
@@ -100,10 +103,24 @@ impl AhciController {
 
         let hba = hba_virt.as_mut_ptr::<HbaMemory>();
 
+        // Read HBA capabilities before reset (reset may clear transient state
+        // but CAP is a read-only register that persists).
+        let cap = unsafe { ptr::read_volatile(&raw const (*hba).cap) };
+        let supports_ncq = cap & (1 << 30) != 0;
+        let num_command_slots = (((cap >> 8) & 0x1F) as u8) + 1; // NCS is 0-based
+        log!(
+            "AHCI CAP: SNCQ={}, NCS={} ({} command slots)",
+            supports_ncq,
+            num_command_slots - 1,
+            num_command_slots
+        );
+
         let mut controller = Self {
             hba,
             ports: Vec::new(),
             pci_device,
+            supports_ncq,
+            num_command_slots,
         };
 
         controller.reset_controller()?;
@@ -245,17 +262,15 @@ impl AhciController {
                         match signature {
                             SATA_SIG_ATA => {
                                 log!("Found SATA drive on port {}", i);
-                                // Port was initialized with DeviceType::Ata, no change needed
                                 let mut port = port;
                                 port.set_device_type(DeviceType::Ata);
-                                self.ports[i] = Some(Arc::new(BlockingMutex::new(port)));
+                                self.ports[i] = Some(port);
                             }
                             SATA_SIG_ATAPI => {
                                 log!("Found ATAPI device on port {}", i);
-                                // Update device type to ATAPI
                                 let mut port = port;
                                 port.set_device_type(DeviceType::Atapi);
-                                self.ports[i] = Some(Arc::new(BlockingMutex::new(port)));
+                                self.ports[i] = Some(port);
                             }
                             sig => {
                                 log!("Port {} has unsupported/invalid signature: {:#x}", i, sig);

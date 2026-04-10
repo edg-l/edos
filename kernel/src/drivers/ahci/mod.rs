@@ -8,7 +8,6 @@ use x86_64::instructions::hlt;
 use crate::{
     drivers::{
         ahci::{controller::AhciController, port::AhciPort, structures::DeviceIdentifyInfo},
-        dma::DmaError,
         pci::{
             pci_manager,
             structures::{PciAddress, PciDevice},
@@ -16,11 +15,7 @@ use crate::{
     },
     log,
     thread::{
-        mutex::BlockingMutex,
-        runqueue::IO_PRIORITY,
-        scheduler::{WakePriority, sched},
-        thread::ThreadId,
-        util::queue_spawn_kthread_named,
+        runqueue::IO_PRIORITY, scheduler::sched, thread::ThreadId, util::queue_spawn_kthread_named,
     },
 };
 
@@ -37,7 +32,7 @@ pub enum AhciError {
     #[error("invalid device")]
     InvalidDevice,
     #[error(transparent)]
-    DmaError(#[from] DmaError),
+    DmaError(#[from] crate::drivers::dma::DmaError),
     #[error("port not ready")]
     PortNotReady,
     #[error("command timeout")]
@@ -74,6 +69,10 @@ pub struct DetectedDevice {
     pub device_info: DeviceIdentifyInfo,
     #[expect(unused)]
     pub device_type: DeviceType,
+    #[expect(unused)]
+    pub supports_ncq: bool,
+    #[expect(unused)]
+    pub ncq_depth: u8,
 }
 
 pub extern "C" fn ahci_driver_main() -> ! {
@@ -108,20 +107,42 @@ pub extern "C" fn ahci_driver_main() -> ! {
 
     let mut detected_devices: Vec<DetectedDevice> = Vec::new();
 
+    // Identify devices and initialize I/O pools.
+    // Ports are still owned by controllers (not yet Arc-wrapped).
     let mut id = 0;
     for controller in &mut controllers {
         for port_idx in 0..controller.ports.len() {
             if let Some(port) = controller.ports[port_idx].as_mut() {
-                let mut port = port.lock();
                 match port.identify_device() {
                     Ok(device_info) => {
                         device_info.print_info(port_idx);
+
+                        // NCQ enabled only if both HBA and device support it
+                        let supports_ncq = controller.supports_ncq
+                            && device_info.supports_ncq
+                            && port.device_type == DeviceType::Ata;
+                        let ncq_depth = if supports_ncq {
+                            device_info
+                                .ncq_queue_depth
+                                .min(controller.num_command_slots)
+                        } else {
+                            0
+                        };
+
+                        // Allocate per-slot DMA pools and command tables.
+                        if let Err(e) = port.init_io_pools(ncq_depth) {
+                            log!("Failed to init I/O pools for port {}: {:?}", port_idx, e);
+                            continue;
+                        }
+
                         detected_devices.push(DetectedDevice {
                             id,
                             controller_pci_address: controller.pci_device.address,
                             port_idx,
                             device_info,
                             device_type: port.device_type,
+                            supports_ncq,
+                            ncq_depth,
                         });
                         id += 1;
                     }
@@ -135,26 +156,26 @@ pub extern "C" fn ahci_driver_main() -> ! {
 
     DETECTED_DEVICES.call_once(|| detected_devices.clone());
 
-    // Initialize the direct-access layer with a flat port array indexed by device_id.
+    // Move ports out of controllers, wrap in Arc, and pass to the direct layer.
     {
-        let mut direct_ports: Vec<Arc<BlockingMutex<AhciPort>>> =
-            Vec::with_capacity(detected_devices.len());
+        let mut direct_ports: Vec<Arc<AhciPort>> = Vec::with_capacity(detected_devices.len());
 
         for device in &detected_devices {
             let port = controllers
-                .iter()
+                .iter_mut()
                 .find(|c| c.pci_device.address == device.controller_pci_address)
-                .and_then(|c| c.ports.get(device.port_idx))
-                .and_then(|p| p.clone())
+                .and_then(|c| c.ports.get_mut(device.port_idx))
+                .and_then(|p| p.take())
                 .expect("device port not found in controller");
-            direct_ports.push(port);
+            direct_ports.push(Arc::new(port));
         }
 
         direct::init(direct_ports);
     }
 
+    // Interrupt dispatch loop.
+    // MSI fires -> hardware ISR wakes this thread -> we dispatch per-slot wakeups.
     loop {
-        // Sleep until an MSI interrupt arrives.
         sched().thread_park_while(|| {
             !controllers.iter().any(|c| {
                 let hba_is = unsafe { ptr::read_volatile(&raw const (*c.hba).is) };
@@ -162,7 +183,6 @@ pub extern "C" fn ahci_driver_main() -> ! {
             })
         });
 
-        // Dispatch HBA interrupts to direct callers.
         for controller in &controllers {
             let hba_is = unsafe { ptr::read_volatile(&(*controller.hba).is) };
             if hba_is == 0 {
@@ -179,15 +199,14 @@ pub extern "C" fn ahci_driver_main() -> ! {
                 if port_is != 0 {
                     unsafe { ptr::write_volatile(&mut port_regs.is, port_is) };
 
-                    // Wake any thread blocked in direct::read_sectors / write_sectors.
+                    // Wake ALL per-slot waiters for this port. Each thread's
+                    // park condition re-checks SACT/CI to determine if its
+                    // specific command completed. Spurious wakes are harmless.
                     if let Some(device) = detected_devices.iter().find(|d| {
                         d.controller_pci_address == controller.pci_device.address
                             && d.port_idx == port_idx
                     }) {
-                        let waiter_tid = direct::get_waiter(device.id);
-                        if waiter_tid != 0 {
-                            sched().wake_thread(ThreadId(waiter_tid), WakePriority::Interrupt);
-                        }
+                        direct::wake_all_waiters(device.id);
                     }
                 }
             }

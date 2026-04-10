@@ -309,7 +309,8 @@ impl EfsDriver {
             let blocks_left_in_extent = extent.length as u32 - block_within_extent;
 
             // How many contiguous blocks can we read in one shot?
-            // Cap at 248 blocks (one pool page per PRDT entry) per AHCI command.
+            // Cap at per-slot pool size (248 pages = 992KB) per AHCI command.
+            // With NCQ, multiple commands can be in flight concurrently.
             const MAX_BULK_BLOCKS: u32 = 248;
             let blocks_needed =
                 ((remaining + offset_in_block + block_size - 1) / block_size) as u32;

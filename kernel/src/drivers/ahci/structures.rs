@@ -284,6 +284,8 @@ pub struct DeviceIdentifyInfo {
     pub capacity_mb: u64,
     pub capacity_gb: u64,
     pub supports_lba48: bool,
+    pub supports_ncq: bool,
+    pub ncq_queue_depth: u8, // 1-32 if NCQ supported, 0 otherwise
     pub supports_power_mgmt: bool,
     pub supports_security: bool,
     pub raw_features: u16,
@@ -419,6 +421,8 @@ impl DeviceIdentifyInfo {
             capacity_mb: 0,
             capacity_gb: 0,
             supports_lba48: false, // Not applicable for ATAPI
+            supports_ncq: false,
+            ncq_queue_depth: 0,
             supports_power_mgmt: false,
             supports_security: false,
             raw_features: 0,
@@ -434,6 +438,8 @@ impl DeviceIdentifyInfo {
             capacity_mb: 0,
             capacity_gb: 0,
             supports_lba48: false,
+            supports_ncq: false,
+            ncq_queue_depth: 0,
             supports_power_mgmt: false,
             supports_security: false,
             raw_features: 0,
@@ -494,6 +500,17 @@ impl DeviceIdentifyInfo {
         // Check if 48-bit LBA is supported (bit 10 of word 83)
         let supports_lba48 = identify_data[167] & 0x04 != 0;
 
+        // NCQ support: word 76 (SATA capabilities) bit 8
+        let sata_caps = u16::from_le_bytes([identify_data[152], identify_data[153]]);
+        let supports_ncq = sata_caps & (1 << 8) != 0;
+        // Queue depth: word 75 bits 4:0 = max queue depth - 1
+        let ncq_queue_depth = if supports_ncq {
+            let qdw = u16::from_le_bytes([identify_data[150], identify_data[151]]);
+            ((qdw & 0x1F) as u8) + 1
+        } else {
+            0
+        };
+
         let sectors = if supports_lba48 && lba48_sectors > 0 {
             lba48_sectors
         } else {
@@ -516,6 +533,8 @@ impl DeviceIdentifyInfo {
             capacity_mb,
             capacity_gb,
             supports_lba48,
+            supports_ncq,
+            ncq_queue_depth,
             supports_power_mgmt,
             supports_security,
             raw_features,
@@ -535,8 +554,8 @@ impl DeviceIdentifyInfo {
             self.capacity_gb
         );
         log!("LBA48 Support: {}", self.supports_lba48);
-        if self.supports_lba48 {
-            log!("  - 48-bit LBA supported");
+        if self.supports_ncq {
+            log!("  - NCQ supported, queue depth {}", self.ncq_queue_depth);
         }
         if self.supports_power_mgmt {
             log!("  - Power Management supported");
