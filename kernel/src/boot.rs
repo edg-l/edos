@@ -1,14 +1,9 @@
-use core::ffi::CStr;
-
 use limine::{
-    BaseRevision,
-    framebuffer::Framebuffer,
+    BaseRevision, RequestsEndMarker, RequestsStartMarker,
     request::{
-        DeviceTreeBlobRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest,
-        MemoryMapRequest, MpRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest,
-        StackSizeRequest,
+        DtbRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest, MemmapRequest,
+        MemmapResponse, MpRequest, RsdpRequest, StackSizeRequest,
     },
-    response::MemoryMapResponse,
 };
 use spin::Once;
 use x86_64::{
@@ -39,7 +34,7 @@ pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests")]
-pub static MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
+pub static MEMORY_MAP_REQUEST: MemmapRequest = MemmapRequest::new();
 
 // Request the higher-half direct mapping
 #[used]
@@ -48,7 +43,7 @@ pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests")]
-pub static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(64 * 1024);
+pub static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new(64 * 1024);
 
 // Request the RSDP address
 #[used]
@@ -62,11 +57,11 @@ static EXECUTABLE_CMDLINE_REQUEST: ExecutableCmdlineRequest = ExecutableCmdlineR
 
 #[used]
 #[unsafe(link_section = ".requests")]
-static DEVICE_TREE_BLOB_REQUEST: DeviceTreeBlobRequest = DeviceTreeBlobRequest::new();
+static DEVICE_TREE_BLOB_REQUEST: DtbRequest = DtbRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests")]
-pub static MP_REQUEST: MpRequest = MpRequest::new();
+pub static MP_REQUEST: MpRequest = MpRequest::new(0);
 
 /// Define the start and end markers for Limine requests.
 #[used]
@@ -78,15 +73,33 @@ static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
 #[expect(unused)]
 pub struct BootInfo {
-    pub framebuffer: Option<Framebuffer<'static>>,
-    pub memory_map: &'static MemoryMapResponse,
+    pub framebuffer: Option<BootFramebuffer>,
+    pub memory_map: &'static MemmapResponse,
     pub physical_memory_offset: VirtAddr,
     pub memory_manager: IrqSpinlock<MemoryManager>,
     pub rdsp: usize,
-    pub cmdline: &'static CStr,
+    pub cmdline: &'static str,
     pub device_tree_blob: Option<usize>,
     pub cr3: (PhysFrame, Cr3Flags),
 }
+
+/// Extracted framebuffer data from Limine, safe to share across threads.
+pub struct BootFramebuffer {
+    pub addr: *mut u32,
+    pub width: u64,
+    pub height: u64,
+    pub pitch: u64,
+    pub bpp: u16,
+    pub red_mask_size: u8,
+    pub red_mask_shift: u8,
+    pub green_mask_size: u8,
+    pub green_mask_shift: u8,
+    pub blue_mask_size: u8,
+    pub blue_mask_shift: u8,
+}
+
+unsafe impl Send for BootFramebuffer {}
+unsafe impl Sync for BootFramebuffer {}
 
 pub static BOOT_INFO: Once<BootInfo> = Once::new();
 
@@ -107,27 +120,39 @@ unsafe extern "C" fn kmain() -> ! {
     serial::init();
 
     let framebuffer = FRAMEBUFFER_REQUEST
-        .get_response()
-        .and_then(|r| r.framebuffers().next());
+        .response()
+        .and_then(|r| r.framebuffers().first())
+        .map(|fb| BootFramebuffer {
+            addr: fb.address() as *mut u32,
+            width: fb.width,
+            height: fb.height,
+            pitch: fb.pitch,
+            bpp: fb.bpp,
+            red_mask_size: fb.red_mask_size,
+            red_mask_shift: fb.red_mask_shift,
+            green_mask_size: fb.green_mask_size,
+            green_mask_shift: fb.green_mask_shift,
+            blue_mask_size: fb.blue_mask_size,
+            blue_mask_shift: fb.blue_mask_shift,
+        });
 
-    let memory_map = MEMORY_MAP_REQUEST
-        .get_response()
-        .expect("need the memory map");
+    let memory_map = MEMORY_MAP_REQUEST.response().expect("need the memory map");
 
     let physical_memory_offset = HHDM_REQUEST
-        .get_response()
+        .response()
         .expect("need higher half mapping")
-        .offset();
+        .offset;
 
-    let rdsp = RSDP_REQUEST.get_response().unwrap().address();
+    // Base revision >= 4: RSDP/DTB addresses are virtual (HHDM), convert to physical.
+    let rdsp = RSDP_REQUEST.response().unwrap().address as usize - physical_memory_offset as usize;
 
-    let _stack_size = STACK_SIZE_REQUEST.get_response().expect("need size");
+    let _stack_size = STACK_SIZE_REQUEST.response().expect("need size");
 
-    let cmdline = EXECUTABLE_CMDLINE_REQUEST.get_response().unwrap().cmdline();
+    let cmdline = EXECUTABLE_CMDLINE_REQUEST.response().unwrap().cmdline();
 
     let device_tree_blob: Option<usize> = DEVICE_TREE_BLOB_REQUEST
-        .get_response()
-        .map(|x| x.dtb_ptr().addr());
+        .response()
+        .map(|x| x.dtb_ptr as usize - physical_memory_offset as usize);
 
     let physical_memory_offset = VirtAddr::new(physical_memory_offset);
 

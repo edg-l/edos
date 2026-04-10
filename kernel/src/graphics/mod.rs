@@ -79,7 +79,7 @@ fn try_init_virtio_gpu() -> Option<Display> {
     // the VGA compat mode provides GOP for Limine, so this is always available.
     // Falls back to 1920x1080 if no framebuffer (e.g. bare virtio-gpu-pci).
     let (width, height) = if let Some(fb) = &boot_info().framebuffer {
-        (fb.width() as u32, fb.height() as u32)
+        (fb.width as u32, fb.height as u32)
     } else {
         (1920, 1080)
     };
@@ -369,36 +369,36 @@ impl DirectFramebuffer {
             .framebuffer
             .as_ref()
             .expect("DirectFramebuffer requires a Limine framebuffer");
-        let width = fb.width() as usize;
-        let height = fb.height() as usize;
-        let pitch = fb.pitch() as usize;
-        let fb_base = fb.addr() as *mut u32;
+        let width = fb.width as usize;
+        let height = fb.height as usize;
+        let pitch = fb.pitch as usize;
+        let fb_base = fb.addr;
 
-        let red_lut = Self::build_channel_lut(fb.red_mask_size(), fb.red_mask_shift());
-        let green_lut = Self::build_channel_lut(fb.green_mask_size(), fb.green_mask_shift());
-        let blue_lut = Self::build_channel_lut(fb.blue_mask_size(), fb.blue_mask_shift());
+        let red_lut = Self::build_channel_lut(fb.red_mask_size, fb.red_mask_shift);
+        let green_lut = Self::build_channel_lut(fb.green_mask_size, fb.green_mask_shift);
+        let blue_lut = Self::build_channel_lut(fb.blue_mask_size, fb.blue_mask_shift);
 
-        let is_identity = fb.bpp() == 32
-            && fb.red_mask_size() == 8
-            && fb.red_mask_shift() == 16
-            && fb.green_mask_size() == 8
-            && fb.green_mask_shift() == 8
-            && fb.blue_mask_size() == 8
-            && fb.blue_mask_shift() == 0
+        let is_identity = fb.bpp == 32
+            && fb.red_mask_size == 8
+            && fb.red_mask_shift == 16
+            && fb.green_mask_size == 8
+            && fb.green_mask_shift == 8
+            && fb.blue_mask_size == 8
+            && fb.blue_mask_shift == 0
             && pitch % 4 == 0;
 
         println!(
             "Framebuffer: {}x{} bpp={} identity={} (R={}@{} G={}@{} B={}@{})",
             width,
             height,
-            fb.bpp(),
+            fb.bpp,
             is_identity,
-            fb.red_mask_size(),
-            fb.red_mask_shift(),
-            fb.green_mask_size(),
-            fb.green_mask_shift(),
-            fb.blue_mask_size(),
-            fb.blue_mask_shift(),
+            fb.red_mask_size,
+            fb.red_mask_shift,
+            fb.green_mask_size,
+            fb.green_mask_shift,
+            fb.blue_mask_size,
+            fb.blue_mask_shift,
         );
 
         let two_page_bytes = 2 * height * pitch;
@@ -412,9 +412,9 @@ impl DirectFramebuffer {
             // page at fb_base + page_size is unmapped MMIO that needs explicit
             // page table entries.
             let hhdm_offset = boot_info().physical_memory_offset.as_u64();
-            let fb_phys = fb.addr() as u64 - hhdm_offset;
+            let fb_phys = fb_base as u64 - hhdm_offset;
             let second_page_phys = fb_phys + (height * pitch) as u64;
-            let second_page_virt = fb.addr() as u64 + (height * pitch) as u64;
+            let second_page_virt = fb_base as u64 + (height * pitch) as u64;
             let second_page_size = (height * pitch) as u64;
             let flags =
                 PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE | pat::WRITE_COMBINING;
@@ -453,7 +453,7 @@ impl DirectFramebuffer {
 
         // Re-map the first framebuffer page (Limine HHDM) with Write-Combining.
         {
-            let first_page_virt = VirtAddr::new(fb.addr() as u64);
+            let first_page_virt = VirtAddr::new(fb_base as u64);
             let first_page_size = (height * pitch) as u64;
             let wc_flags =
                 PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE | pat::WRITE_COMBINING;

@@ -73,21 +73,9 @@ fn init() {
     println!("Initializing frame allocator");
     init_frame_allocator(info.memory_map);
 
-    {
-        // Setup a kernel stack guard
-        let current_sp: u64;
-        unsafe {
-            asm!("mov {}, rsp", out(reg) current_sp);
-        }
-
-        let stack_bottom = (current_sp & !0xfff) - (16 * 1024); // we requested 16kb stack
-        let guard_page = stack_bottom - 4096; // Page just below stack
-
-        // Unmap the guard page
-        memory_mapper()
-            .unmap_memory(VirtAddr::new(guard_page), 4095)
-            .unwrap();
-    }
+    // Note: no guard page for the Limine boot stack. It lives inside the HHDM
+    // which is mapped with 1GB huge pages -- can't unmap a single 4KB page.
+    // Thread stacks created by the scheduler have their own guard pages.
 
     println!("Initializing heap");
     init_heap();
@@ -265,7 +253,7 @@ pub fn mount_system_fs() -> ! {
 
     log!("Got partitions");
 
-    let cmdline = ParsedCmdline::parse(boot_info().cmdline);
+    let cmdline = ParsedCmdline::parse_str(boot_info().cmdline);
 
     let mut part_idx = 0;
 

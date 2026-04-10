@@ -4,7 +4,7 @@ use core::{
     time::Duration,
 };
 
-use limine::mp::Cpu as MpCpu;
+use limine::mp::MpInfo;
 
 use crate::{
     apic::{get_lapic, init::enable_lapic},
@@ -65,8 +65,8 @@ pub fn lapic_id_for_cpu(idx: usize) -> u32 {
 /// Initialize SMP using Limine's MP request: set AP entrypoints and let Limine bring them up.
 pub fn init() {
     // Ensure the request is referenced so the linker keeps it.
-    if let Some(resp) = MP_REQUEST.get_response() {
-        let bsp_lapic = resp.bsp_lapic_id();
+    if let Some(resp) = MP_REQUEST.response() {
+        let bsp_lapic = resp.bsp_lapic_id;
 
         // Register the BSP as CPU index 0.
         CPU_LAPIC_IDS[0].store(bsp_lapic, Ordering::Relaxed);
@@ -80,13 +80,10 @@ pub fn init() {
                 continue;
             }
 
-            log!("smp: booting AP {} (BSP={})", cpu.id, bsp_lapic);
-
-            // Optionally pass data via `extra` if needed later.
-            // cpu.extra.store(0, Ordering::Relaxed);
+            log!("smp: booting AP {} (BSP={})", cpu.processor_id, bsp_lapic);
 
             // Set the AP entry. As soon as we write this, Limine will jump the AP to it.
-            cpu.goto_address.write(ap_start);
+            cpu.bootstrap(ap_start, 0);
         }
     } else {
         println!("[smp] Limine MP response not present; running uniprocessor");
@@ -104,9 +101,9 @@ pub fn init() {
     }
 }
 
-/// Limine AP entrypoint. Signature is mandated by limine::mp::GotoAddress::write.
+/// Limine AP entrypoint.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ap_start(cpu: &MpCpu) -> ! {
+pub unsafe extern "C" fn ap_start(cpu: &MpInfo) -> ! {
     // Per-CPU data and core-local tables
     switch_to_kernel_page();
     tlb_flush_all_including_global();

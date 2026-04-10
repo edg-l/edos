@@ -2,7 +2,7 @@
 //!
 //! The allocator finds first a memory region to allocate itself into, the bitmap.
 
-use limine::{memory_map::EntryType, response::MemoryMapResponse};
+use limine::{memmap, request::MemmapResponse};
 use spin::Once;
 use x86_64::{
     PhysAddr,
@@ -22,7 +22,7 @@ pub fn frame_allocator() -> IrqLockGuard<'static, BitmapFrameAllocator> {
 }
 
 /// Initialize the frame allocator using bootloader memory for bitmap storage
-pub fn init_frame_allocator(memory_regions: &'static MemoryMapResponse) {
+pub fn init_frame_allocator(memory_regions: &'static MemmapResponse) {
     let (_, frame_count) = calculate_frame_range(memory_regions);
     // Round bitmap_bytes up to 2-byte alignment so the refcount array (u16) is properly aligned
     let bitmap_bytes = frame_count.div_ceil(8).next_multiple_of(2);
@@ -66,13 +66,13 @@ pub fn init_frame_allocator(memory_regions: &'static MemoryMapResponse) {
 
 /// Find suitable memory for bitmap storage
 fn find_bitmap_storage(
-    memory_regions: &MemoryMapResponse,
+    memory_regions: &MemmapResponse,
     required_size: usize,
 ) -> Option<(&'static mut [u8], u64, usize)> {
     let usable_regions = memory_regions
         .entries()
         .iter()
-        .filter(|r| r.entry_type == EntryType::USABLE);
+        .filter(|r| r.type_ == memmap::MEMMAP_USABLE);
     let mut addr_ranges = usable_regions.map(|r| r.base..(r.base + r.length));
 
     let mut current = addr_ranges.next()?;
@@ -153,7 +153,7 @@ impl BitmapFrameAllocator {
     ///
     /// Returns a new bitmap frame allocator managing all usable frames
     pub fn new(
-        memory_regions: &'static MemoryMapResponse,
+        memory_regions: &'static MemmapResponse,
         bitmap_storage: &'static mut [u8],
         refcount_storage: &'static mut [u16],
     ) -> Self {
@@ -189,7 +189,7 @@ impl BitmapFrameAllocator {
     }
 
     /// Mark non-usable frames as allocated in the bitmap
-    fn mark_non_usable_frames(&mut self, memory_regions: &MemoryMapResponse) {
+    fn mark_non_usable_frames(&mut self, memory_regions: &MemmapResponse) {
         // First mark all frames as allocated
         for byte in self.bitmap.iter_mut() {
             *byte = 0xFF;
@@ -197,7 +197,7 @@ impl BitmapFrameAllocator {
 
         // Then mark usable regions as free
         for region in memory_regions.entries() {
-            if region.entry_type == EntryType::USABLE {
+            if region.type_ == memmap::MEMMAP_USABLE {
                 let start_frame = PhysFrame::containing_address(PhysAddr::new(region.base));
                 let end_frame =
                     PhysFrame::containing_address(PhysAddr::new(region.base + region.length - 1));
@@ -480,11 +480,11 @@ impl BitmapFrameAllocator {
 }
 
 /// Calculate the range of frames managed by this allocator
-fn calculate_frame_range(memory_regions: &MemoryMapResponse) -> (PhysFrame, usize) {
+fn calculate_frame_range(memory_regions: &MemmapResponse) -> (PhysFrame, usize) {
     let usable_regions = memory_regions
         .entries()
         .iter()
-        .filter(|r| r.entry_type == EntryType::USABLE);
+        .filter(|r| r.type_ == memmap::MEMMAP_USABLE);
 
     let min_addr = usable_regions
         .clone()
@@ -502,7 +502,7 @@ fn calculate_frame_range(memory_regions: &MemoryMapResponse) -> (PhysFrame, usiz
 }
 
 /// Returns the total storage size needed for the bitmap and refcount array combined.
-pub fn calculate_bitmap_size(memory_regions: &MemoryMapResponse) -> usize {
+pub fn calculate_bitmap_size(memory_regions: &MemmapResponse) -> usize {
     let (_, frame_count) = calculate_frame_range(memory_regions);
     // Round bitmap_bytes up to 2-byte alignment so the refcount array (u16) is properly aligned
     let bitmap_bytes = frame_count.div_ceil(8).next_multiple_of(2);
