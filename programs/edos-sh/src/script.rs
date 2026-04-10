@@ -309,7 +309,7 @@ fn parse_for_header(rest: &str) -> Result<(String, Vec<String>), String> {
 
     // Parse values respecting quotes (reuse parse_command logic)
     let expanded = command::expand_variables(values_part);
-    let values: Vec<String> = command::parse_command(&expanded)
+    let values: Vec<String> = command::parse_command_simple(&expanded)
         .into_iter()
         .map(|v| command::expand_tilde(&v))
         .collect();

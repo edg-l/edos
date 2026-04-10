@@ -90,7 +90,7 @@ fn capture_command_output(cmd: &str) -> String {
     };
 
     // Parse cmd into program + args
-    let parts = parse_command(cmd);
+    let parts = parse_command_simple(cmd);
     if parts.is_empty() {
         edos_lib::process::close(read_fd);
         edos_lib::process::close(write_fd);
@@ -329,11 +329,14 @@ pub fn expand_tilde(input: &str) -> String {
 }
 
 /// Parse a command line into arguments, handling quotes and escapes.
-pub fn parse_command(input: &str) -> Vec<String> {
+/// Parse a command line into tokens, tracking whether each token was (even partially) quoted.
+/// The bool in each tuple is true if any part of the token was inside quotes.
+pub fn parse_command(input: &str) -> Vec<(String, bool)> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
     let mut quote_char = '\"';
+    let mut was_quoted = false;
     let mut chars = input.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -341,6 +344,7 @@ pub fn parse_command(input: &str) -> Vec<String> {
             '\"' | '\'' if !in_quotes => {
                 in_quotes = true;
                 quote_char = ch;
+                was_quoted = true;
             }
             q if in_quotes && q == quote_char => {
                 in_quotes = false;
@@ -353,8 +357,9 @@ pub fn parse_command(input: &str) -> Vec<String> {
             }
             ' ' | '\t' | '\n' | '\r' if !in_quotes => {
                 if !current.is_empty() {
-                    args.push(expand_tilde(&current));
+                    args.push((expand_tilde(&current), was_quoted));
                     current = String::new();
+                    was_quoted = false;
                 }
             }
             _ => current.push(ch),
@@ -362,10 +367,18 @@ pub fn parse_command(input: &str) -> Vec<String> {
     }
 
     if !current.is_empty() {
-        args.push(expand_tilde(&current));
+        args.push((expand_tilde(&current), was_quoted));
     }
 
     args
+}
+
+/// Parse a command line into plain strings (discarding quote info).
+pub fn parse_command_simple(input: &str) -> Vec<String> {
+    parse_command(input)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect()
 }
 
 /// Split input into pipeline stages on unquoted `|` characters.
@@ -479,42 +492,47 @@ pub fn parse_heredoc_marker(line: &str) -> Option<(String, String, bool)> {
 }
 
 /// Extract `>`, `>>`, `<` redirections from args, returning remaining args and redirects.
-pub fn extract_redirects(args: &[String]) -> (Vec<String>, Redirects) {
+/// Tokens that were quoted during parsing are never treated as redirect operators.
+pub fn extract_redirects(args: &[(String, bool)]) -> (Vec<String>, Redirects) {
     let mut remaining = Vec::new();
     let mut redirects = Redirects::default();
     let mut i = 0;
 
     while i < args.len() {
-        if args[i] == ">" || args[i] == ">>" {
-            redirects.stdout_append = args[i] == ">>";
+        let (ref tok, quoted) = args[i];
+        if quoted {
+            remaining.push(tok.clone());
+            i += 1;
+        } else if tok == ">" || tok == ">>" {
+            redirects.stdout_append = tok == ">>";
             if i + 1 < args.len() {
-                redirects.stdout_file = Some(args[i + 1].clone());
+                redirects.stdout_file = Some(args[i + 1].0.clone());
                 i += 2;
             } else {
-                eprintln!("syntax error: expected filename after {}", args[i]);
+                eprintln!("syntax error: expected filename after {}", tok);
                 i += 1;
             }
-        } else if args[i] == "<" {
+        } else if tok == "<" {
             if i + 1 < args.len() {
-                redirects.stdin_file = Some(args[i + 1].clone());
+                redirects.stdin_file = Some(args[i + 1].0.clone());
                 i += 2;
             } else {
                 eprintln!("syntax error: expected filename after <");
                 i += 1;
             }
-        } else if args[i].starts_with(">>") {
+        } else if tok.starts_with(">>") {
             redirects.stdout_append = true;
-            redirects.stdout_file = Some(args[i][2..].to_string());
+            redirects.stdout_file = Some(tok[2..].to_string());
             i += 1;
-        } else if args[i].starts_with('>') {
+        } else if tok.starts_with('>') {
             redirects.stdout_append = false;
-            redirects.stdout_file = Some(args[i][1..].to_string());
+            redirects.stdout_file = Some(tok[1..].to_string());
             i += 1;
-        } else if args[i].starts_with('<') {
-            redirects.stdin_file = Some(args[i][1..].to_string());
+        } else if tok.starts_with('<') {
+            redirects.stdin_file = Some(tok[1..].to_string());
             i += 1;
         } else {
-            remaining.push(args[i].clone());
+            remaining.push(tok.clone());
             i += 1;
         }
     }

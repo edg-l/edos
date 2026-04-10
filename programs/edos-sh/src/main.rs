@@ -37,7 +37,7 @@ pub fn run_segment(segment: &str) -> SegmentResult {
             .iter()
             .filter_map(|s| {
                 let expanded = command::expand_variables(s);
-                let args = command::parse_command(&expanded);
+                let args = command::parse_command_simple(&expanded);
                 if args.is_empty() {
                     None
                 } else {
@@ -59,7 +59,8 @@ pub fn run_segment(segment: &str) -> SegmentResult {
     if args.is_empty() {
         return SegmentResult::Done(0);
     }
-    let (cmd, rest) = args.split_first().unwrap();
+    let (first, rest) = args.split_first().unwrap();
+    let cmd = &first.0;
     let (rest, redirects) = command::extract_redirects(rest);
 
     // Open redirect files
@@ -169,7 +170,8 @@ pub fn run_segment_with_stdin(segment: &str, stdin_fd: u64) -> i32 {
     if args.is_empty() {
         return 0;
     }
-    let (cmd, rest) = args.split_first().unwrap();
+    let (first, rest) = args.split_first().unwrap();
+    let cmd = &first.0;
     let (rest, redirects) = command::extract_redirects(rest);
 
     let stdout_fd = if let Some(ref path) = redirects.stdout_file {
