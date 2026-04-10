@@ -204,13 +204,14 @@ impl Editor {
             }
         }
 
-        // Status line (last row).
+        // Status line (last row). Pad to COLS-1 to avoid triggering a
+        // line wrap + scroll when writing the last column.
+        let status_width = COLS - 1;
         write!(w, "\x1b[7m").unwrap(); // reverse video
         let status = self.build_status_line();
-        // Pad or truncate to COLS.
-        let padded = format!("{:<width$}", status, width = COLS);
-        let truncated = if padded.len() > COLS {
-            &padded[..COLS]
+        let padded = format!("{:<width$}", status, width = status_width);
+        let truncated = if padded.len() > status_width {
+            &padded[..status_width]
         } else {
             padded.as_str()
         };
