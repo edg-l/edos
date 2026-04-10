@@ -13,7 +13,7 @@ use x86_64::{
 
 use crate::{
     acpi::{acpi_madt, init_acpi},
-    allocator::{enable_percpu_cache, init_heap, print_alloc_stats},
+    allocator::{enable_percpu_cache, init_heap, mark_gs_ready, print_alloc_stats},
     boot::boot_info,
     cmdline::ParsedCmdline,
     fs::{
@@ -107,6 +107,10 @@ fn init() {
     get_timer_calibration();
     init_boot_time();
     smp::init();
+    // Enable per-CPU cache globally only after all APs have their GS base set.
+    // APs allocate (Box::new for PerCpuData) during init_gs_for_this_cpu before
+    // their GS is ready, so gs_ready() must return false until all APs are up.
+    mark_gs_ready();
     unsafe { syscalls::setup_syscall() };
     println!("Init done");
 }

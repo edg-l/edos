@@ -154,11 +154,18 @@ const MIN_EXPANSION: u64 = 1 << 20; // 1mb
 /// Serialize heap expansion so only one CPU expands at a time.
 static EXPANDING: AtomicBool = AtomicBool::new(false);
 
-/// Check whether per-CPU data is available (GS base is set).
+/// Set once GS base is initialized on the BSP. Avoids an expensive `rdmsr`
+/// on every alloc/dealloc just to check if per-CPU data is available.
+static GS_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
 #[inline(always)]
 fn gs_ready() -> bool {
-    use x86_64::registers::model_specific::GsBase;
-    GsBase::read().as_u64() != 0
+    GS_INITIALIZED.load(Ordering::Relaxed)
+}
+
+/// Mark GS base as initialized. Called once from BSP boot after `init_gs_for_bsp_static`.
+pub fn mark_gs_ready() {
+    GS_INITIALIZED.store(true, Ordering::Release);
 }
 
 unsafe impl GlobalAlloc for Allocator {
