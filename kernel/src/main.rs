@@ -240,6 +240,20 @@ extern "C" fn test_thread3(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
     }
 }
 
+/// Boot loader kthread: reads a binary from disk and sends it back via mailbox.
+extern "C" fn boot_load_binary(arg: *mut u8) -> ! {
+    struct LoadRequest {
+        path: Path,
+        result_tx: Arc<Mailbox<alloc::vec::Vec<u8>, ()>>,
+    }
+
+    let req = *unsafe { Box::from_raw(arg as *mut LoadRequest) };
+    let size = fs::api::file_info(&req.path).unwrap().size as usize;
+    let data = fs::api::read_bytes(&req.path, 0, size).unwrap();
+    req.result_tx.send(data);
+    kthread_exit(0);
+}
+
 pub fn mount_system_fs() -> ! {
     log!("Starting mountfs thread");
     let partitions = fs::api::list_partitions();
@@ -316,24 +330,39 @@ pub fn mount_system_fs() -> ! {
 
     let default_env: [&[u8]; 3] = [b"PATH=/bin", b"HOME=/", b"PWD=/"];
 
-    // Read ELF binaries from disk with interrupts enabled (AHCI needs them).
-    // Sequential because the EFS driver holds a global lock during read_bytes.
-    // TODO: per-inode locking would allow parallel boot loads via NCQ.
-    log!("Loading /bin/edos-wm");
-    let wm_path = root.join("bin/edos-wm").normalize();
-    let wm_size = fs::api::file_info(&wm_path).unwrap().size as usize;
-    let wm_data = fs::api::read_bytes(&wm_path, 0, wm_size).unwrap();
-    log!("Loaded /bin/edos-wm ({} bytes)", wm_size);
-    log!("Loading /bin/edos-taskbar");
-    let taskbar_path = root.join("bin/edos-taskbar").normalize();
-    let taskbar_size = fs::api::file_info(&taskbar_path).unwrap().size as usize;
-    let taskbar_data = fs::api::read_bytes(&taskbar_path, 0, taskbar_size).unwrap();
-    log!("Loaded /bin/edos-taskbar ({} bytes)", taskbar_size);
-    log!("Loading /bin/edos-terminal");
-    let terminal_path = root.join("bin/edos-terminal").normalize();
-    let terminal_size = fs::api::file_info(&terminal_path).unwrap().size as usize;
-    let terminal_data = fs::api::read_bytes(&terminal_path, 0, terminal_size).unwrap();
-    log!("Loaded /bin/edos-terminal ({} bytes)", terminal_size);
+    // Parallel boot: load 3 binaries concurrently via per-inode locking + NCQ.
+    log!("Loading boot binaries (parallel)");
+
+    struct LoadRequest {
+        path: Path,
+        result_tx: Arc<Mailbox<alloc::vec::Vec<u8>, ()>>,
+    }
+
+    let binaries: [(&str, Arc<Mailbox<alloc::vec::Vec<u8>, ()>>); 3] = [
+        ("bin/edos-wm", Arc::new(Mailbox::with_capacity(1))),
+        ("bin/edos-taskbar", Arc::new(Mailbox::with_capacity(1))),
+        ("bin/edos-terminal", Arc::new(Mailbox::with_capacity(1))),
+    ];
+
+    for (name, tx) in &binaries {
+        let req = Box::new(LoadRequest {
+            path: root.join(name).normalize(),
+            result_tx: tx.clone(),
+        });
+        queue_spawn_kthread_named_arg(
+            "boot-load",
+            boot_load_binary as *const () as u64,
+            Box::into_raw(req) as *mut u8,
+        );
+    }
+
+    // Wait for all 3 to complete.
+    let wm_data = binaries[0].1.recv().payload.take().unwrap();
+    log!("Loaded /bin/edos-wm ({} bytes)", wm_data.len());
+    let taskbar_data = binaries[1].1.recv().payload.take().unwrap();
+    log!("Loaded /bin/edos-taskbar ({} bytes)", taskbar_data.len());
+    let terminal_data = binaries[2].1.recv().payload.take().unwrap();
+    log!("Loaded /bin/edos-terminal ({} bytes)", terminal_data.len());
     log!("Spawning user threads");
 
     // Set up user threads with interrupts disabled (page table manipulation).

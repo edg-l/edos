@@ -343,6 +343,15 @@ impl FileSystem for Memfs {
         Ok(())
     }
 
+    fn resolve_inode(&self, path: &Path) -> Result<u64, Error> {
+        let path = path.normalize();
+        let inner = self.inner.read();
+        inner
+            .find_node(&path)?
+            .map(|id| id as u64)
+            .ok_or(Error::FileNotFound)
+    }
+
     fn truncate(&self, path: &Path, size: u64) -> Result<(), Error> {
         let path = path.normalize();
         let mut inner = self.inner.write();

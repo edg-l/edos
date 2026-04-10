@@ -23,11 +23,13 @@ use crate::{
 
 pub mod api;
 pub mod block_device;
+pub mod dentry;
 pub mod devfs;
 pub mod efs;
 pub mod fat32;
 pub mod gpt;
 pub mod handle;
+pub mod inode;
 pub mod mbr;
 pub mod memfs;
 pub mod path;
@@ -197,6 +199,15 @@ pub trait FileSystem {
 
     fn statfs(&self) -> Result<StatFs, Error> {
         Err(Error::Unsupported)
+    }
+
+    /// Return a filesystem-local inode number for the given path.
+    /// Used by the VFS dentry cache to identify inodes.
+    /// Default returns 0 (suitable for stateless filesystems like procfs).
+    fn resolve_inode(&self, path: &Path) -> Result<u64, Error> {
+        // Stateless filesystems don't have meaningful inode numbers.
+        let _ = path;
+        Ok(0)
     }
 
     // Write/mutating operations (&self) -- each driver manages its own locking.

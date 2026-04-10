@@ -2,6 +2,7 @@ use crate::{
     fs::{
         PollState,
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
+        inode::VfsInode,
         path::Path,
     },
     net::socket::Socket,
@@ -253,11 +254,25 @@ impl PipeNotifications {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FsFile {
     pub path: Path,
     pub offset: u64,
     pub append: bool,
+    /// Cached VFS inode for per-inode locking. None for virtual filesystems
+    /// (procfs, devfs) that don't have meaningful inodes.
+    pub inode: Option<Arc<VfsInode>>,
+}
+
+impl core::fmt::Debug for FsFile {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FsFile")
+            .field("path", &self.path)
+            .field("offset", &self.offset)
+            .field("append", &self.append)
+            .field("inode", &self.inode.as_ref().map(|i| (i.mount_id, i.ino)))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]

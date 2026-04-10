@@ -481,6 +481,17 @@ impl FileSystem for Fatfs {
         Ok(())
     }
 
+    fn resolve_inode(&self, path: &Path) -> Result<u64, Error> {
+        if path.normalize().is_root() {
+            return Ok(self.boot_info.root_cluster as u64);
+        }
+        if let Some((entry, _, _)) = self.find_dir_entry(path)? {
+            Ok(entry.first_cluster() as u64)
+        } else {
+            Err(Error::FileNotFound)
+        }
+    }
+
     fn statfs(&self) -> Result<super::StatFs, Error> {
         let bs = &self.boot_info;
         let cluster_size = bs.bytes_per_sector as u64 * bs.sectors_per_cluster as u64;

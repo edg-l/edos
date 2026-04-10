@@ -1698,6 +1698,11 @@ impl FileSystem for EfsDriver {
         Ok(())
     }
 
+    fn resolve_inode(&self, path: &Path) -> Result<u64, Error> {
+        let path = path.normalize();
+        self.resolve_path(&path)
+    }
+
     fn statfs(&self) -> Result<super::StatFs, Error> {
         let m = self.mutable.lock();
         let sb = &m.superblock;

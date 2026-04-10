@@ -7,6 +7,7 @@ use core::time::Duration;
 use x86_64::instructions::interrupts;
 
 use crate::fs::handle::{PollEntry, PollKey, Pollable};
+use crate::fs::vfs;
 use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
 use crate::net::socket::PollableSocket;
 use crate::thread::pipe::PollablePipe;
@@ -181,8 +182,6 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             }
         }
         Some(FileDescriptor::FsFile(file)) => {
-            // FS still needs intermediate buffer (worker thread in different context)
-            // But we pass ownership to avoid the to_vec() copy in fs_api
             const MAX_WRITE_SIZE: usize = 1024 * 1024; // 1 MiB
             let capped_count = count.min(MAX_WRITE_SIZE);
             let mut buffer = vec![0u8; capped_count];
@@ -190,6 +189,9 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 info.lock().errno = Errno::EFAULT;
                 return !0u64;
             }
+
+            // Per-inode write lock from cached inode.
+            let _guard = file.inode.as_ref().map(|i| i.lock.write());
 
             let mut file = file.clone();
             if file.append {
@@ -201,7 +203,18 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                     }
                 }
             }
-            match fs_api::write_bytes_owned(&file.path, file.offset as usize, buffer) {
+
+            let lk = match vfs::lookup(&file.path) {
+                Some(lk) => lk,
+                None => {
+                    info.lock().errno = Errno::EINVAL;
+                    return !0u64;
+                }
+            };
+            match lk
+                .fs
+                .write_bytes(&lk.relative, file.offset as usize, &buffer)
+            {
                 Ok(written) => {
                     let new_fd = FileDescriptor::FsFile(FsFile {
                         offset: file.offset + written,
@@ -536,7 +549,17 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     }
                 }
             } else {
-                match fs_api::read_bytes(&file.path, file.offset as usize, count) {
+                // Per-inode read lock from cached inode (avoids re-resolving).
+                let _guard = file.inode.as_ref().map(|i| i.lock.read());
+
+                let lk = match vfs::lookup(&file.path) {
+                    Some(lk) => lk,
+                    None => {
+                        info.lock().errno = Errno::EINVAL;
+                        return -1;
+                    }
+                };
+                match lk.fs.read_bytes(&lk.relative, file.offset as usize, count) {
                     Ok(d) => d,
                     Err(_) => {
                         info.lock().errno = Errno::EINVAL;
@@ -810,10 +833,14 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         }
     }
 
+    // Resolve VFS inode for per-inode locking on subsequent reads/writes.
+    let inode = vfs::lookup(&path).and_then(|lk| fs_api::resolve_vfs_inode(&lk));
+
     let desc = FileDescriptor::FsFile(FsFile {
         path,
         offset,
         append,
+        inode,
     });
     let fd = info.lock().fd_table.lock().allocate_fd(desc);
     fd as i64
