@@ -39,6 +39,15 @@
   tlb_shootdown_all. CPU topology tracking in smp.rs.
 - **FSGSBASE** - CR4.FSGSBASE enabled with CPUID probe + fallback.
   get_percpu_data() uses rdgsbase (~1 cycle) instead of rdmsr (~30).
+- **Limine 0.6 + bootloader v11** - Crate 0.5->0.6 API migration,
+  bootloader v9->v11 for base revision 6. RSDP/DTB addresses virtual
+  in rev6 (converted to physical). HHDM now 1GB huge pages.
+- **HHDM-based process spawn** - Eliminated CR3 switching during ELF
+  loading. Writes to child address space go through HHDM translation
+  (copy_to_user/zero_user/write_val_to_user helpers on MemoryManager).
+  Fixes TLB shootdown timeouts caused by 100+ms interrupts-off in
+  do_spawn. Boot stack guard page removed (inside HHDM huge pages).
+- **Dep bumps** - acpi 6.1.1, bytemuck 1.25.0, bitflags 2.11.0
 
 ## Network Stack Remaining
 
