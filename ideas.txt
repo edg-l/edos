@@ -30,6 +30,15 @@
   European ISO keyboards (< > º ç ´).
 - **Shell quoted redirect fix** - parse_command tracks quoted tokens,
   extract_redirects skips them. echo "<" > file works correctly.
+- **Heap expansion race fixes** - Lazy vmalloc fault handler, expansion
+  serialization (AtomicBool), per-CPU heap freelists (6 size classes,
+  16 slots/CPU, batch refill/drain). Removed heap warmup workaround.
+- **TLB shootdown IPIs** - TlbShootdown interrupt vector, global
+  TlbFlushRequest with atomic bitmask acks. Deferred frame free in
+  munmap (unmap PTEs, shootdown, then free). COW fork uses
+  tlb_shootdown_all. CPU topology tracking in smp.rs.
+- **FSGSBASE** - CR4.FSGSBASE enabled with CPUID probe + fallback.
+  get_percpu_data() uses rdgsbase (~1 cycle) instead of rdmsr (~30).
 
 ## Network Stack Remaining
 
@@ -59,42 +68,28 @@
   Fix: wire truncate flag to `sys_open` with O_TRUNC, or implement
   truncate-on-open in the kernel.
 
-## Boot Race / Heap Expansion Bug
+## Boot Race / Heap Expansion Bug (mostly fixed, intermittent remnant)
 
-Concurrent heap expansion across CPUs during parallel boot loading causes
-intermittent memory corruption (page fault reading from ~0x634a2, corrupted
-per-CPU data). Triggered by the vmalloc fix (which removed the BTreeMap
-overhead that inadvertently pre-expanded the heap during DMA pool init).
+All three Linux-inspired fixes are now implemented:
+1. **Lazy vmalloc fault handler** -- page fault handler walks kernel PML4
+   lock-free for faults in KERNEL_HEAP..VMALLOC_END. If mapping exists,
+   invlpg and retry. Handles stale paging-structure cache entries.
+2. **Heap expansion serialization** -- AtomicBool EXPANDING ensures only
+   one CPU expands at a time. Waiters spin then retry.
+3. **Per-CPU heap freelists** -- 6 size classes (32-1024 bytes), 16 slots
+   per CPU. Most small allocations avoid the global heap lock. Batch
+   refill/drain of 8 objects. FSGSBASE enabled for fast per-CPU access.
 
-Current workaround: 512KB heap warmup before spawning boot-load threads.
+TLB shootdown IPIs also implemented for safe page unmapping on SMP
+(deferred frame free in munmap, shootdown in COW fork).
 
-How Linux handles this:
-1. Per-CPU slab caches (SLUB) -- most allocations hit per-CPU freelists,
-   no global lock contention, no concurrent expansion.
-2. Lazy vmalloc fault fixup -- when a CPU faults on a vmalloc address,
-   the page fault handler (vmalloc_fault) checks the reference kernel
-   page table (init_mm). If mapped there, copies the PTE and retries.
-   No TLB shootdown IPI needed for new mappings.
-3. TLB shootdown IPIs only for invalidating existing mappings (munmap etc.),
-   not for new mappings.
+The 512KB heap warmup workaround was removed.
 
-Proposed fixes (pick one or combine):
-- Lazy vmalloc fault handler: add a check in the page fault handler for
-  addresses in the vmalloc/heap range. If the address IS mapped in the
-  kernel page table, return without panic (retry will succeed after TLB
-  miss forces a page table walk). Simplest fix, matches Linux approach.
-- Per-CPU heap freelists: maintain small per-CPU allocation caches that
-  don't need the global heap lock. Only fall through to the global
-  allocator when the per-CPU cache is empty.
-- Heap expansion lock: add a dedicated mutex around the entire
-  expand-and-retry path so only one CPU expands at a time.
-
-The heap allocator expansion path (allocator.rs) releases the heap lock,
-calls vmalloc + map_memory, then re-acquires. Two CPUs expanding
-simultaneously both map new pages (serialized by IrqSpinlock), but
-something in the concurrent access pattern corrupts memory. Need to
-investigate whether it's a stale TLB entry, a page table walk race, or
-a buddy allocator metadata write race.
+Intermittent issue remains: boot-load threads occasionally vanish during
+parallel boot (~1 in 5 runs). All CPUs go idle, no panic. Unknown root
+cause -- possibly a pre-existing race in the scheduler, VFS, or buddy
+allocator metadata corruption under specific allocation patterns. Not
+reproducible with sequential boot loading.
 
 ## Ideas
 
