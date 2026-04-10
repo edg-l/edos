@@ -46,7 +46,7 @@ DISPLAY_VIRTIO_GTK := -vga none -device virtio-vga,xres=1920,yres=1080,blob=on -
 define run_qemu_uefi
 	qemu-system-$(KARCH) \
 		-M q35 \
-		-cpu qemu64,+sse4.1,+sse4.2,+x2apic \
+		-cpu qemu64,+sse4.1,+sse4.2,+x2apic,+fsgsbase \
 		-object memory-backend-memfd,id=mem1,size=$(QEMU_MEM) \
 		-machine memory-backend=mem1 \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
@@ -69,7 +69,7 @@ endef
 
 .PHONY: run-x86_64
 run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
-	$(call run_qemu_uefi,iso,4,-accel kvm -s)
+	$(call run_qemu_uefi,iso,4,-accel kvm -s -no-reboot -no-shutdown)
 
 .PHONY: run-vga
 run-vga: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img

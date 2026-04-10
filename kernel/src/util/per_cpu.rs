@@ -1,7 +1,9 @@
 use core::cell::{Cell, UnsafeCell};
 
 use alloc::{boxed::Box, sync::Arc};
+use core::sync::atomic::{AtomicBool, Ordering};
 use x2apic::lapic::LocalApic;
+
 use x86_64::{
     VirtAddr,
     registers::model_specific::{GsBase, KernelGsBase},
@@ -80,12 +82,67 @@ impl PerCpuData {
     }
 }
 
+/// Write GS base using `wrgsbase` (~1 cycle vs ~30 for wrmsr).
+/// Set by BSP after probing CPUID for FSGSBASE support.
+static HAS_FSGSBASE: AtomicBool = AtomicBool::new(false);
+
+/// Probe CPUID and enable FSGSBASE if supported. Called once on BSP;
+/// the result applies to all CPUs (homogeneous feature set).
+pub fn probe_and_enable_fsgsbase() {
+    // CPUID leaf 7, sub-leaf 0: EBX bit 0 = FSGSBASE
+    // rbx is reserved by LLVM, so save/restore it manually.
+    let ebx: u32;
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 7",
+            "xor ecx, ecx",
+            "cpuid",
+            "mov {0:e}, ebx",
+            "pop rbx",
+            out(reg) ebx,
+            out("eax") _,
+            out("ecx") _,
+            out("edx") _,
+        );
+    }
+    if ebx & 1 != 0 {
+        HAS_FSGSBASE.store(true, Ordering::Relaxed);
+        unsafe { crate::drivers::fpu::enable_fsgsbase() };
+    }
+}
+
+/// Enable FSGSBASE on this AP (CR4 is per-CPU). Only call if BSP detected support.
+pub fn enable_fsgsbase_on_ap() {
+    if HAS_FSGSBASE.load(Ordering::Relaxed) {
+        unsafe { crate::drivers::fpu::enable_fsgsbase() };
+    }
+}
+
+#[inline(always)]
+fn write_gs_base(addr: VirtAddr) {
+    if HAS_FSGSBASE.load(Ordering::Relaxed) {
+        unsafe {
+            core::arch::asm!("wrgsbase {}", in(reg) addr.as_u64(), options(nomem, nostack, preserves_flags));
+        }
+    } else {
+        GsBase::write(addr);
+    }
+}
+
 /// Returns a shared reference to the current CPU's PerCpuData via GS base.
+/// Uses `rdgsbase` (~1 cycle) when available, falls back to `rdmsr` (~30 cycles).
 #[inline(always)]
 pub fn get_percpu_data() -> &'static PerCpuData {
-    // Always keep GSBase == KernelGSBase to avoid ambiguity across SWAPGS.
-    let base = GsBase::read().as_u64() as *mut PerCpuData;
-    unsafe { &*base }
+    let base: u64;
+    if HAS_FSGSBASE.load(Ordering::Relaxed) {
+        unsafe {
+            core::arch::asm!("rdgsbase {}", out(reg) base, options(nomem, nostack, preserves_flags));
+        }
+    } else {
+        base = GsBase::read().as_u64();
+    }
+    unsafe { &*(base as *const PerCpuData) }
 }
 
 /// Allocate and install per-CPU data for the current CPU and set GS bases.
@@ -96,7 +153,7 @@ pub unsafe fn init_gs_for_this_cpu(lapic_id: u32) -> &'static PerCpuData {
     let addr = VirtAddr::new(percpu_ptr as u64);
     // Set both to the same value so `swapgs` does not change effective base
     // and `get_percpu_data()` works uniformly.
-    GsBase::write(addr);
+    write_gs_base(addr);
     KernelGsBase::write(addr);
     unsafe { &*percpu_ptr }
 }
@@ -110,7 +167,7 @@ pub unsafe fn init_gs_for_bsp_static() -> &'static PerCpuData {
         (*ptr).lapic_id.set(raw_current_apic_id());
     }
     let addr = VirtAddr::new(ptr as u64);
-    GsBase::write(addr);
+    write_gs_base(addr);
     KernelGsBase::write(addr);
     unsafe { &*ptr }
 }

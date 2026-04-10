@@ -34,6 +34,15 @@ unsafe fn enable_sse() {
     unsafe { Cr4::write(cr4) };
 }
 
+/// Enable FSGSBASE so `rdgsbase`/`wrgsbase` can be used for fast per-CPU
+/// data access (~1 cycle vs ~30 for rdmsr). Call once per CPU, before any
+/// GS base read/write.
+pub unsafe fn enable_fsgsbase() {
+    let mut cr4 = Cr4::read();
+    cr4.insert(Cr4Flags::FSGSBASE);
+    unsafe { Cr4::write(cr4) };
+}
+
 /// Save FPU state using FXSAVE
 pub unsafe fn save_fpu_state(state: &mut FpuState) {
     unsafe {

@@ -110,6 +110,7 @@ pub unsafe extern "C" fn ap_start(cpu: &MpCpu) -> ! {
     // Per-CPU data and core-local tables
     switch_to_kernel_page();
     tlb_flush_all_including_global();
+    crate::util::per_cpu::enable_fsgsbase_on_ap();
     unsafe { init_gs_for_this_cpu(cpu.lapic_id) };
     gdt::init_current_cpu();
     interrupts::init_current_cpu();

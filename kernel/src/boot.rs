@@ -100,6 +100,7 @@ unsafe extern "C" fn kmain() -> ! {
     // removed by the linker.
     assert!(BASE_REVISION.is_supported());
 
+    crate::util::per_cpu::probe_and_enable_fsgsbase();
     unsafe { init_gs_for_bsp_static() };
 
     // Early init serial in case we panic on expects.
