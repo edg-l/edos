@@ -661,7 +661,7 @@ pub fn sys_statfs(path_ptr: *const u8, buf: *mut u8, buf_len: usize) -> i64 {
         }
     };
 
-    let stat = match fs.lock().statfs() {
+    let stat = match fs.read().statfs() {
         Ok(s) => s,
         Err(_) => {
             info.lock().errno = Errno::EIO;

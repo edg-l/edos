@@ -72,10 +72,12 @@ pub fn register_partition(partition: Partition) -> Result<(), Error> {
 }
 
 // Path-scoped APIs (resolve filesystem via VFS)
+// Read-only operations use fs.read() (shared lock).
+// Write/mutating operations use fs.write() (exclusive lock).
 
 pub fn list_files(path: &Path) -> Result<Vec<File>, Error> {
     let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    let mut files = fs.lock().list_files(&rel_path)?;
+    let mut files = fs.read().list_files(&rel_path)?;
 
     // Append synthetic directory entries for child mount points.
     for (name, _mount_path) in vfs::child_mount_points(path) {
@@ -103,39 +105,39 @@ pub fn list_files(path: &Path) -> Result<Vec<File>, Error> {
 
 pub fn read_bytes(path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
     let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.lock().read_bytes(&rel_path, offset, count)
+    fs.read().read_bytes(&rel_path, offset, count)
 }
 
 #[expect(unused)]
 pub fn write_bytes(path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
     let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.lock().write_bytes(&rel_path, offset, data)
+    fs.write().write_bytes(&rel_path, offset, data)
 }
 
 /// Variant that takes ownership of the Vec to avoid an extra to_vec() copy.
 pub fn write_bytes_owned(path: &Path, offset: usize, data: Vec<u8>) -> Result<u64, Error> {
     let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.lock().write_bytes(&rel_path, offset, &data)
+    fs.write().write_bytes(&rel_path, offset, &data)
 }
 
 pub fn create_file(path: &Path) -> Result<(), Error> {
     let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.lock().create_file(&rel_path)
+    fs.write().create_file(&rel_path)
 }
 
 pub fn create_dir(path: &Path) -> Result<(), Error> {
     let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.lock().create_dir(&rel_path)
+    fs.write().create_dir(&rel_path)
 }
 
 pub fn remove_file(path: &Path) -> Result<(), Error> {
     let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.lock().remove_file(&rel_path)
+    fs.write().remove_file(&rel_path)
 }
 
 pub fn remove_dir(path: &Path) -> Result<(), Error> {
     let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.lock().remove_dir(&rel_path)
+    fs.write().remove_dir(&rel_path)
 }
 
 pub fn file_info(path: &Path) -> Result<File, Error> {
@@ -160,23 +162,23 @@ pub fn file_info(path: &Path) -> Result<File, Error> {
         });
     }
     let (fs, rel_path) = vfs::lookup_for_info(path).ok_or(Error::FileNotFound)?;
-    fs.lock().file_info(&rel_path)
+    fs.read().file_info(&rel_path)
 }
 
 #[expect(unused)]
 pub fn flush(path: &Path) -> Result<(), Error> {
     let (fs, _rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.lock().flush()
+    fs.write().flush()
 }
 
 pub fn ioctl(path: &Path, request: u64, arg: u64) -> Result<u64, Error> {
     let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.lock().ioctl(&rel_path, request, arg)
+    fs.write().ioctl(&rel_path, request, arg)
 }
 
 pub fn poll(path: &Path) -> Result<Box<dyn Pollable>, Error> {
     let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.lock().poll(&rel_path)
+    fs.read().poll(&rel_path)
 }
 
 #[expect(unused)]
@@ -187,12 +189,12 @@ pub fn mmap(
     memory: Arc<Mutex<MemoryManager>>,
 ) -> Result<MmapRegion, Error> {
     let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.lock().mmap(&rel_path, offset, length, memory)
+    fs.read().mmap(&rel_path, offset, length, memory)
 }
 
 pub fn truncate(path: &Path, size: u64) -> Result<(), Error> {
     let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.lock().truncate(&rel_path, size)
+    fs.write().truncate(&rel_path, size)
 }
 
 pub fn rename(old_path: &Path, new_path: &Path) -> Result<(), Error> {
@@ -204,5 +206,5 @@ pub fn rename(old_path: &Path, new_path: &Path) -> Result<(), Error> {
         return Err(Error::Unsupported);
     }
 
-    old_fs.lock().rename(&old_rel, &new_rel)
+    old_fs.write().rename(&old_rel, &new_rel)
 }

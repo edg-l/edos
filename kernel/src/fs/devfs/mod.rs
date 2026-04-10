@@ -193,7 +193,7 @@ impl DevFsHandle {
 }
 
 impl FileSystem for DevFsHandle {
-    fn list_files(&mut self, path: &Path) -> Result<Vec<File>, fs::Error> {
+    fn list_files(&self, path: &Path) -> Result<Vec<File>, fs::Error> {
         let normalized = path.normalize();
         let state = self.shared.read();
 
@@ -237,12 +237,7 @@ impl FileSystem for DevFsHandle {
         Ok(entries)
     }
 
-    fn read_bytes(
-        &mut self,
-        path: &Path,
-        offset: usize,
-        count: usize,
-    ) -> Result<Vec<u8>, fs::Error> {
+    fn read_bytes(&self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, fs::Error> {
         let normalized = path.normalize();
         let state = self.shared.read();
         let device = state.get_device(&normalized).map(|d| d.device.clone());
@@ -295,7 +290,7 @@ impl FileSystem for DevFsHandle {
         state.remove_device(&normalized).map_err(fs::Error::from)
     }
 
-    fn file_info(&mut self, path: &Path) -> Result<File, fs::Error> {
+    fn file_info(&self, path: &Path) -> Result<File, fs::Error> {
         let normalized = path.normalize();
         let state = self.shared.read();
 
@@ -344,7 +339,7 @@ impl FileSystem for DevFsHandle {
         }
     }
 
-    fn poll(&mut self, path: &Path) -> Result<Box<dyn Pollable>, fs::Error> {
+    fn poll(&self, path: &Path) -> Result<Box<dyn Pollable>, fs::Error> {
         let normalized = path.normalize();
         let state = self.shared.read();
         let device = state.get_device(&normalized).map(|d| d.device.clone());
@@ -358,7 +353,7 @@ impl FileSystem for DevFsHandle {
     }
 
     fn mmap(
-        &mut self,
+        &self,
         path: &Path,
         offset: usize,
         length: usize,

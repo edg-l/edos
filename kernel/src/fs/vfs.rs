@@ -8,10 +8,10 @@ use alloc::{
 use spin::RwLock;
 
 use super::{FileSystem, MountInfo, path::Path};
-use crate::{fs::gpt::FilesystemType, thread::mutex::BlockingMutex};
+use crate::{fs::gpt::FilesystemType, thread::rwlock::RwLock as BlockingRwLock};
 
 pub struct MountEntry {
-    pub fs: Arc<BlockingMutex<Box<dyn FileSystem + Send>>>,
+    pub fs: Arc<BlockingRwLock<Box<dyn FileSystem + Send + Sync>>>,
     pub device_id: usize,
     pub partition_index: usize,
     pub filesystem: FilesystemType,
@@ -21,7 +21,9 @@ static VFS: RwLock<BTreeMap<Path, MountEntry>> = RwLock::new(BTreeMap::new());
 
 /// Look up the filesystem for a given path. Returns (filesystem, mount-relative path).
 /// Uses longest-prefix matching to find the deepest mount point.
-pub fn lookup(path: &Path) -> Option<(Arc<BlockingMutex<Box<dyn FileSystem + Send>>>, Path)> {
+pub fn lookup(
+    path: &Path,
+) -> Option<(Arc<BlockingRwLock<Box<dyn FileSystem + Send + Sync>>>, Path)> {
     let registry = VFS.read();
     let mut best_mount: Option<(&Path, &MountEntry)> = None;
     for (mount_path, entry) in registry.iter() {
@@ -44,7 +46,7 @@ pub fn lookup(path: &Path) -> Option<(Arc<BlockingMutex<Box<dyn FileSystem + Sen
 /// by resolving through the parent filesystem.
 pub fn lookup_for_info(
     path: &Path,
-) -> Option<(Arc<BlockingMutex<Box<dyn FileSystem + Send>>>, Path)> {
+) -> Option<(Arc<BlockingRwLock<Box<dyn FileSystem + Send + Sync>>>, Path)> {
     if VFS.read().contains_key(path) {
         if let Some(parent) = path.parent() {
             return lookup(&parent).map(|(fs, parent_rel)| {

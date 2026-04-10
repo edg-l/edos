@@ -317,6 +317,8 @@ pub fn mount_system_fs() -> ! {
     let default_env: [&[u8]; 3] = [b"PATH=/bin", b"HOME=/", b"PWD=/"];
 
     // Read ELF binaries from disk with interrupts enabled (AHCI needs them).
+    // Sequential because the EFS driver holds a global lock during read_bytes.
+    // TODO: per-inode locking would allow parallel boot loads via NCQ.
     log!("Loading /bin/edos-wm");
     let wm_path = root.join("bin/edos-wm").normalize();
     let wm_size = fs::api::file_info(&wm_path).unwrap().size as usize;

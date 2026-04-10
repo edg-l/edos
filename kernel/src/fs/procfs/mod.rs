@@ -154,7 +154,7 @@ impl Procfs {
 }
 
 impl FileSystem for Procfs {
-    fn list_files(&mut self, path: &Path) -> Result<Vec<File>, Error> {
+    fn list_files(&self, path: &Path) -> Result<Vec<File>, Error> {
         let path = path.normalize();
         match Self::resolve_path(&path)? {
             ProcNode::Root => {
@@ -198,7 +198,7 @@ impl FileSystem for Procfs {
         }
     }
 
-    fn read_bytes(&mut self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
+    fn read_bytes(&self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
         let path = path.normalize();
         match Self::resolve_path(&path)? {
             ProcNode::ProcessesFile => {
@@ -250,7 +250,7 @@ impl FileSystem for Procfs {
         Err(Error::Unsupported)
     }
 
-    fn file_info(&mut self, path: &Path) -> Result<File, Error> {
+    fn file_info(&self, path: &Path) -> Result<File, Error> {
         let path = path.normalize();
         match Self::resolve_path(&path)? {
             ProcNode::Root => Ok(Self::dir_entry(String::new())),

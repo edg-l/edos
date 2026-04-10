@@ -59,23 +59,21 @@ but needed for a complete real-hardware network stack.
 Second NIC backend. Straightforward now that the stack and e1000e exist.
 Useful for VMs where e1000e emulation is slower than paravirtual.
 
-### VFS per-inode locking (prerequisite for parallel I/O)
-Currently fs.lock() holds the entire EFS driver for the full duration of each
-read_bytes/write_bytes call (including disk I/O). This serializes all file I/O
-on a single filesystem. To exploit NCQ concurrency from multiple threads:
-- Replace the global BlockingMutex<Box<dyn FileSystem>> with per-inode or
-  per-file locks
-- Or split the lock: hold FS lock briefly for metadata, release during data I/O
-- Parallel boot loading (3 kthreads reading different binaries) requires this
-Attempted parallel boot loading and hit a hang with 3 threads contending on
-fs.lock() -- 2 of 3 completed, 3rd stuck. Likely a BlockingMutex wake issue
-under 3-way contention. Needs investigation.
+### VFS per-inode locking
+Current approach: VFS RwLock (shared reads, exclusive writes) + EFS internal
+BlockingMutex for inode_cache + BlockDevice split-lock around AHCI I/O. This
+allows concurrent reads from different filesystems and releases the cache lock
+during disk I/O so NCQ commands overlap.
+
+Next level: per-inode locks (like Linux i_mutex). Would eliminate contention
+between threads reading different files on the same FS. Requires inode objects
+with refcounting and a dentry cache. Significant refactor but the standard
+approach for real OS VFS layers.
 
 ### EFS parallel extent reads
 EfsDriver::read_via_extents reads one extent at a time. For fragmented files
 spanning multiple extents, could issue all extent reads concurrently via
-ncq_read_batch. Requires the per-inode locking above plus refactoring EfsDriver
-from &mut self to shared access.
+ncq_read_batch. Requires per-inode locking above.
 
 ### AHCI zero-copy DMA
 Currently AHCI reads/writes copy through intermediate per-slot DMA pool pages

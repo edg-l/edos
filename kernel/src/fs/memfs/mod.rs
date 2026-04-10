@@ -72,7 +72,7 @@ impl Memfs {
 }
 
 impl FileSystem for Memfs {
-    fn list_files(&mut self, path: &Path) -> Result<Vec<super::File>, Error> {
+    fn list_files(&self, path: &Path) -> Result<Vec<super::File>, Error> {
         let path = path.normalize();
         if let Some(node) = self.find_node(&path)? {
             let node = self.get_node(node)?;
@@ -94,7 +94,7 @@ impl FileSystem for Memfs {
         }
     }
 
-    fn read_bytes(&mut self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
+    fn read_bytes(&self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
         let path = path.normalize();
         if let Some(node) = self.find_node(&path)? {
             let node = self.get_node(node)?;
@@ -312,7 +312,7 @@ impl FileSystem for Memfs {
         }
     }
 
-    fn file_info(&mut self, path: &Path) -> Result<super::File, Error> {
+    fn file_info(&self, path: &Path) -> Result<super::File, Error> {
         let path = path.normalize();
         if let Some(node) = self.find_node(&path)? {
             let node = self.get_node(node)?;

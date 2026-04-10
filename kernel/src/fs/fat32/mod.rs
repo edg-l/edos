@@ -29,7 +29,7 @@ pub struct Fatfs {
 
 impl Fatfs {
     pub fn new(partition: Partition) -> Result<Self, Error> {
-        let mut device = BlockDevice::new(partition.device_id, 4096);
+        let device = BlockDevice::new(partition.device_id, 4096);
         let boot_bytes = device.read_sectors(partition.starting_lba, 1, Vec::new())?;
 
         if boot_bytes.len() != 512 {
@@ -82,7 +82,7 @@ impl Fatfs {
 }
 
 impl FileSystem for Fatfs {
-    fn list_files(&mut self, path: &Path) -> Result<alloc::vec::Vec<super::File>, super::Error> {
+    fn list_files(&self, path: &Path) -> Result<alloc::vec::Vec<super::File>, super::Error> {
         let path = path.normalize();
 
         let entries;
@@ -109,7 +109,7 @@ impl FileSystem for Fatfs {
     }
 
     fn read_bytes(
-        &mut self,
+        &self,
         path: &Path,
         offset: usize,
         count: usize,
@@ -240,7 +240,7 @@ impl FileSystem for Fatfs {
         dirbuf[32..64].copy_from_slice(&dotdot_bytes);
 
         self.device
-            .write_sectors(self.cluster_to_lba(newc), dirbuf, spc)?;
+            .write_sectors(self.cluster_to_lba(newc), &dirbuf, spc)?;
 
         // Insert directory entry in parent
         let (short_name, needs_lfn) = self.generate_short_name(parent_cluster, &name)?;
@@ -288,7 +288,7 @@ impl FileSystem for Fatfs {
             return Err(Error::IoError);
         }
         buf[entry_off] = 0xE5;
-        self.device.write_sectors(base_lba, buf, sectors)?;
+        self.device.write_sectors(base_lba, &buf, sectors)?;
 
         self.delete_long_name_sequence(
             parent_cluster,
@@ -371,7 +371,7 @@ impl FileSystem for Fatfs {
             return Err(Error::IoError);
         }
         read_buffer[entry_off] = 0xE5;
-        let _read_buffer = self.device.write_sectors(base_lba, read_buffer, sectors)?;
+        self.device.write_sectors(base_lba, &read_buffer, sectors)?;
 
         self.delete_long_name_sequence(
             parent_cluster,
@@ -383,7 +383,7 @@ impl FileSystem for Fatfs {
         Ok(())
     }
 
-    fn file_info(&mut self, path: &Path) -> Result<super::File, super::Error> {
+    fn file_info(&self, path: &Path) -> Result<super::File, super::Error> {
         if let Some((entry, _, _)) = self.find_dir_entry(path)? {
             Ok(entry.into())
         } else {
@@ -469,7 +469,7 @@ impl FileSystem for Fatfs {
         Ok(())
     }
 
-    fn statfs(&mut self) -> Result<super::StatFs, Error> {
+    fn statfs(&self) -> Result<super::StatFs, Error> {
         let bs = &self.boot_info;
         let cluster_size = bs.bytes_per_sector as u64 * bs.sectors_per_cluster as u64;
         let total_clusters = bs.calculate_cluster_count() as u64;

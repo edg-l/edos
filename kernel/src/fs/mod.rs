@@ -17,8 +17,8 @@ use crate::{
     log,
     memory::mapper::MemoryManager,
     thread::{
-        mailbox::Mailbox, mutex::BlockingMutex, runqueue::IO_PRIORITY, scheduler::sched,
-        util::queue_spawn_kthread_named,
+        mailbox::Mailbox, runqueue::IO_PRIORITY, rwlock::RwLock as BlockingRwLock,
+        scheduler::sched, util::queue_spawn_kthread_named,
     },
 };
 
@@ -177,31 +177,38 @@ impl MmapRegion {
 }
 
 pub trait FileSystem {
-    fn list_files(&mut self, path: &Path) -> Result<Vec<File>, Error>;
-    fn read_bytes(&mut self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error>;
-    fn write_bytes(&mut self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error>;
-    fn create_file(&mut self, path: &Path) -> Result<(), Error>;
-    fn create_dir(&mut self, path: &Path) -> Result<(), Error>;
-    fn remove_dir(&mut self, path: &Path) -> Result<(), Error>;
-    fn remove_file(&mut self, path: &Path) -> Result<(), Error>;
-    fn file_info(&mut self, path: &Path) -> Result<File, Error>;
-    fn flush(&mut self) -> Result<(), Error>;
+    // Read-only operations (&self) -- can run concurrently via RwLock.
+    fn list_files(&self, path: &Path) -> Result<Vec<File>, Error>;
+    fn read_bytes(&self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error>;
+    fn file_info(&self, path: &Path) -> Result<File, Error>;
 
-    fn ioctl(&mut self, _path: &Path, _request: u64, _arg: u64) -> Result<u64, Error> {
-        Err(Error::IoError)
-    }
-
-    fn poll(&mut self, _path: &Path) -> Result<Box<dyn Pollable>, Error> {
+    fn poll(&self, _path: &Path) -> Result<Box<dyn Pollable>, Error> {
         Err(Error::IoError)
     }
 
     fn mmap(
-        &mut self,
+        &self,
         _path: &Path,
         _offset: usize,
         _length: usize,
         _memory: Arc<Mutex<MemoryManager>>,
     ) -> Result<MmapRegion, Error> {
+        Err(Error::IoError)
+    }
+
+    fn statfs(&self) -> Result<StatFs, Error> {
+        Err(Error::Unsupported)
+    }
+
+    // Write/mutating operations (&mut self) -- exclusive via RwLock.
+    fn write_bytes(&mut self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error>;
+    fn create_file(&mut self, path: &Path) -> Result<(), Error>;
+    fn create_dir(&mut self, path: &Path) -> Result<(), Error>;
+    fn remove_dir(&mut self, path: &Path) -> Result<(), Error>;
+    fn remove_file(&mut self, path: &Path) -> Result<(), Error>;
+    fn flush(&mut self) -> Result<(), Error>;
+
+    fn ioctl(&mut self, _path: &Path, _request: u64, _arg: u64) -> Result<u64, Error> {
         Err(Error::IoError)
     }
 
@@ -211,10 +218,6 @@ pub trait FileSystem {
 
     fn rename(&mut self, _old_path: &Path, _new_path: &Path) -> Result<(), Error> {
         Err(Error::IoError)
-    }
-
-    fn statfs(&mut self) -> Result<StatFs, Error> {
-        Err(Error::Unsupported)
     }
 }
 
@@ -472,11 +475,12 @@ pub extern "C" fn fs_main_thread() -> ! {
                             {
                                 match Fatfs::new(partition.clone()) {
                                     Ok(fat_fs) => {
-                                        let fs: Box<dyn FileSystem + Send> = Box::new(fat_fs);
+                                        let fs: Box<dyn FileSystem + Send + Sync> =
+                                            Box::new(fat_fs);
                                         vfs::mount(
                                             mount_point.clone(),
                                             vfs::MountEntry {
-                                                fs: Arc::new(BlockingMutex::new(fs)),
+                                                fs: Arc::new(BlockingRwLock::new(fs)),
                                                 device_id,
                                                 partition_index,
                                                 filesystem: fstype.clone(),
@@ -500,11 +504,11 @@ pub extern "C" fn fs_main_thread() -> ! {
                         log!("Mounting memfs");
                         match Memfs::new() {
                             Ok(memfs) => {
-                                let fs: Box<dyn FileSystem + Send> = Box::new(memfs);
+                                let fs: Box<dyn FileSystem + Send + Sync> = Box::new(memfs);
                                 vfs::mount(
                                     mount_point.clone(),
                                     vfs::MountEntry {
-                                        fs: Arc::new(BlockingMutex::new(fs)),
+                                        fs: Arc::new(BlockingRwLock::new(fs)),
                                         device_id: 0,
                                         partition_index: 0,
                                         filesystem: FilesystemType::Memfs,
@@ -522,11 +526,11 @@ pub extern "C" fn fs_main_thread() -> ! {
                         log!("Mounting devfs");
                         match DevFs::new() {
                             Ok(devfs) => {
-                                let fs: Box<dyn FileSystem + Send> = Box::new(devfs);
+                                let fs: Box<dyn FileSystem + Send + Sync> = Box::new(devfs);
                                 vfs::mount(
                                     mount_point.clone(),
                                     vfs::MountEntry {
-                                        fs: Arc::new(BlockingMutex::new(fs)),
+                                        fs: Arc::new(BlockingRwLock::new(fs)),
                                         device_id: 0,
                                         partition_index: 0,
                                         filesystem: FilesystemType::Devfs,
@@ -544,11 +548,11 @@ pub extern "C" fn fs_main_thread() -> ! {
                         log!("Mounting procfs");
                         match Procfs::new() {
                             Ok(procfs) => {
-                                let fs: Box<dyn FileSystem + Send> = Box::new(procfs);
+                                let fs: Box<dyn FileSystem + Send + Sync> = Box::new(procfs);
                                 vfs::mount(
                                     mount_point.clone(),
                                     vfs::MountEntry {
-                                        fs: Arc::new(BlockingMutex::new(fs)),
+                                        fs: Arc::new(BlockingRwLock::new(fs)),
                                         device_id: 0,
                                         partition_index: 0,
                                         filesystem: FilesystemType::Procfs,
@@ -571,11 +575,12 @@ pub extern "C" fn fs_main_thread() -> ! {
                             {
                                 match EfsDriver::new(partition.clone()) {
                                     Ok(efs_fs) => {
-                                        let fs: Box<dyn FileSystem + Send> = Box::new(efs_fs);
+                                        let fs: Box<dyn FileSystem + Send + Sync> =
+                                            Box::new(efs_fs);
                                         vfs::mount(
                                             mount_point.clone(),
                                             vfs::MountEntry {
-                                                fs: Arc::new(BlockingMutex::new(fs)),
+                                                fs: Arc::new(BlockingRwLock::new(fs)),
                                                 device_id,
                                                 partition_index,
                                                 filesystem: fstype.clone(),

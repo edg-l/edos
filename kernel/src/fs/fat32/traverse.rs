@@ -15,7 +15,7 @@ use crate::fs::{
 impl Fatfs {
     /// Find entry and return (entry, cluster_that_contains_it, byte_offset_within_cluster).
     pub fn find_dir_entry(
-        &mut self,
+        &self,
         path: &crate::fs::path::Path,
     ) -> Result<Option<(DirectoryEntry, u32, usize)>, Error> {
         // Resolve parent directory cluster chain
@@ -215,7 +215,7 @@ impl Fatfs {
         }
     }
 
-    pub fn get_dir_entries(&mut self, start_cluster: u32) -> Result<Vec<DirectoryRecord>, Error> {
+    pub fn get_dir_entries(&self, start_cluster: u32) -> Result<Vec<DirectoryRecord>, Error> {
         let mut cluster = start_cluster;
         let mut entries = Vec::new();
         let mut lfn_stack: Vec<LongFilenameEntry> = Vec::new();
@@ -301,7 +301,7 @@ impl Fatfs {
         }
     }
 
-    pub fn get_fat_entry(&mut self, cluster_number: u32) -> Result<Option<u32>, Error> {
+    pub fn get_fat_entry(&self, cluster_number: u32) -> Result<Option<u32>, Error> {
         match self.variant {
             FatVariant::Fat32 => {
                 let byte_off = (cluster_number as u64) * 4;
@@ -450,7 +450,7 @@ impl Fatfs {
     }
 
     /// Get root directory entries for FAT12/16
-    pub fn get_root_dir_entries(&mut self) -> Result<Vec<DirectoryRecord>, Error> {
+    pub fn get_root_dir_entries(&self) -> Result<Vec<DirectoryRecord>, Error> {
         match self.variant {
             FatVariant::Fat32 => {
                 // Should not be called for FAT32
@@ -574,7 +574,7 @@ impl Fatfs {
 
     /// Analyze a cluster chain to find consecutive cluster ranges for batched reading.
     /// Returns a vector of (start_cluster, cluster_count) tuples representing consecutive ranges.
-    pub fn analyze_cluster_chain(&mut self, start_cluster: u32) -> Result<Vec<(u32, u32)>, Error> {
+    pub fn analyze_cluster_chain(&self, start_cluster: u32) -> Result<Vec<(u32, u32)>, Error> {
         if start_cluster < 2 {
             return Ok(Vec::new());
         }

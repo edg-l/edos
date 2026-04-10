@@ -16,6 +16,7 @@ use super::block_device::BlockDevice;
 use super::gpt::Partition;
 use super::path::Path;
 use super::{Error, File, FileAttrs, FileKind, FileSystem, FileTime};
+use crate::thread::mutex::BlockingMutex;
 
 // ---- Constants ----------------------------------------------------------------
 
@@ -66,16 +67,14 @@ pub struct EfsDriver {
     superblock: EfsSuperblock,
     bgd_table: Vec<EfsBlockGroupDesc>,
     /// Inode cache: maps inode number -> cached inode.
-    inode_cache: BTreeMap<u64, EfsInode>,
-    /// Reusable scratch buffer for block reads.
-    scratch: Vec<u8>,
+    inode_cache: BlockingMutex<BTreeMap<u64, EfsInode>>,
 }
 
 // ---- Constructor --------------------------------------------------------------
 
 impl EfsDriver {
     pub fn new(partition: Partition) -> Result<Self, Error> {
-        let mut device = BlockDevice::new(partition.device_id, 4096);
+        let device = BlockDevice::new(partition.device_id, 4096);
 
         // Block 0 = boot/reserved, block 1 = superblock.
         // We don't know block_size yet so read 8 sectors (4 KiB) covering
@@ -117,8 +116,7 @@ impl EfsDriver {
             partition,
             superblock,
             bgd_table,
-            inode_cache: BTreeMap::new(),
-            scratch: vec![0u8; bs],
+            inode_cache: BlockingMutex::new(BTreeMap::new()),
         })
     }
 }
@@ -138,21 +136,14 @@ impl EfsDriver {
         self.partition.starting_lba + block * (self.block_size() / 512)
     }
 
-    fn read_block(&mut self, block: u64) -> Result<Vec<u8>, Error> {
+    fn read_block(&self, block: u64) -> Result<Vec<u8>, Error> {
         let lba = self.block_to_lba(block);
         let spb = self.sectors_per_block();
-        // Reuse scratch buffer to avoid allocating a new Vec per read.
-        let buf = core::mem::take(&mut self.scratch);
-        let result = self.device.read_sectors(lba, spb, buf)?;
+        let result = self.device.read_sectors(lba, spb, Vec::new())?;
         Ok(result)
     }
 
-    /// Return the scratch buffer for reuse after a read_block() call.
-    fn recycle(&mut self, buf: Vec<u8>) {
-        self.scratch = buf;
-    }
-
-    fn write_block(&mut self, block: u64, data: &[u8]) -> Result<(), Error> {
+    fn write_block(&self, block: u64, data: &[u8]) -> Result<(), Error> {
         let lba = self.block_to_lba(block);
         let spb = self.sectors_per_block();
         // Use a separate buffer for writes to avoid competing with read_block
@@ -161,7 +152,7 @@ impl EfsDriver {
         let mut buf = vec![0u8; needed];
         let copy_len = data.len().min(needed);
         buf[..copy_len].copy_from_slice(&data[..copy_len]);
-        self.device.write_sectors(lba, buf, spb)?;
+        self.device.write_sectors(lba, &buf, spb)?;
         Ok(())
     }
 
@@ -172,8 +163,8 @@ impl EfsDriver {
         (ino0 / ipg, ino0 % ipg)
     }
 
-    fn read_inode(&mut self, ino: u64) -> Result<EfsInode, Error> {
-        if let Some(cached) = self.inode_cache.get(&ino) {
+    fn read_inode(&self, ino: u64) -> Result<EfsInode, Error> {
+        if let Some(cached) = self.inode_cache.lock().get(&ino) {
             return Ok(*cached);
         }
 
@@ -191,19 +182,18 @@ impl EfsDriver {
         let inode: EfsInode = unsafe {
             core::ptr::read_unaligned(block_data[offset_in_block..].as_ptr() as *const EfsInode)
         };
-        self.recycle(block_data);
 
         // Evict oldest entry if cache is full.
-        if self.inode_cache.len() >= INODE_CACHE_MAX {
-            if let Some(&first_key) = self.inode_cache.keys().next() {
-                self.inode_cache.remove(&first_key);
+        if self.inode_cache.lock().len() >= INODE_CACHE_MAX {
+            if let Some(&first_key) = self.inode_cache.lock().keys().next() {
+                self.inode_cache.lock().remove(&first_key);
             }
         }
-        self.inode_cache.insert(ino, inode);
+        self.inode_cache.lock().insert(ino, inode);
         Ok(inode)
     }
 
-    fn write_inode(&mut self, ino: u64, inode: &EfsInode) -> Result<(), Error> {
+    fn write_inode(&self, ino: u64, inode: &EfsInode) -> Result<(), Error> {
         let (group, idx) = self.inode_location(ino);
         if group >= self.bgd_table.len() {
             return Err(Error::Corrupted);
@@ -221,9 +211,8 @@ impl EfsDriver {
         };
         dst.copy_from_slice(src);
         self.write_block(inode_table_block + block_offset as u64, &block_data)?;
-        self.recycle(block_data);
         // Update cache with the new inode data.
-        self.inode_cache.insert(ino, *inode);
+        self.inode_cache.lock().insert(ino, *inode);
         Ok(())
     }
 }
@@ -233,7 +222,7 @@ impl EfsDriver {
 impl EfsDriver {
     /// Read up to `count` bytes from a file inode starting at `offset`.
     fn read_file_data(
-        &mut self,
+        &self,
         inode: &EfsInode,
         offset: usize,
         count: usize,
@@ -256,7 +245,7 @@ impl EfsDriver {
     }
 
     fn read_via_extents(
-        &mut self,
+        &self,
         inode: &EfsInode,
         byte_offset: usize,
         count: usize,
@@ -323,8 +312,7 @@ impl EfsDriver {
             let total_sectors = (bulk_blocks as u32 * spb as u32) as u16;
 
             // Read all contiguous blocks in one AHCI command.
-            let buf = core::mem::take(&mut self.scratch);
-            let bulk_data = self.device.read_sectors(lba, total_sectors, buf)?;
+            let bulk_data = self.device.read_sectors(lba, total_sectors, Vec::new())?;
 
             // Copy the useful portion into result.
             let bulk_bytes = bulk_blocks as usize * block_size;
@@ -332,7 +320,6 @@ impl EfsDriver {
             let copy_len = remaining.min(available);
             result[result_pos..result_pos + copy_len]
                 .copy_from_slice(&bulk_data[offset_in_block..offset_in_block + copy_len]);
-            self.scratch = bulk_data;
 
             result_pos += copy_len;
             remaining -= copy_len;
@@ -375,7 +362,7 @@ impl EfsDriver {
 
 impl EfsDriver {
     /// Return (name, inode_num, file_type) for all valid entries in a directory.
-    fn read_dir_entries(&mut self, ino: u64) -> Result<Vec<(String, u64, u8)>, Error> {
+    fn read_dir_entries(&self, ino: u64) -> Result<Vec<(String, u64, u8)>, Error> {
         let inode = self.read_inode(ino)?;
         if inode.mode & S_IFMT != S_IFDIR {
             return Err(Error::NotADir);
@@ -413,7 +400,7 @@ impl EfsDriver {
 
     /// Look up a single entry by name in a directory, without allocating Strings.
     /// Returns (inode, file_type) on match.
-    fn lookup_in_dir(&mut self, dir_ino: u64, name: &str) -> Result<Option<(u64, u8)>, Error> {
+    fn lookup_in_dir(&self, dir_ino: u64, name: &str) -> Result<Option<(u64, u8)>, Error> {
         let inode = self.read_inode(dir_ino)?;
         if inode.mode & S_IFMT != S_IFDIR {
             return Err(Error::NotADir);
@@ -443,12 +430,12 @@ impl EfsDriver {
     }
 
     /// Resolve a path to its inode number.
-    fn resolve_path(&mut self, path: &Path) -> Result<u64, Error> {
+    fn resolve_path(&self, path: &Path) -> Result<u64, Error> {
         Ok(self.resolve_path_inode(path)?.0)
     }
 
     /// Resolve a path to (inode_number, inode), avoiding a redundant read_inode after resolution.
-    fn resolve_path_inode(&mut self, path: &Path) -> Result<(u64, EfsInode), Error> {
+    fn resolve_path_inode(&self, path: &Path) -> Result<(u64, EfsInode), Error> {
         if path.is_root() {
             let inode = self.read_inode(EFS_ROOT_INO)?;
             return Ok((EFS_ROOT_INO, inode));
@@ -694,7 +681,6 @@ impl EfsDriver {
             if let Some(bit) = find_free_bit(&bitmap, bits_to_check) {
                 set_bit(&mut bitmap, bit);
                 self.write_block(bitmap_block, &bitmap)?;
-                self.recycle(bitmap);
 
                 self.bgd_table[g].free_blocks_count -= 1;
                 self.superblock.free_blocks -= 1;
@@ -702,7 +688,6 @@ impl EfsDriver {
                 let abs_block = g as u64 * blocks_per_group as u64 + bit as u64;
                 return Ok(abs_block);
             }
-            self.recycle(bitmap);
         }
         Err(Error::IoError)
     }
@@ -721,7 +706,6 @@ impl EfsDriver {
         let mut bitmap = self.read_block(bitmap_block)?;
         clear_bit(&mut bitmap, bit);
         self.write_block(bitmap_block, &bitmap)?;
-        self.recycle(bitmap);
 
         self.bgd_table[group].free_blocks_count += 1;
         self.superblock.free_blocks += 1;
@@ -744,7 +728,6 @@ impl EfsDriver {
             if let Some(bit) = find_free_bit(&bitmap, bits_to_check) {
                 set_bit(&mut bitmap, bit);
                 self.write_block(bitmap_block, &bitmap)?;
-                self.recycle(bitmap);
 
                 self.bgd_table[g].free_inodes_count -= 1;
                 self.superblock.free_inodes -= 1;
@@ -752,7 +735,6 @@ impl EfsDriver {
                 let ino = g as u64 * inodes_per_group as u64 + bit as u64 + 1;
                 return Ok(ino);
             }
-            self.recycle(bitmap);
         }
         Err(Error::IoError)
     }
@@ -772,7 +754,6 @@ impl EfsDriver {
         let mut bitmap = self.read_block(bitmap_block)?;
         clear_bit(&mut bitmap, bit);
         self.write_block(bitmap_block, &bitmap)?;
-        self.recycle(bitmap);
 
         self.bgd_table[group].free_inodes_count += 1;
         self.superblock.free_inodes += 1;
@@ -1239,7 +1220,7 @@ fn new_inode(mode: u16, flags: u32) -> EfsInode {
 // ---- FileSystem trait ---------------------------------------------------------
 
 impl FileSystem for EfsDriver {
-    fn list_files(&mut self, path: &Path) -> Result<Vec<File>, Error> {
+    fn list_files(&self, path: &Path) -> Result<Vec<File>, Error> {
         let path = path.normalize();
         let dir_ino = self.resolve_path(&path)?;
         let entries = self.read_dir_entries(dir_ino)?;
@@ -1255,7 +1236,7 @@ impl FileSystem for EfsDriver {
         Ok(files)
     }
 
-    fn read_bytes(&mut self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
+    fn read_bytes(&self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
         let path = path.normalize();
         let (_ino, inode) = self.resolve_path_inode(&path)?;
         if inode.mode & S_IFMT != S_IFREG {
@@ -1491,7 +1472,7 @@ impl FileSystem for EfsDriver {
         self.remove_dir_entry(parent_ino, &name)
     }
 
-    fn file_info(&mut self, path: &Path) -> Result<File, Error> {
+    fn file_info(&self, path: &Path) -> Result<File, Error> {
         let path = path.normalize();
         let name = if path.is_root() {
             String::from("/")
@@ -1684,7 +1665,7 @@ impl FileSystem for EfsDriver {
         Ok(())
     }
 
-    fn statfs(&mut self) -> Result<super::StatFs, Error> {
+    fn statfs(&self) -> Result<super::StatFs, Error> {
         let sb = &self.superblock;
         let mut volume_name = [0u8; 64];
         volume_name.copy_from_slice(&sb.volume_name);

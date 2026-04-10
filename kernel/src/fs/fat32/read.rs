@@ -13,7 +13,7 @@ impl Fatfs {
     /// Read consecutive clusters in a single batched operation.
     /// Returns the data read from the clusters.
     fn read_consecutive_clusters(
-        &mut self,
+        &self,
         start_cluster: u32,
         cluster_count: u32,
         mut buffer: Vec<u8>,
@@ -56,7 +56,7 @@ impl Fatfs {
         }
     }
     #[expect(unused)]
-    pub fn read_file(&mut self, entry: &DirectoryEntry) -> Result<Vec<u8>, Error> {
+    pub fn read_file(&self, entry: &DirectoryEntry) -> Result<Vec<u8>, Error> {
         if entry.is_directory() {
             return Err(Error::NotAFile);
         }
@@ -106,7 +106,7 @@ impl Fatfs {
     }
 
     pub fn read_file_offset(
-        &mut self,
+        &self,
         entry: &DirectoryEntry,
         offset: usize,
         count: usize,
