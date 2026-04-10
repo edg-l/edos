@@ -134,6 +134,8 @@ pub unsafe extern "C" fn ap_start(cpu: &MpCpu) -> ! {
 
     thread::scheduler::init();
 
+    crate::allocator::enable_percpu_cache();
+
     println!("[smp] AP online: LAPIC id {}", unsafe { get_lapic().id() });
 
     loop {

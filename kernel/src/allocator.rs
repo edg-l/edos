@@ -1,7 +1,12 @@
-//! Kernel allocator
+//! Kernel allocator with per-CPU freelists.
+//!
+//! Small allocations (up to 1024 bytes) are served from per-CPU caches,
+//! avoiding the global heap lock entirely in the common case. Larger
+//! allocations and cache misses fall through to the buddy allocator.
 
 use core::{
-    alloc::GlobalAlloc,
+    alloc::{GlobalAlloc, Layout},
+    cell::UnsafeCell,
     ptr::NonNull,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -15,25 +20,251 @@ use crate::{
     thread::irqlock::IrqSpinlock,
 };
 
+// ---------------------------------------------------------------------------
+// Per-CPU cache
+// ---------------------------------------------------------------------------
+
+/// Size classes served by per-CPU caches. Each is a power of two so objects
+/// are naturally aligned to their size class.
+const SIZE_CLASSES: [usize; 6] = [32, 64, 128, 256, 512, 1024];
+
+/// Maximum cached objects per size class per CPU.
+const CACHE_SLOTS: usize = 16;
+
+/// How many objects to batch-refill or batch-drain at a time.
+const BATCH: usize = 8;
+
+/// Return the size-class index for a (size, align) pair, or `None` if the
+/// request should go to the global allocator.
+fn size_class_index(size: usize, align: usize) -> Option<usize> {
+    for (i, &sc) in SIZE_CLASSES.iter().enumerate() {
+        if size <= sc && align <= sc {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Fixed-size pointer stack for one size class.
+struct SizeClassCache {
+    stack: [*mut u8; CACHE_SLOTS],
+    count: usize,
+}
+
+impl SizeClassCache {
+    const fn new() -> Self {
+        Self {
+            stack: [core::ptr::null_mut(); CACHE_SLOTS],
+            count: 0,
+        }
+    }
+
+    fn try_pop(&mut self) -> Option<*mut u8> {
+        if self.count == 0 {
+            return None;
+        }
+        self.count -= 1;
+        Some(self.stack[self.count])
+    }
+
+    fn try_push(&mut self, ptr: *mut u8) -> bool {
+        if self.count >= CACHE_SLOTS {
+            return false;
+        }
+        self.stack[self.count] = ptr;
+        self.count += 1;
+        true
+    }
+
+    /// Drain up to `BATCH` entries, returning (array, count).
+    fn drain_batch(&mut self) -> ([*mut u8; BATCH], usize) {
+        let n = self.count.min(BATCH);
+        let mut out = [core::ptr::null_mut(); BATCH];
+        for i in 0..n {
+            self.count -= 1;
+            out[i] = self.stack[self.count];
+        }
+        (out, n)
+    }
+}
+
+/// Per-CPU allocation cache. Lives inside `PerCpuData`, accessed only by the
+/// owning CPU with interrupts disabled.
+pub struct PerCpuCache {
+    caches: [SizeClassCache; 6],
+    ready: bool,
+}
+
+// SAFETY: PerCpuCache is only accessed by its owning CPU with IRQs off.
+unsafe impl Send for PerCpuCache {}
+unsafe impl Sync for PerCpuCache {}
+
+impl PerCpuCache {
+    pub const fn new() -> Self {
+        Self {
+            caches: [
+                SizeClassCache::new(),
+                SizeClassCache::new(),
+                SizeClassCache::new(),
+                SizeClassCache::new(),
+                SizeClassCache::new(),
+                SizeClassCache::new(),
+            ],
+            ready: false,
+        }
+    }
+
+    pub fn enable(&mut self) {
+        self.ready = true;
+    }
+}
+
+/// Wrapper so we can store PerCpuCache in `PerCpuData` (which needs Sync).
+pub struct PerCpuCacheCell(pub UnsafeCell<PerCpuCache>);
+unsafe impl Sync for PerCpuCacheCell {}
+unsafe impl Send for PerCpuCacheCell {}
+
+impl PerCpuCacheCell {
+    pub const fn new() -> Self {
+        Self(UnsafeCell::new(PerCpuCache::new()))
+    }
+
+    /// Get mutable access. Only call from owning CPU with interrupts disabled.
+    #[inline(always)]
+    pub unsafe fn get_mut(&self) -> &mut PerCpuCache {
+        unsafe { &mut *self.0.get() }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Global allocator
+// ---------------------------------------------------------------------------
+
 #[global_allocator]
 pub static ALLOCATOR: Allocator = Allocator {
     inner: IrqSpinlock::new(Heap::empty()),
 };
 
 pub struct Allocator {
-    inner: IrqSpinlock<Heap<32>>,
+    pub(crate) inner: IrqSpinlock<Heap<32>>,
 }
 
 const MIN_EXPANSION: u64 = 1 << 20; // 1mb
 
-/// Serialize heap expansion so only one CPU expands at a time. Other CPUs
-/// spin-wait and retry the allocation (which should succeed after the
-/// expanding CPU adds memory). This avoids races in concurrent vmalloc +
-/// page table manipulation + buddy allocator metadata updates.
+/// Serialize heap expansion so only one CPU expands at a time.
 static EXPANDING: AtomicBool = AtomicBool::new(false);
 
+/// Check whether per-CPU data is available (GS base is set).
+#[inline(always)]
+fn gs_ready() -> bool {
+    use x86_64::registers::model_specific::GsBase;
+    GsBase::read().as_u64() != 0
+}
+
 unsafe impl GlobalAlloc for Allocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // Try per-CPU cache first (interrupts disabled for the duration).
+        if gs_ready() {
+            if let Some(ptr) = self.try_percpu_alloc(layout) {
+                return ptr;
+            }
+        }
+
+        // Fall through to global allocator.
+        self.global_alloc(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // Try per-CPU cache first.
+        if gs_ready() {
+            if self.try_percpu_dealloc(ptr, layout) {
+                return;
+            }
+        }
+
+        // Fall through to global allocator.
+        unsafe {
+            self.inner
+                .lock()
+                .dealloc(NonNull::new_unchecked(ptr), layout);
+        }
+    }
+}
+
+impl Allocator {
+    /// Try to allocate from the per-CPU cache. Returns None on miss.
+    fn try_percpu_alloc(&self, layout: Layout) -> Option<*mut u8> {
+        let idx = size_class_index(layout.size(), layout.align())?;
+        let sc = SIZE_CLASSES[idx];
+
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            let cache = unsafe { crate::util::per_cpu::get_percpu_data().heap_cache.get_mut() };
+            if !cache.ready {
+                return None;
+            }
+
+            // Fast path: cache hit.
+            if let Some(ptr) = cache.caches[idx].try_pop() {
+                return Some(ptr);
+            }
+
+            // Slow path: batch refill from global heap (lock taken here).
+            let sc_layout = unsafe { Layout::from_size_align_unchecked(sc, sc) };
+            let mut heap = self.inner.lock();
+            let mut last = None;
+            for _ in 0..BATCH {
+                if let Ok(block) = heap.alloc(sc_layout) {
+                    if last.is_some() {
+                        // Push previous into cache.
+                        let _ = cache.caches[idx].try_push(last.unwrap());
+                    }
+                    last = Some(block.as_ptr());
+                } else {
+                    break;
+                }
+            }
+            last
+        })
+    }
+
+    /// Try to dealloc into the per-CPU cache. Returns false if not applicable.
+    fn try_percpu_dealloc(&self, ptr: *mut u8, layout: Layout) -> bool {
+        let idx = match size_class_index(layout.size(), layout.align()) {
+            Some(i) => i,
+            None => return false,
+        };
+        let sc = SIZE_CLASSES[idx];
+
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            let cache = unsafe { crate::util::per_cpu::get_percpu_data().heap_cache.get_mut() };
+            if !cache.ready {
+                return false;
+            }
+
+            // Fast path: cache has room.
+            if cache.caches[idx].try_push(ptr) {
+                return true;
+            }
+
+            // Slow path: cache full. Drain half, then push this one.
+            let (drained, n) = cache.caches[idx].drain_batch();
+            let _ = cache.caches[idx].try_push(ptr); // guaranteed to succeed
+
+            // Return drained objects to global heap.
+            let sc_layout = unsafe { Layout::from_size_align_unchecked(sc, sc) };
+            let mut heap = self.inner.lock();
+            for i in 0..n {
+                unsafe {
+                    heap.dealloc(NonNull::new_unchecked(drained[i]), sc_layout);
+                }
+            }
+
+            true
+        })
+    }
+
+    /// Global allocator path (no per-CPU cache).
+    fn global_alloc(&self, layout: Layout) -> *mut u8 {
         {
             let mut heap = self.inner.lock();
             if let Ok(block) = heap.alloc(layout) {
@@ -41,48 +272,38 @@ unsafe impl GlobalAlloc for Allocator {
             }
         }
 
-        // Serialize expansion: if another CPU is already expanding, spin
-        // and retry the allocation (the other CPU's expansion may have
-        // added enough memory for us).
+        // Serialize expansion.
         loop {
             match EXPANDING.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
-                Ok(_) => break, // we own the expansion
+                Ok(_) => break,
                 Err(_) => {
-                    // Another CPU is expanding. Spin until it finishes.
                     while EXPANDING.load(Ordering::Relaxed) {
                         core::hint::spin_loop();
                     }
-                    // Retry allocation - the other CPU may have added enough.
                     let mut heap = self.inner.lock();
                     if let Ok(block) = heap.alloc(layout) {
                         return block.as_ptr();
                     }
-                    // Still not enough, try to become the expander ourselves.
                 }
             }
         }
 
-        // expansion size
         let padded = layout.pad_to_align();
         let mut need = padded.size() as u64;
         need = align_up(need, 4096);
 
-        // at least 1 MiB, rounded power of two, cap at 1<<32
         let mut chunk = need.next_power_of_two().max(MIN_EXPANSION);
         let max_block: u64 = 1u64 << 32;
         if chunk > max_block {
             chunk = max_block;
         }
 
-        // over-reserve to allow alignment
         let reserve = chunk * 2;
-        let raw = vmalloc(reserve); // returns 4 KiB aligned
+        let raw = vmalloc(reserve);
 
-        // align base up to chunk
         let base = align_up(raw.as_u64(), chunk);
         let end = base + chunk;
 
-        // only map the aligned window
         {
             let mut mapper = memory_mapper();
             mapper
@@ -94,7 +315,6 @@ unsafe impl GlobalAlloc for Allocator {
                 .expect("failed to map heap expansion");
         }
 
-        // add to heap and retry
         let result = {
             let mut heap = self.inner.lock();
             unsafe { heap.add_to_heap(base as usize, end as usize) };
@@ -103,20 +323,14 @@ unsafe impl GlobalAlloc for Allocator {
                 .unwrap_or(core::ptr::null_mut())
         };
 
-        // Release expansion lock so other CPUs can proceed.
         EXPANDING.store(false, Ordering::Release);
-
         result
     }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
-        unsafe {
-            self.inner
-                .lock()
-                .dealloc(NonNull::new_unchecked(ptr), layout);
-        }
-    }
 }
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
 
 pub fn init_heap() {
     let heap_start = KERNEL_HEAP;
@@ -140,6 +354,17 @@ pub fn init_heap() {
             .lock()
             .init(heap_start.as_u64() as usize, heap_size as usize);
     }
+}
+
+/// Enable the per-CPU allocation cache for the calling CPU.
+/// Call after the heap and per-CPU data are initialized.
+pub fn enable_percpu_cache() {
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        crate::util::per_cpu::get_percpu_data()
+            .heap_cache
+            .get_mut()
+            .enable();
+    });
 }
 
 pub fn print_alloc_stats() {

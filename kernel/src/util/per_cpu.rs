@@ -10,6 +10,7 @@ use x86_64::{
 
 use crate::{
     acpi::raw_current_apic_id,
+    allocator::PerCpuCacheCell,
     thread::{scheduler::Scheduler, thread::Thread},
     util::uaccess::UAccessState,
 };
@@ -32,6 +33,8 @@ pub struct PerCpuData {
     /// pick_and_run, so the outgoing thread's kernel stack is free as
     /// soon as the thread's state is published.
     pub scheduler_stack_top: Cell<u64>,
+    /// Per-CPU heap allocation cache (avoids global heap lock contention).
+    pub heap_cache: PerCpuCacheCell,
 }
 
 // SAFETY: PerCpuData is only accessed by its owning CPU via GS base.
@@ -52,6 +55,7 @@ impl PerCpuData {
             current_thread: UnsafeCell::new(None),
             uaccess: UAccessState::new(),
             scheduler_stack_top: Cell::new(0),
+            heap_cache: PerCpuCacheCell::new(),
         }
     }
 

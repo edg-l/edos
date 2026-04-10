@@ -13,7 +13,7 @@ use x86_64::{
 
 use crate::{
     acpi::{acpi_madt, init_acpi},
-    allocator::{init_heap, print_alloc_stats},
+    allocator::{enable_percpu_cache, init_heap, print_alloc_stats},
     boot::boot_info,
     cmdline::ParsedCmdline,
     fs::{
@@ -91,6 +91,7 @@ fn init() {
 
     println!("Initializing heap");
     init_heap();
+    enable_percpu_cache();
     memory::pat::init_pat();
     println!("Initializing acpi tables");
     init_acpi();
