@@ -89,7 +89,11 @@ pub fn sendto(fd: u64, data: &[u8], addr: Option<&SockAddrIn>) -> Result<usize, 
             addr_len,
         )
     };
-    if ret == u64::MAX { Err(()) } else { Ok(ret as usize) }
+    if ret == u64::MAX {
+        Err(())
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 pub fn recvfrom(fd: u64, buf: &mut [u8]) -> Result<usize, ()> {
@@ -104,14 +108,21 @@ pub fn recvfrom(fd: u64, buf: &mut [u8]) -> Result<usize, ()> {
             0,
         )
     };
-    if ret == u64::MAX { Err(()) } else { Ok(ret as usize) }
+    if ret == u64::MAX {
+        Err(())
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 pub fn send(fd: u64, data: &[u8]) -> Result<usize, ()> {
     // Use write syscall for connected sockets
-    let ret =
-        unsafe { sys::syscall3(sys::SYS_WRITE, fd, data.as_ptr() as u64, data.len() as u64) };
-    if ret == u64::MAX { Err(()) } else { Ok(ret as usize) }
+    let ret = unsafe { sys::syscall3(sys::SYS_WRITE, fd, data.as_ptr() as u64, data.len() as u64) };
+    if ret == u64::MAX {
+        Err(())
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 pub fn recv(fd: u64, buf: &mut [u8]) -> Result<usize, ()> {
@@ -179,23 +190,37 @@ pub fn dns_resolve(hostname: &str) -> Option<[u8; 4]> {
     // Skip QNAME
     while pos < data.len() {
         let b = data[pos] as usize;
-        if b == 0 { pos += 1; break; }
-        if b >= 0xC0 { pos += 2; break; }
+        if b == 0 {
+            pos += 1;
+            break;
+        }
+        if b >= 0xC0 {
+            pos += 2;
+            break;
+        }
         pos += 1 + b;
     }
     pos += 4; // QTYPE + QCLASS
     // Parse answers
     for _ in 0..ancount {
-        if pos + 12 > data.len() { break; }
-        if data[pos] & 0xC0 == 0xC0 { pos += 2; }
-        else {
+        if pos + 12 > data.len() {
+            break;
+        }
+        if data[pos] & 0xC0 == 0xC0 {
+            pos += 2;
+        } else {
             while pos < data.len() {
                 let b = data[pos] as usize;
-                if b == 0 { pos += 1; break; }
+                if b == 0 {
+                    pos += 1;
+                    break;
+                }
                 pos += 1 + b;
             }
         }
-        if pos + 10 > data.len() { break; }
+        if pos + 10 > data.len() {
+            break;
+        }
         let rtype = u16::from_be_bytes([data[pos], data[pos + 1]]);
         let rdlen = u16::from_be_bytes([data[pos + 8], data[pos + 9]]) as usize;
         pos += 10;

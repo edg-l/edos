@@ -99,8 +99,13 @@ fn list_mounts() {
 
 fn list_partitions() {
     let mut buf = vec![0u8; 4096];
-    let ret =
-        unsafe { syscall2(SYS_LIST_PARTITIONS, buf.as_mut_ptr() as u64, buf.len() as u64) };
+    let ret = unsafe {
+        syscall2(
+            SYS_LIST_PARTITIONS,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
     let ret = ret as i64;
     if ret < 0 {
         eprintln!("mount: failed to list partitions");
@@ -145,10 +150,16 @@ fn do_mount(device_id: u64, part_idx: u64, path: &str, fs_type: &str) {
     };
     let ret = ret as i64;
     if ret < 0 {
-        eprintln!("mount: failed to mount dev{}p{} at {}", device_id, part_idx, path);
+        eprintln!(
+            "mount: failed to mount dev{}p{} at {}",
+            device_id, part_idx, path
+        );
         process::exit(1);
     }
-    println!("Mounted dev{}p{} at {} ({})", device_id, part_idx, path, fs_type);
+    println!(
+        "Mounted dev{}p{} at {} ({})",
+        device_id, part_idx, path, fs_type
+    );
 }
 
 fn main() {

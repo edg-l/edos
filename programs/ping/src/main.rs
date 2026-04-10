@@ -81,7 +81,10 @@ fn resolve_host(s: &str) -> Option<[u8; 4]> {
         for (i, part) in parts.iter().enumerate() {
             match part.parse() {
                 Ok(v) => ip[i] = v,
-                Err(_) => { ok = false; break; }
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
             }
         }
         if ok {

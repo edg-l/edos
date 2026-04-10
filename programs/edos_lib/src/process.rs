@@ -122,11 +122,7 @@ pub fn waitpid(pid: u64) -> i32 {
 pub fn waitpid_nonblocking(pid: u64) -> Option<i32> {
     let mut status: i32 = -1;
     let ret = unsafe { sys::syscall3(sys::SYS_WAIT_PID, pid, 0, &mut status as *mut i32 as u64) };
-    if ret == pid {
-        Some(status)
-    } else {
-        None
-    }
+    if ret == pid { Some(status) } else { None }
 }
 
 /// A child process connected via a PTY master fd.
