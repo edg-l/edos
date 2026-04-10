@@ -1,5 +1,6 @@
 //! Intel High Definition Audio controller register definitions.
 //! Reference: Intel HD Audio Specification Rev 1.0a
+#![expect(unused)]
 
 // === Global Registers ===
 pub const GCAP: u32 = 0x00; // Global Capabilities (16-bit)

@@ -465,6 +465,7 @@ impl HdaController {
 
 // === Shared playback state ===
 
+#[expect(unused)]
 struct HdaPlaybackState {
     controller: HdaController,
     pci_device: crate::drivers::pci::structures::PciDevice,

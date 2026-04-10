@@ -82,7 +82,7 @@ impl BlockDevice {
                     crate::drivers::usb::block_api::usb_read_sectors(first_lba, run_count, scratch)
                         .map_err(|_| AhciError::IoError)?;
                 let run_end = run_start + run_count as usize;
-                for (j, (lba_j, idx)) in miss_ranges[run_start..run_end].iter().enumerate() {
+                for (j, (_lba_j, idx)) in miss_ranges[run_start..run_end].iter().enumerate() {
                     let start = j * SECTOR_SIZE;
                     buffer[*idx..*idx + SECTOR_SIZE]
                         .copy_from_slice(&data[start..start + SECTOR_SIZE]);

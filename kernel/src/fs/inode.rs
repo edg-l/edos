@@ -17,6 +17,7 @@ use super::FileKind;
 
 /// A VFS-level inode. Wraps a filesystem-local inode number with per-inode
 /// synchronization and cached metadata.
+#[expect(unused)]
 pub struct VfsInode {
     /// Unique mount identifier (assigned by VFS on mount).
     pub mount_id: usize,

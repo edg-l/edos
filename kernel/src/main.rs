@@ -323,6 +323,7 @@ pub fn mount_system_fs() -> ! {
     // Parallel boot: load 3 binaries concurrently via per-inode locking + NCQ.
     log!("Loading boot binaries (parallel)");
 
+    #[expect(unused)]
     struct LoadRequest {
         path: Path,
         result_tx: Arc<Mailbox<alloc::vec::Vec<u8>, ()>>,

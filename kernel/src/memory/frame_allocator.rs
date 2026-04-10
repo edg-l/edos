@@ -501,7 +501,7 @@ fn calculate_frame_range(memory_regions: &MemmapResponse) -> (PhysFrame, usize) 
     (start_frame, frame_count as usize)
 }
 
-/// Returns the total storage size needed for the bitmap and refcount array combined.
+#[expect(unused)]
 pub fn calculate_bitmap_size(memory_regions: &MemmapResponse) -> usize {
     let (_, frame_count) = calculate_frame_range(memory_regions);
     // Round bitmap_bytes up to 2-byte alignment so the refcount array (u16) is properly aligned

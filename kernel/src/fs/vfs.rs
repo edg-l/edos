@@ -339,7 +339,7 @@ pub fn flush(op: &VfsOp) -> Result<(), Error> {
     op.fs.flush()
 }
 
-/// Per-file flush. Tries inode-based flush_inode first, falls back to full flush.
+#[expect(unused)]
 pub fn flush_file(op: &VfsOp) -> Result<(), Error> {
     if let Some(ino) = op.inode.as_ref().map(|i| i.ino).filter(|&i| i != 0) {
         match op.fs.flush_inode(ino) {

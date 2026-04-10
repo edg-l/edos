@@ -93,7 +93,7 @@ pub fn write_bytes(path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error
     vfs::write(&op, offset, data, false)
 }
 
-/// Variant that takes ownership of the Vec to avoid an extra to_vec() copy.
+#[expect(unused)]
 pub fn write_bytes_owned(path: &Path, offset: usize, data: Vec<u8>) -> Result<u64, Error> {
     let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
     vfs::write(&op, offset, &data, false)

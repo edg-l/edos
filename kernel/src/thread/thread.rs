@@ -552,7 +552,7 @@ impl Thread {
 
     /// Load a user thread from an ELF file on the filesystem.
     ///
-    /// This is a convenience wrapper around `new_user` that reads the file first.
+    #[expect(unused)]
     pub fn new_user_from_path(
         path: &Path,
         name: Option<String>,

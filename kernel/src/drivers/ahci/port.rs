@@ -1150,7 +1150,7 @@ impl AhciPort {
 
         let result = unsafe { &*data_buffer.as_ptr().cast::<[u8; 512]>() };
         let info = DeviceIdentifyInfo::from_identify_data(result);
-        dma().dealloc(data_buffer);
+        let _ = dma().dealloc(data_buffer);
 
         Ok(info)
     }
@@ -1207,7 +1207,7 @@ impl AhciPort {
             device_info.capacity_gb = device_info.capacity_mb / 1024;
         }
 
-        dma().dealloc(data_buffer);
+        let _ = dma().dealloc(data_buffer);
         Ok(device_info)
     }
 
@@ -1226,7 +1226,7 @@ impl AhciPort {
         let last_lba = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         let block_size = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
 
-        dma().dealloc(data_buffer);
+        let _ = dma().dealloc(data_buffer);
 
         Ok(((last_lba as u64) + 1, block_size))
     }
@@ -1284,7 +1284,7 @@ impl AhciPort {
             ptr::copy_nonoverlapping(data_buffer.as_ptr(), buffer.as_mut_ptr(), expected_size);
         }
 
-        dma().dealloc(data_buffer);
+        let _ = dma().dealloc(data_buffer);
         Ok(())
     }
 }

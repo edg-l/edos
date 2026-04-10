@@ -1,3 +1,4 @@
+#![expect(unused)]
 //! HDA codec discovery and configuration.
 
 use super::HdaController;

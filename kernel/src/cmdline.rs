@@ -1,5 +1,3 @@
-use core::ffi::CStr;
-
 use alloc::{
     string::{String, ToString},
     vec::Vec,
@@ -17,12 +15,6 @@ pub struct ParsedCmdline {
 }
 
 impl ParsedCmdline {
-    /// Parse command line from a C string
-    pub fn parse(cmdline: &CStr) -> Self {
-        let cmdline_str = cmdline.to_str().unwrap_or("");
-        Self::parse_str(cmdline_str)
-    }
-
     /// Parse command line from a string slice
     pub fn parse_str(cmdline: &str) -> Self {
         let mut parsed = Self {
