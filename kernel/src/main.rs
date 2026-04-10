@@ -279,6 +279,7 @@ pub fn mount_system_fs() -> ! {
         let part = &partitions[part_idx];
         log!("Partition name {:?}", part.name);
 
+        log!("Mounting root filesystem (EFS)");
         fs::api::mount_partition(
             part.device_id as usize,
             part.index as usize,
@@ -286,6 +287,7 @@ pub fn mount_system_fs() -> ! {
             part.filesystem.as_ref().expect("expected fs type").clone(),
         )
         .unwrap();
+        log!("Root filesystem mounted");
     } else {
         log!("Mounting memfs on /");
         fs::api::mount_partition(0, 0, root.clone(), FilesystemType::Memfs).unwrap();
@@ -305,36 +307,51 @@ pub fn mount_system_fs() -> ! {
     }
 
     // TODO: add support for fstab someday.
-    log!("Mounting memfs /tmp");
+    log!("Mounted devfs + procfs, mounting memfs /tmp");
     let tmp_dir = root.join("tmp").normalize();
     let _ = fs::api::create_dir(&tmp_dir);
     if let Err(err) = fs::api::mount_partition(0, 0, tmp_dir.clone(), FilesystemType::Memfs) {
         log!("Failed to mount memfs at {:?}: {err:?}", dev_dir);
     }
 
-    without_interrupts(|| {
-        let default_env: [&[u8]; 3] = [b"PATH=/bin", b"HOME=/", b"PWD=/"];
+    let default_env: [&[u8]; 3] = [b"PATH=/bin", b"HOME=/", b"PWD=/"];
 
-        let wm_path = root.join("bin/edos-wm").normalize();
-        let wm_argv: [&[u8]; 1] = [b"edos-wm"];
-        let user_thread = Thread::new_user_from_path(
-            &wm_path,
+    // Read ELF binaries from disk with interrupts enabled (AHCI needs them).
+    log!("Loading /bin/edos-wm");
+    let wm_path = root.join("bin/edos-wm").normalize();
+    let wm_size = fs::api::file_info(&wm_path).unwrap().size as usize;
+    let wm_data = fs::api::read_bytes(&wm_path, 0, wm_size).unwrap();
+    log!("Loaded /bin/edos-wm ({} bytes)", wm_size);
+    log!("Loading /bin/edos-taskbar");
+    let taskbar_path = root.join("bin/edos-taskbar").normalize();
+    let taskbar_size = fs::api::file_info(&taskbar_path).unwrap().size as usize;
+    let taskbar_data = fs::api::read_bytes(&taskbar_path, 0, taskbar_size).unwrap();
+    log!("Loaded /bin/edos-taskbar ({} bytes)", taskbar_size);
+    log!("Loading /bin/edos-terminal");
+    let terminal_path = root.join("bin/edos-terminal").normalize();
+    let terminal_size = fs::api::file_info(&terminal_path).unwrap().size as usize;
+    let terminal_data = fs::api::read_bytes(&terminal_path, 0, terminal_size).unwrap();
+    log!("Loaded /bin/edos-terminal ({} bytes)", terminal_size);
+    log!("Spawning user threads");
+
+    // Set up user threads with interrupts disabled (page table manipulation).
+    without_interrupts(|| {
+        let wm_thread = Thread::new_user(
+            &wm_data,
             Some("edos-wm".to_string()),
-            &wm_argv,
+            &[b"edos-wm"],
             &default_env,
             0,
             0,
             root.clone(),
         )
         .unwrap();
-        queue_spawn_thread(user_thread);
+        queue_spawn_thread(wm_thread);
 
-        let taskbar_path = root.join("bin/edos-taskbar").normalize();
-        let taskbar_argv: [&[u8]; 1] = [b"edos-taskbar"];
-        let taskbar_thread = Thread::new_user_from_path(
-            &taskbar_path,
+        let taskbar_thread = Thread::new_user(
+            &taskbar_data,
             Some("edos-taskbar".to_string()),
-            &taskbar_argv,
+            &[b"edos-taskbar"],
             &default_env,
             0,
             0,
@@ -343,12 +360,10 @@ pub fn mount_system_fs() -> ! {
         .unwrap();
         queue_spawn_thread(taskbar_thread);
 
-        let terminal_path = root.join("bin/edos-terminal").normalize();
-        let terminal_argv: [&[u8]; 1] = [b"edos-terminal"];
-        let terminal_thread = Thread::new_user_from_path(
-            &terminal_path,
+        let terminal_thread = Thread::new_user(
+            &terminal_data,
             Some("edos-terminal".to_string()),
-            &terminal_argv,
+            &[b"edos-terminal"],
             &default_env,
             0,
             0,

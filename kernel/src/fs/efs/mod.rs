@@ -275,18 +275,19 @@ impl EfsDriver {
         let extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
         let ext_slice = extents.as_slice();
         let block_size = self.block_size() as usize;
+        let spb = self.sectors_per_block();
 
         let mut result = vec![0u8; count];
         let mut result_pos = 0usize;
         let mut remaining = count;
         let mut cur_byte = byte_offset;
-        let mut ext_idx = 0usize; // sequential scan: start from last found extent
+        let mut ext_idx = 0usize;
 
         while remaining > 0 {
             let logical_block = (cur_byte / block_size) as u32;
             let offset_in_block = cur_byte % block_size;
 
-            // Find the extent covering logical_block, starting from ext_idx.
+            // Find the extent covering logical_block.
             let extent = ext_slice[ext_idx..]
                 .iter()
                 .chain(ext_slice[..ext_idx].iter())
@@ -305,14 +306,32 @@ impl EfsDriver {
             };
 
             let block_within_extent = logical_block - extent.logical_block;
-            let phys_block = extent.physical_start() + block_within_extent as u64;
-            let block_data = self.read_block(phys_block)?;
+            let blocks_left_in_extent = extent.length as u32 - block_within_extent;
 
-            let bytes_available = block_size - offset_in_block;
-            let copy_len = remaining.min(bytes_available);
+            // How many contiguous blocks can we read in one shot?
+            // Cap at 128 blocks (512KB) per AHCI command to stay within DMA limits.
+            const MAX_BULK_BLOCKS: u32 = 128;
+            let blocks_needed =
+                ((remaining + offset_in_block + block_size - 1) / block_size) as u32;
+            let bulk_blocks = blocks_needed
+                .min(blocks_left_in_extent)
+                .min(MAX_BULK_BLOCKS);
+
+            let phys_block = extent.physical_start() + block_within_extent as u64;
+            let lba = self.block_to_lba(phys_block);
+            let total_sectors = (bulk_blocks as u32 * spb as u32) as u16;
+
+            // Read all contiguous blocks in one AHCI command.
+            let buf = core::mem::take(&mut self.scratch);
+            let bulk_data = self.device.read_sectors(lba, total_sectors, buf)?;
+
+            // Copy the useful portion into result.
+            let bulk_bytes = bulk_blocks as usize * block_size;
+            let available = bulk_bytes - offset_in_block;
+            let copy_len = remaining.min(available);
             result[result_pos..result_pos + copy_len]
-                .copy_from_slice(&block_data[offset_in_block..offset_in_block + copy_len]);
-            self.recycle(block_data);
+                .copy_from_slice(&bulk_data[offset_in_block..offset_in_block + copy_len]);
+            self.scratch = bulk_data;
 
             result_pos += copy_len;
             remaining -= copy_len;
