@@ -190,15 +190,19 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
 
                     // Unmap the pages (but don't deallocate the frames - they're shared)
                     let memory_manager = info.lock().memory_manager.clone();
-                    let mut manager = memory_manager.lock();
                     let page_count = (mapping.size + 0xFFF) / 4096;
-
-                    for i in 0..page_count {
-                        let virt_addr = VirtAddr::new(addr + i * 4096);
-                        let page: Page<Size4KiB> = Page::containing_address(virt_addr);
-                        if let Ok((_, flush)) = manager.mapper.unmap(page) {
-                            flush.flush();
+                    {
+                        let mut manager = memory_manager.lock();
+                        for i in 0..page_count {
+                            let virt_addr = VirtAddr::new(addr + i * 4096);
+                            let page: Page<Size4KiB> = Page::containing_address(virt_addr);
+                            if let Ok((_, flush)) = manager.mapper.unmap(page) {
+                                flush.flush();
+                            }
                         }
+                    } // manager dropped here
+                    if crate::memory::tlb::shootdown_needed() {
+                        crate::memory::tlb::tlb_shootdown(VirtAddr::new(addr), page_count);
                     }
 
                     0

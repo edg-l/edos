@@ -65,6 +65,8 @@ pub fn build_idt_for_current_cpu() -> InterruptDescriptorTable {
         idt[InterruptIndex::Xhci.as_u8()].set_handler_fn(xhci_interrupt_handler);
         idt[InterruptIndex::E1000e.as_u8()].set_handler_fn(e1000e_interrupt_handler);
         idt[InterruptIndex::Hda.as_u8()].set_handler_fn(hda_interrupt_handler);
+        idt[InterruptIndex::TlbShootdown.as_u8()]
+            .set_handler_fn(crate::memory::tlb::tlb_shootdown_handler);
         idt[InterruptIndex::Spurious.as_u8()].set_handler_fn(spurious_interrupt_handler);
         idt[InterruptIndex::Reschedule.as_u8()]
             .set_handler_addr(VirtAddr::new(timer_interrupt_handler as *mut u8 as u64));

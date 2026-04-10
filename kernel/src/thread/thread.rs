@@ -751,6 +751,10 @@ impl Thread {
             let stack_top = user.process_stack_top.load(Ordering::Acquire);
             thread_stack_free(&mut memory_manager, stack_top);
 
+            // No TLB shootdown needed: each process has its own address space
+            // (address_space_refs starts at 1, COW fork creates a new PML4).
+            // The dying thread is the only one with this CR3 loaded, so no other
+            // CPU has user-space TLB entries for this address space.
             memory_manager.clean_lower_half();
 
             switch_to_kernel_page();

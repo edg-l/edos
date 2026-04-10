@@ -114,6 +114,11 @@ impl MemoryManager {
         Ok(page_range)
     }
 
+    /// Change page table flags for a range. The local TLB is flushed inline.
+    ///
+    /// If the change reduces permissions (e.g., removing WRITABLE), the caller
+    /// must issue a TLB shootdown after this call returns (and after dropping
+    /// the mapper lock) to ensure other CPUs see the permission change.
     pub fn change_flags(
         &mut self,
         addr: VirtAddr,
@@ -159,6 +164,30 @@ impl MemoryManager {
         }
 
         Ok(page_range)
+    }
+
+    /// Unmap pages and return the freed frames WITHOUT deallocating them.
+    /// The caller must free the frames after completing a TLB shootdown.
+    pub fn unmap_memory_deferred(
+        &mut self,
+        addr: VirtAddr,
+        size: u64,
+    ) -> Result<alloc::vec::Vec<PhysFrame>, UnmapError> {
+        let page_range = get_page_range(addr, size);
+        let mut freed_frames = alloc::vec::Vec::new();
+
+        for page in page_range {
+            if let Ok(frame) = self.mapper.translate_page(page) {
+                let (_, flush) = self.mapper.unmap(page)?;
+                flush.flush();
+                freed_frames.push(frame);
+            } else {
+                let (_, flush) = self.mapper.unmap(page)?;
+                flush.flush();
+            }
+        }
+
+        Ok(freed_frames)
     }
 
     /// Map a given physical address.

@@ -8,6 +8,7 @@ pub mod frame_allocator;
 pub mod mapper;
 pub mod pat;
 pub mod shared;
+pub mod tlb;
 pub mod valloc;
 
 /// Allowlist of physical address ranges that userspace may map via MAP_PHYSICAL.

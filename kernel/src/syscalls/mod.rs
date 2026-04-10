@@ -1781,9 +1781,8 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         cloned
     };
 
-    // Clone COW page tables. Must be called with parent's CR3 active so that
-    // flush_local_tlb() inside clone_user_page_tables_cow flushes the parent's
-    // now-read-only TLB entries on this CPU.
+    // Clone COW page tables. Must be called with parent's CR3 active.
+    // tlb_shootdown_all() inside flushes all CPUs' stale writable entries.
     let child_pml4_frame = {
         let guard = parent_info.lock();
         let parent_mappings = guard.memory_mappings.lock();

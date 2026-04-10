@@ -19,6 +19,7 @@ pub enum InterruptIndex {
     Xhci = APIC_OFFSET + 8,
     E1000e = APIC_OFFSET + 9,
     Hda = APIC_OFFSET + 10,
+    TlbShootdown = APIC_OFFSET + 11,
     Spurious = 0xFF,
 }
 

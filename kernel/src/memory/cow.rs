@@ -149,11 +149,10 @@ pub unsafe fn clone_user_page_tables_cow(
         }
     }
 
-    // Flush the local TLB to ensure the parent's now-read-only PTEs are visible
-    // on this CPU. Other CPUs would need a shootdown IPI for full SMP safety,
-    // but fork from a single-threaded process only has TLB entries on the
-    // calling CPU.
-    flush_local_tlb();
+    // Flush TLB on all CPUs: parent PTEs were changed from writable to
+    // read-only (COW). Any CPU with a cached writable entry could write
+    // through it without triggering a COW fault.
+    crate::memory::tlb::tlb_shootdown_all();
 
     child_pml4_frame
 }
@@ -261,16 +260,4 @@ pub unsafe fn handle_cow_fault(fault_addr: VirtAddr) -> bool {
     }
 
     true
-}
-
-/// Reload CR3 to flush the entire local TLB.
-fn flush_local_tlb() {
-    unsafe {
-        core::arch::asm!(
-            "mov {tmp}, cr3",
-            "mov cr3, {tmp}",
-            tmp = out(reg) _,
-            options(nostack, preserves_flags),
-        );
-    }
 }

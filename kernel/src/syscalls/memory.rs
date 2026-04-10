@@ -200,25 +200,50 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
             match mapping.mapping_type {
                 MappingType::Anonymous => {
                     let memory_manager = info.lock().memory_manager.clone();
-                    if memory_manager.lock().unmap_memory(map_addr, length).is_ok() {
-                        log!("Unmap success");
-                        0
-                    } else {
-                        log!("Unmap fault");
-                        info.lock().errno = Errno::EFAULT;
-                        -1
+                    // Unmap PTEs and collect frames without freeing them.
+                    // Free frames only AFTER the TLB shootdown to prevent
+                    // use-after-free of physical memory via stale TLB entries.
+                    let frames = memory_manager
+                        .lock()
+                        .unmap_memory_deferred(map_addr, length);
+                    match frames {
+                        Ok(frames) => {
+                            if crate::memory::tlb::shootdown_needed() {
+                                crate::memory::tlb::tlb_shootdown(
+                                    map_addr,
+                                    (length + 0xFFF) / 4096,
+                                );
+                            }
+                            // Now safe to free the frames.
+                            let mut fa = crate::memory::frame_allocator::frame_allocator();
+                            for frame in frames {
+                                unsafe { fa.deallocate_frame(frame) };
+                            }
+                            log!("Unmap success");
+                            0
+                        }
+                        Err(_) => {
+                            log!("Unmap fault");
+                            info.lock().errno = Errno::EFAULT;
+                            -1
+                        }
                     }
                 }
                 MappingType::Physical(_phys_base) => {
                     // Physical (MMIO/VRAM): unmap pages without deallocating frames
-                    let mut mapper = memory_mapper();
                     let page_count = (length + 0xFFF) / 4096;
-                    for i in 0..page_count {
-                        let virt = VirtAddr::new(addr + i * 4096);
-                        let page: Page<Size4KiB> = Page::containing_address(virt);
-                        if let Ok((_, flush)) = mapper.mapper.unmap(page) {
-                            flush.flush();
+                    {
+                        let mut mapper = memory_mapper();
+                        for i in 0..page_count {
+                            let virt = VirtAddr::new(addr + i * 4096);
+                            let page: Page<Size4KiB> = Page::containing_address(virt);
+                            if let Ok((_, flush)) = mapper.mapper.unmap(page) {
+                                flush.flush();
+                            }
                         }
+                    } // mapper dropped here, interrupts re-enabled
+                    if crate::memory::tlb::shootdown_needed() {
+                        crate::memory::tlb::tlb_shootdown(map_addr, page_count);
                     }
                     log!("Unmap physical success");
                     0
