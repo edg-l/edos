@@ -4,28 +4,30 @@
 
 use alloc::{collections::btree_map::BTreeMap, string::String, vec::Vec};
 
-use crate::fs::{Error, FileSystem, memfs::node::Node, path::Path};
+use crate::{
+    fs::{Error, FileSystem, memfs::node::Node, path::Path},
+    thread::rwlock::RwLock as BlockingRwLock,
+};
 
 use super::FileKind;
 
 mod node;
 
-/// Memory based filesystem, volatile.
-#[derive(Debug)]
-pub struct Memfs {
+struct MemfsInner {
     nodes: BTreeMap<u32, Node>,
     next_id: u32,
 }
 
-impl Memfs {
-    pub fn new() -> Result<Self, Error> {
-        let root = Node::new(0, String::new(), FileKind::Directory);
-        let mut nodes = BTreeMap::new();
-        nodes.insert(0, root);
-        Ok(Self { nodes, next_id: 1 })
+impl MemfsInner {
+    fn get_node(&self, id: u32) -> Result<&Node, Error> {
+        self.nodes.get(&id).ok_or(Error::Corrupted)
     }
 
-    pub fn find_node(&self, path: &Path) -> Result<Option<u32>, Error> {
+    fn get_node_mut(&mut self, id: u32) -> Result<&mut Node, Error> {
+        self.nodes.get_mut(&id).ok_or(Error::Corrupted)
+    }
+
+    fn find_node(&self, path: &Path) -> Result<Option<u32>, Error> {
         let mut current = self.nodes.get(&0).unwrap();
 
         for component in path.components() {
@@ -48,16 +50,6 @@ impl Memfs {
         Ok(Some(current.id))
     }
 
-    /// Returns a corrupted error if not found.
-    fn get_node(&self, id: u32) -> Result<&Node, Error> {
-        self.nodes.get(&id).ok_or(Error::Corrupted)
-    }
-
-    /// Returns a corrupted error if not found.
-    fn get_node_mut(&mut self, id: u32) -> Result<&mut Node, Error> {
-        self.nodes.get_mut(&id).ok_or(Error::Corrupted)
-    }
-
     fn get_all_child_ids(&self, id: u32) -> Result<Vec<u32>, Error> {
         let mut ids = Vec::new();
         let node = self.get_node(id)?;
@@ -71,11 +63,28 @@ impl Memfs {
     }
 }
 
+/// Memory based filesystem, volatile.
+pub struct Memfs {
+    inner: BlockingRwLock<MemfsInner>,
+}
+
+impl Memfs {
+    pub fn new() -> Result<Self, Error> {
+        let root = Node::new(0, String::new(), FileKind::Directory);
+        let mut nodes = BTreeMap::new();
+        nodes.insert(0, root);
+        Ok(Self {
+            inner: BlockingRwLock::new(MemfsInner { nodes, next_id: 1 }),
+        })
+    }
+}
+
 impl FileSystem for Memfs {
     fn list_files(&self, path: &Path) -> Result<Vec<super::File>, Error> {
         let path = path.normalize();
-        if let Some(node) = self.find_node(&path)? {
-            let node = self.get_node(node)?;
+        let inner = self.inner.read();
+        if let Some(node_id) = inner.find_node(&path)? {
+            let node = inner.get_node(node_id)?;
 
             if node.file.kind != FileKind::Directory {
                 return Err(Error::NotADir);
@@ -84,7 +93,7 @@ impl FileSystem for Memfs {
             let mut files = Vec::new();
 
             for child in &node.childs {
-                let child = self.get_node(*child)?;
+                let child = inner.get_node(*child)?;
                 files.push(child.file.clone());
             }
 
@@ -96,8 +105,9 @@ impl FileSystem for Memfs {
 
     fn read_bytes(&self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
         let path = path.normalize();
-        if let Some(node) = self.find_node(&path)? {
-            let node = self.get_node(node)?;
+        let inner = self.inner.read();
+        if let Some(node_id) = inner.find_node(&path)? {
+            let node = inner.get_node(node_id)?;
 
             if node.file.kind != FileKind::File {
                 return Err(Error::NotAFile);
@@ -117,10 +127,11 @@ impl FileSystem for Memfs {
         }
     }
 
-    fn write_bytes(&mut self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
+    fn write_bytes(&self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
         let path = path.normalize();
-        if let Some(node) = self.find_node(&path)? {
-            let node = self.get_node_mut(node)?;
+        let mut inner = self.inner.write();
+        if let Some(node_id) = inner.find_node(&path)? {
+            let node = inner.get_node_mut(node_id)?;
 
             if node.file.kind != FileKind::File {
                 return Err(Error::NotAFile);
@@ -146,16 +157,17 @@ impl FileSystem for Memfs {
         }
     }
 
-    fn create_file(&mut self, path: &Path) -> Result<(), Error> {
+    fn create_file(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let Some(parent) = path.parent() else {
             return Err(Error::IoError);
         };
 
-        if let Some(parent_node) = self.find_node(&parent)? {
-            let current_id = self.next_id;
+        let mut inner = self.inner.write();
+        if let Some(parent_node_id) = inner.find_node(&parent)? {
+            let current_id = inner.next_id;
             let next_id = current_id.checked_add(1).ok_or(Error::IoError)?;
-            let parent_node = self.get_node_mut(parent_node)?;
+            let parent_node = inner.get_node_mut(parent_node_id)?;
 
             if parent_node.file.kind != FileKind::Directory {
                 return Err(Error::IoError);
@@ -165,8 +177,8 @@ impl FileSystem for Memfs {
 
             let node = Node::new(current_id, name, FileKind::File);
             parent_node.childs.push(node.id);
-            self.next_id = next_id;
-            self.nodes.insert(node.id, node);
+            inner.next_id = next_id;
+            inner.nodes.insert(node.id, node);
 
             Ok(())
         } else {
@@ -174,16 +186,17 @@ impl FileSystem for Memfs {
         }
     }
 
-    fn create_dir(&mut self, path: &Path) -> Result<(), Error> {
+    fn create_dir(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let Some(parent) = path.parent() else {
             return Err(Error::IoError);
         };
 
-        if let Some(parent_node) = self.find_node(&parent)? {
-            let current_id = self.next_id;
+        let mut inner = self.inner.write();
+        if let Some(parent_node_id) = inner.find_node(&parent)? {
+            let current_id = inner.next_id;
             let next_id = current_id.checked_add(1).ok_or(Error::IoError)?;
-            let parent_node = self.get_node_mut(parent_node)?;
+            let parent_node = inner.get_node_mut(parent_node_id)?;
 
             if parent_node.file.kind != FileKind::Directory {
                 return Err(Error::IoError);
@@ -193,8 +206,8 @@ impl FileSystem for Memfs {
 
             let node = Node::new(current_id, name, FileKind::Directory);
             parent_node.childs.push(node.id);
-            self.next_id = next_id;
-            self.nodes.insert(node.id, node);
+            inner.next_id = next_id;
+            inner.nodes.insert(node.id, node);
 
             Ok(())
         } else {
@@ -202,7 +215,7 @@ impl FileSystem for Memfs {
         }
     }
 
-    fn remove_dir(&mut self, path: &Path) -> Result<(), Error> {
+    fn remove_dir(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
 
         if path.is_root() {
@@ -213,8 +226,9 @@ impl FileSystem for Memfs {
             return Err(Error::IoError);
         };
 
-        if let Some(parent_node_id) = self.find_node(&parent)? {
-            let parent_node = self.get_node(parent_node_id)?;
+        let mut inner = self.inner.write();
+        if let Some(parent_node_id) = inner.find_node(&parent)? {
+            let parent_node = inner.get_node(parent_node_id)?;
 
             if parent_node.file.kind != FileKind::Directory {
                 return Err(Error::IoError);
@@ -225,7 +239,7 @@ impl FileSystem for Memfs {
             let name = path.filename();
 
             for (i, id) in parent_node.childs.iter().enumerate() {
-                let child = self.get_node(*id)?;
+                let child = inner.get_node(*id)?;
 
                 if child.file.name == name {
                     idx = Some((i, *id));
@@ -238,17 +252,17 @@ impl FileSystem for Memfs {
             }
 
             if let Some((i, id)) = idx {
-                let child_ids = self.get_all_child_ids(id)?;
+                let child_ids = inner.get_all_child_ids(id)?;
 
                 {
-                    let parent_node = self.get_node_mut(parent_node_id)?;
+                    let parent_node = inner.get_node_mut(parent_node_id)?;
                     parent_node.childs.remove(i);
                 }
 
-                self.nodes.remove(&id);
+                inner.nodes.remove(&id);
 
                 for id in child_ids {
-                    self.nodes.remove(&id);
+                    inner.nodes.remove(&id);
                 }
 
                 Ok(())
@@ -260,7 +274,7 @@ impl FileSystem for Memfs {
         }
     }
 
-    fn remove_file(&mut self, path: &Path) -> Result<(), Error> {
+    fn remove_file(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
 
         if path.is_root() {
@@ -271,8 +285,9 @@ impl FileSystem for Memfs {
             return Err(Error::IoError);
         };
 
-        if let Some(parent_node_id) = self.find_node(&parent)? {
-            let parent_node = self.get_node(parent_node_id)?;
+        let mut inner = self.inner.write();
+        if let Some(parent_node_id) = inner.find_node(&parent)? {
+            let parent_node = inner.get_node(parent_node_id)?;
 
             if parent_node.file.kind != FileKind::Directory {
                 return Err(Error::IoError);
@@ -283,7 +298,7 @@ impl FileSystem for Memfs {
             let name = path.filename();
 
             for (i, id) in parent_node.childs.iter().enumerate() {
-                let child = self.get_node(*id)?;
+                let child = inner.get_node(*id)?;
 
                 if child.file.name == name {
                     idx = Some((i, *id));
@@ -297,11 +312,11 @@ impl FileSystem for Memfs {
 
             if let Some((i, id)) = idx {
                 {
-                    let parent_node = self.get_node_mut(parent_node_id)?;
+                    let parent_node = inner.get_node_mut(parent_node_id)?;
                     parent_node.childs.remove(i);
                 }
 
-                self.nodes.remove(&id);
+                inner.nodes.remove(&id);
 
                 Ok(())
             } else {
@@ -314,8 +329,9 @@ impl FileSystem for Memfs {
 
     fn file_info(&self, path: &Path) -> Result<super::File, Error> {
         let path = path.normalize();
-        if let Some(node) = self.find_node(&path)? {
-            let node = self.get_node(node)?;
+        let inner = self.inner.read();
+        if let Some(node_id) = inner.find_node(&path)? {
+            let node = inner.get_node(node_id)?;
 
             Ok(node.file.clone())
         } else {
@@ -323,14 +339,15 @@ impl FileSystem for Memfs {
         }
     }
 
-    fn flush(&mut self) -> Result<(), Error> {
+    fn flush(&self) -> Result<(), Error> {
         Ok(())
     }
 
-    fn truncate(&mut self, path: &Path, size: u64) -> Result<(), Error> {
+    fn truncate(&self, path: &Path, size: u64) -> Result<(), Error> {
         let path = path.normalize();
-        if let Some(node_id) = self.find_node(&path)? {
-            let node = self.get_node_mut(node_id)?;
+        let mut inner = self.inner.write();
+        if let Some(node_id) = inner.find_node(&path)? {
+            let node = inner.get_node_mut(node_id)?;
             if node.file.kind != FileKind::File {
                 return Err(Error::NotAFile);
             }
@@ -347,7 +364,7 @@ impl FileSystem for Memfs {
         }
     }
 
-    fn rename(&mut self, old_path: &Path, new_path: &Path) -> Result<(), Error> {
+    fn rename(&self, old_path: &Path, new_path: &Path) -> Result<(), Error> {
         let old_path = old_path.normalize();
         let new_path = new_path.normalize();
 
@@ -358,18 +375,20 @@ impl FileSystem for Memfs {
         let old_parent = old_path.parent().ok_or(Error::IoError)?;
         let new_parent = new_path.parent().ok_or(Error::IoError)?;
 
-        let old_parent_id = self.find_node(&old_parent)?.ok_or(Error::FileNotFound)?;
-        let new_parent_id = self.find_node(&new_parent)?.ok_or(Error::FileNotFound)?;
+        let mut inner = self.inner.write();
+
+        let old_parent_id = inner.find_node(&old_parent)?.ok_or(Error::FileNotFound)?;
+        let new_parent_id = inner.find_node(&new_parent)?.ok_or(Error::FileNotFound)?;
 
         let old_name = old_path.filename();
         let new_name = new_path.filename();
 
         // Find the node id to move
         let node_id = {
-            let parent = self.get_node(old_parent_id)?;
+            let parent = inner.get_node(old_parent_id)?;
             let mut found = None;
             for &child_id in &parent.childs {
-                let child = self.get_node(child_id)?;
+                let child = inner.get_node(child_id)?;
                 if child.file.name == old_name {
                     found = Some(child_id);
                     break;
@@ -380,19 +399,19 @@ impl FileSystem for Memfs {
 
         // Remove from old parent
         {
-            let parent = self.get_node_mut(old_parent_id)?;
+            let parent = inner.get_node_mut(old_parent_id)?;
             parent.childs.retain(|&id| id != node_id);
         }
 
         // Update the node's name
         {
-            let node = self.get_node_mut(node_id)?;
+            let node = inner.get_node_mut(node_id)?;
             node.file.name = new_name;
         }
 
         // Add to new parent
         {
-            let parent = self.get_node_mut(new_parent_id)?;
+            let parent = inner.get_node_mut(new_parent_id)?;
             parent.childs.push(node_id);
         }
 

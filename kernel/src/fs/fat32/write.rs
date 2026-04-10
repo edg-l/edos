@@ -26,7 +26,7 @@ impl Fatfs {
     /// Does not shrink or update the on-disk directory entry size yet.
     #[expect(unused)]
     pub fn write_file(
-        &mut self,
+        &self,
         entry: &mut DirectoryEntry,
         entry_pos: Option<(u32, usize)>,
         buf: &[u8],
@@ -38,7 +38,7 @@ impl Fatfs {
     /// Allocates new clusters when writing past the current chain end.
     /// Returns bytes written.
     pub fn write_file_offset(
-        &mut self,
+        &self,
         entry: &mut DirectoryEntry,
         entry_pos: Option<(u32, usize)>, // needed only if entry.first_cluster()<2
         offset: u64,
@@ -191,7 +191,7 @@ impl Fatfs {
     }
 
     /// Allocate a new free cluster and mark it EOF in FAT.
-    pub fn alloc_cluster(&mut self) -> Result<u32, Error> {
+    pub fn alloc_cluster(&self) -> Result<u32, Error> {
         let bytes_per_sector = self.boot_info.bytes_per_sector as usize;
         let fat_sectors = match self.variant {
             FatVariant::Fat32 => self.boot_info.fat_size_32 as u64,
@@ -206,9 +206,10 @@ impl Fatfs {
         // Start hint from FSInfo if valid (FAT32 only), else 2
         let mut start_cluster = match self.variant {
             FatVariant::Fat32 => {
-                if let Some(ref fs_info) = self.fs_info {
-                    if fs_info.next_free != 0xFFFF_FFFF {
-                        fs_info.next_free
+                let fs_info = self.fs_info.lock();
+                if let Some(ref fi) = *fs_info {
+                    if fi.next_free != 0xFFFF_FFFF {
+                        fi.next_free
                     } else {
                         2
                     }
@@ -222,14 +223,14 @@ impl Fatfs {
             start_cluster = 2;
         }
 
-        // Search helper: scan FAT entries for a free cluster, mark it EOF.
+        // Search for a free cluster starting at `start`, scanning up to max_clusters.
+        // Returns the allocated cluster number on success.
         let variant = self.variant;
-        let mut search = |start: u32, _end_exclusive: u32| -> Option<u32> {
+        let search = |start: u32| -> Option<u32> {
             let mut current_cluster = start;
             let max_clusters = entries_per_sector as u64 * fat_sectors;
             let mut sec = Vec::new();
             while (current_cluster as u64) < max_clusters {
-                // Read the FAT entry for current_cluster using variant-aware addressing
                 let (byte_index, entry_size) = match variant {
                     FatVariant::Fat32 => ((current_cluster as usize) * 4, 4usize),
                     FatVariant::Fat16 => ((current_cluster as usize) * 2, 2usize),
@@ -294,19 +295,6 @@ impl Fatfs {
                         .write_sectors(self.first_fat_lba() + sector_index, &sec.clone(), 1)
                         .ok()?;
 
-                    let next = if current_cluster == u32::MAX {
-                        2
-                    } else {
-                        current_cluster.saturating_add(1).max(2)
-                    };
-                    // Update FSInfo only for FAT32
-                    if let Some(ref mut fs_info) = self.fs_info {
-                        fs_info.next_free = next;
-                        if fs_info.free_count != 0xFFFF_FFFF && fs_info.free_count > 0 {
-                            fs_info.free_count -= 1;
-                        }
-                    }
-
                     return Some(current_cluster);
                 }
                 current_cluster += 1;
@@ -314,24 +302,33 @@ impl Fatfs {
             None
         };
 
-        // First pass from hint
-        if let Some(c) = search(
-            start_cluster,
-            entries_per_sector as u32 * fat_sectors as u32,
-        ) {
-            return Ok(c);
-        }
-        // Second pass from 2
-        if let Some(c) = search(2, start_cluster) {
-            return Ok(c);
-        }
+        // First pass from hint, then second pass from 2
+        let found = search(start_cluster).or_else(|| search(2));
 
-        Err(Error::IoError)
+        match found {
+            Some(c) => {
+                // Update FSInfo in memory (FAT32 only)
+                let next = if c == u32::MAX {
+                    2
+                } else {
+                    c.saturating_add(1).max(2)
+                };
+                let mut fs_info = self.fs_info.lock();
+                if let Some(ref mut fi) = *fs_info {
+                    fi.next_free = next;
+                    if fi.free_count != 0xFFFF_FFFF && fi.free_count > 0 {
+                        fi.free_count -= 1;
+                    }
+                }
+                Ok(c)
+            }
+            None => Err(Error::IoError),
+        }
     }
 
     /// Link `from` cluster to `to` cluster by setting FAT[from] = to,
     /// and set FAT[to] to EOF.
-    pub fn link_fat_entry(&mut self, from: u32, to: u32) -> Result<(), Error> {
+    pub fn link_fat_entry(&self, from: u32, to: u32) -> Result<(), Error> {
         self.set_fat_value(from, to)?;
         let eof_val = match self.variant {
             FatVariant::Fat32 => CLUSTER_EOF,
@@ -343,7 +340,7 @@ impl Fatfs {
     }
 
     /// Low-level setter for a FAT entry. Writes to both primary and backup FATs.
-    fn set_fat_value(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
+    fn set_fat_value(&self, cluster: u32, value: u32) -> Result<(), Error> {
         let bytes_per_sector = self.boot_info.bytes_per_sector as usize;
 
         match self.variant {
@@ -402,9 +399,10 @@ impl Fatfs {
         Ok(())
     }
 
-    pub fn save_fs_info(&mut self) -> Result<(), Error> {
-        if let Some(ref fs_info) = self.fs_info {
-            let data: Vec<u8> = bytes_of(fs_info).to_vec(); // 512 bytes
+    pub fn save_fs_info(&self) -> Result<(), Error> {
+        let fs_info = self.fs_info.lock();
+        if let Some(ref fi) = *fs_info {
+            let data: Vec<u8> = bytes_of(fi).to_vec(); // 512 bytes
             self.device.write_sectors(
                 self.partition.starting_lba + self.boot_info.fs_info as u64,
                 &data,
@@ -415,7 +413,7 @@ impl Fatfs {
     }
 
     pub fn patch_dir_entry_at(
-        &mut self,
+        &self,
         entry_cluster: u32,
         entry_offset: usize, // byte offset within the region
         patch: impl FnOnce(&mut DirectoryEntry),
@@ -438,7 +436,7 @@ impl Fatfs {
 
     /// Resolve parent directory cluster and final component name.
     pub fn resolve_parent_and_name(
-        &mut self,
+        &self,
         path: &Path,
     ) -> Result<(u32, alloc::string::String), Error> {
         let path = path.normalize();
@@ -471,7 +469,7 @@ impl Fatfs {
     }
 
     pub(super) fn generate_short_name(
-        &mut self,
+        &self,
         dir_cluster: u32,
         desired: &str,
     ) -> Result<(String, bool), Error> {
@@ -554,7 +552,7 @@ impl Fatfs {
     /// Append a short 8.3 DirectoryEntry to a directory, allocating a new cluster if needed.
     /// Returns (cluster_that_contains_entry, byte_offset_within_cluster).
     pub fn append_dir_entry(
-        &mut self,
+        &self,
         mut dir_cluster: u32,
         new_entry: &DirectoryEntry,
         long_name: Option<&str>,
@@ -625,7 +623,7 @@ impl Fatfs {
         }
     }
 
-    fn mark_entry_deleted(&mut self, cluster: u32, entry_offset: usize) -> Result<(), Error> {
+    fn mark_entry_deleted(&self, cluster: u32, entry_offset: usize) -> Result<(), Error> {
         let (base_lba, sectors) = self.dir_entry_region(cluster);
         let mut buf = self.device.read_sectors(base_lba, sectors, Vec::new())?;
         if entry_offset + 32 > buf.len() {
@@ -637,7 +635,7 @@ impl Fatfs {
     }
 
     pub(super) fn delete_long_name_sequence(
-        &mut self,
+        &self,
         dir_head: u32,
         target_cluster: u32,
         target_offset: usize,
@@ -696,7 +694,7 @@ impl Fatfs {
         }
     }
 
-    pub(super) fn free_cluster_chain(&mut self, start: u32) -> Result<u32, Error> {
+    pub(super) fn free_cluster_chain(&self, start: u32) -> Result<u32, Error> {
         if start < 2 {
             return Ok(0);
         }
@@ -739,12 +737,15 @@ impl Fatfs {
         }
 
         // Update FSInfo in memory (FAT32 only)
-        if let Some(ref mut fs_info) = self.fs_info {
-            if fs_info.free_count != 0xFFFF_FFFF {
-                fs_info.free_count = fs_info.free_count.saturating_add(freed);
-            }
-            if fs_info.next_free == 0xFFFF_FFFF || start < fs_info.next_free {
-                fs_info.next_free = start;
+        {
+            let mut fs_info = self.fs_info.lock();
+            if let Some(ref mut fi) = *fs_info {
+                if fi.free_count != 0xFFFF_FFFF {
+                    fi.free_count = fi.free_count.saturating_add(freed);
+                }
+                if fi.next_free == 0xFFFF_FFFF || start < fi.next_free {
+                    fi.next_free = start;
+                }
             }
         }
 
@@ -753,7 +754,7 @@ impl Fatfs {
 
     /// Copy the entire primary FAT to the backup FAT.
     #[expect(unused)]
-    pub fn mirror_primary_fat_to_backup(&mut self) -> Result<(), Error> {
+    pub fn mirror_primary_fat_to_backup(&self) -> Result<(), Error> {
         let total: u64 = self.boot_info.fat_size_32 as u64; // sectors in one FAT
         let mut src_lba = self.first_fat_lba();
         let mut dst_lba = self.backup_fat_lba();

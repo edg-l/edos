@@ -61,11 +61,20 @@ impl ExtentList {
 /// Maximum number of cached inodes.
 const INODE_CACHE_MAX: usize = 64;
 
+/// Mutable filesystem metadata protected by a lock.
+struct EfsMutableState {
+    superblock: EfsSuperblock,
+    bgd_table: Vec<EfsBlockGroupDesc>,
+}
+
 pub struct EfsDriver {
     device: BlockDevice,
     partition: Partition,
-    superblock: EfsSuperblock,
-    bgd_table: Vec<EfsBlockGroupDesc>,
+    /// Cached values derived from the superblock (immutable after mount).
+    block_size_log2: u32,
+    inodes_per_group: u32,
+    /// Mutable FS metadata (superblock + block group descriptors).
+    mutable: BlockingMutex<EfsMutableState>,
     /// Inode cache: maps inode number -> cached inode.
     inode_cache: BlockingMutex<BTreeMap<u64, EfsInode>>,
 }
@@ -110,12 +119,17 @@ impl EfsDriver {
             bgd_table.push(bgd);
         }
 
-        let bs = 1usize << superblock.block_size_log2;
+        let block_size_log2 = superblock.block_size_log2;
+        let inodes_per_group = superblock.inodes_per_group;
         Ok(Self {
             device,
             partition,
-            superblock,
-            bgd_table,
+            block_size_log2,
+            inodes_per_group,
+            mutable: BlockingMutex::new(EfsMutableState {
+                superblock,
+                bgd_table,
+            }),
             inode_cache: BlockingMutex::new(BTreeMap::new()),
         })
     }
@@ -125,7 +139,7 @@ impl EfsDriver {
 
 impl EfsDriver {
     fn block_size(&self) -> u64 {
-        1u64 << self.superblock.block_size_log2
+        1u64 << self.block_size_log2
     }
 
     fn sectors_per_block(&self) -> u16 {
@@ -159,7 +173,7 @@ impl EfsDriver {
     /// Map inode number to (group_index, inode_index_within_group).
     fn inode_location(&self, ino: u64) -> (usize, usize) {
         let ino0 = (ino - 1) as usize; // inodes are 1-based
-        let ipg = self.superblock.inodes_per_group as usize;
+        let ipg = self.inodes_per_group as usize;
         (ino0 / ipg, ino0 % ipg)
     }
 
@@ -169,10 +183,13 @@ impl EfsDriver {
         }
 
         let (group, idx) = self.inode_location(ino);
-        if group >= self.bgd_table.len() {
-            return Err(Error::Corrupted);
-        }
-        let inode_table_block = self.bgd_table[group].inode_table_block;
+        let inode_table_block = {
+            let m = self.mutable.lock();
+            if group >= m.bgd_table.len() {
+                return Err(Error::Corrupted);
+            }
+            m.bgd_table[group].inode_table_block
+        };
         let block_size = self.block_size() as usize;
         let inodes_per_block = block_size / INODE_SIZE;
         let block_offset = idx / inodes_per_block;
@@ -183,22 +200,26 @@ impl EfsDriver {
             core::ptr::read_unaligned(block_data[offset_in_block..].as_ptr() as *const EfsInode)
         };
 
-        // Evict oldest entry if cache is full.
-        if self.inode_cache.lock().len() >= INODE_CACHE_MAX {
-            if let Some(&first_key) = self.inode_cache.lock().keys().next() {
-                self.inode_cache.lock().remove(&first_key);
+        // Insert into cache, evicting the oldest entry if full.
+        let mut cache = self.inode_cache.lock();
+        if cache.len() >= INODE_CACHE_MAX {
+            if let Some(&first_key) = cache.keys().next() {
+                cache.remove(&first_key);
             }
         }
-        self.inode_cache.lock().insert(ino, inode);
+        cache.insert(ino, inode);
         Ok(inode)
     }
 
     fn write_inode(&self, ino: u64, inode: &EfsInode) -> Result<(), Error> {
         let (group, idx) = self.inode_location(ino);
-        if group >= self.bgd_table.len() {
-            return Err(Error::Corrupted);
-        }
-        let inode_table_block = self.bgd_table[group].inode_table_block;
+        let inode_table_block = {
+            let m = self.mutable.lock();
+            if group >= m.bgd_table.len() {
+                return Err(Error::Corrupted);
+            }
+            m.bgd_table[group].inode_table_block
+        };
         let block_size = self.block_size() as usize;
         let inodes_per_block = block_size / INODE_SIZE;
         let block_offset = idx / inodes_per_block;
@@ -458,7 +479,7 @@ impl EfsDriver {
 impl EfsDriver {
     /// Write `data` to an inode starting at `byte_offset`.
     /// Grows the file if necessary.  Returns the new file size.
-    fn write_file_data(&mut self, ino: u64, byte_offset: usize, data: &[u8]) -> Result<u64, Error> {
+    fn write_file_data(&self, ino: u64, byte_offset: usize, data: &[u8]) -> Result<u64, Error> {
         if data.is_empty() {
             return Ok(self.read_inode(ino)?.size);
         }
@@ -488,7 +509,7 @@ impl EfsDriver {
     }
 
     fn write_inline(
-        &mut self,
+        &self,
         ino: u64,
         inode: &EfsInode,
         offset: usize,
@@ -504,7 +525,7 @@ impl EfsDriver {
         Ok(new_size)
     }
 
-    fn convert_inline_to_extents(&mut self, ino: u64, inode: &EfsInode) -> Result<(), Error> {
+    fn convert_inline_to_extents(&self, ino: u64, inode: &EfsInode) -> Result<(), Error> {
         let inline_data = inode.data_area[..inode.size as usize].to_vec();
         let block_size = self.block_size() as usize;
 
@@ -554,12 +575,7 @@ impl EfsDriver {
         self.write_inode(ino, &updated)
     }
 
-    fn write_via_extents(
-        &mut self,
-        ino: u64,
-        byte_offset: usize,
-        data: &[u8],
-    ) -> Result<(), Error> {
+    fn write_via_extents(&self, ino: u64, byte_offset: usize, data: &[u8]) -> Result<(), Error> {
         let block_size = self.block_size() as usize;
         let mut written = 0usize;
 
@@ -582,7 +598,7 @@ impl EfsDriver {
     }
 
     /// Return the physical block for the given logical block, allocating if needed.
-    fn ensure_block_for_logical(&mut self, ino: u64, logical_block: u32) -> Result<u64, Error> {
+    fn ensure_block_for_logical(&self, ino: u64, logical_block: u32) -> Result<u64, Error> {
         let inode = self.read_inode(ino)?;
         let hdr: EfsExtentHeader = unsafe {
             core::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader)
@@ -666,15 +682,16 @@ impl EfsDriver {
 
 impl EfsDriver {
     /// Allocate a free block and return its absolute block number.
-    fn alloc_block(&mut self) -> Result<u64, Error> {
+    fn alloc_block(&self) -> Result<u64, Error> {
         let block_size = self.block_size() as usize;
-        let blocks_per_group = self.superblock.blocks_per_group as usize;
+        let mut m = self.mutable.lock();
+        let blocks_per_group = m.superblock.blocks_per_group as usize;
 
-        for g in 0..self.bgd_table.len() {
-            if self.bgd_table[g].free_blocks_count == 0 {
+        for g in 0..m.bgd_table.len() {
+            if m.bgd_table[g].free_blocks_count == 0 {
                 continue;
             }
-            let bitmap_block = self.bgd_table[g].block_bitmap_block;
+            let bitmap_block = m.bgd_table[g].block_bitmap_block;
             let mut bitmap = self.read_block(bitmap_block)?;
 
             let bits_to_check = blocks_per_group.min(block_size * 8);
@@ -682,8 +699,8 @@ impl EfsDriver {
                 set_bit(&mut bitmap, bit);
                 self.write_block(bitmap_block, &bitmap)?;
 
-                self.bgd_table[g].free_blocks_count -= 1;
-                self.superblock.free_blocks -= 1;
+                m.bgd_table[g].free_blocks_count -= 1;
+                m.superblock.free_blocks -= 1;
 
                 let abs_block = g as u64 * blocks_per_group as u64 + bit as u64;
                 return Ok(abs_block);
@@ -693,35 +710,39 @@ impl EfsDriver {
     }
 
     /// Free a block (by absolute block number).
-    fn free_block(&mut self, block: u64) -> Result<(), Error> {
-        let blocks_per_group = self.superblock.blocks_per_group as u64;
-        let group = (block / blocks_per_group) as usize;
-        let bit = (block % blocks_per_group) as usize;
+    fn free_block(&self, block: u64) -> Result<(), Error> {
+        let (group, bit, bitmap_block) = {
+            let m = self.mutable.lock();
+            let blocks_per_group = m.superblock.blocks_per_group as u64;
+            let group = (block / blocks_per_group) as usize;
+            let bit = (block % blocks_per_group) as usize;
+            if group >= m.bgd_table.len() {
+                return Err(Error::Corrupted);
+            }
+            (group, bit, m.bgd_table[group].block_bitmap_block)
+        };
 
-        if group >= self.bgd_table.len() {
-            return Err(Error::Corrupted);
-        }
-
-        let bitmap_block = self.bgd_table[group].block_bitmap_block;
         let mut bitmap = self.read_block(bitmap_block)?;
         clear_bit(&mut bitmap, bit);
         self.write_block(bitmap_block, &bitmap)?;
 
-        self.bgd_table[group].free_blocks_count += 1;
-        self.superblock.free_blocks += 1;
+        let mut m = self.mutable.lock();
+        m.bgd_table[group].free_blocks_count += 1;
+        m.superblock.free_blocks += 1;
         Ok(())
     }
 
     /// Allocate a free inode and return its inode number (1-based).
-    fn alloc_inode(&mut self) -> Result<u64, Error> {
+    fn alloc_inode(&self) -> Result<u64, Error> {
         let block_size = self.block_size() as usize;
-        let inodes_per_group = self.superblock.inodes_per_group as usize;
+        let mut m = self.mutable.lock();
+        let inodes_per_group = m.superblock.inodes_per_group as usize;
 
-        for g in 0..self.bgd_table.len() {
-            if self.bgd_table[g].free_inodes_count == 0 {
+        for g in 0..m.bgd_table.len() {
+            if m.bgd_table[g].free_inodes_count == 0 {
                 continue;
             }
-            let bitmap_block = self.bgd_table[g].inode_bitmap_block;
+            let bitmap_block = m.bgd_table[g].inode_bitmap_block;
             let mut bitmap = self.read_block(bitmap_block)?;
 
             let bits_to_check = inodes_per_group.min(block_size * 8);
@@ -729,8 +750,8 @@ impl EfsDriver {
                 set_bit(&mut bitmap, bit);
                 self.write_block(bitmap_block, &bitmap)?;
 
-                self.bgd_table[g].free_inodes_count -= 1;
-                self.superblock.free_inodes -= 1;
+                m.bgd_table[g].free_inodes_count -= 1;
+                m.superblock.free_inodes -= 1;
 
                 let ino = g as u64 * inodes_per_group as u64 + bit as u64 + 1;
                 return Ok(ino);
@@ -740,23 +761,27 @@ impl EfsDriver {
     }
 
     /// Free an inode.
-    fn free_inode(&mut self, ino: u64) -> Result<(), Error> {
-        let inodes_per_group = self.superblock.inodes_per_group as usize;
+    fn free_inode(&self, ino: u64) -> Result<(), Error> {
+        let inodes_per_group = self.inodes_per_group as usize;
         let ino0 = (ino - 1) as usize;
         let group = ino0 / inodes_per_group;
         let bit = ino0 % inodes_per_group;
 
-        if group >= self.bgd_table.len() {
-            return Err(Error::Corrupted);
-        }
+        let bitmap_block = {
+            let m = self.mutable.lock();
+            if group >= m.bgd_table.len() {
+                return Err(Error::Corrupted);
+            }
+            m.bgd_table[group].inode_bitmap_block
+        };
 
-        let bitmap_block = self.bgd_table[group].inode_bitmap_block;
         let mut bitmap = self.read_block(bitmap_block)?;
         clear_bit(&mut bitmap, bit);
         self.write_block(bitmap_block, &bitmap)?;
 
-        self.bgd_table[group].free_inodes_count += 1;
-        self.superblock.free_inodes += 1;
+        let mut m = self.mutable.lock();
+        m.bgd_table[group].free_inodes_count += 1;
+        m.superblock.free_inodes += 1;
         Ok(())
     }
 }
@@ -766,7 +791,7 @@ impl EfsDriver {
 impl EfsDriver {
     /// Add a new directory entry to the directory inode `dir_ino`.
     fn add_dir_entry(
-        &mut self,
+        &self,
         dir_ino: u64,
         name: &str,
         entry_ino: u64,
@@ -897,7 +922,7 @@ impl EfsDriver {
     }
 
     /// Remove the directory entry with the given name from directory `dir_ino`.
-    fn remove_dir_entry(&mut self, dir_ino: u64, name: &str) -> Result<(), Error> {
+    fn remove_dir_entry(&self, dir_ino: u64, name: &str) -> Result<(), Error> {
         let dir_inode = self.read_inode(dir_ino)?;
         let dir_size = dir_inode.size as usize;
         let mut dir_data = self.read_file_data(&dir_inode, 0, dir_size)?;
@@ -961,7 +986,7 @@ impl EfsDriver {
     }
 
     /// Write the in-memory dir_data back to the directory inode's blocks.
-    fn write_dir_blocks(&mut self, dir_ino: u64, dir_data: &[u8]) -> Result<(), Error> {
+    fn write_dir_blocks(&self, dir_ino: u64, dir_data: &[u8]) -> Result<(), Error> {
         let block_size = self.block_size() as usize;
         let dir_inode = self.read_inode(dir_ino)?;
 
@@ -1245,7 +1270,7 @@ impl FileSystem for EfsDriver {
         self.read_file_data(&inode, offset, count)
     }
 
-    fn write_bytes(&mut self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
+    fn write_bytes(&self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
         let path = path.normalize();
         let (ino, inode) = self.resolve_path_inode(&path)?;
         if inode.mode & S_IFMT != S_IFREG {
@@ -1254,7 +1279,7 @@ impl FileSystem for EfsDriver {
         self.write_file_data(ino, offset, data)
     }
 
-    fn create_file(&mut self, path: &Path) -> Result<(), Error> {
+    fn create_file(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let name = path.last_component().ok_or(Error::IoError)?.to_string();
         let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
@@ -1274,7 +1299,7 @@ impl FileSystem for EfsDriver {
         Ok(())
     }
 
-    fn create_dir(&mut self, path: &Path) -> Result<(), Error> {
+    fn create_dir(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let name = path.last_component().ok_or(Error::IoError)?.to_string();
         let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
@@ -1374,16 +1399,19 @@ impl FileSystem for EfsDriver {
         self.write_inode(parent_ino, &parent_inode2)?;
 
         // Update BGD used_dirs count.
-        let ipg = self.superblock.inodes_per_group as usize;
+        let ipg = self.inodes_per_group as usize;
         let group = ((new_ino - 1) as usize) / ipg;
-        if group < self.bgd_table.len() {
-            self.bgd_table[group].used_dirs_count += 1;
+        {
+            let mut m = self.mutable.lock();
+            if group < m.bgd_table.len() {
+                m.bgd_table[group].used_dirs_count += 1;
+            }
         }
 
         self.add_dir_entry(parent_ino, &name, new_ino, FT_DIR)
     }
 
-    fn remove_file(&mut self, path: &Path) -> Result<(), Error> {
+    fn remove_file(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let name = path.last_component().ok_or(Error::IoError)?.to_string();
         let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
@@ -1416,7 +1444,7 @@ impl FileSystem for EfsDriver {
         self.remove_dir_entry(parent_ino, &name)
     }
 
-    fn remove_dir(&mut self, path: &Path) -> Result<(), Error> {
+    fn remove_dir(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let name = path.last_component().ok_or(Error::IoError)?.to_string();
         let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
@@ -1463,10 +1491,13 @@ impl FileSystem for EfsDriver {
         self.write_inode(parent_ino, &parent_inode)?;
 
         // Update BGD used_dirs.
-        let ipg = self.superblock.inodes_per_group as usize;
+        let ipg = self.inodes_per_group as usize;
         let group = ((dir_ino - 1) as usize) / ipg;
-        if group < self.bgd_table.len() && self.bgd_table[group].used_dirs_count > 0 {
-            self.bgd_table[group].used_dirs_count -= 1;
+        {
+            let mut m = self.mutable.lock();
+            if group < m.bgd_table.len() && m.bgd_table[group].used_dirs_count > 0 {
+                m.bgd_table[group].used_dirs_count -= 1;
+            }
         }
 
         self.remove_dir_entry(parent_ino, &name)
@@ -1483,13 +1514,14 @@ impl FileSystem for EfsDriver {
         Ok(inode_to_file(name, &inode))
     }
 
-    fn flush(&mut self) -> Result<(), Error> {
+    fn flush(&self) -> Result<(), Error> {
+        let m = self.mutable.lock();
         // Write updated superblock to block 1.
         let block_size = self.block_size() as usize;
         let mut sb_block = vec![0u8; block_size];
         let sb_bytes: &[u8] = unsafe {
             core::slice::from_raw_parts(
-                &self.superblock as *const EfsSuperblock as *const u8,
+                &m.superblock as *const EfsSuperblock as *const u8,
                 core::mem::size_of::<EfsSuperblock>(),
             )
         };
@@ -1497,7 +1529,7 @@ impl FileSystem for EfsDriver {
         self.write_block(1, &sb_block)?;
 
         // Write BGD table starting at block 2.
-        let bgd_count = self.bgd_table.len();
+        let bgd_count = m.bgd_table.len();
         let bgds_per_block = block_size / BGD_SIZE;
         let bgd_blocks = (bgd_count + bgds_per_block - 1) / bgds_per_block;
 
@@ -1505,7 +1537,7 @@ impl FileSystem for EfsDriver {
             let mut blk_buf = vec![0u8; block_size];
             let start = blk_idx * bgds_per_block;
             let end = (start + bgds_per_block).min(bgd_count);
-            for (i, bgd) in self.bgd_table[start..end].iter().enumerate() {
+            for (i, bgd) in m.bgd_table[start..end].iter().enumerate() {
                 let off = i * BGD_SIZE;
                 let bgd_bytes: &[u8] = unsafe {
                     core::slice::from_raw_parts(
@@ -1518,11 +1550,12 @@ impl FileSystem for EfsDriver {
             self.write_block(2 + blk_idx as u64, &blk_buf)?;
         }
 
+        drop(m);
         self.device.flush()?;
         Ok(())
     }
 
-    fn truncate(&mut self, path: &Path, size: u64) -> Result<(), Error> {
+    fn truncate(&self, path: &Path, size: u64) -> Result<(), Error> {
         let path = path.normalize();
         let (ino, inode) = self.resolve_path_inode(&path)?;
         if inode.mode & S_IFMT != S_IFREG {
@@ -1620,7 +1653,7 @@ impl FileSystem for EfsDriver {
         self.write_inode(ino, &updated)
     }
 
-    fn rename(&mut self, old_path: &Path, new_path: &Path) -> Result<(), Error> {
+    fn rename(&self, old_path: &Path, new_path: &Path) -> Result<(), Error> {
         let old_path = old_path.normalize();
         let new_path = new_path.normalize();
 
@@ -1666,7 +1699,8 @@ impl FileSystem for EfsDriver {
     }
 
     fn statfs(&self) -> Result<super::StatFs, Error> {
-        let sb = &self.superblock;
+        let m = self.mutable.lock();
+        let sb = &m.superblock;
         let mut volume_name = [0u8; 64];
         volume_name.copy_from_slice(&sb.volume_name);
         Ok(super::StatFs {
@@ -1685,7 +1719,7 @@ impl FileSystem for EfsDriver {
 
 impl EfsDriver {
     /// Update the ".." directory entry of `dir_ino` to point to `new_parent_ino`.
-    fn update_dotdot_entry(&mut self, dir_ino: u64, new_parent_ino: u64) -> Result<(), Error> {
+    fn update_dotdot_entry(&self, dir_ino: u64, new_parent_ino: u64) -> Result<(), Error> {
         let dir_inode = self.read_inode(dir_ino)?;
         let dir_size = dir_inode.size as usize;
         let mut dir_data = self.read_file_data(&dir_inode, 0, dir_size)?;

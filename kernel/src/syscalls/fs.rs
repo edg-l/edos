@@ -653,15 +653,15 @@ pub fn sys_statfs(path_ptr: *const u8, buf: *mut u8, buf_len: usize) -> i64 {
 
     interrupts::enable();
 
-    let fs = match vfs::lookup(&path) {
-        Some((fs, _)) => fs,
+    let lk = match vfs::lookup(&path) {
+        Some(lk) => lk,
         None => {
             info.lock().errno = Errno::ENOENT;
             return -1;
         }
     };
 
-    let stat = match fs.read().statfs() {
+    let stat = match lk.fs.statfs() {
         Ok(s) => s,
         Err(_) => {
             info.lock().errno = Errno::EIO;

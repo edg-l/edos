@@ -253,7 +253,7 @@ impl FileSystem for DevFsHandle {
         }
     }
 
-    fn write_bytes(&mut self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, fs::Error> {
+    fn write_bytes(&self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, fs::Error> {
         let normalized = path.normalize();
         let state = self.shared.read();
         let device = state.get_device(&normalized).map(|d| d.device.clone());
@@ -272,19 +272,19 @@ impl FileSystem for DevFsHandle {
         }
     }
 
-    fn create_file(&mut self, _path: &Path) -> Result<(), fs::Error> {
+    fn create_file(&self, _path: &Path) -> Result<(), fs::Error> {
         Err(fs::Error::IoError)
     }
 
-    fn create_dir(&mut self, _path: &Path) -> Result<(), fs::Error> {
+    fn create_dir(&self, _path: &Path) -> Result<(), fs::Error> {
         Err(fs::Error::IoError)
     }
 
-    fn remove_dir(&mut self, _path: &Path) -> Result<(), fs::Error> {
+    fn remove_dir(&self, _path: &Path) -> Result<(), fs::Error> {
         Err(fs::Error::IoError)
     }
 
-    fn remove_file(&mut self, path: &Path) -> Result<(), fs::Error> {
+    fn remove_file(&self, path: &Path) -> Result<(), fs::Error> {
         let normalized = path.normalize();
         let mut state = self.shared.write();
         state.remove_device(&normalized).map_err(fs::Error::from)
@@ -322,11 +322,11 @@ impl FileSystem for DevFsHandle {
         }
     }
 
-    fn flush(&mut self) -> Result<(), fs::Error> {
+    fn flush(&self) -> Result<(), fs::Error> {
         Ok(())
     }
 
-    fn ioctl(&mut self, path: &Path, request: u64, arg: u64) -> Result<u64, fs::Error> {
+    fn ioctl(&self, path: &Path, request: u64, arg: u64) -> Result<u64, fs::Error> {
         let normalized = path.normalize();
         let state = self.shared.read();
         let device = state.get_device(&normalized).map(|d| d.device.clone());

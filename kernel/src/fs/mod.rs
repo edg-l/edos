@@ -17,8 +17,7 @@ use crate::{
     log,
     memory::mapper::MemoryManager,
     thread::{
-        mailbox::Mailbox, runqueue::IO_PRIORITY, rwlock::RwLock as BlockingRwLock,
-        scheduler::sched, util::queue_spawn_kthread_named,
+        mailbox::Mailbox, runqueue::IO_PRIORITY, scheduler::sched, util::queue_spawn_kthread_named,
     },
 };
 
@@ -200,23 +199,23 @@ pub trait FileSystem {
         Err(Error::Unsupported)
     }
 
-    // Write/mutating operations (&mut self) -- exclusive via RwLock.
-    fn write_bytes(&mut self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error>;
-    fn create_file(&mut self, path: &Path) -> Result<(), Error>;
-    fn create_dir(&mut self, path: &Path) -> Result<(), Error>;
-    fn remove_dir(&mut self, path: &Path) -> Result<(), Error>;
-    fn remove_file(&mut self, path: &Path) -> Result<(), Error>;
-    fn flush(&mut self) -> Result<(), Error>;
+    // Write/mutating operations (&self) -- each driver manages its own locking.
+    fn write_bytes(&self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error>;
+    fn create_file(&self, path: &Path) -> Result<(), Error>;
+    fn create_dir(&self, path: &Path) -> Result<(), Error>;
+    fn remove_dir(&self, path: &Path) -> Result<(), Error>;
+    fn remove_file(&self, path: &Path) -> Result<(), Error>;
+    fn flush(&self) -> Result<(), Error>;
 
-    fn ioctl(&mut self, _path: &Path, _request: u64, _arg: u64) -> Result<u64, Error> {
+    fn ioctl(&self, _path: &Path, _request: u64, _arg: u64) -> Result<u64, Error> {
         Err(Error::IoError)
     }
 
-    fn truncate(&mut self, _path: &Path, _size: u64) -> Result<(), Error> {
+    fn truncate(&self, _path: &Path, _size: u64) -> Result<(), Error> {
         Err(Error::IoError)
     }
 
-    fn rename(&mut self, _old_path: &Path, _new_path: &Path) -> Result<(), Error> {
+    fn rename(&self, _old_path: &Path, _new_path: &Path) -> Result<(), Error> {
         Err(Error::IoError)
     }
 }
@@ -475,12 +474,11 @@ pub extern "C" fn fs_main_thread() -> ! {
                             {
                                 match Fatfs::new(partition.clone()) {
                                     Ok(fat_fs) => {
-                                        let fs: Box<dyn FileSystem + Send + Sync> =
-                                            Box::new(fat_fs);
                                         vfs::mount(
                                             mount_point.clone(),
                                             vfs::MountEntry {
-                                                fs: Arc::new(BlockingRwLock::new(fs)),
+                                                fs: Arc::new(fat_fs),
+                                                mount_id: 0,
                                                 device_id,
                                                 partition_index,
                                                 filesystem: fstype.clone(),
@@ -504,11 +502,11 @@ pub extern "C" fn fs_main_thread() -> ! {
                         log!("Mounting memfs");
                         match Memfs::new() {
                             Ok(memfs) => {
-                                let fs: Box<dyn FileSystem + Send + Sync> = Box::new(memfs);
                                 vfs::mount(
                                     mount_point.clone(),
                                     vfs::MountEntry {
-                                        fs: Arc::new(BlockingRwLock::new(fs)),
+                                        fs: Arc::new(memfs),
+                                        mount_id: 0,
                                         device_id: 0,
                                         partition_index: 0,
                                         filesystem: FilesystemType::Memfs,
@@ -526,11 +524,11 @@ pub extern "C" fn fs_main_thread() -> ! {
                         log!("Mounting devfs");
                         match DevFs::new() {
                             Ok(devfs) => {
-                                let fs: Box<dyn FileSystem + Send + Sync> = Box::new(devfs);
                                 vfs::mount(
                                     mount_point.clone(),
                                     vfs::MountEntry {
-                                        fs: Arc::new(BlockingRwLock::new(fs)),
+                                        fs: Arc::new(devfs),
+                                        mount_id: 0,
                                         device_id: 0,
                                         partition_index: 0,
                                         filesystem: FilesystemType::Devfs,
@@ -548,11 +546,11 @@ pub extern "C" fn fs_main_thread() -> ! {
                         log!("Mounting procfs");
                         match Procfs::new() {
                             Ok(procfs) => {
-                                let fs: Box<dyn FileSystem + Send + Sync> = Box::new(procfs);
                                 vfs::mount(
                                     mount_point.clone(),
                                     vfs::MountEntry {
-                                        fs: Arc::new(BlockingRwLock::new(fs)),
+                                        fs: Arc::new(procfs),
+                                        mount_id: 0,
                                         device_id: 0,
                                         partition_index: 0,
                                         filesystem: FilesystemType::Procfs,
@@ -575,12 +573,11 @@ pub extern "C" fn fs_main_thread() -> ! {
                             {
                                 match EfsDriver::new(partition.clone()) {
                                     Ok(efs_fs) => {
-                                        let fs: Box<dyn FileSystem + Send + Sync> =
-                                            Box::new(efs_fs);
                                         vfs::mount(
                                             mount_point.clone(),
                                             vfs::MountEntry {
-                                                fs: Arc::new(BlockingRwLock::new(fs)),
+                                                fs: Arc::new(efs_fs),
+                                                mount_id: 0,
                                                 device_id,
                                                 partition_index,
                                                 filesystem: fstype.clone(),

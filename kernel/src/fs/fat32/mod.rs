@@ -9,6 +9,7 @@ use crate::{
         gpt::Partition,
     },
     log,
+    thread::mutex::BlockingMutex,
 };
 
 use super::path::Path;
@@ -21,10 +22,14 @@ pub mod write;
 #[derive(Debug)]
 pub struct Fatfs {
     pub boot_info: Fat32BootSector,
-    pub fs_info: Option<FsInfo>,
     pub variant: FatVariant,
     pub partition: Partition,
     pub device: BlockDevice,
+    /// Protects all FAT write operations (alloc/free/set) against concurrent access.
+    pub(super) write_lock: BlockingMutex<()>,
+    /// Cached FSInfo sector, protected by a separate mutex so `statfs` can read it
+    /// without holding the write lock.
+    pub(super) fs_info: BlockingMutex<Option<FsInfo>>,
 }
 
 impl Fatfs {
@@ -73,10 +78,11 @@ impl Fatfs {
 
         Ok(Fatfs {
             boot_info,
-            fs_info,
             variant,
             device,
             partition,
+            write_lock: BlockingMutex::new(()),
+            fs_info: BlockingMutex::new(fs_info),
         })
     }
 }
@@ -121,15 +127,11 @@ impl FileSystem for Fatfs {
         }
     }
 
-    fn write_bytes(
-        &mut self,
-        path: &Path,
-        offset: usize,
-        data: &[u8],
-    ) -> Result<u64, super::Error> {
+    fn write_bytes(&self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, super::Error> {
         if data.is_empty() {
             return Ok(0);
         }
+        let _guard = self.write_lock.lock();
 
         // Locate entry + its on-disk position
         let (mut entry, ec, eo) = match self.find_dir_entry(path)? {
@@ -156,9 +158,11 @@ impl FileSystem for Fatfs {
         Ok(written)
     }
 
-    fn create_file(&mut self, path: &Path) -> Result<(), super::Error> {
+    fn create_file(&self, path: &Path) -> Result<(), super::Error> {
         use crate::fs::fat32::structures::DirectoryEntry;
         use bytemuck::Zeroable;
+
+        let _guard = self.write_lock.lock();
 
         // Resolve parent and leaf name
         let (parent_cluster, name) = self.resolve_parent_and_name(path)?;
@@ -192,7 +196,9 @@ impl FileSystem for Fatfs {
         Ok(())
     }
 
-    fn create_dir(&mut self, path: &Path) -> Result<(), super::Error> {
+    fn create_dir(&self, path: &Path) -> Result<(), super::Error> {
+        let _guard = self.write_lock.lock();
+
         // Resolve parent and leaf name
         let (parent_cluster, name) = self.resolve_parent_and_name(path)?;
 
@@ -262,7 +268,8 @@ impl FileSystem for Fatfs {
         Ok(())
     }
 
-    fn remove_file(&mut self, path: &Path) -> Result<(), super::Error> {
+    fn remove_file(&self, path: &Path) -> Result<(), super::Error> {
+        let _guard = self.write_lock.lock();
         let (parent_cluster, _) = self.resolve_parent_and_name(path)?;
 
         // Locate the entry and its position in parent directory
@@ -300,7 +307,9 @@ impl FileSystem for Fatfs {
         Ok(())
     }
 
-    fn remove_dir(&mut self, path: &Path) -> Result<(), super::Error> {
+    fn remove_dir(&self, path: &Path) -> Result<(), super::Error> {
+        let _guard = self.write_lock.lock();
+
         // Reject root
         if path.normalize().is_root() {
             return Err(Error::NotADir);
@@ -391,7 +400,8 @@ impl FileSystem for Fatfs {
         }
     }
 
-    fn flush(&mut self) -> Result<(), Error> {
+    fn flush(&self) -> Result<(), Error> {
+        let _guard = self.write_lock.lock();
         // Only save FSInfo for FAT32
         if matches!(self.variant, FatVariant::Fat32) {
             self.save_fs_info()?;
@@ -401,7 +411,8 @@ impl FileSystem for Fatfs {
         Ok(())
     }
 
-    fn truncate(&mut self, path: &Path, size: u64) -> Result<(), Error> {
+    fn truncate(&self, path: &Path, size: u64) -> Result<(), Error> {
+        let _guard = self.write_lock.lock();
         let (entry, ec, eo) = match self.find_dir_entry(path)? {
             Some((e, c, o)) if !e.is_directory() => (e, c, o),
             Some(_) => return Err(Error::NotAFile),
@@ -431,7 +442,8 @@ impl FileSystem for Fatfs {
         Ok(())
     }
 
-    fn rename(&mut self, old_path: &Path, new_path: &Path) -> Result<(), Error> {
+    fn rename(&self, old_path: &Path, new_path: &Path) -> Result<(), Error> {
+        let _guard = self.write_lock.lock();
         let old_path = old_path.normalize();
         let new_path = new_path.normalize();
 
@@ -476,7 +488,7 @@ impl FileSystem for Fatfs {
         let total_size = total_clusters * cluster_size;
         let total_blocks = total_size / cluster_size;
 
-        let free_clusters = match &self.fs_info {
+        let free_clusters = match &*self.fs_info.lock() {
             Some(fi) if fi.has_free_count() => fi.free_count as u64,
             _ => 0,
         };

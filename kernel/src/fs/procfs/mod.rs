@@ -230,23 +230,23 @@ impl FileSystem for Procfs {
         }
     }
 
-    fn write_bytes(&mut self, _path: &Path, _offset: usize, _data: &[u8]) -> Result<u64, Error> {
+    fn write_bytes(&self, _path: &Path, _offset: usize, _data: &[u8]) -> Result<u64, Error> {
         Err(Error::Unsupported)
     }
 
-    fn create_file(&mut self, _path: &Path) -> Result<(), Error> {
+    fn create_file(&self, _path: &Path) -> Result<(), Error> {
         Err(Error::Unsupported)
     }
 
-    fn create_dir(&mut self, _path: &Path) -> Result<(), Error> {
+    fn create_dir(&self, _path: &Path) -> Result<(), Error> {
         Err(Error::Unsupported)
     }
 
-    fn remove_dir(&mut self, _path: &Path) -> Result<(), Error> {
+    fn remove_dir(&self, _path: &Path) -> Result<(), Error> {
         Err(Error::Unsupported)
     }
 
-    fn remove_file(&mut self, _path: &Path) -> Result<(), Error> {
+    fn remove_file(&self, _path: &Path) -> Result<(), Error> {
         Err(Error::Unsupported)
     }
 
@@ -290,7 +290,7 @@ impl FileSystem for Procfs {
         }
     }
 
-    fn flush(&mut self) -> Result<(), Error> {
+    fn flush(&self) -> Result<(), Error> {
         Ok(())
     }
 }

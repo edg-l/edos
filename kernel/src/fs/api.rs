@@ -72,12 +72,10 @@ pub fn register_partition(partition: Partition) -> Result<(), Error> {
 }
 
 // Path-scoped APIs (resolve filesystem via VFS)
-// Read-only operations use fs.read() (shared lock).
-// Write/mutating operations use fs.write() (exclusive lock).
 
 pub fn list_files(path: &Path) -> Result<Vec<File>, Error> {
-    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    let mut files = fs.read().list_files(&rel_path)?;
+    let lk = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    let mut files = lk.fs.list_files(&lk.relative)?;
 
     // Append synthetic directory entries for child mount points.
     for (name, _mount_path) in vfs::child_mount_points(path) {
@@ -104,40 +102,40 @@ pub fn list_files(path: &Path) -> Result<Vec<File>, Error> {
 }
 
 pub fn read_bytes(path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
-    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.read().read_bytes(&rel_path, offset, count)
+    let lk = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    lk.fs.read_bytes(&lk.relative, offset, count)
 }
 
 #[expect(unused)]
 pub fn write_bytes(path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
-    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.write().write_bytes(&rel_path, offset, data)
+    let lk = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    lk.fs.write_bytes(&lk.relative, offset, data)
 }
 
 /// Variant that takes ownership of the Vec to avoid an extra to_vec() copy.
 pub fn write_bytes_owned(path: &Path, offset: usize, data: Vec<u8>) -> Result<u64, Error> {
-    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.write().write_bytes(&rel_path, offset, &data)
+    let lk = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    lk.fs.write_bytes(&lk.relative, offset, &data)
 }
 
 pub fn create_file(path: &Path) -> Result<(), Error> {
-    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.write().create_file(&rel_path)
+    let lk = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    lk.fs.create_file(&lk.relative)
 }
 
 pub fn create_dir(path: &Path) -> Result<(), Error> {
-    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.write().create_dir(&rel_path)
+    let lk = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    lk.fs.create_dir(&lk.relative)
 }
 
 pub fn remove_file(path: &Path) -> Result<(), Error> {
-    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.write().remove_file(&rel_path)
+    let lk = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    lk.fs.remove_file(&lk.relative)
 }
 
 pub fn remove_dir(path: &Path) -> Result<(), Error> {
-    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.write().remove_dir(&rel_path)
+    let lk = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    lk.fs.remove_dir(&lk.relative)
 }
 
 pub fn file_info(path: &Path) -> Result<File, Error> {
@@ -161,24 +159,24 @@ pub fn file_info(path: &Path) -> Result<File, Error> {
             modified: None,
         });
     }
-    let (fs, rel_path) = vfs::lookup_for_info(path).ok_or(Error::FileNotFound)?;
-    fs.read().file_info(&rel_path)
+    let lk = vfs::lookup_for_info(path).ok_or(Error::FileNotFound)?;
+    lk.fs.file_info(&lk.relative)
 }
 
 #[expect(unused)]
 pub fn flush(path: &Path) -> Result<(), Error> {
-    let (fs, _rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.write().flush()
+    let lk = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    lk.fs.flush()
 }
 
 pub fn ioctl(path: &Path, request: u64, arg: u64) -> Result<u64, Error> {
-    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.write().ioctl(&rel_path, request, arg)
+    let lk = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    lk.fs.ioctl(&lk.relative, request, arg)
 }
 
 pub fn poll(path: &Path) -> Result<Box<dyn Pollable>, Error> {
-    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.read().poll(&rel_path)
+    let lk = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    lk.fs.poll(&lk.relative)
 }
 
 #[expect(unused)]
@@ -188,23 +186,23 @@ pub fn mmap(
     length: usize,
     memory: Arc<Mutex<MemoryManager>>,
 ) -> Result<MmapRegion, Error> {
-    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.read().mmap(&rel_path, offset, length, memory)
+    let lk = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    lk.fs.mmap(&lk.relative, offset, length, memory)
 }
 
 pub fn truncate(path: &Path, size: u64) -> Result<(), Error> {
-    let (fs, rel_path) = vfs::lookup(path).ok_or(Error::FileNotFound)?;
-    fs.write().truncate(&rel_path, size)
+    let lk = vfs::lookup(path).ok_or(Error::FileNotFound)?;
+    lk.fs.truncate(&lk.relative, size)
 }
 
 pub fn rename(old_path: &Path, new_path: &Path) -> Result<(), Error> {
-    let (old_fs, old_rel) = vfs::lookup(old_path).ok_or(Error::FileNotFound)?;
-    let (new_fs, new_rel) = vfs::lookup(new_path).ok_or(Error::FileNotFound)?;
+    let old_lk = vfs::lookup(old_path).ok_or(Error::FileNotFound)?;
+    let new_lk = vfs::lookup(new_path).ok_or(Error::FileNotFound)?;
 
     // Both paths must resolve to the same filesystem instance (same Arc pointer).
-    if !Arc::ptr_eq(&old_fs, &new_fs) {
+    if !Arc::ptr_eq(&old_lk.fs, &new_lk.fs) {
         return Err(Error::Unsupported);
     }
 
-    old_fs.write().rename(&old_rel, &new_rel)
+    old_lk.fs.rename(&old_lk.relative, &new_lk.relative)
 }
