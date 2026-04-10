@@ -6,6 +6,7 @@ pub mod ahci;
 pub mod dma;
 pub mod e1000e;
 pub mod fpu;
+pub mod hda;
 
 /// Spinlock for serializing 8042 PS/2 controller data port access.
 ///
@@ -90,6 +91,7 @@ pub fn init_drivers() {
     ahci::init(); // must be after pci
     usb::init(); // must be after pci
     e1000e::init(); // must be after pci
+    hda::init(); // must be after pci
     vga::init();
     graphics::init();
     tty::init();

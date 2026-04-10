@@ -60,6 +60,8 @@ define run_qemu_uefi
 		$(if $(4),$(4),$(DISPLAY_VIRTIO)) \
 		-device qemu-xhci -device usb-kbd -device usb-mouse \
 		-netdev user,id=net0 -device e1000e,netdev=net0 \
+		-audiodev pipewire,id=snd0 \
+		-device intel-hda -device hda-output,audiodev=snd0 \
 		-smp $(2) \
 		$(3) \
 		$(QEMUFLAGS)

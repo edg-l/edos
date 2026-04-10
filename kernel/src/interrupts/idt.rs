@@ -14,7 +14,7 @@ use crate::{
         InterruptIndex,
         io::{
             ahci_interrupt_handler, device_not_available_handler, e1000e_interrupt_handler,
-            mouse_interrupt_handler, xhci_interrupt_handler,
+            hda_interrupt_handler, mouse_interrupt_handler, xhci_interrupt_handler,
         },
     },
     log,
@@ -62,6 +62,7 @@ pub fn build_idt_for_current_cpu() -> InterruptDescriptorTable {
         idt[InterruptIndex::Ahci.as_u8()].set_handler_fn(ahci_interrupt_handler);
         idt[InterruptIndex::Xhci.as_u8()].set_handler_fn(xhci_interrupt_handler);
         idt[InterruptIndex::E1000e.as_u8()].set_handler_fn(e1000e_interrupt_handler);
+        idt[InterruptIndex::Hda.as_u8()].set_handler_fn(hda_interrupt_handler);
         idt[InterruptIndex::Spurious.as_u8()].set_handler_fn(spurious_interrupt_handler);
         idt[InterruptIndex::Reschedule.as_u8()]
             .set_handler_addr(VirtAddr::new(timer_interrupt_handler as *mut u8 as u64));

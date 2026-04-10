@@ -13,6 +13,10 @@
 - **Shell scripting** - Functions, control flow, heredocs, command substitution, tab completion
 - **PTY subsystem** - Line discipline, canonical/raw modes
 - **Graphics pipeline** - VRAM double buffering, SHM zero-copy compositing, Ayu Dark theme
+- **COW fork** - Per-frame refcounting, PTE BIT_9 marker, COW fault handler.
+  Shell background jobs (&), subshells (()), jobs/wait builtins
+- **Sound** - Intel HDA driver with CORB/RIRB codec commands, BDL DMA ring,
+  /dev/dsp device node, userspace `play` command for WAV files
 
 ## Network Stack Remaining
 
@@ -32,17 +36,12 @@
 
 ## Ideas
 
-### Sound (high fun-per-effort)
-AC97 or Intel HDA driver. Playing a WAV file from the shell is a great demo moment.
-AC97 is dead simple. Intel HDA is more complex but maps to real hardware.
-
 ### Text Editor
 Even a minimal ed/nano clone. Being able to edit files inside the OS is a
 qualitative leap in self-sufficiency.
 
-### Copy-on-Write Fork + Demand Paging
-Already have mmap and SHM. COW fork makes process spawning way cheaper.
-Demand paging means stop pre-faulting all pages.
+### Demand Paging
+Stop pre-faulting all pages. COW fork is done, demand paging is the other half.
 
 ### io_uring-style Async I/O
 Shared-memory submission/completion ring between userspace and kernel.
@@ -66,4 +65,4 @@ Useful for VMs where e1000e emulation is slower than paravirtual.
 
 ## Fun-per-effort ranking
 
-sound > text editor > more tools > COW fork > async I/O > IPv6
+text editor > more tools > demand paging > async I/O > IPv6 > virtio-net

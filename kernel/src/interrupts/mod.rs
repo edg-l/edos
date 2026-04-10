@@ -18,6 +18,7 @@ pub enum InterruptIndex {
     Reschedule = APIC_OFFSET + 7,
     Xhci = APIC_OFFSET + 8,
     E1000e = APIC_OFFSET + 9,
+    Hda = APIC_OFFSET + 10,
     Spurious = 0xFF,
 }
 
