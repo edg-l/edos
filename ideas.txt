@@ -52,6 +52,49 @@
 - **Per-file fsync** - flush() flushes the entire filesystem. No way to
   fsync a single file. flush_inode trait method exists but no fsync syscall
   yet. Needed for crash-safe writes and databases.
+- **std truncate no-op** - `OpenOptions::truncate(true)` is a no-op in the
+  EDOS Rust std (`sys/fs/edos.rs` truncate method is empty). `File::create`
+  / `std::fs::write` don't truncate existing files, leaving stale bytes when
+  writing shorter content. Workaround: call `file.set_len(len)` after write.
+  Fix: wire truncate flag to `sys_open` with O_TRUNC, or implement
+  truncate-on-open in the kernel.
+
+## Boot Race / Heap Expansion Bug
+
+Concurrent heap expansion across CPUs during parallel boot loading causes
+intermittent memory corruption (page fault reading from ~0x634a2, corrupted
+per-CPU data). Triggered by the vmalloc fix (which removed the BTreeMap
+overhead that inadvertently pre-expanded the heap during DMA pool init).
+
+Current workaround: 512KB heap warmup before spawning boot-load threads.
+
+How Linux handles this:
+1. Per-CPU slab caches (SLUB) -- most allocations hit per-CPU freelists,
+   no global lock contention, no concurrent expansion.
+2. Lazy vmalloc fault fixup -- when a CPU faults on a vmalloc address,
+   the page fault handler (vmalloc_fault) checks the reference kernel
+   page table (init_mm). If mapped there, copies the PTE and retries.
+   No TLB shootdown IPI needed for new mappings.
+3. TLB shootdown IPIs only for invalidating existing mappings (munmap etc.),
+   not for new mappings.
+
+Proposed fixes (pick one or combine):
+- Lazy vmalloc fault handler: add a check in the page fault handler for
+  addresses in the vmalloc/heap range. If the address IS mapped in the
+  kernel page table, return without panic (retry will succeed after TLB
+  miss forces a page table walk). Simplest fix, matches Linux approach.
+- Per-CPU heap freelists: maintain small per-CPU allocation caches that
+  don't need the global heap lock. Only fall through to the global
+  allocator when the per-CPU cache is empty.
+- Heap expansion lock: add a dedicated mutex around the entire
+  expand-and-retry path so only one CPU expands at a time.
+
+The heap allocator expansion path (allocator.rs) releases the heap lock,
+calls vmalloc + map_memory, then re-acquires. Two CPUs expanding
+simultaneously both map new pages (serialized by IrqSpinlock), but
+something in the concurrent access pattern corrupts memory. Need to
+investigate whether it's a stale TLB entry, a page table walk race, or
+a buddy allocator metadata write race.
 
 ## Ideas
 
