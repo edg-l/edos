@@ -1720,6 +1720,33 @@ impl FileSystem for EfsDriver {
             block_groups: sb.block_group_count,
         })
     }
+
+    fn read_bytes_ino(&self, ino: u64, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
+        let inode = self.read_inode(ino)?;
+        if inode.mode & S_IFMT != S_IFREG {
+            return Err(Error::NotAFile);
+        }
+        self.read_file_data(&inode, offset, count)
+    }
+
+    fn write_bytes_ino(&self, ino: u64, offset: usize, data: &[u8]) -> Result<u64, Error> {
+        let inode = self.read_inode(ino)?;
+        if inode.mode & S_IFMT != S_IFREG {
+            return Err(Error::NotAFile);
+        }
+        self.write_file_data(ino, offset, data)
+    }
+
+    fn file_size_ino(&self, ino: u64) -> Result<u64, Error> {
+        let inode = self.read_inode(ino)?;
+        Ok(inode.size)
+    }
+
+    fn flush_inode(&self, _ino: u64) -> Result<(), Error> {
+        // EFS writes inodes and data blocks synchronously.
+        // No write-back cache to flush.
+        Ok(())
+    }
 }
 
 impl EfsDriver {

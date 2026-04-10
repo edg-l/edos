@@ -391,6 +391,48 @@ impl FileSystem for Memfs {
         }
     }
 
+    fn read_bytes_ino(&self, ino: u64, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
+        let id = u32::try_from(ino).map_err(|_| Error::Corrupted)?;
+        let inner = self.inner.read();
+        let node = inner.get_node(id)?;
+        if node.file.kind != FileKind::File {
+            return Err(Error::NotAFile);
+        }
+        if offset >= node.content.len() {
+            return Ok(Vec::new());
+        }
+        let upper_bound = node.content.len().min(offset + count);
+        Ok(node.content[offset..upper_bound].to_vec())
+    }
+
+    fn write_bytes_ino(&self, ino: u64, offset: usize, data: &[u8]) -> Result<u64, Error> {
+        let id = u32::try_from(ino).map_err(|_| Error::Corrupted)?;
+        let mut inner = self.inner.write();
+        let node = inner.get_node_mut(id)?;
+        if node.file.kind != FileKind::File {
+            return Err(Error::NotAFile);
+        }
+        if offset > node.content.len() {
+            return Err(Error::IoError);
+        }
+        if offset == node.content.len() {
+            node.content.extend(data);
+        } else {
+            let tail = &mut node.content[offset..];
+            let overwrite_len = tail.len().min(data.len());
+            tail[..overwrite_len].copy_from_slice(&data[..overwrite_len]);
+            node.content.extend_from_slice(&data[overwrite_len..]);
+        }
+        Ok(data.len() as u64)
+    }
+
+    fn file_size_ino(&self, ino: u64) -> Result<u64, Error> {
+        let id = u32::try_from(ino).map_err(|_| Error::Corrupted)?;
+        let inner = self.inner.read();
+        let node = inner.get_node(id)?;
+        Ok(node.content.len() as u64)
+    }
+
     fn rename(&self, old_path: &Path, new_path: &Path) -> Result<(), Error> {
         let old_path = old_path.normalize();
         let new_path = new_path.normalize();

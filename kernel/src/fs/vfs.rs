@@ -157,6 +157,12 @@ pub fn resolve_with_inode(path: &Path, inode: Option<Arc<VfsInode>>) -> Option<V
 
 pub fn read(op: &VfsOp, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
     let _guard = op.inode.as_ref().map(|i| i.lock.read());
+    if let Some(ino) = op.inode.as_ref().map(|i| i.ino).filter(|&i| i != 0) {
+        match op.fs.read_bytes_ino(ino, offset, count) {
+            Err(Error::Unsupported) => {}
+            result => return result,
+        }
+    }
     op.fs.read_bytes(&op.relative, offset, count)
 }
 
@@ -198,14 +204,33 @@ pub fn list_files(op: &VfsOp, full_path: &Path) -> Result<Vec<File>, Error> {
 /// inside the write lock, preventing reentrancy deadlocks.
 pub fn write(op: &VfsOp, offset: usize, data: &[u8], append: bool) -> Result<u64, Error> {
     let _guard = op.inode.as_ref().map(|i| i.lock.write());
+    let ino = op.inode.as_ref().map(|i| i.ino).filter(|&i| i != 0);
     let actual_offset = if append {
-        op.fs
-            .file_info(&op.relative)
-            .map(|f| f.size as usize)
-            .unwrap_or(offset)
+        if let Some(ino) = ino {
+            match op.fs.file_size_ino(ino) {
+                Ok(size) => size as usize,
+                Err(Error::Unsupported) => op
+                    .fs
+                    .file_info(&op.relative)
+                    .map(|f| f.size as usize)
+                    .unwrap_or(offset),
+                Err(e) => return Err(e),
+            }
+        } else {
+            op.fs
+                .file_info(&op.relative)
+                .map(|f| f.size as usize)
+                .unwrap_or(offset)
+        }
     } else {
         offset
     };
+    if let Some(ino) = ino {
+        match op.fs.write_bytes_ino(ino, actual_offset, data) {
+            Err(Error::Unsupported) => {}
+            result => return result,
+        }
+    }
     op.fs.write_bytes(&op.relative, actual_offset, data)
 }
 
@@ -311,6 +336,17 @@ pub fn rename(old_op: &VfsOp, new_op: &VfsOp) -> Result<(), Error> {
 // --- Passthrough operations (no locking needed) ---
 
 pub fn flush(op: &VfsOp) -> Result<(), Error> {
+    op.fs.flush()
+}
+
+/// Per-file flush. Tries inode-based flush_inode first, falls back to full flush.
+pub fn flush_file(op: &VfsOp) -> Result<(), Error> {
+    if let Some(ino) = op.inode.as_ref().map(|i| i.ino).filter(|&i| i != 0) {
+        match op.fs.flush_inode(ino) {
+            Err(Error::Unsupported) => {}
+            result => return result,
+        }
+    }
     op.fs.flush()
 }
 

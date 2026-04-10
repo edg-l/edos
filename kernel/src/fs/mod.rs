@@ -229,6 +229,26 @@ pub trait FileSystem {
     fn rename(&self, _old_path: &Path, _new_path: &Path) -> Result<(), Error> {
         Err(Error::IoError)
     }
+
+    // --- Inode-based fast-path methods ---
+    // Drivers that support direct inode access override these to skip path walks.
+    // Default returns Unsupported; the VFS falls back to path-based methods.
+
+    fn read_bytes_ino(&self, _ino: u64, _offset: usize, _count: usize) -> Result<Vec<u8>, Error> {
+        Err(Error::Unsupported)
+    }
+
+    fn write_bytes_ino(&self, _ino: u64, _offset: usize, _data: &[u8]) -> Result<u64, Error> {
+        Err(Error::Unsupported)
+    }
+
+    fn file_size_ino(&self, _ino: u64) -> Result<u64, Error> {
+        Err(Error::Unsupported)
+    }
+
+    fn flush_inode(&self, _ino: u64) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
 }
 
 /// Filesystem statistics returned by the `statfs` trait method.
