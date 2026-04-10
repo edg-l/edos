@@ -330,13 +330,6 @@ pub fn mount_system_fs() -> ! {
 
     let default_env: [&[u8]; 3] = [b"PATH=/bin", b"HOME=/", b"PWD=/"];
 
-    // Pre-expand the kernel heap so concurrent boot-load threads don't trigger
-    // heap expansion racing with each other across CPUs.
-    {
-        let warmup = alloc::vec![0u8; 512 * 1024]; // 512 KiB
-        drop(warmup);
-    }
-
     // Parallel boot: load 3 binaries concurrently via per-inode locking + NCQ.
     log!("Loading boot binaries (parallel)");
 

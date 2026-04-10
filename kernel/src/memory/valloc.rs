@@ -15,7 +15,7 @@ use crate::{memory::DYNAMIC_MEM_START, thread::irqlock::IrqSpinlock};
 const MAX_REGIONS: usize = 4096;
 
 /// End of the vmalloc address range (kernel half, well below the direct map).
-const VMALLOC_END: u64 = 0xFFFF_E000_0000_0000;
+pub const VMALLOC_END: u64 = 0xFFFF_E000_0000_0000;
 
 #[derive(Clone, Copy)]
 struct FreeRegion {

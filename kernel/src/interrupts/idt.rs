@@ -4,10 +4,12 @@ use x86_64::{
     PrivilegeLevel, VirtAddr,
     registers::control::Cr2,
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
+    structures::paging::PageTableFlags,
 };
 
 use crate::{
     apic::get_lapic,
+    boot::boot_info,
     drivers::keyboard::keyboard_interrupt_handler,
     gdt,
     interrupts::{
@@ -192,6 +194,14 @@ extern "x86-interrupt" fn page_fault_handler(
             return;
         }
 
+        // Lazy vmalloc fault fixup: if the faulting address is in the kernel
+        // dynamic memory range and the kernel page table has a valid mapping,
+        // this is a stale paging-structure cache entry on another CPU. Flush
+        // the TLB entry and retry.
+        if vmalloc_fault(address) {
+            return;
+        }
+
         println!("EXCEPTION: PAGE FAULT in Ring 0");
         log!("Accessed Address: {address:?}");
         log!("Error Code: {error_code:?}");
@@ -223,6 +233,91 @@ extern "x86-interrupt" fn page_fault_handler(
         log!("Fault Type: {error_desc}");
         sched().thread_exit(11);
     }
+}
+
+/// Handle page faults in the kernel dynamic memory range (heap expansion,
+/// vmalloc). When one CPU maps new pages in the kernel page table, other CPUs
+/// may still have stale paging-structure cache entries ("not present" for a PDE
+/// or PDPTE that is now present). Instead of sending TLB shootdown IPIs for
+/// every new mapping, we lazily fix it up here: walk the kernel page table to
+/// verify the mapping exists, flush the local TLB entry, and let the faulting
+/// instruction retry.
+///
+/// This is lock-free: we read the kernel PML4 physical frame from boot info
+/// (immutable after boot) and walk the page table via the physical memory
+/// offset. Page table entries are 8-byte aligned and written atomically on
+/// x86-64, so reading them without locks is safe.
+fn vmalloc_fault(address: VirtAddr) -> bool {
+    use crate::memory::{KERNEL_HEAP, valloc::VMALLOC_END};
+
+    let addr = address.as_u64();
+
+    // Only handle faults in the kernel dynamic memory range.
+    if addr < KERNEL_HEAP.as_u64() || addr >= VMALLOC_END {
+        return false;
+    }
+
+    let bi = boot_info();
+    let phys_offset = bi.physical_memory_offset.as_u64();
+    let kernel_pml4_phys = bi.cr3.0.start_address().as_u64();
+
+    // Walk the kernel page table (read-only, no locks needed).
+    // PML4
+    let p4_idx = (addr >> 39) & 0x1FF;
+    let p4_entry = unsafe { read_pte(kernel_pml4_phys + p4_idx * 8, phys_offset) };
+    if p4_entry & PageTableFlags::PRESENT.bits() == 0 {
+        return false;
+    }
+
+    // PDPT
+    let p3_phys = p4_entry & 0x000F_FFFF_FFFF_F000;
+    let p3_idx = (addr >> 30) & 0x1FF;
+    let p3_entry = unsafe { read_pte(p3_phys + p3_idx * 8, phys_offset) };
+    if p3_entry & PageTableFlags::PRESENT.bits() == 0 {
+        return false;
+    }
+    if p3_entry & PageTableFlags::HUGE_PAGE.bits() != 0 {
+        // 1 GiB huge page, mapped.
+        flush_and_return(address);
+        return true;
+    }
+
+    // PD
+    let p2_phys = p3_entry & 0x000F_FFFF_FFFF_F000;
+    let p2_idx = (addr >> 21) & 0x1FF;
+    let p2_entry = unsafe { read_pte(p2_phys + p2_idx * 8, phys_offset) };
+    if p2_entry & PageTableFlags::PRESENT.bits() == 0 {
+        return false;
+    }
+    if p2_entry & PageTableFlags::HUGE_PAGE.bits() != 0 {
+        // 2 MiB huge page, mapped.
+        flush_and_return(address);
+        return true;
+    }
+
+    // PT
+    let p1_phys = p2_entry & 0x000F_FFFF_FFFF_F000;
+    let p1_idx = (addr >> 12) & 0x1FF;
+    let p1_entry = unsafe { read_pte(p1_phys + p1_idx * 8, phys_offset) };
+    if p1_entry & PageTableFlags::PRESENT.bits() == 0 {
+        return false;
+    }
+
+    // The mapping exists in the kernel page table but this CPU faulted due
+    // to a stale paging-structure cache. Flush and retry.
+    flush_and_return(address);
+    true
+}
+
+unsafe fn read_pte(phys_addr: u64, phys_offset: u64) -> u64 {
+    let virt = (phys_offset + phys_addr) as *const u64;
+    unsafe { core::ptr::read_volatile(virt) }
+}
+
+fn flush_and_return(address: VirtAddr) {
+    use x86_64::instructions::tlb;
+    use x86_64::structures::paging::{Page, Size4KiB};
+    tlb::flush(Page::<Size4KiB>::containing_address(address).start_address());
 }
 
 fn decode_page_fault_error(error_code: PageFaultErrorCode) -> &'static str {

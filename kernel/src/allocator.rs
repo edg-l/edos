@@ -1,6 +1,10 @@
 //! Kernel allocator
 
-use core::{alloc::GlobalAlloc, ptr::NonNull};
+use core::{
+    alloc::GlobalAlloc,
+    ptr::NonNull,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use buddy_system_allocator::Heap;
 use x86_64::{VirtAddr, align_up, structures::paging::PageTableFlags};
@@ -22,12 +26,39 @@ pub struct Allocator {
 
 const MIN_EXPANSION: u64 = 1 << 20; // 1mb
 
+/// Serialize heap expansion so only one CPU expands at a time. Other CPUs
+/// spin-wait and retry the allocation (which should succeed after the
+/// expanding CPU adds memory). This avoids races in concurrent vmalloc +
+/// page table manipulation + buddy allocator metadata updates.
+static EXPANDING: AtomicBool = AtomicBool::new(false);
+
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         {
             let mut heap = self.inner.lock();
             if let Ok(block) = heap.alloc(layout) {
                 return block.as_ptr();
+            }
+        }
+
+        // Serialize expansion: if another CPU is already expanding, spin
+        // and retry the allocation (the other CPU's expansion may have
+        // added enough memory for us).
+        loop {
+            match EXPANDING.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
+                Ok(_) => break, // we own the expansion
+                Err(_) => {
+                    // Another CPU is expanding. Spin until it finishes.
+                    while EXPANDING.load(Ordering::Relaxed) {
+                        core::hint::spin_loop();
+                    }
+                    // Retry allocation - the other CPU may have added enough.
+                    let mut heap = self.inner.lock();
+                    if let Ok(block) = heap.alloc(layout) {
+                        return block.as_ptr();
+                    }
+                    // Still not enough, try to become the expander ourselves.
+                }
             }
         }
 
@@ -64,13 +95,18 @@ unsafe impl GlobalAlloc for Allocator {
         }
 
         // add to heap and retry
-        {
+        let result = {
             let mut heap = self.inner.lock();
             unsafe { heap.add_to_heap(base as usize, end as usize) };
             heap.alloc(layout)
                 .map(|b| b.as_ptr())
                 .unwrap_or(core::ptr::null_mut())
-        }
+        };
+
+        // Release expansion lock so other CPUs can proceed.
+        EXPANDING.store(false, Ordering::Release);
+
+        result
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
