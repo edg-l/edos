@@ -77,21 +77,23 @@ pub struct CommandHeader {
     pub reserved: [u32; 4],
 }
 
+pub const MAX_PRDT_ENTRIES: usize = 248;
+
 // Command Table - contains the actual SATA command
 // AHCI spec: PRDT entries start at offset 0x80 from command table base.
-// We embed one entry since all current commands use a single PRDT entry.
+// With 248 PRDT entries the struct is exactly 4096 bytes (one page).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct CommandTable {
     pub cfis: [u8; 64], // Command FIS
     pub acmd: [u8; 16], // ATAPI Command
     pub reserved: [u8; 48],
-    pub prdt: [PrdtEntry; 1], // PRDT entries (at offset 0x80)
+    pub prdt: [PrdtEntry; MAX_PRDT_ENTRIES], // PRDT entries (at offset 0x80)
 }
 
 const _: () = {
     assert!(core::mem::offset_of!(CommandTable, prdt) == 0x80);
-    assert!(core::mem::size_of::<CommandTable>() == 0x80 + core::mem::size_of::<PrdtEntry>());
+    assert!(core::mem::size_of::<CommandTable>() == 4096);
 };
 
 // Physical Region Descriptor Table Entry - describes DMA scatter-gather

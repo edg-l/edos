@@ -3,7 +3,7 @@ use core::{
     time::Duration,
 };
 
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 
 use x86_64::PhysAddr;
 
@@ -14,8 +14,9 @@ use crate::{
             fis::FisRegH2D,
             structures::{
                 CMD_HEADER_ATAPI, CMD_HEADER_WRITE, CommandHeader, CommandTable,
-                DeviceIdentifyInfo, HbaFis, HbaPort, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE,
-                PORT_CMD_ST, PORT_IS_TFES, PrdtEntry, ScsiInquiry, ScsiRead10, ScsiReadCapacity10,
+                DeviceIdentifyInfo, HbaFis, HbaPort, MAX_PRDT_ENTRIES, PORT_CMD_CR, PORT_CMD_FR,
+                PORT_CMD_FRE, PORT_CMD_ST, PORT_IS_TFES, PrdtEntry, ScsiInquiry, ScsiRead10,
+                ScsiReadCapacity10,
             },
         },
         dma::{DmaBuffer, DmaRegion, dma},
@@ -25,6 +26,7 @@ use crate::{
 };
 
 const AHCI_CMD_SLOTS: usize = 32;
+const DMA_POOL_PAGES: usize = MAX_PRDT_ENTRIES;
 
 #[expect(unused)]
 #[derive(Debug)]
@@ -41,8 +43,10 @@ pub struct AhciPort {
     // Command slot tracking
     pub free_slots: u32, // Bitmap of free command slots
 
-    // Reusable DMA buffer for ATA read/write. Allocated on first use, grown as needed.
-    io_dma: Option<DmaBuffer>,
+    // Pre-allocated pool of 4KB DMA pages for scatter-gather I/O.
+    io_pool: Vec<DmaBuffer>,
+    // Cached physical addresses for each pool page (avoids page table walks per I/O).
+    io_pool_phys: Vec<PhysAddr>,
 }
 
 unsafe impl Send for AhciPort {}
@@ -107,6 +111,14 @@ impl AhciPort {
 
         log!("Port {} initialized successfully", port_idx);
 
+        let mut io_pool = Vec::with_capacity(DMA_POOL_PAGES);
+        let mut io_pool_phys = Vec::with_capacity(DMA_POOL_PAGES);
+        for _ in 0..DMA_POOL_PAGES {
+            let buf = dma().allocate_sized(4096)?;
+            io_pool_phys.push(buf.phys_addr());
+            io_pool.push(buf);
+        }
+
         Ok(Self {
             port_idx,
             port_regs,
@@ -115,7 +127,8 @@ impl AhciPort {
             fis_area,
             command_tables: [const { None }; AHCI_CMD_SLOTS],
             free_slots: 0xFFFFFFFF, // All slots initially free
-            io_dma: None,
+            io_pool,
+            io_pool_phys,
         })
     }
 
@@ -175,16 +188,6 @@ impl AhciPort {
 
     pub fn set_device_type(&mut self, device_type: DeviceType) {
         self.device_type = device_type;
-    }
-
-    /// Ensure the reusable I/O DMA buffer is at least `min_size` bytes.
-    /// Returns the physical address and a pointer to the buffer.
-    fn ensure_io_dma(&mut self, min_size: usize) -> Result<(PhysAddr, *mut u8), AhciError> {
-        if self.io_dma.is_none() || self.io_dma.as_ref().unwrap().size < min_size {
-            self.io_dma = Some(dma().allocate_sized(min_size)?);
-        }
-        let buf = self.io_dma.as_ref().unwrap();
-        Ok((buf.phys_addr(), buf.as_ptr()))
     }
 
     /// Execute ATAPI command (SCSI packet command)
@@ -442,7 +445,7 @@ impl AhciPort {
         }
     }
 
-    /// Execute ATA read command
+    /// Execute ATA read command using scatter-gather PRDT.
     fn execute_ata_read(
         &mut self,
         lba: u64,
@@ -454,18 +457,39 @@ impl AhciPort {
             return Err(AhciError::IoError);
         }
 
-        let (phys, dma_ptr) = self.ensure_io_dma(expected_size)?;
+        let num_pages = expected_size.div_ceil(4096);
+        if num_pages > DMA_POOL_PAGES {
+            return Err(AhciError::IoError);
+        }
 
-        self.execute_command(
+        let slot = self
+            .allocate_command_slot()
+            .ok_or(AhciError::PortNotReady)?;
+
+        self.setup_scatter_command(
+            slot,
             &FisRegH2D::new_read_dma_ext(lba, sectors),
-            phys,
             expected_size,
-            0,
-            Duration::from_secs(5),
         )?;
 
-        unsafe {
-            ptr::copy_nonoverlapping(dma_ptr, buffer.as_mut_ptr(), expected_size);
+        let prdtl = num_pages as u16;
+        self.issue_command(slot, 0, prdtl)?;
+        let result = self.wait_for_command_completion(slot, Duration::from_secs(5));
+        self.free_command_slot(slot);
+        result?;
+
+        // Copy from pool pages to caller's buffer.
+        let mut offset = 0;
+        for i in 0..num_pages {
+            let copy_len = (expected_size - offset).min(4096);
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    self.io_pool[i].as_ptr(),
+                    buffer.as_mut_ptr().add(offset),
+                    copy_len,
+                );
+            }
+            offset += copy_len;
         }
 
         Ok(())
@@ -489,7 +513,7 @@ impl AhciPort {
         }
     }
 
-    /// Execute ATA write command
+    /// Execute ATA write command using scatter-gather PRDT.
     fn execute_ata_write(
         &mut self,
         lba: u64,
@@ -501,21 +525,40 @@ impl AhciPort {
             return Err(AhciError::IoError);
         }
 
-        let (phys, dma_ptr) = self.ensure_io_dma(expected_size)?;
-
-        unsafe {
-            ptr::copy_nonoverlapping(buffer.as_ptr(), dma_ptr, expected_size);
+        let num_pages = expected_size.div_ceil(4096);
+        if num_pages > DMA_POOL_PAGES {
+            return Err(AhciError::IoError);
         }
 
-        self.execute_command(
+        // Copy from caller's buffer to pool pages.
+        let mut offset = 0;
+        for i in 0..num_pages {
+            let copy_len = (expected_size - offset).min(4096);
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    buffer.as_ptr().add(offset),
+                    self.io_pool[i].as_ptr(),
+                    copy_len,
+                );
+            }
+            offset += copy_len;
+        }
+
+        let slot = self
+            .allocate_command_slot()
+            .ok_or(AhciError::PortNotReady)?;
+
+        self.setup_scatter_command(
+            slot,
             &FisRegH2D::new_write_dma_ext(lba, sectors),
-            phys,
             expected_size,
-            CMD_HEADER_WRITE,
-            Duration::from_secs(5),
         )?;
 
-        Ok(())
+        let prdtl = num_pages as u16;
+        self.issue_command(slot, CMD_HEADER_WRITE, prdtl)?;
+        let result = self.wait_for_command_completion(slot, Duration::from_secs(5));
+        self.free_command_slot(slot);
+        result
     }
 
     pub fn flush_cache(&mut self) -> Result<(), AhciError> {
@@ -727,6 +770,52 @@ impl AhciPort {
                 };
 
                 ptr::write_volatile(&raw mut (*table).prdt[0], prdt_entry);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Set up a command table with scatter-gather PRDT entries pointing to pool pages.
+    fn setup_scatter_command(
+        &mut self,
+        slot: usize,
+        fis: &FisRegH2D,
+        total_bytes: usize,
+    ) -> Result<(), AhciError> {
+        if slot >= AHCI_CMD_SLOTS {
+            return Err(AhciError::InvalidSlot);
+        }
+
+        let num_entries = total_bytes.div_ceil(4096);
+        assert!(num_entries <= DMA_POOL_PAGES);
+
+        // Allocate command table if needed.
+        if self.command_tables[slot].is_none() {
+            self.command_tables[slot] = Some(dma().allocate()?);
+        }
+
+        unsafe {
+            let table = self.command_tables[slot].as_ref().unwrap().get();
+            table.write(core::mem::zeroed());
+            let table = &mut *table;
+
+            // Write FIS.
+            let fis_bytes = bytemuck::bytes_of(fis);
+            table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
+
+            // Build PRDT entries - one per pool page.
+            let mut remaining = total_bytes;
+            for i in 0..num_entries {
+                let phys = self.io_pool_phys[i];
+                let chunk = remaining.min(4096);
+                table.prdt[i] = PrdtEntry {
+                    dba: phys.as_u64() as u32,
+                    dbau: (phys.as_u64() >> 32) as u32,
+                    reserved: 0,
+                    dbc: (chunk as u32) - 1, // byte count minus 1
+                };
+                remaining -= chunk;
             }
         }
 

@@ -57,6 +57,12 @@ but needed for a complete real-hardware network stack.
 Second NIC backend. Straightforward now that the stack and e1000e exist.
 Useful for VMs where e1000e emulation is slower than paravirtual.
 
+### AHCI NCQ (Native Command Queuing)
+AHCI supports 32 concurrent commands per port. Currently serialized with one
+slot + port mutex. NCQ would allow multiple in-flight reads/writes with drive
+reordering for optimal seek. Needs per-slot scatter-gather page sets and
+completion tracking. Scatter-gather PRDT is already done.
+
 ### More userspace tools
 - wget/curl (HTTP client exists, just needs a CLI wrapper)
 - env/printenv (environment variable support exists)

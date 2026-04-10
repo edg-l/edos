@@ -3,10 +3,7 @@ pub mod regs;
 
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 use spin::Mutex;
-use x86_64::{
-    VirtAddr,
-    structures::paging::PageTableFlags,
-};
+use x86_64::{VirtAddr, structures::paging::PageTableFlags};
 
 use crate::{
     drivers::{

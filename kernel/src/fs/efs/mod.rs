@@ -309,8 +309,8 @@ impl EfsDriver {
             let blocks_left_in_extent = extent.length as u32 - block_within_extent;
 
             // How many contiguous blocks can we read in one shot?
-            // Cap at 128 blocks (512KB) per AHCI command to stay within DMA limits.
-            const MAX_BULK_BLOCKS: u32 = 128;
+            // Cap at 248 blocks (one pool page per PRDT entry) per AHCI command.
+            const MAX_BULK_BLOCKS: u32 = 248;
             let blocks_needed =
                 ((remaining + offset_in_block + block_size - 1) / block_size) as u32;
             let bulk_blocks = blocks_needed
