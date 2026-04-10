@@ -30,6 +30,7 @@ pub mod irqlock;
 pub mod mutex;
 pub mod poll;
 pub mod runqueue;
+pub mod rwlock;
 pub mod scheduler;
 pub mod signal;
 pub mod thread;
