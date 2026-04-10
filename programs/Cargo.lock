@@ -57,6 +57,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "edos-vi"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "edos-wm"
 version = "0.1.0"
 dependencies = [
