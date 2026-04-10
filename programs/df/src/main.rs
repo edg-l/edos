@@ -1,7 +1,7 @@
 //! df - display filesystem disk space usage
 //!
 //! Usage: df [path]
-//!   path defaults to "/"
+//!   With no args, shows all mounted filesystems.
 
 use std::arch::asm;
 use std::env;
@@ -61,18 +61,17 @@ struct RawStatFs {
 
 struct MountInfo {
     path: String,
-    fs_code: u32,
 }
 
 fn format_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
-        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+        format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     } else if bytes >= 1024 * 1024 {
-        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
     } else if bytes >= 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
+        format!("{:.1}K", bytes as f64 / 1024.0)
     } else {
-        format!("{} B", bytes)
+        format!("{}B", bytes)
     }
 }
 
@@ -101,58 +100,6 @@ fn str_from_padded(buf: &[u8]) -> &str {
     std::str::from_utf8(&buf[..len]).unwrap_or("???")
 }
 
-fn print_statfs(path: &str, stat: &RawStatFs) {
-    let fs_type = str_from_padded(&stat.fs_type);
-    let vol_name = str_from_padded(&stat.volume_name);
-
-    let total_size = stat.total_blocks * stat.block_size;
-    let free_size = stat.free_blocks * stat.block_size;
-    let used_size = total_size.saturating_sub(free_size);
-    let used_pct = if total_size > 0 {
-        (used_size as f64 / total_size as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    println!("Filesystem: {}", path);
-    println!("Type:       {}", fs_type);
-    if !vol_name.is_empty() {
-        println!("Label:      {}", vol_name);
-    }
-    println!("Block size: {} bytes", stat.block_size);
-
-    // EFS-specific info
-    if fs_type == "efs" {
-        println!("Version:    {}", stat.version);
-        if stat.block_groups > 0 {
-            println!("Groups:     {}", stat.block_groups);
-        }
-    }
-
-    println!();
-    println!(
-        "Blocks:     {}/{} ({} used, {:.1}%)",
-        stat.total_blocks - stat.free_blocks,
-        stat.total_blocks,
-        format_size(used_size),
-        used_pct
-    );
-    println!(
-        "Space:      {} total, {} free",
-        format_size(total_size),
-        format_size(free_size)
-    );
-    if stat.total_inodes > 0 {
-        let used_inodes = stat.total_inodes - stat.free_inodes;
-        let inode_pct = (used_inodes as f64 / stat.total_inodes as f64) * 100.0;
-        println!(
-            "Inodes:     {}/{} ({:.1}% used)",
-            used_inodes, stat.total_inodes, inode_pct
-        );
-    }
-}
-
-/// Get mount points from SYS_LIST_MOUNTS.
 fn get_mounts() -> Vec<MountInfo> {
     let mut buf = vec![0u8; 4096];
     let ret = unsafe { syscall2(SYS_LIST_MOUNTS, buf.as_mut_ptr() as u64, buf.len() as u64) };
@@ -160,86 +107,154 @@ fn get_mounts() -> Vec<MountInfo> {
         return Vec::new();
     }
 
-    let count = ret as usize;
+    // Return value is total bytes written, not entry count.
+    let total_bytes = ret as usize;
     let mut mounts = Vec::new();
     let mut offset = 0;
 
-    for _ in 0..count {
-        if offset + 24 > buf.len() {
-            break;
-        }
+    while offset + 24 <= total_bytes {
         let path_len = u32::from_le_bytes([
             buf[offset],
             buf[offset + 1],
             buf[offset + 2],
             buf[offset + 3],
         ]) as usize;
-        let fs_code = u32::from_le_bytes([
-            buf[offset + 4],
-            buf[offset + 5],
-            buf[offset + 6],
-            buf[offset + 7],
-        ]);
-        // skip rest of header: device_id(u64) + partition_index(u64)
+        // skip fs_code(u32) + device_id(u64) + partition_index(u64)
         offset += 24;
-        if offset + path_len > buf.len() {
+        if offset + path_len > total_bytes {
             break;
         }
         let path = std::str::from_utf8(&buf[offset..offset + path_len])
             .unwrap_or("")
             .to_string();
-        let path = if path.is_empty() {
-            "/".to_string()
-        } else {
-            path
-        };
-        mounts.push(MountInfo { path, fs_code });
+        let path = if path.is_empty() { "/".to_string() } else { path };
+        mounts.push(MountInfo { path });
         offset += path_len;
     }
     mounts
 }
 
-/// Returns true if the filesystem code represents a real (disk-backed) filesystem.
-fn is_disk_filesystem(fs_code: u32) -> bool {
-    matches!(
-        fs_code,
-        1 | 2 | 3 | 9 // fat12, fat16, fat32, efs
-    )
+fn print_table(mounts: &[MountInfo]) {
+    // Header
+    println!(
+        "{:<12} {:<8} {:>8} {:>8} {:>8} {:>5} {}",
+        "Filesystem", "Type", "Size", "Used", "Avail", "Use%", "Mounted on"
+    );
+
+    for mount in mounts {
+        let Some(stat) = statfs(&mount.path) else {
+            continue;
+        };
+        let fs_type = str_from_padded(&stat.fs_type);
+        let total = stat.total_blocks * stat.block_size;
+        let free = stat.free_blocks * stat.block_size;
+        let used = total.saturating_sub(free);
+        let pct = if total > 0 {
+            format!("{:.0}%", (used as f64 / total as f64) * 100.0)
+        } else {
+            "-".to_string()
+        };
+
+        let vol = str_from_padded(&stat.volume_name);
+        let name = if vol.is_empty() { fs_type } else { vol };
+
+        let size_str = if total > 0 {
+            format_size(total)
+        } else {
+            "-".to_string()
+        };
+        let used_str = if total > 0 {
+            format_size(used)
+        } else {
+            "-".to_string()
+        };
+        let avail_str = if total > 0 {
+            format_size(free)
+        } else {
+            "-".to_string()
+        };
+
+        println!(
+            "{:<12} {:<8} {:>8} {:>8} {:>8} {:>5} {}",
+            name, fs_type, size_str, used_str, avail_str, pct, mount.path
+        );
+    }
+}
+
+fn print_verbose(path: &str, stat: &RawStatFs) {
+    let fs_type = str_from_padded(&stat.fs_type);
+    let vol_name = str_from_padded(&stat.volume_name);
+
+    println!("Filesystem: {}", path);
+    println!("Type:       {}", fs_type);
+    if !vol_name.is_empty() {
+        println!("Label:      {}", vol_name);
+    }
+    if stat.block_size > 0 {
+        println!("Block size: {} bytes", stat.block_size);
+    }
+
+    if fs_type == "efs" {
+        println!("Version:    {}", stat.version);
+        if stat.block_groups > 0 {
+            println!("Groups:     {}", stat.block_groups);
+        }
+    }
+
+    let total = stat.total_blocks * stat.block_size;
+    let free = stat.free_blocks * stat.block_size;
+    let used = total.saturating_sub(free);
+
+    if total > 0 {
+        let pct = (used as f64 / total as f64) * 100.0;
+        println!();
+        println!(
+            "Blocks:     {}/{} ({} used, {:.1}%)",
+            stat.total_blocks - stat.free_blocks,
+            stat.total_blocks,
+            format_size(used),
+            pct
+        );
+        println!(
+            "Space:      {} total, {} free",
+            format_size(total),
+            format_size(free)
+        );
+    }
+    if stat.total_inodes > 0 {
+        let used_inodes = stat.total_inodes.saturating_sub(stat.free_inodes);
+        if stat.free_inodes > 0 {
+            let inode_pct = (used_inodes as f64 / stat.total_inodes as f64) * 100.0;
+            println!(
+                "Inodes:     {}/{} ({:.1}% used)",
+                used_inodes, stat.total_inodes, inode_pct
+            );
+        } else {
+            println!("Inodes:     {}", stat.total_inodes);
+        }
+    }
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() > 1 {
+        // Verbose single-path mode
         let path = &args[1];
         match statfs(path) {
-            Some(stat) => print_statfs(path, &stat),
+            Some(stat) => print_verbose(path, &stat),
             None => {
                 eprintln!("df: cannot get filesystem info for {}", path);
                 std::process::exit(1);
             }
         }
     } else {
-        // Show only disk-backed mounted filesystems
+        // Table mode: all mounted filesystems
         let mounts = get_mounts();
-        let mut first = true;
-        for mount in &mounts {
-            if !is_disk_filesystem(mount.fs_code) {
-                continue;
-            }
-            if let Some(stat) = statfs(&mount.path) {
-                if !first {
-                    println!();
-                }
-                print_statfs(&mount.path, &stat);
-                first = false;
-            }
+        if mounts.is_empty() {
+            eprintln!("df: no filesystems mounted");
+            std::process::exit(1);
         }
-        if first {
-            match statfs("/") {
-                Some(stat) => print_statfs("/", &stat),
-                None => eprintln!("df: no filesystem info available"),
-            }
-        }
+        print_table(&mounts);
     }
 }

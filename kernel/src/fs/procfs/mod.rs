@@ -293,6 +293,23 @@ impl FileSystem for Procfs {
     fn flush(&self) -> Result<(), Error> {
         Ok(())
     }
+
+    fn statfs(&self) -> Result<super::StatFs, Error> {
+        let snapshots = Self::collect_snapshots();
+        let mut volume_name = [0u8; 64];
+        volume_name[..5].copy_from_slice(b"proc\0");
+        Ok(super::StatFs {
+            fs_type: "procfs",
+            block_size: 0,
+            total_blocks: 0,
+            free_blocks: 0,
+            total_inodes: snapshots.len() as u64,
+            free_inodes: 0,
+            volume_name,
+            version: 0,
+            block_groups: 0,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -326,6 +326,25 @@ impl FileSystem for DevFsHandle {
         Ok(())
     }
 
+    fn statfs(&self) -> Result<fs::StatFs, fs::Error> {
+        let state = self.shared.read();
+        let devices = state.devices.len() as u64;
+        let dirs = state.directories.len() as u64;
+        let mut volume_name = [0u8; 64];
+        volume_name[..4].copy_from_slice(b"dev\0");
+        Ok(fs::StatFs {
+            fs_type: "devfs",
+            block_size: 0,
+            total_blocks: 0,
+            free_blocks: 0,
+            total_inodes: devices + dirs,
+            free_inodes: 0,
+            volume_name,
+            version: 0,
+            block_groups: 0,
+        })
+    }
+
     fn ioctl(&self, path: &Path, request: u64, arg: u64) -> Result<u64, fs::Error> {
         let normalized = path.normalize();
         let state = self.shared.read();

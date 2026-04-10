@@ -343,6 +343,24 @@ impl FileSystem for Memfs {
         Ok(())
     }
 
+    fn statfs(&self) -> Result<super::StatFs, Error> {
+        let inner = self.inner.read();
+        let total = inner.nodes.len() as u64;
+        let mut volume_name = [0u8; 64];
+        volume_name[..4].copy_from_slice(b"tmp\0");
+        Ok(super::StatFs {
+            fs_type: "memfs",
+            block_size: 4096,
+            total_blocks: 0,
+            free_blocks: 0,
+            total_inodes: total,
+            free_inodes: 0,
+            volume_name,
+            version: 0,
+            block_groups: 0,
+        })
+    }
+
     fn resolve_inode(&self, path: &Path) -> Result<u64, Error> {
         let path = path.normalize();
         let inner = self.inner.read();

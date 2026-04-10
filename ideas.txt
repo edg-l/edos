@@ -19,6 +19,10 @@
   /dev/dsp device node, userspace `play` command for WAV files
 - **AHCI NCQ** - FPDMA commands (32 concurrent slots), per-slot DMA pools,
   lock-free slot allocation, mode exclusion for NCQ/non-NCQ coexistence
+- **VFS per-inode locking** - Per-inode RwLock with dentry cache (256 entries).
+  Single locking layer in vfs.rs (vfs::read/write/file_info/etc.).
+  FileSystem trait all &self, drivers manage internal locks.
+  Parallel boot loading (3 binaries via NCQ, 113ms for 11.8MB).
 
 ## Network Stack Remaining
 
@@ -35,6 +39,15 @@
 - Journaling (feature flag reserved, significant complexity)
 - fsck tool
 - FileTime: VFS uses FAT-style packed date/time, EFS timestamps lossy-converted
+
+## VFS/FS Remaining
+
+- **Inode-based FS trait methods** - FileSystem trait still uses paths
+  (read_bytes(path, ...)). EFS re-walks the directory tree on every call
+  even though the VFS already resolved the inode via dentry cache.
+  Adding read_by_ino(ino, offset, count) would eliminate redundant path walks.
+- **Per-file fsync** - flush() flushes the entire filesystem. No way to
+  fsync a single file. Needed for crash-safe writes and databases.
 
 ## Ideas
 
@@ -59,21 +72,10 @@ but needed for a complete real-hardware network stack.
 Second NIC backend. Straightforward now that the stack and e1000e exist.
 Useful for VMs where e1000e emulation is slower than paravirtual.
 
-### VFS per-inode locking
-Current approach: VFS RwLock (shared reads, exclusive writes) + EFS internal
-BlockingMutex for inode_cache + BlockDevice split-lock around AHCI I/O. This
-allows concurrent reads from different filesystems and releases the cache lock
-during disk I/O so NCQ commands overlap.
-
-Next level: per-inode locks (like Linux i_mutex). Would eliminate contention
-between threads reading different files on the same FS. Requires inode objects
-with refcounting and a dentry cache. Significant refactor but the standard
-approach for real OS VFS layers.
-
 ### EFS parallel extent reads
 EfsDriver::read_via_extents reads one extent at a time. For fragmented files
 spanning multiple extents, could issue all extent reads concurrently via
-ncq_read_batch. Requires per-inode locking above.
+ncq_read_batch.
 
 ### AHCI zero-copy DMA
 Currently AHCI reads/writes copy through intermediate per-slot DMA pool pages
