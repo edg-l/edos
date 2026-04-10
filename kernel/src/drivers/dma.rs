@@ -119,7 +119,7 @@ impl DmaBuffer {
                 .unmap_memory(self.virt_addr, self.size as u64)
                 .map_err(|_| DmaError::DmaAllocationFailed)?;
 
-            vfree(self.virt_addr);
+            vfree(self.virt_addr, self.size as u64);
 
             Ok(())
         })

@@ -64,7 +64,7 @@ impl Handler for AcpiHandler {
         let virt_start = VirtAddr::new(region.virtual_start.as_ptr() as u64);
         match mapper.unmap_memory(virt_start, region.mapped_length as u64) {
             Ok(_) => {
-                vfree(virt_start);
+                vfree(virt_start, region.mapped_length as u64);
             }
             Err(e) => {
                 println!("ACPI: Unamp failed: {:?}", e);

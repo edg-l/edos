@@ -330,6 +330,13 @@ pub fn mount_system_fs() -> ! {
 
     let default_env: [&[u8]; 3] = [b"PATH=/bin", b"HOME=/", b"PWD=/"];
 
+    // Pre-expand the kernel heap so concurrent boot-load threads don't trigger
+    // heap expansion racing with each other across CPUs.
+    {
+        let warmup = alloc::vec![0u8; 512 * 1024]; // 512 KiB
+        drop(warmup);
+    }
+
     // Parallel boot: load 3 binaries concurrently via per-inode locking + NCQ.
     log!("Loading boot binaries (parallel)");
 
@@ -398,7 +405,9 @@ pub fn mount_system_fs() -> ! {
         log!(
             "Spawned edos-taskbar tid={} cpu={}",
             tb_tid.0,
-            taskbar_thread.cpu.load(core::sync::atomic::Ordering::Relaxed)
+            taskbar_thread
+                .cpu
+                .load(core::sync::atomic::Ordering::Relaxed)
         );
 
         let terminal_thread = Thread::new_user(
@@ -415,7 +424,9 @@ pub fn mount_system_fs() -> ! {
         log!(
             "Spawned edos-terminal tid={} cpu={}",
             tm_tid.0,
-            terminal_thread.cpu.load(core::sync::atomic::Ordering::Relaxed)
+            terminal_thread
+                .cpu
+                .load(core::sync::atomic::Ordering::Relaxed)
         );
     });
 
