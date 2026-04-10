@@ -265,6 +265,18 @@ impl Allocator {
 
     /// Global allocator path (no per-CPU cache).
     fn global_alloc(&self, layout: Layout) -> *mut u8 {
+        // If the layout fits a size class, round up to the size-class layout.
+        // This ensures all small blocks use a consistent layout regardless of
+        // whether they were allocated before or after the per-CPU cache was
+        // enabled, so dealloc through the cache drain uses the correct layout.
+        let layout = match size_class_index(layout.size(), layout.align()) {
+            Some(idx) => {
+                let sc = SIZE_CLASSES[idx];
+                unsafe { Layout::from_size_align_unchecked(sc, sc) }
+            }
+            None => layout,
+        };
+
         {
             let mut heap = self.inner.lock();
             if let Ok(block) = heap.alloc(layout) {
