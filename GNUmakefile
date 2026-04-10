@@ -55,7 +55,7 @@ define run_qemu_uefi
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio \
 		-no-reboot -d cpu_reset -D /tmp/qemu_reset.log \
-		-drive id=sata0,if=none,format=qcow2,file=sata-disk.img \
+		-drive id=sata0,if=none,format=qcow2,file=sata-disk.img,aio=io_uring,discard=unmap \
 		-device ide-hd,drive=sata0,bus=ide.1 \
 		$(if $(4),$(4),$(DISPLAY_VIRTIO)) \
 		-device qemu-xhci -device usb-kbd -device usb-mouse \
