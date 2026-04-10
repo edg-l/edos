@@ -793,17 +793,14 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         }
     };
 
-    // Determine initial offset and verify file exists; support create flag
+    // Verify file exists; support create flag.
+    // O_APPEND offset is determined per-write by vfs::write, not at open time.
     let append = (flags & 0x400) != 0; // O_APPEND
     let create = (flags & 0x40) != 0; // O_CREAT
-    let mut offset = 0u64;
+    let offset = 0u64;
     interrupts::enable();
     match fs_api::file_info(&path) {
-        Ok(info) => {
-            if append {
-                offset = info.size;
-            }
-        }
+        Ok(_) => {}
         Err(_) => {
             if create {
                 if fs_api::create_file(&path).is_err() {

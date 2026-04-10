@@ -101,7 +101,7 @@ fn resolve_inode_for(
 
     let ino = fs.resolve_inode(relative).ok()?;
     let info = fs.file_info(relative).ok()?;
-    let inode = VfsInode::new(mount_id, ino, info.kind, info.size);
+    let inode = VfsInode::new(mount_id, ino, info.kind);
     dc.insert(mount_id, relative.clone(), inode.clone());
     Some(inode)
 }
@@ -126,6 +126,18 @@ pub fn resolve_for_info(path: &Path) -> Option<VfsOp> {
         fs: lk.fs,
         relative: lk.relative,
         inode,
+        mount_id: lk.mount_id,
+    })
+}
+
+/// Resolve a path to a VfsOp without inode resolution.
+/// Used for create/mkdir where the target doesn't exist yet.
+pub fn resolve_mount(path: &Path) -> Option<VfsOp> {
+    let lk = lookup(path)?;
+    Some(VfsOp {
+        fs: lk.fs,
+        relative: lk.relative,
+        inode: None,
         mount_id: lk.mount_id,
     })
 }
@@ -289,6 +301,7 @@ pub fn rename(old_op: &VfsOp, new_op: &VfsOp) -> Result<(), Error> {
     let result = old_op.fs.rename(&old_op.relative, &new_op.relative);
     if result.is_ok() {
         let dc = dentry::dentry_cache();
+        dc.invalidate_children(old_op.mount_id, &old_op.relative);
         dc.invalidate(old_op.mount_id, &old_op.relative);
         dc.invalidate(new_op.mount_id, &new_op.relative);
     }

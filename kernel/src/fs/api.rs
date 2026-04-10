@@ -100,12 +100,12 @@ pub fn write_bytes_owned(path: &Path, offset: usize, data: Vec<u8>) -> Result<u6
 }
 
 pub fn create_file(path: &Path) -> Result<(), Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
+    let op = vfs::resolve_mount(path).ok_or(Error::FileNotFound)?;
     vfs::create_file(&op)
 }
 
 pub fn create_dir(path: &Path) -> Result<(), Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
+    let op = vfs::resolve_mount(path).ok_or(Error::FileNotFound)?;
     vfs::create_dir(&op)
 }
 

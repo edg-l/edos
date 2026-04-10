@@ -10,7 +10,6 @@
 //! removes the lookup path; the Arc refcount prevents deallocation.
 
 use alloc::sync::Arc;
-use core::sync::atomic::AtomicU64;
 
 use crate::thread::rwlock::RwLock as BlockingRwLock;
 
@@ -25,8 +24,6 @@ pub struct VfsInode {
     pub ino: u64,
     /// Cached file kind (file, directory, special).
     pub kind: FileKind,
-    /// Cached file size (updated atomically on writes).
-    pub size: AtomicU64,
     /// Per-inode read-write lock.
     /// Readers: concurrent read operations on this file.
     /// Writer: exclusive write/truncate/rename on this file.
@@ -34,12 +31,11 @@ pub struct VfsInode {
 }
 
 impl VfsInode {
-    pub fn new(mount_id: usize, ino: u64, kind: FileKind, size: u64) -> Arc<Self> {
+    pub fn new(mount_id: usize, ino: u64, kind: FileKind) -> Arc<Self> {
         Arc::new(Self {
             mount_id,
             ino,
             kind,
-            size: AtomicU64::new(size),
             lock: BlockingRwLock::new(()),
         })
     }
