@@ -190,31 +190,17 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 return !0u64;
             }
 
-            // Per-inode write lock from cached inode.
-            let _guard = file.inode.as_ref().map(|i| i.lock.write());
-
-            let mut file = file.clone();
-            if file.append {
-                match fs_api::file_info(&file.path) {
-                    Ok(finfo) => file.offset = finfo.size,
-                    Err(_) => {
-                        info.lock().errno = Errno::EINVAL;
-                        return !0u64;
-                    }
-                }
-            }
-
-            let lk = match vfs::lookup(&file.path) {
-                Some(lk) => lk,
+            let op = match vfs::resolve_with_inode(&file.path, file.inode.clone()) {
+                Some(op) => op,
                 None => {
                     info.lock().errno = Errno::EINVAL;
                     return !0u64;
                 }
             };
-            match lk
-                .fs
-                .write_bytes(&lk.relative, file.offset as usize, &buffer)
-            {
+
+            // vfs::write handles locking + O_APPEND atomically.
+            let offset = file.offset as usize;
+            match vfs::write(&op, offset, &buffer, file.append) {
                 Ok(written) => {
                     let new_fd = FileDescriptor::FsFile(FsFile {
                         offset: file.offset + written,
@@ -549,17 +535,15 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     }
                 }
             } else {
-                // Per-inode read lock from cached inode (avoids re-resolving).
-                let _guard = file.inode.as_ref().map(|i| i.lock.read());
-
-                let lk = match vfs::lookup(&file.path) {
-                    Some(lk) => lk,
+                // vfs::read handles per-inode locking.
+                let op = match vfs::resolve_with_inode(&file.path, file.inode.clone()) {
+                    Some(op) => op,
                     None => {
                         info.lock().errno = Errno::EINVAL;
                         return -1;
                     }
                 };
-                match lk.fs.read_bytes(&lk.relative, file.offset as usize, count) {
+                match vfs::read(&op, file.offset as usize, count) {
                     Ok(d) => d,
                     Err(_) => {
                         info.lock().errno = Errno::EINVAL;
@@ -834,7 +818,7 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
     }
 
     // Resolve VFS inode for per-inode locking on subsequent reads/writes.
-    let inode = vfs::lookup(&path).and_then(|lk| fs_api::resolve_vfs_inode(&lk));
+    let inode = fs_api::resolve_vfs_inode_for_path(&path);
 
     let desc = FileDescriptor::FsFile(FsFile {
         path,
