@@ -39,6 +39,7 @@ fn get_screen_info() -> Option<ScreenInfo> {
 }
 
 fn main() {
+    eprintln!("[taskbar] starting");
     // Get screen dimensions
     let screen_info = match get_screen_info() {
         Some(info) => info,

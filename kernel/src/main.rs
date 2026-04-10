@@ -377,7 +377,12 @@ pub fn mount_system_fs() -> ! {
             root.clone(),
         )
         .unwrap();
-        queue_spawn_thread(wm_thread);
+        let wm_tid = queue_spawn_thread(wm_thread.clone());
+        log!(
+            "Spawned edos-wm tid={} cpu={}",
+            wm_tid.0,
+            wm_thread.cpu.load(core::sync::atomic::Ordering::Relaxed)
+        );
 
         let taskbar_thread = Thread::new_user(
             &taskbar_data,
@@ -389,7 +394,12 @@ pub fn mount_system_fs() -> ! {
             root.clone(),
         )
         .unwrap();
-        queue_spawn_thread(taskbar_thread);
+        let tb_tid = queue_spawn_thread(taskbar_thread.clone());
+        log!(
+            "Spawned edos-taskbar tid={} cpu={}",
+            tb_tid.0,
+            taskbar_thread.cpu.load(core::sync::atomic::Ordering::Relaxed)
+        );
 
         let terminal_thread = Thread::new_user(
             &terminal_data,
@@ -401,7 +411,12 @@ pub fn mount_system_fs() -> ! {
             root.clone(),
         )
         .unwrap();
-        queue_spawn_thread(terminal_thread);
+        let tm_tid = queue_spawn_thread(terminal_thread.clone());
+        log!(
+            "Spawned edos-terminal tid={} cpu={}",
+            tm_tid.0,
+            terminal_thread.cpu.load(core::sync::atomic::Ordering::Relaxed)
+        );
     });
 
     kthread_exit(0)

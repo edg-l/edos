@@ -355,6 +355,7 @@ fn determine_cursor_shape(
 }
 
 fn main() {
+    eprintln!("[wm] starting");
     // Initialize screen
     let mut screen = match Screen::get() {
         Ok(s) => s,

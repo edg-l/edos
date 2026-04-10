@@ -18,6 +18,7 @@ const TERMINAL_ROWS: usize = TERMINAL_HEIGHT as usize / 16; // 16px per char
 const SHELL_PATH: &str = "/bin/sh";
 
 fn main() {
+    eprintln!("[terminal] starting");
     // Create terminal window
     let mut window = match Window::new(100, 100, TERMINAL_WIDTH, TERMINAL_HEIGHT) {
         Ok(w) => w,

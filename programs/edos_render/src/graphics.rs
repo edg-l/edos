@@ -130,7 +130,9 @@ pub struct Framebuffer {
 
 impl Framebuffer {
     pub fn new() -> Self {
-        let file = File::open("/dev/fb").unwrap();
+        let file = File::open("/dev/fb").unwrap_or_else(|e| {
+            panic!("Framebuffer: failed to open /dev/fb: {e}");
+        });
         Self {
             fd: file,
             buffer: Vec::with_capacity(size_of::<FramebufferDraw>()),
@@ -267,7 +269,10 @@ impl Framebuffer {
                 core::mem::size_of::<FramebufferInfo>(),
                 IOCTL_ARG_OUT,
             )
-            .unwrap();
+            .map_err(|e| {
+                eprintln!("Framebuffer: screen_info ioctl failed: {e}");
+                GraphicsError::Unknown
+            })?;
 
         Ok(ScreenInfo {
             width: info.width as usize,

@@ -23,6 +23,13 @@
   Single locking layer in vfs.rs (vfs::read/write/file_info/etc.).
   FileSystem trait all &self, drivers manage internal locks.
   Parallel boot loading (3 binaries via NCQ, 113ms for 11.8MB).
+- **Inode-based FS fast path** - read_bytes_ino/write_bytes_ino/file_size_ino
+  on FileSystem trait. VFS tries inode-based first, falls back to path-based.
+  EFS and Memfs skip directory tree walks on read/write for open files.
+- **USB HID ISO keyboard fix** - Fixed 4 wrong/missing keycode mappings for
+  European ISO keyboards (< > º ç ´).
+- **Shell quoted redirect fix** - parse_command tracks quoted tokens,
+  extract_redirects skips them. echo "<" > file works correctly.
 
 ## Network Stack Remaining
 
@@ -42,12 +49,9 @@
 
 ## VFS/FS Remaining
 
-- **Inode-based FS trait methods** - FileSystem trait still uses paths
-  (read_bytes(path, ...)). EFS re-walks the directory tree on every call
-  even though the VFS already resolved the inode via dentry cache.
-  Adding read_by_ino(ino, offset, count) would eliminate redundant path walks.
 - **Per-file fsync** - flush() flushes the entire filesystem. No way to
-  fsync a single file. Needed for crash-safe writes and databases.
+  fsync a single file. flush_inode trait method exists but no fsync syscall
+  yet. Needed for crash-safe writes and databases.
 
 ## Ideas
 
