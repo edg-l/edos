@@ -23,7 +23,7 @@ use crate::{
     memory::{
         USER_STACK_SIZE, USER_STACK_TOP,
         frame_allocator::frame_allocator,
-        mapper::{MemoryManager, active_level_4_table, get_level_4_table},
+        mapper::{MemoryManager, get_level_4_table},
         shared::SharedMemory,
     },
     println,
@@ -271,20 +271,13 @@ pub(crate) fn allocate_tls_region(
     let tls_data_base = VirtAddr::new(tls_data_base_u64);
     let tcb_base = VirtAddr::new(tcb_base_u64);
 
-    unsafe {
-        core::ptr::write_bytes(mapping_base.as_u64() as *mut u8, 0, map_size as usize);
+    memory_manager.zero_user(mapping_base, map_size as usize);
 
-        if !template.init_data.is_empty() {
-            core::ptr::copy_nonoverlapping(
-                template.init_data.as_ptr(),
-                tls_data_base.as_u64() as *mut u8,
-                template.init_data.len(),
-            );
-        }
-
-        let tcb_ptr = tcb_base.as_u64() as *mut u64;
-        tcb_ptr.write(tcb_base.as_u64());
+    if !template.init_data.is_empty() {
+        memory_manager.copy_to_user(tls_data_base, &template.init_data);
     }
+
+    memory_manager.write_val_to_user::<u64>(tcb_base, tcb_base.as_u64());
 
     let runtime = UserThreadTls {
         template: Arc::clone(template),
@@ -436,8 +429,6 @@ impl Thread {
     }
 
     /// Must provide entry point and cr3 page table.
-    ///
-    /// Note: This function switches to kernel page, should be called without interrupts
     pub fn new_user(
         elf_data: &[u8],
         name: Option<String>,
@@ -447,29 +438,24 @@ impl Thread {
         group: u32,
         cwd: Path,
     ) -> Result<Arc<Self>, ElfLoadError> {
-        switch_to_kernel_page();
-        // allocate kernel stack before creating page
         let kernel_stack_top = kthread_stack_alloc();
 
-        // Create user page.
         let kernel_pml4 = boot_info().cr3;
         let physical_memory_offset = boot_info().physical_memory_offset;
         let kernel_table = unsafe { get_level_4_table(kernel_pml4) };
         let page = unsafe { allocate_process_pml4(kernel_table) };
 
-        // Use process page to set mappings
-        unsafe { Cr3::write(page, kernel_pml4.1) };
-
-        let page_table = unsafe { active_level_4_table(physical_memory_offset) };
-        let table = unsafe { OffsetPageTable::new(page_table, physical_memory_offset) };
+        // Build child's page table manager via HHDM (no CR3 switch needed).
+        let child_page_table = unsafe { get_level_4_table((page, kernel_pml4.1)) };
+        let table = unsafe { OffsetPageTable::new(child_page_table, physical_memory_offset) };
 
         let mut process_memory_manager = MemoryManager::new(table);
 
-        // call align
         let stack_top = thread_stack_alloc(&mut process_memory_manager);
 
         let (user_stack_pointer, argv_ptr, argc, envp_ptr) =
-            setup_user_stack(stack_top, argv, envp).map_err(|_| ElfLoadError::MappingFailed)?;
+            setup_user_stack(stack_top, argv, envp, &process_memory_manager)
+                .map_err(|_| ElfLoadError::MappingFailed)?;
 
         let mut load_info = load_elf(elf_data, &mut process_memory_manager)?;
 
@@ -494,9 +480,6 @@ impl Thread {
             owned_regions.push(region);
         }
         let process_regions = Arc::new(load_info.memory_regions);
-
-        // Back to kernel page
-        unsafe { Cr3::write(kernel_pml4.0, kernel_pml4.1) };
 
         let mut context = CpuContext::new_user_thread(entry_point.as_u64(), user_stack_pointer);
         context.rdi = argc as u64;

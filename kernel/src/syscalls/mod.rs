@@ -1220,8 +1220,7 @@ fn do_spawn(
     let elf_data = file_data;
 
     // Clone parent FD entries while interrupts are still enabled (BlockingMutex
-    // requires interrupts for contention handling). We cache these before
-    // disabling interrupts for page table switching below.
+    // requires interrupts for contention handling).
     let parent_stdin = {
         let fd_table = info.lock().fd_table.clone();
         let fds = fd_table.lock();
@@ -1231,11 +1230,6 @@ fn do_spawn(
             fds.get_fd(stderr_fd).cloned(),
         )
     };
-
-    x86_64::instructions::interrupts::disable();
-
-    let cr3 = Cr3::read();
-    switch_to_kernel_page();
 
     let argv_slices: Vec<&[u8]> = argv_storage.iter().map(|arg| arg.as_slice()).collect();
     let envp_slices: Vec<&[u8]> = envp_storage.iter().map(|e| e.as_slice()).collect();
@@ -1252,8 +1246,8 @@ fn do_spawn(
         Ok(thread) => thread,
         Err(e) => {
             log!("UserThread creation failed: {:?}", e);
+            x86_64::instructions::interrupts::disable();
             info.lock().errno = Errno::EINVAL;
-            unsafe { Cr3::write(cr3.0, cr3.1) };
             return !0u64;
         }
     };
@@ -1295,7 +1289,7 @@ fn do_spawn(
 
     queue_spawn_thread(user_thread);
 
-    unsafe { Cr3::write(cr3.0, cr3.1) };
+    x86_64::instructions::interrupts::disable();
 
     child_pid
 }
@@ -1704,7 +1698,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     use crate::{
         memory::{
             cow::clone_user_page_tables_cow,
-            mapper::{MemoryManager, active_level_4_table},
+            mapper::{MemoryManager, get_level_4_table},
             shared::SharedMemory,
         },
         thread::{MappingType, MemoryMapping, fd::FileDescriptorTable},
@@ -1794,14 +1788,11 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
 
     let phys_offset = crate::boot::boot_info().physical_memory_offset;
 
-    // Build a MemoryManager for the child by temporarily activating its CR3.
+    // Build a MemoryManager for the child via HHDM (no CR3 switch needed).
     let child_mm = {
-        unsafe { Cr3::write(child_pml4_frame, parent_cr3.1) };
-        let page_table = unsafe { active_level_4_table(phys_offset) };
-        let table = unsafe { OffsetPageTable::new(page_table, phys_offset) };
-        let mm = MemoryManager::new(table);
-        switch_to_kernel_page();
-        Arc::new(Mutex::new(mm))
+        let child_page_table = unsafe { get_level_4_table((child_pml4_frame, parent_cr3.1)) };
+        let table = unsafe { OffsetPageTable::new(child_page_table, phys_offset) };
+        Arc::new(Mutex::new(MemoryManager::new(table)))
     };
 
     // Allocate kernel stack for the child.

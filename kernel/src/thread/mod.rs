@@ -1,8 +1,5 @@
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
-use core::{
-    ptr,
-    sync::atomic::{AtomicU64, AtomicUsize},
-};
+use core::sync::atomic::{AtomicU64, AtomicUsize};
 use spin::Mutex;
 use x86_64::{
     VirtAddr,
@@ -91,6 +88,7 @@ pub fn setup_user_stack(
     stack_top: u64,
     argv: &[&[u8]],
     envp: &[&[u8]],
+    mm: &MemoryManager,
 ) -> Result<(u64, u64, usize, u64), StackSetupError> {
     let stack_bottom = stack_top
         .checked_sub(USER_STACK_SIZE)
@@ -108,10 +106,8 @@ pub fn setup_user_stack(
         if sp < stack_bottom {
             return Err(StackSetupError::StackOverflow);
         }
-        unsafe {
-            ptr::copy_nonoverlapping(env.as_ptr(), sp as *mut u8, len as usize);
-            ((sp + len) as *mut u8).write(0);
-        }
+        mm.copy_to_user(VirtAddr::new(sp), &env[..len as usize]);
+        mm.write_val_to_user::<u8>(VirtAddr::new(sp + len), 0);
         env_ptrs.push(sp);
     }
     env_ptrs.reverse();
@@ -128,10 +124,8 @@ pub fn setup_user_stack(
             return Err(StackSetupError::StackOverflow);
         }
 
-        unsafe {
-            ptr::copy_nonoverlapping(arg.as_ptr(), sp as *mut u8, len as usize);
-            ((sp + len) as *mut u8).write(0);
-        }
+        mm.copy_to_user(VirtAddr::new(sp), &arg[..len as usize]);
+        mm.write_val_to_user::<u8>(VirtAddr::new(sp + len), 0);
 
         arg_ptrs.push(sp);
     }
@@ -166,7 +160,7 @@ pub fn setup_user_stack(
         if sp < stack_bottom {
             return Err(StackSetupError::StackOverflow);
         }
-        unsafe { (sp as *mut u64).write(0) };
+        mm.write_val_to_user::<u64>(VirtAddr::new(sp), 0);
     }
 
     // Push null terminator for envp
@@ -174,7 +168,7 @@ pub fn setup_user_stack(
     if sp < stack_bottom {
         return Err(StackSetupError::StackOverflow);
     }
-    unsafe { (sp as *mut u64).write(0) };
+    mm.write_val_to_user::<u64>(VirtAddr::new(sp), 0);
 
     // Push env pointers in reverse so first env is at lowest address
     for &ptr_value in env_ptrs.iter().rev() {
@@ -182,7 +176,7 @@ pub fn setup_user_stack(
         if sp < stack_bottom {
             return Err(StackSetupError::StackOverflow);
         }
-        unsafe { (sp as *mut u64).write(ptr_value) };
+        mm.write_val_to_user::<u64>(VirtAddr::new(sp), ptr_value);
     }
 
     let envp_ptr = sp;
@@ -192,14 +186,14 @@ pub fn setup_user_stack(
     if sp < stack_bottom {
         return Err(StackSetupError::StackOverflow);
     }
-    unsafe { (sp as *mut u64).write(0) };
+    mm.write_val_to_user::<u64>(VirtAddr::new(sp), 0);
 
     for &ptr_value in arg_ptrs.iter().rev() {
         sp = sp.checked_sub(8).ok_or(StackSetupError::StackOverflow)?;
         if sp < stack_bottom {
             return Err(StackSetupError::StackOverflow);
         }
-        unsafe { (sp as *mut u64).write(ptr_value) };
+        mm.write_val_to_user::<u64>(VirtAddr::new(sp), ptr_value);
     }
 
     let argv_ptr = sp;
@@ -208,7 +202,7 @@ pub fn setup_user_stack(
     if sp < stack_bottom {
         return Err(StackSetupError::StackOverflow);
     }
-    unsafe { (sp as *mut u64).write(argc as u64) };
+    mm.write_val_to_user::<u64>(VirtAddr::new(sp), argc as u64);
 
     Ok((sp, argv_ptr, argc, envp_ptr))
 }

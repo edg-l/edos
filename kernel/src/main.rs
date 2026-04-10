@@ -3,13 +3,10 @@
 #![feature(abi_x86_interrupt)]
 #![allow(clippy::fn_to_numeric_cast)]
 
-use core::{arch::asm, hint::spin_loop, time::Duration};
+use core::{hint::spin_loop, time::Duration};
 
 use alloc::{boxed::Box, string::ToString, sync::Arc};
-use x86_64::{
-    VirtAddr,
-    instructions::{hlt, interrupts::without_interrupts},
-};
+use x86_64::instructions::hlt;
 
 use crate::{
     acpi::{acpi_madt, init_acpi},
@@ -20,7 +17,7 @@ use crate::{
         gpt::{FilesystemType, format_uuid},
         path::Path,
     },
-    memory::{frame_allocator::init_frame_allocator, mapper::memory_mapper},
+    memory::frame_allocator::init_frame_allocator,
     thread::{
         mailbox::Mailbox,
         scheduler::sched,
@@ -358,63 +355,61 @@ pub fn mount_system_fs() -> ! {
     log!("Loaded /bin/edos-terminal ({} bytes)", terminal_data.len());
     log!("Spawning user threads");
 
-    // Set up user threads with interrupts disabled (page table manipulation).
-    without_interrupts(|| {
-        let wm_thread = Thread::new_user(
-            &wm_data,
-            Some("edos-wm".to_string()),
-            &[b"edos-wm"],
-            &default_env,
-            0,
-            0,
-            root.clone(),
-        )
-        .unwrap();
-        let wm_tid = queue_spawn_thread(wm_thread.clone());
-        log!(
-            "Spawned edos-wm tid={} cpu={}",
-            wm_tid.0,
-            wm_thread.cpu.load(core::sync::atomic::Ordering::Relaxed)
-        );
+    // Spawn initial user threads.
+    let wm_thread = Thread::new_user(
+        &wm_data,
+        Some("edos-wm".to_string()),
+        &[b"edos-wm"],
+        &default_env,
+        0,
+        0,
+        root.clone(),
+    )
+    .unwrap();
+    let wm_tid = queue_spawn_thread(wm_thread.clone());
+    log!(
+        "Spawned edos-wm tid={} cpu={}",
+        wm_tid.0,
+        wm_thread.cpu.load(core::sync::atomic::Ordering::Relaxed)
+    );
 
-        let taskbar_thread = Thread::new_user(
-            &taskbar_data,
-            Some("edos-taskbar".to_string()),
-            &[b"edos-taskbar"],
-            &default_env,
-            0,
-            0,
-            root.clone(),
-        )
-        .unwrap();
-        let tb_tid = queue_spawn_thread(taskbar_thread.clone());
-        log!(
-            "Spawned edos-taskbar tid={} cpu={}",
-            tb_tid.0,
-            taskbar_thread
-                .cpu
-                .load(core::sync::atomic::Ordering::Relaxed)
-        );
+    let taskbar_thread = Thread::new_user(
+        &taskbar_data,
+        Some("edos-taskbar".to_string()),
+        &[b"edos-taskbar"],
+        &default_env,
+        0,
+        0,
+        root.clone(),
+    )
+    .unwrap();
+    let tb_tid = queue_spawn_thread(taskbar_thread.clone());
+    log!(
+        "Spawned edos-taskbar tid={} cpu={}",
+        tb_tid.0,
+        taskbar_thread
+            .cpu
+            .load(core::sync::atomic::Ordering::Relaxed)
+    );
 
-        let terminal_thread = Thread::new_user(
-            &terminal_data,
-            Some("edos-terminal".to_string()),
-            &[b"edos-terminal"],
-            &default_env,
-            0,
-            0,
-            root.clone(),
-        )
-        .unwrap();
-        let tm_tid = queue_spawn_thread(terminal_thread.clone());
-        log!(
-            "Spawned edos-terminal tid={} cpu={}",
-            tm_tid.0,
-            terminal_thread
-                .cpu
-                .load(core::sync::atomic::Ordering::Relaxed)
-        );
-    });
+    let terminal_thread = Thread::new_user(
+        &terminal_data,
+        Some("edos-terminal".to_string()),
+        &[b"edos-terminal"],
+        &default_env,
+        0,
+        0,
+        root.clone(),
+    )
+    .unwrap();
+    let tm_tid = queue_spawn_thread(terminal_thread.clone());
+    log!(
+        "Spawned edos-terminal tid={} cpu={}",
+        tm_tid.0,
+        terminal_thread
+            .cpu
+            .load(core::sync::atomic::Ordering::Relaxed)
+    );
 
     kthread_exit(0)
 }

@@ -255,6 +255,61 @@ impl MemoryManager {
         self.mapper.translate(addr)
     }
 
+    /// Translate a virtual address mapped in this page table to a kernel HHDM pointer.
+    fn translate_to_hhdm_ptr(&self, vaddr: VirtAddr) -> Option<*mut u8> {
+        match self.mapper.translate(vaddr) {
+            TranslateResult::Mapped { frame, offset, .. } => {
+                let phys = frame.start_address() + offset;
+                let hhdm = crate::boot::boot_info().physical_memory_offset;
+                Some((hhdm + phys.as_u64()).as_mut_ptr())
+            }
+            _ => None,
+        }
+    }
+
+    /// Copy bytes into user virtual address space via HHDM, handling page boundaries.
+    pub fn copy_to_user(&self, dest_vaddr: VirtAddr, src: &[u8]) {
+        let mut offset = 0usize;
+        while offset < src.len() {
+            let current_vaddr = dest_vaddr + offset as u64;
+            let page_offset = (current_vaddr.as_u64() & 0xFFF) as usize;
+            let chunk = (4096 - page_offset).min(src.len() - offset);
+            let dest_ptr = self
+                .translate_to_hhdm_ptr(current_vaddr)
+                .expect("copy_to_user: page not mapped");
+            unsafe {
+                core::ptr::copy_nonoverlapping(src[offset..].as_ptr(), dest_ptr, chunk);
+            }
+            offset += chunk;
+        }
+    }
+
+    /// Zero bytes in user virtual address space via HHDM, handling page boundaries.
+    pub fn zero_user(&self, dest_vaddr: VirtAddr, len: usize) {
+        let mut offset = 0usize;
+        while offset < len {
+            let current_vaddr = dest_vaddr + offset as u64;
+            let page_offset = (current_vaddr.as_u64() & 0xFFF) as usize;
+            let chunk = (4096 - page_offset).min(len - offset);
+            let dest_ptr = self
+                .translate_to_hhdm_ptr(current_vaddr)
+                .expect("zero_user: page not mapped");
+            unsafe {
+                core::ptr::write_bytes(dest_ptr, 0, chunk);
+            }
+            offset += chunk;
+        }
+    }
+
+    /// Write a value to user virtual address space via HHDM.
+    /// Uses copy_to_user internally so it handles page boundaries safely.
+    pub fn write_val_to_user<T: Copy>(&self, dest_vaddr: VirtAddr, value: T) {
+        let bytes = unsafe {
+            core::slice::from_raw_parts(&value as *const T as *const u8, core::mem::size_of::<T>())
+        };
+        self.copy_to_user(dest_vaddr, bytes);
+    }
+
     pub fn clean_lower_half(&mut self) {
         let lower_half = Page::range_inclusive(
             Page::containing_address(VirtAddr::new(0)),
