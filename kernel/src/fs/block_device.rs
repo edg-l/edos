@@ -1,6 +1,6 @@
 use core::num::NonZero;
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use lru::LruCache;
 
 use crate::drivers::ahci::{AhciError, direct};
@@ -51,26 +51,31 @@ impl BlockDevice {
         }
 
         if !miss_ranges.is_empty() {
-            // Group misses into contiguous sub-ranges to avoid reading wrong sectors
+            // Group misses into contiguous runs.
+            let mut runs: Vec<(usize, u64, u16)> = Vec::new(); // (miss_range_start, lba, count)
             let mut i = 0;
             while i < miss_ranges.len() {
                 let run_start = i;
                 let first_lba = miss_ranges[run_start].0;
-                // Extend run while LBAs are consecutive
                 while i + 1 < miss_ranges.len() && miss_ranges[i + 1].0 == miss_ranges[i].0 + 1 {
                     i += 1;
                 }
                 let run_count = (i - run_start + 1) as u16;
+                runs.push((run_start, first_lba, run_count));
+                i += 1;
+            }
 
-                self.scratch.resize(run_count as usize * SECTOR_SIZE, 0);
-
-                if self.is_usb_device() {
+            if self.is_usb_device() {
+                // USB: sequential reads (no NCQ).
+                for &(run_start, first_lba, run_count) in &runs {
+                    self.scratch.resize(run_count as usize * SECTOR_SIZE, 0);
                     let scratch = core::mem::take(&mut self.scratch);
                     let data = crate::drivers::usb::block_api::usb_read_sectors(
                         first_lba, run_count, scratch,
                     )
                     .map_err(|_| AhciError::IoError)?;
-                    for (j, (lba_j, idx)) in miss_ranges[run_start..=i].iter().enumerate() {
+                    let run_end = run_start + run_count as usize;
+                    for (j, (lba_j, idx)) in miss_ranges[run_start..run_end].iter().enumerate() {
                         let start = j * SECTOR_SIZE;
                         buffer[*idx..*idx + SECTOR_SIZE]
                             .copy_from_slice(&data[start..start + SECTOR_SIZE]);
@@ -79,18 +84,36 @@ impl BlockDevice {
                         self.cache.put(*lba_j, sector);
                     }
                     self.scratch = data;
-                } else {
-                    direct::read_sectors(self.device_id, first_lba, run_count, &mut self.scratch)?;
-                    for (j, (lba_j, idx)) in miss_ranges[run_start..=i].iter().enumerate() {
+                }
+            } else {
+                // AHCI: batch all runs concurrently via NCQ.
+                let mut run_bufs: Vec<Vec<u8>> = runs
+                    .iter()
+                    .map(|&(_, _, count)| vec![0u8; count as usize * SECTOR_SIZE])
+                    .collect();
+
+                {
+                    let mut batch: Vec<(u64, u16, &mut [u8])> = runs
+                        .iter()
+                        .zip(run_bufs.iter_mut())
+                        .map(|(&(_, lba, count), buf)| (lba, count, buf.as_mut_slice()))
+                        .collect();
+
+                    direct::read_sectors_batch(self.device_id, &mut batch)?;
+                }
+
+                // Populate cache and output buffer from results.
+                for (ri, &(run_start, _, run_count)) in runs.iter().enumerate() {
+                    let run_end = run_start + run_count as usize;
+                    for (j, (lba_j, idx)) in miss_ranges[run_start..run_end].iter().enumerate() {
                         let start = j * SECTOR_SIZE;
                         buffer[*idx..*idx + SECTOR_SIZE]
-                            .copy_from_slice(&self.scratch[start..start + SECTOR_SIZE]);
+                            .copy_from_slice(&run_bufs[ri][start..start + SECTOR_SIZE]);
                         let mut sector = [0u8; SECTOR_SIZE];
-                        sector.copy_from_slice(&self.scratch[start..start + SECTOR_SIZE]);
+                        sector.copy_from_slice(&run_bufs[ri][start..start + SECTOR_SIZE]);
                         self.cache.put(*lba_j, sector);
                     }
                 }
-                i += 1;
             }
         }
 

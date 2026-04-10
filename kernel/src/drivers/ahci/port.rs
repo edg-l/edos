@@ -823,6 +823,101 @@ impl AhciPort {
 
         result
     }
+
+    /// Read multiple disjoint sector ranges concurrently using NCQ.
+    /// All commands are issued before any waits, maximizing drive parallelism.
+    fn ncq_read_batch(&self, ranges: &mut [(u64, u16, &mut [u8])]) -> Result<(), AhciError> {
+        if ranges.is_empty() {
+            return Ok(());
+        }
+
+        // Cap concurrent commands to ncq_depth - 1 (leave a slot for flush/error).
+        let max_batch = (self.ncq_depth as usize).saturating_sub(1).max(1);
+
+        self.enter_ncq_mode();
+
+        let mut first_err: Option<AhciError> = None;
+
+        for chunk in ranges.chunks_mut(max_batch) {
+            // Allocate slots and issue all commands in this sub-batch.
+            let mut slots: heapless::Vec<usize, 32> = heapless::Vec::new();
+            let tid = sched().current_thread().unwrap().id;
+
+            for &(lba, sectors, ref buf) in chunk.iter() {
+                if sectors == 0 {
+                    let _ = slots.push(usize::MAX); // sentinel: no slot needed
+                    continue;
+                }
+                let expected_size = sectors as usize * 512;
+                let num_pages = expected_size.div_ceil(4096);
+                if num_pages > NCQ_PAGES_PER_SLOT || buf.len() < expected_size {
+                    first_err.get_or_insert(AhciError::IoError);
+                    let _ = slots.push(usize::MAX);
+                    continue;
+                }
+
+                let slot = self.allocate_slot_blocking();
+                self.slot_waiters[slot].store(tid.0, Ordering::Release);
+
+                let setup_result = self
+                    .setup_scatter_command(
+                        slot,
+                        &FisRegH2D::new_read_fpdma_queued(lba, sectors, slot as u8),
+                        expected_size,
+                    )
+                    .and_then(|()| self.issue_ncq_command(slot, 0, num_pages as u16));
+
+                if let Err(e) = setup_result {
+                    self.slot_waiters[slot].store(0, Ordering::Release);
+                    self.free_slot(slot);
+                    first_err.get_or_insert(e);
+                    let _ = slots.push(usize::MAX);
+                    continue;
+                }
+                let _ = slots.push(slot);
+            }
+
+            // Wait for all issued commands and copy results.
+            for (i, (_, sectors, buf)) in chunk.iter_mut().enumerate() {
+                let slot = slots[i];
+                if slot == usize::MAX {
+                    continue; // skipped or errored during issue
+                }
+
+                let wait_result = self.wait_for_ncq_completion(slot, Duration::from_secs(5));
+
+                if wait_result.is_ok() {
+                    let expected_size = *sectors as usize * 512;
+                    let num_pages = expected_size.div_ceil(4096);
+                    let pool = &self.slot_pools[slot];
+                    let mut offset = 0;
+                    for p in 0..num_pages {
+                        let copy_len = (expected_size - offset).min(4096);
+                        unsafe {
+                            ptr::copy_nonoverlapping(
+                                pool.pages[p].as_ptr(),
+                                buf.as_mut_ptr().add(offset),
+                                copy_len,
+                            );
+                        }
+                        offset += copy_len;
+                    }
+                } else {
+                    first_err.get_or_insert(wait_result.unwrap_err());
+                }
+
+                self.slot_waiters[slot].store(0, Ordering::Release);
+                self.free_slot(slot);
+            }
+        }
+
+        self.exit_ncq_mode();
+
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -980,6 +1075,23 @@ impl AhciPort {
             DeviceType::Atapi => {
                 let _guard = self.legacy_lock.lock();
                 self.atapi_read(lba, buffer, sectors)
+            }
+        }
+    }
+
+    /// Read multiple disjoint sector ranges. NCQ ports issue all concurrently;
+    /// non-NCQ and ATAPI fall back to sequential reads.
+    pub fn read_sectors_batch(
+        &self,
+        ranges: &mut [(u64, u16, &mut [u8])],
+    ) -> Result<(), AhciError> {
+        match self.device_type {
+            DeviceType::Ata if self.ncq_enabled => self.ncq_read_batch(ranges),
+            _ => {
+                for (lba, sectors, buf) in ranges.iter_mut() {
+                    self.read_sectors(*lba, buf, *sectors)?;
+                }
+                Ok(())
             }
         }
     }

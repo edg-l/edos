@@ -29,6 +29,15 @@ pub fn read_sectors(
     port.read_sectors(lba, buffer, sectors)
 }
 
+/// Read multiple disjoint sector ranges concurrently (NCQ) or sequentially (fallback).
+pub fn read_sectors_batch(
+    device_id: u64,
+    ranges: &mut [(u64, u16, &mut [u8])],
+) -> Result<(), AhciError> {
+    let port = get_port(device_id)?;
+    port.read_sectors_batch(ranges)
+}
+
 /// Write sectors. For NCQ-capable ports, multiple threads can call this concurrently.
 pub fn write_sectors(device_id: u64, lba: u64, data: &[u8], sectors: u16) -> Result<(), AhciError> {
     let port = get_port(device_id)?;

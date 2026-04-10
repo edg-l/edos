@@ -59,6 +59,24 @@ but needed for a complete real-hardware network stack.
 Second NIC backend. Straightforward now that the stack and e1000e exist.
 Useful for VMs where e1000e emulation is slower than paravirtual.
 
+### VFS per-inode locking (prerequisite for parallel I/O)
+Currently fs.lock() holds the entire EFS driver for the full duration of each
+read_bytes/write_bytes call (including disk I/O). This serializes all file I/O
+on a single filesystem. To exploit NCQ concurrency from multiple threads:
+- Replace the global BlockingMutex<Box<dyn FileSystem>> with per-inode or
+  per-file locks
+- Or split the lock: hold FS lock briefly for metadata, release during data I/O
+- Parallel boot loading (3 kthreads reading different binaries) requires this
+Attempted parallel boot loading and hit a hang with 3 threads contending on
+fs.lock() -- 2 of 3 completed, 3rd stuck. Likely a BlockingMutex wake issue
+under 3-way contention. Needs investigation.
+
+### EFS parallel extent reads
+EfsDriver::read_via_extents reads one extent at a time. For fragmented files
+spanning multiple extents, could issue all extent reads concurrently via
+ncq_read_batch. Requires the per-inode locking above plus refactoring EfsDriver
+from &mut self to shared access.
+
 ### AHCI zero-copy DMA
 Currently AHCI reads/writes copy through intermediate per-slot DMA pool pages
 (248 x 4KB scatter-gather pages per slot). Linux avoids this entirely by building
