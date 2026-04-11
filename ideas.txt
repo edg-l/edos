@@ -48,6 +48,9 @@
   Fixes TLB shootdown timeouts caused by 100+ms interrupts-off in
   do_spawn. Boot stack guard page removed (inside HHDM huge pages).
 - **Dep bumps** - acpi 6.1.1, bytemuck 1.25.0, bitflags 2.11.0
+- **O_TRUNC support** - Wired OpenOptions::truncate() through edos_rt
+  OpenFlags::TRUNCATE (0x200) to kernel sys_open. File::create and
+  std::fs::write now correctly truncate existing files.
 
 ## Network Stack Remaining
 
@@ -70,12 +73,6 @@
 - **Per-file fsync** - flush() flushes the entire filesystem. No way to
   fsync a single file. flush_inode trait method exists but no fsync syscall
   yet. Needed for crash-safe writes and databases.
-- **std truncate no-op** - `OpenOptions::truncate(true)` is a no-op in the
-  EDOS Rust std (`sys/fs/edos.rs` truncate method is empty). `File::create`
-  / `std::fs::write` don't truncate existing files, leaving stale bytes when
-  writing shorter content. Workaround: call `file.set_len(len)` after write.
-  Fix: wire truncate flag to `sys_open` with O_TRUNC, or implement
-  truncate-on-open in the kernel.
 
 ## Boot Race / Heap Expansion Bug (mostly fixed, intermittent remnant)
 

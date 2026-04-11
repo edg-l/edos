@@ -797,10 +797,18 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
     // O_APPEND offset is determined per-write by vfs::write, not at open time.
     let append = (flags & 0x400) != 0; // O_APPEND
     let create = (flags & 0x40) != 0; // O_CREAT
+    let truncate = (flags & 0x200) != 0; // O_TRUNC
     let offset = 0u64;
     interrupts::enable();
     match fs_api::file_info(&path) {
-        Ok(_) => {}
+        Ok(_) => {
+            if truncate {
+                if fs_api::truncate(&path, 0).is_err() {
+                    info.lock().errno = Errno::EINVAL;
+                    return -1;
+                }
+            }
+        }
         Err(_) => {
             if create {
                 if fs_api::create_file(&path).is_err() {

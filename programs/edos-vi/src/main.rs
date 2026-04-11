@@ -655,13 +655,10 @@ impl Editor {
 
         let mut content = self.lines.join("\n");
         content.push('\n');
-        let content_len = content.len() as u64;
 
         match std::fs::File::create(&path) {
             Ok(mut file) => match file.write_all(content.as_bytes()) {
                 Ok(()) => {
-                    // Explicit truncate: set_len handles EDOS where truncate is a no-op.
-                    let _ = file.set_len(content_len);
                     let nlines = self.lines.len();
                     self.modified = false;
                     self.status_msg =
