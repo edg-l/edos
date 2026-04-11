@@ -63,6 +63,12 @@
   merges contiguous frames, falls back to pool-copy on translation
   failure or odd-aligned buffers. Applied to NCQ read/write,
   NCQ batch read, and legacy ATA read/write paths.
+- **Demand paging** - VMA subsystem (VmaSet replaces MemoryMapping/
+  MemoryRegion), anonymous zero-fill on fault, lazy ELF loading
+  (segments faulted from stored Arc<Vec<u8>>), lazy stack growth.
+  MemoryManager owns VmaSet (like Linux mm_struct) so copy_to_user
+  can demand-fault during thread construction. Shared fault_in_page
+  used by both IST handler and HHDM translate path.
 
 ## Network Stack Remaining
 
@@ -147,9 +153,6 @@ journaling since the journal needs controlled writeback ordering.
 
 ## Ideas
 
-### Demand Paging
-Stop pre-faulting all pages. COW fork is done, demand paging is the other half.
-
 ### io_uring-style Async I/O
 Shared-memory submission/completion ring between userspace and kernel.
 Already have the SHM infrastructure. Very "modern OS" feature, unique among hobby OSes.
@@ -177,8 +180,8 @@ ncq_read_batch.
 
 ## Fun-per-effort ranking
 
-more tools > demand paging > page cache > async I/O > IPv6 > virtio-net
+more tools > page cache > async I/O > IPv6 > virtio-net
 
 Note: page cache is high-impact (unlocks journaling, mmap, guaranteed
-zero-copy DMA) but large effort. Demand paging is a prerequisite for
-page cache eviction under memory pressure.
+zero-copy DMA) but large effort. Demand paging (done) is a prerequisite
+for page cache eviction under memory pressure.
