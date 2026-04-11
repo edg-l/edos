@@ -190,10 +190,9 @@ spanning multiple extents, could issue all extent reads concurrently via
 ncq_read_batch.
 
 ### More userspace tools
-- wget/curl (HTTP client exists, just needs a CLI wrapper)
-- env/printenv (environment variable support exists)
-- sort, uniq, tee, tr, seq, yes, sleep
 - chmod/chown (once EFS has permission support)
+- printenv (alias for env)
+- basename, dirname, id, whoami, date
 
 ## Fun-per-effort ranking
 
