@@ -103,6 +103,48 @@ cause -- possibly a pre-existing race in the scheduler, VFS, or buddy
 allocator metadata corruption under specific allocation patterns. Not
 reproducible with sequential boot loading.
 
+## Page Cache (important next phase for FS)
+
+Linux-style page cache: all disk I/O goes through page-aligned physical
+frames keyed by (inode, page_index). This is the foundation that makes
+everything else work properly.
+
+**Current problem**: FS drivers allocate heap `Vec<u8>` for every read/write.
+These are not page-aligned, so the AHCI zero-copy DMA path falls back to
+pool-copy when the heap returns non-aligned pointers. The BlockDevice LRU
+sector cache (512B granularity) is the wrong abstraction -- it caches at
+sector level, copies data in/out on every hit, and doesn't integrate with
+the memory system.
+
+**What a page cache provides**:
+- All I/O buffers are physical frames from the frame allocator (always
+  page-aligned, guaranteeing zero-copy DMA 100% of the time)
+- Cache at 4KB page granularity instead of 512B sectors
+- Dirty page tracking with writeback (batch flushing instead of
+  synchronous writes on every FS mutation)
+- Shared pages between readers (multiple opens of the same file share
+  the same cached pages, no redundant I/O)
+- Foundation for mmap/MAP_SHARED (map page cache frames directly into
+  userspace address space)
+- Foundation for O_DIRECT (bypass cache, DMA to user pages)
+- Eliminates per-read/write Vec allocations in EFS and FAT32
+
+**Design sketch**:
+- Global cache: `BTreeMap<(MountId, InodeId, u64), Arc<PageFrame>>` or
+  similar, with LRU eviction under memory pressure
+- `read_page(inode, page_idx)` -> returns cached frame or allocates one
+  and issues a single-page DMA read into it
+- `write_page(inode, page_idx, data)` -> writes into cached frame,
+  marks dirty, periodic writeback flushes dirty pages via DMA
+- FS drivers call page cache instead of BlockDevice directly
+- BlockDevice sector cache removed (replaced by page cache)
+- PRDT entries built from page cache frame physical addresses (always
+  aligned, always zero-copy)
+
+**Scope**: Large (comparable to the network stack). Touches VFS, EFS,
+FAT32, BlockDevice, and the memory subsystem. Should be done before
+journaling since the journal needs controlled writeback ordering.
+
 ## Ideas
 
 ### Text Editor
@@ -139,4 +181,8 @@ ncq_read_batch.
 
 ## Fun-per-effort ranking
 
-text editor > more tools > demand paging > async I/O > IPv6 > virtio-net
+text editor > more tools > demand paging > page cache > async I/O > IPv6 > virtio-net
+
+Note: page cache is high-impact (unlocks journaling, mmap, guaranteed
+zero-copy DMA) but large effort. Demand paging is a prerequisite for
+page cache eviction under memory pressure.

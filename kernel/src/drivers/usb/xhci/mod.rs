@@ -4,6 +4,8 @@ pub mod device;
 pub mod registers;
 pub mod rings;
 
+use core::time::Duration;
+
 use alloc::{sync::Arc, vec::Vec};
 use spin::Once;
 
@@ -1385,6 +1387,13 @@ pub extern "C" fn xhci_driver_main() -> ! {
     let kbd_report_phys = kbd_report_buf.phys_addr().as_u64();
     let mut prev_kbd_report = [0u8; 8];
 
+    // Software key repeat state for USB HID keyboard.
+    // USB keyboards only report state changes, so we must generate repeat events.
+    let mut repeat_key: Option<pc_keyboard::KeyCode> = None;
+    let mut repeat_next_us: u64 = 0; // next repeat event time (uptime_us)
+    const REPEAT_DELAY_US: u64 = 500_000; // 500ms initial delay
+    const REPEAT_INTERVAL_US: u64 = 33_333; // ~30 Hz repeat rate
+
     let mouse_report_buf = dma()
         .allocate_sized(4)
         .expect("xhci: failed to allocate mouse HID report buf");
@@ -1427,11 +1436,21 @@ pub extern "C" fn xhci_driver_main() -> ! {
         // This avoids lost wakes when a mailbox request arrives between the
         // mailbox check and the park call.
         let er = controller.event_ring.as_mut().unwrap() as *mut EventRing;
-        sched().thread_park_while(|| {
-            let has_event = unsafe { (*er).peek() };
-            let has_mailbox = USB_BLOCK_MAILBOX.get().is_some_and(|mb| !mb.is_empty());
-            !has_event && !has_mailbox
-        });
+        if repeat_key.is_some() {
+            // Key held: sleep until next repeat or wake on interrupt/mailbox.
+            let now = crate::timer::uptime_us();
+            if now < repeat_next_us {
+                let wait_us = repeat_next_us - now;
+                sched().thread_sleep(Duration::from_micros(wait_us));
+            }
+        } else {
+            // No key held: park indefinitely until interrupt or mailbox.
+            sched().thread_park_while(|| {
+                let has_event = unsafe { (*er).peek() };
+                let has_mailbox = USB_BLOCK_MAILBOX.get().is_some_and(|mb| !mb.is_empty());
+                !has_event && !has_mailbox
+            });
+        }
 
         // Process all pending events.
         while let Some(event) = controller.event_ring.as_mut().unwrap().poll() {
@@ -1477,6 +1496,29 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                     .broadcast_many(key_events.as_slice());
                             }
                             prev_kbd_report = report;
+
+                            // Update key repeat state from the current report.
+                            // Find the last non-zero key in the report (most recently pressed).
+                            let held_key = report[2..8]
+                                .iter()
+                                .rev()
+                                .find(|&&k| k != 0)
+                                .and_then(|&k| crate::drivers::usb::hid::usb_hid_to_keycode(k));
+                            match held_key {
+                                Some(key) => {
+                                    if repeat_key != Some(key) {
+                                        // New key pressed: start initial delay
+                                        repeat_key = Some(key);
+                                        repeat_next_us =
+                                            crate::timer::uptime_us() + REPEAT_DELAY_US;
+                                    }
+                                    // Same key still held: keep existing repeat timing
+                                }
+                                None => {
+                                    // All keys released
+                                    repeat_key = None;
+                                }
+                            }
 
                             // Resubmit the TRB to receive the next keyboard report
                             if let Some((ref mut dev, ref mut ring, ep_dci)) = keyboard_device {
@@ -1526,6 +1568,16 @@ pub extern "C" fn xhci_driver_main() -> ! {
                 _ => {
                     println!("xhci: unhandled event type {}", event.trb_type());
                 }
+            }
+        }
+
+        // Generate key repeat event if a key is held and the repeat timer has fired.
+        if let Some(key) = repeat_key {
+            let now = crate::timer::uptime_us();
+            if now >= repeat_next_us {
+                let event = pc_keyboard::KeyEvent::new(key, pc_keyboard::KeyState::Down);
+                crate::drivers::keyboard::KEY_EVENT_BROADCAST.broadcast(event);
+                repeat_next_us = now + REPEAT_INTERVAL_US;
             }
         }
 
