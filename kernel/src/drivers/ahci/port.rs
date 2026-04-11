@@ -6,7 +6,8 @@ use core::{
 
 use alloc::{vec, vec::Vec};
 
-use x86_64::PhysAddr;
+use x86_64::structures::paging::mapper::TranslateResult;
+use x86_64::{PhysAddr, VirtAddr};
 
 use crate::{
     drivers::{
@@ -15,13 +16,15 @@ use crate::{
             fis::FisRegH2D,
             structures::{
                 CMD_HEADER_ATAPI, CMD_HEADER_WRITE, CommandHeader, CommandTable,
-                DeviceIdentifyInfo, HbaFis, HbaPort, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE,
-                PORT_CMD_ST, PORT_IS_TFES, PrdtEntry, ScsiInquiry, ScsiRead10, ScsiReadCapacity10,
+                DeviceIdentifyInfo, HbaFis, HbaPort, MAX_PRDT_ENTRIES, PORT_CMD_CR, PORT_CMD_FR,
+                PORT_CMD_FRE, PORT_CMD_ST, PORT_IS_TFES, PrdtEntry, ScsiInquiry, ScsiRead10,
+                ScsiReadCapacity10,
             },
         },
         dma::{DmaBuffer, DmaRegion, dma},
     },
     log,
+    memory::mapper::memory_mapper,
     thread::{mutex::BlockingMutex, scheduler::sched, waitqueue::WaitQueue},
 };
 
@@ -36,6 +39,64 @@ pub const NCQ_PAGES_PER_SLOT: usize = 248;
 struct SlotPool {
     pages: Vec<DmaBuffer>,
     phys: Vec<PhysAddr>,
+}
+
+/// Translate a virtual buffer into a scatter-gather list of (phys_addr, byte_count) entries.
+/// Returns None if any page translation fails. Merges physically contiguous entries.
+/// IMPORTANT: The IrqLock on memory_mapper() is acquired and dropped per-page translation.
+/// Safety: x86-64 PCIe DMA is cache-coherent; dirty WB cache lines are visible to the
+/// HBA via bus snooping. Do not use on non-coherent architectures without cache flushes.
+fn virt_buffer_to_sg_list(
+    buf: *const u8,
+    len: usize,
+) -> Option<heapless::Vec<(PhysAddr, usize), MAX_PRDT_ENTRIES>> {
+    if len == 0 {
+        return Some(heapless::Vec::new());
+    }
+    // AHCI PRDT DBA must be word-aligned (2-byte). Fall back to pool path if not.
+    if buf as usize % 2 != 0 {
+        return None;
+    }
+
+    let mut sg = heapless::Vec::new();
+    let mut remaining = len;
+    let mut vaddr = VirtAddr::new(buf as u64);
+
+    while remaining > 0 {
+        // Translate this virtual address to physical. Acquire/drop lock per page.
+        let phys = {
+            let mapper = memory_mapper();
+            match mapper.translate(vaddr) {
+                TranslateResult::Mapped { frame, offset, .. } => frame.start_address() + offset,
+                _ => return None,
+            }
+        }; // IrqLock dropped here
+
+        // Bytes available in this page from the current offset
+        let page_offset = vaddr.as_u64() as usize & 0xFFF;
+        let chunk = remaining.min(4096 - page_offset);
+
+        // Try to merge with previous entry if physically contiguous
+        if let Some(last) = sg.last_mut() {
+            let (last_phys, last_len): &mut (PhysAddr, usize) = last;
+            if *last_phys + *last_len as u64 == phys {
+                *last_len += chunk;
+                remaining -= chunk;
+                vaddr += chunk as u64;
+                continue;
+            }
+        }
+
+        // New entry
+        if sg.push((phys, chunk)).is_err() {
+            return None; // Exceeded MAX_PRDT_ENTRIES
+        }
+
+        remaining -= chunk;
+        vaddr += chunk as u64;
+    }
+
+    Some(sg)
 }
 
 pub struct AhciPort {
@@ -504,6 +565,46 @@ impl AhciPort {
         Ok(())
     }
 
+    /// Set up a command table with PRDT entries from a pre-built scatter-gather list.
+    /// Used for zero-copy DMA where PRDT points directly to the caller's buffer pages.
+    fn setup_scatter_direct(
+        &self,
+        slot: usize,
+        fis: &FisRegH2D,
+        sg_list: &[(PhysAddr, usize)],
+    ) -> Result<(), AhciError> {
+        debug_assert!(sg_list.len() <= MAX_PRDT_ENTRIES);
+
+        let table_ref = self.command_tables[slot]
+            .as_ref()
+            .ok_or(AhciError::InvalidSlot)?;
+
+        unsafe {
+            let table = table_ref.get();
+            table.write(core::mem::zeroed());
+            let table = &mut *table;
+
+            let fis_bytes = bytemuck::bytes_of(fis);
+            table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
+
+            for (i, &(phys, byte_count)) in sg_list.iter().enumerate() {
+                debug_assert!(phys.as_u64() % 2 == 0, "PRDT DBA must be word-aligned");
+                debug_assert!(byte_count > 0, "zero-length PRDT entry");
+                if byte_count == 0 {
+                    return Err(AhciError::IoError);
+                }
+                table.prdt[i] = PrdtEntry {
+                    dba: phys.as_u64() as u32,
+                    dbau: (phys.as_u64() >> 32) as u32,
+                    reserved: 0,
+                    dbc: (byte_count as u32) - 1,
+                };
+            }
+        }
+
+        Ok(())
+    }
+
     /// Set up an ATAPI command table with PACKET FIS and SCSI CDB.
     fn setup_atapi_command_table(
         &self,
@@ -741,28 +842,35 @@ impl AhciPort {
         self.slot_waiters[slot].store(tid.0, Ordering::Release);
 
         let result = (|| -> Result<(), AhciError> {
-            self.setup_scatter_command(
-                slot,
-                &FisRegH2D::new_read_fpdma_queued(lba, sectors, slot as u8),
-                expected_size,
-            )?;
+            let fis = FisRegH2D::new_read_fpdma_queued(lba, sectors, slot as u8);
+            let sg = virt_buffer_to_sg_list(buffer.as_ptr(), expected_size);
 
-            self.issue_ncq_command(slot, 0, num_pages as u16)?;
+            if let Some(ref sg_list) = sg {
+                self.setup_scatter_direct(slot, &fis, sg_list)?;
+                let prdtl = sg_list.len() as u16;
+                self.issue_ncq_command(slot, 0, prdtl)?;
+            } else {
+                self.setup_scatter_command(slot, &fis, expected_size)?;
+                self.issue_ncq_command(slot, 0, num_pages as u16)?;
+            }
+
             self.wait_for_ncq_completion(slot, Duration::from_secs(5))?;
 
-            // Copy from per-slot pool pages to caller buffer.
-            let pool = &self.slot_pools[slot];
-            let mut offset = 0;
-            for i in 0..num_pages {
-                let copy_len = (expected_size - offset).min(4096);
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        pool.pages[i].as_ptr(),
-                        buffer.as_mut_ptr().add(offset),
-                        copy_len,
-                    );
+            // Only copy from pool if we used the pool path
+            if sg.is_none() {
+                let pool = &self.slot_pools[slot];
+                let mut offset = 0;
+                for i in 0..num_pages {
+                    let copy_len = (expected_size - offset).min(4096);
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            pool.pages[i].as_ptr(),
+                            buffer.as_mut_ptr().add(offset),
+                            copy_len,
+                        );
+                    }
+                    offset += copy_len;
                 }
-                offset += copy_len;
             }
             Ok(())
         })();
@@ -802,29 +910,36 @@ impl AhciPort {
         self.slot_waiters[slot].store(tid.0, Ordering::Release);
 
         let result = (|| -> Result<(), AhciError> {
-            // Copy from caller buffer to per-slot pool pages.
-            let pool = &self.slot_pools[slot];
-            let mut offset = 0;
-            for i in 0..num_pages {
-                let copy_len = (expected_size - offset).min(4096);
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        buffer.as_ptr().add(offset),
-                        pool.pages[i].as_ptr(),
-                        copy_len,
-                    );
-                }
-                offset += copy_len;
-            }
-
             let fis = if fua {
                 FisRegH2D::new_write_fpdma_queued_fua(lba, sectors, slot as u8)
             } else {
                 FisRegH2D::new_write_fpdma_queued(lba, sectors, slot as u8)
             };
-            self.setup_scatter_command(slot, &fis, expected_size)?;
+            let sg = virt_buffer_to_sg_list(buffer.as_ptr(), expected_size);
 
-            self.issue_ncq_command(slot, CMD_HEADER_WRITE, num_pages as u16)?;
+            if let Some(ref sg_list) = sg {
+                self.setup_scatter_direct(slot, &fis, sg_list)?;
+                let prdtl = sg_list.len() as u16;
+                self.issue_ncq_command(slot, CMD_HEADER_WRITE, prdtl)?;
+            } else {
+                // Fallback: copy to pool pages
+                let pool = &self.slot_pools[slot];
+                let mut offset = 0;
+                for i in 0..num_pages {
+                    let copy_len = (expected_size - offset).min(4096);
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            buffer.as_ptr().add(offset),
+                            pool.pages[i].as_ptr(),
+                            copy_len,
+                        );
+                    }
+                    offset += copy_len;
+                }
+                self.setup_scatter_command(slot, &fis, expected_size)?;
+                self.issue_ncq_command(slot, CMD_HEADER_WRITE, num_pages as u16)?;
+            }
+
             self.wait_for_ncq_completion(slot, Duration::from_secs(5))
         })();
 
@@ -856,11 +971,13 @@ impl AhciPort {
         for chunk in ranges.chunks_mut(max_batch) {
             // Allocate slots and issue all commands in this sub-batch.
             let mut slots: heapless::Vec<usize, 32> = heapless::Vec::new();
+            let mut direct: heapless::Vec<bool, 32> = heapless::Vec::new();
             let tid = sched().current_thread().unwrap().id;
 
             for &(lba, sectors, ref buf) in chunk.iter() {
                 if sectors == 0 {
                     let _ = slots.push(usize::MAX); // sentinel: no slot needed
+                    let _ = direct.push(false);
                     continue;
                 }
                 let expected_size = sectors as usize * 512;
@@ -868,28 +985,41 @@ impl AhciPort {
                 if num_pages > NCQ_PAGES_PER_SLOT || buf.len() < expected_size {
                     first_err.get_or_insert(AhciError::IoError);
                     let _ = slots.push(usize::MAX);
+                    let _ = direct.push(false);
                     continue;
                 }
 
                 let slot = self.allocate_slot_blocking();
                 self.slot_waiters[slot].store(tid.0, Ordering::Release);
 
-                let setup_result = self
-                    .setup_scatter_command(
+                let sg = virt_buffer_to_sg_list(buf.as_ptr(), expected_size);
+
+                let setup_result = if let Some(ref sg_list) = sg {
+                    self.setup_scatter_direct(
+                        slot,
+                        &FisRegH2D::new_read_fpdma_queued(lba, sectors, slot as u8),
+                        sg_list,
+                    )
+                    .and_then(|()| self.issue_ncq_command(slot, 0, sg_list.len() as u16))
+                } else {
+                    self.setup_scatter_command(
                         slot,
                         &FisRegH2D::new_read_fpdma_queued(lba, sectors, slot as u8),
                         expected_size,
                     )
-                    .and_then(|()| self.issue_ncq_command(slot, 0, num_pages as u16));
+                    .and_then(|()| self.issue_ncq_command(slot, 0, num_pages as u16))
+                };
 
                 if let Err(e) = setup_result {
                     self.slot_waiters[slot].store(0, Ordering::Release);
                     self.free_slot(slot);
                     first_err.get_or_insert(e);
                     let _ = slots.push(usize::MAX);
+                    let _ = direct.push(false);
                     continue;
                 }
                 let _ = slots.push(slot);
+                let _ = direct.push(sg.is_some());
             }
 
             // Wait for all issued commands and copy results.
@@ -901,7 +1031,8 @@ impl AhciPort {
 
                 let wait_result = self.wait_for_ncq_completion(slot, Duration::from_secs(5));
 
-                if wait_result.is_ok() {
+                if wait_result.is_ok() && !direct[i] {
+                    // Pool path: copy from pool to buffer
                     let expected_size = *sectors as usize * 512;
                     let num_pages = expected_size.div_ceil(4096);
                     let pool = &self.slot_pools[slot];
@@ -917,8 +1048,8 @@ impl AhciPort {
                         }
                         offset += copy_len;
                     }
-                } else {
-                    first_err.get_or_insert(wait_result.unwrap_err());
+                } else if let Err(e) = wait_result {
+                    first_err.get_or_insert(e);
                 }
 
                 self.slot_waiters[slot].store(0, Ordering::Release);
@@ -961,27 +1092,35 @@ impl AhciPort {
         self.slot_waiters[slot].store(tid.0, Ordering::Release);
 
         let result = (|| -> Result<(), AhciError> {
-            self.setup_scatter_command(
-                slot,
-                &FisRegH2D::new_read_dma_ext(lba, sectors),
-                expected_size,
-            )?;
+            let fis = FisRegH2D::new_read_dma_ext(lba, sectors);
+            let sg = virt_buffer_to_sg_list(buffer.as_ptr(), expected_size);
 
-            self.issue_command(slot, 0, num_pages as u16)?;
+            if let Some(ref sg_list) = sg {
+                self.setup_scatter_direct(slot, &fis, sg_list)?;
+                let prdtl = sg_list.len() as u16;
+                self.issue_command(slot, 0, prdtl)?;
+            } else {
+                self.setup_scatter_command(slot, &fis, expected_size)?;
+                self.issue_command(slot, 0, num_pages as u16)?;
+            }
+
             self.wait_for_completion(slot, Duration::from_secs(5))?;
 
-            let pool = &self.slot_pools[slot];
-            let mut offset = 0;
-            for i in 0..num_pages {
-                let copy_len = (expected_size - offset).min(4096);
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        pool.pages[i].as_ptr(),
-                        buffer.as_mut_ptr().add(offset),
-                        copy_len,
-                    );
+            // Only copy from pool if we used the pool path
+            if sg.is_none() {
+                let pool = &self.slot_pools[slot];
+                let mut offset = 0;
+                for i in 0..num_pages {
+                    let copy_len = (expected_size - offset).min(4096);
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            pool.pages[i].as_ptr(),
+                            buffer.as_mut_ptr().add(offset),
+                            copy_len,
+                        );
+                    }
+                    offset += copy_len;
                 }
-                offset += copy_len;
             }
             Ok(())
         })();
@@ -1020,28 +1159,36 @@ impl AhciPort {
         self.slot_waiters[slot].store(tid.0, Ordering::Release);
 
         let result = (|| -> Result<(), AhciError> {
-            let pool = &self.slot_pools[slot];
-            let mut offset = 0;
-            for i in 0..num_pages {
-                let copy_len = (expected_size - offset).min(4096);
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        buffer.as_ptr().add(offset),
-                        pool.pages[i].as_ptr(),
-                        copy_len,
-                    );
-                }
-                offset += copy_len;
-            }
-
             let fis = if fua {
                 FisRegH2D::new_write_dma_fua_ext(lba, sectors)
             } else {
                 FisRegH2D::new_write_dma_ext(lba, sectors)
             };
-            self.setup_scatter_command(slot, &fis, expected_size)?;
+            let sg = virt_buffer_to_sg_list(buffer.as_ptr(), expected_size);
 
-            self.issue_command(slot, CMD_HEADER_WRITE, num_pages as u16)?;
+            if let Some(ref sg_list) = sg {
+                self.setup_scatter_direct(slot, &fis, sg_list)?;
+                let prdtl = sg_list.len() as u16;
+                self.issue_command(slot, CMD_HEADER_WRITE, prdtl)?;
+            } else {
+                // Fallback: copy to pool pages
+                let pool = &self.slot_pools[slot];
+                let mut offset = 0;
+                for i in 0..num_pages {
+                    let copy_len = (expected_size - offset).min(4096);
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            buffer.as_ptr().add(offset),
+                            pool.pages[i].as_ptr(),
+                            copy_len,
+                        );
+                    }
+                    offset += copy_len;
+                }
+                self.setup_scatter_command(slot, &fis, expected_size)?;
+                self.issue_command(slot, CMD_HEADER_WRITE, num_pages as u16)?;
+            }
+
             self.wait_for_completion(slot, Duration::from_secs(5))
         })();
 

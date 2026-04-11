@@ -57,6 +57,12 @@
   Rust std. AHCI FUA detection (IDENTIFY word 84 bit 6) and FUA write
   commands (WRITE DMA FUA EXT, WRITE FPDMA QUEUED FUA) added for
   future use.
+- **AHCI zero-copy DMA** - Build PRDT entries directly from caller
+  buffer physical pages, eliminating per-I/O memcpy through DMA pool
+  pages. Translates virt-to-phys per page via memory_mapper(),
+  merges contiguous frames, falls back to pool-copy on translation
+  failure or odd-aligned buffers. Applied to NCQ read/write,
+  NCQ batch read, and legacy ATA read/write paths.
 
 ## Network Stack Remaining
 
@@ -124,13 +130,6 @@ Useful for VMs where e1000e emulation is slower than paravirtual.
 EfsDriver::read_via_extents reads one extent at a time. For fragmented files
 spanning multiple extents, could issue all extent reads concurrently via
 ncq_read_batch.
-
-### AHCI zero-copy DMA
-Currently AHCI reads/writes copy through intermediate per-slot DMA pool pages
-(248 x 4KB scatter-gather pages per slot). Linux avoids this entirely by building
-PRDT entries that point directly to page cache pages. Requires page-aligned
-buffers from the VFS/page cache layer. Would eliminate the copy-in/copy-out
-overhead and reduce DMA memory usage from ~31MB/port to just the command tables.
 
 ### More userspace tools
 - wget/curl (HTTP client exists, just needs a CLI wrapper)
