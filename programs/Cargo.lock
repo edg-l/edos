@@ -84,6 +84,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "env"
+version = "0.1.0"
+
+[[package]]
 name = "forktest"
 version = "0.1.0"
 dependencies = [
@@ -172,7 +176,15 @@ name = "rmdir"
 version = "0.1.0"
 
 [[package]]
+name = "seq"
+version = "0.1.0"
+
+[[package]]
 name = "sleep"
+version = "0.1.0"
+
+[[package]]
+name = "sort"
 version = "0.1.0"
 
 [[package]]
@@ -184,7 +196,15 @@ name = "tail"
 version = "0.1.0"
 
 [[package]]
+name = "tee"
+version = "0.1.0"
+
+[[package]]
 name = "touch"
+version = "0.1.0"
+
+[[package]]
+name = "tr"
 version = "0.1.0"
 
 [[package]]
@@ -192,7 +212,15 @@ name = "uname"
 version = "0.1.0"
 
 [[package]]
+name = "uniq"
+version = "0.1.0"
+
+[[package]]
 name = "wc"
+version = "0.1.0"
+
+[[package]]
+name = "wget"
 version = "0.1.0"
 
 [[package]]
@@ -204,4 +232,8 @@ dependencies = [
 
 [[package]]
 name = "write"
+version = "0.1.0"
+
+[[package]]
+name = "yes"
 version = "0.1.0"
