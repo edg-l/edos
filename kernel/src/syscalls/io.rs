@@ -486,13 +486,14 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             // Clone the input_wq Arc before entering the loop (avoids holding lock while blocking).
             let input_wq = pty.lock().input_wq();
             loop {
-                // Check if this thread has been killed before blocking.
+                // If this thread has been killed (e.g. Ctrl+C), force-exit
+                // immediately. We can't rely on userspace to handle EINTR
+                // because Rust std's read_to_string retries EINTR in a loop.
                 let is_killed = sched.current_thread().map_or(false, |t| {
                     t.killed.load(core::sync::atomic::Ordering::Acquire)
                 });
                 if is_killed {
-                    info.lock().errno = Errno::EINTR;
-                    break -1;
+                    sched.thread_exit(130); // 128 + SIGINT(2)
                 }
 
                 let (result, eof, notif) = {
