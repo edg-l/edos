@@ -45,6 +45,9 @@ pub struct UserThread {
     pub heap_break: u64,
     pub address_space_refs: Arc<AtomicUsize>,
     pub process_stack_top: Arc<AtomicU64>,
+    /// Per-address-space TLS slot counter. Thread 0 uses slot 0, each
+    /// subsequent clone'd thread gets the next slot via fetch_add.
+    pub next_tls_slot: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone)]

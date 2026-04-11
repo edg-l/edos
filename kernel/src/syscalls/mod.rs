@@ -1583,6 +1583,7 @@ fn sys_clone(
         .tls
         .as_ref()
         .map(|tls| tls.template.clone());
+    let next_tls_slot = parent_user_read.next_tls_slot.clone();
 
     // Create child context - clone parent's CPU state
     let mut child_ctx = CpuContext::new_user_thread(func_ptr, user_stack_top - 8);
@@ -1610,7 +1611,8 @@ fn sys_clone(
     let mut tls_fs_base = 0u64;
     if let Some(template) = tls_template.take() {
         let mut manager_guard = memory_manager.lock();
-        match crate::thread::thread::allocate_tls_region(&template, child_id, &mut manager_guard) {
+        let tls_slot = next_tls_slot.fetch_add(1, Ordering::Relaxed);
+        match crate::thread::thread::allocate_tls_region(&template, tls_slot, &mut manager_guard) {
             Ok(allocation) => {
                 tls_fs_base = allocation.fs_base;
                 tls_region = Some(allocation.vma);
@@ -1645,6 +1647,7 @@ fn sys_clone(
         heap_break: parent_heap_break,
         address_space_refs,
         process_stack_top,
+        next_tls_slot, // Arc clone - shared counter
     }));
 
     // Create child Thread
@@ -1841,6 +1844,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         heap_break: parent_heap_break,
         address_space_refs: Arc::new(AtomicUsize::new(1)),
         process_stack_top: Arc::new(AtomicU64::new(parent_process_stack_top)),
+        next_tls_slot: Arc::new(AtomicU64::new(1)), // fresh counter, slot 0 inherited via COW
     }));
 
     let child_thread = Arc::new(Thread {

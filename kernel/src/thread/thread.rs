@@ -205,7 +205,7 @@ fn align_down_u64(value: u64, align: u64) -> u64 {
 
 pub(crate) fn allocate_tls_region(
     template: &Arc<TlsTemplate>,
-    thread_id: ThreadId,
+    tls_slot: u64,
     memory_manager: &mut MemoryManager,
 ) -> Result<TlsAllocation, ElfLoadError> {
     let align = template.align.max(1);
@@ -224,8 +224,7 @@ pub(crate) fn allocate_tls_region(
 
     let stack_bottom = USER_STACK_TOP.as_u64().saturating_sub(USER_STACK_SIZE);
     let base_anchor = stack_bottom.saturating_sub(TLS_GUARD_GAP);
-    let slot_offset = thread_id
-        .0
+    let slot_offset = tls_slot
         .checked_mul(TLS_REGION_STRIDE)
         .ok_or(ElfLoadError::MappingFailed)?;
 
@@ -482,7 +481,7 @@ impl Thread {
 
         if let Some(template) = load_info.tls_template.take() {
             let template = Arc::new(template);
-            let allocation = allocate_tls_region(&template, id, &mut process_memory_manager)?;
+            let allocation = allocate_tls_region(&template, 0, &mut process_memory_manager)?;
             tls_fs_base = allocation.fs_base;
             vma_set.lock().insert(allocation.vma);
             tls_runtime = Some(allocation.runtime);
@@ -520,6 +519,7 @@ impl Thread {
             heap_break,
             address_space_refs,
             process_stack_top,
+            next_tls_slot: Arc::new(AtomicU64::new(1)), // slot 0 used by initial thread
         }));
 
         let thread = Arc::new(Thread {
@@ -624,6 +624,17 @@ impl Thread {
 
         let mut memory_manager = user.memory_manager.lock();
 
+        // Clean up this thread's TLS region (each thread has its own TLS slot).
+        // Must happen for ALL threads, not just the last one, to avoid leaking
+        // TLS pages in multi-threaded processes.
+        if let Some(tls) = &user.tls {
+            let tls_start = tls.mapping_base;
+            let tls_size = tls.mapping_size;
+            let _ = memory_manager.unmap_memory(tls_start, tls_size);
+            // Remove the TLS VMA from the shared VmaSet
+            user.vmas.lock().remove(&tls_start);
+        }
+
         if is_last_thread {
             // Close all file descriptors (pipes need proper shutdown for EOF)
             if let Some(info) = THREADS.get_info(self.id) {
@@ -700,8 +711,11 @@ impl Thread {
             let vmas = user.vmas.lock().clone();
             for vma in vmas.iter() {
                 match &vma.backing {
-                    VmaBacking::Anonymous | VmaBacking::Tls => {
+                    VmaBacking::Anonymous => {
                         let _ = memory_manager.unmap_memory(vma.start, vma.size());
+                    }
+                    VmaBacking::Tls => {
+                        // Already cleaned up above (per-thread TLS cleanup)
                     }
                     VmaBacking::ElfSegment { .. } => {
                         // Pages may be lazily faulted -- only unmap present ones
