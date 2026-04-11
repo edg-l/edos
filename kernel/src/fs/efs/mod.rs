@@ -14,6 +14,7 @@ use efs_common::{
 
 use super::block_device::BlockDevice;
 use super::gpt::Partition;
+use super::page_cache::PageCacheOps;
 use super::path::Path;
 use super::{Error, File, FileAttrs, FileKind, FileSystem, FileTime};
 use crate::thread::mutex::BlockingMutex;
@@ -1746,6 +1747,133 @@ impl FileSystem for EfsDriver {
         // Data written synchronously; flush drive write cache only.
         self.device.flush()?;
         Ok(())
+    }
+
+    fn as_page_cache_ops(&self) -> Option<&dyn crate::fs::page_cache::PageCacheOps> {
+        Some(self)
+    }
+}
+
+// ---- PageCacheOps implementation --------------------------------------------
+
+impl PageCacheOps for EfsDriver {
+    fn fill_page(&self, ino: u64, page_index: u64, buf: &mut [u8]) -> Result<usize, Error> {
+        let inode = self.read_inode(ino)?;
+        let file_size = inode.size as usize;
+        let offset = page_index as usize * 4096;
+
+        if offset >= file_size {
+            buf.fill(0);
+            return Ok(0);
+        }
+
+        let valid_bytes = (file_size - offset).min(4096);
+
+        if inode.flags & INODE_FLAG_INLINE_DATA != 0 {
+            let end = (offset + valid_bytes).min(inode.data_area.len());
+            buf[..end - offset].copy_from_slice(&inode.data_area[offset..end]);
+            if valid_bytes < 4096 {
+                buf[valid_bytes..].fill(0);
+            }
+            return Ok(valid_bytes);
+        }
+
+        // Extent-based read: one page == one block (block_size == 4096).
+        let hdr: EfsExtentHeader = unsafe {
+            core::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader)
+        };
+        if hdr.magic != EXTENT_MAGIC || hdr.depth != 0 {
+            return Err(Error::Corrupted);
+        }
+
+        let extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
+        let logical_block = page_index as u32;
+
+        let extent = extents
+            .as_slice()
+            .iter()
+            .find(|e| {
+                e.logical_block <= logical_block
+                    && logical_block < e.logical_block + e.length as u32
+            })
+            .ok_or(Error::Corrupted)?;
+
+        let phys_block = extent.physical_start() + (logical_block - extent.logical_block) as u64;
+        let lba = self.block_to_lba(phys_block);
+        let spb = self.sectors_per_block();
+
+        // Read directly into the caller's buffer, bypassing the BlockDevice
+        // sector cache. The page cache IS the cache for file data.
+        crate::drivers::ahci::direct::read_sectors(
+            self.device.device_id,
+            lba,
+            spb,
+            &mut buf[..spb as usize * 512],
+        )?;
+        if valid_bytes < 4096 {
+            buf[valid_bytes..].fill(0);
+        }
+
+        Ok(valid_bytes)
+    }
+
+    fn fill_pages_bulk(
+        &self,
+        ino: u64,
+        offset: usize,
+        count: usize,
+    ) -> Result<alloc::vec::Vec<u8>, Error> {
+        let inode = self.read_inode(ino)?;
+        if inode.mode & S_IFMT != S_IFREG {
+            return Err(Error::NotAFile);
+        }
+        self.read_file_data(&inode, offset, count)
+    }
+
+    fn flush_page(
+        &self,
+        ino: u64,
+        page_index: u64,
+        buf: &[u8],
+        _valid_bytes: usize,
+    ) -> Result<(), Error> {
+        let inode = self.read_inode(ino)?;
+
+        if inode.flags & INODE_FLAG_INLINE_DATA != 0 {
+            // Page cache pages are always 4096 bytes, which exceeds the
+            // inline data area (176 bytes). Convert to extent mode first.
+            self.convert_inline_to_extents(ino, &inode)?;
+            // Fall through to extent-based write below.
+        }
+
+        // Extent-based write.
+        let logical_block = page_index as u32;
+        let phys_block = self.ensure_block_for_logical(ino, logical_block)?;
+        let lba = self.block_to_lba(phys_block);
+        let spb = self.sectors_per_block();
+
+        // Write directly, bypassing the BlockDevice sector cache.
+        let needed = spb as usize * 512;
+        crate::drivers::ahci::direct::write_sectors(
+            self.device.device_id,
+            lba,
+            &buf[..needed],
+            spb,
+        )?;
+
+        Ok(())
+    }
+
+    fn update_size(&self, ino: u64, new_size: u64) -> Result<(), Error> {
+        let inode = self.read_inode(ino)?;
+        if new_size <= inode.size {
+            return Ok(());
+        }
+        let mut updated = inode;
+        updated.size = new_size;
+        updated.mtime_sec = current_unix_time();
+        updated.checksum = efs_common::checksum_inode(&updated);
+        self.write_inode(ino, &updated)
     }
 }
 

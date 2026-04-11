@@ -32,6 +32,7 @@ pub mod handle;
 pub mod inode;
 pub mod mbr;
 pub mod memfs;
+pub mod page_cache;
 pub mod path;
 pub mod procfs;
 pub mod vfs;
@@ -249,6 +250,12 @@ pub trait FileSystem {
     fn flush_inode(&self, _ino: u64) -> Result<(), Error> {
         Err(Error::Unsupported)
     }
+
+    /// Return a reference to `PageCacheOps` if this filesystem supports it.
+    /// Default returns None (stateless filesystems like procfs/memfs/devfs).
+    fn as_page_cache_ops(&self) -> Option<&dyn crate::fs::page_cache::PageCacheOps> {
+        None
+    }
 }
 
 /// Filesystem statistics returned by the `statfs` trait method.
@@ -427,6 +434,7 @@ pub extern "C" fn fs_main_thread() -> ! {
     log!("Started main fs");
     let thread = sched().current_thread().unwrap();
     thread.set_priority(IO_PRIORITY);
+
     let devices = list_devices();
     log!("Listed devices");
 

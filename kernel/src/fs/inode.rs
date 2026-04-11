@@ -1,22 +1,20 @@
-//! VFS-level inode abstraction with per-inode locking.
+//! VFS-level inode abstraction with per-inode locking and page cache.
 //!
 //! Each `VfsInode` represents a unique file/directory on a specific mount.
 //! It carries a per-inode `RwLock<()>` that serializes access: multiple
-//! concurrent readers OR one exclusive writer per inode. The lock protects
-//! no data directly -- it enforces the access protocol at the VFS layer.
+//! concurrent readers OR one exclusive writer per inode.
 //!
-//! Open `FsFile` descriptors hold `Arc<VfsInode>`, keeping the inode alive
-//! as long as any fd references it. Eviction from the dentry cache only
-//! removes the lookup path; the Arc refcount prevents deallocation.
+//! The `pages` field holds a per-inode page cache (Linux calls this the
+//! address_space). Different files have independent page maps and locks,
+//! so concurrent reads of different files have zero contention.
 
 use alloc::sync::Arc;
 
 use crate::thread::rwlock::RwLock as BlockingRwLock;
 
-use super::FileKind;
+use super::{FileKind, page_cache::InodePages};
 
-/// A VFS-level inode. Wraps a filesystem-local inode number with per-inode
-/// synchronization and cached metadata.
+/// A VFS-level inode.
 #[expect(unused)]
 pub struct VfsInode {
     /// Unique mount identifier (assigned by VFS on mount).
@@ -26,9 +24,9 @@ pub struct VfsInode {
     /// Cached file kind (file, directory, special).
     pub kind: FileKind,
     /// Per-inode read-write lock.
-    /// Readers: concurrent read operations on this file.
-    /// Writer: exclusive write/truncate/rename on this file.
     pub lock: BlockingRwLock<()>,
+    /// Per-inode page cache (file data pages).
+    pub pages: InodePages,
 }
 
 impl VfsInode {
@@ -38,6 +36,7 @@ impl VfsInode {
             ino,
             kind,
             lock: BlockingRwLock::new(()),
+            pages: InodePages::new(),
         })
     }
 }

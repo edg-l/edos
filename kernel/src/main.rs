@@ -420,6 +420,7 @@ pub fn mount_system_fs() -> ! {
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     // Note: do not add complex calls or memory read or scheduler reads, otherwise recursive faults can happen.
+    crate::serial::emergency_write(b"\n!!! KERNEL PANIC !!!\n");
     println!("KERNEL PANIC:");
     println!("{info:#?}");
 

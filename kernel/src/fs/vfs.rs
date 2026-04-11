@@ -157,13 +157,127 @@ pub fn resolve_with_inode(path: &Path, inode: Option<Arc<VfsInode>>) -> Option<V
 
 pub fn read(op: &VfsOp, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
     let _guard = op.inode.as_ref().map(|i| i.lock.read());
-    if let Some(ino) = op.inode.as_ref().map(|i| i.ino).filter(|&i| i != 0) {
-        match op.fs.read_bytes_ino(ino, offset, count) {
+
+    if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
+        if let Some(pc_ops) = op.fs.as_page_cache_ops() {
+            return page_cache_read(inode, pc_ops, offset, count);
+        }
+        match op.fs.read_bytes_ino(inode.ino, offset, count) {
             Err(Error::Unsupported) => {}
             result => return result,
         }
     }
     op.fs.read_bytes(&op.relative, offset, count)
+}
+
+fn page_cache_read(
+    inode: &Arc<VfsInode>,
+    pc_ops: &dyn super::page_cache::PageCacheOps,
+    offset: usize,
+    count: usize,
+) -> Result<Vec<u8>, Error> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let start_page = offset / 4096;
+    let end_page = (offset + count - 1) / 4096;
+    let ino = inode.ino;
+
+    // Check which pages are already cached vs need loading.
+    let mut uncached_start: Option<usize> = None;
+    let mut uncached_ranges: Vec<(usize, usize)> = Vec::new(); // (start_page, end_page) inclusive
+
+    for page_idx in start_page..=end_page {
+        let is_cached = {
+            let map = inode.pages.pages.lock();
+            map.contains_key(&(page_idx as u64))
+        };
+        if !is_cached {
+            if uncached_start.is_none() {
+                uncached_start = Some(page_idx);
+            }
+        } else if let Some(start) = uncached_start.take() {
+            uncached_ranges.push((start, page_idx - 1));
+        }
+    }
+    if let Some(start) = uncached_start {
+        uncached_ranges.push((start, end_page));
+    }
+
+    // Bulk-fill uncached ranges using fill_page. For contiguous uncached
+    // ranges, fill_page is called per page but reads go through the FS
+    // driver which can batch them.
+    for &(range_start, range_end) in &uncached_ranges {
+        let byte_offset = range_start * 4096;
+        let byte_count = (range_end - range_start + 1) * 4096;
+
+        // Use fill_pages_bulk if available; otherwise fall back per-page.
+        let bulk_data = pc_ops.fill_pages_bulk(ino, byte_offset, byte_count);
+
+        match bulk_data {
+            Ok(data) => {
+                // Distribute bulk data into per-page cache entries.
+                for page_idx in range_start..=range_end {
+                    let data_offset = (page_idx - range_start) * 4096;
+                    inode.pages.get_or_fill(page_idx as u64, |buf| {
+                        let available = data.len().saturating_sub(data_offset);
+                        let copy = available.min(4096);
+                        if copy > 0 {
+                            buf[..copy].copy_from_slice(&data[data_offset..data_offset + copy]);
+                        }
+                        if copy < 4096 {
+                            buf[copy..].fill(0);
+                        }
+                        Ok(())
+                    })?;
+                }
+            }
+            Err(_) => {
+                // Fallback: fill per-page
+                for page_idx in range_start..=range_end {
+                    inode.pages.get_or_fill(page_idx as u64, |buf| {
+                        let valid = pc_ops.fill_page(ino, page_idx as u64, buf)?;
+                        if valid < 4096 {
+                            buf[valid..].fill(0);
+                        }
+                        Ok(())
+                    })?;
+                }
+            }
+        }
+    }
+
+    // Now all pages are cached. Read from cache.
+    let mut result = Vec::with_capacity(count);
+    for page_idx in start_page..=end_page {
+        let guard = inode.pages.get_or_fill(page_idx as u64, |buf| {
+            // Should always be a cache hit at this point.
+            let valid = pc_ops.fill_page(ino, page_idx as u64, buf)?;
+            if valid < 4096 {
+                buf[valid..].fill(0);
+            }
+            Ok(())
+        })?;
+
+        let page_start_in_file = page_idx * 4096;
+        let copy_start = if page_idx == start_page {
+            offset - page_start_in_file
+        } else {
+            0
+        };
+        let copy_end = if page_idx == end_page {
+            offset + count - page_start_in_file
+        } else {
+            4096
+        };
+        let copy_end = copy_end.min(4096);
+
+        let slice = unsafe { guard.as_slice() };
+        result.extend_from_slice(&slice[copy_start..copy_end]);
+    }
+
+    Ok(result)
 }
 
 pub fn file_info(op: &VfsOp) -> Result<File, Error> {
@@ -204,9 +318,8 @@ pub fn list_files(op: &VfsOp, full_path: &Path) -> Result<Vec<File>, Error> {
 /// inside the write lock, preventing reentrancy deadlocks.
 pub fn write(op: &VfsOp, offset: usize, data: &[u8], append: bool) -> Result<u64, Error> {
     let _guard = op.inode.as_ref().map(|i| i.lock.write());
-    let ino = op.inode.as_ref().map(|i| i.ino).filter(|&i| i != 0);
     let actual_offset = if append {
-        if let Some(ino) = ino {
+        if let Some(ino) = op.inode.as_ref().map(|i| i.ino).filter(|&i| i != 0) {
             match op.fs.file_size_ino(ino) {
                 Ok(size) => size as usize,
                 Err(Error::Unsupported) => op
@@ -225,8 +338,12 @@ pub fn write(op: &VfsOp, offset: usize, data: &[u8], append: bool) -> Result<u64
     } else {
         offset
     };
-    if let Some(ino) = ino {
-        match op.fs.write_bytes_ino(ino, actual_offset, data) {
+
+    if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
+        if let Some(pc_ops) = op.fs.as_page_cache_ops() {
+            return page_cache_write(inode, pc_ops, actual_offset, data);
+        }
+        match op.fs.write_bytes_ino(inode.ino, actual_offset, data) {
             Err(Error::Unsupported) => {}
             result => return result,
         }
@@ -234,11 +351,79 @@ pub fn write(op: &VfsOp, offset: usize, data: &[u8], append: bool) -> Result<u64
     op.fs.write_bytes(&op.relative, actual_offset, data)
 }
 
+fn page_cache_write(
+    inode: &Arc<VfsInode>,
+    pc_ops: &dyn super::page_cache::PageCacheOps,
+    offset: usize,
+    data: &[u8],
+) -> Result<u64, Error> {
+    if data.is_empty() {
+        return Ok(0);
+    }
+
+    let start_page = offset / 4096;
+    let end_page = (offset + data.len() - 1) / 4096;
+    let ino = inode.ino;
+    let mut data_pos = 0usize;
+
+    for page_idx in start_page..=end_page {
+        let page_start_in_file = page_idx * 4096;
+        let write_start = if page_idx == start_page {
+            offset - page_start_in_file
+        } else {
+            0
+        };
+        let write_end = if page_idx == end_page {
+            offset + data.len() - page_start_in_file
+        } else {
+            4096
+        };
+        let write_len = write_end - write_start;
+
+        let is_full_page = write_start == 0 && write_end == 4096;
+
+        let guard = if is_full_page {
+            inode.pages.get_or_fill(page_idx as u64, |buf| {
+                buf.fill(0);
+                Ok(())
+            })?
+        } else {
+            inode.pages.get_or_fill(page_idx as u64, |buf| {
+                let valid = pc_ops.fill_page(ino, page_idx as u64, buf)?;
+                if valid < 4096 {
+                    buf[valid..].fill(0);
+                }
+                Ok(())
+            })?
+        };
+
+        let slice = unsafe { guard.as_slice_mut() };
+        slice[write_start..write_end].copy_from_slice(&data[data_pos..data_pos + write_len]);
+        data_pos += write_len;
+
+        inode.pages.mark_dirty(page_idx as u64);
+    }
+
+    // Write-through: flush dirty pages to disk immediately.
+    inode
+        .pages
+        .flush_dirty(|page_index, buf| pc_ops.flush_page(ino, page_index, buf, 4096))?;
+
+    let new_size = (offset + data.len()) as u64;
+    pc_ops.update_size(ino, new_size)?;
+
+    Ok(new_size)
+}
+
 pub fn truncate(op: &VfsOp, size: u64) -> Result<(), Error> {
     let _guard = op.inode.as_ref().map(|i| i.lock.write());
     let result = op.fs.truncate(&op.relative, size);
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
+        if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
+            let from_page = (size as usize + 4095) / 4096;
+            inode.pages.invalidate_from(from_page as u64);
+        }
     }
     result
 }
@@ -281,6 +466,9 @@ pub fn remove_file(op: &VfsOp) -> Result<(), Error> {
     let result = op.fs.remove_file(&op.relative);
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
+        if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
+            inode.pages.invalidate_all();
+        }
     }
     result
 }
@@ -340,8 +528,15 @@ pub fn flush(op: &VfsOp) -> Result<(), Error> {
 }
 
 pub fn flush_file(op: &VfsOp) -> Result<(), Error> {
-    if let Some(ino) = op.inode.as_ref().map(|i| i.ino).filter(|&i| i != 0) {
-        match op.fs.flush_inode(ino) {
+    if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
+        // Flush per-inode dirty page cache pages first.
+        if let Some(pc_ops) = op.fs.as_page_cache_ops() {
+            let ino = inode.ino;
+            inode
+                .pages
+                .flush_dirty(|page_index, buf| pc_ops.flush_page(ino, page_index, buf, 4096))?;
+        }
+        match op.fs.flush_inode(inode.ino) {
             Err(Error::Unsupported) => {}
             result => return result,
         }
