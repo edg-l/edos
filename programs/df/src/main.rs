@@ -127,7 +127,11 @@ fn get_mounts() -> Vec<MountInfo> {
         let path = std::str::from_utf8(&buf[offset..offset + path_len])
             .unwrap_or("")
             .to_string();
-        let path = if path.is_empty() { "/".to_string() } else { path };
+        let path = if path.is_empty() {
+            "/".to_string()
+        } else {
+            path
+        };
         mounts.push(MountInfo { path });
         offset += path_len;
     }

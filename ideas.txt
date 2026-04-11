@@ -69,6 +69,17 @@
   MemoryManager owns VmaSet (like Linux mm_struct) so copy_to_user
   can demand-fault during thread construction. Shared fault_in_page
   used by both IST handler and HHDM translate path.
+- **Boot hang fix** - Root cause was switch_to_kernel_page() calling
+  tlb_flush_all_including_global() unconditionally (even when CR3
+  didn't change), creating a TLB storm during parallel boot that
+  triggered cascading vmalloc faults. Combined with IST re-entrancy
+  (nested page fault on IST 1 clobbered the outer handler's stack
+  frame), this caused all CPUs to get stuck. Fix: removed the
+  unconditional global TLB flush (Cr3::write already flushes
+  non-globals), and moved page fault handler off IST onto the
+  regular kernel stack so nested faults work naturally. Double fault
+  handler retains its own IST for stack overflow protection.
+  20/20 boot test passes (was ~1 in 5 failure rate).
 
 ## Network Stack Remaining
 
@@ -86,9 +97,9 @@
 - fsck tool
 - FileTime: VFS uses FAT-style packed date/time, EFS timestamps lossy-converted
 
-## Boot Race / Heap Expansion Bug (mostly fixed, intermittent remnant)
+## Boot Race / Heap Expansion Bug (fixed)
 
-All three Linux-inspired fixes are now implemented:
+All fixes implemented:
 1. **Lazy vmalloc fault handler** -- page fault handler walks kernel PML4
    lock-free for faults in KERNEL_HEAP..VMALLOC_END. If mapping exists,
    invlpg and retry. Handles stale paging-structure cache entries.
@@ -97,17 +108,20 @@ All three Linux-inspired fixes are now implemented:
 3. **Per-CPU heap freelists** -- 6 size classes (32-1024 bytes), 16 slots
    per CPU. Most small allocations avoid the global heap lock. Batch
    refill/drain of 8 objects. FSGSBASE enabled for fast per-CPU access.
+4. **TLB flush fix** -- switch_to_kernel_page() no longer calls
+   tlb_flush_all_including_global() unconditionally. Cr3::write
+   already flushes non-global entries. The unconditional global flush
+   was the root trigger for the intermittent boot hang.
+5. **Page fault off IST** -- Page fault handler uses the kernel stack
+   instead of IST 1. Nested page faults (vmalloc fault during demand
+   fault handling) work naturally. Double fault retains its own IST
+   for stack overflow protection.
 
 TLB shootdown IPIs also implemented for safe page unmapping on SMP
 (deferred frame free in munmap, shootdown in COW fork).
 
-The 512KB heap warmup workaround was removed.
-
-Intermittent issue remains: boot-load threads occasionally vanish during
-parallel boot (~1 in 5 runs). All CPUs go idle, no panic. Unknown root
-cause -- possibly a pre-existing race in the scheduler, VFS, or buddy
-allocator metadata corruption under specific allocation patterns. Not
-reproducible with sequential boot loading.
+The 512KB heap warmup workaround was removed. 20/20 boot passes
+(was ~1 in 5 failure rate).
 
 ## Page Cache (important next phase for FS)
 
@@ -188,6 +202,12 @@ Useful for VMs where e1000e emulation is slower than paravirtual.
 EfsDriver::read_via_extents reads one extent at a time. For fragmented files
 spanning multiple extents, could issue all extent reads concurrently via
 ncq_read_batch.
+
+### SIGINT delivery to foreground processes
+Ctrl+C in the terminal doesn't kill foreground processes. Tools that read
+stdin (wc, sort, uniq, tee, tr, cat with no args) hang with no way to
+interrupt them. Need proper signal delivery from PTY/terminal to the
+foreground process group.
 
 ### More userspace tools
 - chmod/chown (once EFS has permission support)

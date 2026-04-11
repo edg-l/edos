@@ -238,10 +238,7 @@ impl Editor {
                     Mode::Insert => "INSERT",
                     Mode::Command => "COMMAND",
                 };
-                let name = self
-                    .filename
-                    .as_deref()
-                    .unwrap_or("[No Name]");
+                let name = self.filename.as_deref().unwrap_or("[No Name]");
                 let modified = if self.modified { " [+]" } else { "" };
                 let pos = format!("{}:{}", self.cy + 1, self.cx + 1);
                 if self.status_msg.is_empty() {
@@ -347,7 +344,8 @@ impl Editor {
                 self.cx = 0;
                 self.mode = Mode::Insert;
                 self.modified = true;
-                self.undo_stack.push(UndoAction::InsertLine { row: new_row });
+                self.undo_stack
+                    .push(UndoAction::InsertLine { row: new_row });
                 return;
             }
             // Open line above
@@ -356,7 +354,8 @@ impl Editor {
                 self.cx = 0;
                 self.mode = Mode::Insert;
                 self.modified = true;
-                self.undo_stack.push(UndoAction::InsertLine { row: self.cy });
+                self.undo_stack
+                    .push(UndoAction::InsertLine { row: self.cy });
                 return;
             }
             // Enter Command mode
@@ -513,7 +512,8 @@ impl Editor {
                     let ch = self.lines[row].remove(col);
                     self.cx -= 1;
                     self.modified = true;
-                    self.undo_stack.push(UndoAction::DeleteChar { row, col, ch });
+                    self.undo_stack
+                        .push(UndoAction::DeleteChar { row, col, ch });
                 } else if self.cy > 0 {
                     // Join with previous line.
                     let row = self.cy;
@@ -523,7 +523,8 @@ impl Editor {
                     self.cy -= 1;
                     self.cx = col;
                     self.modified = true;
-                    self.undo_stack.push(UndoAction::JoinLine { row: row - 1, col });
+                    self.undo_stack
+                        .push(UndoAction::JoinLine { row: row - 1, col });
                 }
             }
             Key::Delete => {
@@ -533,7 +534,8 @@ impl Editor {
                 if col < line_len {
                     let ch = self.lines[row].remove(col);
                     self.modified = true;
-                    self.undo_stack.push(UndoAction::DeleteChar { row, col, ch });
+                    self.undo_stack
+                        .push(UndoAction::DeleteChar { row, col, ch });
                 } else if row + 1 < self.lines.len() {
                     // Join next line into current.
                     let join_col = self.lines[row].len();
@@ -624,8 +626,7 @@ impl Editor {
             self.save();
         } else if trimmed == "q" {
             if self.modified {
-                self.status_msg =
-                    "No write since last change (add ! to override)".to_string();
+                self.status_msg = "No write since last change (add ! to override)".to_string();
             } else {
                 self.running = false;
             }
@@ -661,8 +662,7 @@ impl Editor {
                 Ok(()) => {
                     let nlines = self.lines.len();
                     self.modified = false;
-                    self.status_msg =
-                        format!("\"{}\" written, {} lines", path, nlines);
+                    self.status_msg = format!("\"{}\" written, {} lines", path, nlines);
                 }
                 Err(e) => {
                     self.status_msg = format!("Error writing: {}", e);
