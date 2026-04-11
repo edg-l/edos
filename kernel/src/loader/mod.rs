@@ -1,3 +1,5 @@
+use alloc::collections::BTreeSet;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use elf::{ElfBytes, endian::LittleEndian};
 use thiserror::Error;
@@ -6,6 +8,7 @@ use x86_64::{VirtAddr, align_up, structures::paging::PageTableFlags};
 use crate::{
     log,
     memory::{
+        frame_allocator::frame_allocator,
         mapper::MemoryManager,
         vma::{Vma, VmaBacking, VmaFlags, VmaProt},
     },
@@ -41,14 +44,78 @@ pub enum ElfLoadError {
     NoEntryPoint,
 }
 
+/// Eagerly fault a single page within an ELF segment VMA.
+/// Allocates a frame, fills it from ELF data (with proper BSS zeroing),
+/// and maps it into the address space.
+fn eager_fault_elf_page(
+    memory_manager: &mut MemoryManager,
+    elf_data: &[u8],
+    page_addr: VirtAddr,
+    vma_start: VirtAddr,
+    file_offset: u64,
+    file_size: u64,
+    vaddr_offset: u64,
+    flags: PageTableFlags,
+) -> Result<(), ElfLoadError> {
+    use x86_64::structures::paging::FrameAllocator;
+
+    let frame = frame_allocator()
+        .allocate_frame()
+        .ok_or(ElfLoadError::MappingFailed)?;
+
+    let phys_offset = crate::boot::boot_info().physical_memory_offset;
+    let frame_ptr = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
+    // Zero the frame first
+    unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
+
+    // Compute file data range for this page
+    let page_off_in_vma = page_addr.as_u64() - vma_start.as_u64();
+    // Segment byte offset for start of this page
+    let seg_start = page_off_in_vma.saturating_sub(vaddr_offset);
+    // Segment byte offset for end of this page
+    let seg_end = (page_off_in_vma + 4096).saturating_sub(vaddr_offset);
+
+    // Clamp to file_size to get the file data portion
+    let copy_start = seg_start.min(file_size);
+    let copy_end = seg_end.min(file_size);
+
+    if copy_end > copy_start {
+        let elf_src_offset = (file_offset + copy_start) as usize;
+        let elf_src_end = (file_offset + copy_end) as usize;
+        if elf_src_end <= elf_data.len() {
+            // Destination offset within the page: if the segment starts mid-page,
+            // there is vaddr_offset bytes of padding before the data in the first page.
+            let dst_offset = if page_off_in_vma < vaddr_offset {
+                (vaddr_offset - page_off_in_vma) as usize
+            } else {
+                0usize
+            };
+            let copy_len = (copy_end - copy_start) as usize;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    elf_data[elf_src_offset..].as_ptr(),
+                    frame_ptr.add(dst_offset),
+                    copy_len,
+                );
+            }
+        }
+    }
+
+    memory_manager
+        .map_address(page_addr, frame.start_address(), flags)
+        .map_err(|_| ElfLoadError::MappingFailed)?;
+
+    Ok(())
+}
+
 /// Data must be in kernel space
 ///
 /// This function must be called using the process page.
 pub fn load_elf(
-    data: &[u8],
+    data: Arc<Vec<u8>>,
     memory_manager: &mut MemoryManager,
 ) -> Result<LoadedInfo, ElfLoadError> {
-    let elf_file: ElfBytes<'_, LittleEndian> = ElfBytes::minimal_parse(data)?;
+    let elf_file: ElfBytes<'_, LittleEndian> = ElfBytes::minimal_parse(&data)?;
 
     let header = elf_file.ehdr;
 
@@ -81,67 +148,16 @@ pub fn load_elf(
     let mut tls_template: Option<TlsTemplate> = None;
     let base_addr = load_base;
 
-    // let common_data = elf_file.find_common_data()?;
-
     for header in program_headers.iter() {
         if header.p_type == elf::abi::PT_LOAD {
-            /*
-            println!(
-                "ELF: Found PT_LOAD segment: vaddr=0x{:x}, filesz={}, memsz={}, flags=0x{:x}",
-                header.p_vaddr, header.p_filesz, header.p_memsz, header.p_flags
-            ); */
-
             let vaddr = base_addr + header.p_vaddr;
             let mem_size = header.p_memsz;
             let file_size = header.p_filesz;
-
-            /*
-            println!(
-                "ELF: Loading segment at 0x{:x}, file_size: {}, mem_size: {}",
-                vaddr.as_u64(),
-                file_size,
-                mem_size
-            );
-            */
-
-            // todo: verify segments are valid
 
             // Align to page boundaries for mapping
             let page_aligned_vaddr = VirtAddr::new(vaddr.as_u64() & !0xfff);
             let vaddr_offset = vaddr.as_u64() - page_aligned_vaddr.as_u64();
             let aligned_size = (mem_size + vaddr_offset + 0xfff) & !0xfff;
-
-            // Writeable flags first, because we need to write data and relocations
-            let flags = PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
-
-            /*
-            println!(
-                "ELF: Mapping aligned region: 0x{:x}-0x{:x} (size: 0x{:x})",
-                page_aligned_vaddr.as_u64(),
-                page_aligned_vaddr.as_u64() + aligned_size,
-                aligned_size
-            );
-            */
-
-            // Map memory for the entire segment (including BSS if mem_size > file_size)
-            let _range = memory_manager
-                .map_memory(page_aligned_vaddr, aligned_size, flags)
-                .map_err(|e| {
-                    println!("ELF: Mapping failed: {:?}", e);
-                    ElfLoadError::MappingFailed
-                })?;
-
-            // Copy file data into memory
-            if file_size > 0 {
-                let segment_data = elf_file.segment_data(&header)?;
-                memory_manager.copy_to_user(vaddr, segment_data);
-            }
-
-            // Zero out BSS section (mem_size > file_size)
-            if mem_size > file_size {
-                let bss_start = vaddr + file_size;
-                memory_manager.zero_user(bss_start, (mem_size - file_size) as usize);
-            }
 
             let mut prot = VmaProt::empty();
             if header.p_flags & elf::abi::PF_R != 0 {
@@ -154,12 +170,18 @@ pub fn load_elf(
                 prot |= VmaProt::EXEC;
             }
 
+            // Create a lazy VMA backed by ELF data -- no pages mapped yet.
             let region = Vma {
                 start: page_aligned_vaddr,
                 end: page_aligned_vaddr + aligned_size,
                 prot,
-                flags: VmaFlags::PRIVATE,
-                backing: VmaBacking::Elf,
+                flags: VmaFlags::PRIVATE | VmaFlags::LAZY,
+                backing: VmaBacking::ElfSegment {
+                    elf_data: data.clone(),
+                    file_offset: header.p_offset,
+                    file_size,
+                    vaddr_offset,
+                },
             };
 
             memory_regions.push(region);
@@ -192,7 +214,11 @@ pub fn load_elf(
         }
     }
 
+    // Process relocations: eagerly fault target pages (writable), apply relocations,
+    // then fix permissions on those pages. Remaining pages are faulted lazily with
+    // correct VMA permissions.
     let section_headers = elf_file.section_headers().unwrap();
+    let mut reloc_pages: BTreeSet<VirtAddr> = BTreeSet::new();
 
     for section_header in section_headers.iter() {
         match section_header.sh_type {
@@ -202,18 +228,47 @@ pub fn load_elf(
                 for rela in rela_entries {
                     let reloc_addr = base_addr + rela.r_offset;
                     let reloc_type = rela.r_type;
-                    //println!("Relocation rela R_X86_64_RELATIVE: {}", rela.r_offset);
 
                     match reloc_type {
-                        // R_X86_64_RELATIVE - Most common for PIC static executables
+                        // R_X86_64_RELATIVE - most common for PIC static executables
                         8 => {
+                            let page_addr = VirtAddr::new(reloc_addr.as_u64() & !0xfff);
+
+                            // Eagerly fault this page if not already faulted
+                            if reloc_pages.insert(page_addr) {
+                                // Find which VMA this relocation belongs to
+                                if let Some(region) =
+                                    memory_regions.iter().find(|r| r.contains(page_addr))
+                                {
+                                    if let VmaBacking::ElfSegment {
+                                        elf_data: ref ed,
+                                        file_offset,
+                                        file_size,
+                                        vaddr_offset,
+                                    } = region.backing
+                                    {
+                                        eager_fault_elf_page(
+                                            memory_manager,
+                                            ed,
+                                            page_addr,
+                                            region.start,
+                                            file_offset,
+                                            file_size,
+                                            vaddr_offset,
+                                            PageTableFlags::PRESENT
+                                                | PageTableFlags::USER_ACCESSIBLE
+                                                | PageTableFlags::WRITABLE,
+                                        )?;
+                                    }
+                                }
+                            }
+
                             let value: u64 = base_addr.as_u64() + rela.r_addend as u64;
                             memory_manager.write_val_to_user(reloc_addr, value);
                         }
 
                         _ => {
                             println!("Unsupported relocation type: {}", reloc_type);
-                            // For now, continue - many relocations might not be needed
                         }
                     }
                 }
@@ -228,34 +283,21 @@ pub fn load_elf(
         }
     }
 
-    // TODO: same for .fini_array destructors
-
-    // Set proper page flags.
-    for header in program_headers.iter() {
-        if header.p_type == elf::abi::PT_LOAD {
-            let vaddr = base_addr + header.p_vaddr;
-            let mem_size = header.p_memsz;
-
-            // Align to page boundaries for mapping
-            let page_aligned_vaddr = VirtAddr::new(vaddr.as_u64() & !0xfff);
-            let vaddr_offset = vaddr.as_u64() - page_aligned_vaddr.as_u64();
-            let aligned_size = (mem_size + vaddr_offset + 0xfff) & !0xfff;
-
-            let mut flags = PageTableFlags::USER_ACCESSIBLE;
-
-            if header.p_flags & elf::abi::PF_W != 0 {
+    // Set correct permissions on eagerly-faulted relocation pages.
+    // These were mapped WRITABLE for relocation patching; now set to final perms.
+    for &page_addr in &reloc_pages {
+        if let Some(region) = memory_regions.iter().find(|r| r.contains(page_addr)) {
+            let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+            if region.prot.contains(VmaProt::WRITE) {
                 flags |= PageTableFlags::WRITABLE;
             }
-
-            if header.p_flags & elf::abi::PF_X == 0 {
+            if !region.prot.contains(VmaProt::EXEC) {
                 flags |= PageTableFlags::NO_EXECUTE;
             }
-
-            // If this is a code segment, remove write permissions after loading
             memory_manager
-                .change_flags(page_aligned_vaddr, aligned_size, flags)
+                .change_flags(page_addr, 4096, flags)
                 .map_err(|e| {
-                    println!("ELF: Failed to update flags: {:?}", e);
+                    println!("ELF: Failed to update flags on reloc page: {:?}", e);
                     ElfLoadError::MappingFailed
                 })?;
         }

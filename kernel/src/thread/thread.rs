@@ -432,7 +432,7 @@ impl Thread {
 
     /// Must provide entry point and cr3 page table.
     pub fn new_user(
-        elf_data: &[u8],
+        elf_data: Arc<Vec<u8>>,
         name: Option<String>,
         argv: &[&[u8]],
         envp: &[&[u8]],
@@ -459,7 +459,7 @@ impl Thread {
             setup_user_stack(stack_top, argv, envp, &process_memory_manager)
                 .map_err(|_| ElfLoadError::MappingFailed)?;
 
-        let mut load_info = load_elf(elf_data, &mut process_memory_manager)?;
+        let mut load_info = load_elf(elf_data.clone(), &mut process_memory_manager)?;
 
         let id = ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, Ordering::Relaxed));
 
@@ -586,14 +586,13 @@ impl Thread {
             return Err(ElfLoadError::MissingSegments);
         }
 
-        // Read the entire file
-        let elf_data = fs::api::read_bytes(path, 0, file_size).map_err(|e| {
+        // Read the entire file, wrap in Arc for lazy ELF loading
+        let elf_data = Arc::new(fs::api::read_bytes(path, 0, file_size).map_err(|e| {
             println!("Failed to read file {:?}: {:?}", path, e);
             ElfLoadError::MappingFailed
-        })?;
+        })?);
 
-        // Call the existing new_user with the loaded data
-        Self::new_user(&elf_data, name, argv, envp, user, group, cwd)
+        Self::new_user(elf_data, name, argv, envp, user, group, cwd)
     }
 
     pub fn free(&self) {
@@ -697,8 +696,23 @@ impl Thread {
             let vmas = user.vmas.lock().clone();
             for vma in vmas.iter() {
                 match &vma.backing {
-                    VmaBacking::Anonymous | VmaBacking::Elf | VmaBacking::Tls => {
+                    VmaBacking::Anonymous | VmaBacking::Tls => {
                         let _ = memory_manager.unmap_memory(vma.start, vma.size());
+                    }
+                    VmaBacking::ElfSegment { .. } => {
+                        // Pages may be lazily faulted -- only unmap present ones
+                        use x86_64::structures::paging::{Mapper, Page, Size4KiB};
+                        let page_count = (vma.size() + 0xFFF) / 4096;
+                        for i in 0..page_count {
+                            let virt = VirtAddr::new(vma.start.as_u64() + i * 4096);
+                            let page: Page<Size4KiB> = Page::containing_address(virt);
+                            if let Ok(phys) = memory_manager.mapper.translate_page(page) {
+                                if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
+                                    flush.ignore();
+                                }
+                                unsafe { frame_allocator().deallocate_frame(phys) };
+                            }
+                        }
                     }
                     VmaBacking::SharedMemory { shm_id } => {
                         use x86_64::structures::paging::{Mapper, Page, Size4KiB};

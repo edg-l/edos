@@ -1,4 +1,6 @@
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use x86_64::VirtAddr;
@@ -35,8 +37,20 @@ pub enum VmaBacking {
     },
     /// Shared memory region
     SharedMemory { shm_id: u64 },
-    /// ELF segment (eagerly loaded)
-    Elf,
+    /// ELF segment backed by in-kernel ELF data.
+    /// Pages are faulted in on demand from the stored ELF data.
+    ElfSegment {
+        /// The full ELF file data (shared across all segments of the same binary)
+        elf_data: Arc<Vec<u8>>,
+        /// Offset of this segment's data within the ELF file
+        file_offset: u64,
+        /// Size of file-backed data (bytes beyond this up to VMA size are BSS/zero)
+        file_size: u64,
+        /// Offset of the segment's virtual address within the page-aligned VMA start
+        /// (i.e., vaddr - page_aligned_vaddr). Needed because the VMA start is page-aligned
+        /// but the segment data may start at an offset within that first page.
+        vaddr_offset: u64,
+    },
     /// TLS region
     Tls,
     /// Stack

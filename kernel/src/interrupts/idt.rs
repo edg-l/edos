@@ -178,6 +178,16 @@ extern "x86-interrupt" fn page_fault_handler(
     let address = Cr2::read().unwrap();
 
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0 {
+        // Demand-fault lazy user pages accessed from kernel (e.g., copy_to_user via HHDM).
+        // Must be checked BEFORE uaccess so the page gets mapped and the access succeeds.
+        if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+            && address.as_u64() < 0x0000_8000_0000_0000
+        {
+            if unsafe { crate::memory::fault::handle_demand_fault(address, error_code) } {
+                return;
+            }
+        }
+
         // Check if we're in a user access operation
         let uaccess = current_cpu_uaccess();
         if uaccess.is_active() {
@@ -233,13 +243,12 @@ extern "x86-interrupt" fn page_fault_handler(
             }
         }
 
-        log!("Page fault");
-        log!("Accessed Address: {address:?}");
-        log!("Error Code: {error_code:?}");
-        log!("Error Desc: {error_desc:?}");
-        log!("RIP: {:p}", stack_frame.instruction_pointer);
-        log!("Stack: {:p}", stack_frame.stack_pointer);
-        log!("Fault Type: {error_desc}");
+        // Use println! (direct serial, no heap allocation) so the message is
+        // guaranteed to reach serial output from the IST page fault handler.
+        println!(
+            "KILL: PF addr={:p} rip={:p} err={error_code:?} ({error_desc})",
+            address, stack_frame.instruction_pointer
+        );
         sched().thread_exit(11);
     }
 }

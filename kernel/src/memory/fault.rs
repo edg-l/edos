@@ -1,3 +1,6 @@
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
 use x86_64::{
     VirtAddr,
     registers::control::Cr3,
@@ -67,12 +70,6 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
         return false; // Execute on no-exec VMA
     }
 
-    // Only handle Anonymous and Stack backing for now
-    match &vma.backing {
-        VmaBacking::Anonymous | VmaBacking::Stack => {}
-        _ => return false,
-    }
-
     // Build page table flags from VMA protection
     let mut pt_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if vma.prot.contains(VmaProt::WRITE) {
@@ -81,6 +78,24 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
     if !vma.prot.contains(VmaProt::EXEC) {
         pt_flags |= PageTableFlags::NO_EXECUTE;
     }
+
+    // Extract ElfSegment fields before dropping locks (Arc clone is cheap)
+    let elf_info: Option<(Arc<Vec<u8>>, u64, u64, u64, VirtAddr)> = match &vma.backing {
+        VmaBacking::Anonymous | VmaBacking::Stack => None,
+        VmaBacking::ElfSegment {
+            elf_data,
+            file_offset,
+            file_size,
+            vaddr_offset,
+        } => Some((
+            elf_data.clone(),
+            *file_offset,
+            *file_size,
+            *vaddr_offset,
+            vma.start,
+        )),
+        _ => return false,
+    };
 
     // Drop the VMA lock before allocating (frame_allocator uses its own lock)
     drop(vmas);
@@ -99,11 +114,40 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
         core::ptr::write_bytes(frame_virt.as_mut_ptr::<u8>(), 0, 4096);
     }
 
+    // For ELF-backed pages, fill from the stored ELF data
+    let page_addr = fault_addr.align_down(4096u64);
+    if let Some((elf_data, file_offset, file_size, vaddr_offset, vma_start)) = elf_info {
+        let page_off_in_vma = page_addr.as_u64() - vma_start.as_u64();
+        let seg_start = page_off_in_vma.saturating_sub(vaddr_offset);
+        let seg_end = (page_off_in_vma + 4096).saturating_sub(vaddr_offset);
+        let copy_start = seg_start.min(file_size);
+        let copy_end = seg_end.min(file_size);
+
+        if copy_end > copy_start {
+            let elf_src_offset = (file_offset + copy_start) as usize;
+            let elf_src_end = (file_offset + copy_end) as usize;
+            if elf_src_end <= elf_data.len() {
+                let dst_offset = if page_off_in_vma < vaddr_offset {
+                    (vaddr_offset - page_off_in_vma) as usize
+                } else {
+                    0usize
+                };
+                let copy_len = (copy_end - copy_start) as usize;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        elf_data[elf_src_offset..].as_ptr(),
+                        frame_virt.as_mut_ptr::<u8>().add(dst_offset),
+                        copy_len,
+                    );
+                }
+            }
+        }
+    }
+
     // Map the page into the faulting process's page table via HHDM.
     // We walk the page table directly (same approach as handle_cow_fault)
     // to avoid needing a MemoryManager lock.
     let (cr3_frame, _) = Cr3::read();
-    let page_addr = fault_addr.align_down(4096u64);
 
     let success = unsafe { map_page_direct(cr3_frame, page_addr, frame, pt_flags, phys_offset) };
 

@@ -1141,7 +1141,7 @@ fn do_spawn(
     };
 
     let file_data = match fs_api::read_bytes(path, 0, finfo.size as usize) {
-        Ok(data) => data,
+        Ok(data) => Arc::new(data),
         Err(_) => {
             x86_64::instructions::interrupts::disable();
             info.lock().errno = Errno::EINVAL;
@@ -1243,7 +1243,7 @@ fn do_spawn(
     let envp_slices: Vec<&[u8]> = envp_storage.iter().map(|e| e.as_slice()).collect();
 
     let user_thread = match Thread::new_user(
-        &elf_data,
+        elf_data,
         Some(path_str.to_string()),
         &argv_slices,
         &envp_slices,

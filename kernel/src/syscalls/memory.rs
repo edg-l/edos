@@ -288,7 +288,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                     info.lock().errno = Errno::EINVAL;
                     -1
                 }
-                VmaBacking::Elf | VmaBacking::Tls | VmaBacking::Stack => {
+                VmaBacking::ElfSegment { .. } | VmaBacking::Tls | VmaBacking::Stack => {
                     // These are kernel-managed; put back and return error
                     user_arc.read().vmas.lock().insert(vma);
                     info.lock().errno = Errno::EINVAL;

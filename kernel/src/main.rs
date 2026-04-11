@@ -348,17 +348,17 @@ pub fn mount_system_fs() -> ! {
     }
 
     // Wait for all 3 to complete.
-    let wm_data = binaries[0].1.recv().payload.take().unwrap();
+    let wm_data = Arc::new(binaries[0].1.recv().payload.take().unwrap());
     log!("Loaded /bin/edos-wm ({} bytes)", wm_data.len());
-    let taskbar_data = binaries[1].1.recv().payload.take().unwrap();
+    let taskbar_data = Arc::new(binaries[1].1.recv().payload.take().unwrap());
     log!("Loaded /bin/edos-taskbar ({} bytes)", taskbar_data.len());
-    let terminal_data = binaries[2].1.recv().payload.take().unwrap();
+    let terminal_data = Arc::new(binaries[2].1.recv().payload.take().unwrap());
     log!("Loaded /bin/edos-terminal ({} bytes)", terminal_data.len());
     log!("Spawning user threads");
 
     // Spawn initial user threads.
     let wm_thread = Thread::new_user(
-        &wm_data,
+        wm_data,
         Some("edos-wm".to_string()),
         &[b"edos-wm"],
         &default_env,
@@ -375,7 +375,7 @@ pub fn mount_system_fs() -> ! {
     );
 
     let taskbar_thread = Thread::new_user(
-        &taskbar_data,
+        taskbar_data,
         Some("edos-taskbar".to_string()),
         &[b"edos-taskbar"],
         &default_env,
@@ -394,7 +394,7 @@ pub fn mount_system_fs() -> ! {
     );
 
     let terminal_thread = Thread::new_user(
-        &terminal_data,
+        terminal_data,
         Some("edos-terminal".to_string()),
         &[b"edos-terminal"],
         &default_env,
