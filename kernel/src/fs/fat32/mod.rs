@@ -411,6 +411,12 @@ impl FileSystem for Fatfs {
         Ok(())
     }
 
+    fn flush_inode(&self, _ino: u64) -> Result<(), Error> {
+        // Flush drive write cache only, skip FSInfo write.
+        self.device.flush()?;
+        Ok(())
+    }
+
     fn truncate(&self, path: &Path, size: u64) -> Result<(), Error> {
         let _guard = self.write_lock.lock();
         let (entry, ec, eo) = match self.find_dir_entry(path)? {

@@ -1743,8 +1743,8 @@ impl FileSystem for EfsDriver {
     }
 
     fn flush_inode(&self, _ino: u64) -> Result<(), Error> {
-        // EFS writes inodes and data blocks synchronously.
-        // No write-back cache to flush.
+        // Data written synchronously; flush drive write cache only.
+        self.device.flush()?;
         Ok(())
     }
 }

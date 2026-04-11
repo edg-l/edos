@@ -147,6 +147,11 @@ pub fn flush(path: &Path) -> Result<(), Error> {
     vfs::flush(&op)
 }
 
+pub fn flush_file(path: &Path, inode: Option<Arc<VfsInode>>) -> Result<(), Error> {
+    let op = vfs::resolve_with_inode(path, inode).ok_or(Error::FileNotFound)?;
+    vfs::flush_file(&op)
+}
+
 pub fn ioctl(path: &Path, request: u64, arg: u64) -> Result<u64, Error> {
     let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
     vfs::ioctl(&op, request, arg)

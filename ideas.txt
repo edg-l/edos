@@ -51,6 +51,12 @@
 - **O_TRUNC support** - Wired OpenOptions::truncate() through edos_rt
   OpenFlags::TRUNCATE (0x200) to kernel sys_open. File::create and
   std::fs::write now correctly truncate existing files.
+- **Per-file fsync** - SYS_FSYNC syscall (14) with per-inode flush path.
+  EFS/FAT32 flush_inode() flushes drive write cache only (skips
+  superblock/BGD/FSInfo). File::sync_all()/sync_data() wired through
+  Rust std. AHCI FUA detection (IDENTIFY word 84 bit 6) and FUA write
+  commands (WRITE DMA FUA EXT, WRITE FPDMA QUEUED FUA) added for
+  future use.
 
 ## Network Stack Remaining
 
@@ -67,12 +73,6 @@
 - Journaling (feature flag reserved, significant complexity)
 - fsck tool
 - FileTime: VFS uses FAT-style packed date/time, EFS timestamps lossy-converted
-
-## VFS/FS Remaining
-
-- **Per-file fsync** - flush() flushes the entire filesystem. No way to
-  fsync a single file. flush_inode trait method exists but no fsync syscall
-  yet. Needed for crash-safe writes and databases.
 
 ## Boot Race / Heap Expansion Bug (mostly fixed, intermittent remnant)
 

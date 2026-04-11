@@ -288,6 +288,7 @@ pub struct DeviceIdentifyInfo {
     pub ncq_queue_depth: u8, // 1-32 if NCQ supported, 0 otherwise
     pub supports_power_mgmt: bool,
     pub supports_security: bool,
+    pub supports_fua: bool,
     pub raw_features: u16,
 }
 
@@ -425,6 +426,7 @@ impl DeviceIdentifyInfo {
             ncq_queue_depth: 0,
             supports_power_mgmt: false,
             supports_security: false,
+            supports_fua: false,
             raw_features: 0,
         }
     }
@@ -442,6 +444,7 @@ impl DeviceIdentifyInfo {
             ncq_queue_depth: 0,
             supports_power_mgmt: false,
             supports_security: false,
+            supports_fua: false,
             raw_features: 0,
         }
     }
@@ -525,6 +528,10 @@ impl DeviceIdentifyInfo {
         let supports_power_mgmt = raw_features & 0x0020 != 0;
         let supports_security = raw_features & 0x0002 != 0;
 
+        // FUA support: word 84 bit 6 (commands/features supported)
+        let word84 = u16::from_le_bytes([identify_data[168], identify_data[169]]);
+        let supports_fua = word84 & (1 << 6) != 0;
+
         Self {
             model,
             serial,
@@ -537,6 +544,7 @@ impl DeviceIdentifyInfo {
             ncq_queue_depth,
             supports_power_mgmt,
             supports_security,
+            supports_fua,
             raw_features,
         }
     }
@@ -562,6 +570,9 @@ impl DeviceIdentifyInfo {
         }
         if self.supports_security {
             log!("  - Security feature set supported");
+        }
+        if self.supports_fua {
+            log!("  - FUA (Force Unit Access) supported");
         }
     }
 }

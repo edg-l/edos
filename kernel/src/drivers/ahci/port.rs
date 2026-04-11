@@ -44,6 +44,7 @@ pub struct AhciPort {
     pub device_type: DeviceType,
     pub ncq_enabled: bool,
     pub ncq_depth: u8,
+    pub supports_fua: bool,
 
     // DMA regions (immutable after init)
     command_list: DmaRegion<[CommandHeader; AHCI_CMD_SLOTS]>,
@@ -158,6 +159,7 @@ impl AhciPort {
             device_type,
             ncq_enabled: false,
             ncq_depth: 0,
+            supports_fua: false,
             command_list,
             fis_area,
             command_tables,
@@ -177,10 +179,11 @@ impl AhciPort {
     ///
     /// `ncq_depth`: effective NCQ queue depth (min of HBA and device). 0 if no NCQ.
     /// Must be called exactly once, before the port is shared via Arc.
-    pub fn init_io_pools(&mut self, ncq_depth: u8) -> Result<(), AhciError> {
+    pub fn init_io_pools(&mut self, ncq_depth: u8, supports_fua: bool) -> Result<(), AhciError> {
         let use_ncq = ncq_depth > 0 && self.device_type == DeviceType::Ata;
         self.ncq_depth = if use_ncq { ncq_depth } else { 0 };
         self.ncq_enabled = use_ncq;
+        self.supports_fua = supports_fua;
 
         let num_slots = if use_ncq {
             ncq_depth as usize
@@ -772,7 +775,14 @@ impl AhciPort {
     }
 
     /// Write sectors using NCQ (WRITE FPDMA QUEUED). Concurrent-safe via &self.
-    fn ncq_write(&self, lba: u64, buffer: &[u8], sectors: u16) -> Result<(), AhciError> {
+    /// If `fua` is true, uses WRITE FPDMA QUEUED with FUA bit set.
+    fn ncq_write_inner(
+        &self,
+        lba: u64,
+        buffer: &[u8],
+        sectors: u16,
+        fua: bool,
+    ) -> Result<(), AhciError> {
         if sectors == 0 {
             return Ok(());
         }
@@ -807,11 +817,12 @@ impl AhciPort {
                 offset += copy_len;
             }
 
-            self.setup_scatter_command(
-                slot,
-                &FisRegH2D::new_write_fpdma_queued(lba, sectors, slot as u8),
-                expected_size,
-            )?;
+            let fis = if fua {
+                FisRegH2D::new_write_fpdma_queued_fua(lba, sectors, slot as u8)
+            } else {
+                FisRegH2D::new_write_fpdma_queued(lba, sectors, slot as u8)
+            };
+            self.setup_scatter_command(slot, &fis, expected_size)?;
 
             self.issue_ncq_command(slot, CMD_HEADER_WRITE, num_pages as u16)?;
             self.wait_for_ncq_completion(slot, Duration::from_secs(5))
@@ -822,6 +833,10 @@ impl AhciPort {
         self.exit_ncq_mode();
 
         result
+    }
+
+    fn ncq_write(&self, lba: u64, buffer: &[u8], sectors: u16) -> Result<(), AhciError> {
+        self.ncq_write_inner(lba, buffer, sectors, false)
     }
 
     /// Read multiple disjoint sector ranges concurrently using NCQ.
@@ -978,7 +993,14 @@ impl AhciPort {
     }
 
     /// Write sectors using legacy DMA EXT with scatter-gather. Serialized.
-    fn legacy_ata_write(&self, lba: u64, buffer: &[u8], sectors: u16) -> Result<(), AhciError> {
+    /// If `fua` is true, uses WRITE DMA FUA EXT instead of WRITE DMA EXT.
+    fn legacy_ata_write_inner(
+        &self,
+        lba: u64,
+        buffer: &[u8],
+        sectors: u16,
+        fua: bool,
+    ) -> Result<(), AhciError> {
         if sectors == 0 {
             return Ok(());
         }
@@ -1012,11 +1034,12 @@ impl AhciPort {
                 offset += copy_len;
             }
 
-            self.setup_scatter_command(
-                slot,
-                &FisRegH2D::new_write_dma_ext(lba, sectors),
-                expected_size,
-            )?;
+            let fis = if fua {
+                FisRegH2D::new_write_dma_fua_ext(lba, sectors)
+            } else {
+                FisRegH2D::new_write_dma_ext(lba, sectors)
+            };
+            self.setup_scatter_command(slot, &fis, expected_size)?;
 
             self.issue_command(slot, CMD_HEADER_WRITE, num_pages as u16)?;
             self.wait_for_completion(slot, Duration::from_secs(5))
@@ -1026,6 +1049,10 @@ impl AhciPort {
         self.free_slot(slot);
 
         result
+    }
+
+    fn legacy_ata_write(&self, lba: u64, buffer: &[u8], sectors: u16) -> Result<(), AhciError> {
+        self.legacy_ata_write_inner(lba, buffer, sectors, false)
     }
 }
 
@@ -1101,6 +1128,25 @@ impl AhciPort {
         match self.device_type {
             DeviceType::Ata if self.ncq_enabled => self.ncq_write(lba, buffer, sectors),
             DeviceType::Ata => self.legacy_ata_write(lba, buffer, sectors),
+            DeviceType::Atapi => Err(AhciError::ReadOnly),
+        }
+    }
+
+    /// Write sectors with Force Unit Access (bypasses drive write cache).
+    /// Returns `IoError` if the device does not support FUA.
+    #[expect(unused)]
+    pub fn write_sectors_fua(
+        &self,
+        lba: u64,
+        buffer: &[u8],
+        sectors: u16,
+    ) -> Result<(), AhciError> {
+        if !self.supports_fua {
+            return Err(AhciError::IoError);
+        }
+        match self.device_type {
+            DeviceType::Ata if self.ncq_enabled => self.ncq_write_inner(lba, buffer, sectors, true),
+            DeviceType::Ata => self.legacy_ata_write_inner(lba, buffer, sectors, true),
             DeviceType::Atapi => Err(AhciError::ReadOnly),
         }
     }

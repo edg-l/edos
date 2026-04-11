@@ -130,7 +130,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
                         };
 
                         // Allocate per-slot DMA pools and command tables.
-                        if let Err(e) = port.init_io_pools(ncq_depth) {
+                        if let Err(e) = port.init_io_pools(ncq_depth, device_info.supports_fua) {
                             log!("Failed to init I/O pools for port {}: {:?}", port_idx, e);
                             continue;
                         }

@@ -38,6 +38,7 @@ pub const FIS_TYPE_DEV_BITS: u8 = 0xA1; // Set device bits
 // ATA Commands
 pub const ATA_CMD_READ_DMA_EXT: u8 = 0x25;
 pub const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
+pub const ATA_CMD_WRITE_DMA_FUA_EXT: u8 = 0x3D;
 pub const ATA_CMD_IDENTIFY: u8 = 0xEC;
 pub const ATA_CMD_PACKET: u8 = 0xA0;
 pub const ATA_CMD_READ_FPDMA_QUEUED: u8 = 0x60;
@@ -118,6 +119,13 @@ impl FisRegH2D {
         fis.countl = (sectors & 0xFF) as u8;
         fis.counth = ((sectors >> 8) & 0xFF) as u8;
 
+        fis
+    }
+
+    /// WRITE DMA FUA EXT - write with Force Unit Access (bypasses drive write cache).
+    pub fn new_write_dma_fua_ext(lba: u64, sectors: u16) -> Self {
+        let mut fis = Self::new_write_dma_ext(lba, sectors);
+        fis.command = ATA_CMD_WRITE_DMA_FUA_EXT;
         fis
     }
 
@@ -229,6 +237,13 @@ impl FisRegH2D {
         fis.lba4 = ((lba >> 32) & 0xFF) as u8;
         fis.lba5 = ((lba >> 40) & 0xFF) as u8;
 
+        fis
+    }
+
+    /// WRITE FPDMA QUEUED with FUA (Force Unit Access). Device register bit 7.
+    pub fn new_write_fpdma_queued_fua(lba: u64, sectors: u16, tag: u8) -> Self {
+        let mut fis = Self::new_write_fpdma_queued(lba, sectors, tag);
+        fis.device |= 1 << 7; // FUA bit
         fis
     }
 

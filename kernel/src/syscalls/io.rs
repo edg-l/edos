@@ -1405,6 +1405,35 @@ pub fn sys_ftruncate(fd: u64, size: u64) -> i32 {
     }
 }
 
+pub fn sys_fsync(fd: u64) -> i32 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let (path, inode) = {
+        let guard = info.lock();
+        let fd_table = guard.fd_table.lock();
+        match fd_table.get_fd(fd) {
+            Some(FileDescriptor::FsFile(f)) => (f.path.clone(), f.inode.clone()),
+            _ => {
+                drop(fd_table);
+                drop(guard);
+                info.lock().errno = Errno::EINVAL;
+                return -1;
+            }
+        }
+    };
+
+    interrupts::enable();
+    match fs_api::flush_file(&path, inode) {
+        Ok(()) => 0,
+        Err(_) => {
+            info.lock().errno = Errno::EINVAL;
+            -1
+        }
+    }
+}
+
 pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {
     let sched = sched();
     let info = sched.current_thread_info();

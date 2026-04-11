@@ -277,6 +277,7 @@ const SYS_STAT: u64 = 10;
 const SYS_MUNMAP: u64 = 11;
 const SYS_LSEEK: u64 = 12;
 const SYS_FTRUNCATE: u64 = 13;
+const SYS_FSYNC: u64 = 14;
 const SYS_RENAME: u64 = 82;
 const SYS_ISATTY: u64 = 15;
 const SYS_IOCTL: u64 = 16;
@@ -405,6 +406,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let fd = ctx.rdi;
             let size = ctx.rsi;
             ctx.rax = io::sys_ftruncate(fd, size) as u64;
+        }
+        SYS_FSYNC => {
+            let fd = ctx.rdi;
+            ctx.rax = io::sys_fsync(fd) as u64;
         }
         SYS_RENAME => {
             let old_path_ptr = ctx.rdi as *const u8;
