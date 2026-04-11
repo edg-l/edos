@@ -153,6 +153,23 @@ journaling since the journal needs controlled writeback ordering.
 
 ## Ideas
 
+### File-backed mmap / MAP_SHARED
+mmap files into userspace address space backed by page cache frames.
+MAP_PRIVATE gives COW file pages, MAP_SHARED allows multiple processes
+to share the same physical pages (writes visible to all mappers and
+flushed to disk on msync/munmap). VmaBacking::FileBacked { inode, offset }
+replaces ElfSegment once the page cache exists. Prerequisite for dynamic
+linking (shared libraries mapped MAP_PRIVATE from disk).
+
+### Dynamic Linker (ld.so)
+ELF dynamic linking: PT_INTERP, PT_DYNAMIC parsing, symbol resolution
+(DT_HASH/DT_GNU_HASH), PLT/GOT lazy binding, dlopen/dlsym/dlclose.
+Requires General Dynamic TLS model + DTV (dynamic thread vector).
+Shared libraries share physical pages across processes via MAP_SHARED
+file-backed mmap. Enables C library use, plugin systems, and shared
+memory savings. Natural ordering: page cache -> file-backed mmap ->
+dynamic linker.
+
 ### io_uring-style Async I/O
 Shared-memory submission/completion ring between userspace and kernel.
 Already have the SHM infrastructure. Very "modern OS" feature, unique among hobby OSes.
@@ -180,8 +197,8 @@ ncq_read_batch.
 
 ## Fun-per-effort ranking
 
-more tools > page cache > async I/O > IPv6 > virtio-net
+more tools > page cache > file-backed mmap > dynamic linker > async I/O > IPv6 > virtio-net
 
-Note: page cache is high-impact (unlocks journaling, mmap, guaranteed
-zero-copy DMA) but large effort. Demand paging (done) is a prerequisite
-for page cache eviction under memory pressure.
+Note: page cache -> file-backed mmap -> dynamic linker is the natural
+progression. Each builds on the previous. Demand paging (done) is a
+prerequisite for page cache eviction under memory pressure.
