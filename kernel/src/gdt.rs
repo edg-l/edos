@@ -18,22 +18,10 @@ use x86_64::{
 use crate::{memory::mapper::align_stack_pointer, util::per_cpu::get_percpu_data};
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
-pub const PAGE_FAULT_IST_INDEX: u16 = 1;
 pub const RING3_STACK_PST_INDEX: u16 = 0;
 
 fn init_tss_for_current_cpu() {
     let mut tss = TaskStateSegment::new();
-
-    let page_fault_stack_end = {
-        let layout = Layout::from_size_align(1024 * 64, 4096).unwrap();
-        let stack_start = unsafe { alloc(layout) };
-
-        if stack_start.is_null() {
-            handle_alloc_error(layout)
-        }
-
-        VirtAddr::from_ptr(unsafe { stack_start.byte_add(layout.size()) })
-    };
 
     let double_fault_stack_end = {
         let layout = Layout::from_size_align(1024 * 32, 4096).unwrap();
@@ -59,7 +47,6 @@ fn init_tss_for_current_cpu() {
     };
 
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = double_fault_stack_end;
-    tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = page_fault_stack_end;
     tss.privilege_stack_table[RING3_STACK_PST_INDEX as usize] = ring3_pst_stack_end;
 
     let pcpu = get_percpu_data();

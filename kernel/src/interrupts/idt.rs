@@ -40,10 +40,13 @@ pub fn build_idt_for_current_cpu() -> InterruptDescriptorTable {
         idt.double_fault
             .set_handler_fn(double_fault_handler)
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
-        idt.page_fault
-            .set_handler_fn(page_fault_handler)
-            .set_stack_index(gdt::PAGE_FAULT_IST_INDEX);
     }
+    // Page faults use the current kernel stack (no IST). This allows nested
+    // page faults (e.g., vmalloc fault during demand fault handling) to work
+    // naturally by pushing a new frame on the same stack. Kernel stack
+    // overflow hits the guard page and escalates to a double fault, which IS
+    // on its own IST and will be caught.
+    idt.page_fault.set_handler_fn(page_fault_handler);
 
     idt.alignment_check.set_handler_fn(alignment_check_handler);
     idt.general_protection_fault

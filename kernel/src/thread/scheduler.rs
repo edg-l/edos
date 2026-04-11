@@ -27,7 +27,6 @@ use crate::{
         KTHREAD_STACK_REGION_SIZE, KTHREAD_STACK_SIZE, mapper::memory_mapper, valloc::vmalloc,
     },
     println,
-    smp::tlb_flush_all_including_global,
     thread::{
         UserThreadInfo,
         context::CpuContext,
@@ -1576,7 +1575,8 @@ impl Eq for SleepEntry {}
 pub fn switch_to_kernel_page() {
     let kernel_cr3 = boot_info().cr3;
     if Cr3::read().0.start_address() != kernel_cr3.0.start_address() {
+        // Cr3::write flushes all non-global TLB entries. Kernel mappings
+        // don't use GLOBAL, so they are all refreshed by this write.
         unsafe { Cr3::write(kernel_cr3.0, kernel_cr3.1) };
     }
-    tlb_flush_all_including_global();
 }
