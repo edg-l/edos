@@ -40,7 +40,7 @@ use crate::{
         scheduler::switch_to_kernel_page,
         setup_user_stack,
         signal::SignalState,
-        util::{kthread_stack_alloc, kthread_stack_free, thread_stack_alloc, thread_stack_free},
+        util::{kthread_stack_alloc, kthread_stack_free, thread_stack_free},
     },
     timer::Instant,
     window,
@@ -452,9 +452,23 @@ impl Thread {
         let table = unsafe { OffsetPageTable::new(child_page_table, physical_memory_offset) };
 
         let mut process_memory_manager = MemoryManager::new(table);
+        process_memory_manager.pml4_frame = Some(page);
 
-        let stack_top = thread_stack_alloc(&mut process_memory_manager);
+        // Build VmaSet early with Stack VMA so copy_to_user can demand-fault
+        // stack pages during setup_user_stack.
+        let stack_top = USER_STACK_TOP.as_u64();
+        let vma_set = Arc::new(spin::Mutex::new(VmaSet::new()));
+        let stack_bottom = VirtAddr::new(stack_top - USER_STACK_SIZE);
+        vma_set.lock().insert(Vma {
+            start: stack_bottom,
+            end: USER_STACK_TOP,
+            prot: VmaProt::READ | VmaProt::WRITE,
+            flags: VmaFlags::PRIVATE | VmaFlags::GROWSDOWN | VmaFlags::LAZY,
+            backing: VmaBacking::Stack,
+        });
+        process_memory_manager.vmas = Some(vma_set.clone());
 
+        // setup_user_stack now demand-faults stack pages via MemoryManager's VmaSet
         let (user_stack_pointer, argv_ptr, argc, envp_ptr) =
             setup_user_stack(stack_top, argv, envp, &process_memory_manager)
                 .map_err(|_| ElfLoadError::MappingFailed)?;
@@ -464,36 +478,26 @@ impl Thread {
         let id = ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, Ordering::Relaxed));
 
         let mut tls_runtime: Option<UserThreadTls> = None;
-        let mut tls_region: Option<Vma> = None;
         let mut tls_fs_base = 0u64;
 
         if let Some(template) = load_info.tls_template.take() {
             let template = Arc::new(template);
             let allocation = allocate_tls_region(&template, id, &mut process_memory_manager)?;
             tls_fs_base = allocation.fs_base;
-            tls_region = Some(allocation.vma);
+            vma_set.lock().insert(allocation.vma);
             tls_runtime = Some(allocation.runtime);
+        }
+
+        // Add ELF segment VMAs
+        {
+            let mut vmas = vma_set.lock();
+            for vma in load_info.memory_regions {
+                vmas.insert(vma);
+            }
         }
 
         let entry_point = load_info.entry_point;
         let heap_break = load_info.heap_break;
-
-        // Build initial VmaSet from ELF segments + TLS + stack
-        let mut vma_set = VmaSet::new();
-        for vma in load_info.memory_regions {
-            vma_set.insert(vma);
-        }
-        if let Some(tls_vma) = tls_region {
-            vma_set.insert(tls_vma);
-        }
-        let stack_bottom = VirtAddr::new(stack_top - USER_STACK_SIZE);
-        vma_set.insert(Vma {
-            start: stack_bottom,
-            end: VirtAddr::new(stack_top),
-            prot: VmaProt::READ | VmaProt::WRITE,
-            flags: VmaFlags::PRIVATE | VmaFlags::GROWSDOWN,
-            backing: VmaBacking::Stack,
-        });
 
         let mut context = CpuContext::new_user_thread(entry_point.as_u64(), user_stack_pointer);
         context.rdi = argc as u64;
@@ -511,7 +515,7 @@ impl Thread {
             pid: id.0,
             cr3: (page, kernel_pml4.1),
             memory_manager: mm.clone(),
-            vmas: Arc::new(spin::Mutex::new(vma_set)),
+            vmas: vma_set, // same Arc, shared between MemoryManager and UserThread
             tls: tls_runtime,
             heap_break,
             address_space_refs,

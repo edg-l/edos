@@ -117,30 +117,27 @@ pub fn kthread_exit(code: i32) -> ! {
     sched().thread_exit(code)
 }
 
-/// Returns the stack top of a kthread or a kernel stack for a user process.
-///
-/// Note: When used in a iretq, the stack must be 8 byte aligned as to emulate a call.
-/// Thus called must decrement the stack top by 8 bytes.
-pub fn thread_stack_alloc(manager: &mut MemoryManager) -> u64 {
-    let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
-
-    manager
-        .map_memory(
-            stack_bottom,
-            USER_STACK_SIZE,
-            PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::NO_EXECUTE
-                | PageTableFlags::USER_ACCESSIBLE,
-        )
-        .expect("failed to map kstack");
-
+pub fn thread_stack_alloc(_manager: &mut MemoryManager) -> u64 {
     USER_STACK_TOP.as_u64()
 }
 
+/// Free a lazily-allocated user stack. Only unmaps pages that were actually
+/// faulted in (present in the page table).
 pub fn thread_stack_free(manager: &mut MemoryManager, stack_top: u64) {
-    let stack_bottom = VirtAddr::new(stack_top - USER_STACK_SIZE);
-    manager.unmap_memory(stack_bottom, USER_STACK_SIZE).ok();
+    use x86_64::structures::paging::{Mapper, Page, Size4KiB, Translate};
+
+    let stack_bottom = stack_top - USER_STACK_SIZE;
+    let page_count = USER_STACK_SIZE / 4096;
+    for i in 0..page_count {
+        let virt = VirtAddr::new(stack_bottom + i * 4096);
+        let page: Page<Size4KiB> = Page::containing_address(virt);
+        if let Ok(phys) = manager.mapper.translate_page(page) {
+            if let Ok((_, flush)) = manager.mapper.unmap(page) {
+                flush.ignore();
+            }
+            unsafe { crate::memory::frame_allocator::frame_allocator().deallocate_frame(phys) };
+        }
+    }
 }
 
 pub fn queue_spawn_thread(thread: Arc<Thread>) -> ThreadId {

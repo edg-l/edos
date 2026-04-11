@@ -1,3 +1,4 @@
+use alloc::sync::Arc;
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::control::Cr3Flags,
@@ -11,7 +12,7 @@ use x86_64::{
 
 use crate::{
     boot::boot_info,
-    memory::{STACK_ALIGNMENT, frame_allocator::frame_allocator},
+    memory::{STACK_ALIGNMENT, frame_allocator::frame_allocator, vma::VmaSet},
     thread::irqlock::IrqLockGuard,
 };
 
@@ -47,12 +48,20 @@ pub fn memory_mapper() -> IrqLockGuard<'static, MemoryManager> {
 #[derive(Debug)]
 pub struct MemoryManager {
     pub mapper: OffsetPageTable<'static>,
+    /// PML4 physical frame (user processes only, None for kernel mapper)
+    pub pml4_frame: Option<PhysFrame>,
+    /// VMA set (user processes only, None for kernel mapper)
+    pub vmas: Option<Arc<spin::Mutex<VmaSet>>>,
 }
 
 #[expect(unused)]
 impl MemoryManager {
     pub fn new(page_table: OffsetPageTable<'static>) -> Self {
-        Self { mapper: page_table }
+        Self {
+            mapper: page_table,
+            pml4_frame: None,
+            vmas: None,
+        }
     }
 
     /// Maps memory, the default flag is PRESENT, use extra flags for more.
@@ -256,15 +265,36 @@ impl MemoryManager {
     }
 
     /// Translate a virtual address mapped in this page table to a kernel HHDM pointer.
+    /// If the page is not yet present and this MemoryManager has an attached VmaSet,
+    /// demand-faults the page before returning the pointer.
     fn translate_to_hhdm_ptr(&self, vaddr: VirtAddr) -> Option<*mut u8> {
-        match self.mapper.translate(vaddr) {
-            TranslateResult::Mapped { frame, offset, .. } => {
-                let phys = frame.start_address() + offset;
-                let hhdm = crate::boot::boot_info().physical_memory_offset;
-                Some((hhdm + phys.as_u64()).as_mut_ptr())
-            }
-            _ => None,
+        // Fast path: page already mapped
+        if let TranslateResult::Mapped { frame, offset, .. } = self.mapper.translate(vaddr) {
+            let phys = frame.start_address() + offset;
+            let hhdm = crate::boot::boot_info().physical_memory_offset;
+            return Some((hhdm + phys.as_u64()).as_mut_ptr());
         }
+
+        // Slow path: demand-fault via attached VmaSet
+        let vmas_arc = self.vmas.as_ref()?;
+        let pml4 = self.pml4_frame?;
+        let phys_offset = crate::boot::boot_info().physical_memory_offset;
+
+        let fault_info = {
+            let vmas = vmas_arc.lock();
+            crate::memory::fault::lookup_fault_vma(&vmas, vaddr)?
+        };
+        // VmaSet lock dropped before allocating frames
+
+        if crate::memory::fault::fault_in_page(vaddr, &fault_info, pml4, phys_offset) {
+            // Retry translation after mapping
+            if let TranslateResult::Mapped { frame, offset, .. } = self.mapper.translate(vaddr) {
+                let phys = frame.start_address() + offset;
+                return Some((phys_offset + phys.as_u64()).as_mut_ptr());
+            }
+        }
+
+        None
     }
 
     /// Copy bytes into user virtual address space via HHDM, handling page boundaries.

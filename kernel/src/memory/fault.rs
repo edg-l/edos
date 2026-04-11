@@ -13,12 +13,126 @@ use crate::{
     boot::boot_info,
     memory::{
         frame_allocator::frame_allocator,
-        vma::{VmaBacking, VmaFlags, VmaProt},
+        vma::{VmaBacking, VmaFlags, VmaProt, VmaSet},
     },
     thread::scheduler::sched,
 };
 
 use x86_64::structures::idt::PageFaultErrorCode;
+
+/// Info extracted from a VMA needed to resolve a demand fault.
+/// Extracted while holding the VMA lock, used after dropping it.
+pub struct FaultInfo {
+    pub pt_flags: PageTableFlags,
+    pub elf_info: Option<(Arc<Vec<u8>>, u64, u64, u64, VirtAddr)>,
+}
+
+/// Look up VMA for a fault address and extract fault resolution info.
+/// Returns None if no VMA covers the address, the VMA isn't lazy, or
+/// the backing type isn't supported for demand faulting.
+pub fn lookup_fault_vma(vmas: &VmaSet, fault_addr: VirtAddr) -> Option<FaultInfo> {
+    let vma = vmas.find(fault_addr)?;
+    if !vma.flags.contains(VmaFlags::LAZY) {
+        return None;
+    }
+
+    let mut pt_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    if vma.prot.contains(VmaProt::WRITE) {
+        pt_flags |= PageTableFlags::WRITABLE;
+    }
+    if !vma.prot.contains(VmaProt::EXEC) {
+        pt_flags |= PageTableFlags::NO_EXECUTE;
+    }
+
+    let elf_info = match &vma.backing {
+        VmaBacking::Anonymous | VmaBacking::Stack => None,
+        VmaBacking::ElfSegment {
+            elf_data,
+            file_offset,
+            file_size,
+            vaddr_offset,
+        } => Some((
+            elf_data.clone(),
+            *file_offset,
+            *file_size,
+            *vaddr_offset,
+            vma.start,
+        )),
+        _ => return None,
+    };
+
+    Some(FaultInfo { pt_flags, elf_info })
+}
+
+/// Fault in a single page given pre-extracted VMA info.
+/// Allocates a zero-filled frame, optionally fills from ELF data, and maps it.
+/// Can be called after dropping the VMA lock.
+/// Returns true if the page was mapped (or was already present from a race).
+pub fn fault_in_page(
+    fault_addr: VirtAddr,
+    info: &FaultInfo,
+    cr3: PhysFrame,
+    phys_offset: VirtAddr,
+) -> bool {
+    // Allocate a physical frame
+    let frame = match frame_allocator().allocate_frame() {
+        Some(f) => f,
+        None => return false,
+    };
+
+    // Zero the frame via HHDM
+    let frame_virt = phys_offset + frame.start_address().as_u64();
+    unsafe {
+        core::ptr::write_bytes(frame_virt.as_mut_ptr::<u8>(), 0, 4096);
+    }
+
+    // For ELF-backed pages, fill from the stored ELF data
+    let page_addr = fault_addr.align_down(4096u64);
+    if let Some((ref elf_data, file_offset, file_size, vaddr_offset, vma_start)) = info.elf_info {
+        let page_off_in_vma = page_addr.as_u64() - vma_start.as_u64();
+        let seg_start = page_off_in_vma.saturating_sub(vaddr_offset);
+        let seg_end = (page_off_in_vma + 4096).saturating_sub(vaddr_offset);
+        let copy_start = seg_start.min(file_size);
+        let copy_end = seg_end.min(file_size);
+
+        if copy_end > copy_start {
+            let elf_src_offset = (file_offset + copy_start) as usize;
+            let elf_src_end = (file_offset + copy_end) as usize;
+            if elf_src_end <= elf_data.len() {
+                let dst_offset = if page_off_in_vma < vaddr_offset {
+                    (vaddr_offset - page_off_in_vma) as usize
+                } else {
+                    0usize
+                };
+                let copy_len = (copy_end - copy_start) as usize;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        elf_data[elf_src_offset..].as_ptr(),
+                        frame_virt.as_mut_ptr::<u8>().add(dst_offset),
+                        copy_len,
+                    );
+                }
+            }
+        }
+    }
+
+    // Map the page
+    let success = unsafe { map_page_direct(cr3, page_addr, frame, info.pt_flags, phys_offset) };
+
+    if success {
+        x86_64::instructions::tlb::flush(page_addr);
+        true
+    } else {
+        // Race: check if another CPU/path already mapped it
+        if is_page_present(cr3, page_addr, phys_offset) {
+            unsafe { frame_allocator().deallocate_frame(frame) };
+            true
+        } else {
+            unsafe { frame_allocator().deallocate_frame(frame) };
+            false
+        }
+    }
+}
 
 /// Handle a demand page fault for userspace.
 ///
@@ -55,12 +169,7 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
         None => return false, // No VMA covers this address
     };
 
-    // Check if this VMA is lazy (demand-paged)
-    if !vma.flags.contains(VmaFlags::LAZY) {
-        return false; // Eagerly mapped VMA shouldn't have non-present pages
-    }
-
-    // Permission checks
+    // Permission checks from the hardware error code
     let is_write = error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE);
     if is_write && !vma.prot.contains(VmaProt::WRITE) {
         return false; // Write to read-only VMA
@@ -70,102 +179,19 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
         return false; // Execute on no-exec VMA
     }
 
-    // Build page table flags from VMA protection
-    let mut pt_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-    if vma.prot.contains(VmaProt::WRITE) {
-        pt_flags |= PageTableFlags::WRITABLE;
-    }
-    if !vma.prot.contains(VmaProt::EXEC) {
-        pt_flags |= PageTableFlags::NO_EXECUTE;
-    }
-
-    // Extract ElfSegment fields before dropping locks (Arc clone is cheap)
-    let elf_info: Option<(Arc<Vec<u8>>, u64, u64, u64, VirtAddr)> = match &vma.backing {
-        VmaBacking::Anonymous | VmaBacking::Stack => None,
-        VmaBacking::ElfSegment {
-            elf_data,
-            file_offset,
-            file_size,
-            vaddr_offset,
-        } => Some((
-            elf_data.clone(),
-            *file_offset,
-            *file_size,
-            *vaddr_offset,
-            vma.start,
-        )),
-        _ => return false,
+    let fault_info = match lookup_fault_vma(&vmas, fault_addr) {
+        Some(info) => info,
+        None => return false,
     };
 
-    // Drop the VMA lock before allocating (frame_allocator uses its own lock)
+    // Drop locks before allocating (frame_allocator uses its own lock)
     drop(vmas);
     drop(user_read);
 
-    // Allocate a physical frame
-    let frame = match frame_allocator().allocate_frame() {
-        Some(f) => f,
-        None => return false, // OOM
-    };
-
-    // Zero the frame via HHDM
-    let phys_offset = boot_info().physical_memory_offset;
-    let frame_virt = phys_offset + frame.start_address().as_u64();
-    unsafe {
-        core::ptr::write_bytes(frame_virt.as_mut_ptr::<u8>(), 0, 4096);
-    }
-
-    // For ELF-backed pages, fill from the stored ELF data
-    let page_addr = fault_addr.align_down(4096u64);
-    if let Some((elf_data, file_offset, file_size, vaddr_offset, vma_start)) = elf_info {
-        let page_off_in_vma = page_addr.as_u64() - vma_start.as_u64();
-        let seg_start = page_off_in_vma.saturating_sub(vaddr_offset);
-        let seg_end = (page_off_in_vma + 4096).saturating_sub(vaddr_offset);
-        let copy_start = seg_start.min(file_size);
-        let copy_end = seg_end.min(file_size);
-
-        if copy_end > copy_start {
-            let elf_src_offset = (file_offset + copy_start) as usize;
-            let elf_src_end = (file_offset + copy_end) as usize;
-            if elf_src_end <= elf_data.len() {
-                let dst_offset = if page_off_in_vma < vaddr_offset {
-                    (vaddr_offset - page_off_in_vma) as usize
-                } else {
-                    0usize
-                };
-                let copy_len = (copy_end - copy_start) as usize;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        elf_data[elf_src_offset..].as_ptr(),
-                        frame_virt.as_mut_ptr::<u8>().add(dst_offset),
-                        copy_len,
-                    );
-                }
-            }
-        }
-    }
-
-    // Map the page into the faulting process's page table via HHDM.
-    // We walk the page table directly (same approach as handle_cow_fault)
-    // to avoid needing a MemoryManager lock.
     let (cr3_frame, _) = Cr3::read();
+    let phys_offset = boot_info().physical_memory_offset;
 
-    let success = unsafe { map_page_direct(cr3_frame, page_addr, frame, pt_flags, phys_offset) };
-
-    if success {
-        x86_64::instructions::tlb::flush(page_addr);
-        true
-    } else {
-        // Map failed: check if the page is already present (race with another CPU)
-        if is_page_present(cr3_frame, page_addr, phys_offset) {
-            // Another CPU already mapped this page - free our frame and succeed
-            unsafe { frame_allocator().deallocate_frame(frame) };
-            true
-        } else {
-            // Real failure - free frame and report
-            unsafe { frame_allocator().deallocate_frame(frame) };
-            false
-        }
-    }
+    fault_in_page(fault_addr, &fault_info, cr3_frame, phys_offset)
 }
 
 /// Map a single page directly into a page table via HHDM.

@@ -1798,11 +1798,18 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
 
     let phys_offset = crate::boot::boot_info().physical_memory_offset;
 
+    // Wrap the deep-cloned VmaSet in an Arc so it can be shared between
+    // the child MemoryManager and UserThread.
+    let child_vma_set_arc = Arc::new(spin::Mutex::new(child_vma_set));
+
     // Build a MemoryManager for the child via HHDM (no CR3 switch needed).
     let child_mm = {
         let child_page_table = unsafe { get_level_4_table((child_pml4_frame, parent_cr3.1)) };
         let table = unsafe { OffsetPageTable::new(child_page_table, phys_offset) };
-        Arc::new(Mutex::new(MemoryManager::new(table)))
+        let mut mm = MemoryManager::new(table);
+        mm.pml4_frame = Some(child_pml4_frame);
+        mm.vmas = Some(child_vma_set_arc.clone());
+        Arc::new(Mutex::new(mm))
     };
 
     // Allocate kernel stack for the child.
@@ -1829,7 +1836,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         pid: child_id.0,
         cr3: (child_pml4_frame, parent_cr3.1),
         memory_manager: child_mm.clone(),
-        vmas: Arc::new(spin::Mutex::new(child_vma_set)),
+        vmas: child_vma_set_arc,
         tls: parent_tls,
         heap_break: parent_heap_break,
         address_space_refs: Arc::new(AtomicUsize::new(1)),
