@@ -1,16 +1,12 @@
-use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize};
 use spin::Mutex;
-use x86_64::{
-    VirtAddr,
-    registers::control::Cr3Flags,
-    structures::paging::{PageTableFlags, PhysFrame},
-};
+use x86_64::{VirtAddr, registers::control::Cr3Flags, structures::paging::PhysFrame};
 
 use crate::{
     fs::path::Path,
     loader::TlsTemplate,
-    memory::{STACK_ALIGNMENT, USER_STACK_SIZE, mapper::MemoryManager},
+    memory::{STACK_ALIGNMENT, USER_STACK_SIZE, mapper::MemoryManager, vma::VmaSet},
     syscalls::Errno,
     thread::{fd::FileDescriptorTable, mutex::BlockingMutex},
 };
@@ -44,8 +40,7 @@ pub struct UserThread {
     /// Physical addr
     pub cr3: (PhysFrame, Cr3Flags),
     pub memory_manager: Arc<Mutex<MemoryManager>>,
-    pub memory_regions: Arc<Vec<MemoryRegion>>,
-    pub owned_regions: Vec<MemoryRegion>,
+    pub vmas: Arc<spin::Mutex<VmaSet>>,
     pub tls: Option<UserThreadTls>,
     pub heap_break: u64,
     pub address_space_refs: Arc<AtomicUsize>,
@@ -70,8 +65,6 @@ pub struct UserThreadInfo {
     pub pid: u64,
     pub errno: Errno,
     pub fd_table: Arc<BlockingMutex<FileDescriptorTable>>,
-    // For mmap
-    pub memory_mappings: Arc<BlockingMutex<BTreeMap<VirtAddr, MemoryMapping>>>,
     pub next_mmap_addr: Arc<AtomicU64>,
     pub memory_manager: Arc<Mutex<MemoryManager>>,
     pub cwd: Arc<BlockingMutex<Path>>,
@@ -205,43 +198,4 @@ pub fn setup_user_stack(
     mm.write_val_to_user::<u64>(VirtAddr::new(sp), argc as u64);
 
     Ok((sp, argv_ptr, argc, envp_ptr))
-}
-
-#[expect(unused)]
-#[derive(Debug, Clone)]
-pub struct MemoryRegion {
-    pub start: VirtAddr,
-    pub size: u64,
-    #[allow(unused)]
-    pub flags: PageTableFlags,
-    pub region_type: MemoryRegionType,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum MemoryRegionType {
-    Code,
-    Data,
-    Tls,
-    ThreadLocal,
-}
-
-#[expect(unused)]
-#[derive(Debug, Clone)]
-pub struct MemoryMapping {
-    pub size: u64,
-    pub flags: PageTableFlags,
-    pub mapping_type: MappingType, // Anonymous, File, etc.
-}
-
-#[derive(Debug, Clone)]
-pub enum MappingType {
-    Anonymous,
-    Shared(u64),   // shm_id
-    Physical(u64), // physical base address (MMIO/VRAM, frames not owned by allocator)
-}
-
-#[expect(unused)]
-#[derive(Debug, Clone)]
-pub struct File {
-    fd: u64,
 }

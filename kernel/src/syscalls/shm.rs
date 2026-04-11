@@ -8,13 +8,15 @@ use x86_64::{
 };
 
 use crate::{
-    memory::shared::{SharedMemory, SharedMemoryError},
-    syscalls::{Errno, memory::find_free_virtual_address_atomic},
-    thread::{MappingType, MemoryMapping, scheduler::sched},
+    memory::{
+        shared::{SharedMemory, SharedMemoryError},
+        vma::{Vma, VmaBacking, VmaFlags, VmaProt},
+    },
+    syscalls::Errno,
+    thread::scheduler::sched,
 };
 
 // Protection flags (match Linux)
-#[expect(unused)]
 const PROT_READ: u64 = 0x1;
 const PROT_WRITE: u64 = 0x2;
 const PROT_EXEC: u64 = 0x4;
@@ -80,10 +82,27 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
 
     let size = shm.size() as u64;
 
+    let thread = match sched.current_thread() {
+        Some(t) => t,
+        None => {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+    let user_arc = match &thread.user {
+        Some(u) => u.clone(),
+        None => {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
     // Determine mapping address
     let map_addr = if addr_hint == 0 {
-        let guard = info.lock();
-        find_free_virtual_address_atomic(&guard.memory_mappings, &guard.next_mmap_addr, size)
+        let user_read = user_arc.read();
+        let next_mmap_addr = info.lock().next_mmap_addr.clone();
+        let vmas = user_read.vmas.lock();
+        vmas.find_free_address(&next_mmap_addr, size)
     } else {
         // Validate user-supplied address: must be page-aligned and in user space
         if addr_hint & 0xFFF != 0 || addr_hint >= 0x0000_8000_0000_0000 {
@@ -119,7 +138,6 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
                 // Rollback: unmap any pages we've already mapped
                 for j in 0..i {
                     let rollback_addr = VirtAddr::new(map_addr.as_u64() + (j as u64 * 4096));
-                    // Unmap without deallocating the frame (it's shared)
                     let page: Page<Size4KiB> = Page::containing_address(rollback_addr);
                     if let Ok((_, flush)) = manager.mapper.unmap(page) {
                         flush.flush();
@@ -148,15 +166,25 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
         return !0u64;
     }
 
-    // Record the mapping
-    info.lock().memory_mappings.lock().insert(
-        map_addr,
-        MemoryMapping {
-            size,
-            flags: page_flags,
-            mapping_type: MappingType::Shared(shm_id),
-        },
-    );
+    let mut vma_prot = VmaProt::empty();
+    if prot & PROT_READ != 0 {
+        vma_prot |= VmaProt::READ;
+    }
+    if prot & PROT_WRITE != 0 {
+        vma_prot |= VmaProt::WRITE;
+    }
+    if prot & PROT_EXEC != 0 {
+        vma_prot |= VmaProt::EXEC;
+    }
+
+    // Record the mapping in VmaSet
+    user_arc.read().vmas.lock().insert(Vma {
+        start: map_addr,
+        end: map_addr + size,
+        prot: vma_prot,
+        flags: VmaFlags::SHARED,
+        backing: VmaBacking::SharedMemory { shm_id },
+    });
 
     map_addr.as_u64()
 }
@@ -176,13 +204,29 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
 
     let map_addr = VirtAddr::new(addr);
 
-    // Find and remove the mapping
-    let mapping = info.lock().memory_mappings.lock().remove(&map_addr);
+    let thread = match sched.current_thread() {
+        Some(t) => t,
+        None => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+    let user_arc = match &thread.user {
+        Some(u) => u.clone(),
+        None => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
 
-    match mapping {
-        Some(mapping) => {
-            match mapping.mapping_type {
-                MappingType::Shared(shm_id) => {
+    // Find and remove the VMA
+    let vma = user_arc.read().vmas.lock().remove(&map_addr);
+
+    match vma {
+        Some(vma) => {
+            match &vma.backing {
+                VmaBacking::SharedMemory { shm_id } => {
+                    let shm_id = *shm_id;
                     // Get the shared memory to decrement ref count
                     if let Some(shm) = SharedMemory::get(shm_id) {
                         shm.dec_ref();
@@ -190,7 +234,7 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
 
                     // Unmap the pages (but don't deallocate the frames - they're shared)
                     let memory_manager = info.lock().memory_manager.clone();
-                    let page_count = (mapping.size + 0xFFF) / 4096;
+                    let page_count = (vma.size() + 0xFFF) / 4096;
                     {
                         let mut manager = memory_manager.lock();
                         for i in 0..page_count {
@@ -200,16 +244,16 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
                                 flush.flush();
                             }
                         }
-                    } // manager dropped here
+                    }
                     if crate::memory::tlb::shootdown_needed() {
                         crate::memory::tlb::tlb_shootdown(VirtAddr::new(addr), page_count);
                     }
 
                     0
                 }
-                MappingType::Anonymous | MappingType::Physical(_) => {
+                _ => {
                     // Not a shared memory mapping, restore and return error
-                    info.lock().memory_mappings.lock().insert(map_addr, mapping);
+                    user_arc.read().vmas.lock().insert(vma);
                     info.lock().errno = Errno::EINVAL;
                     -1
                 }

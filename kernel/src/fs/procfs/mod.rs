@@ -332,8 +332,7 @@ struct ThreadSnapshot {
     group_id: Option<u32>,
     cwd: Option<String>,
     heap_break: Option<u64>,
-    memory_regions: Option<usize>,
-    memory_mappings: Option<usize>,
+    vma_count: Option<usize>,
     next_mmap_addr: Option<u64>,
     errno: Option<Errno>,
 }
@@ -360,7 +359,7 @@ impl ThreadSnapshot {
         let kstack_top = thread.kstack_top;
         let is_kernel = thread.user.is_none();
 
-        let (user_pid, heap_break, memory_regions) = thread
+        let (user_pid, heap_break, vma_count) = thread
             .user
             .as_ref()
             .map(|user_arc| {
@@ -368,13 +367,12 @@ impl ThreadSnapshot {
                 (
                     Some(user.pid),
                     Some(user.heap_break),
-                    Some(user.memory_regions.len()),
+                    Some(user.vmas.lock().len()),
                 )
             })
             .unwrap_or((None, None, None));
 
-        let (user_id, group_id, cwd, errno, memory_mappings, next_mmap_addr) =
-            read_thread_info(thread.id);
+        let (user_id, group_id, cwd, errno, next_mmap_addr) = read_thread_info(thread.id);
 
         Self {
             tid,
@@ -395,8 +393,7 @@ impl ThreadSnapshot {
             group_id,
             cwd,
             heap_break,
-            memory_regions,
-            memory_mappings,
+            vma_count,
             next_mmap_addr,
             errno,
         }
@@ -454,13 +451,8 @@ impl ThreadSnapshot {
         let _ = writeln!(out, "Heap Break: {}", display_option_hex(self.heap_break));
         let _ = writeln!(
             out,
-            "Memory Regions: {}",
-            display_option_decimal(self.memory_regions.map(|v| v as u64))
-        );
-        let _ = writeln!(
-            out,
-            "Memory Mappings: {}",
-            display_option_decimal(self.memory_mappings.map(|v| v as u64))
+            "VMAs: {}",
+            display_option_decimal(self.vma_count.map(|v| v as u64))
         );
         let _ = writeln!(
             out,
@@ -483,7 +475,6 @@ fn read_thread_info(
     Option<u32>,
     Option<String>,
     Option<Errno>,
-    Option<usize>,
     Option<u64>,
 ) {
     if let Some(info_arc) = get_thread_info_by_id(tid)
@@ -494,14 +485,13 @@ fn read_thread_info(
             Some(info.group_id),
             Some(info.cwd.lock().to_string()),
             Some(info.errno),
-            Some(info.memory_mappings.lock().len()),
             Some(
                 info.next_mmap_addr
                     .load(core::sync::atomic::Ordering::Relaxed),
             ),
         );
     }
-    (None, None, None, None, None, None)
+    (None, None, None, None, None)
 }
 
 fn display_option_decimal(value: Option<u64>) -> String {

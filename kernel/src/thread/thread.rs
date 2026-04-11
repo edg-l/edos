@@ -25,11 +25,12 @@ use crate::{
         frame_allocator::frame_allocator,
         mapper::{MemoryManager, get_level_4_table},
         shared::SharedMemory,
+        vma::{Vma, VmaBacking, VmaFlags, VmaProt, VmaSet},
     },
     println,
     syscalls::Errno,
     thread::{
-        MappingType, MemoryRegion, MemoryRegionType, UserThread, UserThreadInfo, UserThreadTls,
+        UserThread, UserThreadInfo, UserThreadTls,
         context::CpuContext,
         fd::FileDescriptorTable,
         irqlock::IrqSpinlock,
@@ -182,7 +183,7 @@ const PAGE_SIZE: u64 = 4096;
 
 pub(crate) struct TlsAllocation {
     pub runtime: UserThreadTls,
-    pub region: MemoryRegion,
+    pub vma: Vma,
     pub fs_base: u64,
 }
 
@@ -289,16 +290,17 @@ pub(crate) fn allocate_tls_region(
         mapping_size: map_size,
     };
 
-    let region = MemoryRegion {
+    let vma = Vma {
         start: mapping_base,
-        size: map_size,
-        flags,
-        region_type: MemoryRegionType::Tls,
+        end: mapping_base + map_size,
+        prot: VmaProt::READ | VmaProt::WRITE,
+        flags: VmaFlags::PRIVATE,
+        backing: VmaBacking::Tls,
     };
 
     Ok(TlsAllocation {
         runtime,
-        region,
+        vma,
         fs_base: tcb_base.as_u64(),
     })
 }
@@ -462,24 +464,36 @@ impl Thread {
         let id = ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, Ordering::Relaxed));
 
         let mut tls_runtime: Option<UserThreadTls> = None;
-        let mut tls_region: Option<MemoryRegion> = None;
+        let mut tls_region: Option<Vma> = None;
         let mut tls_fs_base = 0u64;
 
         if let Some(template) = load_info.tls_template.take() {
             let template = Arc::new(template);
             let allocation = allocate_tls_region(&template, id, &mut process_memory_manager)?;
             tls_fs_base = allocation.fs_base;
-            tls_region = Some(allocation.region);
+            tls_region = Some(allocation.vma);
             tls_runtime = Some(allocation.runtime);
         }
 
         let entry_point = load_info.entry_point;
         let heap_break = load_info.heap_break;
-        let mut owned_regions = Vec::new();
-        if let Some(region) = tls_region {
-            owned_regions.push(region);
+
+        // Build initial VmaSet from ELF segments + TLS + stack
+        let mut vma_set = VmaSet::new();
+        for vma in load_info.memory_regions {
+            vma_set.insert(vma);
         }
-        let process_regions = Arc::new(load_info.memory_regions);
+        if let Some(tls_vma) = tls_region {
+            vma_set.insert(tls_vma);
+        }
+        let stack_bottom = VirtAddr::new(stack_top - USER_STACK_SIZE);
+        vma_set.insert(Vma {
+            start: stack_bottom,
+            end: VirtAddr::new(stack_top),
+            prot: VmaProt::READ | VmaProt::WRITE,
+            flags: VmaFlags::PRIVATE | VmaFlags::GROWSDOWN,
+            backing: VmaBacking::Stack,
+        });
 
         let mut context = CpuContext::new_user_thread(entry_point.as_u64(), user_stack_pointer);
         context.rdi = argc as u64;
@@ -497,8 +511,7 @@ impl Thread {
             pid: id.0,
             cr3: (page, kernel_pml4.1),
             memory_manager: mm.clone(),
-            memory_regions: Arc::clone(&process_regions),
-            owned_regions,
+            vmas: Arc::new(spin::Mutex::new(vma_set)),
             tls: tls_runtime,
             heap_break,
             address_space_refs,
@@ -538,7 +551,6 @@ impl Thread {
                 pid: id.0,
                 errno: Errno::Clear,
                 fd_table: Arc::new(BlockingMutex::new(FileDescriptorTable::new())),
-                memory_mappings: Arc::new(BlockingMutex::new(BTreeMap::new())),
                 next_mmap_addr: Arc::new(AtomicU64::new(heap_break)),
                 memory_manager: mm,
                 cwd: Arc::new(BlockingMutex::new(cwd)),
@@ -608,10 +620,6 @@ impl Thread {
         let is_last_thread = remaining == 1;
 
         let mut memory_manager = user.memory_manager.lock();
-
-        for region in &user.owned_regions {
-            let _ = memory_manager.unmap_memory(region.start, region.size);
-        }
 
         if is_last_thread {
             // Close all file descriptors (pipes need proper shutdown for EOF)
@@ -685,50 +693,42 @@ impl Thread {
             // Clean up windows owned by this process
             window::cleanup_process_windows(user.pid);
 
-            if let Some(info) = THREADS.get_info(self.id) {
-                let mappings = info.lock().memory_mappings.lock().clone();
-                for (addr, mapping) in mappings {
-                    match mapping.mapping_type {
-                        MappingType::Anonymous => {
-                            // Anonymous mappings: unmap and deallocate frames
-                            let _ = memory_manager.unmap_memory(addr, mapping.size);
-                        }
-                        MappingType::Shared(shm_id) => {
-                            // Shared memory: unmap pages but DON'T deallocate frames
-                            // The frames belong to the SharedMemory object
-                            use x86_64::structures::paging::{Mapper, Page, Size4KiB};
-                            let page_count = (mapping.size + 0xFFF) / 4096;
-                            for i in 0..page_count {
-                                let virt_addr = VirtAddr::new(addr.as_u64() + i * 4096);
-                                let page: Page<Size4KiB> = Page::containing_address(virt_addr);
-                                if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
-                                    flush.flush();
-                                }
-                            }
-                            // Decrement the shared memory ref count
-                            if let Some(shm) = SharedMemory::get(shm_id) {
-                                shm.dec_ref();
+            // Unmap all VMAs, skipping Stack (handled by thread_stack_free below)
+            let vmas = user.vmas.lock().clone();
+            for vma in vmas.iter() {
+                match &vma.backing {
+                    VmaBacking::Anonymous | VmaBacking::Elf | VmaBacking::Tls => {
+                        let _ = memory_manager.unmap_memory(vma.start, vma.size());
+                    }
+                    VmaBacking::SharedMemory { shm_id } => {
+                        use x86_64::structures::paging::{Mapper, Page, Size4KiB};
+                        let page_count = (vma.size() + 0xFFF) / 4096;
+                        for i in 0..page_count {
+                            let virt_addr = VirtAddr::new(vma.start.as_u64() + i * 4096);
+                            let page: Page<Size4KiB> = Page::containing_address(virt_addr);
+                            if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
+                                flush.flush();
                             }
                         }
-                        MappingType::Physical(_phys_base) => {
-                            // Physical (MMIO/VRAM) mapping: unmap pages but DON'T
-                            // deallocate frames -- they are not owned by the frame allocator.
-                            use x86_64::structures::paging::{Mapper, Page, Size4KiB};
-                            let page_count = (mapping.size + 0xFFF) / 4096;
-                            for i in 0..page_count {
-                                let virt_addr = VirtAddr::new(addr.as_u64() + i * 4096);
-                                let page: Page<Size4KiB> = Page::containing_address(virt_addr);
-                                if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
-                                    flush.flush();
-                                }
+                        if let Some(shm) = SharedMemory::get(*shm_id) {
+                            shm.dec_ref();
+                        }
+                    }
+                    VmaBacking::Physical { .. } => {
+                        use x86_64::structures::paging::{Mapper, Page, Size4KiB};
+                        let page_count = (vma.size() + 0xFFF) / 4096;
+                        for i in 0..page_count {
+                            let virt_addr = VirtAddr::new(vma.start.as_u64() + i * 4096);
+                            let page: Page<Size4KiB> = Page::containing_address(virt_addr);
+                            if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
+                                flush.flush();
                             }
                         }
                     }
+                    VmaBacking::Stack => {
+                        // Handled below by thread_stack_free
+                    }
                 }
-            }
-
-            for region in user.memory_regions.iter() {
-                let _ = memory_manager.unmap_memory(region.start, region.size);
             }
 
             let stack_top = user.process_stack_top.load(Ordering::Acquire);

@@ -1,4 +1,3 @@
-use alloc::collections::btree_map::BTreeMap;
 use x86_64::{
     VirtAddr,
     registers::control::Cr3,
@@ -7,8 +6,11 @@ use x86_64::{
 
 use crate::{
     boot::boot_info,
-    memory::{frame_allocator::frame_allocator, mapper::COW_BIT},
-    thread::{MappingType, MemoryMapping},
+    memory::{
+        frame_allocator::frame_allocator,
+        mapper::COW_BIT,
+        vma::{VmaBacking, VmaSet},
+    },
 };
 
 /// Walk the parent's user-space page tables and build a COW copy for the child.
@@ -28,10 +30,7 @@ use crate::{
 /// CR3 is active or the parent's page tables are otherwise accessible via the
 /// physical memory offset). The caller must ensure no other thread is
 /// concurrently modifying the parent's page tables.
-pub unsafe fn clone_user_page_tables_cow(
-    parent_cr3: PhysFrame,
-    parent_mappings: &BTreeMap<VirtAddr, MemoryMapping>,
-) -> PhysFrame {
+pub unsafe fn clone_user_page_tables_cow(parent_cr3: PhysFrame, parent_vmas: &VmaSet) -> PhysFrame {
     let phys_offset = boot_info().physical_memory_offset;
 
     // Helper: get a &mut PageTable from a physical frame.
@@ -128,7 +127,7 @@ pub unsafe fn clone_user_page_tables_cow(
                             | ((pml1_idx as u64) << 12),
                     );
 
-                    if is_special_mapping(virt, parent_mappings) {
+                    if is_special_mapping(virt, parent_vmas) {
                         // SHM or Physical/MMIO: copy PTE unchanged, no COW.
                         // Bump refcount so deallocate_frame on child exit
                         // decrements instead of freeing the frame while
@@ -158,19 +157,12 @@ pub unsafe fn clone_user_page_tables_cow(
 }
 
 /// Returns true if `virt` falls within a SHM or Physical mapping.
-fn is_special_mapping(virt: VirtAddr, mappings: &BTreeMap<VirtAddr, MemoryMapping>) -> bool {
-    for (&start, mapping) in mappings.iter() {
-        let end = start + mapping.size;
-        if virt >= start && virt < end {
-            return matches!(
-                mapping.mapping_type,
-                MappingType::Shared(_) | MappingType::Physical(_)
-            );
-        }
-        // BTreeMap is sorted; if start is already past virt we can stop.
-        if start > virt {
-            break;
-        }
+fn is_special_mapping(virt: VirtAddr, vmas: &VmaSet) -> bool {
+    if let Some(vma) = vmas.find(virt) {
+        return matches!(
+            vma.backing,
+            VmaBacking::SharedMemory { .. } | VmaBacking::Physical { .. }
+        );
     }
     false
 }

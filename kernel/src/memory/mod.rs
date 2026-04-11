@@ -10,6 +10,7 @@ pub mod pat;
 pub mod shared;
 pub mod tlb;
 pub mod valloc;
+pub mod vma;
 
 /// Allowlist of physical address ranges that userspace may map via MAP_PHYSICAL.
 /// Each entry is (start, end) inclusive of start, exclusive of end.

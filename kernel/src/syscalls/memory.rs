@@ -1,5 +1,4 @@
-use alloc::{collections::btree_map::BTreeMap, format, sync::Arc};
-use core::sync::atomic::{AtomicU64, Ordering};
+use alloc::format;
 
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -8,10 +7,14 @@ use x86_64::{
 
 use crate::{
     log,
-    memory::{mapper::memory_mapper, pat},
+    memory::{
+        mapper::memory_mapper,
+        pat,
+        vma::{Vma, VmaBacking, VmaFlags, VmaProt},
+    },
     println,
     syscalls::Errno,
-    thread::{MappingType, MemoryMapping, UserThreadInfo, mutex::BlockingMutex, scheduler::sched},
+    thread::scheduler::sched,
 };
 
 // Protection flags (match Linux)
@@ -62,6 +65,22 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
 
     let is_physical = (flags & MAP_PHYSICAL) != 0;
 
+    // Access VmaSet from UserThread
+    let thread = match sched.current_thread() {
+        Some(t) => t,
+        None => {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+    let user_arc = match &thread.user {
+        Some(u) => u.clone(),
+        None => {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
     if is_physical {
         // Validate physical address alignment
         if phys_addr & 0xFFF != 0 {
@@ -76,10 +95,11 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
             return !0u64;
         }
 
-        // Physical mapping: map MMIO/VRAM pages directly without allocating frames
         let map_addr = if addr == 0 {
-            let guard = info.lock();
-            find_free_virtual_address_atomic(&guard.memory_mappings, &guard.next_mmap_addr, length)
+            let user_read = user_arc.read();
+            let next_mmap_addr = info.lock().next_mmap_addr.clone();
+            let vmas = user_read.vmas.lock();
+            vmas.find_free_address(&next_mmap_addr, length)
         } else {
             VirtAddr::new(addr)
         };
@@ -118,14 +138,26 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
         }
         drop(mm);
 
-        info.lock().memory_mappings.lock().insert(
-            map_addr,
-            MemoryMapping {
-                size: length,
-                flags: phys_flags,
-                mapping_type: MappingType::Physical(phys_addr),
+        let mut vma_prot = VmaProt::empty();
+        if prot & PROT_READ != 0 {
+            vma_prot |= VmaProt::READ;
+        }
+        if prot & PROT_WRITE != 0 {
+            vma_prot |= VmaProt::WRITE;
+        }
+        if prot & PROT_EXEC != 0 {
+            vma_prot |= VmaProt::EXEC;
+        }
+
+        user_arc.read().vmas.lock().insert(Vma {
+            start: map_addr,
+            end: map_addr + length,
+            prot: vma_prot,
+            flags: VmaFlags::PRIVATE,
+            backing: VmaBacking::Physical {
+                phys_base: phys_addr,
             },
-        );
+        });
 
         log!("mmap: mapped physical at {map_addr:p}");
         map_addr.as_u64()
@@ -138,8 +170,10 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
         }
 
         let map_addr = if addr == 0 {
-            let guard = info.lock();
-            find_free_virtual_address_atomic(&guard.memory_mappings, &guard.next_mmap_addr, length)
+            let user_read = user_arc.read();
+            let next_mmap_addr = info.lock().next_mmap_addr.clone();
+            let vmas = user_read.vmas.lock();
+            vmas.find_free_address(&next_mmap_addr, length)
         } else {
             VirtAddr::new(addr)
         };
@@ -153,6 +187,17 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
             page_flags |= PageTableFlags::NO_EXECUTE;
         }
 
+        let mut vma_prot = VmaProt::empty();
+        if prot & PROT_READ != 0 {
+            vma_prot |= VmaProt::READ;
+        }
+        if prot & PROT_WRITE != 0 {
+            vma_prot |= VmaProt::WRITE;
+        }
+        if prot & PROT_EXEC != 0 {
+            vma_prot |= VmaProt::EXEC;
+        }
+
         // Map the memory
         let memory_manager = info.lock().memory_manager.clone();
         if memory_manager
@@ -160,14 +205,13 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
             .map_memory(map_addr, length, page_flags)
             .is_ok()
         {
-            info.lock().memory_mappings.lock().insert(
-                map_addr,
-                MemoryMapping {
-                    size: length,
-                    flags: page_flags,
-                    mapping_type: MappingType::Anonymous,
-                },
-            );
+            user_arc.read().vmas.lock().insert(Vma {
+                start: map_addr,
+                end: map_addr + length,
+                prot: vma_prot,
+                flags: VmaFlags::PRIVATE,
+                backing: VmaBacking::Anonymous,
+            });
 
             log!("mmap: mapped at {map_addr:p}");
 
@@ -193,16 +237,28 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
 
     let map_addr = VirtAddr::new(addr);
 
-    // Check if this is a valid mapping - short lock
-    let mapping = info.lock().memory_mappings.lock().remove(&map_addr);
-    if let Some(mapping) = mapping {
-        if mapping.size == length {
-            match mapping.mapping_type {
-                MappingType::Anonymous => {
+    let thread = match sched.current_thread() {
+        Some(t) => t,
+        None => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+    let user_arc = match &thread.user {
+        Some(u) => u.clone(),
+        None => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    // Remove the VMA - short lock
+    let vma = user_arc.read().vmas.lock().remove(&map_addr);
+    if let Some(vma) = vma {
+        if vma.size() == length {
+            match &vma.backing {
+                VmaBacking::Anonymous => {
                     let memory_manager = info.lock().memory_manager.clone();
-                    // Unmap PTEs and collect frames without freeing them.
-                    // Free frames only AFTER the TLB shootdown to prevent
-                    // use-after-free of physical memory via stale TLB entries.
                     let frames = memory_manager
                         .lock()
                         .unmap_memory_deferred(map_addr, length);
@@ -214,7 +270,6 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                                     (length + 0xFFF) / 4096,
                                 );
                             }
-                            // Now safe to free the frames.
                             let mut fa = crate::memory::frame_allocator::frame_allocator();
                             for frame in frames {
                                 unsafe { fa.deallocate_frame(frame) };
@@ -224,13 +279,13 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                         }
                         Err(_) => {
                             log!("Unmap fault");
+                            user_arc.read().vmas.lock().insert(vma);
                             info.lock().errno = Errno::EFAULT;
                             -1
                         }
                     }
                 }
-                MappingType::Physical(_phys_base) => {
-                    // Physical (MMIO/VRAM): unmap pages without deallocating frames
+                VmaBacking::Physical { .. } => {
                     let page_count = (length + 0xFFF) / 4096;
                     {
                         let mut mapper = memory_mapper();
@@ -241,69 +296,36 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                                 flush.flush();
                             }
                         }
-                    } // mapper dropped here, interrupts re-enabled
+                    }
                     if crate::memory::tlb::shootdown_needed() {
                         crate::memory::tlb::tlb_shootdown(map_addr, page_count);
                     }
                     log!("Unmap physical success");
                     0
                 }
-                MappingType::Shared(_) => {
+                VmaBacking::SharedMemory { .. } => {
                     // Shared memory should be unmapped via sys_shm_unmap
-                    info.lock().memory_mappings.lock().insert(map_addr, mapping);
+                    user_arc.read().vmas.lock().insert(vma);
+                    info.lock().errno = Errno::EINVAL;
+                    -1
+                }
+                VmaBacking::Elf | VmaBacking::Tls | VmaBacking::Stack => {
+                    // These are kernel-managed; put back and return error
+                    user_arc.read().vmas.lock().insert(vma);
                     info.lock().errno = Errno::EINVAL;
                     -1
                 }
             }
         } else {
             log!("Unmap fail, partial");
-            // Re-insert the mapping since we couldn't handle partial unmapping
-            info.lock().memory_mappings.lock().insert(map_addr, mapping);
+            // Re-insert since we can't handle partial unmapping
+            user_arc.read().vmas.lock().insert(vma);
             info.lock().errno = Errno::EINVAL;
-            -1 // EINVAL - partial unmapping not supported yet
+            -1
         }
     } else {
         log!("Unmap fail, einval");
         info.lock().errno = Errno::EINVAL;
-        -1 // EINVAL - not a valid mapping
+        -1
     }
-}
-
-/// Find free virtual address with atomic next_mmap_addr and locked memory_mappings
-pub fn find_free_virtual_address_atomic(
-    memory_mappings: &Arc<BlockingMutex<BTreeMap<VirtAddr, MemoryMapping>>>,
-    next_mmap_addr: &Arc<AtomicU64>,
-    length: u64,
-) -> VirtAddr {
-    let aligned_length = (length + 0xfff) & !0xfff;
-
-    loop {
-        // Atomically allocate address range
-        let candidate_u64 = next_mmap_addr.fetch_add(aligned_length, Ordering::Relaxed);
-        let candidate = VirtAddr::new(candidate_u64);
-        let end_addr = candidate + aligned_length;
-
-        // Check if this range overlaps with existing mappings - short lock
-        let mappings = memory_mappings.lock();
-        let mut overlaps = false;
-        for (&mapping_start, mapping) in mappings.iter() {
-            let mapping_end = mapping_start + mapping.size;
-            if !(end_addr <= mapping_start || candidate >= mapping_end) {
-                overlaps = true;
-                break;
-            }
-        }
-        drop(mappings); // Release lock immediately
-
-        if !overlaps {
-            return candidate;
-        }
-
-        // Address collided, atomic counter already advanced so try again
-    }
-}
-
-/// Legacy function for compatibility - now uses atomic version
-pub fn find_free_virtual_address(thread: &mut UserThreadInfo, length: u64) -> VirtAddr {
-    find_free_virtual_address_atomic(&thread.memory_mappings, &thread.next_mmap_addr, length)
 }

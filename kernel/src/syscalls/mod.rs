@@ -22,7 +22,10 @@ use crate::{
     fs::Error as FsError,
     gdt::selectors,
     log,
-    memory::STACK_ALIGNMENT,
+    memory::{
+        STACK_ALIGNMENT,
+        vma::{Vma, VmaBacking, VmaFlags, VmaProt, VmaSet},
+    },
     net::device::NetDevice,
     println,
     syscalls::{
@@ -37,7 +40,7 @@ use crate::{
         memory::{sys_mmap, sys_munmap},
     },
     thread::{
-        MemoryRegion, MemoryRegionType, UserThreadInfo,
+        UserThreadInfo,
         context::CpuContext,
         irqlock::IrqSpinlock,
         mutex::BlockingMutex,
@@ -1522,14 +1525,16 @@ fn sys_clone(
     };
 
     // Allocate user stack if not provided
-    let (user_stack_top, stack_region) = if child_stack == 0 {
+    let (user_stack_top, stack_vma) = if child_stack == 0 {
         // Allocate a new user stack using internal mmap
         let parent_info = sched.current_thread_info();
-        let stack_size = 2 * 1024 * 1024; // 2MB stack
+        let stack_size = 2 * 1024 * 1024u64; // 2MB stack
 
         let stack_bottom = {
-            let mut info = parent_info.lock();
-            memory::find_free_virtual_address(&mut info, stack_size)
+            let user_read = parent_user.read();
+            let next_mmap_addr = parent_info.lock().next_mmap_addr.clone();
+            let vmas = user_read.vmas.lock();
+            vmas.find_free_address(&next_mmap_addr, stack_size)
         };
 
         // Map the stack
@@ -1547,17 +1552,18 @@ fn sys_clone(
             return !0u64;
         }
 
-        let stack_region = MemoryRegion {
+        let vma = Vma {
             start: stack_bottom,
-            size: stack_size,
-            flags: page_flags,
-            region_type: MemoryRegionType::ThreadLocal,
+            end: stack_bottom + stack_size,
+            prot: VmaProt::READ | VmaProt::WRITE,
+            flags: VmaFlags::PRIVATE | VmaFlags::GROWSDOWN,
+            backing: VmaBacking::Stack,
         };
 
         let stack_top_aligned =
             (stack_bottom.as_u64() + stack_size) & !(STACK_ALIGNMENT as u64 - 1);
 
-        (stack_top_aligned, Some(stack_region))
+        (stack_top_aligned, Some(vma))
     } else {
         (child_stack, None)
     };
@@ -1570,7 +1576,7 @@ fn sys_clone(
     let cr3 = parent_user_read.cr3;
     let memory_manager = parent_user_read.memory_manager.clone();
     let parent_heap_break = parent_user_read.heap_break;
-    let parent_process_regions = parent_user_read.memory_regions.clone();
+    let parent_vmas = parent_user_read.vmas.clone();
     let process_stack_top = parent_user_read.process_stack_top.clone();
     let address_space_refs = parent_user_read.address_space_refs.clone();
     let mut tls_template = parent_user_read
@@ -1607,7 +1613,7 @@ fn sys_clone(
         match crate::thread::thread::allocate_tls_region(&template, child_id, &mut manager_guard) {
             Ok(allocation) => {
                 tls_fs_base = allocation.fs_base;
-                tls_region = Some(allocation.region);
+                tls_region = Some(allocation.vma);
                 tls_runtime = Some(allocation.runtime);
             }
             Err(_) => {
@@ -1620,9 +1626,12 @@ fn sys_clone(
         drop(manager_guard);
     }
 
-    let mut child_owned_regions: Vec<MemoryRegion> = stack_region.into_iter().collect();
-    if let Some(region) = tls_region.take() {
-        child_owned_regions.push(region);
+    // Add the new stack and TLS VMAs to the shared VmaSet
+    if let Some(vma) = stack_vma {
+        parent_vmas.lock().insert(vma);
+    }
+    if let Some(vma) = tls_region.take() {
+        parent_vmas.lock().insert(vma);
     }
 
     address_space_refs.fetch_add(1, Ordering::AcqRel);
@@ -1631,8 +1640,7 @@ fn sys_clone(
         pid: child_id.0,
         cr3,
         memory_manager: memory_manager.clone(),
-        memory_regions: parent_process_regions,
-        owned_regions: child_owned_regions,
+        vmas: parent_vmas, // Arc clone - shared address space
         tls: tls_runtime,
         heap_break: parent_heap_break,
         address_space_refs,
@@ -1677,7 +1685,6 @@ fn sys_clone(
             pid: child_id.0,
             errno: Errno::Clear,
             fd_table: parent_info_guard.fd_table.clone(), // Arc clone - shared
-            memory_mappings: parent_info_guard.memory_mappings.clone(), // Arc clone - shared
             next_mmap_addr: parent_info_guard.next_mmap_addr.clone(), // Arc clone - shared
             memory_manager,
             cwd: parent_info_guard.cwd.clone(), // Arc clone - shared
@@ -1696,7 +1703,6 @@ fn sys_clone(
 }
 
 fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
-    use alloc::collections::BTreeMap;
     use core::sync::atomic::AtomicUsize;
     use x86_64::structures::paging::OffsetPageTable;
 
@@ -1706,7 +1712,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
             mapper::{MemoryManager, get_level_4_table},
             shared::SharedMemory,
         },
-        thread::{MappingType, MemoryMapping, fd::FileDescriptorTable},
+        thread::fd::FileDescriptorTable,
     };
 
     let sched = sched();
@@ -1730,13 +1736,36 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     let parent_user_read = parent_user.read();
     let parent_cr3 = parent_user_read.cr3;
     let parent_heap_break = parent_user_read.heap_break;
-    let parent_process_regions = parent_user_read.memory_regions.clone();
     let parent_process_stack_top = parent_user_read.process_stack_top.load(Ordering::Acquire);
     let parent_tls = parent_user_read.tls.clone();
     let parent_fs_base = parent_thread.tls_base.load(Ordering::Acquire);
+
+    // Deep-clone the VmaSet: each VMA is cloned, SHM entries get inc_ref
+    let child_vma_set = {
+        let parent_vmas = parent_user_read.vmas.lock();
+        let mut cloned = VmaSet::new();
+        for vma in parent_vmas.iter() {
+            if let VmaBacking::SharedMemory { shm_id } = &vma.backing {
+                if let Some(shm) = SharedMemory::get(*shm_id) {
+                    let _ = shm.inc_ref();
+                }
+            }
+            cloned.insert(vma.clone());
+        }
+        cloned
+    };
+
+    // Clone COW page tables using the parent's VmaSet.
+    // Must be called with parent's CR3 active.
+    // tlb_shootdown_all() inside flushes all CPUs' stale writable entries.
+    let child_pml4_frame = {
+        let parent_vmas = parent_user_read.vmas.lock();
+        unsafe { clone_user_page_tables_cow(parent_cr3.0, &parent_vmas) }
+    };
+
     drop(parent_user_read);
 
-    // Read parent info before locking for COW (BlockingMutex requires interrupts).
+    // Read parent info
     let parent_info = sched.current_thread_info();
     let parent_next_mmap = {
         let guard = parent_info.lock();
@@ -1762,30 +1791,6 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
             new_table.insert_fd(fd_num, desc.clone());
         }
         Arc::new(BlockingMutex::new(new_table))
-    };
-
-    // Deep-clone memory_mappings: copy the BTreeMap, inc_ref each SHM entry.
-    let child_memory_mappings: BTreeMap<VirtAddr, MemoryMapping> = {
-        let guard = parent_info.lock();
-        let parent_mappings = guard.memory_mappings.lock();
-        let mut cloned = BTreeMap::new();
-        for (&addr, mapping) in parent_mappings.iter() {
-            if let MappingType::Shared(shm_id) = &mapping.mapping_type {
-                if let Some(shm) = SharedMemory::get(*shm_id) {
-                    let _ = shm.inc_ref();
-                }
-            }
-            cloned.insert(addr, mapping.clone());
-        }
-        cloned
-    };
-
-    // Clone COW page tables. Must be called with parent's CR3 active.
-    // tlb_shootdown_all() inside flushes all CPUs' stale writable entries.
-    let child_pml4_frame = {
-        let guard = parent_info.lock();
-        let parent_mappings = guard.memory_mappings.lock();
-        unsafe { clone_user_page_tables_cow(parent_cr3.0, &parent_mappings) }
     };
 
     // Switch to kernel page table for the remaining setup.
@@ -1824,8 +1829,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         pid: child_id.0,
         cr3: (child_pml4_frame, parent_cr3.1),
         memory_manager: child_mm.clone(),
-        memory_regions: parent_process_regions,
-        owned_regions: Vec::new(),
+        vmas: Arc::new(spin::Mutex::new(child_vma_set)),
         tls: parent_tls,
         heap_break: parent_heap_break,
         address_space_refs: Arc::new(AtomicUsize::new(1)),
@@ -1870,7 +1874,6 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
             pid: child_id.0,
             errno: Errno::Clear,
             fd_table: child_fd_table,
-            memory_mappings: Arc::new(BlockingMutex::new(child_memory_mappings)),
             next_mmap_addr: Arc::new(AtomicU64::new(parent_next_mmap)),
             memory_manager: child_mm,
             cwd: Arc::new(BlockingMutex::new(parent_cwd_clone)),

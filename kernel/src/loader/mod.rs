@@ -5,9 +5,11 @@ use x86_64::{VirtAddr, align_up, structures::paging::PageTableFlags};
 
 use crate::{
     log,
-    memory::mapper::MemoryManager,
+    memory::{
+        mapper::MemoryManager,
+        vma::{Vma, VmaBacking, VmaFlags, VmaProt},
+    },
     println,
-    thread::{MemoryRegion, MemoryRegionType},
 };
 
 #[derive(Debug, Clone)]
@@ -21,7 +23,7 @@ pub struct TlsTemplate {
 pub struct LoadedInfo {
     pub entry_point: VirtAddr,
     pub heap_break: u64,
-    pub memory_regions: Vec<MemoryRegion>,
+    pub memory_regions: Vec<Vma>,
     pub tls_template: Option<TlsTemplate>,
 }
 
@@ -141,15 +143,23 @@ pub fn load_elf(
                 memory_manager.zero_user(bss_start, (mem_size - file_size) as usize);
             }
 
-            let region = MemoryRegion {
+            let mut prot = VmaProt::empty();
+            if header.p_flags & elf::abi::PF_R != 0 {
+                prot |= VmaProt::READ;
+            }
+            if header.p_flags & elf::abi::PF_W != 0 {
+                prot |= VmaProt::WRITE;
+            }
+            if header.p_flags & elf::abi::PF_X != 0 {
+                prot |= VmaProt::EXEC;
+            }
+
+            let region = Vma {
                 start: page_aligned_vaddr,
-                size: aligned_size,
-                flags,
-                region_type: if header.p_flags & elf::abi::PF_X != 0 {
-                    MemoryRegionType::Code
-                } else {
-                    MemoryRegionType::Data
-                },
+                end: page_aligned_vaddr + aligned_size,
+                prot,
+                flags: VmaFlags::PRIVATE,
+                backing: VmaBacking::Elf,
             };
 
             memory_regions.push(region);

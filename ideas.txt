@@ -147,10 +147,6 @@ journaling since the journal needs controlled writeback ordering.
 
 ## Ideas
 
-### Text Editor
-Even a minimal ed/nano clone. Being able to edit files inside the OS is a
-qualitative leap in self-sufficiency.
-
 ### Demand Paging
 Stop pre-faulting all pages. COW fork is done, demand paging is the other half.
 
@@ -181,7 +177,7 @@ ncq_read_batch.
 
 ## Fun-per-effort ranking
 
-text editor > more tools > demand paging > page cache > async I/O > IPv6 > virtio-net
+more tools > demand paging > page cache > async I/O > IPv6 > virtio-net
 
 Note: page cache is high-impact (unlocks journaling, mmap, guaranteed
 zero-copy DMA) but large effort. Demand paging is a prerequisite for
