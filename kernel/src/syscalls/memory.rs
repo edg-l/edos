@@ -178,15 +178,6 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
             VirtAddr::new(addr)
         };
 
-        // Convert protection flags
-        let mut page_flags = PageTableFlags::USER_ACCESSIBLE;
-        if prot & PROT_WRITE != 0 {
-            page_flags |= PageTableFlags::WRITABLE;
-        }
-        if prot & PROT_EXEC == 0 {
-            page_flags |= PageTableFlags::NO_EXECUTE;
-        }
-
         let mut vma_prot = VmaProt::empty();
         if prot & PROT_READ != 0 {
             vma_prot |= VmaProt::READ;
@@ -198,29 +189,17 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
             vma_prot |= VmaProt::EXEC;
         }
 
-        // Map the memory
-        let memory_manager = info.lock().memory_manager.clone();
-        if memory_manager
-            .lock()
-            .map_memory(map_addr, length, page_flags)
-            .is_ok()
-        {
-            user_arc.read().vmas.lock().insert(Vma {
-                start: map_addr,
-                end: map_addr + length,
-                prot: vma_prot,
-                flags: VmaFlags::PRIVATE,
-                backing: VmaBacking::Anonymous,
-            });
+        // Lazy allocation - just record the VMA, don't allocate frames
+        user_arc.read().vmas.lock().insert(Vma {
+            start: map_addr,
+            end: map_addr + length,
+            prot: vma_prot,
+            flags: VmaFlags::PRIVATE | VmaFlags::LAZY,
+            backing: VmaBacking::Anonymous,
+        });
 
-            log!("mmap: mapped at {map_addr:p}");
-
-            map_addr.as_u64()
-        } else {
-            log!("Error mapping");
-            info.lock().errno = Errno::ENOMEM;
-            !0u64 // -1 (ENOMEM)
-        }
+        log!("mmap: lazy mapped at {map_addr:p}");
+        map_addr.as_u64()
     }
 }
 
@@ -259,31 +238,31 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
             match &vma.backing {
                 VmaBacking::Anonymous => {
                     let memory_manager = info.lock().memory_manager.clone();
-                    let frames = memory_manager
-                        .lock()
-                        .unmap_memory_deferred(map_addr, length);
-                    match frames {
-                        Ok(frames) => {
-                            if crate::memory::tlb::shootdown_needed() {
-                                crate::memory::tlb::tlb_shootdown(
-                                    map_addr,
-                                    (length + 0xFFF) / 4096,
-                                );
+                    let page_count = (length + 0xFFF) / 4096;
+                    let mut frames = alloc::vec::Vec::new();
+                    {
+                        let mut mm = memory_manager.lock();
+                        for i in 0..page_count {
+                            let virt = VirtAddr::new(map_addr.as_u64() + i * 4096);
+                            let page: Page<Size4KiB> = Page::containing_address(virt);
+                            // Only unmap pages that are actually present (lazy pages may not be)
+                            if let Ok(phys) = mm.mapper.translate_page(page) {
+                                if let Ok((_, flush)) = mm.mapper.unmap(page) {
+                                    flush.ignore(); // Will do TLB shootdown below
+                                    frames.push(phys);
+                                }
                             }
-                            let mut fa = crate::memory::frame_allocator::frame_allocator();
-                            for frame in frames {
-                                unsafe { fa.deallocate_frame(frame) };
-                            }
-                            log!("Unmap success");
-                            0
-                        }
-                        Err(_) => {
-                            log!("Unmap fault");
-                            user_arc.read().vmas.lock().insert(vma);
-                            info.lock().errno = Errno::EFAULT;
-                            -1
                         }
                     }
+                    if !frames.is_empty() && crate::memory::tlb::shootdown_needed() {
+                        crate::memory::tlb::tlb_shootdown(map_addr, page_count);
+                    }
+                    let mut fa = crate::memory::frame_allocator::frame_allocator();
+                    for frame in frames {
+                        unsafe { fa.deallocate_frame(frame) };
+                    }
+                    log!("Unmap success");
+                    0
                 }
                 VmaBacking::Physical { .. } => {
                     let page_count = (length + 0xFFF) / 4096;

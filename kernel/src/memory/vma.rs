@@ -48,9 +48,7 @@ pub struct Vma {
     pub start: VirtAddr,
     /// End address (exclusive)
     pub end: VirtAddr,
-    #[allow(dead_code)]
     pub prot: VmaProt,
-    #[allow(dead_code)]
     pub flags: VmaFlags,
     pub backing: VmaBacking,
 }

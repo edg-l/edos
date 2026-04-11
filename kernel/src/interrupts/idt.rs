@@ -226,6 +226,13 @@ extern "x86-interrupt" fn page_fault_handler(
             }
         }
 
+        // Demand paging: handle non-present pages backed by VMAs
+        if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
+            if unsafe { crate::memory::fault::handle_demand_fault(address, error_code) } {
+                return;
+            }
+        }
+
         log!("Page fault");
         log!("Accessed Address: {address:?}");
         log!("Error Code: {error_code:?}");
