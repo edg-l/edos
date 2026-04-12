@@ -466,8 +466,46 @@ impl EfsDriver {
         if inode.mode & S_IFMT != S_IFDIR {
             return Err(Error::NotADir);
         }
-        let dir_data = self.read_file_data(&inode, 0, inode.size as usize)?;
+        // Directory data is metadata — read through the block page cache so
+        // we see dirty pages written by add_dir_entry/remove_dir_entry (which
+        // go through write_block → BlockPageCache in write-back mode).
+        // Do NOT use read_file_data/read_via_extents here; those bypass the
+        // cache via direct::read_sectors and would miss uncommitted changes.
+        let dir_data = self.read_dir_data_cached(&inode)?;
         self.parse_dir_entries_from_bytes(&dir_data)
+    }
+
+    fn read_dir_data_cached(&self, inode: &EfsInode) -> Result<Vec<u8>, Error> {
+        let dir_size = inode.size as usize;
+        if dir_size == 0 {
+            return Ok(vec![]);
+        }
+        if inode.flags & INODE_FLAG_INLINE_DATA != 0 {
+            return Ok(inode.data_area[..dir_size.min(INODE_DATA_AREA_SIZE)].to_vec());
+        }
+        let block_size = self.block_size() as usize;
+        let hdr: EfsExtentHeader = unsafe {
+            core::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader)
+        };
+        if hdr.magic != EXTENT_MAGIC || hdr.depth != 0 {
+            return Err(Error::Corrupted);
+        }
+        let extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
+        let mut result = vec![0u8; dir_size];
+        let mut result_pos = 0usize;
+        for ext in extents.as_slice() {
+            for i in 0..ext.length as u64 {
+                if result_pos >= dir_size {
+                    break;
+                }
+                let phys_block = ext.physical_start() + i;
+                let block_data = self.read_block(phys_block)?;
+                let copy_len = (dir_size - result_pos).min(block_size);
+                result[result_pos..result_pos + copy_len].copy_from_slice(&block_data[..copy_len]);
+                result_pos += copy_len;
+            }
+        }
+        Ok(result)
     }
 
     fn parse_dir_entries_from_bytes(&self, data: &[u8]) -> Result<Vec<(String, u64, u8)>, Error> {
@@ -504,7 +542,7 @@ impl EfsDriver {
         if inode.mode & S_IFMT != S_IFDIR {
             return Err(Error::NotADir);
         }
-        let dir_data = self.read_file_data(&inode, 0, inode.size as usize)?;
+        let dir_data = self.read_dir_data_cached(&inode)?;
         let name_bytes = name.as_bytes();
         let mut offset = 0usize;
 
@@ -1014,8 +1052,9 @@ impl EfsDriver {
         let dir_inode = self.read_inode(dir_ino)?;
         let dir_size = dir_inode.size as usize;
 
-        // Load all directory data.
-        let mut dir_data = self.read_file_data(&dir_inode, 0, dir_size)?;
+        // Load all directory data through the block page cache so we see
+        // uncommitted dirty pages from prior add/remove_dir_entry calls.
+        let mut dir_data = self.read_dir_data_cached(&dir_inode)?;
 
         // Scan for slack space in existing entries.
         let mut offset = 0usize;
@@ -1139,8 +1178,7 @@ impl EfsDriver {
         tx: &mut TxHandle<'_>,
     ) -> Result<(), Error> {
         let dir_inode = self.read_inode(dir_ino)?;
-        let dir_size = dir_inode.size as usize;
-        let mut dir_data = self.read_file_data(&dir_inode, 0, dir_size)?;
+        let mut dir_data = self.read_dir_data_cached(&dir_inode)?;
 
         let mut offset = 0usize;
         let mut prev_end = 0usize;
@@ -2272,8 +2310,7 @@ impl EfsDriver {
         tx: &mut TxHandle<'_>,
     ) -> Result<(), Error> {
         let dir_inode = self.read_inode(dir_ino)?;
-        let dir_size = dir_inode.size as usize;
-        let mut dir_data = self.read_file_data(&dir_inode, 0, dir_size)?;
+        let mut dir_data = self.read_dir_data_cached(&dir_inode)?;
 
         let mut offset = 0usize;
         while offset + DIR_ENTRY_HEADER_SIZE <= dir_data.len() {
