@@ -17,8 +17,8 @@ use alloc::{
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use efs_common::{
-    DescriptorEntry, JOURNAL_BLOCK_MAGIC, JOURNAL_MAGIC, JournalBlockHeader, JournalBlockKind,
-    JournalSuperblock, RevokeEntry, commit_block_checksum, journal_sb_checksum,
+    DESC_FLAG_ESCAPED, DescriptorEntry, JOURNAL_BLOCK_MAGIC, JOURNAL_MAGIC, JournalBlockHeader,
+    JournalBlockKind, JournalSuperblock, RevokeEntry, commit_block_checksum, journal_sb_checksum,
 };
 
 use crate::{
@@ -51,6 +51,8 @@ pub struct Transaction {
     pub enrolled_blocks: BTreeMap<(u64, u64), Arc<CachedBlockPage>>,
     /// Blocks to be revoked: (device_id, fs_block).
     pub revokes: BTreeSet<(u64, u64)>,
+    /// Number of ring blocks consumed when committed (set by seal_and_commit).
+    pub ring_blocks: u64,
 }
 
 impl Transaction {
@@ -60,6 +62,7 @@ impl Transaction {
             tx_id,
             enrolled_blocks: BTreeMap::new(),
             revokes: BTreeSet::new(),
+            ring_blocks: 0,
         }
     }
 
@@ -75,10 +78,16 @@ pub(crate) struct JournalState {
     pub head_seq: u64,
     /// Oldest sequence number that has not yet been checkpointed to disk.
     pub tail_seq: u64,
+    /// Next ring block offset to write at (counts blocks consumed, wraps mod ring_size).
+    pub head_block: u64,
+    /// Ring block offset of the oldest live data (advances with tail_seq).
+    pub tail_block: u64,
     /// The currently open (accumulating) transaction.
     pub active: Transaction,
     /// Transactions that have been sealed but not yet committed to disk.
     pub sealed: VecDeque<Transaction>,
+    /// Committed txs awaiting checkpoint (seq, ring_blocks consumed).
+    pub committed_pending: VecDeque<(u64, u64)>,
     /// Highest sequence number that has been written to disk (committed).
     pub committed_seq: u64,
 }
@@ -120,8 +129,11 @@ impl Journal {
             state: BlockingMutex::new(JournalState {
                 head_seq,
                 tail_seq,
+                head_block: 0,
+                tail_block: 0,
                 active: Transaction::new(head_seq, head_seq),
                 sealed: VecDeque::new(),
+                committed_pending: VecDeque::new(),
                 committed_seq: head_seq.saturating_sub(1),
             }),
             commit_wq: WaitQueue::new(),
@@ -343,26 +355,34 @@ impl Journal {
             tracker.values().copied().min().unwrap_or(committed)
         };
 
+        let mut changed = false;
         {
             let mut state = self.state.lock();
-            // Remove sealed txs that are fully checkpointed.
-            while let Some(front) = state.sealed.front() {
-                if front.seq >= min_journaled_seq {
+            // Pop committed txs that are fully checkpointed (all their enrolled
+            // blocks have been flushed to home locations).
+            while let Some(&(seq, blocks)) = state.committed_pending.front() {
+                if seq >= min_journaled_seq {
                     break;
                 }
-                state.sealed.pop_front();
+                state.committed_pending.pop_front();
+                state.tail_block += blocks;
+                state.tail_seq = seq + 1;
+                changed = true;
             }
-            let new_tail = state
-                .sealed
-                .front()
-                .map(|tx| tx.seq)
-                .unwrap_or(state.head_seq);
-            if new_tail > state.tail_seq {
-                state.tail_seq = new_tail;
+            // If nothing remains, tail catches up to head.
+            if state.committed_pending.is_empty() && state.sealed.is_empty() {
+                if state.tail_seq < state.head_seq {
+                    state.tail_seq = state.head_seq;
+                    state.tail_block = state.head_block;
+                    changed = true;
+                }
             }
         }
 
-        self.write_journal_sb()
+        if changed {
+            self.write_journal_sb()?;
+        }
+        Ok(())
     }
 
     // ---- force_commit_and_wait ----------------------------------------------
@@ -370,19 +390,25 @@ impl Journal {
     /// Seal the active transaction (if non-empty) and block until it is fully
     /// committed to the journal ring.  Used by sys_sync and sys_fsync.
     pub fn force_commit_and_wait(&self) -> Result<(), AhciError> {
-        // Snapshot the seq we need committed before we kick.
         let target_seq = {
             let state = self.state.lock();
-            // The active transaction's seq will become committed after a seal.
-            // If active is empty and head_seq-1 is already committed, we are done.
             state.active.seq
         };
 
         self.kick_committer();
 
-        // Wait until committed_seq >= target_seq.
-        self.commit_wq
-            .wait_until(|| self.committed_seq() >= target_seq);
+        // Wait with timeout to avoid hanging forever if committer panics.
+        let outcome = self.commit_wq.wait_until_timeout(
+            || self.committed_seq() >= target_seq,
+            Some(core::time::Duration::from_secs(30)),
+        );
+        if matches!(outcome, crate::thread::waitqueue::WaitOutcome::TimedOut) {
+            crate::log!(
+                "journal: force_commit_and_wait timed out waiting for seq {}",
+                target_seq
+            );
+            return Err(AhciError::IoError);
+        }
         Ok(())
     }
 
@@ -430,12 +456,25 @@ impl Journal {
                 continue;
             }
 
-            // Build descriptor entries.
-            let entries: Vec<DescriptorEntry> = tx
-                .enrolled_blocks
-                .keys()
-                .map(|&(_dev, fs_block)| DescriptorEntry { fs_block })
-                .collect();
+            // Build descriptor entries with escape detection.
+            let mut entries: Vec<DescriptorEntry> = Vec::with_capacity(tx.enrolled_blocks.len());
+            let mut data_blocks: Vec<Vec<u8>> = Vec::with_capacity(tx.enrolled_blocks.len());
+            for (&(_dev, fs_block), page) in &tx.enrolled_blocks {
+                let page_data = unsafe { page.as_slice() };
+                let first_word =
+                    u32::from_le_bytes([page_data[0], page_data[1], page_data[2], page_data[3]]);
+                let escaped = first_word == JOURNAL_BLOCK_MAGIC;
+                let mut block_copy = page_data.to_vec();
+                if escaped {
+                    block_copy[..4].fill(0);
+                }
+                entries.push(DescriptorEntry {
+                    fs_block,
+                    flags: if escaped { DESC_FLAG_ESCAPED } else { 0 },
+                    _reserved: 0,
+                });
+                data_blocks.push(block_copy);
+            }
 
             // Build revoke entries (use the tx seq as the revoke seq).
             let revoke_entries: Vec<RevokeEntry> = tx
@@ -447,9 +486,9 @@ impl Journal {
                 })
                 .collect();
 
-            // Calculate how many ring slots we need:
+            // Calculate how many ring blocks we need:
             //   1 descriptor + N data blocks + (1 revoke if any) + 1 commit
-            let n_data = entries.len() as u64;
+            let n_data = data_blocks.len() as u64;
             let n_revoke = if revoke_entries.is_empty() {
                 0u64
             } else {
@@ -457,79 +496,59 @@ impl Journal {
             };
             let needed = 1 + n_data + n_revoke + 1;
 
-            // Check ring capacity (tail_seq to head_seq = used slots).
-            let available = {
+            // Check ring capacity in blocks (not tx count).
+            let (ring_pos_start, ring_size) = {
                 let s = self.state.lock();
                 let ring_size = self.block_count as u64 - 1; // block 0 is JSB
-                let used = s.head_seq.saturating_sub(s.tail_seq);
-                ring_size.saturating_sub(used)
+                let used = s.head_block.wrapping_sub(s.tail_block);
+                if needed > ring_size.saturating_sub(used) {
+                    drop(s);
+                    let mut s2 = self.state.lock();
+                    s2.sealed.push_front(tx);
+                    return Err(AhciError::IoError);
+                }
+                (s.head_block, ring_size)
             };
 
-            if needed > available {
-                // Ring full; re-push tx and return error.
-                let mut s = self.state.lock();
-                s.sealed.push_front(tx);
-                return Err(AhciError::IoError);
-            }
-
-            // Compute ring write position: use (tail_seq-based) absolute index.
-            // block_pos 0 -> ring slot 1 (slot 0 is the JSB), wraps modulo (block_count-1).
-            let ring_base = {
-                let s = self.state.lock();
-                // The next write position in the ring is derived from head_seq.
-                // We track it as: position = head_seq (monotonically increasing),
-                // ring_slot = (position % ring_size) + 1.
-                // We start writing at the current head_seq - 1 (the just-sealed tx's seq).
-                s.head_seq - 1 // The sealed tx we just popped had this seq before bump
-            };
-            // The ring index for the first block of this tx.
-            let ring_start = tx.seq; // Each tx writes starting at its seq-based offset.
-
-            let ring_size = self.block_count as u64 - 1;
-            let mut ring_pos = ring_start;
+            let mut ring_pos = ring_pos_start;
 
             // Write descriptor block.
             let desc_block = self.build_descriptor_block(tx.seq, tx.tx_id, &entries);
-            let desc_ring_idx = ring_pos % ring_size;
-            self.write_journal_block(desc_ring_idx, &desc_block)?;
+            self.write_journal_block(ring_pos % ring_size, &desc_block)?;
             ring_pos += 1;
 
-            // Write data blocks (one per enrolled page).
+            // Write data blocks (one per enrolled page, possibly escaped).
             let mut payload_bytes: Vec<u8> = Vec::with_capacity(n_data as usize * BLOCK_SIZE);
-            for (_key, page) in &tx.enrolled_blocks {
-                // SAFETY: no writer holds write_lock here; we are reading a consistent snapshot.
-                let page_data = unsafe { page.as_slice() };
-                let data_ring_idx = ring_pos % ring_size;
-                self.write_journal_block(data_ring_idx, page_data)?;
-                payload_bytes.extend_from_slice(page_data);
+            for block_data in &data_blocks {
+                self.write_journal_block(ring_pos % ring_size, block_data)?;
+                payload_bytes.extend_from_slice(block_data);
                 ring_pos += 1;
             }
 
             // Write revoke block if needed.
             if !revoke_entries.is_empty() {
                 let revoke_block = self.build_revoke_block(tx.seq, tx.tx_id, &revoke_entries);
-                let revoke_ring_idx = ring_pos % ring_size;
-                self.write_journal_block(revoke_ring_idx, &revoke_block)?;
+                self.write_journal_block(ring_pos % ring_size, &revoke_block)?;
                 ring_pos += 1;
             }
 
             // Ordering barrier: flush drive write cache before commit block.
             direct::flush_cache(self.device_id)?;
 
-            // Compute CRC over all payload bytes.
+            // Compute CRC over all payload bytes (escaped copies).
             let payload_crc = commit_block_checksum(&payload_bytes);
 
             // Write commit block with FUA.
             let commit_block = self.build_commit_block(tx.seq, tx.tx_id, payload_crc);
-            let commit_ring_idx = ring_pos % ring_size;
-            self.write_journal_block_fua(commit_ring_idx, &commit_block)?;
+            self.write_journal_block_fua(ring_pos % ring_size, &commit_block)?;
+            ring_pos += 1;
 
-            let _ = ring_base; // used for documentation; ring_start carries the actual position
-
-            // Success: bump committed_seq and wake waiters.
+            // Success: advance head_block cursor and committed_seq.
             {
                 let mut s = self.state.lock();
+                s.head_block = ring_pos;
                 s.committed_seq = tx.seq;
+                s.committed_pending.push_back((tx.seq, needed));
             }
             self.commit_wq.wake_all();
         }

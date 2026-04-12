@@ -15,8 +15,8 @@ pub use dir_entry::{DIR_ENTRY_HEADER_SIZE, EfsDirEntryHeader, dir_entry_min_size
 pub use extent::{EfsExtent, EfsExtentHeader, EfsExtentIndex, MAX_INLINE_EXTENTS};
 pub use inode::{EfsInode, INODE_DATA_AREA_SIZE};
 pub use journal::{
-    DescriptorEntry, JOURNAL_BLOCK_MAGIC, JOURNAL_MAGIC, JournalBlockHeader, JournalBlockKind,
-    JournalSuperblock, RevokeEntry, commit_block_checksum, journal_sb_checksum,
+    DESC_FLAG_ESCAPED, DescriptorEntry, JOURNAL_BLOCK_MAGIC, JOURNAL_MAGIC, JournalBlockHeader,
+    JournalBlockKind, JournalSuperblock, RevokeEntry, commit_block_checksum, journal_sb_checksum,
 };
 pub use superblock::{EfsSuperblock, has_superblock_backup};
 

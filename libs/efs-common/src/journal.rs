@@ -90,9 +90,16 @@ const _: () = assert!(size_of::<JournalBlockHeader>() == 24);
 pub struct DescriptorEntry {
     /// Absolute filesystem block number being journalled.
     pub fs_block: u64,
+    /// Flags: bit 0 = ESCAPED (first 4 bytes of data block were replaced with
+    /// zeros because they matched JOURNAL_BLOCK_MAGIC).
+    pub flags: u32,
+    /// Reserved, must be zero.
+    pub _reserved: u32,
 }
 
-const _: () = assert!(size_of::<DescriptorEntry>() == 8);
+pub const DESC_FLAG_ESCAPED: u32 = 1 << 0;
+
+const _: () = assert!(size_of::<DescriptorEntry>() == 16);
 
 // ---- RevokeEntry ------------------------------------------------------------
 
