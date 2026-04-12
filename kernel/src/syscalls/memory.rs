@@ -191,6 +191,40 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             VirtAddr::new(addr)
         };
 
+        // Guard against stale PTEs in the chosen range (e.g. leaked by a prior
+        // unmap). Diagnostic: logs if any stale PTE is found so we can track
+        // down the leak source.
+        {
+            let memory_manager = info.lock().memory_manager.clone();
+            let mut mm = memory_manager.lock();
+            let page_count = (length + 0xFFF) / 4096;
+            let mut stale_count = 0usize;
+            let mut first_stale: Option<(VirtAddr, u64)> = None;
+            for i in 0..page_count {
+                let v = VirtAddr::new(map_addr.as_u64() + i * 4096);
+                let page: Page<Size4KiB> = Page::containing_address(v);
+                if let Ok(phys) = mm.mapper.translate_page(page) {
+                    stale_count += 1;
+                    if first_stale.is_none() {
+                        first_stale = Some((v, phys.start_address().as_u64()));
+                    }
+                    if let Ok((_, flush)) = mm.mapper.unmap(page) {
+                        flush.flush();
+                    }
+                }
+            }
+            if stale_count > 0 {
+                if let Some((v, phys)) = first_stale {
+                    log!(
+                        "mmap: cleared {stale_count} STALE PTE(s) starting {v:?} phys={phys:#x} in {map_addr:?}+{length:#x}"
+                    );
+                }
+                if crate::memory::tlb::shootdown_needed() {
+                    crate::memory::tlb::tlb_shootdown(map_addr, page_count);
+                }
+            }
+        }
+
         let mut vma_prot = VmaProt::empty();
         if prot & PROT_READ != 0 {
             vma_prot |= VmaProt::READ;

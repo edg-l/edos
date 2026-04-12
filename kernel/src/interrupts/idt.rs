@@ -252,6 +252,46 @@ extern "x86-interrupt" fn page_fault_handler(
             "KILL: PF addr={:p} rip={:p} err={error_code:?} ({error_desc})",
             address, stack_frame.instruction_pointer
         );
+
+        // Diagnostic: if the PTE is present, dump its flags + phys so we can
+        // identify stale/leaked PTEs. Walks CR3 directly through HHDM.
+        {
+            use x86_64::registers::control::Cr3;
+            use x86_64::structures::paging::{PageTable, PhysFrame};
+            let (cr3_frame, _) = Cr3::read();
+            let phys_off = crate::boot::boot_info().physical_memory_offset;
+            let a = address.as_u64();
+            let i4 = ((a >> 39) & 0x1FF) as usize;
+            let i3 = ((a >> 30) & 0x1FF) as usize;
+            let i2 = ((a >> 21) & 0x1FF) as usize;
+            let i1 = ((a >> 12) & 0x1FF) as usize;
+            let pt = |f: PhysFrame| -> &'static PageTable {
+                unsafe { &*(phys_off + f.start_address().as_u64()).as_ptr::<PageTable>() }
+            };
+            let p4 = pt(cr3_frame);
+            if p4[i4].flags().contains(PageTableFlags::PRESENT) {
+                let p3 = pt(PhysFrame::containing_address(p4[i4].addr()));
+                if p3[i3].flags().contains(PageTableFlags::PRESENT) {
+                    let p2 = pt(PhysFrame::containing_address(p3[i3].addr()));
+                    if p2[i2].flags().contains(PageTableFlags::PRESENT) {
+                        let p1 = pt(PhysFrame::containing_address(p2[i2].addr()));
+                        let e = &p1[i1];
+                        println!(
+                            "PF-debug: pte.flags={:?} pte.phys={:#x}",
+                            e.flags(),
+                            e.addr().as_u64(),
+                        );
+                    } else {
+                        println!("PF-debug: no PML2 entry for {a:#x}");
+                    }
+                } else {
+                    println!("PF-debug: no PML3 entry for {a:#x}");
+                }
+            } else {
+                println!("PF-debug: no PML4 entry for {a:#x}");
+            }
+        }
+
         sched().thread_exit(11);
     }
 }
