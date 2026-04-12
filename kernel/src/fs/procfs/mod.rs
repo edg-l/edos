@@ -9,7 +9,9 @@ use alloc::{
 };
 
 use crate::{
-    fs::{Error, File, FileAttrs, FileKind, FileSystem, path::Path},
+    fs::{
+        Error, File, FileAttrs, FileKind, FileSystem, block_page_cache::BlockPageCache, path::Path,
+    },
     memory::frame_allocator::frame_allocator,
     syscalls::Errno,
     thread::thread::{State, Thread, ThreadId, get_thread_info_by_id, list_threads},
@@ -112,6 +114,17 @@ impl Procfs {
         )
     }
 
+    fn render_block_cache() -> String {
+        if !BlockPageCache::initialized() {
+            return "hits: 0\nmisses: 0\nevictions: 0\ndetached_fallbacks: 0\n".to_string();
+        }
+        let s = BlockPageCache::global().stats();
+        format!(
+            "hits: {}\nmisses: {}\nevictions: {}\ndetached_fallbacks: {}\n",
+            s.hits, s.misses, s.evictions, s.detached_fallbacks
+        )
+    }
+
     fn resolve_path(path: &Path) -> Result<ProcNode, Error> {
         if path.is_root() {
             return Ok(ProcNode::Root);
@@ -123,6 +136,7 @@ impl Procfs {
             1 => match components[0].as_str() {
                 "processes" => Ok(ProcNode::ProcessesFile),
                 "meminfo" => Ok(ProcNode::MemInfo),
+                "block_cache" => Ok(ProcNode::BlockCacheStats),
                 tid_component => parse_tid(tid_component)
                     .map(ProcNode::ProcessDir)
                     .ok_or(Error::FileNotFound),
@@ -159,13 +173,19 @@ impl FileSystem for Procfs {
         match Self::resolve_path(&path)? {
             ProcNode::Root => {
                 let snapshots = Self::collect_snapshots();
-                let mut files = Vec::with_capacity(snapshots.len() + 2);
+                let mut files = Vec::with_capacity(snapshots.len() + 3);
 
                 let summary = Self::render_process_table(&snapshots);
                 files.push(Self::file_entry("processes".to_string(), summary.len()));
 
                 let meminfo = Self::render_meminfo();
                 files.push(Self::file_entry("meminfo".to_string(), meminfo.len()));
+
+                let block_cache = Self::render_block_cache();
+                files.push(Self::file_entry(
+                    "block_cache".to_string(),
+                    block_cache.len(),
+                ));
 
                 for snapshot in snapshots {
                     files.push(Self::dir_entry(snapshot.tid.to_string()));
@@ -193,6 +213,7 @@ impl FileSystem for Procfs {
             }
             ProcNode::ProcessesFile
             | ProcNode::MemInfo
+            | ProcNode::BlockCacheStats
             | ProcNode::ProcessStatus(_)
             | ProcNode::ProcessCmdline(_) => Err(Error::NotADir),
         }
@@ -224,6 +245,10 @@ impl FileSystem for Procfs {
             }
             ProcNode::MemInfo => {
                 let content = Self::render_meminfo();
+                Ok(Self::read_text(content, offset, count))
+            }
+            ProcNode::BlockCacheStats => {
+                let content = Self::render_block_cache();
                 Ok(Self::read_text(content, offset, count))
             }
             ProcNode::Root | ProcNode::ProcessDir(_) => Err(Error::NotAFile),
@@ -262,6 +287,10 @@ impl FileSystem for Procfs {
             ProcNode::MemInfo => {
                 let meminfo = Self::render_meminfo();
                 Ok(Self::file_entry("meminfo".to_string(), meminfo.len()))
+            }
+            ProcNode::BlockCacheStats => {
+                let content = Self::render_block_cache();
+                Ok(Self::file_entry("block_cache".to_string(), content.len()))
             }
             ProcNode::ProcessDir(tid) => {
                 let snapshots = Self::collect_snapshots();
@@ -517,6 +546,7 @@ enum ProcNode {
     Root,
     ProcessesFile,
     MemInfo,
+    BlockCacheStats,
     ProcessDir(u64),
     ProcessStatus(u64),
     ProcessCmdline(u64),
