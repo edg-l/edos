@@ -245,6 +245,9 @@ impl MemoryManager {
             frame_allocator.set_frame_allocated(idx);
         }
 
+        #[cfg(debug_assertions)]
+        debug_assert_permissive_parents(pml4_frame, virt_addr);
+
         Ok(())
     }
 
@@ -447,4 +450,60 @@ unsafe fn upgrade_parent_entries(pml4: &mut PageTable, virt_addr: VirtAddr, flag
             }
         }
     }
+}
+
+/// Assert that every present intermediate paging-structure entry leading to
+/// `virt_addr` has `WRITABLE | USER_ACCESSIBLE`. Effective x86-64 access is
+/// the AND across all levels, so a restrictive intermediate silently makes
+/// every leaf in the sub-range read-only or kernel-only. Debug-only.
+///
+/// Only checked for user-half addresses; kernel intermediates may legitimately
+/// lack USER_ACCESSIBLE.
+#[cfg(debug_assertions)]
+pub fn debug_assert_permissive_parents(pml4_frame: PhysFrame, virt_addr: VirtAddr) {
+    if virt_addr.as_u64() >= 0x0000_8000_0000_0000 {
+        return;
+    }
+    let a = virt_addr.as_u64();
+    let i4 = ((a >> 39) & 0x1FF) as usize;
+    let i3 = ((a >> 30) & 0x1FF) as usize;
+    let i2 = ((a >> 21) & 0x1FF) as usize;
+    let phys_off = boot_info().physical_memory_offset;
+    let want = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    let pt_from_frame = |f: PhysFrame| -> &'static PageTable {
+        let virt = phys_off + f.start_address().as_u64();
+        unsafe { &*virt.as_ptr::<PageTable>() }
+    };
+    let p4 = pt_from_frame(pml4_frame);
+    let p4e = &p4[i4];
+    if !p4e.flags().contains(PageTableFlags::PRESENT) {
+        return;
+    }
+    debug_assert!(
+        p4e.flags().contains(want),
+        "pml4[{i4}] missing {want:?} for user va {virt_addr:?} (flags={:?})",
+        p4e.flags()
+    );
+    let p3 = pt_from_frame(PhysFrame::containing_address(p4e.addr()));
+    let p3e = &p3[i3];
+    if !p3e.flags().contains(PageTableFlags::PRESENT) {
+        return;
+    }
+    debug_assert!(
+        p3e.flags().contains(want),
+        "pml3[{i3}] missing {want:?} for user va {virt_addr:?} (flags={:?})",
+        p3e.flags()
+    );
+    let p2 = pt_from_frame(PhysFrame::containing_address(p3e.addr()));
+    let p2e = &p2[i2];
+    if !p2e.flags().contains(PageTableFlags::PRESENT)
+        || p2e.flags().contains(PageTableFlags::HUGE_PAGE)
+    {
+        return;
+    }
+    debug_assert!(
+        p2e.flags().contains(want),
+        "pml2[{i2}] missing {want:?} for user va {virt_addr:?} (flags={:?})",
+        p2e.flags()
+    );
 }

@@ -246,13 +246,14 @@ extern "x86-interrupt" fn page_fault_handler(
             }
         }
 
-        // Before killing: if this is a PROTECTION_VIOLATION and the PTE is
-        // actually good for this access (the CPU took the fault from a stale
-        // TLB entry), invalidate the local TLB entry and return. The user's
-        // instruction will retry via the fresh PTE. Avoids spurious KILLs
-        // when another CPU resolved the access (COW, demand-fault) without
-        // shooting down our TLB.
-        if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
+        println!(
+            "KILL: PF addr={:p} rip={:p} err={error_code:?} ({error_desc})",
+            address, stack_frame.instruction_pointer
+        );
+        // Walk the page tables and dump flags at each level so that
+        // permission/intermediate-level issues are visible in the log.
+        // Effective access on x86-64 is the AND across all levels.
+        {
             use x86_64::registers::control::Cr3;
             use x86_64::structures::paging::{PageTable, PhysFrame};
             let (cr3_frame, _) = Cr3::read();
@@ -266,102 +267,29 @@ extern "x86-interrupt" fn page_fault_handler(
                 unsafe { &*(phys_off + f.start_address().as_u64()).as_ptr::<PageTable>() }
             };
             let p4 = pt(cr3_frame);
-            let mut pte_flags: Option<PageTableFlags> = None;
-            let mut pte_phys: u64 = 0;
-            if p4[i4].flags().contains(PageTableFlags::PRESENT) {
-                let p3 = pt(PhysFrame::containing_address(p4[i4].addr()));
-                if p3[i3].flags().contains(PageTableFlags::PRESENT) {
-                    let p2 = pt(PhysFrame::containing_address(p3[i3].addr()));
-                    if p2[i2].flags().contains(PageTableFlags::PRESENT) {
-                        let p1 = pt(PhysFrame::containing_address(p2[i2].addr()));
-                        let e = &p1[i1];
-                        if e.flags().contains(PageTableFlags::PRESENT) {
-                            pte_flags = Some(e.flags());
-                            pte_phys = e.addr().as_u64();
-                        }
-                    }
-                }
-            }
-
-            if let Some(flags) = pte_flags {
-                let write_ok = !error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
-                    || flags.contains(PageTableFlags::WRITABLE);
-                let user_ok = !error_code.contains(PageFaultErrorCode::USER_MODE)
-                    || flags.contains(PageTableFlags::USER_ACCESSIBLE);
-                if write_ok && user_ok {
-                    // The PTE says this access is fine. Heavy-hand TLB flush
-                    // by reloading CR3 (also flushes paging-structure caches).
-                    // If we re-enter here for the same (addr, rip) the issue
-                    // is not a stale TLB; give up and kill so we can diagnose.
-                    static LAST_ADDR: core::sync::atomic::AtomicU64 =
-                        core::sync::atomic::AtomicU64::new(0);
-                    static LAST_RIP: core::sync::atomic::AtomicU64 =
-                        core::sync::atomic::AtomicU64::new(0);
-                    static RETRY_COUNT: core::sync::atomic::AtomicU32 =
-                        core::sync::atomic::AtomicU32::new(0);
-                    let prev_addr =
-                        LAST_ADDR.swap(address.as_u64(), core::sync::atomic::Ordering::Relaxed);
-                    let prev_rip = LAST_RIP.swap(
-                        stack_frame.instruction_pointer.as_u64(),
-                        core::sync::atomic::Ordering::Relaxed,
-                    );
-                    let count = if prev_addr == address.as_u64()
-                        && prev_rip == stack_frame.instruction_pointer.as_u64()
+            let p4e = &p4[i4];
+            println!("PF-walk: pml4[{i4}] flags={:?}", p4e.flags());
+            if p4e.flags().contains(PageTableFlags::PRESENT) {
+                let p3 = pt(PhysFrame::containing_address(p4e.addr()));
+                let p3e = &p3[i3];
+                println!("PF-walk: pml3[{i3}] flags={:?}", p3e.flags());
+                if p3e.flags().contains(PageTableFlags::PRESENT) {
+                    let p2 = pt(PhysFrame::containing_address(p3e.addr()));
+                    let p2e = &p2[i2];
+                    println!("PF-walk: pml2[{i2}] flags={:?}", p2e.flags());
+                    if p2e.flags().contains(PageTableFlags::PRESENT)
+                        && !p2e.flags().contains(PageTableFlags::HUGE_PAGE)
                     {
-                        RETRY_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1
-                    } else {
-                        RETRY_COUNT.store(1, core::sync::atomic::Ordering::Relaxed);
-                        1
-                    };
-                    if count > 3 {
+                        let p1 = pt(PhysFrame::containing_address(p2e.addr()));
+                        let e = &p1[i1];
                         println!(
-                            "stale-tlb-loop: giving up after {count} retries at addr={:p} rip={:p} flags={:?} phys={:#x}",
-                            address, stack_frame.instruction_pointer, flags, pte_phys
+                            "PF-walk: pml1[{i1}] flags={:?} phys={:#x}",
+                            e.flags(),
+                            e.addr().as_u64()
                         );
-                        // fall through to KILL
-                    } else {
-                        use x86_64::registers::control::Cr3;
-                        let (f, c) = Cr3::read();
-                        unsafe { Cr3::write(f, c) };
-                        println!(
-                            "stale-tlb-retry#{count}: addr={:p} rip={:p} flags={:?} phys={:#x}",
-                            address, stack_frame.instruction_pointer, flags, pte_phys
-                        );
-                        return;
                     }
                 }
             }
-
-            // Diagnostic for the unrecoverable case.
-            println!(
-                "KILL: PF addr={:p} rip={:p} err={error_code:?} ({error_desc})",
-                address, stack_frame.instruction_pointer
-            );
-            match pte_flags {
-                Some(f) => println!("PF-debug: pte.flags={:?} pte.phys={:#x}", f, pte_phys),
-                None => println!("PF-debug: addr={a:#x} no present PTE"),
-            }
-            // Dump intermediate level flags; effective access is AND across all.
-            {
-                let p4e = &p4[i4];
-                println!("PF-walk: pml4[{i4}] flags={:?}", p4e.flags());
-                if p4e.flags().contains(PageTableFlags::PRESENT) {
-                    let p3 = pt(PhysFrame::containing_address(p4e.addr()));
-                    let p3e = &p3[i3];
-                    println!("PF-walk: pml3[{i3}] flags={:?}", p3e.flags());
-                    if p3e.flags().contains(PageTableFlags::PRESENT) {
-                        let p2 = pt(PhysFrame::containing_address(p3e.addr()));
-                        let p2e = &p2[i2];
-                        println!("PF-walk: pml2[{i2}] flags={:?}", p2e.flags());
-                    }
-                }
-            }
-        } else {
-            // Non-protection fault that fell through the demand-fault handler.
-            println!(
-                "KILL: PF addr={:p} rip={:p} err={error_code:?} ({error_desc})",
-                address, stack_frame.instruction_pointer
-            );
         }
 
         sched().thread_exit(11);

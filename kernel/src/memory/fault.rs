@@ -447,6 +447,10 @@ unsafe fn map_page_direct(
 
     // Map the page
     pte.set_addr(frame.start_address(), flags);
+
+    #[cfg(debug_assertions)]
+    crate::memory::mapper::debug_assert_permissive_parents(cr3, vaddr);
+
     true
 }
 
