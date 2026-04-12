@@ -53,7 +53,8 @@ define run_qemu_uefi
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		$(if $(filter iso,$(1)),-cdrom $(IMAGE_NAME).iso,-hda $(IMAGE_NAME).hdd) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-serial stdio \
+		-chardev stdio,id=ser0,signal=off,logfile=run_log.txt \
+		-serial chardev:ser0 \
 		-no-reboot -d cpu_reset -D /tmp/qemu_reset.log \
 		-drive id=sata0,if=none,format=qcow2,file=sata-disk.img,aio=io_uring,discard=unmap \
 		-device ide-hd,drive=sata0,bus=ide.1 \
