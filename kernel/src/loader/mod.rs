@@ -59,7 +59,13 @@ pub enum ElfLoadError {
 }
 
 /// Allocate a private frame, copy one page from the inode page cache into it,
-/// and map it writable at `page_addr` for relocation patching.
+/// and map it at `page_addr` with the given flags.
+///
+/// `zero_from` optionally zeroes bytes `[zero_from..4096]` after the memcpy.
+/// Used for the last file-data page of a PT_LOAD whose `p_filesz` is not a
+/// multiple of 4096: bytes past `p_filesz` are the start of BSS and must read
+/// as zero per the ELF spec, but the cache page contains whatever the linker
+/// left on disk (usually alignment junk).
 ///
 /// The cache page is pinned only long enough for the memcpy; it is unpinned
 /// before returning so the cache can evict it independently. The private frame
@@ -71,6 +77,7 @@ fn eager_fault_elf_page_from_cache(
     file_page_idx: u64,
     page_addr: VirtAddr,
     flags: PageTableFlags,
+    zero_from: Option<usize>,
 ) -> Result<(), ElfLoadError> {
     use x86_64::structures::paging::FrameAllocator;
 
@@ -98,7 +105,16 @@ fn eager_fault_elf_page_from_cache(
     cached_page.unpin();
     drop(cached_page);
 
-    // Map the private frame writable for relocation patching.
+    // ELF tail-zero: bytes past p_filesz within the last file page must read
+    // as zero (they are the start of the BSS region that shares this page).
+    if let Some(off) = zero_from {
+        if off < 4096 {
+            unsafe {
+                core::ptr::write_bytes(frame_ptr.add(off), 0, 4096 - off);
+            }
+        }
+    }
+
     memory_manager
         .map_address(page_addr, private_frame.start_address(), flags)
         .map_err(|_| ElfLoadError::MappingFailed)?;
@@ -230,6 +246,9 @@ pub fn load_elf(
     let mut max_addr = 0u64;
     let mut memory_regions: Vec<Vma> = Vec::new();
     let mut tls_template: Option<TlsTemplate> = None;
+    let mut reloc_pages: BTreeSet<VirtAddr> = BTreeSet::new();
+    let write_flags =
+        PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
 
     // Program header table (targeted read).
     let phdr_bytes_len = (e_phnum as u64) * (PHDR_SIZE as u64);
@@ -317,6 +336,31 @@ pub fn load_elf(
                 });
             }
 
+            // Pre-fault the last file page when p_filesz does not end on a page
+            // boundary. Bytes past p_filesz within that page must read as zero
+            // (they are the BSS-in-file-page region per the ELF spec), but the
+            // page cache holds whatever the linker left there. We allocate a
+            // private frame, copy the cache page, zero the tail, and pin the
+            // page into this process. Add to reloc_pages so the relocation
+            // loop won't re-fault it; the final change_flags pass tightens
+            // its PTE to the segment's real permissions.
+            let tail_start = ((vaddr_offset + p_filesz) & 0xfff) as usize;
+            if tail_start != 0 && p_filesz > 0 {
+                let last_file_page_vma_offset = (file_page_count as u64 - 1) * 4096;
+                let last_page_addr = page_aligned_vaddr + last_file_page_vma_offset;
+                let last_file_page_idx = (file_offset + last_file_page_vma_offset) / 4096;
+                eager_fault_elf_page_from_cache(
+                    memory_manager,
+                    inode,
+                    &fs,
+                    last_file_page_idx,
+                    last_page_addr,
+                    write_flags,
+                    Some(tail_start),
+                )?;
+                reloc_pages.insert(last_page_addr);
+            }
+
             let segment_end = p_vaddr + p_memsz;
             max_addr = max_addr.max(segment_end + load_base.as_u64());
         } else if p_type == PT_TLS {
@@ -342,17 +386,12 @@ pub fn load_elf(
     }
 
     // Task 2.7: Relocation loop using the page-cache helper.
-    let write_flags =
-        PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
-
     // Section header table (targeted read).
     let shdr_bytes_len = (e_shnum as u64) * (SHDR_SIZE as u64);
     let shdr_bytes = read_file_range(path, e_shoff, shdr_bytes_len)?;
     if shdr_bytes.len() < shdr_bytes_len as usize {
         return Err(ElfLoadError::MissingSegments);
     }
-
-    let mut reloc_pages: BTreeSet<VirtAddr> = BTreeSet::new();
 
     for i in 0..e_shnum as usize {
         let sh = &shdr_bytes[i * SHDR_SIZE..(i + 1) * SHDR_SIZE];
@@ -409,6 +448,7 @@ pub fn load_elf(
                                                 file_page_idx,
                                                 page_addr,
                                                 write_flags,
+                                                None,
                                             )?;
                                         }
                                         VmaBacking::Anonymous => {
