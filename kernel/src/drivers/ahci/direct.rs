@@ -44,6 +44,29 @@ pub fn write_sectors(device_id: u64, lba: u64, data: &[u8], sectors: u16) -> Res
     port.write_sectors(lba, data, sectors)
 }
 
+/// Write sectors with Force Unit Access (bypasses drive write cache).
+///
+/// Falls back to a plain write followed by `flush_cache` on devices that do
+/// not support FUA, so callers always get durability semantics even on QEMU.
+pub fn write_sectors_fua(
+    device_id: u64,
+    lba: u64,
+    data: &[u8],
+    sectors: u16,
+) -> Result<(), AhciError> {
+    let port = get_port(device_id)?;
+    match port.write_sectors_fua(lba, data, sectors) {
+        Ok(()) => Ok(()),
+        Err(AhciError::IoError) => {
+            // Device does not support FUA; fall back to write + flush.
+            port.write_sectors(lba, data, sectors)?;
+            port.flush_cache()?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Flush cache. For NCQ-capable ports, drains NCQ before issuing FLUSH CACHE.
 pub fn flush_cache(device_id: u64) -> Result<(), AhciError> {
     let port = get_port(device_id)?;

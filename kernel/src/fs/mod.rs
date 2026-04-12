@@ -31,6 +31,7 @@ pub mod fat32;
 pub mod gpt;
 pub mod handle;
 pub mod inode;
+pub mod journal;
 pub mod mbr;
 pub mod memfs;
 pub mod page_cache;

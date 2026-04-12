@@ -1281,7 +1281,6 @@ impl AhciPort {
 
     /// Write sectors with Force Unit Access (bypasses drive write cache).
     /// Returns `IoError` if the device does not support FUA.
-    #[expect(unused)]
     pub fn write_sectors_fua(
         &self,
         lba: u64,

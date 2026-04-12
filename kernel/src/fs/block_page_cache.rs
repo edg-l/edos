@@ -20,7 +20,12 @@
 // sync_all() increments flush_requested, wakes the writeback thread, then
 // blocks on sync_done_wq until flush_completed >= its request number.
 
-use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use lru::LruCache;
@@ -270,6 +275,9 @@ pub struct BlockPageCache {
     pub writeback_wq: WaitQueue,
     /// sync_all() waiters block here until their request is complete.
     pub sync_done_wq: WaitQueue,
+    /// Per-device journal handles registered at mount time.
+    /// Wired in Phase 5; populated by `register_device`.
+    journals: BlockingMutex<BTreeMap<u64, Arc<crate::fs::journal::Journal>>>,
 }
 
 static BLOCK_PAGE_CACHE: Once<BlockPageCache> = Once::new();
@@ -338,6 +346,7 @@ impl BlockPageCache {
             flush_completed: AtomicU64::new(0),
             writeback_wq: WaitQueue::new(),
             sync_done_wq: WaitQueue::new(),
+            journals: BlockingMutex::new(BTreeMap::new()),
         }
     }
 
@@ -358,6 +367,19 @@ impl BlockPageCache {
     /// Returns true if the cache has been initialized.
     pub fn initialized() -> bool {
         CACHE_INITIALIZED.load(Ordering::Acquire)
+    }
+
+    // ---- Journal registry -----------------------------------------------
+
+    /// Associate a journal with a block device. Called at EFS mount time
+    /// (Phase 5 wires this in; the method compiles but is not called in Phase 3).
+    pub fn register_device(&self, device_id: u64, journal: Arc<crate::fs::journal::Journal>) {
+        self.journals.lock().insert(device_id, journal);
+    }
+
+    /// Look up the journal for a device, if one has been registered.
+    pub fn journal_for_device(&self, device_id: u64) -> Option<Arc<crate::fs::journal::Journal>> {
+        self.journals.lock().get(&device_id).cloned()
     }
 
     // ---- Internal helpers ------------------------------------------------

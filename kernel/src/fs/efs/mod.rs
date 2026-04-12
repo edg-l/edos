@@ -6,9 +6,10 @@ use alloc::vec::Vec;
 
 use efs_common::{
     DIR_ENTRY_HEADER_SIZE, EFS_ROOT_INO, EXTENT_MAGIC, EfsBlockGroupDesc, EfsDirEntryHeader,
-    EfsExtent, EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, FT_REG_FILE, INODE_DATA_AREA_SIZE,
-    INODE_FLAG_INLINE_DATA, MAX_INLINE_EXTENTS, S_IFDIR, S_IFMT, S_IFREG, checksum_inode,
-    dir_entry_min_size,
+    EfsExtent, EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, FT_REG_FILE, INCOMPAT_JOURNAL,
+    INODE_DATA_AREA_SIZE, INODE_FLAG_INLINE_DATA, JOURNAL_MAGIC, JournalSuperblock,
+    MAX_INLINE_EXTENTS, S_IFDIR, S_IFMT, S_IFREG, checksum_inode, dir_entry_min_size,
+    journal_sb_checksum,
 };
 
 use super::block_device::BlockDevice;
@@ -16,6 +17,7 @@ use super::gpt::Partition;
 use super::page_cache::PageCacheOps;
 use super::path::Path;
 use super::{Error, File, FileAttrs, FileKind, FileSystem, FileTime};
+use crate::log;
 use crate::thread::mutex::BlockingMutex;
 
 // ---- Constants ----------------------------------------------------------------
@@ -64,12 +66,26 @@ struct EfsMutableState {
     bgd_table: Vec<EfsBlockGroupDesc>,
 }
 
+/// Immutable journal layout parsed at mount time.
+pub struct JournalLayout {
+    /// Absolute block number (within the EFS partition) of the journal's first block.
+    pub first_block: u64,
+    /// Total number of blocks in the journal region.
+    pub block_count: u32,
+    /// Oldest live transaction sequence number at mount time.
+    pub head_seq: u64,
+    /// Tail sequence number at mount time (oldest unreclaimed transaction).
+    pub tail_seq: u64,
+}
+
 pub struct EfsDriver {
     device: BlockDevice,
     partition: Partition,
     /// Cached values derived from the superblock (immutable after mount).
     block_size_log2: u32,
     inodes_per_group: u32,
+    /// Journal layout parsed from the journal superblock at mount.
+    pub journal_layout: JournalLayout,
     /// Mutable FS metadata (superblock + block group descriptors).
     mutable: BlockingMutex<EfsMutableState>,
 }
@@ -92,6 +108,16 @@ impl EfsDriver {
             unsafe { core::ptr::read_unaligned(sb_bytes.as_ptr() as *const EfsSuperblock) };
 
         superblock.validate().map_err(|_| Error::InvalidFs)?;
+
+        // Refuse to mount without a journal. Filesystems formatted with an
+        // older efs-mkfs that lacks INCOMPAT_JOURNAL must be reformatted.
+        if superblock.incompatible_features & INCOMPAT_JOURNAL == 0 {
+            log!(
+                "efs: refusing to mount -- journal required (INCOMPAT_JOURNAL missing). \
+                 Reformat with latest efs-mkfs."
+            );
+            return Err(Error::InvalidFs);
+        }
 
         let block_size = 1u64 << superblock.block_size_log2;
         // BlockPageCache requires 4 KiB blocks (one block == one page).
@@ -124,6 +150,57 @@ impl EfsDriver {
             bgd_table.push(bgd);
         }
 
+        // ---- Validate journal superblock ----------------------------------------
+        // journal_first_block is an absolute EFS block number (0 = first block of
+        // the partition). Convert to page index the same way read_block does:
+        //   page_idx = lba / SECTORS_PER_DEFAULT_BLOCK
+        //   lba = starting_lba + block * (block_size / 512)
+        let j_first_block = superblock.journal_first_block;
+        let j_lba = starting_lba + j_first_block * sectors_per_block as u64;
+        let j_page_idx = j_lba / SECTORS_PER_DEFAULT_BLOCK as u64;
+        let j_page = device.read_page(j_page_idx)?;
+        let j_bytes = j_page.as_slice();
+
+        // SAFETY: JournalSuperblock is repr(C, packed), 64 bytes; the page is 4096 bytes.
+        let jsb: JournalSuperblock =
+            unsafe { core::ptr::read_unaligned(j_bytes.as_ptr() as *const JournalSuperblock) };
+
+        // Copy packed fields to locals to avoid misaligned reference UB.
+        let jsb_magic = jsb.magic;
+        let jsb_version = jsb.version;
+        let jsb_crc32 = jsb.crc32;
+        let jsb_block_count = jsb.block_count;
+        let jsb_head_seq = jsb.head_seq;
+        let jsb_tail_seq = jsb.tail_seq;
+
+        if jsb_magic != JOURNAL_MAGIC {
+            log!("efs: journal superblock has bad magic {:#x}", jsb_magic);
+            return Err(Error::InvalidFs);
+        }
+        if jsb_version != 1 {
+            log!(
+                "efs: journal superblock has unsupported version {}",
+                jsb_version
+            );
+            return Err(Error::InvalidFs);
+        }
+        let expected_crc = journal_sb_checksum(&jsb);
+        if jsb_crc32 != expected_crc {
+            log!(
+                "efs: journal superblock checksum mismatch (got {:#x}, expected {:#x})",
+                jsb_crc32,
+                expected_crc
+            );
+            return Err(Error::InvalidFs);
+        }
+
+        let journal_layout = JournalLayout {
+            first_block: j_first_block,
+            block_count: jsb_block_count,
+            head_seq: jsb_head_seq,
+            tail_seq: jsb_tail_seq,
+        };
+
         let block_size_log2 = superblock.block_size_log2;
         let inodes_per_group = superblock.inodes_per_group;
         Ok(Self {
@@ -131,6 +208,7 @@ impl EfsDriver {
             partition,
             block_size_log2,
             inodes_per_group,
+            journal_layout,
             mutable: BlockingMutex::new(EfsMutableState {
                 superblock,
                 bgd_table,
