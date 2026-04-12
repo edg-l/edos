@@ -35,14 +35,14 @@ pub fn committer_thread() -> ! {
         let journals = cache.all_journals();
 
         for j in &journals {
+            // Always try to advance the tail first — even if the last commit
+            // failed due to ring-full, draining checkpoints frees space.
+            if let Err(e) = j.advance_tail() {
+                log!("journal_committer: advance_tail error: {:?}", e);
+            }
             if j.has_pending_work() {
                 if let Err(e) = j.seal_and_commit_if_needed() {
                     log!("journal_committer: seal_and_commit error: {:?}", e);
-                    continue;
-                }
-                // Advance tail to reclaim ring space for checkpointed txs.
-                if let Err(e) = j.advance_tail() {
-                    log!("journal_committer: advance_tail error: {:?}", e);
                 }
             }
         }

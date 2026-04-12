@@ -10,7 +10,7 @@ use alloc::{
     sync::Arc,
 };
 
-use super::{Journal, Transaction};
+use super::Journal;
 use crate::fs::block_page_cache::CachedBlockPage;
 
 /// RAII handle for a single logical transaction.
@@ -67,34 +67,30 @@ impl Drop for TxHandle<'_> {
         }
 
         // Merge staged enrollments into the active transaction.
-        let mut state = self.journal.state.lock();
-        let active: &mut Transaction = &mut state.active;
+        //
+        // Lock ordering: acquire state first to merge blocks, then tracker.
+        // We must read active.seq under the SAME state lock as the merge to
+        // avoid TOCTOU (active could be sealed between two lock acquisitions).
+        let staged_blocks = core::mem::take(&mut self.staged_blocks);
+        let staged_revokes = core::mem::take(&mut self.staged_revokes);
 
-        // Update checkpoint_tracker: remember the seq of the active tx for
-        // each enrolled block so writeback knows when it is safe to flush.
-        let active_seq = active.seq;
-        {
-            // We need the tracker lock but we already hold state.  Acquire it
-            // separately after releasing state? No — we hold state and need
-            // tracker. That ordering (state -> tracker) must be consistent
-            // everywhere. BlockingMutex does not support re-entrant locking, so
-            // we must not hold both at once.  Release state before acquiring
-            // tracker.
-            drop(state);
-            let mut tracker = self.journal.checkpoint_tracker.lock();
-            for &key in self.staged_blocks.keys() {
-                tracker.insert(key, active_seq);
-            }
-            drop(tracker);
-            // Re-acquire state to merge the blocks.
+        let active_seq = {
             let mut state = self.journal.state.lock();
-            let active: &mut Transaction = &mut state.active;
-            for (key, page) in core::mem::take(&mut self.staged_blocks) {
-                active.enrolled_blocks.insert(key, page);
+            let active = &mut state.active;
+            let seq = active.seq;
+            for (key, page) in staged_blocks.iter() {
+                active.enrolled_blocks.insert(*key, page.clone());
             }
-            for key in core::mem::take(&mut self.staged_revokes) {
+            for &key in &staged_revokes {
                 active.revokes.insert(key);
             }
+            seq
+        };
+
+        // Update checkpoint_tracker outside the state lock (different lock).
+        let mut tracker = self.journal.checkpoint_tracker.lock();
+        for &key in staged_blocks.keys() {
+            tracker.insert(key, active_seq);
         }
     }
 }

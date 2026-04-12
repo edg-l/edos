@@ -1894,13 +1894,24 @@ impl EfsDriver {
         parent_inode2.checksum = checksum_inode(&parent_inode2);
         self.write_inode(parent_ino, &parent_inode2, tx)?;
 
-        // Update BGD used_dirs count.
+        // Update BGD used_dirs count and enroll the BGD page.
         let ipg = self.inodes_per_group as usize;
         let group = ((new_ino - 1) as usize) / ipg;
         {
             let mut m = self.mutable.lock();
             if group < m.bgd_table.len() {
                 m.bgd_table[group].used_dirs_count += 1;
+            }
+        }
+        {
+            let block_size = self.block_size() as usize;
+            let bgds_per_block = block_size / BGD_SIZE;
+            let bgd_block = 2u64 + (group / bgds_per_block) as u64;
+            let bgd_page_idx = self.block_to_lba(bgd_block) / 8;
+            if let Ok(guard) =
+                BlockPageCache::global().read_page(self.device.device_id, bgd_page_idx)
+            {
+                tx.enroll_block(self.device.device_id, bgd_page_idx, guard.page_arc());
             }
         }
 
@@ -1966,13 +1977,24 @@ impl EfsDriver {
         parent_inode.checksum = checksum_inode(&parent_inode);
         self.write_inode(parent_ino, &parent_inode, tx)?;
 
-        // Update BGD used_dirs.
+        // Update BGD used_dirs and enroll the BGD page.
         let ipg = self.inodes_per_group as usize;
         let group = ((dir_ino - 1) as usize) / ipg;
         {
             let mut m = self.mutable.lock();
             if group < m.bgd_table.len() && m.bgd_table[group].used_dirs_count > 0 {
                 m.bgd_table[group].used_dirs_count -= 1;
+            }
+        }
+        {
+            let block_size = self.block_size() as usize;
+            let bgds_per_block = block_size / BGD_SIZE;
+            let bgd_block = 2u64 + (group / bgds_per_block) as u64;
+            let bgd_page_idx = self.block_to_lba(bgd_block) / 8;
+            if let Ok(guard) =
+                BlockPageCache::global().read_page(self.device.device_id, bgd_page_idx)
+            {
+                tx.enroll_block(self.device.device_id, bgd_page_idx, guard.page_arc());
             }
         }
 
@@ -2271,12 +2293,15 @@ impl PageCacheOps for EfsDriver {
 
         // INVARIANT: file-data page cache does not route through BlockDevice to avoid double-caching. Do not change.
         let needed = spb as usize * 512;
-        crate::drivers::ahci::direct::write_sectors(
+        if let Err(e) = crate::drivers::ahci::direct::write_sectors(
             self.device.device_id,
             lba,
             &buf[..needed],
             spb,
-        )?;
+        ) {
+            tx.abort();
+            return Err(e.into());
+        }
 
         Ok(())
     }
