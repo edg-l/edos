@@ -264,9 +264,11 @@ fn test5() {
     }
 
     if child_pid == 0 {
-        // Child: touch the past-EOF page -- kernel must kill us
-        let _byte = unsafe { ptr.add(PAGE as usize).read() };
-        // Should never reach here
+        // Child: touch the past-EOF page -- kernel must kill us.
+        // read_volatile prevents the compiler from optimizing out the load.
+        let byte = unsafe { core::ptr::read_volatile(ptr.add(PAGE as usize)) };
+        // Prints only if the access somehow didn't fault.
+        println!("test5 child: unexpected byte {} past EOF", byte);
         std::process::exit(0);
     }
 
@@ -333,8 +335,10 @@ fn test6() {
     }
 
     if child_pid == 0 {
-        // Child: access byte 4096 (past truncated end) -- should be killed
-        let _byte = unsafe { ptr.add(PAGE as usize).read() };
+        // Child: access byte 4096 (past truncated end) -- should be killed.
+        // read_volatile prevents the compiler from optimizing out the load.
+        let byte = unsafe { core::ptr::read_volatile(ptr.add(PAGE as usize)) };
+        println!("test6 child: unexpected byte {} after truncate", byte);
         std::process::exit(0);
     }
 
