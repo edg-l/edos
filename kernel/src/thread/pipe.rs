@@ -254,11 +254,31 @@ impl PipeNotifications {
     }
 }
 
+/// Access mode recorded at open time from the O_RDONLY / O_WRONLY / O_RDWR flag bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenMode {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
+}
+
+impl OpenMode {
+    pub fn readable(self) -> bool {
+        matches!(self, Self::ReadOnly | Self::ReadWrite)
+    }
+
+    pub fn writable(self) -> bool {
+        matches!(self, Self::WriteOnly | Self::ReadWrite)
+    }
+}
+
 #[derive(Clone)]
 pub struct FsFile {
     pub path: Path,
     pub offset: u64,
     pub append: bool,
+    /// Access mode (read / write / read-write) parsed from open flags.
+    pub mode: OpenMode,
     /// Cached VFS inode for per-inode locking. None for virtual filesystems
     /// (procfs, devfs) that don't have meaningful inodes.
     pub inode: Option<Arc<VfsInode>>,
@@ -270,6 +290,7 @@ impl core::fmt::Debug for FsFile {
             .field("path", &self.path)
             .field("offset", &self.offset)
             .field("append", &self.append)
+            .field("mode", &self.mode)
             .field("inode", &self.inode.as_ref().map(|i| (i.mount_id, i.ino)))
             .finish()
     }

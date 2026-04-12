@@ -58,6 +58,10 @@ pub fn lookup_fault_vma(vmas: &VmaSet, fault_addr: VirtAddr) -> Option<FaultInfo
             *vaddr_offset,
             vma.start,
         )),
+        // FileBacked is recognized as a valid backing type.
+        // Phase B will implement real fault-in logic; for now return None so the
+        // fault handler treats it as unresolvable (no behavior change in Phase A).
+        VmaBacking::FileBacked { .. } => return None,
         _ => return None,
     };
 

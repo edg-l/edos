@@ -23,12 +23,23 @@ const PROT_WRITE: u32 = 0x2;
 const PROT_EXEC: u32 = 0x4;
 
 // Mapping flags
-const MAP_ANONYMOUS: u32 = 0x20;
-const MAP_PRIVATE: u32 = 0x02;
-const MAP_PHYSICAL: u32 = 0x40;
-const MAP_WRITE_COMBINING: u32 = 0x80;
+pub const MAP_SHARED: u32 = 0x01;
+pub const MAP_PRIVATE: u32 = 0x02;
+pub const MAP_FIXED: u32 = 0x10;
+pub const MAP_ANONYMOUS: u32 = 0x20;
+pub const MAP_PHYSICAL: u32 = 0x40;
+pub const MAP_WRITE_COMBINING: u32 = 0x80;
 
-pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -> u64 {
+// msync flags
+pub const MS_ASYNC: u32 = 0x1;
+pub const MS_SYNC: u32 = 0x2;
+pub const MS_INVALIDATE: u32 = 0x4;
+
+/// `r8` is overloaded: physical address for MAP_PHYSICAL, fd for file-backed mappings.
+/// `r9` is the file offset (used only for file-backed mappings).
+pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64) -> u64 {
+    let phys_addr = r8; // alias for MAP_PHYSICAL path
+    let _file_offset = r9; // used in Phase B for file-backed path
     let prot_str = match (
         prot & PROT_READ != 0,
         prot & PROT_WRITE != 0,
@@ -47,7 +58,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
     } else if flags & MAP_ANONYMOUS != 0 {
         "anonymous".into()
     } else {
-        "file-backed".into()
+        format!("file-backed fd={r8} off={r9:#x}")
     };
     log!(
         "mmap: addr={addr:#x} len={length:#x} ({} KiB) prot={prot_str} {kind}",
@@ -161,12 +172,12 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
 
         log!("mmap: mapped physical at {map_addr:p}");
         map_addr.as_u64()
-    } else {
-        // Only support anonymous private mappings otherwise
-        if (flags & MAP_ANONYMOUS) == 0 || (flags & MAP_PRIVATE) == 0 {
-            println!("Unsupported mapping type");
+    } else if (flags & MAP_ANONYMOUS) != 0 || r8 == u64::MAX {
+        // Anonymous mapping (MAP_ANONYMOUS set, or fd == -1).
+        if (flags & MAP_PRIVATE) == 0 && (flags & MAP_SHARED) == 0 {
+            println!("mmap: anonymous mapping must have MAP_PRIVATE or MAP_SHARED");
             info.lock().errno = Errno::EINVAL;
-            return !0u64; // -1 (EINVAL)
+            return !0u64;
         }
 
         let map_addr = if addr == 0 {
@@ -200,6 +211,11 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, phys_addr: u64) -
 
         log!("mmap: lazy mapped at {map_addr:p}");
         map_addr.as_u64()
+    } else {
+        // File-backed mapping: not yet implemented (Phase B).
+        log!("mmap: file-backed mapping not yet implemented (fd={r8} off={r9:#x})");
+        info.lock().errno = Errno::EINVAL;
+        !0u64
     }
 }
 
@@ -290,6 +306,13 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                 }
                 VmaBacking::ElfSegment { .. } | VmaBacking::Tls | VmaBacking::Stack => {
                     // These are kernel-managed; put back and return error
+                    user_arc.read().vmas.lock().insert(vma);
+                    info.lock().errno = Errno::EINVAL;
+                    -1
+                }
+                VmaBacking::FileBacked { .. } => {
+                    // Phase B will implement proper unmap with frame/pin cleanup.
+                    // For Phase A no file-backed VMAs are created, so this is unreachable.
                     user_arc.read().vmas.lock().insert(vma);
                     info.lock().errno = Errno::EINVAL;
                     -1

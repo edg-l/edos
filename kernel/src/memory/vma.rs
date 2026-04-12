@@ -7,6 +7,9 @@ use x86_64::VirtAddr;
 
 use bitflags::bitflags;
 
+use crate::fs::inode::VfsInode;
+use crate::fs::page_cache::CachedPage;
+
 bitflags! {
     #[derive(Debug, Clone, Copy)]
     pub struct VmaProt: u8 {
@@ -26,7 +29,7 @@ bitflags! {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum VmaBacking {
     /// Zero-fill on demand
     Anonymous,
@@ -55,6 +58,65 @@ pub enum VmaBacking {
     Tls,
     /// Stack
     Stack,
+    /// File-backed mapping (MAP_PRIVATE or MAP_SHARED).
+    /// `pages` has one slot per VMA page (length = VMA size / 4096), initially all None.
+    /// Phase B fills slots during demand faults; Phase C uses them for msync/munmap.
+    FileBacked {
+        inode: Arc<VfsInode>,
+        /// Byte offset in the file corresponding to the VMA start (4 KiB aligned).
+        file_offset: u64,
+        /// true = MAP_SHARED, false = MAP_PRIVATE.
+        shared: bool,
+        /// true if PROT_WRITE was requested at mmap time.
+        writable_mapping: bool,
+        /// Per-page Arc to the cached page, indexed by (virt_page - vma_start) / 4096.
+        /// None = not yet faulted in (or COW'd away to a private frame).
+        pages: Vec<Option<Arc<CachedPage>>>,
+    },
+}
+
+impl core::fmt::Debug for VmaBacking {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Anonymous => write!(f, "Anonymous"),
+            Self::Physical { phys_base } => f
+                .debug_struct("Physical")
+                .field("phys_base", phys_base)
+                .finish(),
+            Self::SharedMemory { shm_id } => f
+                .debug_struct("SharedMemory")
+                .field("shm_id", shm_id)
+                .finish(),
+            Self::ElfSegment {
+                file_offset,
+                file_size,
+                vaddr_offset,
+                ..
+            } => f
+                .debug_struct("ElfSegment")
+                .field("file_offset", file_offset)
+                .field("file_size", file_size)
+                .field("vaddr_offset", vaddr_offset)
+                .finish(),
+            Self::Tls => write!(f, "Tls"),
+            Self::Stack => write!(f, "Stack"),
+            Self::FileBacked {
+                inode,
+                file_offset,
+                shared,
+                writable_mapping,
+                pages,
+            } => f
+                .debug_struct("FileBacked")
+                .field("mount_id", &inode.mount_id)
+                .field("ino", &inode.ino)
+                .field("file_offset", file_offset)
+                .field("shared", shared)
+                .field("writable_mapping", writable_mapping)
+                .field("pages_len", &pages.len())
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

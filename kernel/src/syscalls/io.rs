@@ -23,7 +23,7 @@ use crate::{
     syscalls::Errno,
     thread::{
         mutex::BlockingMutex,
-        pipe::{FileDescriptor, FsFile, StandardStream},
+        pipe::{FileDescriptor, FsFile, OpenMode, StandardStream},
         pty::Pty,
         scheduler::sched,
     },
@@ -802,6 +802,13 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
     let create = (flags & 0x40) != 0; // O_CREAT
     let truncate = (flags & 0x200) != 0; // O_TRUNC
     let offset = 0u64;
+    // Parse access mode from the low 2 bits: 0=O_RDONLY, 1=O_WRONLY, 2=O_RDWR.
+    let open_mode = match flags & 0x3 {
+        0 => OpenMode::ReadOnly,
+        1 => OpenMode::WriteOnly,
+        2 => OpenMode::ReadWrite,
+        _ => OpenMode::ReadWrite, // 3 is not a valid Linux value; treat as ReadWrite
+    };
     interrupts::enable();
     match fs_api::file_info(&path) {
         Ok(_) => {
@@ -832,6 +839,7 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         path,
         offset,
         append,
+        mode: open_mode,
         inode,
     });
     let fd = info.lock().fd_table.lock().allocate_fd(desc);

@@ -88,6 +88,15 @@ impl core::ops::Deref for PageGuard {
     }
 }
 
+impl PageGuard {
+    /// Clone the underlying `Arc<CachedPage>` without dropping the guard.
+    /// Callers that want to keep the page alive after the guard drops must
+    /// call `page.pin()` on the returned Arc themselves.
+    pub fn arc(&self) -> Arc<CachedPage> {
+        Arc::clone(&self.page)
+    }
+}
+
 impl Drop for PageGuard {
     fn drop(&mut self) {
         self.page.unpin();

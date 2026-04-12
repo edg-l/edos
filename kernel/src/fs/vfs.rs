@@ -613,3 +613,51 @@ pub fn child_mount_points(parent: &Path) -> Vec<(String, Path)> {
 pub fn is_mount_point(path: &Path) -> bool {
     VFS.read().contains_key(path)
 }
+
+/// Look up the filesystem for a given mount ID.
+/// Iterates the mount registry and returns a clone of the matching Arc.
+pub fn fs_by_mount_id(mount_id: usize) -> Option<Arc<dyn super::FileSystem + Send + Sync>> {
+    let registry = VFS.read();
+    for entry in registry.values() {
+        if entry.mount_id == mount_id {
+            return Some(entry.fs.clone());
+        }
+    }
+    None
+}
+
+/// Fetch or fill a single page from an inode's page cache.
+///
+/// Returns an `Arc<CachedPage>` that callers can clone to keep the page alive
+/// independent of the `PageGuard` drop guard.  The returned Arc has one
+/// logical pin contributed by the caller; callers must call `page.unpin()`
+/// when they no longer need the page held (e.g. on munmap).
+///
+/// Uses `PageCacheOps::fill_page` supplied by the inode's filesystem.
+/// Returns `Err(Errno::EINVAL)` if the filesystem does not support the page cache
+/// or the inode number is zero.
+pub fn get_or_fill_page(
+    inode: &Arc<super::inode::VfsInode>,
+    page_idx: u64,
+) -> Result<Arc<super::page_cache::CachedPage>, super::super::syscalls::Errno> {
+    let fs = fs_by_mount_id(inode.mount_id).ok_or(super::super::syscalls::Errno::EINVAL)?;
+    let pc_ops = fs
+        .as_page_cache_ops()
+        .ok_or(super::super::syscalls::Errno::EINVAL)?;
+    let ino = inode.ino;
+    let guard = inode
+        .pages
+        .get_or_fill(page_idx, |buf| {
+            let valid = pc_ops.fill_page(ino, page_idx, buf)?;
+            if valid < 4096 {
+                buf[valid..].fill(0);
+            }
+            Ok(())
+        })
+        .map_err(|_| super::super::syscalls::Errno::EIO)?;
+    // Extract the Arc before the guard drops (and unpins).
+    // Pin explicitly so the caller holds a pin independent of the guard.
+    let page = guard.arc();
+    page.pin();
+    Ok(page)
+}

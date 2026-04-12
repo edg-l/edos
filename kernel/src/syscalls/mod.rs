@@ -292,6 +292,7 @@ const SYS_GETPID: u64 = 39; // get process ID
 const SYS_SPAWN: u64 = 57; // spawn process
 const SYS_DUP: u64 = 32; // duplicate file descriptor assigning lowest unused fd
 const SYS_DUP2: u64 = 33; // duplicate file descriptor to specific target
+const SYS_MSYNC: u64 = 34; // flush memory-mapped file pages to storage
 const SYS_WAIT_PID: u64 = 40;
 const SYS_MOUNT: u64 = 202;
 const SYS_LIST_PARTITIONS: u64 = 203;
@@ -457,15 +458,23 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let length = ctx.rsi;
             let prot = ctx.rdx as u32;
             let flags = ctx.r10 as u32;
-            let phys_addr = ctx.r8;
+            let r8 = ctx.r8; // phys_addr (MAP_PHYSICAL) or fd (file-backed)
+            let r9 = ctx.r9; // file_offset (file-backed only)
 
-            ctx.rax = sys_mmap(addr, length, prot, flags, phys_addr);
+            ctx.rax = sys_mmap(addr, length, prot, flags, r8, r9);
         }
         SYS_MUNMAP => {
             let addr = ctx.rdi;
             let length = ctx.rsi;
 
             ctx.rax = sys_munmap(addr, length) as u64;
+        }
+        SYS_MSYNC => {
+            // Phase A stub: real implementation in Phase C.
+            let sched = sched();
+            let info = sched.current_thread_info();
+            info.lock().errno = Errno::EINVAL;
+            ctx.rax = !0u64;
         }
         SYS_EXIT => {
             let code = ctx.rdi as i32;

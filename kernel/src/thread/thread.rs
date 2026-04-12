@@ -769,6 +769,21 @@ impl Thread {
                     VmaBacking::Stack => {
                         // Handled below by thread_stack_free
                     }
+                    VmaBacking::FileBacked { .. } => {
+                        // Phase B will implement proper cleanup with frame/pin refcount
+                        // decrement and optional dirty flush for MAP_SHARED.
+                        // For Phase A no file-backed VMAs are created, so this path is
+                        // not reached during normal operation.
+                        use x86_64::structures::paging::{Mapper, Page, Size4KiB};
+                        let page_count = (vma.size() + 0xFFF) / 4096;
+                        for i in 0..page_count {
+                            let virt_addr = VirtAddr::new(vma.start.as_u64() + i * 4096);
+                            let page: Page<Size4KiB> = Page::containing_address(virt_addr);
+                            if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
+                                flush.ignore();
+                            }
+                        }
+                    }
                 }
             }
 
