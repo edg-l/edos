@@ -252,14 +252,17 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             }
         };
 
-        // Permission checks deferred: Rust std's edos OpenOptions ignores
-        // the .read()/.write() builder calls and passes no RDONLY/WRONLY/
-        // RDWR bit to sys_open, so every fd looks RDONLY to the kernel.
-        // Enforcing MAP_SHARED+PROT_WRITE requires a writable fd here would
-        // reject every legitimate write mapping. The kernel doesn't enforce
-        // open mode on regular read/write either, so this is consistent with
-        // the rest of the API until the std is fixed. Known issue.
-        let _ = fs_file.mode;
+        // Permission checks: MAP_PRIVATE and MAP_SHARED both require a
+        // readable fd. MAP_SHARED + PROT_WRITE additionally requires a
+        // writable fd (writes would reach disk).
+        if !fs_file.mode.readable() {
+            info.lock().errno = Errno::EACCES;
+            return !0u64;
+        }
+        if is_shared && (prot & PROT_WRITE) != 0 && !fs_file.mode.writable() {
+            info.lock().errno = Errno::EACCES;
+            return !0u64;
+        }
 
         // Get the inode and verify the filesystem supports the page cache.
         let inode = match &fs_file.inode {

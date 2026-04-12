@@ -10,3 +10,4 @@ sata-disk.img
 .gdb_history
 run_log.txt
 usb-test.img
+/logs/

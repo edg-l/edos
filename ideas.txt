@@ -137,6 +137,27 @@
   regular kernel stack so nested faults work naturally. Double fault
   handler retains its own IST for stack overflow protection.
   20/20 boot test passes (was ~1 in 5 failure rate).
+- **File-backed mmap (MAP_PRIVATE + MAP_SHARED)** - VmaBacking::FileBacked
+  with Arc<VfsInode> + Arc<CachedPage>-per-page on the VMA. MAP_PRIVATE
+  installs read-only + COW_BIT, writes fault into anon via the existing
+  COW handler. MAP_SHARED installs writable, dirty-marks unconditionally
+  on first fault, flushes via PageCacheOps::flush_page on msync, munmap,
+  process exit, and periodically from the writeback kthread (global
+  DIRTY_INODES Weak registry, IrqSpinlock so fault-handler registration
+  is safe). VmaSet::split_at + remove_range enable partial munmap.
+  Truncate walks a per-inode mappers reverse-map and unmaps invalidated
+  PTEs across every live mapper process with per-process TLB shootdown.
+  Past-EOF access kills the faulting thread (code 11). sys_msync (SYS=34)
+  and edos_rt 0.0.35 (READ_ONLY/WRITE_ONLY/READ_WRITE OpenFlags wired
+  through the Rust std's OpenOptions.read/write). 7-test userspace
+  mmaptest (MAP_PRIVATE read, COW write, MAP_SHARED + msync, two-mapper
+  visibility, past-EOF kill in forked child, truncate invalidation kill,
+  fsync+msync round-trip) all pass on EFS. FAT32 / memfs return EINVAL
+  (no PageCacheOps). Side win: fixed a latent map_address bug where
+  read-only user mappings created intermediate PML2 entries without
+  WRITABLE, poisoning the 2 MiB range for later writable mappings (was
+  causing wm to crash after 30s of SHM cycling); debug_assert_permissive
+  _parents catches regressions.
 
 ## Network Stack Remaining
 
@@ -237,13 +258,12 @@ cluster_size starts mattering.
 
 ## Ideas
 
-### File-backed mmap / MAP_SHARED
-mmap files into userspace address space backed by page cache frames.
-MAP_PRIVATE gives COW file pages, MAP_SHARED allows multiple processes
-to share the same physical pages (writes visible to all mappers and
-flushed to disk on msync/munmap). VmaBacking::FileBacked { inode, offset }
-replaces ElfSegment once the page cache exists. Prerequisite for dynamic
-linking (shared libraries mapped MAP_PRIVATE from disk).
+### ElfSegment -> FileBacked migration
+Currently ELF segments are kept in-kernel as Arc<Vec<u8>> (an entire
+ELF binary per process). File-backed mmap now exists, so migrate the
+ELF loader to use VmaBacking::FileBacked via MAP_PRIVATE from the
+binary on disk. Saves memory (shared pages across fork, cache reuse
+for re-exec), and is the prerequisite for the dynamic linker.
 
 ### Dynamic Linker (ld.so)
 ELF dynamic linking: PT_INTERP, PT_DYNAMIC parsing, symbol resolution
@@ -286,10 +306,9 @@ foreground process group.
 
 ## Fun-per-effort ranking
 
-fsck > more tools > file-backed mmap > dynamic linker >
+fsck > more tools > ElfSegment->FileBacked > dynamic linker >
 async I/O > IPv6 > virtio-net
 
 Note: fsck is the last storage-stack piece (steps 1-3 shipped).
-page cache -> file-backed mmap -> dynamic linker is the
-memory/loader progression. They're independent and can interleave.
-They're independent and can interleave.
+File-backed mmap shipped; ElfSegment->FileBacked migration is the
+next step in the memory/loader progression toward the dynamic linker.
