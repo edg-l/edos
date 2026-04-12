@@ -246,16 +246,13 @@ extern "x86-interrupt" fn page_fault_handler(
             }
         }
 
-        // Use println! (direct serial, no heap allocation) so the message is
-        // guaranteed to reach serial output from the IST page fault handler.
-        println!(
-            "KILL: PF addr={:p} rip={:p} err={error_code:?} ({error_desc})",
-            address, stack_frame.instruction_pointer
-        );
-
-        // Diagnostic: if the PTE is present, dump its flags + phys so we can
-        // identify stale/leaked PTEs. Walks CR3 directly through HHDM.
-        {
+        // Before killing: if this is a PROTECTION_VIOLATION and the PTE is
+        // actually good for this access (the CPU took the fault from a stale
+        // TLB entry), invalidate the local TLB entry and return. The user's
+        // instruction will retry via the fresh PTE. Avoids spurious KILLs
+        // when another CPU resolved the access (COW, demand-fault) without
+        // shooting down our TLB.
+        if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
             use x86_64::registers::control::Cr3;
             use x86_64::structures::paging::{PageTable, PhysFrame};
             let (cr3_frame, _) = Cr3::read();
@@ -269,6 +266,8 @@ extern "x86-interrupt" fn page_fault_handler(
                 unsafe { &*(phys_off + f.start_address().as_u64()).as_ptr::<PageTable>() }
             };
             let p4 = pt(cr3_frame);
+            let mut pte_flags: Option<PageTableFlags> = None;
+            let mut pte_phys: u64 = 0;
             if p4[i4].flags().contains(PageTableFlags::PRESENT) {
                 let p3 = pt(PhysFrame::containing_address(p4[i4].addr()));
                 if p3[i3].flags().contains(PageTableFlags::PRESENT) {
@@ -276,20 +275,45 @@ extern "x86-interrupt" fn page_fault_handler(
                     if p2[i2].flags().contains(PageTableFlags::PRESENT) {
                         let p1 = pt(PhysFrame::containing_address(p2[i2].addr()));
                         let e = &p1[i1];
-                        println!(
-                            "PF-debug: pte.flags={:?} pte.phys={:#x}",
-                            e.flags(),
-                            e.addr().as_u64(),
-                        );
-                    } else {
-                        println!("PF-debug: no PML2 entry for {a:#x}");
+                        if e.flags().contains(PageTableFlags::PRESENT) {
+                            pte_flags = Some(e.flags());
+                            pte_phys = e.addr().as_u64();
+                        }
                     }
-                } else {
-                    println!("PF-debug: no PML3 entry for {a:#x}");
                 }
-            } else {
-                println!("PF-debug: no PML4 entry for {a:#x}");
             }
+
+            if let Some(flags) = pte_flags {
+                let write_ok = !error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+                    || flags.contains(PageTableFlags::WRITABLE);
+                let user_ok = !error_code.contains(PageFaultErrorCode::USER_MODE)
+                    || flags.contains(PageTableFlags::USER_ACCESSIBLE);
+                if write_ok && user_ok {
+                    // Stale TLB. Flush local entry and retry.
+                    x86_64::instructions::tlb::flush(address);
+                    println!(
+                        "stale-tlb-retry: addr={:p} rip={:p} flags={:?} phys={:#x}",
+                        address, stack_frame.instruction_pointer, flags, pte_phys
+                    );
+                    return;
+                }
+            }
+
+            // Diagnostic for the unrecoverable case.
+            println!(
+                "KILL: PF addr={:p} rip={:p} err={error_code:?} ({error_desc})",
+                address, stack_frame.instruction_pointer
+            );
+            match pte_flags {
+                Some(f) => println!("PF-debug: pte.flags={:?} pte.phys={:#x}", f, pte_phys),
+                None => println!("PF-debug: addr={a:#x} no present PTE"),
+            }
+        } else {
+            // Non-protection fault that fell through the demand-fault handler.
+            println!(
+                "KILL: PF addr={:p} rip={:p} err={error_code:?} ({error_desc})",
+                address, stack_frame.instruction_pointer
+            );
         }
 
         sched().thread_exit(11);
