@@ -289,13 +289,46 @@ extern "x86-interrupt" fn page_fault_handler(
                 let user_ok = !error_code.contains(PageFaultErrorCode::USER_MODE)
                     || flags.contains(PageTableFlags::USER_ACCESSIBLE);
                 if write_ok && user_ok {
-                    // Stale TLB. Flush local entry and retry.
-                    x86_64::instructions::tlb::flush(address);
-                    println!(
-                        "stale-tlb-retry: addr={:p} rip={:p} flags={:?} phys={:#x}",
-                        address, stack_frame.instruction_pointer, flags, pte_phys
+                    // The PTE says this access is fine. Heavy-hand TLB flush
+                    // by reloading CR3 (also flushes paging-structure caches).
+                    // If we re-enter here for the same (addr, rip) the issue
+                    // is not a stale TLB; give up and kill so we can diagnose.
+                    static LAST_ADDR: core::sync::atomic::AtomicU64 =
+                        core::sync::atomic::AtomicU64::new(0);
+                    static LAST_RIP: core::sync::atomic::AtomicU64 =
+                        core::sync::atomic::AtomicU64::new(0);
+                    static RETRY_COUNT: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let prev_addr =
+                        LAST_ADDR.swap(address.as_u64(), core::sync::atomic::Ordering::Relaxed);
+                    let prev_rip = LAST_RIP.swap(
+                        stack_frame.instruction_pointer.as_u64(),
+                        core::sync::atomic::Ordering::Relaxed,
                     );
-                    return;
+                    let count = if prev_addr == address.as_u64()
+                        && prev_rip == stack_frame.instruction_pointer.as_u64()
+                    {
+                        RETRY_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1
+                    } else {
+                        RETRY_COUNT.store(1, core::sync::atomic::Ordering::Relaxed);
+                        1
+                    };
+                    if count > 3 {
+                        println!(
+                            "stale-tlb-loop: giving up after {count} retries at addr={:p} rip={:p} flags={:?} phys={:#x}",
+                            address, stack_frame.instruction_pointer, flags, pte_phys
+                        );
+                        // fall through to KILL
+                    } else {
+                        use x86_64::registers::control::Cr3;
+                        let (f, c) = Cr3::read();
+                        unsafe { Cr3::write(f, c) };
+                        println!(
+                            "stale-tlb-retry#{count}: addr={:p} rip={:p} flags={:?} phys={:#x}",
+                            address, stack_frame.instruction_pointer, flags, pte_phys
+                        );
+                        return;
+                    }
                 }
             }
 
