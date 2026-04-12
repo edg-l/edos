@@ -1,3 +1,19 @@
+//! Per-inode page cache.
+//!
+//! LOCK ORDERING: vfs inode lock < page_cache pages lock < mm-mapper lock.
+//! Truncate-invalidate acquires in this order; faults drop mm-mapper lock
+//! before taking the page_cache lock (see fault.rs).
+//!
+//! Write policy divergence:
+//!   - `write(2)` paths (`page_cache_write` in vfs.rs) are write-through:
+//!     data is written into the cache page and immediately flushed to disk.
+//!   - MAP_SHARED mappings are write-back: stores go directly into the cache
+//!     frame (the kernel never sees individual stores), the page is marked
+//!     dirty on the first fault, and data is flushed by msync(MS_SYNC),
+//!     munmap, fsync, or the periodic writeback kthread.
+//!   This does NOT break the "file data bypasses BlockPageCache" invariant:
+//!   `PageCacheOps::flush_page` routes through direct AHCI, not BlockPageCache.
+
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use x86_64::structures::paging::{FrameAllocator, PhysFrame};
@@ -59,6 +75,10 @@ impl CachedPage {
 
     pub fn clear_dirty(&self) {
         self.dirty.store(false, Ordering::Release);
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Acquire)
     }
 
     pub fn frame(&self) -> PhysFrame {

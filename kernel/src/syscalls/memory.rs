@@ -1,4 +1,4 @@
-use alloc::format;
+use alloc::{format, sync::Arc, vec::Vec};
 
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -6,6 +6,7 @@ use x86_64::{
 };
 
 use crate::{
+    fs::{page_cache::CachedPage, vfs::fs_by_mount_id},
     log,
     memory::{
         frame_allocator::frame_allocator,
@@ -217,13 +218,14 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         let file_offset = r9;
         let fd = r8 as i64;
 
-        // Reject MAP_SHARED for Phase B (MAP_PRIVATE only).
-        if (flags & MAP_SHARED) != 0 {
-            log!("mmap: MAP_SHARED not yet supported (Phase C)");
+        let is_shared = (flags & MAP_SHARED) != 0;
+        let is_private = (flags & MAP_PRIVATE) != 0;
+
+        if !is_shared && !is_private {
             info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
-        if (flags & MAP_PRIVATE) == 0 {
+        if is_shared && is_private {
             info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
@@ -250,8 +252,14 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             }
         };
 
-        // Permission check: MAP_PRIVATE requires readable fd.
+        // Permission checks:
+        // MAP_PRIVATE and MAP_SHARED both require a readable fd.
+        // MAP_SHARED + PROT_WRITE additionally requires a writable fd.
         if !fs_file.mode.readable() {
+            info.lock().errno = Errno::EACCES;
+            return !0u64;
+        }
+        if is_shared && (prot & PROT_WRITE) != 0 && !fs_file.mode.writable() {
             info.lock().errno = Errno::EACCES;
             return !0u64;
         }
@@ -268,7 +276,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
 
         // Verify the filesystem has PageCacheOps (EFS has it; FAT32/memfs do not).
         {
-            let maybe_fs = crate::fs::vfs::fs_by_mount_id(inode.mount_id);
+            let maybe_fs = fs_by_mount_id(inode.mount_id);
             match maybe_fs {
                 Some(fs) if fs.as_page_cache_ops().is_some() => {}
                 _ => {
@@ -303,23 +311,222 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             vma_prot |= VmaProt::EXEC;
         }
 
+        let vma_flags = if is_shared {
+            VmaFlags::SHARED | VmaFlags::LAZY
+        } else {
+            VmaFlags::PRIVATE | VmaFlags::LAZY
+        };
+
         user_arc.read().vmas.lock().insert(Vma {
             start: map_addr,
             end: map_addr + length,
             prot: vma_prot,
-            flags: VmaFlags::PRIVATE | VmaFlags::LAZY,
+            flags: vma_flags,
             backing: VmaBacking::FileBacked {
                 inode,
                 file_offset,
-                shared: false,
+                shared: is_shared,
                 writable_mapping,
                 pages: alloc::vec![None; num_pages],
             },
         });
 
-        log!("mmap: file-backed MAP_PRIVATE at {map_addr:p} len={length:#x} off={file_offset:#x}");
+        if is_shared {
+            log!(
+                "mmap: file-backed MAP_SHARED at {map_addr:p} len={length:#x} off={file_offset:#x}"
+            );
+        } else {
+            log!(
+                "mmap: file-backed MAP_PRIVATE at {map_addr:p} len={length:#x} off={file_offset:#x}"
+            );
+        }
         map_addr.as_u64()
     }
+}
+
+/// Flush dirty shared pages for a FileBacked VMA before unmapping.
+/// Collects work under VmaSet lock; flushes after releasing it.
+/// Errors are logged but do not prevent unmap (unmap must not fail).
+fn flush_shared_vma_pages(
+    inode: &Arc<crate::fs::inode::VfsInode>,
+    pages: &[Option<Arc<CachedPage>>],
+) {
+    // Collect dirty pages while holding no extra locks.
+    let mut work: Vec<(u64, Arc<CachedPage>)> = Vec::new();
+    for (slot, maybe_page) in pages.iter().enumerate() {
+        if let Some(page) = maybe_page {
+            if page.is_dirty() {
+                work.push((slot as u64, Arc::clone(page)));
+            }
+        }
+    }
+    if work.is_empty() {
+        return;
+    }
+    let fs = match fs_by_mount_id(inode.mount_id) {
+        Some(f) => f,
+        None => {
+            log!(
+                "flush_shared_vma_pages: no fs for mount_id={}",
+                inode.mount_id
+            );
+            return;
+        }
+    };
+    let pc_ops = match fs.as_page_cache_ops() {
+        Some(ops) => ops,
+        None => {
+            log!("flush_shared_vma_pages: fs has no page_cache_ops");
+            return;
+        }
+    };
+    for (slot, page) in &work {
+        // slot is index within the VMA's pages vec; it is not the file page index
+        // (file page index is computed from file_offset at VMA creation, but we
+        // stored the Arc per slot so we re-derive via the inode's page map).
+        // We need the actual file page index for flush_page.  Since we have the
+        // Arc<CachedPage> but not the page index here, look it up via inode.pages.
+        let page_idx = {
+            let map = inode.pages.pages.lock();
+            map.iter()
+                .find(|(_, p)| Arc::ptr_eq(p, page))
+                .map(|(&k, _)| k)
+        };
+        if let Some(idx) = page_idx {
+            // Safety: no mutable aliasing; the page frame is exclusively
+            // referenced by the cache and mapped read-only in userspace PTEs.
+            let buf = unsafe { page.as_slice() };
+            match pc_ops.flush_page(inode.ino, idx, buf, 4096) {
+                Ok(()) => page.clear_dirty(),
+                Err(e) => log!(
+                    "flush_shared_vma_pages: flush_page ino={} idx={} err={:?}",
+                    inode.ino,
+                    idx,
+                    e
+                ),
+            }
+        } else {
+            let _ = slot;
+        }
+    }
+}
+
+/// sys_msync: flush MAP_SHARED dirty pages in [addr, addr+len) to storage.
+///
+/// Lock ordering: VmaSet lock is acquired to collect work (Arc<CachedPage> + fs info),
+/// then released before calling flush_page (which does AHCI I/O).
+pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
+    let sched = sched();
+    let info = sched.current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    // MS_ASYNC: no-op for v1; pages are already marked dirty and the writeback
+    // kthread will flush them on its next periodic pass.
+    if flags & MS_ASYNC != 0 && flags & MS_SYNC == 0 {
+        return 0;
+    }
+    // MS_INVALIDATE: no-op for v1 (no revalidation path yet).
+
+    if addr & 0xFFF != 0 || len & 0xFFF != 0 {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let thread = match sched.current_thread() {
+        Some(t) => t,
+        None => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+    let user_arc = match &thread.user {
+        Some(u) => u.clone(),
+        None => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    let range_start = VirtAddr::new(addr);
+    let range_end = VirtAddr::new(addr + len);
+
+    // Collect flush work while holding the VmaSet lock, then flush after releasing.
+    // Each work item: (inode Arc, file page index, CachedPage Arc).
+    let mut work: Vec<(Arc<crate::fs::inode::VfsInode>, u64, Arc<CachedPage>)> = Vec::new();
+
+    {
+        let user_read = user_arc.read();
+        let vmas = user_read.vmas.lock();
+
+        for vma in vmas.iter() {
+            // Skip VMAs that don't overlap [range_start, range_end)
+            if vma.end <= range_start || vma.start >= range_end {
+                continue;
+            }
+            let (inode, file_offset, pages) = match &vma.backing {
+                VmaBacking::FileBacked {
+                    inode,
+                    file_offset,
+                    shared: true,
+                    pages,
+                    ..
+                } => (inode, *file_offset, pages),
+                // Skip non-shared or non-file VMAs silently (Linux behavior).
+                _ => continue,
+            };
+
+            // Intersection of [range_start, range_end) and [vma.start, vma.end)
+            let effective_start = range_start.max(vma.start);
+            let effective_end = range_end.min(vma.end);
+
+            let first_slot = ((effective_start.as_u64() - vma.start.as_u64()) / 4096) as usize;
+            let last_slot = ((effective_end.as_u64() - vma.start.as_u64() + 4095) / 4096) as usize;
+            let last_slot = last_slot.min(pages.len());
+
+            for slot in first_slot..last_slot {
+                if let Some(page) = &pages[slot] {
+                    if page.is_dirty() {
+                        let page_idx = (file_offset + slot as u64 * 4096) / 4096;
+                        work.push((Arc::clone(inode), page_idx, Arc::clone(page)));
+                    }
+                }
+            }
+        }
+        // VmaSet lock dropped here.
+    }
+
+    // Flush collected pages outside the VmaSet lock (AHCI I/O may block).
+    for (inode, page_idx, page) in &work {
+        let fs = match fs_by_mount_id(inode.mount_id) {
+            Some(f) => f,
+            None => {
+                log!("msync: no fs for mount_id={}", inode.mount_id);
+                continue;
+            }
+        };
+        let pc_ops = match fs.as_page_cache_ops() {
+            Some(ops) => ops,
+            None => continue,
+        };
+        // Safety: no mutable aliasing; user PTEs may be writable but the cache
+        // frame is the sole physical backing and we're only reading it here.
+        let buf = unsafe { page.as_slice() };
+        match pc_ops.flush_page(inode.ino, *page_idx, buf, 4096) {
+            Ok(()) => page.clear_dirty(),
+            Err(e) => {
+                log!(
+                    "msync: flush_page ino={} idx={} err={:?}",
+                    inode.ino,
+                    page_idx,
+                    e
+                );
+                info.lock().errno = Errno::EIO;
+                return -1;
+            }
+        }
+    }
+
+    0
 }
 
 pub fn sys_munmap(addr: u64, length: u64) -> i32 {
@@ -412,7 +619,18 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                     crate::memory::tlb::tlb_shootdown(vma_start, vma_page_count);
                 }
             }
-            VmaBacking::FileBacked { pages, .. } => {
+            VmaBacking::FileBacked {
+                inode,
+                shared,
+                pages,
+                ..
+            } => {
+                // For MAP_SHARED: flush dirty pages to disk before unmapping.
+                // Flush errors are logged but do not prevent unmap (unmap must not fail).
+                if shared {
+                    flush_shared_vma_pages(&inode, &pages);
+                }
+
                 // Unmap PTEs and decrement frame refcounts for all present pages.
                 // Drop the per-page Arc<CachedPage> (done automatically by `pages` Vec drop)
                 // which keeps the cache frame alive for the duration of the mapping.

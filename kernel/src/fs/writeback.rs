@@ -1,15 +1,19 @@
-//! Background writeback kthread for the block page cache.
+//! Background writeback kthread for the block page cache and MAP_SHARED inodes.
 //!
 //! Spawned once during boot after AHCI drivers are initialized. Loops forever:
 //!   - Waits up to 5 seconds on `writeback_wq` for a kick or periodic tick.
 //!   - On wake (or timeout), increments `flush_requested` to treat a timer
 //!     expiry as an implicit request, then checks whether there is work to do.
 //!   - Calls `flush_dirty_once()` to write all dirty pages in one pass.
+//!   - Also calls `flush_dirty_inodes()` to flush dirty MAP_SHARED inode pages.
 //!   - Records the completed request number and wakes `sync_done_wq`.
 
 use core::{sync::atomic::Ordering, time::Duration};
 
-use crate::{fs::block_page_cache::BlockPageCache, log};
+use crate::{
+    fs::{block_page_cache::BlockPageCache, vfs::flush_dirty_inodes},
+    log,
+};
 
 pub fn writeback_thread() -> ! {
     loop {
@@ -46,6 +50,9 @@ pub fn writeback_thread() -> ! {
                 }
             };
 
+            // Second pass: flush dirty pages from MAP_SHARED file-backed mappings.
+            flush_dirty_inodes();
+
             cache.stats.writeback_runs.fetch_add(1, Ordering::Relaxed);
             cache
                 .stats
@@ -71,6 +78,9 @@ pub fn writeback_thread() -> ! {
                 0
             }
         };
+
+        // Second pass: flush dirty MAP_SHARED inode pages.
+        flush_dirty_inodes();
 
         cache.stats.writeback_runs.fetch_add(1, Ordering::Relaxed);
         cache

@@ -16,6 +16,11 @@ use crate::{fs::gpt::FilesystemType, memory::mapper::MemoryManager};
 
 static NEXT_MOUNT_ID: AtomicUsize = AtomicUsize::new(1);
 
+/// Global registry of inodes that have MAP_SHARED dirty pages.
+/// Entries are Weak so that inode drop removes them naturally (via tombstoning).
+/// The writeback kthread iterates this list to flush dirty shared-mapping pages.
+static DIRTY_INODES: Mutex<Vec<alloc::sync::Weak<VfsInode>>> = Mutex::new(Vec::new());
+
 pub struct MountEntry {
     pub fs: Arc<dyn FileSystem + Send + Sync>,
     pub mount_id: usize,
@@ -624,6 +629,50 @@ pub fn fs_by_mount_id(mount_id: usize) -> Option<Arc<dyn super::FileSystem + Sen
         }
     }
     None
+}
+
+/// Register an inode as having dirty MAP_SHARED pages, so the writeback
+/// kthread can flush it periodically. Duplicate registrations are deduplicated.
+pub fn register_dirty_inode(inode: &Arc<VfsInode>) {
+    let weak = Arc::downgrade(inode);
+    let mut list = DIRTY_INODES.lock();
+    // Deduplicate: if already present, skip.
+    let already = list
+        .iter()
+        .any(|w| w.upgrade().map(|a| Arc::ptr_eq(&a, inode)).unwrap_or(false));
+    if !already {
+        list.push(weak);
+    }
+}
+
+/// Flush dirty MAP_SHARED pages for all registered dirty inodes.
+/// Called by the writeback kthread on its periodic pass.
+/// Removes tombstoned (dropped) entries from the list as a side effect.
+pub fn flush_dirty_inodes() {
+    // Snapshot live inodes under the lock; flush outside it to avoid blocking
+    // the lock during AHCI I/O.
+    let live: Vec<Arc<VfsInode>> = {
+        let mut list = DIRTY_INODES.lock();
+        let live: Vec<Arc<VfsInode>> = list.iter().filter_map(|w| w.upgrade()).collect();
+        // Compact tombstoned entries.
+        list.retain(|w| w.upgrade().is_some());
+        live
+    };
+
+    for inode in live {
+        let fs = match fs_by_mount_id(inode.mount_id) {
+            Some(f) => f,
+            None => continue,
+        };
+        let pc_ops = match fs.as_page_cache_ops() {
+            Some(ops) => ops,
+            None => continue,
+        };
+        let ino = inode.ino;
+        let _ = inode
+            .pages
+            .flush_dirty(|page_idx, buf| pc_ops.flush_page(ino, page_idx, buf, 4096));
+    }
 }
 
 /// Fetch or fill a single page from an inode's page cache.

@@ -14,7 +14,7 @@ use crate::{
     fs::{
         inode::VfsInode,
         page_cache::CachedPage,
-        vfs::{fs_by_mount_id, get_or_fill_page},
+        vfs::{fs_by_mount_id, get_or_fill_page, register_dirty_inode},
     },
     memory::{
         frame_allocator::frame_allocator,
@@ -45,6 +45,8 @@ pub enum FaultSource {
         page_idx: u64,
         /// Arc slot index within the VMA's `pages` Vec, for storing the Arc.
         vma_page_slot: usize,
+        /// true for MAP_SHARED mappings; used to mark the page dirty on fault.
+        shared: bool,
     },
 }
 
@@ -108,6 +110,7 @@ pub fn lookup_fault_vma(vmas: &VmaSet, fault_addr: VirtAddr) -> Option<FaultInfo
                 inode: Arc::clone(inode),
                 page_idx,
                 vma_page_slot,
+                shared: *shared,
             }
         }
         _ => return None,
@@ -145,6 +148,7 @@ pub fn fault_in_page(
         inode,
         page_idx,
         vma_page_slot,
+        shared,
     } = &info.source
     {
         // Past-EOF check: if the faulting page starts at or beyond the file size,
@@ -182,6 +186,14 @@ pub fn fault_in_page(
 
         if success {
             x86_64::instructions::tlb::flush(page_addr);
+            // MAP_SHARED: mark the page dirty unconditionally on first fault.
+            // We can't observe individual stores, so we treat any mapped shared
+            // page as potentially written. Cost: one extra writeback per
+            // mapped-but-never-written page; acceptable until eviction is added.
+            if *shared {
+                inode.pages.mark_dirty(*page_idx);
+                register_dirty_inode(inode);
+            }
             FaultOutcome {
                 mapped: true,
                 cached_page: Some((*vma_page_slot, cached_page)),

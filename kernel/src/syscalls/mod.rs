@@ -37,7 +37,7 @@ use crate::{
             SelectFd, sys_chdir, sys_close, sys_getcwd, sys_getrandom, sys_list_dir, sys_open,
             sys_poll, sys_read, sys_write,
         },
-        memory::{sys_mmap, sys_munmap},
+        memory::{sys_mmap, sys_msync, sys_munmap},
     },
     thread::{
         UserThreadInfo,
@@ -470,11 +470,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             ctx.rax = sys_munmap(addr, length) as u64;
         }
         SYS_MSYNC => {
-            // Phase A stub: real implementation in Phase C.
-            let sched = sched();
-            let info = sched.current_thread_info();
-            info.lock().errno = Errno::EINVAL;
-            ctx.rax = !0u64;
+            let addr = ctx.rdi;
+            let len = ctx.rsi;
+            let flags = ctx.rdx as u32;
+            ctx.rax = sys_msync(addr, len, flags) as u64;
         }
         SYS_EXIT => {
             let code = ctx.rdi as i32;
