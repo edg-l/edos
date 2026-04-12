@@ -357,26 +357,17 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
 
     let outcome = fault_in_page(fault_addr, &fault_info, cr3_frame, phys_offset);
 
-    // For FileBacked faults, store the Arc<CachedPage> on the VMA to keep it alive.
-    if let Some((slot, cached_page)) = outcome.cached_page {
-        // Re-acquire to mutate the VMA's pages slot.
-        let thread2 = sched().current_thread();
-        if let Some(t) = thread2 {
-            if let Some(u) = &t.user {
-                let user_read = u.read();
-                let mut vmas = user_read.vmas.lock();
-                let page_addr = fault_addr.align_down(4096u64);
-                // Walk to find the VMA that covers the fault address and store the Arc.
-                if let Some(vma) = vmas.find_mut(fault_addr) {
-                    if let VmaBacking::FileBacked { pages, .. } = &mut vma.backing {
-                        let _ = page_addr; // suppress unused warning
-                        if slot < pages.len() {
-                            pages[slot] = Some(cached_page);
-                        }
-                    }
-                }
-            }
-        }
+    // For FileBacked faults, store the Arc<CachedPage> on the VMA to keep it
+    // alive. We released the vmas lock across fault_in_page so a concurrent
+    // split_at/remove_range may have altered the VMA layout. Recompute the
+    // slot from the CURRENT VMA's start+file_offset instead of trusting the
+    // pre-drop slot index.
+    //
+    // If the VMA is gone (remove_range), sys_munmap already unmapped the PTE
+    // and dec_refcount'd our bump, so we just drop the Arc here (unpin is
+    // the only leftover side effect).
+    if let Some((_original_slot, cached_page)) = outcome.cached_page {
+        let _ = store_cached_page_on_vma(fault_addr, cached_page);
     }
 
     if outcome.mapped {
@@ -386,6 +377,48 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
         }
     }
     outcome.mapped
+}
+
+/// Re-acquire the current thread's VmaSet lock, find the FileBacked VMA that
+/// contains `fault_addr`, recompute the per-VMA page slot from CURRENT bounds
+/// (not a stale slot index captured before the lock was dropped), and store
+/// the `Arc<CachedPage>` there. Returns true if stored.
+///
+/// If the VMA has been split/removed between fault-in and this call, the
+/// caller passes through: a concurrent sys_munmap also dec_refcount'd the
+/// fault-in bump when it tore down the PTE, so dropping the Arc here is
+/// sufficient cleanup.
+pub fn store_cached_page_on_vma(
+    fault_addr: VirtAddr,
+    cached_page: Arc<crate::fs::page_cache::CachedPage>,
+) -> bool {
+    let t = match sched().current_thread() {
+        Some(t) => t,
+        None => return false,
+    };
+    let u = match &t.user {
+        Some(u) => u,
+        None => return false,
+    };
+    let user_read = u.read();
+    let mut vmas = user_read.vmas.lock();
+    let vma = match vmas.find_mut(fault_addr) {
+        Some(v) => v,
+        None => return false,
+    };
+    let vma_start = vma.start.as_u64();
+    let page_addr = fault_addr.align_down(4096u64).as_u64();
+    if page_addr < vma_start {
+        return false;
+    }
+    let slot = ((page_addr - vma_start) / 4096) as usize;
+    if let VmaBacking::FileBacked { pages, .. } = &mut vma.backing {
+        if slot < pages.len() {
+            pages[slot] = Some(cached_page);
+            return true;
+        }
+    }
+    false
 }
 
 /// Map a single page directly into a page table via HHDM.

@@ -61,7 +61,7 @@ use crate::{
 mod fs;
 mod io;
 mod ioctl;
-mod memory;
+pub mod memory;
 mod net;
 mod shm;
 mod sync;

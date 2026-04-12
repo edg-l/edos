@@ -311,13 +311,22 @@ impl MemoryManager {
 
         let outcome = crate::memory::fault::fault_in_page(vaddr, &fault_info, pml4, phys_offset);
 
-        // For FileBacked faults, store the Arc<CachedPage> on the VMA.
-        if let Some((slot, cached_page)) = outcome.cached_page {
+        // For FileBacked faults, store the Arc<CachedPage> on the VMA,
+        // recomputing the slot from the CURRENT VMA bounds (the pre-drop
+        // slot index is stale if a concurrent split_at ran).
+        if let Some((_original_slot, cached_page)) = outcome.cached_page {
             let mut vmas = vmas_arc.lock();
             if let Some(vma) = vmas.find_mut(vaddr) {
-                if let crate::memory::vma::VmaBacking::FileBacked { pages, .. } = &mut vma.backing {
-                    if slot < pages.len() {
-                        pages[slot] = Some(cached_page);
+                let vma_start = vma.start.as_u64();
+                let page_addr = vaddr.align_down(4096u64).as_u64();
+                if page_addr >= vma_start {
+                    let slot = ((page_addr - vma_start) / 4096) as usize;
+                    if let crate::memory::vma::VmaBacking::FileBacked { pages, .. } =
+                        &mut vma.backing
+                    {
+                        if slot < pages.len() {
+                            pages[slot] = Some(cached_page);
+                        }
                     }
                 }
             }

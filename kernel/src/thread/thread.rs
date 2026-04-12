@@ -769,18 +769,34 @@ impl Thread {
                     VmaBacking::Stack => {
                         // Handled below by thread_stack_free
                     }
-                    VmaBacking::FileBacked { .. } => {
-                        // Phase B will implement proper cleanup with frame/pin refcount
-                        // decrement and optional dirty flush for MAP_SHARED.
-                        // For Phase A no file-backed VMAs are created, so this path is
-                        // not reached during normal operation.
+                    VmaBacking::FileBacked {
+                        inode,
+                        shared,
+                        pages,
+                        ..
+                    } => {
+                        // For MAP_SHARED: flush dirty pages to disk before exit so
+                        // writes survive the process's death (Linux msync-on-exit
+                        // semantics). Errors are logged, never prevent exit.
+                        if *shared {
+                            crate::syscalls::memory::flush_shared_vma_pages(inode, pages);
+                        }
+                        // Unmap each present PTE and decrement the frame refcount
+                        // that was bumped at fault-in time. Drop the pages Vec
+                        // AFTER the dec_refcount loop so the Arc<CachedPage>
+                        // refs are released last; the BTreeMap entry in
+                        // inode.pages keeps the cache frame alive.
                         use x86_64::structures::paging::{Mapper, Page, Size4KiB};
                         let page_count = (vma.size() + 0xFFF) / 4096;
+                        let mut fa = frame_allocator();
                         for i in 0..page_count {
                             let virt_addr = VirtAddr::new(vma.start.as_u64() + i * 4096);
                             let page: Page<Size4KiB> = Page::containing_address(virt_addr);
-                            if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
-                                flush.ignore();
+                            if let Ok(phys) = memory_manager.mapper.translate_page(page) {
+                                if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
+                                    flush.ignore();
+                                    fa.dec_refcount(phys);
+                                }
                             }
                         }
                     }

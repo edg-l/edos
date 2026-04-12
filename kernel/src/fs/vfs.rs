@@ -20,6 +20,7 @@ use x86_64::{
 use crate::{
     fs::gpt::FilesystemType,
     memory::{frame_allocator::frame_allocator, mapper::MemoryManager, vma::VmaBacking},
+    thread::irqlock::IrqSpinlock,
 };
 
 static NEXT_MOUNT_ID: AtomicUsize = AtomicUsize::new(1);
@@ -27,7 +28,13 @@ static NEXT_MOUNT_ID: AtomicUsize = AtomicUsize::new(1);
 /// Global registry of inodes that have MAP_SHARED dirty pages.
 /// Entries are Weak so that inode drop removes them naturally (via tombstoning).
 /// The writeback kthread iterates this list to flush dirty shared-mapping pages.
-static DIRTY_INODES: Mutex<Vec<alloc::sync::Weak<VfsInode>>> = Mutex::new(Vec::new());
+// IrqSpinlock (not plain Mutex) because `register_dirty_inode` is called from
+// `fault_in_page`, which in turn runs inside the page-fault handler context.
+// With a plain spin::Mutex, the writeback kthread could hold DIRTY_INODES
+// while getting preempted, then the same CPU takes a page fault that calls
+// `register_dirty_inode` -- deadlock. IrqSpinlock disables interrupts while
+// held, preventing the recursive acquire.
+static DIRTY_INODES: IrqSpinlock<Vec<alloc::sync::Weak<VfsInode>>> = IrqSpinlock::new(Vec::new());
 
 pub struct MountEntry {
     pub fs: Arc<dyn FileSystem + Send + Sync>,
