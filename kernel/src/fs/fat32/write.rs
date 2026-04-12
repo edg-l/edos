@@ -74,9 +74,7 @@ impl Fatfs {
 
             // Patch on-disk entry with new head
             let (base_lba, region_sectors) = self.dir_entry_region(dir_cluster);
-            let mut dirbuf = self
-                .device
-                .read_sectors(base_lba, region_sectors, Vec::new())?;
+            let mut dirbuf = self.read_disk_sectors(base_lba, region_sectors)?;
             if entry_off + 32 > dirbuf.len() {
                 return Err(Error::IoError);
             }
@@ -85,8 +83,7 @@ impl Fatfs {
             de.first_cluster_low = (head & 0xFFFF) as u16;
             let bytes: [u8; 32] = bytemuck::cast(de);
             dirbuf[entry_off..entry_off + 32].copy_from_slice(&bytes);
-            self.device
-                .write_sectors(base_lba, &dirbuf, region_sectors)?;
+            self.write_disk_sectors(base_lba, &dirbuf, region_sectors)?;
 
             // Update in-memory copy
             entry.first_cluster_high = ((head >> 16) & 0xFFFF) as u16;
@@ -149,7 +146,7 @@ impl Fatfs {
             let mut scratch = if fresh_current {
                 alloc::vec![0u8; bpc]
             } else {
-                let v = self.device.read_sectors(lba, spc_u16, Vec::new())?;
+                let v = self.read_disk_sectors(lba, spc_u16)?;
                 if v.len() != bpc {
                     return Err(Error::IoError);
                 }
@@ -160,7 +157,7 @@ impl Fatfs {
             let take = space.min(remaining);
             scratch[inner_off..inner_off + take].copy_from_slice(&buf[buf_off..buf_off + take]);
 
-            self.device.write_sectors(lba, &scratch, spc_u16)?;
+            self.write_disk_sectors(lba, &scratch, spc_u16)?;
 
             wrote += take;
             remaining -= take;
@@ -229,7 +226,7 @@ impl Fatfs {
         let search = |start: u32| -> Option<u32> {
             let mut current_cluster = start;
             let max_clusters = entries_per_sector as u64 * fat_sectors;
-            let mut sec = Vec::new();
+            let mut sec;
             while (current_cluster as u64) < max_clusters {
                 let (byte_index, entry_size) = match variant {
                     FatVariant::Fat32 => ((current_cluster as usize) * 4, 4usize),
@@ -239,10 +236,8 @@ impl Fatfs {
                 let sector_index = (byte_index / bytes_per_sector) as u64;
                 let within = byte_index % bytes_per_sector;
 
-                sec.clear();
                 sec = self
-                    .device
-                    .read_sectors(self.first_fat_lba() + sector_index, 1, sec)
+                    .read_disk_sectors(self.first_fat_lba() + sector_index, 1)
                     .ok()?;
 
                 if within + entry_size > sec.len() {
@@ -291,8 +286,7 @@ impl Fatfs {
                         }
                     }
 
-                    self.device
-                        .write_sectors(self.first_fat_lba() + sector_index, &sec.clone(), 1)
+                    self.write_disk_sectors(self.first_fat_lba() + sector_index, &sec.clone(), 1)
                         .ok()?;
 
                     return Some(current_cluster);
@@ -349,26 +343,20 @@ impl Fatfs {
                 let sector_index = (byte_index / bytes_per_sector) as u64;
                 let within = byte_index % bytes_per_sector;
 
-                let mut sec =
-                    self.device
-                        .read_sectors(self.first_fat_lba() + sector_index, 1, Vec::new())?;
+                let mut sec = self.read_disk_sectors(self.first_fat_lba() + sector_index, 1)?;
                 let v = value & FAT32_MASK;
                 sec[within..within + 4].copy_from_slice(&v.to_le_bytes());
-                self.device
-                    .write_sectors(self.first_fat_lba() + sector_index, &sec, 1)?;
+                self.write_disk_sectors(self.first_fat_lba() + sector_index, &sec, 1)?;
             }
             FatVariant::Fat16 => {
                 let byte_index = (cluster as usize) * 2;
                 let sector_index = (byte_index / bytes_per_sector) as u64;
                 let within = byte_index % bytes_per_sector;
 
-                let mut sec =
-                    self.device
-                        .read_sectors(self.first_fat_lba() + sector_index, 1, Vec::new())?;
+                let mut sec = self.read_disk_sectors(self.first_fat_lba() + sector_index, 1)?;
                 let v = (value & FAT16_MASK) as u16;
                 sec[within..within + 2].copy_from_slice(&v.to_le_bytes());
-                self.device
-                    .write_sectors(self.first_fat_lba() + sector_index, &sec, 1)?;
+                self.write_disk_sectors(self.first_fat_lba() + sector_index, &sec, 1)?;
             }
             FatVariant::Fat12 => {
                 // FAT12 uses 1.5 bytes per entry, requiring special handling
@@ -376,9 +364,7 @@ impl Fatfs {
                 let sector_index = byte_offset / bytes_per_sector as u64;
                 let within = (byte_offset % bytes_per_sector as u64) as usize;
 
-                let mut sec =
-                    self.device
-                        .read_sectors(self.first_fat_lba() + sector_index, 1, Vec::new())?;
+                let mut sec = self.read_disk_sectors(self.first_fat_lba() + sector_index, 1)?;
 
                 if (cluster & 1) == 0 {
                     // Even cluster: lower 12 bits
@@ -392,8 +378,7 @@ impl Fatfs {
                     sec[within..within + 2].copy_from_slice(&new_val.to_le_bytes());
                 }
 
-                self.device
-                    .write_sectors(self.first_fat_lba() + sector_index, &sec, 1)?;
+                self.write_disk_sectors(self.first_fat_lba() + sector_index, &sec, 1)?;
             }
         }
         Ok(())
@@ -403,7 +388,7 @@ impl Fatfs {
         let fs_info = self.fs_info.lock();
         if let Some(ref fi) = *fs_info {
             let data: Vec<u8> = bytes_of(fi).to_vec(); // 512 bytes
-            self.device.write_sectors(
+            self.write_disk_sectors(
                 self.partition.starting_lba + self.boot_info.fs_info as u64,
                 &data,
                 1,
@@ -420,7 +405,7 @@ impl Fatfs {
     ) -> Result<(), Error> {
         let (base_lba, sectors) = self.dir_entry_region(entry_cluster);
 
-        let mut buf = self.device.read_sectors(base_lba, sectors, Vec::new())?;
+        let mut buf = self.read_disk_sectors(base_lba, sectors)?;
         if entry_offset + 32 > buf.len() {
             return Err(Error::IoError);
         }
@@ -430,7 +415,7 @@ impl Fatfs {
         let bytes: [u8; 32] = bytemuck::cast(de);
         buf[entry_offset..entry_offset + 32].copy_from_slice(&bytes);
 
-        self.device.write_sectors(base_lba, &buf, sectors)?;
+        self.write_disk_sectors(base_lba, &buf, sectors)?;
         Ok(())
     }
 
@@ -566,11 +551,10 @@ impl Fatfs {
             .unwrap_or_default();
         let needed_slots = lfn_entries.len() + 1;
 
-        let mut buf = Vec::new();
+        let mut buf;
         loop {
             let base_lba = self.cluster_to_lba(dir_cluster);
-            buf.clear();
-            buf = self.device.read_sectors(base_lba, spc, buf)?;
+            buf = self.read_disk_sectors(base_lba, spc)?;
             if buf.len() < cluster_bytes {
                 return Err(Error::IoError);
             }
@@ -594,7 +578,7 @@ impl Fatfs {
                     }
                     let bytes: [u8; 32] = bytemuck::cast(*new_entry);
                     buf[pos..pos + 32].copy_from_slice(&bytes);
-                    self.device.write_sectors(base_lba, &buf, spc)?;
+                    self.write_disk_sectors(base_lba, &buf, spc)?;
                     return Ok((dir_cluster, pos));
                 }
 
@@ -615,8 +599,7 @@ impl Fatfs {
                     }
                     let bytes: [u8; 32] = bytemuck::cast(*new_entry);
                     new_buf[pos..pos + 32].copy_from_slice(&bytes);
-                    self.device
-                        .write_sectors(self.cluster_to_lba(newc), &new_buf, spc)?;
+                    self.write_disk_sectors(self.cluster_to_lba(newc), &new_buf, spc)?;
                     return Ok((newc, pos));
                 }
             }
@@ -625,12 +608,12 @@ impl Fatfs {
 
     fn mark_entry_deleted(&self, cluster: u32, entry_offset: usize) -> Result<(), Error> {
         let (base_lba, sectors) = self.dir_entry_region(cluster);
-        let mut buf = self.device.read_sectors(base_lba, sectors, Vec::new())?;
+        let mut buf = self.read_disk_sectors(base_lba, sectors)?;
         if entry_offset + 32 > buf.len() {
             return Err(Error::IoError);
         }
         buf[entry_offset] = 0xE5;
-        self.device.write_sectors(base_lba, &buf, sectors)?;
+        self.write_disk_sectors(base_lba, &buf, sectors)?;
         Ok(())
     }
 
@@ -651,7 +634,7 @@ impl Fatfs {
 
         loop {
             let base_lba = self.cluster_to_lba(cluster);
-            let buf = self.device.read_sectors(base_lba, spc, Vec::new())?;
+            let buf = self.read_disk_sectors(base_lba, spc)?;
             let mut off = 0usize;
 
             while off + 32 <= buf.len() {
@@ -766,9 +749,8 @@ impl Fatfs {
         let mut buf = Vec::new();
         while remaining > 0 {
             let take = core::cmp::min(remaining, chunk as u64) as u16;
-            buf.clear();
-            buf = self.device.read_sectors(src_lba, take, buf)?;
-            self.device.write_sectors(dst_lba, &buf, take)?;
+            buf = self.read_disk_sectors(src_lba, take)?;
+            self.write_disk_sectors(dst_lba, &buf, take)?;
 
             src_lba += take as u64;
             dst_lba += take as u64;

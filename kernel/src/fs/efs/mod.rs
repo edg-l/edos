@@ -1,6 +1,5 @@
 // EFS kernel driver.
 
-use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -59,9 +58,6 @@ impl ExtentList {
 
 // ---- Driver struct ------------------------------------------------------------
 
-/// Maximum number of cached inodes.
-const INODE_CACHE_MAX: usize = 64;
-
 /// Mutable filesystem metadata protected by a lock.
 struct EfsMutableState {
     superblock: EfsSuperblock,
@@ -76,21 +72,19 @@ pub struct EfsDriver {
     inodes_per_group: u32,
     /// Mutable FS metadata (superblock + block group descriptors).
     mutable: BlockingMutex<EfsMutableState>,
-    /// Inode cache: maps inode number -> cached inode.
-    inode_cache: BlockingMutex<BTreeMap<u64, EfsInode>>,
 }
 
 // ---- Constructor --------------------------------------------------------------
 
 impl EfsDriver {
     pub fn new(partition: Partition) -> Result<Self, Error> {
-        let device = BlockDevice::new(partition.device_id, 4096);
+        let device = BlockDevice::new(partition.device_id);
 
         // Block 0 = boot/reserved, block 1 = superblock.
-        // We don't know block_size yet so read 8 sectors (4 KiB) covering
-        // the superblock at the default 4 KiB block boundary.
+        // sb_lba is always partition.starting_lba + 8, which is a 4 KiB page boundary.
         let sb_lba = partition.starting_lba + SECTORS_PER_DEFAULT_BLOCK as u64;
-        let sb_bytes = device.read_sectors(sb_lba, SECTORS_PER_DEFAULT_BLOCK, vec![])?;
+        let sb_page = device.read_page(sb_lba / SECTORS_PER_DEFAULT_BLOCK as u64)?;
+        let sb_bytes = sb_page.as_slice();
 
         // SAFETY: EfsSuperblock is repr(C, packed), 256 bytes; the buffer is
         // at least 256 bytes.  We use read_unaligned to avoid UB on packed fields.
@@ -108,18 +102,24 @@ impl EfsDriver {
         let starting_lba = partition.starting_lba;
 
         // Block 2 = start of BGD table.
+        // bgd_lba = starting_lba + 16, which is a 4 KiB page boundary.
         let bgd_lba = starting_lba + 2 * (block_size / 512);
         let bgd_count = superblock.block_group_count as usize;
-        // How many sectors do we need for the BGD table?
+        // How many pages do we need for the BGD table?
         let bgd_bytes_needed = bgd_count * BGD_SIZE;
-        let bgd_sectors = ((bgd_bytes_needed + 511) / 512).max(sectors_per_block as usize) as u16;
-        let bgd_bytes = device.read_sectors(bgd_lba, bgd_sectors, vec![])?;
+        let bgd_pages = ((bgd_bytes_needed + 4095) / 4096).max(1);
+        let bgd_page_guards = device.read_pages(bgd_lba / sectors_per_block as u64, bgd_pages)?;
+        // Flatten pages into a contiguous slice for parsing.
+        let bgd_flat: Vec<u8> = bgd_page_guards
+            .iter()
+            .flat_map(|g| g.as_slice().iter().copied())
+            .collect();
 
         let mut bgd_table = Vec::with_capacity(bgd_count);
         for i in 0..bgd_count {
             let offset = i * BGD_SIZE;
             let bgd: EfsBlockGroupDesc = unsafe {
-                core::ptr::read_unaligned(bgd_bytes[offset..].as_ptr() as *const EfsBlockGroupDesc)
+                core::ptr::read_unaligned(bgd_flat[offset..].as_ptr() as *const EfsBlockGroupDesc)
             };
             bgd_table.push(bgd);
         }
@@ -135,7 +135,6 @@ impl EfsDriver {
                 superblock,
                 bgd_table,
             }),
-            inode_cache: BlockingMutex::new(BTreeMap::new()),
         })
     }
 }
@@ -183,10 +182,6 @@ impl EfsDriver {
 
     // Inode-table blocks hit the block page cache after first access.
     fn read_inode(&self, ino: u64) -> Result<EfsInode, Error> {
-        if let Some(cached) = self.inode_cache.lock().get(&ino) {
-            return Ok(*cached);
-        }
-
         let (group, idx) = self.inode_location(ino);
         let inode_table_block = {
             let m = self.mutable.lock();
@@ -204,15 +199,6 @@ impl EfsDriver {
         let inode: EfsInode = unsafe {
             core::ptr::read_unaligned(block_data[offset_in_block..].as_ptr() as *const EfsInode)
         };
-
-        // Insert into cache, evicting the oldest entry if full.
-        let mut cache = self.inode_cache.lock();
-        if cache.len() >= INODE_CACHE_MAX {
-            if let Some(&first_key) = cache.keys().next() {
-                cache.remove(&first_key);
-            }
-        }
-        cache.insert(ino, inode);
         Ok(inode)
     }
 
@@ -237,8 +223,6 @@ impl EfsDriver {
         };
         dst.copy_from_slice(src);
         self.write_block(inode_table_block + block_offset as u64, &block_data)?;
-        // Update cache with the new inode data.
-        self.inode_cache.lock().insert(ino, *inode);
         Ok(())
     }
 }

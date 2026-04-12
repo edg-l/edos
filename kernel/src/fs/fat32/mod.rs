@@ -2,6 +2,7 @@ use alloc::vec::Vec;
 use bytemuck::{Zeroable, cast_ref};
 
 use crate::{
+    drivers::ahci::AhciError,
     fs::{
         Error, File, FileSystem, FileTime,
         block_device::BlockDevice,
@@ -34,8 +35,19 @@ pub struct Fatfs {
 
 impl Fatfs {
     pub fn new(partition: Partition) -> Result<Self, Error> {
-        let device = BlockDevice::new(partition.device_id, 4096);
-        let boot_bytes = device.read_sectors(partition.starting_lba, 1, Vec::new())?;
+        let device = BlockDevice::new(partition.device_id);
+        // Read the boot sector through the page cache (single-sector read from page 0 of partition).
+        // Note: the Fatfs helpers are on self, so we call the cache directly here during init.
+        let boot_bytes = {
+            use crate::fs::block_page_cache::BlockPageCache;
+            const SECTORS_PER_PAGE: u64 = 8;
+            let page_idx = partition.starting_lba / SECTORS_PER_PAGE;
+            let off_in_page = ((partition.starting_lba % SECTORS_PER_PAGE) as usize) * 512;
+            let guard = BlockPageCache::global()
+                .read_page(partition.device_id, page_idx)
+                .map_err(|_| Error::MissingCriticalSectors)?;
+            guard.as_slice()[off_in_page..off_in_page + 512].to_vec()
+        };
 
         if boot_bytes.len() != 512 {
             return Err(Error::MissingCriticalSectors);
@@ -54,11 +66,17 @@ impl Fatfs {
                     return Err(Error::InvalidFs);
                 }
 
-                let fs_info_bytes = device.read_sectors(
-                    partition.starting_lba + boot_info.fs_info as u64,
-                    1,
-                    boot_bytes,
-                )?;
+                let fs_info_lba = partition.starting_lba + boot_info.fs_info as u64;
+                let fs_info_bytes = {
+                    use crate::fs::block_page_cache::BlockPageCache;
+                    const SECTORS_PER_PAGE: u64 = 8;
+                    let page_idx = fs_info_lba / SECTORS_PER_PAGE;
+                    let off_in_page = ((fs_info_lba % SECTORS_PER_PAGE) as usize) * 512;
+                    let guard = BlockPageCache::global()
+                        .read_page(partition.device_id, page_idx)
+                        .map_err(|_| Error::MissingCriticalSectors)?;
+                    guard.as_slice()[off_in_page..off_in_page + 512].to_vec()
+                };
 
                 let fs_info: FsInfo =
                     *cast_ref::<[u8; 512], _>(fs_info_bytes.as_slice().try_into().unwrap());
@@ -84,6 +102,63 @@ impl Fatfs {
             write_lock: BlockingMutex::new(()),
             fs_info: BlockingMutex::new(fs_info),
         })
+    }
+}
+
+// ---- Page-cache I/O helpers --------------------------------------------------
+//
+// FAT32 does not have a per-file inode page cache (unlike EFS).  All I/O —
+// both metadata (FAT table, directory entries) and file data (cluster reads
+// and writes) — routes through the block page cache here.  This means cluster
+// data is cached at the block level, which is intentional: the cache improves
+// repeated reads of the same cluster without any EFS-style per-inode overhead.
+impl Fatfs {
+    /// Read `sectors` starting at `lba`, returning the data as a Vec<u8>.
+    /// Routes through the block page cache (fills from disk on miss).
+    pub(super) fn read_disk_sectors(&self, lba: u64, sectors: u16) -> Result<Vec<u8>, Error> {
+        const SECTOR_SIZE: usize = 512;
+        const SECTORS_PER_PAGE: u64 = 8;
+        let total_bytes = sectors as usize * SECTOR_SIZE;
+        let mut buffer = alloc::vec![0u8; total_bytes];
+
+        let first_page = lba / SECTORS_PER_PAGE;
+        let last_lba = lba + sectors as u64 - 1;
+        let last_page = last_lba / SECTORS_PER_PAGE;
+
+        let mut buf_pos = 0usize;
+        for page_idx in first_page..=last_page {
+            let guard = self.device.read_page(page_idx).map_err(ahci_to_fs)?;
+            let page_start_lba = page_idx * SECTORS_PER_PAGE;
+            let sec_start = lba.max(page_start_lba) - page_start_lba;
+            let sec_end =
+                (lba + sectors as u64).min(page_start_lba + SECTORS_PER_PAGE) - page_start_lba;
+            let byte_start = sec_start as usize * SECTOR_SIZE;
+            let byte_end = sec_end as usize * SECTOR_SIZE;
+            let slice = &guard.as_slice()[byte_start..byte_end];
+            let len = slice.len();
+            buffer[buf_pos..buf_pos + len].copy_from_slice(slice);
+            buf_pos += len;
+        }
+        Ok(buffer)
+    }
+
+    /// Write `sectors` starting at `lba`. Routes through the block page cache.
+    pub(super) fn write_disk_sectors(
+        &self,
+        lba: u64,
+        data: &[u8],
+        sectors: u16,
+    ) -> Result<(), Error> {
+        self.device
+            .write_partial_sectors(lba, sectors, data)
+            .map_err(ahci_to_fs)
+    }
+}
+
+fn ahci_to_fs(e: AhciError) -> Error {
+    match e {
+        AhciError::IoError => Error::IoError,
+        _ => Error::IoError,
     }
 }
 
@@ -245,8 +320,7 @@ impl FileSystem for Fatfs {
         dirbuf[0..32].copy_from_slice(&dot_bytes);
         dirbuf[32..64].copy_from_slice(&dotdot_bytes);
 
-        self.device
-            .write_sectors(self.cluster_to_lba(newc), &dirbuf, spc)?;
+        self.write_disk_sectors(self.cluster_to_lba(newc), &dirbuf, spc)?;
 
         // Insert directory entry in parent
         let (short_name, needs_lfn) = self.generate_short_name(parent_cluster, &name)?;
@@ -289,13 +363,12 @@ impl FileSystem for Fatfs {
 
         // Mark the directory entry deleted (0xE5)
         let (base_lba, sectors) = self.dir_entry_region(dir_cluster);
-        let mut buf = Vec::new();
-        buf = self.device.read_sectors(base_lba, sectors, buf)?;
+        let mut buf = self.read_disk_sectors(base_lba, sectors)?;
         if entry_off + 32 > buf.len() {
             return Err(Error::IoError);
         }
         buf[entry_off] = 0xE5;
-        self.device.write_sectors(base_lba, &buf, sectors)?;
+        self.write_disk_sectors(base_lba, &buf, sectors)?;
 
         self.delete_long_name_sequence(
             parent_cluster,
@@ -326,16 +399,15 @@ impl FileSystem for Fatfs {
             return Err(Error::NotADir);
         }
 
-        let mut read_buffer = Vec::new();
-
+        let mut read_buffer;
+        // Silence: read_buffer is always assigned before use below.
         // Ensure the directory is empty (only "." and ".." allowed)
         let mut cur = entry.first_cluster();
         if cur >= 2 {
             let spc = self.boot_info.sectors_per_cluster as u16;
             loop {
                 let base_lba = self.cluster_to_lba(cur);
-                read_buffer.clear();
-                read_buffer = self.device.read_sectors(base_lba, spc, read_buffer)?;
+                read_buffer = self.read_disk_sectors(base_lba, spc)?;
                 let mut off = 0usize;
                 while off + 32 <= read_buffer.len() {
                     let first = read_buffer[off];
@@ -374,13 +446,12 @@ impl FileSystem for Fatfs {
         // Mark the parent directory entry deleted (0xE5)
         let (base_lba, sectors) = self.dir_entry_region(dir_cluster);
 
-        read_buffer.clear();
-        read_buffer = self.device.read_sectors(base_lba, sectors, read_buffer)?;
+        read_buffer = self.read_disk_sectors(base_lba, sectors)?;
         if entry_off + 32 > read_buffer.len() {
             return Err(Error::IoError);
         }
         read_buffer[entry_off] = 0xE5;
-        self.device.write_sectors(base_lba, &read_buffer, sectors)?;
+        self.write_disk_sectors(base_lba, &read_buffer, sectors)?;
 
         self.delete_long_name_sequence(
             parent_cluster,

@@ -61,11 +61,10 @@ impl Fatfs {
             let root_dir_lba = self.root_dir_lba();
             let root_dir_sectors = (self.boot_info.root_entry_count as u64 * 32).div_ceil(512);
 
-            let mut buf = Vec::new();
+            let mut buf;
             let mut lfn_stack: Vec<LongFilenameEntry> = Vec::new();
             for sector in 0..root_dir_sectors {
-                buf.clear();
-                buf = self.device.read_sectors(root_dir_lba + sector, 1, buf)?;
+                buf = self.read_disk_sectors(root_dir_lba + sector, 1)?;
                 let mut off = 0usize;
 
                 while off + 32 <= buf.len() {
@@ -138,12 +137,11 @@ impl Fatfs {
             let spc = self.boot_info.sectors_per_cluster as u16;
             let mut cur = dir_cluster;
 
-            let mut buf = Vec::new();
+            let mut buf;
             let mut lfn_stack: Vec<LongFilenameEntry> = Vec::new();
             loop {
                 let base_lba = self.cluster_to_lba(cur);
-                buf.clear();
-                buf = self.device.read_sectors(base_lba, spc, buf)?;
+                buf = self.read_disk_sectors(base_lba, spc)?;
                 let mut off = 0usize;
 
                 while off + 32 <= buf.len() {
@@ -220,15 +218,10 @@ impl Fatfs {
         let mut entries = Vec::new();
         let mut lfn_stack: Vec<LongFilenameEntry> = Vec::new();
 
-        let mut data = Vec::new();
+        let mut data;
         loop {
             let base_lba = self.cluster_to_lba(cluster);
-            data.clear();
-            data = self.device.read_sectors(
-                base_lba,
-                self.boot_info.sectors_per_cluster as u16,
-                data,
-            )?;
+            data = self.read_disk_sectors(base_lba, self.boot_info.sectors_per_cluster as u16)?;
 
             let mut offset = 0;
 
@@ -308,7 +301,7 @@ impl Fatfs {
                 let fat_sector = self.first_fat_lba() + (byte_off / 512);
                 let off_in_sector = (byte_off % 512) as usize;
 
-                let sector = self.device.read_sectors(fat_sector, 1, Vec::new())?;
+                let sector = self.read_disk_sectors(fat_sector, 1)?;
 
                 let raw = u32::from_le_bytes(
                     sector[off_in_sector..off_in_sector + 4].try_into().unwrap(),
@@ -330,7 +323,7 @@ impl Fatfs {
                 let fat_sector = self.first_fat_lba() + (byte_off / 512);
                 let off_in_sector = (byte_off % 512) as usize;
 
-                let sector = self.device.read_sectors(fat_sector, 1, Vec::new())?;
+                let sector = self.read_disk_sectors(fat_sector, 1)?;
 
                 let raw = u16::from_le_bytes(
                     sector[off_in_sector..off_in_sector + 2].try_into().unwrap(),
@@ -353,7 +346,7 @@ impl Fatfs {
                 let fat_sector = self.first_fat_lba() + (byte_off / 512);
                 let off_in_sector = (byte_off % 512) as usize;
 
-                let sector = self.device.read_sectors(fat_sector, 1, Vec::new())?;
+                let sector = self.read_disk_sectors(fat_sector, 1)?;
 
                 let val = if (cluster_number & 1) == 0 {
                     // Even cluster: use lower 12 bits of the 16-bit value
@@ -471,12 +464,11 @@ impl Fatfs {
                 }
 
                 let mut entries = Vec::new();
-                let mut buffer = Vec::new();
+                let mut buffer;
                 let mut lfn_stack: Vec<LongFilenameEntry> = Vec::new();
 
                 for sector in 0..root_dir_sectors {
-                    buffer.clear();
-                    buffer = self.device.read_sectors(root_dir_lba + sector, 1, buffer)?;
+                    buffer = self.read_disk_sectors(root_dir_lba + sector, 1)?;
 
                     let mut offset = 0;
                     while offset + 32 <= buffer.len() {

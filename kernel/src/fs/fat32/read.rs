@@ -35,9 +35,7 @@ impl Fatfs {
                 let batch_sectors = (batch_size as u16) * spc;
 
                 let base_lba = self.cluster_to_lba(current_cluster);
-                let batch_data = self
-                    .device
-                    .read_sectors(base_lba, batch_sectors, Vec::new())?;
+                let batch_data = self.read_disk_sectors(base_lba, batch_sectors)?;
 
                 // Only take the bytes we need from this batch
                 let bytes_to_take = (batch_size as usize) * cluster_bytes;
@@ -51,7 +49,7 @@ impl Fatfs {
         } else {
             // Read all clusters in one operation
             let base_lba = self.cluster_to_lba(start_cluster);
-            buffer = self.device.read_sectors(base_lba, total_sectors, buffer)?;
+            buffer = self.read_disk_sectors(base_lba, total_sectors)?;
             Ok(buffer)
         }
     }
