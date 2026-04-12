@@ -160,7 +160,16 @@ pub fn read(op: &VfsOp, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
 
     if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
         if let Some(pc_ops) = op.fs.as_page_cache_ops() {
-            return page_cache_read(inode, pc_ops, offset, count);
+            let file_size = op
+                .fs
+                .file_size_ino(inode.ino)
+                .unwrap_or_else(|_| op.fs.file_info(&op.relative).map(|f| f.size).unwrap_or(0))
+                as usize;
+            if offset >= file_size {
+                return Ok(Vec::new());
+            }
+            let clamped = count.min(file_size - offset);
+            return page_cache_read(inode, pc_ops, offset, clamped);
         }
         match op.fs.read_bytes_ino(inode.ino, offset, count) {
             Err(Error::Unsupported) => {}
