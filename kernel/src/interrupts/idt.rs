@@ -341,6 +341,21 @@ extern "x86-interrupt" fn page_fault_handler(
                 Some(f) => println!("PF-debug: pte.flags={:?} pte.phys={:#x}", f, pte_phys),
                 None => println!("PF-debug: addr={a:#x} no present PTE"),
             }
+            // Dump intermediate level flags; effective access is AND across all.
+            {
+                let p4e = &p4[i4];
+                println!("PF-walk: pml4[{i4}] flags={:?}", p4e.flags());
+                if p4e.flags().contains(PageTableFlags::PRESENT) {
+                    let p3 = pt(PhysFrame::containing_address(p4e.addr()));
+                    let p3e = &p3[i3];
+                    println!("PF-walk: pml3[{i3}] flags={:?}", p3e.flags());
+                    if p3e.flags().contains(PageTableFlags::PRESENT) {
+                        let p2 = pt(PhysFrame::containing_address(p3e.addr()));
+                        let p2e = &p2[i2];
+                        println!("PF-walk: pml2[{i2}] flags={:?}", p2e.flags());
+                    }
+                }
+            }
         } else {
             // Non-protection fault that fell through the demand-fault handler.
             println!(
