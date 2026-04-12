@@ -159,6 +159,12 @@ fn test3() {
 
 // -----------------------------------------------------------------------
 // Test 4: MAP_SHARED two-mapper visibility within one process
+//
+// TODO: also add a test that forks, MAP_PRIVATE's a file, has the child
+// write, and verifies the parent's view is unchanged (MAP_PRIVATE COW
+// across fork). The COW infra is shared with anonymous fork which has
+// broader coverage, so this is low priority but would close the loop
+// for the FileBacked-specific COW path.
 // -----------------------------------------------------------------------
 fn test4() {
     let path = "/var/mmaptest_t4.dat";

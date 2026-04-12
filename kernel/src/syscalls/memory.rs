@@ -364,6 +364,12 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
 /// Flush dirty shared pages for a FileBacked VMA before unmapping.
 /// Collects work under VmaSet lock; flushes after releasing it.
 /// Errors are logged but do not prevent unmap (unmap must not fail).
+///
+/// TODO: the caller passes only the `pages` slice, so we cannot derive the
+/// real file `page_idx` directly; we reverse-scan `inode.pages` with pointer
+/// equality, which is O(cached_pages * vma_pages). Fine for v1 but ugly. Fix
+/// by taking `file_offset` (VMA field) so `page_idx = file_offset/4096 +
+/// slot`. Deferred.
 pub fn flush_shared_vma_pages(
     inode: &Arc<crate::fs::inode::VfsInode>,
     pages: &[Option<Arc<CachedPage>>],

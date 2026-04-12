@@ -153,6 +153,9 @@ pub fn fault_in_page(
     {
         // Past-EOF check: if the faulting page starts at or beyond the file size,
         // return false (SIGBUS-equivalent — caller kills the thread).
+        //
+        // TODO: we call `fs_by_mount_id` here and again inside
+        // `get_or_fill_page`. Merge to a single lookup (pass fs down).
         if let Some(fs) = fs_by_mount_id(inode.mount_id) {
             if let Ok(file_size) = fs.file_size_ino(inode.ino) {
                 if page_idx * 4096 >= file_size {
