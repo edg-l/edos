@@ -1,5 +1,6 @@
 pub mod io;
 pub mod keymap;
+pub mod mem;
 pub mod net;
 pub mod process;
 pub mod shm;

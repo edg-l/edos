@@ -136,6 +136,13 @@ name = "mkdir"
 version = "0.1.0"
 
 [[package]]
+name = "mmaptest"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "mount"
 version = "0.1.0"
 
