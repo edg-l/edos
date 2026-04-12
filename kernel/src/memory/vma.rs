@@ -161,6 +161,17 @@ impl VmaSet {
             .filter(|vma| vma.contains(addr))
     }
 
+    /// Find the VMA containing the given address (mutable).
+    pub fn find_mut(&mut self, addr: VirtAddr) -> Option<&mut Vma> {
+        let key = self
+            .vmas
+            .range(..=addr)
+            .next_back()
+            .map(|(k, _)| *k)
+            .filter(|&k| self.vmas[&k].contains(addr))?;
+        self.vmas.get_mut(&key)
+    }
+
     pub fn insert(&mut self, vma: Vma) {
         self.vmas.insert(vma.start, vma);
     }
@@ -175,6 +186,85 @@ impl VmaSet {
 
     pub fn len(&self) -> usize {
         self.vmas.len()
+    }
+
+    /// Split the VMA containing `addr` at a page-aligned boundary so that `addr`
+    /// becomes the start of the second half.  Does nothing if `addr` is already
+    /// the start of a VMA or if no VMA contains `addr`.
+    ///
+    /// For `FileBacked` VMAs the per-page Arc vec is split at the corresponding
+    /// index and the second half's `file_offset` is adjusted accordingly.
+    pub fn split_at(&mut self, addr: VirtAddr) {
+        let aligned = addr.align_down(4096u64);
+
+        // Find the VMA that contains `aligned` strictly inside (not at its start).
+        let start_key = match self
+            .vmas
+            .range(..aligned)
+            .next_back()
+            .map(|(k, _)| *k)
+            .filter(|&k| {
+                let vma = &self.vmas[&k];
+                vma.contains(aligned) && vma.start != aligned
+            }) {
+            Some(k) => k,
+            None => return,
+        };
+
+        let mut original = self.vmas.remove(&start_key).unwrap();
+        let split_byte_offset = aligned.as_u64() - original.start.as_u64();
+        let split_page_idx = (split_byte_offset / 4096) as usize;
+
+        // Build the tail VMA.
+        let tail_backing = match &mut original.backing {
+            VmaBacking::FileBacked {
+                inode,
+                file_offset,
+                shared,
+                writable_mapping,
+                pages,
+            } => {
+                let tail_pages = pages.split_off(split_page_idx);
+                let tail_file_offset = *file_offset + split_byte_offset;
+                VmaBacking::FileBacked {
+                    inode: Arc::clone(inode),
+                    file_offset: tail_file_offset,
+                    shared: *shared,
+                    writable_mapping: *writable_mapping,
+                    pages: tail_pages,
+                }
+            }
+            other => other.clone(),
+        };
+
+        let tail = Vma {
+            start: aligned,
+            end: original.end,
+            prot: original.prot,
+            flags: original.flags,
+            backing: tail_backing,
+        };
+        original.end = aligned;
+
+        self.vmas.insert(original.start, original);
+        self.vmas.insert(tail.start, tail);
+    }
+
+    /// Remove all VMAs fully contained in `[start, end)`, splitting VMAs that
+    /// straddle the boundaries as needed.  Returns the removed VMAs.
+    pub fn remove_range(&mut self, start: VirtAddr, end: VirtAddr) -> Vec<Vma> {
+        self.split_at(start);
+        self.split_at(end);
+
+        let keys: Vec<VirtAddr> = self.vmas.range(start..end).map(|(k, _)| *k).collect();
+
+        let mut removed = Vec::new();
+        for k in keys {
+            if let Some(vma) = self.vmas.remove(&k) {
+                removed.push(vma);
+            }
+        }
+        removed
     }
 
     /// Find free virtual address for a mapping of the given length,

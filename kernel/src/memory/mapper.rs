@@ -286,7 +286,21 @@ impl MemoryManager {
         };
         // VmaSet lock dropped before allocating frames
 
-        if crate::memory::fault::fault_in_page(vaddr, &fault_info, pml4, phys_offset) {
+        let outcome = crate::memory::fault::fault_in_page(vaddr, &fault_info, pml4, phys_offset);
+
+        // For FileBacked faults, store the Arc<CachedPage> on the VMA.
+        if let Some((slot, cached_page)) = outcome.cached_page {
+            let mut vmas = vmas_arc.lock();
+            if let Some(vma) = vmas.find_mut(vaddr) {
+                if let crate::memory::vma::VmaBacking::FileBacked { pages, .. } = &mut vma.backing {
+                    if slot < pages.len() {
+                        pages[slot] = Some(cached_page);
+                    }
+                }
+            }
+        }
+
+        if outcome.mapped {
             // Retry translation after mapping
             if let TranslateResult::Mapped { frame, offset, .. } = self.mapper.translate(vaddr) {
                 let phys = frame.start_address() + offset;

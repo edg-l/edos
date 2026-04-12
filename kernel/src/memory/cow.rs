@@ -156,12 +156,15 @@ pub unsafe fn clone_user_page_tables_cow(parent_cr3: PhysFrame, parent_vmas: &Vm
     child_pml4_frame
 }
 
-/// Returns true if `virt` falls within a SHM or Physical mapping.
+/// Returns true if `virt` falls within a SHM, Physical, or MAP_SHARED FileBacked mapping.
+/// These PTEs are copied verbatim into the child (no COW stripping) during fork.
 fn is_special_mapping(virt: VirtAddr, vmas: &VmaSet) -> bool {
     if let Some(vma) = vmas.find(virt) {
         return matches!(
             vma.backing,
-            VmaBacking::SharedMemory { .. } | VmaBacking::Physical { .. }
+            VmaBacking::SharedMemory { .. }
+                | VmaBacking::Physical { .. }
+                | VmaBacking::FileBacked { shared: true, .. }
         );
     }
     false

@@ -8,13 +8,14 @@ use x86_64::{
 use crate::{
     log,
     memory::{
+        frame_allocator::frame_allocator,
         mapper::memory_mapper,
         pat,
         vma::{Vma, VmaBacking, VmaFlags, VmaProt},
     },
     println,
     syscalls::Errno,
-    thread::scheduler::sched,
+    thread::{pipe::FileDescriptor, scheduler::sched},
 };
 
 // Protection flags (match Linux)
@@ -212,10 +213,112 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         log!("mmap: lazy mapped at {map_addr:p}");
         map_addr.as_u64()
     } else {
-        // File-backed mapping: not yet implemented (Phase B).
-        log!("mmap: file-backed mapping not yet implemented (fd={r8} off={r9:#x})");
-        info.lock().errno = Errno::EINVAL;
-        !0u64
+        // File-backed mapping.
+        let file_offset = r9;
+        let fd = r8 as i64;
+
+        // Reject MAP_SHARED for Phase B (MAP_PRIVATE only).
+        if (flags & MAP_SHARED) != 0 {
+            log!("mmap: MAP_SHARED not yet supported (Phase C)");
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+        if (flags & MAP_PRIVATE) == 0 {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+
+        // Alignment checks.
+        if file_offset & 0xFFF != 0 {
+            log!("mmap: file_offset must be page-aligned");
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+        if length & 0xFFF != 0 || addr != 0 && addr & 0xFFF != 0 {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+
+        // Look up the FsFile from the fd table.
+        let fd_table = info.lock().fd_table.clone();
+        let fs_file = match fd_table.lock().get_fd(fd as u64).cloned() {
+            Some(FileDescriptor::FsFile(f)) => f,
+            _ => {
+                log!("mmap: invalid fd {fd}");
+                info.lock().errno = Errno::EBADF;
+                return !0u64;
+            }
+        };
+
+        // Permission check: MAP_PRIVATE requires readable fd.
+        if !fs_file.mode.readable() {
+            info.lock().errno = Errno::EACCES;
+            return !0u64;
+        }
+
+        // Get the inode and verify the filesystem supports the page cache.
+        let inode = match &fs_file.inode {
+            Some(i) => i.clone(),
+            None => {
+                log!("mmap: file has no inode (virtual fs?)");
+                info.lock().errno = Errno::EINVAL;
+                return !0u64;
+            }
+        };
+
+        // Verify the filesystem has PageCacheOps (EFS has it; FAT32/memfs do not).
+        {
+            let maybe_fs = crate::fs::vfs::fs_by_mount_id(inode.mount_id);
+            match maybe_fs {
+                Some(fs) if fs.as_page_cache_ops().is_some() => {}
+                _ => {
+                    log!("mmap: filesystem does not support page-cached mmap");
+                    info.lock().errno = Errno::EINVAL;
+                    return !0u64;
+                }
+            }
+        }
+
+        let num_pages = (length / 4096) as usize;
+
+        let map_addr = if addr == 0 {
+            let user_read = user_arc.read();
+            let next_mmap_addr = info.lock().next_mmap_addr.clone();
+            let vmas = user_read.vmas.lock();
+            vmas.find_free_address(&next_mmap_addr, length)
+        } else {
+            VirtAddr::new(addr)
+        };
+
+        let writable_mapping = (prot & PROT_WRITE) != 0;
+
+        let mut vma_prot = VmaProt::empty();
+        if prot & PROT_READ != 0 {
+            vma_prot |= VmaProt::READ;
+        }
+        if prot & PROT_WRITE != 0 {
+            vma_prot |= VmaProt::WRITE;
+        }
+        if prot & PROT_EXEC != 0 {
+            vma_prot |= VmaProt::EXEC;
+        }
+
+        user_arc.read().vmas.lock().insert(Vma {
+            start: map_addr,
+            end: map_addr + length,
+            prot: vma_prot,
+            flags: VmaFlags::PRIVATE | VmaFlags::LAZY,
+            backing: VmaBacking::FileBacked {
+                inode,
+                file_offset,
+                shared: false,
+                writable_mapping,
+                pages: alloc::vec![None; num_pages],
+            },
+        });
+
+        log!("mmap: file-backed MAP_PRIVATE at {map_addr:p} len={length:#x} off={file_offset:#x}");
+        map_addr.as_u64()
     }
 }
 
@@ -247,87 +350,121 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
         }
     };
 
-    // Remove the VMA - short lock
-    let vma = user_arc.read().vmas.lock().remove(&map_addr);
-    if let Some(vma) = vma {
-        if vma.size() == length {
-            match &vma.backing {
-                VmaBacking::Anonymous => {
-                    let memory_manager = info.lock().memory_manager.clone();
-                    let page_count = (length + 0xFFF) / 4096;
-                    let mut frames = alloc::vec::Vec::new();
-                    {
-                        let mut mm = memory_manager.lock();
-                        for i in 0..page_count {
-                            let virt = VirtAddr::new(map_addr.as_u64() + i * 4096);
-                            let page: Page<Size4KiB> = Page::containing_address(virt);
-                            // Only unmap pages that are actually present (lazy pages may not be)
-                            if let Ok(phys) = mm.mapper.translate_page(page) {
-                                if let Ok((_, flush)) = mm.mapper.unmap(page) {
-                                    flush.ignore(); // Will do TLB shootdown below
-                                    frames.push(phys);
-                                }
+    let unmap_end = VirtAddr::new(addr + length);
+
+    // Remove all VMAs fully covered by [map_addr, unmap_end), splitting straddlers.
+    let removed_vmas = user_arc
+        .read()
+        .vmas
+        .lock()
+        .remove_range(map_addr, unmap_end);
+
+    if removed_vmas.is_empty() {
+        log!("Unmap fail, no VMAs in range");
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let memory_manager = info.lock().memory_manager.clone();
+    let mut any_error = false;
+
+    for vma in removed_vmas {
+        let vma_start = vma.start;
+        let vma_length = vma.size();
+        let vma_page_count = (vma_length + 0xFFF) / 4096;
+
+        match vma.backing {
+            VmaBacking::Anonymous => {
+                let mut frames = alloc::vec::Vec::new();
+                {
+                    let mut mm = memory_manager.lock();
+                    for i in 0..vma_page_count {
+                        let virt = VirtAddr::new(vma_start.as_u64() + i * 4096);
+                        let page: Page<Size4KiB> = Page::containing_address(virt);
+                        if let Ok(phys) = mm.mapper.translate_page(page) {
+                            if let Ok((_, flush)) = mm.mapper.unmap(page) {
+                                flush.ignore();
+                                frames.push(phys);
                             }
                         }
                     }
-                    if !frames.is_empty() && crate::memory::tlb::shootdown_needed() {
-                        crate::memory::tlb::tlb_shootdown(map_addr, page_count);
-                    }
-                    let mut fa = crate::memory::frame_allocator::frame_allocator();
-                    for frame in frames {
-                        unsafe { fa.deallocate_frame(frame) };
-                    }
-                    log!("Unmap success");
-                    0
                 }
-                VmaBacking::Physical { .. } => {
-                    let page_count = (length + 0xFFF) / 4096;
-                    {
-                        let mut mapper = memory_mapper();
-                        for i in 0..page_count {
-                            let virt = VirtAddr::new(addr + i * 4096);
-                            let page: Page<Size4KiB> = Page::containing_address(virt);
-                            if let Ok((_, flush)) = mapper.mapper.unmap(page) {
-                                flush.flush();
-                            }
-                        }
-                    }
-                    if crate::memory::tlb::shootdown_needed() {
-                        crate::memory::tlb::tlb_shootdown(map_addr, page_count);
-                    }
-                    log!("Unmap physical success");
-                    0
+                if !frames.is_empty() && crate::memory::tlb::shootdown_needed() {
+                    crate::memory::tlb::tlb_shootdown(vma_start, vma_page_count);
                 }
-                VmaBacking::SharedMemory { .. } => {
-                    // Shared memory should be unmapped via sys_shm_unmap
-                    user_arc.read().vmas.lock().insert(vma);
-                    info.lock().errno = Errno::EINVAL;
-                    -1
-                }
-                VmaBacking::ElfSegment { .. } | VmaBacking::Tls | VmaBacking::Stack => {
-                    // These are kernel-managed; put back and return error
-                    user_arc.read().vmas.lock().insert(vma);
-                    info.lock().errno = Errno::EINVAL;
-                    -1
-                }
-                VmaBacking::FileBacked { .. } => {
-                    // Phase B will implement proper unmap with frame/pin cleanup.
-                    // For Phase A no file-backed VMAs are created, so this is unreachable.
-                    user_arc.read().vmas.lock().insert(vma);
-                    info.lock().errno = Errno::EINVAL;
-                    -1
+                let mut fa = frame_allocator();
+                for frame in frames {
+                    unsafe { fa.deallocate_frame(frame) };
                 }
             }
-        } else {
-            log!("Unmap fail, partial");
-            // Re-insert since we can't handle partial unmapping
-            user_arc.read().vmas.lock().insert(vma);
-            info.lock().errno = Errno::EINVAL;
-            -1
+            VmaBacking::Physical { .. } => {
+                {
+                    let mut mapper = memory_mapper();
+                    for i in 0..vma_page_count {
+                        let virt = VirtAddr::new(vma_start.as_u64() + i * 4096);
+                        let page: Page<Size4KiB> = Page::containing_address(virt);
+                        if let Ok((_, flush)) = mapper.mapper.unmap(page) {
+                            flush.flush();
+                        }
+                    }
+                }
+                if crate::memory::tlb::shootdown_needed() {
+                    crate::memory::tlb::tlb_shootdown(vma_start, vma_page_count);
+                }
+            }
+            VmaBacking::FileBacked { pages, .. } => {
+                // Unmap PTEs and decrement frame refcounts for all present pages.
+                // Drop the per-page Arc<CachedPage> (done automatically by `pages` Vec drop)
+                // which keeps the cache frame alive for the duration of the mapping.
+                let mut frames = alloc::vec::Vec::new();
+                {
+                    let mut mm = memory_manager.lock();
+                    for i in 0..vma_page_count {
+                        let virt = VirtAddr::new(vma_start.as_u64() + i * 4096);
+                        let page: Page<Size4KiB> = Page::containing_address(virt);
+                        if let Ok(phys) = mm.mapper.translate_page(page) {
+                            if let Ok((_, flush)) = mm.mapper.unmap(page) {
+                                flush.ignore();
+                                frames.push(phys);
+                            }
+                        }
+                    }
+                }
+                if !frames.is_empty() && crate::memory::tlb::shootdown_needed() {
+                    crate::memory::tlb::tlb_shootdown(vma_start, vma_page_count);
+                }
+                {
+                    let mut fa = frame_allocator();
+                    for frame in frames {
+                        // Decrement the refcount that was bumped at fault-in time.
+                        // When rc reaches 0 the frame is still alive via the
+                        // CachedPage Arc held in `pages`; the Arc drop above
+                        // (via `pages` Vec drop) will then be the last reference.
+                        fa.dec_refcount(frame);
+                    }
+                }
+                // `pages` Vec is dropped here, releasing Arc<CachedPage> refs.
+                drop(pages);
+            }
+            VmaBacking::SharedMemory { .. } => {
+                // Re-insert and return error; SHM has its own unmap syscall.
+                user_arc.read().vmas.lock().insert(vma);
+                any_error = true;
+            }
+            VmaBacking::ElfSegment { .. } | VmaBacking::Tls | VmaBacking::Stack => {
+                // Kernel-managed; re-insert and return error.
+                user_arc.read().vmas.lock().insert(vma);
+                any_error = true;
+            }
         }
-    } else {
-        log!("Unmap fail, einval");
-        info.lock().errno = Errno::EINVAL;
-        -1
     }
+
+    if any_error {
+        info.lock().errno = Errno::EINVAL;
+        log!("Unmap partial error (kernel-managed VMAs in range)");
+        return -1;
+    }
+
+    log!("Unmap success");
+    0
 }

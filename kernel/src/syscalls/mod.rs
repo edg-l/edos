@@ -1769,17 +1769,47 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     let parent_tls = parent_user_read.tls.clone();
     let parent_fs_base = parent_thread.tls_base.load(Ordering::Acquire);
 
-    // Deep-clone the VmaSet: each VMA is cloned, SHM entries get inc_ref
+    // Deep-clone the VmaSet: each VMA is cloned, SHM entries get inc_ref.
+    // FileBacked VMAs get a fresh empty pages vec — the child re-faults lazily.
     let child_vma_set = {
         let parent_vmas = parent_user_read.vmas.lock();
         let mut cloned = VmaSet::new();
         for vma in parent_vmas.iter() {
-            if let VmaBacking::SharedMemory { shm_id } = &vma.backing {
-                if let Some(shm) = SharedMemory::get(*shm_id) {
-                    let _ = shm.inc_ref();
+            match &vma.backing {
+                VmaBacking::SharedMemory { shm_id } => {
+                    if let Some(shm) = SharedMemory::get(*shm_id) {
+                        let _ = shm.inc_ref();
+                    }
+                    cloned.insert(vma.clone());
+                }
+                VmaBacking::FileBacked {
+                    inode,
+                    file_offset,
+                    shared,
+                    writable_mapping,
+                    pages,
+                } => {
+                    // Child gets a fresh pages vec (no shared Arc<CachedPage> refs).
+                    // Child will re-fault and fill its own page slots lazily.
+                    let num_pages = pages.len();
+                    cloned.insert(Vma {
+                        start: vma.start,
+                        end: vma.end,
+                        prot: vma.prot,
+                        flags: vma.flags,
+                        backing: VmaBacking::FileBacked {
+                            inode: Arc::clone(inode),
+                            file_offset: *file_offset,
+                            shared: *shared,
+                            writable_mapping: *writable_mapping,
+                            pages: alloc::vec![None; num_pages],
+                        },
+                    });
+                }
+                _ => {
+                    cloned.insert(vma.clone());
                 }
             }
-            cloned.insert(vma.clone());
         }
         cloned
     };
