@@ -168,20 +168,17 @@ pub fn load_elf(
         return Err(ElfLoadError::MissingSegments);
     }
 
-    // Minimal parse just to read table offsets/sizes from the header.
-    let ehdr_elf: ElfBytes<'_, LittleEndian> = ElfBytes::minimal_parse(&ehdr_bytes)?;
-    let ehdr = ehdr_elf.ehdr;
+    // ElfBytes::minimal_parse validates that the shdr/phdr tables fit within the
+    // slice it is given, so we can't call it on the 64-byte ehdr buffer when
+    // e_shoff points near the end of the file. Hand-parse the table offsets and
+    // sizes from the fixed Elf64_Ehdr layout and issue a single bounded read that
+    // covers [0, sh_end) before handing the buffer to the elf crate.
+    let e_shoff = u64::from_le_bytes(ehdr_bytes[0x28..0x30].try_into().unwrap());
+    let e_shentsize = u16::from_le_bytes(ehdr_bytes[0x3A..0x3C].try_into().unwrap());
+    let e_shnum = u16::from_le_bytes(ehdr_bytes[0x3C..0x3E].try_into().unwrap());
 
-    if ehdr.e_machine != elf::abi::EM_X86_64 {
-        return Err(ElfLoadError::UnsupportedArchitecture);
-    }
-    if ehdr.e_entry == 0 {
-        return Err(ElfLoadError::NoEntryPoint);
-    }
-
-    // Compute the end of the section header table.
-    let sh_end = (ehdr.e_shoff as usize)
-        .saturating_add((ehdr.e_shentsize as usize).saturating_mul(ehdr.e_shnum as usize));
+    let sh_end =
+        (e_shoff as usize).saturating_add((e_shentsize as usize).saturating_mul(e_shnum as usize));
 
     if sh_end > HEADER_CAP {
         return Err(ElfLoadError::MissingSegments);
@@ -192,6 +189,13 @@ pub fn load_elf(
     let elf_file: ElfBytes<'_, LittleEndian> = ElfBytes::minimal_parse(&header_buf)?;
 
     let header = elf_file.ehdr;
+
+    if header.e_machine != elf::abi::EM_X86_64 {
+        return Err(ElfLoadError::UnsupportedArchitecture);
+    }
+    if header.e_entry == 0 {
+        return Err(ElfLoadError::NoEntryPoint);
+    }
 
     let load_base = match header.e_type {
         elf::abi::ET_EXEC => VirtAddr::new(0),
