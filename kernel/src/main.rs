@@ -139,6 +139,7 @@ fn main() -> ! {
     }
     //test_new();
     logs::init();
+    crate::fs::block_page_cache::BlockPageCache::init();
     drivers::init_drivers();
     fs::init();
     window::init();

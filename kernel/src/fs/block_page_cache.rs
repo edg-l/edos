@@ -276,14 +276,21 @@ impl BlockPageCache {
         }
     }
 
-    /// Access the global instance. Lazy-initialized on first use.
+    /// Initialize the global cache. Call once during boot.
+    pub fn init() {
+        BLOCK_PAGE_CACHE.call_once(BlockPageCache::new);
+        CACHE_INITIALIZED.store(true, Ordering::Release);
+    }
+
+    /// Access the global instance. Lazy-initialized on first use if init()
+    /// has not been called.
     pub fn global() -> &'static BlockPageCache {
         let c = BLOCK_PAGE_CACHE.call_once(BlockPageCache::new);
         CACHE_INITIALIZED.store(true, Ordering::Release);
         c
     }
 
-    /// Returns true if the cache has been touched at least once.
+    /// Returns true if the cache has been initialized.
     pub fn initialized() -> bool {
         CACHE_INITIALIZED.load(Ordering::Acquire)
     }
