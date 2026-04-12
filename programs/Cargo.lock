@@ -192,6 +192,10 @@ name = "stat"
 version = "0.1.0"
 
 [[package]]
+name = "sync"
+version = "0.1.0"
+
+[[package]]
 name = "tail"
 version = "0.1.0"
 
