@@ -74,15 +74,36 @@
   PageCacheOps trait on FileSystem (fill_page, fill_pages_bulk,
   flush_page, update_size). Bulk fill path does one multi-block AHCI
   read then distributes into per-page entries (Linux readahead style).
-  Direct AHCI I/O bypassing BlockDevice sector cache for file data.
-  Write-through (flush after dirty). Truncate/remove invalidate pages.
-  FAT32 not yet wired up. Metadata (inode tables, bitmaps, dir blocks)
-  still uses BlockDevice sector cache -- see Storage Stack Roadmap.
+  Direct AHCI I/O bypassing BlockDevice (INVARIANT, preserved). Stays
+  write-through for now; file-data write-back can come later.
+- **Block-device page cache (storage roadmap step 1)** - 4 KiB-page
+  cache keyed by (device_id, block), 8 LRU shards x 256 = 2048-page
+  ceiling. Replaces the old 512 B sector LRU on BlockDevice. EFS
+  read_block/write_block, inode/BGD/bitmap reads, and FAT32 metadata
+  all go through it. Per-page write_lock serializes RMW. /proc/block_cache
+  exposes hits/misses/evictions. inode_cache removed from EfsDriver.
+- **Write-back metadata cache (storage roadmap step 2)** - write_page /
+  write_partial_page mark dirty + return; background block_writeback
+  kthread flushes every 5s or on kick. flush_requested / flush_completed
+  AtomicU64 counters form a race-free sync barrier. flush_device calls
+  AHCI FLUSH CACHE after writeback (fsync reaches platter). sys_sync
+  (162) added; /bin/sync tool. system-mount wall: 1379ms -> 972ms.
+  CRASH SAFETY: write-back without journal means crash mid-mkdir can
+  corrupt the FS. Journal (step 3) fixes.
 - **Kernel lifetime logging** - spawn: / exit: log lines with load time
   (do_spawn duration), wall time (thread creation -> exit), cpu time
   (scheduler accounting), and demand_faults count. Revealed ~140x
   cold/warm page-cache speedup on binary loads and mkdir being the
   bottleneck in system-mount.
+- **Kernel debug_asserts** - is_canonical() pointer checks on
+  intrusive_list push_back/push_front/unlink. pin_count==0 on
+  CachedBlockPage::drop. Frame-alignment checks in the block cache.
+  spawn_thread state check. Zero release cost; catches pointer
+  corruption / leaked guards early.
+- **pick_sched lapic_id fix** - SCHEDULERS is keyed by lapic_id, not
+  sequential index. Previous code iterated 0..num_cpus treating i as
+  lapic_id; works on QEMU, broken on real hardware with sparse lapic
+  IDs. Now iterates values directly.
 - **Boot hang fix** - Root cause was switch_to_kernel_page() calling
   tlb_flush_all_including_global() unconditionally (even when CR3
   didn't change), creating a TLB storm during parallel boot that
@@ -139,39 +160,16 @@ The 512KB heap warmup workaround was removed. 20/20 boot passes
 
 ## Storage Stack Roadmap
 
-Observed boot wall time is dominated by synchronous metadata writes.
-system-mount kthread: wall=1379ms, cpu=326ms (~1s of I/O stall).
-Three create_dir calls for /dev, /proc, /tmp cost ~720ms because every
-EFS mkdir fires ~5 synchronous write-through AHCI commands (alloc inode,
-alloc block, write new dir data, write new inode, update parent).
+Starting point: system-mount kthread wall=1379ms, cpu=326ms (~1s of
+I/O stall). Three create_dir calls for /dev, /proc, /tmp cost ~720ms
+because every EFS mkdir fires ~5 synchronous write-through AHCI
+commands.
 
-Proper production architecture, in order:
+Steps 1 and 2 are done (see Done section). Current system-mount
+wall: ~970ms. FS is NOT crash-safe: a crash during metadata updates
+(e.g. mid-mkdir) can leave dangling inodes or orphaned dir entries.
 
-### 1. Extend page cache to metadata (DONE, step 1)
-
-Per-inode page cache for EFS file data already exists (bulk-fill +
-per-page caching, write-through). Metadata (inode tables, block/inode
-bitmaps, BGD, superblock, directory data blocks) still goes through
-`BlockDevice`'s 512B sector cache which is read-through / write-through.
-
-Add a block-device-level page cache keyed by (device_id, block) holding
-4KB frames. All metadata reads/writes go through it. Writes dirty the
-page; a writeback thread flushes (step 2). Unifies the cache: one LRU,
-one dirty-tracking mechanism, one eviction policy, page-aligned frames
-that guarantee AHCI zero-copy. Delete `BlockDevice`'s sector cache
-(~125 lines in block_device.rs) once metadata callers migrate.
-
-EFS `read_block`/`write_block` become cache lookups. Superblock, BGD,
-inode tables, block/inode bitmaps all land in the same cache.
-
-### 2. Writeback thread
-
-Background kthread that periodically scans for dirty pages and flushes
-them via AHCI (NCQ-batched). Also triggered by memory pressure and
-`fsync`/`sync` syscalls. Classic Linux bdflush/pdflush model. Already
-have FUA support from per-file fsync work — journal commits will use it.
-
-### 3. Journal (WAL) for EFS
+### 3. Journal (WAL) for EFS (next)
 
 Write-back metadata without a journal corrupts on crash. Add a
 fixed-size on-disk log ring: metadata ops write descriptors + data to
@@ -278,10 +276,10 @@ foreground process group.
 
 ## Fun-per-effort ranking
 
-metadata page cache > writeback thread > journal > more tools >
-file-backed mmap > dynamic linker > async I/O > fsck > IPv6 > virtio-net
+journal > more tools > file-backed mmap > dynamic linker >
+async I/O > fsck > IPv6 > virtio-net
 
-Note: metadata page cache -> writeback -> journal -> fsck is the
-storage-stack progression (see Storage Stack Roadmap). page cache ->
+Note: journal -> fsck is the remaining storage-stack progression
+(metadata cache + writeback already shipped). page cache ->
 file-backed mmap -> dynamic linker is the memory/loader progression.
 They're independent and can interleave.
