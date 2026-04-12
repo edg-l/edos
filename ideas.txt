@@ -69,6 +69,20 @@
   MemoryManager owns VmaSet (like Linux mm_struct) so copy_to_user
   can demand-fault during thread construction. Shared fault_in_page
   used by both IST handler and HHDM translate path.
+- **Per-inode page cache (EFS file data)** - Linux-style address_space
+  per VfsInode: BTreeMap<page_idx, Arc<CachedPage>> + BlockingMutex.
+  PageCacheOps trait on FileSystem (fill_page, fill_pages_bulk,
+  flush_page, update_size). Bulk fill path does one multi-block AHCI
+  read then distributes into per-page entries (Linux readahead style).
+  Direct AHCI I/O bypassing BlockDevice sector cache for file data.
+  Write-through (flush after dirty). Truncate/remove invalidate pages.
+  FAT32 not yet wired up. Metadata (inode tables, bitmaps, dir blocks)
+  still uses BlockDevice sector cache -- see Storage Stack Roadmap.
+- **Kernel lifetime logging** - spawn: / exit: log lines with load time
+  (do_spawn duration), wall time (thread creation -> exit), cpu time
+  (scheduler accounting), and demand_faults count. Revealed ~140x
+  cold/warm page-cache speedup on binary loads and mkdir being the
+  bottleneck in system-mount.
 - **Boot hang fix** - Root cause was switch_to_kernel_page() calling
   tlb_flush_all_including_global() unconditionally (even when CR3
   didn't change), creating a TLB storm during parallel boot that
@@ -123,47 +137,60 @@ TLB shootdown IPIs also implemented for safe page unmapping on SMP
 The 512KB heap warmup workaround was removed. 20/20 boot passes
 (was ~1 in 5 failure rate).
 
-## Page Cache (important next phase for FS)
+## Storage Stack Roadmap
 
-Linux-style page cache: all disk I/O goes through page-aligned physical
-frames keyed by (inode, page_index). This is the foundation that makes
-everything else work properly.
+Observed boot wall time is dominated by synchronous metadata writes.
+system-mount kthread: wall=1379ms, cpu=326ms (~1s of I/O stall).
+Three create_dir calls for /dev, /proc, /tmp cost ~720ms because every
+EFS mkdir fires ~5 synchronous write-through AHCI commands (alloc inode,
+alloc block, write new dir data, write new inode, update parent).
 
-**Current problem**: FS drivers allocate heap `Vec<u8>` for every read/write.
-These are not page-aligned, so the AHCI zero-copy DMA path falls back to
-pool-copy when the heap returns non-aligned pointers. The BlockDevice LRU
-sector cache (512B granularity) is the wrong abstraction -- it caches at
-sector level, copies data in/out on every hit, and doesn't integrate with
-the memory system.
+Proper production architecture, in order:
 
-**What a page cache provides**:
-- All I/O buffers are physical frames from the frame allocator (always
-  page-aligned, guaranteeing zero-copy DMA 100% of the time)
-- Cache at 4KB page granularity instead of 512B sectors
-- Dirty page tracking with writeback (batch flushing instead of
-  synchronous writes on every FS mutation)
-- Shared pages between readers (multiple opens of the same file share
-  the same cached pages, no redundant I/O)
-- Foundation for mmap/MAP_SHARED (map page cache frames directly into
-  userspace address space)
-- Foundation for O_DIRECT (bypass cache, DMA to user pages)
-- Eliminates per-read/write Vec allocations in EFS and FAT32
+### 1. Extend page cache to metadata (next)
 
-**Design sketch**:
-- Global cache: `BTreeMap<(MountId, InodeId, u64), Arc<PageFrame>>` or
-  similar, with LRU eviction under memory pressure
-- `read_page(inode, page_idx)` -> returns cached frame or allocates one
-  and issues a single-page DMA read into it
-- `write_page(inode, page_idx, data)` -> writes into cached frame,
-  marks dirty, periodic writeback flushes dirty pages via DMA
-- FS drivers call page cache instead of BlockDevice directly
-- BlockDevice sector cache removed (replaced by page cache)
-- PRDT entries built from page cache frame physical addresses (always
-  aligned, always zero-copy)
+Per-inode page cache for EFS file data already exists (bulk-fill +
+per-page caching, write-through). Metadata (inode tables, block/inode
+bitmaps, BGD, superblock, directory data blocks) still goes through
+`BlockDevice`'s 512B sector cache which is read-through / write-through.
 
-**Scope**: Large (comparable to the network stack). Touches VFS, EFS,
-FAT32, BlockDevice, and the memory subsystem. Should be done before
-journaling since the journal needs controlled writeback ordering.
+Add a block-device-level page cache keyed by (device_id, block) holding
+4KB frames. All metadata reads/writes go through it. Writes dirty the
+page; a writeback thread flushes (step 2). Unifies the cache: one LRU,
+one dirty-tracking mechanism, one eviction policy, page-aligned frames
+that guarantee AHCI zero-copy. Delete `BlockDevice`'s sector cache
+(~125 lines in block_device.rs) once metadata callers migrate.
+
+EFS `read_block`/`write_block` become cache lookups. Superblock, BGD,
+inode tables, block/inode bitmaps all land in the same cache.
+
+### 2. Writeback thread
+
+Background kthread that periodically scans for dirty pages and flushes
+them via AHCI (NCQ-batched). Also triggered by memory pressure and
+`fsync`/`sync` syscalls. Classic Linux bdflush/pdflush model. Already
+have FUA support from per-file fsync work — journal commits will use it.
+
+### 3. Journal (WAL) for EFS
+
+Write-back metadata without a journal corrupts on crash. Add a
+fixed-size on-disk log ring: metadata ops write descriptors + data to
+the journal, commit record with FUA, then apply in place lazily. On
+mount, replay committed transactions. Ext3/ext4 jbd2 model.
+
+Scope: ~2k LoC. Adds a new EFS feature bit. Disk format: reserve a
+contiguous extent at mkfs time for the journal.
+
+### 4. fsck tool
+
+Host tool (like efs-mkfs): scan inodes, verify bitmaps, reclaim leaked
+blocks, replay journal if mounted dirty. Needed once the journal exists
+to make recovery actually trustworthy.
+
+**Why this order**: metadata page cache is the foundation; writeback
+needs it; journal needs write-back ordering control; fsck needs the
+journal to know what "dirty" means. Each step lands a visible win
+(faster mkdir/mount, then durable crash semantics, then recovery).
 
 ## Ideas
 
@@ -216,8 +243,10 @@ foreground process group.
 
 ## Fun-per-effort ranking
 
-more tools > page cache > file-backed mmap > dynamic linker > async I/O > IPv6 > virtio-net
+metadata page cache > writeback thread > journal > more tools >
+file-backed mmap > dynamic linker > async I/O > fsck > IPv6 > virtio-net
 
-Note: page cache -> file-backed mmap -> dynamic linker is the natural
-progression. Each builds on the previous. Demand paging (done) is a
-prerequisite for page cache eviction under memory pressure.
+Note: metadata page cache -> writeback -> journal -> fsck is the
+storage-stack progression (see Storage Stack Roadmap). page cache ->
+file-backed mmap -> dynamic linker is the memory/loader progression.
+They're independent and can interleave.
