@@ -691,6 +691,14 @@ impl Scheduler {
                 "spawn_thread: thread {} already linked",
                 thread.id.0
             );
+            let cur_state = thread.state();
+            debug_assert_eq!(
+                cur_state,
+                State::Ready,
+                "spawn_thread: thread {} must be Ready, is {:?}",
+                thread.id.0,
+                cur_state
+            );
             self.thread_count.fetch_add(1, Ordering::AcqRel);
             thread.state.store(State::Ready as u8, Ordering::Release);
             thread.cpu.store(self.cpu, Ordering::Release);

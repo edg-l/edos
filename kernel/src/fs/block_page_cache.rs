@@ -110,6 +110,12 @@ impl CachedBlockPage {
 
 impl Drop for CachedBlockPage {
     fn drop(&mut self) {
+        debug_assert_eq!(
+            self.pin_count(),
+            0,
+            "CachedBlockPage dropped with pin_count={} (guard leaked?)",
+            self.pin_count()
+        );
         unsafe { frame_allocator().deallocate_frame(self.frame) };
     }
 }
@@ -371,6 +377,11 @@ impl BlockPageCache {
         let frame = frame_allocator()
             .allocate_frame()
             .ok_or(AhciError::IoError)?;
+        debug_assert_eq!(
+            frame.start_address().as_u64() & (PAGE_SIZE as u64 - 1),
+            0,
+            "frame_allocator returned unaligned frame"
+        );
         if let Err(e) = read_frame(device_id, page_block_idx, frame) {
             unsafe { frame_allocator().deallocate_frame(frame) };
             return Err(e);
@@ -428,7 +439,14 @@ impl BlockPageCache {
         let mut frames: Vec<Option<PhysFrame>> = vec![None; miss_indices.len()];
         for (fi, &mi) in miss_indices.iter().enumerate() {
             match frame_allocator().allocate_frame() {
-                Some(f) => frames[fi] = Some(f),
+                Some(f) => {
+                    debug_assert_eq!(
+                        f.start_address().as_u64() & (PAGE_SIZE as u64 - 1),
+                        0,
+                        "frame_allocator returned unaligned frame"
+                    );
+                    frames[fi] = Some(f);
+                }
                 None => {
                     // Free already-allocated frames and bail.
                     for prev in frames[..fi].iter().flatten() {

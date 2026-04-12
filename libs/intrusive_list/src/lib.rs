@@ -24,6 +24,15 @@ use core::marker::PhantomData;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+/// x86-64 canonical-address check. Upper 17 bits must be all-0 or all-1
+/// for a 48-bit virtual address. Null (0) is canonical. Used to detect
+/// pointer corruption early in debug builds — zero cost in release.
+#[inline]
+fn is_canonical(addr: u64) -> bool {
+    let high = addr >> 47;
+    high == 0 || high == 0x1_FFFF
+}
+
 // ---------------------------------------------------------------------------
 // Link node
 // ---------------------------------------------------------------------------
@@ -161,6 +170,21 @@ impl<T: Linked> IntrusiveList<T> {
     /// - The node must not be moved or dropped while it remains linked.
     pub unsafe fn push_back(&mut self, ptr: *mut T) {
         debug_assert!(!ptr.is_null());
+        debug_assert!(
+            is_canonical(ptr as u64),
+            "push_back: non-canonical ptr {:p}",
+            ptr
+        );
+        debug_assert!(
+            is_canonical(self.head as u64),
+            "push_back: non-canonical head {:p}",
+            self.head
+        );
+        debug_assert!(
+            is_canonical(self.tail as u64),
+            "push_back: non-canonical tail {:p}",
+            self.tail
+        );
         let link = unsafe { T::links(ptr) };
         debug_assert!(
             !unsafe { (*link).linked.load(Ordering::Relaxed) },
@@ -189,6 +213,21 @@ impl<T: Linked> IntrusiveList<T> {
     /// Same requirements as [`push_back`](Self::push_back).
     pub unsafe fn push_front(&mut self, ptr: *mut T) {
         debug_assert!(!ptr.is_null());
+        debug_assert!(
+            is_canonical(ptr as u64),
+            "push_front: non-canonical ptr {:p}",
+            ptr
+        );
+        debug_assert!(
+            is_canonical(self.head as u64),
+            "push_front: non-canonical head {:p}",
+            self.head
+        );
+        debug_assert!(
+            is_canonical(self.tail as u64),
+            "push_front: non-canonical tail {:p}",
+            self.tail
+        );
         let link = unsafe { T::links(ptr) };
         debug_assert!(
             !unsafe { (*link).linked.load(Ordering::Relaxed) },
@@ -256,9 +295,25 @@ impl<T: Linked> IntrusiveList<T> {
     ///
     /// `link` must be a valid, linked node in this list.
     unsafe fn unlink(&mut self, link: *mut Link) {
+        debug_assert!(
+            is_canonical(link as u64),
+            "unlink: non-canonical link {:p}",
+            link
+        );
         unsafe {
             let prev = (*link).prev;
             let next = (*link).next;
+
+            debug_assert!(
+                is_canonical(prev as u64),
+                "unlink: non-canonical prev {:p}",
+                prev
+            );
+            debug_assert!(
+                is_canonical(next as u64),
+                "unlink: non-canonical next {:p}",
+                next
+            );
 
             if prev.is_null() {
                 self.head = next;
