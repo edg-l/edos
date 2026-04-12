@@ -145,6 +145,10 @@ fn main() -> ! {
         "block_writeback",
         fs::writeback::writeback_thread as *const () as u64,
     );
+    queue_spawn_kthread_named(
+        "journal_committer",
+        fs::journal::committer::committer_thread as *const () as u64,
+    );
     fs::init();
     window::init();
 

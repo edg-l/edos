@@ -1,6 +1,7 @@
 // EFS kernel driver.
 
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -13,7 +14,9 @@ use efs_common::{
 };
 
 use super::block_device::BlockDevice;
+use super::block_page_cache::BlockPageCache;
 use super::gpt::Partition;
+use super::journal::{Journal, tx::TxHandle};
 use super::page_cache::PageCacheOps;
 use super::path::Path;
 use super::{Error, File, FileAttrs, FileKind, FileSystem, FileTime};
@@ -66,26 +69,14 @@ struct EfsMutableState {
     bgd_table: Vec<EfsBlockGroupDesc>,
 }
 
-/// Immutable journal layout parsed at mount time.
-pub struct JournalLayout {
-    /// Absolute block number (within the EFS partition) of the journal's first block.
-    pub first_block: u64,
-    /// Total number of blocks in the journal region.
-    pub block_count: u32,
-    /// Oldest live transaction sequence number at mount time.
-    pub head_seq: u64,
-    /// Tail sequence number at mount time (oldest unreclaimed transaction).
-    pub tail_seq: u64,
-}
-
 pub struct EfsDriver {
     device: BlockDevice,
     partition: Partition,
     /// Cached values derived from the superblock (immutable after mount).
     block_size_log2: u32,
     inodes_per_group: u32,
-    /// Journal layout parsed from the journal superblock at mount.
-    pub journal_layout: JournalLayout,
+    /// Live journal for this filesystem.
+    journal: Arc<Journal>,
     /// Mutable FS metadata (superblock + block group descriptors).
     mutable: BlockingMutex<EfsMutableState>,
 }
@@ -194,21 +185,28 @@ impl EfsDriver {
             return Err(Error::InvalidFs);
         }
 
-        let journal_layout = JournalLayout {
-            first_block: j_first_block,
-            block_count: jsb_block_count,
-            head_seq: jsb_head_seq,
-            tail_seq: jsb_tail_seq,
-        };
-
         let block_size_log2 = superblock.block_size_log2;
         let inodes_per_group = superblock.inodes_per_group;
+
+        // j_first_block is already a partition-relative EFS block number.
+        let journal = Journal::new(
+            partition.device_id,
+            j_first_block,
+            jsb_block_count,
+            jsb_head_seq,
+            jsb_tail_seq,
+        );
+
+        // Register the journal with the block page cache so writeback can
+        // gate flushes on commit state.
+        BlockPageCache::global().register_device(partition.device_id, journal.clone());
+
         Ok(Self {
             device,
             partition,
             block_size_log2,
             inodes_per_group,
-            journal_layout,
+            journal,
             mutable: BlockingMutex::new(EfsMutableState {
                 superblock,
                 bgd_table,
@@ -241,13 +239,18 @@ impl EfsDriver {
         Ok(guard.as_slice().to_vec())
     }
 
-    fn write_block(&self, block: u64, data: &[u8]) -> Result<(), Error> {
+    fn write_block(&self, block: u64, data: &[u8], tx: &mut TxHandle<'_>) -> Result<(), Error> {
         let lba = self.block_to_lba(block);
         let page_idx = lba / 8;
         let mut buf = [0u8; 4096];
         let n = data.len().min(4096);
         buf[..n].copy_from_slice(&data[..n]);
         self.device.write_page(page_idx, &buf)?;
+        // Enroll the freshly written page in the transaction.
+        let guard = BlockPageCache::global()
+            .read_page(self.device.device_id, page_idx)
+            .map_err(|_| Error::IoError)?;
+        tx.enroll_block(self.device.device_id, page_idx, guard.page_arc());
         Ok(())
     }
 
@@ -280,7 +283,7 @@ impl EfsDriver {
         Ok(inode)
     }
 
-    fn write_inode(&self, ino: u64, inode: &EfsInode) -> Result<(), Error> {
+    fn write_inode(&self, ino: u64, inode: &EfsInode, tx: &mut TxHandle<'_>) -> Result<(), Error> {
         let (group, idx) = self.inode_location(ino);
         let inode_table_block = {
             let m = self.mutable.lock();
@@ -300,7 +303,7 @@ impl EfsDriver {
             core::slice::from_raw_parts(inode as *const EfsInode as *const u8, INODE_SIZE)
         };
         dst.copy_from_slice(src);
-        self.write_block(inode_table_block + block_offset as u64, &block_data)?;
+        self.write_block(inode_table_block + block_offset as u64, &block_data, tx)?;
         Ok(())
     }
 }
@@ -554,7 +557,13 @@ impl EfsDriver {
 impl EfsDriver {
     /// Write `data` to an inode starting at `byte_offset`.
     /// Grows the file if necessary.  Returns the new file size.
-    fn write_file_data(&self, ino: u64, byte_offset: usize, data: &[u8]) -> Result<u64, Error> {
+    fn write_file_data(
+        &self,
+        ino: u64,
+        byte_offset: usize,
+        data: &[u8],
+        tx: &mut TxHandle<'_>,
+    ) -> Result<u64, Error> {
         if data.is_empty() {
             return Ok(self.read_inode(ino)?.size);
         }
@@ -566,20 +575,20 @@ impl EfsDriver {
         if inode.flags & INODE_FLAG_INLINE_DATA != 0 {
             // Can we still fit inline?
             if end_offset <= INODE_DATA_AREA_SIZE {
-                return self.write_inline(ino, &inode, byte_offset, data, new_size);
+                return self.write_inline(ino, &inode, byte_offset, data, new_size, tx);
             }
             // Must convert to extent mode before writing.
-            self.convert_inline_to_extents(ino, &inode)?;
+            self.convert_inline_to_extents(ino, &inode, tx)?;
         }
 
-        self.write_via_extents(ino, byte_offset, data)?;
+        self.write_via_extents(ino, byte_offset, data, tx)?;
         let mut updated = self.read_inode(ino)?;
         if new_size > updated.size {
             updated.size = new_size;
         }
         updated.mtime_sec = current_unix_time();
         updated.checksum = checksum_inode(&updated);
-        self.write_inode(ino, &updated)?;
+        self.write_inode(ino, &updated, tx)?;
         Ok(updated.size)
     }
 
@@ -590,25 +599,31 @@ impl EfsDriver {
         offset: usize,
         data: &[u8],
         new_size: u64,
+        tx: &mut TxHandle<'_>,
     ) -> Result<u64, Error> {
         let mut updated = *inode;
         updated.data_area[offset..offset + data.len()].copy_from_slice(data);
         updated.size = new_size;
         updated.mtime_sec = current_unix_time();
         updated.checksum = checksum_inode(&updated);
-        self.write_inode(ino, &updated)?;
+        self.write_inode(ino, &updated, tx)?;
         Ok(new_size)
     }
 
-    fn convert_inline_to_extents(&self, ino: u64, inode: &EfsInode) -> Result<(), Error> {
+    fn convert_inline_to_extents(
+        &self,
+        ino: u64,
+        inode: &EfsInode,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
         let inline_data = inode.data_area[..inode.size as usize].to_vec();
         let block_size = self.block_size() as usize;
 
         // Allocate one block for the data.
-        let phys_block = self.alloc_block()?;
+        let phys_block = self.alloc_block(tx)?;
         let mut block_buf = vec![0u8; block_size];
         block_buf[..inline_data.len()].copy_from_slice(&inline_data);
-        self.write_block(phys_block, &block_buf)?;
+        self.write_block(phys_block, &block_buf, tx)?;
 
         // Build extent header + one extent in data_area.
         let mut updated = *inode;
@@ -647,10 +662,16 @@ impl EfsDriver {
 
         updated.blocks = 1;
         updated.checksum = checksum_inode(&updated);
-        self.write_inode(ino, &updated)
+        self.write_inode(ino, &updated, tx)
     }
 
-    fn write_via_extents(&self, ino: u64, byte_offset: usize, data: &[u8]) -> Result<(), Error> {
+    fn write_via_extents(
+        &self,
+        ino: u64,
+        byte_offset: usize,
+        data: &[u8],
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
         let block_size = self.block_size() as usize;
         let mut written = 0usize;
 
@@ -660,12 +681,12 @@ impl EfsDriver {
             let offset_in_block = cur_byte % block_size;
             let copy_len = (data.len() - written).min(block_size - offset_in_block);
 
-            let phys_block = self.ensure_block_for_logical(ino, logical_block)?;
+            let phys_block = self.ensure_block_for_logical(ino, logical_block, tx)?;
 
             let mut block_data = self.read_block(phys_block)?;
             block_data[offset_in_block..offset_in_block + copy_len]
                 .copy_from_slice(&data[written..written + copy_len]);
-            self.write_block(phys_block, &block_data)?;
+            self.write_block(phys_block, &block_data, tx)?;
 
             written += copy_len;
         }
@@ -673,7 +694,12 @@ impl EfsDriver {
     }
 
     /// Return the physical block for the given logical block, allocating if needed.
-    fn ensure_block_for_logical(&self, ino: u64, logical_block: u32) -> Result<u64, Error> {
+    fn ensure_block_for_logical(
+        &self,
+        ino: u64,
+        logical_block: u32,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<u64, Error> {
         let inode = self.read_inode(ino)?;
         let hdr: EfsExtentHeader = unsafe {
             core::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader)
@@ -694,10 +720,10 @@ impl EfsDriver {
         }
 
         // Allocate a new block.
-        let phys_block = self.alloc_block()?;
+        let phys_block = self.alloc_block(tx)?;
         // Zero it.
         let block_size = self.block_size() as usize;
-        self.write_block(phys_block, &vec![0u8; block_size])?;
+        self.write_block(phys_block, &vec![0u8; block_size], tx)?;
 
         // Can we extend an existing extent?
         let mut new_extents = extents.clone();
@@ -747,7 +773,7 @@ impl EfsDriver {
         }
         updated.blocks = new_extents.as_slice().iter().map(|e| e.length as u64).sum();
         updated.checksum = checksum_inode(&updated);
-        self.write_inode(ino, &updated)?;
+        self.write_inode(ino, &updated, tx)?;
 
         Ok(phys_block)
     }
@@ -757,7 +783,7 @@ impl EfsDriver {
 
 impl EfsDriver {
     /// Allocate a free block and return its absolute block number.
-    fn alloc_block(&self) -> Result<u64, Error> {
+    fn alloc_block(&self, tx: &mut TxHandle<'_>) -> Result<u64, Error> {
         let block_size = self.block_size() as usize;
         let mut m = self.mutable.lock();
         let blocks_per_group = m.superblock.blocks_per_group as usize;
@@ -772,12 +798,36 @@ impl EfsDriver {
             let bits_to_check = blocks_per_group.min(block_size * 8);
             if let Some(bit) = find_free_bit(&bitmap, bits_to_check) {
                 set_bit(&mut bitmap, bit);
-                self.write_block(bitmap_block, &bitmap)?;
-
                 m.bgd_table[g].free_blocks_count -= 1;
                 m.superblock.free_blocks -= 1;
 
                 let abs_block = g as u64 * blocks_per_group as u64 + bit as u64;
+
+                // Write bitmap (enrolled by write_block).
+                drop(m);
+                self.write_block(bitmap_block, &bitmap, tx)?;
+
+                // Enroll BGD page (block 2 contains the BGD table; compute the
+                // page holding group g's descriptor).
+                let bgd_page_idx = {
+                    let bgds_per_block = block_size / BGD_SIZE;
+                    let bgd_block = 2u64 + (g / bgds_per_block) as u64;
+                    self.block_to_lba(bgd_block) / 8
+                };
+                if let Ok(guard) =
+                    BlockPageCache::global().read_page(self.device.device_id, bgd_page_idx)
+                {
+                    tx.enroll_block(self.device.device_id, bgd_page_idx, guard.page_arc());
+                }
+
+                // Enroll superblock page (block 1).
+                let sb_page_idx = self.block_to_lba(1) / 8;
+                if let Ok(guard) =
+                    BlockPageCache::global().read_page(self.device.device_id, sb_page_idx)
+                {
+                    tx.enroll_block(self.device.device_id, sb_page_idx, guard.page_arc());
+                }
+
                 return Ok(abs_block);
             }
         }
@@ -785,7 +835,8 @@ impl EfsDriver {
     }
 
     /// Free a block (by absolute block number).
-    fn free_block(&self, block: u64) -> Result<(), Error> {
+    fn free_block(&self, block: u64, tx: &mut TxHandle<'_>) -> Result<(), Error> {
+        let block_size = self.block_size() as usize;
         let (group, bit, bitmap_block) = {
             let m = self.mutable.lock();
             let blocks_per_group = m.superblock.blocks_per_group as u64;
@@ -799,16 +850,40 @@ impl EfsDriver {
 
         let mut bitmap = self.read_block(bitmap_block)?;
         clear_bit(&mut bitmap, bit);
-        self.write_block(bitmap_block, &bitmap)?;
+        self.write_block(bitmap_block, &bitmap, tx)?;
 
-        let mut m = self.mutable.lock();
-        m.bgd_table[group].free_blocks_count += 1;
-        m.superblock.free_blocks += 1;
+        {
+            let mut m = self.mutable.lock();
+            m.bgd_table[group].free_blocks_count += 1;
+            m.superblock.free_blocks += 1;
+        }
+
+        // Enroll BGD page.
+        let bgd_page_idx = {
+            let bgds_per_block = block_size / BGD_SIZE;
+            let bgd_block = 2u64 + (group / bgds_per_block) as u64;
+            self.block_to_lba(bgd_block) / 8
+        };
+        if let Ok(guard) = BlockPageCache::global().read_page(self.device.device_id, bgd_page_idx) {
+            tx.enroll_block(self.device.device_id, bgd_page_idx, guard.page_arc());
+        }
+
+        // Enroll superblock page (block 1).
+        let sb_page_idx = self.block_to_lba(1) / 8;
+        if let Ok(guard) = BlockPageCache::global().read_page(self.device.device_id, sb_page_idx) {
+            tx.enroll_block(self.device.device_id, sb_page_idx, guard.page_arc());
+        }
+
+        // Revoke the freed block so replay doesn't overwrite freed space.
+        // The freed block's partition-relative page index:
+        let freed_page_idx = self.block_to_lba(block) / 8;
+        tx.enroll_revoke(self.device.device_id, freed_page_idx);
+
         Ok(())
     }
 
     /// Allocate a free inode and return its inode number (1-based).
-    fn alloc_inode(&self) -> Result<u64, Error> {
+    fn alloc_inode(&self, tx: &mut TxHandle<'_>) -> Result<u64, Error> {
         let block_size = self.block_size() as usize;
         let mut m = self.mutable.lock();
         let inodes_per_group = m.superblock.inodes_per_group as usize;
@@ -823,12 +898,34 @@ impl EfsDriver {
             let bits_to_check = inodes_per_group.min(block_size * 8);
             if let Some(bit) = find_free_bit(&bitmap, bits_to_check) {
                 set_bit(&mut bitmap, bit);
-                self.write_block(bitmap_block, &bitmap)?;
-
                 m.bgd_table[g].free_inodes_count -= 1;
                 m.superblock.free_inodes -= 1;
 
                 let ino = g as u64 * inodes_per_group as u64 + bit as u64 + 1;
+                drop(m);
+
+                self.write_block(bitmap_block, &bitmap, tx)?;
+
+                // Enroll BGD page.
+                let bgd_page_idx = {
+                    let bgds_per_block = block_size / BGD_SIZE;
+                    let bgd_block = 2u64 + (g / bgds_per_block) as u64;
+                    self.block_to_lba(bgd_block) / 8
+                };
+                if let Ok(guard) =
+                    BlockPageCache::global().read_page(self.device.device_id, bgd_page_idx)
+                {
+                    tx.enroll_block(self.device.device_id, bgd_page_idx, guard.page_arc());
+                }
+
+                // Enroll superblock page (block 1).
+                let sb_page_idx = self.block_to_lba(1) / 8;
+                if let Ok(guard) =
+                    BlockPageCache::global().read_page(self.device.device_id, sb_page_idx)
+                {
+                    tx.enroll_block(self.device.device_id, sb_page_idx, guard.page_arc());
+                }
+
                 return Ok(ino);
             }
         }
@@ -836,7 +933,8 @@ impl EfsDriver {
     }
 
     /// Free an inode.
-    fn free_inode(&self, ino: u64) -> Result<(), Error> {
+    fn free_inode(&self, ino: u64, tx: &mut TxHandle<'_>) -> Result<(), Error> {
+        let block_size = self.block_size() as usize;
         let inodes_per_group = self.inodes_per_group as usize;
         let ino0 = (ino - 1) as usize;
         let group = ino0 / inodes_per_group;
@@ -852,11 +950,30 @@ impl EfsDriver {
 
         let mut bitmap = self.read_block(bitmap_block)?;
         clear_bit(&mut bitmap, bit);
-        self.write_block(bitmap_block, &bitmap)?;
+        self.write_block(bitmap_block, &bitmap, tx)?;
 
-        let mut m = self.mutable.lock();
-        m.bgd_table[group].free_inodes_count += 1;
-        m.superblock.free_inodes += 1;
+        {
+            let mut m = self.mutable.lock();
+            m.bgd_table[group].free_inodes_count += 1;
+            m.superblock.free_inodes += 1;
+        }
+
+        // Enroll BGD page.
+        let bgd_page_idx = {
+            let bgds_per_block = block_size / BGD_SIZE;
+            let bgd_block = 2u64 + (group / bgds_per_block) as u64;
+            self.block_to_lba(bgd_block) / 8
+        };
+        if let Ok(guard) = BlockPageCache::global().read_page(self.device.device_id, bgd_page_idx) {
+            tx.enroll_block(self.device.device_id, bgd_page_idx, guard.page_arc());
+        }
+
+        // Enroll superblock page (block 1).
+        let sb_page_idx = self.block_to_lba(1) / 8;
+        if let Ok(guard) = BlockPageCache::global().read_page(self.device.device_id, sb_page_idx) {
+            tx.enroll_block(self.device.device_id, sb_page_idx, guard.page_arc());
+        }
+
         Ok(())
     }
 }
@@ -871,6 +988,7 @@ impl EfsDriver {
         name: &str,
         entry_ino: u64,
         file_type: u8,
+        tx: &mut TxHandle<'_>,
     ) -> Result<(), Error> {
         let name_bytes = name.as_bytes();
         let name_len = name_bytes.len() as u8;
@@ -969,35 +1087,41 @@ impl EfsDriver {
             let dir_inode2 = self.read_inode(dir_ino)?;
             if dir_inode2.flags & INODE_FLAG_INLINE_DATA != 0 {
                 // Convert first.
-                self.convert_inline_to_extents(dir_ino, &dir_inode2)?;
+                self.convert_inline_to_extents(dir_ino, &dir_inode2, tx)?;
             }
 
             let logical_block = (new_block_start / block_size) as u32;
-            let phys_block = self.ensure_block_for_logical(dir_ino, logical_block)?;
+            let phys_block = self.ensure_block_for_logical(dir_ino, logical_block, tx)?;
             self.write_block(
                 phys_block,
                 &dir_data[new_block_start..new_block_start + block_size],
+                tx,
             )?;
 
             let mut updated = self.read_inode(dir_ino)?;
             updated.size = new_size;
             updated.mtime_sec = current_unix_time();
             updated.checksum = checksum_inode(&updated);
-            self.write_inode(dir_ino, &updated)?;
+            self.write_inode(dir_ino, &updated, tx)?;
             return Ok(());
         }
 
         // Write back modified dir_data block by block.
-        self.write_dir_blocks(dir_ino, &dir_data)?;
+        self.write_dir_blocks(dir_ino, &dir_data, tx)?;
 
         let mut updated = self.read_inode(dir_ino)?;
         updated.mtime_sec = current_unix_time();
         updated.checksum = checksum_inode(&updated);
-        self.write_inode(dir_ino, &updated)
+        self.write_inode(dir_ino, &updated, tx)
     }
 
     /// Remove the directory entry with the given name from directory `dir_ino`.
-    fn remove_dir_entry(&self, dir_ino: u64, name: &str) -> Result<(), Error> {
+    fn remove_dir_entry(
+        &self,
+        dir_ino: u64,
+        name: &str,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
         let dir_inode = self.read_inode(dir_ino)?;
         let dir_size = dir_inode.size as usize;
         let mut dir_data = self.read_file_data(&dir_inode, 0, dir_size)?;
@@ -1046,11 +1170,11 @@ impl EfsDriver {
                             dir_data[prev_off + 9] = (new_rec_len >> 8) as u8;
                         }
 
-                        self.write_dir_blocks(dir_ino, &dir_data)?;
+                        self.write_dir_blocks(dir_ino, &dir_data, tx)?;
                         let mut updated = self.read_inode(dir_ino)?;
                         updated.mtime_sec = current_unix_time();
                         updated.checksum = checksum_inode(&updated);
-                        return self.write_inode(dir_ino, &updated);
+                        return self.write_inode(dir_ino, &updated, tx);
                     }
                 }
             }
@@ -1061,7 +1185,12 @@ impl EfsDriver {
     }
 
     /// Write the in-memory dir_data back to the directory inode's blocks.
-    fn write_dir_blocks(&self, dir_ino: u64, dir_data: &[u8]) -> Result<(), Error> {
+    fn write_dir_blocks(
+        &self,
+        dir_ino: u64,
+        dir_data: &[u8],
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
         let block_size = self.block_size() as usize;
         let dir_inode = self.read_inode(dir_ino)?;
 
@@ -1071,7 +1200,7 @@ impl EfsDriver {
             let copy_len = dir_data.len().min(INODE_DATA_AREA_SIZE);
             updated.data_area[..copy_len].copy_from_slice(&dir_data[..copy_len]);
             updated.checksum = checksum_inode(&updated);
-            return self.write_inode(dir_ino, &updated);
+            return self.write_inode(dir_ino, &updated, tx);
         }
 
         // Extent mode: write block by block.
@@ -1079,11 +1208,11 @@ impl EfsDriver {
         let mut buf = vec![0u8; block_size];
         while written < dir_data.len() {
             let logical_block = (written / block_size) as u32;
-            let phys_block = self.ensure_block_for_logical(dir_ino, logical_block)?;
+            let phys_block = self.ensure_block_for_logical(dir_ino, logical_block, tx)?;
             let end = (written + block_size).min(dir_data.len());
             buf.fill(0);
             buf[..end - written].copy_from_slice(&dir_data[written..end]);
-            self.write_block(phys_block, &buf)?;
+            self.write_block(phys_block, &buf, tx)?;
             written += block_size;
         }
         Ok(())
@@ -1351,7 +1480,14 @@ impl FileSystem for EfsDriver {
         if inode.mode & S_IFMT != S_IFREG {
             return Err(Error::NotAFile);
         }
-        self.write_file_data(ino, offset, data)
+        let mut tx = self.journal.begin_tx();
+        match self.write_file_data(ino, offset, data, &mut tx) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                tx.abort();
+                Err(e)
+            }
+        }
     }
 
     fn create_file(&self, path: &Path) -> Result<(), Error> {
@@ -1365,13 +1501,81 @@ impl FileSystem for EfsDriver {
             return Err(Error::NotADir);
         }
 
-        let new_ino = self.alloc_inode()?;
-        let inode = new_inode(S_IFREG | 0o644, INODE_FLAG_INLINE_DATA);
-        self.write_inode(new_ino, &inode)?;
+        let mut tx = self.journal.begin_tx();
+        match self.create_file_inner(parent_ino, &name, &mut tx) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                tx.abort();
+                Err(e)
+            }
+        }
+    }
 
-        // Update group dir count if needed (file, not dir — skip used_dirs).
-        self.add_dir_entry(parent_ino, &name, new_ino, FT_REG_FILE)?;
+    fn resolve_inode(&self, path: &Path) -> Result<u64, Error> {
+        let path = path.normalize();
+        self.resolve_path(&path)
+    }
+
+    fn statfs(&self) -> Result<super::StatFs, Error> {
+        let m = self.mutable.lock();
+        let sb = &m.superblock;
+        let mut volume_name = [0u8; 64];
+        volume_name.copy_from_slice(&sb.volume_name);
+        Ok(super::StatFs {
+            fs_type: "efs",
+            block_size: 1u64 << sb.block_size_log2,
+            total_blocks: sb.total_blocks,
+            free_blocks: sb.free_blocks,
+            total_inodes: sb.total_inodes,
+            free_inodes: sb.free_inodes,
+            volume_name,
+            version: sb.version,
+            block_groups: sb.block_group_count,
+        })
+    }
+
+    fn read_bytes_ino(&self, ino: u64, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
+        let inode = self.read_inode(ino)?;
+        if inode.mode & S_IFMT != S_IFREG {
+            return Err(Error::NotAFile);
+        }
+        self.read_file_data(&inode, offset, count)
+    }
+
+    fn write_bytes_ino(&self, ino: u64, offset: usize, data: &[u8]) -> Result<u64, Error> {
+        let inode = self.read_inode(ino)?;
+        if inode.mode & S_IFMT != S_IFREG {
+            return Err(Error::NotAFile);
+        }
+        let mut tx = self.journal.begin_tx();
+        match self.write_file_data(ino, offset, data, &mut tx) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                tx.abort();
+                Err(e)
+            }
+        }
+    }
+
+    fn file_size_ino(&self, ino: u64) -> Result<u64, Error> {
+        let inode = self.read_inode(ino)?;
+        Ok(inode.size)
+    }
+
+    fn flush_inode(&self, _ino: u64) -> Result<(), Error> {
+        // Open an empty TxHandle (no enrollments) so that on drop it merges
+        // nothing into the active tx; then force-commit the journal and flush.
+        let tx = self.journal.begin_tx();
+        drop(tx); // merges empty set — no-op on active tx
+        self.journal
+            .force_commit_and_wait()
+            .map_err(|_| Error::IoError)?;
+        self.device.flush()?;
         Ok(())
+    }
+
+    fn as_page_cache_ops(&self) -> Option<&dyn crate::fs::page_cache::PageCacheOps> {
+        Some(self)
     }
 
     fn create_dir(&self, path: &Path) -> Result<(), Error> {
@@ -1385,10 +1589,173 @@ impl FileSystem for EfsDriver {
             return Err(Error::NotADir);
         }
 
-        let new_ino = self.alloc_inode()?;
+        let mut tx = self.journal.begin_tx();
+        match self.create_dir_inner(parent_ino, &name, &mut tx) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                tx.abort();
+                Err(e)
+            }
+        }
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), Error> {
+        let path = path.normalize();
+        let name = path.last_component().ok_or(Error::IoError)?.to_string();
+        let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
+
+        let parent_ino = self.resolve_path(&parent)?;
+        let file_ino = self.resolve_path(&path)?;
+        let file_inode = self.read_inode(file_ino)?;
+
+        if file_inode.mode & S_IFMT != S_IFREG {
+            return Err(Error::NotAFile);
+        }
+
+        let mut tx = self.journal.begin_tx();
+        match self.remove_file_inner(parent_ino, file_ino, &file_inode, &name, &mut tx) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                tx.abort();
+                Err(e)
+            }
+        }
+    }
+
+    fn remove_dir(&self, path: &Path) -> Result<(), Error> {
+        let path = path.normalize();
+        let name = path.last_component().ok_or(Error::IoError)?.to_string();
+        let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
+
+        let parent_ino = self.resolve_path(&parent)?;
+        let dir_ino = self.resolve_path(&path)?;
+        let dir_inode = self.read_inode(dir_ino)?;
+
+        if dir_inode.mode & S_IFMT != S_IFDIR {
+            return Err(Error::NotADir);
+        }
+
+        // Verify directory is empty (only "." and "..").
+        let entries = self.read_dir_entries(dir_ino)?;
+        let non_meta = entries
+            .iter()
+            .filter(|(n, _, _)| n != "." && n != "..")
+            .count();
+        if non_meta > 0 {
+            return Err(Error::IoError);
+        }
+
+        let mut tx = self.journal.begin_tx();
+        match self.remove_dir_inner(parent_ino, dir_ino, &dir_inode, &name, &mut tx) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                tx.abort();
+                Err(e)
+            }
+        }
+    }
+
+    fn file_info(&self, path: &Path) -> Result<File, Error> {
+        let path = path.normalize();
+        let name = if path.is_root() {
+            String::from("/")
+        } else {
+            path.last_component().unwrap_or("/").to_string()
+        };
+        let (_ino, inode) = self.resolve_path_inode(&path)?;
+        Ok(inode_to_file(name, &inode))
+    }
+
+    fn flush(&self) -> Result<(), Error> {
+        let mut tx = self.journal.begin_tx();
+        let result = self.flush_inner(&mut tx);
+        if result.is_err() {
+            tx.abort();
+        }
+        result
+    }
+
+    fn truncate(&self, path: &Path, size: u64) -> Result<(), Error> {
+        let path = path.normalize();
+        let (ino, inode) = self.resolve_path_inode(&path)?;
+        if inode.mode & S_IFMT != S_IFREG {
+            return Err(Error::NotAFile);
+        }
+
+        let mut tx = self.journal.begin_tx();
+        match self.truncate_inner(ino, &inode, size, &mut tx) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                tx.abort();
+                Err(e)
+            }
+        }
+    }
+
+    fn rename(&self, old_path: &Path, new_path: &Path) -> Result<(), Error> {
+        let old_path = old_path.normalize();
+        let new_path = new_path.normalize();
+
+        let old_name = old_path.last_component().ok_or(Error::IoError)?.to_string();
+        let new_name = new_path.last_component().ok_or(Error::IoError)?.to_string();
+
+        let old_parent_path = old_path
+            .parent()
+            .unwrap_or_else(|| Path::parse("/").unwrap());
+        let new_parent_path = new_path
+            .parent()
+            .unwrap_or_else(|| Path::parse("/").unwrap());
+
+        let old_parent_ino = self.resolve_path(&old_parent_path)?;
+        let new_parent_ino = self.resolve_path(&new_parent_path)?;
+        let target_ino = self.resolve_path(&old_path)?;
+        let target_inode = self.read_inode(target_ino)?;
+
+        let mut tx = self.journal.begin_tx();
+        match self.rename_inner(
+            old_parent_ino,
+            new_parent_ino,
+            target_ino,
+            &target_inode,
+            &old_name,
+            &new_name,
+            &mut tx,
+        ) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                tx.abort();
+                Err(e)
+            }
+        }
+    }
+}
+
+// ---- _inner helpers (called by FileSystem trait methods, take &mut TxHandle) ---
+
+impl EfsDriver {
+    fn create_file_inner(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
+        let new_ino = self.alloc_inode(tx)?;
+        let inode = new_inode(S_IFREG | 0o644, INODE_FLAG_INLINE_DATA);
+        self.write_inode(new_ino, &inode, tx)?;
+        self.add_dir_entry(parent_ino, name, new_ino, FT_REG_FILE, tx)?;
+        Ok(())
+    }
+
+    fn create_dir_inner(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
+        let new_ino = self.alloc_inode(tx)?;
 
         // Initialize directory inode with "." and ".." entries using a data block.
-        let phys_block = self.alloc_block()?;
+        let phys_block = self.alloc_block(tx)?;
         let block_size = self.block_size() as usize;
         let mut block_buf = vec![0u8; block_size];
 
@@ -1414,7 +1781,7 @@ impl FileSystem for EfsDriver {
             b"..",
         );
 
-        self.write_block(phys_block, &block_buf)?;
+        self.write_block(phys_block, &block_buf, tx)?;
 
         // Build extent header for the new dir inode.
         let hdr_size = core::mem::size_of::<EfsExtentHeader>();
@@ -1465,13 +1832,13 @@ impl FileSystem for EfsDriver {
             data_area,
         };
         inode.checksum = checksum_inode(&inode);
-        self.write_inode(new_ino, &inode)?;
+        self.write_inode(new_ino, &inode, tx)?;
 
         // Increment parent link_count for the ".." back-reference.
         let mut parent_inode2 = self.read_inode(parent_ino)?;
         parent_inode2.link_count += 1;
         parent_inode2.checksum = checksum_inode(&parent_inode2);
-        self.write_inode(parent_ino, &parent_inode2)?;
+        self.write_inode(parent_ino, &parent_inode2, tx)?;
 
         // Update BGD used_dirs count.
         let ipg = self.inodes_per_group as usize;
@@ -1483,22 +1850,17 @@ impl FileSystem for EfsDriver {
             }
         }
 
-        self.add_dir_entry(parent_ino, &name, new_ino, FT_DIR)
+        self.add_dir_entry(parent_ino, name, new_ino, FT_DIR, tx)
     }
 
-    fn remove_file(&self, path: &Path) -> Result<(), Error> {
-        let path = path.normalize();
-        let name = path.last_component().ok_or(Error::IoError)?.to_string();
-        let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
-
-        let parent_ino = self.resolve_path(&parent)?;
-        let file_ino = self.resolve_path(&path)?;
-        let file_inode = self.read_inode(file_ino)?;
-
-        if file_inode.mode & S_IFMT != S_IFREG {
-            return Err(Error::NotAFile);
-        }
-
+    fn remove_file_inner(
+        &self,
+        parent_ino: u64,
+        file_ino: u64,
+        file_inode: &EfsInode,
+        name: &str,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
         // Free data blocks.
         if file_inode.flags & INODE_FLAG_INLINE_DATA == 0 {
             let hdr: EfsExtentHeader = unsafe {
@@ -1509,39 +1871,24 @@ impl FileSystem for EfsDriver {
                     self.parse_inline_extents(&file_inode.data_area, hdr.entries as usize)?;
                 for ext in extents.as_slice() {
                     for i in 0..ext.length as u64 {
-                        self.free_block(ext.physical_start() + i)?;
+                        self.free_block(ext.physical_start() + i, tx)?;
                     }
                 }
             }
         }
 
-        self.free_inode(file_ino)?;
-        self.remove_dir_entry(parent_ino, &name)
+        self.free_inode(file_ino, tx)?;
+        self.remove_dir_entry(parent_ino, name, tx)
     }
 
-    fn remove_dir(&self, path: &Path) -> Result<(), Error> {
-        let path = path.normalize();
-        let name = path.last_component().ok_or(Error::IoError)?.to_string();
-        let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
-
-        let parent_ino = self.resolve_path(&parent)?;
-        let dir_ino = self.resolve_path(&path)?;
-        let dir_inode = self.read_inode(dir_ino)?;
-
-        if dir_inode.mode & S_IFMT != S_IFDIR {
-            return Err(Error::NotADir);
-        }
-
-        // Verify directory is empty (only "." and "..").
-        let entries = self.read_dir_entries(dir_ino)?;
-        let non_meta = entries
-            .iter()
-            .filter(|(n, _, _)| n != "." && n != "..")
-            .count();
-        if non_meta > 0 {
-            return Err(Error::IoError);
-        }
-
+    fn remove_dir_inner(
+        &self,
+        parent_ino: u64,
+        dir_ino: u64,
+        dir_inode: &EfsInode,
+        name: &str,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
         // Free data blocks.
         let hdr: EfsExtentHeader = unsafe {
             core::ptr::read_unaligned(dir_inode.data_area.as_ptr() as *const EfsExtentHeader)
@@ -1550,12 +1897,12 @@ impl FileSystem for EfsDriver {
             let extents = self.parse_inline_extents(&dir_inode.data_area, hdr.entries as usize)?;
             for ext in extents.as_slice() {
                 for i in 0..ext.length as u64 {
-                    self.free_block(ext.physical_start() + i)?;
+                    self.free_block(ext.physical_start() + i, tx)?;
                 }
             }
         }
 
-        self.free_inode(dir_ino)?;
+        self.free_inode(dir_ino, tx)?;
 
         // Decrement parent link_count.
         let mut parent_inode = self.read_inode(parent_ino)?;
@@ -1563,7 +1910,7 @@ impl FileSystem for EfsDriver {
             parent_inode.link_count -= 1;
         }
         parent_inode.checksum = checksum_inode(&parent_inode);
-        self.write_inode(parent_ino, &parent_inode)?;
+        self.write_inode(parent_ino, &parent_inode, tx)?;
 
         // Update BGD used_dirs.
         let ipg = self.inodes_per_group as usize;
@@ -1575,21 +1922,10 @@ impl FileSystem for EfsDriver {
             }
         }
 
-        self.remove_dir_entry(parent_ino, &name)
+        self.remove_dir_entry(parent_ino, name, tx)
     }
 
-    fn file_info(&self, path: &Path) -> Result<File, Error> {
-        let path = path.normalize();
-        let name = if path.is_root() {
-            String::from("/")
-        } else {
-            path.last_component().unwrap_or("/").to_string()
-        };
-        let (_ino, inode) = self.resolve_path_inode(&path)?;
-        Ok(inode_to_file(name, &inode))
-    }
-
-    fn flush(&self) -> Result<(), Error> {
+    fn flush_inner(&self, tx: &mut TxHandle<'_>) -> Result<(), Error> {
         let m = self.mutable.lock();
         // Write updated superblock to block 1.
         let block_size = self.block_size() as usize;
@@ -1601,13 +1937,16 @@ impl FileSystem for EfsDriver {
             )
         };
         sb_block[..sb_bytes.len()].copy_from_slice(sb_bytes);
-        self.write_block(1, &sb_block)?;
+        drop(m);
+        self.write_block(1, &sb_block, tx)?;
 
+        let m = self.mutable.lock();
         // Write BGD table starting at block 2.
         let bgd_count = m.bgd_table.len();
         let bgds_per_block = block_size / BGD_SIZE;
         let bgd_blocks = (bgd_count + bgds_per_block - 1) / bgds_per_block;
 
+        let mut bgd_blocks_data: Vec<Vec<u8>> = Vec::with_capacity(bgd_blocks);
         for blk_idx in 0..bgd_blocks {
             let mut blk_buf = vec![0u8; block_size];
             let start = blk_idx * bgds_per_block;
@@ -1622,29 +1961,33 @@ impl FileSystem for EfsDriver {
                 };
                 blk_buf[off..off + BGD_SIZE].copy_from_slice(bgd_bytes);
             }
-            self.write_block(2 + blk_idx as u64, &blk_buf)?;
+            bgd_blocks_data.push(blk_buf);
+        }
+        drop(m);
+
+        for (blk_idx, blk_buf) in bgd_blocks_data.iter().enumerate() {
+            self.write_block(2 + blk_idx as u64, blk_buf, tx)?;
         }
 
-        drop(m);
         self.device.flush()?;
         Ok(())
     }
 
-    fn truncate(&self, path: &Path, size: u64) -> Result<(), Error> {
-        let path = path.normalize();
-        let (ino, inode) = self.resolve_path_inode(&path)?;
-        if inode.mode & S_IFMT != S_IFREG {
-            return Err(Error::NotAFile);
-        }
-
+    fn truncate_inner(
+        &self,
+        ino: u64,
+        inode: &EfsInode,
+        size: u64,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
         let current_size = inode.size;
         if size >= current_size {
             // Growing: just update size (sparse).
-            let mut updated = inode;
+            let mut updated = *inode;
             updated.size = size;
             updated.mtime_sec = current_unix_time();
             updated.checksum = checksum_inode(&updated);
-            return self.write_inode(ino, &updated);
+            return self.write_inode(ino, &updated, tx);
         }
 
         // Shrinking: free excess blocks.
@@ -1671,13 +2014,13 @@ impl FileSystem for EfsDriver {
                     let ext_end = ext_start + ext.length as u64;
                     if ext_start >= new_blocks {
                         for i in 0..ext.length as u64 {
-                            self.free_block(ext.physical_start() + i)?;
+                            self.free_block(ext.physical_start() + i, tx)?;
                         }
                     } else if ext_end > new_blocks {
                         let keep = (new_blocks - ext_start) as u16;
                         let free_start = ext.physical_start() + keep as u64;
                         for i in 0..(ext.length - keep) as u64 {
-                            self.free_block(free_start + i)?;
+                            self.free_block(free_start + i, tx)?;
                         }
                         let mut trimmed = *ext;
                         trimmed.length = keep;
@@ -1688,7 +2031,7 @@ impl FileSystem for EfsDriver {
                 }
 
                 // Rebuild extent tree in inode.
-                let mut updated = inode;
+                let mut updated = *inode;
                 let hdr_size = core::mem::size_of::<EfsExtentHeader>();
                 let ext_size = core::mem::size_of::<EfsExtent>();
                 let new_hdr = EfsExtentHeader {
@@ -1716,45 +2059,36 @@ impl FileSystem for EfsDriver {
                 updated.size = size;
                 updated.mtime_sec = current_unix_time();
                 updated.checksum = checksum_inode(&updated);
-                return self.write_inode(ino, &updated);
+                return self.write_inode(ino, &updated, tx);
             }
         }
 
         // Inline or empty.
-        let mut updated = inode;
+        let mut updated = *inode;
         updated.size = size;
         updated.mtime_sec = current_unix_time();
         updated.checksum = checksum_inode(&updated);
-        self.write_inode(ino, &updated)
+        self.write_inode(ino, &updated, tx)
     }
 
-    fn rename(&self, old_path: &Path, new_path: &Path) -> Result<(), Error> {
-        let old_path = old_path.normalize();
-        let new_path = new_path.normalize();
-
-        let old_name = old_path.last_component().ok_or(Error::IoError)?.to_string();
-        let new_name = new_path.last_component().ok_or(Error::IoError)?.to_string();
-
-        let old_parent_path = old_path
-            .parent()
-            .unwrap_or_else(|| Path::parse("/").unwrap());
-        let new_parent_path = new_path
-            .parent()
-            .unwrap_or_else(|| Path::parse("/").unwrap());
-
-        let old_parent_ino = self.resolve_path(&old_parent_path)?;
-        let new_parent_ino = self.resolve_path(&new_parent_path)?;
-        let target_ino = self.resolve_path(&old_path)?;
-        let target_inode = self.read_inode(target_ino)?;
-
+    fn rename_inner(
+        &self,
+        old_parent_ino: u64,
+        new_parent_ino: u64,
+        target_ino: u64,
+        target_inode: &EfsInode,
+        old_name: &str,
+        new_name: &str,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
         let file_type = target_inode.file_type_for_dir_entry();
 
-        self.remove_dir_entry(old_parent_ino, &old_name)?;
-        self.add_dir_entry(new_parent_ino, &new_name, target_ino, file_type)?;
+        self.remove_dir_entry(old_parent_ino, old_name, tx)?;
+        self.add_dir_entry(new_parent_ino, new_name, target_ino, file_type, tx)?;
 
         // If moving a directory, update its ".." entry.
         if target_inode.mode & S_IFMT == S_IFDIR && old_parent_ino != new_parent_ino {
-            self.update_dotdot_entry(target_ino, new_parent_ino)?;
+            self.update_dotdot_entry(target_ino, new_parent_ino, tx)?;
 
             // Adjust link counts of old and new parents.
             let mut old_p = self.read_inode(old_parent_ino)?;
@@ -1762,69 +2096,15 @@ impl FileSystem for EfsDriver {
                 old_p.link_count -= 1;
             }
             old_p.checksum = checksum_inode(&old_p);
-            self.write_inode(old_parent_ino, &old_p)?;
+            self.write_inode(old_parent_ino, &old_p, tx)?;
 
             let mut new_p = self.read_inode(new_parent_ino)?;
             new_p.link_count += 1;
             new_p.checksum = checksum_inode(&new_p);
-            self.write_inode(new_parent_ino, &new_p)?;
+            self.write_inode(new_parent_ino, &new_p, tx)?;
         }
 
         Ok(())
-    }
-
-    fn resolve_inode(&self, path: &Path) -> Result<u64, Error> {
-        let path = path.normalize();
-        self.resolve_path(&path)
-    }
-
-    fn statfs(&self) -> Result<super::StatFs, Error> {
-        let m = self.mutable.lock();
-        let sb = &m.superblock;
-        let mut volume_name = [0u8; 64];
-        volume_name.copy_from_slice(&sb.volume_name);
-        Ok(super::StatFs {
-            fs_type: "efs",
-            block_size: 1u64 << sb.block_size_log2,
-            total_blocks: sb.total_blocks,
-            free_blocks: sb.free_blocks,
-            total_inodes: sb.total_inodes,
-            free_inodes: sb.free_inodes,
-            volume_name,
-            version: sb.version,
-            block_groups: sb.block_group_count,
-        })
-    }
-
-    fn read_bytes_ino(&self, ino: u64, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
-        let inode = self.read_inode(ino)?;
-        if inode.mode & S_IFMT != S_IFREG {
-            return Err(Error::NotAFile);
-        }
-        self.read_file_data(&inode, offset, count)
-    }
-
-    fn write_bytes_ino(&self, ino: u64, offset: usize, data: &[u8]) -> Result<u64, Error> {
-        let inode = self.read_inode(ino)?;
-        if inode.mode & S_IFMT != S_IFREG {
-            return Err(Error::NotAFile);
-        }
-        self.write_file_data(ino, offset, data)
-    }
-
-    fn file_size_ino(&self, ino: u64) -> Result<u64, Error> {
-        let inode = self.read_inode(ino)?;
-        Ok(inode.size)
-    }
-
-    fn flush_inode(&self, _ino: u64) -> Result<(), Error> {
-        // Data written synchronously; flush drive write cache only.
-        self.device.flush()?;
-        Ok(())
-    }
-
-    fn as_page_cache_ops(&self) -> Option<&dyn crate::fs::page_cache::PageCacheOps> {
-        Some(self)
     }
 }
 
@@ -1911,17 +2191,27 @@ impl PageCacheOps for EfsDriver {
         _valid_bytes: usize,
     ) -> Result<(), Error> {
         let inode = self.read_inode(ino)?;
+        let mut tx = self.journal.begin_tx();
 
         if inode.flags & INODE_FLAG_INLINE_DATA != 0 {
             // Page cache pages are always 4096 bytes, which exceeds the
             // inline data area (176 bytes). Convert to extent mode first.
-            self.convert_inline_to_extents(ino, &inode)?;
+            if let Err(e) = self.convert_inline_to_extents(ino, &inode, &mut tx) {
+                tx.abort();
+                return Err(e);
+            }
             // Fall through to extent-based write below.
         }
 
         // Extent-based write.
         let logical_block = page_index as u32;
-        let phys_block = self.ensure_block_for_logical(ino, logical_block)?;
+        let phys_block = match self.ensure_block_for_logical(ino, logical_block, &mut tx) {
+            Ok(b) => b,
+            Err(e) => {
+                tx.abort();
+                return Err(e);
+            }
+        };
         let lba = self.block_to_lba(phys_block);
         let spb = self.sectors_per_block();
 
@@ -1946,13 +2236,25 @@ impl PageCacheOps for EfsDriver {
         updated.size = new_size;
         updated.mtime_sec = current_unix_time();
         updated.checksum = efs_common::checksum_inode(&updated);
-        self.write_inode(ino, &updated)
+        let mut tx = self.journal.begin_tx();
+        match self.write_inode(ino, &updated, &mut tx) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                tx.abort();
+                Err(e)
+            }
+        }
     }
 }
 
 impl EfsDriver {
     /// Update the ".." directory entry of `dir_ino` to point to `new_parent_ino`.
-    fn update_dotdot_entry(&self, dir_ino: u64, new_parent_ino: u64) -> Result<(), Error> {
+    fn update_dotdot_entry(
+        &self,
+        dir_ino: u64,
+        new_parent_ino: u64,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
         let dir_inode = self.read_inode(dir_ino)?;
         let dir_size = dir_inode.size as usize;
         let mut dir_data = self.read_file_data(&dir_inode, 0, dir_size)?;
@@ -1978,7 +2280,7 @@ impl EfsDriver {
                     dir_data[offset + 5] = ((new_parent_ino >> 40) & 0xFF) as u8;
                     dir_data[offset + 6] = ((new_parent_ino >> 48) & 0xFF) as u8;
                     dir_data[offset + 7] = ((new_parent_ino >> 56) & 0xFF) as u8;
-                    return self.write_dir_blocks(dir_ino, &dir_data);
+                    return self.write_dir_blocks(dir_ino, &dir_data, tx);
                 }
             }
             offset += rec_len;

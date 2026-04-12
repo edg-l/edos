@@ -165,6 +165,12 @@ impl BlockPageGuard {
     pub unsafe fn as_mut_slice(&self) -> &mut [u8; PAGE_SIZE] {
         unsafe { self.page.as_mut_slice() }
     }
+
+    /// Return a clone of the underlying `Arc<CachedBlockPage>` so callers can
+    /// enroll the page in a journal transaction.
+    pub fn page_arc(&self) -> Arc<CachedBlockPage> {
+        Arc::clone(&self.page)
+    }
 }
 
 impl core::ops::Deref for BlockPageGuard {
@@ -380,6 +386,11 @@ impl BlockPageCache {
     /// Look up the journal for a device, if one has been registered.
     pub fn journal_for_device(&self, device_id: u64) -> Option<Arc<crate::fs::journal::Journal>> {
         self.journals.lock().get(&device_id).cloned()
+    }
+
+    /// Return all registered journals (for the committer kthread).
+    pub fn all_journals(&self) -> Vec<Arc<crate::fs::journal::Journal>> {
+        self.journals.lock().values().cloned().collect()
     }
 
     // ---- Internal helpers ------------------------------------------------
@@ -744,6 +755,31 @@ impl BlockPageCache {
                     continue;
                 };
 
+                // Journal gating: skip pages that have not yet been committed.
+                let journal_seq_for_page: Option<u64> = {
+                    let journals = self.journals.lock();
+                    if let Some(j) = journals.get(&key.0) {
+                        let tracker = j.checkpoint_tracker.lock();
+                        tracker.get(&key).copied()
+                    } else {
+                        None // No journal for this device — always flushable.
+                    }
+                };
+
+                if let Some(enrolled_seq) = journal_seq_for_page {
+                    let committed = {
+                        let journals = self.journals.lock();
+                        journals
+                            .get(&key.0)
+                            .map(|j| j.committed_seq())
+                            .unwrap_or(u64::MAX)
+                    };
+                    if enrolled_seq > committed {
+                        // Not yet committed; leave in dirty set and skip.
+                        continue;
+                    }
+                }
+
                 // Acquire write_lock to serialize against concurrent writers.
                 let _wg = page.write_lock.lock();
                 if !page.is_dirty() {
@@ -755,6 +791,14 @@ impl BlockPageCache {
                 page.clear_dirty();
                 bytes_written += PAGE_SIZE as u64;
                 drop(_wg);
+
+                // Notify the journal that this block has been checkpointed.
+                if let Some(enrolled_seq) = journal_seq_for_page {
+                    let journals = self.journals.lock();
+                    if let Some(j) = journals.get(&key.0) {
+                        j.note_checkpointed(key.0, key.1, enrolled_seq);
+                    }
+                }
 
                 // Only remove from dirty set if the page was not re-dirtied
                 // by a concurrent writer between clear_dirty and this check.

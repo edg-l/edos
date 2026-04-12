@@ -19,6 +19,7 @@ use crate::util::uaccess::{
 };
 use crate::{
     drivers::{keyboard::KEY_EVENT_BROADCAST, random, tty},
+    log,
     syscalls::Errno,
     thread::{
         mutex::BlockingMutex,
@@ -1428,12 +1429,22 @@ pub fn sys_fsync(fd: u64) -> i32 {
 
     interrupts::enable();
     match fs_api::flush_file(&path, inode) {
-        Ok(()) => 0,
+        Ok(()) => {}
         Err(_) => {
             info.lock().errno = Errno::EINVAL;
-            -1
+            return -1;
         }
     }
+
+    // Commit any pending journal transactions so data is durable.
+    for journal in BlockPageCache::global().all_journals() {
+        if let Err(e) = journal.force_commit_and_wait() {
+            log!("sys_fsync: journal commit error: {:?}", e);
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    }
+    0
 }
 
 /// Flush all dirty block cache pages to disk. Always succeeds from the
@@ -1443,6 +1454,12 @@ pub fn sys_sync() {
         x86_64::instructions::interrupts::are_enabled(),
         "sys_sync called with interrupts disabled"
     );
+    // Commit all pending journal transactions before flushing pages.
+    for journal in BlockPageCache::global().all_journals() {
+        if let Err(e) = journal.force_commit_and_wait() {
+            log!("sys_sync: journal commit error: {:?}", e);
+        }
+    }
     BlockPageCache::global().sync_all();
 }
 
