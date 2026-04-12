@@ -29,6 +29,7 @@ use crate::{
 use super::block_page_cache::CachedBlockPage;
 
 pub mod committer;
+pub mod replay;
 pub mod tx;
 
 // ---- Constants ---------------------------------------------------------------

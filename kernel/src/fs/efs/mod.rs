@@ -188,13 +188,64 @@ impl EfsDriver {
         let block_size_log2 = superblock.block_size_log2;
         let inodes_per_group = superblock.inodes_per_group;
 
+        // Replay committed-but-uncheckpointed journal transactions before
+        // constructing the live Journal (which opens a fresh active tx).
+        let replay_result = crate::fs::journal::replay::replay(
+            partition.device_id,
+            j_first_block,
+            jsb_block_count,
+            starting_lba,
+            jsb_head_seq,
+            jsb_tail_seq,
+        )?;
+
+        // After replay, reset the JSB: tail = head (all applied).
+        // head_block and tail_block start at replay_result.ring_blocks_consumed
+        // (if we replayed) or 0 (if clean).
+        let post_replay_head_seq = jsb_head_seq;
+        let post_replay_tail_seq = jsb_head_seq; // everything replayed
+
+        if replay_result.txs_applied > 0 {
+            // Write updated JSB with tail = head.
+            let updated_jsb = JournalSuperblock {
+                magic: JOURNAL_MAGIC,
+                version: 1,
+                block_count: jsb_block_count,
+                block_size: 4096,
+                tail_seq: post_replay_tail_seq,
+                head_seq: post_replay_head_seq,
+                crc32: 0,
+                reserved: [0u8; 28],
+            };
+            let crc = journal_sb_checksum(&updated_jsb);
+            let updated_jsb = JournalSuperblock {
+                crc32: crc,
+                ..updated_jsb
+            };
+            let jsb_lba = j_lba;
+            let mut jsb_block = vec![0u8; 4096];
+            let jsb_bytes: &[u8] = unsafe {
+                core::slice::from_raw_parts(
+                    &updated_jsb as *const JournalSuperblock as *const u8,
+                    core::mem::size_of::<JournalSuperblock>(),
+                )
+            };
+            jsb_block[..jsb_bytes.len()].copy_from_slice(jsb_bytes);
+            crate::drivers::ahci::direct::write_sectors_fua(
+                partition.device_id,
+                jsb_lba,
+                &jsb_block,
+                sectors_per_block,
+            )?;
+        }
+
         // j_first_block is already a partition-relative EFS block number.
         let journal = Journal::new(
             partition.device_id,
             j_first_block,
             jsb_block_count,
-            jsb_head_seq,
-            jsb_tail_seq,
+            post_replay_head_seq,
+            post_replay_tail_seq,
         );
 
         // Register the journal with the block page cache so writeback can
