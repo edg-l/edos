@@ -459,10 +459,17 @@ unsafe fn ensure_table_entry(
     phys_offset: VirtAddr,
 ) -> Option<PhysFrame> {
     if entry.flags().contains(PageTableFlags::PRESENT) {
+        // Upgrade a pre-existing restrictive intermediate (e.g. installed by
+        // a read-only SHM map via map_address) to have the permissive flags
+        // we want. Safe because effective access is the AND across all levels
+        // and the leaf enforces actual permissions.
+        let new_flags = entry.flags() | flags;
+        if new_flags != entry.flags() {
+            entry.set_flags(new_flags);
+        }
         Some(PhysFrame::containing_address(entry.addr()))
     } else {
         let new_frame = frame_allocator().allocate_frame()?;
-        // Zero the new table
         let virt = phys_offset + new_frame.start_address().as_u64();
         unsafe {
             core::ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, 4096);

@@ -200,6 +200,12 @@ impl MemoryManager {
     }
 
     /// Map a given physical address.
+    ///
+    /// Intermediate page-table entries (PML4/PML3/PML2) are installed and
+    /// upgraded as needed to be `PRESENT | WRITABLE | USER_ACCESSIBLE` so a
+    /// restrictive earlier mapping (e.g. read-only SHM) does not poison the
+    /// range for later writable mappings. x86-64 effective access is the AND
+    /// across all levels; the leaf flags control effective permissions.
     pub fn map_address(
         &mut self,
         virt_addr: VirtAddr,
@@ -210,12 +216,26 @@ impl MemoryManager {
         let frame = PhysFrame::containing_address(phys_addr);
         let mut frame_allocator = frame_allocator();
 
+        let parent_flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+
+        // Upgrade any existing restrictive intermediate entries. Use pml4_frame
+        // for user MMs; fall back to current CR3 for the kernel global mapper.
+        let pml4_frame = self.pml4_frame.unwrap_or_else(|| {
+            use x86_64::registers::control::Cr3;
+            Cr3::read().0
+        });
+        let phys_off = boot_info().physical_memory_offset;
+        let pml4_ptr = (phys_off + pml4_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
+        unsafe { upgrade_parent_entries(&mut *pml4_ptr, virt_addr, parent_flags) };
+
         unsafe {
             self.mapper
-                .map_to(
+                .map_to_with_table_flags(
                     page,
                     frame,
                     PageTableFlags::PRESENT | flags,
+                    parent_flags,
                     &mut *frame_allocator,
                 )?
                 .flush()
@@ -381,4 +401,50 @@ pub fn get_page_range(addr: VirtAddr, size: u64) -> PageRangeInclusive<Size4KiB>
 /// Align a stack pointer down to the required stack alignment (16 bytes for FPU/SSE)
 pub fn align_stack_pointer(stack_ptr: VirtAddr) -> VirtAddr {
     VirtAddr::new(stack_ptr.as_u64() & !(STACK_ALIGNMENT - 1))
+}
+
+/// Walk the page-table chain from `pml4` down to (but not including) the PML1
+/// leaf for `virt_addr`, OR-ing `flags` into every present intermediate entry.
+/// Does not create new entries (that is the mapper's job).  Required because
+/// `map_to_with_table_flags` only applies parent flags to NEWLY created
+/// intermediates, not existing ones.  Without this, a restrictive earlier
+/// mapping (e.g. read-only SHM) leaves PML2/3/4 entries without WRITABLE, and
+/// x86-64's AND-across-levels semantics then block any later writable leaf
+/// in the same 2 MiB / 1 GiB / 512 GiB range.
+unsafe fn upgrade_parent_entries(pml4: &mut PageTable, virt_addr: VirtAddr, flags: PageTableFlags) {
+    let a = virt_addr.as_u64();
+    let i4 = ((a >> 39) & 0x1FF) as usize;
+    let i3 = ((a >> 30) & 0x1FF) as usize;
+    let i2 = ((a >> 21) & 0x1FF) as usize;
+    let phys_off = boot_info().physical_memory_offset;
+    let pt_from_frame = |f: PhysFrame| -> &'static mut PageTable {
+        let virt = phys_off + f.start_address().as_u64();
+        unsafe { &mut *virt.as_mut_ptr::<PageTable>() }
+    };
+
+    let p4e = &mut pml4[i4];
+    if p4e.flags().contains(PageTableFlags::PRESENT) {
+        let new_flags = p4e.flags() | flags;
+        if new_flags != p4e.flags() {
+            p4e.set_flags(new_flags);
+        }
+        let pml3 = pt_from_frame(PhysFrame::containing_address(p4e.addr()));
+        let p3e = &mut pml3[i3];
+        if p3e.flags().contains(PageTableFlags::PRESENT) {
+            let new_flags = p3e.flags() | flags;
+            if new_flags != p3e.flags() {
+                p3e.set_flags(new_flags);
+            }
+            let pml2 = pt_from_frame(PhysFrame::containing_address(p3e.addr()));
+            let p2e = &mut pml2[i2];
+            if p2e.flags().contains(PageTableFlags::PRESENT)
+                && !p2e.flags().contains(PageTableFlags::HUGE_PAGE)
+            {
+                let new_flags = p2e.flags() | flags;
+                if new_flags != p2e.flags() {
+                    p2e.set_flags(new_flags);
+                }
+            }
+        }
+    }
 }
