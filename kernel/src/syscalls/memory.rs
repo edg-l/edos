@@ -676,7 +676,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                 user_arc.read().vmas.lock().insert(vma);
                 any_error = true;
             }
-            VmaBacking::ElfSegment { .. } | VmaBacking::Tls | VmaBacking::Stack => {
+            VmaBacking::Tls | VmaBacking::Stack => {
                 // Kernel-managed; re-insert and return error.
                 user_arc.read().vmas.lock().insert(vma);
                 any_error = true;

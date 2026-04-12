@@ -1,5 +1,4 @@
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 use x86_64::{
     VirtAddr,
@@ -30,14 +29,6 @@ use x86_64::structures::idt::PageFaultErrorCode;
 pub enum FaultSource {
     /// Zero-fill (Anonymous, Stack).
     Zero,
-    /// ELF segment data from an in-kernel buffer.
-    ElfData {
-        elf_data: Arc<Vec<u8>>,
-        file_offset: u64,
-        file_size: u64,
-        vaddr_offset: u64,
-        vma_start: VirtAddr,
-    },
     /// File-backed (MAP_PRIVATE or MAP_SHARED).
     FileBacked {
         inode: Arc<VfsInode>,
@@ -76,18 +67,6 @@ pub fn lookup_fault_vma(vmas: &VmaSet, fault_addr: VirtAddr) -> Option<FaultInfo
 
     let source = match &vma.backing {
         VmaBacking::Anonymous | VmaBacking::Stack => FaultSource::Zero,
-        VmaBacking::ElfSegment {
-            elf_data,
-            file_offset,
-            file_size,
-            vaddr_offset,
-        } => FaultSource::ElfData {
-            elf_data: elf_data.clone(),
-            file_offset: *file_offset,
-            file_size: *file_size,
-            vaddr_offset: *vaddr_offset,
-            vma_start: vma.start,
-        },
         VmaBacking::FileBacked {
             inode,
             file_offset,
@@ -131,7 +110,7 @@ pub struct FaultOutcome {
 }
 
 /// Fault in a single page given pre-extracted VMA info.
-/// For Zero/ElfData: allocates a frame, optionally copies ELF data, and maps it.
+/// For Zero (Anonymous/Stack): allocates a zeroed frame and maps it.
 /// For FileBacked: fetches the page from the inode page cache and maps it read-only + COW_BIT
 /// (MAP_PRIVATE) or with full prot flags (MAP_SHARED).
 /// Can be called after dropping the VMA lock.
@@ -227,7 +206,7 @@ pub fn fault_in_page(
             }
         }
     } else {
-        // --- Zero / ElfData path (original logic) ---
+        // --- Zero path (Anonymous, Stack) ---
 
         // Allocate a physical frame
         let frame = match frame_allocator().allocate_frame() {
@@ -244,42 +223,6 @@ pub fn fault_in_page(
         let frame_virt = phys_offset + frame.start_address().as_u64();
         unsafe {
             core::ptr::write_bytes(frame_virt.as_mut_ptr::<u8>(), 0, 4096);
-        }
-
-        // For ELF-backed pages, fill from the stored ELF data
-        if let FaultSource::ElfData {
-            elf_data,
-            file_offset,
-            file_size,
-            vaddr_offset,
-            vma_start,
-        } = &info.source
-        {
-            let page_off_in_vma = page_addr.as_u64() - vma_start.as_u64();
-            let seg_start = page_off_in_vma.saturating_sub(*vaddr_offset);
-            let seg_end = (page_off_in_vma + 4096).saturating_sub(*vaddr_offset);
-            let copy_start = seg_start.min(*file_size);
-            let copy_end = seg_end.min(*file_size);
-
-            if copy_end > copy_start {
-                let elf_src_offset = (file_offset + copy_start) as usize;
-                let elf_src_end = (file_offset + copy_end) as usize;
-                if elf_src_end <= elf_data.len() {
-                    let dst_offset = if page_off_in_vma < *vaddr_offset {
-                        (vaddr_offset - page_off_in_vma) as usize
-                    } else {
-                        0usize
-                    };
-                    let copy_len = (copy_end - copy_start) as usize;
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            elf_data[elf_src_offset..].as_ptr(),
-                            frame_virt.as_mut_ptr::<u8>().add(dst_offset),
-                            copy_len,
-                        );
-                    }
-                }
-            }
         }
 
         // Map the page

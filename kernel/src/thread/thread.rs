@@ -18,8 +18,8 @@ use intrusive_list::Link;
 use crate::{
     boot::boot_info,
     drivers::{fpu::FpuState, hpet::driver::get_hpet_timer},
-    fs::{self, path::Path},
-    loader::{ElfLoadError, TlsTemplate, load_elf_from_bytes},
+    fs::{self, inode::VfsInode, path::Path},
+    loader::{ElfLoadError, TlsTemplate, load_elf},
     memory::{
         USER_STACK_SIZE, USER_STACK_TOP,
         frame_allocator::frame_allocator,
@@ -438,7 +438,8 @@ impl Thread {
 
     /// Must provide entry point and cr3 page table.
     pub fn new_user(
-        elf_data: Arc<Vec<u8>>,
+        inode: Arc<VfsInode>,
+        path: &Path,
         name: Option<String>,
         argv: &[&[u8]],
         envp: &[&[u8]],
@@ -479,7 +480,7 @@ impl Thread {
             setup_user_stack(stack_top, argv, envp, &process_memory_manager)
                 .map_err(|_| ElfLoadError::MappingFailed)?;
 
-        let mut load_info = load_elf_from_bytes(elf_data.clone(), &mut process_memory_manager)?;
+        let mut load_info = load_elf(&inode, path, &mut process_memory_manager)?;
 
         let id = ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, Ordering::Relaxed));
 
@@ -533,8 +534,8 @@ impl Thread {
         // so that truncate/invalidate_mappings_above can unmap pages in this process.
         // Collect inode Arcs while holding the VmaSet lock, then register while
         // NOT holding the VmaSet lock to respect lock ordering (inode.mappers > vmas).
-        // No-op in Phase 2 (VMAs are ElfSegment from load_elf_from_bytes fallback);
-        // becomes live in Phase 3 when do_spawn calls load_elf directly.
+        // Registers this process as a mapper of every FileBacked VMA so that
+        // truncate/invalidate_mappings_above can unmap pages in this process.
         {
             let file_backed_inodes: Vec<Arc<crate::fs::inode::VfsInode>> = {
                 let user = user_state.read();
@@ -615,25 +616,12 @@ impl Thread {
         group: u32,
         cwd: Path,
     ) -> Result<Arc<Self>, ElfLoadError> {
-        // Get file info to know the size
-        let file_info = fs::api::file_info(path).map_err(|e| {
-            println!("Failed to get file info for {:?}: {:?}", path, e);
+        let inode = fs::api::resolve_inode(path).map_err(|e| {
+            println!("Failed to resolve inode for {:?}: {:?}", path, e);
             ElfLoadError::MappingFailed
         })?;
 
-        let file_size = file_info.size as usize;
-        if file_size == 0 {
-            println!("File {:?} is empty", path);
-            return Err(ElfLoadError::MissingSegments);
-        }
-
-        // Read the entire file, wrap in Arc for lazy ELF loading
-        let elf_data = Arc::new(fs::api::read_bytes(path, 0, file_size).map_err(|e| {
-            println!("Failed to read file {:?}: {:?}", path, e);
-            ElfLoadError::MappingFailed
-        })?);
-
-        Self::new_user(elf_data, name, argv, envp, user, group, cwd)
+        Self::new_user(inode, path, name, argv, envp, user, group, cwd)
     }
 
     pub fn free(&self) {
@@ -753,21 +741,6 @@ impl Thread {
                     }
                     VmaBacking::Tls => {
                         // Already cleaned up above (per-thread TLS cleanup)
-                    }
-                    VmaBacking::ElfSegment { .. } => {
-                        // Pages may be lazily faulted -- only unmap present ones
-                        use x86_64::structures::paging::{Mapper, Page, Size4KiB};
-                        let page_count = (vma.size() + 0xFFF) / 4096;
-                        for i in 0..page_count {
-                            let virt = VirtAddr::new(vma.start.as_u64() + i * 4096);
-                            let page: Page<Size4KiB> = Page::containing_address(virt);
-                            if let Ok(phys) = memory_manager.mapper.translate_page(page) {
-                                if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
-                                    flush.ignore();
-                                }
-                                unsafe { frame_allocator().deallocate_frame(phys) };
-                            }
-                        }
                     }
                     VmaBacking::SharedMemory { shm_id } => {
                         use x86_64::structures::paging::{Mapper, Page, Size4KiB};

@@ -240,18 +240,6 @@ extern "C" fn test_thread3(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
 }
 
 /// Boot loader kthread: reads a binary from disk and sends it back via mailbox.
-extern "C" fn boot_load_binary(arg: *mut u8) -> ! {
-    struct LoadRequest {
-        path: Path,
-        result_tx: Arc<Mailbox<alloc::vec::Vec<u8>, ()>>,
-    }
-
-    let req = *unsafe { Box::from_raw(arg as *mut LoadRequest) };
-    let size = fs::api::file_info(&req.path).unwrap().size as usize;
-    let data = fs::api::read_bytes(&req.path, 0, size).unwrap();
-    req.result_tx.send(data);
-    kthread_exit(0);
-}
 
 pub fn mount_system_fs() -> ! {
     log!("Starting mountfs thread");
@@ -329,53 +317,26 @@ pub fn mount_system_fs() -> ! {
 
     let default_env: [&[u8]; 3] = [b"PATH=/bin", b"HOME=/", b"PWD=/"];
 
-    // Parallel boot: load 3 binaries concurrently via per-inode locking + NCQ.
-    log!("Loading boot binaries (parallel)");
+    log!("Spawning user threads via page-cache loader");
 
-    #[expect(unused)]
-    struct LoadRequest {
-        path: Path,
-        result_tx: Arc<Mailbox<alloc::vec::Vec<u8>, ()>>,
-    }
+    let spawn_binary = |name: &str, argv0: &[u8]| {
+        let path = root.join(name).normalize();
+        let inode = crate::fs::api::resolve_inode(&path)
+            .unwrap_or_else(|e| panic!("resolve_inode {name}: {e:?}"));
+        Thread::new_user(
+            inode,
+            &path,
+            Some(name.to_string()),
+            &[argv0],
+            &default_env,
+            0,
+            0,
+            root.clone(),
+        )
+        .unwrap_or_else(|e| panic!("Thread::new_user {name}: {e:?}"))
+    };
 
-    let binaries: [(&str, Arc<Mailbox<alloc::vec::Vec<u8>, ()>>); 3] = [
-        ("bin/edos-wm", Arc::new(Mailbox::with_capacity(1))),
-        ("bin/edos-taskbar", Arc::new(Mailbox::with_capacity(1))),
-        ("bin/edos-terminal", Arc::new(Mailbox::with_capacity(1))),
-    ];
-
-    for (name, tx) in &binaries {
-        let req = Box::new(LoadRequest {
-            path: root.join(name).normalize(),
-            result_tx: tx.clone(),
-        });
-        queue_spawn_kthread_named_arg(
-            "boot-load",
-            boot_load_binary as *const () as u64,
-            Box::into_raw(req) as *mut u8,
-        );
-    }
-
-    // Wait for all 3 to complete.
-    let wm_data = Arc::new(binaries[0].1.recv().payload.take().unwrap());
-    log!("Loaded /bin/edos-wm ({} bytes)", wm_data.len());
-    let taskbar_data = Arc::new(binaries[1].1.recv().payload.take().unwrap());
-    log!("Loaded /bin/edos-taskbar ({} bytes)", taskbar_data.len());
-    let terminal_data = Arc::new(binaries[2].1.recv().payload.take().unwrap());
-    log!("Loaded /bin/edos-terminal ({} bytes)", terminal_data.len());
-    log!("Spawning user threads");
-
-    // Spawn initial user threads.
-    let wm_thread = Thread::new_user(
-        wm_data,
-        Some("edos-wm".to_string()),
-        &[b"edos-wm"],
-        &default_env,
-        0,
-        0,
-        root.clone(),
-    )
-    .unwrap();
+    let wm_thread = spawn_binary("bin/edos-wm", b"edos-wm");
     let wm_tid = queue_spawn_thread(wm_thread.clone());
     log!(
         "Spawned edos-wm tid={} cpu={}",
@@ -383,16 +344,7 @@ pub fn mount_system_fs() -> ! {
         wm_thread.cpu.load(core::sync::atomic::Ordering::Relaxed)
     );
 
-    let taskbar_thread = Thread::new_user(
-        taskbar_data,
-        Some("edos-taskbar".to_string()),
-        &[b"edos-taskbar"],
-        &default_env,
-        0,
-        0,
-        root.clone(),
-    )
-    .unwrap();
+    let taskbar_thread = spawn_binary("bin/edos-taskbar", b"edos-taskbar");
     let tb_tid = queue_spawn_thread(taskbar_thread.clone());
     log!(
         "Spawned edos-taskbar tid={} cpu={}",
@@ -402,16 +354,7 @@ pub fn mount_system_fs() -> ! {
             .load(core::sync::atomic::Ordering::Relaxed)
     );
 
-    let terminal_thread = Thread::new_user(
-        terminal_data,
-        Some("edos-terminal".to_string()),
-        &[b"edos-terminal"],
-        &default_env,
-        0,
-        0,
-        root.clone(),
-    )
-    .unwrap();
+    let terminal_thread = spawn_binary("bin/edos-terminal", b"edos-terminal");
     let tm_tid = queue_spawn_thread(terminal_thread.clone());
     log!(
         "Spawned edos-terminal tid={} cpu={}",

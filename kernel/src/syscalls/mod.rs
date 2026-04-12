@@ -1154,8 +1154,11 @@ fn do_spawn(
         }
     };
 
-    let file_data = match fs_api::read_bytes(path, 0, finfo.size as usize) {
-        Ok(data) => Arc::new(data),
+    // Read up to 258 bytes to detect shebang or ELF magic without loading the
+    // full binary. 258 covers the 4-byte ELF magic and a typical shebang line.
+    let probe_len = core::cmp::min(finfo.size as usize, 258);
+    let probe = match fs_api::read_bytes(path, 0, probe_len) {
+        Ok(data) => data,
         Err(_) => {
             x86_64::instructions::interrupts::disable();
             info.lock().errno = Errno::EINVAL;
@@ -1164,14 +1167,14 @@ fn do_spawn(
     };
 
     // Detect shebang (#!) at depth 0. Only recurse once to avoid infinite loops.
-    if depth == 0 && file_data.starts_with(b"#!") {
+    if depth == 0 && probe.starts_with(b"#!") {
         // Parse the first line (up to newline or 256 bytes)
-        let first_line_end = file_data[2..]
+        let first_line_end = probe[2..]
             .iter()
             .position(|&b| b == b'\n')
             .map(|p| p + 2)
-            .unwrap_or_else(|| core::cmp::min(file_data.len(), 258));
-        let shebang_line = core::str::from_utf8(&file_data[2..first_line_end])
+            .unwrap_or_else(|| core::cmp::min(probe.len(), 258));
+        let shebang_line = core::str::from_utf8(&probe[2..first_line_end])
             .unwrap_or("")
             .trim();
 
@@ -1233,13 +1236,22 @@ fn do_spawn(
     }
 
     // Reject files that are neither ELF nor shebang
-    if !file_data.starts_with(b"\x7fELF") {
+    if !probe.starts_with(b"\x7fELF") {
         x86_64::instructions::interrupts::disable();
         info.lock().errno = Errno::ENOEXEC;
         return !0u64;
     }
 
-    let elf_data = file_data;
+    // Resolve the inode for file-backed ELF loading. The inode Arc is held for
+    // the duration of the mapping via each VmaBacking::FileBacked.
+    let inode = match fs_api::resolve_inode(path) {
+        Ok(ino) => ino,
+        Err(_) => {
+            x86_64::instructions::interrupts::disable();
+            info.lock().errno = Errno::ENOEXEC;
+            return !0u64;
+        }
+    };
 
     // Clone parent FD entries while interrupts are still enabled (BlockingMutex
     // requires interrupts for contention handling).
@@ -1257,7 +1269,8 @@ fn do_spawn(
     let envp_slices: Vec<&[u8]> = envp_storage.iter().map(|e| e.as_slice()).collect();
 
     let user_thread = match Thread::new_user(
-        elf_data,
+        inode,
+        path,
         Some(path_str.to_string()),
         &argv_slices,
         &envp_slices,
@@ -1890,7 +1903,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
 
     let child_id = allocate_thread_id();
 
-    let child_user = Arc::new(RwLock::new(crate::thread::UserThread {
+    let child_user_arc = Arc::new(RwLock::new(crate::thread::UserThread {
         pid: child_id.0,
         cr3: (child_pml4_frame, parent_cr3.1),
         memory_manager: child_mm.clone(),
@@ -1922,7 +1935,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         exit_code: AtomicI32::new(0),
         killed: AtomicBool::new(false),
         signal: SignalState::new(),
-        user: Some(child_user),
+        user: Some(child_user_arc.clone()),
         rq_link: Link::new(),
         rq_boosted: AtomicBool::new(false),
         context_saved: AtomicBool::new(true),
@@ -1949,6 +1962,30 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
             group_id: parent_group_id,
         })),
     );
+
+    // Task 3.4b: Register the fork child as a mapper of every FileBacked VMA it
+    // inherited so that truncate/invalidate_mappings_above can reach the child.
+    // Collect inode Arcs under the VmaSet lock, then register outside the lock
+    // to avoid holding two locks simultaneously (inode.mappers > vmas ordering).
+    {
+        let file_backed_inodes: Vec<Arc<crate::fs::inode::VfsInode>> = {
+            let child_user_read = child_user_arc.read();
+            let vmas = child_user_read.vmas.lock();
+            vmas.iter()
+                .filter_map(|vma| {
+                    if let VmaBacking::FileBacked { inode, .. } = &vma.backing {
+                        Some(Arc::clone(inode))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let weak = Arc::downgrade(&child_user_arc);
+        for inode in file_backed_inodes {
+            inode.mappers.lock().push(weak.clone());
+        }
+    }
 
     crate::thread::util::queue_spawn_thread(child_thread);
 
