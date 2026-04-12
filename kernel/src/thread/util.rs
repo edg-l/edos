@@ -14,7 +14,6 @@ use crate::{
         valloc::vmalloc,
     },
     print, println,
-    smp::NUM_CPUS,
     thread::{
         UserThreadInfo,
         scheduler::{SCHEDULERS, Scheduler, exit_thread, sched},
@@ -92,24 +91,22 @@ pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> Th
 }
 
 pub fn pick_sched() -> &'static Scheduler {
-    let num_cpus = NUM_CPUS.load(Ordering::Relaxed);
-
+    // SCHEDULERS is keyed by lapic_id, which is NOT guaranteed to be
+    // contiguous 0..num_cpus on real hardware. Iterate values directly.
     let schedulers = SCHEDULERS.read();
-    let mut best_id = 0;
-    let mut min_count = u64::MAX;
-    for i in 0..num_cpus {
-        if let Some(sched) = schedulers.get(&(i as u32)).cloned() {
-            let count = sched.thread_count.load(Ordering::Acquire);
-            if count < min_count {
-                min_count = count;
-                best_id = i;
-            }
+    let mut best: Option<(u32, u64)> = None;
+    for (&lapic_id, sched) in schedulers.iter() {
+        let count = sched.thread_count.load(Ordering::Acquire);
+        match best {
+            Some((_, best_count)) if count >= best_count => {}
+            _ => best = Some((lapic_id, count)),
         }
     }
 
+    let (best_lapic, _) = best.expect("pick_sched: no schedulers registered");
     schedulers
-        .get(&(best_id as u32))
-        .expect("failed to find scheduler")
+        .get(&best_lapic)
+        .expect("pick_sched: selected scheduler disappeared")
 }
 
 /// Exits a kthread.
