@@ -53,6 +53,11 @@ const PAGE_SIZE: usize = 4096;
 const SECTORS_PER_PAGE: u16 = 8;
 /// Device IDs >= this value are USB storage devices.
 const USB_DEVICE_ID_BASE: u64 = 1000;
+/// A dirty page is only written back if it has been dirty for at least this
+/// long. Matches Linux's `dirty_expire_centisecs` concept (Linux default 30s;
+/// we use 5s since our metadata volume is small). Forced flushes (sync/fsync)
+/// ignore this and flush everything immediately.
+const DIRTY_EXPIRE_MS: u64 = 5_000;
 
 // ---------------------------------------------------------------------------
 // CachedBlockPage
@@ -63,6 +68,9 @@ pub struct CachedBlockPage {
     pub key: (u64, u64),
     pub frame: PhysFrame,
     pub dirty: AtomicBool,
+    /// HPET tick when this page was first dirtied (0 = not dirty).
+    /// Used for dirty_expire: writeback skips recently-dirtied pages.
+    pub dirty_since_tick: AtomicU64,
     pub pin_count: AtomicU32,
     /// Serializes partial and full-page writers on the same page.
     pub write_lock: BlockingMutex<()>,
@@ -74,6 +82,7 @@ impl CachedBlockPage {
             key,
             frame,
             dirty: AtomicBool::new(false),
+            dirty_since_tick: AtomicU64::new(0),
             pin_count: AtomicU32::new(0),
             write_lock: BlockingMutex::new(()),
         }
@@ -101,15 +110,31 @@ impl CachedBlockPage {
     }
 
     pub fn mark_dirty(&self) {
-        self.dirty.store(true, Ordering::Release);
+        // Only set the timestamp on the first dirty (not re-dirty).
+        if !self.dirty.swap(true, Ordering::AcqRel) {
+            let tick = crate::timer::Instant::now().tick();
+            self.dirty_since_tick.store(tick, Ordering::Release);
+        }
     }
 
     pub fn clear_dirty(&self) {
         self.dirty.store(false, Ordering::Release);
+        self.dirty_since_tick.store(0, Ordering::Release);
     }
 
     pub fn is_dirty(&self) -> bool {
         self.dirty.load(Ordering::Acquire)
+    }
+
+    /// Returns true if this page has been dirty for at least `DIRTY_EXPIRE_MS`.
+    pub fn is_expired(&self) -> bool {
+        let tick = self.dirty_since_tick.load(Ordering::Acquire);
+        if tick == 0 {
+            return false;
+        }
+        let now = crate::timer::Instant::now();
+        let since = crate::timer::Instant::from_tick(tick);
+        now.duration_since(since).as_millis() as u64 >= DIRTY_EXPIRE_MS
     }
 
     pub fn pin(&self) {
@@ -730,7 +755,10 @@ impl BlockPageCache {
     ///
     /// Uses snapshot-then-conditional-remove to avoid losing pages that are
     /// re-dirtied while we are writing them. Returns the number of bytes written.
-    pub fn flush_dirty_once(&self) -> Result<u64, AhciError> {
+    /// Flush dirty pages to disk. If `force` is false, only pages that have
+    /// been dirty for at least `DIRTY_EXPIRE_MS` are flushed (periodic writeback).
+    /// If `force` is true, all dirty pages are flushed immediately (sync/fsync).
+    pub fn flush_dirty_once(&self, force: bool) -> Result<u64, AhciError> {
         let mut bytes_written: u64 = 0;
 
         for (si, shard_lock) in self.shards.iter().enumerate() {
@@ -780,10 +808,15 @@ impl BlockPageCache {
                     }
                 }
 
+                // Dirty-expire: skip recently-dirtied pages on periodic writeback.
+                // Forced flushes (sync/fsync) bypass this to guarantee durability.
+                if !force && !page.is_expired() {
+                    continue;
+                }
+
                 // Acquire write_lock to serialize against concurrent writers.
                 let _wg = page.write_lock.lock();
                 if !page.is_dirty() {
-                    // Already flushed by a concurrent path (e.g. fsync).
                     continue;
                 }
 

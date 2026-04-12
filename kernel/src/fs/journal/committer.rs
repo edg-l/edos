@@ -22,12 +22,12 @@ pub fn committer_thread() -> ! {
             let dummy_wq = crate::thread::waitqueue::WaitQueue::new();
             dummy_wq.wait_until_timeout(|| false, Some(Duration::from_millis(200)));
         } else {
-            // Wait on the first journal's kick queue with a 1-second timeout,
-            // then process all journals.
+            // Wait on the first journal's kick queue with a 5-second timeout
+            // (matches Linux jbd2 default commit interval), then process all.
             let wq = &journals[0].commit_kick_wq;
             wq.wait_until_timeout(
                 || journals.iter().any(|j| j.has_pending_work()),
-                Some(Duration::from_secs(1)),
+                Some(Duration::from_secs(5)),
             );
         }
 

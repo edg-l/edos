@@ -27,14 +27,44 @@ pub fn writeback_thread() -> ! {
                 },
                 Some(Duration::from_secs(5)),
             );
-            // Treat the wakeup (kick or timer expiry) as an implicit request
-            // so the loop always runs at least one flush pass.
-            cache.flush_requested.fetch_add(1, Ordering::Release);
+
+            // Re-check: if still req == done, this was a periodic timer wake.
+            // Use force=false to respect dirty_expire. If someone kicked while
+            // we slept, force=true to honor sync/fsync semantics.
+            let new_req = cache.flush_requested.load(Ordering::Acquire);
+            let forced = new_req != done;
+            if !forced {
+                // Periodic timer: bump requested so we run one pass.
+                cache.flush_requested.fetch_add(1, Ordering::Release);
+            }
+
+            let bytes = match cache.flush_dirty_once(forced) {
+                Ok(b) => b,
+                Err(e) => {
+                    log!("writeback: flush error {:?}", e);
+                    0
+                }
+            };
+
+            cache.stats.writeback_runs.fetch_add(1, Ordering::Relaxed);
+            cache
+                .stats
+                .writeback_bytes
+                .fetch_add(bytes, Ordering::Relaxed);
+            if bytes > 0 {
+                log!("writeback: flushed {} bytes", bytes);
+            }
+
+            let completed_req = cache.flush_requested.load(Ordering::Acquire);
+            cache
+                .flush_completed
+                .store(completed_req, Ordering::Release);
+            cache.sync_done_wq.wake_all();
             continue;
         }
 
-        // Run one flush pass.
-        let bytes = match cache.flush_dirty_once() {
+        // Explicit kick (sync/fsync): force=true, flush everything.
+        let bytes = match cache.flush_dirty_once(true) {
             Ok(b) => b,
             Err(e) => {
                 log!("writeback: flush error {:?}", e);
