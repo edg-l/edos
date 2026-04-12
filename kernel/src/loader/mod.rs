@@ -1,7 +1,6 @@
 use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use elf::{ElfBytes, endian::LittleEndian};
 use thiserror::Error;
 use x86_64::{VirtAddr, align_up, structures::paging::PageTableFlags};
 
@@ -45,8 +44,6 @@ pub struct LoadedInfo {
 
 #[derive(Debug, Error)]
 pub enum ElfLoadError {
-    #[error(transparent)]
-    InvalidElf(#[from] elf::ParseError),
     #[error("UnsupportedArchitecture")]
     UnsupportedArchitecture,
     #[error("MappingFailed")]
@@ -154,52 +151,78 @@ pub fn load_elf(
     }
 
     // --- Page-cache path ---
+    //
+    // Hand-parse the ehdr, program-header table, and section-header table
+    // directly from the Elf64 on-disk layout. We avoid `elf::ElfBytes` here:
+    // `minimal_parse` requires a single contiguous slice that spans both the
+    // phdr and shdr tables, but linkers place shdrs at the end of the file
+    // (edos-wm has e_shoff around 4.38 MiB), and we don't want to pull that
+    // much into kernel memory just to enumerate headers.
 
-    // Read a bounded header window: Elf64_Ehdr (64 bytes) tells us where the
-    // program-header and section-header tables are. We then read enough bytes to
-    // cover [0, e_shoff + e_shentsize * e_shnum) in one shot, capped at 64 KiB.
-    // If the tables extend beyond 64 KiB, fail with MissingSegments to keep the
-    // kernel heap bounded (binary layout is unexpected).
-    const HEADER_CAP: usize = 64 * 1024;
+    // Elf64_Ehdr field offsets (64-byte header, little-endian).
+    const E_TYPE_OFF: usize = 0x10;
+    const E_MACHINE_OFF: usize = 0x12;
+    const E_ENTRY_OFF: usize = 0x18;
+    const E_PHOFF_OFF: usize = 0x20;
+    const E_SHOFF_OFF: usize = 0x28;
+    const E_PHENTSIZE_OFF: usize = 0x36;
+    const E_PHNUM_OFF: usize = 0x38;
+    const E_SHENTSIZE_OFF: usize = 0x3A;
+    const E_SHNUM_OFF: usize = 0x3C;
 
-    // Read the fixed-size ELF header first.
+    const EM_X86_64: u16 = 62;
+    const ET_EXEC: u16 = 2;
+    const ET_DYN: u16 = 3;
+    const PT_LOAD: u32 = 1;
+    const PT_TLS: u32 = 7;
+    const PF_X: u32 = 1;
+    const PF_W: u32 = 2;
+    const PF_R: u32 = 4;
+    const SHT_RELA: u32 = 4;
+
+    const PHDR_SIZE: usize = 56;
+    const SHDR_SIZE: usize = 64;
+
     let ehdr_bytes = read_file_range(path, 0, 64)?;
     if ehdr_bytes.len() < 64 {
         return Err(ElfLoadError::MissingSegments);
     }
 
-    // ElfBytes::minimal_parse validates that the shdr/phdr tables fit within the
-    // slice it is given, so we can't call it on the 64-byte ehdr buffer when
-    // e_shoff points near the end of the file. Hand-parse the table offsets and
-    // sizes from the fixed Elf64_Ehdr layout and issue a single bounded read that
-    // covers [0, sh_end) before handing the buffer to the elf crate.
-    let e_shoff = u64::from_le_bytes(ehdr_bytes[0x28..0x30].try_into().unwrap());
-    let e_shentsize = u16::from_le_bytes(ehdr_bytes[0x3A..0x3C].try_into().unwrap());
-    let e_shnum = u16::from_le_bytes(ehdr_bytes[0x3C..0x3E].try_into().unwrap());
+    let e_type = u16::from_le_bytes(ehdr_bytes[E_TYPE_OFF..E_TYPE_OFF + 2].try_into().unwrap());
+    let e_machine = u16::from_le_bytes(
+        ehdr_bytes[E_MACHINE_OFF..E_MACHINE_OFF + 2]
+            .try_into()
+            .unwrap(),
+    );
+    let e_entry = u64::from_le_bytes(ehdr_bytes[E_ENTRY_OFF..E_ENTRY_OFF + 8].try_into().unwrap());
+    let e_phoff = u64::from_le_bytes(ehdr_bytes[E_PHOFF_OFF..E_PHOFF_OFF + 8].try_into().unwrap());
+    let e_shoff = u64::from_le_bytes(ehdr_bytes[E_SHOFF_OFF..E_SHOFF_OFF + 8].try_into().unwrap());
+    let e_phentsize = u16::from_le_bytes(
+        ehdr_bytes[E_PHENTSIZE_OFF..E_PHENTSIZE_OFF + 2]
+            .try_into()
+            .unwrap(),
+    );
+    let e_phnum = u16::from_le_bytes(ehdr_bytes[E_PHNUM_OFF..E_PHNUM_OFF + 2].try_into().unwrap());
+    let e_shentsize = u16::from_le_bytes(
+        ehdr_bytes[E_SHENTSIZE_OFF..E_SHENTSIZE_OFF + 2]
+            .try_into()
+            .unwrap(),
+    );
+    let e_shnum = u16::from_le_bytes(ehdr_bytes[E_SHNUM_OFF..E_SHNUM_OFF + 2].try_into().unwrap());
 
-    let sh_end =
-        (e_shoff as usize).saturating_add((e_shentsize as usize).saturating_mul(e_shnum as usize));
-
-    if sh_end > HEADER_CAP {
-        return Err(ElfLoadError::MissingSegments);
-    }
-
-    // Read [0, sh_end) -- covers ehdr, phdrs, and shdrs.
-    let header_buf = read_file_range(path, 0, sh_end as u64)?;
-    let elf_file: ElfBytes<'_, LittleEndian> = ElfBytes::minimal_parse(&header_buf)?;
-
-    let header = elf_file.ehdr;
-
-    if header.e_machine != elf::abi::EM_X86_64 {
+    if e_machine != EM_X86_64 {
         return Err(ElfLoadError::UnsupportedArchitecture);
     }
-    if header.e_entry == 0 {
+    if e_entry == 0 {
         return Err(ElfLoadError::NoEntryPoint);
     }
+    if e_phentsize as usize != PHDR_SIZE || e_shentsize as usize != SHDR_SIZE {
+        return Err(ElfLoadError::UnsupportedArchitecture);
+    }
 
-    let load_base = match header.e_type {
-        elf::abi::ET_EXEC => VirtAddr::new(0),
-        elf::abi::ET_DYN => VirtAddr::new(0x400000),
+    let load_base = match e_type {
+        ET_EXEC => VirtAddr::new(0),
+        ET_DYN => VirtAddr::new(0x400000),
         _ => return Err(ElfLoadError::UnsupportedArchitecture),
     };
 
@@ -208,16 +231,30 @@ pub fn load_elf(
     let mut memory_regions: Vec<Vma> = Vec::new();
     let mut tls_template: Option<TlsTemplate> = None;
 
-    let program_headers = elf_file.segments().ok_or(ElfLoadError::MissingSegments)?;
+    // Program header table (targeted read).
+    let phdr_bytes_len = (e_phnum as u64) * (PHDR_SIZE as u64);
+    let phdr_bytes = read_file_range(path, e_phoff, phdr_bytes_len)?;
+    if phdr_bytes.len() < phdr_bytes_len as usize {
+        return Err(ElfLoadError::MissingSegments);
+    }
 
     // Task 2.4: Build FileBacked + BSS VMAs for each PT_LOAD.
-    for ph in program_headers.iter() {
-        if ph.p_type == elf::abi::PT_LOAD {
-            if ph.p_memsz == 0 {
+    for i in 0..e_phnum as usize {
+        let ph = &phdr_bytes[i * PHDR_SIZE..(i + 1) * PHDR_SIZE];
+        let p_type = u32::from_le_bytes(ph[0..4].try_into().unwrap());
+        let p_flags = u32::from_le_bytes(ph[4..8].try_into().unwrap());
+        let p_offset = u64::from_le_bytes(ph[8..16].try_into().unwrap());
+        let p_vaddr = u64::from_le_bytes(ph[16..24].try_into().unwrap());
+        let p_filesz = u64::from_le_bytes(ph[32..40].try_into().unwrap());
+        let p_memsz = u64::from_le_bytes(ph[40..48].try_into().unwrap());
+        let p_align = u64::from_le_bytes(ph[48..56].try_into().unwrap());
+
+        if p_type == PT_LOAD {
+            if p_memsz == 0 {
                 continue;
             }
 
-            let vaddr = base_addr + ph.p_vaddr;
+            let vaddr = base_addr + p_vaddr;
             let page_aligned_vaddr = VirtAddr::new(vaddr.as_u64() & !0xfff);
             let vaddr_offset = vaddr.as_u64() - page_aligned_vaddr.as_u64();
 
@@ -225,28 +262,28 @@ pub fn load_elf(
             // file_offset = p_offset - vaddr_offset is page-aligned. A linker that
             // violates this would produce incorrect page-cache lookups.
             debug_assert!(
-                (ph.p_offset.wrapping_sub(vaddr_offset)) & 0xfff == 0,
+                (p_offset.wrapping_sub(vaddr_offset)) & 0xfff == 0,
                 "ELF segment p_offset must share low bits with p_vaddr"
             );
 
-            let file_offset = ph.p_offset - vaddr_offset; // page-aligned file byte offset
+            let file_offset = p_offset - vaddr_offset; // page-aligned file byte offset
 
             let mut prot = VmaProt::empty();
-            if ph.p_flags & elf::abi::PF_R != 0 {
+            if p_flags & PF_R != 0 {
                 prot |= VmaProt::READ;
             }
-            if ph.p_flags & elf::abi::PF_W != 0 {
+            if p_flags & PF_W != 0 {
                 prot |= VmaProt::WRITE;
             }
-            if ph.p_flags & elf::abi::PF_X != 0 {
+            if p_flags & PF_X != 0 {
                 prot |= VmaProt::EXEC;
             }
 
-            let writable_mapping = ph.p_flags & elf::abi::PF_W != 0;
+            let writable_mapping = p_flags & PF_W != 0;
 
             // Number of pages that contain file data (including the partial last page).
-            let file_last_page_end = align_up(vaddr_offset + ph.p_filesz, 4096);
-            let mem_last_page_end = align_up(vaddr_offset + ph.p_memsz, 4096);
+            let file_last_page_end = align_up(vaddr_offset + p_filesz, 4096);
+            let mem_last_page_end = align_up(vaddr_offset + p_memsz, 4096);
             let file_page_count = (file_last_page_end / 4096) as usize;
 
             // File-backed VMA covers all pages that touch file data.
@@ -280,30 +317,26 @@ pub fn load_elf(
                 });
             }
 
-            let segment_end = ph.p_vaddr + ph.p_memsz;
+            let segment_end = p_vaddr + p_memsz;
             max_addr = max_addr.max(segment_end + load_base.as_u64());
-        } else if ph.p_type == elf::abi::PT_TLS {
+        } else if p_type == PT_TLS {
             // Task 2.5: TLS template via targeted read_file_range.
-            if ph.p_memsz == 0 {
+            if p_memsz == 0 {
                 continue;
             }
 
-            log!(
-                "elf: TLS segment: filesz={} memsz={}",
-                ph.p_filesz,
-                ph.p_memsz
-            );
+            log!("elf: TLS segment: filesz={} memsz={}", p_filesz, p_memsz);
 
-            let init_data = if ph.p_filesz == 0 {
+            let init_data = if p_filesz == 0 {
                 Vec::new()
             } else {
-                read_file_range(path, ph.p_offset, ph.p_filesz)?
+                read_file_range(path, p_offset, p_filesz)?
             };
 
             tls_template = Some(TlsTemplate {
                 init_data,
-                mem_size: ph.p_memsz,
-                align: ph.p_align.max(1),
+                mem_size: p_memsz,
+                align: p_align.max(1),
             });
         }
     }
@@ -312,14 +345,25 @@ pub fn load_elf(
     let write_flags =
         PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
 
-    let section_headers = elf_file.section_headers().unwrap();
+    // Section header table (targeted read).
+    let shdr_bytes_len = (e_shnum as u64) * (SHDR_SIZE as u64);
+    let shdr_bytes = read_file_range(path, e_shoff, shdr_bytes_len)?;
+    if shdr_bytes.len() < shdr_bytes_len as usize {
+        return Err(ElfLoadError::MissingSegments);
+    }
+
     let mut reloc_pages: BTreeSet<VirtAddr> = BTreeSet::new();
 
-    for sh in section_headers.iter() {
-        match sh.sh_type {
-            elf::abi::SHT_RELA => {
+    for i in 0..e_shnum as usize {
+        let sh = &shdr_bytes[i * SHDR_SIZE..(i + 1) * SHDR_SIZE];
+        let sh_type = u32::from_le_bytes(sh[4..8].try_into().unwrap());
+        let sh_offset = u64::from_le_bytes(sh[24..32].try_into().unwrap());
+        let sh_size = u64::from_le_bytes(sh[32..40].try_into().unwrap());
+
+        match sh_type {
+            SHT_RELA => {
                 // Read relocation section data via targeted read_file_range.
-                let rela_bytes = read_file_range(path, sh.sh_offset, sh.sh_size)?;
+                let rela_bytes = read_file_range(path, sh_offset, sh_size)?;
 
                 // Each Elf64_Rela entry is 24 bytes: r_offset (8), r_info (8), r_addend (8).
                 const RELA_SIZE: usize = 24;
@@ -390,11 +434,14 @@ pub fn load_elf(
                     }
                 }
             }
-            elf::abi::SHT_REL => {
+            // SHT_REL (9): unsupported on x86_64 (we use RELA only).
+            9 => {
                 panic!("REL relocation unsupported");
             }
-            elf::abi::SHT_INIT_ARRAY => {
-                println!("INIT ARRAY FOUND: {:?}", sh);
+            // SHT_INIT_ARRAY (14): noted but not invoked here; the runtime
+            // handles init array calls in _start.
+            14 => {
+                println!("INIT ARRAY FOUND: offset={:#x} size={}", sh_offset, sh_size);
             }
             _ => {}
         }
@@ -433,7 +480,7 @@ pub fn load_elf(
         max_addr = 0x10000000;
     }
 
-    let actual_entry = VirtAddr::new(load_base.as_u64() + header.e_entry);
+    let actual_entry = VirtAddr::new(load_base.as_u64() + e_entry);
 
     log!(
         "elf: loaded at {:#x}, entry={:#x} (file-backed path)",
