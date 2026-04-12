@@ -323,13 +323,30 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             prot: vma_prot,
             flags: vma_flags,
             backing: VmaBacking::FileBacked {
-                inode,
+                inode: Arc::clone(&inode),
                 file_offset,
                 shared: is_shared,
                 writable_mapping,
                 pages: alloc::vec![None; num_pages],
             },
         });
+
+        // D.1: Register this process in the inode's reverse map so that a future
+        // truncate can walk all mappers and unmap PTEs past the new EOF.
+        // Entries are Weak to avoid pinning the process indefinitely; tombstones
+        // are cleaned up lazily during truncate invalidation.
+        {
+            let weak = Arc::downgrade(&user_arc);
+            let mut mappers = inode.mappers.lock();
+            let already = mappers.iter().any(|w| {
+                w.upgrade()
+                    .map(|a| Arc::ptr_eq(&a, &user_arc))
+                    .unwrap_or(false)
+            });
+            if !already {
+                mappers.push(weak);
+            }
+        }
 
         if is_shared {
             log!(

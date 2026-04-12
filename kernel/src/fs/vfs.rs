@@ -12,7 +12,15 @@ use super::{
     Error, File, FileAttrs, FileKind, FileSystem, MmapRegion, MountInfo, StatFs, dentry,
     handle::Pollable, inode::VfsInode, path::Path,
 };
-use crate::{fs::gpt::FilesystemType, memory::mapper::MemoryManager};
+use x86_64::{
+    VirtAddr,
+    structures::paging::{Mapper, Page, Size4KiB},
+};
+
+use crate::{
+    fs::gpt::FilesystemType,
+    memory::{frame_allocator::frame_allocator, mapper::MemoryManager, vma::VmaBacking},
+};
 
 static NEXT_MOUNT_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -436,6 +444,11 @@ pub fn truncate(op: &VfsOp, size: u64) -> Result<(), Error> {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
         if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
             let from_page = (size as usize + 4095) / 4096;
+            // D.2: Unmap PTEs past new_size from every process that has a
+            // FileBacked VMA on this inode, before freeing the cache frames.
+            // Lock ordering: inode.lock (held above) > mappers.lock > vmas.lock
+            // > memory_manager.lock.  We release vmas/mm locks before shootdown.
+            invalidate_mappings_above(inode, size);
             inode.pages.invalidate_from(from_page as u64);
         }
     }
@@ -481,6 +494,14 @@ pub fn remove_file(op: &VfsOp) -> Result<(), Error> {
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
         if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
+            // D.4 — Orphan inode semantics (matches Linux unlink-while-mapped):
+            // We do NOT walk or invalidate mappers here.  Existing FileBacked VMAs
+            // hold an Arc<VfsInode> that keeps the inode (and its page cache) alive
+            // until the last VMA is munmap'd.  Pages already faulted in stay alive
+            // via the per-VMA Vec<Option<Arc<CachedPage>>>; re-faults after unlink
+            // attempt get_or_fill on the now-deleted file, which returns EIO and
+            // kills the faulting thread (SIGBUS-equivalent).
+            // The dentry cache has been invalidated above, so new opens fail ENOENT.
             inode.pages.invalidate_all();
         }
     }
@@ -672,6 +693,122 @@ pub fn flush_dirty_inodes() {
         let _ = inode
             .pages
             .flush_dirty(|page_idx, buf| pc_ops.flush_page(ino, page_idx, buf, 4096));
+    }
+}
+
+/// D.2 — Truncate invalidation: unmap PTEs past `new_size` in every process
+/// that has a FileBacked VMA referencing `inode`.
+///
+/// # Lock ordering
+/// Caller must hold inode.lock (write) before calling this function.
+/// Inside we acquire: inode.mappers.lock > vmas.lock > memory_manager.lock.
+/// The vmas and mm locks are released before issuing the TLB shootdown.
+///
+/// # Partial-VMA handling
+/// A VMA may straddle the new_size boundary.  Only pages whose file offset
+/// is >= new_size are invalidated; pages before new_size are left mapped.
+/// The VMA itself is NOT split; only the affected PTE slots are cleared.
+pub fn invalidate_mappings_above(inode: &Arc<VfsInode>, new_size: u64) {
+    use crate::thread::UserThread;
+
+    // Collect live UserThread Arcs while holding the mappers lock, then
+    // drop the lock before doing any MM work.
+    let live: Vec<alloc::sync::Arc<spin::RwLock<UserThread>>> = {
+        let mut mappers = inode.mappers.lock();
+        // Compact tombstoned entries as a side effect.
+        mappers.retain(|w| w.upgrade().is_some());
+        mappers.iter().filter_map(|w| w.upgrade()).collect()
+    };
+
+    // Accumulate (start_virt, page_count) pairs for the TLB shootdown after
+    // all per-process unmaps are done (cannot hold mm lock during shootdown).
+    let mut shootdown_ranges: Vec<(VirtAddr, u64)> = Vec::new();
+
+    for user_arc in &live {
+        let user = user_arc.read();
+        let mut vmas = user.vmas.lock();
+        let mut mm = user.memory_manager.lock();
+
+        // Walk all VMAs in this process looking for FileBacked on this inode.
+        // Collect the list of (vma_start, slots_to_invalidate) first, then
+        // process them, because we need mutable access to each VMA.
+        let vma_starts: Vec<VirtAddr> = vmas
+            .iter()
+            .filter_map(|vma| match &vma.backing {
+                VmaBacking::FileBacked { inode: vi, .. } if Arc::ptr_eq(vi, inode) => {
+                    Some(vma.start)
+                }
+                _ => None,
+            })
+            .collect();
+
+        for vma_start in vma_starts {
+            let vma = match vmas.find_mut(vma_start) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let (file_offset, pages) = match &mut vma.backing {
+                VmaBacking::FileBacked {
+                    file_offset, pages, ..
+                } => (*file_offset, pages),
+                _ => continue,
+            };
+
+            // The file byte range covered by this VMA is [file_offset, file_offset + vma.size()).
+            // Pages whose file offset >= new_size must be invalidated.
+            let vma_size = vma.end.as_u64() - vma.start.as_u64();
+            let num_slots = (vma_size / 4096) as usize;
+
+            // First slot index (within the VMA) that is past new_size.
+            let first_invalid_slot = if new_size <= file_offset {
+                // The entire VMA is past new_size.
+                0usize
+            } else {
+                let bytes_before_cut = new_size - file_offset;
+                ((bytes_before_cut + 4095) / 4096) as usize
+            };
+
+            if first_invalid_slot >= num_slots {
+                // No slots past new_size in this VMA.
+                continue;
+            }
+
+            let mut invalidated_pages: u64 = 0;
+            let first_invalid_virt =
+                VirtAddr::new(vma.start.as_u64() + first_invalid_slot as u64 * 4096);
+
+            for slot in first_invalid_slot..num_slots {
+                let virt = VirtAddr::new(vma.start.as_u64() + slot as u64 * 4096);
+                let page: Page<Size4KiB> = Page::containing_address(virt);
+
+                if let Ok(phys) = mm.mapper.translate_page(page) {
+                    if let Ok((_, flush)) = mm.mapper.unmap(page) {
+                        flush.ignore();
+                        // Decrement the refcount bumped at fault-in time.
+                        frame_allocator().dec_refcount(phys);
+                        invalidated_pages += 1;
+                    }
+                }
+                // Drop the Arc<CachedPage> for this slot; the inode's page
+                // cache entry will be freed by invalidate_from() after we return.
+                if slot < pages.len() {
+                    pages[slot] = None;
+                }
+            }
+
+            if invalidated_pages > 0 {
+                shootdown_ranges.push((first_invalid_virt, invalidated_pages));
+            }
+        }
+        // vmas lock and mm lock drop here.
+    }
+
+    // Issue TLB shootdowns after all MM locks are released.
+    for (start, count) in shootdown_ranges {
+        if crate::memory::tlb::shootdown_needed() {
+            crate::memory::tlb::tlb_shootdown(start, count);
+        }
     }
 }
 
