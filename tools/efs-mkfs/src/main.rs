@@ -34,6 +34,7 @@ Options:
   --populate <DIR>               Recursively copy files from DIR into the root
   --partition-offset <BYTES>     Byte offset of EFS partition within the image (default: 0)
   --label <NAME>                 Volume label (max 63 chars)
+  --journal-size-mib <N>         Journal size in MiB (default: 16, min: 4)
   --help                         Show this help
 "
     );
@@ -47,6 +48,7 @@ struct Args {
     populate: Option<PathBuf>,
     partition_offset: u64,
     label: Option<String>,
+    journal_size_mib: u32,
 }
 
 fn parse_args() -> Args {
@@ -57,6 +59,7 @@ fn parse_args() -> Args {
     let mut populate: Option<PathBuf> = None;
     let mut partition_offset: u64 = 0;
     let mut label: Option<String> = None;
+    let mut journal_size_mib: u32 = 16;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -113,6 +116,21 @@ fn parse_args() -> Args {
                 }
                 label = Some(val);
             }
+            "--journal-size-mib" => {
+                let val = args.next().unwrap_or_else(|| {
+                    eprintln!("--journal-size-mib requires a value");
+                    process::exit(1);
+                });
+                let n: u32 = val.parse().unwrap_or_else(|_| {
+                    eprintln!("invalid journal size: {val}");
+                    process::exit(1);
+                });
+                if n < 4 {
+                    eprintln!("--journal-size-mib must be at least 4");
+                    process::exit(1);
+                }
+                journal_size_mib = n;
+            }
             s if s.starts_with('-') => {
                 eprintln!("unknown option: {s}");
                 usage();
@@ -139,6 +157,7 @@ fn parse_args() -> Args {
         populate,
         partition_offset,
         label,
+        journal_size_mib,
     }
 }
 
@@ -188,13 +207,24 @@ fn main() {
 
     let layout = layout::Layout::compute(partition_size, args.block_size, args.partition_offset);
 
+    // Validate journal size: must not exceed partition size minus minimum metadata.
+    let journal_blocks = args.journal_size_mib as u64 * 1024 * 1024 / args.block_size as u64;
+    if journal_blocks + 16 > layout.total_blocks {
+        eprintln!(
+            "journal too large: {} blocks requested but partition only has {} blocks",
+            journal_blocks, layout.total_blocks
+        );
+        process::exit(1);
+    }
+
     println!(
-        "  {} blocks, {} groups, {} inodes",
-        layout.total_blocks, layout.block_group_count, layout.total_inodes,
+        "  {} blocks, {} groups, {} inodes, journal {} blocks",
+        layout.total_blocks, layout.block_group_count, layout.total_inodes, journal_blocks,
     );
 
-    let (mut allocator, mut bgds) = mkfs::format(&mut file, &layout, args.label.as_deref())
-        .unwrap_or_else(|e| {
+    let (mut allocator, mut bgds) =
+        mkfs::format(&mut file, &layout, args.label.as_deref(), journal_blocks)
+            .unwrap_or_else(|e| {
             eprintln!("format failed: {e}");
             process::exit(1);
         });

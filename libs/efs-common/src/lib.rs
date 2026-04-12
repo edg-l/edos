@@ -5,6 +5,7 @@ pub mod crc32;
 pub mod dir_entry;
 pub mod extent;
 pub mod inode;
+pub mod journal;
 pub mod superblock;
 
 // Re-export all public types for convenience.
@@ -13,6 +14,10 @@ pub use crc32::{checksum_block_group_desc, checksum_inode, checksum_superblock, 
 pub use dir_entry::{DIR_ENTRY_HEADER_SIZE, EfsDirEntryHeader, dir_entry_min_size};
 pub use extent::{EfsExtent, EfsExtentHeader, EfsExtentIndex, MAX_INLINE_EXTENTS};
 pub use inode::{EfsInode, INODE_DATA_AREA_SIZE};
+pub use journal::{
+    DescriptorEntry, JOURNAL_BLOCK_MAGIC, JOURNAL_MAGIC, JournalBlockHeader, JournalBlockKind,
+    JournalSuperblock, RevokeEntry, commit_block_checksum, journal_sb_checksum,
+};
 pub use superblock::{EfsSuperblock, has_superblock_backup};
 
 // ---- Magic and version ----
@@ -38,6 +43,11 @@ pub const EFS_ROOT_INO: u64 = 1;
 
 /// Compatible feature: filesystem was created with TRIM/discard support.
 pub const COMPAT_DISCARD: u64 = 1 << 0;
+
+/// Incompatible feature: filesystem has a journal. Kernel must honour the
+/// journal before mounting read-write. A kernel that does not understand this
+/// flag must refuse to mount.
+pub const INCOMPAT_JOURNAL: u64 = 0x1;
 
 // ---- Inode flag bits ----
 

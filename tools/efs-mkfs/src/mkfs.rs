@@ -4,8 +4,9 @@ use std::time::SystemTime;
 
 use efs_common::{
     EFS_MAGIC, EFS_ROOT_INO, EFS_VERSION, EXTENT_MAGIC, EfsBlockGroupDesc, EfsExtent,
-    EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, MAX_INLINE_EXTENTS, S_IFDIR,
-    checksum_block_group_desc, checksum_inode, checksum_superblock,
+    EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, INCOMPAT_JOURNAL, JOURNAL_MAGIC,
+    JournalSuperblock, MAX_INLINE_EXTENTS, S_IFDIR, checksum_block_group_desc, checksum_inode,
+    checksum_superblock, journal_sb_checksum,
 };
 use uuid::Uuid;
 
@@ -221,7 +222,11 @@ fn write_bgd_table(
 }
 
 /// Format the partition: write superblock, BGD table, bitmaps, inode tables,
-/// and create the root directory inode.
+/// root directory inode, and journal region.
+///
+/// `journal_blocks` is the number of 4 KiB blocks to reserve for the journal.
+/// The journal is placed at the tail of the partition (last `journal_blocks`
+/// blocks), so it never overlaps group metadata.
 ///
 /// Returns the `Allocator` with all metadata marked as used so callers can
 /// continue allocating for file population.
@@ -229,6 +234,7 @@ pub fn format(
     file: &mut File,
     layout: &Layout,
     label: Option<&str>,
+    journal_blocks: u64,
 ) -> io::Result<(Allocator, Vec<EfsBlockGroupDesc>)> {
     // ---- First, extend/zero the partition area so seeks never go past EOF ----
     let end = layout.partition_offset + layout.total_blocks * layout.block_size as u64;
@@ -253,6 +259,9 @@ pub fn format(
     // first_data_block: first block after BGD table.
     let first_data_block = 2 + layout.bgd_table_blocks;
 
+    // Journal is placed at the tail of the partition: last `journal_blocks` blocks.
+    let journal_first_block = layout.total_blocks - journal_blocks;
+
     let mut sb = EfsSuperblock {
         magic: EFS_MAGIC,
         version: EFS_VERSION,
@@ -266,7 +275,7 @@ pub fn format(
         inode_size: 256,
         block_group_count: layout.block_group_count,
         compatible_features: 0,
-        incompatible_features: 0,
+        incompatible_features: INCOMPAT_JOURNAL,
         read_only_features: 0,
         uuid: *uuid.as_bytes(),
         volume_name,
@@ -276,7 +285,10 @@ pub fn format(
         max_mount_count: 0,
         first_data_block,
         checksum: 0,
-        reserved: [0u8; 64],
+        journal_first_block,
+        journal_block_count: journal_blocks as u32,
+        journal_sb_checksum: 0, // filled in after writing journal SB
+        reserved: [0u8; 48],
     };
 
     // ---- Mark all partition blocks as zero ----
@@ -291,6 +303,11 @@ pub fn format(
     allocator.mark_block_used(1);
     for b in 0..layout.bgd_table_blocks {
         allocator.mark_block_used(2 + b);
+    }
+
+    // Mark journal blocks as used so the allocator never hands them to file data.
+    for b in 0..journal_blocks {
+        allocator.mark_block_used(journal_first_block + b);
     }
 
     // ---- Per-group: mark metadata blocks, build BGD entries ----
@@ -410,6 +427,42 @@ pub fn format(
 
     sb.free_blocks = total_free_blocks;
     sb.free_inodes = total_free_inodes;
+
+    // ---- Write journal region ----
+    // Zero all journal blocks first so partial reads during replay never see
+    // stale data from a previous format.
+    zero_blocks(file, layout, journal_first_block, journal_blocks)?;
+
+    // Build and write the journal superblock at journal_first_block.
+    let jsb = JournalSuperblock {
+        magic: JOURNAL_MAGIC,
+        version: 1,
+        block_count: journal_blocks as u32,
+        block_size: layout.block_size,
+        tail_seq: 1,
+        head_seq: 1,
+        crc32: 0, // computed below
+        reserved: [0u8; 28],
+    };
+    let jsb_crc = journal_sb_checksum(&jsb);
+    let jsb = JournalSuperblock { crc32: jsb_crc, ..jsb };
+
+    // Store the journal SB checksum in the EFS superblock so the kernel can
+    // verify it without re-reading the journal block during fast mount.
+    sb.journal_sb_checksum = jsb_crc;
+
+    // Write journal superblock at the first journal block (first 64 bytes;
+    // the rest of the block is already zeroed from zero_blocks above).
+    let mut jsb_block = vec![0u8; layout.block_size as usize];
+    let jsb_bytes = unsafe {
+        std::slice::from_raw_parts(
+            &jsb as *const JournalSuperblock as *const u8,
+            std::mem::size_of::<JournalSuperblock>(),
+        )
+    };
+    jsb_block[..jsb_bytes.len()].copy_from_slice(jsb_bytes);
+    write_block(file, layout, journal_first_block, &jsb_block)?;
+
     sb.checksum = checksum_superblock(&sb);
 
     // ---- Write primary superblock and BGD table ----

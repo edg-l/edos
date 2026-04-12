@@ -53,8 +53,17 @@ pub struct EfsSuperblock {
     pub first_data_block: u64,
     /// CRC32 of the first 256 bytes of the superblock with this field zeroed.
     pub checksum: u32,
+    /// Block number (absolute, within the EFS partition) of the first journal block.
+    /// Valid only when `incompatible_features & INCOMPAT_JOURNAL != 0`.
+    pub journal_first_block: u64,
+    /// Number of blocks reserved for the journal region.
+    pub journal_block_count: u32,
+    /// CRC32 of the `JournalSuperblock` that lives at `journal_first_block`.
+    /// Stored here so a fast sanity check can be done without re-reading the
+    /// journal block.
+    pub journal_sb_checksum: u32,
     /// Reserved; must be zero.
-    pub reserved: [u8; 64],
+    pub reserved: [u8; 48],
 }
 
 const _: () = assert!(core::mem::size_of::<EfsSuperblock>() == 256);
