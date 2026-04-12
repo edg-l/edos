@@ -1,166 +1,155 @@
-use core::num::NonZero;
+use alloc::vec::Vec;
 
-use alloc::{vec, vec::Vec};
-use lru::LruCache;
+use crate::drivers::ahci::{AhciError, direct};
 
-use crate::{
-    drivers::ahci::{AhciError, direct},
-    thread::mutex::BlockingMutex,
-};
+use super::block_page_cache::{BlockPageCache, BlockPageGuard};
 
 const SECTOR_SIZE: usize = 512;
+const SECTORS_PER_PAGE: u16 = 8;
+const PAGE_SIZE: usize = 4096;
 
 /// Device IDs >= this value are USB storage devices and route to the USB block API.
-const USB_DEVICE_ID_BASE: u64 = 1000;
+pub const USB_DEVICE_ID_BASE: u64 = 1000;
 
 #[derive(Debug)]
 pub struct BlockDevice {
     pub device_id: u64,
-    cache: BlockingMutex<LruCache<u64, [u8; SECTOR_SIZE]>>,
 }
 
 impl BlockDevice {
-    pub fn new(device_id: u64, cache_size: usize) -> Self {
-        Self {
-            device_id,
-            cache: BlockingMutex::new(LruCache::new(NonZero::new(cache_size).unwrap())),
-        }
+    /// Create a new BlockDevice. `_cache_size` is kept for call-site compatibility
+    /// but is unused — caching is handled by the global BlockPageCache (lazy-init).
+    pub fn new(device_id: u64, _cache_size: usize) -> Self {
+        Self { device_id }
     }
 
     fn is_usb_device(&self) -> bool {
         self.device_id >= USB_DEVICE_ID_BASE
     }
 
-    /// Read sectors from disk. The cache lock is released during AHCI I/O so
-    /// other threads can issue concurrent NCQ commands.
+    // ---- Page-level API (used by EFS) ------------------------------------
+
+    /// Fetch a 4 KiB page from the block cache (fills from disk on miss).
+    pub fn read_page(&self, page_block_idx: u64) -> Result<BlockPageGuard, AhciError> {
+        BlockPageCache::global().read_page(self.device_id, page_block_idx)
+    }
+
+    /// Fetch multiple consecutive 4 KiB pages.
+    #[allow(dead_code)]
+    pub fn read_pages(
+        &self,
+        start_page: u64,
+        count: usize,
+    ) -> Result<Vec<BlockPageGuard>, AhciError> {
+        BlockPageCache::global().read_pages(self.device_id, start_page, count)
+    }
+
+    /// Write a full 4 KiB page (write-through).
+    pub fn write_page(&self, page_block_idx: u64, data: &[u8; PAGE_SIZE]) -> Result<(), AhciError> {
+        BlockPageCache::global().write_page(self.device_id, page_block_idx, data)
+    }
+
+    /// Write a sub-page sector range (RMW, write-through).
+    #[allow(dead_code)]
+    pub fn write_partial_sectors(
+        &self,
+        lba: u64,
+        sectors: u16,
+        data: &[u8],
+    ) -> Result<(), AhciError> {
+        BlockPageCache::global().write_partial_page(self.device_id, lba, sectors, data)
+    }
+
+    /// Flush all dirty cached pages for this device then issue an AHCI cache flush.
+    pub fn flush(&self) -> Result<(), AhciError> {
+        BlockPageCache::global().flush_device(self.device_id)?;
+        if !self.is_usb_device() {
+            direct::flush_cache(self.device_id)?;
+        }
+        Ok(())
+    }
+
+    // ---- Legacy sector-level shims (kept for FAT32 compatibility) --------
+    //
+    // EFS no longer calls these — it uses read_page/write_page directly.
+    // FAT32 still relies on them until it is migrated separately.
+
+    /// Read `sectors` starting at `lba`. Uses the block page cache where
+    /// alignment allows; falls back to partial-page reads otherwise.
     pub fn read_sectors(
         &self,
         lba: u64,
         sectors: u16,
         mut buffer: Vec<u8>,
     ) -> Result<Vec<u8>, AhciError> {
-        buffer.resize(sectors as usize * SECTOR_SIZE, 0);
+        let total_bytes = sectors as usize * SECTOR_SIZE;
+        buffer.resize(total_bytes, 0);
 
-        // Phase 1: check cache, collect misses (lock held briefly).
-        let mut miss_ranges: Vec<(u64, usize)> = Vec::new();
-        {
-            let mut cache = self.cache.lock();
-            for i in 0..sectors as u64 {
-                let idx = (i as usize) * SECTOR_SIZE;
-                let lba_i = lba + i;
-                if let Some(sector) = cache.get(&lba_i) {
-                    buffer[idx..idx + SECTOR_SIZE].copy_from_slice(sector);
-                } else {
-                    miss_ranges.push((lba_i, idx));
-                }
-            }
-        } // cache lock released
+        // Walk through covering pages, copying the relevant sectors out.
+        let first_page = lba / SECTORS_PER_PAGE as u64;
+        let last_lba = lba + sectors as u64 - 1;
+        let last_page = last_lba / SECTORS_PER_PAGE as u64;
 
-        if miss_ranges.is_empty() {
-            return Ok(buffer);
-        }
+        let mut buf_pos = 0usize;
+        for page_idx in first_page..=last_page {
+            let guard = BlockPageCache::global().read_page(self.device_id, page_idx)?;
+            let page_start_lba = page_idx * SECTORS_PER_PAGE as u64;
 
-        // Group misses into contiguous runs.
-        let mut runs: Vec<(usize, u64, u16)> = Vec::new(); // (miss_start_idx, lba, count)
-        let mut i = 0;
-        while i < miss_ranges.len() {
-            let run_start = i;
-            let first_lba = miss_ranges[run_start].0;
-            while i + 1 < miss_ranges.len() && miss_ranges[i + 1].0 == miss_ranges[i].0 + 1 {
-                i += 1;
-            }
-            let run_count = (i - run_start + 1) as u16;
-            runs.push((run_start, first_lba, run_count));
-            i += 1;
-        }
+            // Which sectors of this page do we need?
+            let sec_start = lba.max(page_start_lba) - page_start_lba;
+            let sec_end_exclusive = (lba + sectors as u64)
+                .min(page_start_lba + SECTORS_PER_PAGE as u64)
+                - page_start_lba;
 
-        // Phase 2: I/O (no cache lock held -- NCQ commands from multiple threads overlap).
-        if self.is_usb_device() {
-            for &(run_start, first_lba, run_count) in &runs {
-                let mut scratch = vec![0u8; run_count as usize * SECTOR_SIZE];
-                let data =
-                    crate::drivers::usb::block_api::usb_read_sectors(first_lba, run_count, scratch)
-                        .map_err(|_| AhciError::IoError)?;
-                let run_end = run_start + run_count as usize;
-                for (j, (_lba_j, idx)) in miss_ranges[run_start..run_end].iter().enumerate() {
-                    let start = j * SECTOR_SIZE;
-                    buffer[*idx..*idx + SECTOR_SIZE]
-                        .copy_from_slice(&data[start..start + SECTOR_SIZE]);
-                }
-                scratch = data;
-                // Phase 3 (USB): populate cache under lock.
-                let mut cache = self.cache.lock();
-                for (j, (lba_j, _)) in miss_ranges[run_start..run_end].iter().enumerate() {
-                    let start = j * SECTOR_SIZE;
-                    let mut sector = [0u8; SECTOR_SIZE];
-                    sector.copy_from_slice(&scratch[start..start + SECTOR_SIZE]);
-                    cache.put(*lba_j, sector);
-                }
-            }
-        } else {
-            // AHCI: batch all runs concurrently via NCQ.
-            let mut run_bufs: Vec<Vec<u8>> = runs
-                .iter()
-                .map(|&(_, _, count)| vec![0u8; count as usize * SECTOR_SIZE])
-                .collect();
-
-            {
-                let mut batch: Vec<(u64, u16, &mut [u8])> = runs
-                    .iter()
-                    .zip(run_bufs.iter_mut())
-                    .map(|(&(_, lba, count), buf)| (lba, count, buf.as_mut_slice()))
-                    .collect();
-
-                direct::read_sectors_batch(self.device_id, &mut batch)?;
-            }
-
-            // Phase 3: populate cache under lock (brief).
-            let mut cache = self.cache.lock();
-            for (ri, &(run_start, _, run_count)) in runs.iter().enumerate() {
-                let run_end = run_start + run_count as usize;
-                for (j, (lba_j, idx)) in miss_ranges[run_start..run_end].iter().enumerate() {
-                    let start = j * SECTOR_SIZE;
-                    buffer[*idx..*idx + SECTOR_SIZE]
-                        .copy_from_slice(&run_bufs[ri][start..start + SECTOR_SIZE]);
-                    let mut sector = [0u8; SECTOR_SIZE];
-                    sector.copy_from_slice(&run_bufs[ri][start..start + SECTOR_SIZE]);
-                    cache.put(*lba_j, sector);
-                }
-            }
+            let byte_start = sec_start as usize * SECTOR_SIZE;
+            let byte_end = sec_end_exclusive as usize * SECTOR_SIZE;
+            let slice = &guard.as_slice()[byte_start..byte_end];
+            let len = slice.len();
+            buffer[buf_pos..buf_pos + len].copy_from_slice(slice);
+            buf_pos += len;
         }
 
         Ok(buffer)
     }
 
+    /// Write `sectors` starting at `lba`. Routes through the page cache.
     pub fn write_sectors(&self, lba: u64, data: &[u8], sectors: u16) -> Result<(), AhciError> {
         assert_eq!(data.len(), sectors as usize * SECTOR_SIZE);
 
-        // Update cache.
-        {
-            let mut cache = self.cache.lock();
-            for i in 0..sectors as u64 {
-                let idx = (i as usize) * SECTOR_SIZE;
-                let mut sector = [0u8; SECTOR_SIZE];
-                sector.copy_from_slice(&data[idx..idx + SECTOR_SIZE]);
-                cache.put(lba + i, sector);
-            }
-        }
+        let first_page = lba / SECTORS_PER_PAGE as u64;
+        let last_lba = lba + sectors as u64 - 1;
+        let last_page = last_lba / SECTORS_PER_PAGE as u64;
 
-        // Write to device.
-        if self.is_usb_device() {
-            crate::drivers::usb::block_api::usb_write_sectors(lba, sectors, data.to_vec())
-                .map_err(|_| AhciError::IoError)?;
-        } else {
-            direct::write_sectors(self.device_id, lba, data, sectors)?;
+        let mut data_pos = 0usize;
+        for page_idx in first_page..=last_page {
+            let page_start_lba = page_idx * SECTORS_PER_PAGE as u64;
+
+            let sec_start = lba.max(page_start_lba) - page_start_lba;
+            let sec_end_exclusive = (lba + sectors as u64)
+                .min(page_start_lba + SECTORS_PER_PAGE as u64)
+                - page_start_lba;
+
+            let byte_count = (sec_end_exclusive - sec_start) as usize * SECTOR_SIZE;
+            let write_lba = page_start_lba + sec_start;
+            let write_sectors = (sec_end_exclusive - sec_start) as u16;
+
+            if sec_start == 0 && sec_end_exclusive == SECTORS_PER_PAGE as u64 {
+                // Aligned full-page write.
+                let mut buf = [0u8; PAGE_SIZE];
+                buf.copy_from_slice(&data[data_pos..data_pos + PAGE_SIZE]);
+                BlockPageCache::global().write_page(self.device_id, page_idx, &buf)?;
+            } else {
+                // Partial-page write (RMW).
+                BlockPageCache::global().write_partial_page(
+                    self.device_id,
+                    write_lba,
+                    write_sectors,
+                    &data[data_pos..data_pos + byte_count],
+                )?;
+            }
+            data_pos += byte_count;
         }
 
         Ok(())
-    }
-
-    pub fn flush(&self) -> Result<(), AhciError> {
-        if self.is_usb_device() {
-            return Ok(());
-        }
-        direct::flush_cache(self.device_id)
     }
 }

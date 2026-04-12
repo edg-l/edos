@@ -100,6 +100,10 @@ impl EfsDriver {
         superblock.validate().map_err(|_| Error::InvalidFs)?;
 
         let block_size = 1u64 << superblock.block_size_log2;
+        // BlockPageCache requires 4 KiB blocks (one block == one page).
+        if block_size != 4096 {
+            return Err(Error::InvalidFs);
+        }
         let sectors_per_block = (block_size / 512) as u16;
         let starting_lba = partition.starting_lba;
 
@@ -153,21 +157,20 @@ impl EfsDriver {
 
     fn read_block(&self, block: u64) -> Result<Vec<u8>, Error> {
         let lba = self.block_to_lba(block);
-        let spb = self.sectors_per_block();
-        let result = self.device.read_sectors(lba, spb, Vec::new())?;
-        Ok(result)
+        let page_idx = lba / 8;
+        let guard = self.device.read_page(page_idx)?;
+        // .to_vec() copies from the pinned frame; callers currently expect Vec<u8>.
+        // When guard signatures are propagated upward this copy can be removed.
+        Ok(guard.as_slice().to_vec())
     }
 
     fn write_block(&self, block: u64, data: &[u8]) -> Result<(), Error> {
         let lba = self.block_to_lba(block);
-        let spb = self.sectors_per_block();
-        // Use a separate buffer for writes to avoid competing with read_block
-        // for the scratch buffer (read_block's caller may not have recycled yet).
-        let needed = spb as usize * 512;
-        let mut buf = vec![0u8; needed];
-        let copy_len = data.len().min(needed);
-        buf[..copy_len].copy_from_slice(&data[..copy_len]);
-        self.device.write_sectors(lba, &buf, spb)?;
+        let page_idx = lba / 8;
+        let mut buf = [0u8; 4096];
+        let n = data.len().min(4096);
+        buf[..n].copy_from_slice(&data[..n]);
+        self.device.write_page(page_idx, &buf)?;
         Ok(())
     }
 
@@ -178,6 +181,7 @@ impl EfsDriver {
         (ino0 / ipg, ino0 % ipg)
     }
 
+    // Inode-table blocks hit the block page cache after first access.
     fn read_inode(&self, ino: u64) -> Result<EfsInode, Error> {
         if let Some(cached) = self.inode_cache.lock().get(&ino) {
             return Ok(*cached);
@@ -333,8 +337,16 @@ impl EfsDriver {
             let lba = self.block_to_lba(phys_block);
             let total_sectors = (bulk_blocks as u32 * spb as u32) as u16;
 
-            // Read all contiguous blocks in one AHCI command.
-            let bulk_data = self.device.read_sectors(lba, total_sectors, Vec::new())?;
+            // INVARIANT: file-data reads bypass BlockDevice to avoid shredding
+            // bulk AHCI commands into per-page cache ops. The per-inode page
+            // cache owns file data — do not route through BlockPageCache.
+            let mut bulk_data = vec![0u8; total_sectors as usize * 512];
+            crate::drivers::ahci::direct::read_sectors(
+                self.device.device_id,
+                lba,
+                total_sectors,
+                &mut bulk_data,
+            )?;
 
             // Copy the useful portion into result.
             let bulk_bytes = bulk_blocks as usize * block_size;
@@ -1802,8 +1814,7 @@ impl PageCacheOps for EfsDriver {
         let lba = self.block_to_lba(phys_block);
         let spb = self.sectors_per_block();
 
-        // Read directly into the caller's buffer, bypassing the BlockDevice
-        // sector cache. The page cache IS the cache for file data.
+        // INVARIANT: file-data page cache does not route through BlockDevice to avoid double-caching. Do not change.
         crate::drivers::ahci::direct::read_sectors(
             self.device.device_id,
             lba,
@@ -1852,7 +1863,7 @@ impl PageCacheOps for EfsDriver {
         let lba = self.block_to_lba(phys_block);
         let spb = self.sectors_per_block();
 
-        // Write directly, bypassing the BlockDevice sector cache.
+        // INVARIANT: file-data page cache does not route through BlockDevice to avoid double-caching. Do not change.
         let needed = spb as usize * 512;
         crate::drivers::ahci::direct::write_sectors(
             self.device.device_id,

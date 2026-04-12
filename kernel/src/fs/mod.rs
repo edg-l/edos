@@ -23,6 +23,7 @@ use crate::{
 
 pub mod api;
 pub mod block_device;
+pub mod block_page_cache;
 pub mod dentry;
 pub mod devfs;
 pub mod efs;
