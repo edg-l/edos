@@ -1,14 +1,26 @@
 // Block-granularity page cache for metadata I/O.
 #![allow(dead_code)]
 //
-// Stores 4 KiB pages (one EFS block = one page) keyed by (device_id, page_block_idx).
-// Uses 8 shards to reduce contention. Each shard holds an LRU map with capacity
-// SHARD_CAPACITY (256), giving a total ceiling of 2048 pages = 8 MiB.
+// Write semantics: WRITE-BACK. Writes update the in-memory page and mark it
+// dirty; a background writeback kthread (fs::writeback) periodically flushes
+// dirty pages to disk.
 //
-// Write semantics are write-through: every write flushes synchronously to the
-// device before returning.
+// Crash-consistency risk: unflushed dirty pages are lost on power failure.
+// A journal (step 3 of the storage roadmap) will eliminate this risk by
+// providing ordered, atomic metadata updates before they are written through.
+//
+// Dirty tracking uses a BTreeSet<Key> per shard. The writeback thread uses a
+// snapshot-then-conditional-remove protocol to avoid losing dirtied pages that
+// were re-dirtied while a flush was in flight.
+//
+// Flush sequencing uses two AtomicU64 counters:
+//   flush_requested  -- bumped by kick_writeback() and the 5 s periodic tick.
+//   flush_completed  -- set to the req value the thread started with after
+//                       each pass; monotonically non-decreasing.
+// sync_all() increments flush_requested, wakes the writeback thread, then
+// blocks on sync_done_wq until flush_completed >= its request number.
 
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use lru::LruCache;
@@ -19,7 +31,7 @@ use crate::{
     drivers::ahci::{AhciError, direct},
     log,
     memory::{frame_allocator::frame_allocator, get_virt_addr_from_phys_offset},
-    thread::mutex::BlockingMutex,
+    thread::{mutex::BlockingMutex, waitqueue::WaitQueue},
 };
 
 // ---------------------------------------------------------------------------
@@ -141,7 +153,7 @@ impl BlockPageGuard {
         unsafe { self.page.as_slice() }
     }
 
-    /// Mutable view — caller must hold page.write_lock externally.
+    /// Mutable view -- caller must hold page.write_lock externally.
     ///
     /// # Safety
     /// Caller must hold the page's write_lock.
@@ -172,13 +184,23 @@ pub struct StatsSnapshot {
     pub misses: u64,
     pub evictions: u64,
     pub detached_fallbacks: u64,
+    pub dirty_pages: u64,
+    pub writeback_runs: u64,
+    pub writeback_bytes: u64,
+    pub sync_calls: u64,
+    pub flush_requested: u64,
+    pub flush_completed: u64,
 }
 
-struct Stats {
-    hits: AtomicU64,
-    misses: AtomicU64,
-    evictions: AtomicU64,
-    detached_fallbacks: AtomicU64,
+pub(super) struct Stats {
+    pub hits: AtomicU64,
+    pub misses: AtomicU64,
+    pub evictions: AtomicU64,
+    pub detached_fallbacks: AtomicU64,
+    pub dirty_pages: AtomicU64,
+    pub writeback_runs: AtomicU64,
+    pub writeback_bytes: AtomicU64,
+    pub sync_calls: AtomicU64,
 }
 
 impl Stats {
@@ -188,15 +210,43 @@ impl Stats {
             misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             detached_fallbacks: AtomicU64::new(0),
+            dirty_pages: AtomicU64::new(0),
+            writeback_runs: AtomicU64::new(0),
+            writeback_bytes: AtomicU64::new(0),
+            sync_calls: AtomicU64::new(0),
         }
     }
 
-    fn snapshot(&self) -> StatsSnapshot {
+    fn snapshot(&self, flush_requested: u64, flush_completed: u64) -> StatsSnapshot {
         StatsSnapshot {
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
             evictions: self.evictions.load(Ordering::Relaxed),
             detached_fallbacks: self.detached_fallbacks.load(Ordering::Relaxed),
+            dirty_pages: self.dirty_pages.load(Ordering::Relaxed),
+            writeback_runs: self.writeback_runs.load(Ordering::Relaxed),
+            writeback_bytes: self.writeback_bytes.load(Ordering::Relaxed),
+            sync_calls: self.sync_calls.load(Ordering::Relaxed),
+            flush_requested,
+            flush_completed,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shard -- LRU + dirty set under one lock
+// ---------------------------------------------------------------------------
+
+struct ShardInner {
+    lru: LruCache<Key, Arc<CachedBlockPage>>,
+    dirty: BTreeSet<Key>,
+}
+
+impl ShardInner {
+    fn new() -> Self {
+        Self {
+            lru: LruCache::new(core::num::NonZero::new(SHARD_CAPACITY).unwrap()),
+            dirty: BTreeSet::new(),
         }
     }
 }
@@ -206,18 +256,27 @@ impl Stats {
 // ---------------------------------------------------------------------------
 
 type Key = (u64, u64);
-type Shard = BlockingMutex<LruCache<Key, Arc<CachedBlockPage>>>;
+type Shard = BlockingMutex<ShardInner>;
 
 pub struct BlockPageCache {
     shards: [Shard; NUM_SHARDS],
-    stats: Stats,
+    pub(super) stats: Stats,
+    /// Monotonically increasing; each kick or periodic tick increments this.
+    pub flush_requested: AtomicU64,
+    /// Set to the `flush_requested` value at the start of the last completed
+    /// writeback pass. `flush_completed >= N` means request N is done.
+    pub flush_completed: AtomicU64,
+    /// Writeback thread waits here between kicks and the 5 s periodic tick.
+    pub writeback_wq: WaitQueue,
+    /// sync_all() waiters block here until their request is complete.
+    pub sync_done_wq: WaitQueue,
 }
 
 static BLOCK_PAGE_CACHE: Once<BlockPageCache> = Once::new();
 static CACHE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 fn shard_index(key: Key) -> usize {
-    // FNV-inspired mix — keeps shard selection fast and lock-free.
+    // FNV-inspired mix -- keeps shard selection fast and lock-free.
     let h = key
         .0
         .wrapping_mul(0x517cc1b727220a95)
@@ -271,14 +330,14 @@ fn write_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<
 impl BlockPageCache {
     fn new() -> Self {
         // Array init requires Copy/Default, so build via a closure workaround.
-        let shards = core::array::from_fn(|_| {
-            BlockingMutex::new(LruCache::new(
-                core::num::NonZero::new(SHARD_CAPACITY).unwrap(),
-            ))
-        });
+        let shards = core::array::from_fn(|_| BlockingMutex::new(ShardInner::new()));
         Self {
             shards,
             stats: Stats::new(),
+            flush_requested: AtomicU64::new(0),
+            flush_completed: AtomicU64::new(0),
+            writeback_wq: WaitQueue::new(),
+            sync_done_wq: WaitQueue::new(),
         }
     }
 
@@ -308,23 +367,24 @@ impl BlockPageCache {
     /// Otherwise evict an LRU entry if the shard is full and insert.
     fn insert_or_resolve_race(
         &self,
-        shard: &mut LruCache<Key, Arc<CachedBlockPage>>,
+        shard: &mut ShardInner,
         key: Key,
         new_page: Arc<CachedBlockPage>,
     ) -> Arc<CachedBlockPage> {
-        if let Some(existing) = shard.get(&key) {
+        if let Some(existing) = shard.lru.get(&key) {
             // Another thread filled this page while we were doing I/O.
             // Our `new_page` Arc drops at return; its Drop frees the frame.
             return Arc::clone(existing);
         }
 
         // Evict LRU entries that are neither pinned nor dirty until we make room.
-        while shard.len() >= SHARD_CAPACITY {
-            let evict_key = match shard.peek_lru() {
+        while shard.lru.len() >= SHARD_CAPACITY {
+            let evict_key = match shard.lru.peek_lru() {
                 Some((&k, page)) if page.pin_count() == 0 && !page.is_dirty() => k,
                 _ => {
-                    // All or the LRU candidate is pinned/dirty — return detached.
-                    // When the caller drops the guard, the Arc's Drop frees the frame.
+                    // All or the LRU candidate is pinned/dirty -- kick writeback
+                    // before returning detached so the dirty pages drain soon.
+                    self.kick_writeback();
                     self.stats
                         .detached_fallbacks
                         .fetch_add(1, Ordering::Relaxed);
@@ -338,12 +398,12 @@ impl BlockPageCache {
             };
             // pop removes from LRU; the evicted Arc drops (if refcount hits 0
             // here, Drop frees the frame; otherwise a holder will free it later).
-            if shard.pop(&evict_key).is_some() {
+            if shard.lru.pop(&evict_key).is_some() {
                 self.stats.evictions.fetch_add(1, Ordering::Relaxed);
             }
         }
 
-        shard.put(key, Arc::clone(&new_page));
+        shard.lru.put(key, Arc::clone(&new_page));
         new_page
     }
 
@@ -366,7 +426,7 @@ impl BlockPageCache {
         // Fast path: already cached.
         {
             let mut shard = self.shards[si].lock();
-            if let Some(page) = shard.get(&key) {
+            if let Some(page) = shard.lru.get(&key) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(BlockPageGuard::new(Arc::clone(page)));
             }
@@ -419,7 +479,7 @@ impl BlockPageCache {
             let key = (device_id, start_page + i as u64);
             let si = shard_index(key);
             let mut shard = self.shards[si].lock();
-            if let Some(page) = shard.get(&key) {
+            if let Some(page) = shard.lru.get(&key) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 guards[i] = Some(BlockPageGuard::new(Arc::clone(page)));
             } else {
@@ -474,7 +534,7 @@ impl BlockPageCache {
             // AHCI: group contiguous miss indices into runs for batch I/O.
             // Each run gets a slice into its frame(s).
             // For simplicity, issue each miss as an individual direct read
-            // — the AHCI driver handles concurrent NCQ internally.
+            // -- the AHCI driver handles concurrent NCQ internally.
             // A future optimisation can coalesce truly-contiguous runs.
             let mut batch: Vec<(u64, u16, &mut [u8])> = miss_indices
                 .iter()
@@ -509,7 +569,8 @@ impl BlockPageCache {
         Ok(guards.into_iter().map(|g| g.unwrap()).collect())
     }
 
-    /// Write a full page. Acquires write_lock to serialize against partial writers.
+    /// Write a full page. Write-back: marks the page dirty for the background
+    /// writeback thread to flush to disk asynchronously.
     pub fn write_page(
         &self,
         device_id: u64,
@@ -527,11 +588,11 @@ impl BlockPageCache {
         // Get or create the cached page.
         let guard = {
             let mut shard = self.shards[si].lock();
-            if let Some(page) = shard.get(&key) {
+            if let Some(page) = shard.lru.get(&key) {
                 BlockPageGuard::new(Arc::clone(page))
             } else {
                 drop(shard);
-                // Allocate fresh frame (no read needed — full overwrite).
+                // Allocate fresh frame (no read needed -- full overwrite).
                 let frame = frame_allocator()
                     .allocate_frame()
                     .ok_or(AhciError::IoError)?;
@@ -542,20 +603,33 @@ impl BlockPageCache {
             }
         };
 
-        // Write-through: copy data then flush to disk.
+        // Copy data into the frame and mark dirty (write-back).
         {
             let _wl = guard.write_lock.lock();
             // SAFETY: we hold write_lock.
             let dest = unsafe { guard.as_mut_slice() };
             dest.copy_from_slice(data);
-            write_frame(device_id, page_block_idx, guard.frame)?;
-            guard.clear_dirty();
+            guard.mark_dirty();
+        }
+
+        // Insert into dirty set; kick writeback if shard pressure threshold reached.
+        {
+            let mut shard = self.shards[si].lock();
+            let newly_inserted = shard.dirty.insert(key);
+            if newly_inserted {
+                self.stats.dirty_pages.fetch_add(1, Ordering::Relaxed);
+            }
+            let shard_dirty_len = shard.dirty.len();
+            drop(shard);
+            if shard_dirty_len > SHARD_CAPACITY / 4 {
+                self.kick_writeback();
+            }
         }
 
         Ok(())
     }
 
-    /// Read-modify-write: update a sub-sector range within a page then flush.
+    /// Read-modify-write: update a sub-sector range within a page then mark dirty.
     ///
     /// `lba` is the absolute LBA on disk; `sectors` is how many 512 B sectors
     /// starting at `lba` are covered by `data`. The owning page is identified
@@ -581,64 +655,179 @@ impl BlockPageCache {
         let page_block_idx = lba / SECTORS_PER_PAGE as u64;
         let offset_in_page = ((lba % SECTORS_PER_PAGE as u64) * 512) as usize;
         let len = sectors as usize * 512;
+        let key = (device_id, page_block_idx);
+        let si = shard_index(key);
 
         // Pin the page (fills from disk if not cached).
         let guard = self.read_page(device_id, page_block_idx)?;
 
         // Serialize writers on this page.
-        let _wl = guard.write_lock.lock();
         {
+            let _wl = guard.write_lock.lock();
             // SAFETY: we hold write_lock.
             let dest = unsafe { guard.as_mut_slice() };
             dest[offset_in_page..offset_in_page + len].copy_from_slice(data);
+            guard.mark_dirty();
         }
-        write_frame(device_id, page_block_idx, guard.frame)?;
-        guard.clear_dirty();
+
+        // Insert into dirty set; kick writeback if shard pressure threshold reached.
+        {
+            let mut shard = self.shards[si].lock();
+            let newly_inserted = shard.dirty.insert(key);
+            if newly_inserted {
+                self.stats.dirty_pages.fetch_add(1, Ordering::Relaxed);
+            }
+            let shard_dirty_len = shard.dirty.len();
+            drop(shard);
+            if shard_dirty_len > SHARD_CAPACITY / 4 {
+                self.kick_writeback();
+            }
+        }
 
         Ok(())
     }
 
-    /// Flush all dirty pages for a device synchronously.
-    pub fn flush_device(&self, device_id: u64) -> Result<(), AhciError> {
-        // Collect dirty pages across all shards.
-        let mut dirty: Vec<Arc<CachedBlockPage>> = Vec::new();
-        for shard in &self.shards {
-            let shard = shard.lock();
-            for (_, page) in shard.iter() {
-                if page.key.0 == device_id && page.is_dirty() {
-                    dirty.push(Arc::clone(page));
+    /// Signal the writeback thread that there is work to do.
+    pub fn kick_writeback(&self) {
+        self.flush_requested.fetch_add(1, Ordering::Release);
+        self.writeback_wq.wake_all();
+    }
+
+    /// Flush all dirty pages for all devices in one pass.
+    ///
+    /// Uses snapshot-then-conditional-remove to avoid losing pages that are
+    /// re-dirtied while we are writing them. Returns the number of bytes written.
+    pub fn flush_dirty_once(&self) -> Result<u64, AhciError> {
+        let mut bytes_written: u64 = 0;
+
+        for (si, shard_lock) in self.shards.iter().enumerate() {
+            // Snapshot the dirty set without holding the lock during I/O.
+            let keys_snapshot: Vec<Key> = {
+                let shard = shard_lock.lock();
+                shard.dirty.iter().copied().collect()
+            };
+
+            for key in keys_snapshot {
+                // Re-fetch the page under the lock (it may have been evicted).
+                let page = {
+                    let mut shard = shard_lock.lock();
+                    shard.lru.get(&key).cloned()
+                };
+                let Some(page) = page else {
+                    // Evicted between snapshot and now; remove from dirty set.
+                    let mut shard = shard_lock.lock();
+                    if shard.dirty.remove(&key) {
+                        self.stats.dirty_pages.fetch_sub(1, Ordering::Relaxed);
+                    }
+                    continue;
+                };
+
+                // Acquire write_lock to serialize against concurrent writers.
+                let _wg = page.write_lock.lock();
+                if !page.is_dirty() {
+                    // Already flushed by a concurrent path (e.g. fsync).
+                    continue;
                 }
+
+                write_frame(page.key.0, page.key.1, page.frame)?;
+                page.clear_dirty();
+                bytes_written += PAGE_SIZE as u64;
+                drop(_wg);
+
+                // Only remove from dirty set if the page was not re-dirtied
+                // by a concurrent writer between clear_dirty and this check.
+                {
+                    let mut shard = shard_lock.lock();
+                    if !page.is_dirty() {
+                        if shard.dirty.remove(&key) {
+                            self.stats.dirty_pages.fetch_sub(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+
+                let _ = si; // suppress lint
             }
         }
 
-        for page in &dirty {
-            let _wl = page.write_lock.lock();
-            if page.is_dirty() {
-                write_frame(page.key.0, page.key.1, page.frame)?;
-                page.clear_dirty();
-            }
+        Ok(bytes_written)
+    }
+
+    /// Wait until the writeback thread has completed at least request `req`.
+    fn wait_for_flush(&self, req: u64) {
+        self.sync_done_wq
+            .wait_until(|| self.flush_completed.load(Ordering::Acquire) >= req);
+    }
+
+    /// Flush all dirty pages synchronously. Kicks the writeback thread and
+    /// blocks until the pass that covers this call has completed.
+    pub fn sync_all(&self) {
+        self.stats.sync_calls.fetch_add(1, Ordering::Relaxed);
+        let req = self.flush_requested.fetch_add(1, Ordering::Release) + 1;
+        self.writeback_wq.wake_all();
+        self.wait_for_flush(req);
+    }
+
+    /// Flush all dirty pages for a specific device, then issue an AHCI cache
+    /// flush command for non-USB devices.
+    ///
+    /// Uses the writeback sequencing protocol: kicks the thread, waits for the
+    /// pass to complete, then issues the hardware flush command.
+    pub fn flush_device(&self, device_id: u64) -> Result<(), AhciError> {
+        let req = self.flush_requested.fetch_add(1, Ordering::Release) + 1;
+        self.writeback_wq.wake_all();
+        self.wait_for_flush(req);
+
+        if !is_usb(device_id) {
+            direct::flush_cache(device_id)?;
         }
         Ok(())
     }
 
     /// Remove all cached pages for a device (e.g., on unmount).
+    ///
+    /// Flushes dirty pages first (log-and-continue on error), then invalidates
+    /// all cached pages for the device and cleans up the dirty set.
     pub fn invalidate_device(&self, device_id: u64) {
+        if let Err(e) = self.flush_device(device_id) {
+            log!(
+                "block_page_cache: flush_device failed during invalidate for device {}: {:?}",
+                device_id,
+                e
+            );
+        }
+
         for shard in &self.shards {
             let mut shard = shard.lock();
             let keys: Vec<Key> = shard
+                .lru
                 .iter()
                 .filter(|(k, _)| k.0 == device_id)
                 .map(|(&k, _)| k)
                 .collect();
-            for key in keys {
+            for key in &keys {
                 // Drop Arc; Drop on CachedBlockPage frees the frame when the
                 // last reference goes away.
-                shard.pop(&key);
+                shard.lru.pop(key);
+            }
+            // Remove device entries from the dirty set.
+            let dirty_keys: Vec<Key> = shard
+                .dirty
+                .iter()
+                .copied()
+                .filter(|k| k.0 == device_id)
+                .collect();
+            for key in dirty_keys {
+                if shard.dirty.remove(&key) {
+                    self.stats.dirty_pages.fetch_sub(1, Ordering::Relaxed);
+                }
             }
         }
     }
 
     pub fn stats(&self) -> StatsSnapshot {
-        self.stats.snapshot()
+        self.stats.snapshot(
+            self.flush_requested.load(Ordering::Relaxed),
+            self.flush_completed.load(Ordering::Relaxed),
+        )
     }
 }

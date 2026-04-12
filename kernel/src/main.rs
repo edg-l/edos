@@ -141,6 +141,10 @@ fn main() -> ! {
     logs::init();
     crate::fs::block_page_cache::BlockPageCache::init();
     drivers::init_drivers();
+    queue_spawn_kthread_named(
+        "block_writeback",
+        fs::writeback::writeback_thread as *const () as u64,
+    );
     fs::init();
     window::init();
 

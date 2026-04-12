@@ -6,6 +6,7 @@ use core::time::Duration;
 
 use x86_64::instructions::interrupts;
 
+use crate::fs::block_page_cache::BlockPageCache;
 use crate::fs::handle::{PollEntry, PollKey, Pollable};
 use crate::fs::vfs;
 use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
@@ -1433,6 +1434,16 @@ pub fn sys_fsync(fd: u64) -> i32 {
             -1
         }
     }
+}
+
+/// Flush all dirty block cache pages to disk. Always succeeds from the
+/// caller's perspective (errors are logged by the writeback thread).
+pub fn sys_sync() {
+    debug_assert!(
+        x86_64::instructions::interrupts::are_enabled(),
+        "sys_sync called with interrupts disabled"
+    );
+    BlockPageCache::global().sync_all();
 }
 
 pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {

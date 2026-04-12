@@ -116,12 +116,30 @@ impl Procfs {
 
     fn render_block_cache() -> String {
         if !BlockPageCache::initialized() {
-            return "hits: 0\nmisses: 0\nevictions: 0\ndetached_fallbacks: 0\n".to_string();
+            return concat!(
+                "hits: 0\nmisses: 0\nevictions: 0\ndetached_fallbacks: 0\n",
+                "dirty_pages: 0\nwriteback_runs: 0\nwriteback_bytes: 0\n",
+                "sync_calls: 0\nflush_requested: 0\nflush_completed: 0\n"
+            )
+            .to_string();
         }
         let s = BlockPageCache::global().stats();
         format!(
-            "hits: {}\nmisses: {}\nevictions: {}\ndetached_fallbacks: {}\n",
-            s.hits, s.misses, s.evictions, s.detached_fallbacks
+            concat!(
+                "hits: {}\nmisses: {}\nevictions: {}\ndetached_fallbacks: {}\n",
+                "dirty_pages: {}\nwriteback_runs: {}\nwriteback_bytes: {}\n",
+                "sync_calls: {}\nflush_requested: {}\nflush_completed: {}\n"
+            ),
+            s.hits,
+            s.misses,
+            s.evictions,
+            s.detached_fallbacks,
+            s.dirty_pages,
+            s.writeback_runs,
+            s.writeback_bytes,
+            s.sync_calls,
+            s.flush_requested,
+            s.flush_completed,
         )
     }
 

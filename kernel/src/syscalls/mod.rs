@@ -340,6 +340,7 @@ const SYS_GETPEERNAME: u64 = 252;
 const SYS_GETSOCKNAME: u64 = 253;
 const SYS_STATFS: u64 = 254;
 const SYS_FORK: u64 = 255;
+const SYS_SYNC: u64 = 162;
 
 /// Arguments struct for SYS_SPAWN2. Passed as a single pointer from userspace.
 #[repr(C)]
@@ -779,6 +780,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         }
         SYS_FORK => {
             ctx.rax = sys_fork(ctx) as u64;
+        }
+        SYS_SYNC => {
+            io::sys_sync();
+            ctx.rax = 0;
         }
         _ => {
             ctx.rax = !0u64;
