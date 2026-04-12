@@ -393,12 +393,15 @@ impl Journal {
     pub fn force_commit_and_wait(&self) -> Result<(), AhciError> {
         let target_seq = {
             let state = self.state.lock();
+            if state.active.is_empty() && state.sealed.is_empty() {
+                // Nothing pending — already fully committed.
+                return Ok(());
+            }
             state.active.seq
         };
 
         self.kick_committer();
 
-        // Wait with timeout to avoid hanging forever if committer panics.
         let outcome = self.commit_wq.wait_until_timeout(
             || self.committed_seq() >= target_seq,
             Some(core::time::Duration::from_secs(30)),
