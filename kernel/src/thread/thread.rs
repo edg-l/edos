@@ -19,7 +19,7 @@ use crate::{
     boot::boot_info,
     drivers::{fpu::FpuState, hpet::driver::get_hpet_timer},
     fs::{self, path::Path},
-    loader::{ElfLoadError, TlsTemplate, load_elf},
+    loader::{ElfLoadError, TlsTemplate, load_elf_from_bytes},
     memory::{
         USER_STACK_SIZE, USER_STACK_TOP,
         frame_allocator::frame_allocator,
@@ -479,7 +479,7 @@ impl Thread {
             setup_user_stack(stack_top, argv, envp, &process_memory_manager)
                 .map_err(|_| ElfLoadError::MappingFailed)?;
 
-        let mut load_info = load_elf(elf_data.clone(), &mut process_memory_manager)?;
+        let mut load_info = load_elf_from_bytes(elf_data.clone(), &mut process_memory_manager)?;
 
         let id = ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, Ordering::Relaxed));
 
@@ -528,6 +528,34 @@ impl Thread {
             process_stack_top,
             next_tls_slot: Arc::new(AtomicU64::new(1)), // slot 0 used by initial thread
         }));
+
+        // Task 2.9: Register the new process as a mapper of every FileBacked VMA
+        // so that truncate/invalidate_mappings_above can unmap pages in this process.
+        // Collect inode Arcs while holding the VmaSet lock, then register while
+        // NOT holding the VmaSet lock to respect lock ordering (inode.mappers > vmas).
+        // No-op in Phase 2 (VMAs are ElfSegment from load_elf_from_bytes fallback);
+        // becomes live in Phase 3 when do_spawn calls load_elf directly.
+        {
+            let file_backed_inodes: Vec<Arc<crate::fs::inode::VfsInode>> = {
+                let user = user_state.read();
+                let vmas = user.vmas.lock();
+                vmas.iter()
+                    .filter_map(|vma| {
+                        if let crate::memory::vma::VmaBacking::FileBacked { inode, .. } =
+                            &vma.backing
+                        {
+                            Some(Arc::clone(inode))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+            let weak = Arc::downgrade(&user_state);
+            for inode in file_backed_inodes {
+                inode.mappers.lock().push(weak.clone());
+            }
+        }
 
         let thread = Arc::new(Thread {
             id,
