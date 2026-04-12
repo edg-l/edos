@@ -1049,6 +1049,28 @@ impl Scheduler {
     pub fn thread_exit(&self, code: i32) -> ! {
         let tid = self.current_thread_id().unwrap();
 
+        // Log lifetime stats before the without_interrupts fast path (log! allocates).
+        if let Some(t) = get_thread_by_id(tid) {
+            let created = t.created_at_tick.load(Ordering::Acquire);
+            if let Some(timer) = crate::drivers::hpet::driver::get_hpet_timer()
+                && created != 0
+            {
+                let now = crate::timer::Instant::now().tick();
+                let wall_ns = timer.ticks_to_nanos(now.saturating_sub(created));
+                let cpu_ns = t.cpu_time_ns();
+                let faults = t.demand_faults.load(Ordering::Relaxed);
+                crate::log!(
+                    "exit: code={} wall={}.{:03}ms cpu={}.{:03}ms faults={}",
+                    code,
+                    wall_ns / 1_000_000,
+                    (wall_ns / 1_000) % 1_000,
+                    cpu_ns / 1_000_000,
+                    (cpu_ns / 1_000) % 1_000,
+                    faults
+                );
+            }
+        }
+
         // Fast path with interrupts disabled: mark Dying, detach from
         // per-CPU, enqueue on reaper for deferred cleanup, then switch_away.
         // Heavy cleanup (free, unmap, etc.) happens in the reaper thread

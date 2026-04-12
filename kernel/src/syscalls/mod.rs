@@ -1123,6 +1123,7 @@ fn do_spawn(
 ) -> u64 {
     use crate::{fs::api as fs_api, thread::util::queue_spawn_thread};
 
+    let spawn_start = crate::timer::Instant::now();
     let sched = sched();
     let info = sched.current_thread_info();
 
@@ -1294,6 +1295,15 @@ fn do_spawn(
             pty.lock().foreground_pid = Some(child_pid);
         }
     }
+
+    let load_ns = spawn_start.elapsed().as_nanos() as u64;
+    crate::log!(
+        "spawn: tid={} name={} load={}.{:03}ms",
+        child_pid,
+        path_str,
+        load_ns / 1_000_000,
+        (load_ns / 1_000) % 1_000
+    );
 
     queue_spawn_thread(user_thread);
 
@@ -1664,6 +1674,8 @@ fn sys_clone(
         sleep_deadline: AtomicU64::new(0),
         cpu_time_ns: AtomicU64::new(0),
         run_start_tick: AtomicU64::new(0),
+        created_at_tick: AtomicU64::new(crate::timer::Instant::now().tick()),
+        demand_faults: AtomicU32::new(0),
         tls_base: AtomicU64::new(tls_fs_base),
         cpu: AtomicU32::new(0),
         exit_code: AtomicI32::new(0),
@@ -1860,6 +1872,8 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         sleep_deadline: AtomicU64::new(0),
         cpu_time_ns: AtomicU64::new(0),
         run_start_tick: AtomicU64::new(0),
+        created_at_tick: AtomicU64::new(crate::timer::Instant::now().tick()),
+        demand_faults: AtomicU32::new(0),
         tls_base: AtomicU64::new(parent_fs_base),
         cpu: AtomicU32::new(0),
         exit_code: AtomicI32::new(0),

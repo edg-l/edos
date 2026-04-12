@@ -136,6 +136,11 @@ pub struct Thread {
     pub cpu_time_ns: AtomicU64,
     pub run_start_tick: AtomicU64,
 
+    // HPET tick at thread creation. Used to compute wall lifetime on exit.
+    pub created_at_tick: AtomicU64,
+    // Demand page faults served on behalf of this thread (userspace-triggered).
+    pub demand_faults: AtomicU32,
+
     pub tls_base: AtomicU64,
 
     pub exit_code: AtomicI32,
@@ -412,6 +417,8 @@ impl Thread {
             sleep_deadline: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),
             run_start_tick: AtomicU64::new(0),
+            created_at_tick: AtomicU64::new(Instant::now().tick()),
+            demand_faults: AtomicU32::new(0),
             tls_base: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
@@ -535,6 +542,8 @@ impl Thread {
             sleep_deadline: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),
             run_start_tick: AtomicU64::new(0),
+            created_at_tick: AtomicU64::new(Instant::now().tick()),
+            demand_faults: AtomicU32::new(0),
             tls_base: AtomicU64::new(tls_fs_base),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),

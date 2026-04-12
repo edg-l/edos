@@ -191,7 +191,12 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
     let (cr3_frame, _) = Cr3::read();
     let phys_offset = boot_info().physical_memory_offset;
 
-    fault_in_page(fault_addr, &fault_info, cr3_frame, phys_offset)
+    let ok = fault_in_page(fault_addr, &fault_info, cr3_frame, phys_offset);
+    if ok && let Some(t) = sched().current_thread() {
+        t.demand_faults
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    ok
 }
 
 /// Map a single page directly into a page table via HHDM.
