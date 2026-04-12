@@ -1,0 +1,316 @@
+# Intermittent Boot Hang (2026-04-12) — missed wakeup during WM/terminal init
+
+## Symptoms
+- Reproduces ~1 in 10 boots (estimate from handful of runs).
+- All 4 CPUs halted in `Scheduler::run_idle` (kernel/src/thread/scheduler.rs:402).
+- Boot reached user-mode fully: wm, taskbar, terminal all spawned
+  (tid 19 = wm, 20 = taskbar, 21 = terminal).
+- wm and taskbar both printed their `[wm] starting` / `[taskbar] starting`
+  lines; terminal did NOT print its `[terminal] starting` line.
+- wm drew its initial window decoration (blue frame visible on screen) —
+  reached the first framebuffer composite.
+- Last user-visible log event: `Spawned edos-terminal` at ~t=1.4s; then
+  silence until periodic `block_writeback` ticks at t=10s+ (unrelated).
+- No KILL, no panic, no stale-tlb-retry, no debug_assert fires.
+- Screen shows wm's decorations for a window but no content inside —
+  terminal never rendered its PTY buffer to SHM.
+
+## GDB findings (attached via -s gdbstub on :1234)
+- Each CPU's backtrace:
+    Scheduler::run_idle           (scheduler.rs:402)
+    Scheduler::pick_and_run       (scheduler.rs:495)
+    schedule_voluntary            (scheduler.rs:1218/1220, under without_interrupts)
+    save_transition_switch        (asm trampoline)
+- pick_and_run chose idle on every CPU. Nothing runnable. All three user
+  threads are parked / sleeping on event mailboxes or polls.
+- All CPUs share CR3 = 0x7e5eb000 (kernel page table, as expected for idle).
+- IF=1 on all CPUs (eflags 0x246: IOPL=0 IF ZF PF) -- so interrupts are
+  enabled and IPIs/timer interrupts could still fire; nothing actively
+  wakes them.
+- CR2 on CPU 0 = 0x413c52 (a userspace text segment address) -- this is
+  sticky from the last page fault, almost certainly the demand-faulted
+  code page of the last-running user thread. Not diagnostic of the hang.
+
+## Saved artifacts (gitignored, in logs/)
+- logs/2026-04-12-boot-hang-missed-wakeup.log
+    serial log captured up to and through the hang
+- logs/2026-04-12-boot-hang-gdb-dump.txt
+    full gdb snapshot: register state + 20-frame backtrace for every CPU,
+    RSP memory near idle context, scheduler/threads static addresses
+- logs/2026-04-12-boot-hang-thread-states.txt
+    rust-gdb walk of THREADS BTreeMap, each thread's state + name
+
+## Actual thread states at the hang
+
+```
+ TID  STATE     CPU   NAME
+   1  Parked      1   reaper              (normal, reaps dead threads)
+   2  Parked      1   klogger             (normal)
+ 3-7  Parked          ahci,xhci,e1000e,hda,vga  (device kthreads, normal)
+   8  Sleeping    3   tcp-retransmit      (timer)
+ 9,10 Parked          keyboard, mouse     (hid event wait, normal)
+  11  Sleeping    1   block_writeback     (5s timer)
+  12  Sleeping    1   journal_committer   (5s timer)
+  13  Parked      1   fs                  (vfs kthread, request wait)
+  14  Parked      0   window-input        (awaits mouse/kbd routed events)
+  19  Sleeping    3   edos-wm             <-- frame-cap timer sleep (alive!)
+  20  Parked      3   edos-taskbar        <-- awaiting event (hang)
+  21  Parked      0   edos-terminal       <-- awaiting event (hang)
+```
+
+### This sharpens the hypothesis significantly
+
+- wm is NOT hung. It is Sleeping (timer-based) and will wake periodically
+  to composite. Its poll_events returns fast with nothing to do because
+  taskbar and terminal never sent anything.
+- taskbar AND terminal are both Parked. Terminal parked BEFORE its first
+  println (serial log confirms no `[terminal] starting`). So terminal is
+  stuck in very early init, likely:
+    a. Rust runtime pre-main setup (TLS alloc, allocator warmup).
+    b. std::io stdin fd 0 open on /dev/tty or PTY slave.
+    c. Some library-ctor syscall that parks.
+- taskbar parked AFTER its `[taskbar] starting` print. Different stall
+  point. Likely in its first rendering pipeline step: shm_create,
+  window_create, poll_events.
+
+Two distinct stall sites, both producing Parked with no wakeup, make
+it unlikely to be a coincidence of two different bugs. More likely a
+SINGLE scheduler-level bug in park/wake that manifests wherever a
+thread parks around the time another thread is doing the waking edge.
+
+### Very first thing to check
+
+`kernel/src/thread/scheduler.rs` thread_park and wake_thread semantics:
+- Does wake_thread set a "pending wake" flag on the thread BEFORE
+  looking at its state? (Rust std's Thread::park/unpark does.)
+- Does thread_park check state AFTER CAS'ing to Parked? Or does it
+  CAS to Parked and then sleep, allowing a racing wake_thread to see
+  it as Ready (not Parked) and skip the wake IPI?
+
+The USB key-repeat handoff (2026-04-11) notes that `wake_thread`
+handles both Sleeping and Parked states. That check (if needed for
+correctness) hints at where races happen. Audit that function.
+
+Another specific site to look at: the handoff from 2026-04-11-003
+(boot hang + ctrlc + page cache) describes wait-queue WaitQueue::wait_until
+that "acquires the BlockingMutex inside without_interrupts -- fatal on
+contention." That particular fix was for the PageCache BlockingMutex,
+but the pattern may recur anywhere wait_until is used.
+
+## Insight for a future agent (start here)
+
+### Signal/silence map from the log
+Three user processes, all spawned successfully:
+- tid=19 wm      : printed `[wm] starting` AND `wm: refresh=74Hz frame_time=13ms`.
+                   Did SHM allocation (0x7e9000 = 8100 KiB) and lazy anon
+                   backbuffer. So wm entered its main loop and ran at least
+                   one composite (desktop gradient drew, you can see a
+                   blue window frame on screen).
+- tid=20 taskbar : printed `[taskbar] starting`. No further output.
+- tid=21 terminal: did ONE anon mmap (0x10000 @ 0x44a000 — allocator
+                   arena during std init). NEVER printed `[terminal] starting`.
+                   So terminal is parked BEFORE its first println in main.
+
+This is the most important clue. Terminal didn't reach main's first line.
+It is blocked in Rust runtime startup or in a pre-print syscall
+(likely `sys_open`/`sys_read` on a device, or a futex inside std's
+thread-local-storage init).
+
+### Most likely cause: park/wake TOCTOU race, not a dead lock
+
+All three processes are Parked or Sleeping. No kernel code is running,
+IF=1 everywhere (from the gdb dump), so a wakeup IPI could still wake
+them — but nothing is sending one.
+
+The classic pattern:
+  producer:   `event.ready = true;  wake_thread(consumer);`
+  consumer:   `if !event.ready { park_current(); }`
+
+If the consumer reads `event.ready` as false, then the producer sets it
+true and calls wake_thread BEFORE the consumer has transitioned to
+Parked, the wake_thread is a no-op (thread isn't Parked yet). Consumer
+then parks. No future wakeup ever comes because the edge was consumed.
+
+Rust std's Thread::park uses a token to prevent this. If EDOS's
+thread_park/wake_thread in `kernel/src/thread/scheduler.rs` does NOT
+carry a wake token / spurious-wakeup flag, this class of race is
+possible at every park site.
+
+### Where to look first (prioritized)
+
+1. `kernel/src/thread/scheduler.rs` -- thread_park, wake_thread,
+   park_current. Confirm whether the park has a "token" field that
+   wake_thread sets even when not-yet-parked, and that park_current
+   checks it before sleeping. If not, that's the bug class.
+
+2. `programs/edos-terminal/src/main.rs` -- what is the FIRST thing main
+   does (or runs before main)? Instrument with a `println!` as the very
+   first statement. If that still doesn't print, the hang is in the
+   Rust runtime (`lang_start`, `init`, allocator warmup, TLS setup).
+   If it prints, the hang is in whatever second thing it calls.
+
+3. Per-process second prints: inject a `println!("early")` on the first
+   line of main() in edos-terminal and edos-taskbar. Two outcomes:
+   - Either prints under hang  → post-main syscall park issue.
+   - Neither prints under hang → pre-main Rust runtime issue (TLS,
+     allocator, args) or the futex/mailbox early init.
+
+4. `kernel/src/syscalls/` -- audit every syscall that blocks (reads from
+   a pipe/pty, polls a mailbox, futex_wait). At each park site, verify
+   the "ready" flag is checked AFTER transitioning to Parked state so a
+   concurrent wake sees Parked.
+
+5. `kernel/src/thread/pipe.rs` / mailbox / window poll queues -- these
+   are the likely wake-source objects. Check their wake path re-checks
+   the thread state and avoids the TOCTOU.
+
+### Secondary hypothesis
+
+Terminal tries to open `/dev/pty/<n>` or similar. If the PTY slave open
+blocks waiting for a master-side open (and terminal IS the master from
+elsewhere? wm isn't), the terminal is stuck on a one-way rendezvous.
+Check: does edos-terminal open a PTY? Who is supposed to open the other
+side? That pairing must happen atomically or via a refcounted handle.
+
+### Secondary hypothesis: TLS init futex
+
+Each thread gets a per-thread TLS region (see handoff 2026-04-11-002
+"TLS fixes"). If TLS allocation calls into an allocator that uses a
+futex-protected heap, and the futex logic has the race above, the first
+thread that touches the allocator can park on uncontended acquire.
+
+Rule out by adding a `println!` inside `__rust_alloc` (via the edos_rt
+allocator hook) at the very first call. If terminal is not even
+reaching its allocator, this is ruled out.
+
+### Ruling out
+
+Not a deadlock (no locks held; all CPUs idle).
+Not a panic (no serial output of panic).
+Not the old vmalloc/IST bug (see below).
+Not caused by file-backed mmap (path does not execute before hang).
+
+## Candidate files (in priority order)
+- kernel/src/thread/scheduler.rs    (park/wake primitives)
+- kernel/src/window/                (poll_events syscall, wakeup wiring)
+- kernel/src/thread/pipe.rs         (mailbox, pipe wait queues)
+- kernel/src/syscalls/io.rs         (sys_read blocking path for PTY)
+- programs/edos-terminal/src/main.rs (early main, or lack thereof)
+- /home/edgar/data/rust/library/std/src/sys/pal/edos/ (Rust runtime init
+  on EDOS; TLS, lang_start)
+- edos_rt/src/                      (allocator, fd ops used in startup)
+
+## Quick repro recipe
+Boot 10 times. When one hangs:
+1. Do not kill QEMU. Verify `-s` in the command line (gdbstub on :1234).
+2. Attach gdb with the saved script under /tmp/mmap_gdb_dump.gdb (or
+   hand-roll), capture backtraces. Save to logs/ with date prefix.
+3. Walk THREADS (statics below) and dump each Thread's state + park
+   target, if a pretty-printer or manual bucket walk is workable.
+
+   Useful statics:
+     edos_kernel::thread::scheduler::SCHEDULERS  @ 0xffffffff8017b980
+     edos_kernel::thread::thread::THREADS        @ 0xffffffff8017b458
+   THREADS is a hashbrown HashMap<u64, Arc<Thread>>. Walking the table
+   layout requires either a Rust pretty-printer or peeking raw bucket
+   memory; previous attempt failed (`no member named lock`), so next
+   time start by printing the full type via `ptype` and work out the
+   field chain manually.
+
+4. For each candidate blocked thread, find its Thread struct via gdb
+   and read the state field. Record. Compare against syscall entry
+   trace (if added).
+
+## rust-gdb tips (use it instead of plain gdb)
+
+Plain gdb gives register / backtrace info but barfs on Rust types.
+rust-gdb loads Rust pretty-printers and `ptype` prints the struct
+layout cleanly. Use:
+
+    rust-gdb -q -batch -x /tmp/script.gdb \
+        kernel/target/x86_64-unknown-none/debug/edos-kernel
+
+Known facts from this session's rust-gdb probe:
+- `edos_kernel::thread::thread::THREADS` is a `ThreadRegistry` with
+    map:   RwLock<BTreeMap<ThreadId, Arc<Thread>>>
+    infos: RwLock<BTreeMap<ThreadId, Arc<IrqSpinlock<UserThreadInfo>>>>
+  Length = 17 at hang time (3 user + idle threads + kernel kthreads).
+  Root node pointer: `...THREADS.map.data.value.root.Some.0.node.pointer`
+- `edos_kernel::thread::thread::Thread` struct has:
+    id, cpu, name (Arc<String>), state: Atomic<u8>, priority, ...
+    user: Option<Arc<RwLock<UserThread>>>, ctx, kstack_top, rq_link, ...
+  So `state` is an atomic u8 where the value maps to the enum in
+  kernel/src/thread/thread.rs:60-69:
+    0 Ready, 1 Running, 2 Sleeping, 3 Parked, 4 Waking, 5 Dying
+
+### Walking BTreeMap contents from rust-gdb (WORKS)
+
+Rust's gdb providers DO support BTreeMap, but rust-gdb's auto-load
+doesn't always hook it up for kernel ELFs (no embedded
+`.debug_gdb_scripts`). Force-register from Python:
+
+```
+python
+import sys
+sys.path.insert(0, "/data2/edgar/edos-programs/toolchain/edos/lib/rustlib/etc")
+import gdb_lookup
+gdb.printing.register_pretty_printer(gdb.current_objfile(), gdb_lookup.printer)
+
+val = gdb.parse_and_eval("edos_kernel::thread::thread::THREADS.map.data.value")
+entries = list(gdb.default_visualizer(val).children())
+# entries is alternating (keyN, key_val), (valN, arc_val). len = 2 * count.
+end
+```
+
+To extract fields from `Thread`:
+- Arc dereference: `arc_val["ptr"]["pointer"].dereference()["data"]`
+  (ArcInner has fields `strong`, `weak`, `data`)
+- Atomic unwrap: Atomic<T> has `v: UnsafeCell<Align<T>>`, Align is a
+  tuple struct, so the raw value is `atomic["v"]["value"]["__0"]`
+- State enum: `State: u8 {0:Ready,1:Running,2:Sleeping,3:Parked,
+  4:Waking,5:Dying}` (kernel/src/thread/thread.rs:62)
+- Arc<String> pretty-prints if you pass the inner data value to
+  `gdb.default_visualizer(...)`.to_string().
+
+Full working script for iterating THREADS and printing state per tid:
+committed at `tools/debug/dump_threads.gdb`. Run with:
+
+```
+rust-gdb -q -batch -x tools/debug/dump_threads.gdb \
+    kernel/target/x86_64-unknown-none/debug/edos-kernel
+```
+
+Outputs the same table shown above under "Actual thread states at the
+hang". Extend this script for other BTreeMap/Arc walks as needed.
+
+### LLDB / CodeLLDB note
+
+CodeLLDB's Rust formatters reuse the Rust toolchain's
+`lldb_providers.py`. That file has NO BTreeMap support (only the
+gdb_providers.py has it). For `THREADS` specifically, rust-gdb is the
+better tool; LLDB would require hand-written providers.
+
+### If gdb walk is still painful, alternative
+
+Add a kernel debug helper `pub fn dump_all_threads()` in
+`kernel/src/thread/thread.rs` that iterates `THREADS.map.read()` and
+prints each (id, state, cpu, name, user.is_some()) to serial. Wire it
+to a keyboard hotkey (Ctrl+Alt+D or similar) via the keyboard input
+handler, or to the periodic writeback-kthread for passive logging. One
+commit, repro the hang, read run_log.txt. Eliminates all gdb fiddling.
+
+## Unrelated to file-backed mmap
+Phases A-E of file-backed mmap added no code on the window / event / poll
+path and the hang reproduces before any mmaptest invocation. Not a
+regression from that work.
+
+## Previously fixed boot hang (for context, not this bug)
+An earlier intermittent boot hang (~1 in 5 runs) was the IST/vmalloc
+cascade — all 4 CPUs stuck in page_fault_handler, CR2 in the vmalloc
+region. That one was FIXED in commit 76f5af4 (2026-04-11):
+  - Removed unconditional `tlb_flush_all_including_global` in
+    `switch_to_kernel_page` (TLB storm was the trigger).
+  - Moved page fault handler off IST 1 onto the regular kernel stack so
+    nested faults are recursive-but-safe.
+Double fault still has its own IST for stack overflow protection.
+Different symptoms, different bug.
