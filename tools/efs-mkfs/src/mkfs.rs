@@ -441,8 +441,10 @@ pub fn format(
         block_size: layout.block_size,
         tail_seq: 1,
         head_seq: 1,
+        tail_block: 0,
+        head_block: 0,
         crc32: 0, // computed below
-        reserved: [0u8; 28],
+        reserved: [0u8; 12],
     };
     let jsb_crc = journal_sb_checksum(&jsb);
     let jsb = JournalSuperblock { crc32: jsb_crc, ..jsb };

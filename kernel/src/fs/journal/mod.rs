@@ -122,6 +122,7 @@ impl Journal {
         block_count: u32,
         head_seq: u64,
         tail_seq: u64,
+        initial_head_block: u64,
     ) -> Arc<Journal> {
         Arc::new(Journal {
             device_id,
@@ -130,8 +131,8 @@ impl Journal {
             state: BlockingMutex::new(JournalState {
                 head_seq,
                 tail_seq,
-                head_block: 0,
-                tail_block: 0,
+                head_block: initial_head_block,
+                tail_block: initial_head_block,
                 active: Transaction::new(head_seq, head_seq),
                 sealed: VecDeque::new(),
                 committed_pending: VecDeque::new(),
@@ -158,6 +159,7 @@ impl Journal {
     // ---- Block builder helpers ----------------------------------------------
 
     /// Build a 4096-byte descriptor block for `seq`/`tx_id` listing `entries`.
+    /// Layout: [JournalBlockHeader (24B)] [entry_count: u32 (4B)] [DescriptorEntry * N]
     pub fn build_descriptor_block(
         &self,
         seq: u64,
@@ -173,10 +175,13 @@ impl Journal {
             tx_id,
         };
         write_struct(&mut buf, 0, &hdr);
-        let entry_size = core::mem::size_of::<DescriptorEntry>();
         let header_size = core::mem::size_of::<JournalBlockHeader>();
+        // Store entry count after header so replay doesn't rely on zero-termination.
+        buf[header_size..header_size + 4].copy_from_slice(&(entries.len() as u32).to_le_bytes());
+        let entries_offset = header_size + 4;
+        let entry_size = core::mem::size_of::<DescriptorEntry>();
         for (i, entry) in entries.iter().enumerate() {
-            let off = header_size + i * entry_size;
+            let off = entries_offset + i * entry_size;
             if off + entry_size > BLOCK_SIZE {
                 break;
             }
@@ -253,9 +258,9 @@ impl Journal {
     /// Rebuild the `JournalSuperblock` from current state and write it to disk
     /// with FUA so it survives power loss.
     pub fn write_journal_sb(&self) -> Result<(), AhciError> {
-        let (head_seq, tail_seq) = {
+        let (head_seq, tail_seq, head_block, tail_block) = {
             let s = self.state.lock();
-            (s.head_seq, s.tail_seq)
+            (s.head_seq, s.tail_seq, s.head_block, s.tail_block)
         };
 
         let jsb = JournalSuperblock {
@@ -265,8 +270,10 @@ impl Journal {
             block_size: BLOCK_SIZE as u32,
             tail_seq,
             head_seq,
+            tail_block,
+            head_block,
             crc32: 0,
-            reserved: [0u8; 28],
+            reserved: [0u8; 12],
         };
         let crc = journal_sb_checksum(&jsb);
         let jsb = JournalSuperblock { crc32: crc, ..jsb };

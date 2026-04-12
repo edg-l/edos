@@ -48,6 +48,7 @@ pub fn replay(
     partition_start_lba: u64,
     head_seq: u64,
     tail_seq: u64,
+    tail_block: u64,
 ) -> Result<ReplayResult, AhciError> {
     if head_seq == tail_seq {
         log!("efs journal: clean, no replay needed");
@@ -81,12 +82,12 @@ pub fn replay(
 
     let mut revoke_set: BTreeMap<u64, u64> = BTreeMap::new(); // fs_block → max_revoke_seq
     let mut committed_txs: Vec<CommittedTx> = Vec::new();
-    let mut ring_pos: u64 = 0;
+    let mut ring_pos: u64 = tail_block;
     let mut total_ring_blocks: u64 = 0;
 
     loop {
-        if ring_pos >= ring_size * 2 {
-            // Safety: don't scan more than twice around the ring.
+        if ring_pos >= tail_block + ring_size {
+            // Don't scan more than one full ring from the starting position.
             break;
         }
 
@@ -277,17 +278,24 @@ fn parse_header(block: &[u8]) -> Option<JournalBlockHeader> {
 
 fn parse_descriptor_entries(block: &[u8]) -> Vec<DescriptorEntry> {
     let hdr_size = core::mem::size_of::<JournalBlockHeader>();
+    // Entry count stored as u32 right after the header.
+    let count = u32::from_le_bytes([
+        block[hdr_size],
+        block[hdr_size + 1],
+        block[hdr_size + 2],
+        block[hdr_size + 3],
+    ]) as usize;
+    let entries_offset = hdr_size + 4;
     let entry_size = core::mem::size_of::<DescriptorEntry>();
-    let mut entries = Vec::new();
-    let mut off = hdr_size;
-    while off + entry_size <= BLOCK_SIZE {
+    let mut entries = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = entries_offset + i * entry_size;
+        if off + entry_size > BLOCK_SIZE {
+            break;
+        }
         let entry: DescriptorEntry =
             unsafe { core::ptr::read_unaligned(block[off..].as_ptr() as *const DescriptorEntry) };
-        if entry.fs_block == 0 {
-            break; // zero entry = end of list
-        }
         entries.push(entry);
-        off += entry_size;
     }
     entries
 }

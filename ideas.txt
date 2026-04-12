@@ -104,6 +104,28 @@
   sequential index. Previous code iterated 0..num_cpus treating i as
   lapic_id; works on QEMU, broken on real hardware with sparse lapic
   IDs. Now iterates values directly.
+- **EFS metadata journal (storage roadmap step 3)** - jbd2-style WAL
+  for crash-safe metadata. On-disk ring (default 16 MiB, reserved at
+  mkfs). TxHandle RAII wraps every metadata op (create/remove file/dir,
+  rename, truncate); enrolls dirty pages + revoke records for freed
+  blocks. Committer kthread seals active tx every 1s, writes
+  descriptor+data+revoke+FUA commit to the ring. Writeback gated:
+  dirty pages don't flush to home location until their tx is committed.
+  Two-pass replay on mount: pass 1 builds revoke set, pass 2 applies
+  committed data blocks (skipping revoked). CRC-verified commits,
+  magic-escaped data blocks. DescriptorEntry 16B with flags field.
+  Block-level ring capacity tracking (head_block/tail_block).
+  sys_sync/sys_fsync force-commit with 30s timeout.
+  INCOMPAT_JOURNAL feature bit; old images must be reformatted.
+  /bin/sync tool. system-mount wall: 1379ms -> 808ms.
+- **VFS page_cache_read EOF fix** - page_cache_read returned full count
+  bytes past EOF (zero-filled cached pages). read_to_end looped
+  forever. Fix: VFS read() clamps to file_size_ino before page cache.
+- **EFS file-data I/O path consistency** - write_via_extents and all
+  directory-data reads now correctly use their designated paths:
+  file data via direct AHCI (matching read_via_extents), directory
+  data via read_dir_data_cached (through block page cache, matching
+  write_block). Prevents stale-data bugs with write-back metadata.
 - **Boot hang fix** - Root cause was switch_to_kernel_page() calling
   tlb_flush_all_including_global() unconditionally (even when CR3
   didn't change), creating a TLB storm during parallel boot that
@@ -161,34 +183,22 @@ The 512KB heap warmup workaround was removed. 20/20 boot passes
 ## Storage Stack Roadmap
 
 Starting point: system-mount kthread wall=1379ms, cpu=326ms (~1s of
-I/O stall). Three create_dir calls for /dev, /proc, /tmp cost ~720ms
-because every EFS mkdir fires ~5 synchronous write-through AHCI
-commands.
+I/O stall). Three create_dir calls for /dev, /proc, /tmp cost ~720ms.
 
-Steps 1 and 2 are done (see Done section). Current system-mount
-wall: ~970ms. FS is NOT crash-safe: a crash during metadata updates
-(e.g. mid-mkdir) can leave dangling inodes or orphaned dir entries.
+Steps 1-3 are done (see Done section). Current system-mount wall:
+~808ms. FS IS crash-safe for metadata (journal replays on mount).
 
-### 3. Journal (WAL) for EFS (next)
-
-Write-back metadata without a journal corrupts on crash. Add a
-fixed-size on-disk log ring: metadata ops write descriptors + data to
-the journal, commit record with FUA, then apply in place lazily. On
-mount, replay committed transactions. Ext3/ext4 jbd2 model.
-
-Scope: ~2k LoC. Adds a new EFS feature bit. Disk format: reserve a
-contiguous extent at mkfs time for the journal.
-
-### 4. fsck tool
+### 4. fsck tool (next)
 
 Host tool (like efs-mkfs): scan inodes, verify bitmaps, reclaim leaked
 blocks, replay journal if mounted dirty. Needed once the journal exists
 to make recovery actually trustworthy.
 
-**Why this order**: metadata page cache is the foundation; writeback
-needs it; journal needs write-back ordering control; fsck needs the
-journal to know what "dirty" means. Each step lands a visible win
-(faster mkdir/mount, then durable crash semantics, then recovery).
+**Why this order**: steps 1-3 are shipped. fsck is the remaining
+piece — it scans inodes/bitmaps for consistency and replays the
+journal if mount was dirty. Needed to make recovery trustworthy
+beyond what replay alone provides (e.g. leaked blocks after a
+revoke-less crash, bitmap inconsistencies).
 
 ## Open questions / loose ends
 
@@ -276,10 +286,10 @@ foreground process group.
 
 ## Fun-per-effort ranking
 
-journal > more tools > file-backed mmap > dynamic linker >
-async I/O > fsck > IPv6 > virtio-net
+fsck > more tools > file-backed mmap > dynamic linker >
+async I/O > IPv6 > virtio-net
 
-Note: journal -> fsck is the remaining storage-stack progression
-(metadata cache + writeback already shipped). page cache ->
-file-backed mmap -> dynamic linker is the memory/loader progression.
+Note: fsck is the last storage-stack piece (steps 1-3 shipped).
+page cache -> file-backed mmap -> dynamic linker is the
+memory/loader progression. They're independent and can interleave.
 They're independent and can interleave.

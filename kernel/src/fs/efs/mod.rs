@@ -163,6 +163,8 @@ impl EfsDriver {
         let jsb_block_count = jsb.block_count;
         let jsb_head_seq = jsb.head_seq;
         let jsb_tail_seq = jsb.tail_seq;
+        let jsb_tail_block = jsb.tail_block;
+        let jsb_head_block = jsb.head_block;
 
         if jsb_magic != JOURNAL_MAGIC {
             log!("efs: journal superblock has bad magic {:#x}", jsb_magic);
@@ -197,16 +199,15 @@ impl EfsDriver {
             starting_lba,
             jsb_head_seq,
             jsb_tail_seq,
+            jsb_tail_block,
         )?;
 
         // After replay, reset the JSB: tail = head (all applied).
-        // head_block and tail_block start at replay_result.ring_blocks_consumed
-        // (if we replayed) or 0 (if clean).
         let post_replay_head_seq = jsb_head_seq;
-        let post_replay_tail_seq = jsb_head_seq; // everything replayed
+        let post_replay_tail_seq = jsb_head_seq;
+        let post_replay_head_block = jsb_head_block;
 
         if replay_result.txs_applied > 0 {
-            // Write updated JSB with tail = head.
             let updated_jsb = JournalSuperblock {
                 magic: JOURNAL_MAGIC,
                 version: 1,
@@ -214,8 +215,10 @@ impl EfsDriver {
                 block_size: 4096,
                 tail_seq: post_replay_tail_seq,
                 head_seq: post_replay_head_seq,
+                tail_block: post_replay_head_block,
+                head_block: post_replay_head_block,
                 crc32: 0,
-                reserved: [0u8; 28],
+                reserved: [0u8; 12],
             };
             let crc = journal_sb_checksum(&updated_jsb);
             let updated_jsb = JournalSuperblock {
@@ -246,6 +249,7 @@ impl EfsDriver {
             jsb_block_count,
             post_replay_head_seq,
             post_replay_tail_seq,
+            post_replay_head_block,
         );
 
         // Register the journal with the block page cache so writeback can

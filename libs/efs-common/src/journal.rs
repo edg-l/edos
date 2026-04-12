@@ -37,10 +37,14 @@ pub struct JournalSuperblock {
     /// Sequence number that will be assigned to the next new transaction (head).
     /// Invariant: `head_seq >= tail_seq`.
     pub head_seq: u64,
+    /// Ring block offset of the oldest live tx (used by replay to find start).
+    pub tail_block: u64,
+    /// Ring block offset of the next write position.
+    pub head_block: u64,
     /// CRC32 over the entire struct with this field zeroed.
     pub crc32: u32,
     /// Reserved; must be zero.
-    pub reserved: [u8; 28],
+    pub reserved: [u8; 12],
 }
 
 const _: () = assert!(size_of::<JournalSuperblock>() == 64);

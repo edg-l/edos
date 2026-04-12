@@ -874,3 +874,104 @@ Bytes 156 .. 167 : (same layout)
 ---- unused ------
 Bytes 168 .. 175 : (unused, zero)
 ```
+
+## Journal
+
+EFS uses a metadata-only write-ahead journal (WAL) for crash safety,
+inspired by ext3/jbd2 in `data=writeback` mode. File data is NOT
+journaled; only metadata mutations (inodes, bitmaps, BGDs, directory
+data blocks) are recorded in the journal before being applied to their
+home locations.
+
+### On-disk layout
+
+The journal occupies a contiguous extent reserved at `efs-mkfs` time
+(default 16 MiB). Its location is recorded in the EFS superblock:
+
+- `journal_first_block: u64` -- first block of the journal extent
+- `journal_block_count: u32` -- total blocks (including the journal SB)
+- `journal_sb_checksum: u32` -- CRC32 of the journal superblock
+
+The `INCOMPAT_JOURNAL` (0x1) feature bit must be set. The kernel
+refuses to mount images without it.
+
+### Journal superblock (block 0 of the extent)
+
+64 bytes, `repr(C, packed)`:
+
+| Offset | Size | Field         | Description                              |
+|--------|------|---------------|------------------------------------------|
+| 0      | 4    | magic         | `"EJS!"` (0x454A5321)                    |
+| 4      | 4    | version       | Must be 1                                |
+| 8      | 4    | block_count   | Total journal blocks                     |
+| 12     | 4    | block_size    | Must match FS block size (4096)          |
+| 16     | 8    | tail_seq      | Oldest live transaction seq              |
+| 24     | 8    | head_seq      | Next transaction seq                     |
+| 32     | 8    | tail_block    | Ring offset of oldest live data          |
+| 40     | 8    | head_block    | Ring offset of next write position       |
+| 48     | 4    | crc32         | CRC32 of struct with this field zeroed   |
+| 52     | 12   | reserved      | Must be zero                             |
+
+### Ring structure
+
+Block 0 = journal superblock. Blocks 1..block_count-1 form the ring
+(ring_size = block_count - 1). Ring positions wrap modulo ring_size.
+`journal_block_lba(idx) = (first_block + (idx % ring_size) + 1) * 8`.
+
+### Block types
+
+Every journal metadata block starts with a 24-byte `JournalBlockHeader`:
+
+| Offset | Size | Field | Description                                    |
+|--------|------|-------|------------------------------------------------|
+| 0      | 4    | magic | `"EJB!"` (0x454A4221)                          |
+| 4      | 1    | kind  | 1=Descriptor, 2=Commit, 3=Revoke              |
+| 5      | 3    | _pad  | Zero                                           |
+| 8      | 8    | seq   | Transaction sequence number                    |
+| 16     | 8    | tx_id | Transaction identifier                         |
+
+**Descriptor block**: lists fs_blocks whose data follows.
+Layout: header (24B) + entry_count (u32, 4B) + DescriptorEntry[N].
+Each DescriptorEntry is 16 bytes: `fs_block: u64`, `flags: u32`,
+`_reserved: u32`. Flag bit 0 = ESCAPED (first 4 bytes replaced with
+zeros because they matched JOURNAL_BLOCK_MAGIC).
+
+**Data blocks**: one 4096-byte block per descriptor entry, in order.
+Contains the metadata block content as-is (or escaped).
+
+**Revoke block**: lists blocks that must NOT be replayed from older txs.
+Layout: header (24B) + RevokeEntry[N] (16B each: `fs_block: u64`,
+`seq: u64`). Terminated by zero entry.
+
+**Commit block**: seals a transaction. Layout: header (24B) +
+`payload_crc: u32` (CRC32 of all data block bytes, in escaped form).
+Written with FUA for durability.
+
+### Transaction flow
+
+1. `TxHandle` (RAII) opened at each top-level metadata op.
+2. Helpers enroll dirty pages via `tx.enroll_block(dev, block, page)`.
+3. `free_block` also enrolls revoke records via `tx.enroll_revoke`.
+4. TxHandle::Drop merges staged blocks into the active transaction.
+5. Committer kthread (1s tick or kick) seals active -> writes
+   descriptor + data + optional revoke + flush_cache + FUA commit.
+6. Writeback gate: dirty pages skip flush until committed_seq >= their
+   enrolled seq.
+7. After checkpoint (home-location flush), advance_tail reclaims ring.
+
+### Mount-time replay
+
+Two-pass scan from tail_block:
+- Pass 1: collect committed txs and revoke set (fs_block -> max_revoke_seq)
+- Pass 2: apply data blocks to home locations, skipping revoked blocks
+  (revoke_seq >= tx_seq). Un-escape DESC_FLAG_ESCAPED blocks.
+
+After replay: flush_cache, write updated JSB (tail=head) with FUA.
+Idempotent: crash during replay re-replays on next boot.
+
+### Crash safety guarantees
+
+- Metadata committed to the journal survives power loss.
+- Partial transactions (no commit block) are discarded on replay.
+- Freed blocks are revoke-protected against stale replay.
+- File data is NOT crash-safe (data=writeback mode).
