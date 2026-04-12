@@ -147,7 +147,7 @@ alloc block, write new dir data, write new inode, update parent).
 
 Proper production architecture, in order:
 
-### 1. Extend page cache to metadata (next)
+### 1. Extend page cache to metadata (DONE, step 1)
 
 Per-inode page cache for EFS file data already exists (bulk-fill +
 per-page caching, write-through). Metadata (inode tables, block/inode
@@ -191,6 +191,41 @@ to make recovery actually trustworthy.
 needs it; journal needs write-back ordering control; fsck needs the
 journal to know what "dirty" means. Each step lands a visible win
 (faster mkdir/mount, then durable crash semantics, then recovery).
+
+## Open questions / loose ends
+
+### Transient boot GPF — root cause unknown
+During the block page cache development, one boot hit a GPF at
+`IntrusiveList::push_back`, error code 0x0, non-canonical pointer
+write at `(*self.tail).next = link`. Fault did not reproduce after
+the following unrelated changes landed:
+- `Drop for CachedBlockPage` (replaced manual deallocate_frame)
+- `read_via_extents` bypass (file-data out of the block cache)
+
+Inspection of allocator, scheduler, runqueue, intrusive list, SMP
+init found no concrete race that could produce a non-canonical
+`self.tail` during boot kthread spawn. Hypothesis: timing-sensitive
+cross-CPU `spawn_thread` + `on_tick` race; not deterministic.
+
+Mitigation in place: `debug_assert!(is_canonical(...))` on
+push_back/push_front/unlink pointer fields. Next time the GPF
+appears, one of those will fire with a clear message pointing at
+exactly which pointer went bad.
+
+### Warm spawn latency regression after inode_cache removal
+Removing `EfsDriver::inode_cache` was correct design (one cache,
+not two) but warm `/bin/ps` load went from ~0.2ms (pre-block-cache,
+BTreeMap hit) to ~6ms (block page cache lookup + inode parse). Not
+urgent — 6ms is fine absolutely — but if warm spawn latency
+matters later, add a tiny CPU-local inode parse cache (say 8
+entries, FIFO) in EFS to avoid re-parsing the same inode on every
+open.
+
+### FAT32 full-cluster write vs RMW
+Aligned full-page writes now skip RMW. Cluster writes that are
+smaller than a page (e.g. 512B sector with cluster_size=1) still
+RMW. Fine for FAT32's small-sector case; document or optimize if
+cluster_size starts mattering.
 
 ## Ideas
 
