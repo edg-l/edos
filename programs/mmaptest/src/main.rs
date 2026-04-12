@@ -19,38 +19,41 @@ fn pass(test: u32, detail: &str) {
 // Test 1: MAP_PRIVATE read -- verify mmap bytes match fs::read bytes
 // -----------------------------------------------------------------------
 fn test1() {
-    let path = "/tmp/mmaptest_t1.dat";
-    let content = b"Hello, mmap world!  ";
-    fs::write(path, content).unwrap_or_else(|e| fail(1, &format!("write file: {}", e)));
+    let path = "/var/mmaptest_t1.dat";
+    // Full-page content. Kernel requires page-aligned mmap length for
+    // file-backed mappings.
+    let mut content = vec![0u8; PAGE as usize];
+    let hello = b"Hello, mmap world!  ";
+    content[..hello.len()].copy_from_slice(hello);
+    fs::write(path, &content).unwrap_or_else(|e| fail(1, &format!("write file: {}", e)));
 
     let expected: Vec<u8> = fs::read(path).unwrap_or_else(|e| fail(1, &format!("fs::read: {}", e)));
 
     let file = File::open(path).unwrap_or_else(|e| fail(1, &format!("open: {}", e)));
     let fd = file.as_raw_fd();
-    let len = content.len() as u64;
 
-    let ptr = mmap(core::ptr::null_mut(), len, PROT_READ, MAP_PRIVATE, fd, 0);
+    let ptr = mmap(core::ptr::null_mut(), PAGE, PROT_READ, MAP_PRIVATE, fd, 0);
     if ptr.is_null() || ptr as usize == usize::MAX {
         fail(1, "mmap returned null/MAP_FAILED");
     }
 
-    let mapped: Vec<u8> = unsafe { core::slice::from_raw_parts(ptr, len as usize).to_vec() };
-    munmap(ptr, len);
+    let mapped: Vec<u8> = unsafe { core::slice::from_raw_parts(ptr, PAGE as usize).to_vec() };
+    munmap(ptr, PAGE);
 
     if mapped != expected {
         fail(
             1,
-            &format!("mmap bytes {:?} != fs::read bytes {:?}", mapped, expected),
+            &format!(
+                "mmap first 20 {:?} != fs::read first 20 {:?}",
+                &mapped[..20],
+                &expected[..20]
+            ),
         );
     }
 
     pass(
         1,
-        &format!(
-            "first {} bytes via mmap: {:?}",
-            16.min(mapped.len()),
-            &mapped[..16.min(mapped.len())]
-        ),
+        &format!("first 20 bytes via mmap match fs::read: {:?}", &mapped[..20]),
     );
 }
 
@@ -58,7 +61,7 @@ fn test1() {
 // Test 2: MAP_PRIVATE COW write -- private write does NOT reach disk
 // -----------------------------------------------------------------------
 fn test2() {
-    let path = "/tmp/mmaptest_t2.dat";
+    let path = "/var/mmaptest_t2.dat";
     let content = vec![b'A'; PAGE as usize];
     fs::write(path, &content).unwrap_or_else(|e| fail(2, &format!("write file: {}", e)));
 
@@ -108,7 +111,7 @@ fn test2() {
 // Test 3: MAP_SHARED write + msync -- write must reach disk after msync
 // -----------------------------------------------------------------------
 fn test3() {
-    let path = "/tmp/mmaptest_t3.dat";
+    let path = "/var/mmaptest_t3.dat";
     let content = vec![b'A'; PAGE as usize];
     fs::write(path, &content).unwrap_or_else(|e| fail(3, &format!("write file: {}", e)));
 
@@ -158,7 +161,7 @@ fn test3() {
 // Test 4: MAP_SHARED two-mapper visibility within one process
 // -----------------------------------------------------------------------
 fn test4() {
-    let path = "/tmp/mmaptest_t4.dat";
+    let path = "/var/mmaptest_t4.dat";
     let content = vec![b'A'; PAGE as usize];
     fs::write(path, &content).unwrap_or_else(|e| fail(4, &format!("write file: {}", e)));
 
@@ -226,7 +229,7 @@ fn test4() {
 // Test 5: Past-EOF fault kills child (fork + deref second page of 4KB file)
 // -----------------------------------------------------------------------
 fn test5() {
-    let path = "/tmp/mmaptest_t5.dat";
+    let path = "/var/mmaptest_t5.dat";
     let content = vec![b'X'; PAGE as usize]; // 4 KB
     fs::write(path, &content).unwrap_or_else(|e| fail(5, &format!("write file: {}", e)));
 
@@ -288,7 +291,7 @@ fn test5() {
 // Test 6: Truncate post-mapping page kills child
 // -----------------------------------------------------------------------
 fn test6() {
-    let path = "/tmp/mmaptest_t6.dat";
+    let path = "/var/mmaptest_t6.dat";
     let content = vec![b'Y'; PAGE as usize * 2]; // 8 KB
     fs::write(path, &content).unwrap_or_else(|e| fail(6, &format!("write file: {}", e)));
 
@@ -355,7 +358,7 @@ fn test6() {
 // Test 7: fsync + msync round-trip
 // -----------------------------------------------------------------------
 fn test7() {
-    let path = "/tmp/mmaptest_t7.dat";
+    let path = "/var/mmaptest_t7.dat";
     let content = vec![b'A'; PAGE as usize];
     fs::write(path, &content).unwrap_or_else(|e| fail(7, &format!("write file: {}", e)));
 
