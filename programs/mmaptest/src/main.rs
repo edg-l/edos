@@ -159,12 +159,6 @@ fn test3() {
 
 // -----------------------------------------------------------------------
 // Test 4: MAP_SHARED two-mapper visibility within one process
-//
-// TODO: also add a test that forks, MAP_PRIVATE's a file, has the child
-// write, and verifies the parent's view is unchanged (MAP_PRIVATE COW
-// across fork). The COW infra is shared with anonymous fork which has
-// broader coverage, so this is low priority but would close the loop
-// for the FileBacked-specific COW path.
 // -----------------------------------------------------------------------
 fn test4() {
     let path = "/var/mmaptest_t4.dat";
@@ -420,8 +414,79 @@ fn test7() {
     pass(7, "fsync + msync round-trip: byte 0 is 'Z'");
 }
 
+// -----------------------------------------------------------------------
+// Test 8: Fork + MAP_PRIVATE COW isolation
+//
+// The child writes to its private mapping. The parent's view must be
+// unchanged and the file on disk must be unchanged. Exercises the
+// FileBacked-specific COW-across-fork path.
+// -----------------------------------------------------------------------
+fn test8() {
+    let path = "/var/mmaptest_t8.dat";
+    let content = vec![b'A'; PAGE as usize];
+    fs::write(path, &content).unwrap_or_else(|e| fail(8, &format!("write file: {}", e)));
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap_or_else(|e| fail(8, &format!("open: {}", e)));
+    let fd = file.as_raw_fd();
+
+    let ptr = mmap(
+        core::ptr::null_mut(),
+        PAGE,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE,
+        fd,
+        0,
+    );
+    if ptr.is_null() || ptr as usize == usize::MAX {
+        fail(8, "mmap returned null/MAP_FAILED");
+    }
+
+    let child_pid = process::fork();
+    if child_pid < 0 {
+        munmap(ptr, PAGE);
+        fail(8, "fork failed");
+    }
+
+    if child_pid == 0 {
+        // Child: write to its private mapping. COW should isolate the
+        // parent's view and not touch the on-disk file.
+        unsafe { core::ptr::write_volatile(ptr, b'X') };
+        let mine = unsafe { core::ptr::read_volatile(ptr) };
+        if mine != b'X' {
+            println!("test8 child: child saw {} after its own write", mine);
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
+    let exit_code = process::waitpid(child_pid as u64);
+    if exit_code != 0 {
+        munmap(ptr, PAGE);
+        fail(8, &format!("child exited {}, expected 0", exit_code));
+    }
+
+    // Parent view: byte 0 must still be 'A' (COW isolation).
+    let parent_byte = unsafe { core::ptr::read_volatile(ptr) };
+    munmap(ptr, PAGE);
+    if parent_byte != b'A' {
+        fail(8, &format!("parent saw {} after child write, expected 'A'", parent_byte));
+    }
+
+    // Disk must be untouched too.
+    let on_disk: Vec<u8> = fs::read(path).unwrap_or_else(|e| fail(8, &format!("fs::read: {}", e)));
+    if on_disk[0] != b'A' {
+        fail(8, &format!("disk byte 0 is {}, expected 'A'", on_disk[0]));
+    }
+
+    pass(8, "fork + MAP_PRIVATE: parent view isolated, disk unchanged");
+}
+
 fn main() {
-    println!("mmaptest: running 7 tests");
+    println!("mmaptest: running 8 tests");
 
     test1();
     test2();
@@ -430,6 +495,7 @@ fn main() {
     test5();
     test6();
     test7();
+    test8();
 
     println!("mmaptest: all tests passed");
     std::process::exit(0);

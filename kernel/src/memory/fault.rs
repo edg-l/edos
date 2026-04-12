@@ -151,25 +151,34 @@ pub fn fault_in_page(
         shared,
     } = &info.source
     {
-        // Past-EOF check: if the faulting page starts at or beyond the file size,
-        // return false (SIGBUS-equivalent — caller kills the thread).
-        //
-        // TODO: we call `fs_by_mount_id` here and again inside
-        // `get_or_fill_page`. Merge to a single lookup (pass fs down).
-        if let Some(fs) = fs_by_mount_id(inode.mount_id) {
-            if let Ok(file_size) = fs.file_size_ino(inode.ino) {
-                if page_idx * 4096 >= file_size {
-                    return FaultOutcome {
-                        mapped: false,
-                        cached_page: None,
-                    };
-                }
+        // Resolve the filesystem once for both the past-EOF check and
+        // `get_or_fill_page`. If the mount vanished between mmap and this
+        // fault, treat as EOF (kills the faulting thread).
+        let fs = match fs_by_mount_id(inode.mount_id) {
+            Some(f) => f,
+            None => {
+                return FaultOutcome {
+                    mapped: false,
+                    cached_page: None,
+                };
+            }
+        };
+
+        // Past-EOF check: if the faulting page starts at or beyond the file
+        // size, return false (SIGBUS-equivalent — caller kills the thread).
+        if let Ok(file_size) = fs.file_size_ino(inode.ino) {
+            if page_idx * 4096 >= file_size {
+                return FaultOutcome {
+                    mapped: false,
+                    cached_page: None,
+                };
             }
         }
 
         // Get or fill the page from the inode page cache.
-        // `get_or_fill_page` calls `page.pin()` before returning, so the Arc keeps the pin alive.
-        let cached_page = match get_or_fill_page(inode, *page_idx) {
+        // `get_or_fill_page` calls `page.pin()` before returning, so the Arc
+        // keeps the pin alive.
+        let cached_page = match get_or_fill_page(inode, *page_idx, &fs) {
             Ok(p) => p,
             Err(_) => {
                 return FaultOutcome {

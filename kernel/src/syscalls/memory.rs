@@ -362,24 +362,22 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
 }
 
 /// Flush dirty shared pages for a FileBacked VMA before unmapping.
-/// Collects work under VmaSet lock; flushes after releasing it.
 /// Errors are logged but do not prevent unmap (unmap must not fail).
 ///
-/// TODO: the caller passes only the `pages` slice, so we cannot derive the
-/// real file `page_idx` directly; we reverse-scan `inode.pages` with pointer
-/// equality, which is O(cached_pages * vma_pages). Fine for v1 but ugly. Fix
-/// by taking `file_offset` (VMA field) so `page_idx = file_offset/4096 +
-/// slot`. Deferred.
+/// `file_offset` is the VMA's file_offset field (page-aligned); the file
+/// page index for slot N is `file_offset/4096 + N`.
 pub fn flush_shared_vma_pages(
     inode: &Arc<crate::fs::inode::VfsInode>,
+    file_offset: u64,
     pages: &[Option<Arc<CachedPage>>],
 ) {
-    // Collect dirty pages while holding no extra locks.
+    // Collect (page_idx, Arc<CachedPage>) for dirty slots.
+    let base_idx = file_offset / 4096;
     let mut work: Vec<(u64, Arc<CachedPage>)> = Vec::new();
     for (slot, maybe_page) in pages.iter().enumerate() {
         if let Some(page) = maybe_page {
             if page.is_dirty() {
-                work.push((slot as u64, Arc::clone(page)));
+                work.push((base_idx + slot as u64, Arc::clone(page)));
             }
         }
     }
@@ -403,33 +401,18 @@ pub fn flush_shared_vma_pages(
             return;
         }
     };
-    for (slot, page) in &work {
-        // slot is index within the VMA's pages vec; it is not the file page index
-        // (file page index is computed from file_offset at VMA creation, but we
-        // stored the Arc per slot so we re-derive via the inode's page map).
-        // We need the actual file page index for flush_page.  Since we have the
-        // Arc<CachedPage> but not the page index here, look it up via inode.pages.
-        let page_idx = {
-            let map = inode.pages.pages.lock();
-            map.iter()
-                .find(|(_, p)| Arc::ptr_eq(p, page))
-                .map(|(&k, _)| k)
-        };
-        if let Some(idx) = page_idx {
-            // Safety: no mutable aliasing; the page frame is exclusively
-            // referenced by the cache and mapped read-only in userspace PTEs.
-            let buf = unsafe { page.as_slice() };
-            match pc_ops.flush_page(inode.ino, idx, buf, 4096) {
-                Ok(()) => page.clear_dirty(),
-                Err(e) => log!(
-                    "flush_shared_vma_pages: flush_page ino={} idx={} err={:?}",
-                    inode.ino,
-                    idx,
-                    e
-                ),
-            }
-        } else {
-            let _ = slot;
+    for (idx, page) in &work {
+        // Safety: no mutable aliasing; the page frame is exclusively
+        // referenced by the cache and mapped read-only in userspace PTEs.
+        let buf = unsafe { page.as_slice() };
+        match pc_ops.flush_page(inode.ino, *idx, buf, 4096) {
+            Ok(()) => page.clear_dirty(),
+            Err(e) => log!(
+                "flush_shared_vma_pages: flush_page ino={} idx={} err={:?}",
+                inode.ino,
+                idx,
+                e
+            ),
         }
     }
 }
@@ -644,6 +627,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
             }
             VmaBacking::FileBacked {
                 inode,
+                file_offset,
                 shared,
                 pages,
                 ..
@@ -651,7 +635,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                 // For MAP_SHARED: flush dirty pages to disk before unmapping.
                 // Flush errors are logged but do not prevent unmap (unmap must not fail).
                 if shared {
-                    flush_shared_vma_pages(&inode, &pages);
+                    flush_shared_vma_pages(&inode, file_offset, &pages);
                 }
 
                 // Unmap PTEs and decrement frame refcounts for all present pages.

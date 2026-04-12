@@ -826,14 +826,17 @@ pub fn invalidate_mappings_above(inode: &Arc<VfsInode>, new_size: u64) {
 /// logical pin contributed by the caller; callers must call `page.unpin()`
 /// when they no longer need the page held (e.g. on munmap).
 ///
-/// Uses `PageCacheOps::fill_page` supplied by the inode's filesystem.
+/// Uses `PageCacheOps::fill_page` supplied by `fs` (the inode's filesystem,
+/// passed in by the caller to avoid a redundant `fs_by_mount_id` lookup when
+/// the caller has already resolved it).
+///
 /// Returns `Err(Errno::EINVAL)` if the filesystem does not support the page cache
 /// or the inode number is zero.
 pub fn get_or_fill_page(
     inode: &Arc<super::inode::VfsInode>,
     page_idx: u64,
+    fs: &Arc<dyn super::FileSystem + Send + Sync>,
 ) -> Result<Arc<super::page_cache::CachedPage>, super::super::syscalls::Errno> {
-    let fs = fs_by_mount_id(inode.mount_id).ok_or(super::super::syscalls::Errno::EINVAL)?;
     let pc_ops = fs
         .as_page_cache_ops()
         .ok_or(super::super::syscalls::Errno::EINVAL)?;

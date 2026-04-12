@@ -771,6 +771,7 @@ impl Thread {
                     }
                     VmaBacking::FileBacked {
                         inode,
+                        file_offset,
                         shared,
                         pages,
                         ..
@@ -779,7 +780,11 @@ impl Thread {
                         // writes survive the process's death (Linux msync-on-exit
                         // semantics). Errors are logged, never prevent exit.
                         if *shared {
-                            crate::syscalls::memory::flush_shared_vma_pages(inode, pages);
+                            crate::syscalls::memory::flush_shared_vma_pages(
+                                inode,
+                                *file_offset,
+                                pages,
+                            );
                         }
                         // Unmap each present PTE and decrement the frame refcount
                         // that was bumped at fault-in time. Drop the pages Vec
