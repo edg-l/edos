@@ -673,6 +673,7 @@ impl EfsDriver {
         tx: &mut TxHandle<'_>,
     ) -> Result<(), Error> {
         let block_size = self.block_size() as usize;
+        let spb = self.sectors_per_block();
         let mut written = 0usize;
 
         while written < data.len() {
@@ -683,10 +684,25 @@ impl EfsDriver {
 
             let phys_block = self.ensure_block_for_logical(ino, logical_block, tx)?;
 
-            let mut block_data = self.read_block(phys_block)?;
+            // INVARIANT: file-data writes bypass BlockPageCache to stay consistent
+            // with the read path (read_via_extents) which also bypasses it. Only
+            // metadata (inode, bitmap, BGD) goes through the journaled block cache.
+            let lba = self.block_to_lba(phys_block);
+            let mut block_data = vec![0u8; block_size];
+            crate::drivers::ahci::direct::read_sectors(
+                self.device.device_id,
+                lba,
+                spb,
+                &mut block_data,
+            )?;
             block_data[offset_in_block..offset_in_block + copy_len]
                 .copy_from_slice(&data[written..written + copy_len]);
-            self.write_block(phys_block, &block_data, tx)?;
+            crate::drivers::ahci::direct::write_sectors(
+                self.device.device_id,
+                lba,
+                &block_data,
+                spb,
+            )?;
 
             written += copy_len;
         }
