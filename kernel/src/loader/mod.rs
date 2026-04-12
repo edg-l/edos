@@ -6,6 +6,8 @@ use thiserror::Error;
 use x86_64::{VirtAddr, align_up, structures::paging::PageTableFlags};
 
 use crate::{
+    fs::api as fs_api,
+    fs::path::Path,
     log,
     memory::{
         frame_allocator::frame_allocator,
@@ -14,6 +16,14 @@ use crate::{
     },
     println,
 };
+
+/// Read `len` bytes from a file at `offset` via the VFS page cache.
+/// Used by Phase 2 to read ELF headers, relocation sections, and TLS init data
+/// without materialising the entire binary in kernel memory.
+#[allow(dead_code)]
+fn read_file_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, ElfLoadError> {
+    fs_api::read_bytes(path, offset as usize, len as usize).map_err(|_| ElfLoadError::MappingFailed)
+}
 
 #[derive(Debug, Clone)]
 pub struct TlsTemplate {

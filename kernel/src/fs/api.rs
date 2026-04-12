@@ -188,3 +188,12 @@ pub fn rename(old_path: &Path, new_path: &Path) -> Result<(), Error> {
 pub fn resolve_vfs_inode_for_path(path: &Path) -> Option<Arc<VfsInode>> {
     vfs::resolve(path).and_then(|op| op.inode)
 }
+
+/// Resolve a path to its VfsInode, returning `Err(Error::FileNotFound)` when
+/// the path does not exist or resolves to a directory with no backing inode.
+#[allow(dead_code)]
+pub fn resolve_inode(path: &Path) -> Result<Arc<VfsInode>, Error> {
+    vfs::resolve(path)
+        .and_then(|op| op.inode)
+        .ok_or(Error::FileNotFound)
+}
