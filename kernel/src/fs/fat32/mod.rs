@@ -143,15 +143,53 @@ impl Fatfs {
     }
 
     /// Write `sectors` starting at `lba`. Routes through the block page cache.
+    ///
+    /// Splits the range into page-aligned full-page writes (fast path, no RMW)
+    /// and partial-page ranges (RMW via write_partial_sectors). The partial
+    /// path reads the existing page, patches the sub-range, writes the whole
+    /// page back — wasted read if the caller actually wrote a full page.
     pub(super) fn write_disk_sectors(
         &self,
         lba: u64,
         data: &[u8],
         sectors: u16,
     ) -> Result<(), Error> {
-        self.device
-            .write_partial_sectors(lba, sectors, data)
-            .map_err(ahci_to_fs)
+        const SECTOR_SIZE: usize = 512;
+        const SECTORS_PER_PAGE: u64 = 8;
+        const PAGE_SIZE: usize = 4096;
+
+        debug_assert_eq!(data.len(), sectors as usize * SECTOR_SIZE);
+
+        let mut cur_lba = lba;
+        let mut remaining = sectors as u64;
+        let mut data_pos = 0usize;
+
+        while remaining > 0 {
+            let sector_in_page = cur_lba & (SECTORS_PER_PAGE - 1);
+            let page_idx = cur_lba / SECTORS_PER_PAGE;
+
+            if sector_in_page == 0 && remaining >= SECTORS_PER_PAGE {
+                // Aligned full-page write: no read-modify-write.
+                let page: &[u8; PAGE_SIZE] = data[data_pos..data_pos + PAGE_SIZE]
+                    .try_into()
+                    .expect("exact 4 KiB slice");
+                self.device.write_page(page_idx, page).map_err(ahci_to_fs)?;
+                cur_lba += SECTORS_PER_PAGE;
+                remaining -= SECTORS_PER_PAGE;
+                data_pos += PAGE_SIZE;
+            } else {
+                // Partial range within one page: RMW.
+                let take = (SECTORS_PER_PAGE - sector_in_page).min(remaining);
+                let bytes = take as usize * SECTOR_SIZE;
+                self.device
+                    .write_partial_sectors(cur_lba, take as u16, &data[data_pos..data_pos + bytes])
+                    .map_err(ahci_to_fs)?;
+                cur_lba += take;
+                remaining -= take;
+                data_pos += bytes;
+            }
+        }
+        Ok(())
     }
 }
 
