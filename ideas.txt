@@ -137,6 +137,20 @@
   regular kernel stack so nested faults work naturally. Double fault
   handler retains its own IST for stack overflow protection.
   20/20 boot test passes (was ~1 in 5 failure rate).
+- **Scheduler park/wake race fix (2026-04-13)** - Added wake-pending
+  token (Thread.wake_pending: AtomicBool). Wakers signal_wake() before
+  probing state; parkers consume_wake_pending() after CAS to Parked/
+  Sleeping and revert to Running if set. Closes the lost-wakeup race
+  for thread_park, thread_park_while, and thread_sleep at the primitive
+  level. wake_thread_slow + wake_thread_from_irq collapsed to one
+  do_wake; retry loop / MAX_RETRIES / spin_loop deleted. New transition
+  Sleeping->Running for sleep abort. thread_park_while now LOOPS on
+  spurious-wake (token consumed but closure still says park) so callers
+  without their own outer loop (sys_waitpid in particular) are correct
+  by contract. Fixes the intermittent boot hang documented in bug.txt
+  AND the shell-dies-after-`ls` symptom seen during testing. Debug
+  visibility: Thread.last_syscall + dump_threads.gdb shows SYSCALL and
+  WP columns per thread.
 - **File-backed mmap (MAP_PRIVATE + MAP_SHARED)** - VmaBacking::FileBacked
   with Arc<VfsInode> + Arc<CachedPage>-per-page on the VMA. MAP_PRIVATE
   installs read-only + COW_BIT, writes fault into anon via the existing
