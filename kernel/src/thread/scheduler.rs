@@ -909,9 +909,16 @@ impl Scheduler {
 
     /// Park the current thread while `should_park` returns true.
     ///
-    /// Sets state to Parked *before* calling the closure, so any concurrent
-    /// `try_wake()` sees Parked and succeeds. This closes the lost-wakeup
-    /// window that exists with `thread_park()`.
+    /// Sets state to Parked *before* calling the closure inside
+    /// `transition_park_while`, so any concurrent `try_wake()` sees Parked
+    /// and succeeds. This closes the lost-wakeup window that exists with
+    /// the bare `thread_park()`.
+    ///
+    /// Contract: returns ONLY when `should_park()` observes false. Spurious
+    /// wakes (e.g. a stale wake-pending token consumed during the transition)
+    /// are absorbed by re-checking the closure after each return from
+    /// `save_transition_switch` and looping if the condition still wants to
+    /// park. Callers therefore do not need to loop themselves.
     pub fn thread_park_while<F: FnMut() -> bool>(&self, mut should_park: F) {
         let Some(_cur) = self.current_thread() else {
             return;
@@ -928,18 +935,21 @@ impl Scheduler {
                 check_fn: check_wrapper::<F>,
                 check_ctx: &mut should_park as *mut F as *mut u8,
             };
-            let switched = without_interrupts(|| unsafe {
+            without_interrupts(|| unsafe {
                 save_transition_switch(
                     transition_park_while,
                     &mut ctx as *mut ParkWhileCtx as *mut u8,
-                )
+                );
             });
-            if !switched {
-                // Condition was false and we reverted cleanly, no need to loop.
+            // After every return from save_transition_switch (whether we
+            // actually parked, aborted on closure-false, or aborted because
+            // a stale wake token was consumed), re-evaluate the condition.
+            // Returning while `should_park` still says park would break
+            // callers like `sys_waitpid` that have no outer loop and treat
+            // the return as proof that the wait condition was satisfied.
+            if !should_park() {
                 return;
             }
-            // Resumed after parking (or had to switch due to waker race).
-            // Loop to re-check condition.
         }
     }
 
