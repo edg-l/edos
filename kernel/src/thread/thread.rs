@@ -520,6 +520,13 @@ impl Thread {
 
         let mut load_info = load_elf(&inode, path, &mut process_memory_manager)?;
 
+        // Store reloc table and VMA range on the MemoryManager for lazy fault
+        // application in Phase 2. Also record the load base used to compute
+        // relocated values: `value = load_base + entry.addend`.
+        process_memory_manager.reloc_table = load_info.reloc_table.take();
+        process_memory_manager.reloc_vma_range = load_info.reloc_vma_range.take();
+        process_memory_manager.load_base = load_info.load_base;
+
         let id = ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, Ordering::Relaxed));
 
         let mut tls_runtime: Option<UserThreadTls> = None;

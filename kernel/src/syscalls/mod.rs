@@ -1885,12 +1885,21 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     let child_vma_set_arc = Arc::new(spin::Mutex::new(child_vma_set));
 
     // Build a MemoryManager for the child via HHDM (no CR3 switch needed).
+    // Explicitly clone reloc_table (Arc clone, cheap) and reloc_vma_range from
+    // the parent so the child can apply lazy relocs after COW faults.
     let child_mm = {
         let child_page_table = unsafe { get_level_4_table((child_pml4_frame, parent_cr3.1)) };
         let table = unsafe { OffsetPageTable::new(child_page_table, phys_offset) };
         let mut mm = MemoryManager::new(table);
         mm.pml4_frame = Some(child_pml4_frame);
         mm.vmas = Some(child_vma_set_arc.clone());
+        {
+            let parent_user_guard = parent_user.read();
+            let parent_mm = parent_user_guard.memory_manager.lock();
+            mm.reloc_table = parent_mm.reloc_table.clone();
+            mm.reloc_vma_range = parent_mm.reloc_vma_range.clone();
+            mm.load_base = parent_mm.load_base;
+        }
         Arc::new(Mutex::new(mm))
     };
 

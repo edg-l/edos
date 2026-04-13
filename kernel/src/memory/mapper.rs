@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use core::ops::Range;
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::control::Cr3Flags,
@@ -12,6 +13,7 @@ use x86_64::{
 
 use crate::{
     boot::boot_info,
+    loader::reloc::RelocTable,
     memory::{STACK_ALIGNMENT, frame_allocator::frame_allocator, vma::VmaSet},
     thread::irqlock::IrqLockGuard,
 };
@@ -52,6 +54,16 @@ pub struct MemoryManager {
     pub pml4_frame: Option<PhysFrame>,
     /// VMA set (user processes only, None for kernel mapper)
     pub vmas: Option<Arc<spin::Mutex<VmaSet>>>,
+    /// Parsed R_X86_64_RELATIVE table for lazy page-fault relocation application.
+    /// Shared (Arc) so fork can clone it cheaply without re-parsing.
+    pub reloc_table: Option<Arc<RelocTable>>,
+    /// Load-base-relative virtual address range of the writable PT_LOAD VMA
+    /// that contains reloc targets. Used by the fault handler to decide whether
+    /// to apply relocs when faulting a private writable page.
+    pub reloc_vma_range: Option<Range<VirtAddr>>,
+    /// ELF load base for this process (used by the fault handler to compute
+    /// relocated values: `value = load_base + entry.addend`).
+    pub load_base: u64,
 }
 
 #[expect(unused)]
@@ -61,6 +73,9 @@ impl MemoryManager {
             mapper: page_table,
             pml4_frame: None,
             vmas: None,
+            reloc_table: None,
+            reloc_vma_range: None,
+            load_base: 0,
         }
     }
 
