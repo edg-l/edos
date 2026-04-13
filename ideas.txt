@@ -165,6 +165,17 @@
   reruns (`--force` to override). Double-claim guard skips bitmap
   clears for blocks also held by live inodes. 8 integration tests +
   `doc/efs-fsck.md`.
+- **Lazy ELF relocation (2026-04-13)** - Replaced eager R_X86_64_RELATIVE
+  pass with on-demand patching driven by the page fault handler. Per-process
+  Arc<RelocTable> with per-page bucket index parsed at load_elf; fault path
+  early-COWs reloc-target pages (allocate private frame, copy from cache,
+  apply relocs, map writable, never patch shared cache). Partial-last-file-
+  page pre-fault has relocs applied at load time (lazy path can't fire on
+  already-mapped pages). Cold-spawn /bin/sh from terminal: 238ms -> 162ms
+  (-32%). Boot-time parallel loads unchanged (already I/O-bound). Foundation
+  for future dynamic linker. Does not yet shrink time-to-/bin/sh because
+  boot-load kthreads are already parallel and AHCI-bound; gain is on serial
+  cold spawns.
 - **File-backed mmap (MAP_PRIVATE + MAP_SHARED)** - VmaBacking::FileBacked
   with Arc<VfsInode> + Arc<CachedPage>-per-page on the VMA. MAP_PRIVATE
   installs read-only + COW_BIT, writes fault into anon via the existing
@@ -186,6 +197,22 @@
   WRITABLE, poisoning the 2 MiB range for later writable mappings (was
   causing wm to crash after 30s of SHM cycling); debug_assert_permissive
   _parents catches regressions.
+- **ElfSegment -> FileBacked migration (2026-04-12)** - ELF loader no
+  longer keeps the binary as Arc<Vec<u8>>. load_elf takes Arc<VfsInode>
+  + Path; per-PT_LOAD it builds VmaBacking::FileBacked { inode,
+  file_offset, shared:false, writable_mapping, pages } reusing the
+  per-inode page cache, plus a separate Anonymous VMA for the BSS tail
+  past the last file page. Partial last file page is eagerly zero-padded.
+  Bulk-prefetch via prefetch_file_pages still feeds the eager-reloc pass
+  (writable .data pages COW-materialize at load time because RELATIVE
+  entries are patched in place; .text/.rodata stay shared via the cache).
+  Thread::new_user threads the inode through; FileBacked VMAs register on
+  inode.mappers for truncate invalidation. VmaBacking::ElfSegment,
+  load_elf_from_bytes, FaultSource::ElfData and their fault/free arms all
+  deleted. Wins: page-cache reuse across re-exec, sharing across fork, no
+  per-process full-binary copy. Prerequisite for the dynamic linker. Note:
+  binaries on FAT32 / memfs return ENOEXEC until those FSes implement
+  PageCacheOps.
 
 ## Network Stack Remaining
 
@@ -286,12 +313,12 @@ cluster_size starts mattering.
 
 ## Ideas
 
-### ElfSegment -> FileBacked migration
-Currently ELF segments are kept in-kernel as Arc<Vec<u8>> (an entire
-ELF binary per process). File-backed mmap now exists, so migrate the
-ELF loader to use VmaBacking::FileBacked via MAP_PRIVATE from the
-binary on disk. Saves memory (shared pages across fork, cache reuse
-for re-exec), and is the prerequisite for the dynamic linker.
+### PageCacheOps for FAT32 + memfs
+Today only EFS implements PageCacheOps, so file-backed mmap (and the
+new FileBacked ELF loader) returns EINVAL/ENOEXEC on FAT32 and memfs.
+Binaries copied to a USB FAT32 drive cannot exec, and mmap'ing files on
+/tmp falls back to read+anon. Wiring PageCacheOps through both drivers
+unblocks both paths.
 
 ### Dynamic Linker (ld.so)
 ELF dynamic linking: PT_INTERP, PT_DYNAMIC parsing, symbol resolution
@@ -349,9 +376,12 @@ first piece to land before any in-EDOS fsck makes sense.
 
 ## Fun-per-effort ranking
 
-more tools > ElfSegment->FileBacked > dynamic linker > in-EDOS fsck >
-async I/O > IPv6 > virtio-net
+more tools > dynamic linker > PageCacheOps for FAT32+memfs > in-EDOS
+fsck > async I/O > IPv6 > virtio-net
 
 Note: storage-stack roadmap steps 1-4 are all shipped (host fsck done).
-File-backed mmap shipped; ElfSegment->FileBacked migration is the
-next step in the memory/loader progression toward the dynamic linker.
+File-backed mmap, ElfSegment->FileBacked loader migration, and lazy ELF
+relocation are all shipped. The next step in the memory/loader
+progression toward the dynamic linker is PageCacheOps for FAT32+memfs
+(so binaries on USB drives can exec) or PT_INTERP / dynamic linker
+support itself.
