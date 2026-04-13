@@ -1,113 +1,128 @@
-# LIKELY FIXED 2026-04-13 — Intermittent missed-wakeup in scheduler park/wake
+# FIXED 2026-04-13 — Missed-wakeup in scheduler park/wake (3 iterations)
 
 ## Status
-Likely fixed by commits `4b8eab3` (token), `b48f2b3` (park_while loop).
+Fixed. Took three iterations to land correctly:
 
-Confidence is "likely, not proven":
-- The shell-dies-after-`ls` symptom was reliably reproducible and is
-  no longer reproducing post-fix (10 commands in sequence, multiple
-  reboots).
-- The original ~1-in-10 boot hang has not reproduced post-fix, but the
-  baseline reproduction rate was low enough that a handful of clean
-  boots is not statistically conclusive. Need ~30+ clean boots before
-  declaring it dead with confidence.
-- The fix is structurally correct (token closes the lost-wakeup race
-  class at the primitive level; park_while loop closes the contract
-  gap exposed by the token), so even if a different hang appears it
-  shouldn't be the same root cause.
+1. `4b8eab3` — wake-pending token (closes the lost-wake race at the
+   primitive level).
+2. `b48f2b3` — `thread_park_while` loops on spurious wake. **Wrong fix.**
+   Broke the wait-queue protocol; surfaced as a hard hang where
+   terminal/taskbar parked on TTY_BUFFER with the lock free and the wait
+   queue empty (caught the second time wm fast-path triggered three
+   back-to-back eprintlns).
+3. `42c8886` — revert (2)'s loop, fix `sys_waitpid` instead. **Right fix.**
+   `thread_park_while` is now "may return spuriously" matching Rust
+   std's `Thread::park` contract. Every wait-queue caller already loops;
+   `sys_waitpid` was the one bare caller, now wrapped.
 
-If a hang DOES reappear, run the dump_threads recipe at the bottom of
-this file. The new SYSCALL/WP columns will tell you immediately
-whether it's a residual park/wake bug (WP=1 on Parked = primitive
-bug) or something else.
+Validated: shell + ls/ps/df run cleanly across many commands; full boot
+to /bin/sh in ~1.7s (was 4.8s before the speedup work, hung at boot
+between iterations 2 and 3).
 
-## What it was
-Two related symptoms with the same root cause:
+## Symptoms (all from the same root cause)
 
-1. **Boot hang (~1-in-10)**: all four CPUs idle in `Scheduler::run_idle`,
-   user threads (terminal, taskbar) Parked with no wake en route. Original
-   diagnosis in this file's git history if you need it.
-2. **Shell exits after a command**: typing `ls` produces output but no
-   new prompt. The shell process exited cleanly with code 0 right after
-   spawning the child. `dump_threads` showed the shell tid simply gone.
+- **Original boot hang (~1-in-10)**: all four CPUs idle in
+  `Scheduler::run_idle`, terminal/taskbar Parked, no wake en route.
+- **Shell exits after a command**: typing `ls` produces output but no
+  new prompt. Shell exits cleanly with code 0 right after spawning the
+  child. Exposed by iteration (2) — `sys_waitpid` returning 0 with stale
+  status because `thread_park_while` returned spuriously, userspace
+  `waitpid()` returns -1, shell interprets -1 as "exit shell builtin."
+- **Terminal/taskbar deadlock at boot under fast loader**: with both the
+  parallel boot loader and the bulk-prefetch landed, wm finishes load
+  fast enough to do three back-to-back eprintln calls on TTY_BUFFER. Tid
+  19/20 try to acquire between WM's writes, get popped from the wait
+  queue by `wake_one`, then iteration (2)'s loop re-parks them without
+  re-pushing → next `wake_one` finds an empty queue → wake lost forever.
 
-## Root cause
-Two bugs stacked on top of each other:
+## Root cause (the design lesson)
 
-**Bug A — lost wakeup at the primitive level.** The classic park/wake
-race: producer publishes its event state and calls `wake_thread` while
-the consumer is between "checked condition, decided to park" and "CASed
-state to Parked". The waker observed Running, fell into a 64-PAUSE
-retry loop, and silently dropped the wake when the loop expired before
-the parker reached Parked. The `wake_thread_from_irq` Running case was
-strictly worse — no retry at all, just `mark_need_resched + IPI` and
-hope the parker hasn't transitioned yet.
+There are two valid contracts for a park primitive:
 
-**Bug B — broken contract for `thread_park_while`.** Once the token
-landed (Bug A fix), `transition_park_while` could return "no switch"
-for two distinct reasons: (a) closure said don't park; (b) stale wake
-token was consumed during the transition. The old `thread_park_while`
-exited on either, treating both as "condition is satisfied." Callers
-without their own retry loop — `sys_waitpid` in particular — saw the
-spurious return and proceeded as if the wait had completed.
+1. **"Loops internally"** — primitive blocks until predicate observes
+   false. Caller does not loop. (What iteration 2 implemented.)
+2. **"May return spuriously"** — primitive returns whenever woken or
+   when an internal hint says go. Caller MUST loop on the predicate.
+   (Rust std `Thread::park`. POSIX `pthread_cond_wait`. POSIX `futex_wait`.)
 
-The shell symptom was Bug B falling through `sys_waitpid` → return 0
-without writing `status` → userspace `waitpid` returns -1 → shell's
-`run_chain` returns -1, which is its sentinel for "exit shell."
+Either is fine in isolation, but **wait-queue protocols require contract
+(2)**. The producer's `wake_one` pops the waiter exactly once per wake.
+A primitive that re-parks internally (without re-pushing to the queue)
+silently loses every subsequent wake. Iteration (2) violated this and
+the symptom only appeared when the producer churned the lock fast
+enough to pop the waiter out of the queue while it was still ready to
+park again.
 
-## The fix
+The bulk-prefetch did not introduce the bug — it just made wm fast
+enough to expose the race that had been latent since iteration (2)
+landed.
 
-### Wake-pending token (kernel/src/thread/{thread,scheduler}.rs)
-- New `Thread.wake_pending: AtomicBool`.
-- Wakers call `signal_wake()` BEFORE probing state — establishes
-  happens-before with the parker's consume.
-- `transition_park`, `transition_park_while`, `transition_sleep` call
-  `consume_wake_pending()` after CAS to Parked/Sleeping. If true, revert
-  state to Running and abort the park/sleep.
-- `wake_thread_slow` and `wake_thread_from_irq` collapsed to a single
-  `do_wake` function. Retry loop and `MAX_RETRIES` deleted.
+## The fix shape (final)
 
-### Looping `thread_park_while`
-- Re-evaluates the closure after every return from `save_transition_switch`.
-- Returns ONLY when the closure observes false. Spurious wakes (token
-  consumed without a real condition change) are absorbed by the loop.
-- Callers without their own outer loop (`sys_waitpid`) are now correct.
+### Primitive layer (`kernel/src/thread/{thread,scheduler}.rs`)
+- `Thread.wake_pending: AtomicBool` token.
+- Wakers call `signal_wake()` before probing state.
+- `transition_park` / `transition_park_while` / `transition_sleep` call
+  `consume_wake_pending()` after CAS to Parked/Sleeping; revert to
+  Running if the token was set.
+- `wake_thread_slow` and `wake_thread_from_irq` collapsed to one
+  `do_wake`. No retry loop, no `MAX_RETRIES`, no spin.
+- `thread_park_while` does ONE transition then returns. Spurious returns
+  are part of the contract.
+- New transition `Sleeping -> Running` for sleep abort.
 
-### New state transition
-Added `Sleeping -> Running` (sleep abort via consumed token) to
-`is_valid_transition`.
+### Wait-queue layer (`kernel/src/thread/waitqueue.rs`)
+- `wait_internal` is documented as "exactly one push + one park + one
+  remove per call." Callers loop externally and re-enter `wait_until`
+  on each iteration to re-push the tid.
 
-### Debug visibility (commit `66f4c68`)
-- `Thread.last_syscall: AtomicU32` — single relaxed store at the top of
-  `syscall_handler` via the new `with_current_thread` no-clone accessor
-  on `PerCpuData`.
-- `tools/debug/dump_threads.gdb` gained `SYSCALL` and `WP` columns. For
-  any future hang, the dump tells you immediately which syscall each
-  parked thread is in and whether its wake token is set.
+### Direct callers
+- `sys_waitpid` (`kernel/src/syscalls/mod.rs`) wrapped in
+  `while !has_exited(target) { thread_park_while(...) }`. The only
+  bare caller; everything else (driver kthreads, sys_poll_events,
+  Subscriber::recv, BlockingMutex::lock via WaitQueue, etc.) already
+  loops.
 
-## How to reason about it now
-- Producers MUST call `signal_wake` before any state observation if they
-  want a wake delivered. `wake_thread*` does this for you.
-- Parkers MUST call `consume_wake_pending` after CAS to Parked/Sleeping
-  if they want the token to close the race. The three transition
-  functions in scheduler.rs do this.
-- `thread_park_while` guarantees: returns only when its closure observes
-  false. Callers with no outer loop are correct.
-- Bare `thread_park` is "may return spuriously, caller loops." Standard
-  `loop { check; park; }` pattern (Rust std::thread::park semantics).
+### Debug visibility (`66f4c68`)
+- `Thread.last_syscall` (relaxed store at top of syscall_handler) plus
+  `tools/debug/dump_threads.gdb` `SYSCALL` and `WP` columns. Cuts
+  diagnosis time for any future park/wake hang from "GDB walk
+  BTreeMap and decode by hand" to "read the dump."
+
+## Reasoning rules going forward (also in CLAUDE.md)
+
+- Producers MUST `signal_wake` (or call a `wake_thread*` wrapper that
+  does) BEFORE probing thread state. Establishes happens-before with
+  the parker's `consume_wake_pending`.
+- Parkers (the three `transition_*` functions) MUST `consume_wake_pending`
+  AFTER CAS to Parked/Sleeping; revert to Running if set.
+- `thread_park_while` MAY RETURN SPURIOUSLY. Callers MUST loop on the
+  actual condition. Pattern: `while !done() { thread_park_while(|| !done()); }`.
+- Wait-queue invariant: each `wait_until` call = one push + one park +
+  one remove. Re-parking without re-pushing breaks this.
 
 ## If a similar hang reappears
-Run `tools/debug/dump_threads.gdb` against the running QEMU. New
-columns make diagnosis fast:
+
+Run `tools/debug/dump_threads.gdb` against the running QEMU.
 
 - `WP=1` on a Parked thread → primitive bug (token set but parker did
   not consume). Should never happen with the current implementation.
-- `WP=0` on a Parked thread → producer never called `wake_thread`. That
-  is an application/protocol bug, not a scheduler bug.
-- `SYSCALL=FUTEX_WAIT|WINDOW_POLL|READ|...` tells you exactly where the
-  thread is parked without a backtrace walk.
+- `WP=0` on a Parked thread, lock target free, wait queue empty →
+  iteration (2)-style bug. Look for a `thread_park_while` caller that
+  loops internally instead of letting the caller loop.
+- `WP=0` on a Parked thread, lock target free, wait queue NON-EMPTY but
+  thread not in queue → producer didn't call `wake_thread` after
+  releasing the lock, OR the wake was sent to the wrong tid.
+- `SYSCALL=FUTEX_WAIT|WINDOW_POLL|READ|...` tells you exactly which
+  syscall the thread is parked in without a backtrace walk.
+
+For lock-state inspection (e.g. is TTY_BUFFER held?), see
+`/tmp/dump_tty.gdb` recipe pattern: parse the BlockingMutex's `locked`
+atomic and the embedded WaitQueue's `front`/`back`/buffer. Empty deque
+is `front == back && !full`.
 
 ## Saved artifacts (gitignored, in logs/) — kept for posterity
+
 - logs/2026-04-12-boot-hang-missed-wakeup.log
 - logs/2026-04-12-boot-hang-gdb-dump.txt
 - logs/2026-04-12-boot-hang-thread-states.txt

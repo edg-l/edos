@@ -87,6 +87,22 @@ impl WaitQueue {
         self.inner.lock().is_empty()
     }
 
+    /// Single-iteration wait: push tid → park (or sleep) → remove tid.
+    ///
+    /// **Protocol invariant**: each call performs exactly one push + one park
+    /// + one remove. The producer's `wake_one`/`wake_all` pops the tid as
+    /// part of waking it, so the post-park `retain` is a no-op in the common
+    /// case (spurious-pop self-remove safety only).
+    ///
+    /// Because `thread_park_while` may return spuriously (Rust std-style
+    /// contract — see CLAUDE.md "Park/wake protocol"), this function may
+    /// also return spuriously. Callers that must block until a real
+    /// condition is met (e.g. `BlockingMutex::lock`) MUST loop on that
+    /// condition externally — re-entering `wait_until` re-pushes the tid
+    /// and the protocol stays consistent. Looping inside this function (or
+    /// inside `thread_park_while`) would re-park without re-pushing and
+    /// silently lose wakes when the producer churns the lock faster than
+    /// the waiter can drain the queue.
     fn wait_internal<F: Fn() -> bool>(&self, ready: F, timeout: Option<Duration>) -> WaitOutcome {
         if ready() {
             return WaitOutcome::Ready;
