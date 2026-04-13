@@ -288,7 +288,8 @@ pub fn format(
         journal_first_block,
         journal_block_count: journal_blocks as u32,
         journal_sb_checksum: 0, // filled in after writing journal SB
-        reserved: [0u8; 48],
+        fsck_in_progress: 0,
+        reserved: [0u8; 47],
     };
 
     // ---- Mark all partition blocks as zero ----
@@ -447,7 +448,10 @@ pub fn format(
         reserved: [0u8; 12],
     };
     let jsb_crc = journal_sb_checksum(&jsb);
-    let jsb = JournalSuperblock { crc32: jsb_crc, ..jsb };
+    let jsb = JournalSuperblock {
+        crc32: jsb_crc,
+        ..jsb
+    };
 
     // Store the journal SB checksum in the EFS superblock so the kernel can
     // verify it without re-reading the journal block during fast mount.

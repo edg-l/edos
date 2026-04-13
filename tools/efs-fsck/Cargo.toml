@@ -1,0 +1,11 @@
+[package]
+name = "efs-fsck"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "efs-fsck"
+path = "src/main.rs"
+
+[dependencies]
+efs-common = { path = "../../libs/efs-common" }

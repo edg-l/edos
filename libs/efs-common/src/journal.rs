@@ -2,7 +2,6 @@
 ///
 /// All structs are `repr(C, packed)` to guarantee the exact byte layout.
 /// Size assertions ensure the layout never silently drifts.
-
 use core::mem::size_of;
 
 use crate::crc32::{as_bytes, crc32};

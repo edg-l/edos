@@ -244,6 +244,14 @@ sata-disk.img: $(FILESYSTEM_FILES) tools/efs-mkfs/src/*.rs libs/efs-common/src/*
 	qemu-img convert -f raw -O qcow2 sata-disk.raw sata-disk.img
 	rm -f sata-disk.raw
 
+.PHONY: efs-fsck
+efs-fsck:
+	cargo build --release --manifest-path tools/efs-fsck/Cargo.toml
+
+.PHONY: check-fsck
+check-fsck:
+	cargo test --release --manifest-path tools/efs-fsck/Cargo.toml
+
 .PHONY: clean-sata
 clean-sata:
 	rm -f sata-disk.img sata-disk.raw

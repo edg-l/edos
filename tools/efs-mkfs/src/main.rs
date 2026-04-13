@@ -223,11 +223,12 @@ fn main() {
     );
 
     let (mut allocator, mut bgds) =
-        mkfs::format(&mut file, &layout, args.label.as_deref(), journal_blocks)
-            .unwrap_or_else(|e| {
-            eprintln!("format failed: {e}");
-            process::exit(1);
-        });
+        mkfs::format(&mut file, &layout, args.label.as_deref(), journal_blocks).unwrap_or_else(
+            |e| {
+                eprintln!("format failed: {e}");
+                process::exit(1);
+            },
+        );
 
     if let Some(ref pop_dir) = args.populate {
         if !pop_dir.is_dir() {

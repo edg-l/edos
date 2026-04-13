@@ -12,8 +12,8 @@
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 use efs_common::{
-    DESC_FLAG_ESCAPED, DescriptorEntry, JOURNAL_BLOCK_MAGIC, JournalBlockHeader, JournalBlockKind,
-    RevokeEntry, commit_block_checksum,
+    DESC_FLAG_ESCAPED, JOURNAL_BLOCK_MAGIC, JournalBlockHeader, JournalBlockKind,
+    commit_block_checksum, parse_descriptor_entries, parse_header, parse_revoke_entries,
 };
 
 use crate::{
@@ -108,7 +108,7 @@ pub fn replay(
         let desc_tx_id = hdr.tx_id;
 
         // Parse descriptor entries to know how many data blocks follow.
-        let entries = parse_descriptor_entries(&block);
+        let entries = parse_descriptor_entries(&block, BLOCK_SIZE);
         let n_data = entries.len() as u64;
         ring_pos += 1; // past descriptor
 
@@ -128,7 +128,7 @@ pub fn replay(
         if let Some(nh) = &next_hdr {
             if nh.kind == JournalBlockKind::Revoke as u8 && nh.seq == desc_seq {
                 // Parse revoke entries.
-                let revokes = parse_revoke_entries(&next_block);
+                let revokes = parse_revoke_entries(&next_block, BLOCK_SIZE);
                 for r in &revokes {
                     let existing = revoke_set.entry(r.fs_block).or_insert(0);
                     if r.seq > *existing {
@@ -260,59 +260,6 @@ pub fn replay(
 
 struct CommittedTx {
     seq: u64,
-    entries: Vec<DescriptorEntry>,
+    entries: Vec<efs_common::DescriptorEntry>,
     data_blocks: Vec<Vec<u8>>,
-}
-
-fn parse_header(block: &[u8]) -> Option<JournalBlockHeader> {
-    if block.len() < core::mem::size_of::<JournalBlockHeader>() {
-        return None;
-    }
-    let hdr: JournalBlockHeader =
-        unsafe { core::ptr::read_unaligned(block.as_ptr() as *const JournalBlockHeader) };
-    if hdr.magic != JOURNAL_BLOCK_MAGIC {
-        return None;
-    }
-    Some(hdr)
-}
-
-fn parse_descriptor_entries(block: &[u8]) -> Vec<DescriptorEntry> {
-    let hdr_size = core::mem::size_of::<JournalBlockHeader>();
-    // Entry count stored as u32 right after the header.
-    let count = u32::from_le_bytes([
-        block[hdr_size],
-        block[hdr_size + 1],
-        block[hdr_size + 2],
-        block[hdr_size + 3],
-    ]) as usize;
-    let entries_offset = hdr_size + 4;
-    let entry_size = core::mem::size_of::<DescriptorEntry>();
-    let mut entries = Vec::with_capacity(count);
-    for i in 0..count {
-        let off = entries_offset + i * entry_size;
-        if off + entry_size > BLOCK_SIZE {
-            break;
-        }
-        let entry: DescriptorEntry =
-            unsafe { core::ptr::read_unaligned(block[off..].as_ptr() as *const DescriptorEntry) };
-        entries.push(entry);
-    }
-    entries
-}
-
-fn parse_revoke_entries(block: &[u8]) -> Vec<RevokeEntry> {
-    let hdr_size = core::mem::size_of::<JournalBlockHeader>();
-    let entry_size = core::mem::size_of::<RevokeEntry>();
-    let mut entries = Vec::new();
-    let mut off = hdr_size;
-    while off + entry_size <= BLOCK_SIZE {
-        let entry: RevokeEntry =
-            unsafe { core::ptr::read_unaligned(block[off..].as_ptr() as *const RevokeEntry) };
-        if entry.fs_block == 0 && entry.seq == 0 {
-            break;
-        }
-        entries.push(entry);
-        off += entry_size;
-    }
-    entries
 }

@@ -62,8 +62,11 @@ pub struct EfsSuperblock {
     /// Stored here so a fast sanity check can be done without re-reading the
     /// journal block.
     pub journal_sb_checksum: u32,
+    /// Set to 1 while fsck --repair is in progress; cleared on clean exit.
+    /// If set on fsck startup, refuse to run without --force.
+    pub fsck_in_progress: u8,
     /// Reserved; must be zero.
-    pub reserved: [u8; 48],
+    pub reserved: [u8; 47],
 }
 
 const _: () = assert!(core::mem::size_of::<EfsSuperblock>() == 256);

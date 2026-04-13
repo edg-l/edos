@@ -152,6 +152,19 @@
   AND the shell-dies-after-`ls` symptom seen during testing. Debug
   visibility: Thread.last_syscall + dump_threads.gdb shows SYSCALL and
   WP columns per thread.
+- **EFS host fsck (storage roadmap step 4)** - `tools/efs-fsck/` host
+  tool: SB/BGD cross-check, journal replay (port of kernel's two-pass
+  algorithm via shared `libs/efs-common/journal_parse.rs`), inode scan
+  with extent validation, block+inode bitmap rebuild and leak/double-
+  claim detection, directory-tree walk with `.`/`..` and link-count
+  reconciliation. `--repair` opts into 5 fix classes (leaked block
+  bits, leaked inode bits, BGD/SB free-count sums, link-count fixes,
+  orphan deletion) with per-class prompts (`-y` to auto-accept) and
+  Linux-style exit codes (0/1/4/8/16). `fsck_in_progress` byte stolen
+  from superblock reserved area protects against killed-mid-repair
+  reruns (`--force` to override). Double-claim guard skips bitmap
+  clears for blocks also held by live inodes. 8 integration tests +
+  `doc/efs-fsck.md`.
 - **File-backed mmap (MAP_PRIVATE + MAP_SHARED)** - VmaBacking::FileBacked
   with Arc<VfsInode> + Arc<CachedPage>-per-page on the VMA. MAP_PRIVATE
   installs read-only + COW_BIT, writes fault into anon via the existing
@@ -224,17 +237,17 @@ I/O stall). Three create_dir calls for /dev, /proc, /tmp cost ~720ms.
 Steps 1-3 are done (see Done section). Current system-mount wall:
 ~808ms. FS IS crash-safe for metadata (journal replays on mount).
 
-### 4. fsck tool (next)
+### 4. fsck tool (DONE — host)
 
-Host tool (like efs-mkfs): scan inodes, verify bitmaps, reclaim leaked
-blocks, replay journal if mounted dirty. Needed once the journal exists
-to make recovery actually trustworthy.
-
-**Why this order**: steps 1-3 are shipped. fsck is the remaining
-piece — it scans inodes/bitmaps for consistency and replays the
-journal if mount was dirty. Needed to make recovery trustworthy
-beyond what replay alone provides (e.g. leaked blocks after a
-revoke-less crash, bitmap inconsistencies).
+Host tool `tools/efs-fsck/` shipped. Scans inodes, verifies bitmaps,
+reclaims leaked blocks, replays journal if mounted dirty. Read-only by
+default; `--repair` opts into destructive fixes with per-class prompts
+(`-y` to auto-accept). Linux-style exit codes (0/1/4/8/16). Shares the
+journal parsers with the kernel via `libs/efs-common/journal_parse.rs`
+(only kernel change in the whole feature). `fsck_in_progress` sentinel
+byte stolen from superblock reserved area so a killed-mid-repair fsck
+refuses to re-run without `--force`. 8 integration tests + doc at
+`doc/efs-fsck.md`.
 
 ## Open questions / loose ends
 
@@ -319,11 +332,26 @@ foreground process group.
 - printenv (alias for env)
 - basename, dirname, id, whoami, date
 
+### In-EDOS fsck (`/bin/fsck`)
+Host `efs-fsck` is the canonical recovery tool. A thinner in-EDOS
+userspace wrapper would be useful for unmounted secondary block
+devices (USB drives, second SATA, attached image files). Cannot fsck
+the live root FS without an initramfs (chicken-and-egg), and EDOS has
+none — kernel still replays journal automatically on mount, which
+covers the common boot case. Code reuse: `libs/efs-common` is already
+`no_std` and works in userspace; the host crate's `std::fs::File`
+calls would swap for `open("/dev/sdb")` + `pread`/`pwrite`/`fsync`.
+
+**Prereq investigation**: check `kernel/src/fs/devfs/` to see what
+`/dev/sda` exposes today. Raw block-device-as-file (open+pread on a
+sector-aligned device node) may not be wired. If it isn't, that's the
+first piece to land before any in-EDOS fsck makes sense.
+
 ## Fun-per-effort ranking
 
-fsck > more tools > ElfSegment->FileBacked > dynamic linker >
+more tools > ElfSegment->FileBacked > dynamic linker > in-EDOS fsck >
 async I/O > IPv6 > virtio-net
 
-Note: fsck is the last storage-stack piece (steps 1-3 shipped).
+Note: storage-stack roadmap steps 1-4 are all shipped (host fsck done).
 File-backed mmap shipped; ElfSegment->FileBacked migration is the
 next step in the memory/loader progression toward the dynamic linker.
