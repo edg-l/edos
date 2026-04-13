@@ -1,9 +1,25 @@
-# FIXED 2026-04-13 — Intermittent missed-wakeup in scheduler park/wake
+# LIKELY FIXED 2026-04-13 — Intermittent missed-wakeup in scheduler park/wake
 
 ## Status
-Fixed by commits `4b8eab3` (token), `b48f2b3` (park_while loop). The
-intermittent boot hang and the related shell-dies-after-`ls` symptom
-both go away.
+Likely fixed by commits `4b8eab3` (token), `b48f2b3` (park_while loop).
+
+Confidence is "likely, not proven":
+- The shell-dies-after-`ls` symptom was reliably reproducible and is
+  no longer reproducing post-fix (10 commands in sequence, multiple
+  reboots).
+- The original ~1-in-10 boot hang has not reproduced post-fix, but the
+  baseline reproduction rate was low enough that a handful of clean
+  boots is not statistically conclusive. Need ~30+ clean boots before
+  declaring it dead with confidence.
+- The fix is structurally correct (token closes the lost-wakeup race
+  class at the primitive level; park_while loop closes the contract
+  gap exposed by the token), so even if a different hang appears it
+  shouldn't be the same root cause.
+
+If a hang DOES reappear, run the dump_threads recipe at the bottom of
+this file. The new SYSCALL/WP columns will tell you immediately
+whether it's a residual park/wake bug (WP=1 on Parked = primitive
+bug) or something else.
 
 ## What it was
 Two related symptoms with the same root cause:
