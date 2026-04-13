@@ -409,18 +409,27 @@ impl Journal {
 
         self.kick_committer();
 
-        let outcome = self.commit_wq.wait_until_timeout(
-            || self.committed_seq() >= target_seq,
-            Some(core::time::Duration::from_secs(30)),
-        );
-        if matches!(outcome, crate::thread::waitqueue::WaitOutcome::TimedOut) {
-            crate::log!(
-                "journal: force_commit_and_wait timed out waiting for seq {}",
-                target_seq
-            );
-            return Err(AhciError::IoError);
+        // wait_until_timeout may return spuriously (per WaitQueue contract:
+        // wake_pending tokens, thread_park_while spurious returns). Loop on
+        // the actual condition with a real wall-clock deadline instead of
+        // trusting a single TimedOut return.
+        let deadline = crate::timer::Instant::now() + core::time::Duration::from_secs(30);
+        loop {
+            if self.committed_seq() >= target_seq {
+                return Ok(());
+            }
+            let now = crate::timer::Instant::now();
+            if now >= deadline {
+                crate::log!(
+                    "journal: force_commit_and_wait timed out waiting for seq {}",
+                    target_seq
+                );
+                return Err(AhciError::IoError);
+            }
+            let remaining = deadline.duration_since(now);
+            self.commit_wq
+                .wait_until_timeout(|| self.committed_seq() >= target_seq, Some(remaining));
         }
-        Ok(())
     }
 
     // ---- Seal and commit ----------------------------------------------------
