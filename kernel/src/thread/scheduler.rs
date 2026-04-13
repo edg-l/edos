@@ -914,11 +914,13 @@ impl Scheduler {
     /// and succeeds. This closes the lost-wakeup window that exists with
     /// the bare `thread_park()`.
     ///
-    /// Contract: returns ONLY when `should_park()` observes false. Spurious
-    /// wakes (e.g. a stale wake-pending token consumed during the transition)
-    /// are absorbed by re-checking the closure after each return from
-    /// `save_transition_switch` and looping if the condition still wants to
-    /// park. Callers therefore do not need to loop themselves.
+    /// Contract: **may return spuriously** — a stale wake-pending token
+    /// consumed during the transition will short-circuit the park even when
+    /// the condition still says park. Callers MUST loop on the actual
+    /// condition. This matches Rust std's `Thread::park` semantics. The
+    /// reason: looping inside this function would re-park without
+    /// re-enrolling the thread on a wait queue, breaking wait-queue
+    /// protocols where the producer pops the waiter exactly once.
     pub fn thread_park_while<F: FnMut() -> bool>(&self, mut should_park: F) {
         let Some(_cur) = self.current_thread() else {
             return;
@@ -930,27 +932,16 @@ impl Scheduler {
             f()
         }
 
-        loop {
-            let mut ctx = ParkWhileCtx {
-                check_fn: check_wrapper::<F>,
-                check_ctx: &mut should_park as *mut F as *mut u8,
-            };
-            without_interrupts(|| unsafe {
-                save_transition_switch(
-                    transition_park_while,
-                    &mut ctx as *mut ParkWhileCtx as *mut u8,
-                );
-            });
-            // After every return from save_transition_switch (whether we
-            // actually parked, aborted on closure-false, or aborted because
-            // a stale wake token was consumed), re-evaluate the condition.
-            // Returning while `should_park` still says park would break
-            // callers like `sys_waitpid` that have no outer loop and treat
-            // the return as proof that the wait condition was satisfied.
-            if !should_park() {
-                return;
-            }
-        }
+        let mut ctx = ParkWhileCtx {
+            check_fn: check_wrapper::<F>,
+            check_ctx: &mut should_park as *mut F as *mut u8,
+        };
+        without_interrupts(|| unsafe {
+            save_transition_switch(
+                transition_park_while,
+                &mut ctx as *mut ParkWhileCtx as *mut u8,
+            );
+        });
     }
 
     #[inline]

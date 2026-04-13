@@ -939,8 +939,11 @@ fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
     let current_tid = sched.current_thread().unwrap().id;
     EXITED_THREADS.register_waiter(target, current_tid);
 
-    // Park until the target has exited (peek, don't consume)
-    sched.thread_park_while(|| !EXITED_THREADS.has_exited(target));
+    // Park until the target has exited. thread_park_while may return
+    // spuriously (stale wake token, etc.), so loop on the real condition.
+    while !EXITED_THREADS.has_exited(target) {
+        sched.thread_park_while(|| !EXITED_THREADS.has_exited(target));
+    }
 
     EXITED_THREADS.unregister_waiter(target);
 
