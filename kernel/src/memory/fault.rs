@@ -15,6 +15,7 @@ use crate::{
         page_cache::CachedPage,
         vfs::{fs_by_mount_id, get_or_fill_page, register_dirty_inode},
     },
+    loader::reloc::RelocTable,
     memory::{
         frame_allocator::frame_allocator,
         mapper::COW_BIT,
@@ -253,6 +254,117 @@ pub fn fault_in_page(
     }
 }
 
+/// Handle a fault on a page in the reloc-bearing writable PT_LOAD VMA.
+///
+/// Allocates a fresh private frame, copies the cache page into it, applies
+/// R_X86_64_RELATIVE relocations from `reloc_table`, and maps the frame
+/// writable (no COW_BIT). The cache page is never patched.
+///
+/// Returns `Some(true)` on success, `Some(false)` on failure (caller kills
+/// the faulting thread), or `None` if `fault_info` is not a FileBacked fault
+/// (caller falls through to the normal demand path).
+///
+/// # Safety
+/// Must be called from the page fault handler with the faulting thread's CR3 active.
+unsafe fn fault_in_reloc_page(
+    fault_addr: VirtAddr,
+    fault_info: &FaultInfo,
+    cr3: PhysFrame,
+    phys_offset: VirtAddr,
+    reloc_table: &RelocTable,
+    page_vaddr_offset: u32,
+    load_base: u64,
+) -> Option<bool> {
+    // Only applies to FileBacked MAP_PRIVATE faults.
+    let (inode, page_idx) = match &fault_info.source {
+        FaultSource::FileBacked {
+            inode,
+            page_idx,
+            shared,
+            ..
+        } => {
+            if *shared {
+                // MAP_SHARED: no reloc patching needed (cache is the source of truth).
+                return None;
+            }
+            (Arc::clone(inode), *page_idx)
+        }
+        _ => return None,
+    };
+
+    let page_addr = fault_addr.align_down(4096u64);
+
+    let fs = match fs_by_mount_id(inode.mount_id) {
+        Some(f) => f,
+        None => return Some(false),
+    };
+
+    // Past-EOF check: same as normal FileBacked path.
+    if let Ok(file_size) = fs.file_size_ino(inode.ino) {
+        if page_idx * 4096 >= file_size {
+            return Some(false);
+        }
+    }
+
+    // Get the cache page (pins it).
+    let cached_page = match get_or_fill_page(&inode, page_idx, &fs) {
+        Ok(p) => p,
+        Err(_) => return Some(false),
+    };
+
+    let cache_frame = cached_page.frame();
+
+    // Allocate a fresh private frame (never shared with the cache).
+    let private_frame = match frame_allocator().allocate_frame() {
+        Some(f) => f,
+        None => {
+            cached_page.unpin();
+            return Some(false);
+        }
+    };
+
+    // Copy the cache page into the private frame via HHDM.
+    let cache_ptr = (phys_offset + cache_frame.start_address().as_u64()).as_ptr::<u8>();
+    let private_ptr = (phys_offset + private_frame.start_address().as_u64()).as_mut_ptr::<u8>();
+    unsafe {
+        core::ptr::copy_nonoverlapping(cache_ptr, private_ptr, 4096);
+    }
+
+    // Release the cache pin now that we have our own copy.
+    cached_page.unpin();
+    drop(cached_page);
+
+    // Apply all RELATIVE relocations that land in this page.
+    unsafe {
+        reloc_table.apply_relocs_to_page(
+            phys_offset + private_frame.start_address().as_u64(),
+            page_vaddr_offset,
+            load_base,
+        );
+    }
+
+    // Build PTE flags: writable, no COW_BIT (this is our private patched copy).
+    let mut pt_flags = fault_info.pt_flags;
+    // Strip COW_BIT (set by lookup_fault_vma for MAP_PRIVATE) and add WRITABLE.
+    pt_flags &= !COW_BIT;
+    pt_flags |= PageTableFlags::WRITABLE;
+
+    // Map the private frame at the faulting page address.
+    let success = unsafe { map_page_direct(cr3, page_addr, private_frame, pt_flags, phys_offset) };
+
+    if success {
+        x86_64::instructions::tlb::flush(page_addr);
+        Some(true)
+    } else if is_page_present(cr3, page_addr, phys_offset) {
+        // Race: another CPU already mapped it; free our private frame.
+        unsafe { frame_allocator().deallocate_frame(private_frame) };
+        Some(true)
+    } else {
+        unsafe { frame_allocator().deallocate_frame(private_frame) };
+        Some(false)
+    }
+}
+
 /// Handle a demand page fault for userspace.
 ///
 /// Called from the page fault handler when a userspace access faults on a
@@ -303,12 +415,56 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
         None => return false,
     };
 
+    // Reloc-page early path: if this fault hits the writable PT_LOAD VMA and
+    // the process has a RelocTable, allocate a fresh private frame, copy from
+    // the cache page, apply relocations, and map it writable immediately
+    // (no COW_BIT). The cache page is never patched.
+    let reloc_info: Option<(Arc<RelocTable>, u32, u64)> = {
+        let mm = user_read.memory_manager.lock();
+        if let (Some(table), Some(range)) = (&mm.reloc_table, &mm.reloc_vma_range) {
+            let page_addr = fault_addr.align_down(4096u64);
+            if range.contains(&page_addr) {
+                // page_vaddr_offset: page-aligned byte offset from load base.
+                let page_vaddr_offset = (page_addr.as_u64() - mm.load_base) as u32;
+                Some((Arc::clone(table), page_vaddr_offset, mm.load_base))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
     // Drop locks before allocating (frame_allocator uses its own lock)
     drop(vmas);
     drop(user_read);
 
     let (cr3_frame, _) = Cr3::read();
     let phys_offset = boot_info().physical_memory_offset;
+
+    // If this is a reloc-bearing page, handle it with the lazy reloc path.
+    if let Some((reloc_table, page_vaddr_offset, load_base)) = reloc_info {
+        if let Some(mapped) = unsafe {
+            fault_in_reloc_page(
+                fault_addr,
+                &fault_info,
+                cr3_frame,
+                phys_offset,
+                &reloc_table,
+                page_vaddr_offset,
+                load_base,
+            )
+        } {
+            if mapped {
+                if let Some(t) = sched().current_thread() {
+                    t.demand_faults
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            return mapped;
+        }
+        // Fall through to normal path if reloc path declines (e.g. not FileBacked).
+    }
 
     let outcome = fault_in_page(fault_addr, &fault_info, cr3_frame, phys_offset);
 
