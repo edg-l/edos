@@ -1,11 +1,5 @@
 pub mod reloc;
 
-/// When `false`, `R_X86_64_RELATIVE` patches are applied lazily on the first
-/// write fault to each page (Phase 2). When `true`, the eager loop at the end
-/// of `load_elf` patches every reloc at load time (original behavior).
-/// Flip to `true` to roll back if lazy relocs cause problems.
-const EAGER_RELOCS: bool = false;
-
 use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -81,13 +75,16 @@ pub enum ElfLoadError {
 /// `zero_from` optionally zeroes bytes `[zero_from..4096]` after the memcpy.
 /// Used for the last file-data page of a PT_LOAD whose `p_filesz` is not a
 /// multiple of 4096: bytes past `p_filesz` are the start of BSS and must read
-/// as zero per the ELF spec, but the cache page contains whatever the linker
-/// left on disk (usually alignment junk).
+/// as zero per the ELF spec (the "tail zero" requirement), but the cache page
+/// contains whatever the linker left on disk (usually alignment junk). This
+/// pre-fault is the only caller; the lazy reloc path cannot fire on an
+/// already-mapped page, so relocs in this page are applied immediately after
+/// the page is mapped (see the reloc_pages walk below).
 ///
 /// The cache page is pinned only long enough for the memcpy; it is unpinned
 /// before returning so the cache can evict it independently. The private frame
 /// is fully independent of the cache.
-fn eager_fault_elf_page_from_cache(
+fn prefault_elf_tail_page_from_cache(
     memory_manager: &mut MemoryManager,
     inode: &Arc<VfsInode>,
     fs: &Arc<dyn crate::fs::FileSystem + Send + Sync>,
@@ -184,31 +181,6 @@ fn prefetch_file_pages(
             Ok(())
         });
     }
-}
-
-/// Allocate a zeroed private frame and map it writable at `page_addr`.
-///
-/// Used during relocation patching when the second page of a cross-page
-/// 8-byte relocation entry lands in the BSS (Anonymous) VMA.
-fn eager_fault_anon_page(
-    mm: &mut MemoryManager,
-    page_addr: VirtAddr,
-    flags: PageTableFlags,
-) -> Result<(), ElfLoadError> {
-    use x86_64::structures::paging::FrameAllocator;
-
-    let frame = frame_allocator()
-        .allocate_frame()
-        .ok_or(ElfLoadError::MappingFailed)?;
-
-    let phys_offset = crate::boot::boot_info().physical_memory_offset;
-    let frame_ptr = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
-    unsafe { core::ptr::write_bytes(frame_ptr, 0, 4096) };
-
-    mm.map_address(page_addr, frame.start_address(), flags)
-        .map_err(|_| ElfLoadError::MappingFailed)?;
-
-    Ok(())
 }
 
 /// Load an ELF binary via the inode page cache, building `VmaBacking::FileBacked`
@@ -435,7 +407,7 @@ pub fn load_elf(
                 let last_file_page_vma_offset = (file_page_count as u64 - 1) * 4096;
                 let last_page_addr = page_aligned_vaddr + last_file_page_vma_offset;
                 let last_file_page_idx = (file_offset + last_file_page_vma_offset) / 4096;
-                eager_fault_elf_page_from_cache(
+                prefault_elf_tail_page_from_cache(
                     memory_manager,
                     inode,
                     &fs,
@@ -478,8 +450,8 @@ pub fn load_elf(
         return Err(ElfLoadError::MissingSegments);
     }
 
-    // Collect all R_X86_64_RELATIVE entries from SHT_RELA sections.
-    // Used for both eager patching (EAGER_RELOCS) and RelocTable construction.
+    // Collect all R_X86_64_RELATIVE entries from SHT_RELA sections for
+    // RelocTable construction (lazy fault-time application).
     let mut raw_relocs: Vec<(u32, i64)> = Vec::new();
 
     for i in 0..e_shnum as usize {
@@ -532,56 +504,6 @@ pub fn load_elf(
                             let r_offset_u32 = r_offset as u32;
 
                             raw_relocs.push((r_offset_u32, r_addend));
-
-                            if EAGER_RELOCS {
-                                let reloc_addr = base_addr + r_offset;
-                                let first_page = VirtAddr::new(reloc_addr.as_u64() & !0xfff);
-                                // An 8-byte patch may straddle a page boundary.
-                                let last_page = VirtAddr::new((reloc_addr.as_u64() + 7) & !0xfff);
-
-                                for &page_addr in &[first_page, last_page] {
-                                    if reloc_pages.contains(&page_addr) {
-                                        continue;
-                                    }
-
-                                    if let Some(region) =
-                                        memory_regions.iter().find(|r| r.contains(page_addr))
-                                    {
-                                        match &region.backing {
-                                            VmaBacking::FileBacked {
-                                                file_offset: vma_file_offset,
-                                                ..
-                                            } => {
-                                                let page_byte_offset =
-                                                    page_addr.as_u64() - region.start.as_u64();
-                                                let file_page_idx =
-                                                    (vma_file_offset + page_byte_offset) / 4096;
-                                                eager_fault_elf_page_from_cache(
-                                                    memory_manager,
-                                                    inode,
-                                                    &fs,
-                                                    file_page_idx,
-                                                    page_addr,
-                                                    write_flags,
-                                                    None,
-                                                )?;
-                                            }
-                                            VmaBacking::Anonymous => {
-                                                eager_fault_anon_page(
-                                                    memory_manager,
-                                                    page_addr,
-                                                    write_flags,
-                                                )?;
-                                            }
-                                            _ => {}
-                                        }
-                                        reloc_pages.insert(page_addr);
-                                    }
-                                }
-
-                                let value = base_addr.as_u64().wrapping_add(r_addend as u64);
-                                memory_manager.write_val_to_user(reloc_addr, value);
-                            }
                         }
                         // JUMP_SLOT / GLOB_DAT: panic — EDOS binaries are static-PIE;
                         // dynamic symbol relocs should never appear.
@@ -648,55 +570,24 @@ pub fn load_elf(
     };
 
     // Pre-fetch PT_LOAD file pages into the per-inode page cache via bulk AHCI
-    // reads. With lazy relocs (EAGER_RELOCS=false), skip ONLY the writable
-    // PT_LOAD that owns relocs (matched by file_offset); other writable
-    // segments and all PF_X (.text/.rodata) segments are still prefetched
-    // because they are read from cache without modification.
+    // reads. Skip the writable PT_LOAD that owns relocs (matched by
+    // file_offset): those pages are private-on-fault and populated by the lazy
+    // fault handler, not from a prefetch. All other segments (.text/.rodata and
+    // non-reloc writable segments) are prefetched because they are read from
+    // cache without modification.
     for region in &memory_regions {
         if let VmaBacking::FileBacked {
             file_offset, pages, ..
         } = &region.backing
         {
-            if !EAGER_RELOCS && reloc_skip_file_offset == Some(*file_offset) {
+            if reloc_skip_file_offset == Some(*file_offset) {
                 continue;
             }
             prefetch_file_pages(inode, &fs, *file_offset, pages.len());
         }
     }
 
-    // Tighten permissions on eagerly-faulted relocation pages (EAGER_RELOCS only).
-    // Pages were mapped WRITABLE for patching; set final perms from the
-    // containing VMA's VmaProt.
-    if EAGER_RELOCS {
-        for &page_addr in &reloc_pages {
-            if let Some(region) = memory_regions.iter().find(|r| r.contains(page_addr)) {
-                let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-                if region.prot.contains(VmaProt::WRITE) {
-                    flags |= PageTableFlags::WRITABLE;
-                }
-                if !region.prot.contains(VmaProt::EXEC) {
-                    flags |= PageTableFlags::NO_EXECUTE;
-                }
-                log!(
-                    "elf: reloc page {:#x} in {:?} VMA [{:#x}, {:#x}), final flags {:?}",
-                    page_addr.as_u64(),
-                    region.backing,
-                    region.start.as_u64(),
-                    region.end.as_u64(),
-                    flags
-                );
-                memory_manager
-                    .change_flags(page_addr, 4096, flags)
-                    .map_err(|e| {
-                        println!("ELF: Failed to update flags on reloc page: {:?}", e);
-                        ElfLoadError::MappingFailed
-                    })?;
-            }
-        }
-    }
-
     // Build the RelocTable for lazy fault-time application.
-    // Constructed regardless of EAGER_RELOCS so Phase 2 has it available.
     // When raw_relocs is non-empty, reloc_vma_range was set above (the
     // resolution panics otherwise), so the unwrap is safe.
     let built_reloc_table: Option<Arc<RelocTable>> = if raw_relocs.is_empty() {
@@ -714,83 +605,38 @@ pub fn load_elf(
         ))
     };
 
-    // Apply relocations to any pages the loader pre-faulted via
-    // eager_fault_elf_page_from_cache (the partial last file page that
-    // needs zero-padding past p_filesz per the ELF spec). Those pages are
-    // already mapped writable, so the lazy reloc fault path will never
-    // fire for them. Without this, reloc targets that fall inside the
-    // partial last file page (typical for .got sitting at the end of the
-    // writable PT_LOAD) remain unrelocated and userspace dereferences a
-    // null-or-bogus address.
-    if !EAGER_RELOCS {
-        if let Some(ref table) = built_reloc_table {
-            use x86_64::structures::paging::mapper::TranslateResult;
-            let phys_offset = crate::boot::boot_info().physical_memory_offset;
-            for &page_addr in &reloc_pages {
-                let page_offset = (page_addr.as_u64() - load_base.as_u64()) as u32;
-                let TranslateResult::Mapped { frame, offset, .. } =
-                    memory_manager.translate(page_addr)
-                else {
-                    panic!(
-                        "lazy reloc: pre-faulted reloc page {:#x} not mapped",
-                        page_addr.as_u64()
-                    );
-                };
-                let frame_virt = phys_offset + (frame.start_address() + offset).as_u64();
-                unsafe {
-                    table.apply_relocs_to_page(frame_virt, page_offset, load_base.as_u64());
-                }
+    // Apply relocations to pages that were pre-faulted by
+    // prefault_elf_tail_page_from_cache (the partial last file page that needs
+    // zero-padding past p_filesz per the ELF spec). Those pages are already
+    // mapped writable, so the lazy reloc fault path will never fire for them.
+    // Without this, reloc targets that fall inside the partial last file page
+    // (typical for .got sitting at the end of the writable PT_LOAD) remain
+    // unrelocated and userspace dereferences a null-or-bogus address.
+    if let Some(ref table) = built_reloc_table {
+        use x86_64::structures::paging::mapper::TranslateResult;
+        let phys_offset = crate::boot::boot_info().physical_memory_offset;
+        for &page_addr in &reloc_pages {
+            let page_offset = (page_addr.as_u64() - load_base.as_u64()) as u32;
+            let TranslateResult::Mapped { frame, offset, .. } = memory_manager.translate(page_addr)
+            else {
+                panic!(
+                    "lazy reloc: pre-faulted reloc page {:#x} not mapped",
+                    page_addr.as_u64()
+                );
+            };
+            let frame_virt = phys_offset + (frame.start_address() + offset).as_u64();
+            unsafe {
+                table.apply_relocs_to_page(frame_virt, page_offset, load_base.as_u64());
             }
         }
     }
 
-    // Debug self-check (EAGER_RELOCS only): after the eager loop has patched
-    // every reloc target, walk the RelocTable and verify each address reads
-    // back the expected relocated value. Catches RelocTable construction bugs
-    // before Phase 2 goes live.
-    #[cfg(debug_assertions)]
-    if EAGER_RELOCS {
-        if let Some(ref table) = built_reloc_table {
-            if let Some(ref range) = reloc_vma_range {
-                use x86_64::structures::paging::Translate;
-                let phys_offset = crate::boot::boot_info().physical_memory_offset;
-                let range_start = (range.start.as_u64() - load_base.as_u64()) as u32;
-                let page_count = ((range.end.as_u64() - range.start.as_u64()) / 4096) as u32;
-                for p in 0..page_count {
-                    let page_off = range_start + p * 4096;
-                    let entries = table.entries_for_page(page_off);
-                    for entry in entries {
-                        let reloc_vaddr = load_base + entry.offset as u64;
-                        let expected = load_base.as_u64().wrapping_add(entry.addend as u64);
-                        // Use the page-table translator to find the physical frame.
-                        let tr = memory_manager.mapper.translate(reloc_vaddr);
-                        let got = match tr {
-                            x86_64::structures::paging::mapper::TranslateResult::Mapped {
-                                frame,
-                                offset,
-                                ..
-                            } => {
-                                let phys = frame.start_address() + offset;
-                                unsafe {
-                                    core::ptr::read_unaligned(
-                                        (phys_offset + phys.as_u64()).as_ptr::<u64>(),
-                                    )
-                                }
-                            }
-                            _ => u64::MAX,
-                        };
-                        assert!(
-                            got == expected,
-                            "lazy reloc table mismatch at offset {:#x}: \
-                             got {:#x}, want {:#x}",
-                            entry.offset,
-                            got,
-                            expected
-                        );
-                    }
-                }
-            }
-        }
+    if let Some(ref table) = built_reloc_table {
+        log!(
+            "elf: lazy reloc table: {} entries, {} pages",
+            table.entry_count(),
+            table.populated_buckets()
+        );
     }
 
     if max_addr == 0 {

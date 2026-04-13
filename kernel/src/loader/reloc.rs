@@ -116,6 +116,16 @@ impl RelocTable {
         })
     }
 
+    /// Number of entries in the relocation table.
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Number of page buckets that contain at least one relocation entry.
+    pub fn populated_buckets(&self) -> usize {
+        self.buckets.iter().filter(|b| b.len > 0).count()
+    }
+
     /// Return the slice of `RelocEntry` whose targets land in the page
     /// at `page_vaddr_offset` (page-aligned byte offset from the ELF load
     /// image base).
