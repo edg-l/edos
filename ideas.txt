@@ -147,7 +147,8 @@
   Sleeping->Running for sleep abort. thread_park_while now LOOPS on
   spurious-wake (token consumed but closure still says park) so callers
   without their own outer loop (sys_waitpid in particular) are correct
-  by contract. Fixes the intermittent boot hang documented in bug.txt
+  by contract. Fixes the intermittent boot hang documented in
+  doc/bugs/2026-04-13-sched-park-wake-missed-wakeup.md
   AND the shell-dies-after-`ls` symptom seen during testing. Debug
   visibility: Thread.last_syscall + dump_threads.gdb shows SYSCALL and
   WP columns per thread.
