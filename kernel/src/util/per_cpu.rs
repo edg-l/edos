@@ -76,6 +76,16 @@ impl PerCpuData {
         unsafe { (*self.current_thread.get()).clone() }
     }
 
+    /// Borrow the current thread without cloning the Arc. Cheap fast path
+    /// for hot kernel sites (e.g. syscall dispatch instrumentation) that
+    /// want a single field access without paying for an atomic refcount
+    /// bump and drop. Caller must not retain the borrow across a context
+    /// switch; the safest pattern is a closure scope.
+    #[inline]
+    pub fn with_current_thread<R>(&self, f: impl FnOnce(&Thread) -> R) -> Option<R> {
+        unsafe { (*self.current_thread.get()).as_deref().map(f) }
+    }
+
     /// Set the current thread.
     pub unsafe fn set_current_thread(&self, thread: Option<Arc<Thread>>) {
         unsafe { *self.current_thread.get() = thread }

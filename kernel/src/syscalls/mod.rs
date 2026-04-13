@@ -367,6 +367,12 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
 
     // Note: we may need to call switch_to_kernel_page(); and switch back later.
 
+    // Record the syscall number on the current thread for debug visibility.
+    // Single relaxed store on a hot cache line; see Thread::last_syscall.
+    crate::util::per_cpu::get_percpu_data().with_current_thread(|t| {
+        t.last_syscall.store(ctx.rax as u32, Ordering::Relaxed);
+    });
+
     match ctx.rax {
         SYS_WRITE => {
             let fd = ctx.rdi;
@@ -1707,6 +1713,7 @@ fn sys_clone(
         exit_code: AtomicI32::new(0),
         killed: AtomicBool::new(false),
         wake_pending: AtomicBool::new(false),
+        last_syscall: AtomicU32::new(crate::thread::thread::NO_SYSCALL),
         signal: SignalState::new(),
         user: Some(child_user),
         rq_link: Link::new(),
@@ -1936,6 +1943,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         exit_code: AtomicI32::new(0),
         killed: AtomicBool::new(false),
         wake_pending: AtomicBool::new(false),
+        last_syscall: AtomicU32::new(crate::thread::thread::NO_SYSCALL),
         signal: SignalState::new(),
         user: Some(child_user_arc.clone()),
         rq_link: Link::new(),

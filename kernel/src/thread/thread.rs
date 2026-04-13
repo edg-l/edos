@@ -57,6 +57,11 @@ impl Deref for ThreadId {
     }
 }
 
+/// Sentinel for `Thread::last_syscall` meaning "thread has never entered a
+/// syscall since spawn." Distinct from any real syscall number (SYS_READ=0
+/// rules out 0; we use the high end of u32 instead).
+pub const NO_SYSCALL: u32 = u32::MAX;
+
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
@@ -156,6 +161,12 @@ pub struct Thread {
     /// every park/sleep site without relying on retry loops or condition
     /// rechecks. Multiple wakes coalesce into one consume.
     pub wake_pending: AtomicBool,
+
+    /// Syscall number of the most recent SYSCALL entry, or `NO_SYSCALL`
+    /// (`u32::MAX`) if the thread has never entered a syscall (kthreads).
+    /// Written by the syscall dispatcher; read by debug tooling. Single
+    /// relaxed store on a hot cache line — sub-cycle cost.
+    pub last_syscall: AtomicU32,
     /// Signal state: pending bitmask and per-signal disposition.
     pub signal: SignalState,
 
@@ -449,6 +460,7 @@ impl Thread {
             exit_code: AtomicI32::new(0),
             killed: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
+            last_syscall: AtomicU32::new(NO_SYSCALL),
             signal: SignalState::new(),
             rq_link: Link::new(),
             rq_boosted: AtomicBool::new(false),
@@ -604,6 +616,7 @@ impl Thread {
             exit_code: AtomicI32::new(0),
             killed: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
+            last_syscall: AtomicU32::new(NO_SYSCALL),
             signal: SignalState::new(),
             user: Some(user_state),
             rq_link: Link::new(),
