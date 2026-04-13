@@ -229,6 +229,15 @@ extern "x86-interrupt" fn page_fault_handler(
 
         panic!("EXCEPTION: PAGE FAULT IN RING 0");
     } else {
+        // Re-enable interrupts before invoking blocking fault handlers.
+        // The x86-interrupt convention clears IF on PF entry, but the demand
+        // and COW paths legitimately block: NCQ I/O wait via thread_park_while,
+        // BlockPageCache shard mutex contention on EFS metadata, vma-set wait
+        // queues. The page fault handler runs on the regular kernel stack
+        // (not IST), so nested faults are handled normally. iretq restores
+        // the saved IF on return.
+        x86_64::instructions::interrupts::enable();
+
         let is_cow_candidate = error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
             && error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
             && error_code.contains(PageFaultErrorCode::USER_MODE);
