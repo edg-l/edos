@@ -398,10 +398,11 @@ pub fn load_elf(
             // boundary. Bytes past p_filesz within that page must read as zero
             // (they are the BSS-in-file-page region per the ELF spec), but the
             // page cache holds whatever the linker left there. We allocate a
-            // private frame, copy the cache page, zero the tail, and pin the
-            // page into this process. Add to reloc_pages so the relocation
-            // loop won't re-fault it; the final change_flags pass tightens
-            // its PTE to the segment's real permissions.
+            // private frame, copy the cache page, zero the tail, and map the
+            // page into this process. Add to reloc_pages so the post-RelocTable
+            // walk below can patch any RELATIVE entries targeting this page;
+            // the lazy fault path will never fire for it because it is already
+            // mapped.
             let tail_start = ((vaddr_offset + p_filesz) & 0xfff) as usize;
             if tail_start != 0 && p_filesz > 0 {
                 let last_file_page_vma_offset = (file_page_count as u64 - 1) * 4096;
