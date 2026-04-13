@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use spin::Once;
 
-use crate::drivers::ahci::{AhciError, port::AhciPort};
+use crate::drivers::ahci::{AhciError, DeviceType, port::AhciPort};
 
 /// Flat array of AHCI ports indexed by device_id.
 static AHCI_PORTS: Once<Vec<Arc<AhciPort>>> = Once::new();
@@ -78,4 +78,15 @@ pub fn wake_all_waiters(device_id: u64) {
     if let Some(port) = AHCI_PORTS.get().and_then(|p| p.get(device_id as usize)) {
         port.wake_all_slot_waiters();
     }
+}
+
+/// Whether the backing port is an ATAPI (CD/DVD) device. Used by the
+/// partition scanner to skip CD-ROMs at boot — we have no ISO9660 driver
+/// and probing them is artificially slow under QEMU emulation (~600ms on
+/// the first command). When an ISO9660 driver lands, mount it explicitly
+/// and detect_filesystem will work fine on demand.
+pub fn is_atapi(device_id: u64) -> bool {
+    get_port(device_id)
+        .map(|p| p.device_type == DeviceType::Atapi)
+        .unwrap_or(false)
 }

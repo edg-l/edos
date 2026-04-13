@@ -446,6 +446,15 @@ pub extern "C" fn fs_main_thread() -> ! {
     let mut partitions: Vec<Partition> = Vec::new();
 
     for device in &devices {
+        // Skip CD/DVD (ATAPI) devices. We have no ISO9660 filesystem
+        // driver and the first ATAPI READ on a freshly-initialized
+        // device is ~600ms under QEMU's emulated media-ready latency.
+        // When CD-ROM support lands, mount it explicitly via the mount
+        // syscall — detect_filesystem still handles ATAPI correctly.
+        if crate::drivers::ahci::direct::is_atapi(device.id) {
+            log!("Skipping ATAPI device {} at boot", device.id);
+            continue;
+        }
         match parse_gpt(device.id) {
             Ok(found_partitions) => {
                 log!("GPT found on device {}", device.id);
