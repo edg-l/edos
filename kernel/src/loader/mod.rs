@@ -122,6 +122,53 @@ fn eager_fault_elf_page_from_cache(
     Ok(())
 }
 
+/// Prime the per-inode page cache with a contiguous file range using one
+/// `fill_pages_bulk` call. The relocation loop in `load_elf` would
+/// otherwise issue one synchronous single-page `get_or_fill_page` per
+/// relocation target — under cold cache that's hundreds of single-sector
+/// AHCI commands. One bulk read coalesces them into a single NCQ command
+/// that completes in tens of milliseconds.
+///
+/// Best-effort: on bulk-read error or unsupported, returns silently and
+/// the per-page path will fall back to single-page reads.
+fn prefetch_file_pages(
+    inode: &Arc<VfsInode>,
+    fs: &Arc<dyn crate::fs::FileSystem + Send + Sync>,
+    file_offset: u64,
+    page_count: usize,
+) {
+    if page_count == 0 {
+        return;
+    }
+    let Some(pc_ops) = fs.as_page_cache_ops() else {
+        return;
+    };
+
+    let bytes = page_count * 4096;
+    let Ok(data) = pc_ops.fill_pages_bulk(inode.ino, file_offset as usize, bytes) else {
+        return;
+    };
+
+    let start_page = file_offset / 4096;
+    for i in 0..page_count {
+        let page_idx = start_page + i as u64;
+        let off = i * 4096;
+        // get_or_fill is a no-op for already-cached pages and otherwise
+        // populates from the bulk buffer without hitting disk.
+        let _ = inode.pages.get_or_fill(page_idx, |buf| {
+            let avail = data.len().saturating_sub(off);
+            let copy = avail.min(4096);
+            if copy > 0 {
+                buf[..copy].copy_from_slice(&data[off..off + copy]);
+            }
+            if copy < 4096 {
+                buf[copy..].fill(0);
+            }
+            Ok(())
+        });
+    }
+}
+
 /// Allocate a zeroed private frame and map it writable at `page_addr`.
 ///
 /// Used during relocation patching when the second page of a cross-page
@@ -382,6 +429,21 @@ pub fn load_elf(
                 mem_size: p_memsz,
                 align: p_align.max(1),
             });
+        }
+    }
+
+    // Pre-fetch all PT_LOAD file pages into the per-inode page cache via
+    // bulk AHCI reads. The relocation loop below would otherwise issue
+    // one synchronous single-page read per relocation target — under cold
+    // cache that's hundreds of round-trips. Bulk-prefetch coalesces them
+    // into a few NCQ commands. Pages already faulted (e.g. tail-page
+    // pre-fault for partial last file page) are skipped by get_or_fill.
+    for region in &memory_regions {
+        if let VmaBacking::FileBacked {
+            file_offset, pages, ..
+        } = &region.backing
+        {
+            prefetch_file_pages(inode, &fs, *file_offset, pages.len());
         }
     }
 
