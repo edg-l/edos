@@ -69,15 +69,16 @@ pub enum State {
 }
 
 /// Valid state machine transitions:
-///   Ready   -> Running  (scheduler picks thread)
-///   Running -> Ready    (preempted, re-enqueued)
-///   Running -> Parked   (thread_park / thread_park_while)
-///   Running -> Sleeping (thread_sleep)
-///   Running -> Dying    (thread_exit)
-///   Parked  -> Waking   (try_wake)
-///   Parked  -> Running  (thread_park_while abort)
-///   Sleeping-> Waking   (try_wake)
-///   Waking  -> Ready    (complete_wake)
+///   Ready    -> Running  (scheduler picks thread)
+///   Running  -> Ready    (preempted, re-enqueued)
+///   Running  -> Parked   (thread_park / thread_park_while)
+///   Running  -> Sleeping (thread_sleep)
+///   Running  -> Dying    (thread_exit)
+///   Parked   -> Waking   (try_wake)
+///   Parked   -> Running  (park abort: token consumed or closure said don't park)
+///   Sleeping -> Waking   (try_wake)
+///   Sleeping -> Running  (sleep abort: token consumed)
+///   Waking   -> Ready    (complete_wake)
 fn is_valid_transition(from: State, to: State) -> bool {
     matches!(
         (from, to),
@@ -89,6 +90,7 @@ fn is_valid_transition(from: State, to: State) -> bool {
             | (State::Parked, State::Waking)
             | (State::Parked, State::Running)
             | (State::Sleeping, State::Waking)
+            | (State::Sleeping, State::Running)
             | (State::Waking, State::Ready)
     )
 }
@@ -147,6 +149,13 @@ pub struct Thread {
     /// Set when the process has been killed (e.g. by Ctrl+C). Sleeping syscalls
     /// check this flag on wakeup and return EINTR to unblock the process.
     pub killed: AtomicBool,
+
+    /// Wake-pending token. Wakers publish their intent here BEFORE probing
+    /// `state`; parkers consume it (swap to false) AFTER CAS to Parked/Sleeping
+    /// and revert to Running if it was set. Closes the lost-wakeup race for
+    /// every park/sleep site without relying on retry loops or condition
+    /// rechecks. Multiple wakes coalesce into one consume.
+    pub wake_pending: AtomicBool,
     /// Signal state: pending bitmask and per-signal disposition.
     pub signal: SignalState,
 
@@ -331,6 +340,22 @@ impl Thread {
             .fetch_or(Flags::NEED_RESCHED.bits(), Ordering::AcqRel);
     }
 
+    /// Publish a wake intent. Producers call this BEFORE probing `state`.
+    /// If the parker reaches its CAS-to-Parked after this returns, it will
+    /// observe the token in `consume_wake_pending` and abort park.
+    #[inline]
+    pub fn signal_wake(&self) {
+        self.wake_pending.store(true, Ordering::Release);
+    }
+
+    /// Consume a pending wake. Parkers call this AFTER CAS-to-Parked (or
+    /// CAS-to-Sleeping). Returns true if a wake was published since the
+    /// last consume.
+    #[inline]
+    pub fn consume_wake_pending(&self) -> bool {
+        self.wake_pending.swap(false, Ordering::AcqRel)
+    }
+
     pub fn set_priority(&self, prio: u8) {
         self.priority
             .store(prio.min((PRIORITY_LEVELS - 1) as u8), Ordering::Release);
@@ -423,6 +448,7 @@ impl Thread {
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
             killed: AtomicBool::new(false),
+            wake_pending: AtomicBool::new(false),
             signal: SignalState::new(),
             rq_link: Link::new(),
             rq_boosted: AtomicBool::new(false),
@@ -577,6 +603,7 @@ impl Thread {
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
             killed: AtomicBool::new(false),
+            wake_pending: AtomicBool::new(false),
             signal: SignalState::new(),
             user: Some(user_state),
             rq_link: Link::new(),

@@ -1,6 +1,5 @@
 use core::{
     cmp,
-    hint::spin_loop,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     time::Duration,
 };
@@ -957,101 +956,74 @@ impl Scheduler {
         });
     }
 
+    /// Wake `tid`. Safe from any context. Skips a no-op self-wake.
     // Careful over proritizing, it can starve threads, specially in smp 1
     pub fn wake_thread(&self, tid: ThreadId, priority: WakePriority) {
         if Some(tid) == self.current_thread_id() {
             return;
         }
-        self.wake_thread_internal(tid, priority, false);
-    }
-
-    pub fn wake_thread_irq(&self, tid: ThreadId, priority: WakePriority) {
-        self.wake_thread_internal(tid, priority, true);
-    }
-
-    fn wake_thread_internal(&self, tid: ThreadId, priority: WakePriority, from_irq: bool) {
         if let Some(t) = get_thread_by_id(tid) {
-            if from_irq {
-                self.wake_thread_from_irq(t, priority);
-            } else {
-                self.wake_thread_slow(t, priority);
-            }
+            self.do_wake(t, priority);
         }
     }
 
-    fn wake_thread_slow(&self, thread: Arc<Thread>, priority: WakePriority) {
-        const MAX_RETRIES: usize = 64;
-        let mut retries = 0;
+    /// Wake `tid` from an IRQ handler. Identical to `wake_thread` minus the
+    /// self-skip — IRQ handlers don't reason about the preempted thread's
+    /// identity.
+    pub fn wake_thread_irq(&self, tid: ThreadId, priority: WakePriority) {
+        if let Some(t) = get_thread_by_id(tid) {
+            self.do_wake(t, priority);
+        }
+    }
 
-        loop {
+    /// Single-pass wake protocol shared by `wake_thread` and `wake_thread_irq`.
+    ///
+    /// Correctness rests on the wake-pending token: we publish it BEFORE
+    /// probing state, so a parker that CASes Running→Parked after our store
+    /// is guaranteed to observe `wake_pending=true` in `consume_wake_pending`
+    /// and revert to Running. No retry loop, no spin: wakes are delivered
+    /// in a single pass and the token closes every race window. Bare
+    /// `thread_park` callers see at most one spurious wake per cycle.
+    ///
+    /// Safe from any context — `without_interrupts` is a cheap no-op when
+    /// IRQs are already disabled.
+    fn do_wake(&self, thread: Arc<Thread>, priority: WakePriority) {
+        // Publish wake intent. Pairs with `consume_wake_pending` in
+        // transition_park / transition_park_while / transition_sleep.
+        thread.signal_wake();
+
+        without_interrupts(|| {
+            // Fast path: thread is already Sleeping/Parked. Claim it via
+            // try_wake (Sleeping/Parked → Waking) and enqueue it as Ready.
             if thread.try_wake() {
                 self.complete_wake(&thread, priority);
                 return;
             }
 
-            match State::from(thread.state.load(Ordering::Acquire)) {
+            // Otherwise the thread is Running, Ready, Waking, or Dying.
+            // Token is already set, so a Running thread that subsequently
+            // parks will abort. Nudge the target CPU so the wake takes
+            // effect promptly.
+            let state = State::from(thread.state.load(Ordering::Acquire));
+            let cpu = thread.cpu.load(Ordering::Acquire);
+            match state {
                 State::Ready | State::Waking => {
-                    without_interrupts(|| {
-                        let cpu = thread.cpu.load(Ordering::Acquire);
-                        let sc = sched_for_cpu(cpu);
-                        sc.mark_running_thread_need_resched();
-                        if cpu != self.cpu {
-                            self.send_reschedule_ipi(cpu);
-                        }
-                    });
-                    return;
+                    sched_for_cpu(cpu).mark_running_thread_need_resched();
                 }
                 State::Running => {
-                    without_interrupts(|| {
-                        thread.mark_need_resched();
-                        let cpu = thread.cpu.load(Ordering::Acquire);
-                        if cpu != self.cpu {
-                            self.send_reschedule_ipi(cpu);
-                        }
-                    });
-                    retries += 1;
-                    if retries >= MAX_RETRIES {
-                        // IPI sent, the target CPU will preempt eventually.
-                        return;
-                    }
-                    spin_loop();
+                    thread.mark_need_resched();
                 }
-                State::Dying => return,
-                _ => {
-                    retries += 1;
-                    if retries >= MAX_RETRIES {
-                        return;
-                    }
-                    spin_loop();
-                }
-            }
-        }
-    }
-
-    #[inline(never)]
-    fn wake_thread_from_irq(&self, thread: Arc<Thread>, priority: WakePriority) {
-        let state = State::from(thread.state.load(Ordering::Acquire));
-        let cpu = thread.cpu.load(Ordering::Acquire);
-        match state {
-            State::Sleeping | State::Parked => {
-                if thread.try_wake() {
-                    self.complete_wake(&thread, priority);
+                State::Sleeping | State::Parked => {
+                    // Lost the try_wake CAS race to a concurrent waker.
+                    // They will (or already did) deliver via complete_wake.
                     return;
                 }
+                State::Dying => return,
             }
-            State::Ready | State::Waking => {
-                let sc = sched_for_cpu(cpu);
-                sc.mark_running_thread_need_resched();
+            if cpu != self.cpu {
+                self.send_reschedule_ipi(cpu);
             }
-            State::Running => {
-                thread.mark_need_resched();
-            }
-            State::Dying => return,
-        }
-
-        if cpu != self.cpu {
-            self.send_reschedule_ipi(cpu);
-        }
+        });
     }
 
     pub fn thread_exit(&self, code: i32) -> ! {
@@ -1280,7 +1252,27 @@ extern "C" fn transition_park(_arg: *mut u8) -> bool {
     let Some(cur) = sched.current_thread() else {
         return true;
     };
-    let _ = cur.cas_state(State::Running, State::Parked);
+
+    if !cur.cas_state(State::Running, State::Parked) {
+        // Not Running (e.g., concurrent transition to Dying). Bail without
+        // switching; the caller will observe the unexpected state on return.
+        return false;
+    }
+
+    // Token check. Wakers publish `wake_pending` BEFORE probing state, so
+    // any wake delivered after our caller's last check sees Parked here.
+    if cur.consume_wake_pending() {
+        if cur.cas_state(State::Parked, State::Running) {
+            // Reverted cleanly: no waker reached us via try_wake. Skip the
+            // context switch entirely.
+            return false;
+        }
+        // CAS lost: a waker beat us to try_wake (Parked -> Waking) and
+        // complete_wake will set us Ready in some runqueue. We must switch
+        // so the scheduler can pick us back up properly.
+        return true;
+    }
+
     true
 }
 
@@ -1304,15 +1296,22 @@ extern "C" fn transition_park_while(arg: *mut u8) -> bool {
         return false; // Not running (Dying, etc.) — don't switch.
     }
 
-    // Check condition with state already Parked so a concurrent waker succeeds.
+    // Check the wake-pending token AND the user condition. We bail (don't
+    // park) if either says so. The token covers wakes that arrived after
+    // the caller's last condition check but before our CAS to Parked; the
+    // closure covers state changes the producer made without going through
+    // a wake (or wakes whose target was just transitioned to Parked, where
+    // try_wake will succeed independently).
+    let token = cur.consume_wake_pending();
     let should_park = (ctx.check_fn)(ctx.check_ctx);
-    if !should_park {
-        // Condition false — try to revert Parked -> Running.
+
+    if token || !should_park {
         if cur.cas_state(State::Parked, State::Running) {
-            return false; // Successfully reverted, no switch needed.
+            return false; // Reverted cleanly; no switch.
         }
-        // CAS failed: a waker raced and enqueued us. Must switch so the
-        // scheduler can pop and unlink us from the runqueue.
+        // CAS lost: a waker reached try_wake first (Parked -> Waking) and
+        // complete_wake set us Ready in some runqueue. Switch so the
+        // scheduler can pick us back up.
         return true;
     }
 
@@ -1335,6 +1334,15 @@ extern "C" fn transition_sleep(arg: *mut u8) -> bool {
     if !cur.cas_state(State::Running, State::Sleeping) {
         // Interrupts are disabled and we own the Running state -- CAS cannot fail.
         unreachable!("transition_sleep: CAS Running->Sleeping failed");
+    }
+
+    // Token check: a wake delivered between the caller's setup and our CAS
+    // to Sleeping should abort the sleep, just like park.
+    if cur.consume_wake_pending() {
+        if cur.cas_state(State::Sleeping, State::Running) {
+            return false;
+        }
+        return true;
     }
 
     let deadline_tick = ctx.deadline_tick;
