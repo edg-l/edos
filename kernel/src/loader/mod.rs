@@ -313,9 +313,16 @@ pub fn load_elf(
     let mut reloc_pages: BTreeSet<VirtAddr> = BTreeSet::new();
     let write_flags =
         PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
-    // Virtual address range of the writable PT_LOAD VMA (page-aligned start/end).
-    let mut reloc_vma_range: Option<core::ops::Range<VirtAddr>> = None;
-    let mut writable_load_count = 0u32;
+    // Candidate writable PT_LOAD segments. After SHT_RELA is parsed, exactly
+    // one of these must contain all reloc targets; the rest are non-reloc
+    // writable segments (e.g. a future GNU_RELRO + .data split). Phase 0
+    // census shows current binaries always have exactly one writable PT_LOAD,
+    // so writable_candidates.len() == 1 in practice today.
+    struct WritableCandidate {
+        vma_range: core::ops::Range<VirtAddr>,
+        file_offset: u64,
+    }
+    let mut writable_candidates: Vec<WritableCandidate> = Vec::new();
 
     // Program header table (targeted read).
     let phdr_bytes_len = (e_phnum as u64) * (PHDR_SIZE as u64);
@@ -403,19 +410,16 @@ pub fn load_elf(
                 });
             }
 
-            // Track the writable PT_LOAD VMA range for the reloc table.
-            // Reviewer mandate: assert exactly one writable PT_LOAD exists.
+            // Track every writable PT_LOAD as a candidate. The actual reloc-
+            // bearing segment is identified after SHT_RELA is parsed (so the
+            // assert correctly fires only when relocs span more than one).
             if writable_mapping {
-                writable_load_count += 1;
-                assert!(
-                    writable_load_count <= 1,
-                    "lazy reloc: found more than one writable PT_LOAD \
-                     segment; exactly one expected per Phase 0 census"
-                );
-                // The VMA range spans the full memory extent (file-backed + BSS).
                 let vma_start = page_aligned_vaddr;
                 let vma_end = page_aligned_vaddr + align_up(vaddr_offset + p_memsz, 4096);
-                reloc_vma_range = Some(vma_start..vma_end);
+                writable_candidates.push(WritableCandidate {
+                    vma_range: vma_start..vma_end,
+                    file_offset,
+                });
             }
 
             // Pre-fault the last file page when p_filesz does not end on a page
@@ -464,26 +468,6 @@ pub fn load_elf(
                 mem_size: p_memsz,
                 align: p_align.max(1),
             });
-        }
-    }
-
-    // Pre-fetch PT_LOAD file pages into the per-inode page cache via bulk AHCI
-    // reads. Skip the writable PT_LOAD when lazy relocs are enabled: those pages
-    // are faulted in on-demand and patched lazily. Only prefetch PF_X segments
-    // (.text/.rodata) which are read from cache without modification.
-    for region in &memory_regions {
-        if let VmaBacking::FileBacked {
-            file_offset,
-            pages,
-            writable_mapping,
-            ..
-        } = &region.backing
-        {
-            if !EAGER_RELOCS && *writable_mapping {
-                // Lazy path: skip prefetch for reloc-bearing writable segment.
-                continue;
-            }
-            prefetch_file_pages(inode, &fs, *file_offset, pages.len());
         }
     }
 
@@ -536,6 +520,15 @@ pub fn load_elf(
                             );
 
                             // Phase 0 confirmed all reloc targets fit in u32.
+                            // Guard against future / malformed binaries that
+                            // might place a target above 4 GiB: silent
+                            // truncation would land in the wrong page bucket.
+                            assert!(
+                                r_offset <= u32::MAX as u64,
+                                "lazy reloc: R_X86_64_RELATIVE r_offset {:#x} \
+                                 exceeds u32 range; load image > 4 GiB unsupported",
+                                r_offset
+                            );
                             let r_offset_u32 = r_offset as u32;
 
                             raw_relocs.push((r_offset_u32, r_addend));
@@ -618,6 +611,59 @@ pub fn load_elf(
         }
     }
 
+    // Resolve the reloc-bearing writable PT_LOAD by intersecting the parsed
+    // RELATIVE entries with the writable PT_LOAD candidates. Per Phase 0 census,
+    // every current binary has exactly one such candidate; this assert correctly
+    // distinguishes "two writable PT_LOADs both with relocs" (panic) from
+    // "two writable PT_LOADs but only one has relocs" (fine).
+    let (reloc_vma_range, reloc_skip_file_offset): (
+        Option<core::ops::Range<VirtAddr>>,
+        Option<u64>,
+    ) = if raw_relocs.is_empty() {
+        (None, None)
+    } else {
+        let mut matched: Option<usize> = None;
+        for (idx, cand) in writable_candidates.iter().enumerate() {
+            let start_off = cand.vma_range.start.as_u64() - load_base.as_u64();
+            let end_off = cand.vma_range.end.as_u64() - load_base.as_u64();
+            let any = raw_relocs.iter().any(|&(off, _)| {
+                let off64 = off as u64;
+                off64 >= start_off && off64 < end_off
+            });
+            if any {
+                assert!(
+                    matched.is_none(),
+                    "lazy reloc: relocations span multiple writable PT_LOAD \
+                     segments; exactly one expected"
+                );
+                matched = Some(idx);
+            }
+        }
+        let m = matched
+            .expect("lazy reloc: parsed RELATIVE entries but no writable PT_LOAD contains them");
+        (
+            Some(writable_candidates[m].vma_range.clone()),
+            Some(writable_candidates[m].file_offset),
+        )
+    };
+
+    // Pre-fetch PT_LOAD file pages into the per-inode page cache via bulk AHCI
+    // reads. With lazy relocs (EAGER_RELOCS=false), skip ONLY the writable
+    // PT_LOAD that owns relocs (matched by file_offset); other writable
+    // segments and all PF_X (.text/.rodata) segments are still prefetched
+    // because they are read from cache without modification.
+    for region in &memory_regions {
+        if let VmaBacking::FileBacked {
+            file_offset, pages, ..
+        } = &region.backing
+        {
+            if !EAGER_RELOCS && reloc_skip_file_offset == Some(*file_offset) {
+                continue;
+            }
+            prefetch_file_pages(inode, &fs, *file_offset, pages.len());
+        }
+    }
+
     // Tighten permissions on eagerly-faulted relocation pages (EAGER_RELOCS only).
     // Pages were mapped WRITABLE for patching; set final perms from the
     // containing VMA's VmaProt.
@@ -651,18 +697,16 @@ pub fn load_elf(
 
     // Build the RelocTable for lazy fault-time application.
     // Constructed regardless of EAGER_RELOCS so Phase 2 has it available.
+    // When raw_relocs is non-empty, reloc_vma_range was set above (the
+    // resolution panics otherwise), so the unwrap is safe.
     let built_reloc_table: Option<Arc<RelocTable>> = if raw_relocs.is_empty() {
         None
     } else {
-        // Determine the writable PT_LOAD page-aligned start and page count
-        // for the bucket array. Default to full 4 GiB if unknown (defensive).
-        let (vma_page_start, vma_page_count) = if let Some(ref range) = reloc_vma_range {
-            let start_off = (range.start.as_u64() - load_base.as_u64()) as u32;
-            let page_count = ((range.end.as_u64() - range.start.as_u64()) / 4096) as usize;
-            (start_off, page_count)
-        } else {
-            (0u32, 1024 * 1024) // 4 GiB / 4096 pages as a defensive upper bound
-        };
+        let range = reloc_vma_range
+            .as_ref()
+            .expect("lazy reloc: raw_relocs non-empty implies reloc_vma_range is set");
+        let vma_page_start = (range.start.as_u64() - load_base.as_u64()) as u32;
+        let vma_page_count = ((range.end.as_u64() - range.start.as_u64()) / 4096) as usize;
         Some(RelocTable::build(
             raw_relocs,
             vma_page_start,

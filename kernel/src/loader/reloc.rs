@@ -91,12 +91,10 @@ impl RelocTable {
             buckets.push(Bucket { start: 0, len: 0 });
         }
 
-        let mut i = 0u32;
         for (entry_idx, entry) in entries.iter().enumerate() {
             let off = entry.offset;
             // Skip entries outside this VMA.
             if off < vma_page_start {
-                i = entry_idx as u32 + 1;
                 continue;
             }
             let vma_off = off - vma_page_start;
@@ -109,9 +107,7 @@ impl RelocTable {
                 bucket.start = entry_idx as u32;
             }
             bucket.len += 1;
-            i = entry_idx as u32 + 1;
         }
-        let _ = i; // suppress unused warning
 
         Arc::new(Self {
             entries,
