@@ -714,6 +714,36 @@ pub fn load_elf(
         ))
     };
 
+    // Apply relocations to any pages the loader pre-faulted via
+    // eager_fault_elf_page_from_cache (the partial last file page that
+    // needs zero-padding past p_filesz per the ELF spec). Those pages are
+    // already mapped writable, so the lazy reloc fault path will never
+    // fire for them. Without this, reloc targets that fall inside the
+    // partial last file page (typical for .got sitting at the end of the
+    // writable PT_LOAD) remain unrelocated and userspace dereferences a
+    // null-or-bogus address.
+    if !EAGER_RELOCS {
+        if let Some(ref table) = built_reloc_table {
+            use x86_64::structures::paging::mapper::TranslateResult;
+            let phys_offset = crate::boot::boot_info().physical_memory_offset;
+            for &page_addr in &reloc_pages {
+                let page_offset = (page_addr.as_u64() - load_base.as_u64()) as u32;
+                let TranslateResult::Mapped { frame, offset, .. } =
+                    memory_manager.translate(page_addr)
+                else {
+                    panic!(
+                        "lazy reloc: pre-faulted reloc page {:#x} not mapped",
+                        page_addr.as_u64()
+                    );
+                };
+                let frame_virt = phys_offset + (frame.start_address() + offset).as_u64();
+                unsafe {
+                    table.apply_relocs_to_page(frame_virt, page_offset, load_base.as_u64());
+                }
+            }
+        }
+    }
+
     // Debug self-check (EAGER_RELOCS only): after the eager loop has patched
     // every reloc target, walk the RelocTable and verify each address reads
     // back the expected relocated value. Catches RelocTable construction bugs
