@@ -239,7 +239,40 @@ extern "C" fn test_thread3(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
     }
 }
 
-/// Boot loader kthread: reads a binary from disk and sends it back via mailbox.
+/// Per-binary load request handed to a `boot-load` kthread. Owned via
+/// `Box::into_raw` and reclaimed by the kthread on entry.
+struct BootLoadRequest {
+    name: alloc::string::String,
+    argv0: alloc::vec::Vec<u8>,
+    root: Path,
+    result_tx: Arc<Mailbox<Arc<Thread>, ()>>,
+}
+
+/// Boot loader kthread: builds a user `Thread` (ELF load + eager-faulted
+/// reloc pages) for one binary and ships it back via mailbox. Multiple
+/// instances run concurrently so AHCI NCQ overlaps the per-inode page
+/// fills across binaries — restores the parallelism that disappeared
+/// when the loader migrated from `Vec<u8>` to file-backed mmap.
+extern "C" fn boot_load_thread(arg: *mut u8) -> ! {
+    let req: Box<BootLoadRequest> = unsafe { Box::from_raw(arg as *mut BootLoadRequest) };
+    let path = req.root.join(&req.name).normalize();
+    let inode = fs::api::resolve_inode(&path)
+        .unwrap_or_else(|e| panic!("boot-load resolve_inode {}: {e:?}", req.name));
+    let env: [&[u8]; 3] = [b"PATH=/bin", b"HOME=/", b"PWD=/"];
+    let thread = Thread::new_user(
+        inode,
+        &path,
+        Some(req.name.clone()),
+        &[&req.argv0],
+        &env,
+        0,
+        0,
+        req.root.clone(),
+    )
+    .unwrap_or_else(|e| panic!("boot-load Thread::new_user {}: {e:?}", req.name));
+    req.result_tx.send(thread);
+    kthread_exit(0)
+}
 
 pub fn mount_system_fs() -> ! {
     log!("Starting mountfs thread");
@@ -315,54 +348,48 @@ pub fn mount_system_fs() -> ! {
         log!("Failed to mount memfs at {:?}: {err:?}", dev_dir);
     }
 
-    let default_env: [&[u8]; 3] = [b"PATH=/bin", b"HOME=/", b"PWD=/"];
+    log!("Spawning user threads via page-cache loader (parallel)");
 
-    log!("Spawning user threads via page-cache loader");
+    // Fan out one boot-load kthread per binary. Each kthread builds a
+    // user Thread (ELF load + reloc page-faults) independently, so AHCI
+    // NCQ can overlap the per-inode page fills across all three binaries.
+    let binaries: [(&str, &[u8]); 3] = [
+        ("bin/edos-wm", b"edos-wm"),
+        ("bin/edos-taskbar", b"edos-taskbar"),
+        ("bin/edos-terminal", b"edos-terminal"),
+    ];
 
-    let spawn_binary = |name: &str, argv0: &[u8]| {
-        let path = root.join(name).normalize();
-        let inode = crate::fs::api::resolve_inode(&path)
-            .unwrap_or_else(|e| panic!("resolve_inode {name}: {e:?}"));
-        Thread::new_user(
-            inode,
-            &path,
-            Some(name.to_string()),
-            &[argv0],
-            &default_env,
-            0,
-            0,
-            root.clone(),
-        )
-        .unwrap_or_else(|e| panic!("Thread::new_user {name}: {e:?}"))
-    };
+    let mailboxes: alloc::vec::Vec<(&str, Arc<Mailbox<Arc<Thread>, ()>>)> = binaries
+        .iter()
+        .map(|(name, argv0)| {
+            let tx = Arc::new(Mailbox::with_capacity(1));
+            let req = Box::new(BootLoadRequest {
+                name: (*name).to_string(),
+                argv0: argv0.to_vec(),
+                root: root.clone(),
+                result_tx: tx.clone(),
+            });
+            queue_spawn_kthread_named_arg(
+                "boot-load",
+                boot_load_thread as *const () as u64,
+                Box::into_raw(req) as *mut u8,
+            );
+            (*name, tx)
+        })
+        .collect();
 
-    let wm_thread = spawn_binary("bin/edos-wm", b"edos-wm");
-    let wm_tid = queue_spawn_thread(wm_thread.clone());
-    log!(
-        "Spawned edos-wm tid={} cpu={}",
-        wm_tid.0,
-        wm_thread.cpu.load(core::sync::atomic::Ordering::Relaxed)
-    );
-
-    let taskbar_thread = spawn_binary("bin/edos-taskbar", b"edos-taskbar");
-    let tb_tid = queue_spawn_thread(taskbar_thread.clone());
-    log!(
-        "Spawned edos-taskbar tid={} cpu={}",
-        tb_tid.0,
-        taskbar_thread
-            .cpu
-            .load(core::sync::atomic::Ordering::Relaxed)
-    );
-
-    let terminal_thread = spawn_binary("bin/edos-terminal", b"edos-terminal");
-    let tm_tid = queue_spawn_thread(terminal_thread.clone());
-    log!(
-        "Spawned edos-terminal tid={} cpu={}",
-        tm_tid.0,
-        terminal_thread
-            .cpu
-            .load(core::sync::atomic::Ordering::Relaxed)
-    );
+    // Collect built threads in spawn order and queue them on the scheduler.
+    for (name, tx) in mailboxes {
+        let mut req = tx.recv();
+        let thread = req.payload.take().unwrap();
+        let tid = queue_spawn_thread(thread.clone());
+        log!(
+            "Spawned {} tid={} cpu={}",
+            name,
+            tid.0,
+            thread.cpu.load(core::sync::atomic::Ordering::Relaxed)
+        );
+    }
 
     kthread_exit(0)
 }
