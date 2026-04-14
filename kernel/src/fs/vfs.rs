@@ -494,6 +494,9 @@ pub fn create_dir(op: &VfsOp) -> Result<(), Error> {
     result
 }
 
+/// Lock ordering note: `remove_file` acquires parent inode.lock (write) then
+/// inside `invalidate_mappings_above` acquires inode.mappers.lock > vmas.lock
+/// > memory_manager.lock. This is consistent with truncate's existing contract.
 pub fn remove_file(op: &VfsOp) -> Result<(), Error> {
     let parent_inode = resolve_parent_inode(op);
     let _guard = parent_inode.as_ref().map(|i| i.lock.write());
@@ -501,14 +504,17 @@ pub fn remove_file(op: &VfsOp) -> Result<(), Error> {
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
         if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
-            // D.4 — Orphan inode semantics (matches Linux unlink-while-mapped):
-            // We do NOT walk or invalidate mappers here.  Existing FileBacked VMAs
-            // hold an Arc<VfsInode> that keeps the inode (and its page cache) alive
-            // until the last VMA is munmap'd.  Pages already faulted in stay alive
-            // via the per-VMA Vec<Option<Arc<CachedPage>>>; re-faults after unlink
-            // attempt get_or_fill on the now-deleted file, which returns EIO and
-            // kills the faulting thread (SIGBUS-equivalent).
+            // Actively tear down PTEs for all MAP_SHARED FileBacked VMAs that
+            // reference this inode. This prevents subsequent writes through those
+            // mappings from silently dirtying a now-deleted file's cluster chain.
+            // PTEs for already-faulted MAP_PRIVATE pages are also cleared.
+            // Lock ordering: parent inode.lock (held above) > mappers.lock >
+            // vmas.lock > memory_manager.lock (acquired inside
+            // invalidate_mappings_above).
             // The dentry cache has been invalidated above, so new opens fail ENOENT.
+            // Filesystems that implement orphan semantics (FAT32) use mappers_pin to
+            // defer cluster chain freeing until the last unmap.
+            invalidate_mappings_above(inode, 0);
             inode.pages.invalidate_all();
         }
     }
