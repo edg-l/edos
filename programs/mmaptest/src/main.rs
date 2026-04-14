@@ -6,35 +6,36 @@ use edos_lib::process;
 
 const PAGE: u64 = 4096;
 
-fn fail(test: u32, msg: &str) -> ! {
-    eprintln!("FAIL test {}: {}", test, msg);
+fn fail(test: u32, dir: &str, msg: &str) -> ! {
+    eprintln!("FAIL test {} [{}]: {}", test, dir, msg);
     std::process::exit(1);
 }
 
-fn pass(test: u32, detail: &str) {
-    println!("PASS test {}: {}", test, detail);
+fn pass(test: u32, dir: &str, detail: &str) {
+    println!("PASS test {} [{}]: {}", test, dir, detail);
 }
 
 // -----------------------------------------------------------------------
 // Test 1: MAP_PRIVATE read -- verify mmap bytes match fs::read bytes
 // -----------------------------------------------------------------------
-fn test1() {
-    let path = "/var/mmaptest_t1.dat";
+fn test1(dir: &str) {
+    let path = format!("{}/mmaptest_t1.dat", dir);
     // Full-page content. Kernel requires page-aligned mmap length for
     // file-backed mappings.
     let mut content = vec![0u8; PAGE as usize];
     let hello = b"Hello, mmap world!  ";
     content[..hello.len()].copy_from_slice(hello);
-    fs::write(path, &content).unwrap_or_else(|e| fail(1, &format!("write file: {}", e)));
+    fs::write(&path, &content).unwrap_or_else(|e| fail(1, dir, &format!("write file: {}", e)));
 
-    let expected: Vec<u8> = fs::read(path).unwrap_or_else(|e| fail(1, &format!("fs::read: {}", e)));
+    let expected: Vec<u8> =
+        fs::read(&path).unwrap_or_else(|e| fail(1, dir, &format!("fs::read: {}", e)));
 
-    let file = File::open(path).unwrap_or_else(|e| fail(1, &format!("open: {}", e)));
+    let file = File::open(&path).unwrap_or_else(|e| fail(1, dir, &format!("open: {}", e)));
     let fd = file.as_raw_fd();
 
     let ptr = mmap(core::ptr::null_mut(), PAGE, PROT_READ, MAP_PRIVATE, fd, 0);
     if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(1, "mmap returned null/MAP_FAILED");
+        fail(1, dir, "mmap returned null/MAP_FAILED");
     }
 
     let mapped: Vec<u8> = unsafe { core::slice::from_raw_parts(ptr, PAGE as usize).to_vec() };
@@ -43,6 +44,7 @@ fn test1() {
     if mapped != expected {
         fail(
             1,
+            dir,
             &format!(
                 "mmap first 20 {:?} != fs::read first 20 {:?}",
                 &mapped[..20],
@@ -53,22 +55,26 @@ fn test1() {
 
     pass(
         1,
-        &format!("first 20 bytes via mmap match fs::read: {:?}", &mapped[..20]),
+        dir,
+        &format!(
+            "first 20 bytes via mmap match fs::read: {:?}",
+            &mapped[..20]
+        ),
     );
 }
 
 // -----------------------------------------------------------------------
 // Test 2: MAP_PRIVATE COW write -- private write does NOT reach disk
 // -----------------------------------------------------------------------
-fn test2() {
-    let path = "/var/mmaptest_t2.dat";
+fn test2(dir: &str) {
+    let path = format!("{}/mmaptest_t2.dat", dir);
     let content = vec![b'A'; PAGE as usize];
-    fs::write(path, &content).unwrap_or_else(|e| fail(2, &format!("write file: {}", e)));
+    fs::write(&path, &content).unwrap_or_else(|e| fail(2, dir, &format!("write file: {}", e)));
 
     let file = OpenOptions::new()
         .read(true)
-        .open(path)
-        .unwrap_or_else(|e| fail(2, &format!("open: {}", e)));
+        .open(&path)
+        .unwrap_or_else(|e| fail(2, dir, &format!("open: {}", e)));
     let fd = file.as_raw_fd();
 
     let ptr = mmap(
@@ -80,23 +86,28 @@ fn test2() {
         0,
     );
     if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(2, "mmap returned null/MAP_FAILED");
+        fail(2, dir, "mmap returned null/MAP_FAILED");
     }
 
     // Write 'B' via private mapping
     unsafe { ptr.write(b'B') };
     let mapped_byte = unsafe { ptr.read() };
     if mapped_byte != b'B' {
-        fail(2, &format!("expected 'B' in mapping, got {}", mapped_byte));
+        fail(
+            2,
+            dir,
+            &format!("expected 'B' in mapping, got {}", mapped_byte),
+        );
     }
 
     munmap(ptr, PAGE);
 
     // File on disk must still start with 'A'
-    let disk_byte = fs::read(path).unwrap_or_else(|e| fail(2, &format!("re-read: {}", e)))[0];
+    let disk_byte = fs::read(&path).unwrap_or_else(|e| fail(2, dir, &format!("re-read: {}", e)))[0];
     if disk_byte != b'A' {
         fail(
             2,
+            dir,
             &format!(
                 "COW failed: disk byte should be 'A' but got '{}'",
                 disk_byte as char
@@ -104,22 +115,22 @@ fn test2() {
         );
     }
 
-    pass(2, "COW write visible in mapping ('B'), disk still 'A'");
+    pass(2, dir, "COW write visible in mapping ('B'), disk still 'A'");
 }
 
 // -----------------------------------------------------------------------
 // Test 3: MAP_SHARED write + msync -- write must reach disk after msync
 // -----------------------------------------------------------------------
-fn test3() {
-    let path = "/var/mmaptest_t3.dat";
+fn test3(dir: &str) {
+    let path = format!("{}/mmaptest_t3.dat", dir);
     let content = vec![b'A'; PAGE as usize];
-    fs::write(path, &content).unwrap_or_else(|e| fail(3, &format!("write file: {}", e)));
+    fs::write(&path, &content).unwrap_or_else(|e| fail(3, dir, &format!("write file: {}", e)));
 
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(path)
-        .unwrap_or_else(|e| fail(3, &format!("open: {}", e)));
+        .open(&path)
+        .unwrap_or_else(|e| fail(3, dir, &format!("open: {}", e)));
     let fd = file.as_raw_fd();
 
     let ptr = mmap(
@@ -131,22 +142,23 @@ fn test3() {
         0,
     );
     if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(3, "mmap returned null/MAP_FAILED");
+        fail(3, dir, "mmap returned null/MAP_FAILED");
     }
 
     unsafe { ptr.write(b'C') };
 
     let ret = unsafe { msync(ptr, PAGE, MS_SYNC) };
     if ret != 0 {
-        fail(3, &format!("msync returned {}", ret));
+        fail(3, dir, &format!("msync returned {}", ret));
     }
 
     munmap(ptr, PAGE);
 
-    let disk_byte = fs::read(path).unwrap_or_else(|e| fail(3, &format!("re-read: {}", e)))[0];
+    let disk_byte = fs::read(&path).unwrap_or_else(|e| fail(3, dir, &format!("re-read: {}", e)))[0];
     if disk_byte != b'C' {
         fail(
             3,
+            dir,
             &format!(
                 "expected 'C' on disk after msync, got '{}'",
                 disk_byte as char
@@ -154,27 +166,27 @@ fn test3() {
         );
     }
 
-    pass(3, "MAP_SHARED write + msync: disk byte is 'C'");
+    pass(3, dir, "MAP_SHARED write + msync: disk byte is 'C'");
 }
 
 // -----------------------------------------------------------------------
 // Test 4: MAP_SHARED two-mapper visibility within one process
 // -----------------------------------------------------------------------
-fn test4() {
-    let path = "/var/mmaptest_t4.dat";
+fn test4(dir: &str) {
+    let path = format!("{}/mmaptest_t4.dat", dir);
     let content = vec![b'A'; PAGE as usize];
-    fs::write(path, &content).unwrap_or_else(|e| fail(4, &format!("write file: {}", e)));
+    fs::write(&path, &content).unwrap_or_else(|e| fail(4, dir, &format!("write file: {}", e)));
 
     let file_a = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(path)
-        .unwrap_or_else(|e| fail(4, &format!("open A: {}", e)));
+        .open(&path)
+        .unwrap_or_else(|e| fail(4, dir, &format!("open A: {}", e)));
     let file_b = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(path)
-        .unwrap_or_else(|e| fail(4, &format!("open B: {}", e)));
+        .open(&path)
+        .unwrap_or_else(|e| fail(4, dir, &format!("open B: {}", e)));
 
     let fd_a = file_a.as_raw_fd();
     let fd_b = file_b.as_raw_fd();
@@ -197,10 +209,10 @@ fn test4() {
     );
 
     if ptr_a.is_null() || ptr_a as usize == usize::MAX {
-        fail(4, "mmap A returned null/MAP_FAILED");
+        fail(4, dir, "mmap A returned null/MAP_FAILED");
     }
     if ptr_b.is_null() || ptr_b as usize == usize::MAX {
-        fail(4, "mmap B returned null/MAP_FAILED");
+        fail(4, dir, "mmap B returned null/MAP_FAILED");
     }
 
     // Write 'D' via mapping A
@@ -215,6 +227,7 @@ fn test4() {
     if seen != b'D' {
         fail(
             4,
+            dir,
             &format!(
                 "two-mapper visibility failed: expected 'D' via mapping B, got '{}'",
                 seen as char
@@ -222,18 +235,22 @@ fn test4() {
         );
     }
 
-    pass(4, "write via mapping A visible via mapping B without msync");
+    pass(
+        4,
+        dir,
+        "write via mapping A visible via mapping B without msync",
+    );
 }
 
 // -----------------------------------------------------------------------
 // Test 5: Past-EOF fault kills child (fork + deref second page of 4KB file)
 // -----------------------------------------------------------------------
-fn test5() {
-    let path = "/var/mmaptest_t5.dat";
+fn test5(dir: &str) {
+    let path = format!("{}/mmaptest_t5.dat", dir);
     let content = vec![b'X'; PAGE as usize]; // 4 KB
-    fs::write(path, &content).unwrap_or_else(|e| fail(5, &format!("write file: {}", e)));
+    fs::write(&path, &content).unwrap_or_else(|e| fail(5, dir, &format!("write file: {}", e)));
 
-    let file = File::open(path).unwrap_or_else(|e| fail(5, &format!("open: {}", e)));
+    let file = File::open(&path).unwrap_or_else(|e| fail(5, dir, &format!("open: {}", e)));
     let fd = file.as_raw_fd();
 
     // Map 2 pages even though file is only 1 page
@@ -246,13 +263,13 @@ fn test5() {
         0,
     );
     if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(5, "mmap returned null/MAP_FAILED");
+        fail(5, dir, "mmap returned null/MAP_FAILED");
     }
 
     // First page (in-file) must be readable
     let first = unsafe { ptr.read() };
     if first != b'X' {
-        fail(5, &format!("expected 'X' at byte 0, got {}", first));
+        fail(5, dir, &format!("expected 'X' at byte 0, got {}", first));
     }
 
     // Fork a child; the child accesses the second page (past EOF), which must
@@ -260,7 +277,7 @@ fn test5() {
     let child_pid = process::fork();
     if child_pid < 0 {
         munmap(ptr, PAGE * 2);
-        fail(5, "fork failed");
+        fail(5, dir, "fork failed");
     }
 
     if child_pid == 0 {
@@ -277,10 +294,11 @@ fn test5() {
     munmap(ptr, PAGE * 2);
 
     if exit_code == 11 {
-        pass(5, "past-EOF fault killed child with code 11: ok");
+        pass(5, dir, "past-EOF fault killed child with code 11: ok");
     } else {
         fail(
             5,
+            dir,
             &format!(
                 "expected child exit code 11 (SIGSEGV-equiv), got {}",
                 exit_code
@@ -292,16 +310,16 @@ fn test5() {
 // -----------------------------------------------------------------------
 // Test 6: Truncate post-mapping page kills child
 // -----------------------------------------------------------------------
-fn test6() {
-    let path = "/var/mmaptest_t6.dat";
+fn test6(dir: &str) {
+    let path = format!("{}/mmaptest_t6.dat", dir);
     let content = vec![b'Y'; PAGE as usize * 2]; // 8 KB
-    fs::write(path, &content).unwrap_or_else(|e| fail(6, &format!("write file: {}", e)));
+    fs::write(&path, &content).unwrap_or_else(|e| fail(6, dir, &format!("write file: {}", e)));
 
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(path)
-        .unwrap_or_else(|e| fail(6, &format!("open: {}", e)));
+        .open(&path)
+        .unwrap_or_else(|e| fail(6, dir, &format!("open: {}", e)));
     let fd = file.as_raw_fd();
 
     let ptr = mmap(
@@ -313,25 +331,25 @@ fn test6() {
         0,
     );
     if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(6, "mmap returned null/MAP_FAILED");
+        fail(6, dir, "mmap returned null/MAP_FAILED");
     }
 
     // Both pages accessible before truncation
     let b0 = unsafe { ptr.read() };
     let b1 = unsafe { ptr.add(PAGE as usize).read() };
     if b0 != b'Y' || b1 != b'Y' {
-        fail(6, "pre-truncate read failed");
+        fail(6, dir, "pre-truncate read failed");
     }
 
     // Truncate to 4 KB
     file.set_len(PAGE)
-        .unwrap_or_else(|e| fail(6, &format!("set_len: {}", e)));
+        .unwrap_or_else(|e| fail(6, dir, &format!("set_len: {}", e)));
 
     // Fork a child to access the now-truncated second page
     let child_pid = process::fork();
     if child_pid < 0 {
         munmap(ptr, PAGE * 2);
-        fail(6, "fork failed");
+        fail(6, dir, "fork failed");
     }
 
     if child_pid == 0 {
@@ -346,10 +364,11 @@ fn test6() {
     munmap(ptr, PAGE * 2);
 
     if exit_code == 11 {
-        pass(6, "post-truncate fault killed child with code 11: ok");
+        pass(6, dir, "post-truncate fault killed child with code 11: ok");
     } else {
         fail(
             6,
+            dir,
             &format!(
                 "expected child exit code 11 after truncate, got {}",
                 exit_code
@@ -361,16 +380,16 @@ fn test6() {
 // -----------------------------------------------------------------------
 // Test 7: fsync + msync round-trip
 // -----------------------------------------------------------------------
-fn test7() {
-    let path = "/var/mmaptest_t7.dat";
+fn test7(dir: &str) {
+    let path = format!("{}/mmaptest_t7.dat", dir);
     let content = vec![b'A'; PAGE as usize];
-    fs::write(path, &content).unwrap_or_else(|e| fail(7, &format!("write file: {}", e)));
+    fs::write(&path, &content).unwrap_or_else(|e| fail(7, dir, &format!("write file: {}", e)));
 
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(path)
-        .unwrap_or_else(|e| fail(7, &format!("open rw: {}", e)));
+        .open(&path)
+        .unwrap_or_else(|e| fail(7, dir, &format!("open rw: {}", e)));
     let fd = file.as_raw_fd();
 
     let ptr = mmap(
@@ -382,28 +401,29 @@ fn test7() {
         0,
     );
     if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(7, "mmap returned null/MAP_FAILED");
+        fail(7, dir, "mmap returned null/MAP_FAILED");
     }
 
     unsafe { ptr.write(b'Z') };
 
     let ret = unsafe { msync(ptr, PAGE, MS_SYNC) };
     if ret != 0 {
-        fail(7, &format!("msync returned {}", ret));
+        fail(7, dir, &format!("msync returned {}", ret));
     }
 
     munmap(ptr, PAGE);
 
     // fsync via std (file is still open)
     file.sync_all()
-        .unwrap_or_else(|e| fail(7, &format!("sync_all: {}", e)));
+        .unwrap_or_else(|e| fail(7, dir, &format!("sync_all: {}", e)));
     drop(file);
 
     // Re-open and read
-    let disk_byte = fs::read(path).unwrap_or_else(|e| fail(7, &format!("re-read: {}", e)))[0];
+    let disk_byte = fs::read(&path).unwrap_or_else(|e| fail(7, dir, &format!("re-read: {}", e)))[0];
     if disk_byte != b'Z' {
         fail(
             7,
+            dir,
             &format!(
                 "expected 'Z' on disk after msync+fsync, got '{}'",
                 disk_byte as char
@@ -411,7 +431,7 @@ fn test7() {
         );
     }
 
-    pass(7, "fsync + msync round-trip: byte 0 is 'Z'");
+    pass(7, dir, "fsync + msync round-trip: byte 0 is 'Z'");
 }
 
 // -----------------------------------------------------------------------
@@ -421,16 +441,16 @@ fn test7() {
 // unchanged and the file on disk must be unchanged. Exercises the
 // FileBacked-specific COW-across-fork path.
 // -----------------------------------------------------------------------
-fn test8() {
-    let path = "/var/mmaptest_t8.dat";
+fn test8(dir: &str) {
+    let path = format!("{}/mmaptest_t8.dat", dir);
     let content = vec![b'A'; PAGE as usize];
-    fs::write(path, &content).unwrap_or_else(|e| fail(8, &format!("write file: {}", e)));
+    fs::write(&path, &content).unwrap_or_else(|e| fail(8, dir, &format!("write file: {}", e)));
 
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(path)
-        .unwrap_or_else(|e| fail(8, &format!("open: {}", e)));
+        .open(&path)
+        .unwrap_or_else(|e| fail(8, dir, &format!("open: {}", e)));
     let fd = file.as_raw_fd();
 
     let ptr = mmap(
@@ -442,13 +462,13 @@ fn test8() {
         0,
     );
     if ptr.is_null() || ptr as usize == usize::MAX {
-        fail(8, "mmap returned null/MAP_FAILED");
+        fail(8, dir, "mmap returned null/MAP_FAILED");
     }
 
     let child_pid = process::fork();
     if child_pid < 0 {
         munmap(ptr, PAGE);
-        fail(8, "fork failed");
+        fail(8, dir, "fork failed");
     }
 
     if child_pid == 0 {
@@ -466,37 +486,213 @@ fn test8() {
     let exit_code = process::waitpid(child_pid as u64);
     if exit_code != 0 {
         munmap(ptr, PAGE);
-        fail(8, &format!("child exited {}, expected 0", exit_code));
+        fail(8, dir, &format!("child exited {}, expected 0", exit_code));
     }
 
     // Parent view: byte 0 must still be 'A' (COW isolation).
     let parent_byte = unsafe { core::ptr::read_volatile(ptr) };
     munmap(ptr, PAGE);
     if parent_byte != b'A' {
-        fail(8, &format!("parent saw {} after child write, expected 'A'", parent_byte));
+        fail(
+            8,
+            dir,
+            &format!("parent saw {} after child write, expected 'A'", parent_byte),
+        );
     }
 
     // Disk must be untouched too.
-    let on_disk: Vec<u8> = fs::read(path).unwrap_or_else(|e| fail(8, &format!("fs::read: {}", e)));
+    let on_disk: Vec<u8> =
+        fs::read(&path).unwrap_or_else(|e| fail(8, dir, &format!("fs::read: {}", e)));
     if on_disk[0] != b'A' {
-        fail(8, &format!("disk byte 0 is {}, expected 'A'", on_disk[0]));
+        fail(
+            8,
+            dir,
+            &format!("disk byte 0 is {}, expected 'A'", on_disk[0]),
+        );
     }
 
-    pass(8, "fork + MAP_PRIVATE: parent view isolated, disk unchanged");
+    pass(
+        8,
+        dir,
+        "fork + MAP_PRIVATE: parent view isolated, disk unchanged",
+    );
+}
+
+// -----------------------------------------------------------------------
+// Test 9: Unlink-while-MAP_SHARED-dirty
+//
+// Open a file, map MAP_SHARED, write into the mapping, then unlink the
+// file while the mapping is still live. The kernel must NOT panic; the
+// pin counter holds the cluster chain (FAT32) or node (memfs/EFS) alive
+// until munmap. After munmap the path must not be accessible.
+//
+// Skipped on filesystems that do not support page-cache mmap (MAP_FAILED
+// on mmap is the observable signal for those, since they reject the mmap
+// syscall).
+// -----------------------------------------------------------------------
+fn test9(dir: &str) {
+    let path = format!("{}/mmaptest_t9.dat", dir);
+
+    // Write 8 KB of 'U'
+    let content = vec![b'U'; PAGE as usize * 2];
+    fs::write(&path, &content).unwrap_or_else(|e| fail(9, dir, &format!("write file: {}", e)));
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|e| fail(9, dir, &format!("open: {}", e)));
+    let fd = file.as_raw_fd();
+
+    let ptr = mmap(
+        core::ptr::null_mut(),
+        PAGE * 2,
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED,
+        fd,
+        0,
+    );
+
+    // If this filesystem does not support page-cache mmap, mmap returns MAP_FAILED.
+    // Skip gracefully rather than failing.
+    if ptr.is_null() || ptr as usize == usize::MAX {
+        drop(file);
+        // Clean up the file we created; ignore errors (file may be gone).
+        let _ = fs::remove_file(&path);
+        println!("SKIP test 9 [{}]: mmap not supported on this fs", dir);
+        return;
+    }
+
+    // Write 'V' at offset 0 through the mapping while the file is still linked.
+    unsafe { core::ptr::write_volatile(ptr, b'V') };
+
+    // Unlink the file. The kernel must keep the data alive because the mapping
+    // pins the inode.
+    fs::remove_file(&path).unwrap_or_else(|e| fail(9, dir, &format!("remove_file: {}", e)));
+
+    // The mapping must still read 'V' after unlink (inode is pinned).
+    let still_v = unsafe { core::ptr::read_volatile(ptr) };
+    if still_v != b'V' {
+        munmap(ptr, PAGE * 2);
+        fail(
+            9,
+            dir,
+            &format!(
+                "mapping read '{}' after unlink, expected 'V'",
+                still_v as char
+            ),
+        );
+    }
+
+    // msync the dirty page -- flush_page must succeed even for orphaned inode.
+    let ret = unsafe { msync(ptr, PAGE * 2, MS_SYNC) };
+    if ret != 0 {
+        munmap(ptr, PAGE * 2);
+        fail(9, dir, &format!("msync after unlink returned {}", ret));
+    }
+
+    munmap(ptr, PAGE * 2);
+    drop(file);
+
+    // After munmap (last unpin), the path must not be accessible.
+    match fs::read(&path) {
+        Err(_) => {}
+        Ok(_) => fail(
+            9,
+            dir,
+            "re-open after unlink+munmap succeeded (should fail)",
+        ),
+    }
+
+    pass(
+        9,
+        dir,
+        "unlink-while-mapped: mapping stayed live, path gone after munmap",
+    );
+}
+
+// -----------------------------------------------------------------------
+// Test 10: Exec from cached fs
+//
+// Copy a binary to the test dir (only meaningful under memfs /tmp or EFS
+// /var), exec it, and verify it runs successfully. Exercises the ELF
+// loader's PageCacheOps path for memfs.
+//
+// Only runs when dir is /tmp or /var (skipped elsewhere).
+// -----------------------------------------------------------------------
+fn test10(dir: &str) {
+    // Only meaningful for /tmp (memfs) and /var (EFS) where exec makes sense.
+    // FAT32 and other mounts may not have writable /bin.
+    if dir != "/tmp" && dir != "/var" {
+        println!(
+            "SKIP test 10 [{}]: exec test only runs on /tmp and /var",
+            dir
+        );
+        return;
+    }
+
+    let dst = format!("{}/mmaptest_echo", dir);
+
+    // Copy /bin/echo to the test dir.
+    fs::copy("/bin/echo", &dst)
+        .unwrap_or_else(|e| fail(10, dir, &format!("copy /bin/echo -> {}: {}", dst, e)));
+
+    // Spawn the copy and wait for it to exit cleanly.
+    let pid = process::spawn(&dst, &["hello from test10"], 0, 1, 2);
+    if pid == u64::MAX {
+        let _ = fs::remove_file(&dst);
+        fail(10, dir, &format!("spawn {} returned MAX (not found?)", dst));
+    }
+
+    let exit_code = process::waitpid(pid);
+
+    // Clean up regardless of result.
+    let _ = fs::remove_file(&dst);
+
+    if exit_code != 0 {
+        fail(
+            10,
+            dir,
+            &format!("spawned binary exited with code {}, expected 0", exit_code),
+        );
+    }
+
+    pass(
+        10,
+        dir,
+        &format!("exec from {}: binary ran and exited 0", dir),
+    );
+}
+
+fn run_suite(dir: &str) {
+    println!("mmaptest: running tests on [{}]", dir);
+    test1(dir);
+    test2(dir);
+    test3(dir);
+    test4(dir);
+    test5(dir);
+    test6(dir);
+    test7(dir);
+    test8(dir);
+    test9(dir);
+    test10(dir);
+    println!("mmaptest: all tests passed [{}]", dir);
 }
 
 fn main() {
-    println!("mmaptest: running 8 tests");
+    let args: Vec<String> = std::env::args().collect();
 
-    test1();
-    test2();
-    test3();
-    test4();
-    test5();
-    test6();
-    test7();
-    test8();
+    if args.len() > 1 {
+        // Run only the directories given on the command line.
+        for dir in &args[1..] {
+            run_suite(dir);
+        }
+    } else {
+        // Default: run on EFS (/var) and memfs (/tmp).
+        // FAT32 is not auto-mounted; pass its mountpoint explicitly if desired.
+        run_suite("/var");
+        run_suite("/tmp");
+    }
 
-    println!("mmaptest: all tests passed");
     std::process::exit(0);
 }
