@@ -317,6 +317,11 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             VmaFlags::PRIVATE | VmaFlags::LAZY
         };
 
+        // Pin BEFORE inserting the VMA: otherwise a concurrent remove_file that
+        // observes mappers_pin == 0 between the VMA insert and on_pin would free
+        // the FAT32 cluster chain, leaving this VMA pointing at nothing.
+        crate::fs::vfs::on_pin(inode.mount_id, inode.ino);
+
         user_arc.read().vmas.lock().insert(Vma {
             start: map_addr,
             end: map_addr + length,
@@ -347,11 +352,6 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
                 mappers.push(weak);
             }
         }
-
-        // Notify the filesystem that a new FileBacked VMA has been created.
-        // FAT32 uses this to increment its mapper pin count so that a concurrent
-        // remove_file defers cluster chain freeing until the last mapper unpins.
-        crate::fs::vfs::on_pin(inode.mount_id, inode.ino);
 
         if is_shared {
             log!(

@@ -4,18 +4,19 @@
 //! (not through BlockPageCache) per the project invariant for file data paths.
 //!
 //! # Cluster chain walking
-//! `cluster_at_index` and `ensure_chain_to` both walk the chain from the head
-//! on every call. This is O(N) per page, making sequential I/O O(N^2) in
-//! cluster count for large files. Acceptable for v1 given typical file sizes
-//! on FAT32 mounts; future optimization can memoize the last visited position.
+//! `cluster_at_index` walks from the head on every call, so `fill_page` is O(N)
+//! in cluster count; sequential fill over a large file is O(N^2). `flush_page`
+//! uses `ensure_chain_to` which walks once per call and returns both the head
+//! and the target cluster, saving a second walk per iteration. Future work can
+//! memoize the last visited position for both paths.
 
-use alloc::{collections::BTreeSet, vec, vec::Vec};
+use alloc::{collections::BTreeSet, vec};
 
 use crate::{
     drivers::ahci::direct,
     fs::{
         Error, FileTime,
-        fat32::{FatInodeEntry, Fatfs, fat_ino_from_pos},
+        fat32::{FatInodeEntry, Fatfs},
         page_cache::PageCacheOps,
     },
 };
@@ -67,27 +68,28 @@ impl Fatfs {
 
     /// Ensure the cluster chain rooted at `head_opt` covers logical index
     /// `target_cluster_idx`, allocating clusters as needed. Returns the (possibly
-    /// new) head cluster. Does NOT patch the on-disk directory entry.
+    /// new) head cluster AND the cluster at `target_cluster_idx`, so the caller
+    /// does not have to re-walk via `cluster_at_index`. Does NOT patch the
+    /// on-disk directory entry.
     ///
     /// A `BTreeSet<u32>` guards against cycles in existing chain.
     pub(super) fn ensure_chain_to(
         &self,
         head_opt: Option<u32>,
         target_cluster_idx: usize,
-    ) -> Result<u32, Error> {
+    ) -> Result<(u32, u32), Error> {
         let head = match head_opt.filter(|&h| h >= 2) {
             Some(h) => h,
             None => {
-                // No head yet; allocate one.
+                // No head yet; allocate one (and possibly extend).
                 let h = self.alloc_cluster()?;
-                // Extend if more clusters are needed.
                 let mut last = h;
                 for _ in 0..target_cluster_idx {
                     let nc = self.alloc_cluster()?;
                     self.link_fat_entry(last, nc)?;
                     last = nc;
                 }
-                return Ok(h);
+                return Ok((h, last));
             }
         };
 
@@ -98,7 +100,7 @@ impl Fatfs {
         let mut idx = 0usize;
         loop {
             if idx == target_cluster_idx {
-                return Ok(head);
+                return Ok((head, cur));
             }
             if !visited.insert(cur) {
                 return Err(Error::Corrupted);
@@ -116,7 +118,7 @@ impl Fatfs {
                         cur = nc;
                         idx += 1;
                     }
-                    return Ok(head);
+                    return Ok((head, cur));
                 }
             }
         }
@@ -304,8 +306,10 @@ impl PageCacheOps for Fatfs {
             let cluster_idx = file_pos / bpc;
             let cluster_off = file_pos % bpc;
 
-            // Ensure the cluster exists, allocating if necessary.
-            let head = self.ensure_chain_to(actual_head, cluster_idx)?;
+            // Ensure the cluster exists, allocating if necessary. Returns both
+            // the (possibly new) head and the target cluster, avoiding a second
+            // chain walk via `cluster_at_index`.
+            let (head, cluster) = self.ensure_chain_to(actual_head, cluster_idx)?;
 
             // If the head was just allocated (first time actual_head was None),
             // patch the dirent and update the side table.
@@ -325,11 +329,6 @@ impl PageCacheOps for Fatfs {
                 }
                 actual_head = Some(head);
             }
-
-            let cluster = match self.cluster_at_index(head, cluster_idx)? {
-                Some(c) => c,
-                None => return Err(Error::IoError),
-            };
 
             let cluster_avail = bpc - cluster_off;
             let need = valid - buf_pos;
@@ -377,13 +376,22 @@ impl PageCacheOps for Fatfs {
             return Err(Error::IoError);
         }
 
-        let entry = self.lookup_inode_entry(ino)?;
-        if new_size <= entry.file_size as u64 {
-            // No-op: grow-only contract.
+        // Pre-check without the write lock to avoid unnecessary contention on
+        // the grow-only no-op path.
+        let pre = self.lookup_inode_entry(ino)?;
+        if new_size <= pre.file_size as u64 {
             return Ok(());
         }
 
         let _guard = self.write_lock.lock();
+
+        // Re-read under write_lock. remove_file also acquires write_lock before
+        // flipping orphan=true, so this catches a concurrent unlink and avoids
+        // writing the new size into a dirent that was just marked 0xE5.
+        let entry = self.lookup_inode_entry(ino)?;
+        if new_size <= entry.file_size as u64 {
+            return Ok(());
+        }
 
         // Skip dirent patch for orphaned inodes (dirent already marked 0xE5).
         if !entry.orphan {
