@@ -709,7 +709,16 @@ impl EfsDriver {
         inode: &EfsInode,
         tx: &mut TxHandle<'_>,
     ) -> Result<(), Error> {
-        let inline_data = inode.data_area[..inode.size as usize].to_vec();
+        // `inode.size` can legally exceed `INODE_DATA_AREA_SIZE` here: the
+        // write-back `page_cache_write` updates `size` synchronously but
+        // defers `flush_page` (which is the caller of this function), so
+        // the on-disk inode can briefly say "inline + size 4096" even
+        // though only the first 176 bytes of data_area are meaningful.
+        // Preserve only the bytes that fit inline; `flush_page` will
+        // overwrite the new block with the full 4 KiB cache page right
+        // after we return.
+        let preserved = (inode.size as usize).min(INODE_DATA_AREA_SIZE);
+        let inline_data = inode.data_area[..preserved].to_vec();
         let block_size = self.block_size() as usize;
 
         // Allocate one block for the data.
