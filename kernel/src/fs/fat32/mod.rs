@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 use bytemuck::{Zeroable, cast_ref};
 
 use crate::{
@@ -15,10 +15,50 @@ use crate::{
 
 use super::path::Path;
 
+pub mod page_cache;
 pub mod read;
 pub mod structures;
 pub mod traverse;
 pub mod write;
+
+/// Side-table entry for a FAT32 inode.
+///
+/// Keyed by `fat_ino_from_pos(dir_cluster, entry_offset)` in `Fatfs.inode_table`.
+/// Populated on first lookup/create; updated on write/truncate/remove.
+#[derive(Debug, Clone)]
+pub struct FatInodeEntry {
+    /// Cluster that contains this file's directory entry.
+    pub dir_cluster: u32,
+    /// Byte offset of the short DirectoryEntry within that cluster's data.
+    pub entry_offset: u32,
+    /// Head cluster of the file's data chain (0 = file has no data yet).
+    pub first_cluster: u32,
+    /// Current on-disk file size in bytes.
+    pub file_size: u32,
+    /// Count of live FileBacked VMAs backed by this inode (pin-on-mmap semantics).
+    pub mappers_pin: u32,
+    /// True after remove_file while mappers_pin > 0 (Linux-style orphan).
+    /// The cluster chain is kept alive until the last mapper unpins.
+    pub orphan: bool,
+}
+
+/// Encode a (dir_cluster, entry_offset) pair as a FAT32 inode number.
+///
+/// The encoding is stable as long as the directory entry does not move within
+/// its cluster (short-name rewrites preserve position; only LFN slot insertions
+/// in v2+ would invalidate it, and those are out of scope for v1).
+#[inline]
+pub fn fat_ino_from_pos(dir_cluster: u32, entry_offset: usize) -> u64 {
+    ((dir_cluster as u64) << 32) | (entry_offset as u64)
+}
+
+/// Decode a FAT32 inode number back into (dir_cluster, entry_offset).
+#[inline]
+pub fn split_fat_ino(ino: u64) -> (u32, u32) {
+    let dir_cluster = (ino >> 32) as u32;
+    let entry_offset = (ino & 0xFFFF_FFFF) as u32;
+    (dir_cluster, entry_offset)
+}
 
 #[derive(Debug)]
 pub struct Fatfs {
@@ -31,6 +71,10 @@ pub struct Fatfs {
     /// Cached FSInfo sector, protected by a separate mutex so `statfs` can read it
     /// without holding the write lock.
     pub(super) fs_info: BlockingMutex<Option<FsInfo>>,
+    /// Per-inode side table for FAT32. Maps ino (dirent-position encoding) to
+    /// FatInodeEntry. Only populated for FatVariant::Fat32. FAT12/16 never
+    /// write to this table.
+    pub(super) inode_table: BlockingMutex<BTreeMap<u64, FatInodeEntry>>,
 }
 
 impl Fatfs {
@@ -101,6 +145,7 @@ impl Fatfs {
             partition,
             write_lock: BlockingMutex::new(()),
             fs_info: BlockingMutex::new(fs_info),
+            inode_table: BlockingMutex::new(BTreeMap::new()),
         })
     }
 }
@@ -268,6 +313,23 @@ impl FileSystem for Fatfs {
             de.write_time = current_time.time;
         })?;
 
+        // Update the side table for FAT32 (the write may have allocated a head cluster).
+        if matches!(self.variant, FatVariant::Fat32) {
+            debug_assert!(eo <= u32::MAX as usize, "entry_offset overflows u32");
+            let ino = fat_ino_from_pos(ec, eo);
+            let mut table = self.inode_table.lock();
+            let e = table.entry(ino).or_insert_with(|| FatInodeEntry {
+                dir_cluster: ec,
+                entry_offset: eo as u32,
+                first_cluster: entry.first_cluster(),
+                file_size: new_size as u32,
+                mappers_pin: 0,
+                orphan: false,
+            });
+            e.first_cluster = entry.first_cluster();
+            e.file_size = new_size as u32;
+        }
+
         Ok(written)
     }
 
@@ -305,7 +367,29 @@ impl FileSystem for Fatfs {
 
         // Append to parent directory
         let long_name = needs_lfn.then_some(name.as_str());
-        let _ = self.append_dir_entry(parent_cluster, &de, long_name)?;
+        let (dirent_cluster, dirent_offset) =
+            self.append_dir_entry(parent_cluster, &de, long_name)?;
+
+        // Populate the side table for FAT32.
+        if matches!(self.variant, FatVariant::Fat32) {
+            debug_assert!(
+                dirent_offset <= u32::MAX as usize,
+                "entry_offset overflows u32"
+            );
+            let ino = fat_ino_from_pos(dirent_cluster, dirent_offset);
+            self.inode_table.lock().insert(
+                ino,
+                FatInodeEntry {
+                    dir_cluster: dirent_cluster,
+                    entry_offset: dirent_offset as u32,
+                    first_cluster: 0,
+                    file_size: 0,
+                    mappers_pin: 0,
+                    orphan: false,
+                },
+            );
+        }
+
         Ok(())
     }
 
@@ -393,6 +477,9 @@ impl FileSystem for Fatfs {
             return Err(Error::NotAFile);
         }
 
+        // Phase 3 will replace this with orphan-aware logic. For now (Phase 1):
+        // free cluster chain, mark dirent deleted, remove side table entry.
+
         // Free the file's cluster chain, if any
         let start = entry.first_cluster();
         if start >= 2 {
@@ -414,6 +501,14 @@ impl FileSystem for Fatfs {
             entry_off,
             entry.short_name_checksum(),
         )?;
+
+        // Remove side table entry for FAT32 (after chain is freed and dirent marked).
+        // Phase 3 replaces this with orphan-aware logic that checks mappers_pin first.
+        if matches!(self.variant, FatVariant::Fat32) {
+            debug_assert!(entry_off <= u32::MAX as usize, "entry_offset overflows u32");
+            let ino = fat_ino_from_pos(dir_cluster, entry_off);
+            self.inode_table.lock().remove(&ino);
+        }
 
         Ok(())
     }
@@ -534,6 +629,10 @@ impl FileSystem for Fatfs {
             None => return Err(Error::FileNotFound),
         };
 
+        if size > u32::MAX as u64 {
+            return Err(Error::IoError);
+        }
+
         if size == 0 {
             // Free all clusters if there are any
             let start = entry.first_cluster();
@@ -546,12 +645,31 @@ impl FileSystem for Fatfs {
                 de.first_cluster_high = 0;
                 de.first_cluster_low = 0;
             })?;
+
+            // Update side table for FAT32.
+            if matches!(self.variant, FatVariant::Fat32) {
+                debug_assert!(eo <= u32::MAX as usize, "entry_offset overflows u32");
+                let ino = fat_ino_from_pos(ec, eo);
+                if let Some(e) = self.inode_table.lock().get_mut(&ino) {
+                    e.first_cluster = 0;
+                    e.file_size = 0;
+                }
+            }
         } else {
             // For non-zero truncate, update the directory entry size.
             // Clusters beyond the new size are left allocated but inaccessible.
             self.patch_dir_entry_at(ec, eo, |de| {
                 de.file_size = size as u32;
             })?;
+
+            // Update side table for FAT32 (first_cluster unchanged for size > 0).
+            if matches!(self.variant, FatVariant::Fat32) {
+                debug_assert!(eo <= u32::MAX as usize, "entry_offset overflows u32");
+                let ino = fat_ino_from_pos(ec, eo);
+                if let Some(e) = self.inode_table.lock().get_mut(&ino) {
+                    e.file_size = size as u32;
+                }
+            }
         }
 
         Ok(())
@@ -561,6 +679,10 @@ impl FileSystem for Fatfs {
         let _guard = self.write_lock.lock();
         let old_path = old_path.normalize();
         let new_path = new_path.normalize();
+        // Inode stability invariant: v1 only supports same-directory renames with
+        // short-name rewrites. The directory entry stays in the same cluster at the
+        // same byte offset, so (dir_cluster, entry_offset) -- and thus the ino -- is
+        // unchanged. The side table entry is left alone here.
 
         // Only support same-directory renames
         let old_parent = old_path.parent().ok_or(Error::IoError)?;
@@ -600,11 +722,41 @@ impl FileSystem for Fatfs {
         if path.normalize().is_root() {
             return Ok(self.boot_info.root_cluster as u64);
         }
-        if let Some((entry, _, _)) = self.find_dir_entry(path)? {
-            Ok(entry.first_cluster() as u64)
-        } else {
-            Err(Error::FileNotFound)
+
+        // FAT12/16: use legacy first-cluster ino; no side table.
+        if !matches!(self.variant, FatVariant::Fat32) {
+            return if let Some((entry, _, _)) = self.find_dir_entry(path)? {
+                Ok(entry.first_cluster() as u64)
+            } else {
+                Err(Error::FileNotFound)
+            };
         }
+
+        // FAT32: use dirent-position encoding and maintain the side table.
+        let (entry, dc, eo) = match self.find_dir_entry(path)? {
+            Some(x) => x,
+            None => return Err(Error::FileNotFound),
+        };
+
+        debug_assert!(eo <= u32::MAX as usize, "entry_offset overflows u32");
+        let ino = fat_ino_from_pos(dc, eo);
+
+        {
+            let mut table = self.inode_table.lock();
+            let e = table.entry(ino).or_insert_with(|| FatInodeEntry {
+                dir_cluster: dc,
+                entry_offset: eo as u32,
+                first_cluster: entry.first_cluster(),
+                file_size: entry.file_size,
+                mappers_pin: 0,
+                orphan: false,
+            });
+            // Refresh data-cluster and size; preserve mappers_pin and orphan.
+            e.first_cluster = entry.first_cluster();
+            e.file_size = entry.file_size;
+        }
+
+        Ok(ino)
     }
 
     fn statfs(&self) -> Result<super::StatFs, Error> {
