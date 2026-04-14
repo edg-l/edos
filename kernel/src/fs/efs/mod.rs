@@ -1687,6 +1687,25 @@ impl FileSystem for EfsDriver {
         Some(self)
     }
 
+    fn evict_inode(&self, ino: u64) -> Result<(), Error> {
+        // Called from VfsInode::drop when the last Arc ref is released and
+        // the inode was previously orphaned via remove_file. Free data blocks
+        // + inode inside a journal transaction. Non-regular-file inos (dirs
+        // etc.) shouldn't hit this path; if they do, silently tolerate.
+        let file_inode = self.read_inode(ino)?;
+        if file_inode.mode & S_IFMT != S_IFREG {
+            return Ok(());
+        }
+        let mut tx = self.journal.begin_tx();
+        match self.free_file_storage(ino, &file_inode, &mut tx) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                tx.abort();
+                Err(e)
+            }
+        }
+    }
+
     fn create_dir(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let name = path.last_component().ok_or(Error::IoError)?.to_string();
@@ -1973,15 +1992,30 @@ impl EfsDriver {
         self.add_dir_entry(parent_ino, name, new_ino, FT_DIR, tx)
     }
 
+    /// Detach the dentry only. Block and inode freeing is deferred to
+    /// `evict_inode`, which the VFS calls on the final `Arc<VfsInode>` drop.
+    /// This is the Linux model: unlink removes the name but leaves data
+    /// reachable by already-open fds and live mmap mappings.
     fn remove_file_inner(
         &self,
         parent_ino: u64,
-        file_ino: u64,
-        file_inode: &EfsInode,
+        _file_ino: u64,
+        _file_inode: &EfsInode,
         name: &str,
         tx: &mut TxHandle<'_>,
     ) -> Result<(), Error> {
-        // Free data blocks.
+        self.remove_dir_entry(parent_ino, name, tx)
+    }
+
+    /// Free on-disk blocks + inode. Called from `FileSystem::evict_inode`
+    /// (VfsInode::drop when orphan) and from `remove_dir_inner` (empty-dir
+    /// removal, where there cannot be live refs).
+    fn free_file_storage(
+        &self,
+        file_ino: u64,
+        file_inode: &EfsInode,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
         if file_inode.flags & INODE_FLAG_INLINE_DATA == 0 {
             let hdr: EfsExtentHeader = unsafe {
                 core::ptr::read_unaligned(file_inode.data_area.as_ptr() as *const EfsExtentHeader)
@@ -1996,9 +2030,7 @@ impl EfsDriver {
                 }
             }
         }
-
-        self.free_inode(file_ino, tx)?;
-        self.remove_dir_entry(parent_ino, name, tx)
+        self.free_inode(file_ino, tx)
     }
 
     fn remove_dir_inner(

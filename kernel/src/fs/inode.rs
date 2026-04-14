@@ -8,6 +8,15 @@
 //! address_space). Different files have independent page maps and locks,
 //! so concurrent reads of different files have zero contention.
 //!
+//! # Reference counting = Linux `i_count`
+//!
+//! The `Arc<VfsInode>` refcount models Linux's `i_count`: every open
+//! `FsFile`, every `FileBacked` VMA, and the dentry cache all hold an Arc.
+//! When the last Arc drops, `Drop` fires and — if the inode was unlinked
+//! while references were live (`orphan == true`) — calls
+//! `FileSystem::evict_inode(ino)` to free on-disk blocks. This is the
+//! equivalent of Linux's `iput_final` / `evict_inode`.
+//!
 //! # Reverse mapping for truncate invalidation
 //!
 //! `mappers` is a list of `Weak` references to every `UserThread` that has a
@@ -22,6 +31,7 @@
 //! Fault paths drop the mm mapper lock before touching the page cache.
 
 use alloc::sync::{Arc, Weak};
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::RwLock;
 
 use crate::thread::{UserThread, mutex::BlockingMutex, rwlock::RwLock as BlockingRwLock};
@@ -44,6 +54,10 @@ pub struct VfsInode {
     /// Weak references so process exit tombstones entries automatically.
     /// Protected by a BlockingMutex; entries are deduplicated on insert.
     pub mappers: BlockingMutex<alloc::vec::Vec<Weak<RwLock<UserThread>>>>,
+    /// Set by `vfs::remove_file` / `vfs::remove_dir` when the dentry is
+    /// detached while Arc refs are still live. Triggers `evict_inode` on the
+    /// final Arc drop. Equivalent to "`nlink == 0 && i_count > 0`" in Linux.
+    pub orphan: AtomicBool,
 }
 
 impl VfsInode {
@@ -55,6 +69,37 @@ impl VfsInode {
             lock: BlockingRwLock::new(()),
             pages: InodePages::new(),
             mappers: BlockingMutex::new(alloc::vec::Vec::new()),
+            orphan: AtomicBool::new(false),
         })
+    }
+
+    pub fn mark_orphan(&self) {
+        self.orphan.store(true, Ordering::Release);
+    }
+
+    pub fn is_orphan(&self) -> bool {
+        self.orphan.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for VfsInode {
+    fn drop(&mut self) {
+        // Linux `evict_inode` equivalent: if the dentry was detached while we
+        // still had refs, now that the last ref is gone we ask the FS to free
+        // its on-disk allocations (blocks, cluster chain, node content, etc).
+        // ino == 0 is a sentinel for "not a real inode" (stateless FSes).
+        if !self.is_orphan() || self.ino == 0 {
+            return;
+        }
+        if let Some(fs) = super::vfs::fs_by_mount_id(self.mount_id) {
+            if let Err(e) = fs.evict_inode(self.ino) {
+                crate::log!(
+                    "VfsInode::drop: evict_inode(mount={}, ino={}) failed: {:?}",
+                    self.mount_id,
+                    self.ino,
+                    e
+                );
+            }
+        }
     }
 }

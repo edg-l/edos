@@ -185,9 +185,11 @@ impl InodePages {
         Ok(guard)
     }
 
-    /// Mark a page as dirty.
+    /// Mark a page as dirty. Lock acquisition order is always
+    /// `pages` → `dirty_keys`, consistent with `flush_dirty` below.
     pub fn mark_dirty(&self, page_index: u64) {
-        if let Some(page) = self.pages.lock().get(&page_index) {
+        let map = self.pages.lock();
+        if let Some(page) = map.get(&page_index) {
             page.mark_dirty();
         }
         let mut dk = self.dirty_keys.lock();
@@ -196,14 +198,23 @@ impl InodePages {
         }
     }
 
-    /// Flush all dirty pages via `flush_fn`. Lock not held during I/O.
+    /// Flush all dirty pages via `flush_fn`. The per-inode lock is NOT held
+    /// during I/O, but the final `clear_dirty` + `dirty_keys` removal is
+    /// performed atomically (both under `dirty_keys` lock) so that a
+    /// concurrent `mark_dirty` either (a) runs entirely before this section
+    /// — key removal eats its push but the flag re-set ensures the next
+    /// flush round picks it up via the still-true flag replayed through
+    /// mark_dirty on the next writer call — or (b) runs entirely after,
+    /// with both flag-set and key-push preserved. Either way no dirty
+    /// page ends up without both a set `dirty` flag AND a `dirty_keys`
+    /// entry pointing at it.
     pub fn flush_dirty(
         &self,
         mut flush_fn: impl FnMut(u64, &[u8]) -> Result<(), Error>,
     ) -> Result<(), Error> {
         let dirty: Vec<(u64, Arc<CachedPage>)> = {
-            let dk = self.dirty_keys.lock();
             let map = self.pages.lock();
+            let dk = self.dirty_keys.lock();
             dk.iter()
                 .filter_map(|&idx| map.get(&idx).map(|p| (idx, Arc::clone(p))))
                 .collect()
@@ -214,11 +225,11 @@ impl InodePages {
             let result = flush_fn(*idx, unsafe { page.as_slice() });
             page.unpin();
             result?;
+            // Clear the flag and remove the key atomically under the
+            // dirty_keys lock, so a concurrent mark_dirty cannot race
+            // in between and lose the dirty state.
+            let mut dk = self.dirty_keys.lock();
             page.clear_dirty();
-        }
-
-        let mut dk = self.dirty_keys.lock();
-        for (idx, _) in &dirty {
             dk.retain(|k| k != idx);
         }
         Ok(())
@@ -243,11 +254,6 @@ impl InodePages {
                 unsafe { frame_allocator().deallocate_frame(page.frame()) };
             }
         }
-    }
-
-    /// Remove all cached pages.
-    pub fn invalidate_all(&self) {
-        self.invalidate_from(0);
     }
 }
 

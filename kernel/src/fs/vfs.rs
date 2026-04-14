@@ -390,8 +390,13 @@ fn page_cache_write(
         return Ok(0);
     }
 
+    // Overflow-safe end offset. Reject writes where offset + data.len()
+    // would wrap past usize::MAX, so we can't later compute a tiny
+    // new_size that silently truncates the file.
+    let end_offset = offset.checked_add(data.len()).ok_or(Error::IoError)?;
+
     let start_page = offset / 4096;
-    let end_page = (offset + data.len() - 1) / 4096;
+    let end_page = (end_offset - 1) / 4096;
     let ino = inode.ino;
     let mut data_pos = 0usize;
 
@@ -438,7 +443,7 @@ fn page_cache_write(
         .pages
         .flush_dirty(|page_index, buf| pc_ops.flush_page(ino, page_index, buf, 4096))?;
 
-    let new_size = (offset + data.len()) as u64;
+    let new_size = end_offset as u64;
     pc_ops.update_size(ino, new_size)?;
 
     // Return bytes written (POSIX write semantics), not new file size. The sys_write
@@ -451,17 +456,21 @@ fn page_cache_write(
 pub fn truncate(op: &VfsOp, size: u64) -> Result<(), Error> {
     let _guard = op.inode.as_ref().map(|i| i.lock.write());
     let result = op.fs.truncate(&op.relative, size);
-    if result.is_ok() {
-        dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
-        if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
-            let from_page = (size as usize + 4095) / 4096;
-            // D.2: Unmap PTEs past new_size from every process that has a
-            // FileBacked VMA on this inode, before freeing the cache frames.
-            // Lock ordering: inode.lock (held above) > mappers.lock > vmas.lock
-            // > memory_manager.lock.  We release vmas/mm locks before shootdown.
-            invalidate_mappings_above(inode, size);
-            inode.pages.invalidate_from(from_page as u64);
-        }
+    // Always run invalidators, even on FS failure. The FS may have partially
+    // applied the truncate (cluster chain trimmed but dirent size update
+    // failed, or similar). Leaving stale pages in the cache would let reads
+    // return data whose on-disk backing no longer exists. Dropping the
+    // dentry cache also forces a fresh resolve on the next open, which
+    // picks up whatever state the FS landed in.
+    dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
+    if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
+        let from_page = (size as usize + 4095) / 4096;
+        // D.2: Unmap PTEs past new_size from every process that has a
+        // FileBacked VMA on this inode, before freeing the cache frames.
+        // Lock ordering: inode.lock (held above) > mappers.lock > vmas.lock
+        // > memory_manager.lock.  We release vmas/mm locks before shootdown.
+        invalidate_mappings_above(inode, size);
+        inode.pages.invalidate_from(from_page as u64);
     }
     result
 }
@@ -498,25 +507,24 @@ pub fn create_dir(op: &VfsOp) -> Result<(), Error> {
     result
 }
 
-/// Remove a regular file. Implements Linux-style orphan-inode semantics:
-/// unlink detaches the dentry but mappings stay alive. Existing `FileBacked`
-/// VMAs hold `Arc<CachedPage>` refs to already-faulted frames, so reads and
-/// writes through those mappings continue to see the same in-memory data for
-/// the lifetime of the mapping. No PTE teardown, no forced re-fault.
+/// Remove a regular file. Implements Linux-style orphan-inode semantics
+/// via `Arc<VfsInode>` refcounting:
 ///
-/// The page cache is invalidated to drop dirty tracking; on EFS this is
-/// required because `remove_file` frees the data blocks immediately (no
-/// orphan-inode block retention yet), so the writeback kthread must not
-/// continue flushing dirty pages onto what may now be another file's storage.
-/// FAT32 uses `mappers_pin` to defer cluster-chain freeing until the last
-/// unmap, which is the correct Linux-equivalent pattern.
+/// 1. The FS driver's `remove_file` detaches the dentry from the directory
+///    tree only; it MUST NOT free data blocks or the inode itself.
+/// 2. The dentry cache entry for this path is invalidated so new opens
+///    fail ENOENT.
+/// 3. If any `Arc<VfsInode>` refs remain (open fds, FileBacked VMAs), the
+///    inode is marked orphan. Existing mappings continue to read and write
+///    through live PTEs — their `Arc<CachedPage>` keeps faulted frames alive
+///    and the file's blocks stay allocated.
+/// 4. `VfsInode::drop` fires when the last ref is released and calls
+///    `FileSystem::evict_inode(ino)` to free the on-disk allocation. This
+///    is the equivalent of Linux's `evict_inode`.
 ///
-/// TODO: add pin-on-mmap to EFS mirroring FAT32, so block/inode freeing is
-/// deferred until the last mapper (and open fd) goes away. That closes the
-/// last hole: today, an unlinked-while-mapped EFS file whose blocks get
-/// reallocated to another file would let a live PTE read/write into that
-/// other file's data. Not reachable from current userspace (no concurrent
-/// heavy unlink+alloc path), but a real Linux inode cache fixes it properly.
+/// The page cache is NOT invalidated: dirty pages are still valid file data
+/// going to still-allocated blocks. Writeback keeps working on the orphan
+/// until the final Arc drop, at which point InodePages drops too.
 pub fn remove_file(op: &VfsOp) -> Result<(), Error> {
     let parent_inode = resolve_parent_inode(op);
     let _guard = parent_inode.as_ref().map(|i| i.lock.write());
@@ -524,7 +532,7 @@ pub fn remove_file(op: &VfsOp) -> Result<(), Error> {
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
         if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
-            inode.pages.invalidate_all();
+            inode.mark_orphan();
         }
     }
     result
@@ -660,31 +668,6 @@ pub fn child_mount_points(parent: &Path) -> Vec<(String, Path)> {
 /// Check if a path is a registered mount point.
 pub fn is_mount_point(path: &Path) -> bool {
     VFS.read().contains_key(path)
-}
-
-/// Called when a new FileBacked VMA is created (mmap) for `ino` on `mount_id`.
-///
-/// Resolves the filesystem and delegates to `FileSystem::on_pin(ino)`.
-/// Errors are swallowed; mmap has already succeeded by the time this is called.
-pub fn on_pin(mount_id: usize, ino: u64) {
-    if let Some(fs) = fs_by_mount_id(mount_id) {
-        let _ = fs.on_pin(ino);
-    }
-}
-
-/// Called on VMA drop (munmap or process exit) for FileBacked VMAs.
-///
-/// Resolves the filesystem for `mount_id` and delegates to
-/// `FileSystem::on_unpin(ino)`. Filesystems that implement orphan-preserve
-/// semantics (FAT32) will decrement their mapper pin count and free the cluster
-/// chain when the last mapper unpins an unlinked file.
-///
-/// Errors are swallowed here because unmap must never fail. Callers log
-/// unexpected errors separately if needed.
-pub fn on_unpin(mount_id: usize, ino: u64) {
-    if let Some(fs) = fs_by_mount_id(mount_id) {
-        let _ = fs.on_unpin(ino);
-    }
 }
 
 /// Look up the filesystem for a given mount ID.

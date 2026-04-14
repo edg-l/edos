@@ -260,20 +260,11 @@ pub trait FileSystem {
         None
     }
 
-    /// Called when a new FileBacked VMA is created mapping `ino` on this filesystem
-    /// (i.e. on successful mmap). Filesystems that implement orphan semantics (e.g.
-    /// FAT32) override this to increment their mapper pin count so that a concurrent
-    /// remove_file defers cluster chain freeing until the last mapper unpins.
-    /// The default is a no-op.
-    fn on_pin(&self, _ino: u64) -> Result<(), Error> {
-        Ok(())
-    }
-
-    /// Called when the last FileBacked VMA mapping `ino` on this filesystem is
-    /// unmapped (via munmap or process exit). Filesystems that implement orphan
-    /// semantics (e.g. FAT32) override this to free cluster chains deferred by
-    /// remove_file when mappers_pin > 0 at unlink time. The default is a no-op.
-    fn on_unpin(&self, _ino: u64) -> Result<(), Error> {
+    /// Free on-disk resources for an inode that was unlinked while still
+    /// referenced. Called by `VfsInode::drop` when `orphan == true` on the
+    /// final Arc release, modelling Linux's `evict_inode`. The VFS guarantees
+    /// no live fds or VMAs exist at this point. Default: no-op (stateless FS).
+    fn evict_inode(&self, _ino: u64) -> Result<(), Error> {
         Ok(())
     }
 }

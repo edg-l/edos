@@ -125,46 +125,31 @@ impl Fatfs {
     }
 
     // ---------------------------------------------------------------------------
-    // Orphan pin/unpin
+    // Orphan eviction (called by VfsInode::drop via FileSystem::evict_inode)
     // ---------------------------------------------------------------------------
 
-    /// Increment the mapper pin count for `ino`. Called from `Fatfs::mmap`.
-    pub(super) fn pin_inode(&self, ino: u64) {
-        if let Some(e) = self.inode_table.lock().get_mut(&ino) {
-            e.mappers_pin = e.mappers_pin.saturating_add(1);
-        }
-    }
-
-    /// Decrement the mapper pin count for `ino`. If the count reaches zero and
-    /// the inode is an orphan (removed while mapped), free the cluster chain and
-    /// remove the side table entry.
-    pub(super) fn unpin_inode(&self, ino: u64) -> Result<(), Error> {
-        // Read the current state under the table lock.
-        let should_free = {
-            let mut table = self.inode_table.lock();
-            let e = match table.get_mut(&ino) {
-                Some(e) => e,
-                None => return Ok(()),
-            };
-            if e.mappers_pin > 0 {
-                e.mappers_pin -= 1;
-            }
-            if e.mappers_pin == 0 && e.orphan {
-                // Take the entry so we can free outside the lock.
-                Some(table.remove(&ino).unwrap())
-            } else {
-                None
-            }
+    /// Free the cluster chain associated with `ino` and drop the side-table
+    /// entry. Invoked from `FileSystem::evict_inode` when the final
+    /// `Arc<VfsInode>` for an orphaned FAT32 inode is released.
+    ///
+    /// Callers that hit this path on a still-linked (non-orphan) ino by
+    /// accident will NOT lose data: remove the side-table entry only; keep
+    /// the on-disk chain intact. This defensive check is cheap and prevents
+    /// a double-free if the drop fires on an inode whose remove_file failed.
+    pub(super) fn evict_inode_fat32(&self, ino: u64) -> Result<(), Error> {
+        let entry = match self.inode_table.lock().remove(&ino) {
+            Some(e) => e,
+            None => return Ok(()),
         };
-
-        if let Some(entry) = should_free {
-            // Acquire the write lock and free the cluster chain.
-            let _guard = self.write_lock.lock();
-            if entry.first_cluster >= 2 {
-                self.free_cluster_chain(entry.first_cluster)?;
-            }
+        if !entry.orphan {
+            // Non-orphan eviction: just dropped the side-table cache entry.
+            // The on-disk file is still linked; leave its chain alone.
+            return Ok(());
         }
-
+        let _guard = self.write_lock.lock();
+        if entry.first_cluster >= 2 {
+            self.free_cluster_chain(entry.first_cluster)?;
+        }
         Ok(())
     }
 }
@@ -433,10 +418,5 @@ impl Fatfs {
     /// Return the file size from the side table (hot path for fault.rs past-EOF check).
     pub(super) fn file_size_ino_fat32(&self, ino: u64) -> Result<u64, Error> {
         self.lookup_inode_entry(ino).map(|e| e.file_size as u64)
-    }
-
-    /// Override `on_unpin` for FAT32: forward to unpin_inode for orphan cleanup.
-    pub(super) fn on_unpin_fat32(&self, ino: u64) -> Result<(), Error> {
-        self.unpin_inode(ino)
     }
 }

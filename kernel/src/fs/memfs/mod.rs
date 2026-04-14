@@ -310,7 +310,7 @@ impl FileSystem for Memfs {
                 let child = inner.get_node(*id)?;
 
                 if child.file.name == name {
-                    idx = Some((i, *id));
+                    idx = Some(i);
 
                     if child.file.kind != FileKind::File {
                         return Err(Error::NotAFile);
@@ -319,14 +319,14 @@ impl FileSystem for Memfs {
                 }
             }
 
-            if let Some((i, id)) = idx {
-                {
-                    let parent_node = inner.get_node_mut(parent_node_id)?;
-                    parent_node.childs.remove(i);
-                }
-
-                inner.nodes.remove(&id);
-
+            if let Some(i) = idx {
+                // Detach from parent's childs list so path lookups fail. The
+                // node itself stays in `nodes` keyed by ino so already-open
+                // fds and live mmap mappings can still fill/flush through
+                // ino-based lookups. `evict_inode` drops the node when the
+                // final `Arc<VfsInode>` is released (Linux i_count model).
+                let parent_node = inner.get_node_mut(parent_node_id)?;
+                parent_node.childs.remove(i);
                 Ok(())
             } else {
                 Err(Error::FileNotFound)
@@ -444,6 +444,14 @@ impl FileSystem for Memfs {
 
     fn as_page_cache_ops(&self) -> Option<&dyn PageCacheOps> {
         Some(self)
+    }
+
+    fn evict_inode(&self, ino: u64) -> Result<(), Error> {
+        // Called from VfsInode::drop when an orphaned memfs node's final
+        // Arc ref is released. Drop the node so its `content` Vec frees.
+        let id = u32::try_from(ino).map_err(|_| Error::Corrupted)?;
+        self.inner.write().nodes.remove(&id);
+        Ok(())
     }
 
     fn rename(&self, old_path: &Path, new_path: &Path) -> Result<(), Error> {

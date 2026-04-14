@@ -24,7 +24,9 @@ pub mod write;
 /// Side-table entry for a FAT32 inode.
 ///
 /// Keyed by `fat_ino_from_pos(dir_cluster, entry_offset)` in `Fatfs.inode_table`.
-/// Populated on first lookup/create; updated on write/truncate/remove.
+/// Populated on first lookup/create; updated on write/truncate; removed only
+/// via `evict_inode` (triggered by the final `Arc<VfsInode>` drop). Orphan
+/// entries live here until that final drop frees the chain.
 #[derive(Debug, Clone)]
 pub struct FatInodeEntry {
     /// Cluster that contains this file's directory entry.
@@ -35,10 +37,9 @@ pub struct FatInodeEntry {
     pub first_cluster: u32,
     /// Current on-disk file size in bytes.
     pub file_size: u32,
-    /// Count of live FileBacked VMAs backed by this inode (pin-on-mmap semantics).
-    pub mappers_pin: u32,
-    /// True after remove_file while mappers_pin > 0 (Linux-style orphan).
-    /// The cluster chain is kept alive until the last mapper unpins.
+    /// True once `remove_file` has detached the dirent. The cluster chain
+    /// stays live (to service in-flight reads/writes through existing Arc
+    /// refs) until `evict_inode` is called from `VfsInode::drop`.
     pub orphan: bool,
 }
 
@@ -324,7 +325,6 @@ impl FileSystem for Fatfs {
                 entry_offset: eo as u32,
                 first_cluster: entry.first_cluster(),
                 file_size: new_size as u32,
-                mappers_pin: 0,
                 orphan: false,
             });
             e.first_cluster = entry.first_cluster();
@@ -385,7 +385,6 @@ impl FileSystem for Fatfs {
                     entry_offset: dirent_offset as u32,
                     first_cluster: 0,
                     file_size: 0,
-                    mappers_pin: 0,
                     orphan: false,
                 },
             );
@@ -478,24 +477,18 @@ impl FileSystem for Fatfs {
             return Err(Error::NotAFile);
         }
 
-        // Orphan-aware removal (Phase 3):
-        // - If mappers_pin > 0 (file is currently mmap'd): mark orphan=true, defer
-        //   cluster chain freeing until the last mapper unpins. The dirent is still
-        //   marked 0xE5 so new opens fail ENOENT.
-        // - If mappers_pin == 0: free the cluster chain immediately (classic unlink).
-        // For FAT12/16 (no side table): always free immediately.
+        // Linux-style orphan-inode removal:
+        //   FAT32: mark the dirent 0xE5 (so new opens fail ENOENT) and flip
+        //     the side-table entry's `orphan` flag. The cluster chain stays
+        //     live and reachable by ino so existing fds/VMAs keep working;
+        //     `evict_inode` frees the chain when the final Arc<VfsInode>
+        //     drops.
+        //   FAT12/16: PageCacheOps is not exposed for these variants, so no
+        //     mmap path exists and we free the chain inline. Open fds across
+        //     unlink is not supported on FAT12/16 here.
+        let is_fat32 = matches!(self.variant, FatVariant::Fat32);
 
-        let has_mappers_pin = if matches!(self.variant, FatVariant::Fat32) {
-            debug_assert!(entry_off <= u32::MAX as usize, "entry_offset overflows u32");
-            let ino = fat_ino_from_pos(dir_cluster, entry_off);
-            let table = self.inode_table.lock();
-            table.get(&ino).map(|e| e.mappers_pin).unwrap_or(0) > 0
-        } else {
-            false
-        };
-
-        if !has_mappers_pin {
-            // Free the file's cluster chain, if any.
+        if !is_fat32 {
             let start = entry.first_cluster();
             if start >= 2 {
                 let _freed = self.free_cluster_chain(start)?;
@@ -518,18 +511,11 @@ impl FileSystem for Fatfs {
             entry.short_name_checksum(),
         )?;
 
-        // Update the side table for FAT32.
-        if matches!(self.variant, FatVariant::Fat32) {
+        if is_fat32 {
             let ino = fat_ino_from_pos(dir_cluster, entry_off);
             let mut table = self.inode_table.lock();
-            if has_mappers_pin {
-                // Defer chain freeing: mark as orphan so unpin_inode frees it later.
-                if let Some(e) = table.get_mut(&ino) {
-                    e.orphan = true;
-                }
-            } else {
-                // Chain already freed above; remove the side table entry.
-                table.remove(&ino);
+            if let Some(e) = table.get_mut(&ino) {
+                e.orphan = true;
             }
         }
 
@@ -653,13 +639,8 @@ impl FileSystem for Fatfs {
         self.file_size_ino_fat32(ino)
     }
 
-    fn on_pin(&self, ino: u64) -> Result<(), Error> {
-        self.pin_inode(ino);
-        Ok(())
-    }
-
-    fn on_unpin(&self, ino: u64) -> Result<(), Error> {
-        self.on_unpin_fat32(ino)
+    fn evict_inode(&self, ino: u64) -> Result<(), Error> {
+        self.evict_inode_fat32(ino)
     }
 
     fn truncate(&self, path: &Path, size: u64) -> Result<(), Error> {
@@ -789,10 +770,9 @@ impl FileSystem for Fatfs {
                 entry_offset: eo as u32,
                 first_cluster: entry.first_cluster(),
                 file_size: entry.file_size,
-                mappers_pin: 0,
                 orphan: false,
             });
-            // Refresh data-cluster and size; preserve mappers_pin and orphan.
+            // Refresh data-cluster and size; preserve orphan flag.
             e.first_cluster = entry.first_cluster();
             e.file_size = entry.file_size;
         }

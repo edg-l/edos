@@ -317,11 +317,9 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             VmaFlags::PRIVATE | VmaFlags::LAZY
         };
 
-        // Pin BEFORE inserting the VMA: otherwise a concurrent remove_file that
-        // observes mappers_pin == 0 between the VMA insert and on_pin would free
-        // the FAT32 cluster chain, leaving this VMA pointing at nothing.
-        crate::fs::vfs::on_pin(inode.mount_id, inode.ino);
-
+        // Note: no explicit FS pin here. The VMA holds `Arc<VfsInode>`, which
+        // bumps the inode refcount; evict_inode fires only when the final Arc
+        // (including this VMA's) is released. This is the Linux `i_count` model.
         user_arc.read().vmas.lock().insert(Vma {
             start: map_addr,
             end: map_addr + length,
@@ -673,15 +671,13 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                         fa.dec_refcount(frame);
                     }
                 }
-                // Capture (mount_id, ino) before dropping the inode Arc.
-                let (mount_id, ino) = (inode.mount_id, inode.ino);
-                // `pages` Vec is dropped here, releasing Arc<CachedPage> refs.
+                // `pages` Vec drop releases our Arc<CachedPage> refs; the
+                // `inode` Arc drops at end of scope. If this was the last ref
+                // and the inode was previously orphaned by remove_file,
+                // VfsInode::drop triggers FileSystem::evict_inode to free
+                // on-disk allocations.
                 drop(pages);
-                // Notify the filesystem that one FileBacked VMA has been unmapped.
-                // FAT32 uses this to decrement its mapper pin count and free orphan
-                // cluster chains when the last mapper unpins an unlinked file.
-                // Must be called after `drop(pages)` so page refs are released first.
-                crate::fs::vfs::on_unpin(mount_id, ino);
+                drop(inode);
             }
             VmaBacking::SharedMemory { .. } => {
                 // Re-insert and return error; SHM has its own unmap syscall.
