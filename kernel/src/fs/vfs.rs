@@ -498,9 +498,25 @@ pub fn create_dir(op: &VfsOp) -> Result<(), Error> {
     result
 }
 
-/// Lock ordering note: `remove_file` acquires parent inode.lock (write) then
-/// inside `invalidate_mappings_above` acquires inode.mappers.lock > vmas.lock
-/// > memory_manager.lock. This is consistent with truncate's existing contract.
+/// Remove a regular file. Implements Linux-style orphan-inode semantics:
+/// unlink detaches the dentry but mappings stay alive. Existing `FileBacked`
+/// VMAs hold `Arc<CachedPage>` refs to already-faulted frames, so reads and
+/// writes through those mappings continue to see the same in-memory data for
+/// the lifetime of the mapping. No PTE teardown, no forced re-fault.
+///
+/// The page cache is invalidated to drop dirty tracking; on EFS this is
+/// required because `remove_file` frees the data blocks immediately (no
+/// orphan-inode block retention yet), so the writeback kthread must not
+/// continue flushing dirty pages onto what may now be another file's storage.
+/// FAT32 uses `mappers_pin` to defer cluster-chain freeing until the last
+/// unmap, which is the correct Linux-equivalent pattern.
+///
+/// TODO: add pin-on-mmap to EFS mirroring FAT32, so block/inode freeing is
+/// deferred until the last mapper (and open fd) goes away. That closes the
+/// last hole: today, an unlinked-while-mapped EFS file whose blocks get
+/// reallocated to another file would let a live PTE read/write into that
+/// other file's data. Not reachable from current userspace (no concurrent
+/// heavy unlink+alloc path), but a real Linux inode cache fixes it properly.
 pub fn remove_file(op: &VfsOp) -> Result<(), Error> {
     let parent_inode = resolve_parent_inode(op);
     let _guard = parent_inode.as_ref().map(|i| i.lock.write());
@@ -508,17 +524,6 @@ pub fn remove_file(op: &VfsOp) -> Result<(), Error> {
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
         if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
-            // Actively tear down PTEs for all MAP_SHARED FileBacked VMAs that
-            // reference this inode. This prevents subsequent writes through those
-            // mappings from silently dirtying a now-deleted file's cluster chain.
-            // PTEs for already-faulted MAP_PRIVATE pages are also cleared.
-            // Lock ordering: parent inode.lock (held above) > mappers.lock >
-            // vmas.lock > memory_manager.lock (acquired inside
-            // invalidate_mappings_above).
-            // The dentry cache has been invalidated above, so new opens fail ENOENT.
-            // Filesystems that implement orphan semantics (FAT32) use mappers_pin to
-            // defer cluster chain freeing until the last unmap.
-            invalidate_mappings_above(inode, 0);
             inode.pages.invalidate_all();
         }
     }

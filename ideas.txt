@@ -329,6 +329,22 @@ file-backed mmap. Enables C library use, plugin systems, and shared
 memory savings. Natural ordering: page cache -> file-backed mmap ->
 dynamic linker.
 
+### EFS orphan pin-on-mmap (Linux-compatible unlink-while-open)
+Today, unlinking an EFS regular file immediately frees its data blocks and
+inode, even if there are live mmap mappings or open fds referring to it.
+Existing FileBacked VMAs hold Arc<CachedPage> refs so reads through already-
+mapped PTEs still work (the in-memory frame stays alive), but any write that
+would fault in a new page, and any writeback of dirty pages, races with the
+reallocator: if the freed blocks get handed to another file, the live PTE
+reads/writes leak into that file's data. FAT32 already solves this with
+`mappers_pin` + `orphan=true` deferring `free_cluster_chain` until the last
+unpin. EFS should mirror that pattern: per-inode pin counter (maybe also
+counting open fds, not just mappers), `orphan` flag, defer `free_inode` +
+`free_block` in `remove_file_inner` until pin drops to zero, trigger the
+deferred free from an `on_unpin` (and on `sys_close` if we start pinning
+fds too). This is the last gap before EDOS unlink-while-mapped matches the
+Linux model end-to-end across all filesystems.
+
 ### io_uring-style Async I/O
 Shared-memory submission/completion ring between userspace and kernel.
 Already have the SHM infrastructure. Very "modern OS" feature, unique among hobby OSes.
