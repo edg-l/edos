@@ -1,5 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd;
+use std::time::Instant;
 
 use edos_lib::mem::{MAP_PRIVATE, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE, mmap, msync, munmap};
 use edos_lib::process;
@@ -13,6 +14,18 @@ fn fail(test: u32, dir: &str, msg: &str) -> ! {
 
 fn pass(test: u32, dir: &str, detail: &str) {
     println!("PASS test {} [{}]: {}", test, dir, detail);
+}
+
+fn timed<R>(test: u32, dir: &str, label: &str, f: impl FnOnce() -> R) -> R {
+    let start = Instant::now();
+    let r = f();
+    let us = start.elapsed().as_micros();
+    if us >= 10_000 {
+        println!("  [{}] test {} {} took {} ms", dir, test, label, us / 1000);
+    } else {
+        println!("  [{}] test {} {} took {} us", dir, test, label, us);
+    }
+    r
 }
 
 // -----------------------------------------------------------------------
@@ -634,17 +647,22 @@ fn test10(dir: &str) {
     let dst = format!("{}/mmaptest_echo", dir);
 
     // Copy /bin/echo to the test dir.
-    fs::copy("/bin/echo", &dst)
+    let src_size = fs::metadata("/bin/echo").map(|m| m.len()).unwrap_or(0);
+    let copied = timed(10, dir, "fs::copy(/bin/echo)", || fs::copy("/bin/echo", &dst))
         .unwrap_or_else(|e| fail(10, dir, &format!("copy /bin/echo -> {}: {}", dst, e)));
+    println!("  [{}] test 10 copied {} bytes (src size {})", dir, copied, src_size);
 
     // Spawn the copy and wait for it to exit cleanly.
-    let pid = process::spawn(&dst, &["hello from test10"], 0, 1, 2);
-    if pid == u64::MAX {
-        let _ = fs::remove_file(&dst);
-        fail(10, dir, &format!("spawn {} returned MAX (not found?)", dst));
-    }
-
-    let exit_code = process::waitpid(pid);
+    let pid = timed(10, dir, "spawn+wait", || {
+        let pid = process::spawn(&dst, &["hello from test10"], 0, 1, 2);
+        if pid == u64::MAX {
+            let _ = fs::remove_file(&dst);
+            fail(10, dir, &format!("spawn {} returned MAX (not found?)", dst));
+        }
+        let exit_code = process::waitpid(pid);
+        (pid, exit_code)
+    });
+    let (_, exit_code) = pid;
 
     // Clean up regardless of result.
     let _ = fs::remove_file(&dst);
@@ -666,17 +684,32 @@ fn test10(dir: &str) {
 
 fn run_suite(dir: &str) {
     println!("mmaptest: running tests on [{}]", dir);
-    test1(dir);
-    test2(dir);
-    test3(dir);
-    test4(dir);
-    test5(dir);
-    test6(dir);
-    test7(dir);
-    test8(dir);
-    test9(dir);
-    test10(dir);
-    println!("mmaptest: all tests passed [{}]", dir);
+    let suite_start = Instant::now();
+
+    let run = |n: u32, f: &dyn Fn(&str)| {
+        let start = Instant::now();
+        f(dir);
+        let us = start.elapsed().as_micros();
+        if us >= 10_000 {
+            println!("  [{}] test {} finished in {} ms", dir, n, us / 1000);
+        } else {
+            println!("  [{}] test {} finished in {} us", dir, n, us);
+        }
+    };
+
+    run(1, &test1);
+    run(2, &test2);
+    run(3, &test3);
+    run(4, &test4);
+    run(5, &test5);
+    run(6, &test6);
+    run(7, &test7);
+    run(8, &test8);
+    run(9, &test9);
+    run(10, &test10);
+
+    let total_ms = suite_start.elapsed().as_millis();
+    println!("mmaptest: all tests passed [{}] ({} ms)", dir, total_ms);
 }
 
 fn main() {
