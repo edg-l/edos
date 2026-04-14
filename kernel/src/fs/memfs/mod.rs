@@ -530,8 +530,11 @@ impl PageCacheOps for Memfs {
 
     /// Write a page from the cache back into `node.content`.
     ///
-    /// Grows `node.content` with zero fill if necessary so that
-    /// `offset + valid_bytes` is within bounds. Updates `node.file.size`.
+    /// VFS callers always pass `valid_bytes = 4096` regardless of the true tail;
+    /// trusting that would inflate the file because `node.content` IS the file
+    /// storage (unlike disk-backed FSes where block size and file size are
+    /// independent). Instead we copy the whole page into content but leave
+    /// `node.file.size` untouched; `update_size` is authoritative for size.
     ///
     /// Note: see module-level doc for the MAP_SHARED / path-based write
     /// coherency caveat.
@@ -540,7 +543,7 @@ impl PageCacheOps for Memfs {
         ino: u64,
         page_index: u64,
         buf: &[u8],
-        valid_bytes: usize,
+        _valid_bytes: usize,
     ) -> Result<(), Error> {
         debug_assert_eq!(buf.len(), 4096);
         let id = u32::try_from(ino).map_err(|_| Error::Corrupted)?;
@@ -550,17 +553,22 @@ impl PageCacheOps for Memfs {
             return Err(Error::NotAFile);
         }
         let offset = (page_index as usize) * 4096;
-        let needed = offset + valid_bytes;
-        if needed > node.content.len() {
-            node.content.resize(needed, 0u8);
+        let end = offset + 4096;
+        if end > node.content.len() {
+            node.content.resize(end, 0u8);
         }
-        node.content[offset..offset + valid_bytes].copy_from_slice(&buf[..valid_bytes]);
-        node.file.size = node.content.len() as u64;
+        node.content[offset..end].copy_from_slice(buf);
+        // Do NOT touch node.file.size here; update_size sets the authoritative
+        // size. Writing 4096 bytes into content past the real EOF is harmless
+        // because reads are clamped to file.size at the VFS layer.
         Ok(())
     }
 
-    /// Grow `node.content` to `new_size`, no-op on shrink (shrinking is
-    /// `FileSystem::truncate`'s responsibility per the `PageCacheOps` contract).
+    /// Set the on-disk file size. Grow-only per the `PageCacheOps` contract.
+    ///
+    /// `node.content` may be larger than `new_size` when called after a
+    /// `flush_page` that wrote a full 4 KiB page for a small file; that is
+    /// fine because reads clamp to `file.size`.
     fn update_size(&self, ino: u64, new_size: u64) -> Result<(), Error> {
         let id = u32::try_from(ino).map_err(|_| Error::Corrupted)?;
         let mut inner = self.inner.write();
@@ -568,12 +576,14 @@ impl PageCacheOps for Memfs {
         if node.file.kind != FileKind::File {
             return Err(Error::NotAFile);
         }
-        let new_size = new_size as usize;
-        if new_size <= node.content.len() {
+        if new_size <= node.file.size {
             return Ok(());
         }
-        node.content.resize(new_size, 0u8);
-        node.file.size = node.content.len() as u64;
+        let new_size_usize = new_size as usize;
+        if new_size_usize > node.content.len() {
+            node.content.resize(new_size_usize, 0u8);
+        }
+        node.file.size = new_size;
         Ok(())
     }
 }

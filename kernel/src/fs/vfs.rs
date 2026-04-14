@@ -441,7 +441,11 @@ fn page_cache_write(
     let new_size = (offset + data.len()) as u64;
     pc_ops.update_size(ino, new_size)?;
 
-    Ok(new_size)
+    // Return bytes written (POSIX write semantics), not new file size. The sys_write
+    // caller uses this both as the userspace return and to advance file.offset; using
+    // new_size would make offsets compound and cause std write_all to panic when
+    // `write` claims it wrote more bytes than the input buffer had.
+    Ok(data.len() as u64)
 }
 
 pub fn truncate(op: &VfsOp, size: u64) -> Result<(), Error> {
