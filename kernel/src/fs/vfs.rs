@@ -438,11 +438,21 @@ fn page_cache_write(
         inode.pages.mark_dirty(page_idx as u64);
     }
 
-    // Write-through: flush dirty pages to disk immediately.
-    inode
-        .pages
-        .flush_dirty(|page_index, buf| pc_ops.flush_page(ino, page_index, buf, 4096))?;
+    // Write-back: leave dirty pages in the per-inode cache and register the
+    // inode with the global DIRTY_INODES list. The writeback kthread flushes
+    // on its periodic pass; fsync/sync_all force an immediate flush via
+    // `flush_file`. Matches Linux semantics: write(2) is buffered, fsync(2)
+    // is the sync point. Same-process reads of just-written data still see
+    // the new bytes because they hit the still-dirty cache page.
+    register_dirty_inode(inode);
 
+    // Size must be observable immediately (stat, seek-end, same-process
+    // read clamping), so we update it synchronously via the FS's on-disk
+    // inode. On a crash before writeback, the inode may report a size
+    // whose blocks haven't been allocated yet; EFS's journal will then
+    // show size > extent-tree coverage. Reads past the extent-covered
+    // region return zeros (holes), which matches POSIX. True data
+    // durability is a user-side fsync.
     let new_size = end_offset as u64;
     pc_ops.update_size(ino, new_size)?;
 

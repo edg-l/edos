@@ -313,6 +313,34 @@ cluster_size starts mattering.
 
 ## Ideas
 
+### EFS write-path perf: batch journal tx per flush_dirty round (up next)
+After switching `page_cache_write` to write-back (commit after this note),
+large sequential writes still pay per-page EFS overhead in `flush_page`:
+each page opens its own `begin_tx`, calls `ensure_block_for_logical`,
+drops the tx, and the committer kthread serially flushes the resulting
+metadata through BlockPageCache. The writeback kthread iterates dirty
+pages one at a time via `InodePages::flush_dirty`, so a 1.9 MiB copy
+pays ~480 separate journal roundtrips. Fix: have `flush_dirty` open
+a single journal tx (or a single FS-scoped batch) and hand it to
+`flush_page` for every page in this round, so all extent updates +
+inode size writes merge into one commit. Probably a new
+`PageCacheOps::flush_pages_bulk(ino, (page_idx, buf)*)` method that
+filesystems can override, with the default calling `flush_page` per
+entry for backwards compatibility.
+
+### EFS write-path perf: sequential-extent pre-allocation (up next after batching)
+`flush_page` currently allocates one cluster at a time via
+`ensure_block_for_logical`, which walks the extent tree per call and
+splits what could have been one contiguous extent into many tiny
+ones. For a growing file, we should detect the "append pattern" and
+pre-allocate a contiguous extent of N blocks up front (maybe 32 or
+64), then let subsequent `flush_page` calls land inside the already-
+allocated range without walking/appending the extent tree. This
+matches ext4's delayed allocation + multi-block allocator (mballoc).
+Payoffs: fewer extent-tree entries on disk (less metadata to flush),
+fewer bitmap updates (one BGD transaction per big alloc, not 480),
+contiguous data on disk (faster reads later).
+
 ### PageCacheOps for FAT32 + memfs
 Today only EFS implements PageCacheOps, so file-backed mmap (and the
 new FileBacked ELF loader) returns EINVAL/ENOEXEC on FAT32 and memfs.
