@@ -1,11 +1,20 @@
 //! Memory based filesystem
 //!
 //! Root has node id 0.
+//!
+//! # PageCacheOps coherency note (v1)
+//!
+//! MAP_SHARED pages are NOT coherent with concurrent path-based
+//! `write_bytes` / `write_bytes_ino` on the same file. `flush_page`
+//! overwrites `node.content` wholesale from the cached frame, so a
+//! concurrent path-based write racing against a dirty-page writeback will
+//! have its data silently overwritten. This mirrors the v1 design and will
+//! be revisited if memfs gains a use case beyond /tmp.
 
 use alloc::{collections::btree_map::BTreeMap, string::String, vec::Vec};
 
 use crate::{
-    fs::{Error, FileSystem, memfs::node::Node, path::Path},
+    fs::{Error, FileSystem, memfs::node::Node, page_cache::PageCacheOps, path::Path},
     thread::rwlock::RwLock as BlockingRwLock,
 };
 
@@ -433,6 +442,10 @@ impl FileSystem for Memfs {
         Ok(node.content.len() as u64)
     }
 
+    fn as_page_cache_ops(&self) -> Option<&dyn PageCacheOps> {
+        Some(self)
+    }
+
     fn rename(&self, old_path: &Path, new_path: &Path) -> Result<(), Error> {
         let old_path = old_path.normalize();
         let new_path = new_path.normalize();
@@ -484,6 +497,83 @@ impl FileSystem for Memfs {
             parent.childs.push(node_id);
         }
 
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PageCacheOps implementation
+// ---------------------------------------------------------------------------
+
+impl PageCacheOps for Memfs {
+    /// Copy a 4 KiB page of file content into `buf`.
+    ///
+    /// `node.content` is the source of truth. No disk I/O.
+    fn fill_page(&self, ino: u64, page_index: u64, buf: &mut [u8]) -> Result<usize, Error> {
+        debug_assert_eq!(buf.len(), 4096);
+        let id = u32::try_from(ino).map_err(|_| Error::Corrupted)?;
+        let inner = self.inner.read();
+        let node = inner.get_node(id)?;
+        if node.file.kind != FileKind::File {
+            return Err(Error::NotAFile);
+        }
+        let offset = (page_index as usize) * 4096;
+        if offset >= node.content.len() {
+            buf.fill(0);
+            return Ok(0);
+        }
+        let valid = core::cmp::min(node.content.len() - offset, 4096);
+        buf[..valid].copy_from_slice(&node.content[offset..offset + valid]);
+        buf[valid..].fill(0);
+        Ok(valid)
+    }
+
+    /// Write a page from the cache back into `node.content`.
+    ///
+    /// Grows `node.content` with zero fill if necessary so that
+    /// `offset + valid_bytes` is within bounds. Updates `node.file.size`.
+    ///
+    /// Note: see module-level doc for the MAP_SHARED / path-based write
+    /// coherency caveat.
+    fn flush_page(
+        &self,
+        ino: u64,
+        page_index: u64,
+        buf: &[u8],
+        valid_bytes: usize,
+    ) -> Result<(), Error> {
+        debug_assert_eq!(buf.len(), 4096);
+        let id = u32::try_from(ino).map_err(|_| Error::Corrupted)?;
+        let mut inner = self.inner.write();
+        let node = inner.get_node_mut(id)?;
+        if node.file.kind != FileKind::File {
+            return Err(Error::NotAFile);
+        }
+        let offset = (page_index as usize) * 4096;
+        let needed = offset + valid_bytes;
+        if needed > node.content.len() {
+            node.content.resize(needed, 0u8);
+        }
+        node.content[offset..offset + valid_bytes].copy_from_slice(&buf[..valid_bytes]);
+        node.file.size = node.content.len() as u64;
+        Ok(())
+    }
+
+    /// Grow `node.content` to `new_size`, no-op on shrink (shrinking is
+    /// `FileSystem::truncate`'s responsibility per the `PageCacheOps` contract).
+    fn update_size(&self, ino: u64, new_size: u64) -> Result<(), Error> {
+        let id = u32::try_from(ino).map_err(|_| Error::Corrupted)?;
+        let mut inner = self.inner.write();
+        let node = inner.get_node_mut(id)?;
+        if node.file.kind != FileKind::File {
+            return Err(Error::NotAFile);
+        }
+        let new_size = new_size as usize;
+        if new_size <= node.content.len() {
+            return Ok(());
+        }
+        node.content.resize(new_size, 0u8);
+        node.file.size = node.content.len() as u64;
         Ok(())
     }
 }
