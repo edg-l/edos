@@ -259,6 +259,23 @@ pub trait FileSystem {
     fn as_page_cache_ops(&self) -> Option<&dyn crate::fs::page_cache::PageCacheOps> {
         None
     }
+
+    /// Called when a new FileBacked VMA is created mapping `ino` on this filesystem
+    /// (i.e. on successful mmap). Filesystems that implement orphan semantics (e.g.
+    /// FAT32) override this to increment their mapper pin count so that a concurrent
+    /// remove_file defers cluster chain freeing until the last mapper unpins.
+    /// The default is a no-op.
+    fn on_pin(&self, _ino: u64) -> Result<(), Error> {
+        Ok(())
+    }
+
+    /// Called when the last FileBacked VMA mapping `ino` on this filesystem is
+    /// unmapped (via munmap or process exit). Filesystems that implement orphan
+    /// semantics (e.g. FAT32) override this to free cluster chains deferred by
+    /// remove_file when mappers_pin > 0 at unlink time. The default is a no-op.
+    fn on_unpin(&self, _ino: u64) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// Filesystem statistics returned by the `statfs` trait method.

@@ -653,6 +653,31 @@ pub fn is_mount_point(path: &Path) -> bool {
     VFS.read().contains_key(path)
 }
 
+/// Called when a new FileBacked VMA is created (mmap) for `ino` on `mount_id`.
+///
+/// Resolves the filesystem and delegates to `FileSystem::on_pin(ino)`.
+/// Errors are swallowed; mmap has already succeeded by the time this is called.
+pub fn on_pin(mount_id: usize, ino: u64) {
+    if let Some(fs) = fs_by_mount_id(mount_id) {
+        let _ = fs.on_pin(ino);
+    }
+}
+
+/// Called on VMA drop (munmap or process exit) for FileBacked VMAs.
+///
+/// Resolves the filesystem for `mount_id` and delegates to
+/// `FileSystem::on_unpin(ino)`. Filesystems that implement orphan-preserve
+/// semantics (FAT32) will decrement their mapper pin count and free the cluster
+/// chain when the last mapper unpins an unlinked file.
+///
+/// Errors are swallowed here because unmap must never fail. Callers log
+/// unexpected errors separately if needed.
+pub fn on_unpin(mount_id: usize, ino: u64) {
+    if let Some(fs) = fs_by_mount_id(mount_id) {
+        let _ = fs.on_unpin(ino);
+    }
+}
+
 /// Look up the filesystem for a given mount ID.
 /// Iterates the mount registry and returns a clone of the matching Arc.
 pub fn fs_by_mount_id(mount_id: usize) -> Option<Arc<dyn super::FileSystem + Send + Sync>> {

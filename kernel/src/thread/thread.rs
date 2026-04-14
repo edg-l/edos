@@ -852,6 +852,12 @@ impl Thread {
                                 }
                             }
                         }
+                        // Capture (mount_id, ino) before the inode Arc is released
+                        // with the VMA. Notify the filesystem that this FileBacked
+                        // VMA has been torn down (FAT32 uses this for orphan cleanup).
+                        let (mount_id, ino) = (inode.mount_id, inode.ino);
+                        // pages is a reference here; it drops with the VMA below.
+                        crate::fs::vfs::on_unpin(mount_id, ino);
                     }
                 }
             }

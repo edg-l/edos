@@ -348,6 +348,11 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             }
         }
 
+        // Notify the filesystem that a new FileBacked VMA has been created.
+        // FAT32 uses this to increment its mapper pin count so that a concurrent
+        // remove_file defers cluster chain freeing until the last mapper unpins.
+        crate::fs::vfs::on_pin(inode.mount_id, inode.ino);
+
         if is_shared {
             log!(
                 "mmap: file-backed MAP_SHARED at {map_addr:p} len={length:#x} off={file_offset:#x}"
@@ -668,8 +673,15 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                         fa.dec_refcount(frame);
                     }
                 }
+                // Capture (mount_id, ino) before dropping the inode Arc.
+                let (mount_id, ino) = (inode.mount_id, inode.ino);
                 // `pages` Vec is dropped here, releasing Arc<CachedPage> refs.
                 drop(pages);
+                // Notify the filesystem that one FileBacked VMA has been unmapped.
+                // FAT32 uses this to decrement its mapper pin count and free orphan
+                // cluster chains when the last mapper unpins an unlinked file.
+                // Must be called after `drop(pages)` so page refs are released first.
+                crate::fs::vfs::on_unpin(mount_id, ino);
             }
             VmaBacking::SharedMemory { .. } => {
                 // Re-insert and return error; SHM has its own unmap syscall.

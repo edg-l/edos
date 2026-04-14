@@ -477,16 +477,31 @@ impl FileSystem for Fatfs {
             return Err(Error::NotAFile);
         }
 
-        // Phase 3 will replace this with orphan-aware logic. For now (Phase 1):
-        // free cluster chain, mark dirent deleted, remove side table entry.
+        // Orphan-aware removal (Phase 3):
+        // - If mappers_pin > 0 (file is currently mmap'd): mark orphan=true, defer
+        //   cluster chain freeing until the last mapper unpins. The dirent is still
+        //   marked 0xE5 so new opens fail ENOENT.
+        // - If mappers_pin == 0: free the cluster chain immediately (classic unlink).
+        // For FAT12/16 (no side table): always free immediately.
 
-        // Free the file's cluster chain, if any
-        let start = entry.first_cluster();
-        if start >= 2 {
-            let _freed = self.free_cluster_chain(start)?;
+        let has_mappers_pin = if matches!(self.variant, FatVariant::Fat32) {
+            debug_assert!(entry_off <= u32::MAX as usize, "entry_offset overflows u32");
+            let ino = fat_ino_from_pos(dir_cluster, entry_off);
+            let table = self.inode_table.lock();
+            table.get(&ino).map(|e| e.mappers_pin).unwrap_or(0) > 0
+        } else {
+            false
+        };
+
+        if !has_mappers_pin {
+            // Free the file's cluster chain, if any.
+            let start = entry.first_cluster();
+            if start >= 2 {
+                let _freed = self.free_cluster_chain(start)?;
+            }
         }
 
-        // Mark the directory entry deleted (0xE5)
+        // Mark the directory entry deleted (0xE5).
         let (base_lba, sectors) = self.dir_entry_region(dir_cluster);
         let mut buf = self.read_disk_sectors(base_lba, sectors)?;
         if entry_off + 32 > buf.len() {
@@ -502,12 +517,19 @@ impl FileSystem for Fatfs {
             entry.short_name_checksum(),
         )?;
 
-        // Remove side table entry for FAT32 (after chain is freed and dirent marked).
-        // Phase 3 replaces this with orphan-aware logic that checks mappers_pin first.
+        // Update the side table for FAT32.
         if matches!(self.variant, FatVariant::Fat32) {
-            debug_assert!(entry_off <= u32::MAX as usize, "entry_offset overflows u32");
             let ino = fat_ino_from_pos(dir_cluster, entry_off);
-            self.inode_table.lock().remove(&ino);
+            let mut table = self.inode_table.lock();
+            if has_mappers_pin {
+                // Defer chain freeing: mark as orphan so unpin_inode frees it later.
+                if let Some(e) = table.get_mut(&ino) {
+                    e.orphan = true;
+                }
+            } else {
+                // Chain already freed above; remove the side table entry.
+                table.remove(&ino);
+            }
         }
 
         Ok(())
@@ -616,9 +638,27 @@ impl FileSystem for Fatfs {
     }
 
     fn flush_inode(&self, _ino: u64) -> Result<(), Error> {
-        // Flush drive write cache only, skip FSInfo write.
+        // Flush drive write cache only; metadata is already on disk via
+        // BlockPageCache writeback, and file data went through direct AHCI.
         self.device.flush()?;
         Ok(())
+    }
+
+    fn as_page_cache_ops(&self) -> Option<&dyn crate::fs::page_cache::PageCacheOps> {
+        self.as_page_cache_ops_fat32()
+    }
+
+    fn file_size_ino(&self, ino: u64) -> Result<u64, Error> {
+        self.file_size_ino_fat32(ino)
+    }
+
+    fn on_pin(&self, ino: u64) -> Result<(), Error> {
+        self.pin_inode(ino);
+        Ok(())
+    }
+
+    fn on_unpin(&self, ino: u64) -> Result<(), Error> {
+        self.on_unpin_fat32(ino)
     }
 
     fn truncate(&self, path: &Path, size: u64) -> Result<(), Error> {

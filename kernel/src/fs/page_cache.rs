@@ -281,6 +281,9 @@ pub trait PageCacheOps {
         valid_bytes: usize,
     ) -> Result<(), Error>;
 
-    /// Update the on-disk file size if new_size > current size.
+    /// Update the on-disk file size. **Grow-only**: implementations MUST be
+    /// no-ops when `new_size <= current file size`. Explicit shrinking is the
+    /// responsibility of `FileSystem::truncate`. The page cache calls `update_size`
+    /// after a write to record the new EOF, but never to shrink.
     fn update_size(&self, ino: u64, new_size: u64) -> Result<(), Error>;
 }
