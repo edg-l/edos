@@ -604,12 +604,22 @@ pub fn flush(op: &VfsOp) -> Result<(), Error> {
 
 pub fn flush_file(op: &VfsOp) -> Result<(), Error> {
     if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
-        // Flush per-inode dirty page cache pages first.
+        // Flush per-inode dirty page cache pages via the bulk path.
+        //
+        // We pass None for new_size_hint: `page_cache_write` already stamped
+        // the inode size synchronously via `pc_ops.update_size` at write time
+        // (see the doc-comment at vfs.rs:449-457).  fsync's job is data
+        // durability, not size re-stamping.
+        //
+        // Ordering: `flush_pages_bulk` merges all metadata enrollments into
+        // the active journal tx; the `flush_inode` call below then seals that
+        // tx via `force_commit_and_wait`, guaranteeing the batch is durable
+        // before we return.
         if let Some(pc_ops) = op.fs.as_page_cache_ops() {
             let ino = inode.ino;
             inode
                 .pages
-                .flush_dirty(|page_index, buf| pc_ops.flush_page(ino, page_index, buf, 4096))?;
+                .flush_dirty_bulk(|pages| pc_ops.flush_pages_bulk(ino, pages, None))?;
         }
         match op.fs.flush_inode(inode.ino) {
             Err(Error::Unsupported) => {}
@@ -729,10 +739,13 @@ pub fn flush_dirty_inodes() {
             Some(ops) => ops,
             None => continue,
         };
+        // The writeback kthread does not know the target file size — it was
+        // stamped synchronously by `page_cache_write` via `pc_ops.update_size`.
+        // Pass None so EFS skips the redundant inode-size write.
         let ino = inode.ino;
         let _ = inode
             .pages
-            .flush_dirty(|page_idx, buf| pc_ops.flush_page(ino, page_idx, buf, 4096));
+            .flush_dirty_bulk(|pages| pc_ops.flush_pages_bulk(ino, pages, None));
     }
 }
 

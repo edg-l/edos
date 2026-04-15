@@ -519,6 +519,11 @@ pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
         };
         // Safety: no mutable aliasing; user PTEs may be writable but the cache
         // frame is the sole physical backing and we're only reading it here.
+        //
+        // Note: msync stays on the per-page path intentionally.  Switching to
+        // `flush_pages_bulk` would require tracking which page indices to remove
+        // from `dirty_keys` on success — a non-trivial change for a rare syscall.
+        // The bulk path is a possible follow-up improvement.
         let buf = unsafe { page.as_slice() };
         match pc_ops.flush_page(inode.ino, *page_idx, buf, 4096) {
             Ok(()) => page.clear_dirty(),

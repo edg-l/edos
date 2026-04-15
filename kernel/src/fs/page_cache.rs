@@ -14,7 +14,11 @@
 //!   This does NOT break the "file data bypasses BlockPageCache" invariant:
 //!   `PageCacheOps::flush_page` routes through direct AHCI, not BlockPageCache.
 
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    vec::Vec,
+};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use x86_64::structures::paging::{FrameAllocator, PhysFrame};
 
@@ -235,6 +239,70 @@ impl InodePages {
         Ok(())
     }
 
+    /// Flush all dirty pages via `flush_fn` with all-or-nothing semantics.
+    ///
+    /// **Semantics differ from `flush_dirty`**: `flush_dirty` clears dirty flags
+    /// page-by-page inside the I/O loop, so a partial success on AHCI failure
+    /// preserves already-flushed pages as clean.  This method is all-or-nothing:
+    /// if `flush_fn` returns `Err`, ALL dirty flags and dirty-key entries are left
+    /// intact so the next writeback round retries the entire batch.  This matches
+    /// the EFS bulk-transaction model where the journal either commits all extent
+    /// and inode metadata for the whole batch, or aborts and records nothing.
+    ///
+    /// A concurrent `mark_dirty` between the snapshot and the post-flush cleanup
+    /// will have pushed its key again; the `dirty_keys` retain call below is safe
+    /// because those concurrent keys are NOT in the `dirty` snapshot.
+    pub fn flush_dirty_bulk(
+        &self,
+        flush_fn: impl FnOnce(&[(u64, Arc<CachedPage>)]) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        // Snapshot under dual-lock in pages → dirty_keys order (same as flush_dirty).
+        let dirty: Vec<(u64, Arc<CachedPage>)> = {
+            let map = self.pages.lock();
+            let dk = self.dirty_keys.lock();
+            dk.iter()
+                .filter_map(|&idx| map.get(&idx).map(|p| (idx, Arc::clone(p))))
+                .collect()
+        };
+
+        if dirty.is_empty() {
+            return Ok(());
+        }
+
+        // Pin all pages before releasing locks, so AHCI can read the frames.
+        for (_, page) in &dirty {
+            page.pin();
+        }
+
+        let result = flush_fn(&dirty);
+
+        // Unpin regardless of outcome.
+        for (_, page) in &dirty {
+            page.unpin();
+        }
+
+        match result {
+            Ok(()) => {
+                // All-or-nothing: clear flags and remove keys for every page in
+                // the snapshot in one pass under the dirty_keys lock.
+                // Build a set of flushed indices for O(N log N) retain instead
+                // of O(N²) (one retain per index).
+                let indices: BTreeSet<u64> = dirty.iter().map(|(idx, _)| *idx).collect();
+                for (_, page) in &dirty {
+                    page.clear_dirty();
+                }
+                let mut dk = self.dirty_keys.lock();
+                dk.retain(|k| !indices.contains(k));
+                Ok(())
+            }
+            Err(e) => {
+                // Leave ALL dirty flags and dirty_keys intact so the next round
+                // retries the whole batch.
+                Err(e)
+            }
+        }
+    }
+
     /// Remove pages at page_index >= from_page. For truncate.
     pub fn invalidate_from(&self, from_page: u64) {
         let evicted: Vec<Arc<CachedPage>> = {
@@ -292,4 +360,38 @@ pub trait PageCacheOps {
     /// responsibility of `FileSystem::truncate`. The page cache calls `update_size`
     /// after a write to record the new EOF, but never to shrink.
     fn update_size(&self, ino: u64, new_size: u64) -> Result<(), Error>;
+
+    /// Flush a batch of dirty pages in one call.
+    ///
+    /// `pages` is a slice of `(page_index, Arc<CachedPage>)` pairs; each page is
+    /// already pinned by the caller.  `new_size_hint` is the file size to record
+    /// after the flush; if `None` the implementation skips the size update.
+    ///
+    /// The default implementation loops over `flush_page` + `update_size`, giving
+    /// correct behaviour for all filesystems that implement those two methods
+    /// (memfs, FAT32).  EFS overrides this to open a single journal transaction
+    /// for the entire batch.
+    ///
+    /// Correctness invariant for memfs/FAT32: `flush_page` writes page data into
+    /// the filesystem's own storage and `update_size` sets the authoritative file
+    /// size; the loop here is therefore equivalent to calling them individually.
+    fn flush_pages_bulk(
+        &self,
+        ino: u64,
+        pages: &[(u64, Arc<CachedPage>)],
+        new_size_hint: Option<u64>,
+    ) -> Result<(), Error> {
+        for (page_index, page) in pages {
+            // Pages are pre-pinned by the caller (InodePages::flush_dirty_bulk),
+            // but pin again to match the per-page flush_dirty pin/unpin contract.
+            page.pin();
+            let result = self.flush_page(ino, *page_index, unsafe { page.as_slice() }, PAGE_SIZE);
+            page.unpin();
+            result?;
+        }
+        if let Some(sz) = new_size_hint {
+            self.update_size(ino, sz)?;
+        }
+        Ok(())
+    }
 }

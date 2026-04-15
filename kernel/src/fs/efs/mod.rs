@@ -17,7 +17,7 @@ use super::block_device::BlockDevice;
 use super::block_page_cache::BlockPageCache;
 use super::gpt::Partition;
 use super::journal::{Journal, tx::TxHandle};
-use super::page_cache::PageCacheOps;
+use super::page_cache::{CachedPage, PageCacheOps};
 use super::path::Path;
 use super::{Error, File, FileAttrs, FileKind, FileSystem, FileTime};
 use crate::log;
@@ -897,6 +897,156 @@ impl EfsDriver {
         self.write_inode(ino, &updated, tx)?;
 
         Ok(phys_block)
+    }
+
+    /// Allocate / resolve physical blocks for a batch of logical block numbers,
+    /// writing the updated inode ONCE at the end rather than once per block.
+    ///
+    /// Steps:
+    ///   (a) Read the inode once.
+    ///   (b) If the inline-data flag is set, convert to extent mode BEFORE the
+    ///       loop — `ensure_block_for_logical` errors on inline inodes.
+    ///   (c) For each logical block, find an existing extent mapping or allocate a
+    ///       new physical block.  When a new block is contiguous with the last
+    ///       extent (both logically and physically), extend that extent rather than
+    ///       creating a new one (same coalescing logic as `ensure_block_for_logical`).
+    ///   (d) Write the updated inode ONCE with the final extent list, updated
+    ///       block count, optional new size, and refreshed checksum + mtime.
+    ///
+    /// Returns a Vec of physical block numbers in the same order as `logical_blocks`.
+    ///
+    /// Crash-safety note: `alloc_block` decrements the in-memory free-block
+    /// counters and writes through `BlockPageCache` before the tx commits.  On tx
+    /// abort the journal enrollment is discarded, but the `BlockPageCache` page
+    /// may still flush, leaving the bitmap bit set on disk with no extent
+    /// referencing it (leaked block).  This is the same failure mode as the
+    /// per-page `flush_page` path — not new behaviour, and acceptable for v1.
+    fn ensure_blocks_for_logical_batch(
+        &self,
+        ino: u64,
+        logical_blocks: &[u32],
+        new_size: Option<u64>,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<Vec<u64>, Error> {
+        if logical_blocks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // (a) Read inode once.
+        let mut inode = self.read_inode(ino)?;
+
+        // (b) Convert inline data to extents before the loop if needed.
+        //     `ensure_block_for_logical` (and our own extent walk below) requires
+        //     extent mode.
+        if inode.flags & INODE_FLAG_INLINE_DATA != 0 {
+            self.convert_inline_to_extents(ino, &inode, tx)?;
+            // Re-read so we have the updated data_area with the extent header.
+            inode = self.read_inode(ino)?;
+        }
+
+        let hdr: EfsExtentHeader = unsafe {
+            core::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader)
+        };
+        if hdr.magic != EXTENT_MAGIC || hdr.depth != 0 {
+            return Err(Error::Corrupted);
+        }
+
+        let mut extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
+        let mut phys_blocks = Vec::with_capacity(logical_blocks.len());
+
+        // (c) Walk logical blocks, reusing existing mappings or allocating new ones.
+        for &lb in logical_blocks {
+            // Check if already mapped by an existing extent.
+            let existing = extents.as_slice().iter().find_map(|e| {
+                if e.logical_block <= lb && lb < e.logical_block + e.length as u32 {
+                    Some(e.physical_start() + (lb - e.logical_block) as u64)
+                } else {
+                    None
+                }
+            });
+
+            if let Some(phys) = existing {
+                phys_blocks.push(phys);
+                continue;
+            }
+
+            // Allocate a new physical block.
+            let phys_block = self.alloc_block(tx)?;
+            // Zero the new block.
+            let block_size = self.block_size() as usize;
+            self.write_block(phys_block, &vec![0u8; block_size], tx)?;
+
+            // Extent coalescing: if the last extent is contiguous (both logically
+            // and physically) with the new block, extend it.
+            //
+            // Note on alloc_block bitmap dedup: `alloc_block` calls `write_block`
+            // on the bitmap once per allocation; `write_block` enrolls the block
+            // in the journal, and the journal deduplicates by (dev, block) key, so
+            // 480 enrollments of the same bitmap page collapse to one journal ring
+            // entry.  However, each `alloc_block` call does invoke
+            // `device.write_page` on `BlockPageCache`, which is 480 in-memory
+            // writes to the same cached page — acceptable for v1 since they are
+            // all in-memory and the final journaled state is correct.
+            // Coalesce with any existing extent that is contiguous both
+            // logically and physically — mirrors `ensure_block_for_logical`
+            // which iterates ALL extents, not just the last one.
+            let mut extended = false;
+            for ext in extents.as_mut_slice().iter_mut() {
+                if ext.logical_block + ext.length as u32 == lb
+                    && ext.physical_start() + ext.length as u64 == phys_block
+                {
+                    ext.length += 1;
+                    extended = true;
+                    break;
+                }
+            }
+
+            if !extended {
+                if !extents.push(EfsExtent {
+                    logical_block: lb,
+                    length: 1,
+                    start_hi: (phys_block >> 32) as u16,
+                    start_lo: phys_block as u32,
+                }) {
+                    return Err(Error::Unsupported);
+                }
+            }
+
+            phys_blocks.push(phys_block);
+        }
+
+        // (d) Write updated inode ONCE with final extent list.
+        let hdr_size = core::mem::size_of::<EfsExtentHeader>();
+        let ext_size = core::mem::size_of::<EfsExtent>();
+        let new_hdr = EfsExtentHeader {
+            magic: EXTENT_MAGIC,
+            entries: extents.len as u16,
+            max_entries: MAX_INLINE_EXTENTS as u16,
+            depth: 0,
+            reserved: 0,
+        };
+        let hdr_bytes: &[u8] = unsafe {
+            core::slice::from_raw_parts(&new_hdr as *const EfsExtentHeader as *const u8, hdr_size)
+        };
+        inode.data_area[..hdr_size].copy_from_slice(hdr_bytes);
+        for (i, ext) in extents.as_slice().iter().enumerate() {
+            let off = hdr_size + i * ext_size;
+            let ext_bytes: &[u8] = unsafe {
+                core::slice::from_raw_parts(ext as *const EfsExtent as *const u8, ext_size)
+            };
+            inode.data_area[off..off + ext_size].copy_from_slice(ext_bytes);
+        }
+        inode.blocks = extents.as_slice().iter().map(|e| e.length as u64).sum();
+        if let Some(sz) = new_size {
+            if sz > inode.size {
+                inode.size = sz;
+            }
+        }
+        inode.mtime_sec = current_unix_time();
+        inode.checksum = checksum_inode(&inode);
+        self.write_inode(ino, &inode, tx)?;
+
+        Ok(phys_blocks)
     }
 }
 
@@ -2449,6 +2599,87 @@ impl PageCacheOps for EfsDriver {
                 Err(e)
             }
         }
+    }
+
+    /// Flush a batch of dirty pages in a single journal transaction per chunk.
+    ///
+    /// Batch size is capped at `MAX_BULK_PAGES` (512) pages.  If `pages` is
+    /// larger than that, we process 512-page chunks, each with its own tx.
+    /// `new_size_hint` is forwarded only to the last chunk so the inode size
+    /// is written exactly once.
+    ///
+    /// Within each chunk:
+    ///   1. Open one `TxHandle`.
+    ///   2. Resolve / allocate all physical blocks in one pass via
+    ///      `ensure_blocks_for_logical_batch`, which reads and writes the inode
+    ///      once regardless of how many pages are in the batch.
+    ///   3. Write each page's data directly to AHCI (bypassing BlockPageCache,
+    ///      consistent with the single-page `flush_page` path).
+    ///   4. Drop the tx on success (merges into the active journal tx).
+    ///      On any error, abort the tx and return immediately.
+    ///
+    /// Crash-safety: mid-batch AHCI failure → tx.abort() → bitmap bits may
+    /// still flush via BlockPageCache (same block-leak failure mode as the
+    /// per-page `flush_page` path — not new behaviour).  The inode write is
+    /// the last step in `ensure_blocks_for_logical_batch`, so a failure before
+    /// `write_inode` leaves no extent records on disk.
+    fn flush_pages_bulk(
+        &self,
+        ino: u64,
+        pages: &[(u64, Arc<CachedPage>)],
+        new_size_hint: Option<u64>,
+    ) -> Result<(), Error> {
+        const MAX_BULK_PAGES: usize = 512;
+        let spb = self.sectors_per_block();
+        let needed_bytes = spb as usize * 512;
+
+        let mut chunk_start = 0usize;
+        while chunk_start < pages.len() {
+            let chunk_end = (chunk_start + MAX_BULK_PAGES).min(pages.len());
+            let chunk = &pages[chunk_start..chunk_end];
+            let is_last_chunk = chunk_end == pages.len();
+
+            let logical_blocks: Vec<u32> = chunk.iter().map(|(pi, _)| *pi as u32).collect();
+
+            let size_for_chunk = if is_last_chunk { new_size_hint } else { None };
+
+            let mut tx = self.journal.begin_tx();
+
+            let phys_blocks = match self.ensure_blocks_for_logical_batch(
+                ino,
+                &logical_blocks,
+                size_for_chunk,
+                &mut tx,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    tx.abort();
+                    return Err(e);
+                }
+            };
+
+            // Write file data directly to AHCI — do not route through
+            // BlockPageCache (same invariant as single-page flush_page).
+            for ((_, page), &phys_block) in chunk.iter().zip(phys_blocks.iter()) {
+                let lba = self.block_to_lba(phys_block);
+                let buf = unsafe { page.as_slice() };
+                if let Err(e) = crate::drivers::ahci::direct::write_sectors(
+                    self.device.device_id,
+                    lba,
+                    &buf[..needed_bytes],
+                    spb,
+                ) {
+                    tx.abort();
+                    return Err(e.into());
+                }
+            }
+
+            // tx drops here, merging enrolled metadata into the active journal tx.
+            drop(tx);
+            chunk_start = chunk_end;
+        }
+
+        Ok(())
     }
 }
 
