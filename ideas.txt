@@ -313,20 +313,100 @@ cluster_size starts mattering.
 
 ## Ideas
 
-### EFS write-path perf: batch journal tx per flush_dirty round (up next)
-After switching `page_cache_write` to write-back (commit after this note),
-large sequential writes still pay per-page EFS overhead in `flush_page`:
-each page opens its own `begin_tx`, calls `ensure_block_for_logical`,
-drops the tx, and the committer kthread serially flushes the resulting
-metadata through BlockPageCache. The writeback kthread iterates dirty
-pages one at a time via `InodePages::flush_dirty`, so a 1.9 MiB copy
-pays ~480 separate journal roundtrips. Fix: have `flush_dirty` open
-a single journal tx (or a single FS-scoped batch) and hand it to
-`flush_page` for every page in this round, so all extent updates +
-inode size writes merge into one commit. Probably a new
-`PageCacheOps::flush_pages_bulk(ino, (page_idx, buf)*)` method that
-filesystems can override, with the default calling `flush_page` per
-entry for backwards compatibility.
+### Foundations for async I/O (TOP PRIORITY, unblocks multiple features)
+
+Discovered while planning async NCQ readahead
+(`.claude/plans/async-ncq-readahead.md`): AHCI already supports
+concurrent NCQ slots and IRQ-driven wake, but a split `submit/wait` API
+is unsafe today because of generic kernel-infrastructure gaps. These
+aren't "async is hard" issues — they are missing foundations that also
+affect other planned work (proper SIGKILL delivery, process-level
+cleanup on exec, multi-threaded file I/O, virtio-blk / USB async reads,
+reaper correctness in general). Roadmap in dependency order:
+
+1. **Thread handles with Arc / Weak refcounting instead of raw TIDs.**
+   Today `slot_waiters[slot]: AtomicU64` stores a raw TID; if the
+   submitter thread exits and its TID is recycled, the IRQ handler's
+   `wake_thread(tid)` wakes the wrong thread. Linux uses
+   `task_struct *` with refcounts. EDOS needs an `Arc<Thread>` (or
+   `Weak<Thread>`) stored in sync primitives that hold "this thread
+   is waiting on me" pointers. Touches: `slot_waiters`, wait-queues
+   that outlive the caller, mailboxes, any IRQ-context wake.
+   Also fixes latent races in existing code, not just async.
+
+2. **Cancellable / transferable waits for dying threads.** When a
+   thread is killed (SIGKILL, process group termination) while parked
+   on I/O, the reaper needs a way to hand off ownership of the
+   pending resource (kernel cleanup thread, destination page cache).
+   Today the reaper just drops the stack, so anything with a blocking
+   Drop deadlocks the reaper. Pieces: a "cleanup queue" the reaper
+   drains, `Drop` contracts that never block, per-thread list of
+   owned async resources. Prereq for real signal handling too.
+
+3. **Physical frame RAII for cache pages.** `CachedPage` has no Drop
+   today — frames are leaked if the Arc is dropped without going
+   through the correct release path. Fine when all frames are owned
+   by the page map, but breaks the moment a fallible path can drop
+   the Arc after allocating a frame. Need `CachedPage::drop` that
+   returns the frame to the allocator; audit every code path that
+   creates a CachedPage outside the page map.
+
+4. **Strict lock-order discipline for fs/page-cache paths.** Async
+   plans need e.g. `pages → in_flight → waitq` in one order
+   everywhere. Current codebase has ordering implicitly; needs to
+   be documented and mechanically checked. A `lock_order!` macro or
+   thread-local assertion would catch future inversions at dev time.
+
+5. **Per-inode async I/O registry (last layer, uses #1-#4).**
+   `InodePages` gets an `in_flight: BTreeMap<page_idx, Arc<PageFillHandle>>`
+   that readers consult before issuing their own fill. Handle lives
+   longer than any single thread, carries the Arc<CachedPage>s being
+   populated, has a WaitQueue readers park on. Removal from the map
+   atomic with either "publish to pages map" (success) or "mark error
+   and let next reader retry" (failure).
+
+6. **Generic async block I/O trait.** Today AHCI is the only disk.
+   Async readahead should live behind a generic trait so USB mass
+   storage, virtio-blk (future), and NVMe all get it. Light lift
+   once #1-#5 are in place.
+
+Each of #1-#5 is ~1-2 sessions of careful work; #6 is light. This is
+higher priority than any other idea below because it unblocks async
+readahead, proper signal handling, safer thread cancellation, and the
+long-term I/O story across all block devices. See the async readahead
+entry below for the specific payoff on file-read performance.
+
+### Async NCQ pipelined readahead (blocked on Foundations above)
+
+Linux's async-marker readahead: when the user reads the last page of
+the current window, the kernel pre-fires the NEXT window's I/O so it
+completes while the user consumes the current batch, keeping the I/O
+pipeline full. Current EDOS readahead is sync-only, so steady-state
+64 KiB user reads still trigger 64 KiB AHCI commands — the prefetch
+window follows the user rather than pulling ahead. Small-file whole-
+file prefetch (shipped 2026-04-15) covers files ≤ 2 MiB; async is
+needed for the large-file case.
+
+Design is already drafted in `.claude/plans/async-ncq-readahead.md`
+(5 phases, ~400 LOC). First review found 4 BLOCKERs, all of which
+trace back to the Foundations roadmap above. Do NOT try to implement
+this until the Foundations are in place; otherwise we will re-hit the
+same design walls.
+
+Payoff once Foundations + this land: first-run mmaptest test 10 on
+/var EFS drops from ~500 ms (current, with whole-file prefetch) to
+~150 ms; concurrent-read throughput improves across the board;
+writeback/read overlap becomes possible.
+
+### EFS write-path perf: batch journal tx per flush_dirty round (DONE 2026-04-15)
+Shipped as commit `824e656`. Added `PageCacheOps::flush_pages_bulk`
+with a default per-page loop; EFS overrides to chunk pages in 512-page
+batches, each with one TxHandle and one `ensure_blocks_for_logical_batch`
+(read inode once, walk all logical blocks with extent coalescing, write
+inode once). Direct AHCI page writes bypass BlockPageCache. Also added
+`InodePages::flush_dirty_bulk` with all-or-nothing semantics. vfs
+`flush_file` and `flush_dirty_inodes` migrated. mmaptest test 7
+(fsync+msync) on /var EFS: ~4.1s → 159ms (26x).
 
 ### EFS write-path perf: sequential-extent pre-allocation (up next after batching)
 `flush_page` currently allocates one cluster at a time via
