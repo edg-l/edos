@@ -381,7 +381,10 @@ impl EfsDriver {
         let to_read = count.min(available);
 
         if inode.flags & INODE_FLAG_INLINE_DATA != 0 {
-            // Data lives directly in data_area.
+            // Data lives directly in data_area. Invariant: for inline-mode
+            // inodes, `size <= INODE_DATA_AREA_SIZE` (176 bytes) is enforced
+            // by `update_size`, which converts inline->extents before
+            // stamping any size that would overflow the inline area.
             let end = (offset + to_read).min(inode.data_area.len());
             return Ok(inode.data_area[offset..end].to_vec());
         }
@@ -2407,11 +2410,38 @@ impl PageCacheOps for EfsDriver {
         if new_size <= inode.size {
             return Ok(());
         }
-        let mut updated = inode;
+        let mut tx = self.journal.begin_tx();
+
+        // Invariant: inline-mode inodes have `size <= INODE_DATA_AREA_SIZE`.
+        // If the new size would overflow the inline area, convert to extent
+        // mode BEFORE stamping the size — otherwise the on-disk inode would
+        // transiently say "inline + size > 176", which any caller reading
+        // via the on-disk path (loader prefetch, direct read_bytes_ino) would
+        // interpret as an out-of-range slice on `data_area`.
+        let base = if inode.flags & INODE_FLAG_INLINE_DATA != 0
+            && new_size > INODE_DATA_AREA_SIZE as u64
+        {
+            if let Err(e) = self.convert_inline_to_extents(ino, &inode, &mut tx) {
+                tx.abort();
+                return Err(e);
+            }
+            // Re-read so the updated inode carries the extent header and
+            // cleared INLINE_DATA flag.
+            match self.read_inode(ino) {
+                Ok(v) => v,
+                Err(e) => {
+                    tx.abort();
+                    return Err(e);
+                }
+            }
+        } else {
+            inode
+        };
+
+        let mut updated = base;
         updated.size = new_size;
         updated.mtime_sec = current_unix_time();
         updated.checksum = efs_common::checksum_inode(&updated);
-        let mut tx = self.journal.begin_tx();
         match self.write_inode(ino, &updated, &mut tx) {
             Ok(v) => Ok(v),
             Err(e) => {
