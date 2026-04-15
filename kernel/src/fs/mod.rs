@@ -37,6 +37,7 @@ pub mod memfs;
 pub mod page_cache;
 pub mod path;
 pub mod procfs;
+pub mod readahead;
 pub mod vfs;
 pub mod writeback;
 

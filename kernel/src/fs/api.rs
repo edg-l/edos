@@ -11,6 +11,7 @@ use crate::{
         handle::Pollable,
         inode::VfsInode,
         path::Path,
+        readahead::ReadaheadState,
         vfs,
     },
     memory::mapper::MemoryManager,
@@ -84,7 +85,9 @@ pub fn list_files(path: &Path) -> Result<Vec<File>, Error> {
 
 pub fn read_bytes(path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
     let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
-    vfs::read(&op, offset, count)
+    // Path-API reads have no fd, so readahead state is not preserved across calls.
+    let mut ra = ReadaheadState::default();
+    vfs::read(&op, &mut ra, offset, count)
 }
 
 #[expect(unused)]

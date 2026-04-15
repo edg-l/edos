@@ -282,6 +282,8 @@ pub struct FsFile {
     /// Cached VFS inode for per-inode locking. None for virtual filesystems
     /// (procfs, devfs) that don't have meaningful inodes.
     pub inode: Option<Arc<VfsInode>>,
+    /// Per-fd sequential readahead window state. Updated on every vfs::read call.
+    pub ra: crate::fs::readahead::ReadaheadState,
 }
 
 impl core::fmt::Debug for FsFile {

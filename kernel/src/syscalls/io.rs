@@ -527,6 +527,9 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             }
         }
         Some(FileDescriptor::FsFile(file)) => {
+            // Snapshot readahead state before the devfs/vfs branch split.
+            let mut ra = file.ra;
+
             // Fast path: devfs devices can be read directly without the FS Mailbox.
             let data = if let Some(device) = crate::fs::devfs::try_lookup_from_full_path(&file.path)
             {
@@ -546,7 +549,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                         return -1;
                     }
                 };
-                match vfs::read(&op, file.offset as usize, count) {
+                match vfs::read(&op, &mut ra, file.offset as usize, count) {
                     Ok(d) => d,
                     Err(_) => {
                         info.lock().errno = Errno::EINVAL;
@@ -565,9 +568,11 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 return -1;
             }
 
-            // Update file offset
+            // Update file offset and write back readahead state (vfs path mutated ra;
+            // devfs path leaves ra unchanged from the snapshot above).
             let new_fd = FileDescriptor::FsFile(FsFile {
                 offset: file.offset + bytes_to_copy as u64,
+                ra,
                 ..file
             });
             fd_table.lock().replace_fd(fd, new_fd);
@@ -841,6 +846,7 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         append,
         mode: open_mode,
         inode,
+        ra: crate::fs::readahead::ReadaheadState::default(),
     });
     let fd = info.lock().fd_table.lock().allocate_fd(desc);
     fd as i64

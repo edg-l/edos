@@ -10,7 +10,7 @@ use spin::{Mutex, RwLock};
 
 use super::{
     Error, File, FileAttrs, FileKind, FileSystem, MmapRegion, MountInfo, StatFs, dentry,
-    handle::Pollable, inode::VfsInode, path::Path,
+    handle::Pollable, inode::VfsInode, path::Path, readahead::ReadaheadState,
 };
 use x86_64::{
     VirtAddr,
@@ -173,9 +173,21 @@ pub fn resolve_with_inode(path: &Path, inode: Option<Arc<VfsInode>>) -> Option<V
     })
 }
 
+// --- Readahead debug logging ---
+// Flip the body to enable debug logs locally; keep disabled by default.
+// To enable: replace `{}` with `{ crate::serial_println!($($arg)*); }`
+macro_rules! ra_log {
+    ($($arg:tt)*) => {};
+}
+
 // --- Read-path operations ---
 
-pub fn read(op: &VfsOp, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
+pub fn read(
+    op: &VfsOp,
+    ra: &mut ReadaheadState,
+    offset: usize,
+    count: usize,
+) -> Result<Vec<u8>, Error> {
     let _guard = op.inode.as_ref().map(|i| i.lock.read());
 
     if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
@@ -189,7 +201,7 @@ pub fn read(op: &VfsOp, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
                 return Ok(Vec::new());
             }
             let clamped = count.min(file_size - offset);
-            return page_cache_read(inode, pc_ops, offset, clamped);
+            return page_cache_read(inode, pc_ops, ra, file_size, offset, clamped);
         }
         match op.fs.read_bytes_ino(inode.ino, offset, count) {
             Err(Error::Unsupported) => {}
@@ -202,6 +214,8 @@ pub fn read(op: &VfsOp, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
 fn page_cache_read(
     inode: &Arc<VfsInode>,
     pc_ops: &dyn super::page_cache::PageCacheOps,
+    ra: &mut ReadaheadState,
+    file_size: usize,
     offset: usize,
     count: usize,
 ) -> Result<Vec<u8>, Error> {
@@ -209,15 +223,64 @@ fn page_cache_read(
         return Ok(Vec::new());
     }
 
+    use super::readahead::{RA_INIT_PAGES, RA_MAX_PAGES, RA_NO_PREV, RA_WHOLE_FILE_MAX_PAGES};
+
     let start_page = offset / 4096;
     let end_page = (offset + count - 1) / 4096;
     let ino = inode.ino;
 
+    // Saturating_add guards against a corrupt file_size near usize::MAX that
+    // would wrap to a tiny page count.
+    let file_size_pages: u64 = (file_size.saturating_add(4095) / 4096) as u64;
+
+    let sequential =
+        ra.prev_last_page == RA_NO_PREV || start_page as u64 == ra.prev_last_page.wrapping_add(1);
+
+    let read_end_page: usize = if sequential {
+        // Small-file fast path: on the very first sequential read of a file
+        // that fits within RA_WHOLE_FILE_MAX_PAGES, fetch the entire file in
+        // one bulk pass. Avoids the ramp-up stall where each 64 KiB user
+        // read still triggers its own AHCI command until the window reaches
+        // max after ~7 calls.
+        if ra.prev_last_page == RA_NO_PREV
+            && file_size_pages > 0
+            && file_size_pages <= RA_WHOLE_FILE_MAX_PAGES
+        {
+            (file_size_pages - 1) as usize
+        } else {
+            let ra_pages = if ra.window_size == 0 {
+                RA_INIT_PAGES
+            } else {
+                ra.window_size
+            };
+            // `target` is the exclusive end (one past the last page to fetch).
+            let target = end_page as u64 + 1 + ra_pages;
+            let clipped = target.min(file_size_pages);
+            // Convert exclusive end back to inclusive page index; never shrink below user's request.
+            (clipped.saturating_sub(1) as usize).max(end_page)
+        }
+    } else {
+        ra.reset();
+        end_page
+    };
+
+    ra_log!(
+        "ra: ino={} req=[{}..{}] read_end={} seq={} win={} prev={}",
+        ino,
+        start_page,
+        end_page,
+        read_end_page,
+        sequential,
+        ra.window_size,
+        ra.prev_last_page,
+    );
+
     // Check which pages are already cached vs need loading.
+    // The scan covers the full readahead range so ahead pages are filled too.
     let mut uncached_start: Option<usize> = None;
     let mut uncached_ranges: Vec<(usize, usize)> = Vec::new(); // (start_page, end_page) inclusive
 
-    for page_idx in start_page..=end_page {
+    for page_idx in start_page..=read_end_page {
         let is_cached = {
             let map = inode.pages.pages.lock();
             map.contains_key(&(page_idx as u64))
@@ -231,12 +294,11 @@ fn page_cache_read(
         }
     }
     if let Some(start) = uncached_start {
-        uncached_ranges.push((start, end_page));
+        uncached_ranges.push((start, read_end_page));
     }
 
-    // Bulk-fill uncached ranges using fill_page. For contiguous uncached
-    // ranges, fill_page is called per page but reads go through the FS
-    // driver which can batch them.
+    // Bulk-fill uncached ranges using fill_pages_bulk. For contiguous uncached
+    // ranges, fill_pages_bulk issues a single AHCI command per range.
     for &(range_start, range_end) in &uncached_ranges {
         let byte_offset = range_start * 4096;
         let byte_count = (range_end - range_start + 1) * 4096;
@@ -277,7 +339,29 @@ fn page_cache_read(
         }
     }
 
-    // Now all pages are cached. Read from cache.
+    // Ramp advances only when actual I/O occurred; warm-cache repeats don't
+    // double window_size. prev_last_page tracks the *requested* end-page so
+    // the next read's sequential check reflects what the user consumed.
+    let did_io = !uncached_ranges.is_empty();
+    if sequential && did_io {
+        let next = if ra.window_size == 0 {
+            RA_INIT_PAGES
+        } else {
+            ra.window_size.saturating_mul(2)
+        };
+        ra.window_size = next.min(RA_MAX_PAGES);
+    }
+    ra.prev_last_page = end_page as u64;
+
+    ra_log!(
+        "ra: ino={} after: win={} prev={} did_io={}",
+        ino,
+        ra.window_size,
+        ra.prev_last_page,
+        did_io,
+    );
+
+    // Result Vec covers only the user-requested range; readahead pages stay in cache.
     let mut result = Vec::with_capacity(count);
     for page_idx in start_page..=end_page {
         let guard = inode.pages.get_or_fill(page_idx as u64, |buf| {
