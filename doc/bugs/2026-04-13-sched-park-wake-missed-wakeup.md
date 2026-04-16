@@ -112,7 +112,11 @@ Run `tools/debug/dump_threads.gdb` against the running QEMU.
   loops internally instead of letting the caller loop.
 - `WP=0` on a Parked thread, lock target free, wait queue NON-EMPTY but
   thread not in queue → producer didn't call `wake_thread` after
-  releasing the lock, OR the wake was sent to the wrong tid.
+  releasing the lock, OR the wake was sent to a handle pointing at a
+  different Thread. (Since Foundation #1 landed 2026-04-16, sync
+  primitives store `Weak<Thread>` — the "wake wrong thread after TID
+  recycle" class of bug is closed at the API level. A dangling Weak
+  makes `wake_thread` a silent no-op; never a misdirected wake.)
 - `SYSCALL=FUTEX_WAIT|WINDOW_POLL|READ|...` tells you exactly which
   syscall the thread is parked in without a backtrace walk.
 

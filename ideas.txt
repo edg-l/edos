@@ -213,6 +213,16 @@
   per-process full-binary copy. Prerequisite for the dynamic linker. Note:
   binaries on FAT32 / memfs return ENOEXEC until those FSes implement
   PageCacheOps.
+- **Arc/Weak thread handles (Foundation #1, 2026-04-16)** - Replaced
+  raw TID storage in every sync primitive and IRQ-reachable static with
+  `Weak<Thread>`. `Scheduler::wake_thread` / `wake_thread_irq` now take
+  `&Weak<Thread>` exclusively (TID-based wake API deleted). Migrated:
+  WaitQueue, PollWaiter, broadcast Subscriber, AHCI slot_waiters,
+  ThreadExitRegistry waiters, AHCI/xHCI/e1000e/HDA/keyboard/mouse driver
+  dispatcher handles, REAPER_HANDLE, kill_process. Dangling Weak →
+  silent no-op wake instead of waking a TID-recycled successor. Closes
+  the latent "wake wrong thread" race; prereq for Foundation #2
+  (cancellable waits) and async NCQ readahead.
 
 ## Network Stack Remaining
 
@@ -383,14 +393,14 @@ cleanup on exec, multi-threaded file I/O, virtio-blk / USB async reads,
 reaper correctness in general). Roadmap in dependency order:
 
 1. **Thread handles with Arc / Weak refcounting instead of raw TIDs.**
-   Today `slot_waiters[slot]: AtomicU64` stores a raw TID; if the
-   submitter thread exits and its TID is recycled, the IRQ handler's
-   `wake_thread(tid)` wakes the wrong thread. Linux uses
-   `task_struct *` with refcounts. EDOS needs an `Arc<Thread>` (or
-   `Weak<Thread>`) stored in sync primitives that hold "this thread
-   is waiting on me" pointers. Touches: `slot_waiters`, wait-queues
-   that outlive the caller, mailboxes, any IRQ-context wake.
-   Also fixes latent races in existing code, not just async.
+   **DONE 2026-04-16.** `Scheduler::wake_thread` / `wake_thread_irq`
+   now take `&Weak<Thread>` exclusively; the TID-based API is deleted.
+   Every sync primitive (WaitQueue, PollWaiter, Subscriber, AHCI
+   slot_waiters, ThreadExitRegistry waiters, every driver dispatcher
+   thread handle, REAPER_HANDLE, kill_process) stores `Weak<Thread>`.
+   A dangling Weak upgrades to `None` → `wake_thread*` is a silent
+   no-op instead of waking a recycled TID's successor. See CLAUDE.md
+   "Thread handles" invariant and `.claude/plans/arc-weak-thread-handles.md`.
 
 2. **Cancellable / transferable waits for dying threads.** When a
    thread is killed (SIGKILL, process group termination) while parked
