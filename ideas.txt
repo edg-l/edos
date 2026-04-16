@@ -278,23 +278,32 @@ refuses to re-run without `--force`. 8 integration tests + doc at
 
 ## Open questions / loose ends
 
-### Transient boot GPF — root cause unknown
-During the block page cache development, one boot hit a GPF at
-`IntrusiveList::push_back`, error code 0x0, non-canonical pointer
-write at `(*self.tail).next = link`. Fault did not reproduce after
-the following unrelated changes landed:
-- `Drop for CachedBlockPage` (replaced manual deallocate_frame)
-- `read_via_extents` bypass (file-data out of the block cache)
+### Transient boot GPF — ROOT-CAUSED 2026-04-15 (frame allocator aliasing)
+Earlier "transient boot GPF" in `IntrusiveList::push_back` with a
+non-canonical head/tail was a secondary symptom of a bigger bug:
+the physical frame allocator was handing out the same phys frame
+twice (heap ↔ vmalloc DMA). virtio-gpu DMA response data was
+overwriting scheduler runqueue memory, producing the non-canonical
+pointer.
 
-Inspection of allocator, scheduler, runqueue, intrusive list, SMP
-init found no concrete race that could produce a non-canonical
-`self.tail` during boot kthread spawn. Hypothesis: timing-sensitive
-cross-CPU `spawn_thread` + `on_tick` race; not deterministic.
+Root cause: `MemoryManager::map_address` / `map_address_range` set
+the bitmap bit for the target phys but did not bump the refcount.
+`unmap_memory`'s `deallocate_frame` later decremented a refcount
+that was never incremented — when the phys was ALSO held by a
+heap mapping (refcount=1 from `allocate_frame`), the decrement
+took it to 0, cleared the bitmap bit, and the next allocation
+returned that still-mapped frame.
 
-Mitigation in place: `debug_assert!(is_canonical(...))` on
-push_back/push_front/unlink pointer fields. Next time the GPF
-appears, one of those will fire with a clear message pointing at
-exactly which pointer went bad.
+Fix: `map_address` now calls `inc_or_set_refcount` instead of
+`set_frame_allocated`. Each mapping holds a real refcount; the
+final unmap drops to 0 and clears the bit.
+
+Regression guard: `memory::verify_kernel_no_phys_aliasing()` runs
+at the end of `init_drivers()` and panics if any kernel-half phys
+is mapped at two virts. Also a hard `assert!` in
+`BitmapFrameAllocator::deallocate_frame` catches refcount-0 double
+free. The intrusive-list canonical-address debug_assert stays as
+defense in depth.
 
 ### Warm spawn latency regression after inode_cache removal
 Removing `EfsDriver::inode_cache` was correct design (one cache,

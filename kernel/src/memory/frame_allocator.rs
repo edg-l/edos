@@ -377,6 +377,12 @@ impl BitmapFrameAllocator {
 
             if run >= count {
                 for offset in 0..count {
+                    debug_assert!(
+                        self.refcounts[idx + offset] == 0,
+                        "allocate_contiguous_frames: frame index {} has refcount {} but bitmap says free (double-alloc)",
+                        idx + offset,
+                        self.refcounts[idx + offset]
+                    );
                     self.set_frame_allocated(idx + offset);
                     self.refcounts[idx + offset] = 1;
                 }
@@ -418,9 +424,20 @@ impl BitmapFrameAllocator {
     ///
     /// # Safety
     ///
-    /// The frame must not be in use and must have been allocated by this allocator
+    /// The frame must not be in use and must have been allocated by this allocator.
+    ///
+    /// Frames mapped via `map_address` / `map_address_range` (MMIO, pre-existing
+    /// physical ranges) have `refcount == 0` — calling `deallocate_frame` on
+    /// those is a bug that would leak the bitmap bit. We panic instead of
+    /// silently clearing state.
     pub unsafe fn deallocate_frame(&mut self, frame: PhysFrame) {
         if let Some(index) = self.frame_to_index(frame) {
+            assert!(
+                self.refcounts[index] > 0,
+                "deallocate_frame: frame idx {} (phys {:#x}) has refcount=0; caller is freeing a non-allocator-owned frame (MMIO?) or double-freeing",
+                index,
+                frame.start_address().as_u64()
+            );
             if self.refcounts[index] > 1 {
                 self.refcounts[index] -= 1;
                 return;
@@ -444,6 +461,26 @@ impl BitmapFrameAllocator {
             self.refcounts[idx] = self.refcounts[idx]
                 .checked_add(1)
                 .expect("inc_refcount: refcount overflow");
+        }
+    }
+
+    /// Ensure `frame` is marked allocated and bump its refcount by one. Used
+    /// by `map_address` / `map_address_range` where the caller supplies an
+    /// existing physical frame (MMIO, shared memory) rather than allocating a
+    /// fresh one: the frame may already be tracked (refcount > 0) in which
+    /// case we just bump, or may be unmarked (refcount == 0) in which case we
+    /// set the bitmap bit and initialize the refcount to 1.
+    ///
+    /// Symmetric with `deallocate_frame`: each `inc_or_set_refcount` must be
+    /// matched by exactly one `deallocate_frame`.
+    pub fn inc_or_set_refcount(&mut self, frame: PhysFrame) {
+        if let Some(idx) = self.frame_to_index(frame) {
+            if self.refcounts[idx] == 0 {
+                self.set_frame_allocated(idx);
+            }
+            self.refcounts[idx] = self.refcounts[idx]
+                .checked_add(1)
+                .expect("inc_or_set_refcount: refcount overflow");
         }
     }
 
@@ -513,6 +550,16 @@ pub fn calculate_bitmap_size(memory_regions: &MemmapResponse) -> usize {
 unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         if let Some(index) = self.find_free_frame() {
+            // Bitmap and refcount must agree: a frame found via find_free_frame
+            // (which scans the bitmap) MUST have refcount==0. If refcount>0 the
+            // bitmap and refcount are inconsistent — we are about to hand out a
+            // frame that is still in use somewhere.
+            debug_assert!(
+                self.refcounts[index] == 0,
+                "allocate_frame: frame index {} has refcount {} but bitmap says free (double-alloc)",
+                index,
+                self.refcounts[index]
+            );
             self.set_frame_allocated(index);
             self.refcounts[index] = 1;
             self.index_to_frame(index)

@@ -227,6 +227,18 @@ impl MemoryManager {
         phys_addr: PhysAddr,
         flags: PageTableFlags,
     ) -> Result<(), x86_64::structures::paging::mapper::MapToError<Size4KiB>> {
+        // Diagnostic: log map_address calls targeting the first 1 MiB of RAM.
+        // Legitimate MMIO is at high phys; legitimate user/loader mappings are
+        // to anonymous phys that the allocator handed out post-heap. Any low
+        // phys here is a strong smell for the heap-alias bug.
+        if phys_addr.as_u64() < 0x0010_0000 {
+            crate::println!(
+                "map_address LOW-PHYS: virt={:#x} phys={:#x} flags={:?}",
+                virt_addr.as_u64(),
+                phys_addr.as_u64(),
+                flags
+            );
+        }
         let page = Page::containing_address(virt_addr);
         let frame = PhysFrame::containing_address(phys_addr);
         let mut frame_allocator = frame_allocator();
