@@ -342,6 +342,33 @@ follow-ups worth doing when scheduler load-balancing matters:
    wake to the idle CPU's rq. Cleaner to do post-Foundation-#1 since
    the wake path already takes a `Weak<Thread>` handle.
 
+### Driver kthread startup starvation on busy CPU
+Observed 2026-04-15: mouse kthread can take up to 5 seconds to
+start running because `pick_sched()` at spawn time placed it on the
+same CPU as the e1000e driver kthread, which was blocked on DHCP
+for ~5 seconds. Meanwhile `edos-wm` spawned by `system-mount` at
+~1.5s tried `open("/dev/mouse")`, got `InvalidInput` (device not
+yet registered in devfs), panicked, and exited. No automatic retry.
+
+Two issues conflate here:
+1. Scheduler places cooperative-blocked-driver kthreads and
+   latency-sensitive driver kthreads on the same CPU, starving the
+   latter until the former unblocks.
+2. Userspace programs assume their required `/dev/*` entries exist
+   at program start. They don't (drivers register async).
+
+Fix options, ranked:
+- (best) `system-mount` should wait for `/dev/mouse` and `/dev/kbd`
+  to exist before spawning `edos-wm` (and any program that depends
+  on input). Possibly a generic "wait for device" syscall or a
+  `/dev/.ready` sentinel.
+- edos-wm retries `open("/dev/mouse")` with backoff instead of
+  panicking on first failure.
+- `queue_spawn_kthread_named_on(cpu)` variant so mouse and keyboard
+  go to specifically different CPUs from network drivers.
+- Convert DHCP wait from `thread_park_while` on a 5s hard timeout
+  to an event-driven kthread that yields between short polls.
+
 ## Ideas
 
 ### Foundations for async I/O (TOP PRIORITY, unblocks multiple features)
