@@ -1,3 +1,4 @@
+use alloc::sync::Weak;
 use core::time::Duration;
 use heapless::Deque;
 use spin::Mutex;
@@ -5,7 +6,7 @@ use x86_64::instructions::interrupts::{self, without_interrupts};
 
 use crate::thread::{
     scheduler::{WakePriority, sched},
-    thread::ThreadId,
+    thread::Thread,
 };
 
 /// Maximum number of threads that can wait on a single WaitQueue.
@@ -23,7 +24,7 @@ pub enum WaitOutcome {
 
 #[derive(Debug)]
 pub struct WaitQueue {
-    inner: Mutex<Deque<ThreadId, WAITQUEUE_CAP>>,
+    inner: Mutex<Deque<Weak<Thread>, WAITQUEUE_CAP>>,
 }
 
 impl WaitQueue {
@@ -47,37 +48,48 @@ impl WaitQueue {
         self.wait_internal(ready, timeout)
     }
 
-    /// Wake one thread
+    /// Wake one live thread from the queue.
+    ///
+    /// Pops entries until a live thread (Weak::upgrade succeeds) is woken or
+    /// the queue is empty. Dead entries (thread exited between enrollment and
+    /// wake) are silently discarded so a single dead waiter at head cannot
+    /// stall the wake.
     pub fn wake_one(&self) -> bool {
-        without_interrupts(|| {
-            let tid_opt = {
+        loop {
+            let handle_opt = without_interrupts(|| {
                 let mut q = self.inner.lock();
                 q.pop_front()
-            };
-            if let Some(tid) = tid_opt {
-                sched().wake_thread(tid, WakePriority::Normal);
-                true
-            } else {
-                false
+            });
+            match handle_opt {
+                None => return false,
+                Some(handle) => {
+                    if sched().wake_thread_handle(&handle, WakePriority::Normal) {
+                        return true;
+                    }
+                    // Thread exited between enrollment and wake, or self-skip
+                    // fired — discard and try the next entry.
+                }
             }
-        })
+        }
     }
 
     /// Wake all threads
     pub fn wake_all(&self) -> usize {
-        // Drain into stack buffer under lock, then wake outside to avoid
-        // holding the lock while wake_thread_slow spins.
-        let tids: heapless::Vec<ThreadId, WAITQUEUE_CAP> = without_interrupts(|| {
+        // Drain into stack buffer under lock (heapless::Vec, no allocation),
+        // then wake outside to avoid holding the lock while do_wake spins.
+        let handles: heapless::Vec<Weak<Thread>, WAITQUEUE_CAP> = without_interrupts(|| {
             let mut q = self.inner.lock();
             let mut v = heapless::Vec::new();
-            while let Some(tid) = q.pop_front() {
-                let _ = v.push(tid);
+            while let Some(h) = q.pop_front() {
+                let _ = v.push(h);
             }
             v
         });
-        let n = tids.len();
-        for tid in tids {
-            sched().wake_thread(tid, WakePriority::Normal);
+        let mut n = 0usize;
+        for handle in &handles {
+            if sched().wake_thread_handle(handle, WakePriority::Normal) {
+                n += 1;
+            }
         }
         n
     }
@@ -87,10 +99,10 @@ impl WaitQueue {
         self.inner.lock().is_empty()
     }
 
-    /// Single-iteration wait: push tid → park (or sleep) → remove tid.
+    /// Single-iteration wait: push handle → park (or sleep) → remove handle.
     ///
     /// **Protocol invariant**: each call performs exactly one push + one park
-    /// + one remove. The producer's `wake_one`/`wake_all` pops the tid as
+    /// + one remove. The producer's `wake_one`/`wake_all` pops the handle as
     /// part of waking it, so the post-park `retain` is a no-op in the common
     /// case (spurious-pop self-remove safety only).
     ///
@@ -98,7 +110,7 @@ impl WaitQueue {
     /// contract — see CLAUDE.md "Park/wake protocol"), this function may
     /// also return spuriously. Callers that must block until a real
     /// condition is met (e.g. `BlockingMutex::lock`) MUST loop on that
-    /// condition externally — re-entering `wait_until` re-pushes the tid
+    /// condition externally — re-entering `wait_until` re-pushes the handle
     /// and the protocol stays consistent. Looping inside this function (or
     /// inside `thread_park_while`) would re-park without re-pushing and
     /// silently lose wakes when the producer churns the lock faster than
@@ -114,23 +126,24 @@ impl WaitQueue {
             Sleep(Duration),
         }
 
-        let tid = sched().current_thread_id().unwrap();
+        let my_handle = sched().current_thread_weak().unwrap();
         let mut action: Option<SleepAction> = None;
 
         // Enqueue and check readiness inside without_interrupts to close the
-        // lost-wakeup window: heapless::Deque does not allocate, so this is safe.
-        // Park/sleep must happen OUTSIDE without_interrupts since context switching
-        // requires interrupts to be re-enabled.
+        // lost-wakeup window: heapless::Deque does not allocate, and
+        // Weak::clone is a refcount bump only — both are safe here.
+        // Park/sleep must happen OUTSIDE without_interrupts since context
+        // switching requires interrupts to be re-enabled.
         interrupts::without_interrupts(|| {
             {
                 let mut q = self.inner.lock();
-                q.push_back(tid)
+                q.push_back(my_handle.clone())
                     .expect("WaitQueue overflow: too many waiters");
             }
 
             if ready() {
                 let mut q = self.inner.lock();
-                q.retain(|&id| id != tid);
+                q.retain(|w| !Weak::ptr_eq(w, &my_handle));
                 return;
             }
 
@@ -154,11 +167,11 @@ impl WaitQueue {
             }
         }
 
-        // Always remove our tid from the wait queue after waking,
+        // Always remove our handle from the wait queue after waking,
         // regardless of how we were woken (park, sleep, or timeout).
         interrupts::without_interrupts(|| {
             let mut q = self.inner.lock();
-            q.retain(|&id| id != tid);
+            q.retain(|w| !Weak::ptr_eq(w, &my_handle));
         });
 
         let Some(action) = action else {

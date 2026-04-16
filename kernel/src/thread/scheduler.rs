@@ -4,7 +4,10 @@ use core::{
     time::Duration,
 };
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{
+    boxed::Box,
+    sync::{Arc, Weak},
+};
 use crossbeam_queue::ArrayQueue;
 use heapless::{BinaryHeap, binary_heap::Min};
 use spin::{Mutex, Once, RwLock};
@@ -955,6 +958,66 @@ impl Scheduler {
         without_interrupts(|| unsafe {
             save_transition_switch(transition_sleep, &mut ctx as *mut SleepCtx as *mut u8);
         });
+    }
+
+    /// Return a `Weak<Thread>` for the currently running thread on this CPU.
+    ///
+    /// Returns `None` when the CPU is idle (no current thread). `Arc::downgrade`
+    /// is a refcount bump only — allocator-free, safe in any context including
+    /// IRQ handlers.
+    pub fn current_thread_weak(&self) -> Option<Weak<Thread>> {
+        self.current_thread().as_ref().map(Arc::downgrade)
+    }
+
+    /// Wake the thread identified by `handle` (thread-context variant).
+    ///
+    /// Safety properties:
+    /// - `Weak::upgrade` is allocator-free: pure atomic CAS on the ArcInner
+    ///   strong count. Returns `None` if the thread has already exited.
+    /// - The temporary `Arc<Thread>` dropped at function exit decrements the
+    ///   strong count. Because `THREADS` holds the canonical strong ref until
+    ///   the reaper removes the thread, the strong count after our decrement is
+    ///   always ≥ 1 while the thread is alive — no deallocation occurs here.
+    /// - The wake-pending token protocol is unchanged: `do_wake` calls
+    ///   `signal_wake` before probing state, preserving the park/wake invariant.
+    ///
+    /// Self-wake is skipped via `Weak::ptr_eq` *before* upgrade to avoid an
+    /// unnecessary refcount bump on the common fast path.
+    ///
+    /// Returns `true` if a live thread was woken, `false` if the handle was
+    /// dangling (thread exited) or the self-skip fired.
+    pub fn wake_thread_handle(&self, handle: &Weak<Thread>, priority: WakePriority) -> bool {
+        // Self-skip: compare control-block pointers before paying for upgrade.
+        if let Some(current_weak) = self.current_thread_weak() {
+            if Weak::ptr_eq(handle, &current_weak) {
+                return false;
+            }
+        }
+        if let Some(thread) = handle.upgrade() {
+            self.do_wake(thread, priority);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Wake the thread identified by `handle` from an IRQ handler.
+    ///
+    /// Identical to `wake_thread_handle` but without the self-skip check —
+    /// IRQ handlers are not associated with a specific thread identity and the
+    /// self-skip check would require `current_thread()` which is not meaningful
+    /// in that context.
+    ///
+    /// Safety properties are identical to `wake_thread_handle`: `Weak::upgrade`
+    /// is allocator-free and the temporary `Arc` drop cannot free the Thread
+    /// because `THREADS` holds the strong ref until reaper removal.
+    pub fn wake_thread_handle_irq(&self, handle: &Weak<Thread>, priority: WakePriority) -> bool {
+        if let Some(thread) = handle.upgrade() {
+            self.do_wake(thread, priority);
+            true
+        } else {
+            false
+        }
     }
 
     /// Wake `tid`. Safe from any context. Skips a no-op self-wake.

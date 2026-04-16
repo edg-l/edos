@@ -1013,14 +1013,14 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
             .collect::<Vec<_>>()
     };
 
-    let thread_id = match sched().current_thread_id() {
-        Some(id) => id,
+    let thread_weak = match sched().current_thread_weak() {
+        Some(w) => w,
         None => {
             info.lock().errno = Errno::EINVAL;
             return -1;
         }
     };
-    let waiter = Arc::new(PollWaiter::new(thread_id));
+    let waiter = Arc::new(PollWaiter::new(thread_weak));
 
     interrupts::enable();
 

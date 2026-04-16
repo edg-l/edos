@@ -4,7 +4,12 @@ use core::{
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
-use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    collections::btree_map::BTreeMap,
+    string::String,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
@@ -978,8 +983,8 @@ pub(super) static THREADS: ThreadRegistry = ThreadRegistry::new();
 
 pub struct ThreadExitRegistry {
     map: RwLock<BTreeMap<ThreadId, i32>>,
-    /// Threads waiting for another thread to exit: child_tid -> waiter_tid.
-    waiters: RwLock<BTreeMap<ThreadId, ThreadId>>,
+    /// Threads waiting for another thread to exit: child_tid -> Weak<Thread>.
+    waiters: RwLock<BTreeMap<ThreadId, Weak<Thread>>>,
 }
 
 impl ThreadExitRegistry {
@@ -1006,7 +1011,7 @@ impl ThreadExitRegistry {
     }
 
     /// Register that `waiter` wants to be woken when `target` exits.
-    pub fn register_waiter(&self, target: ThreadId, waiter: ThreadId) {
+    pub fn register_waiter(&self, target: ThreadId, waiter: Weak<Thread>) {
         without_interrupts(|| {
             self.waiters.write().insert(target, waiter);
         })
@@ -1020,11 +1025,15 @@ impl ThreadExitRegistry {
     }
 
     /// Take and wake the waiter for a given target thread, if any.
+    ///
+    /// Called from the reaper kthread (thread context, not IRQ), so we use
+    /// `wake_thread_handle` (which has a self-skip check). The waiter Weak
+    /// is valid as long as THREADS holds the canonical strong ref.
     pub fn wake_waiter(&self, target: ThreadId) {
         let waiter = without_interrupts(|| self.waiters.write().remove(&target));
-        if let Some(waiter_tid) = waiter {
+        if let Some(waiter_handle) = waiter {
             use crate::thread::scheduler::{WakePriority, sched};
-            sched().wake_thread_irq(waiter_tid, WakePriority::Normal);
+            sched().wake_thread_handle(&waiter_handle, WakePriority::Normal);
         }
     }
 }
@@ -1043,6 +1052,12 @@ pub fn take_thread_exit_code(tid: ThreadId) -> Option<i32> {
 // simple wrapper
 pub fn get_thread_by_id(tid: ThreadId) -> Option<Arc<Thread>> {
     without_interrupts(|| THREADS.get(tid))
+}
+
+/// Return a `Weak<Thread>` for `tid` without keeping a strong reference.
+/// Takes the THREADS read lock briefly; `Arc::downgrade` is refcount-only.
+pub fn get_thread_weak(tid: ThreadId) -> Option<Weak<Thread>> {
+    without_interrupts(|| THREADS.get(tid).map(|arc| Arc::downgrade(&arc)))
 }
 
 pub fn get_thread_info_by_id(tid: ThreadId) -> Option<Arc<IrqSpinlock<UserThreadInfo>>> {

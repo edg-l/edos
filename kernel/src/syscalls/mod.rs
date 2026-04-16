@@ -936,8 +936,8 @@ fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
     }
 
     // Register as waiter so record_thread_exit wakes us
-    let current_tid = sched.current_thread().unwrap().id;
-    EXITED_THREADS.register_waiter(target, current_tid);
+    let current_weak = sched.current_thread_weak().unwrap();
+    EXITED_THREADS.register_waiter(target, current_weak);
 
     // Park until the target has exited. thread_park_while may return
     // spuriously (stale wake token, etc.), so loop on the real condition.
