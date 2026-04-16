@@ -31,8 +31,8 @@ pub fn usb_read_sectors(lba: u64, sectors: u16, buffer: Vec<u8>) -> Result<Vec<u
         buffer,
     });
     // Wake the xHCI driver thread so it processes the request.
-    if let Some(tid) = XHCI_DRIVER_THREAD_ID.get() {
-        sched().wake_thread(*tid, WakePriority::Normal);
+    if let Some(handle) = XHCI_DRIVER_THREAD_ID.get() {
+        sched().wake_thread(handle, WakePriority::Normal);
     }
     match response.wait() {
         UsbBlockResponse::ReadResult(result) => result,
@@ -52,8 +52,8 @@ pub fn usb_write_sectors(lba: u64, sectors: u16, data: Vec<u8>) -> Result<Vec<u8
     };
 
     let response = mailbox.send(UsbBlockRequest::Write { lba, sectors, data });
-    if let Some(tid) = XHCI_DRIVER_THREAD_ID.get() {
-        sched().wake_thread(*tid, WakePriority::Normal);
+    if let Some(handle) = XHCI_DRIVER_THREAD_ID.get() {
+        sched().wake_thread(handle, WakePriority::Normal);
     }
     match response.wait() {
         UsbBlockResponse::WriteResult(result) => result,

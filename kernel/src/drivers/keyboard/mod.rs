@@ -1,6 +1,10 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{
+    boxed::Box,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{HandleControl, KeyEvent, Keyboard, ScancodeSet1, layouts};
 use spin::{Mutex, Once};
@@ -18,7 +22,7 @@ use crate::{
         broadcast::{Broadcaster, Subscriber},
         mutex::BlockingMutex,
         scheduler::sched,
-        thread::ThreadId,
+        thread::Thread,
     },
 };
 
@@ -37,7 +41,7 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: Interrupt
     unsafe { get_lapic().end_of_interrupt() };
 }
 
-pub static KEYBOARD_THREAD_ID: Once<ThreadId> = Once::new();
+pub static KEYBOARD_THREAD_ID: Once<Weak<Thread>> = Once::new();
 
 /// Early init: create the scancode queue before IRQs are enabled.
 pub fn init() {
@@ -48,7 +52,7 @@ pub extern "C" fn driver_main() -> ! {
     // PS/2 hardware init is done by ps2::init_ps2_controller() before
     // this thread is spawned. We only set up the driver thread state here.
     let thread = sched().current_thread().unwrap();
-    KEYBOARD_THREAD_ID.call_once(|| thread.id);
+    KEYBOARD_THREAD_ID.call_once(|| Arc::downgrade(&thread));
     thread.set_priority(10);
 
     // Layout doesn't matter -- we only use add_byte() for scancode→KeyCode,

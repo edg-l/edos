@@ -3,7 +3,7 @@
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{KeyEvent, KeyState};
-use spin::{Once, RwLock};
+use spin::RwLock;
 
 use crate::{
     drivers::{
@@ -11,9 +11,7 @@ use crate::{
         mouse::{MOUSE_BROADCAST, MouseEvent},
     },
     log,
-    thread::{
-        broadcast::Subscriber, scheduler::sched, thread::ThreadId, util::queue_spawn_kthread_named,
-    },
+    thread::{broadcast::Subscriber, scheduler::sched, util::queue_spawn_kthread_named},
 };
 
 use super::registry::{WINDOW_REGISTRY, WindowId, decoration, flags};
@@ -216,9 +214,6 @@ impl WindowEventQueue {
 pub static WINDOW_EVENTS: RwLock<BTreeMap<WindowId, Arc<WindowEventQueue>>> =
     RwLock::new(BTreeMap::new());
 
-/// Thread ID of the input routing thread.
-pub static INPUT_THREAD_ID: Once<ThreadId> = Once::new();
-
 /// Last mouse button state for detecting changes.
 static LAST_MOUSE_BUTTONS: spin::Mutex<u8> = spin::Mutex::new(0);
 
@@ -281,7 +276,6 @@ extern "C" fn input_routing_thread() -> ! {
     log!("Window input routing thread started");
 
     let thread = sched().current_thread().unwrap();
-    INPUT_THREAD_ID.call_once(|| thread.id);
     thread.set_priority(10); // High priority for input
 
     // Subscribe to input broadcasts

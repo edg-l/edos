@@ -1,7 +1,7 @@
 pub mod descriptors;
 pub mod regs;
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{Ordering, compiler_fence};
 use x86_64::{
     VirtAddr, structures::paging::PageTableFlags, structures::paging::mapper::MapToError,
@@ -343,7 +343,7 @@ pub extern "C" fn e1000e_driver_main() -> ! {
 
     let thread = sched().current_thread().unwrap();
     thread.set_priority(IO_PRIORITY);
-    E1000E_DRIVER_THREAD_ID.call_once(|| thread.id);
+    E1000E_DRIVER_THREAD_ID.call_once(|| Arc::downgrade(&thread));
 
     let devices = pci_manager().read().get_devices().to_vec();
     let pci_dev = devices

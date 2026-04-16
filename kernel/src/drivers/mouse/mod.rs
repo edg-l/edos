@@ -2,7 +2,11 @@
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{
+    boxed::Box,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use crossbeam_queue::ArrayQueue;
 use spin::Once;
 
@@ -19,7 +23,7 @@ use crate::{
         broadcast::{Broadcaster, Subscriber},
         mutex::BlockingMutex,
         scheduler::{WakePriority, sched},
-        thread::ThreadId,
+        thread::Thread,
     },
 };
 
@@ -84,16 +88,16 @@ static SCREEN_HEIGHT: AtomicI32 = AtomicI32::new(600);
 // Whether the mouse has a scroll wheel (set by ps2::init_ps2_controller)
 pub(crate) static HAS_WHEEL: AtomicU8 = AtomicU8::new(0);
 
-// Driver thread ID for waking
-pub static MOUSE_THREAD_ID: Once<ThreadId> = Once::new();
+// Driver thread handle for waking from IRQ context.
+pub static MOUSE_THREAD_ID: Once<Weak<Thread>> = Once::new();
 
 /// Push a mouse byte from an external handler (e.g. keyboard IRQ
 /// draining a mouse byte from the shared 8042 buffer).
 pub fn push_mouse_byte(byte: u8) {
     if let Some(queue) = SCANCODE_QUEUE.get() {
         let _ = queue.push(byte);
-        if let Some(tid) = MOUSE_THREAD_ID.get() {
-            sched().wake_thread_irq(*tid, WakePriority::Interrupt);
+        if let Some(handle) = MOUSE_THREAD_ID.get() {
+            sched().wake_thread_irq(handle, WakePriority::Interrupt);
         }
     }
 }
@@ -168,7 +172,7 @@ pub extern "C" fn driver_main() -> ! {
     log!("Mouse driver thread started");
 
     let thread = sched().current_thread().unwrap();
-    MOUSE_THREAD_ID.call_once(|| thread.id);
+    MOUSE_THREAD_ID.call_once(|| Arc::downgrade(&thread));
     thread.set_priority(10);
 
     // Get screen dimensions and center the mouse

@@ -23,7 +23,7 @@ impl PollWaiter {
     /// Notify the owning thread that an event has been delivered.
     pub fn notify(&self) {
         self.pending.store(true, Ordering::Release);
-        sched().wake_thread_handle(&self.thread, WakePriority::Normal);
+        sched().wake_thread(&self.thread, WakePriority::Normal);
     }
 
     /// Clear the pending flag, returning whether a notification was pending.

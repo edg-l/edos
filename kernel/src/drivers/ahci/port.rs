@@ -1511,7 +1511,7 @@ impl AhciPort {
         for waiter in &self.slot_waiters {
             let handle_opt = waiter.lock().clone();
             if let Some(ref handle) = handle_opt {
-                sched().wake_thread_handle(handle, WakePriority::Interrupt);
+                sched().wake_thread(handle, WakePriority::Interrupt);
             }
         }
     }

@@ -600,7 +600,7 @@ pub extern "C" fn hda_driver_main() -> ! {
 
     let thread = sched().current_thread().unwrap();
     thread.set_priority(IO_PRIORITY);
-    HDA_DRIVER_THREAD_ID.call_once(|| thread.id);
+    HDA_DRIVER_THREAD_ID.call_once(|| Arc::downgrade(&thread));
 
     let devices = pci_manager().read().get_devices().to_vec();
     let pci_dev = devices

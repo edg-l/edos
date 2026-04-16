@@ -63,7 +63,7 @@ impl WaitQueue {
             match handle_opt {
                 None => return false,
                 Some(handle) => {
-                    if sched().wake_thread_handle(&handle, WakePriority::Normal) {
+                    if sched().wake_thread(&handle, WakePriority::Normal) {
                         return true;
                     }
                     // Thread exited between enrollment and wake, or self-skip
@@ -87,7 +87,7 @@ impl WaitQueue {
         });
         let mut n = 0usize;
         for handle in &handles {
-            if sched().wake_thread_handle(handle, WakePriority::Normal) {
+            if sched().wake_thread(handle, WakePriority::Normal) {
                 n += 1;
             }
         }

@@ -1,3 +1,4 @@
+use alloc::sync::Weak;
 use spin::Once;
 use x86_64::structures::idt::InterruptStackFrame;
 
@@ -6,13 +7,13 @@ use crate::{
     drivers::ahci::AHCI_DRIVER_THREAD_ID,
     thread::{
         scheduler::{WakePriority, sched},
-        thread::ThreadId,
+        thread::Thread,
     },
 };
 
-pub static XHCI_DRIVER_THREAD_ID: Once<ThreadId> = Once::new();
-pub static E1000E_DRIVER_THREAD_ID: Once<ThreadId> = Once::new();
-pub static HDA_DRIVER_THREAD_ID: Once<ThreadId> = Once::new();
+pub static XHCI_DRIVER_THREAD_ID: Once<Weak<Thread>> = Once::new();
+pub static E1000E_DRIVER_THREAD_ID: Once<Weak<Thread>> = Once::new();
+pub static HDA_DRIVER_THREAD_ID: Once<Weak<Thread>> = Once::new();
 
 pub(super) extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::drivers::ps2_drain_buffer();
@@ -20,29 +21,29 @@ pub(super) extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: Inter
 }
 
 pub(super) extern "x86-interrupt" fn ahci_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    if let Some(tid) = AHCI_DRIVER_THREAD_ID.get() {
-        sched().wake_thread_irq(*tid, WakePriority::Interrupt);
+    if let Some(handle) = AHCI_DRIVER_THREAD_ID.get() {
+        sched().wake_thread_irq(handle, WakePriority::Interrupt);
     }
     unsafe { get_lapic().end_of_interrupt() };
 }
 
 pub(super) extern "x86-interrupt" fn xhci_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    if let Some(tid) = XHCI_DRIVER_THREAD_ID.get() {
-        sched().wake_thread_irq(*tid, WakePriority::Interrupt);
+    if let Some(handle) = XHCI_DRIVER_THREAD_ID.get() {
+        sched().wake_thread_irq(handle, WakePriority::Interrupt);
     }
     unsafe { get_lapic().end_of_interrupt() };
 }
 
 pub(super) extern "x86-interrupt" fn e1000e_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    if let Some(tid) = E1000E_DRIVER_THREAD_ID.get() {
-        sched().wake_thread_irq(*tid, WakePriority::Interrupt);
+    if let Some(handle) = E1000E_DRIVER_THREAD_ID.get() {
+        sched().wake_thread_irq(handle, WakePriority::Interrupt);
     }
     unsafe { get_lapic().end_of_interrupt() };
 }
 
 pub(super) extern "x86-interrupt" fn hda_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    if let Some(tid) = HDA_DRIVER_THREAD_ID.get() {
-        sched().wake_thread_irq(*tid, WakePriority::Interrupt);
+    if let Some(handle) = HDA_DRIVER_THREAD_ID.get() {
+        sched().wake_thread_irq(handle, WakePriority::Interrupt);
     }
     unsafe { get_lapic().end_of_interrupt() };
 }

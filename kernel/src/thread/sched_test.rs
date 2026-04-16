@@ -8,11 +8,21 @@ use crate::{
     println,
     thread::{
         scheduler::{WakePriority, sched},
-        thread::ThreadId,
+        thread::{ThreadId, get_thread_weak},
         util::queue_spawn_kthread_named_arg,
     },
     timer::Instant,
 };
+
+/// Test-only helper: wake a thread by TID via the Weak-handle API. Tests
+/// still store raw TIDs in atomic cells because test threads are short-lived
+/// and never recycle during a test run; this helper bridges that storage
+/// back to the canonical `wake_thread` API.
+fn wake_tid(tid: ThreadId, priority: WakePriority) {
+    if let Some(handle) = get_thread_weak(tid) {
+        sched().wake_thread(&handle, priority);
+    }
+}
 
 /// Exit QEMU via the isa-debug-exit device (port 0xf4).
 /// The exit code seen by the host is `(code << 1) | 1`, so
@@ -168,7 +178,7 @@ extern "C" fn test_park_b(arg: *mut u8) -> ! {
     // Give A time to actually park
     sched().thread_sleep(Duration::from_millis(10));
     let tid = ThreadId(h.wake_target_tid.load(Ordering::Acquire));
-    sched().wake_thread(tid, WakePriority::Normal);
+    wake_tid(tid, WakePriority::Normal);
     test_done(&h, "park-wake-b");
     sched().thread_exit(0);
 }
@@ -227,7 +237,7 @@ extern "C" fn test_park_while_d(arg: *mut u8) -> ! {
     sched().thread_sleep(Duration::from_millis(10));
     h.park_while_condition.store(false, Ordering::Release);
     let tid = ThreadId(h.park_while_tid.load(Ordering::Acquire));
-    sched().wake_thread(tid, WakePriority::Normal);
+    wake_tid(tid, WakePriority::Normal);
     test_done(&h, "park-while-d");
     sched().thread_exit(0);
 }
@@ -266,7 +276,7 @@ extern "C" fn test_ping(arg: *mut u8) -> ! {
     for _ in 0..PING_PONG_ROUNDS {
         sched().thread_park();
         // Woken by pong. Wake pong back.
-        sched().wake_thread(pong, WakePriority::Normal);
+        wake_tid(pong, WakePriority::Normal);
     }
     // Final park - pong will wake us one last time
     sched().thread_park();
@@ -296,13 +306,13 @@ extern "C" fn test_pong(arg: *mut u8) -> ! {
 
     for _ in 0..PING_PONG_ROUNDS {
         // Wake ping
-        sched().wake_thread(ping, WakePriority::Normal);
+        wake_tid(ping, WakePriority::Normal);
         h.ping_pong_count.fetch_add(1, Ordering::AcqRel);
         // Park, wait for ping to wake us back
         sched().thread_park();
     }
     // Wake ping one final time so it can finish
-    sched().wake_thread(ping, WakePriority::Normal);
+    wake_tid(ping, WakePriority::Normal);
 
     test_done(&h, "ping-pong-pong");
     sched().thread_exit(0);
@@ -405,7 +415,7 @@ extern "C" fn test_multi_wake_waker(arg: *mut u8) -> ! {
     for slot in &h.multi_wake_tids {
         let tid = slot.load(Ordering::Acquire);
         if tid != 0 {
-            sched().wake_thread(ThreadId(tid), WakePriority::Normal);
+            wake_tid(ThreadId(tid), WakePriority::Normal);
         }
     }
 
@@ -462,7 +472,7 @@ extern "C" fn test_abort_race_waker(arg: *mut u8) -> ! {
         }
         // Immediately flip condition and wake -- NO sleep, race the parker
         h.abort_race_condition.store(false, Ordering::Release);
-        sched().wake_thread(parker, WakePriority::Normal);
+        wake_tid(parker, WakePriority::Normal);
         h.abort_race_rounds.fetch_add(1, Ordering::AcqRel);
         // Yield to give parker a chance to run its next iteration
         sched().thread_yield();
@@ -509,7 +519,7 @@ extern "C" fn test_wbp_waker(arg: *mut u8) -> ! {
         core::hint::spin_loop();
     }
     // No sleep! Wake immediately while parker might still be Running.
-    sched().wake_thread(parker, WakePriority::Normal);
+    wake_tid(parker, WakePriority::Normal);
 
     test_done(&h, "wake-before-park-waker");
     sched().thread_exit(0);
@@ -552,7 +562,7 @@ extern "C" fn test_sleep_interrupt_waker(arg: *mut u8) -> ! {
     // Give sleeper time to enter sleep
     sched().thread_sleep(Duration::from_millis(5));
     // Wake the sleeping thread early
-    sched().wake_thread(sleeper, WakePriority::Normal);
+    wake_tid(sleeper, WakePriority::Normal);
 
     test_done(&h, "sleep-interrupt-waker");
     sched().thread_exit(0);

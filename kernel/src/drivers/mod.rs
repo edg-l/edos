@@ -62,13 +62,13 @@ pub fn ps2_drain_buffer() {
     // Wake driver threads outside the lock
     let sched = crate::thread::scheduler::sched();
     if got_keyboard {
-        if let Some(tid) = keyboard::KEYBOARD_THREAD_ID.get() {
-            sched.wake_thread_irq(*tid, crate::thread::scheduler::WakePriority::Interrupt);
+        if let Some(handle) = keyboard::KEYBOARD_THREAD_ID.get() {
+            sched.wake_thread_irq(handle, crate::thread::scheduler::WakePriority::Interrupt);
         }
     }
     if got_mouse {
-        if let Some(tid) = mouse::MOUSE_THREAD_ID.get() {
-            sched.wake_thread_irq(*tid, crate::thread::scheduler::WakePriority::Interrupt);
+        if let Some(handle) = mouse::MOUSE_THREAD_ID.get() {
+            sched.wake_thread_irq(handle, crate::thread::scheduler::WakePriority::Interrupt);
         }
     }
 }

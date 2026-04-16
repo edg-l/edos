@@ -1,6 +1,9 @@
 use core::ptr;
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use spin::Once;
 use thiserror::Error;
 use x86_64::instructions::hlt;
@@ -15,7 +18,10 @@ use crate::{
     },
     log,
     thread::{
-        runqueue::IO_PRIORITY, scheduler::sched, thread::ThreadId, util::queue_spawn_kthread_named,
+        runqueue::IO_PRIORITY,
+        scheduler::sched,
+        thread::{Thread, get_thread_weak},
+        util::queue_spawn_kthread_named,
     },
 };
 
@@ -51,13 +57,15 @@ pub enum DeviceType {
     Atapi,
 }
 
-pub static AHCI_DRIVER_THREAD_ID: Once<ThreadId> = Once::new();
+pub static AHCI_DRIVER_THREAD_ID: Once<Weak<Thread>> = Once::new();
 
 pub static DETECTED_DEVICES: Once<Vec<DetectedDevice>> = Once::new();
 
 pub fn init() {
-    AHCI_DRIVER_THREAD_ID
-        .call_once(|| queue_spawn_kthread_named("ahci", ahci_driver_main as *const () as u64));
+    AHCI_DRIVER_THREAD_ID.call_once(|| {
+        let tid = queue_spawn_kthread_named("ahci", ahci_driver_main as *const () as u64);
+        get_thread_weak(tid).expect("ahci kthread vanished before call_once")
+    });
 }
 
 #[derive(Debug, Clone)]

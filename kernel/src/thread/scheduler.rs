@@ -986,7 +986,7 @@ impl Scheduler {
     ///
     /// Returns `true` if a live thread was woken, `false` if the handle was
     /// dangling (thread exited) or the self-skip fired.
-    pub fn wake_thread_handle(&self, handle: &Weak<Thread>, priority: WakePriority) -> bool {
+    pub fn wake_thread(&self, handle: &Weak<Thread>, priority: WakePriority) -> bool {
         // Self-skip: compare control-block pointers before paying for upgrade.
         if let Some(current_weak) = self.current_thread_weak() {
             if Weak::ptr_eq(handle, &current_weak) {
@@ -1003,40 +1003,20 @@ impl Scheduler {
 
     /// Wake the thread identified by `handle` from an IRQ handler.
     ///
-    /// Identical to `wake_thread_handle` but without the self-skip check —
+    /// Identical to `wake_thread` but without the self-skip check —
     /// IRQ handlers are not associated with a specific thread identity and the
     /// self-skip check would require `current_thread()` which is not meaningful
     /// in that context.
     ///
-    /// Safety properties are identical to `wake_thread_handle`: `Weak::upgrade`
+    /// Safety properties are identical to `wake_thread`: `Weak::upgrade`
     /// is allocator-free and the temporary `Arc` drop cannot free the Thread
     /// because `THREADS` holds the strong ref until reaper removal.
-    pub fn wake_thread_handle_irq(&self, handle: &Weak<Thread>, priority: WakePriority) -> bool {
+    pub fn wake_thread_irq(&self, handle: &Weak<Thread>, priority: WakePriority) -> bool {
         if let Some(thread) = handle.upgrade() {
             self.do_wake(thread, priority);
             true
         } else {
             false
-        }
-    }
-
-    /// Wake `tid`. Safe from any context. Skips a no-op self-wake.
-    // Careful over proritizing, it can starve threads, specially in smp 1
-    pub fn wake_thread(&self, tid: ThreadId, priority: WakePriority) {
-        if Some(tid) == self.current_thread_id() {
-            return;
-        }
-        if let Some(t) = get_thread_by_id(tid) {
-            self.do_wake(t, priority);
-        }
-    }
-
-    /// Wake `tid` from an IRQ handler. Identical to `wake_thread` minus the
-    /// self-skip — IRQ handlers don't reason about the preempted thread's
-    /// identity.
-    pub fn wake_thread_irq(&self, tid: ThreadId, priority: WakePriority) {
-        if let Some(t) = get_thread_by_id(tid) {
-            self.do_wake(t, priority);
         }
     }
 
@@ -1598,7 +1578,7 @@ pub unsafe extern "C" fn save_transition_switch(
 
 /// Queue of dead threads awaiting cleanup. Lock-free, allocation-free on push.
 static REAPER_QUEUE: Once<ArrayQueue<Arc<Thread>>> = Once::new();
-static REAPER_TID: AtomicU64 = AtomicU64::new(0);
+static REAPER_HANDLE: Once<Weak<Thread>> = Once::new();
 
 /// Initialize the reaper subsystem. Call once from the BSP after scheduler init.
 pub fn init_reaper() {
@@ -1606,7 +1586,10 @@ pub fn init_reaper() {
 
     let tid =
         crate::thread::util::queue_spawn_kthread_named("reaper", reaper_thread as *const () as u64);
-    REAPER_TID.store(tid.0, Ordering::Release);
+    REAPER_HANDLE.call_once(|| {
+        crate::thread::thread::get_thread_weak(tid)
+            .expect("reaper kthread vanished before call_once")
+    });
     println!("Reaper thread started (tid={})", tid.0);
 }
 
@@ -1638,10 +1621,10 @@ fn reaper_enqueue(thread: Arc<Thread>) {
         // The thread's resources will leak. Log it.
         println!("WARNING: reaper queue full, thread cleanup leaked");
     }
-    // Wake the reaper thread.
-    let reaper_tid = REAPER_TID.load(Ordering::Acquire);
-    if reaper_tid != 0 {
-        sched().wake_thread_irq(ThreadId(reaper_tid), WakePriority::Normal);
+    // Wake the reaper thread. `reaper_enqueue` is called from `thread_exit`
+    // with interrupts already disabled, so we use the IRQ-safe variant.
+    if let Some(handle) = REAPER_HANDLE.get() {
+        sched().wake_thread_irq(handle, WakePriority::Normal);
     }
 }
 

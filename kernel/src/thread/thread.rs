@@ -1027,13 +1027,13 @@ impl ThreadExitRegistry {
     /// Take and wake the waiter for a given target thread, if any.
     ///
     /// Called from the reaper kthread (thread context, not IRQ), so we use
-    /// `wake_thread_handle` (which has a self-skip check). The waiter Weak
+    /// `wake_thread` (which has a self-skip check). The waiter Weak
     /// is valid as long as THREADS holds the canonical strong ref.
     pub fn wake_waiter(&self, target: ThreadId) {
         let waiter = without_interrupts(|| self.waiters.write().remove(&target));
         if let Some(waiter_handle) = waiter {
             use crate::thread::scheduler::{WakePriority, sched};
-            sched().wake_thread_handle(&waiter_handle, WakePriority::Normal);
+            sched().wake_thread(&waiter_handle, WakePriority::Normal);
         }
     }
 }
@@ -1123,7 +1123,7 @@ pub fn kill_process_with_signal(pid: u64, signum: u32) -> bool {
         }
 
         // Wake the thread so it can observe the signal
-        sched().wake_thread(ThreadId(pid), WakePriority::Normal);
+        sched().wake_thread(&Arc::downgrade(&thread), WakePriority::Normal);
         true
     } else {
         false
