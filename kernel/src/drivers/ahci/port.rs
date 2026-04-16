@@ -1,10 +1,10 @@
 use core::{
     ptr,
-    sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering},
     time::Duration,
 };
 
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Weak, vec, vec::Vec};
 
 use x86_64::structures::paging::mapper::TranslateResult;
 use x86_64::{PhysAddr, VirtAddr};
@@ -25,7 +25,12 @@ use crate::{
     },
     log,
     memory::mapper::memory_mapper,
-    thread::{mutex::BlockingMutex, scheduler::sched, waitqueue::WaitQueue},
+    thread::{
+        mutex::BlockingMutex,
+        scheduler::{WakePriority, sched},
+        thread::Thread,
+        waitqueue::WaitQueue,
+    },
 };
 
 const AHCI_CMD_SLOTS: usize = 32;
@@ -123,9 +128,21 @@ pub struct AhciPort {
     // Brief spinlock for MMIO register writes (SACT + CI read-modify-write).
     mmio_lock: spin::Mutex<()>,
 
-    // Per-slot waiter TIDs. The interrupt dispatch thread reads these to wake
-    // the correct I/O thread when a command completes. 0 = no waiter.
-    slot_waiters: [AtomicU64; AHCI_CMD_SLOTS],
+    // Per-slot waiter handles. The AHCI driver kthread reads these to wake
+    // the correct I/O thread when a command completes. None = no waiter.
+    //
+    // IRQ-safety: this uses plain `spin::Mutex`, which does NOT disable
+    // interrupts. Every access site below runs in thread context: submitters
+    // are the I/O-issuing threads (e.g. userspace via syscall), and
+    // `wake_all_slot_waiters` is called from the AHCI driver kthread's
+    // `process_completion` path. The hardware IRQ handler only wakes
+    // `AHCI_DRIVER_THREAD_ID`; it does NOT touch `slot_waiters` directly. If
+    // that ever changes (e.g. async NCQ readahead wanting to wake directly
+    // from IRQ), this type MUST become `IrqSpinlock<[Option<Weak<Thread>>; N]>`
+    // or an `AtomicPtr<WeakRaw>` array first — otherwise a driver-thread
+    // lock holder preempted by a hardware IRQ handler that also tries to
+    // acquire the lock will deadlock.
+    slot_waiters: [spin::Mutex<Option<Weak<Thread>>>; AHCI_CMD_SLOTS],
 
     // NCQ / non-NCQ mode exclusion (only meaningful when ncq_enabled).
     //   > 0 : count of in-flight NCQ (FPDMA) commands
@@ -227,7 +244,7 @@ impl AhciPort {
             slot_pools: Vec::new(),
             free_slots: AtomicU32::new(1), // Only slot 0 available until init_io_pools
             mmio_lock: spin::Mutex::new(()),
-            slot_waiters: [const { AtomicU64::new(0) }; AHCI_CMD_SLOTS],
+            slot_waiters: [const { spin::Mutex::new(None) }; AHCI_CMD_SLOTS],
             mode: AtomicI32::new(0),
             mode_waitq: WaitQueue::new(),
             slot_waitq: WaitQueue::new(),
@@ -838,8 +855,8 @@ impl AhciPort {
         self.enter_ncq_mode();
 
         let slot = self.allocate_slot_blocking();
-        let tid = sched().current_thread().unwrap().id;
-        self.slot_waiters[slot].store(tid.0, Ordering::Release);
+        let handle = sched().current_thread_weak().unwrap();
+        *self.slot_waiters[slot].lock() = Some(handle.clone());
 
         let result = (|| -> Result<(), AhciError> {
             let fis = FisRegH2D::new_read_fpdma_queued(lba, sectors, slot as u8);
@@ -875,7 +892,7 @@ impl AhciPort {
             Ok(())
         })();
 
-        self.slot_waiters[slot].store(0, Ordering::Release);
+        *self.slot_waiters[slot].lock() = None;
         self.free_slot(slot);
         self.exit_ncq_mode();
 
@@ -906,8 +923,8 @@ impl AhciPort {
         self.enter_ncq_mode();
 
         let slot = self.allocate_slot_blocking();
-        let tid = sched().current_thread().unwrap().id;
-        self.slot_waiters[slot].store(tid.0, Ordering::Release);
+        let handle = sched().current_thread_weak().unwrap();
+        *self.slot_waiters[slot].lock() = Some(handle.clone());
 
         let result = (|| -> Result<(), AhciError> {
             let fis = if fua {
@@ -943,7 +960,7 @@ impl AhciPort {
             self.wait_for_ncq_completion(slot, Duration::from_secs(5))
         })();
 
-        self.slot_waiters[slot].store(0, Ordering::Release);
+        *self.slot_waiters[slot].lock() = None;
         self.free_slot(slot);
         self.exit_ncq_mode();
 
@@ -972,7 +989,7 @@ impl AhciPort {
             // Allocate slots and issue all commands in this sub-batch.
             let mut slots: heapless::Vec<usize, 32> = heapless::Vec::new();
             let mut direct: heapless::Vec<bool, 32> = heapless::Vec::new();
-            let tid = sched().current_thread().unwrap().id;
+            let handle = sched().current_thread_weak().unwrap();
 
             for &(lba, sectors, ref buf) in chunk.iter() {
                 if sectors == 0 {
@@ -990,7 +1007,7 @@ impl AhciPort {
                 }
 
                 let slot = self.allocate_slot_blocking();
-                self.slot_waiters[slot].store(tid.0, Ordering::Release);
+                *self.slot_waiters[slot].lock() = Some(handle.clone());
 
                 let sg = virt_buffer_to_sg_list(buf.as_ptr(), expected_size);
 
@@ -1011,7 +1028,7 @@ impl AhciPort {
                 };
 
                 if let Err(e) = setup_result {
-                    self.slot_waiters[slot].store(0, Ordering::Release);
+                    *self.slot_waiters[slot].lock() = None;
                     self.free_slot(slot);
                     first_err.get_or_insert(e);
                     let _ = slots.push(usize::MAX);
@@ -1052,7 +1069,7 @@ impl AhciPort {
                     first_err.get_or_insert(e);
                 }
 
-                self.slot_waiters[slot].store(0, Ordering::Release);
+                *self.slot_waiters[slot].lock() = None;
                 self.free_slot(slot);
             }
         }
@@ -1088,8 +1105,8 @@ impl AhciPort {
         let _guard = self.legacy_lock.lock();
 
         let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
-        let tid = sched().current_thread().unwrap().id;
-        self.slot_waiters[slot].store(tid.0, Ordering::Release);
+        let handle = sched().current_thread_weak().unwrap();
+        *self.slot_waiters[slot].lock() = Some(handle.clone());
 
         let result = (|| -> Result<(), AhciError> {
             let fis = FisRegH2D::new_read_dma_ext(lba, sectors);
@@ -1125,7 +1142,7 @@ impl AhciPort {
             Ok(())
         })();
 
-        self.slot_waiters[slot].store(0, Ordering::Release);
+        *self.slot_waiters[slot].lock() = None;
         self.free_slot(slot);
 
         result
@@ -1155,8 +1172,8 @@ impl AhciPort {
         let _guard = self.legacy_lock.lock();
 
         let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
-        let tid = sched().current_thread().unwrap().id;
-        self.slot_waiters[slot].store(tid.0, Ordering::Release);
+        let handle = sched().current_thread_weak().unwrap();
+        *self.slot_waiters[slot].lock() = Some(handle.clone());
 
         let result = (|| -> Result<(), AhciError> {
             let fis = if fua {
@@ -1192,7 +1209,7 @@ impl AhciPort {
             self.wait_for_completion(slot, Duration::from_secs(5))
         })();
 
-        self.slot_waiters[slot].store(0, Ordering::Release);
+        *self.slot_waiters[slot].lock() = None;
         self.free_slot(slot);
 
         result
@@ -1219,8 +1236,8 @@ impl AhciPort {
         timeout: Duration,
     ) -> Result<(), AhciError> {
         let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
-        let tid = sched().current_thread().unwrap().id;
-        self.slot_waiters[slot].store(tid.0, Ordering::Release);
+        let handle = sched().current_thread_weak().unwrap();
+        *self.slot_waiters[slot].lock() = Some(handle.clone());
 
         let result = (|| -> Result<(), AhciError> {
             self.setup_command_table(slot, fis, buffer_addr, buffer_size)?;
@@ -1229,7 +1246,7 @@ impl AhciPort {
             self.wait_for_completion(slot, timeout)
         })();
 
-        self.slot_waiters[slot].store(0, Ordering::Release);
+        *self.slot_waiters[slot].lock() = None;
         self.free_slot(slot);
 
         result
@@ -1362,8 +1379,8 @@ impl AhciPort {
         timeout: Duration,
     ) -> Result<(), AhciError> {
         let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
-        let tid = sched().current_thread().unwrap().id;
-        self.slot_waiters[slot].store(tid.0, Ordering::Release);
+        let handle = sched().current_thread_weak().unwrap();
+        *self.slot_waiters[slot].lock() = Some(handle.clone());
 
         let result = (|| -> Result<(), AhciError> {
             self.setup_atapi_command_table(slot, scsi_cmd, buffer_addr, buffer_size)?;
@@ -1372,7 +1389,7 @@ impl AhciPort {
             self.wait_for_completion(slot, timeout)
         })();
 
-        self.slot_waiters[slot].store(0, Ordering::Release);
+        *self.slot_waiters[slot].lock() = None;
         self.free_slot(slot);
 
         result
@@ -1486,15 +1503,15 @@ impl AhciPort {
 // ---------------------------------------------------------------------------
 
 impl AhciPort {
-    /// Wake all threads waiting on any slot. Called by the interrupt dispatch thread.
+    /// Wake all threads waiting on any slot. Called by the AHCI driver kthread
+    /// after `process_completion`. Runs in thread context (NOT IRQ context);
+    /// the per-slot `spin::Mutex` is safe here — see the `slot_waiters` field
+    /// comment for the IRQ-safety reasoning.
     pub fn wake_all_slot_waiters(&self) {
         for waiter in &self.slot_waiters {
-            let tid = waiter.load(Ordering::Acquire);
-            if tid != 0 {
-                sched().wake_thread(
-                    crate::thread::thread::ThreadId(tid),
-                    crate::thread::scheduler::WakePriority::Interrupt,
-                );
+            let handle_opt = waiter.lock().clone();
+            if let Some(ref handle) = handle_opt {
+                sched().wake_thread_handle(handle, WakePriority::Interrupt);
             }
         }
     }
