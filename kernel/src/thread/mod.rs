@@ -11,6 +11,7 @@ use crate::{
     thread::{fd::FileDescriptorTable, mutex::BlockingMutex},
 };
 pub mod broadcast;
+pub mod cancel;
 pub mod context;
 pub mod fd;
 pub mod interrupt;
@@ -32,6 +33,9 @@ pub mod waitqueue;
 
 #[cfg(feature = "sched-test")]
 pub mod sched_test;
+
+#[cfg(feature = "cancel-smoke")]
+pub mod cancel_smoke;
 
 #[derive(Debug)]
 pub struct UserThread {
@@ -202,3 +206,6 @@ pub fn setup_user_stack(
 
     Ok((sp, argv_ptr, argc, envp_ptr))
 }
+
+#[allow(unused_imports)]
+pub use cancel::{ArcCancellableOp, CancellableOp, OWNED_OPS_CAP};

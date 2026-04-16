@@ -132,6 +132,9 @@ fn main() -> ! {
         }
     }
 
+    #[cfg(feature = "cancel-smoke")]
+    crate::thread::cancel_smoke::run_cancel_smoke();
+
     #[allow(unreachable_code)]
     let now = Instant::now();
 

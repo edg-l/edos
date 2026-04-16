@@ -36,6 +36,7 @@ use crate::{
     syscalls::Errno,
     thread::{
         UserThread, UserThreadInfo, UserThreadTls,
+        cancel::{ArcCancellableOp, OWNED_OPS_CAP},
         context::CpuContext,
         fd::FileDescriptorTable,
         irqlock::IrqSpinlock,
@@ -194,6 +195,16 @@ pub struct Thread {
     // UnsafeCell because it's accessed without a lock (only current CPU writes).
     pub fpu: UnsafeCell<FpuState>,
     pub fpu_init: AtomicBool,
+
+    /// Async operations the thread currently owns.  On wake-after-completion
+    /// the op unregisters itself (`owned_ops_remove`).  On death, `Thread::free`
+    /// calls `owned_ops_cancel_all` which drains this list and invokes
+    /// `cancel()` on every entry.
+    ///
+    /// `IrqSpinlock` because cancel enumeration can overlap contexts where
+    /// the global allocator is held; we avoid any blocking locks.  Pushes
+    /// happen on the submitting thread BEFORE park, outside scheduler/IRQ paths.
+    pub owned_ops: IrqSpinlock<heapless::Vec<ArcCancellableOp, OWNED_OPS_CAP>>,
 }
 
 intrusive_list::impl_linked!(Thread, rq_link);
@@ -472,6 +483,7 @@ impl Thread {
             context_saved: AtomicBool::new(true),
             fpu: UnsafeCell::new(FpuState::default()),
             fpu_init: AtomicBool::new(false),
+            owned_ops: IrqSpinlock::new(heapless::Vec::new()),
         });
 
         THREADS.insert(thread.clone());
@@ -636,6 +648,7 @@ impl Thread {
             context_saved: AtomicBool::new(true),
             fpu: UnsafeCell::new(FpuState::default()),
             fpu_init: AtomicBool::new(false),
+            owned_ops: IrqSpinlock::new(heapless::Vec::new()),
         });
 
         THREADS.insert(thread.clone());
@@ -689,6 +702,12 @@ impl Thread {
             "free: thread {} still linked on runqueue",
             self.id.0
         );
+        // Cancel all in-flight async operations before any resource teardown.
+        // This releases AHCI slots and any other driver resources owned by
+        // this thread, so that drivers don't observe dangling Weak<Thread>
+        // references during their completion paths.
+        self.owned_ops_cancel_all();
+
         kthread_stack_free(self.kstack_top);
 
         let Some(user_lock) = &self.user else {
@@ -928,6 +947,56 @@ impl Thread {
                 }
                 _ => return false, // Waking, Dying, etc.
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Owned-ops registry (Foundation #2: cancellable waits)
+    // -----------------------------------------------------------------------
+
+    /// Register an in-flight async operation before parking.
+    ///
+    /// Called by the submitting thread BEFORE it parks.  This is thread
+    /// context, so heap allocation (Arc construction) is allowed.
+    ///
+    /// Returns `Err(op)` if the registry is full (`OWNED_OPS_CAP` reached).
+    /// On overflow the caller falls back to the pre-Foundation-#2 behaviour
+    /// (no cancel hookup for that op).
+    #[allow(dead_code)] // used by AHCI cancel wiring (Phase 3b, Session B)
+    pub fn owned_ops_push(&self, op: ArcCancellableOp) -> Result<(), ArcCancellableOp> {
+        self.owned_ops.lock().push(op)
+    }
+
+    /// Deregister a completed op by pointer identity.
+    ///
+    /// Called by the driver or the submitter after wake-after-completion.
+    /// O(N) scan with N ≤ `OWNED_OPS_CAP` (≤ 32); cheap.
+    #[allow(dead_code)] // used by AHCI cancel wiring (Phase 3b, Session B)
+    pub fn owned_ops_remove(&self, op_ptr: *const ()) {
+        let mut guard = self.owned_ops.lock();
+        if let Some(pos) = guard
+            .iter()
+            .position(|arc| Arc::as_ptr(arc) as *const () == op_ptr)
+        {
+            guard.swap_remove(pos);
+        }
+    }
+
+    /// Called from `Thread::free` (reaper kthread context).
+    ///
+    /// Drains the registry into a local buffer, releases the lock, then
+    /// calls `cancel()` on each entry.  Draining first avoids holding the
+    /// `IrqSpinlock` across arbitrary `cancel()` implementations that may
+    /// themselves acquire driver locks.
+    pub fn owned_ops_cancel_all(&self) {
+        // Drain under lock — heapless::Vec::take gives us the contents.
+        let ops: heapless::Vec<ArcCancellableOp, OWNED_OPS_CAP> = {
+            let mut guard = self.owned_ops.lock();
+            core::mem::take(&mut *guard)
+        };
+        // Cancel outside the lock.
+        for op in ops {
+            op.cancel();
         }
     }
 }

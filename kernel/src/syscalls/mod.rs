@@ -6,6 +6,7 @@ use core::{
 
 use alloc::vec;
 use alloc::{format, string::ToString, sync::Arc, vec::Vec};
+use heapless::Vec as HeaplessVec;
 use intrusive_list::Link;
 use spin::{Mutex, RwLock};
 use x86_64::{
@@ -1724,6 +1725,7 @@ fn sys_clone(
         context_saved: AtomicBool::new(true),
         fpu: core::cell::UnsafeCell::new(crate::drivers::fpu::FpuState::default()),
         fpu_init: AtomicBool::new(false),
+        owned_ops: crate::thread::irqlock::IrqSpinlock::new(HeaplessVec::new()),
     });
 
     // Clone parent's UserThreadInfo - share fd_table
@@ -1968,6 +1970,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
             core::cell::UnsafeCell::new(fpu_state)
         },
         fpu_init: AtomicBool::new(true),
+        owned_ops: crate::thread::irqlock::IrqSpinlock::new(HeaplessVec::new()),
     });
 
     insert_thread(child_thread.clone());

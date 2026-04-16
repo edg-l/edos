@@ -1,9 +1,18 @@
-use core::ops::{Deref, DerefMut};
+use core::{
+    fmt,
+    ops::{Deref, DerefMut},
+};
 use spin::{Mutex, MutexGuard};
 use x86_64::instructions::interrupts;
 
 pub struct IrqSpinlock<T> {
     inner: Mutex<T>,
+}
+
+impl<T> fmt::Debug for IrqSpinlock<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("IrqSpinlock { <contents omitted> }")
+    }
 }
 
 impl<T> IrqSpinlock<T> {
