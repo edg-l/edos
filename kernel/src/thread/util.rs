@@ -1,6 +1,6 @@
 #![expect(unused)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use alloc::{string::ToString, sync::Arc};
 use crossbeam_queue::ArrayQueue;
@@ -90,23 +90,41 @@ pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> Th
     id
 }
 
+/// Rotating hint for `pick_sched` tie-breaking. Bumped every call to spread
+/// new-thread placement across CPUs with equal `thread_count`. Prevents the
+/// boot-time skew where sorted-lapic iteration + lowest-first tie-break packs
+/// most early kthreads onto a single CPU.
+static PICK_SCHED_ROTATION: AtomicU32 = AtomicU32::new(0);
+
 pub fn pick_sched() -> &'static Scheduler {
     // SCHEDULERS is keyed by lapic_id, which is NOT guaranteed to be
     // contiguous 0..num_cpus on real hardware. Iterate values directly.
     let schedulers = SCHEDULERS.read();
-    let mut best: Option<(u32, u64)> = None;
-    for (&lapic_id, sched) in schedulers.iter() {
-        let count = sched.thread_count.load(Ordering::Acquire);
-        match best {
-            Some((_, best_count)) if count >= best_count => {}
-            _ => best = Some((lapic_id, count)),
+    let n = schedulers.len();
+    assert!(n > 0, "pick_sched: no schedulers registered");
+
+    // Find the minimum thread_count across all schedulers.
+    let mut min_count = u64::MAX;
+    for sched in schedulers.values() {
+        let c = sched.thread_count.load(Ordering::Acquire);
+        if c < min_count {
+            min_count = c;
         }
     }
 
-    let (best_lapic, _) = best.expect("pick_sched: no schedulers registered");
-    schedulers
-        .get(&best_lapic)
-        .expect("pick_sched: selected scheduler disappeared")
+    // Round-robin across all schedulers matching `min_count`. On a balanced
+    // system every scheduler has the same count; the rotation then evenly
+    // distributes new spawns. If one CPU has a lower count, it wins until
+    // the others catch up.
+    let start = PICK_SCHED_ROTATION.fetch_add(1, Ordering::Relaxed) as usize;
+    for i in 0..n {
+        let idx = (start + i) % n;
+        let (_, sched) = schedulers.iter().nth(idx).unwrap();
+        if sched.thread_count.load(Ordering::Acquire) == min_count {
+            return sched;
+        }
+    }
+    unreachable!("pick_sched: no scheduler matched min_count");
 }
 
 /// Exits a kthread.

@@ -320,6 +320,28 @@ smaller than a page (e.g. 512B sector with cluster_size=1) still
 RMW. Fine for FAT32's small-sector case; document or optimize if
 cluster_size starts mattering.
 
+### Scheduler balance: parked-thread migration + wake-to-idle (not fixed)
+Observed 2026-04-15 via `ps`: 13 kernel+user threads ended up parked
+on CPU 3 while CPUs 0/1/2 each had 2 threads. The biased placement
+traced to `pick_sched()`: sorted-lapic iteration + `>=` tie-break made
+CPU 3 (last iterated) effectively never win ties, so early boot spawns
+that all saw `thread_count=0` initially packed onto one CPU via a
+different cascade. Fixed 2026-04-15 by switching `pick_sched` to a
+rotating tie-break (`PICK_SCHED_ROTATION: AtomicU32` bumps each call),
+so new spawns with equal counts round-robin across CPUs.
+
+Not fixed: existing parked threads stay on their original CPU forever.
+Work-stealing only moves Ready/Running. A driver kthread that parks on
+CPU X stays on CPU X, gets enqueued back to CPU X's rq on wake. Two
+follow-ups worth doing when scheduler load-balancing matters:
+
+1. Let work-stealing steal parked threads too, OR a periodic rebalance
+   pass that migrates parked threads from overloaded CPUs.
+2. Wake-to-idle hint: when `wake_thread_handle` fires and the target
+   thread's home CPU is loaded AND another CPU is idle, redirect the
+   wake to the idle CPU's rq. Cleaner to do post-Foundation-#1 since
+   the wake path already takes a `Weak<Thread>` handle.
+
 ## Ideas
 
 ### Foundations for async I/O (TOP PRIORITY, unblocks multiple features)
