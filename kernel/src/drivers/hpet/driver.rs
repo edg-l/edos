@@ -19,6 +19,10 @@ const HPET_MAIN_COUNTER: usize = 0xF0;
 static HPET: Once<HpetTimer> = Once::new();
 
 pub fn init() {
+    if HPET.is_completed() {
+        return;
+    }
+
     let tables = acpi_tables();
 
     let result = HpetInfo::new(tables);
