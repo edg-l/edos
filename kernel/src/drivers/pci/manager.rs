@@ -1,50 +1,41 @@
 #![expect(unused)]
 
 use alloc::vec::Vec;
-use x86_64::instructions::port::Port;
 
 use crate::{
-    drivers::pci::structures::{PciAddress, PciConfigHeader, PciDevice},
+    drivers::pci::{
+        config,
+        structures::{PciAddress, PciConfigHeader, PciDevice},
+    },
     println,
 };
 
 pub struct PciManager {
-    config_address: Port<u32>,
-    config_data: Port<u32>,
     devices: Vec<PciDevice>,
 }
 
 impl PciManager {
     pub fn new() -> Self {
         Self {
-            config_address: Port::new(0xCF8),
-            config_data: Port::new(0xCFC),
             devices: Vec::new(),
         }
     }
 
-    // Step 1: Read configuration data
+    // Delegate to locked helpers so concurrent PCI config access from driver
+    // kthreads (via `config::pci_read_*`) and manager code here does not
+    // interleave 0xCF8 address writes with 0xCFC data reads. Prior to this
+    // refactor, `PciManager` owned its own unlocked port handles, producing
+    // garbage BAR reads that aliased heap frames.
     fn read_config_u32(&mut self, address: PciAddress, offset: u8) -> u32 {
-        let addr = 0x8000_0000
-            | ((address.bus as u32) << 16)
-            | ((address.device as u32) << 11)
-            | ((address.function as u32) << 8)
-            | ((offset & 0xFC) as u32);
-
-        unsafe {
-            self.config_address.write(addr);
-            self.config_data.read()
-        }
+        config::pci_read_u32(address, offset)
     }
 
     fn read_config_u16(&mut self, address: PciAddress, offset: u8) -> u16 {
-        let shift = (offset & 0x2) * 8;
-        (self.read_config_u32(address, offset) >> shift) as u16
+        config::pci_read_u16(address, offset)
     }
 
     fn read_config_u8(&mut self, address: PciAddress, offset: u8) -> u8 {
-        let shift = (offset & 0x3) * 8;
-        (self.read_config_u32(address, offset) >> shift) as u8
+        config::pci_read_u8(address, offset)
     }
 
     // Step 2: Check if device exists
