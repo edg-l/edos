@@ -91,15 +91,11 @@ impl Drop for VfsInode {
         if !self.is_orphan() || self.ino == 0 {
             return;
         }
-        if let Some(fs) = super::vfs::fs_by_mount_id(self.mount_id) {
-            if let Err(e) = fs.evict_inode(self.ino) {
-                crate::log!(
-                    "VfsInode::drop: evict_inode(mount={}, ino={}) failed: {:?}",
-                    self.mount_id,
-                    self.ino,
-                    e
-                );
-            }
-        }
+        // Post to the evict kthread instead of calling evict_inode directly.
+        // This keeps Drop non-blocking: evict_inode on EFS can issue AHCI I/O,
+        // which would block the reaper (and any other thread whose VMA drop
+        // triggers this). See doc/invariants/drop-contract.md and
+        // doc/bugs/2026-04-16-drop-audit.md for the full rationale.
+        super::evict::post_evict(self.mount_id, self.ino);
     }
 }

@@ -120,6 +120,7 @@ fn main() -> ! {
     // Init scheduler
     thread::scheduler::init();
     thread::scheduler::init_reaper();
+    fs::evict::init_evict_kthread();
 
     #[cfg(feature = "sched-test")]
     {

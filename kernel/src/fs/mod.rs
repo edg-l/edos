@@ -27,6 +27,7 @@ pub mod block_page_cache;
 pub mod dentry;
 pub mod devfs;
 pub mod efs;
+pub mod evict;
 pub mod fat32;
 pub mod gpt;
 pub mod handle;
