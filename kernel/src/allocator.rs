@@ -365,7 +365,7 @@ pub fn init_heap() {
         )
         .expect("failed to map heap");
 
-    println!("Mapped kernel heap at {:p}-{:p}", heap_end, heap_end);
+    println!("Mapped kernel heap at {:p}-{:p}", heap_start, heap_end);
 
     unsafe {
         ALLOCATOR
