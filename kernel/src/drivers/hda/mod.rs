@@ -99,6 +99,18 @@ impl HdaController {
         // Read BAR0 physical address
         let bar0_phys = read_bar_phys(pci_device.address, 0);
 
+        // Dump raw BARs + status/command register for diagnostics.
+        for bi in 0..6u8 {
+            let raw = crate::drivers::pci::config::pci_read_u32(pci_device.address, 0x10 + bi * 4);
+            crate::log!("hda: BAR{} raw = {:#x}", bi, raw);
+        }
+        crate::log!(
+            "hda: command = {:#x}, status = {:#x}",
+            pci_read_u16(pci_device.address, 0x04),
+            pci_read_u16(pci_device.address, 0x06)
+        );
+        crate::log!("hda: computed BAR0 phys = {:#x}", bar0_phys.as_u64());
+
         // Map MMIO region (16KB) into a fresh virtual address with NO_CACHE.
         // Cannot use the boot identity map: it uses cacheable 2MB huge pages,
         // which causes stale reads on MMIO registers.
