@@ -8,6 +8,13 @@ default = []
 test = []
 trace = []
 sched-test = []
+## Spawns a kthread that acquires rank 10 then rank 20 and verifies no panic.
+## Prints "lock-order self-test PASS" and returns normally.
+lock-order-self-test = []
+## Spawns a kthread that acquires rank 20 then rank 10 (inversion) and is
+## EXPECTED to panic, halting the machine. Run in isolation with
+## `make run-single`. Halts the machine by design.
+lock-order-self-test-inversion = []
 
 [dependencies]
 limine = "0.6"
