@@ -40,14 +40,14 @@ fn wait_for_drain(target: u64, timeout_iters: u32) -> Option<u64> {
 }
 
 fn test_dir(dir: &str) -> Result<(), String> {
-    let before = read_drain_count().ok_or_else(|| "failed to read /proc/evict_stats".to_string())?;
+    let before =
+        read_drain_count().ok_or_else(|| "failed to read /proc/evict_stats".to_string())?;
     println!("evicttest: {dir} drain_count before = {before}");
 
     for i in 0..N_PER_DIR {
         let path = format!("{dir}/.evicttest.{i}");
         {
-            let mut f = File::create(&path)
-                .map_err(|e| format!("create {path}: {e}"))?;
+            let mut f = File::create(&path).map_err(|e| format!("create {path}: {e}"))?;
             f.write_all(b"x")
                 .map_err(|e| format!("write {path}: {e}"))?;
         }

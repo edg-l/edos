@@ -648,9 +648,14 @@ fn test10(dir: &str) {
 
     // Copy /bin/echo to the test dir.
     let src_size = fs::metadata("/bin/echo").map(|m| m.len()).unwrap_or(0);
-    let copied = timed(10, dir, "fs::copy(/bin/echo)", || fs::copy("/bin/echo", &dst))
-        .unwrap_or_else(|e| fail(10, dir, &format!("copy /bin/echo -> {}: {}", dst, e)));
-    println!("  [{}] test 10 copied {} bytes (src size {})", dir, copied, src_size);
+    let copied = timed(10, dir, "fs::copy(/bin/echo)", || {
+        fs::copy("/bin/echo", &dst)
+    })
+    .unwrap_or_else(|e| fail(10, dir, &format!("copy /bin/echo -> {}: {}", dst, e)));
+    println!(
+        "  [{}] test 10 copied {} bytes (src size {})",
+        dir, copied, src_size
+    );
 
     // Spawn the copy and wait for it to exit cleanly.
     let pid = timed(10, dir, "spawn+wait", || {

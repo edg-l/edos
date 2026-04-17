@@ -150,6 +150,18 @@ impl Procfs {
         )
     }
 
+    fn render_lock_order_stats() -> String {
+        use crate::debug::lock_order::{LOCK_ORDER_INVERSIONS, MAX_RANK_DEPTH};
+        use core::sync::atomic::Ordering;
+
+        // Both counters are only incremented in debug builds; they stay 0 in
+        // release builds.  The `/proc` file always exists so userspace tooling
+        // does not need to special-case the build profile.
+        let inversions = LOCK_ORDER_INVERSIONS.load(Ordering::Relaxed);
+        let max_depth = MAX_RANK_DEPTH.load(Ordering::Relaxed);
+        format!("inversions: {inversions}\nmax_depth: {max_depth}\n")
+    }
+
     fn resolve_path(path: &Path) -> Result<ProcNode, Error> {
         if path.is_root() {
             return Ok(ProcNode::Root);
@@ -163,6 +175,7 @@ impl Procfs {
                 "meminfo" => Ok(ProcNode::MemInfo),
                 "block_cache" => Ok(ProcNode::BlockCacheStats),
                 "evict_stats" => Ok(ProcNode::EvictStats),
+                "lock_order_stats" => Ok(ProcNode::LockOrderStats),
                 tid_component => parse_tid(tid_component)
                     .map(ProcNode::ProcessDir)
                     .ok_or(Error::FileNotFound),
@@ -219,6 +232,12 @@ impl FileSystem for Procfs {
                     evict_stats.len(),
                 ));
 
+                let lock_order_stats = Self::render_lock_order_stats();
+                files.push(Self::file_entry(
+                    "lock_order_stats".to_string(),
+                    lock_order_stats.len(),
+                ));
+
                 for snapshot in snapshots {
                     files.push(Self::dir_entry(snapshot.tid.to_string()));
                 }
@@ -247,6 +266,7 @@ impl FileSystem for Procfs {
             | ProcNode::MemInfo
             | ProcNode::BlockCacheStats
             | ProcNode::EvictStats
+            | ProcNode::LockOrderStats
             | ProcNode::ProcessStatus(_)
             | ProcNode::ProcessCmdline(_) => Err(Error::NotADir),
         }
@@ -286,6 +306,10 @@ impl FileSystem for Procfs {
             }
             ProcNode::EvictStats => {
                 let content = Self::render_evict_stats();
+                Ok(Self::read_text(content, offset, count))
+            }
+            ProcNode::LockOrderStats => {
+                let content = Self::render_lock_order_stats();
                 Ok(Self::read_text(content, offset, count))
             }
             ProcNode::Root | ProcNode::ProcessDir(_) => Err(Error::NotAFile),
@@ -332,6 +356,13 @@ impl FileSystem for Procfs {
             ProcNode::EvictStats => {
                 let content = Self::render_evict_stats();
                 Ok(Self::file_entry("evict_stats".to_string(), content.len()))
+            }
+            ProcNode::LockOrderStats => {
+                let content = Self::render_lock_order_stats();
+                Ok(Self::file_entry(
+                    "lock_order_stats".to_string(),
+                    content.len(),
+                ))
             }
             ProcNode::ProcessDir(tid) => {
                 let snapshots = Self::collect_snapshots();
@@ -589,6 +620,7 @@ enum ProcNode {
     MemInfo,
     BlockCacheStats,
     EvictStats,
+    LockOrderStats,
     ProcessDir(u64),
     ProcessStatus(u64),
     ProcessCmdline(u64),

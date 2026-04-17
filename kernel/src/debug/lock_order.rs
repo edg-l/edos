@@ -1,4 +1,4 @@
-// Phase 2 instruments call sites; allow unused items until then.
+// Atomics are accessed from both debug and release builds (always-exported).
 #![allow(dead_code)]
 
 /// Lock-order rank constants and per-thread enforcement infrastructure.
@@ -65,6 +65,22 @@ pub const RANK_PCI_CONFIG: u16 = 200;
 /// 16 is ~2x the deepest observed chain (9 levels).
 pub const LOCK_RANK_DEPTH: usize = 16;
 
+// ---- Global observability counters ------------------------------------------
+//
+// These are incremented in debug builds (inside `enter()`).  They are declared
+// without `#[cfg(debug_assertions)]` so that `/proc/lock_order_stats` can read
+// them unconditionally; in release builds both counters stay at 0.
+
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+/// Number of lock-order violations detected. Should always be 0 in a healthy
+/// boot; incremented just before panicking so a swallowed panic is still
+/// observable.
+pub static LOCK_ORDER_INVERSIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Maximum observed rank-stack depth across all threads and all time.
+pub static MAX_RANK_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
 // ---- enter / exit -----------------------------------------------------------
 
 /// Called before acquiring a ranked lock. Verifies `rank > top_rank`.
@@ -95,6 +111,10 @@ pub fn enter(rank: u16, site: &'static str) {
     let top_rank = top.map(|(r, _)| r).unwrap_or(0);
 
     if rank <= top_rank {
+        // Increment the global counter before panicking so the violation is
+        // observable even if the panic message is somehow lost.
+        LOCK_ORDER_INVERSIONS.fetch_add(1, Ordering::Relaxed);
+
         // Build the panic message without allocation.
         let mut msg = heapless::String::<256>::new();
         use core::fmt::Write as _;
@@ -120,6 +140,12 @@ pub fn enter(rank: u16, site: &'static str) {
     stack
         .push((rank, site))
         .expect("lock_order stack overflow (depth > LOCK_RANK_DEPTH)");
+
+    // Update the global max-depth counter.
+    let depth = stack.len();
+    let _ = MAX_RANK_DEPTH.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
+        if depth > prev { Some(depth) } else { None }
+    });
 }
 
 /// Called before acquiring a same-class different-instance ranked lock.
