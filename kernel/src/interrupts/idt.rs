@@ -186,9 +186,17 @@ extern "x86-interrupt" fn page_fault_handler(
         if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
             && address.as_u64() < 0x0000_8000_0000_0000
         {
+            // Re-enable interrupts: handle_demand_fault legitimately blocks
+            // (NCQ I/O wait, BlockPageCache shard mutex contention on EFS
+            // metadata, vma-set wait queues). The x86-interrupt convention
+            // clears IF on PF entry; the ring-3 branch enables below for the
+            // same reason. Ring-0 faulters are uaccess-style copy_from/to_user
+            // paths that tolerate being preempted during the fixup.
+            x86_64::instructions::interrupts::enable();
             if unsafe { crate::memory::fault::handle_demand_fault(address, error_code) } {
                 return;
             }
+            x86_64::instructions::interrupts::disable();
         }
 
         // Check if we're in a user access operation
