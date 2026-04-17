@@ -440,16 +440,43 @@ reaper correctness in general). Roadmap in dependency order:
 
 4. **Strict lock-order discipline for fs/page-cache paths.**
    **DONE 2026-04-17.** Canonical rank table in
-   `doc/invariants/lock-order.md` (ranks 10-200). Per-thread rank
-   stack (`Thread.lock_ranks`, `heapless::Vec`, debug only) enforced
-   by `ranked_lock!` / `ranked_read!` / `ranked_write!` macros and
-   `RankedGuard<G>` (ManuallyDrop-based RAII). All 20 ranked lock
-   sites across VFS, page-cache, journal, EFS, AHCI, frame allocator,
-   and memory manager instrumented. Pre-existing journal
-   `tracker->state` AB/BA inversion fixed. `/proc/lock_order_stats`
-   exposes inversion count and max stack depth. `lockordertest`
-   program verifies inversions==0 after a representative workload.
-   See `.claude/plans/foundation-4-lock-order.md`.
+   `doc/invariants/lock-order.md` (ranks 10-200 for subsystem locks;
+   900/910 for deep utility leaves kernel_mapper/frame_alloc).
+   Per-thread rank stack (`Thread.lock_ranks`, `heapless::Vec`, debug
+   only) enforced by `ranked_lock!` / `ranked_read!` / `ranked_write!`
+   macros and `RankedGuard<G>` (ManuallyDrop-based RAII). All ~80
+   ranked lock sites across VFS, page-cache, journal, EFS, AHCI, frame
+   allocator, and memory manager instrumented. `/proc/lock_order_stats`
+   exposes inversion count + max stack depth. `lockordertest` program
+   verifies inversions==0 after a representative workload.
+
+   **Caught 6 pre-existing latent lock-order bugs in one session:**
+   (1) journal `tracker->state` AB/BA via `committed_seq()` under
+       `checkpoint_tracker` in `is_safe_to_flush`/`advance_tail`;
+   (2) thread-teardown `mm(80)->vmas(70)` in TLS cleanup + last-thread
+       VMA teardown, narrowed by drop-reacquire;
+   (3) EFS `mutable(160)->BPC(110)` in `alloc_inode`/`alloc_block`,
+       fixed by adding `alloc_mutex(32)` serializer and narrowing
+       `mutable` scope out of BPC I/O (**side-effect perf win**:
+       mmaptest full suite dropped to ~200ms — mutable no longer held
+       across AHCI reads);
+   (4) BPC `shard(110)->frame_alloc(90)` via `CachedBlockPage::drop`
+       during eviction, fixed by deferring Arc drops out of shard scope;
+   (5) VFS `inode(30)->VFS(10)` in `list_files` calling
+       `child_mount_points` under inode guard, narrowed guard to the
+       FS driver call;
+   (6) BPC `write_lock(140)->kernel_mapper(85)` via AHCI DMA
+       translation during writeback — fixed by moving kernel_mapper
+       and frame_alloc to deep-leaf ranks (900/910). **Systemic
+       lesson**: utility leaves called from arbitrary contexts must be
+       numerically HIGHEST in the rank table, not near their
+       call-site neighbors.
+
+   Each rank-fix was also a lock-hold-time shrink (overbroad locks
+   get caught because they're held across paths that reach lower
+   ranks). The tracker doubles as a "lock-hold-time linter". See
+   `.claude/plans/foundation-4-lock-order.md` and the session handoff
+   at `.claude/handoff/2026-04-17-2-foundation-4-complete.md`.
 
 5. **Per-inode async I/O registry (last layer, uses #1-#4).**
    `InodePages` gets an `in_flight: BTreeMap<page_idx, Arc<PageFillHandle>>`
