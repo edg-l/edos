@@ -20,8 +20,7 @@ use super::journal::{Journal, tx::TxHandle};
 use super::page_cache::{CachedPage, PageCacheOps};
 use super::path::Path;
 use super::{Error, File, FileAttrs, FileKind, FileSystem, FileTime};
-use crate::log;
-use crate::thread::mutex::BlockingMutex;
+use crate::{debug::lock_order::RANK_EFS_MUTABLE, log, ranked_lock, thread::mutex::BlockingMutex};
 
 // ---- Constants ----------------------------------------------------------------
 
@@ -320,7 +319,7 @@ impl EfsDriver {
     fn read_inode(&self, ino: u64) -> Result<EfsInode, Error> {
         let (group, idx) = self.inode_location(ino);
         let inode_table_block = {
-            let m = self.mutable.lock();
+            let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
             if group >= m.bgd_table.len() {
                 return Err(Error::Corrupted);
             }
@@ -341,7 +340,7 @@ impl EfsDriver {
     fn write_inode(&self, ino: u64, inode: &EfsInode, tx: &mut TxHandle<'_>) -> Result<(), Error> {
         let (group, idx) = self.inode_location(ino);
         let inode_table_block = {
-            let m = self.mutable.lock();
+            let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
             if group >= m.bgd_table.len() {
                 return Err(Error::Corrupted);
             }
@@ -1056,7 +1055,7 @@ impl EfsDriver {
     /// Allocate a free block and return its absolute block number.
     fn alloc_block(&self, tx: &mut TxHandle<'_>) -> Result<u64, Error> {
         let block_size = self.block_size() as usize;
-        let mut m = self.mutable.lock();
+        let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
         let blocks_per_group = m.superblock.blocks_per_group as usize;
 
         for g in 0..m.bgd_table.len() {
@@ -1109,7 +1108,7 @@ impl EfsDriver {
     fn free_block(&self, block: u64, tx: &mut TxHandle<'_>) -> Result<(), Error> {
         let block_size = self.block_size() as usize;
         let (group, bit, bitmap_block) = {
-            let m = self.mutable.lock();
+            let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
             let blocks_per_group = m.superblock.blocks_per_group as u64;
             let group = (block / blocks_per_group) as usize;
             let bit = (block % blocks_per_group) as usize;
@@ -1124,7 +1123,7 @@ impl EfsDriver {
         self.write_block(bitmap_block, &bitmap, tx)?;
 
         {
-            let mut m = self.mutable.lock();
+            let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
             m.bgd_table[group].free_blocks_count += 1;
             m.superblock.free_blocks += 1;
         }
@@ -1156,7 +1155,7 @@ impl EfsDriver {
     /// Allocate a free inode and return its inode number (1-based).
     fn alloc_inode(&self, tx: &mut TxHandle<'_>) -> Result<u64, Error> {
         let block_size = self.block_size() as usize;
-        let mut m = self.mutable.lock();
+        let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
         let inodes_per_group = m.superblock.inodes_per_group as usize;
 
         for g in 0..m.bgd_table.len() {
@@ -1212,7 +1211,7 @@ impl EfsDriver {
         let bit = ino0 % inodes_per_group;
 
         let bitmap_block = {
-            let m = self.mutable.lock();
+            let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
             if group >= m.bgd_table.len() {
                 return Err(Error::Corrupted);
             }
@@ -1224,7 +1223,7 @@ impl EfsDriver {
         self.write_block(bitmap_block, &bitmap, tx)?;
 
         {
-            let mut m = self.mutable.lock();
+            let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
             m.bgd_table[group].free_inodes_count += 1;
             m.superblock.free_inodes += 1;
         }
@@ -1788,7 +1787,7 @@ impl FileSystem for EfsDriver {
     }
 
     fn statfs(&self) -> Result<super::StatFs, Error> {
-        let m = self.mutable.lock();
+        let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
         let sb = &m.superblock;
         let mut volume_name = [0u8; 64];
         volume_name.copy_from_slice(&sb.volume_name);
@@ -2134,7 +2133,7 @@ impl EfsDriver {
         let ipg = self.inodes_per_group as usize;
         let group = ((new_ino - 1) as usize) / ipg;
         {
-            let mut m = self.mutable.lock();
+            let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
             if group < m.bgd_table.len() {
                 m.bgd_table[group].used_dirs_count += 1;
             }
@@ -2230,7 +2229,7 @@ impl EfsDriver {
         let ipg = self.inodes_per_group as usize;
         let group = ((dir_ino - 1) as usize) / ipg;
         {
-            let mut m = self.mutable.lock();
+            let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
             if group < m.bgd_table.len() && m.bgd_table[group].used_dirs_count > 0 {
                 m.bgd_table[group].used_dirs_count -= 1;
             }
@@ -2251,7 +2250,7 @@ impl EfsDriver {
     }
 
     fn flush_inner(&self, tx: &mut TxHandle<'_>) -> Result<(), Error> {
-        let m = self.mutable.lock();
+        let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
         // Write updated superblock to block 1.
         let block_size = self.block_size() as usize;
         let mut sb_block = vec![0u8; block_size];
@@ -2265,7 +2264,7 @@ impl EfsDriver {
         drop(m);
         self.write_block(1, &sb_block, tx)?;
 
-        let m = self.mutable.lock();
+        let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
         // Write BGD table starting at block 2.
         let bgd_count = m.bgd_table.len();
         let bgds_per_block = block_size / BGD_SIZE;
