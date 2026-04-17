@@ -205,6 +205,24 @@ pub struct Thread {
     /// the global allocator is held; we avoid any blocking locks.  Pushes
     /// happen on the submitting thread BEFORE park, outside scheduler/IRQ paths.
     pub owned_ops: IrqSpinlock<heapless::Vec<ArcCancellableOp, OWNED_OPS_CAP>>,
+
+    /// Per-thread lock-rank stack for debug-only lock-order enforcement.
+    ///
+    /// Only read/written by the thread that owns this `Thread` struct, via
+    /// `crate::debug::lock_order::enter` and `exit`. The `enter()` helper
+    /// asserts `current_thread_id() == self.id` before every access.
+    ///
+    /// `UnsafeCell` is required because Rust's aliasing rules prohibit
+    /// interior mutability through a shared `&Thread` reference without it.
+    /// The single-owner invariant makes concurrent access impossible: no
+    /// other CPU thread ever reaches into another thread's rank stack.
+    ///
+    /// Absent in release builds; carries zero size and zero runtime overhead.
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub lock_ranks: core::cell::UnsafeCell<
+        heapless::Vec<(u16, &'static str), { crate::debug::lock_order::LOCK_RANK_DEPTH }>,
+    >,
 }
 
 intrusive_list::impl_linked!(Thread, rq_link);
@@ -484,6 +502,8 @@ impl Thread {
             fpu: UnsafeCell::new(FpuState::default()),
             fpu_init: AtomicBool::new(false),
             owned_ops: IrqSpinlock::new(heapless::Vec::new()),
+            #[cfg(debug_assertions)]
+            lock_ranks: core::cell::UnsafeCell::new(heapless::Vec::new()),
         });
 
         THREADS.insert(thread.clone());
@@ -649,6 +669,8 @@ impl Thread {
             fpu: UnsafeCell::new(FpuState::default()),
             fpu_init: AtomicBool::new(false),
             owned_ops: IrqSpinlock::new(heapless::Vec::new()),
+            #[cfg(debug_assertions)]
+            lock_ranks: core::cell::UnsafeCell::new(heapless::Vec::new()),
         });
 
         THREADS.insert(thread.clone());

@@ -35,6 +35,7 @@ mod allocator;
 mod apic;
 mod boot;
 mod cmdline;
+mod debug;
 mod drivers;
 mod fs;
 mod gdt;
@@ -121,6 +122,12 @@ fn main() -> ! {
     thread::scheduler::init();
     thread::scheduler::init_reaper();
     fs::evict::init_evict_kthread();
+
+    #[cfg(feature = "lock-order-self-test")]
+    debug::lock_order_self_test::spawn_self_test();
+
+    #[cfg(feature = "lock-order-self-test-inversion")]
+    debug::lock_order_self_test::spawn_inversion_test();
 
     #[cfg(feature = "sched-test")]
     {

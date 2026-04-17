@@ -1726,6 +1726,8 @@ fn sys_clone(
         fpu: core::cell::UnsafeCell::new(crate::drivers::fpu::FpuState::default()),
         fpu_init: AtomicBool::new(false),
         owned_ops: crate::thread::irqlock::IrqSpinlock::new(HeaplessVec::new()),
+        #[cfg(debug_assertions)]
+        lock_ranks: core::cell::UnsafeCell::new(heapless::Vec::new()),
     });
 
     // Clone parent's UserThreadInfo - share fd_table
@@ -1971,6 +1973,8 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         },
         fpu_init: AtomicBool::new(true),
         owned_ops: crate::thread::irqlock::IrqSpinlock::new(HeaplessVec::new()),
+        #[cfg(debug_assertions)]
+        lock_ranks: core::cell::UnsafeCell::new(heapless::Vec::new()),
     });
 
     insert_thread(child_thread.clone());
