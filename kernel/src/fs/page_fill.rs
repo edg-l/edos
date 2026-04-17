@@ -1,6 +1,3 @@
-// Phase 1: new module; call sites are wired in Phase 2. Until then, suppress
-// dead-code lints so `make check` stays clean.
-#![allow(dead_code)]
 //! Per-inode async-compatible page fill: `PageFillHandle` + `get_or_fill_async_sync`.
 //!
 //! # Overview

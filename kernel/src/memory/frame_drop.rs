@@ -1,5 +1,3 @@
-// Phase 1: used by page_fill.rs; call sites in page_fill.rs are wired in Phase 2.
-#![allow(dead_code)]
 //! RAII guard for a single physical frame.
 //!
 //! `FrameDrop` wraps a `PhysFrame` that has been allocated but not yet handed

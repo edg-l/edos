@@ -44,6 +44,21 @@
 //!     munmap, fsync, or the periodic writeback kthread.
 //!   This does NOT break the "file data bypasses BlockPageCache" invariant:
 //!   `PageCacheOps::flush_page` routes through direct AHCI, not BlockPageCache.
+//!
+//! # Entry points
+//!
+//! **`InodePages::get_or_fill` has been retired.** New code must use the
+//! functions in `kernel/src/fs/page_fill.rs`:
+//!
+//! - `page_fill::get_or_fill_async_sync` — single-page fill with in-flight
+//!   deduplication and cancel hookup via `owned_ops`.
+//! - `page_fill::get_or_fill_bulk_async_sync` — bulk fill for a contiguous
+//!   page range under a single `PageFillHandle`.
+//!
+//! Both functions implement the reader state machine documented in
+//! `kernel/src/fs/page_fill.rs` and uphold the publish-terminal-state-before-remove
+//! invariant described above. See `doc/invariants/lock-order.md` rank 42 for the
+//! canonical lock-order entry.
 
 use alloc::{
     collections::{BTreeMap, BTreeSet},
@@ -51,12 +66,12 @@ use alloc::{
     vec::Vec,
 };
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use x86_64::structures::paging::{FrameAllocator, PhysFrame};
+use x86_64::structures::paging::PhysFrame;
 
 use crate::{
     debug::lock_order::{RANK_DIRTY_KEYS, RANK_PAGES},
     fs::{Error, page_fill::PageFillHandle},
-    memory::{frame_allocator::frame_allocator, get_virt_addr_from_phys_offset},
+    memory::get_virt_addr_from_phys_offset,
     ranked_lock,
     thread::{irqlock::IrqSpinlock, mutex::BlockingMutex},
 };
@@ -212,53 +227,6 @@ impl InodePages {
             in_flight: IrqSpinlock::new(BTreeMap::new()),
             dirty_keys: BlockingMutex::new(Vec::new()),
         }
-    }
-
-    /// Get a cached page or fill it via `fill_fn` (which does disk I/O).
-    /// The per-inode lock is NOT held during I/O.
-    pub fn get_or_fill(
-        &self,
-        page_index: u64,
-        fill_fn: impl FnOnce(&mut [u8]) -> Result<(), Error>,
-    ) -> Result<PageGuard, Error> {
-        // Fast path: already cached.
-        {
-            let map = ranked_lock!(RANK_PAGES, "InodePages.pages", self.pages);
-            if let Some(page) = map.get(&page_index) {
-                return Ok(PageGuard::new(Arc::clone(page)));
-            }
-        }
-
-        // Slow path: allocate frame, fill from disk, insert.
-        let frame = frame_allocator().allocate_frame().ok_or(Error::IoError)?;
-
-        let slice: &mut [u8] = unsafe {
-            let ptr = get_virt_addr_from_phys_offset(frame.start_address()).as_mut_ptr();
-            core::slice::from_raw_parts_mut(ptr, PAGE_SIZE)
-        };
-
-        if let Err(e) = fill_fn(slice) {
-            unsafe { frame_allocator().deallocate_frame(frame) };
-            return Err(e);
-        }
-
-        let page = Arc::new(CachedPage::new(frame));
-        let guard = PageGuard::new(Arc::clone(&page));
-
-        let mut map = ranked_lock!(RANK_PAGES, "InodePages.pages", self.pages);
-        if let Some(existing) = map.get(&page_index) {
-            // Another thread raced us. Use theirs; our `page` and `guard`
-            // drop naturally. The guard unpin runs first, then the final
-            // Arc drop triggers `CachedPage::drop` which deallocates our
-            // frame. No manual free needed.
-            let g = PageGuard::new(Arc::clone(existing));
-            drop(map);
-            drop(guard);
-            drop(page);
-            return Ok(g);
-        }
-        map.insert(page_index, page);
-        Ok(guard)
     }
 
     /// Mark a page as dirty. Lock acquisition order is always
