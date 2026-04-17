@@ -1,18 +1,25 @@
 use core::{
     ptr,
-    sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering},
     time::Duration,
 };
 
-use alloc::{sync::Weak, vec, vec::Vec};
+use alloc::{
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
 
 use x86_64::structures::paging::mapper::TranslateResult;
 use x86_64::{PhysAddr, VirtAddr};
+
+use spin::Once;
 
 use crate::{
     drivers::{
         ahci::{
             AhciError, DeviceType,
+            cancel_op::{AhciSlotOp, SLOT_CANCELLED, SLOT_COMPLETED, SLOT_PENDING},
             fis::FisRegH2D,
             structures::{
                 CMD_HEADER_ATAPI, CMD_HEADER_WRITE, CommandHeader, CommandTable,
@@ -26,9 +33,9 @@ use crate::{
     log,
     memory::mapper::memory_mapper,
     thread::{
+        cancel::ArcCancellableOp,
         mutex::BlockingMutex,
         scheduler::{WakePriority, sched},
-        thread::Thread,
         waitqueue::WaitQueue,
     },
 };
@@ -108,19 +115,19 @@ pub struct AhciPort {
     pub port_idx: usize,
     pub port_regs: *mut HbaPort,
     pub device_type: DeviceType,
-    pub ncq_enabled: bool,
-    pub ncq_depth: u8,
-    pub supports_fua: bool,
+    ncq_enabled: AtomicBool,
+    ncq_depth: AtomicU8,
+    supports_fua: AtomicBool,
 
     // DMA regions (immutable after init)
     command_list: DmaRegion<[CommandHeader; AHCI_CMD_SLOTS]>,
     fis_area: DmaRegion<HbaFis>,
-    command_tables: [Option<DmaRegion<CommandTable>>; AHCI_CMD_SLOTS],
+    command_tables: [Once<DmaRegion<CommandTable>>; AHCI_CMD_SLOTS],
 
     // Per-slot scatter-gather page pools.
     // For NCQ: ncq_depth slots allocated. For non-NCQ ATA: 1 slot (slot 0).
     // For ATAPI: empty (ATAPI uses temporary DMA buffers, not scatter pools).
-    slot_pools: Vec<SlotPool>,
+    slot_pools: Once<Vec<SlotPool>>,
 
     // Slot management -- atomic for lock-free NCQ slot allocation.
     free_slots: AtomicU32,
@@ -131,18 +138,25 @@ pub struct AhciPort {
     // Per-slot waiter handles. The AHCI driver kthread reads these to wake
     // the correct I/O thread when a command completes. None = no waiter.
     //
+    // Each slot holds an `Arc<AhciSlotOp>` which carries: the submitter's
+    // `Weak<Thread>` (for waking), a `Weak<AhciPort>` (for cancel-path slot
+    // release), and an `AtomicU8` state machine (Pending/Completed/Cancelled).
+    //
     // IRQ-safety: this uses plain `spin::Mutex`, which does NOT disable
-    // interrupts. Every access site below runs in thread context: submitters
-    // are the I/O-issuing threads (e.g. userspace via syscall), and
-    // `wake_all_slot_waiters` is called from the AHCI driver kthread's
-    // `process_completion` path. The hardware IRQ handler only wakes
-    // `AHCI_DRIVER_THREAD_ID`; it does NOT touch `slot_waiters` directly. If
-    // that ever changes (e.g. async NCQ readahead wanting to wake directly
-    // from IRQ), this type MUST become `IrqSpinlock<[Option<Weak<Thread>>; N]>`
-    // or an `AtomicPtr<WeakRaw>` array first — otherwise a driver-thread
-    // lock holder preempted by a hardware IRQ handler that also tries to
-    // acquire the lock will deadlock.
-    slot_waiters: [spin::Mutex<Option<Weak<Thread>>>; AHCI_CMD_SLOTS],
+    // interrupts. Every access site runs in thread context: submitters are the
+    // I/O-issuing threads (e.g. userspace via syscall), `wake_all_slot_waiters`
+    // runs in the AHCI driver kthread's completion path, and `cancel()` runs
+    // on the reaper kthread via `Thread::free`. The hardware IRQ handler only
+    // wakes `AHCI_DRIVER_THREAD_ID`; it does NOT touch `slot_waiters` directly.
+    // If that ever changes (e.g. async NCQ readahead waking directly from IRQ),
+    // this MUST become `IrqSpinlock` first — otherwise a lock holder preempted
+    // by an IRQ that also tries to acquire the lock will deadlock.
+    slot_waiters: [spin::Mutex<Option<Arc<AhciSlotOp>>>; AHCI_CMD_SLOTS],
+
+    // Weak self-reference for cancel path: `AhciSlotOp::cancel` upgrades this
+    // to call `release_orphaned_slot`. Set immediately after `Arc::new(port)`
+    // in `ahci/mod.rs`; must not be called before that.
+    weak_self: Once<Weak<AhciPort>>,
 
     // NCQ / non-NCQ mode exclusion (only meaningful when ncq_enabled).
     //   > 0 : count of in-flight NCQ (FPDMA) commands
@@ -225,9 +239,11 @@ impl AhciPort {
         }
 
         // Pre-allocate command table for slot 0 (needed for IDENTIFY during init).
-        let mut command_tables: [Option<DmaRegion<CommandTable>>; AHCI_CMD_SLOTS] =
-            [const { None }; AHCI_CMD_SLOTS];
-        command_tables[0] = Some(dma().allocate()?);
+        // Allocate outside `call_once` so we can propagate failure via `?`.
+        let command_tables: [Once<DmaRegion<CommandTable>>; AHCI_CMD_SLOTS] =
+            [const { Once::new() }; AHCI_CMD_SLOTS];
+        let slot0_table = dma().allocate()?;
+        command_tables[0].call_once(|| slot0_table);
 
         log!("Port {} initialized successfully", port_idx);
 
@@ -235,16 +251,17 @@ impl AhciPort {
             port_idx,
             port_regs,
             device_type,
-            ncq_enabled: false,
-            ncq_depth: 0,
-            supports_fua: false,
+            ncq_enabled: AtomicBool::new(false),
+            ncq_depth: AtomicU8::new(0),
+            supports_fua: AtomicBool::new(false),
             command_list,
             fis_area,
             command_tables,
-            slot_pools: Vec::new(),
+            slot_pools: Once::new(),
             free_slots: AtomicU32::new(1), // Only slot 0 available until init_io_pools
             mmio_lock: spin::Mutex::new(()),
             slot_waiters: [const { spin::Mutex::new(None) }; AHCI_CMD_SLOTS],
+            weak_self: Once::new(),
             mode: AtomicI32::new(0),
             mode_waitq: WaitQueue::new(),
             slot_waitq: WaitQueue::new(),
@@ -256,12 +273,13 @@ impl AhciPort {
     /// Post-identify initialization: allocate per-slot DMA pools and command tables.
     ///
     /// `ncq_depth`: effective NCQ queue depth (min of HBA and device). 0 if no NCQ.
-    /// Must be called exactly once, before the port is shared via Arc.
-    pub fn init_io_pools(&mut self, ncq_depth: u8, supports_fua: bool) -> Result<(), AhciError> {
+    /// Must be called exactly once, after `set_weak_self`.
+    pub fn init_io_pools(&self, ncq_depth: u8, supports_fua: bool) -> Result<(), AhciError> {
         let use_ncq = ncq_depth > 0 && self.device_type == DeviceType::Ata;
-        self.ncq_depth = if use_ncq { ncq_depth } else { 0 };
-        self.ncq_enabled = use_ncq;
-        self.supports_fua = supports_fua;
+        self.ncq_depth
+            .store(if use_ncq { ncq_depth } else { 0 }, Ordering::Release);
+        self.ncq_enabled.store(use_ncq, Ordering::Release);
+        self.supports_fua.store(supports_fua, Ordering::Release);
 
         let num_slots = if use_ncq {
             ncq_depth as usize
@@ -271,12 +289,15 @@ impl AhciPort {
             0 // ATAPI: no scatter-gather pools
         };
 
-        // Pre-allocate command tables and DMA page pools for all usable slots.
-        for slot in 0..num_slots {
-            if self.command_tables[slot].is_none() {
-                self.command_tables[slot] = Some(dma().allocate()?);
-            }
+        // Pre-allocate command tables for slots 1..num_slots (slot 0 done in new()).
+        // Build the slot pools Vec and store it via Once.
+        for slot in 1..num_slots {
+            let table = dma().allocate()?;
+            self.command_tables[slot].call_once(|| table);
+        }
 
+        let mut pools = Vec::with_capacity(num_slots);
+        for _ in 0..num_slots {
             let mut pages = Vec::with_capacity(NCQ_PAGES_PER_SLOT);
             let mut phys = Vec::with_capacity(NCQ_PAGES_PER_SLOT);
             for _ in 0..NCQ_PAGES_PER_SLOT {
@@ -284,8 +305,9 @@ impl AhciPort {
                 phys.push(buf.phys_addr());
                 pages.push(buf);
             }
-            self.slot_pools.push(SlotPool { pages, phys });
+            pools.push(SlotPool { pages, phys });
         }
+        self.slot_pools.call_once(|| pools);
 
         // Set free_slots to include all usable slots.
         let mask = if num_slots > 0 {
@@ -390,6 +412,103 @@ impl AhciPort {
     pub fn set_device_type(&mut self, device_type: DeviceType) {
         self.device_type = device_type;
     }
+
+    /// Store the weak self-reference. Called immediately after `Arc::new(port)`
+    /// in `ahci/mod.rs` before the port enters `DIRECT_PORTS`.
+    pub fn set_weak_self(&self, weak: Weak<AhciPort>) {
+        self.weak_self.call_once(|| weak);
+    }
+
+    /// Upgrade `weak_self` to a strong `Arc<AhciPort>`.
+    ///
+    /// # Panics
+    /// - If called before `set_weak_self`.
+    /// - If the port has been dropped (should not happen when called from
+    ///   within a method on `&self`).
+    #[allow(dead_code)]
+    pub fn self_arc(&self) -> Arc<AhciPort> {
+        self.weak_self
+            .get()
+            .expect("AhciPort::self_arc called before set_weak_self")
+            .upgrade()
+            .expect("AhciPort dropped while self_arc() caller held &self")
+    }
+
+    /// Release an orphaned slot: clear the waiter entry and return the slot to
+    /// the free pool.
+    ///
+    /// Called from two places:
+    /// 1. `AhciSlotOp::cancel` — submitter died, cancel path won the CAS.
+    /// 2. `wake_all_slot_waiters` — normal completion raced with a dead/dying
+    ///    thread; completion won the CAS but there is no one to wake.
+    ///
+    /// Must only be called once per slot lifetime (the CAS in `cancel` /
+    /// `wake_all_slot_waiters` guarantees this). Runs in thread context.
+    #[inline]
+    pub fn release_orphaned_slot(&self, slot: usize) {
+        *self.slot_waiters[slot].lock() = None;
+        self.free_slot(slot);
+    }
+
+    /// Conditionally release a slot, only if `op` is still the stored waiter.
+    ///
+    /// Used by `AhciSlotOp::cancel` in the `Err(SLOT_COMPLETED)` branch:
+    /// the IRQ path already set Completed and chose to wake the thread (not
+    /// call `release_orphaned_slot`), but the thread was already dying. The
+    /// cancel path then checks — if our Arc is still in `slot_waiters`, the
+    /// submitter never cleared it (because it never woke up), so we free it.
+    /// If another op already occupies the slot, do nothing.
+    ///
+    /// Uses raw pointer equality on `AhciSlotOp` (same allocation) rather
+    /// than `Arc::ptr_eq` because the cancel path has `&AhciSlotOp`, not an
+    /// `Arc<AhciSlotOp>`.
+    pub fn maybe_release_slot(&self, slot: usize, op: &AhciSlotOp) {
+        let op_ptr = op as *const AhciSlotOp;
+        let still_there = {
+            let mut g = self.slot_waiters[slot].lock();
+            let is_ours = g
+                .as_ref()
+                .map(|stored| Arc::as_ptr(stored) == op_ptr)
+                .unwrap_or(false);
+            if is_ours {
+                *g = None;
+                true
+            } else {
+                false
+            }
+        };
+        if still_there {
+            self.free_slot(slot);
+        }
+    }
+
+    // ---- Interior-mutable field accessors ----------------------------------
+
+    fn ncq_depth(&self) -> u8 {
+        self.ncq_depth.load(Ordering::Acquire)
+    }
+
+    fn ncq_enabled(&self) -> bool {
+        self.ncq_enabled.load(Ordering::Acquire)
+    }
+
+    fn supports_fua(&self) -> bool {
+        self.supports_fua.load(Ordering::Acquire)
+    }
+
+    fn command_table(&self, slot: usize) -> &DmaRegion<CommandTable> {
+        self.command_tables[slot]
+            .get()
+            .expect("command_table not initialized for slot")
+    }
+
+    fn slot_pool(&self, slot: usize) -> &SlotPool {
+        &self.slot_pools.get().expect("slot_pools not initialized")[slot]
+    }
+
+    fn slot_pools_len(&self) -> usize {
+        self.slot_pools.get().map(|v| v.len()).unwrap_or(0)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +554,190 @@ impl AhciPort {
     fn free_slot(&self, slot: usize) {
         self.free_slots.fetch_or(1 << slot, Ordering::Release);
         self.slot_waitq.wake_one();
+    }
+
+    /// Allocate a slot (blocking), create an `AhciSlotOp`, register it with
+    /// the submitter's `owned_ops`, run `f`, then clean up.
+    ///
+    /// Used by NCQ paths (`ncq_read`, `ncq_write_inner`, ATAPI execute_atapi_command)
+    /// where we must wait for a slot rather than fail.
+    ///
+    /// `f` receives `(slot, &Arc<AhciSlotOp>)` and returns `Result<R, AhciError>`.
+    /// After `f` returns:
+    /// 1. On `Ok`: asserts the op reached `SLOT_COMPLETED`.
+    /// 2. Removes the op from `owned_ops`.
+    /// 3. Clears `slot_waiters[slot]` and returns the slot to the free pool.
+    fn with_slot_blocking<R>(
+        &self,
+        f: impl FnOnce(usize, &Arc<AhciSlotOp>) -> Result<R, AhciError>,
+    ) -> Result<R, AhciError> {
+        let slot = self.allocate_slot_blocking();
+
+        let port_weak = self
+            .weak_self
+            .get()
+            .cloned()
+            .expect("AhciPort::set_weak_self must be called before any command submission");
+        let waiter = sched().current_thread_weak().unwrap_or_default();
+        let op = Arc::new(AhciSlotOp::new(port_weak, slot, waiter));
+        *self.slot_waiters[slot].lock() = Some(Arc::clone(&op));
+
+        // Register with owned_ops BEFORE parking inside f().
+        let current = sched().current_thread();
+        let push_ok = if let Some(ref t) = current {
+            t.owned_ops_push(Arc::clone(&op) as ArcCancellableOp)
+                .is_ok()
+        } else {
+            false
+        };
+        if !push_ok {
+            log!(
+                "AHCI port {}: owned_ops full for slot {}; cancel hookup skipped",
+                self.port_idx,
+                slot
+            );
+        }
+
+        let result = f(slot, &op);
+
+        // Drive the state machine on success. NCQ paths reach SLOT_COMPLETED
+        // via `wake_all_slot_waiters` (the IRQ-driven wake path CASes PENDING
+        // → COMPLETED before waking). Non-NCQ / polling paths complete
+        // synchronously inside `f` without touching state, so the CAS here
+        // catches them up. The state-machine invariant after this line: an
+        // Ok result means SLOT_COMPLETED; a PENDING-but-Ok op means cancel
+        // raced and won (rare: thread death between f() return and this CAS).
+        if result.is_ok() {
+            let _ = op.state.compare_exchange(
+                SLOT_PENDING,
+                SLOT_COMPLETED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            debug_assert_ne!(
+                op.state.load(Ordering::Acquire),
+                SLOT_CANCELLED,
+                "AHCI slot {} cancelled on Ok path",
+                slot
+            );
+        }
+
+        // Deregister from owned_ops.
+        if push_ok {
+            if let Some(ref t) = current {
+                t.owned_ops_remove(Arc::as_ptr(&op) as *const ());
+            }
+        }
+
+        // Idempotent cleanup: only free the slot if it is still ours.
+        // `wake_all_slot_waiters` may have called `release_orphaned_slot` already
+        // (Running→Dying race: wake_thread was a no-op, slot was released there).
+        // The ptr_eq guard is load-bearing: without it, a concurrent
+        // release_orphaned_slot (from wake_all_slot_waiters observing a Dying thread)
+        // would clear slot_waiters and free the slot, and we'd double-free.
+        let still_ours = {
+            let mut g = self.slot_waiters[slot].lock();
+            if g.as_ref().map(|o| Arc::ptr_eq(o, &op)).unwrap_or(false) {
+                *g = None;
+                true
+            } else {
+                false
+            }
+        };
+        if still_ours {
+            self.free_slot(slot);
+        }
+
+        result
+    }
+
+    /// Allocate a slot (non-blocking), create an `AhciSlotOp`, register it
+    /// with the submitter's `owned_ops`, run `f`, then clean up.
+    ///
+    /// Used by non-NCQ / legacy paths where no slot available is an error.
+    /// ATAPI commands use try semantics (matching pre-Foundation-#2 behavior:
+    /// `execute_atapi_command` always used `allocate_slot`, never blocking).
+    ///
+    /// Returns `Err(AhciError::PortNotReady)` immediately if no slot is free.
+    /// If `f` returns `Err`, the slot is still cleaned up.
+    fn with_slot_try<R>(
+        &self,
+        f: impl FnOnce(usize, &Arc<AhciSlotOp>) -> Result<R, AhciError>,
+    ) -> Result<R, AhciError> {
+        let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
+
+        let port_weak = self
+            .weak_self
+            .get()
+            .cloned()
+            .expect("AhciPort::set_weak_self must be called before any command submission");
+        let waiter = sched().current_thread_weak().unwrap_or_default();
+        let op = Arc::new(AhciSlotOp::new(port_weak, slot, waiter));
+        *self.slot_waiters[slot].lock() = Some(Arc::clone(&op));
+
+        // Register with owned_ops BEFORE parking inside f().
+        let current = sched().current_thread();
+        let push_ok = if let Some(ref t) = current {
+            t.owned_ops_push(Arc::clone(&op) as ArcCancellableOp)
+                .is_ok()
+        } else {
+            false
+        };
+        if !push_ok {
+            log!(
+                "AHCI port {}: owned_ops full for slot {}; cancel hookup skipped",
+                self.port_idx,
+                slot
+            );
+        }
+
+        let result = f(slot, &op);
+
+        // Drive the state machine on success. Non-NCQ / polling paths
+        // complete synchronously inside `f` without touching state, so the
+        // CAS here catches them up. NCQ paths (if any reach here — most
+        // don't via _try) would already be at COMPLETED and the CAS is a
+        // no-op. See `with_slot_blocking` for the full rationale.
+        if result.is_ok() {
+            let _ = op.state.compare_exchange(
+                SLOT_PENDING,
+                SLOT_COMPLETED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            debug_assert_ne!(
+                op.state.load(Ordering::Acquire),
+                SLOT_CANCELLED,
+                "AHCI slot {} cancelled on Ok path",
+                slot
+            );
+        }
+
+        // Deregister from owned_ops.
+        if push_ok {
+            if let Some(ref t) = current {
+                t.owned_ops_remove(Arc::as_ptr(&op) as *const ());
+            }
+        }
+
+        // Idempotent cleanup: only free the slot if it is still ours.
+        // The ptr_eq guard is load-bearing: a concurrent release_orphaned_slot
+        // (from wake_all_slot_waiters seeing a Dying thread) may have already
+        // cleared slot_waiters and freed the slot; without this check we'd double-free.
+        let still_ours = {
+            let mut g = self.slot_waiters[slot].lock();
+            if g.as_ref().map(|o| Arc::ptr_eq(o, &op)).unwrap_or(false) {
+                *g = None;
+                true
+            } else {
+                false
+            }
+        };
+        if still_ours {
+            self.free_slot(slot);
+        }
+
+        result
     }
 }
 
@@ -514,9 +817,7 @@ impl AhciPort {
         buffer_addr: PhysAddr,
         buffer_size: usize,
     ) -> Result<(), AhciError> {
-        let table_ref = self.command_tables[slot]
-            .as_ref()
-            .ok_or(AhciError::InvalidSlot)?;
+        let table_ref = self.command_table(slot);
 
         let has_data = buffer_size > 0;
 
@@ -550,11 +851,9 @@ impl AhciPort {
     ) -> Result<(), AhciError> {
         let num_entries = total_bytes.div_ceil(4096);
         debug_assert!(num_entries <= NCQ_PAGES_PER_SLOT);
-        debug_assert!(slot < self.slot_pools.len(), "slot {slot} has no pool");
+        debug_assert!(slot < self.slot_pools_len(), "slot {slot} has no pool");
 
-        let table_ref = self.command_tables[slot]
-            .as_ref()
-            .ok_or(AhciError::InvalidSlot)?;
+        let table_ref = self.command_table(slot);
 
         unsafe {
             let table = table_ref.get();
@@ -564,7 +863,7 @@ impl AhciPort {
             let fis_bytes = bytemuck::bytes_of(fis);
             table.cfis[..fis_bytes.len()].copy_from_slice(fis_bytes);
 
-            let pool = &self.slot_pools[slot];
+            let pool = self.slot_pool(slot);
             let mut remaining = total_bytes;
             for i in 0..num_entries {
                 let phys = pool.phys[i];
@@ -592,9 +891,7 @@ impl AhciPort {
     ) -> Result<(), AhciError> {
         debug_assert!(sg_list.len() <= MAX_PRDT_ENTRIES);
 
-        let table_ref = self.command_tables[slot]
-            .as_ref()
-            .ok_or(AhciError::InvalidSlot)?;
+        let table_ref = self.command_table(slot);
 
         unsafe {
             let table = table_ref.get();
@@ -634,9 +931,7 @@ impl AhciPort {
             return Err(AhciError::IoError);
         }
 
-        let table_ref = self.command_tables[slot]
-            .as_ref()
-            .ok_or(AhciError::InvalidSlot)?;
+        let table_ref = self.command_table(slot);
 
         unsafe {
             let table = table_ref.get();
@@ -670,9 +965,7 @@ impl AhciPort {
 impl AhciPort {
     /// Write command header and issue a non-NCQ command (CI only).
     fn issue_command(&self, slot: usize, flags: u16, prdtl: u16) -> Result<(), AhciError> {
-        let table_ref = self.command_tables[slot]
-            .as_ref()
-            .ok_or(AhciError::InvalidSlot)?;
+        let table_ref = self.command_table(slot);
 
         // Write command header via raw pointer to avoid &mut aliasing over the full array.
         unsafe {
@@ -703,9 +996,7 @@ impl AhciPort {
 
     /// Write command header and issue an NCQ (FPDMA) command (SACT then CI).
     fn issue_ncq_command(&self, slot: usize, flags: u16, prdtl: u16) -> Result<(), AhciError> {
-        let table_ref = self.command_tables[slot]
-            .as_ref()
-            .ok_or(AhciError::InvalidSlot)?;
+        let table_ref = self.command_table(slot);
 
         unsafe {
             let header = &raw mut (*self.command_list.get())[slot];
@@ -854,11 +1145,7 @@ impl AhciPort {
 
         self.enter_ncq_mode();
 
-        let slot = self.allocate_slot_blocking();
-        let handle = sched().current_thread_weak().unwrap();
-        *self.slot_waiters[slot].lock() = Some(handle.clone());
-
-        let result = (|| -> Result<(), AhciError> {
+        let result = self.with_slot_blocking(|slot, _op| {
             let fis = FisRegH2D::new_read_fpdma_queued(lba, sectors, slot as u8);
             let sg = virt_buffer_to_sg_list(buffer.as_ptr(), expected_size);
 
@@ -875,7 +1162,7 @@ impl AhciPort {
 
             // Only copy from pool if we used the pool path
             if sg.is_none() {
-                let pool = &self.slot_pools[slot];
+                let pool = self.slot_pool(slot);
                 let mut offset = 0;
                 for i in 0..num_pages {
                     let copy_len = (expected_size - offset).min(4096);
@@ -890,10 +1177,8 @@ impl AhciPort {
                 }
             }
             Ok(())
-        })();
+        });
 
-        *self.slot_waiters[slot].lock() = None;
-        self.free_slot(slot);
         self.exit_ncq_mode();
 
         result
@@ -922,11 +1207,7 @@ impl AhciPort {
 
         self.enter_ncq_mode();
 
-        let slot = self.allocate_slot_blocking();
-        let handle = sched().current_thread_weak().unwrap();
-        *self.slot_waiters[slot].lock() = Some(handle.clone());
-
-        let result = (|| -> Result<(), AhciError> {
+        let result = self.with_slot_blocking(|slot, _op| {
             let fis = if fua {
                 FisRegH2D::new_write_fpdma_queued_fua(lba, sectors, slot as u8)
             } else {
@@ -940,7 +1221,7 @@ impl AhciPort {
                 self.issue_ncq_command(slot, CMD_HEADER_WRITE, prdtl)?;
             } else {
                 // Fallback: copy to pool pages
-                let pool = &self.slot_pools[slot];
+                let pool = self.slot_pool(slot);
                 let mut offset = 0;
                 for i in 0..num_pages {
                     let copy_len = (expected_size - offset).min(4096);
@@ -958,10 +1239,8 @@ impl AhciPort {
             }
 
             self.wait_for_ncq_completion(slot, Duration::from_secs(5))
-        })();
+        });
 
-        *self.slot_waiters[slot].lock() = None;
-        self.free_slot(slot);
         self.exit_ncq_mode();
 
         result
@@ -979,21 +1258,32 @@ impl AhciPort {
         }
 
         // Cap concurrent commands to ncq_depth - 1 (leave a slot for flush/error).
-        let max_batch = (self.ncq_depth as usize).saturating_sub(1).max(1);
+        let max_batch = (self.ncq_depth() as usize).saturating_sub(1).max(1);
 
         self.enter_ncq_mode();
 
         let mut first_err: Option<AhciError> = None;
 
+        // Per-thread handle for cancel registration.
+        let current = sched().current_thread();
+        let waiter_weak = sched().current_thread_weak().unwrap_or_default();
+        let weak_port = self
+            .weak_self
+            .get()
+            .cloned()
+            .expect("AhciPort::set_weak_self not called before issuing I/O");
+
         for chunk in ranges.chunks_mut(max_batch) {
             // Allocate slots and issue all commands in this sub-batch.
+            // Each slot gets its own AhciSlotOp for cancel tracking.
             let mut slots: heapless::Vec<usize, 32> = heapless::Vec::new();
+            let mut ops: heapless::Vec<Option<Arc<AhciSlotOp>>, 32> = heapless::Vec::new();
             let mut direct: heapless::Vec<bool, 32> = heapless::Vec::new();
-            let handle = sched().current_thread_weak().unwrap();
 
             for &(lba, sectors, ref buf) in chunk.iter() {
                 if sectors == 0 {
                     let _ = slots.push(usize::MAX); // sentinel: no slot needed
+                    let _ = ops.push(None);
                     let _ = direct.push(false);
                     continue;
                 }
@@ -1002,12 +1292,34 @@ impl AhciPort {
                 if num_pages > NCQ_PAGES_PER_SLOT || buf.len() < expected_size {
                     first_err.get_or_insert(AhciError::IoError);
                     let _ = slots.push(usize::MAX);
+                    let _ = ops.push(None);
                     let _ = direct.push(false);
                     continue;
                 }
 
                 let slot = self.allocate_slot_blocking();
-                *self.slot_waiters[slot].lock() = Some(handle.clone());
+                let op = Arc::new(AhciSlotOp::new(
+                    weak_port.clone(),
+                    slot,
+                    waiter_weak.clone(),
+                ));
+                *self.slot_waiters[slot].lock() = Some(Arc::clone(&op));
+
+                // Best-effort cancel registration. With OWNED_OPS_CAP=32 and
+                // max_batch up to 31, push may rarely fail on the last slots.
+                // A failed push means that slot won't be auto-cancelled on death;
+                // all other batch slots will be. Log a warning.
+                if let Some(ref t) = current {
+                    if t.owned_ops_push(Arc::clone(&op) as ArcCancellableOp)
+                        .is_err()
+                    {
+                        log!(
+                            "AHCI port {}: owned_ops full for batch slot {}; cancel hookup skipped",
+                            self.port_idx,
+                            slot
+                        );
+                    }
+                }
 
                 let sg = virt_buffer_to_sg_list(buf.as_ptr(), expected_size);
 
@@ -1028,14 +1340,39 @@ impl AhciPort {
                 };
 
                 if let Err(e) = setup_result {
-                    *self.slot_waiters[slot].lock() = None;
-                    self.free_slot(slot);
+                    // Setup failed: remove from owned_ops, clear slot.
+                    // CAS Pending→Cancelled so a concurrent IRQ's CAS to
+                    // Completed fails and the IRQ path sees no work to do.
+                    let _ = op.state.compare_exchange(
+                        SLOT_PENDING,
+                        SLOT_CANCELLED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
+                    if let Some(ref t) = current {
+                        t.owned_ops_remove(Arc::as_ptr(&op) as *const ());
+                    }
+                    // Idempotent: only free if the slot is still ours.
+                    let still_ours = {
+                        let mut g = self.slot_waiters[slot].lock();
+                        if g.as_ref().map(|o| Arc::ptr_eq(o, &op)).unwrap_or(false) {
+                            *g = None;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if still_ours {
+                        self.free_slot(slot);
+                    }
                     first_err.get_or_insert(e);
                     let _ = slots.push(usize::MAX);
+                    let _ = ops.push(None);
                     let _ = direct.push(false);
                     continue;
                 }
                 let _ = slots.push(slot);
+                let _ = ops.push(Some(op));
                 let _ = direct.push(sg.is_some());
             }
 
@@ -1052,7 +1389,7 @@ impl AhciPort {
                     // Pool path: copy from pool to buffer
                     let expected_size = *sectors as usize * 512;
                     let num_pages = expected_size.div_ceil(4096);
-                    let pool = &self.slot_pools[slot];
+                    let pool = self.slot_pool(slot);
                     let mut offset = 0;
                     for p in 0..num_pages {
                         let copy_len = (expected_size - offset).min(4096);
@@ -1069,8 +1406,28 @@ impl AhciPort {
                     first_err.get_or_insert(e);
                 }
 
-                *self.slot_waiters[slot].lock() = None;
-                self.free_slot(slot);
+                // Deregister from owned_ops and release slot.
+                // Use ptr_eq guard: wake_all_slot_waiters may have called
+                // release_orphaned_slot already (Running→Dying race), so we
+                // only free the slot if it is still ours. Without this check
+                // we'd double-free the slot.
+                if let Some(ref op) = ops[i] {
+                    if let Some(ref t) = current {
+                        t.owned_ops_remove(Arc::as_ptr(op) as *const ());
+                    }
+                    let still_ours = {
+                        let mut g = self.slot_waiters[slot].lock();
+                        if g.as_ref().map(|o| Arc::ptr_eq(o, op)).unwrap_or(false) {
+                            *g = None;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if still_ours {
+                        self.free_slot(slot);
+                    }
+                }
             }
         }
 
@@ -1104,11 +1461,7 @@ impl AhciPort {
 
         let _guard = self.legacy_lock.lock();
 
-        let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
-        let handle = sched().current_thread_weak().unwrap();
-        *self.slot_waiters[slot].lock() = Some(handle.clone());
-
-        let result = (|| -> Result<(), AhciError> {
+        self.with_slot_try(|slot, _op| {
             let fis = FisRegH2D::new_read_dma_ext(lba, sectors);
             let sg = virt_buffer_to_sg_list(buffer.as_ptr(), expected_size);
 
@@ -1125,7 +1478,7 @@ impl AhciPort {
 
             // Only copy from pool if we used the pool path
             if sg.is_none() {
-                let pool = &self.slot_pools[slot];
+                let pool = self.slot_pool(slot);
                 let mut offset = 0;
                 for i in 0..num_pages {
                     let copy_len = (expected_size - offset).min(4096);
@@ -1140,12 +1493,7 @@ impl AhciPort {
                 }
             }
             Ok(())
-        })();
-
-        *self.slot_waiters[slot].lock() = None;
-        self.free_slot(slot);
-
-        result
+        })
     }
 
     /// Write sectors using legacy DMA EXT with scatter-gather. Serialized.
@@ -1171,11 +1519,7 @@ impl AhciPort {
 
         let _guard = self.legacy_lock.lock();
 
-        let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
-        let handle = sched().current_thread_weak().unwrap();
-        *self.slot_waiters[slot].lock() = Some(handle.clone());
-
-        let result = (|| -> Result<(), AhciError> {
+        self.with_slot_try(|slot, _op| {
             let fis = if fua {
                 FisRegH2D::new_write_dma_fua_ext(lba, sectors)
             } else {
@@ -1189,7 +1533,7 @@ impl AhciPort {
                 self.issue_command(slot, CMD_HEADER_WRITE, prdtl)?;
             } else {
                 // Fallback: copy to pool pages
-                let pool = &self.slot_pools[slot];
+                let pool = self.slot_pool(slot);
                 let mut offset = 0;
                 for i in 0..num_pages {
                     let copy_len = (expected_size - offset).min(4096);
@@ -1207,12 +1551,7 @@ impl AhciPort {
             }
 
             self.wait_for_completion(slot, Duration::from_secs(5))
-        })();
-
-        *self.slot_waiters[slot].lock() = None;
-        self.free_slot(slot);
-
-        result
+        })
     }
 
     fn legacy_ata_write(&self, lba: u64, buffer: &[u8], sectors: u16) -> Result<(), AhciError> {
@@ -1235,21 +1574,12 @@ impl AhciPort {
         flags: u16,
         timeout: Duration,
     ) -> Result<(), AhciError> {
-        let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
-        let handle = sched().current_thread_weak().unwrap();
-        *self.slot_waiters[slot].lock() = Some(handle.clone());
-
-        let result = (|| -> Result<(), AhciError> {
+        self.with_slot_try(|slot, _op| {
             self.setup_command_table(slot, fis, buffer_addr, buffer_size)?;
             let prdtl = if buffer_size > 0 { 1 } else { 0 };
             self.issue_command(slot, flags, prdtl)?;
             self.wait_for_completion(slot, timeout)
-        })();
-
-        *self.slot_waiters[slot].lock() = None;
-        self.free_slot(slot);
-
-        result
+        })
     }
 }
 
@@ -1261,7 +1591,7 @@ impl AhciPort {
     /// Read sectors from the device. Dispatches to NCQ, legacy ATA, or ATAPI.
     pub fn read_sectors(&self, lba: u64, buffer: &mut [u8], sectors: u16) -> Result<(), AhciError> {
         match self.device_type {
-            DeviceType::Ata if self.ncq_enabled => self.ncq_read(lba, buffer, sectors),
+            DeviceType::Ata if self.ncq_enabled() => self.ncq_read(lba, buffer, sectors),
             DeviceType::Ata => self.legacy_ata_read(lba, buffer, sectors),
             DeviceType::Atapi => {
                 let _guard = self.legacy_lock.lock();
@@ -1277,7 +1607,7 @@ impl AhciPort {
         ranges: &mut [(u64, u16, &mut [u8])],
     ) -> Result<(), AhciError> {
         match self.device_type {
-            DeviceType::Ata if self.ncq_enabled => self.ncq_read_batch(ranges),
+            DeviceType::Ata if self.ncq_enabled() => self.ncq_read_batch(ranges),
             _ => {
                 for (lba, sectors, buf) in ranges.iter_mut() {
                     self.read_sectors(*lba, buf, *sectors)?;
@@ -1290,7 +1620,7 @@ impl AhciPort {
     /// Write sectors to the device. Dispatches to NCQ, legacy ATA, or ATAPI.
     pub fn write_sectors(&self, lba: u64, buffer: &[u8], sectors: u16) -> Result<(), AhciError> {
         match self.device_type {
-            DeviceType::Ata if self.ncq_enabled => self.ncq_write(lba, buffer, sectors),
+            DeviceType::Ata if self.ncq_enabled() => self.ncq_write(lba, buffer, sectors),
             DeviceType::Ata => self.legacy_ata_write(lba, buffer, sectors),
             DeviceType::Atapi => Err(AhciError::ReadOnly),
         }
@@ -1304,11 +1634,13 @@ impl AhciPort {
         buffer: &[u8],
         sectors: u16,
     ) -> Result<(), AhciError> {
-        if !self.supports_fua {
+        if !self.supports_fua() {
             return Err(AhciError::IoError);
         }
         match self.device_type {
-            DeviceType::Ata if self.ncq_enabled => self.ncq_write_inner(lba, buffer, sectors, true),
+            DeviceType::Ata if self.ncq_enabled() => {
+                self.ncq_write_inner(lba, buffer, sectors, true)
+            }
             DeviceType::Ata => self.legacy_ata_write_inner(lba, buffer, sectors, true),
             DeviceType::Atapi => Err(AhciError::ReadOnly),
         }
@@ -1319,7 +1651,7 @@ impl AhciPort {
         match self.device_type {
             DeviceType::Ata => {
                 let _guard = self.legacy_lock.lock();
-                if self.ncq_enabled {
+                if self.ncq_enabled() {
                     self.enter_legacy_mode();
                 }
                 let result = self.execute_command(
@@ -1329,7 +1661,7 @@ impl AhciPort {
                     0,
                     Duration::from_secs(5),
                 );
-                if self.ncq_enabled {
+                if self.ncq_enabled() {
                     self.exit_legacy_mode();
                 }
                 result
@@ -1338,8 +1670,8 @@ impl AhciPort {
         }
     }
 
-    /// Issue IDENTIFY DEVICE. Called during init only (&mut self available).
-    pub fn identify_device(&mut self) -> Result<DeviceIdentifyInfo, AhciError> {
+    /// Issue IDENTIFY DEVICE. Called during init after `set_weak_self`.
+    pub fn identify_device(&self) -> Result<DeviceIdentifyInfo, AhciError> {
         match self.device_type {
             DeviceType::Ata => self.execute_ata_identify(),
             DeviceType::Atapi => self.execute_atapi_inquiry_as_identify(),
@@ -1378,21 +1710,12 @@ impl AhciPort {
         buffer_size: usize,
         timeout: Duration,
     ) -> Result<(), AhciError> {
-        let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
-        let handle = sched().current_thread_weak().unwrap();
-        *self.slot_waiters[slot].lock() = Some(handle.clone());
-
-        let result = (|| -> Result<(), AhciError> {
+        self.with_slot_try(|slot, _op| {
             self.setup_atapi_command_table(slot, scsi_cmd, buffer_addr, buffer_size)?;
             let prdtl = if buffer_size > 0 { 1 } else { 0 };
             self.issue_command(slot, CMD_HEADER_ATAPI, prdtl)?;
             self.wait_for_completion(slot, timeout)
-        })();
-
-        *self.slot_waiters[slot].lock() = None;
-        self.free_slot(slot);
-
-        result
+        })
     }
 
     /// SCSI INQUIRY, converted to DeviceIdentifyInfo.
@@ -1504,15 +1827,49 @@ impl AhciPort {
 
 impl AhciPort {
     /// Wake all threads waiting on any slot. Called by the AHCI driver kthread
-    /// after `process_completion`. Runs in thread context (NOT IRQ context);
-    /// the per-slot `spin::Mutex` is safe here — see the `slot_waiters` field
-    /// comment for the IRQ-safety reasoning.
+    /// after an interrupt signals command completion.
+    ///
+    /// Runs in thread context (NOT IRQ context); the per-slot `spin::Mutex` is
+    /// safe here — see the `slot_waiters` field comment for IRQ-safety reasoning.
+    ///
+    /// # Cancel-race handling (Foundation #2)
+    ///
+    /// Each slot's `AhciSlotOp` has a `state` CAS machine:
+    /// - **Pending → Completed** (we win): try to wake the submitter. If the
+    ///   submitter's `Weak<Thread>` is gone or the thread is `Dying`, call
+    ///   `release_orphaned_slot` ourselves so the slot is not leaked.
+    /// - **Pending → Cancelled** (cancel path won): the canceller already called
+    ///   `release_orphaned_slot`. Nothing to do.
+    /// - **Already Completed** (double-interrupt, impossible in practice): panic
+    ///   in debug mode, no-op in release.
     pub fn wake_all_slot_waiters(&self) {
-        for waiter in &self.slot_waiters {
-            let handle_opt = waiter.lock().clone();
-            if let Some(ref handle) = handle_opt {
-                sched().wake_thread(handle, WakePriority::Interrupt);
+        // AHCI's IRQ means "SOME slots completed; check SACT to find which."
+        // It does NOT tell us which specific slot just completed. The correct
+        // protocol is to wake every parked waiter and let them re-read SACT
+        // in their `thread_park_while` closure (which will re-park if their
+        // slot is still in-flight). Spurious wakes are expected and cheap.
+        //
+        // We do NOT touch `op.state` here. The submitter is authoritative on
+        // completion (it sees SACT=0 for its slot and CASes PENDING→COMPLETED
+        // in `with_slot_*` on the success path). The only state transitions
+        // originating elsewhere are PENDING→CANCELLED (from `cancel()`) or
+        // PENDING→COMPLETED (from the submitter). A CAS here would spuriously
+        // "complete" slots that have not actually completed, hiding their
+        // later real completion behind a CAS failure — hanging the waiter.
+        for waiter_mutex in self.slot_waiters.iter() {
+            let op_opt = waiter_mutex.lock().clone();
+            let Some(op) = op_opt else {
+                continue;
+            };
+            // If the op was already cancelled, the canceller already freed
+            // the slot and cleared `slot_waiters` — our clone is just
+            // keeping the Arc alive until this scope ends. Waking a
+            // cancelled op's thread is harmless (wake_pending + dangling
+            // Weak = silent no-op), but skip for clarity.
+            if op.state.load(Ordering::Acquire) == SLOT_CANCELLED {
+                continue;
             }
+            sched().wake_thread(&op.waiter, WakePriority::Interrupt);
         }
     }
 }

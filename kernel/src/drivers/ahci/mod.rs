@@ -26,6 +26,7 @@ use crate::{
 };
 
 pub mod api;
+pub mod cancel_op;
 pub mod controller;
 pub mod direct;
 
@@ -115,69 +116,69 @@ pub extern "C" fn ahci_driver_main() -> ! {
 
     let mut detected_devices: Vec<DetectedDevice> = Vec::new();
 
-    // Identify devices and initialize I/O pools.
-    // Ports are still owned by controllers (not yet Arc-wrapped).
-    let mut id = 0;
+    // Arc-wrap all ports first so weak_self is set before any command submission.
+    let mut port_arcs: Vec<(Arc<AhciPort>, PciAddress, usize, bool, u8)> = Vec::new();
     for controller in &mut controllers {
         for port_idx in 0..controller.ports.len() {
-            if let Some(port) = controller.ports[port_idx].as_mut() {
-                match port.identify_device() {
-                    Ok(device_info) => {
-                        device_info.print_info(port_idx);
+            if let Some(port) = controller.ports[port_idx].take() {
+                let arc = Arc::new(port);
+                arc.set_weak_self(Arc::downgrade(&arc));
+                port_arcs.push((
+                    arc,
+                    controller.pci_device.address,
+                    port_idx,
+                    controller.supports_ncq,
+                    controller.num_command_slots,
+                ));
+            }
+        }
+    }
 
-                        // NCQ enabled only if both HBA and device support it
-                        let supports_ncq = controller.supports_ncq
-                            && device_info.supports_ncq
-                            && port.device_type == DeviceType::Ata;
-                        let ncq_depth = if supports_ncq {
-                            device_info
-                                .ncq_queue_depth
-                                .min(controller.num_command_slots)
-                        } else {
-                            0
-                        };
+    // Now identify devices and initialize I/O pools via Arc (weak_self is set).
+    let mut id = 0;
+    let mut direct_ports: Vec<Arc<AhciPort>> = Vec::with_capacity(port_arcs.len());
+    for (arc, pci_address, port_idx, supports_ncq_hba, num_command_slots) in port_arcs {
+        match arc.identify_device() {
+            Ok(device_info) => {
+                device_info.print_info(port_idx);
 
-                        // Allocate per-slot DMA pools and command tables.
-                        if let Err(e) = port.init_io_pools(ncq_depth, device_info.supports_fua) {
-                            log!("Failed to init I/O pools for port {}: {:?}", port_idx, e);
-                            continue;
-                        }
+                // NCQ enabled only if both HBA and device support it
+                let supports_ncq = supports_ncq_hba
+                    && device_info.supports_ncq
+                    && arc.device_type == DeviceType::Ata;
+                let ncq_depth = if supports_ncq {
+                    device_info.ncq_queue_depth.min(num_command_slots)
+                } else {
+                    0
+                };
 
-                        detected_devices.push(DetectedDevice {
-                            id,
-                            controller_pci_address: controller.pci_device.address,
-                            port_idx,
-                            device_info,
-                            device_type: port.device_type,
-                            supports_ncq,
-                            ncq_depth,
-                        });
-                        id += 1;
-                    }
-                    Err(e) => {
-                        log!("Failed to identify device on port {}: {:?}", port_idx, e);
-                    }
+                // Allocate per-slot DMA pools and command tables.
+                if let Err(e) = arc.init_io_pools(ncq_depth, device_info.supports_fua) {
+                    log!("Failed to init I/O pools for port {}: {:?}", port_idx, e);
+                    continue;
                 }
+
+                detected_devices.push(DetectedDevice {
+                    id,
+                    controller_pci_address: pci_address,
+                    port_idx,
+                    device_info,
+                    device_type: arc.device_type,
+                    supports_ncq,
+                    ncq_depth,
+                });
+                id += 1;
+                direct_ports.push(arc);
+            }
+            Err(e) => {
+                log!("Failed to identify device on port {}: {:?}", port_idx, e);
             }
         }
     }
 
     DETECTED_DEVICES.call_once(|| detected_devices.clone());
 
-    // Move ports out of controllers, wrap in Arc, and pass to the direct layer.
     {
-        let mut direct_ports: Vec<Arc<AhciPort>> = Vec::with_capacity(detected_devices.len());
-
-        for device in &detected_devices {
-            let port = controllers
-                .iter_mut()
-                .find(|c| c.pci_device.address == device.controller_pci_address)
-                .and_then(|c| c.ports.get_mut(device.port_idx))
-                .and_then(|p| p.take())
-                .expect("device port not found in controller");
-            direct_ports.push(Arc::new(port));
-        }
-
         direct::init(direct_ports);
     }
 
