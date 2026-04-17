@@ -6,6 +6,7 @@ use x86_64::{
 };
 
 use crate::{
+    debug::lock_order::{RANK_MAPPERS, RANK_USER_MM, RANK_VMAS},
     fs::{page_cache::CachedPage, vfs::fs_by_mount_id},
     log,
     memory::{
@@ -14,7 +15,7 @@ use crate::{
         pat,
         vma::{Vma, VmaBacking, VmaFlags, VmaProt},
     },
-    println,
+    println, ranked_lock,
     syscalls::Errno,
     thread::{pipe::FileDescriptor, scheduler::sched},
 };
@@ -111,7 +112,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         let map_addr = if addr == 0 {
             let user_read = user_arc.read();
             let next_mmap_addr = info.lock().next_mmap_addr.clone();
-            let vmas = user_read.vmas.lock();
+            let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
             vmas.find_free_address(&next_mmap_addr, length)
         } else {
             VirtAddr::new(addr)
@@ -127,7 +128,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
 
         let page_count = (length + 0xFFF) / 4096;
         let memory_manager = info.lock().memory_manager.clone();
-        let mut mm = memory_manager.lock();
+        let mut mm = ranked_lock!(RANK_USER_MM, "user.mm", memory_manager);
         for i in 0..page_count {
             let virt = VirtAddr::new(map_addr.as_u64() + i * 4096);
             let phys = PhysAddr::new(phys_addr + i * 4096);
@@ -162,15 +163,18 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             vma_prot |= VmaProt::EXEC;
         }
 
-        user_arc.read().vmas.lock().insert(Vma {
-            start: map_addr,
-            end: map_addr + length,
-            prot: vma_prot,
-            flags: VmaFlags::PRIVATE,
-            backing: VmaBacking::Physical {
-                phys_base: phys_addr,
-            },
-        });
+        {
+            let _user = user_arc.read();
+            ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert(Vma {
+                start: map_addr,
+                end: map_addr + length,
+                prot: vma_prot,
+                flags: VmaFlags::PRIVATE,
+                backing: VmaBacking::Physical {
+                    phys_base: phys_addr,
+                },
+            });
+        }
 
         log!("mmap: mapped physical at {map_addr:p}");
         map_addr.as_u64()
@@ -185,7 +189,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         let map_addr = if addr == 0 {
             let user_read = user_arc.read();
             let next_mmap_addr = info.lock().next_mmap_addr.clone();
-            let vmas = user_read.vmas.lock();
+            let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
             vmas.find_free_address(&next_mmap_addr, length)
         } else {
             VirtAddr::new(addr)
@@ -203,13 +207,16 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         }
 
         // Lazy allocation - just record the VMA, don't allocate frames
-        user_arc.read().vmas.lock().insert(Vma {
-            start: map_addr,
-            end: map_addr + length,
-            prot: vma_prot,
-            flags: VmaFlags::PRIVATE | VmaFlags::LAZY,
-            backing: VmaBacking::Anonymous,
-        });
+        {
+            let _user = user_arc.read();
+            ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert(Vma {
+                start: map_addr,
+                end: map_addr + length,
+                prot: vma_prot,
+                flags: VmaFlags::PRIVATE | VmaFlags::LAZY,
+                backing: VmaBacking::Anonymous,
+            });
+        }
 
         log!("mmap: lazy mapped at {map_addr:p}");
         map_addr.as_u64()
@@ -292,7 +299,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         let map_addr = if addr == 0 {
             let user_read = user_arc.read();
             let next_mmap_addr = info.lock().next_mmap_addr.clone();
-            let vmas = user_read.vmas.lock();
+            let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
             vmas.find_free_address(&next_mmap_addr, length)
         } else {
             VirtAddr::new(addr)
@@ -320,19 +327,22 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         // Note: no explicit FS pin here. The VMA holds `Arc<VfsInode>`, which
         // bumps the inode refcount; evict_inode fires only when the final Arc
         // (including this VMA's) is released. This is the Linux `i_count` model.
-        user_arc.read().vmas.lock().insert(Vma {
-            start: map_addr,
-            end: map_addr + length,
-            prot: vma_prot,
-            flags: vma_flags,
-            backing: VmaBacking::FileBacked {
-                inode: Arc::clone(&inode),
-                file_offset,
-                shared: is_shared,
-                writable_mapping,
-                pages: alloc::vec![None; num_pages],
-            },
-        });
+        {
+            let _user = user_arc.read();
+            ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert(Vma {
+                start: map_addr,
+                end: map_addr + length,
+                prot: vma_prot,
+                flags: vma_flags,
+                backing: VmaBacking::FileBacked {
+                    inode: Arc::clone(&inode),
+                    file_offset,
+                    shared: is_shared,
+                    writable_mapping,
+                    pages: alloc::vec![None; num_pages],
+                },
+            });
+        }
 
         // D.1: Register this process in the inode's reverse map so that a future
         // truncate can walk all mappers and unmap PTEs past the new EOF.
@@ -340,7 +350,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         // are cleaned up lazily during truncate invalidation.
         {
             let weak = Arc::downgrade(&user_arc);
-            let mut mappers = inode.mappers.lock();
+            let mut mappers = ranked_lock!(RANK_MAPPERS, "inode.mappers", inode.mappers);
             let already = mappers.iter().any(|w| {
                 w.upgrade()
                     .map(|a| Arc::ptr_eq(&a, &user_arc))
@@ -465,7 +475,7 @@ pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
 
     {
         let user_read = user_arc.read();
-        let vmas = user_read.vmas.lock();
+        let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
 
         for vma in vmas.iter() {
             // Skip VMAs that don't overlap [range_start, range_end)
@@ -574,11 +584,10 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
     let unmap_end = VirtAddr::new(addr + length);
 
     // Remove all VMAs fully covered by [map_addr, unmap_end), splitting straddlers.
-    let removed_vmas = user_arc
-        .read()
-        .vmas
-        .lock()
-        .remove_range(map_addr, unmap_end);
+    let removed_vmas = {
+        let _user = user_arc.read();
+        ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).remove_range(map_addr, unmap_end)
+    };
 
     if removed_vmas.is_empty() {
         log!("Unmap fail, no VMAs in range");
@@ -598,7 +607,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
             VmaBacking::Anonymous => {
                 let mut frames = alloc::vec::Vec::new();
                 {
-                    let mut mm = memory_manager.lock();
+                    let mut mm = ranked_lock!(RANK_USER_MM, "user.mm", memory_manager);
                     for i in 0..vma_page_count {
                         let virt = VirtAddr::new(vma_start.as_u64() + i * 4096);
                         let page: Page<Size4KiB> = Page::containing_address(virt);
@@ -651,7 +660,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                 // which keeps the cache frame alive for the duration of the mapping.
                 let mut frames = alloc::vec::Vec::new();
                 {
-                    let mut mm = memory_manager.lock();
+                    let mut mm = ranked_lock!(RANK_USER_MM, "user.mm", memory_manager);
                     for i in 0..vma_page_count {
                         let virt = VirtAddr::new(vma_start.as_u64() + i * 4096);
                         let page: Page<Size4KiB> = Page::containing_address(virt);
@@ -686,12 +695,14 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
             }
             VmaBacking::SharedMemory { .. } => {
                 // Re-insert and return error; SHM has its own unmap syscall.
-                user_arc.read().vmas.lock().insert(vma);
+                let _user = user_arc.read();
+                ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert(vma);
                 any_error = true;
             }
             VmaBacking::Tls | VmaBacking::Stack => {
                 // Kernel-managed; re-insert and return error.
-                user_arc.read().vmas.lock().insert(vma);
+                let _user = user_arc.read();
+                ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert(vma);
                 any_error = true;
             }
         }

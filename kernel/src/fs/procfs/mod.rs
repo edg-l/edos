@@ -9,10 +9,12 @@ use alloc::{
 };
 
 use crate::{
+    debug::lock_order::RANK_VMAS,
     fs::{
         Error, File, FileAttrs, FileKind, FileSystem, block_page_cache::BlockPageCache, path::Path,
     },
     memory::frame_allocator::frame_allocator,
+    ranked_lock,
     syscalls::Errno,
     thread::thread::{State, Thread, ThreadId, get_thread_info_by_id, list_threads},
 };
@@ -435,7 +437,7 @@ impl ThreadSnapshot {
                 (
                     Some(user.pid),
                     Some(user.heap_break),
-                    Some(user.vmas.lock().len()),
+                    Some(ranked_lock!(RANK_VMAS, "user.vmas", user.vmas).len()),
                 )
             })
             .unwrap_or((None, None, None));

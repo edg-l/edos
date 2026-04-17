@@ -20,6 +20,7 @@ use x86_64::{
 };
 
 use crate::{
+    debug::lock_order::{RANK_MAPPERS, RANK_USER_MM, RANK_VMAS},
     fs::Error as FsError,
     gdt::selectors,
     log,
@@ -28,7 +29,7 @@ use crate::{
         vma::{Vma, VmaBacking, VmaFlags, VmaProt, VmaSet},
     },
     net::device::NetDevice,
-    println,
+    println, ranked_lock,
     syscalls::{
         fs::{
             FstatEntry, sys_fstat, sys_list_mounts, sys_list_partitions, sys_mkdir, sys_mount,
@@ -1579,7 +1580,7 @@ fn sys_clone(
         let stack_bottom = {
             let user_read = parent_user.read();
             let next_mmap_addr = parent_info.lock().next_mmap_addr.clone();
-            let vmas = user_read.vmas.lock();
+            let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
             vmas.find_free_address(&next_mmap_addr, stack_size)
         };
 
@@ -1656,7 +1657,7 @@ fn sys_clone(
     let mut tls_region = None;
     let mut tls_fs_base = 0u64;
     if let Some(template) = tls_template.take() {
-        let mut manager_guard = memory_manager.lock();
+        let mut manager_guard = ranked_lock!(RANK_USER_MM, "user.mm", memory_manager);
         let tls_slot = next_tls_slot.fetch_add(1, Ordering::Relaxed);
         match crate::thread::thread::allocate_tls_region(&template, tls_slot, &mut manager_guard) {
             Ok(allocation) => {
@@ -1799,7 +1800,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     // Deep-clone the VmaSet: each VMA is cloned, SHM entries get inc_ref.
     // FileBacked VMAs get a fresh empty pages vec — the child re-faults lazily.
     let child_vma_set = {
-        let parent_vmas = parent_user_read.vmas.lock();
+        let parent_vmas = ranked_lock!(RANK_VMAS, "user.vmas", parent_user_read.vmas);
         let mut cloned = VmaSet::new();
         for vma in parent_vmas.iter() {
             match &vma.backing {
@@ -1845,7 +1846,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     // Must be called with parent's CR3 active.
     // tlb_shootdown_all() inside flushes all CPUs' stale writable entries.
     let child_pml4_frame = {
-        let parent_vmas = parent_user_read.vmas.lock();
+        let parent_vmas = ranked_lock!(RANK_VMAS, "user.vmas", parent_user_read.vmas);
         unsafe { clone_user_page_tables_cow(parent_cr3.0, &parent_vmas) }
     };
 
@@ -1899,7 +1900,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         mm.vmas = Some(child_vma_set_arc.clone());
         {
             let parent_user_guard = parent_user.read();
-            let parent_mm = parent_user_guard.memory_manager.lock();
+            let parent_mm = ranked_lock!(RANK_USER_MM, "user.mm", parent_user_guard.memory_manager);
             mm.reloc_table = parent_mm.reloc_table.clone();
             mm.reloc_vma_range = parent_mm.reloc_vma_range.clone();
             mm.load_base = parent_mm.load_base;
@@ -1999,7 +2000,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     {
         let file_backed_inodes: Vec<Arc<crate::fs::inode::VfsInode>> = {
             let child_user_read = child_user_arc.read();
-            let vmas = child_user_read.vmas.lock();
+            let vmas = ranked_lock!(RANK_VMAS, "user.vmas", child_user_read.vmas);
             vmas.iter()
                 .filter_map(|vma| {
                     if let VmaBacking::FileBacked { inode, .. } = &vma.backing {
@@ -2012,7 +2013,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         };
         let weak = Arc::downgrade(&child_user_arc);
         for inode in file_backed_inodes {
-            inode.mappers.lock().push(weak.clone());
+            ranked_lock!(RANK_MAPPERS, "inode.mappers", inode.mappers).push(weak.clone());
         }
     }
 

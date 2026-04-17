@@ -8,10 +8,12 @@ use x86_64::{
 };
 
 use crate::{
+    debug::lock_order::{RANK_USER_MM, RANK_VMAS},
     memory::{
         shared::{SharedMemory, SharedMemoryError},
         vma::{Vma, VmaBacking, VmaFlags, VmaProt},
     },
+    ranked_lock,
     syscalls::Errno,
     thread::scheduler::sched,
 };
@@ -101,7 +103,7 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
     let map_addr = if addr_hint == 0 {
         let user_read = user_arc.read();
         let next_mmap_addr = info.lock().next_mmap_addr.clone();
-        let vmas = user_read.vmas.lock();
+        let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
         vmas.find_free_address(&next_mmap_addr, size)
     } else {
         // Validate user-supplied address: must be page-aligned and in user space
@@ -124,7 +126,7 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
     // Map each frame into the process's address space
     let memory_manager = info.lock().memory_manager.clone();
     {
-        let mut manager = memory_manager.lock();
+        let mut manager = ranked_lock!(RANK_USER_MM, "user.mm", memory_manager);
         let frames = shm.frames();
 
         for (i, frame) in frames.iter().enumerate() {
@@ -153,7 +155,7 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
     if shm.inc_ref().is_err() {
         // Rollback: unmap all pages we just mapped
         let memory_manager = info.lock().memory_manager.clone();
-        let mut manager = memory_manager.lock();
+        let mut manager = ranked_lock!(RANK_USER_MM, "user.mm", memory_manager);
         let page_count = (size + 0xFFF) / 4096;
         for i in 0..page_count {
             let virt_addr = VirtAddr::new(map_addr.as_u64() + i * 4096);
@@ -178,13 +180,16 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
     }
 
     // Record the mapping in VmaSet
-    user_arc.read().vmas.lock().insert(Vma {
-        start: map_addr,
-        end: map_addr + size,
-        prot: vma_prot,
-        flags: VmaFlags::SHARED,
-        backing: VmaBacking::SharedMemory { shm_id },
-    });
+    {
+        let _user = user_arc.read();
+        ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert(Vma {
+            start: map_addr,
+            end: map_addr + size,
+            prot: vma_prot,
+            flags: VmaFlags::SHARED,
+            backing: VmaBacking::SharedMemory { shm_id },
+        });
+    }
 
     map_addr.as_u64()
 }
@@ -220,7 +225,10 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
     };
 
     // Find and remove the VMA
-    let vma = user_arc.read().vmas.lock().remove(&map_addr);
+    let vma = {
+        let _user = user_arc.read();
+        ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).remove(&map_addr)
+    };
 
     match vma {
         Some(vma) => {
@@ -236,7 +244,7 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
                     let memory_manager = info.lock().memory_manager.clone();
                     let page_count = (vma.size() + 0xFFF) / 4096;
                     {
-                        let mut manager = memory_manager.lock();
+                        let mut manager = ranked_lock!(RANK_USER_MM, "user.mm", memory_manager);
                         for i in 0..page_count {
                             let virt_addr = VirtAddr::new(addr + i * 4096);
                             let page: Page<Size4KiB> = Page::containing_address(virt_addr);
@@ -253,7 +261,8 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
                 }
                 _ => {
                     // Not a shared memory mapping, restore and return error
-                    user_arc.read().vmas.lock().insert(vma);
+                    let _user = user_arc.read();
+                    ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert(vma);
                     info.lock().errno = Errno::EINVAL;
                     -1
                 }

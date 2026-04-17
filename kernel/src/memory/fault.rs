@@ -10,6 +10,7 @@ use x86_64::{
 
 use crate::{
     boot::boot_info,
+    debug::lock_order::{RANK_USER_MM, RANK_VMAS},
     fs::{
         inode::VfsInode,
         page_cache::CachedPage,
@@ -21,6 +22,7 @@ use crate::{
         mapper::COW_BIT,
         vma::{VmaBacking, VmaFlags, VmaProt, VmaSet},
     },
+    ranked_lock,
     thread::scheduler::sched,
 };
 
@@ -403,7 +405,7 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
 
     // Read the VmaSet under spin lock (IST-safe)
     let user_read = user.read();
-    let vmas = user_read.vmas.lock();
+    let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
 
     let vma = match vmas.find(fault_addr) {
         Some(v) => v,
@@ -430,7 +432,7 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
     // the cache page, apply relocations, and map it writable immediately
     // (no COW_BIT). The cache page is never patched.
     let reloc_info: Option<(Arc<RelocTable>, u32, u64)> = {
-        let mm = user_read.memory_manager.lock();
+        let mm = ranked_lock!(RANK_USER_MM, "user.mm", user_read.memory_manager);
         if let (Some(table), Some(range)) = (&mm.reloc_table, &mm.reloc_vma_range) {
             let page_addr = fault_addr.align_down(4096u64);
             if range.contains(&page_addr) {
@@ -529,7 +531,7 @@ pub fn store_cached_page_on_vma(
         None => return false,
     };
     let user_read = u.read();
-    let mut vmas = user_read.vmas.lock();
+    let mut vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
     let vma = match vmas.find_mut(fault_addr) {
         Some(v) => v,
         None => return false,

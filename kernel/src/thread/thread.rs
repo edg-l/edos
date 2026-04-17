@@ -22,6 +22,7 @@ use intrusive_list::Link;
 
 use crate::{
     boot::boot_info,
+    debug::lock_order::{RANK_MAPPERS, RANK_USER_MM, RANK_VMAS},
     drivers::{fpu::FpuState, hpet::driver::get_hpet_timer},
     fs::{self, inode::VfsInode, path::Path},
     loader::{ElfLoadError, TlsTemplate, load_elf},
@@ -32,7 +33,7 @@ use crate::{
         shared::SharedMemory,
         vma::{Vma, VmaBacking, VmaFlags, VmaProt, VmaSet},
     },
-    println,
+    println, ranked_lock,
     syscalls::Errno,
     thread::{
         UserThread, UserThreadInfo, UserThreadTls,
@@ -621,7 +622,7 @@ impl Thread {
         {
             let file_backed_inodes: Vec<Arc<crate::fs::inode::VfsInode>> = {
                 let user = user_state.read();
-                let vmas = user.vmas.lock();
+                let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user.vmas);
                 vmas.iter()
                     .filter_map(|vma| {
                         if let crate::memory::vma::VmaBacking::FileBacked { inode, .. } =
@@ -636,7 +637,7 @@ impl Thread {
             };
             let weak = Arc::downgrade(&user_state);
             for inode in file_backed_inodes {
-                inode.mappers.lock().push(weak.clone());
+                ranked_lock!(RANK_MAPPERS, "inode.mappers", inode.mappers).push(weak.clone());
             }
         }
 
@@ -740,7 +741,10 @@ impl Thread {
         let remaining = user.address_space_refs.fetch_sub(1, Ordering::AcqRel);
         let is_last_thread = remaining == 1;
 
-        let mut memory_manager = user.memory_manager.lock();
+        // Lock ordering note: vmas (rank 70) must be acquired before mm (rank 80).
+        // This site uses mm to unmap TLS, then vmas to remove the VMA entry.
+        // The operations are sequential (mm dropped before vmas), so no nesting occurs.
+        let mut memory_manager = ranked_lock!(RANK_USER_MM, "user.mm", user.memory_manager);
 
         // Clean up this thread's TLS region (each thread has its own TLS slot).
         // Must happen for ALL threads, not just the last one, to avoid leaking
@@ -749,8 +753,11 @@ impl Thread {
             let tls_start = tls.mapping_base;
             let tls_size = tls.mapping_size;
             let _ = memory_manager.unmap_memory(tls_start, tls_size);
-            // Remove the TLS VMA from the shared VmaSet
-            user.vmas.lock().remove(&tls_start);
+            // Drop mm (rank 80) before taking vmas (rank 70) to preserve order.
+            drop(memory_manager);
+            ranked_lock!(RANK_VMAS, "user.vmas", user.vmas).remove(&tls_start);
+            // Re-acquire mm for subsequent unmap operations below.
+            memory_manager = ranked_lock!(RANK_USER_MM, "user.mm", user.memory_manager);
         }
 
         if is_last_thread {
@@ -825,8 +832,11 @@ impl Thread {
             // Clean up windows owned by this process
             window::cleanup_process_windows(user.pid);
 
-            // Unmap all VMAs, skipping Stack (handled by thread_stack_free below)
-            let vmas = user.vmas.lock().clone();
+            // Unmap all VMAs, skipping Stack (handled by thread_stack_free below).
+            // Drop mm (rank 80) before taking vmas (rank 70), then re-acquire mm.
+            drop(memory_manager);
+            let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user.vmas).clone();
+            memory_manager = ranked_lock!(RANK_USER_MM, "user.mm", user.memory_manager);
             for vma in vmas.iter() {
                 match &vma.backing {
                     VmaBacking::Anonymous => {
