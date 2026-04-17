@@ -6,6 +6,7 @@
 use x86_64::instructions::port::Port;
 
 use super::structures::PciAddress;
+use crate::{debug::lock_order::RANK_PCI_CONFIG, ranked_lock};
 
 /// Spinlock serializing PCI config space accesses (ports 0xCF8/0xCFC).
 /// The address+data sequence is non-atomic, so concurrent CPUs must not interleave.
@@ -20,7 +21,7 @@ fn pci_config_address(addr: PciAddress, offset: u8) -> u32 {
 }
 
 pub fn pci_read_u32(addr: PciAddress, offset: u8) -> u32 {
-    let _guard = PCI_CONFIG_LOCK.lock();
+    let _guard = ranked_lock!(RANK_PCI_CONFIG, "PCI_CONFIG_LOCK", PCI_CONFIG_LOCK);
     let mut cfg_addr: Port<u32> = Port::new(0xCF8);
     let mut cfg_data: Port<u32> = Port::new(0xCFC);
     unsafe {
@@ -30,7 +31,7 @@ pub fn pci_read_u32(addr: PciAddress, offset: u8) -> u32 {
 }
 
 pub fn pci_write_u32(addr: PciAddress, offset: u8, value: u32) {
-    let _guard = PCI_CONFIG_LOCK.lock();
+    let _guard = ranked_lock!(RANK_PCI_CONFIG, "PCI_CONFIG_LOCK", PCI_CONFIG_LOCK);
     let mut cfg_addr: Port<u32> = Port::new(0xCF8);
     let mut cfg_data: Port<u32> = Port::new(0xCFC);
     unsafe {
@@ -46,7 +47,7 @@ pub fn pci_read_u16(addr: PciAddress, offset: u8) -> u16 {
 
 pub fn pci_write_u16(addr: PciAddress, offset: u8, value: u16) {
     // Single lock for the read-modify-write to avoid TOCTOU with other CPUs.
-    let _guard = PCI_CONFIG_LOCK.lock();
+    let _guard = ranked_lock!(RANK_PCI_CONFIG, "PCI_CONFIG_LOCK", PCI_CONFIG_LOCK);
     let mut cfg_addr: Port<u32> = Port::new(0xCF8);
     let mut cfg_data: Port<u32> = Port::new(0xCFC);
     let config_addr = pci_config_address(addr, offset & !3);
@@ -107,7 +108,7 @@ pub fn read_bar_phys(addr: PciAddress, bar_index: u8) -> x86_64::PhysAddr {
 
 #[expect(unused)]
 pub fn pci_write_u8(addr: PciAddress, offset: u8, value: u8) {
-    let _guard = PCI_CONFIG_LOCK.lock();
+    let _guard = ranked_lock!(RANK_PCI_CONFIG, "PCI_CONFIG_LOCK", PCI_CONFIG_LOCK);
     let mut cfg_addr: Port<u32> = Port::new(0xCF8);
     let mut cfg_data: Port<u32> = Port::new(0xCFC);
     let config_addr = pci_config_address(addr, offset & !3);

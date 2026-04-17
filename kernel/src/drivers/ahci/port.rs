@@ -16,6 +16,7 @@ use x86_64::{PhysAddr, VirtAddr};
 use spin::Once;
 
 use crate::{
+    debug::lock_order::{RANK_AHCI_LEGACY, RANK_AHCI_MMIO, RANK_AHCI_SLOT},
     drivers::{
         ahci::{
             AhciError, DeviceType,
@@ -32,6 +33,7 @@ use crate::{
     },
     log,
     memory::mapper::memory_mapper,
+    ranked_lock,
     thread::{
         cancel::ArcCancellableOp,
         mutex::BlockingMutex,
@@ -446,7 +448,11 @@ impl AhciPort {
     /// `wake_all_slot_waiters` guarantees this). Runs in thread context.
     #[inline]
     pub fn release_orphaned_slot(&self, slot: usize) {
-        *self.slot_waiters[slot].lock() = None;
+        **ranked_lock!(
+            RANK_AHCI_SLOT,
+            "AhciPort.slot_waiters",
+            self.slot_waiters[slot]
+        ) = None;
         self.free_slot(slot);
     }
 
@@ -465,13 +471,17 @@ impl AhciPort {
     pub fn maybe_release_slot(&self, slot: usize, op: &AhciSlotOp) {
         let op_ptr = op as *const AhciSlotOp;
         let still_there = {
-            let mut g = self.slot_waiters[slot].lock();
+            let mut g = ranked_lock!(
+                RANK_AHCI_SLOT,
+                "AhciPort.slot_waiters",
+                self.slot_waiters[slot]
+            );
             let is_ours = g
                 .as_ref()
                 .map(|stored| Arc::as_ptr(stored) == op_ptr)
                 .unwrap_or(false);
             if is_ours {
-                *g = None;
+                **g = None;
                 true
             } else {
                 false
@@ -580,7 +590,11 @@ impl AhciPort {
             .expect("AhciPort::set_weak_self must be called before any command submission");
         let waiter = sched().current_thread_weak().unwrap_or_default();
         let op = Arc::new(AhciSlotOp::new(port_weak, slot, waiter));
-        *self.slot_waiters[slot].lock() = Some(Arc::clone(&op));
+        **ranked_lock!(
+            RANK_AHCI_SLOT,
+            "AhciPort.slot_waiters",
+            self.slot_waiters[slot]
+        ) = Some(Arc::clone(&op));
 
         // Register with owned_ops BEFORE parking inside f().
         let current = sched().current_thread();
@@ -636,9 +650,13 @@ impl AhciPort {
         // release_orphaned_slot (from wake_all_slot_waiters observing a Dying thread)
         // would clear slot_waiters and free the slot, and we'd double-free.
         let still_ours = {
-            let mut g = self.slot_waiters[slot].lock();
+            let mut g = ranked_lock!(
+                RANK_AHCI_SLOT,
+                "AhciPort.slot_waiters",
+                self.slot_waiters[slot]
+            );
             if g.as_ref().map(|o| Arc::ptr_eq(o, &op)).unwrap_or(false) {
-                *g = None;
+                **g = None;
                 true
             } else {
                 false
@@ -673,7 +691,11 @@ impl AhciPort {
             .expect("AhciPort::set_weak_self must be called before any command submission");
         let waiter = sched().current_thread_weak().unwrap_or_default();
         let op = Arc::new(AhciSlotOp::new(port_weak, slot, waiter));
-        *self.slot_waiters[slot].lock() = Some(Arc::clone(&op));
+        **ranked_lock!(
+            RANK_AHCI_SLOT,
+            "AhciPort.slot_waiters",
+            self.slot_waiters[slot]
+        ) = Some(Arc::clone(&op));
 
         // Register with owned_ops BEFORE parking inside f().
         let current = sched().current_thread();
@@ -725,9 +747,13 @@ impl AhciPort {
         // (from wake_all_slot_waiters seeing a Dying thread) may have already
         // cleared slot_waiters and freed the slot; without this check we'd double-free.
         let still_ours = {
-            let mut g = self.slot_waiters[slot].lock();
+            let mut g = ranked_lock!(
+                RANK_AHCI_SLOT,
+                "AhciPort.slot_waiters",
+                self.slot_waiters[slot]
+            );
             if g.as_ref().map(|o| Arc::ptr_eq(o, &op)).unwrap_or(false) {
-                *g = None;
+                **g = None;
                 true
             } else {
                 false
@@ -985,7 +1011,7 @@ impl AhciPort {
         }
 
         // Issue: write CI bit (read-modify-write under mmio_lock).
-        let _lock = self.mmio_lock.lock();
+        let _lock = ranked_lock!(RANK_AHCI_MMIO, "AhciPort.mmio_lock", self.mmio_lock);
         unsafe {
             let ci = ptr::read_volatile(&raw const (*self.port_regs).ci);
             ptr::write_volatile(&raw mut (*self.port_regs).ci, ci | (1 << slot));
@@ -1015,7 +1041,7 @@ impl AhciPort {
         }
 
         // Issue: SACT MUST be written before CI for NCQ commands.
-        let _lock = self.mmio_lock.lock();
+        let _lock = ranked_lock!(RANK_AHCI_MMIO, "AhciPort.mmio_lock", self.mmio_lock);
         unsafe {
             let sact = ptr::read_volatile(&raw const (*self.port_regs).sact);
             ptr::write_volatile(&raw mut (*self.port_regs).sact, sact | (1 << slot));
@@ -1303,7 +1329,11 @@ impl AhciPort {
                     slot,
                     waiter_weak.clone(),
                 ));
-                *self.slot_waiters[slot].lock() = Some(Arc::clone(&op));
+                **ranked_lock!(
+                    RANK_AHCI_SLOT,
+                    "AhciPort.slot_waiters",
+                    self.slot_waiters[slot]
+                ) = Some(Arc::clone(&op));
 
                 // Best-effort cancel registration. With OWNED_OPS_CAP=32 and
                 // max_batch up to 31, push may rarely fail on the last slots.
@@ -1354,9 +1384,13 @@ impl AhciPort {
                     }
                     // Idempotent: only free if the slot is still ours.
                     let still_ours = {
-                        let mut g = self.slot_waiters[slot].lock();
+                        let mut g = ranked_lock!(
+                            RANK_AHCI_SLOT,
+                            "AhciPort.slot_waiters",
+                            self.slot_waiters[slot]
+                        );
                         if g.as_ref().map(|o| Arc::ptr_eq(o, &op)).unwrap_or(false) {
-                            *g = None;
+                            **g = None;
                             true
                         } else {
                             false
@@ -1416,9 +1450,13 @@ impl AhciPort {
                         t.owned_ops_remove(Arc::as_ptr(op) as *const ());
                     }
                     let still_ours = {
-                        let mut g = self.slot_waiters[slot].lock();
+                        let mut g = ranked_lock!(
+                            RANK_AHCI_SLOT,
+                            "AhciPort.slot_waiters",
+                            self.slot_waiters[slot]
+                        );
                         if g.as_ref().map(|o| Arc::ptr_eq(o, op)).unwrap_or(false) {
-                            *g = None;
+                            **g = None;
                             true
                         } else {
                             false
@@ -1459,7 +1497,7 @@ impl AhciPort {
             return Err(AhciError::IoError);
         }
 
-        let _guard = self.legacy_lock.lock();
+        let _guard = ranked_lock!(RANK_AHCI_LEGACY, "AhciPort.legacy_lock", self.legacy_lock);
 
         self.with_slot_try(|slot, _op| {
             let fis = FisRegH2D::new_read_dma_ext(lba, sectors);
@@ -1517,7 +1555,7 @@ impl AhciPort {
             return Err(AhciError::IoError);
         }
 
-        let _guard = self.legacy_lock.lock();
+        let _guard = ranked_lock!(RANK_AHCI_LEGACY, "AhciPort.legacy_lock", self.legacy_lock);
 
         self.with_slot_try(|slot, _op| {
             let fis = if fua {
@@ -1594,7 +1632,8 @@ impl AhciPort {
             DeviceType::Ata if self.ncq_enabled() => self.ncq_read(lba, buffer, sectors),
             DeviceType::Ata => self.legacy_ata_read(lba, buffer, sectors),
             DeviceType::Atapi => {
-                let _guard = self.legacy_lock.lock();
+                let _guard =
+                    ranked_lock!(RANK_AHCI_LEGACY, "AhciPort.legacy_lock", self.legacy_lock);
                 self.atapi_read(lba, buffer, sectors)
             }
         }
@@ -1650,7 +1689,8 @@ impl AhciPort {
     pub fn flush_cache(&self) -> Result<(), AhciError> {
         match self.device_type {
             DeviceType::Ata => {
-                let _guard = self.legacy_lock.lock();
+                let _guard =
+                    ranked_lock!(RANK_AHCI_LEGACY, "AhciPort.legacy_lock", self.legacy_lock);
                 if self.ncq_enabled() {
                     self.enter_legacy_mode();
                 }
@@ -1857,7 +1897,8 @@ impl AhciPort {
         // "complete" slots that have not actually completed, hiding their
         // later real completion behind a CAS failure — hanging the waiter.
         for waiter_mutex in self.slot_waiters.iter() {
-            let op_opt = waiter_mutex.lock().clone();
+            let op_opt =
+                ranked_lock!(RANK_AHCI_SLOT, "AhciPort.slot_waiters", waiter_mutex).clone();
             let Some(op) = op_opt else {
                 continue;
             };
