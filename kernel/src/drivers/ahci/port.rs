@@ -1137,7 +1137,42 @@ impl AhciPort {
             }
 
             if start.elapsed() >= timeout {
-                log!("AHCI port {}: NCQ timeout on slot {}", self.port_idx, slot);
+                // Dump diagnostic state: SACT, CI, TFD, SERR, port IS tell us
+                // whether the drive actually completed (SACT cleared but we
+                // missed the wake), or the command is genuinely stuck.
+                let sact_now = unsafe { ptr::read_volatile(&raw const (*port_regs).sact) };
+                let ci_now = unsafe { ptr::read_volatile(&raw const (*port_regs).ci) };
+                let tfd_now = unsafe { ptr::read_volatile(&raw const (*port_regs).tfd) };
+                let serr_now = unsafe { ptr::read_volatile(&raw const (*port_regs).serr) };
+                let is_now = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
+                log!(
+                    "AHCI port {}: NCQ timeout slot {} SACT={:#x} CI={:#x} TFD={:#x} SERR={:#x} IS={:#x} free_slots={:#x}",
+                    self.port_idx,
+                    slot,
+                    sact_now,
+                    ci_now,
+                    tfd_now,
+                    serr_now,
+                    is_now,
+                    self.free_slots.load(Ordering::Acquire)
+                );
+                // Restart the port to purge hardware state before the slot is
+                // reused (mirrors the TFES error path at line ~1124). Without
+                // this, slot N's SACT bit may still be set in hardware when the
+                // next submitter OR-writes it, and the next CI write may not
+                // retrigger the drive — cascading hangs. Only one thread runs
+                // restart; others exit and return CommandTimeout.
+                self.wake_all_slot_waiters();
+                if self
+                    .restarting
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    self.mode_waitq
+                        .wait_until(|| self.mode.load(Ordering::Acquire) <= 1);
+                    let _ = self.restart_port();
+                    self.restarting.store(false, Ordering::Release);
+                }
                 return Err(AhciError::CommandTimeout);
             }
 
