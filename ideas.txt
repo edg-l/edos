@@ -223,6 +223,25 @@
   silent no-op wake instead of waking a TID-recycled successor. Closes
   the latent "wake wrong thread" race; prereq for Foundation #2
   (cancellable waits) and async NCQ readahead.
+- **Cancellable waits + deferred VfsInode eviction (Foundation #2, 2026-04-17)** -
+  `VfsInode::drop` posts orphan-inode evictions to a dedicated evict-inode
+  kthread instead of calling `fs.evict_inode` inline (which issues AHCI
+  I/O). Per-`Thread` `owned_ops: IrqSpinlock<Vec<Arc<dyn CancellableOp>>>`
+  registry drained at the top of `Thread::free`. AHCI command slots
+  (`[Option<Arc<AhciSlotOp>>; 32]`) register ops so dying threads don't
+  leak slots. USB mailbox audit: existing Arc<ResponseInner> semantics +
+  Foundation-#1 silent wakes mean no CancellableOp needed. Drop-contract
+  runtime guards (debug_assertions) catch blocking Drops fired from
+  reaper/evict-kthread context. `/proc/evict_stats` + userspace
+  `evicttest` program verify the pipeline end-to-end. Along the way:
+  root-caused an edos_rt `FileDesc` Drop bug that made every Rust
+  program leak fds (now fixed in edos_rt + Rust std fork).
+- **Physical frame RAII for CachedPage (Foundation #3, 2026-04-17)** -
+  `CachedPage::drop` deallocates the frame on last Arc drop. Removed
+  manual `deallocate_frame` in `get_or_fill`'s race path and the
+  `strong_count == 1` heuristic in `invalidate_from`. Fixed a
+  pre-existing pin leak in `store_cached_page_on_vma` surfaced by the
+  new Drop's pin_count==0 assertion.
 
 ## Network Stack Remaining
 
@@ -411,13 +430,13 @@ reaper correctness in general). Roadmap in dependency order:
    drains, `Drop` contracts that never block, per-thread list of
    owned async resources. Prereq for real signal handling too.
 
-3. **Physical frame RAII for cache pages.** `CachedPage` has no Drop
-   today — frames are leaked if the Arc is dropped without going
-   through the correct release path. Fine when all frames are owned
-   by the page map, but breaks the moment a fallible path can drop
-   the Arc after allocating a frame. Need `CachedPage::drop` that
-   returns the frame to the allocator; audit every code path that
-   creates a CachedPage outside the page map.
+3. **Physical frame RAII for cache pages.** **DONE 2026-04-17.**
+   `CachedPage::drop` deallocates the frame on last Arc drop (mirrors
+   `CachedBlockPage::drop`). Removed the manual `deallocate_frame` in
+   `InodePages::get_or_fill`'s race-insert path and the
+   `strong_count == 1` heuristic in `invalidate_from`. Debug assert on
+   `pin_count == 0` at drop caught a pre-existing pin leak in
+   `store_cached_page_on_vma` (fixed: unpin at entry).
 
 4. **Strict lock-order discipline for fs/page-cache paths.** Async
    plans need e.g. `pages → in_flight → waitq` in one order
