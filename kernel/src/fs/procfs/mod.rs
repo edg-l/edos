@@ -114,6 +114,11 @@ impl Procfs {
         )
     }
 
+    fn render_evict_stats() -> String {
+        use crate::fs::evict::evict_kthread_drain_count;
+        format!("drain_count: {}\n", evict_kthread_drain_count())
+    }
+
     fn render_block_cache() -> String {
         if !BlockPageCache::initialized() {
             return concat!(
@@ -155,6 +160,7 @@ impl Procfs {
                 "processes" => Ok(ProcNode::ProcessesFile),
                 "meminfo" => Ok(ProcNode::MemInfo),
                 "block_cache" => Ok(ProcNode::BlockCacheStats),
+                "evict_stats" => Ok(ProcNode::EvictStats),
                 tid_component => parse_tid(tid_component)
                     .map(ProcNode::ProcessDir)
                     .ok_or(Error::FileNotFound),
@@ -205,6 +211,12 @@ impl FileSystem for Procfs {
                     block_cache.len(),
                 ));
 
+                let evict_stats = Self::render_evict_stats();
+                files.push(Self::file_entry(
+                    "evict_stats".to_string(),
+                    evict_stats.len(),
+                ));
+
                 for snapshot in snapshots {
                     files.push(Self::dir_entry(snapshot.tid.to_string()));
                 }
@@ -232,6 +244,7 @@ impl FileSystem for Procfs {
             ProcNode::ProcessesFile
             | ProcNode::MemInfo
             | ProcNode::BlockCacheStats
+            | ProcNode::EvictStats
             | ProcNode::ProcessStatus(_)
             | ProcNode::ProcessCmdline(_) => Err(Error::NotADir),
         }
@@ -267,6 +280,10 @@ impl FileSystem for Procfs {
             }
             ProcNode::BlockCacheStats => {
                 let content = Self::render_block_cache();
+                Ok(Self::read_text(content, offset, count))
+            }
+            ProcNode::EvictStats => {
+                let content = Self::render_evict_stats();
                 Ok(Self::read_text(content, offset, count))
             }
             ProcNode::Root | ProcNode::ProcessDir(_) => Err(Error::NotAFile),
@@ -309,6 +326,10 @@ impl FileSystem for Procfs {
             ProcNode::BlockCacheStats => {
                 let content = Self::render_block_cache();
                 Ok(Self::file_entry("block_cache".to_string(), content.len()))
+            }
+            ProcNode::EvictStats => {
+                let content = Self::render_evict_stats();
+                Ok(Self::file_entry("evict_stats".to_string(), content.len()))
             }
             ProcNode::ProcessDir(tid) => {
                 let snapshots = Self::collect_snapshots();
@@ -565,6 +586,7 @@ enum ProcNode {
     ProcessesFile,
     MemInfo,
     BlockCacheStats,
+    EvictStats,
     ProcessDir(u64),
     ProcessStatus(u64),
     ProcessCmdline(u64),

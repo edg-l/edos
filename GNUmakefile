@@ -132,6 +132,7 @@ test-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features sched-test"
 	$(call run_qemu_uefi,iso,1,-display none)
 
+
 .PHONY: run-kvm
 run-emu: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
 	$(call run_qemu_uefi,iso,4,-accel tcg)

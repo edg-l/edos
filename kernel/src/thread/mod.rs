@@ -34,9 +34,6 @@ pub mod waitqueue;
 #[cfg(feature = "sched-test")]
 pub mod sched_test;
 
-#[cfg(feature = "cancel-smoke")]
-pub mod cancel_smoke;
-
 #[derive(Debug)]
 pub struct UserThread {
     /// Same as thread id for now.

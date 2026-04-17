@@ -8,7 +8,6 @@ default = []
 test = []
 trace = []
 sched-test = []
-cancel-smoke = []
 
 [dependencies]
 limine = "0.6"

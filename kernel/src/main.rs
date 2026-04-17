@@ -132,9 +132,6 @@ fn main() -> ! {
         }
     }
 
-    #[cfg(feature = "cancel-smoke")]
-    crate::thread::cancel_smoke::run_cancel_smoke();
-
     #[allow(unreachable_code)]
     let now = Instant::now();
 
@@ -146,6 +143,7 @@ fn main() -> ! {
     crate::fs::block_page_cache::BlockPageCache::init();
     drivers::init_drivers();
     memory::verify_kernel_no_phys_aliasing();
+
     queue_spawn_kthread_named(
         "block_writeback",
         fs::writeback::writeback_thread as *const () as u64,
