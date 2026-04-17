@@ -104,6 +104,20 @@ pub fn enter(rank: u16, site: &'static str) {
         return;
     };
 
+    // Defensive guard: if the Arc's inner pointer lands outside the kernel
+    // half (top bit of the 48-bit canonical addr set), the percpu
+    // `current_thread` field was torn or uninitialized — e.g. a context
+    // switch observed mid-transition. Dereferencing it would NPE-crash the
+    // caller (see 2026-04-17 lock_order-null-thread-fault bug). Skip
+    // tracking and emit a diagnostic via the lock-bypassing emergency path;
+    // a missed tracking entry is harmless, a fault here is catastrophic
+    // (nested crash inside a spinlock acquire).
+    let ptr = alloc::sync::Arc::as_ptr(&thread) as usize;
+    if ptr < 0xffff_8000_0000_0000 {
+        crate::serial::emergency_write(b"lock_order: skipping enter due to bogus thread Arc\n");
+        return;
+    }
+
     // Single-owner sanity: the thread returned by current_thread() must be us.
     debug_assert_eq!(
         sched.current_thread_id(),
@@ -175,6 +189,15 @@ pub fn enter_same(rank: u16, site: &'static str) {
         return;
     };
 
+    // See `enter()` for rationale: bogus Arc pointer means skip tracking.
+    let ptr = alloc::sync::Arc::as_ptr(&thread) as usize;
+    if ptr < 0xffff_8000_0000_0000 {
+        crate::serial::emergency_write(
+            b"lock_order: skipping enter_same due to bogus thread Arc\n",
+        );
+        return;
+    }
+
     debug_assert_eq!(
         sched.current_thread_id(),
         Some(thread.id),
@@ -218,6 +241,16 @@ pub fn exit(rank: u16, site: &'static str) {
     let Some(thread) = sched.current_thread() else {
         return;
     };
+
+    // See `enter()` for rationale: bogus Arc pointer means skip tracking.
+    // This mirrors `enter`'s skip so the paired push/pop stay balanced when
+    // a Foundation-#4 tracking window straddles a torn-read; if `enter`
+    // skipped, `exit` must also skip or the stack underflows.
+    let ptr = alloc::sync::Arc::as_ptr(&thread) as usize;
+    if ptr < 0xffff_8000_0000_0000 {
+        crate::serial::emergency_write(b"lock_order: skipping exit due to bogus thread Arc\n");
+        return;
+    }
 
     let stack = unsafe { &mut *thread.lock_ranks.get() };
 
