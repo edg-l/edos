@@ -48,8 +48,6 @@ pub const RANK_DIRTY_KEYS: u16 = 50;
 pub const RANK_MAPPERS: u16 = 60;
 pub const RANK_VMAS: u16 = 70;
 pub const RANK_USER_MM: u16 = 80;
-pub const RANK_KERNEL_MAPPER: u16 = 85;
-pub const RANK_FRAME_ALLOC: u16 = 90;
 pub const RANK_DIRTY_INODES: u16 = 100;
 pub const RANK_BPC_SHARD: u16 = 110;
 pub const RANK_BPC_JOURNALS: u16 = 120;
@@ -61,6 +59,12 @@ pub const RANK_AHCI_LEGACY: u16 = 170;
 pub const RANK_AHCI_SLOT: u16 = 180;
 pub const RANK_AHCI_MMIO: u16 = 190;
 pub const RANK_PCI_CONFIG: u16 = 200;
+// Deep utility leaves — acquired from arbitrary contexts (AHCI DMA setup,
+// page-table edits, etc.). Must be higher than any caller's rank. Ordered
+// relative to each other because `MemoryManager::map_memory` acquires
+// frame_alloc while kernel_mapper is held.
+pub const RANK_KERNEL_MAPPER: u16 = 900;
+pub const RANK_FRAME_ALLOC: u16 = 910;
 
 /// Maximum nesting depth of the per-thread rank stack.
 /// 16 is ~2x the deepest observed chain (9 levels).

@@ -27,17 +27,15 @@ Non-ranked locks are listed separately below with justification.
 | Rank | Lock | Type | Location | Notes |
 |-----:|------|------|----------|-------|
 |  10 | `VFS` mount registry | `spin::RwLock<BTreeMap>` | `fs/vfs.rs:47` | Read-held across `fs.clone()`; no inner locks taken while held. |
-|  30 | `inode.lock` (per-inode) | `thread::rwlock::RwLock<()>` | `fs/inode.rs:50` | Outer per-inode gate. Held across FS driver callbacks (memfs, efs, fat32). Inner: 32, 35, 40, 50, 60, 70, 80, 85. |
-|  32 | `EfsDriver.alloc_mutex` | `BlockingMutex<()>` | `fs/efs/mod.rs:82` | Serializes bitmap allocation (`alloc_inode`/`alloc_block`) across CPUs so `mutable` (160) can be released across BPC I/O without two allocators picking the same bit. Acquired at the top of EFS alloc paths, above all leaf locks the alloc transitively touches (kernel_mapper 85, frame_alloc 90, BPC 110, journal 120–150, AHCI 170–200, `mutable` 160). |
+|  30 | `inode.lock` (per-inode) | `thread::rwlock::RwLock<()>` | `fs/inode.rs:50` | Outer per-inode gate. Held across FS driver callbacks (memfs, efs, fat32). Inner: 32, 35, 40, 50, 60, 70, 80, and deep leaves (900, 910). |
+|  32 | `EfsDriver.alloc_mutex` | `BlockingMutex<()>` | `fs/efs/mod.rs:82` | Serializes bitmap allocation (`alloc_inode`/`alloc_block`) across CPUs so `mutable` (160) can be released across BPC I/O without two allocators picking the same bit. Acquired at the top of EFS alloc paths, above all leaf locks the alloc transitively touches (BPC 110, journal 120–150, `mutable` 160, AHCI 170–200, kernel_mapper 900, frame_alloc 910). |
 |  35 | `dentry_cache.inner` | `BlockingMutex` | `fs/dentry.rs:31` | Acquired after `inode.lock` (always — see audit log). Leaf on the dentry side. |
 |  40 | `inode.pages.pages` | `BlockingMutex<BTreeMap>` | `fs/page_cache.rs:163` | Inner: `dirty_keys` (50). NEVER held across disk I/O (get_or_fill drops before calling fill_fn). |
 |  42 | `InodePages.in_flight` | *(not yet added)* | — | **Forward reference for Foundation #5.** When async readahead lands, in_flight goes here between `pages` (40) and `dirty_keys` (50). |
 |  50 | `inode.pages.dirty_keys` | `BlockingMutex<Vec>` | `fs/page_cache.rs:164` | Leaf on the per-inode side. |
 |  60 | `inode.mappers` | `BlockingMutex<Vec<Weak<...>>>` | `fs/inode.rs:56` | Inner: vmas (70), per-process mm (80) on target UserThreads during truncate. |
 |  70 | `UserThread.vmas` | `Arc<spin::Mutex<VmaSet>>` | `thread/mod.rs:44` | Per-process VMA set. Inner: 80 per-process mm. See `fault.rs:406-433`. |
-|  80 | `UserThread.memory_manager` | `Arc<spin::Mutex<MemoryManager>>` | `thread/mod.rs:43` | Per-process page table. Leaf for PTE walks. Acquired alone or inside vmas (70). **Distinct class from rank 85.** **Caveat**: `copy_to_user`/`zero_user`/`write_val_to_user` use `translate_to_hhdm_ptr`, whose demand-fault slow path acquires rank-70 vmas — callers holding rank-80 mm MUST pre-map the target range eagerly (via `map_memory`) so the fast path is taken. See `mapper.rs:326` and `thread/thread.rs` `allocate_tls_region`. |
-|  85 | kernel-global mapper | `IrqSpinlock<MemoryManager>` | `memory/mapper.rs:46` via `boot_info().memory_manager` | Accessed via `memory_mapper()`. Kernel-address-space edits only (kmap, device mapping). Never co-held with rank 80. |
-|  90 | `FRAME_ALLOCATOR` | `IrqSpinlock<BitmapFrameAllocator>` | `memory/frame_allocator.rs:17` | True leaf. Brief hold; no inner locks. |
+|  80 | `UserThread.memory_manager` | `Arc<spin::Mutex<MemoryManager>>` | `thread/mod.rs:43` | Per-process page table. Leaf for PTE walks. Acquired alone or inside vmas (70). **Distinct class from rank 900 kernel mapper.** **Caveat**: `copy_to_user`/`zero_user`/`write_val_to_user` use `translate_to_hhdm_ptr`, whose demand-fault slow path acquires rank-70 vmas — callers holding rank-80 mm MUST pre-map the target range eagerly (via `map_memory`) so the fast path is taken. See `mapper.rs:326` and `thread/thread.rs` `allocate_tls_region`. |
 | 100 | `DIRTY_INODES` | `IrqSpinlock<Vec<Weak<VfsInode>>>` | `fs/vfs.rs:37` | Called from `register_dirty_inode` (rank 30 inode.lock path) and writeback kthread (no other lock held). Holds nothing else. |
 | 110 | `BlockPageCache.shards[N]` | `BlockingMutex<ShardInner>` | `fs/block_page_cache.rs:295, 372` | NEVER held across disk I/O. Inner: `journals` (120), `write_lock` (140). Sibling of 130/150 (journal ranks) — never co-held. |
 | 120 | `BlockPageCache.journals` | `BlockingMutex<BTreeMap>` | `fs/block_page_cache.rs:311` | Brief; returns `Arc<Journal>`. Leaf within the block cache subsystem. |
@@ -49,6 +47,8 @@ Non-ranked locks are listed separately below with justification.
 | 180 | `AhciPort.slot_waiters[i]` | `spin::Mutex<Option<Arc<AhciSlotOp>>>` | `drivers/ahci/port.rs:154` | Brief per-slot. Never held across park or I/O. |
 | 190 | `AhciPort.mmio_lock` | `spin::Mutex<()>` | `drivers/ahci/port.rs:136` | Very short raw MMIO RMW. True leaf. |
 | 200 | `PCI_CONFIG_LOCK` | `spin::Mutex<()>` | `drivers/pci/config.rs:12` | Config-space RMW. Acquired alone; true leaf. |
+| 900 | kernel-global mapper | `IrqSpinlock<MemoryManager>` | `memory/mapper.rs:50` via `boot_info().memory_manager` | Accessed via `memory_mapper()`. Kernel-address-space edits + per-page virt-to-phys translation during DMA setup. Deep leaf: called from arbitrary driver/FS contexts. Never co-held with user `memory_manager` (80). Inner: frame_alloc (910) during `map_memory`. |
+| 910 | `FRAME_ALLOCATOR` | `IrqSpinlock<BitmapFrameAllocator>` | `memory/frame_allocator.rs:17` | Deep leaf. Brief hold; no inner locks. Called from everywhere (BPC fills, mapper PT-frame alloc, fault handlers). Placed above kernel_mapper so `map_memory` (`kernel_mapper(900) → frame_alloc(910)`) is ascending. |
 
 ### Rank 80 vs 85: per-process and kernel-global mappers
 
