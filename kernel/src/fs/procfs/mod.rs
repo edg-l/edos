@@ -121,6 +121,20 @@ impl Procfs {
         format!("drain_count: {}\n", evict_kthread_drain_count())
     }
 
+    fn render_inflight_stats() -> String {
+        use crate::fs::page_fill::{
+            INFLIGHT_CANCELS, INFLIGHT_CURRENT, INFLIGHT_INSTALLS, INFLIGHT_JOINS, INFLIGHT_RETRIES,
+        };
+        format!(
+            "installs: {}\njoins: {}\nretries: {}\ncancels: {}\ncurrent: {}\n",
+            INFLIGHT_INSTALLS.load(Ordering::Relaxed),
+            INFLIGHT_JOINS.load(Ordering::Relaxed),
+            INFLIGHT_RETRIES.load(Ordering::Relaxed),
+            INFLIGHT_CANCELS.load(Ordering::Relaxed),
+            INFLIGHT_CURRENT.load(Ordering::Relaxed),
+        )
+    }
+
     fn render_block_cache() -> String {
         if !BlockPageCache::initialized() {
             return concat!(
@@ -176,6 +190,7 @@ impl Procfs {
                 "block_cache" => Ok(ProcNode::BlockCacheStats),
                 "evict_stats" => Ok(ProcNode::EvictStats),
                 "lock_order_stats" => Ok(ProcNode::LockOrderStats),
+                "inflight_stats" => Ok(ProcNode::InflightStats),
                 tid_component => parse_tid(tid_component)
                     .map(ProcNode::ProcessDir)
                     .ok_or(Error::FileNotFound),
@@ -238,6 +253,12 @@ impl FileSystem for Procfs {
                     lock_order_stats.len(),
                 ));
 
+                let inflight_stats = Self::render_inflight_stats();
+                files.push(Self::file_entry(
+                    "inflight_stats".to_string(),
+                    inflight_stats.len(),
+                ));
+
                 for snapshot in snapshots {
                     files.push(Self::dir_entry(snapshot.tid.to_string()));
                 }
@@ -267,6 +288,7 @@ impl FileSystem for Procfs {
             | ProcNode::BlockCacheStats
             | ProcNode::EvictStats
             | ProcNode::LockOrderStats
+            | ProcNode::InflightStats
             | ProcNode::ProcessStatus(_)
             | ProcNode::ProcessCmdline(_) => Err(Error::NotADir),
         }
@@ -310,6 +332,10 @@ impl FileSystem for Procfs {
             }
             ProcNode::LockOrderStats => {
                 let content = Self::render_lock_order_stats();
+                Ok(Self::read_text(content, offset, count))
+            }
+            ProcNode::InflightStats => {
+                let content = Self::render_inflight_stats();
                 Ok(Self::read_text(content, offset, count))
             }
             ProcNode::Root | ProcNode::ProcessDir(_) => Err(Error::NotAFile),
@@ -361,6 +387,13 @@ impl FileSystem for Procfs {
                 let content = Self::render_lock_order_stats();
                 Ok(Self::file_entry(
                     "lock_order_stats".to_string(),
+                    content.len(),
+                ))
+            }
+            ProcNode::InflightStats => {
+                let content = Self::render_inflight_stats();
+                Ok(Self::file_entry(
+                    "inflight_stats".to_string(),
                     content.len(),
                 ))
             }
@@ -621,6 +654,7 @@ enum ProcNode {
     BlockCacheStats,
     EvictStats,
     LockOrderStats,
+    InflightStats,
     ProcessDir(u64),
     ProcessStatus(u64),
     ProcessCmdline(u64),

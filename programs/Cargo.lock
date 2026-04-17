@@ -132,6 +132,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "inflighttest"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "lockordertest"
 version = "0.1.0"
 dependencies = [

@@ -40,7 +40,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use x86_64::structures::paging::FrameAllocator;
 
 use crate::{
@@ -65,6 +65,34 @@ pub const FILL_PENDING: u8 = 0;
 pub const FILL_SUCCESS: u8 = 1;
 /// Fill failed; next reader must retry.
 pub const FILL_FAILED: u8 = 2;
+
+// ---------------------------------------------------------------------------
+// Stats counters
+// ---------------------------------------------------------------------------
+
+/// Total number of logical fills started as publisher (one per successful
+/// `in_flight` install, regardless of bulk vs. single-page).
+pub static INFLIGHT_INSTALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Total number of slow-path joins: a reader found an existing handle and
+/// parked on it rather than becoming a publisher.
+pub static INFLIGHT_JOINS: AtomicU64 = AtomicU64::new(0);
+
+/// Total number of retries: a waiter woke to FILL_FAILED or found the page
+/// evicted after wake, and had to loop back to try again as publisher.
+pub static INFLIGHT_RETRIES: AtomicU64 = AtomicU64::new(0);
+
+/// Total number of cancel calls fired (handle's CancellableOp::cancel).
+pub static INFLIGHT_CANCELS: AtomicU64 = AtomicU64::new(0);
+
+/// Number of logical fill handles currently live in `in_flight` maps.
+///
+/// "Logical fills" means one unit per publisher install (bulk fills count as 1
+/// even though they install N map entries). Incremented on successful install;
+/// decremented on publish-and-remove (success or failure) and on cancel.
+/// Matches the cardinality of distinct `PageFillHandle` objects, not the number
+/// of `in_flight` map entries.
+pub static INFLIGHT_CURRENT: AtomicUsize = AtomicUsize::new(0);
 
 // ---------------------------------------------------------------------------
 // PageFillHandle
@@ -152,14 +180,19 @@ impl CancellableOp for PageFillHandle {
     /// Must be non-blocking: uses `IrqSpinlock` (not `BlockingMutex`) for
     /// `in_flight`.
     fn cancel(&self) {
+        INFLIGHT_CANCELS.fetch_add(1, Ordering::Relaxed);
+
         // CAS Pending -> Failed. If we lose the CAS, another path already
         // finished (finish_success, finish_failed, or a prior cancel).
-        let _ = self.state.compare_exchange(
-            FILL_PENDING,
-            FILL_FAILED,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        let was_pending = self
+            .state
+            .compare_exchange(
+                FILL_PENDING,
+                FILL_FAILED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok();
 
         // Remove our entries from in_flight if the inode is still alive.
         // Weak::upgrade returns None if the VfsInode (and its in_flight map)
@@ -174,6 +207,13 @@ impl CancellableOp for PageFillHandle {
                 self.page_idx,
                 self.len,
             );
+        }
+
+        // Decrement INFLIGHT_CURRENT only if we won the CAS (i.e. we are the
+        // one transitioning from Pending to Failed). If another path already
+        // finished the handle, that path decremented INFLIGHT_CURRENT.
+        if was_pending {
+            INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
         }
 
         // Wake waiters after the spinlock is released so any newly-arriving
@@ -336,6 +376,8 @@ pub fn get_or_fill_async_sync(
         };
 
         if let Some(handle) = handle_opt {
+            // Slow path: join an existing in-flight fill.
+            INFLIGHT_JOINS.fetch_add(1, Ordering::Relaxed);
             // Park until the fill reaches a terminal state.
             // Outer loop on real condition per CLAUDE.md "Park/wake protocol".
             handle
@@ -351,7 +393,7 @@ pub fn get_or_fill_async_sync(
                 }
             }
             // Woke with FILL_FAILED or page was evicted between wake and re-check.
-            // Loop back and try again as publisher.
+            INFLIGHT_RETRIES.fetch_add(1, Ordering::Relaxed);
             continue;
         }
 
@@ -374,7 +416,8 @@ pub fn get_or_fill_async_sync(
         };
 
         if let Err(existing) = install_result {
-            // Lost the race; park on the winner's handle.
+            // Lost the install race; park on the winner's handle.
+            INFLIGHT_JOINS.fetch_add(1, Ordering::Relaxed);
             existing
                 .waiters
                 .wait_until(|| existing.load_state() != FILL_PENDING);
@@ -386,10 +429,15 @@ pub fn get_or_fill_async_sync(
                     return Ok(PageGuard::new(Arc::clone(page)));
                 }
             }
+            INFLIGHT_RETRIES.fetch_add(1, Ordering::Relaxed);
             continue;
         }
 
-        // We installed the handle. Register with owned_ops for cancel hookup.
+        // We installed the handle successfully.
+        INFLIGHT_INSTALLS.fetch_add(1, Ordering::Relaxed);
+        INFLIGHT_CURRENT.fetch_add(1, Ordering::Relaxed);
+
+        // Register with owned_ops for cancel hookup.
         let op: Arc<dyn CancellableOp> = Arc::clone(&handle) as Arc<dyn CancellableOp>;
         let push_ok = sched()
             .current_thread()
@@ -405,6 +453,7 @@ pub fn get_or_fill_async_sync(
             // transitions terminal -> permanent hang.
             handle.finish_failed();
             in_flight_remove_all(inode, &handle);
+            INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
             let fill_fn = fill_fn_opt
                 .take()
                 .expect("get_or_fill_async_sync: fill_fn already consumed");
@@ -417,6 +466,7 @@ pub fn get_or_fill_async_sync(
             None => {
                 handle.finish_failed();
                 in_flight_remove_all(inode, &handle);
+                INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
                 sched().current_thread().map(|t| {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                 });
@@ -451,6 +501,7 @@ pub fn get_or_fill_async_sync(
                         // Publish-terminal-state-before-remove: success branch.
                         handle.finish_success();
                         in_flight_remove_all(inode, &handle);
+                        INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
                         sched().current_thread().map(|t| {
                             t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                         });
@@ -466,6 +517,7 @@ pub fn get_or_fill_async_sync(
                 // finish_success (store Success + wake_all) BEFORE in_flight remove.
                 handle.finish_success();
                 in_flight_remove_all(inode, &handle);
+                INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
                 sched().current_thread().map(|t| {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                 });
@@ -479,6 +531,7 @@ pub fn get_or_fill_async_sync(
                 // finish_failed (store Failed + wake_all) BEFORE in_flight remove.
                 handle.finish_failed();
                 in_flight_remove_all(inode, &handle);
+                INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
                 sched().current_thread().map(|t| {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                 });
@@ -570,13 +623,19 @@ pub fn get_or_fill_bulk_async_sync(
         };
 
         if let Some(conflict) = park_on {
-            // Park until the conflicting fill finishes, then retry the whole bulk.
+            // Bulk join: park on the conflicting fill, then retry.
+            INFLIGHT_JOINS.fetch_add(1, Ordering::Relaxed);
             conflict
                 .waiters
                 .wait_until(|| conflict.load_state() != FILL_PENDING);
             drop(conflict);
+            INFLIGHT_RETRIES.fetch_add(1, Ordering::Relaxed);
             continue 'outer;
         }
+
+        // Handle is installed successfully at all indices.
+        INFLIGHT_INSTALLS.fetch_add(1, Ordering::Relaxed);
+        INFLIGHT_CURRENT.fetch_add(1, Ordering::Relaxed);
 
         // --- Handle is installed. Register with owned_ops for cancel hookup. ---
         let op: Arc<dyn CancellableOp> = Arc::clone(&handle) as Arc<dyn CancellableOp>;
@@ -592,6 +651,7 @@ pub fn get_or_fill_bulk_async_sync(
             // just-installed handle (publish FAILED before removing).
             handle.finish_failed();
             in_flight_remove_all(inode, &handle);
+            INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
             return Err(Error::IoError);
         }
 
@@ -604,6 +664,7 @@ pub fn get_or_fill_bulk_async_sync(
                     // Out of memory: failure path — publish before removing.
                     handle.finish_failed();
                     in_flight_remove_all(inode, &handle);
+                    INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
                     sched().current_thread().map(|t| {
                         t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                     });
@@ -654,6 +715,7 @@ pub fn get_or_fill_bulk_async_sync(
                 // Publish-terminal-state-before-remove: success branch.
                 handle.finish_success();
                 in_flight_remove_all(inode, &handle);
+                INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
                 sched().current_thread().map(|t| {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                 });
@@ -664,6 +726,7 @@ pub fn get_or_fill_bulk_async_sync(
                 // Publish-terminal-state-before-remove: failure branch.
                 handle.finish_failed();
                 in_flight_remove_all(inode, &handle);
+                INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
                 sched().current_thread().map(|t| {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                 });
