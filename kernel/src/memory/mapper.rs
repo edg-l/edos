@@ -13,6 +13,7 @@ use x86_64::{
 
 use crate::{
     boot::boot_info,
+    debug::lock_order::{RANK_KERNEL_MAPPER, RankedGuard},
     loader::reloc::RelocTable,
     memory::{STACK_ALIGNMENT, frame_allocator::frame_allocator, vma::VmaSet},
     thread::irqlock::IrqLockGuard,
@@ -43,8 +44,13 @@ pub unsafe fn get_level_4_table(cr3: (PhysFrame, Cr3Flags)) -> &'static mut Page
     unsafe { &mut *page_table_ptr }
 }
 
-pub fn memory_mapper() -> IrqLockGuard<'static, MemoryManager> {
-    boot_info().memory_manager.lock()
+/// Acquire the kernel-global memory mapper (rank 85).
+/// Returns a `RankedGuard` that pops the rank stack on drop, after releasing
+/// the `IrqLockGuard`. Zero-cost in release builds.
+pub fn memory_mapper() -> RankedGuard<IrqLockGuard<'static, MemoryManager>> {
+    boot_info()
+        .memory_manager
+        .lock_ranked(RANK_KERNEL_MAPPER, "kernel.mapper")
 }
 
 #[derive(Debug)]
