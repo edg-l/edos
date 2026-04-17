@@ -104,7 +104,7 @@ impl MemoryManager {
                     .ok_or(MapToError::FrameAllocationFailed)?;
                 unsafe {
                     self.mapper
-                        .map_to(page, frame, flags, &mut *frame_allocator)?
+                        .map_to(page, frame, flags, &mut **frame_allocator)?
                         .flush()
                 };
             }
@@ -135,7 +135,7 @@ impl MemoryManager {
                 );
                 unsafe {
                     self.mapper
-                        .map_to(page, current_frame, flags, &mut *frame_allocator)?
+                        .map_to(page, current_frame, flags, &mut **frame_allocator)?
                         .flush()
                 };
             }
@@ -269,7 +269,7 @@ impl MemoryManager {
                     frame,
                     PageTableFlags::PRESENT | flags,
                     parent_flags,
-                    &mut *frame_allocator,
+                    &mut **frame_allocator,
                 )?
                 .flush()
         };
@@ -427,7 +427,7 @@ impl MemoryManager {
 
         unsafe {
             self.mapper
-                .clean_up_addr_range(lower_half, &mut *frame_allocator())
+                .clean_up_addr_range(lower_half, &mut **frame_allocator())
         };
     }
 }

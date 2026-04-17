@@ -10,6 +10,7 @@ use x86_64::{
 };
 
 use crate::{
+    debug::lock_order::{RANK_FRAME_ALLOC, RankedGuard},
     memory::get_virt_addr_from_phys_offset,
     thread::irqlock::{IrqLockGuard, IrqSpinlock},
 };
@@ -17,8 +18,11 @@ use crate::{
 static FRAME_ALLOCATOR: Once<IrqSpinlock<BitmapFrameAllocator>> = Once::new();
 
 #[must_use]
-pub fn frame_allocator() -> IrqLockGuard<'static, BitmapFrameAllocator> {
-    FRAME_ALLOCATOR.get().unwrap().lock()
+pub fn frame_allocator() -> RankedGuard<IrqLockGuard<'static, BitmapFrameAllocator>> {
+    FRAME_ALLOCATOR
+        .get()
+        .unwrap()
+        .lock_ranked(RANK_FRAME_ALLOC, "frame_alloc")
 }
 
 /// Initialize the frame allocator using bootloader memory for bitmap storage
