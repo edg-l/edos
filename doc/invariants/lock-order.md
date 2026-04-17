@@ -43,7 +43,7 @@ Non-ranked locks are listed separately below with justification.
 | 130 | `Journal.checkpoint_tracker` | `BlockingMutex<BTreeMap>` | `fs/journal/mod.rs:109` | **Sibling leaf (post Task 0.0 fix).** Never co-held with `state` (150) in any path. See "Journal inversion fix" below. |
 | 140 | `CachedBlockPage.write_lock` | `BlockingMutex<()>` | `fs/block_page_cache.rs:76` | Serializes partial writers per page. True leaf. |
 | 150 | `Journal.state` | `BlockingMutex<JournalState>` | `fs/journal/mod.rs:102` | **Sibling leaf (post Task 0.0 fix).** `tx.rs` closes state's scope before acquiring tracker; all other callers take state alone. See "Journal inversion fix" below. |
-| 160 | `EfsDriver.mutable` | `BlockingMutex<EfsMutableState>` | `fs/efs/mod.rs:81` | Acquired by EFS callbacks under `inode.lock` (30). Inner: block_page_cache shards (110), journal state (150). |
+| 160 | `EfsDriver.mutable` | `BlockingMutex<EfsMutableState>` | `fs/efs/mod.rs:81` | Acquired by EFS callbacks under `inode.lock` (30). True leaf when held: every site releases `mutable` (via explicit `drop(m)`) before calling block_page_cache (110) or journal (120/130/150). Never nested with lower-ranked locks. |
 | 170 | `AhciPort.legacy_lock` | `BlockingMutex<()>` | `drivers/ahci/port.rs:175` | Serializes non-NCQ commands. Nested: slot_waiters (180), mmio_lock (190 — via underlying path). |
 | 180 | `AhciPort.slot_waiters[i]` | `spin::Mutex<Option<Arc<AhciSlotOp>>>` | `drivers/ahci/port.rs:154` | Brief per-slot. Never held across park or I/O. |
 | 190 | `AhciPort.mmio_lock` | `spin::Mutex<()>` | `drivers/ahci/port.rs:136` | Very short raw MMIO RMW. True leaf. |
