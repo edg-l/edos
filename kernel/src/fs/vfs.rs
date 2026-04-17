@@ -585,6 +585,7 @@ pub fn truncate(op: &VfsOp, size: u64) -> Result<(), Error> {
         // FileBacked VMA on this inode, before freeing the cache frames.
         // Lock ordering: inode.lock (held above) > mappers.lock > vmas.lock
         // > memory_manager.lock.  We release vmas/mm locks before shootdown.
+        // See doc/invariants/lock-order.md for the full rank table.
         invalidate_mappings_above(inode, size);
         inode.pages.invalidate_from(from_page as u64);
     }
@@ -880,6 +881,7 @@ pub fn flush_dirty_inodes() {
 /// Caller must hold inode.lock (write) before calling this function.
 /// Inside we acquire: inode.mappers.lock > vmas.lock > memory_manager.lock.
 /// The vmas and mm locks are released before issuing the TLB shootdown.
+/// See doc/invariants/lock-order.md for the full rank table.
 ///
 /// # Partial-VMA handling
 /// A VMA may straddle the new_size boundary.  Only pages whose file offset

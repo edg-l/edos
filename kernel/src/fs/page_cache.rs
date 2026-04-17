@@ -3,6 +3,7 @@
 //! LOCK ORDERING: vfs inode lock < page_cache pages lock < mm-mapper lock.
 //! Truncate-invalidate acquires in this order; faults drop mm-mapper lock
 //! before taking the page_cache lock (see fault.rs).
+//! See doc/invariants/lock-order.md for the full rank table and enforcement.
 //!
 //! Write policy divergence:
 //!   - `write(2)` paths (`page_cache_write` in vfs.rs) are write-through:
