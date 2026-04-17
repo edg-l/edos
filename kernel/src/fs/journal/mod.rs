@@ -318,9 +318,13 @@ impl Journal {
     /// been committed (its journal copy is safe for replay before home copy).
     #[allow(dead_code)]
     pub fn is_safe_to_flush(&self, dev: u64, block: u64) -> bool {
+        // Hoist committed_seq() read before taking checkpoint_tracker to avoid
+        // a tracker -> state lock-order inversion (see doc/invariants/lock-order.md,
+        // Task 0.0 of Foundation #4).
+        let committed = self.committed_seq();
         let tracker = self.checkpoint_tracker.lock();
         match tracker.get(&(dev, block)) {
-            Some(&seq) => seq <= self.committed_seq(),
+            Some(&seq) => seq <= committed,
             None => true,
         }
     }
@@ -358,8 +362,11 @@ impl Journal {
     /// Persists the new tail to the journal superblock.
     pub fn advance_tail(&self) -> Result<(), AhciError> {
         let min_journaled_seq = {
-            let tracker = self.checkpoint_tracker.lock();
+            // Hoist committed_seq() read before taking checkpoint_tracker to avoid
+            // a tracker -> state lock-order inversion (see doc/invariants/lock-order.md,
+            // Task 0.0 of Foundation #4).
             let committed = self.committed_seq();
+            let tracker = self.checkpoint_tracker.lock();
             tracker.values().copied().min().unwrap_or(committed)
         };
 
