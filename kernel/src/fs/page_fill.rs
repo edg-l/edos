@@ -6,7 +6,7 @@
 //! `InodePages::in_flight` while a fill is in progress. It carries:
 //!
 //! - `inode: Weak<VfsInode>` — for cancel-path cleanup.
-//! - `page_idx: u64` + `len: u32` — the range `[page_idx, page_idx + len)`
+//! - `page_idx: u64` + `len: u64` — the range `[page_idx, page_idx + len)`
 //!   this handle covers. Single-page fills have `len = 1`; bulk fills have
 //!   `len = N` and the same `Arc<PageFillHandle>` is stored at every index in
 //!   the range.
@@ -95,7 +95,7 @@ pub struct PageFillHandle {
     pub page_idx: u64,
     /// Number of pages covered: `[page_idx, page_idx + len)`.
     /// 1 for single-page fills; >1 for bulk fills.
-    pub len: u32,
+    pub len: u64,
     /// Parked readers wake here when the fill transitions to a terminal state.
     pub waiters: WaitQueue,
     /// Fill state machine: `FILL_PENDING` → `FILL_SUCCESS | FILL_FAILED`.
@@ -104,7 +104,7 @@ pub struct PageFillHandle {
 
 impl PageFillHandle {
     /// Construct a new handle in `FILL_PENDING` state.
-    pub fn new(inode: Weak<VfsInode>, page_idx: u64, len: u32) -> Arc<Self> {
+    pub fn new(inode: Weak<VfsInode>, page_idx: u64, len: u64) -> Arc<Self> {
         Arc::new(Self {
             inode,
             page_idx,
@@ -203,7 +203,7 @@ pub fn in_flight_remove_all(inode: &VfsInode, handle: &Arc<PageFillHandle>) {
         .pages
         .in_flight
         .lock_ranked(RANK_IN_FLIGHT, "InodePages.in_flight (remove_all)");
-    for idx in handle.page_idx..(handle.page_idx + handle.len as u64) {
+    for idx in handle.page_idx..(handle.page_idx + handle.len) {
         if let Some(existing) = inflight.get(&idx) {
             if Arc::ptr_eq(existing, handle) {
                 inflight.remove(&idx);
@@ -214,12 +214,12 @@ pub fn in_flight_remove_all(inode: &VfsInode, handle: &Arc<PageFillHandle>) {
 
 /// Raw-pointer variant used by `CancellableOp::cancel` where we only have `&self`
 /// and cannot construct a free-standing `Arc` for `Arc::ptr_eq`.
-fn in_flight_remove_by_ptr(inode: &VfsInode, ptr: *const PageFillHandle, page_idx: u64, len: u32) {
+fn in_flight_remove_by_ptr(inode: &VfsInode, ptr: *const PageFillHandle, page_idx: u64, len: u64) {
     let mut inflight = inode
         .pages
         .in_flight
         .lock_ranked(RANK_IN_FLIGHT, "InodePages.in_flight (cancel)");
-    for idx in page_idx..(page_idx + len as u64) {
+    for idx in page_idx..(page_idx + len) {
         if let Some(existing) = inflight.get(&idx) {
             if Arc::as_ptr(existing) == ptr {
                 inflight.remove(&idx);
@@ -309,10 +309,6 @@ pub fn inline_fill_no_handle(
 /// `owned_ops`. On issuer death, `cancel()` fires: CAS to Failed, remove from
 /// `in_flight`, wake waiters. Waiters retry as publishers.
 ///
-/// # Phase 1 note
-///
-/// This function is defined but NOT YET called by anything — Phase 2 migrates
-/// the call sites. The legacy `InodePages::get_or_fill` continues to be used.
 pub fn get_or_fill_async_sync(
     inode: &Arc<VfsInode>,
     page_idx: u64,
@@ -544,7 +540,7 @@ pub fn get_or_fill_bulk_async_sync(
     'outer: loop {
         // --- Install phase ---
         // Build ONE handle covering the entire range.
-        let handle = PageFillHandle::new(Arc::downgrade(inode), start_page, page_count as u32);
+        let handle = PageFillHandle::new(Arc::downgrade(inode), start_page, page_count);
 
         // Try to install at every index atomically under one in_flight lock.
         let park_on: Option<Arc<PageFillHandle>> = {
