@@ -17,7 +17,7 @@ use crate::{
 
 use super::{
     Error, File, FileAttrs, FileKind, FileSystem, MmapRegion, MountInfo, StatFs, dentry,
-    handle::Pollable, inode::VfsInode, path::Path, readahead::ReadaheadState,
+    handle::Pollable, inode::VfsInode, page_fill, path::Path, readahead::ReadaheadState,
 };
 use x86_64::{
     VirtAddr,
@@ -314,30 +314,21 @@ fn page_cache_read(
         let byte_count = (range_end - range_start + 1) * 4096;
 
         // Use fill_pages_bulk if available; otherwise fall back per-page.
-        let bulk_data = pc_ops.fill_pages_bulk(ino, byte_offset, byte_count);
+        // range_end is inclusive; page_count is exclusive count = end - start + 1.
+        let page_count = (range_end - range_start + 1) as u64;
+        let bulk_result =
+            page_fill::get_or_fill_bulk_async_sync(inode, range_start as u64, page_count, || {
+                pc_ops.fill_pages_bulk(ino, byte_offset, byte_count)
+            });
 
-        match bulk_data {
-            Ok(data) => {
-                // Distribute bulk data into per-page cache entries.
-                for page_idx in range_start..=range_end {
-                    let data_offset = (page_idx - range_start) * 4096;
-                    inode.pages.get_or_fill(page_idx as u64, |buf| {
-                        let available = data.len().saturating_sub(data_offset);
-                        let copy = available.min(4096);
-                        if copy > 0 {
-                            buf[..copy].copy_from_slice(&data[data_offset..data_offset + copy]);
-                        }
-                        if copy < 4096 {
-                            buf[copy..].fill(0);
-                        }
-                        Ok(())
-                    })?;
-                }
+        match bulk_result {
+            Ok(()) => {
+                // All pages for this range are now in the page cache.
             }
             Err(_) => {
-                // Fallback: fill per-page
+                // Bulk path failed or was unsupported; fall back to per-page fills.
                 for page_idx in range_start..=range_end {
-                    inode.pages.get_or_fill(page_idx as u64, |buf| {
+                    page_fill::get_or_fill_async_sync(inode, page_idx as u64, |buf| {
                         let valid = pc_ops.fill_page(ino, page_idx as u64, buf)?;
                         if valid < 4096 {
                             buf[valid..].fill(0);
@@ -374,8 +365,8 @@ fn page_cache_read(
     // Result Vec covers only the user-requested range; readahead pages stay in cache.
     let mut result = Vec::with_capacity(count);
     for page_idx in start_page..=end_page {
-        let guard = inode.pages.get_or_fill(page_idx as u64, |buf| {
-            // Should always be a cache hit at this point.
+        let guard = page_fill::get_or_fill_async_sync(inode, page_idx as u64, |buf| {
+            // Should always be a cache hit at this point; fill_fn is a miss fallback.
             let valid = pc_ops.fill_page(ino, page_idx as u64, buf)?;
             if valid < 4096 {
                 buf[valid..].fill(0);
@@ -525,12 +516,12 @@ fn page_cache_write(
         let is_full_page = write_start == 0 && write_end == 4096;
 
         let guard = if is_full_page {
-            inode.pages.get_or_fill(page_idx as u64, |buf| {
+            page_fill::get_or_fill_async_sync(inode, page_idx as u64, |buf| {
                 buf.fill(0);
                 Ok(())
             })?
         } else {
-            inode.pages.get_or_fill(page_idx as u64, |buf| {
+            page_fill::get_or_fill_async_sync(inode, page_idx as u64, |buf| {
                 let valid = pc_ops.fill_page(ino, page_idx as u64, buf)?;
                 if valid < 4096 {
                     buf[valid..].fill(0);
@@ -1018,16 +1009,14 @@ pub fn get_or_fill_page(
         .as_page_cache_ops()
         .ok_or(super::super::syscalls::Errno::EINVAL)?;
     let ino = inode.ino;
-    let guard = inode
-        .pages
-        .get_or_fill(page_idx, |buf| {
-            let valid = pc_ops.fill_page(ino, page_idx, buf)?;
-            if valid < 4096 {
-                buf[valid..].fill(0);
-            }
-            Ok(())
-        })
-        .map_err(|_| super::super::syscalls::Errno::EIO)?;
+    let guard = page_fill::get_or_fill_async_sync(inode, page_idx, |buf| {
+        let valid = pc_ops.fill_page(ino, page_idx, buf)?;
+        if valid < 4096 {
+            buf[valid..].fill(0);
+        }
+        Ok(())
+    })
+    .map_err(|_| super::super::syscalls::Errno::EIO)?;
     // Extract the Arc before the guard drops (and unpins).
     // Pin explicitly so the caller holds a pin independent of the guard.
     let page = guard.arc();

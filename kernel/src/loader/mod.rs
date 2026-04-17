@@ -12,6 +12,7 @@ use crate::{
     fs::{
         api as fs_api,
         inode::VfsInode,
+        page_fill,
         path::Path,
         vfs::{fs_by_mount_id, get_or_fill_page},
     },
@@ -137,14 +138,15 @@ fn prefault_elf_tail_page_from_cache(
 }
 
 /// Prime the per-inode page cache with a contiguous file range using one
-/// `fill_pages_bulk` call. The relocation loop in `load_elf` would
-/// otherwise issue one synchronous single-page `get_or_fill_page` per
-/// relocation target — under cold cache that's hundreds of single-sector
-/// AHCI commands. One bulk read coalesces them into a single NCQ command
-/// that completes in tens of milliseconds.
+/// `fill_pages_bulk` call via the in-flight registry. The relocation loop in
+/// `load_elf` would otherwise issue one synchronous single-page
+/// `get_or_fill_page` per relocation target — under cold cache that's hundreds
+/// of single-sector AHCI commands. One bulk read coalesces them into a single
+/// NCQ command that completes in tens of milliseconds.
 ///
-/// Best-effort: on bulk-read error or unsupported, returns silently and
-/// the per-page path will fall back to single-page reads.
+/// Best-effort: on bulk-read error, unsupported, or `owned_ops` overflow,
+/// returns silently. The per-page `get_or_fill_page` calls in the relocation
+/// loop serve as the fallback.
 fn prefetch_file_pages(
     inode: &Arc<VfsInode>,
     fs: &Arc<dyn crate::fs::FileSystem + Send + Sync>,
@@ -158,29 +160,16 @@ fn prefetch_file_pages(
         return;
     };
 
-    let bytes = page_count * 4096;
-    let Ok(data) = pc_ops.fill_pages_bulk(inode.ino, file_offset as usize, bytes) else {
-        return;
-    };
-
     let start_page = file_offset / 4096;
-    for i in 0..page_count {
-        let page_idx = start_page + i as u64;
-        let off = i * 4096;
-        // get_or_fill is a no-op for already-cached pages and otherwise
-        // populates from the bulk buffer without hitting disk.
-        let _ = inode.pages.get_or_fill(page_idx, |buf| {
-            let avail = data.len().saturating_sub(off);
-            let copy = avail.min(4096);
-            if copy > 0 {
-                buf[..copy].copy_from_slice(&data[off..off + copy]);
-            }
-            if copy < 4096 {
-                buf[copy..].fill(0);
-            }
-            Ok(())
-        });
-    }
+    let bytes = page_count * 4096;
+    let ino = inode.ino;
+    let byte_offset = file_offset as usize;
+
+    // Use the bulk in-flight registry path. On failure (Err), the per-page
+    // fallback in load_elf's relocation loop handles misses.
+    let _ = page_fill::get_or_fill_bulk_async_sync(inode, start_page, page_count as u64, || {
+        pc_ops.fill_pages_bulk(ino, byte_offset, bytes)
+    });
 }
 
 /// Load an ELF binary via the inode page cache, building `VmaBacking::FileBacked`

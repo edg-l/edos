@@ -39,7 +39,10 @@
 //! `fill_fn` runs with NO InodePages lock held, so AHCI (170-200) and BPC
 //! (110) acquisitions inside `fill_fn` are fine from rank 42's perspective.
 
-use alloc::sync::{Arc, Weak};
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::sync::atomic::{AtomicU8, Ordering};
 use x86_64::structures::paging::FrameAllocator;
 
@@ -481,6 +484,191 @@ pub fn get_or_fill_async_sync(
 
                 // Publish-terminal-state-before-remove invariant (failure branch):
                 // finish_failed (store Failed + wake_all) BEFORE in_flight remove.
+                handle.finish_failed();
+                in_flight_remove_all(inode, &handle);
+                sched().current_thread().map(|t| {
+                    t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
+                });
+                return Err(e);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// get_or_fill_bulk_async_sync (Task 2.2)
+// ---------------------------------------------------------------------------
+
+/// Populate `inode.pages` for the exclusive range `[start_page, start_page + page_count)`
+/// using a single `bulk_fill_fn` invocation.
+///
+/// A single `PageFillHandle` with `len = page_count` is created and installed at
+/// EVERY index in the range under one `in_flight(42)` critical section. Any
+/// concurrent reader for any page in the range parks on this handle's `WaitQueue`.
+///
+/// # Behavior when a range index already has a handle
+///
+/// If ANY index in `[start_page, start_page + page_count)` already has an
+/// in-flight handle (installed by a concurrent single-page reader), the entire
+/// bulk publish is aborted. The caller parks on the FIRST such handle, then
+/// retries the bulk install from the top. This is simpler than narrowing the
+/// bulk range; it is safe because after parking the conflicting page will be
+/// cached (success) or absent (retry naturally).
+///
+/// # owned_ops push failure
+///
+/// If the issuing thread's `owned_ops` registry is full, the bulk install is
+/// abandoned entirely: the just-installed handle is removed, `finish_failed` is
+/// called to wake any readers that snuck in, and `Err(Error::IoError)` is
+/// returned so the caller can fall back to the per-page
+/// `get_or_fill_async_sync` path.
+///
+/// # Lock order
+///
+/// Same edges as single-page path: `pages(40) → in_flight(42)` on
+/// publish-and-remove; ascending, valid.
+///
+/// # Publish-terminal-state-before-remove invariant
+///
+/// Both branches uphold: success calls `finish_success` then
+/// `in_flight_remove_all`; failure calls `finish_failed` then
+/// `in_flight_remove_all`.
+pub fn get_or_fill_bulk_async_sync(
+    inode: &Arc<VfsInode>,
+    start_page: u64,
+    page_count: u64,
+    bulk_fill_fn: impl FnOnce() -> Result<Vec<u8>, Error>,
+) -> Result<(), Error> {
+    assert!(
+        page_count > 0,
+        "get_or_fill_bulk_async_sync: page_count must be > 0"
+    );
+
+    'outer: loop {
+        // --- Install phase ---
+        // Build ONE handle covering the entire range.
+        let handle = PageFillHandle::new(Arc::downgrade(inode), start_page, page_count as u32);
+
+        // Try to install at every index atomically under one in_flight lock.
+        let park_on: Option<Arc<PageFillHandle>> = {
+            let mut inflight = inode
+                .pages
+                .in_flight
+                .lock_ranked(RANK_IN_FLIGHT, "InodePages.in_flight (bulk-install)");
+
+            let mut conflict: Option<Arc<PageFillHandle>> = None;
+            for idx in start_page..(start_page + page_count) {
+                if let Some(existing) = inflight.get(&idx) {
+                    conflict = Some(Arc::clone(existing));
+                    break;
+                }
+            }
+
+            if let Some(c) = conflict {
+                // At least one index is busy. Abort the bulk install; park below.
+                Some(c)
+            } else {
+                // All indices free: install the same Arc at every index.
+                for idx in start_page..(start_page + page_count) {
+                    inflight.insert(idx, Arc::clone(&handle));
+                }
+                None
+            }
+        };
+
+        if let Some(conflict) = park_on {
+            // Park until the conflicting fill finishes, then retry the whole bulk.
+            conflict
+                .waiters
+                .wait_until(|| conflict.load_state() != FILL_PENDING);
+            drop(conflict);
+            continue 'outer;
+        }
+
+        // --- Handle is installed. Register with owned_ops for cancel hookup. ---
+        let op: Arc<dyn CancellableOp> = Arc::clone(&handle) as Arc<dyn CancellableOp>;
+        let push_ok = sched()
+            .current_thread()
+            .map(|t| t.owned_ops_push(op).is_ok())
+            .unwrap_or(false);
+
+        if !push_ok {
+            // owned_ops full: cannot register for cancellation. If the issuer
+            // dies mid-fill, the handle would be stranded in Pending. Safer to
+            // abort the bulk entirely. Wake any readers that latched onto our
+            // just-installed handle (publish FAILED before removing).
+            handle.finish_failed();
+            in_flight_remove_all(inode, &handle);
+            return Err(Error::IoError);
+        }
+
+        // --- Allocate frames (one per page in the range). ---
+        let mut frames: Vec<FrameDrop> = Vec::with_capacity(page_count as usize);
+        for _ in 0..page_count {
+            match frame_allocator().allocate_frame() {
+                Some(f) => frames.push(FrameDrop::new(f)),
+                None => {
+                    // Out of memory: failure path — publish before removing.
+                    handle.finish_failed();
+                    in_flight_remove_all(inode, &handle);
+                    sched().current_thread().map(|t| {
+                        t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
+                    });
+                    // frames Vec drops here, returning all partially-allocated frames.
+                    return Err(Error::IoError);
+                }
+            }
+        }
+
+        // --- Call bulk_fill_fn with no InodePages lock held. ---
+        let fill_result = bulk_fill_fn();
+
+        match fill_result {
+            Ok(data) => {
+                // Wrap each frame into an Arc<CachedPage>, copying the chunk.
+                let mut pages_to_insert: Vec<(u64, Arc<CachedPage>)> =
+                    Vec::with_capacity(page_count as usize);
+
+                for (i, fd) in frames.into_iter().enumerate() {
+                    let data_offset = i * 4096;
+                    {
+                        let slice = unsafe { fd.frame_slice_mut() };
+                        let available = data.len().saturating_sub(data_offset);
+                        let copy = available.min(4096);
+                        if copy > 0 {
+                            slice[..copy].copy_from_slice(&data[data_offset..data_offset + copy]);
+                        }
+                        if copy < 4096 {
+                            slice[copy..].fill(0);
+                        }
+                    }
+                    let frame = fd.forget();
+                    let page = Arc::new(CachedPage::new(frame));
+                    pages_to_insert.push((start_page + i as u64, page));
+                }
+
+                // Publish all N pages under a single pages(40) critical section.
+                {
+                    let mut pages =
+                        ranked_lock!(RANK_PAGES, "InodePages.pages (bulk)", inode.pages.pages);
+                    for (idx, page) in pages_to_insert {
+                        // Defensive: if another thread already inserted this page, keep
+                        // theirs and drop ours (CachedPage::drop returns the frame).
+                        pages.entry(idx).or_insert(page);
+                    }
+                }
+
+                // Publish-terminal-state-before-remove: success branch.
+                handle.finish_success();
+                in_flight_remove_all(inode, &handle);
+                sched().current_thread().map(|t| {
+                    t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
+                });
+                return Ok(());
+            }
+            Err(e) => {
+                // frames Vec drops here, returning all allocated frames.
+                // Publish-terminal-state-before-remove: failure branch.
                 handle.finish_failed();
                 in_flight_remove_all(inode, &handle);
                 sched().current_thread().map(|t| {
