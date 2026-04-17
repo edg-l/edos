@@ -8,6 +8,13 @@ use alloc::{
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, RwLock};
 
+use crate::{
+    debug::lock_order::{
+        RANK_DIRTY_INODES, RANK_INODE, RANK_MAPPERS, RANK_USER_MM, RANK_VFS, RANK_VMAS,
+    },
+    ranked_lock, ranked_read, ranked_write,
+};
+
 use super::{
     Error, File, FileAttrs, FileKind, FileSystem, MmapRegion, MountInfo, StatFs, dentry,
     handle::Pollable, inode::VfsInode, path::Path, readahead::ReadaheadState,
@@ -65,7 +72,7 @@ pub struct VfsOp {
 /// Look up the filesystem for a given path.
 /// Uses longest-prefix matching to find the deepest mount point.
 fn lookup(path: &Path) -> Option<VfsLookup> {
-    let registry = VFS.read();
+    let registry = ranked_read!(RANK_VFS, "VFS", VFS);
     let mut best_mount: Option<(&Path, &MountEntry)> = None;
     for (mount_path, entry) in registry.iter() {
         if path == mount_path || path.starts_with(mount_path) {
@@ -90,7 +97,7 @@ fn lookup(path: &Path) -> Option<VfsLookup> {
 /// Look up for FileInfo specifically - handles the case where the path itself is a mount point
 /// by resolving through the parent filesystem.
 fn lookup_for_info(path: &Path) -> Option<VfsLookup> {
-    if VFS.read().contains_key(path) {
+    if ranked_read!(RANK_VFS, "VFS", VFS).contains_key(path) {
         if let Some(parent) = path.parent() {
             return lookup(&parent).map(|lk| {
                 let name = path.last_component().unwrap_or("");
@@ -188,7 +195,10 @@ pub fn read(
     offset: usize,
     count: usize,
 ) -> Result<Vec<u8>, Error> {
-    let _guard = op.inode.as_ref().map(|i| i.lock.read());
+    let _guard = op
+        .inode
+        .as_ref()
+        .map(|i| i.lock.read_ranked(RANK_INODE, "inode.lock"));
 
     if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
         if let Some(pc_ops) = op.fs.as_page_cache_ops() {
@@ -394,12 +404,18 @@ fn page_cache_read(
 }
 
 pub fn file_info(op: &VfsOp) -> Result<File, Error> {
-    let _guard = op.inode.as_ref().map(|i| i.lock.read());
+    let _guard = op
+        .inode
+        .as_ref()
+        .map(|i| i.lock.read_ranked(RANK_INODE, "inode.lock"));
     op.fs.file_info(&op.relative)
 }
 
 pub fn list_files(op: &VfsOp, full_path: &Path) -> Result<Vec<File>, Error> {
-    let _guard = op.inode.as_ref().map(|i| i.lock.read());
+    let _guard = op
+        .inode
+        .as_ref()
+        .map(|i| i.lock.read_ranked(RANK_INODE, "inode.lock"));
     let mut files = op.fs.list_files(&op.relative)?;
 
     // Append synthetic directory entries for child mount points.
@@ -430,7 +446,10 @@ pub fn list_files(op: &VfsOp, full_path: &Path) -> Result<Vec<File>, Error> {
 /// Write with optional O_APPEND support. The append size query happens
 /// inside the write lock, preventing reentrancy deadlocks.
 pub fn write(op: &VfsOp, offset: usize, data: &[u8], append: bool) -> Result<u64, Error> {
-    let _guard = op.inode.as_ref().map(|i| i.lock.write());
+    let _guard = op
+        .inode
+        .as_ref()
+        .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
     let actual_offset = if append {
         if let Some(ino) = op.inode.as_ref().map(|i| i.ino).filter(|&i| i != 0) {
             match op.fs.file_size_ino(ino) {
@@ -548,7 +567,10 @@ fn page_cache_write(
 }
 
 pub fn truncate(op: &VfsOp, size: u64) -> Result<(), Error> {
-    let _guard = op.inode.as_ref().map(|i| i.lock.write());
+    let _guard = op
+        .inode
+        .as_ref()
+        .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
     let result = op.fs.truncate(&op.relative, size);
     // Always run invalidators, even on FS failure. The FS may have partially
     // applied the truncate (cluster chain trimmed but dirent size update
@@ -570,7 +592,10 @@ pub fn truncate(op: &VfsOp, size: u64) -> Result<(), Error> {
 }
 
 pub fn ioctl(op: &VfsOp, request: u64, arg: u64) -> Result<u64, Error> {
-    let _guard = op.inode.as_ref().map(|i| i.lock.write());
+    let _guard = op
+        .inode
+        .as_ref()
+        .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
     op.fs.ioctl(&op.relative, request, arg)
 }
 
@@ -583,7 +608,9 @@ fn resolve_parent_inode(op: &VfsOp) -> Option<Arc<VfsInode>> {
 
 pub fn create_file(op: &VfsOp) -> Result<(), Error> {
     let parent_inode = resolve_parent_inode(op);
-    let _guard = parent_inode.as_ref().map(|i| i.lock.write());
+    let _guard = parent_inode
+        .as_ref()
+        .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
     let result = op.fs.create_file(&op.relative);
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
@@ -593,7 +620,9 @@ pub fn create_file(op: &VfsOp) -> Result<(), Error> {
 
 pub fn create_dir(op: &VfsOp) -> Result<(), Error> {
     let parent_inode = resolve_parent_inode(op);
-    let _guard = parent_inode.as_ref().map(|i| i.lock.write());
+    let _guard = parent_inode
+        .as_ref()
+        .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
     let result = op.fs.create_dir(&op.relative);
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
@@ -621,7 +650,9 @@ pub fn create_dir(op: &VfsOp) -> Result<(), Error> {
 /// until the final Arc drop, at which point InodePages drops too.
 pub fn remove_file(op: &VfsOp) -> Result<(), Error> {
     let parent_inode = resolve_parent_inode(op);
-    let _guard = parent_inode.as_ref().map(|i| i.lock.write());
+    let _guard = parent_inode
+        .as_ref()
+        .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
     let result = op.fs.remove_file(&op.relative);
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
@@ -634,7 +665,9 @@ pub fn remove_file(op: &VfsOp) -> Result<(), Error> {
 
 pub fn remove_dir(op: &VfsOp) -> Result<(), Error> {
     let parent_inode = resolve_parent_inode(op);
-    let _guard = parent_inode.as_ref().map(|i| i.lock.write());
+    let _guard = parent_inode
+        .as_ref()
+        .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
     let result = op.fs.remove_dir(&op.relative);
     if result.is_ok() {
         let dc = dentry::dentry_cache();
@@ -653,20 +686,25 @@ pub fn rename(old_op: &VfsOp, new_op: &VfsOp) -> Result<(), Error> {
     let new_parent_inode = resolve_parent_inode(new_op);
 
     // Acquire locks in inode number order to prevent deadlocks.
+    // The first acquisition is ranked_write (strict); the second is
+    // write_ranked_same (same class, different instance). Caller is
+    // responsible for the key ordering (ino order above).
     let (_g1, _g2) = match (&old_parent_inode, &new_parent_inode) {
-        (Some(a), Some(b)) if Arc::ptr_eq(a, b) => (Some(a.lock.write()), None),
+        (Some(a), Some(b)) if Arc::ptr_eq(a, b) => {
+            (Some(a.lock.write_ranked(RANK_INODE, "inode.lock")), None)
+        }
         (Some(a), Some(b)) if a.ino <= b.ino => {
-            let g1 = a.lock.write();
-            let g2 = b.lock.write();
+            let g1 = a.lock.write_ranked(RANK_INODE, "inode.lock");
+            let g2 = b.lock.write_ranked_same(RANK_INODE, "inode.lock");
             (Some(g1), Some(g2))
         }
         (Some(a), Some(b)) => {
-            let g1 = b.lock.write();
-            let g2 = a.lock.write();
+            let g1 = b.lock.write_ranked(RANK_INODE, "inode.lock");
+            let g2 = a.lock.write_ranked_same(RANK_INODE, "inode.lock");
             (Some(g1), Some(g2))
         }
-        (Some(a), None) => (Some(a.lock.write()), None),
-        (None, Some(b)) => (Some(b.lock.write()), None),
+        (Some(a), None) => (Some(a.lock.write_ranked(RANK_INODE, "inode.lock")), None),
+        (None, Some(b)) => (Some(b.lock.write_ranked(RANK_INODE, "inode.lock")), None),
         (None, None) => (None, None),
     };
 
@@ -734,15 +772,17 @@ pub fn statfs(op: &VfsOp) -> Result<StatFs, Error> {
 
 pub fn mount(mount_point: Path, mut entry: MountEntry) {
     entry.mount_id = NEXT_MOUNT_ID.fetch_add(1, Ordering::Relaxed);
-    VFS.write().insert(mount_point, entry);
+    ranked_write!(RANK_VFS, "VFS", VFS).insert(mount_point, entry);
 }
 
 pub fn unmount(mount_point: &Path) -> bool {
-    VFS.write().remove(mount_point).is_some()
+    ranked_write!(RANK_VFS, "VFS", VFS)
+        .remove(mount_point)
+        .is_some()
 }
 
 pub fn list_mounts() -> Vec<MountInfo> {
-    VFS.read()
+    ranked_read!(RANK_VFS, "VFS", VFS)
         .iter()
         .map(|(path, entry)| MountInfo {
             mount_point: path.clone(),
@@ -756,7 +796,7 @@ pub fn list_mounts() -> Vec<MountInfo> {
 /// Returns the names and full paths of direct child mount points under `parent`.
 /// Used by list_files to synthesize directory entries for mount points.
 pub fn child_mount_points(parent: &Path) -> Vec<(String, Path)> {
-    let registry = VFS.read();
+    let registry = ranked_read!(RANK_VFS, "VFS", VFS);
     let parent_depth = parent.component_count();
     let mut children = Vec::new();
     for (mount_path, _) in registry.iter() {
@@ -771,13 +811,13 @@ pub fn child_mount_points(parent: &Path) -> Vec<(String, Path)> {
 
 /// Check if a path is a registered mount point.
 pub fn is_mount_point(path: &Path) -> bool {
-    VFS.read().contains_key(path)
+    ranked_read!(RANK_VFS, "VFS", VFS).contains_key(path)
 }
 
 /// Look up the filesystem for a given mount ID.
 /// Iterates the mount registry and returns a clone of the matching Arc.
 pub fn fs_by_mount_id(mount_id: usize) -> Option<Arc<dyn super::FileSystem + Send + Sync>> {
-    let registry = VFS.read();
+    let registry = ranked_read!(RANK_VFS, "VFS", VFS);
     for entry in registry.values() {
         if entry.mount_id == mount_id {
             return Some(entry.fs.clone());
@@ -790,7 +830,7 @@ pub fn fs_by_mount_id(mount_id: usize) -> Option<Arc<dyn super::FileSystem + Sen
 /// kthread can flush it periodically. Duplicate registrations are deduplicated.
 pub fn register_dirty_inode(inode: &Arc<VfsInode>) {
     let weak = Arc::downgrade(inode);
-    let mut list = DIRTY_INODES.lock();
+    let mut list = DIRTY_INODES.lock_ranked(RANK_DIRTY_INODES, "DIRTY_INODES");
     // Deduplicate: if already present, skip.
     let already = list
         .iter()
@@ -807,7 +847,7 @@ pub fn flush_dirty_inodes() {
     // Snapshot live inodes under the lock; flush outside it to avoid blocking
     // the lock during AHCI I/O.
     let live: Vec<Arc<VfsInode>> = {
-        let mut list = DIRTY_INODES.lock();
+        let mut list = DIRTY_INODES.lock_ranked(RANK_DIRTY_INODES, "DIRTY_INODES");
         let live: Vec<Arc<VfsInode>> = list.iter().filter_map(|w| w.upgrade()).collect();
         // Compact tombstoned entries.
         list.retain(|w| w.upgrade().is_some());
@@ -851,7 +891,7 @@ pub fn invalidate_mappings_above(inode: &Arc<VfsInode>, new_size: u64) {
     // Collect live UserThread Arcs while holding the mappers lock, then
     // drop the lock before doing any MM work.
     let live: Vec<alloc::sync::Arc<spin::RwLock<UserThread>>> = {
-        let mut mappers = inode.mappers.lock();
+        let mut mappers = ranked_lock!(RANK_MAPPERS, "inode.mappers", inode.mappers);
         // Compact tombstoned entries as a side effect.
         mappers.retain(|w| w.upgrade().is_some());
         mappers.iter().filter_map(|w| w.upgrade()).collect()
@@ -863,8 +903,8 @@ pub fn invalidate_mappings_above(inode: &Arc<VfsInode>, new_size: u64) {
 
     for user_arc in &live {
         let user = user_arc.read();
-        let mut vmas = user.vmas.lock();
-        let mut mm = user.memory_manager.lock();
+        let mut vmas = ranked_lock!(RANK_VMAS, "user.vmas", user.vmas);
+        let mut mm = ranked_lock!(RANK_USER_MM, "user.mm", user.memory_manager);
 
         // Walk all VMAs in this process looking for FileBacked on this inode.
         // Collect the list of (vma_start, slots_to_invalidate) first, then

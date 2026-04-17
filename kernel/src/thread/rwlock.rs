@@ -100,6 +100,21 @@ impl<T> RwLock<T> {
         RankedGuard::new(inner, rank, site)
     }
 
+    /// Acquire an exclusive write lock for a same-class different-instance
+    /// acquisition. Permits `rank >= top` rather than strictly greater.
+    /// Use ONLY in key-ordered same-class patterns (e.g. `vfs::rename` with
+    /// two parent inodes). NOT reentrance protection.
+    #[allow(dead_code)]
+    pub fn write_ranked_same(
+        &self,
+        rank: u16,
+        site: &'static str,
+    ) -> RankedGuard<RwLockWriteGuard<'_, T>> {
+        crate::debug::lock_order::enter_same(rank, site);
+        let inner = self.write();
+        RankedGuard::new(inner, rank, site)
+    }
+
     /// Get mutable access when the lock itself is uniquely borrowed.
     #[expect(unused)]
     pub fn get_mut(&mut self) -> &mut T {
