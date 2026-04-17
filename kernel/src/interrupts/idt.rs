@@ -263,9 +263,13 @@ extern "x86-interrupt" fn page_fault_handler(
             }
         }
 
-        println!(
+        // Use emergency_println (bypasses SERIAL_DBG lock) so that if the
+        // faulting code itself held the serial lock, we still get output
+        // instead of deadlocking.
+        crate::emergency_println!(
             "KILL: PF addr={:p} rip={:p} err={error_code:?} ({error_desc})",
-            address, stack_frame.instruction_pointer
+            address,
+            stack_frame.instruction_pointer
         );
         // Walk the page tables and dump flags at each level so that
         // permission/intermediate-level issues are visible in the log.
@@ -285,21 +289,21 @@ extern "x86-interrupt" fn page_fault_handler(
             };
             let p4 = pt(cr3_frame);
             let p4e = &p4[i4];
-            println!("PF-walk: pml4[{i4}] flags={:?}", p4e.flags());
+            crate::emergency_println!("PF-walk: pml4[{i4}] flags={:?}", p4e.flags());
             if p4e.flags().contains(PageTableFlags::PRESENT) {
                 let p3 = pt(PhysFrame::containing_address(p4e.addr()));
                 let p3e = &p3[i3];
-                println!("PF-walk: pml3[{i3}] flags={:?}", p3e.flags());
+                crate::emergency_println!("PF-walk: pml3[{i3}] flags={:?}", p3e.flags());
                 if p3e.flags().contains(PageTableFlags::PRESENT) {
                     let p2 = pt(PhysFrame::containing_address(p3e.addr()));
                     let p2e = &p2[i2];
-                    println!("PF-walk: pml2[{i2}] flags={:?}", p2e.flags());
+                    crate::emergency_println!("PF-walk: pml2[{i2}] flags={:?}", p2e.flags());
                     if p2e.flags().contains(PageTableFlags::PRESENT)
                         && !p2e.flags().contains(PageTableFlags::HUGE_PAGE)
                     {
                         let p1 = pt(PhysFrame::containing_address(p2e.addr()));
                         let e = &p1[i1];
-                        println!(
+                        crate::emergency_println!(
                             "PF-walk: pml1[{i1}] flags={:?} phys={:#x}",
                             e.flags(),
                             e.addr().as_u64()

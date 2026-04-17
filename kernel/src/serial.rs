@@ -69,3 +69,21 @@ pub fn emergency_write(msg: &[u8]) {
         }
     }
 }
+
+/// Lock-bypassing formatted print for crash paths. Formats into a 512-byte
+/// stack buffer (truncates silently on overflow) then writes directly to the
+/// UART. Use from page-fault/double-fault handlers that might race with the
+/// regular serial lock.
+#[doc(hidden)]
+pub fn _emergency_print(args: fmt::Arguments) {
+    let mut buf: heapless::String<512> = heapless::String::new();
+    let _ = buf.write_fmt(args);
+    emergency_write(buf.as_bytes());
+}
+
+#[macro_export]
+macro_rules! emergency_println {
+    ($($arg:tt)*) => {
+        $crate::serial::_emergency_print(core::format_args!("{}\n", core::format_args!($($arg)*)))
+    };
+}
