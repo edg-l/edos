@@ -10,7 +10,7 @@
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
-use crate::thread::mutex::BlockingMutex;
+use crate::{debug::lock_order::RANK_DENTRY, ranked_lock, thread::mutex::BlockingMutex};
 
 use super::{inode::VfsInode, path::Path};
 
@@ -44,13 +44,13 @@ impl DentryCache {
 
     /// Look up an inode by mount and path.
     pub fn lookup(&self, mount_id: usize, path: &Path) -> Option<Arc<VfsInode>> {
-        let cache = self.inner.lock();
+        let cache = ranked_lock!(RANK_DENTRY, "dentry_cache", self.inner);
         cache.entries.get(&(mount_id, path.clone())).cloned()
     }
 
     /// Insert an inode into the cache. Evicts the oldest entry if full.
     pub fn insert(&self, mount_id: usize, path: Path, inode: Arc<VfsInode>) {
-        let mut cache = self.inner.lock();
+        let mut cache = ranked_lock!(RANK_DENTRY, "dentry_cache", self.inner);
 
         // Don't re-insert if already present.
         if cache.entries.contains_key(&(mount_id, path.clone())) {
@@ -74,7 +74,7 @@ impl DentryCache {
 
     /// Invalidate a specific path.
     pub fn invalidate(&self, mount_id: usize, path: &Path) {
-        let mut cache = self.inner.lock();
+        let mut cache = ranked_lock!(RANK_DENTRY, "dentry_cache", self.inner);
         if cache.entries.remove(&(mount_id, path.clone())).is_some() {
             cache.order.retain(|_, v| v != &(mount_id, path.clone()));
         }
@@ -82,7 +82,7 @@ impl DentryCache {
 
     /// Invalidate all entries under a parent path (for directory removal).
     pub fn invalidate_children(&self, mount_id: usize, parent: &Path) {
-        let mut cache = self.inner.lock();
+        let mut cache = ranked_lock!(RANK_DENTRY, "dentry_cache", self.inner);
         let to_remove: Vec<(usize, Path)> = cache
             .entries
             .keys()
