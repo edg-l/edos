@@ -331,6 +331,9 @@ pub(crate) fn allocate_tls_region(
     let tls_data_base = VirtAddr::new(tls_data_base_u64);
     let tcb_base = VirtAddr::new(tcb_base_u64);
 
+    // Safe under rank-80 mm because map_memory above is eager (PRESENT bit set on every
+    // page before returning), so translate_to_hhdm_ptr takes its fast path and never
+    // acquires rank-70 vmas. See doc/invariants/lock-order.md rank-80 note.
     memory_manager.zero_user(mapping_base, map_size as usize);
 
     if !template.init_data.is_empty() {

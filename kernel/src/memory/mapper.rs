@@ -331,7 +331,10 @@ impl MemoryManager {
             return Some((hhdm + phys.as_u64()).as_mut_ptr());
         }
 
-        // Slow path: demand-fault via attached VmaSet
+        // Slow path: demand-fault via attached VmaSet. Acquires rank-70 vmas. Callers that
+        // hold rank-80 mm MUST ensure the page is already mapped (e.g. via eager map_memory)
+        // so this branch is not taken, otherwise the rank tracker fires (80 -> 70 inversion).
+        // See doc/invariants/lock-order.md rank-80 note.
         let vmas_arc = self.vmas.as_ref()?;
         let pml4 = self.pml4_frame?;
         let phys_offset = crate::boot::boot_info().physical_memory_offset;
