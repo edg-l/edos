@@ -74,7 +74,6 @@ impl<T> RwLock<T> {
     /// lock-rank stack. The rank is popped when the returned `RankedGuard`
     /// is dropped, AFTER the inner read guard is released. Zero-cost in
     /// release builds.
-    #[allow(dead_code)]
     pub fn read_ranked(
         &self,
         rank: u16,
@@ -89,7 +88,6 @@ impl<T> RwLock<T> {
     /// lock-rank stack. The rank is popped when the returned `RankedGuard`
     /// is dropped, AFTER the inner write guard is released. Zero-cost in
     /// release builds.
-    #[allow(dead_code)]
     pub fn write_ranked(
         &self,
         rank: u16,
