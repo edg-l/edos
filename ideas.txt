@@ -470,6 +470,39 @@ readahead, proper signal handling, safer thread cancellation, and the
 long-term I/O story across all block devices. See the async readahead
 entry below for the specific payoff on file-read performance.
 
+### Extend lock-order ranks to more subsystems (Foundation #4 follow-up)
+
+Foundation #4 shipped rank instrumentation across VFS, page-cache,
+journal, EFS, AHCI, frame allocator, and memory manager. The mechanism
+(`ranked_lock!` + `Thread.lock_ranks` + per-thread rank stack) is
+generic and applies to any `Mutex`/`RwLock`/`IrqSpinlock` in the
+kernel. In the fs/mm audit it caught 3 real pre-existing inversions in
+its first boot cycle (journal `tracker->state`, thread teardown
+`mm->vmas`, EFS `mutable->BPC`). Extending to other subsystems is a
+high-ROI way to shake out latent inversions before they manifest as
+rare concurrent-load hangs. Candidates, ranked by fun-per-effort:
+
+1. **Networking stack** — TCP state machine, socket tables, route
+   table, ARP cache, e1000e/virtio-net driver locks. TCP nested
+   locking (socket lock -> send queue -> retransmit timer) is a
+   classic inversion trap. Probably the highest payoff.
+2. **USB stack** — xHCI ring locks, device enumeration, HID dispatch.
+   Foundation #2 drop-audit already noted async `block_api`
+   interactions worth verifying.
+3. **Window system** — window registry, focus, input routing, shared
+   memory compositor. Multi-threaded (client + compositor + input
+   threads), ripe for latent inversions. User-facing so inversions
+   manifest as WM hangs.
+4. **HDA audio** — codec/stream/buffer locks. Currently marked "out
+   of Phase 2 scope" in `doc/invariants/lock-order.md`.
+5. **devfs / PTY** — `tty_lock -> line_discipline -> char_device`
+   kind of chains.
+
+Marginal cost per subsystem: one rank constant, one row in
+`doc/invariants/lock-order.md`, and s/`.lock()`/`.lock_ranked(RANK,
+"site")`/ on ~10-30 sites. Per-subsystem cost a few hours; expected
+payoff is a real bug or two per subsystem based on fs audit yield.
+
 ### Async NCQ pipelined readahead (blocked on Foundations above)
 
 Linux's async-marker readahead: when the user reads the last page of

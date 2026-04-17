@@ -40,6 +40,7 @@
 
 pub const RANK_VFS: u16 = 10;
 pub const RANK_INODE: u16 = 30;
+pub const RANK_EFS_ALLOC: u16 = 32;
 pub const RANK_DENTRY: u16 = 35;
 pub const RANK_PAGES: u16 = 40;
 pub const RANK_IN_FLIGHT: u16 = 42; // forward ref for Foundation #5
@@ -48,7 +49,6 @@ pub const RANK_MAPPERS: u16 = 60;
 pub const RANK_VMAS: u16 = 70;
 pub const RANK_USER_MM: u16 = 80;
 pub const RANK_KERNEL_MAPPER: u16 = 85;
-pub const RANK_EFS_ALLOC: u16 = 88;
 pub const RANK_FRAME_ALLOC: u16 = 90;
 pub const RANK_DIRTY_INODES: u16 = 100;
 pub const RANK_BPC_SHARD: u16 = 110;
