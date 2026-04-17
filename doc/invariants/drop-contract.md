@@ -57,17 +57,48 @@ and return immediately.
 
 ## Enforcement (debug builds)
 
-Phase 5 of Foundation #2 adds `debug_assert!` guards at blocking Drop sites:
+Phase 5 of Foundation #2 adds `debug_assert!` guards at blocking Drop sites.
+The guards fire if the calling thread is the reaper or evict kthread, which
+must never block.
+
+### Helper functions
+
+| Function | Location |
+|---|---|
+| `current_thread_is_reaper()` | `kernel/src/thread/scheduler.rs` — compares `sched().current_thread_id()` against `REAPER_TID` |
+| `current_thread_is_evict_kthread()` | `kernel/src/fs/evict.rs` — compares `sched().current_thread_id()` against `EVICT_TID` |
+
+Both return `false` before their respective kthreads are started (TID == 0).
+Both are `#[inline]` and alloc-free.
+
+### Types with guards
+
+| Type | Guard location | Reason |
+|---|---|---|
+| `VfsInode` | `kernel/src/fs/inode.rs`, `VfsInode::drop` | Was blocking before Phase 1; guard catches any future regression that re-introduces blocking code before the `post_evict` call |
+
+### Types without guards (all non-blocking; guard not needed)
+
+`CachedBlockPage`, `PageGuard`, `TxHandle`, `SharedMemory`, `MemoryManager`,
+`FpuState`, `SignalState`, `Vma`, `FileDescriptor` variants — all confirmed
+non-blocking by the Phase 0 drop audit. No guard is needed. If any of these
+gains blocking work in the future, add a guard at that time.
+
+### Guard shape
 
 ```rust
-debug_assert!(
-    !current_thread_is_reaper() && !current_thread_is_evict_kthread(),
-    "blocking Drop fired on reaper or evict kthread"
-);
+#[cfg(debug_assertions)]
+{
+    debug_assert!(
+        !crate::thread::scheduler::current_thread_is_reaper()
+            && !crate::fs::evict::current_thread_is_evict_kthread(),
+        "blocking Drop (TypeName) fired on reaper or evict kthread"
+    );
+}
 ```
 
-These are compiled out in release. They catch regressions at development time
-before they serialise production exits.
+These are compiled out in release builds. They catch regressions at development
+time before they serialise production exits.
 
 ---
 

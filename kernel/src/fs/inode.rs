@@ -91,6 +91,23 @@ impl Drop for VfsInode {
         if !self.is_orphan() || self.ino == 0 {
             return;
         }
+
+        // Runtime regression guard (debug builds only): VfsInode::drop must
+        // remain non-blocking. If it ever gets blocking work re-introduced and
+        // fires on the reaper or evict kthread, it will deadlock or cause a
+        // recursive-enqueue runaway. See doc/invariants/drop-contract.md.
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(
+                !crate::thread::scheduler::current_thread_is_reaper()
+                    && !crate::fs::evict::current_thread_is_evict_kthread(),
+                "blocking Drop (VfsInode) fired on reaper or evict kthread \
+                 (mount={}, ino={})",
+                self.mount_id,
+                self.ino
+            );
+        }
+
         // Post to the evict kthread instead of calling evict_inode directly.
         // This keeps Drop non-blocking: evict_inode on EFS can issue AHCI I/O,
         // which would block the reaper (and any other thread whose VMA drop

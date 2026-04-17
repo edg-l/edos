@@ -1579,6 +1579,19 @@ pub unsafe extern "C" fn save_transition_switch(
 /// Queue of dead threads awaiting cleanup. Lock-free, allocation-free on push.
 static REAPER_QUEUE: Once<ArrayQueue<Arc<Thread>>> = Once::new();
 static REAPER_HANDLE: Once<Weak<Thread>> = Once::new();
+/// ThreadId of the reaper kthread, or 0 before it starts.
+pub static REAPER_TID: AtomicU64 = AtomicU64::new(0);
+
+/// Returns true if the calling thread is the reaper kthread.
+///
+/// Used by debug_assert guards in blocking `Drop` implementations to catch
+/// regressions where blocking work is inadvertently re-introduced on the
+/// reaper path. Compiled out in release builds.
+#[inline]
+pub fn current_thread_is_reaper() -> bool {
+    let current = sched().current_thread_id().map(|t| t.0).unwrap_or(0);
+    current != 0 && current == REAPER_TID.load(Ordering::Acquire)
+}
 
 /// Initialize the reaper subsystem. Call once from the BSP after scheduler init.
 pub fn init_reaper() {
@@ -1590,6 +1603,7 @@ pub fn init_reaper() {
         crate::thread::thread::get_thread_weak(tid)
             .expect("reaper kthread vanished before call_once")
     });
+    REAPER_TID.store(tid.0, Ordering::Release);
     println!("Reaper thread started (tid={})", tid.0);
 }
 

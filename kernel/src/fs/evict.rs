@@ -44,9 +44,25 @@ pub struct EvictRequest {
 
 static EVICT_QUEUE: Once<ArrayQueue<EvictRequest>> = Once::new();
 static EVICT_HANDLE: Once<Weak<crate::thread::thread::Thread>> = Once::new();
+/// Monotonically increasing count of successful `evict_inode` calls completed
+/// by the evict kthread. Used by tests and diagnostics to confirm the kthread
+/// is draining the queue. Incremented after each successful call, not on error.
+pub static EVICT_DRAIN_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// ThreadId of the evict kthread, or 0 before it starts.
 pub static EVICT_TID: AtomicU64 = AtomicU64::new(0);
+
+/// Returns true if the calling thread is the evict-inode kthread.
+///
+/// Used by debug_assert guards in blocking `Drop` implementations to catch
+/// regressions where blocking work fires on the evict kthread (which would
+/// cause recursive enqueue or deadlock). Compiled out in release builds.
+#[inline]
+pub fn current_thread_is_evict_kthread() -> bool {
+    use crate::thread::scheduler::sched;
+    let current = sched().current_thread_id().map(|t| t.0).unwrap_or(0);
+    current != 0 && current == EVICT_TID.load(Ordering::Acquire)
+}
 
 fn evict_queue() -> &'static ArrayQueue<EvictRequest> {
     EVICT_QUEUE.call_once(|| ArrayQueue::new(EVICT_QUEUE_CAP))
@@ -100,6 +116,14 @@ pub fn post_evict(mount_id: usize, ino: u64) {
     }
 }
 
+/// Read the current drain count. Exposed via `/proc/evict_stats` and useful
+/// for tests that want to verify the evict kthread processed at least N
+/// requests after a known trigger.
+#[inline]
+pub fn evict_kthread_drain_count() -> u64 {
+    EVICT_DRAIN_COUNT.load(Ordering::Relaxed)
+}
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
@@ -140,6 +164,8 @@ extern "C" fn evict_kthread() -> ! {
                         req.ino,
                         e
                     );
+                } else {
+                    EVICT_DRAIN_COUNT.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
