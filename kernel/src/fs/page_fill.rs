@@ -401,10 +401,13 @@ pub fn get_or_fill_async_sync(
             .unwrap_or(false);
 
         if !push_ok {
-            // owned_ops full: remove handle from in_flight, fill inline without
-            // cancel hookup. There are no parked readers on this handle (we just
-            // installed it and no other thread has seen it yet in its Pending
-            // state before we remove it), so removing is safe.
+            // owned_ops full: publish terminal state BEFORE removing from
+            // in_flight so any reader that cloned the handle in the window
+            // between our install and this point observes Failed and exits
+            // its park loop (re-checks pages, retries as publisher). If we
+            // removed first, that reader would park on a handle that never
+            // transitions terminal -> permanent hang.
+            handle.finish_failed();
             in_flight_remove_all(inode, &handle);
             let fill_fn = fill_fn_opt
                 .take()
