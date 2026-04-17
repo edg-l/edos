@@ -87,6 +87,14 @@ pub fn sched() -> &'static Scheduler {
             .unwrap_unchecked()
     }
 }
+
+/// Like `sched()` but returns `None` before the per-CPU scheduler is installed.
+/// Used by paths that run very early in boot (e.g. the lock-order tracker from
+/// inside the frame allocator / heap init).
+#[inline(always)]
+pub fn try_sched() -> Option<&'static Scheduler> {
+    unsafe { get_percpu_data().scheduler.get().as_ref() }
+}
 pub static SCHEDULERS: RwLock<heapless::LinearMap<u32, &'static Scheduler, 128>> =
     RwLock::new(heapless::LinearMap::new());
 

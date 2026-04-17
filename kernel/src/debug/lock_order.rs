@@ -88,16 +88,20 @@ pub static MAX_RANK_DEPTH: AtomicUsize = AtomicUsize::new(0);
 /// No-op in release builds and before the scheduler has a current thread.
 #[cfg(debug_assertions)]
 pub fn enter(rank: u16, site: &'static str) {
-    use crate::thread::scheduler::sched;
+    use crate::thread::scheduler::try_sched;
 
-    let Some(thread) = sched().current_thread() else {
-        // Pre-scheduler init: no-op.
+    // Pre-scheduler init (frame allocator / heap init run before the per-CPU
+    // scheduler pointer is installed): no-op.
+    let Some(sched) = try_sched() else {
+        return;
+    };
+    let Some(thread) = sched.current_thread() else {
         return;
     };
 
     // Single-owner sanity: the thread returned by current_thread() must be us.
     debug_assert_eq!(
-        sched().current_thread_id(),
+        sched.current_thread_id(),
         Some(thread.id),
         "lock_order::enter: current_thread_id mismatch (concurrent access?)"
     );
@@ -157,14 +161,17 @@ pub fn enter(rank: u16, site: &'static str) {
 /// not detectable by the rank system.
 #[cfg(debug_assertions)]
 pub fn enter_same(rank: u16, site: &'static str) {
-    use crate::thread::scheduler::sched;
+    use crate::thread::scheduler::try_sched;
 
-    let Some(thread) = sched().current_thread() else {
+    let Some(sched) = try_sched() else {
+        return;
+    };
+    let Some(thread) = sched.current_thread() else {
         return;
     };
 
     debug_assert_eq!(
-        sched().current_thread_id(),
+        sched.current_thread_id(),
         Some(thread.id),
         "lock_order::enter_same: current_thread_id mismatch"
     );
@@ -198,9 +205,12 @@ pub fn enter_same(rank: u16, site: &'static str) {
 /// the popped entry matches the expected `(rank, site)`.
 #[cfg(debug_assertions)]
 pub fn exit(rank: u16, site: &'static str) {
-    use crate::thread::scheduler::sched;
+    use crate::thread::scheduler::try_sched;
 
-    let Some(thread) = sched().current_thread() else {
+    let Some(sched) = try_sched() else {
+        return;
+    };
+    let Some(thread) = sched.current_thread() else {
         return;
     };
 
