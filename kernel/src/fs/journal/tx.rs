@@ -11,7 +11,11 @@ use alloc::{
 };
 
 use super::Journal;
-use crate::fs::block_page_cache::CachedBlockPage;
+use crate::{
+    debug::lock_order::{RANK_JOURNAL_STATE, RANK_JOURNAL_TRACKER},
+    fs::block_page_cache::CachedBlockPage,
+    ranked_lock,
+};
 
 /// RAII handle for a single logical transaction.
 ///
@@ -71,11 +75,13 @@ impl Drop for TxHandle<'_> {
         // Lock ordering: acquire state first to merge blocks, then tracker.
         // We must read active.seq under the SAME state lock as the merge to
         // avoid TOCTOU (active could be sealed between two lock acquisitions).
+        // See doc/invariants/lock-order.md: state (150) and tracker (130) are
+        // sibling leaves; here state is acquired and released BEFORE tracker.
         let staged_blocks = core::mem::take(&mut self.staged_blocks);
         let staged_revokes = core::mem::take(&mut self.staged_revokes);
 
         let active_seq = {
-            let mut state = self.journal.state.lock();
+            let mut state = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.journal.state);
             let active = &mut state.active;
             let seq = active.seq;
             for (key, page) in staged_blocks.iter() {
@@ -88,7 +94,11 @@ impl Drop for TxHandle<'_> {
         };
 
         // Update checkpoint_tracker outside the state lock (different lock).
-        let mut tracker = self.journal.checkpoint_tracker.lock();
+        let mut tracker = ranked_lock!(
+            RANK_JOURNAL_TRACKER,
+            "Journal.checkpoint_tracker",
+            self.journal.checkpoint_tracker
+        );
         for &key in staged_blocks.keys() {
             tracker.insert(key, active_seq);
         }

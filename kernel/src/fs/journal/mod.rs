@@ -22,7 +22,9 @@ use efs_common::{
 };
 
 use crate::{
+    debug::lock_order::{RANK_JOURNAL_STATE, RANK_JOURNAL_TRACKER},
     drivers::ahci::{AhciError, direct},
+    ranked_lock,
     thread::{mutex::BlockingMutex, waitqueue::WaitQueue},
 };
 
@@ -259,7 +261,7 @@ impl Journal {
     /// with FUA so it survives power loss.
     pub fn write_journal_sb(&self) -> Result<(), AhciError> {
         let (head_seq, tail_seq, head_block, tail_block) = {
-            let s = self.state.lock();
+            let s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
             (s.head_seq, s.tail_seq, s.head_block, s.tail_block)
         };
 
@@ -308,7 +310,7 @@ impl Journal {
     // ---- Committed seq accessor --------------------------------------------
 
     pub fn committed_seq(&self) -> u64 {
-        self.state.lock().committed_seq
+        ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state).committed_seq
     }
 
     // ---- Writeback gating --------------------------------------------------
@@ -322,7 +324,11 @@ impl Journal {
         // a tracker -> state lock-order inversion (see doc/invariants/lock-order.md,
         // Task 0.0 of Foundation #4).
         let committed = self.committed_seq();
-        let tracker = self.checkpoint_tracker.lock();
+        let tracker = ranked_lock!(
+            RANK_JOURNAL_TRACKER,
+            "Journal.checkpoint_tracker",
+            self.checkpoint_tracker
+        );
         match tracker.get(&(dev, block)) {
             Some(&seq) => seq <= committed,
             None => true,
@@ -333,7 +339,11 @@ impl Journal {
     /// home location.  Removes the tracker entry only if the enrolled seq still
     /// matches (a later tx may have re-enrolled the block with a higher seq).
     pub fn note_checkpointed(&self, dev: u64, block: u64, expected_seq: u64) {
-        let mut tracker = self.checkpoint_tracker.lock();
+        let mut tracker = ranked_lock!(
+            RANK_JOURNAL_TRACKER,
+            "Journal.checkpoint_tracker",
+            self.checkpoint_tracker
+        );
         if tracker.get(&(dev, block)).copied() == Some(expected_seq) {
             tracker.remove(&(dev, block));
         }
@@ -345,7 +355,7 @@ impl Journal {
 
     /// True if there is anything for the committer to process.
     pub fn has_pending_work(&self) -> bool {
-        let s = self.state.lock();
+        let s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
         !s.active.is_empty() || !s.sealed.is_empty()
     }
 
@@ -366,13 +376,17 @@ impl Journal {
             // a tracker -> state lock-order inversion (see doc/invariants/lock-order.md,
             // Task 0.0 of Foundation #4).
             let committed = self.committed_seq();
-            let tracker = self.checkpoint_tracker.lock();
+            let tracker = ranked_lock!(
+                RANK_JOURNAL_TRACKER,
+                "Journal.checkpoint_tracker",
+                self.checkpoint_tracker
+            );
             tracker.values().copied().min().unwrap_or(committed)
         };
 
         let mut changed = false;
         {
-            let mut state = self.state.lock();
+            let mut state = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
             // Pop committed txs that are fully checkpointed (all their enrolled
             // blocks have been flushed to home locations).
             while let Some(&(seq, blocks)) = state.committed_pending.front() {
@@ -406,7 +420,7 @@ impl Journal {
     /// committed to the journal ring.  Used by sys_sync and sys_fsync.
     pub fn force_commit_and_wait(&self) -> Result<(), AhciError> {
         let target_seq = {
-            let state = self.state.lock();
+            let state = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
             if state.active.is_empty() && state.sealed.is_empty() {
                 // Nothing pending — already fully committed.
                 return Ok(());
@@ -449,7 +463,7 @@ impl Journal {
     pub fn seal_and_commit(&self) -> Result<(), AhciError> {
         // Step 1: move active tx to sealed queue if non-empty.
         {
-            let mut s = self.state.lock();
+            let mut s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
             if !s.active.is_empty() {
                 let next_seq = s.head_seq + 1;
                 let next_tx_id = self.next_tx_id();
@@ -467,7 +481,7 @@ impl Journal {
         // We do NOT hold the state lock during I/O so other threads can enroll.
         loop {
             let tx = {
-                let mut s = self.state.lock();
+                let mut s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
                 match s.sealed.pop_front() {
                     Some(tx) => tx,
                     None => break,
@@ -476,7 +490,7 @@ impl Journal {
 
             if tx.is_empty() {
                 // Nothing to write; just bump committed_seq.
-                let mut s = self.state.lock();
+                let mut s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
                 s.committed_seq = tx.seq;
                 drop(s);
                 self.commit_wq.wake_all();
@@ -525,12 +539,12 @@ impl Journal {
 
             // Check ring capacity in blocks (not tx count).
             let (ring_pos_start, ring_size) = {
-                let s = self.state.lock();
+                let s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
                 let ring_size = self.block_count as u64 - 1; // block 0 is JSB
                 let used = s.head_block.wrapping_sub(s.tail_block);
                 if needed > ring_size.saturating_sub(used) {
                     drop(s);
-                    let mut s2 = self.state.lock();
+                    let mut s2 = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
                     s2.sealed.push_front(tx);
                     return Err(AhciError::IoError);
                 }
@@ -572,7 +586,7 @@ impl Journal {
 
             // Success: advance head_block cursor and committed_seq.
             {
-                let mut s = self.state.lock();
+                let mut s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
                 s.head_block = ring_pos;
                 s.committed_seq = tx.seq;
                 s.committed_pending.push_back((tx.seq, needed));
