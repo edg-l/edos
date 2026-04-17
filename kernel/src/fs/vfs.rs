@@ -412,11 +412,16 @@ pub fn file_info(op: &VfsOp) -> Result<File, Error> {
 }
 
 pub fn list_files(op: &VfsOp, full_path: &Path) -> Result<Vec<File>, Error> {
-    let _guard = op
-        .inode
-        .as_ref()
-        .map(|i| i.lock.read_ranked(RANK_INODE, "inode.lock"));
-    let mut files = op.fs.list_files(&op.relative)?;
+    // Release inode.lock (rank 30) before calling child_mount_points, which
+    // acquires VFS (rank 10). The inode guard only needs to protect the
+    // driver's list_files call; the mount-registry query is fs-global.
+    let mut files = {
+        let _guard = op
+            .inode
+            .as_ref()
+            .map(|i| i.lock.read_ranked(RANK_INODE, "inode.lock"));
+        op.fs.list_files(&op.relative)?
+    };
 
     // Append synthetic directory entries for child mount points.
     for (name, _mount_path) in child_mount_points(full_path) {
