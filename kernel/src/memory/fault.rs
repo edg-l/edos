@@ -513,6 +513,13 @@ pub fn store_cached_page_on_vma(
     fault_addr: VirtAddr,
     cached_page: Arc<crate::fs::page_cache::CachedPage>,
 ) -> bool {
+    // `cached_page` carries a +1 pin from `get_or_fill_page`. Once this
+    // function consumes it, the pin's purpose is over -- either the Arc
+    // ends up stored in the VMA (Arc keeps the page alive) or it drops
+    // here (last ref, frame freed via `CachedPage::drop`). Unpin up front
+    // so every return path sees pin_count=0 at Arc drop time.
+    cached_page.unpin();
+
     let t = match sched().current_thread() {
         Some(t) => t,
         None => return false,

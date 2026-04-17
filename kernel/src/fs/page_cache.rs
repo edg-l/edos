@@ -90,6 +90,32 @@ impl CachedPage {
     }
 }
 
+/// RAII: release the physical frame when the last `Arc<CachedPage>` drops.
+///
+/// Before this Drop existed, callers had to manually `deallocate_frame` on
+/// every error path and in `invalidate_from` based on `Arc::strong_count == 1`
+/// heuristics. Any missed site -- or a race where two threads both hold
+/// Arcs, one calls `invalidate_from` and sees strong_count > 1, and the
+/// other then drops without knowing it was the last owner -- silently leaks
+/// the frame. With Drop, lifecycle follows the Arc.
+///
+/// `BlockPageCache::CachedBlockPage` uses the same pattern; see its Drop
+/// for the mirror design. See `doc/invariants/drop-contract.md`: this Drop
+/// is non-blocking (atomic bit clear + refcount dec in the allocator) and
+/// is safe to fire from any context, including the reaper kthread.
+impl Drop for CachedPage {
+    fn drop(&mut self) {
+        debug_assert_eq!(
+            self.pin_count.load(Ordering::Acquire),
+            0,
+            "CachedPage dropped with pin_count != 0 (phys {:#x})",
+            self.frame.start_address().as_u64()
+        );
+        // SAFETY: this is the last Arc to this page; frame is ours to return.
+        unsafe { crate::memory::frame_allocator::frame_allocator().deallocate_frame(self.frame) };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PageGuard -- RAII pin guard
 // ---------------------------------------------------------------------------
@@ -179,10 +205,14 @@ impl InodePages {
 
         let mut map = self.pages.lock();
         if let Some(existing) = map.get(&page_index) {
-            // Another thread raced us. Use theirs, free ours.
+            // Another thread raced us. Use theirs; our `page` and `guard`
+            // drop naturally. The guard unpin runs first, then the final
+            // Arc drop triggers `CachedPage::drop` which deallocates our
+            // frame. No manual free needed.
             let g = PageGuard::new(Arc::clone(existing));
             drop(map);
-            unsafe { frame_allocator().deallocate_frame(frame) };
+            drop(guard);
+            drop(page);
             return Ok(g);
         }
         map.insert(page_index, page);
@@ -304,6 +334,12 @@ impl InodePages {
     }
 
     /// Remove pages at page_index >= from_page. For truncate.
+    ///
+    /// Frame deallocation is automatic via `CachedPage::drop`: the `evicted`
+    /// vec holds the Arcs until its scope ends, at which point any Arc that
+    /// has no other holder (FileBacked VMA, PageGuard, etc.) runs its Drop
+    /// and returns the frame to the allocator. Arcs still held elsewhere
+    /// stay alive until their last holder drops.
     pub fn invalidate_from(&self, from_page: u64) {
         let evicted: Vec<Arc<CachedPage>> = {
             let mut map = self.pages.lock();
@@ -317,11 +353,7 @@ impl InodePages {
             pages
         };
         self.dirty_keys.lock().retain(|k| *k < from_page);
-        for page in evicted {
-            if Arc::strong_count(&page) == 1 {
-                unsafe { frame_allocator().deallocate_frame(page.frame()) };
-            }
-        }
+        drop(evicted);
     }
 }
 
