@@ -23,8 +23,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use x86_64::structures::paging::{FrameAllocator, PhysFrame};
 
 use crate::{
+    debug::lock_order::{RANK_DIRTY_KEYS, RANK_PAGES},
     fs::Error,
     memory::{frame_allocator::frame_allocator, get_virt_addr_from_phys_offset},
+    ranked_lock,
     thread::mutex::BlockingMutex,
 };
 
@@ -181,7 +183,7 @@ impl InodePages {
     ) -> Result<PageGuard, Error> {
         // Fast path: already cached.
         {
-            let map = self.pages.lock();
+            let map = ranked_lock!(RANK_PAGES, "InodePages.pages", self.pages);
             if let Some(page) = map.get(&page_index) {
                 return Ok(PageGuard::new(Arc::clone(page)));
             }
@@ -203,7 +205,7 @@ impl InodePages {
         let page = Arc::new(CachedPage::new(frame));
         let guard = PageGuard::new(Arc::clone(&page));
 
-        let mut map = self.pages.lock();
+        let mut map = ranked_lock!(RANK_PAGES, "InodePages.pages", self.pages);
         if let Some(existing) = map.get(&page_index) {
             // Another thread raced us. Use theirs; our `page` and `guard`
             // drop naturally. The guard unpin runs first, then the final
@@ -222,11 +224,11 @@ impl InodePages {
     /// Mark a page as dirty. Lock acquisition order is always
     /// `pages` → `dirty_keys`, consistent with `flush_dirty` below.
     pub fn mark_dirty(&self, page_index: u64) {
-        let map = self.pages.lock();
+        let map = ranked_lock!(RANK_PAGES, "InodePages.pages", self.pages);
         if let Some(page) = map.get(&page_index) {
             page.mark_dirty();
         }
-        let mut dk = self.dirty_keys.lock();
+        let mut dk = ranked_lock!(RANK_DIRTY_KEYS, "InodePages.dirty_keys", self.dirty_keys);
         if !dk.contains(&page_index) {
             dk.push(page_index);
         }
@@ -247,8 +249,8 @@ impl InodePages {
         mut flush_fn: impl FnMut(u64, &[u8]) -> Result<(), Error>,
     ) -> Result<(), Error> {
         let dirty: Vec<(u64, Arc<CachedPage>)> = {
-            let map = self.pages.lock();
-            let dk = self.dirty_keys.lock();
+            let map = ranked_lock!(RANK_PAGES, "InodePages.pages", self.pages);
+            let dk = ranked_lock!(RANK_DIRTY_KEYS, "InodePages.dirty_keys", self.dirty_keys);
             dk.iter()
                 .filter_map(|&idx| map.get(&idx).map(|p| (idx, Arc::clone(p))))
                 .collect()
@@ -262,7 +264,7 @@ impl InodePages {
             // Clear the flag and remove the key atomically under the
             // dirty_keys lock, so a concurrent mark_dirty cannot race
             // in between and lose the dirty state.
-            let mut dk = self.dirty_keys.lock();
+            let mut dk = ranked_lock!(RANK_DIRTY_KEYS, "InodePages.dirty_keys", self.dirty_keys);
             page.clear_dirty();
             dk.retain(|k| k != idx);
         }
@@ -288,8 +290,8 @@ impl InodePages {
     ) -> Result<(), Error> {
         // Snapshot under dual-lock in pages → dirty_keys order (same as flush_dirty).
         let dirty: Vec<(u64, Arc<CachedPage>)> = {
-            let map = self.pages.lock();
-            let dk = self.dirty_keys.lock();
+            let map = ranked_lock!(RANK_PAGES, "InodePages.pages", self.pages);
+            let dk = ranked_lock!(RANK_DIRTY_KEYS, "InodePages.dirty_keys", self.dirty_keys);
             dk.iter()
                 .filter_map(|&idx| map.get(&idx).map(|p| (idx, Arc::clone(p))))
                 .collect()
@@ -321,7 +323,8 @@ impl InodePages {
                 for (_, page) in &dirty {
                     page.clear_dirty();
                 }
-                let mut dk = self.dirty_keys.lock();
+                let mut dk =
+                    ranked_lock!(RANK_DIRTY_KEYS, "InodePages.dirty_keys", self.dirty_keys);
                 dk.retain(|k| !indices.contains(k));
                 Ok(())
             }
@@ -342,7 +345,7 @@ impl InodePages {
     /// stay alive until their last holder drops.
     pub fn invalidate_from(&self, from_page: u64) {
         let evicted: Vec<Arc<CachedPage>> = {
-            let mut map = self.pages.lock();
+            let mut map = ranked_lock!(RANK_PAGES, "InodePages.pages", self.pages);
             let keys: Vec<u64> = map.keys().filter(|&&k| k >= from_page).copied().collect();
             let mut pages = Vec::new();
             for k in keys {
@@ -352,7 +355,8 @@ impl InodePages {
             }
             pages
         };
-        self.dirty_keys.lock().retain(|k| *k < from_page);
+        ranked_lock!(RANK_DIRTY_KEYS, "InodePages.dirty_keys", self.dirty_keys)
+            .retain(|k| *k < from_page);
         drop(evicted);
     }
 }
