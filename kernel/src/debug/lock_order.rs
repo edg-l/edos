@@ -50,6 +50,7 @@ pub const RANK_USER_MM: u16 = 80;
 pub const RANK_KERNEL_MAPPER: u16 = 85;
 pub const RANK_FRAME_ALLOC: u16 = 90;
 pub const RANK_DIRTY_INODES: u16 = 100;
+pub const RANK_EFS_ALLOC: u16 = 105;
 pub const RANK_BPC_SHARD: u16 = 110;
 pub const RANK_BPC_JOURNALS: u16 = 120;
 pub const RANK_JOURNAL_TRACKER: u16 = 130;

@@ -20,7 +20,11 @@ use super::journal::{Journal, tx::TxHandle};
 use super::page_cache::{CachedPage, PageCacheOps};
 use super::path::Path;
 use super::{Error, File, FileAttrs, FileKind, FileSystem, FileTime};
-use crate::{debug::lock_order::RANK_EFS_MUTABLE, log, ranked_lock, thread::mutex::BlockingMutex};
+use crate::{
+    debug::lock_order::{RANK_EFS_ALLOC, RANK_EFS_MUTABLE},
+    log, ranked_lock,
+    thread::mutex::BlockingMutex,
+};
 
 // ---- Constants ----------------------------------------------------------------
 
@@ -76,6 +80,11 @@ pub struct EfsDriver {
     inodes_per_group: u32,
     /// Live journal for this filesystem.
     journal: Arc<Journal>,
+    /// Serializes bitmap-based allocation (`alloc_inode` / `alloc_block`) so
+    /// that `mutable` can be released across BPC I/O without two concurrent
+    /// allocators picking the same bit. Rank 105 (above `DIRTY_INODES` 100,
+    /// below `BPC.shard` 110).
+    alloc_mutex: BlockingMutex<()>,
     /// Mutable FS metadata (superblock + block group descriptors).
     mutable: BlockingMutex<EfsMutableState>,
 }
@@ -261,6 +270,7 @@ impl EfsDriver {
             block_size_log2,
             inodes_per_group,
             journal,
+            alloc_mutex: BlockingMutex::new(()),
             mutable: BlockingMutex::new(EfsMutableState {
                 superblock,
                 bgd_table,
@@ -1055,26 +1065,42 @@ impl EfsDriver {
     /// Allocate a free block and return its absolute block number.
     fn alloc_block(&self, tx: &mut TxHandle<'_>) -> Result<u64, Error> {
         let block_size = self.block_size() as usize;
-        let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
-        let blocks_per_group = m.superblock.blocks_per_group as usize;
 
-        for g in 0..m.bgd_table.len() {
-            if m.bgd_table[g].free_blocks_count == 0 {
+        // Serialize allocation across CPUs so that `mutable` can be released
+        // across BPC I/O without two allocators picking the same bit.
+        let _alloc = ranked_lock!(RANK_EFS_ALLOC, "EfsDriver.alloc", self.alloc_mutex);
+
+        let (blocks_per_group, group_count) = {
+            let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
+            (m.superblock.blocks_per_group as usize, m.bgd_table.len())
+        };
+
+        for g in 0..group_count {
+            // Snapshot per-group state without holding `mutable` across BPC I/O.
+            let (free_count, bitmap_block) = {
+                let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
+                (
+                    m.bgd_table[g].free_blocks_count,
+                    m.bgd_table[g].block_bitmap_block,
+                )
+            };
+            if free_count == 0 {
                 continue;
             }
-            let bitmap_block = m.bgd_table[g].block_bitmap_block;
             let mut bitmap = self.read_block(bitmap_block)?;
 
             let bits_to_check = blocks_per_group.min(block_size * 8);
             if let Some(bit) = find_free_bit(&bitmap, bits_to_check) {
                 set_bit(&mut bitmap, bit);
-                m.bgd_table[g].free_blocks_count -= 1;
-                m.superblock.free_blocks -= 1;
 
-                let abs_block = g as u64 * blocks_per_group as u64 + bit as u64;
+                let abs_block = {
+                    let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
+                    m.bgd_table[g].free_blocks_count -= 1;
+                    m.superblock.free_blocks -= 1;
+                    g as u64 * blocks_per_group as u64 + bit as u64
+                };
 
                 // Write bitmap (enrolled by write_block).
-                drop(m);
                 self.write_block(bitmap_block, &bitmap, tx)?;
 
                 // Enroll BGD page (block 2 contains the BGD table; compute the
@@ -1155,24 +1181,40 @@ impl EfsDriver {
     /// Allocate a free inode and return its inode number (1-based).
     fn alloc_inode(&self, tx: &mut TxHandle<'_>) -> Result<u64, Error> {
         let block_size = self.block_size() as usize;
-        let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
-        let inodes_per_group = m.superblock.inodes_per_group as usize;
 
-        for g in 0..m.bgd_table.len() {
-            if m.bgd_table[g].free_inodes_count == 0 {
+        // Serialize allocation across CPUs so that `mutable` can be released
+        // across BPC I/O without two allocators picking the same bit.
+        let _alloc = ranked_lock!(RANK_EFS_ALLOC, "EfsDriver.alloc", self.alloc_mutex);
+
+        let (inodes_per_group, group_count) = {
+            let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
+            (m.superblock.inodes_per_group as usize, m.bgd_table.len())
+        };
+
+        for g in 0..group_count {
+            // Snapshot per-group state without holding `mutable` across BPC I/O.
+            let (free_count, bitmap_block) = {
+                let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
+                (
+                    m.bgd_table[g].free_inodes_count,
+                    m.bgd_table[g].inode_bitmap_block,
+                )
+            };
+            if free_count == 0 {
                 continue;
             }
-            let bitmap_block = m.bgd_table[g].inode_bitmap_block;
             let mut bitmap = self.read_block(bitmap_block)?;
 
             let bits_to_check = inodes_per_group.min(block_size * 8);
             if let Some(bit) = find_free_bit(&bitmap, bits_to_check) {
                 set_bit(&mut bitmap, bit);
-                m.bgd_table[g].free_inodes_count -= 1;
-                m.superblock.free_inodes -= 1;
 
-                let ino = g as u64 * inodes_per_group as u64 + bit as u64 + 1;
-                drop(m);
+                let ino = {
+                    let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
+                    m.bgd_table[g].free_inodes_count -= 1;
+                    m.superblock.free_inodes -= 1;
+                    g as u64 * inodes_per_group as u64 + bit as u64 + 1
+                };
 
                 self.write_block(bitmap_block, &bitmap, tx)?;
 
