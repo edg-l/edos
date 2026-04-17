@@ -33,9 +33,13 @@ use spin::Once;
 use x86_64::structures::paging::{FrameAllocator, PhysFrame};
 
 use crate::{
+    debug::lock_order::{
+        RANK_BPC_JOURNALS, RANK_BPC_SHARD, RANK_JOURNAL_TRACKER, RANK_PAGE_WRITE_LOCK,
+    },
     drivers::ahci::{AhciError, direct},
     log,
     memory::{frame_allocator::frame_allocator, get_virt_addr_from_phys_offset},
+    ranked_lock,
     thread::{mutex::BlockingMutex, waitqueue::WaitQueue},
 };
 
@@ -405,17 +409,22 @@ impl BlockPageCache {
     /// Associate a journal with a block device. Called at EFS mount time
     /// (Phase 5 wires this in; the method compiles but is not called in Phase 3).
     pub fn register_device(&self, device_id: u64, journal: Arc<crate::fs::journal::Journal>) {
-        self.journals.lock().insert(device_id, journal);
+        ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals).insert(device_id, journal);
     }
 
     /// Look up the journal for a device, if one has been registered.
     pub fn journal_for_device(&self, device_id: u64) -> Option<Arc<crate::fs::journal::Journal>> {
-        self.journals.lock().get(&device_id).cloned()
+        ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals)
+            .get(&device_id)
+            .cloned()
     }
 
     /// Return all registered journals (for the committer kthread).
     pub fn all_journals(&self) -> Vec<Arc<crate::fs::journal::Journal>> {
-        self.journals.lock().values().cloned().collect()
+        ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals)
+            .values()
+            .cloned()
+            .collect()
     }
 
     // ---- Internal helpers ------------------------------------------------
@@ -483,7 +492,7 @@ impl BlockPageCache {
 
         // Fast path: already cached.
         {
-            let mut shard = self.shards[si].lock();
+            let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
             if let Some(page) = shard.lru.get(&key) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(BlockPageGuard::new(Arc::clone(page)));
@@ -507,7 +516,7 @@ impl BlockPageCache {
 
         let new_page = Arc::new(CachedBlockPage::new(key, frame));
         let resolved = {
-            let mut shard = self.shards[si].lock();
+            let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
             self.insert_or_resolve_race(&mut shard, key, new_page)
         };
         Ok(BlockPageGuard::new(resolved))
@@ -536,7 +545,7 @@ impl BlockPageCache {
         for i in 0..count {
             let key = (device_id, start_page + i as u64);
             let si = shard_index(key);
-            let mut shard = self.shards[si].lock();
+            let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
             if let Some(page) = shard.lru.get(&key) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 guards[i] = Some(BlockPageGuard::new(Arc::clone(page)));
@@ -618,7 +627,7 @@ impl BlockPageCache {
             let si = shard_index(key);
             let new_page = Arc::new(CachedBlockPage::new(key, frames[fi].unwrap()));
             let resolved = {
-                let mut shard = self.shards[si].lock();
+                let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
                 self.insert_or_resolve_race(&mut shard, key, new_page)
             };
             guards[mi] = Some(BlockPageGuard::new(resolved));
@@ -645,7 +654,7 @@ impl BlockPageCache {
 
         // Get or create the cached page.
         let guard = {
-            let mut shard = self.shards[si].lock();
+            let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
             if let Some(page) = shard.lru.get(&key) {
                 BlockPageGuard::new(Arc::clone(page))
             } else {
@@ -655,7 +664,7 @@ impl BlockPageCache {
                     .allocate_frame()
                     .ok_or(AhciError::IoError)?;
                 let new_page = Arc::new(CachedBlockPage::new(key, frame));
-                let mut shard = self.shards[si].lock();
+                let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
                 let resolved = self.insert_or_resolve_race(&mut shard, key, new_page);
                 BlockPageGuard::new(resolved)
             }
@@ -663,7 +672,11 @@ impl BlockPageCache {
 
         // Copy data into the frame and mark dirty (write-back).
         {
-            let _wl = guard.write_lock.lock();
+            let _wl = ranked_lock!(
+                RANK_PAGE_WRITE_LOCK,
+                "BPC.page.write_lock",
+                guard.write_lock
+            );
             // SAFETY: we hold write_lock.
             let dest = unsafe { guard.as_mut_slice() };
             dest.copy_from_slice(data);
@@ -672,7 +685,7 @@ impl BlockPageCache {
 
         // Insert into dirty set; kick writeback if shard pressure threshold reached.
         {
-            let mut shard = self.shards[si].lock();
+            let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
             let newly_inserted = shard.dirty.insert(key);
             if newly_inserted {
                 self.stats.dirty_pages.fetch_add(1, Ordering::Relaxed);
@@ -721,7 +734,11 @@ impl BlockPageCache {
 
         // Serialize writers on this page.
         {
-            let _wl = guard.write_lock.lock();
+            let _wl = ranked_lock!(
+                RANK_PAGE_WRITE_LOCK,
+                "BPC.page.write_lock",
+                guard.write_lock
+            );
             // SAFETY: we hold write_lock.
             let dest = unsafe { guard.as_mut_slice() };
             dest[offset_in_page..offset_in_page + len].copy_from_slice(data);
@@ -730,7 +747,7 @@ impl BlockPageCache {
 
         // Insert into dirty set; kick writeback if shard pressure threshold reached.
         {
-            let mut shard = self.shards[si].lock();
+            let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
             let newly_inserted = shard.dirty.insert(key);
             if newly_inserted {
                 self.stats.dirty_pages.fetch_add(1, Ordering::Relaxed);
@@ -764,19 +781,19 @@ impl BlockPageCache {
         for (si, shard_lock) in self.shards.iter().enumerate() {
             // Snapshot the dirty set without holding the lock during I/O.
             let keys_snapshot: Vec<Key> = {
-                let shard = shard_lock.lock();
+                let shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", shard_lock);
                 shard.dirty.iter().copied().collect()
             };
 
             for key in keys_snapshot {
                 // Re-fetch the page under the lock (it may have been evicted).
                 let page = {
-                    let mut shard = shard_lock.lock();
+                    let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", shard_lock);
                     shard.lru.get(&key).cloned()
                 };
                 let Some(page) = page else {
                     // Evicted between snapshot and now; remove from dirty set.
-                    let mut shard = shard_lock.lock();
+                    let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", shard_lock);
                     if shard.dirty.remove(&key) {
                         self.stats.dirty_pages.fetch_sub(1, Ordering::Relaxed);
                     }
@@ -784,10 +801,15 @@ impl BlockPageCache {
                 };
 
                 // Journal gating: skip pages that have not yet been committed.
+                // Lock order: BPC.journals (120) -> Journal.checkpoint_tracker (130).
                 let journal_seq_for_page: Option<u64> = {
-                    let journals = self.journals.lock();
+                    let journals = ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals);
                     if let Some(j) = journals.get(&key.0) {
-                        let tracker = j.checkpoint_tracker.lock();
+                        let tracker = ranked_lock!(
+                            RANK_JOURNAL_TRACKER,
+                            "Journal.checkpoint_tracker",
+                            j.checkpoint_tracker
+                        );
                         tracker.get(&key).copied()
                     } else {
                         None // No journal for this device — always flushable.
@@ -796,7 +818,8 @@ impl BlockPageCache {
 
                 if let Some(enrolled_seq) = journal_seq_for_page {
                     let committed = {
-                        let journals = self.journals.lock();
+                        let journals =
+                            ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals);
                         journals
                             .get(&key.0)
                             .map(|j| j.committed_seq())
@@ -815,7 +838,8 @@ impl BlockPageCache {
                 }
 
                 // Acquire write_lock to serialize against concurrent writers.
-                let _wg = page.write_lock.lock();
+                let _wg =
+                    ranked_lock!(RANK_PAGE_WRITE_LOCK, "BPC.page.write_lock", page.write_lock);
                 if !page.is_dirty() {
                     continue;
                 }
@@ -826,8 +850,10 @@ impl BlockPageCache {
                 drop(_wg);
 
                 // Notify the journal that this block has been checkpointed.
+                // Lock order: BPC.journals (120) -> Journal.checkpoint_tracker (130) inside
+                // note_checkpointed.
                 if let Some(enrolled_seq) = journal_seq_for_page {
-                    let journals = self.journals.lock();
+                    let journals = ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals);
                     if let Some(j) = journals.get(&key.0) {
                         j.note_checkpointed(key.0, key.1, enrolled_seq);
                     }
@@ -836,7 +862,7 @@ impl BlockPageCache {
                 // Only remove from dirty set if the page was not re-dirtied
                 // by a concurrent writer between clear_dirty and this check.
                 {
-                    let mut shard = shard_lock.lock();
+                    let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", shard_lock);
                     if !page.is_dirty() {
                         if shard.dirty.remove(&key) {
                             self.stats.dirty_pages.fetch_sub(1, Ordering::Relaxed);
@@ -896,7 +922,7 @@ impl BlockPageCache {
         }
 
         for shard in &self.shards {
-            let mut shard = shard.lock();
+            let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", shard);
             let keys: Vec<Key> = shard
                 .lru
                 .iter()
