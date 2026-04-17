@@ -5,6 +5,8 @@ use core::{
 use spin::{Mutex, MutexGuard};
 use x86_64::instructions::interrupts;
 
+use crate::debug::lock_order::RankedGuard;
+
 pub struct IrqSpinlock<T> {
     inner: Mutex<T>,
 }
@@ -34,6 +36,16 @@ impl<T> IrqSpinlock<T> {
             guard: Some(guard),
             prev_if,
         }
+    }
+
+    /// Acquire the lock and push `rank` onto the per-thread lock-rank stack.
+    /// Returns a `RankedGuard` that pops the rank on drop AFTER releasing the
+    /// inner `IrqLockGuard`. Zero-cost in release builds.
+    #[allow(dead_code)]
+    pub fn lock_ranked(&self, rank: u16, site: &'static str) -> RankedGuard<IrqLockGuard<'_, T>> {
+        crate::debug::lock_order::enter(rank, site);
+        let inner = self.lock();
+        RankedGuard::new(inner, rank, site)
     }
 
     /// Try to lock. If successful, IRQs are disabled until drop.

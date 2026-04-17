@@ -5,7 +5,7 @@ use core::{
     sync::atomic::{AtomicI32, Ordering},
 };
 
-use crate::thread::waitqueue::WaitQueue;
+use crate::{debug::lock_order::RankedGuard, thread::waitqueue::WaitQueue};
 
 /// A reader-writer lock that blocks waiting threads via the scheduler.
 ///
@@ -68,6 +68,36 @@ impl<T> RwLock<T> {
             self.waiters
                 .wait_until(|| self.state.load(Ordering::Acquire) == 0);
         }
+    }
+
+    /// Acquire a shared read lock, pushing `rank` onto the per-thread
+    /// lock-rank stack. The rank is popped when the returned `RankedGuard`
+    /// is dropped, AFTER the inner read guard is released. Zero-cost in
+    /// release builds.
+    #[allow(dead_code)]
+    pub fn read_ranked(
+        &self,
+        rank: u16,
+        site: &'static str,
+    ) -> RankedGuard<RwLockReadGuard<'_, T>> {
+        crate::debug::lock_order::enter(rank, site);
+        let inner = self.read();
+        RankedGuard::new(inner, rank, site)
+    }
+
+    /// Acquire an exclusive write lock, pushing `rank` onto the per-thread
+    /// lock-rank stack. The rank is popped when the returned `RankedGuard`
+    /// is dropped, AFTER the inner write guard is released. Zero-cost in
+    /// release builds.
+    #[allow(dead_code)]
+    pub fn write_ranked(
+        &self,
+        rank: u16,
+        site: &'static str,
+    ) -> RankedGuard<RwLockWriteGuard<'_, T>> {
+        crate::debug::lock_order::enter(rank, site);
+        let inner = self.write();
+        RankedGuard::new(inner, rank, site)
     }
 
     /// Get mutable access when the lock itself is uniquely borrowed.
