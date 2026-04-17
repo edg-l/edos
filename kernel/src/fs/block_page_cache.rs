@@ -459,14 +459,25 @@ impl BlockPageCache {
                     // All or the LRU candidate is pinned/dirty -- kick writeback
                     // before returning detached so the dirty pages drain soon.
                     self.kick_writeback();
-                    self.stats
+                    let n = self
+                        .stats
                         .detached_fallbacks
-                        .fetch_add(1, Ordering::Relaxed);
-                    log!(
-                        "block_page_cache: shard full of pinned pages, detached fallback for key ({}, {})",
-                        key.0,
-                        key.1
-                    );
+                        .fetch_add(1, Ordering::Relaxed)
+                        + 1;
+                    // Log the first occurrence + every 1000th after that. A
+                    // busy fsync over a 256-entry shard can generate hundreds
+                    // of fallbacks per second; per-call log saturates the
+                    // UART (115200 baud) and throttles the whole kernel via
+                    // the serial lock. The counter in /proc/bpc_stats is the
+                    // authoritative source.
+                    if n == 1 || n.is_multiple_of(1000) {
+                        log!(
+                            "block_page_cache: detached fallback #{} for key ({}, {})",
+                            n,
+                            key.0,
+                            key.1
+                        );
+                    }
                     return new_page;
                 }
             };
