@@ -1,4 +1,7 @@
-use core::ptr;
+use core::{
+    ptr,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use alloc::{
     sync::{Arc, Weak},
@@ -61,6 +64,15 @@ pub enum DeviceType {
 pub static AHCI_DRIVER_THREAD_ID: Once<Weak<Thread>> = Once::new();
 
 pub static DETECTED_DEVICES: Once<Vec<DetectedDevice>> = Once::new();
+
+/// Dispatcher ran its loop body (not just a spurious park-exit).
+/// Incremented once per pass of the inner for-controller loop.
+pub static AHCI_DISPATCHER_PASSES: AtomicU64 = AtomicU64::new(0);
+
+/// Total `wake_thread` calls issued from `wake_all_slot_waiters` across all
+/// ports. Lets the NCQ-timeout diagnostic decide whether the wake path was
+/// active while we were parked.
+pub static AHCI_SLOT_WAKES: AtomicU64 = AtomicU64::new(0);
 
 pub fn init() {
     AHCI_DRIVER_THREAD_ID.call_once(|| {
@@ -191,6 +203,8 @@ pub extern "C" fn ahci_driver_main() -> ! {
                 hba_is != 0
             })
         });
+
+        AHCI_DISPATCHER_PASSES.fetch_add(1, Ordering::Relaxed);
 
         for controller in &controllers {
             let hba_is = unsafe { ptr::read_volatile(&(*controller.hba).is) };

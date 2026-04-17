@@ -1145,8 +1145,15 @@ impl AhciPort {
                 let tfd_now = unsafe { ptr::read_volatile(&raw const (*port_regs).tfd) };
                 let serr_now = unsafe { ptr::read_volatile(&raw const (*port_regs).serr) };
                 let is_now = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
+                // IRQ-chain diagnostics: if irqs/passes/wakes kept growing
+                // while we were parked, the wake path was active and the
+                // drive genuinely didn't complete. If they stalled, the
+                // IRQ chain was broken somewhere.
+                let irqs = crate::interrupts::io::AHCI_IRQS_FIRED.load(Ordering::Relaxed);
+                let passes = crate::drivers::ahci::AHCI_DISPATCHER_PASSES.load(Ordering::Relaxed);
+                let wakes = crate::drivers::ahci::AHCI_SLOT_WAKES.load(Ordering::Relaxed);
                 log!(
-                    "AHCI port {}: NCQ timeout slot {} SACT={:#x} CI={:#x} TFD={:#x} SERR={:#x} IS={:#x} free_slots={:#x}",
+                    "AHCI port {}: NCQ timeout slot {} SACT={:#x} CI={:#x} TFD={:#x} SERR={:#x} IS={:#x} free_slots={:#x} irqs={} passes={} wakes={}",
                     self.port_idx,
                     slot,
                     sact_now,
@@ -1154,7 +1161,10 @@ impl AhciPort {
                     tfd_now,
                     serr_now,
                     is_now,
-                    self.free_slots.load(Ordering::Acquire)
+                    self.free_slots.load(Ordering::Acquire),
+                    irqs,
+                    passes,
+                    wakes
                 );
                 // Restart the port to purge hardware state before the slot is
                 // reused (mirrors the TFES error path at line ~1124). Without
@@ -1946,6 +1956,7 @@ impl AhciPort {
                 continue;
             }
             sched().wake_thread(&op.waiter, WakePriority::Interrupt);
+            crate::drivers::ahci::AHCI_SLOT_WAKES.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
