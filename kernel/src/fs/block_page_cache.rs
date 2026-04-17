@@ -430,18 +430,25 @@ impl BlockPageCache {
     // ---- Internal helpers ------------------------------------------------
 
     /// Try to insert `new_page` into the shard. If an entry for the key
-    /// already exists (race), return that existing page and free `frame`.
-    /// Otherwise evict an LRU entry if the shard is full and insert.
+    /// already exists (race), return that existing page and surface `new_page`
+    /// in `to_drop` (its Drop frees the frame — the caller drops `to_drop`
+    /// AFTER releasing the shard lock so `frame_allocator()` is acquired with
+    /// no BPC rank on the stack). Otherwise evict an LRU entry (if any, same
+    /// deferred-drop treatment) and insert.
     fn insert_or_resolve_race(
         &self,
         shard: &mut ShardInner,
         key: Key,
         new_page: Arc<CachedBlockPage>,
+        to_drop: &mut Vec<Arc<CachedBlockPage>>,
     ) -> Arc<CachedBlockPage> {
         if let Some(existing) = shard.lru.get(&key) {
             // Another thread filled this page while we were doing I/O.
-            // Our `new_page` Arc drops at return; its Drop frees the frame.
-            return Arc::clone(existing);
+            // `new_page` has to be dropped outside the shard lock (its Drop
+            // calls frame_allocator, rank 90 < BPC.shard 110).
+            let resolved = Arc::clone(existing);
+            to_drop.push(new_page);
+            return resolved;
         }
 
         // Evict LRU entries that are neither pinned nor dirty until we make room.
@@ -463,10 +470,12 @@ impl BlockPageCache {
                     return new_page;
                 }
             };
-            // pop removes from LRU; the evicted Arc drops (if refcount hits 0
-            // here, Drop frees the frame; otherwise a holder will free it later).
-            if shard.lru.pop(&evict_key).is_some() {
+            // pop the evicted Arc into `to_drop`; it drops outside the shard
+            // scope so `CachedBlockPage::drop`'s deallocate_frame (rank 90)
+            // doesn't inverse-acquire under BPC.shard (rank 110).
+            if let Some(evicted) = shard.lru.pop(&evict_key) {
                 self.stats.evictions.fetch_add(1, Ordering::Relaxed);
+                to_drop.push(evicted);
             }
         }
 
@@ -515,10 +524,12 @@ impl BlockPageCache {
         }
 
         let new_page = Arc::new(CachedBlockPage::new(key, frame));
+        let mut to_drop: Vec<Arc<CachedBlockPage>> = Vec::with_capacity(2);
         let resolved = {
             let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
-            self.insert_or_resolve_race(&mut shard, key, new_page)
+            self.insert_or_resolve_race(&mut shard, key, new_page, &mut to_drop)
         };
+        drop(to_drop);
         Ok(BlockPageGuard::new(resolved))
     }
 
@@ -622,16 +633,18 @@ impl BlockPageCache {
         }
 
         // Insert pages into cache, resolving any races.
+        let mut to_drop: Vec<Arc<CachedBlockPage>> = Vec::new();
         for (fi, &mi) in miss_indices.iter().enumerate() {
             let key = (device_id, start_page + mi as u64);
             let si = shard_index(key);
             let new_page = Arc::new(CachedBlockPage::new(key, frames[fi].unwrap()));
             let resolved = {
                 let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
-                self.insert_or_resolve_race(&mut shard, key, new_page)
+                self.insert_or_resolve_race(&mut shard, key, new_page, &mut to_drop)
             };
             guards[mi] = Some(BlockPageGuard::new(resolved));
         }
+        drop(to_drop);
 
         Ok(guards.into_iter().map(|g| g.unwrap()).collect())
     }
@@ -664,8 +677,12 @@ impl BlockPageCache {
                     .allocate_frame()
                     .ok_or(AhciError::IoError)?;
                 let new_page = Arc::new(CachedBlockPage::new(key, frame));
-                let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
-                let resolved = self.insert_or_resolve_race(&mut shard, key, new_page);
+                let mut to_drop: Vec<Arc<CachedBlockPage>> = Vec::with_capacity(2);
+                let resolved = {
+                    let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
+                    self.insert_or_resolve_race(&mut shard, key, new_page, &mut to_drop)
+                };
+                drop(to_drop);
                 BlockPageGuard::new(resolved)
             }
         };
@@ -922,6 +939,10 @@ impl BlockPageCache {
         }
 
         for shard in &self.shards {
+            // Collect evicted Arcs and drop them AFTER releasing the shard
+            // lock; CachedBlockPage::drop acquires frame_allocator (rank 90)
+            // which is below BPC.shard (rank 110).
+            let mut to_drop: Vec<Arc<CachedBlockPage>> = Vec::new();
             let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", shard);
             let keys: Vec<Key> = shard
                 .lru
@@ -930,9 +951,9 @@ impl BlockPageCache {
                 .map(|(&k, _)| k)
                 .collect();
             for key in &keys {
-                // Drop Arc; Drop on CachedBlockPage frees the frame when the
-                // last reference goes away.
-                shard.lru.pop(key);
+                if let Some(evicted) = shard.lru.pop(key) {
+                    to_drop.push(evicted);
+                }
             }
             // Remove device entries from the dirty set.
             let dirty_keys: Vec<Key> = shard
