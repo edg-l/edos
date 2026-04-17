@@ -10,7 +10,10 @@ use crate::thread::{
 };
 
 /// Maximum number of threads that can wait on a single WaitQueue.
-const WAITQUEUE_CAP: usize = 32;
+/// Raised from 32 to 64 (Foundation #5 Task 0.4b): fault-storm / many-core
+/// concurrent-reader scenarios may bring up to 64 threads to the same uncached
+/// page simultaneously; 32 was too tight. Cost: ~512 B extra per handle.
+const WAITQUEUE_CAP: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitOutcome {
