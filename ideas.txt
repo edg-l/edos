@@ -438,11 +438,18 @@ reaper correctness in general). Roadmap in dependency order:
    `pin_count == 0` at drop caught a pre-existing pin leak in
    `store_cached_page_on_vma` (fixed: unpin at entry).
 
-4. **Strict lock-order discipline for fs/page-cache paths.** Async
-   plans need e.g. `pages → in_flight → waitq` in one order
-   everywhere. Current codebase has ordering implicitly; needs to
-   be documented and mechanically checked. A `lock_order!` macro or
-   thread-local assertion would catch future inversions at dev time.
+4. **Strict lock-order discipline for fs/page-cache paths.**
+   **DONE 2026-04-17.** Canonical rank table in
+   `doc/invariants/lock-order.md` (ranks 10-200). Per-thread rank
+   stack (`Thread.lock_ranks`, `heapless::Vec`, debug only) enforced
+   by `ranked_lock!` / `ranked_read!` / `ranked_write!` macros and
+   `RankedGuard<G>` (ManuallyDrop-based RAII). All 20 ranked lock
+   sites across VFS, page-cache, journal, EFS, AHCI, frame allocator,
+   and memory manager instrumented. Pre-existing journal
+   `tracker->state` AB/BA inversion fixed. `/proc/lock_order_stats`
+   exposes inversion count and max stack depth. `lockordertest`
+   program verifies inversions==0 after a representative workload.
+   See `.claude/plans/foundation-4-lock-order.md`.
 
 5. **Per-inode async I/O registry (last layer, uses #1-#4).**
    `InodePages` gets an `in_flight: BTreeMap<page_idx, Arc<PageFillHandle>>`
