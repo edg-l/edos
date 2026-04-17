@@ -1,9 +1,39 @@
 //! Per-inode page cache.
 //!
-//! LOCK ORDERING: vfs inode lock < page_cache pages lock < mm-mapper lock.
+//! LOCK ORDERING: vfs inode lock < page_cache pages lock < in_flight lock <
+//! dirty_keys lock < mm-mapper lock.
 //! Truncate-invalidate acquires in this order; faults drop mm-mapper lock
 //! before taking the page_cache lock (see fault.rs).
 //! See doc/invariants/lock-order.md for the full rank table and enforcement.
+//!
+//! # in_flight registry (Foundation #5)
+//!
+//! `InodePages::in_flight` is an `IrqSpinlock<BTreeMap<u64, Arc<PageFillHandle>>>`
+//! at rank 42, sitting between `pages` (40) and `dirty_keys` (50).
+//!
+//! **Why `IrqSpinlock` and not `BlockingMutex`**: the reaper kthread calls
+//! `CancellableOp::cancel` on `PageFillHandle` which must acquire `in_flight`.
+//! The reaper must not park (drop-contract in `doc/invariants/drop-contract.md`),
+//! so `BlockingMutex::lock` (which may park) is forbidden. `IrqSpinlock` disables
+//! local interrupts for the brief get/remove window (O(log N), N = concurrent
+//! fills per inode, typically 1-4). Waiters that need to park do so on the
+//! handle's `WaitQueue` AFTER releasing `in_flight`; neither the publisher nor
+//! the reader-join path holds `in_flight` across a park.
+//!
+//! **Publish-terminal-state-before-remove invariant**: on BOTH success and
+//! failure branches, `finish_success` / `finish_failed` (store terminal state +
+//! wake_all) MUST be called BEFORE removing the handle from `in_flight`. If we
+//! removed first, a waiter waking between the remove and the state store would
+//! see state == Pending + no handle in `in_flight` + no page in `pages`, and
+//! racily become a fresh publisher — then receive the stale `wake_all`.
+//!
+//! # Lock-order edges involving in_flight (rank 42)
+//!
+//! - `pages(40) → in_flight(42)`: publish-and-remove in `get_or_fill_async_sync`.
+//!   Ascending. Valid.
+//! - `in_flight(42)` single-step: slow-path check, install, cancel.
+//! - `fill_fn` runs OUTSIDE all InodePages locks; AHCI (170-200) and BPC (110)
+//!   inside `fill_fn` are therefore unconstrained from rank 42's perspective.
 //!
 //! Write policy divergence:
 //!   - `write(2)` paths (`page_cache_write` in vfs.rs) are write-through:
@@ -25,10 +55,10 @@ use x86_64::structures::paging::{FrameAllocator, PhysFrame};
 
 use crate::{
     debug::lock_order::{RANK_DIRTY_KEYS, RANK_PAGES},
-    fs::Error,
+    fs::{Error, page_fill::PageFillHandle},
     memory::{frame_allocator::frame_allocator, get_virt_addr_from_phys_offset},
     ranked_lock,
-    thread::mutex::BlockingMutex,
+    thread::{irqlock::IrqSpinlock, mutex::BlockingMutex},
 };
 
 const PAGE_SIZE: usize = 4096;
@@ -44,7 +74,7 @@ pub struct CachedPage {
 }
 
 impl CachedPage {
-    fn new(frame: PhysFrame) -> Self {
+    pub(crate) fn new(frame: PhysFrame) -> Self {
         Self {
             frame,
             dirty: AtomicBool::new(false),
@@ -128,7 +158,7 @@ pub struct PageGuard {
 }
 
 impl PageGuard {
-    fn new(page: Arc<CachedPage>) -> Self {
+    pub(crate) fn new(page: Arc<CachedPage>) -> Self {
         page.pin();
         Self { page }
     }
@@ -162,8 +192,16 @@ impl Drop for PageGuard {
 
 /// Per-inode page cache. Each file gets its own map + lock, so different files
 /// have zero contention (matching Linux's per-address_space design).
+///
+/// # in_flight (rank 42)
+///
+/// Maps `page_idx → Arc<PageFillHandle>` for pages currently being filled.
+/// See the module doc for the full invariant and rationale for `IrqSpinlock`.
 pub struct InodePages {
     pub pages: BlockingMutex<BTreeMap<u64, Arc<CachedPage>>>,
+    /// In-flight fill registry. `IrqSpinlock` (rank 42) — see module doc.
+    /// Lock order: `pages(40) → in_flight(42)`.
+    pub in_flight: IrqSpinlock<BTreeMap<u64, Arc<PageFillHandle>>>,
     dirty_keys: BlockingMutex<Vec<u64>>,
 }
 
@@ -171,6 +209,7 @@ impl InodePages {
     pub fn new() -> Self {
         Self {
             pages: BlockingMutex::new(BTreeMap::new()),
+            in_flight: IrqSpinlock::new(BTreeMap::new()),
             dirty_keys: BlockingMutex::new(Vec::new()),
         }
     }

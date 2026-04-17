@@ -36,11 +36,15 @@ pub mod journal;
 pub mod mbr;
 pub mod memfs;
 pub mod page_cache;
+pub mod page_fill;
 pub mod path;
 pub mod procfs;
 pub mod readahead;
 pub mod vfs;
 pub mod writeback;
+
+#[allow(unused_imports)]
+pub use page_fill::PageFillHandle;
 
 pub use devfs::{DevFsDevice, DevFsError, DevFsHandle as DevFs, register_device_str};
 

@@ -9,6 +9,7 @@ use crate::boot::boot_info;
 pub mod cow;
 pub mod fault;
 pub mod frame_allocator;
+pub mod frame_drop;
 pub mod mapper;
 pub mod pat;
 pub mod shared;
