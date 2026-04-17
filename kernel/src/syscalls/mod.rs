@@ -1677,10 +1677,10 @@ fn sys_clone(
 
     // Add the new stack and TLS VMAs to the shared VmaSet
     if let Some(vma) = stack_vma {
-        parent_vmas.lock().insert(vma);
+        ranked_lock!(RANK_VMAS, "sys_clone::stack_vma_insert", parent_vmas).insert(vma);
     }
     if let Some(vma) = tls_region.take() {
-        parent_vmas.lock().insert(vma);
+        ranked_lock!(RANK_VMAS, "sys_clone::tls_vma_insert", parent_vmas).insert(vma);
     }
 
     address_space_refs.fetch_add(1, Ordering::AcqRel);

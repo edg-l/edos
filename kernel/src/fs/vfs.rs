@@ -10,7 +10,7 @@ use spin::{Mutex, RwLock};
 
 use crate::{
     debug::lock_order::{
-        RANK_DIRTY_INODES, RANK_INODE, RANK_MAPPERS, RANK_USER_MM, RANK_VFS, RANK_VMAS,
+        RANK_DIRTY_INODES, RANK_INODE, RANK_MAPPERS, RANK_PAGES, RANK_USER_MM, RANK_VFS, RANK_VMAS,
     },
     ranked_lock, ranked_read, ranked_write,
 };
@@ -292,7 +292,7 @@ fn page_cache_read(
 
     for page_idx in start_page..=read_end_page {
         let is_cached = {
-            let map = inode.pages.pages.lock();
+            let map = ranked_lock!(RANK_PAGES, "vfs::page_cache_read", inode.pages.pages);
             map.contains_key(&(page_idx as u64))
         };
         if !is_cached {

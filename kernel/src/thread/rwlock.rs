@@ -104,7 +104,6 @@ impl<T> RwLock<T> {
     /// acquisition. Permits `rank >= top` rather than strictly greater.
     /// Use ONLY in key-ordered same-class patterns (e.g. `vfs::rename` with
     /// two parent inodes). NOT reentrance protection.
-    #[allow(dead_code)]
     pub fn write_ranked_same(
         &self,
         rank: u16,
