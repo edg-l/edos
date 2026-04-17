@@ -88,6 +88,13 @@ name = "env"
 version = "0.1.0"
 
 [[package]]
+name = "evicttest"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "forktest"
 version = "0.1.0"
 dependencies = [
