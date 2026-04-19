@@ -18,6 +18,11 @@ $(call USER_VARIABLE,QEMU_MEM,2G)
 # Default user QEMU flags. These are appended to the QEMU command calls.
 $(call USER_VARIABLE,QEMUFLAGS,-m $(QEMU_MEM))
 
+# SATA backend AIO mode. `io_uring` is the default; `threads` is used by the
+# run-aio-threads target to isolate whether AHCI NCQ stalls trace to the host
+# io_uring path.
+$(call USER_VARIABLE,QEMU_AIO,io_uring)
+
 override IMAGE_NAME := edos-$(KARCH)
 
 .PHONY: all
@@ -56,7 +61,7 @@ define run_qemu_uefi
 		-chardev stdio,id=ser0,signal=off,logfile=run_log.txt \
 		-serial chardev:ser0 \
 		-no-reboot -d cpu_reset -D /tmp/qemu_reset.log \
-		-drive id=sata0,if=none,format=qcow2,file=sata-disk.img,aio=io_uring,discard=unmap \
+		-drive id=sata0,if=none,format=qcow2,file=sata-disk.img,aio=$(QEMU_AIO),discard=unmap \
 		-device ide-hd,drive=sata0,bus=ide.1 \
 		$(if $(4),$(4),$(DISPLAY_VIRTIO)) \
 		-device qemu-xhci -device usb-kbd -device usb-mouse \
@@ -70,6 +75,15 @@ endef
 
 .PHONY: run-x86_64
 run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+	$(call run_qemu_uefi,iso,4,-accel kvm -s -no-reboot -no-shutdown)
+
+# Like `run` but swaps the SATA backend's aio=io_uring for aio=threads.
+# Used to triage whether the AHCI NCQ timeout (8 MiB + fsync inflighttest
+# after ~503 writes) is io_uring-specific on the host. If the stall
+# disappears here, blame io_uring; otherwise the bug is deeper.
+.PHONY: run-aio-threads
+run-aio-threads: QEMU_AIO := threads
+run-aio-threads: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
 	$(call run_qemu_uefi,iso,4,-accel kvm -s -no-reboot -no-shutdown)
 
 .PHONY: run-vga
