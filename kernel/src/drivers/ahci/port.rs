@@ -376,9 +376,28 @@ impl AhciPort {
     }
 
     /// Restart port after error recovery. Re-programs CLB/FB from existing DMA regions.
+    ///
+    /// Stopping ST/FRE does NOT clear `PxSACT` or `PxCI`: both are `R/W1S` per
+    /// the AHCI 1.3.1 spec, cleared only by an SDB FIS, COMRESET, or HBA
+    /// reset. If we recycle a slot whose prior submission left SACT.N=1, the
+    /// next OR-write of the same bit is a hardware no-op and the drive never
+    /// retriggers. We issue a COMRESET whenever residual SACT/CI bits are
+    /// observed after the stop, which is exactly the NCQ-timeout case.
     fn restart_port(&self) -> Result<(), AhciError> {
         Self::stop_port(self.port_regs)?;
         unsafe {
+            let residual_sact = ptr::read_volatile(&raw const (*self.port_regs).sact);
+            let residual_ci = ptr::read_volatile(&raw const (*self.port_regs).ci);
+            if residual_sact != 0 || residual_ci != 0 {
+                log!(
+                    "AHCI port {}: residual SACT={:#x} CI={:#x} after stop, issuing COMRESET",
+                    self.port_idx,
+                    residual_sact,
+                    residual_ci
+                );
+                self.comreset()?;
+            }
+
             // Clear error state
             ptr::write_volatile(&raw mut (*self.port_regs).serr, 0xFFFFFFFF);
             ptr::write_volatile(&raw mut (*self.port_regs).is, 0xFFFFFFFF);
@@ -407,6 +426,58 @@ impl AhciPort {
             ptr::write_volatile(&raw mut (*self.port_regs).cmd, cmd);
             cmd |= PORT_CMD_ST;
             ptr::write_volatile(&raw mut (*self.port_regs).cmd, cmd);
+        }
+        Ok(())
+    }
+
+    /// Issue a COMRESET on the port to clear `PxSACT` / `PxCI` and force the
+    /// drive to re-establish the link. Caller must stop the port (ST=0, FRE=0)
+    /// first. Per AHCI 1.3.1 section 10.4.2:
+    ///
+    /// 1. PxSCTL.DET = 1 (initiate COMRESET).
+    /// 2. Wait at least 1 ms.
+    /// 3. PxSCTL.DET = 0 (release).
+    /// 4. Wait for PxSSTS.DET = 3 (device present + PHY ready).
+    ///
+    /// Returns `CommandTimeout` if the drive fails to re-establish within 1 s.
+    fn comreset(&self) -> Result<(), AhciError> {
+        unsafe {
+            let mut sctl = ptr::read_volatile(&raw const (*self.port_regs).sctl);
+            sctl = (sctl & !0xF) | 0x1;
+            ptr::write_volatile(&raw mut (*self.port_regs).sctl, sctl);
+            sched().thread_sleep(Duration::from_millis(2));
+            sctl &= !0xF;
+            ptr::write_volatile(&raw mut (*self.port_regs).sctl, sctl);
+
+            let start = crate::timer::Instant::now();
+            loop {
+                let ssts = ptr::read_volatile(&raw const (*self.port_regs).ssts);
+                if ssts & 0xF == 0x3 {
+                    break;
+                }
+                if start.elapsed().as_millis() > 1000 {
+                    log!(
+                        "AHCI port {}: COMRESET timed out (SSTS={:#x})",
+                        self.port_idx,
+                        ssts
+                    );
+                    return Err(AhciError::CommandTimeout);
+                }
+                sched().thread_sleep(Duration::from_millis(1));
+            }
+
+            let sact = ptr::read_volatile(&raw const (*self.port_regs).sact);
+            let ci = ptr::read_volatile(&raw const (*self.port_regs).ci);
+            debug_assert_eq!(
+                sact, 0,
+                "COMRESET did not clear PxSACT on port {} (SACT={:#x})",
+                self.port_idx, sact,
+            );
+            debug_assert_eq!(
+                ci, 0,
+                "COMRESET did not clear PxCI on port {} (CI={:#x})",
+                self.port_idx, ci,
+            );
         }
         Ok(())
     }
