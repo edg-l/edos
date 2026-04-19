@@ -1442,19 +1442,16 @@ pub fn sys_fsync(fd: u64) -> i32 {
     };
 
     interrupts::enable();
-    match fs_api::flush_file(&path, inode) {
-        Ok(()) => {}
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
-        }
+    if let Err(e) = fs_api::flush_file(&path, inode) {
+        info.lock().errno = Errno::from(e);
+        return -1;
     }
 
     // Commit any pending journal transactions so data is durable.
     for journal in BlockPageCache::global().all_journals() {
         if let Err(e) = journal.force_commit_and_wait() {
             log!("sys_fsync: journal commit error: {:?}", e);
-            info.lock().errno = Errno::EINVAL;
+            info.lock().errno = Errno::EIO;
             return -1;
         }
     }
