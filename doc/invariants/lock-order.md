@@ -31,7 +31,7 @@ Non-ranked locks are listed separately below with justification.
 |  32 | `EfsDriver.alloc_mutex` | `BlockingMutex<()>` | `fs/efs/mod.rs:82` | Serializes bitmap allocation (`alloc_inode`/`alloc_block`) across CPUs so `mutable` (160) can be released across BPC I/O without two allocators picking the same bit. Acquired at the top of EFS alloc paths, above all leaf locks the alloc transitively touches (BPC 110, journal 120–150, `mutable` 160, AHCI 170–200, kernel_mapper 900, frame_alloc 910). |
 |  35 | `dentry_cache.inner` | `BlockingMutex` | `fs/dentry.rs:31` | Acquired after `inode.lock` (always — see audit log). Leaf on the dentry side. |
 |  40 | `inode.pages.pages` | `BlockingMutex<BTreeMap>` | `fs/page_cache.rs:163` | Inner: `dirty_keys` (50). NEVER held across disk I/O (get_or_fill drops before calling fill_fn). |
-|  42 | `InodePages.in_flight` | *(not yet added)* | — | **Forward reference for Foundation #5.** When async readahead lands, in_flight goes here between `pages` (40) and `dirty_keys` (50). |
+|  42 | `InodePages.in_flight` | `IrqSpinlock<BTreeMap<u64, Arc<PageFillHandle>>>` | `fs/page_cache.rs:219` | Per-inode in-flight page fill registry (Foundation #5). Installed by the publisher in `get_or_fill_async_sync`/`get_or_fill_bulk_async_sync`; joined by slow-path readers. `IrqSpinlock` (not `BlockingMutex`) because `PageFillHandle::cancel` runs on the reaper kthread and must not park. Hold time is O(log N) get+remove. Only nested edge is `pages(40) → in_flight(42)` during publisher remove; `fill_fn` runs with NO InodePages lock held, so BPC (110), journal (120–150), EFS `mutable` (160), AHCI (170–200), deep leaves (900/910) are all reachable legally from inside it. See `fs/page_fill.rs` and `doc/bugs/2026-04-17-foundation-5.md`. |
 |  50 | `inode.pages.dirty_keys` | `BlockingMutex<Vec>` | `fs/page_cache.rs:164` | Leaf on the per-inode side. |
 |  60 | `inode.mappers` | `BlockingMutex<Vec<Weak<...>>>` | `fs/inode.rs:56` | Inner: vmas (70), per-process mm (80) on target UserThreads during truncate. |
 |  70 | `UserThread.vmas` | `Arc<spin::Mutex<VmaSet>>` | `thread/mod.rs:44` | Per-process VMA set. Inner: 80 per-process mm. See `fault.rs:406-433`. |
@@ -178,16 +178,26 @@ concern between them and the Phase 2 ranked set.
 
 ---
 
-## Foundation #5 forward reference
+## Foundation #5 — shipped 2026-04-17
 
-Foundation #5 (per-inode async I/O registry) will add:
+`InodePages.in_flight` at rank 42 ships as `IrqSpinlock<BTreeMap<u64,
+Arc<PageFillHandle>>>` in `fs/page_cache.rs:219`. Constants
+`RANK_PAGES = 40` and `RANK_IN_FLIGHT = 42` live in
+`kernel/src/debug/lock_order.rs`.
 
-- `InodePages.in_flight` at rank 42: a `BlockingMutex<BTreeMap<u64, PageFillHandle>>`.
-  This sits between `pages` (40) and `dirty_keys` (50).
-- Per-page `PageFillHandle` waitqueue: non-ranked (WaitQueue semantics, see above).
+Lock-order validation:
 
-The edge `pages (40) -> in_flight (42) -> dirty_keys (50)` must be validated against
-the rank table before Foundation #5 ships.
+- `pages(40) → in_flight(42)` is the only nested edge, taken during
+  publisher remove. `fill_fn` runs with NO InodePages lock held, so inner
+  rank acquisitions (BPC 110, journal 120–150, EFS `mutable` 160, AHCI
+  170–200, deep leaves 900/910) are legal.
+- `IrqSpinlock` (not `BlockingMutex`) so `PageFillHandle::cancel` can run
+  on the reaper kthread without violating the drop-contract.
+- `WaitQueue` inside each handle is non-ranked (per WaitQueue semantics
+  documented above).
+
+See `fs/page_fill.rs` for the reader state machine and
+`doc/bugs/2026-04-17-foundation-5.md` for the post-mortem.
 
 ---
 

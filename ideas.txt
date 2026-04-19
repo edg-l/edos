@@ -242,6 +242,23 @@
   `strong_count == 1` heuristic in `invalidate_from`. Fixed a
   pre-existing pin leak in `store_cached_page_on_vma` surfaced by the
   new Drop's pin_count==0 assertion.
+- **Per-inode async I/O registry (Foundation #5, 2026-04-17)** -
+  `InodePages.in_flight: IrqSpinlock<BTreeMap<u64, Arc<PageFillHandle>>>`
+  at lock rank 42. `PageFillHandle` carries Weak<VfsInode>, page range,
+  WaitQueue, AtomicU8 state (PENDING/SUCCESS/FAILED) and a CancellableOp
+  impl so issuer death doesn't strand waiters. Reader state machine in
+  `get_or_fill_async_sync` / `get_or_fill_bulk_async_sync`: fast (cached)
+  -> slow (join existing handle, park on waitqueue) -> publisher (install
+  handle, run fill_fn without InodePages locks held, publish pages(40),
+  finish_state, remove from in_flight(42)). Invariant: terminal state
+  MUST be published before the handle is removed, else a waiter can
+  wake to an empty map and miss the wake. Bulk fills share one handle
+  across [start, start+count). Replaces the legacy `InodePages::get_or_fill`
+  (deleted). /proc/inflight_stats (installs/joins/retries/cancels/current)
+  and programs/inflighttest verify the pipeline. Bugs caught in-session:
+  orphan waiters on !push_ok (fixed), u32 truncation on bulk len
+  (widened to u64), and a pre-existing ring-0 demand fault with IRQs
+  disabled in idt.rs exposed by the new concurrency.
 
 ## Network Stack Remaining
 
@@ -479,23 +496,28 @@ reaper correctness in general). Roadmap in dependency order:
    at `.claude/handoff/2026-04-17-2-foundation-4-complete.md`.
 
 5. **Per-inode async I/O registry (last layer, uses #1-#4).**
-   `InodePages` gets an `in_flight: BTreeMap<page_idx, Arc<PageFillHandle>>`
-   that readers consult before issuing their own fill. Handle lives
-   longer than any single thread, carries the Arc<CachedPage>s being
-   populated, has a WaitQueue readers park on. Removal from the map
-   atomic with either "publish to pages map" (success) or "mark error
-   and let next reader retry" (failure).
+   **DONE 2026-04-17.** `InodePages.in_flight` at rank 42 +
+   `PageFillHandle` (`fs/page_fill.rs`) + `get_or_fill_async_sync` /
+   `get_or_fill_bulk_async_sync` reader state machine + `/proc/inflight_stats`
+   + `programs/inflighttest`. Replaces the legacy synchronous
+   `InodePages::get_or_fill` (deleted). Publish-terminal-state-before-remove
+   invariant enforced in the free fn; handle registered as a per-thread
+   `owned_op` so reaper cancels dying-issuer fills. See
+   `doc/bugs/2026-04-17-foundation-5.md` and
+   `.claude/handoff/2026-04-17-3-foundation-5-phase-4-plus-ahci-ncq-hang.md`.
 
 6. **Generic async block I/O trait.** Today AHCI is the only disk.
    Async readahead should live behind a generic trait so USB mass
-   storage, virtio-blk (future), and NVMe all get it. Light lift
-   once #1-#5 are in place.
+   storage, virtio-blk (future), and NVMe all get it. Light lift now
+   that #1-#5 are in place — `fill_fn` in `get_or_fill_async_sync` is
+   the natural seam: swap the sync backend for a `submit / wait` pair
+   whose `wait` parks on the completion-thread wake.
 
-Each of #1-#5 is ~1-2 sessions of careful work; #6 is light. This is
-higher priority than any other idea below because it unblocks async
-readahead, proper signal handling, safer thread cancellation, and the
-long-term I/O story across all block devices. See the async readahead
-entry below for the specific payoff on file-read performance.
+#1-#5 shipped. #6 is the next step and unblocks async NCQ readahead
+below, proper signal handling (cancellable waits foundation in place),
+safer thread cancellation, and the long-term I/O story across all
+block devices. See the async readahead entry below for the specific
+payoff on file-read performance.
 
 ### Extend lock-order ranks to more subsystems (Foundation #4 follow-up)
 
