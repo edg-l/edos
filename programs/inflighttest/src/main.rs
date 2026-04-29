@@ -72,7 +72,8 @@ fn create_test_file() -> Result<(), String> {
             .map_err(|e| format!("write {FILE_PATH}: {e}"))?;
         written += to_write;
     }
-    f.sync_all().map_err(|e| format!("fsync {FILE_PATH}: {e}"))?;
+    f.sync_all()
+        .map_err(|e| format!("fsync {FILE_PATH}: {e}"))?;
     Ok(())
 }
 
@@ -207,8 +208,10 @@ fn main() -> ExitCode {
     if failed {
         ExitCode::from(1)
     } else {
-        println!("inflighttest: PASS (installs={delta_installs} joins={delta_joins} \
-                 retries={delta_retries} cancels=0)");
+        println!(
+            "inflighttest: PASS (installs={delta_installs} joins={delta_joins} \
+                 retries={delta_retries} cancels=0)"
+        );
         ExitCode::SUCCESS
     }
 }

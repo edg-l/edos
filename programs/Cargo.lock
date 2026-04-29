@@ -7,6 +7,14 @@ name = "alloctest"
 version = "0.1.0"
 
 [[package]]
+name = "basename"
+version = "0.1.0"
+
+[[package]]
+name = "cal"
+version = "0.1.0"
+
+[[package]]
 name = "cat"
 version = "0.1.0"
 
@@ -15,7 +23,15 @@ name = "cp"
 version = "0.1.0"
 
 [[package]]
+name = "cut"
+version = "0.1.0"
+
+[[package]]
 name = "df"
+version = "0.1.0"
+
+[[package]]
+name = "dirname"
 version = "0.1.0"
 
 [[package]]
@@ -95,6 +111,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "false"
+version = "0.1.0"
+
+[[package]]
 name = "forktest"
 version = "0.1.0"
 dependencies = [
@@ -133,6 +153,13 @@ dependencies = [
 
 [[package]]
 name = "inflighttest"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
+name = "kill"
 version = "0.1.0"
 dependencies = [
  "edos_lib",
@@ -237,6 +264,10 @@ version = "0.1.0"
 
 [[package]]
 name = "tr"
+version = "0.1.0"
+
+[[package]]
+name = "true"
 version = "0.1.0"
 
 [[package]]
