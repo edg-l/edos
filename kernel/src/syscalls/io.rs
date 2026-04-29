@@ -186,23 +186,22 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
         Some(FileDescriptor::FsFile(file)) => {
             const MAX_WRITE_SIZE: usize = 1024 * 1024; // 1 MiB
             let capped_count = count.min(MAX_WRITE_SIZE);
-            let mut buffer = vec![0u8; capped_count];
-            if !unsafe { try_copy_from_user(buffer.as_mut_ptr(), buffer_ptr, capped_count) } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
-            }
 
-            let op = match vfs::resolve_with_inode(&file.path, file.inode.clone()) {
-                Some(op) => op,
+            let fs = match file.fs.as_ref() {
+                Some(f) => f,
                 None => {
                     info.lock().errno = Errno::EINVAL;
                     return !0u64;
                 }
             };
+            let op = vfs::VfsOp {
+                fs: fs.clone(),
+                relative: file.relative.clone().unwrap_or_else(|| Path::parse("").unwrap()),
+                inode: file.inode.clone(),
+                mount_id: file.mount_id,
+            };
 
-            // vfs::write handles locking + O_APPEND atomically.
-            let offset = file.offset as usize;
-            match vfs::write(&op, offset, &buffer, file.append) {
+            match vfs::write_from_user(&op, file.offset as usize, buffer_ptr, capped_count, file.append) {
                 Ok(written) => {
                     let new_fd = FileDescriptor::FsFile(FsFile {
                         offset: file.offset + written,
@@ -529,28 +528,44 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
         Some(FileDescriptor::FsFile(file)) => {
             // Snapshot readahead state before the devfs/vfs branch split.
             let mut ra = file.ra;
+            let offset = file.offset as usize;
 
             // Fast path: devfs devices can be read directly without the FS Mailbox.
-            let data = if let Some(device) = crate::fs::devfs::try_lookup_from_full_path(&file.path)
+            let (bytes_read, ra) = if let Some(device) = crate::fs::devfs::try_lookup_from_full_path(&file.path)
             {
-                match device.read(file.offset as usize, count) {
-                    Ok(d) => d,
+                match device.read(offset, count) {
+                    Ok(data) => {
+                        let bytes_to_copy = data.len().min(count);
+                        if bytes_to_copy == 0 {
+                            return 0;
+                        }
+                        if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_copy) } {
+                            info.lock().errno = Errno::EFAULT;
+                            return -1;
+                        }
+                        (bytes_to_copy, ra) // devfs doesn't mutate ra
+                    }
                     Err(_) => {
                         info.lock().errno = Errno::EIO;
                         return -1;
                     }
                 }
             } else {
-                // vfs::read handles per-inode locking.
-                let op = match vfs::resolve_with_inode(&file.path, file.inode.clone()) {
-                    Some(op) => op,
+                let fs = match file.fs.as_ref() {
+                    Some(f) => f,
                     None => {
                         info.lock().errno = Errno::EINVAL;
                         return -1;
                     }
                 };
-                match vfs::read(&op, &mut ra, file.offset as usize, count) {
-                    Ok(d) => d,
+                let op = vfs::VfsOp {
+                    fs: fs.clone(),
+                    relative: file.relative.clone().unwrap_or_else(|| Path::parse("").unwrap()),
+                    inode: file.inode.clone(),
+                    mount_id: file.mount_id,
+                };
+                match vfs::read_to_user(&op, &mut ra, offset, count, buffer_ptr) {
+                    Ok(n) => (n, ra),
                     Err(_) => {
                         info.lock().errno = Errno::EINVAL;
                         return -1;
@@ -558,25 +573,13 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 }
             };
 
-            let bytes_to_copy = data.len().min(count);
-            if bytes_to_copy == 0 {
-                return 0;
-            }
-
-            if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_copy) } {
-                info.lock().errno = Errno::EFAULT;
-                return -1;
-            }
-
-            // Update file offset and write back readahead state (vfs path mutated ra;
-            // devfs path leaves ra unchanged from the snapshot above).
             let new_fd = FileDescriptor::FsFile(FsFile {
-                offset: file.offset + bytes_to_copy as u64,
+                offset: file.offset + bytes_read as u64,
                 ra,
                 ..file
             });
             fd_table.lock().replace_fd(fd, new_fd);
-            bytes_to_copy as i64
+            bytes_read as i64
         }
         Some(FileDescriptor::Socket(sock)) => {
             use crate::net::socket::SOCK_STREAM;
@@ -837,14 +840,21 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         }
     }
 
-    // Resolve VFS inode for per-inode locking on subsequent reads/writes.
-    let inode = fs_api::resolve_vfs_inode_for_path(&path);
+    // Resolve VFS operation at open time. Cache fs, relative, mount_id, and
+    // inode so subsequent read/write syscalls skip the mount-registry scan.
+    let (cached_op, inode) = match vfs::resolve(&path) {
+        Some(op) => (Some(op.fs_info()), op.inode),
+        None => (None, None),
+    };
 
     let desc = FileDescriptor::FsFile(FsFile {
         path,
         offset,
         append,
         mode: open_mode,
+        fs: cached_op.as_ref().map(|c| c.fs.clone()),
+        relative: cached_op.as_ref().map(|c| c.relative.clone()),
+        mount_id: cached_op.as_ref().map(|c| c.mount_id).unwrap_or(0),
         inode,
         ra: crate::fs::readahead::ReadaheadState::default(),
     });

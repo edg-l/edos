@@ -61,12 +61,34 @@ struct VfsLookup {
     mount_id: usize,
 }
 
+/// Stable filesystem mount info (fs, relative path, mount_id) cached from
+/// open-time resolution.  The filesystem backing an open fd never changes,
+/// so this eliminates redundant mount-registry scans on read/write.
+#[derive(Clone)]
+pub struct VfsFsInfo {
+    pub fs: Arc<dyn FileSystem + Send + Sync>,
+    pub relative: Path,
+    pub mount_id: usize,
+}
+
 /// A resolved filesystem operation handle.
 pub struct VfsOp {
     pub fs: Arc<dyn FileSystem + Send + Sync>,
     pub relative: Path,
     pub inode: Option<Arc<VfsInode>>,
     pub mount_id: usize,
+}
+
+impl VfsOp {
+    /// Return just the stable filesystem info (fs, relative path, mount_id),
+    /// excluding the inode.  Useful for caching in FsFile.
+    pub fn fs_info(&self) -> VfsFsInfo {
+        VfsFsInfo {
+            fs: self.fs.clone(),
+            relative: self.relative.clone(),
+            mount_id: self.mount_id,
+        }
+    }
 }
 
 /// Look up the filesystem for a given path.
@@ -195,30 +217,54 @@ pub fn read(
     offset: usize,
     count: usize,
 ) -> Result<Vec<u8>, Error> {
-    let _guard = op
-        .inode
-        .as_ref()
-        .map(|i| i.lock.read_ranked(RANK_INODE, "inode.lock"));
-
-    if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
-        if let Some(pc_ops) = op.fs.as_page_cache_ops() {
-            let file_size = op
-                .fs
-                .file_size_ino(inode.ino)
-                .unwrap_or_else(|_| op.fs.file_info(&op.relative).map(|f| f.size).unwrap_or(0))
-                as usize;
-            if offset >= file_size {
-                return Ok(Vec::new());
+    // Hold the read lock only for the file_size check (prevents truncate
+    // changing size between the check and the clamped-range computation).
+    // Released before page_cache_read so the lock isn't held across
+    // disk I/O / WaitQueue parks during page fills.
+    let file_size_opt = {
+        let _guard = op
+            .inode
+            .as_ref()
+            .map(|i| i.lock.read_ranked(RANK_INODE, "inode.lock"));
+        if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
+            if let Some(_pc_ops) = op.fs.as_page_cache_ops() {
+                Some(
+                    op.fs
+                        .file_size_ino(inode.ino)
+                        .unwrap_or_else(|_| {
+                            op.fs.file_info(&op.relative).map(|f| f.size).unwrap_or(0)
+                        })
+                        as usize,
+                )
+            } else {
+                // No page-cache ops; try read_bytes_ino fallback (still under lock).
+                match op.fs.read_bytes_ino(inode.ino, offset, count) {
+                    Err(Error::Unsupported) => None,
+                    result => return result,
+                }
             }
-            let clamped = count.min(file_size - offset);
-            return page_cache_read(inode, pc_ops, ra, file_size, offset, clamped);
+        } else {
+            None
         }
-        match op.fs.read_bytes_ino(inode.ino, offset, count) {
-            Err(Error::Unsupported) => {}
-            result => return result,
+    };
+
+    let file_size = match file_size_opt {
+        Some(s) => s,
+        None => {
+            // No page-cache ops, or ino == 0, or read_bytes_ino unsupported.
+            // Path-based read doesn't use the lock guard (already dropped).
+            return op.fs.read_bytes(&op.relative, offset, count);
         }
+    };
+
+    let inode = op.inode.as_ref().expect("vfs::read: missing inode after page_cache_ops check");
+    let pc_ops = op.fs.as_page_cache_ops().expect("vfs::read: missing pc_ops after page_cache_ops check");
+
+    if offset >= file_size {
+        return Ok(Vec::new());
     }
-    op.fs.read_bytes(&op.relative, offset, count)
+    let clamped = count.min(file_size - offset);
+    page_cache_read(inode, pc_ops, ra, file_size, offset, clamped)
 }
 
 fn page_cache_read(
@@ -229,8 +275,67 @@ fn page_cache_read(
     offset: usize,
     count: usize,
 ) -> Result<Vec<u8>, Error> {
+    let mut result = Vec::with_capacity(count);
+    page_cache_read_core(
+        inode,
+        pc_ops,
+        ra,
+        file_size,
+        offset,
+        count,
+        &mut |_page_idx, slice, copy_start, copy_end| {
+            result.extend_from_slice(&slice[copy_start..copy_end]);
+            Ok(())
+        },
+    )?;
+    Ok(result)
+}
+
+/// Same as page_cache_read but copies output directly to userspace.
+pub fn page_cache_read_to_user(
+    inode: &Arc<VfsInode>,
+    pc_ops: &dyn super::page_cache::PageCacheOps,
+    ra: &mut ReadaheadState,
+    file_size: usize,
+    offset: usize,
+    count: usize,
+    user_ptr: *mut u8,
+) -> Result<usize, Error> {
+    let mut pos: usize = 0;
+    page_cache_read_core(
+        inode,
+        pc_ops,
+        ra,
+        file_size,
+        offset,
+        count,
+        &mut |_page_idx, slice, copy_start, copy_end| {
+            let len = copy_end - copy_start;
+            if !unsafe { crate::util::uaccess::try_copy_to_user(
+                user_ptr.wrapping_add(pos),
+                slice[copy_start..].as_ptr(),
+                len,
+            ) } {
+                return Err(Error::IoError);
+            }
+            pos += len;
+            Ok(())
+        },
+    )?;
+    Ok(pos)
+}
+
+fn page_cache_read_core(
+    inode: &Arc<VfsInode>,
+    pc_ops: &dyn super::page_cache::PageCacheOps,
+    ra: &mut ReadaheadState,
+    file_size: usize,
+    offset: usize,
+    count: usize,
+    output: &mut dyn FnMut(usize, &[u8], usize, usize) -> Result<(), Error>,
+) -> Result<(), Error> {
     if count == 0 {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     use super::readahead::{RA_INIT_PAGES, RA_MAX_PAGES, RA_NO_PREV, RA_WHOLE_FILE_MAX_PAGES};
@@ -239,19 +344,12 @@ fn page_cache_read(
     let end_page = (offset + count - 1) / 4096;
     let ino = inode.ino;
 
-    // Saturating_add guards against a corrupt file_size near usize::MAX that
-    // would wrap to a tiny page count.
     let file_size_pages: u64 = (file_size.saturating_add(4095) / 4096) as u64;
 
     let sequential =
         ra.prev_last_page == RA_NO_PREV || start_page as u64 == ra.prev_last_page.wrapping_add(1);
 
     let read_end_page: usize = if sequential {
-        // Small-file fast path: on the very first sequential read of a file
-        // that fits within RA_WHOLE_FILE_MAX_PAGES, fetch the entire file in
-        // one bulk pass. Avoids the ramp-up stall where each 64 KiB user
-        // read still triggers its own AHCI command until the window reaches
-        // max after ~7 calls.
         if ra.prev_last_page == RA_NO_PREV
             && file_size_pages > 0
             && file_size_pages <= RA_WHOLE_FILE_MAX_PAGES
@@ -263,10 +361,8 @@ fn page_cache_read(
             } else {
                 ra.window_size
             };
-            // `target` is the exclusive end (one past the last page to fetch).
             let target = end_page as u64 + 1 + ra_pages;
             let clipped = target.min(file_size_pages);
-            // Convert exclusive end back to inclusive page index; never shrink below user's request.
             (clipped.saturating_sub(1) as usize).max(end_page)
         }
     } else {
@@ -285,10 +381,8 @@ fn page_cache_read(
         ra.prev_last_page,
     );
 
-    // Check which pages are already cached vs need loading.
-    // The scan covers the full readahead range so ahead pages are filled too.
     let mut uncached_start: Option<usize> = None;
-    let mut uncached_ranges: Vec<(usize, usize)> = Vec::new(); // (start_page, end_page) inclusive
+    let mut uncached_ranges: Vec<(usize, usize)> = Vec::new();
 
     for page_idx in start_page..=read_end_page {
         let is_cached = {
@@ -307,14 +401,10 @@ fn page_cache_read(
         uncached_ranges.push((start, read_end_page));
     }
 
-    // Bulk-fill uncached ranges using fill_pages_bulk. For contiguous uncached
-    // ranges, fill_pages_bulk issues a single AHCI command per range.
     for &(range_start, range_end) in &uncached_ranges {
         let byte_offset = range_start * 4096;
         let byte_count = (range_end - range_start + 1) * 4096;
 
-        // Use fill_pages_bulk if available; otherwise fall back per-page.
-        // range_end is inclusive; page_count is exclusive count = end - start + 1.
         let page_count = (range_end - range_start + 1) as u64;
         let bulk_result =
             page_fill::get_or_fill_bulk_async_sync(inode, range_start as u64, page_count, || {
@@ -322,11 +412,8 @@ fn page_cache_read(
             });
 
         match bulk_result {
-            Ok(()) => {
-                // All pages for this range are now in the page cache.
-            }
+            Ok(()) => {}
             Err(_) => {
-                // Bulk path failed or was unsupported; fall back to per-page fills.
                 for page_idx in range_start..=range_end {
                     page_fill::get_or_fill_async_sync(inode, page_idx as u64, |buf| {
                         let valid = pc_ops.fill_page(ino, page_idx as u64, buf)?;
@@ -340,9 +427,6 @@ fn page_cache_read(
         }
     }
 
-    // Ramp advances only when actual I/O occurred; warm-cache repeats don't
-    // double window_size. prev_last_page tracks the *requested* end-page so
-    // the next read's sequential check reflects what the user consumed.
     let did_io = !uncached_ranges.is_empty();
     if sequential && did_io {
         let next = if ra.window_size == 0 {
@@ -362,11 +446,8 @@ fn page_cache_read(
         did_io,
     );
 
-    // Result Vec covers only the user-requested range; readahead pages stay in cache.
-    let mut result = Vec::with_capacity(count);
     for page_idx in start_page..=end_page {
         let guard = page_fill::get_or_fill_async_sync(inode, page_idx as u64, |buf| {
-            // Should always be a cache hit at this point; fill_fn is a miss fallback.
             let valid = pc_ops.fill_page(ino, page_idx as u64, buf)?;
             if valid < 4096 {
                 buf[valid..].fill(0);
@@ -388,10 +469,10 @@ fn page_cache_read(
         let copy_end = copy_end.min(4096);
 
         let slice = unsafe { guard.as_slice() };
-        result.extend_from_slice(&slice[copy_start..copy_end]);
+        output(page_idx, slice, copy_start, copy_end)?;
     }
 
-    Ok(result)
+    Ok(())
 }
 
 pub fn file_info(op: &VfsOp) -> Result<File, Error> {
@@ -439,6 +520,62 @@ pub fn list_files(op: &VfsOp, full_path: &Path) -> Result<Vec<File>, Error> {
 
 // --- Write-path operations ---
 
+/// Write with optional O_APPEND support, copying data directly from userspace.
+/// Avoids the intermediate kernel heap buffer in the fd-based write path.
+pub fn write_from_user(
+    op: &VfsOp,
+    offset: usize,
+    user_ptr: *const u8,
+    count: usize,
+    append: bool,
+) -> Result<u64, Error> {
+    let _guard = op
+        .inode
+        .as_ref()
+        .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
+    let actual_offset = if append {
+        if let Some(ino) = op.inode.as_ref().map(|i| i.ino).filter(|&i| i != 0) {
+            match op.fs.file_size_ino(ino) {
+                Ok(size) => size as usize,
+                Err(Error::Unsupported) => op
+                    .fs
+                    .file_info(&op.relative)
+                    .map(|f| f.size as usize)
+                    .unwrap_or(offset),
+                Err(e) => return Err(e),
+            }
+        } else {
+            op.fs
+                .file_info(&op.relative)
+                .map(|f| f.size as usize)
+                .unwrap_or(offset)
+        }
+    } else {
+        offset
+    };
+
+    if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
+        if let Some(pc_ops) = op.fs.as_page_cache_ops() {
+            return page_cache_write_from_user(inode, pc_ops, actual_offset, count, user_ptr);
+        }
+        // No page-cache ops; read bytes into kernel buffer as fallback.
+        // Rare path (non-page-cache drivers).
+        let mut buffer = alloc::vec![0u8; count];
+        if !unsafe { crate::util::uaccess::try_copy_from_user(buffer.as_mut_ptr(), user_ptr, count) } {
+            return Err(Error::IoError);
+        }
+        match op.fs.write_bytes_ino(inode.ino, actual_offset, &buffer) {
+            Err(Error::Unsupported) => {}
+            result => return result,
+        }
+    }
+    let mut buffer = alloc::vec![0u8; count];
+    if !unsafe { crate::util::uaccess::try_copy_from_user(buffer.as_mut_ptr(), user_ptr, count) } {
+        return Err(Error::IoError);
+    }
+    op.fs.write_bytes(&op.relative, actual_offset, &buffer)
+}
+
 /// Write with optional O_APPEND support. The append size query happens
 /// inside the write lock, preventing reentrancy deadlocks.
 pub fn write(op: &VfsOp, offset: usize, data: &[u8], append: bool) -> Result<u64, Error> {
@@ -479,20 +616,113 @@ pub fn write(op: &VfsOp, offset: usize, data: &[u8], append: bool) -> Result<u64
     op.fs.write_bytes(&op.relative, actual_offset, data)
 }
 
+/// Read with readahead, copying output directly to userspace.
+pub fn read_to_user(
+    op: &VfsOp,
+    ra: &mut ReadaheadState,
+    offset: usize,
+    count: usize,
+    user_ptr: *mut u8,
+) -> Result<usize, Error> {
+    let file_size_opt = {
+        let _guard = op
+            .inode
+            .as_ref()
+            .map(|i| i.lock.read_ranked(RANK_INODE, "inode.lock"));
+        if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
+            if let Some(_pc_ops) = op.fs.as_page_cache_ops() {
+                Some(
+                    op.fs
+                        .file_size_ino(inode.ino)
+                        .unwrap_or_else(|_| {
+                            op.fs.file_info(&op.relative).map(|f| f.size).unwrap_or(0)
+                        })
+                        as usize,
+                )
+            } else {
+                match op.fs.read_bytes_ino(inode.ino, offset, count) {
+                    Err(Error::Unsupported) => None,
+                    Ok(data) => {
+                        let n = data.len();
+                        if !unsafe { crate::util::uaccess::try_copy_to_user(user_ptr, data.as_ptr(), n) } {
+                            return Err(Error::IoError);
+                        }
+                        return Ok(n);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        } else {
+            None
+        }
+    };
+
+    let file_size = match file_size_opt {
+        Some(s) => s,
+        None => {
+            let data = op.fs.read_bytes(&op.relative, offset, count)?;
+            let n = data.len();
+            if !unsafe { crate::util::uaccess::try_copy_to_user(user_ptr, data.as_ptr(), n) } {
+                return Err(Error::IoError);
+            }
+            return Ok(n);
+        }
+    };
+
+    let inode = op.inode.as_ref().expect("vfs::read_to_user: missing inode");
+    let pc_ops = op.fs.as_page_cache_ops().expect("vfs::read_to_user: missing pc_ops");
+
+    if offset >= file_size {
+        return Ok(0);
+    }
+    let clamped = count.min(file_size - offset);
+    page_cache_read_to_user(inode, pc_ops, ra, file_size, offset, clamped, user_ptr)
+}
+
 fn page_cache_write(
     inode: &Arc<VfsInode>,
     pc_ops: &dyn super::page_cache::PageCacheOps,
     offset: usize,
     data: &[u8],
 ) -> Result<u64, Error> {
-    if data.is_empty() {
+    page_cache_write_core(inode, pc_ops, offset, data.len(), &mut |start, slice| {
+        slice.copy_from_slice(&data[start..start + slice.len()]);
+        Ok(())
+    })
+}
+
+/// Same as page_cache_write but copies data directly from userspace.
+pub fn page_cache_write_from_user(
+    inode: &Arc<VfsInode>,
+    pc_ops: &dyn super::page_cache::PageCacheOps,
+    offset: usize,
+    count: usize,
+    user_ptr: *const u8,
+) -> Result<u64, Error> {
+    page_cache_write_core(inode, pc_ops, offset, count, &mut |start, slice| {
+        if !unsafe { crate::util::uaccess::try_copy_from_user(
+            slice.as_mut_ptr(),
+            user_ptr.wrapping_add(start),
+            slice.len(),
+        ) } {
+            return Err(Error::IoError);
+        }
+        Ok(())
+    })
+}
+
+fn page_cache_write_core(
+    inode: &Arc<VfsInode>,
+    pc_ops: &dyn super::page_cache::PageCacheOps,
+    offset: usize,
+    count: usize,
+    source: &mut dyn FnMut(usize, &mut [u8]) -> Result<(), Error>,
+) -> Result<u64, Error> {
+    if count == 0 {
         return Ok(0);
     }
 
-    // Overflow-safe end offset. Reject writes where offset + data.len()
-    // would wrap past usize::MAX, so we can't later compute a tiny
-    // new_size that silently truncates the file.
-    let end_offset = offset.checked_add(data.len()).ok_or(Error::IoError)?;
+    let end_offset = offset.checked_add(count).ok_or(Error::IoError)?;
 
     let start_page = offset / 4096;
     let end_page = (end_offset - 1) / 4096;
@@ -507,7 +737,7 @@ fn page_cache_write(
             0
         };
         let write_end = if page_idx == end_page {
-            offset + data.len() - page_start_in_file
+            offset + count - page_start_in_file
         } else {
             4096
         };
@@ -531,35 +761,18 @@ fn page_cache_write(
         };
 
         let slice = unsafe { guard.as_slice_mut() };
-        slice[write_start..write_end].copy_from_slice(&data[data_pos..data_pos + write_len]);
+        source(data_pos, &mut slice[write_start..write_end])?;
         data_pos += write_len;
 
         inode.pages.mark_dirty(page_idx as u64);
     }
 
-    // Write-back: leave dirty pages in the per-inode cache and register the
-    // inode with the global DIRTY_INODES list. The writeback kthread flushes
-    // on its periodic pass; fsync/sync_all force an immediate flush via
-    // `flush_file`. Matches Linux semantics: write(2) is buffered, fsync(2)
-    // is the sync point. Same-process reads of just-written data still see
-    // the new bytes because they hit the still-dirty cache page.
     register_dirty_inode(inode);
 
-    // Size must be observable immediately (stat, seek-end, same-process
-    // read clamping), so we update it synchronously via the FS's on-disk
-    // inode. On a crash before writeback, the inode may report a size
-    // whose blocks haven't been allocated yet; EFS's journal will then
-    // show size > extent-tree coverage. Reads past the extent-covered
-    // region return zeros (holes), which matches POSIX. True data
-    // durability is a user-side fsync.
     let new_size = end_offset as u64;
     pc_ops.update_size(ino, new_size)?;
 
-    // Return bytes written (POSIX write semantics), not new file size. The sys_write
-    // caller uses this both as the userspace return and to advance file.offset; using
-    // new_size would make offsets compound and cause std write_all to panic when
-    // `write` claims it wrote more bytes than the input buffer had.
-    Ok(data.len() as u64)
+    Ok(count as u64)
 }
 
 pub fn truncate(op: &VfsOp, size: u64) -> Result<(), Error> {

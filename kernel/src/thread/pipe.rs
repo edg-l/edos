@@ -1,6 +1,6 @@
 use crate::{
     fs::{
-        PollState,
+        FileSystem, PollState,
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
         inode::VfsInode,
         path::Path,
@@ -279,6 +279,14 @@ pub struct FsFile {
     pub append: bool,
     /// Access mode (read / write / read-write) parsed from open flags.
     pub mode: OpenMode,
+    /// Cached filesystem handle (from open-time mount resolution), stable for
+    /// the fd's lifetime. Eliminates re-scanning the VFS mount registry on
+    /// every read/write syscall.
+    pub fs: Option<Arc<dyn FileSystem + Send + Sync>>,
+    /// Cached mount-relative path (from open-time mount resolution).
+    pub relative: Option<Path>,
+    /// Cached mount id (from open-time mount resolution).
+    pub mount_id: usize,
     /// Cached VFS inode for per-inode locking. None for virtual filesystems
     /// (procfs, devfs) that don't have meaningful inodes.
     pub inode: Option<Arc<VfsInode>>,
