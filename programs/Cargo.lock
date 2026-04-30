@@ -31,6 +31,10 @@ name = "df"
 version = "0.1.0"
 
 [[package]]
+name = "diff"
+version = "0.1.0"
+
+[[package]]
 name = "dirname"
 version = "0.1.0"
 
@@ -44,6 +48,10 @@ version = "0.1.0"
 dependencies = [
  "edos_lib",
 ]
+
+[[package]]
+name = "du"
+version = "0.1.0"
 
 [[package]]
 name = "echo"
@@ -112,6 +120,10 @@ dependencies = [
 
 [[package]]
 name = "false"
+version = "0.1.0"
+
+[[package]]
+name = "find"
 version = "0.1.0"
 
 [[package]]
@@ -296,6 +308,13 @@ dependencies = [
 [[package]]
 name = "write"
 version = "0.1.0"
+
+[[package]]
+name = "xargs"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "yes"
