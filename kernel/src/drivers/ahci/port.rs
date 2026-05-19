@@ -90,10 +90,15 @@ fn virt_buffer_to_sg_list(
         let page_offset = vaddr.as_u64() as usize & 0xFFF;
         let chunk = remaining.min(4096 - page_offset);
 
-        // Try to merge with previous entry if physically contiguous
+        // Try to merge with previous entry if physically contiguous.
+        // AHCI PRDT DBC is a 22-bit field with N-1 encoding: max 4 MiB per
+        // entry. Without this cap, large physically-contiguous buffers would
+        // silently truncate to (byte_count & 0x3FFFFF) and the HBA would
+        // transfer only the low 4 MiB, leaving the tail uninitialized.
+        const MAX_PRDT_ENTRY_BYTES: usize = 4 * 1024 * 1024;
         if let Some(last) = sg.last_mut() {
             let (last_phys, last_len): &mut (PhysAddr, usize) = last;
-            if *last_phys + *last_len as u64 == phys {
+            if *last_phys + *last_len as u64 == phys && *last_len + chunk <= MAX_PRDT_ENTRY_BYTES {
                 *last_len += chunk;
                 remaining -= chunk;
                 vaddr += chunk as u64;
@@ -172,6 +177,13 @@ pub struct AhciPort {
 
     // Guards restart_port so only one thread runs it after NCQ error.
     restarting: AtomicBool,
+
+    // Bumped on every successful `restart_port`. NCQ waiters sample this
+    // before submit; if it changes during their wait, COMRESET wiped SACT
+    // and the slot's "cleared" bit no longer means success -- it means
+    // the command was killed. Without this guard the waiter would return
+    // Ok with a stale (uninitialized) buffer.
+    reset_generation: AtomicU32,
 
     // Serializes legacy (non-NCQ) commands among each other.
     legacy_lock: BlockingMutex<()>,
@@ -268,6 +280,7 @@ impl AhciPort {
             mode_waitq: WaitQueue::new(),
             slot_waitq: WaitQueue::new(),
             restarting: AtomicBool::new(false),
+            reset_generation: AtomicU32::new(0),
             legacy_lock: BlockingMutex::new(()),
         })
     }
@@ -427,6 +440,10 @@ impl AhciPort {
             cmd |= PORT_CMD_ST;
             ptr::write_volatile(&raw mut (*self.port_regs).cmd, cmd);
         }
+        // Publish: any NCQ waiter that captured the prior generation now
+        // sees a different value and must return IoError rather than
+        // interpreting its cleared SACT bit as success.
+        self.reset_generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
@@ -1001,7 +1018,11 @@ impl AhciPort {
             for (i, &(phys, byte_count)) in sg_list.iter().enumerate() {
                 debug_assert!(phys.as_u64() % 2 == 0, "PRDT DBA must be word-aligned");
                 debug_assert!(byte_count > 0, "zero-length PRDT entry");
-                if byte_count == 0 {
+                debug_assert!(
+                    byte_count <= 4 * 1024 * 1024,
+                    "PRDT entry exceeds 4 MiB DBC limit: {byte_count}"
+                );
+                if byte_count == 0 || byte_count > 4 * 1024 * 1024 {
                     return Err(AhciError::IoError);
                 }
                 table.prdt[i] = PrdtEntry {
@@ -1081,11 +1102,14 @@ impl AhciPort {
             ptr::write_volatile(&raw mut (*header).reserved, [0; 4]);
         }
 
-        // Issue: write CI bit (read-modify-write under mmio_lock).
+        // Issue: write only the slot bit. CI is W1S per AHCI 1.3.1 -- writes
+        // of 0 are ignored and writes of 1 set the bit, so a direct write of
+        // `1 << slot` is both spec-correct and avoids the prior RMW's stale-
+        // read window. mmio_lock is retained to keep CI/SACT writes on this
+        // port ordered with respect to each other.
         let _lock = ranked_lock!(RANK_AHCI_MMIO, "AhciPort.mmio_lock", self.mmio_lock);
         unsafe {
-            let ci = ptr::read_volatile(&raw const (*self.port_regs).ci);
-            ptr::write_volatile(&raw mut (*self.port_regs).ci, ci | (1 << slot));
+            ptr::write_volatile(&raw mut (*self.port_regs).ci, 1u32 << slot);
         }
 
         Ok(())
@@ -1111,13 +1135,13 @@ impl AhciPort {
             ptr::write_volatile(&raw mut (*header).reserved, [0; 4]);
         }
 
-        // Issue: SACT MUST be written before CI for NCQ commands.
+        // Issue: SACT MUST be written before CI for NCQ commands. Both
+        // registers are W1S per AHCI 1.3.1 -- writing only the new bit is
+        // spec-correct and skips the prior RMW's stale-read window.
         let _lock = ranked_lock!(RANK_AHCI_MMIO, "AhciPort.mmio_lock", self.mmio_lock);
         unsafe {
-            let sact = ptr::read_volatile(&raw const (*self.port_regs).sact);
-            ptr::write_volatile(&raw mut (*self.port_regs).sact, sact | (1 << slot));
-            let ci = ptr::read_volatile(&raw const (*self.port_regs).ci);
-            ptr::write_volatile(&raw mut (*self.port_regs).ci, ci | (1 << slot));
+            ptr::write_volatile(&raw mut (*self.port_regs).sact, 1u32 << slot);
+            ptr::write_volatile(&raw mut (*self.port_regs).ci, 1u32 << slot);
         }
 
         Ok(())
@@ -1165,11 +1189,27 @@ impl AhciPort {
     }
 
     /// Wait for an NCQ command to complete (SACT bit clears).
-    fn wait_for_ncq_completion(&self, slot: usize, timeout: Duration) -> Result<(), AhciError> {
+    /// Wait for an NCQ slot bit to clear in SACT.
+    ///
+    /// `start_gen` is the `reset_generation` value sampled by the caller
+    /// *before* issuing the command. If `restart_port` runs during the wait,
+    /// `reset_generation` is bumped and COMRESET clears SACT in hardware --
+    /// without this guard the next SACT read would show our bit clear and we
+    /// would silently return Ok with an uninitialized buffer.
+    fn wait_for_ncq_completion(
+        &self,
+        slot: usize,
+        start_gen: u32,
+        timeout: Duration,
+    ) -> Result<(), AhciError> {
         let start = crate::timer::Instant::now();
         let port_regs = self.port_regs;
 
         loop {
+            if self.reset_generation.load(Ordering::Acquire) != start_gen {
+                // Port was reset out from under us. SACT bit is meaningless.
+                return Err(AhciError::IoError);
+            }
             let sact = unsafe { ptr::read_volatile(&raw const (*port_regs).sact) };
             if sact & (1 << slot) == 0 {
                 return Ok(());
@@ -1291,6 +1331,8 @@ impl AhciPort {
             let fis = FisRegH2D::new_read_fpdma_queued(lba, sectors, slot as u8);
             let sg = virt_buffer_to_sg_list(buffer.as_ptr(), expected_size);
 
+            // Sample BEFORE issue so any reset between issue and wait is caught.
+            let start_gen = self.reset_generation.load(Ordering::Acquire);
             if let Some(ref sg_list) = sg {
                 self.setup_scatter_direct(slot, &fis, sg_list)?;
                 let prdtl = sg_list.len() as u16;
@@ -1300,7 +1342,7 @@ impl AhciPort {
                 self.issue_ncq_command(slot, 0, num_pages as u16)?;
             }
 
-            self.wait_for_ncq_completion(slot, Duration::from_secs(5))?;
+            self.wait_for_ncq_completion(slot, start_gen, Duration::from_secs(5))?;
 
             // Only copy from pool if we used the pool path
             if sg.is_none() {
@@ -1357,6 +1399,7 @@ impl AhciPort {
             };
             let sg = virt_buffer_to_sg_list(buffer.as_ptr(), expected_size);
 
+            let start_gen = self.reset_generation.load(Ordering::Acquire);
             if let Some(ref sg_list) = sg {
                 self.setup_scatter_direct(slot, &fis, sg_list)?;
                 let prdtl = sg_list.len() as u16;
@@ -1380,7 +1423,7 @@ impl AhciPort {
                 self.issue_ncq_command(slot, CMD_HEADER_WRITE, num_pages as u16)?;
             }
 
-            self.wait_for_ncq_completion(slot, Duration::from_secs(5))
+            self.wait_for_ncq_completion(slot, start_gen, Duration::from_secs(5))
         });
 
         self.exit_ncq_mode();
@@ -1418,6 +1461,9 @@ impl AhciPort {
         for chunk in ranges.chunks_mut(max_batch) {
             // Allocate slots and issue all commands in this sub-batch.
             // Each slot gets its own AhciSlotOp for cancel tracking.
+            // Sample reset_generation BEFORE any issue in this chunk; if a
+            // reset fires during the chunk, every waiter in it detects it.
+            let start_gen = self.reset_generation.load(Ordering::Acquire);
             let mut slots: heapless::Vec<usize, 32> = heapless::Vec::new();
             let mut ops: heapless::Vec<Option<Arc<AhciSlotOp>>, 32> = heapless::Vec::new();
             let mut direct: heapless::Vec<bool, 32> = heapless::Vec::new();
@@ -1533,7 +1579,8 @@ impl AhciPort {
                     continue; // skipped or errored during issue
                 }
 
-                let wait_result = self.wait_for_ncq_completion(slot, Duration::from_secs(5));
+                let wait_result =
+                    self.wait_for_ncq_completion(slot, start_gen, Duration::from_secs(5));
 
                 if wait_result.is_ok() && !direct[i] {
                     // Pool path: copy from pool to buffer
@@ -1802,14 +1849,16 @@ impl AhciPort {
     }
 
     /// Flush write cache to disk. Drains NCQ before issuing FLUSH CACHE EXT.
+    ///
+    /// On NCQ-enabled ports `enter_legacy_mode` provides its own mutual
+    /// exclusion via `mode==-1`, so taking `legacy_lock` is redundant AND
+    /// dangerous: holding the lock across the park-on-NCQ-drain converts any
+    /// NCQ stall into a freeze of every other legacy-path caller. Only the
+    /// non-NCQ branch uses `legacy_lock`.
     pub fn flush_cache(&self) -> Result<(), AhciError> {
         match self.device_type {
-            DeviceType::Ata => {
-                let _guard =
-                    ranked_lock!(RANK_AHCI_LEGACY, "AhciPort.legacy_lock", self.legacy_lock);
-                if self.ncq_enabled() {
-                    self.enter_legacy_mode();
-                }
+            DeviceType::Ata if self.ncq_enabled() => {
+                self.enter_legacy_mode();
                 let result = self.execute_command(
                     &FisRegH2D::new_flush_cache(),
                     PhysAddr::zero(),
@@ -1817,10 +1866,19 @@ impl AhciPort {
                     0,
                     Duration::from_secs(5),
                 );
-                if self.ncq_enabled() {
-                    self.exit_legacy_mode();
-                }
+                self.exit_legacy_mode();
                 result
+            }
+            DeviceType::Ata => {
+                let _guard =
+                    ranked_lock!(RANK_AHCI_LEGACY, "AhciPort.legacy_lock", self.legacy_lock);
+                self.execute_command(
+                    &FisRegH2D::new_flush_cache(),
+                    PhysAddr::zero(),
+                    0,
+                    0,
+                    Duration::from_secs(5),
+                )
             }
             DeviceType::Atapi => Ok(()),
         }
