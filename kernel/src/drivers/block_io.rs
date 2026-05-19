@@ -161,13 +161,21 @@ impl BlockIoHandle {
     }
 
     /// Park until terminal. Indefinite.
+    ///
+    /// `WaitQueue::wait_until` may return spuriously per the kernel's park
+    /// contract, so we loop on the actual state rather than trusting a
+    /// single wake.
     pub fn wait(&self) -> Result<(), BlockError> {
-        self.waiters
-            .wait_until(|| self.state.load(Ordering::Acquire) != BLOCK_IO_PENDING);
-        match self.state.load(Ordering::Acquire) {
-            BLOCK_IO_SUCCESS => Ok(()),
-            BLOCK_IO_FAILED => Err(BlockError::from_code(self.error.load(Ordering::Acquire))),
-            _ => unreachable!("post-wait state must be terminal"),
+        loop {
+            match self.state.load(Ordering::Acquire) {
+                BLOCK_IO_SUCCESS => return Ok(()),
+                BLOCK_IO_FAILED => {
+                    return Err(BlockError::from_code(self.error.load(Ordering::Acquire)));
+                }
+                _ => {}
+            }
+            self.waiters
+                .wait_until(|| self.state.load(Ordering::Acquire) != BLOCK_IO_PENDING);
         }
     }
 }

@@ -1,21 +1,27 @@
-//! AHCI per-slot cancellable operation.
+//! AHCI per-slot cancellable operations.
 //!
-//! `AhciSlotOp` is created at slot-submission time and stored in two places:
-//! 1. `slot_waiters[slot]` — driver side; the interrupt/completion path reads it.
-//! 2. The submitter thread's `owned_ops` registry — reaper side; `Thread::free`
-//!    calls `cancel()` if the thread dies before the I/O completes.
+//! Two flavors, both impl [`CancellableOp`]:
 //!
-//! Exactly-once completion is guaranteed by an `AtomicU8` state machine with
-//! three states: `SLOT_PENDING → SLOT_COMPLETED` (normal path) or
-//! `SLOT_PENDING → SLOT_CANCELLED` (cancel path).  Whichever CAS wins owns
-//! the hardware slot release.
+//! - [`AhciSlotOp`] tracks a non-NCQ (legacy ATA, ATAPI, IDENTIFY, FLUSH)
+//!   command. The submitter runs synchronously inside `with_slot_try` and
+//!   completes via polling. The op only carries enough state to release the
+//!   slot if the thread dies mid-I/O.
+//!
+//! - [`AhciNcqOp`] tracks an in-flight NCQ command in the async path. It
+//!   carries an [`Arc<BlockIoHandle>`] (so the IRQ dispatcher can publish
+//!   completion), the caller's [`BlockBuffer`] (pinned for the I/O), and
+//!   `SlotCompletion` metadata describing any pool→buffer copy required on
+//!   success. Lives in `slot_waiters[slot]` AND in the submitter's
+//!   `owned_ops`; whichever path wins the state CAS owns hardware cleanup.
 
+use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use alloc::sync::Weak;
-
 use crate::{
-    drivers::ahci::port::AhciPort,
+    drivers::{
+        ahci::port::AhciPort,
+        block_io::{BlockBuffer, BlockError, BlockIoHandle},
+    },
     thread::{cancel::CancellableOp, thread::Thread},
 };
 
@@ -23,20 +29,19 @@ pub const SLOT_PENDING: u8 = 0;
 pub const SLOT_COMPLETED: u8 = 1;
 pub const SLOT_CANCELLED: u8 = 2;
 
-/// In-flight AHCI command slot operation.
+// ---------------------------------------------------------------------------
+// Legacy / non-NCQ
+// ---------------------------------------------------------------------------
+
+/// In-flight non-NCQ command tracker (legacy ATA, ATAPI, IDENTIFY, FLUSH).
 ///
-/// Held by both the per-slot waiter array and the submitter's `owned_ops`
-/// registry.  The completion path (driver kthread) and the cancel path
-/// (reaper kthread via `Thread::free`) race on `state`; whoever wins the
-/// CAS owns the slot release.
+/// The submitter runs synchronously inside `with_slot_try`; this op only
+/// tracks enough state to release the slot if the thread dies during the
+/// sync poll.
 pub struct AhciSlotOp {
-    /// Upgraded only from the cancel path to call `release_orphaned_slot`.
     pub port: Weak<AhciPort>,
-    /// Which command slot this op owns.
     pub slot: usize,
-    /// The submitting thread — upgraded by the completion path to issue a wake.
     pub waiter: Weak<Thread>,
-    /// State machine: 0=Pending, 1=Completed, 2=Cancelled.
     pub state: AtomicU8,
 }
 
@@ -53,7 +58,6 @@ impl AhciSlotOp {
 
 impl CancellableOp for AhciSlotOp {
     fn cancel(&self) {
-        // CAS Pending -> Cancelled. If we win, we own hardware cleanup.
         match self.state.compare_exchange(
             SLOT_PENDING,
             SLOT_CANCELLED,
@@ -61,36 +65,101 @@ impl CancellableOp for AhciSlotOp {
             Ordering::Acquire,
         ) {
             Ok(_) => {
-                // We own the slot. Release it so the port can reuse it.
                 if let Some(port) = self.port.upgrade() {
                     port.release_orphaned_slot(self.slot);
                 }
-                // If port is gone, AHCI is tearing down — nothing to do.
             }
             Err(SLOT_COMPLETED) => {
-                // The IRQ path won the CAS and set Completed first.
-                // It then tried to wake the submitter. There is a window
-                // (Running→Dying race): the IRQ saw the thread as live,
-                // called wake_thread (a silent no-op per Foundation #1),
-                // and did NOT call release_orphaned_slot — expecting the
-                // submitter's post-park cleanup to free the slot. But since
-                // we are in cancel() the thread is dying and that cleanup
-                // will never run. Use maybe_release_slot to race-safely
-                // reclaim the slot: if our Arc is still in slot_waiters the
-                // submitter never cleared it, so we free it.
                 if let Some(port) = self.port.upgrade() {
                     port.maybe_release_slot(self.slot, self);
                 }
             }
-            Err(SLOT_CANCELLED) => {
-                // Idempotent: cancel was already called (should not happen
-                // in practice since `owned_ops_cancel_all` drains the vec).
-            }
+            Err(SLOT_CANCELLED) => {}
             Err(_) => unreachable!("unexpected AhciSlotOp state"),
         }
     }
 
     fn id(&self) -> (&'static str, u64) {
         ("ahci", self.slot as u64)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NCQ
+// ---------------------------------------------------------------------------
+
+/// What the IRQ-side completion path must do once `SACT[slot]` clears.
+pub enum SlotCompletion {
+    /// Zero-copy direct DMA. Nothing to do on success.
+    Direct,
+    /// Pool-path read: copy `num_pages` of `slot_pool` into the destination
+    /// pointer, bounded by `expected_size`.
+    PoolRead {
+        num_pages: usize,
+        expected_size: usize,
+    },
+    /// Pool-path write: data was copied into the slot pool at submit time.
+    /// Nothing to do on success.
+    PoolWrite,
+}
+
+/// In-flight NCQ command tracker for the async submit/complete path.
+pub struct AhciNcqOp {
+    pub port: Weak<AhciPort>,
+    pub slot: usize,
+    pub submitter: Weak<Thread>,
+    pub state: AtomicU8,
+    pub start_gen: u32,
+    pub handle: Arc<BlockIoHandle>,
+    pub buffer: BlockBuffer,
+    pub completion: SlotCompletion,
+}
+
+impl AhciNcqOp {
+    pub fn new(
+        port: Weak<AhciPort>,
+        slot: usize,
+        submitter: Weak<Thread>,
+        start_gen: u32,
+        handle: Arc<BlockIoHandle>,
+        buffer: BlockBuffer,
+        completion: SlotCompletion,
+    ) -> Self {
+        Self {
+            port,
+            slot,
+            submitter,
+            state: AtomicU8::new(SLOT_PENDING),
+            start_gen,
+            handle,
+            buffer,
+            completion,
+        }
+    }
+}
+
+impl CancellableOp for AhciNcqOp {
+    fn cancel(&self) {
+        // CAS Pending -> Cancelled. If we win, publish Cancelled on the
+        // handle and release the hardware slot.
+        match self.state.compare_exchange(
+            SLOT_PENDING,
+            SLOT_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                self.handle.complete(Err(BlockError::Cancelled));
+                if let Some(port) = self.port.upgrade() {
+                    port.release_orphaned_ncq_slot(self.slot);
+                }
+            }
+            Err(SLOT_COMPLETED) | Err(SLOT_CANCELLED) => {}
+            Err(_) => unreachable!("unexpected AhciNcqOp state"),
+        }
+    }
+
+    fn id(&self) -> (&'static str, u64) {
+        ("ahci-ncq", self.slot as u64)
     }
 }

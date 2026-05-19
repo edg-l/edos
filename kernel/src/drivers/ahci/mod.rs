@@ -258,16 +258,16 @@ pub extern "C" fn ahci_driver_main() -> ! {
                 if port_is != 0 {
                     unsafe { ptr::write_volatile(&mut port_regs.is, port_is) };
 
-                    // Wake ALL per-slot waiters for this port. Each thread's
-                    // park condition re-checks SACT/CI to determine if its
-                    // specific command completed. Spurious wakes are harmless.
+                    // Hand off to the port's IRQ-side completion walker:
+                    // completes any NCQ slot whose SACT bit cleared, fails
+                    // all in-flight on TFES, and wakes legacy poll waiters.
                     if let Some(device) = detected_devices.iter().find(|d| {
                         d.controller_pci_address == controller.pci_device.address
                             && d.port_idx == port_idx
                     }) {
                         if let Some(port) = AHCI_PORTS.get().and_then(|p| p.get(device.id as usize))
                         {
-                            port.wake_all_slot_waiters();
+                            port.on_port_irq(port_is);
                         }
                     }
                 }
