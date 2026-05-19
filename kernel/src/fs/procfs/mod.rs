@@ -135,6 +135,13 @@ impl Procfs {
         )
     }
 
+    fn render_ahci_stats() -> String {
+        use crate::drivers::ahci::watchdog::{WATCHDOG_FIRINGS, WATCHDOG_RESTARTS};
+        let firings = WATCHDOG_FIRINGS.load(Ordering::Relaxed);
+        let restarts = WATCHDOG_RESTARTS.load(Ordering::Relaxed);
+        format!("firings={firings} restarts={restarts}\n")
+    }
+
     fn render_block_cache() -> String {
         if !BlockPageCache::initialized() {
             return concat!(
@@ -191,6 +198,7 @@ impl Procfs {
                 "evict_stats" => Ok(ProcNode::EvictStats),
                 "lock_order_stats" => Ok(ProcNode::LockOrderStats),
                 "inflight_stats" => Ok(ProcNode::InflightStats),
+                "ahci_stats" => Ok(ProcNode::AhciStats),
                 tid_component => parse_tid(tid_component)
                     .map(ProcNode::ProcessDir)
                     .ok_or(Error::FileNotFound),
@@ -259,6 +267,9 @@ impl FileSystem for Procfs {
                     inflight_stats.len(),
                 ));
 
+                let ahci_stats = Self::render_ahci_stats();
+                files.push(Self::file_entry("ahci_stats".to_string(), ahci_stats.len()));
+
                 for snapshot in snapshots {
                     files.push(Self::dir_entry(snapshot.tid.to_string()));
                 }
@@ -289,6 +300,7 @@ impl FileSystem for Procfs {
             | ProcNode::EvictStats
             | ProcNode::LockOrderStats
             | ProcNode::InflightStats
+            | ProcNode::AhciStats
             | ProcNode::ProcessStatus(_)
             | ProcNode::ProcessCmdline(_) => Err(Error::NotADir),
         }
@@ -336,6 +348,10 @@ impl FileSystem for Procfs {
             }
             ProcNode::InflightStats => {
                 let content = Self::render_inflight_stats();
+                Ok(Self::read_text(content, offset, count))
+            }
+            ProcNode::AhciStats => {
+                let content = Self::render_ahci_stats();
                 Ok(Self::read_text(content, offset, count))
             }
             ProcNode::Root | ProcNode::ProcessDir(_) => Err(Error::NotAFile),
@@ -396,6 +412,10 @@ impl FileSystem for Procfs {
                     "inflight_stats".to_string(),
                     content.len(),
                 ))
+            }
+            ProcNode::AhciStats => {
+                let content = Self::render_ahci_stats();
+                Ok(Self::file_entry("ahci_stats".to_string(), content.len()))
             }
             ProcNode::ProcessDir(tid) => {
                 let snapshots = Self::collect_snapshots();
@@ -655,6 +675,7 @@ enum ProcNode {
     EvictStats,
     LockOrderStats,
     InflightStats,
+    AhciStats,
     ProcessDir(u64),
     ProcessStatus(u64),
     ProcessCmdline(u64),
