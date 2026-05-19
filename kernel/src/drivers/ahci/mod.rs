@@ -34,11 +34,12 @@ pub mod controller;
 pub mod fis;
 pub mod port;
 pub mod structures;
+pub mod watchdog;
 
 /// Registry of AHCI ports indexed by `DetectedDevice.id`. Kept here so the
 /// IRQ dispatcher and ATAPI-skip predicate can reach a port without going
 /// through the block-io trait registry.
-static AHCI_PORTS: Once<Vec<Arc<AhciPort>>> = Once::new();
+pub(super) static AHCI_PORTS: Once<Vec<Arc<AhciPort>>> = Once::new();
 
 /// Returns true if the AHCI device with `device_id` is an ATAPI device
 /// (CD/DVD). The partition scanner skips these because EDOS has no
@@ -229,6 +230,11 @@ pub extern "C" fn ahci_driver_main() -> ! {
         );
     }
     AHCI_PORTS.call_once(|| direct_ports);
+
+    let _ = queue_spawn_kthread_named(
+        "ahci_watchdog",
+        watchdog::watchdog_entry as *const () as u64,
+    );
 
     // Interrupt dispatch loop.
     // MSI fires -> hardware ISR wakes this thread -> we dispatch per-slot wakeups.

@@ -15,7 +15,7 @@
 //!   `owned_ops`; whichever path wins the state CAS owns hardware cleanup.
 
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use crate::{
     drivers::{
@@ -120,6 +120,12 @@ pub struct AhciNcqOp {
     /// Treating it as completed in that window short-circuits the wait()
     /// against a buffer the drive never wrote to.
     pub issued: AtomicBool,
+    /// HPET tick captured at NCQ submit. `0` = not yet issued.
+    /// Stored with `Relaxed`; the `Release` on `issued` synchronizes
+    /// with the watchdog's `Acquire` load of `issued` and carries this
+    /// store, so any reader that sees `issued == true` also sees a
+    /// valid `issue_time`.
+    pub issue_time: AtomicU64,
 }
 
 impl AhciNcqOp {
@@ -142,6 +148,7 @@ impl AhciNcqOp {
             buffer,
             completion,
             issued: AtomicBool::new(false),
+            issue_time: AtomicU64::new(0),
         }
     }
 }

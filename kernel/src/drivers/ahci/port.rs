@@ -32,6 +32,7 @@ use crate::{
             },
         },
         dma::{DmaBuffer, DmaRegion, dma},
+        hpet::instant::HpetInstant,
     },
     log,
     memory::mapper::memory_mapper,
@@ -1231,6 +1232,8 @@ impl AhciPort {
 
         // Open the slot for IRQ-side completion. Release pairs with the
         // dispatcher's Acquire load in `complete_ncq_slot`.
+        op.issue_time
+            .store(HpetInstant::now().tick(), Ordering::Relaxed);
         op.issued.store(true, Ordering::Release);
 
         // Self-check: the drive may have completed between `issue_ncq_command`
@@ -1326,6 +1329,8 @@ impl AhciPort {
         }
 
         // See `submit_ncq_read` for the issued+self-check rationale.
+        op.issue_time
+            .store(HpetInstant::now().tick(), Ordering::Relaxed);
         op.issued.store(true, Ordering::Release);
         let sact = unsafe { ptr::read_volatile(&raw const (*self.port_regs).sact) };
         if sact & (1u32 << slot) == 0 {
@@ -1457,6 +1462,76 @@ impl AhciPort {
         self.exit_ncq_mode();
     }
 
+    /// Watchdog sweep for this port. Finds NCQ slots in-flight longer than
+    /// `timeout` and recovers via the same path as a TFES IRQ.
+    pub(crate) fn watchdog_sweep(self: &Arc<Self>, timeout: core::time::Duration) {
+        for slot in 0..AHCI_CMD_SLOTS {
+            // Take the lock briefly to clone the Arc; no allocation under lock.
+            let op = {
+                let guard = ranked_lock!(
+                    RANK_AHCI_SLOT,
+                    "AhciPort.ncq_waiters",
+                    self.ncq_waiters[slot]
+                );
+                match guard.as_ref() {
+                    Some(arc) => Arc::clone(arc),
+                    None => continue,
+                }
+            };
+
+            // Acquire-load issued. The submit path does:
+            //   op.issue_time.store(now, Relaxed);
+            //   op.issued.store(true, Release);
+            // so seeing issued==true guarantees a valid issue_time.
+            if !op.issued.load(Ordering::Acquire) {
+                continue;
+            }
+
+            // If completion already CAS'd state to Completed, skip.
+            if op.state.load(Ordering::Acquire) != SLOT_PENDING {
+                continue;
+            }
+
+            // issue_time is safe to load Relaxed; the Acquire on `issued`
+            // above synchronizes-with the submit Release and carries the
+            // prior Relaxed store of `issue_time`.
+            let issued_tick = op.issue_time.load(Ordering::Relaxed);
+            let elapsed = HpetInstant::from_tick(issued_tick).elapsed();
+            if elapsed < timeout {
+                continue;
+            }
+
+            log!(
+                "ahci: watchdog timeout port={} slot={} elapsed_ms={}",
+                self.port_idx,
+                slot,
+                elapsed.as_millis()
+            );
+            crate::drivers::ahci::watchdog::WATCHDOG_FIRINGS.fetch_add(1, Ordering::Relaxed);
+
+            // Acquire the `restarting` CAS guard FIRST, then fail-all + restart.
+            // If a TFES IRQ races us and wins the CAS, we skip entirely; its
+            // `fail_all_ncq_slots` walks the whole slot array, so nothing is
+            // lost. Doing `fail_all` outside the guard would let a new
+            // submitter install a fresh op into a slot we just cleared, and a
+            // concurrent caller's second `fail_all` pass would clobber it.
+            if self
+                .restarting
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.fail_all_ncq_slots(BlockError::Io);
+                let _ = self.restart_port();
+                self.restarting.store(false, Ordering::Release);
+                crate::drivers::ahci::watchdog::WATCHDOG_RESTARTS.fetch_add(1, Ordering::Relaxed);
+            }
+
+            // Port is restarting (by us or a concurrent TFES); further slot
+            // inspection on this port is moot.
+            return;
+        }
+    }
+
     /// Per-port IRQ pass entry point. Replaces the old
     /// `wake_all_slot_waiters` walk. Detects TFES + restarts the port if
     /// needed; otherwise completes any NCQ slot whose `SACT` bit has cleared,
@@ -1470,14 +1545,19 @@ impl AhciPort {
                 tfd & 0xFF,
                 (tfd >> 8) & 0xFF
             );
-            self.fail_all_ncq_slots(BlockError::Io);
-            // Only one thread restarts (re-entrancy guard); subsequent IRQs
-            // before restart completes are no-ops at this branch.
+            // Acquire the `restarting` CAS guard FIRST, then fail-all + restart.
+            // If the watchdog kthread races us and wins the CAS, we skip
+            // entirely; its `fail_all_ncq_slots` walks the whole slot array,
+            // so nothing is lost. Doing `fail_all` outside the guard would
+            // let a new submitter install a fresh op into a slot we just
+            // cleared, and a concurrent caller's second `fail_all` pass would
+            // clobber it.
             if self
                 .restarting
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
+                self.fail_all_ncq_slots(BlockError::Io);
                 let _ = self.restart_port();
                 self.restarting.store(false, Ordering::Release);
             }
