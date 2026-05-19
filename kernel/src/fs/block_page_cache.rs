@@ -36,7 +36,10 @@ use crate::{
     debug::lock_order::{
         RANK_BPC_JOURNALS, RANK_BPC_SHARD, RANK_JOURNAL_TRACKER, RANK_PAGE_WRITE_LOCK,
     },
-    drivers::ahci::{AhciError, direct},
+    drivers::{
+        ahci::AhciError,
+        block_io::{self, BlockBuffer, WriteFlags},
+    },
     log,
     memory::{frame_allocator::frame_allocator, get_virt_addr_from_phys_offset},
     ranked_lock,
@@ -339,6 +342,9 @@ fn is_usb(device_id: u64) -> bool {
 }
 
 /// Issue a single-page read from the appropriate backend.
+///
+/// USB still uses its mailbox API; Phase B migrates USB to the AsyncBlockDevice
+/// trait so this dispatch collapses to a single `block_io::lookup` path.
 fn read_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<(), AhciError> {
     let lba = page_block_idx * SECTORS_PER_PAGE as u64;
     let buf = frame_slice(frame);
@@ -352,7 +358,16 @@ fn read_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<(
         let n = data.len().min(PAGE_SIZE);
         buf[..n].copy_from_slice(&data[..n]);
     } else {
-        direct::read_sectors(device_id, lba, SECTORS_PER_PAGE, buf)?;
+        let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+        let h = dev.submit_read(
+            lba,
+            SECTORS_PER_PAGE as u32,
+            BlockBuffer::Slice {
+                ptr: buf.as_mut_ptr(),
+                len: PAGE_SIZE,
+            },
+        )?;
+        h.wait()?;
     }
     Ok(())
 }
@@ -365,7 +380,17 @@ fn write_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<
         crate::drivers::usb::block_api::usb_write_sectors(lba, SECTORS_PER_PAGE, buf.to_vec())
             .map_err(|_| AhciError::IoError)?;
     } else {
-        direct::write_sectors(device_id, lba, buf, SECTORS_PER_PAGE)?;
+        let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+        let h = dev.submit_write(
+            lba,
+            SECTORS_PER_PAGE as u32,
+            BlockBuffer::Slice {
+                ptr: buf.as_mut_ptr(),
+                len: PAGE_SIZE,
+            },
+            WriteFlags::NONE,
+        )?;
+        h.wait()?;
     }
     Ok(())
 }
@@ -620,22 +645,49 @@ impl BlockPageCache {
                 }
             }
         } else {
-            // AHCI: group contiguous miss indices into runs for batch I/O.
-            // Each run gets a slice into its frame(s).
-            // For simplicity, issue each miss as an individual direct read
-            // -- the AHCI driver handles concurrent NCQ internally.
-            // A future optimisation can coalesce truly-contiguous runs.
-            let mut batch: Vec<(u64, u16, &mut [u8])> = miss_indices
+            // AHCI: hand off to the trait's submit_read_batch. The AHCI impl
+            // forwards to its NCQ batch path for hardware-level parallelism.
+            let dev = match block_io::lookup(device_id) {
+                Some(d) => d,
+                None => {
+                    for f in frames.iter().flatten() {
+                        unsafe { frame_allocator().deallocate_frame(*f) };
+                    }
+                    return Err(AhciError::InvalidDevice);
+                }
+            };
+            let reqs: Vec<(u64, u32, BlockBuffer)> = miss_indices
                 .iter()
                 .enumerate()
                 .map(|(fi, &mi)| {
                     let lba = (start_page + mi as u64) * SECTORS_PER_PAGE as u64;
                     let buf = frame_slice(frames[fi].unwrap());
-                    (lba, SECTORS_PER_PAGE, buf)
+                    (
+                        lba,
+                        SECTORS_PER_PAGE as u32,
+                        BlockBuffer::Slice {
+                            ptr: buf.as_mut_ptr(),
+                            len: PAGE_SIZE,
+                        },
+                    )
                 })
                 .collect();
-
-            if let Err(e) = direct::read_sectors_batch(device_id, &mut batch) {
+            let handles = match dev.submit_read_batch(reqs) {
+                Ok(h) => h,
+                Err(e) => {
+                    for f in frames.iter().flatten() {
+                        unsafe { frame_allocator().deallocate_frame(*f) };
+                    }
+                    return Err(e.into());
+                }
+            };
+            let mut batch_err: Option<AhciError> = None;
+            for h in &handles {
+                if let Err(e) = h.wait() {
+                    batch_err.get_or_insert_with(|| e.into());
+                }
+            }
+            if let Some(e) = batch_err {
                 for f in frames.iter().flatten() {
                     unsafe { frame_allocator().deallocate_frame(*f) };
                 }
@@ -931,7 +983,9 @@ impl BlockPageCache {
         self.wait_for_flush(req);
 
         if !is_usb(device_id) {
-            direct::flush_cache(device_id)?;
+            let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+            let h = dev.submit_flush()?;
+            h.wait()?;
         }
         Ok(())
     }

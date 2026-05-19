@@ -1828,26 +1828,6 @@ impl AhciPort {
         }
     }
 
-    /// Write sectors with Force Unit Access (bypasses drive write cache).
-    /// Returns `IoError` if the device does not support FUA.
-    pub fn write_sectors_fua(
-        &self,
-        lba: u64,
-        buffer: &[u8],
-        sectors: u16,
-    ) -> Result<(), AhciError> {
-        if !self.supports_fua() {
-            return Err(AhciError::IoError);
-        }
-        match self.device_type {
-            DeviceType::Ata if self.ncq_enabled() => {
-                self.ncq_write_inner(lba, buffer, sectors, true)
-            }
-            DeviceType::Ata => self.legacy_ata_write_inner(lba, buffer, sectors, true),
-            DeviceType::Atapi => Err(AhciError::ReadOnly),
-        }
-    }
-
     /// Flush write cache to disk. Drains NCQ before issuing FLUSH CACHE EXT.
     ///
     /// On NCQ-enabled ports `enter_legacy_mode` provides its own mutual
@@ -2087,5 +2067,155 @@ impl AhciPort {
             sched().wake_thread(&op.waiter, WakePriority::Interrupt);
             crate::drivers::ahci::AHCI_SLOT_WAKES.fetch_add(1, Ordering::Relaxed);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AsyncBlockDevice implementation
+// ---------------------------------------------------------------------------
+
+use crate::drivers::block_io::{
+    AsyncBlockDevice, BlockBuffer, BlockError, BlockIoHandle, WriteFlags,
+};
+
+fn ahci_err_to_block(e: AhciError) -> BlockError {
+    match e {
+        AhciError::CommandTimeout => BlockError::Timeout,
+        AhciError::InvalidDevice | AhciError::PortNotReady => BlockError::DeviceGone,
+        AhciError::DmaError(_) => BlockError::NoMemory,
+        AhciError::InvalidSlot | AhciError::ReadOnly => BlockError::InvalidArg,
+        AhciError::IoError => BlockError::Io,
+    }
+}
+
+impl AhciPort {
+    /// Write with FUA if supported, falling back to a plain write + flush
+    /// so callers always get durability semantics even on QEMU where FUA is
+    /// often unimplemented.
+    fn write_with_fua_fallback(
+        &self,
+        lba: u64,
+        data: &[u8],
+        sectors: u16,
+    ) -> Result<(), AhciError> {
+        if self.supports_fua() {
+            let attempt = match self.device_type {
+                DeviceType::Ata if self.ncq_enabled() => {
+                    self.ncq_write_inner(lba, data, sectors, true)
+                }
+                DeviceType::Ata => self.legacy_ata_write_inner(lba, data, sectors, true),
+                DeviceType::Atapi => return Err(AhciError::ReadOnly),
+            };
+            match attempt {
+                Ok(()) => return Ok(()),
+                Err(AhciError::IoError) => {} // fall through to write+flush
+                Err(e) => return Err(e),
+            }
+        }
+        self.write_sectors(lba, data, sectors)?;
+        self.flush_cache()
+    }
+}
+
+impl AsyncBlockDevice for AhciPort {
+    fn submit_read(
+        &self,
+        lba: u64,
+        sectors: u32,
+        buffer: BlockBuffer,
+    ) -> Result<Arc<BlockIoHandle>, BlockError> {
+        let handle = BlockIoHandle::pending();
+        let buf_len = buffer.len();
+        let buf_ptr = buffer.as_mut_ptr();
+        let result = if sectors == 0 || sectors > u16::MAX as u32 {
+            Err(AhciError::IoError)
+        } else {
+            // SAFETY: caller guarantees the buffer outlives the handle.
+            // We complete the handle synchronously before returning, so
+            // the borrow lasts only this call.
+            let slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_len) };
+            self.read_sectors(lba, slice, sectors as u16)
+        };
+        drop(buffer);
+        handle.complete(result.map_err(ahci_err_to_block));
+        Ok(handle)
+    }
+
+    fn submit_write(
+        &self,
+        lba: u64,
+        sectors: u32,
+        buffer: BlockBuffer,
+        flags: WriteFlags,
+    ) -> Result<Arc<BlockIoHandle>, BlockError> {
+        let handle = BlockIoHandle::pending();
+        let buf_len = buffer.len();
+        let buf_ptr = buffer.as_ptr();
+        let result = if sectors == 0 || sectors > u16::MAX as u32 {
+            Err(AhciError::IoError)
+        } else {
+            let slice = unsafe { core::slice::from_raw_parts(buf_ptr, buf_len) };
+            if flags.contains(WriteFlags::FUA) {
+                self.write_with_fua_fallback(lba, slice, sectors as u16)
+            } else {
+                self.write_sectors(lba, slice, sectors as u16)
+            }
+        };
+        drop(buffer);
+        handle.complete(result.map_err(ahci_err_to_block));
+        Ok(handle)
+    }
+
+    fn submit_flush(&self) -> Result<Arc<BlockIoHandle>, BlockError> {
+        let handle = BlockIoHandle::pending();
+        handle.complete(self.flush_cache().map_err(ahci_err_to_block));
+        Ok(handle)
+    }
+
+    fn submit_read_batch(
+        &self,
+        reqs: alloc::vec::Vec<(u64, u32, BlockBuffer)>,
+    ) -> Result<alloc::vec::Vec<Arc<BlockIoHandle>>, BlockError> {
+        // Convert to (lba, sectors, &mut [u8]) ranges. Hold buffers alive
+        // for the duration; ranges borrow from them.
+        let mut buffers: alloc::vec::Vec<BlockBuffer> = alloc::vec::Vec::with_capacity(reqs.len());
+        let mut handles: alloc::vec::Vec<Arc<BlockIoHandle>> =
+            alloc::vec::Vec::with_capacity(reqs.len());
+        let mut metas: alloc::vec::Vec<(u64, u16, *mut u8, usize)> =
+            alloc::vec::Vec::with_capacity(reqs.len());
+
+        for (lba, sectors, buf) in reqs {
+            handles.push(BlockIoHandle::pending());
+            metas.push((lba, sectors as u16, buf.as_mut_ptr(), buf.len()));
+            buffers.push(buf);
+        }
+
+        let mut ranges: alloc::vec::Vec<(u64, u16, &mut [u8])> =
+            alloc::vec::Vec::with_capacity(metas.len());
+        for &(lba, sectors, ptr, len) in &metas {
+            // SAFETY: each buffer is held in `buffers` for the duration of
+            // this call; the slices are disjoint by caller contract.
+            let slice = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
+            ranges.push((lba, sectors, slice));
+        }
+
+        let result = self.read_sectors_batch(&mut ranges);
+        drop(ranges);
+        drop(buffers);
+
+        match result {
+            Ok(()) => {
+                for h in &handles {
+                    h.complete(Ok(()));
+                }
+            }
+            Err(e) => {
+                let be = ahci_err_to_block(e);
+                for h in &handles {
+                    h.complete(Err(be));
+                }
+            }
+        }
+        Ok(handles)
     }
 }

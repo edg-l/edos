@@ -31,11 +31,25 @@ use crate::{
 pub mod api;
 pub mod cancel_op;
 pub mod controller;
-pub mod direct;
-
 pub mod fis;
 pub mod port;
 pub mod structures;
+
+/// Registry of AHCI ports indexed by `DetectedDevice.id`. Kept here so the
+/// IRQ dispatcher and ATAPI-skip predicate can reach a port without going
+/// through the block-io trait registry.
+static AHCI_PORTS: Once<Vec<Arc<AhciPort>>> = Once::new();
+
+/// Returns true if the AHCI device with `device_id` is an ATAPI device
+/// (CD/DVD). The partition scanner skips these because EDOS has no
+/// ISO9660 driver and probing CD-ROMs is artificially slow under QEMU.
+pub fn is_atapi(device_id: u64) -> bool {
+    AHCI_PORTS
+        .get()
+        .and_then(|p| p.get(device_id as usize))
+        .map(|p| p.device_type == DeviceType::Atapi)
+        .unwrap_or(false)
+}
 
 #[derive(Debug, Error, Clone, Copy)]
 pub enum AhciError {
@@ -53,6 +67,20 @@ pub enum AhciError {
     InvalidSlot,
     #[error("device is read-only")]
     ReadOnly,
+}
+
+impl From<crate::drivers::block_io::BlockError> for AhciError {
+    fn from(e: crate::drivers::block_io::BlockError) -> Self {
+        use crate::drivers::block_io::BlockError;
+        match e {
+            BlockError::Timeout => AhciError::CommandTimeout,
+            BlockError::DeviceGone => AhciError::InvalidDevice,
+            BlockError::Io
+            | BlockError::Cancelled
+            | BlockError::InvalidArg
+            | BlockError::NoMemory => AhciError::IoError,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,9 +218,17 @@ pub extern "C" fn ahci_driver_main() -> ! {
 
     DETECTED_DEVICES.call_once(|| detected_devices.clone());
 
-    {
-        direct::init(direct_ports);
+    // Publish ports for the IRQ dispatcher and ATAPI-skip predicate, and
+    // register each AHCI port with the kernel-wide block-io registry so
+    // fs layers can submit_read / submit_write / submit_flush via the
+    // AsyncBlockDevice trait.
+    for (id, port) in direct_ports.iter().enumerate() {
+        crate::drivers::block_io::register(
+            id as u64,
+            port.clone() as Arc<dyn crate::drivers::block_io::AsyncBlockDevice>,
+        );
     }
+    AHCI_PORTS.call_once(|| direct_ports);
 
     // Interrupt dispatch loop.
     // MSI fires -> hardware ISR wakes this thread -> we dispatch per-slot wakeups.
@@ -229,7 +265,10 @@ pub extern "C" fn ahci_driver_main() -> ! {
                         d.controller_pci_address == controller.pci_device.address
                             && d.port_idx == port_idx
                     }) {
-                        direct::wake_all_waiters(device.id);
+                        if let Some(port) = AHCI_PORTS.get().and_then(|p| p.get(device.id as usize))
+                        {
+                            port.wake_all_slot_waiters();
+                        }
                     }
                 }
             }

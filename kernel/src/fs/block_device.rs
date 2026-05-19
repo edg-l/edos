@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::drivers::ahci::{AhciError, direct};
+use crate::drivers::{ahci::AhciError, block_io};
 
 use super::block_page_cache::{BlockPageCache, BlockPageGuard};
 
@@ -55,11 +55,14 @@ impl BlockDevice {
         BlockPageCache::global().write_partial_page(self.device_id, lba, sectors, data)
     }
 
-    /// Flush all dirty cached pages for this device then issue an AHCI cache flush.
+    /// Flush all dirty cached pages for this device then issue a hardware
+    /// cache flush.
     pub fn flush(&self) -> Result<(), AhciError> {
         BlockPageCache::global().flush_device(self.device_id)?;
         if !self.is_usb_device() {
-            direct::flush_cache(self.device_id)?;
+            let dev = block_io::lookup(self.device_id).ok_or(AhciError::InvalidDevice)?;
+            let h = dev.submit_flush()?;
+            h.wait()?;
         }
         Ok(())
     }

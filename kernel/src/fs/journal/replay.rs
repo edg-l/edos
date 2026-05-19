@@ -17,9 +17,48 @@ use efs_common::{
 };
 
 use crate::{
-    drivers::ahci::{AhciError, direct},
+    drivers::{
+        ahci::AhciError,
+        block_io::{self, BlockBuffer, WriteFlags},
+    },
     log,
 };
+
+fn block_read(device_id: u64, lba: u64, sectors: u16, buf: &mut [u8]) -> Result<(), AhciError> {
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let h = dev.submit_read(
+        lba,
+        sectors as u32,
+        BlockBuffer::Slice {
+            ptr: buf.as_mut_ptr(),
+            len: buf.len(),
+        },
+    )?;
+    h.wait()?;
+    Ok(())
+}
+
+fn block_write(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let h = dev.submit_write(
+        lba,
+        sectors as u32,
+        BlockBuffer::Slice {
+            ptr: buf.as_ptr() as *mut u8,
+            len: buf.len(),
+        },
+        WriteFlags::NONE,
+    )?;
+    h.wait()?;
+    Ok(())
+}
+
+fn block_flush(device_id: u64) -> Result<(), AhciError> {
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let h = dev.submit_flush()?;
+    h.wait()?;
+    Ok(())
+}
 
 const BLOCK_SIZE: usize = 4096;
 const SECTORS_PER_BLOCK: u16 = 8;
@@ -71,7 +110,7 @@ pub fn replay(
         let wrapped = (ring_idx % ring_size) + 1;
         let lba = (first_block + wrapped) * SECTORS_PER_BLOCK as u64;
         let mut buf = vec![0u8; BLOCK_SIZE];
-        direct::read_sectors(device_id, lba, SECTORS_PER_BLOCK, &mut buf)?;
+        block_read(device_id, lba, SECTORS_PER_BLOCK, &mut buf)?;
         Ok(buf)
     };
 
@@ -236,13 +275,13 @@ pub fn replay(
             // Write to home location via direct AHCI (not through the block page
             // cache — the cache isn't populated yet during early mount).
             let lba = partition_start_lba + fs_block * SECTORS_PER_BLOCK as u64;
-            direct::write_sectors(device_id, lba, &data, SECTORS_PER_BLOCK)?;
+            block_write(device_id, lba, SECTORS_PER_BLOCK, &data)?;
         }
         applied += 1;
     }
 
     // Flush all replayed writes to platter.
-    direct::flush_cache(device_id)?;
+    block_flush(device_id)?;
 
     log!(
         "efs journal: replayed {} transactions ({} ring blocks)",

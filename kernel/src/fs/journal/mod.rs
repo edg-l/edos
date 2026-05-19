@@ -23,10 +23,50 @@ use efs_common::{
 
 use crate::{
     debug::lock_order::{RANK_JOURNAL_STATE, RANK_JOURNAL_TRACKER},
-    drivers::ahci::{AhciError, direct},
+    drivers::{
+        ahci::AhciError,
+        block_io::{self, BlockBuffer, WriteFlags},
+    },
     ranked_lock,
     thread::{mutex::BlockingMutex, waitqueue::WaitQueue},
 };
+
+fn block_write(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let h = dev.submit_write(
+        lba,
+        sectors as u32,
+        BlockBuffer::Slice {
+            ptr: buf.as_ptr() as *mut u8,
+            len: buf.len(),
+        },
+        WriteFlags::NONE,
+    )?;
+    h.wait()?;
+    Ok(())
+}
+
+fn block_write_fua(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let h = dev.submit_write(
+        lba,
+        sectors as u32,
+        BlockBuffer::Slice {
+            ptr: buf.as_ptr() as *mut u8,
+            len: buf.len(),
+        },
+        WriteFlags::FUA,
+    )?;
+    h.wait()?;
+    Ok(())
+}
+
+fn block_flush(device_id: u64) -> Result<(), AhciError> {
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let h = dev.submit_flush()?;
+    h.wait()?;
+    Ok(())
+}
 
 use super::block_page_cache::CachedBlockPage;
 
@@ -241,7 +281,7 @@ impl Journal {
         data: &[u8],
     ) -> Result<(), AhciError> {
         let lba = self.journal_block_lba(journal_block_idx);
-        direct::write_sectors(self.device_id, lba, data, SECTORS_PER_BLOCK)
+        block_write(self.device_id, lba, SECTORS_PER_BLOCK, data)
     }
 
     /// Write one 4096-byte journal block with Force Unit Access for durability.
@@ -252,7 +292,7 @@ impl Journal {
         data: &[u8],
     ) -> Result<(), AhciError> {
         let lba = self.journal_block_lba(journal_block_idx);
-        direct::write_sectors_fua(self.device_id, lba, data, SECTORS_PER_BLOCK)
+        block_write_fua(self.device_id, lba, SECTORS_PER_BLOCK, data)
     }
 
     // ---- Journal superblock update ------------------------------------------
@@ -285,7 +325,7 @@ impl Journal {
         let lba = self.first_block * SECTORS_PER_BLOCK as u64;
         let mut block = vec![0u8; BLOCK_SIZE];
         write_struct(&mut block, 0, &jsb);
-        direct::write_sectors_fua(self.device_id, lba, &block, SECTORS_PER_BLOCK)
+        block_write_fua(self.device_id, lba, SECTORS_PER_BLOCK, &block)
     }
 
     // ---- TxHandle API -------------------------------------------------------
@@ -574,7 +614,7 @@ impl Journal {
             }
 
             // Ordering barrier: flush drive write cache before commit block.
-            direct::flush_cache(self.device_id)?;
+            block_flush(self.device_id)?;
 
             // Compute CRC over all payload bytes (escaped copies).
             let payload_crc = commit_block_checksum(&payload_bytes);

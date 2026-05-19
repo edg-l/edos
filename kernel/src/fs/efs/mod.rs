@@ -18,6 +18,54 @@ use super::block_page_cache::BlockPageCache;
 use super::gpt::Partition;
 use super::journal::{Journal, tx::TxHandle};
 use super::page_cache::{CachedPage, PageCacheOps};
+use crate::drivers::ahci::AhciError;
+use crate::drivers::block_io::{self, BlockBuffer, WriteFlags};
+
+/// Submit a sector-level read and park on the handle. Returns an `AhciError`
+/// so existing call sites can `?`-propagate without further mapping.
+fn block_read(device_id: u64, lba: u64, sectors: u16, buf: &mut [u8]) -> Result<(), AhciError> {
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let handle = dev.submit_read(
+        lba,
+        sectors as u32,
+        BlockBuffer::Slice {
+            ptr: buf.as_mut_ptr(),
+            len: buf.len(),
+        },
+    )?;
+    handle.wait()?;
+    Ok(())
+}
+
+fn block_write(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let handle = dev.submit_write(
+        lba,
+        sectors as u32,
+        BlockBuffer::Slice {
+            ptr: buf.as_ptr() as *mut u8,
+            len: buf.len(),
+        },
+        WriteFlags::NONE,
+    )?;
+    handle.wait()?;
+    Ok(())
+}
+
+fn block_write_fua(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let handle = dev.submit_write(
+        lba,
+        sectors as u32,
+        BlockBuffer::Slice {
+            ptr: buf.as_ptr() as *mut u8,
+            len: buf.len(),
+        },
+        WriteFlags::FUA,
+    )?;
+    handle.wait()?;
+    Ok(())
+}
 use super::path::Path;
 use super::{Error, File, FileAttrs, FileKind, FileSystem, FileTime};
 use crate::{
@@ -242,12 +290,7 @@ impl EfsDriver {
                 )
             };
             jsb_block[..jsb_bytes.len()].copy_from_slice(jsb_bytes);
-            crate::drivers::ahci::direct::write_sectors_fua(
-                partition.device_id,
-                jsb_lba,
-                &jsb_block,
-                sectors_per_block,
-            )?;
+            block_write_fua(partition.device_id, jsb_lba, sectors_per_block, &jsb_block)?;
         }
 
         // j_first_block is already a partition-relative EFS block number.
@@ -473,12 +516,7 @@ impl EfsDriver {
             // bulk AHCI commands into per-page cache ops. The per-inode page
             // cache owns file data — do not route through BlockPageCache.
             let mut bulk_data = vec![0u8; total_sectors as usize * 512];
-            crate::drivers::ahci::direct::read_sectors(
-                self.device.device_id,
-                lba,
-                total_sectors,
-                &mut bulk_data,
-            )?;
+            block_read(self.device.device_id, lba, total_sectors, &mut bulk_data)?;
 
             // Copy the useful portion into result.
             let bulk_bytes = bulk_blocks as usize * block_size;
@@ -803,20 +841,10 @@ impl EfsDriver {
             // metadata (inode, bitmap, BGD) goes through the journaled block cache.
             let lba = self.block_to_lba(phys_block);
             let mut block_data = vec![0u8; block_size];
-            crate::drivers::ahci::direct::read_sectors(
-                self.device.device_id,
-                lba,
-                spb,
-                &mut block_data,
-            )?;
+            block_read(self.device.device_id, lba, spb, &mut block_data)?;
             block_data[offset_in_block..offset_in_block + copy_len]
                 .copy_from_slice(&data[written..written + copy_len]);
-            crate::drivers::ahci::direct::write_sectors(
-                self.device.device_id,
-                lba,
-                &block_data,
-                spb,
-            )?;
+            block_write(self.device.device_id, lba, spb, &block_data)?;
 
             written += copy_len;
         }
@@ -2523,7 +2551,7 @@ impl PageCacheOps for EfsDriver {
         let spb = self.sectors_per_block();
 
         // INVARIANT: file-data page cache does not route through BlockDevice to avoid double-caching. Do not change.
-        crate::drivers::ahci::direct::read_sectors(
+        block_read(
             self.device.device_id,
             lba,
             spb,
@@ -2583,12 +2611,7 @@ impl PageCacheOps for EfsDriver {
 
         // INVARIANT: file-data page cache does not route through BlockDevice to avoid double-caching. Do not change.
         let needed = spb as usize * 512;
-        if let Err(e) = crate::drivers::ahci::direct::write_sectors(
-            self.device.device_id,
-            lba,
-            &buf[..needed],
-            spb,
-        ) {
+        if let Err(e) = block_write(self.device.device_id, lba, spb, &buf[..needed]) {
             tx.abort();
             return Err(e.into());
         }
@@ -2704,12 +2727,7 @@ impl PageCacheOps for EfsDriver {
             for ((_, page), &phys_block) in chunk.iter().zip(phys_blocks.iter()) {
                 let lba = self.block_to_lba(phys_block);
                 let buf = unsafe { page.as_slice() };
-                if let Err(e) = crate::drivers::ahci::direct::write_sectors(
-                    self.device.device_id,
-                    lba,
-                    &buf[..needed_bytes],
-                    spb,
-                ) {
+                if let Err(e) = block_write(self.device.device_id, lba, spb, &buf[..needed_bytes]) {
                     tx.abort();
                     return Err(e.into());
                 }

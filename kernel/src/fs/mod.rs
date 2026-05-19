@@ -465,7 +465,7 @@ pub extern "C" fn fs_main_thread() -> ! {
         // device is ~600ms under QEMU's emulated media-ready latency.
         // When CD-ROM support lands, mount it explicitly via the mount
         // syscall — detect_filesystem still handles ATAPI correctly.
-        if crate::drivers::ahci::direct::is_atapi(device.id) {
+        if crate::drivers::ahci::is_atapi(device.id) {
             log!("Skipping ATAPI device {} at boot", device.id);
             continue;
         }

@@ -1,7 +1,7 @@
 //! FAT32 PageCacheOps implementation.
 //!
-//! File data I/O routes exclusively through `crate::drivers::ahci::direct`
-//! (not through BlockPageCache) per the project invariant for file data paths.
+//! File data I/O routes exclusively through the block-io trait (bypassing
+//! `BlockPageCache`) per the project invariant for file data paths.
 //!
 //! # Cluster chain walking
 //! `cluster_at_index` walks from the head on every call, so `fill_page` is O(N)
@@ -13,7 +13,7 @@
 use alloc::{collections::BTreeSet, vec};
 
 use crate::{
-    drivers::ahci::direct,
+    drivers::block_io::{self, BlockBuffer, WriteFlags},
     fs::{
         Error, FileTime,
         fat32::{FatInodeEntry, Fatfs},
@@ -221,13 +221,18 @@ impl PageCacheOps for Fatfs {
             let read_bytes = sectors_to_read as usize * SECTOR_SIZE;
 
             let mut scratch = vec![0u8; read_bytes];
-            direct::read_sectors(
-                self.partition.device_id as u64,
-                lba,
-                sectors_to_read,
-                &mut scratch,
-            )
-            .map_err(|_| Error::IoError)?;
+            let dev = block_io::lookup(self.partition.device_id as u64).ok_or(Error::IoError)?;
+            let h = dev
+                .submit_read(
+                    lba,
+                    sectors_to_read as u32,
+                    BlockBuffer::Slice {
+                        ptr: scratch.as_mut_ptr(),
+                        len: read_bytes,
+                    },
+                )
+                .map_err(|_| Error::IoError)?;
+            h.wait().map_err(|_| Error::IoError)?;
 
             // Copy the requested slice from the scratch buffer into buf.
             let src_start = cluster_off % SECTOR_SIZE;
@@ -336,13 +341,19 @@ impl PageCacheOps for Fatfs {
             let mut scratch = vec![0u8; write_bytes];
             scratch[src_start..src_end].copy_from_slice(&buf[buf_pos..buf_pos + take]);
 
-            direct::write_sectors(
-                self.partition.device_id as u64,
-                lba,
-                &scratch,
-                sectors_to_write,
-            )
-            .map_err(|_| Error::IoError)?;
+            let dev = block_io::lookup(self.partition.device_id as u64).ok_or(Error::IoError)?;
+            let h = dev
+                .submit_write(
+                    lba,
+                    sectors_to_write as u32,
+                    BlockBuffer::Slice {
+                        ptr: scratch.as_mut_ptr(),
+                        len: scratch.len(),
+                    },
+                    WriteFlags::NONE,
+                )
+                .map_err(|_| Error::IoError)?;
+            h.wait().map_err(|_| Error::IoError)?;
 
             buf_pos += take;
             file_pos += take;

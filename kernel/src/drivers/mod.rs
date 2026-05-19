@@ -3,6 +3,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::{graphics, thread::util::queue_spawn_kthread_named};
 
 pub mod ahci;
+pub mod block_io;
 pub mod dma;
 pub mod e1000e;
 pub mod fpu;
