@@ -1,13 +1,10 @@
 use alloc::vec::Vec;
 
-use crate::drivers::{ahci::AhciError, block_io};
+use crate::drivers::ahci::AhciError;
 
 use super::block_page_cache::{BlockPageCache, BlockPageGuard};
 
 const PAGE_SIZE: usize = 4096;
-
-/// Device IDs >= this value are USB storage devices and route to the USB block API.
-pub const USB_DEVICE_ID_BASE: u64 = 1000;
 
 #[derive(Debug)]
 pub struct BlockDevice {
@@ -18,10 +15,6 @@ impl BlockDevice {
     /// Create a new BlockDevice. Caching is handled by the global `BlockPageCache`.
     pub fn new(device_id: u64) -> Self {
         Self { device_id }
-    }
-
-    fn is_usb_device(&self) -> bool {
-        self.device_id >= USB_DEVICE_ID_BASE
     }
 
     // ---- Page-level API (used by EFS) ------------------------------------
@@ -55,15 +48,10 @@ impl BlockDevice {
         BlockPageCache::global().write_partial_page(self.device_id, lba, sectors, data)
     }
 
-    /// Flush all dirty cached pages for this device then issue a hardware
-    /// cache flush.
+    /// Flush all dirty cached pages for this device, then issue the hardware
+    /// cache flush via the block-io trait. `submit_flush` is a no-op on
+    /// devices without a write cache.
     pub fn flush(&self) -> Result<(), AhciError> {
-        BlockPageCache::global().flush_device(self.device_id)?;
-        if !self.is_usb_device() {
-            let dev = block_io::lookup(self.device_id).ok_or(AhciError::InvalidDevice)?;
-            let h = dev.submit_flush()?;
-            h.wait()?;
-        }
-        Ok(())
+        BlockPageCache::global().flush_device(self.device_id)
     }
 }

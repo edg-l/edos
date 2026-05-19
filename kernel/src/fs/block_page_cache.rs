@@ -58,8 +58,6 @@ const SHARD_CAPACITY: usize = 256;
 const PAGE_SIZE: usize = 4096;
 /// Sectors per 4 KiB page.
 const SECTORS_PER_PAGE: u16 = 8;
-/// Device IDs >= this value are USB storage devices.
-const USB_DEVICE_ID_BASE: u64 = 1000;
 /// A dirty page is only written back if it has been dirty for at least this
 /// long. Matches Linux's `dirty_expire_centisecs` concept (Linux default 30s;
 /// we use 5s since our metadata volume is small). Forced flushes (sync/fsync)
@@ -337,61 +335,38 @@ fn frame_slice(frame: PhysFrame) -> &'static mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(ptr, PAGE_SIZE) }
 }
 
-fn is_usb(device_id: u64) -> bool {
-    device_id >= USB_DEVICE_ID_BASE
-}
-
-/// Issue a single-page read from the appropriate backend.
-///
-/// USB still uses its mailbox API; Phase B migrates USB to the AsyncBlockDevice
-/// trait so this dispatch collapses to a single `block_io::lookup` path.
+/// Issue a single-page read via the block-io trait.
 fn read_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<(), AhciError> {
     let lba = page_block_idx * SECTORS_PER_PAGE as u64;
     let buf = frame_slice(frame);
-    if is_usb(device_id) {
-        let data = crate::drivers::usb::block_api::usb_read_sectors(
-            lba,
-            SECTORS_PER_PAGE,
-            vec![0u8; PAGE_SIZE],
-        )
-        .map_err(|_| AhciError::IoError)?;
-        let n = data.len().min(PAGE_SIZE);
-        buf[..n].copy_from_slice(&data[..n]);
-    } else {
-        let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-        let h = dev.submit_read(
-            lba,
-            SECTORS_PER_PAGE as u32,
-            BlockBuffer::Slice {
-                ptr: buf.as_mut_ptr(),
-                len: PAGE_SIZE,
-            },
-        )?;
-        h.wait()?;
-    }
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let h = dev.submit_read(
+        lba,
+        SECTORS_PER_PAGE as u32,
+        BlockBuffer::Slice {
+            ptr: buf.as_mut_ptr(),
+            len: PAGE_SIZE,
+        },
+    )?;
+    h.wait()?;
     Ok(())
 }
 
-/// Issue a single-page write to the appropriate backend.
+/// Issue a single-page write via the block-io trait.
 fn write_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<(), AhciError> {
     let lba = page_block_idx * SECTORS_PER_PAGE as u64;
     let buf = frame_slice(frame);
-    if is_usb(device_id) {
-        crate::drivers::usb::block_api::usb_write_sectors(lba, SECTORS_PER_PAGE, buf.to_vec())
-            .map_err(|_| AhciError::IoError)?;
-    } else {
-        let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-        let h = dev.submit_write(
-            lba,
-            SECTORS_PER_PAGE as u32,
-            BlockBuffer::Slice {
-                ptr: buf.as_mut_ptr(),
-                len: PAGE_SIZE,
-            },
-            WriteFlags::NONE,
-        )?;
-        h.wait()?;
-    }
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let h = dev.submit_write(
+        lba,
+        SECTORS_PER_PAGE as u32,
+        BlockBuffer::Slice {
+            ptr: buf.as_mut_ptr(),
+            len: PAGE_SIZE,
+        },
+        WriteFlags::NONE,
+    )?;
+    h.wait()?;
     Ok(())
 }
 
@@ -632,67 +607,54 @@ impl BlockPageCache {
             let _ = mi; // suppress lint
         }
 
-        if is_usb(device_id) {
-            // USB: sequential reads into each frame.
-            for (fi, &mi) in miss_indices.iter().enumerate() {
-                let frame = frames[fi].unwrap();
-                let page_idx = start_page + mi as u64;
-                if let Err(e) = read_frame(device_id, page_idx, frame) {
-                    for f in frames.iter().flatten() {
-                        unsafe { frame_allocator().deallocate_frame(*f) };
-                    }
-                    return Err(e);
-                }
-            }
-        } else {
-            // AHCI: hand off to the trait's submit_read_batch. The AHCI impl
-            // forwards to its NCQ batch path for hardware-level parallelism.
-            let dev = match block_io::lookup(device_id) {
-                Some(d) => d,
-                None => {
-                    for f in frames.iter().flatten() {
-                        unsafe { frame_allocator().deallocate_frame(*f) };
-                    }
-                    return Err(AhciError::InvalidDevice);
-                }
-            };
-            let reqs: Vec<(u64, u32, BlockBuffer)> = miss_indices
-                .iter()
-                .enumerate()
-                .map(|(fi, &mi)| {
-                    let lba = (start_page + mi as u64) * SECTORS_PER_PAGE as u64;
-                    let buf = frame_slice(frames[fi].unwrap());
-                    (
-                        lba,
-                        SECTORS_PER_PAGE as u32,
-                        BlockBuffer::Slice {
-                            ptr: buf.as_mut_ptr(),
-                            len: PAGE_SIZE,
-                        },
-                    )
-                })
-                .collect();
-            let handles = match dev.submit_read_batch(reqs) {
-                Ok(h) => h,
-                Err(e) => {
-                    for f in frames.iter().flatten() {
-                        unsafe { frame_allocator().deallocate_frame(*f) };
-                    }
-                    return Err(e.into());
-                }
-            };
-            let mut batch_err: Option<AhciError> = None;
-            for h in &handles {
-                if let Err(e) = h.wait() {
-                    batch_err.get_or_insert_with(|| e.into());
-                }
-            }
-            if let Some(e) = batch_err {
+        // Hand off to the trait's submit_read_batch. AHCI overrides this with
+        // its NCQ batch path for hardware-level parallelism; USB falls back to
+        // the default serial-submit loop transparently.
+        let dev = match block_io::lookup(device_id) {
+            Some(d) => d,
+            None => {
                 for f in frames.iter().flatten() {
                     unsafe { frame_allocator().deallocate_frame(*f) };
                 }
-                return Err(e);
+                return Err(AhciError::InvalidDevice);
             }
+        };
+        let reqs: Vec<(u64, u32, BlockBuffer)> = miss_indices
+            .iter()
+            .enumerate()
+            .map(|(fi, &mi)| {
+                let lba = (start_page + mi as u64) * SECTORS_PER_PAGE as u64;
+                let buf = frame_slice(frames[fi].unwrap());
+                (
+                    lba,
+                    SECTORS_PER_PAGE as u32,
+                    BlockBuffer::Slice {
+                        ptr: buf.as_mut_ptr(),
+                        len: PAGE_SIZE,
+                    },
+                )
+            })
+            .collect();
+        let handles = match dev.submit_read_batch(reqs) {
+            Ok(h) => h,
+            Err(e) => {
+                for f in frames.iter().flatten() {
+                    unsafe { frame_allocator().deallocate_frame(*f) };
+                }
+                return Err(e.into());
+            }
+        };
+        let mut batch_err: Option<AhciError> = None;
+        for h in &handles {
+            if let Err(e) = h.wait() {
+                batch_err.get_or_insert_with(|| e.into());
+            }
+        }
+        if let Some(e) = batch_err {
+            for f in frames.iter().flatten() {
+                unsafe { frame_allocator().deallocate_frame(*f) };
+            }
+            return Err(e);
         }
 
         // Insert pages into cache, resolving any races.
@@ -982,11 +944,11 @@ impl BlockPageCache {
         self.writeback_wq.wake_all();
         self.wait_for_flush(req);
 
-        if !is_usb(device_id) {
-            let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-            let h = dev.submit_flush()?;
-            h.wait()?;
-        }
+        // submit_flush is a no-op on devices without a hardware write cache
+        // (USB MSC today), and issues FLUSH CACHE EXT on AHCI.
+        let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+        let h = dev.submit_flush()?;
+        h.wait()?;
         Ok(())
     }
 

@@ -1363,6 +1363,10 @@ pub extern "C" fn xhci_driver_main() -> ! {
     // blocking the xHCI thread during port enumeration).
     if let Some((block_count, idx)) = pending_usb_partition {
         let device_id = 1000 + idx as u64;
+        // Register this USB mass-storage device with the kernel-wide block-io
+        // registry so fs/* can submit reads/writes via the AsyncBlockDevice
+        // trait without knowing about the underlying mailbox transport.
+        crate::drivers::usb::block_dev::register(device_id);
         let partition = crate::fs::gpt::Partition {
             index: 0,
             starting_lba: 0,
@@ -1374,7 +1378,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
             device_id,
             unique_partition_guid: [0; 16],
         };
-        if let Err(e) = crate::drivers::usb::block_api::register_usb_partition(partition) {
+        if let Err(e) = crate::fs::api::register_partition(partition) {
             println!("xhci: failed to register USB partition: {:?}", e);
         }
     }
@@ -1430,7 +1434,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
     //
     // Two wake sources:
     // 1. MSI-X interrupt -> wake_thread_irq from interrupt handler (HID events)
-    // 2. USB block I/O -> wake_thread from block_api after mailbox send
+    // 2. USB block I/O -> wake_thread from block_dev after mailbox send
     loop {
         // Use thread_park_while so we only park if there's truly nothing to do.
         // This avoids lost wakes when a mailbox request arrives between the
