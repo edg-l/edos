@@ -2577,6 +2577,96 @@ impl PageCacheOps for EfsDriver {
         self.read_file_data(&inode, offset, count)
     }
 
+    /// Async prefetch: submit ONE AHCI read for the range and return its
+    /// handle + the shared buffer. Returns `None` if the range isn't fully
+    /// covered by a single extent (the caller falls back to sync
+    /// `fill_pages_bulk`).
+    fn submit_prefetch_pages(
+        &self,
+        ino: u64,
+        offset: usize,
+        count: usize,
+    ) -> Result<
+        Option<(
+            alloc::sync::Arc<crate::drivers::block_io::BlockIoHandle>,
+            alloc::sync::Arc<alloc::vec::Vec<u8>>,
+        )>,
+        Error,
+    > {
+        let inode = self.read_inode(ino)?;
+        if inode.mode & S_IFMT != S_IFREG {
+            return Err(Error::NotAFile);
+        }
+        // Past EOF: nothing to do.
+        if offset >= inode.size as usize {
+            return Ok(None);
+        }
+        let to_read = count.min(inode.size as usize - offset);
+        if to_read == 0 {
+            return Ok(None);
+        }
+
+        // Inline-data inodes can't prefetch — the data lives inside the inode.
+        if inode.flags & INODE_FLAG_INLINE_DATA != 0 {
+            return Ok(None);
+        }
+
+        // Parse extents.
+        let hdr: EfsExtentHeader = unsafe {
+            core::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader)
+        };
+        if hdr.magic != EXTENT_MAGIC || hdr.depth != 0 {
+            return Ok(None);
+        }
+        let extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
+
+        let block_size = self.block_size() as usize;
+        let logical_start = (offset / block_size) as u32;
+        let logical_end = ((offset + to_read).div_ceil(block_size)) as u32;
+
+        // The range must be covered by ONE extent for single-submit prefetch.
+        let extent = match extents.as_slice().iter().find(|e| {
+            e.logical_block <= logical_start && logical_start < e.logical_block + e.length as u32
+        }) {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        if logical_end > extent.logical_block + extent.length as u32 {
+            return Ok(None);
+        }
+
+        // Convert to LBA + sector count.
+        let blocks_into_extent = logical_start - extent.logical_block;
+        let phys_block = extent.physical_start() + blocks_into_extent as u64;
+        let lba = self.block_to_lba(phys_block);
+        let total_blocks = logical_end - logical_start;
+        let spb = self.sectors_per_block();
+        let total_sectors = total_blocks * spb as u32;
+        if total_sectors > u16::MAX as u32 {
+            return Ok(None);
+        }
+
+        // Allocate the shared buffer (block-aligned, size = whole-blocks of
+        // data; finalization copies the relevant chunk into each page).
+        let byte_count = total_blocks as usize * block_size;
+        let buffer = alloc::sync::Arc::new(alloc::vec![0u8; byte_count]);
+
+        // Submit the read with a Shared BlockBuffer so the DMA target stays
+        // alive even if no caller observes the prefetch.
+        let dev = crate::drivers::block_io::lookup(self.device.device_id).ok_or(Error::IoError)?;
+        let block_handle = dev
+            .submit_read(
+                lba,
+                total_sectors,
+                crate::drivers::block_io::BlockBuffer::Shared {
+                    vec: buffer.clone(),
+                },
+            )
+            .map_err(|_| Error::IoError)?;
+
+        Ok(Some((block_handle, buffer)))
+    }
+
     fn flush_page(
         &self,
         ino: u64,

@@ -412,20 +412,28 @@ fn page_cache_read_core(
         uncached_ranges.push((start, read_end_page));
     }
 
+    // Split each uncached run at `end_page`: the request portion
+    // `[range_start..=min(range_end, end_page)]` must complete before we
+    // emit, and is filled synchronously. Anything past `end_page` is
+    // pure readahead and can be fired off without parking via
+    // `submit_prefetch_pages`, with finalization deferred to the first
+    // joiner. On any prefetch-submit failure we fall back to the sync
+    // bulk fill — never block the read path on a readahead error.
     for &(range_start, range_end) in &uncached_ranges {
-        let byte_offset = range_start * 4096;
-        let byte_count = (range_end - range_start + 1) * 4096;
-
-        let page_count = (range_end - range_start + 1) as u64;
-        let bulk_result =
-            page_fill::get_or_fill_bulk_async_sync(inode, range_start as u64, page_count, || {
-                pc_ops.fill_pages_bulk(ino, byte_offset, byte_count)
-            });
-
-        match bulk_result {
-            Ok(()) => {}
-            Err(_) => {
-                for page_idx in range_start..=range_end {
+        // Sync portion overlapping the user's requested range.
+        let sync_end = range_end.min(end_page);
+        if range_start <= sync_end {
+            let byte_offset = range_start * 4096;
+            let byte_count = (sync_end - range_start + 1) * 4096;
+            let page_count = (sync_end - range_start + 1) as u64;
+            let bulk_result = page_fill::get_or_fill_bulk_async_sync(
+                inode,
+                range_start as u64,
+                page_count,
+                || pc_ops.fill_pages_bulk(ino, byte_offset, byte_count),
+            );
+            if bulk_result.is_err() {
+                for page_idx in range_start..=sync_end {
                     page_fill::get_or_fill_async_sync(inode, page_idx as u64, |buf| {
                         let valid = pc_ops.fill_page(ino, page_idx as u64, buf)?;
                         if valid < 4096 {
@@ -433,6 +441,42 @@ fn page_cache_read_core(
                         }
                         Ok(())
                     })?;
+                }
+            }
+        }
+
+        // Async-prefetch portion past the user's request.
+        if range_end > end_page {
+            let pf_start = end_page + 1;
+            let pf_end = range_end;
+            let pf_offset = pf_start * 4096;
+            let pf_count = (pf_end - pf_start + 1) * 4096;
+            match pc_ops.submit_prefetch_pages(ino, pf_offset, pf_count) {
+                Ok(Some((block_handle, buffer))) => {
+                    let installed = page_fill::issue_prefetch_bulk(
+                        inode,
+                        pf_start as u64,
+                        (pf_end - pf_start + 1) as u64,
+                        block_handle,
+                        buffer,
+                    );
+                    let _ = installed;
+                }
+                Ok(None) | Err(_) => {
+                    // No prefetch path available (e.g. cross-extent or
+                    // unsupported by driver) — fall back to a sync bulk
+                    // fill of the readahead window so this read still
+                    // benefits from a populated cache, but the user pays
+                    // for it. Same behaviour as pre-Phase-C2.
+                    let byte_offset = pf_offset;
+                    let byte_count = pf_count;
+                    let page_count = (pf_end - pf_start + 1) as u64;
+                    let _ = page_fill::get_or_fill_bulk_async_sync(
+                        inode,
+                        pf_start as u64,
+                        page_count,
+                        || pc_ops.fill_pages_bulk(ino, byte_offset, byte_count),
+                    );
                 }
             }
         }

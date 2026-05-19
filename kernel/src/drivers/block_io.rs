@@ -71,10 +71,6 @@ impl WriteFlags {
 // ---------------------------------------------------------------------------
 
 /// Kernel buffer reference for block I/O.
-///
-/// Only the `Slice` variant exists today. A future `Page` variant tied to
-/// `Arc<CachedPage>` will be added when the page-fill path adopts the trait
-/// (Phase C of the block-io migration).
 pub enum BlockBuffer {
     /// Caller-pinned slice of kernel virtual memory.
     ///
@@ -82,6 +78,14 @@ pub enum BlockBuffer {
     /// Caller MUST ensure the pointed-to bytes are valid until the handle
     /// transitions out of `Pending`.
     Slice { ptr: *mut u8, len: usize },
+    /// Owned vec shared via `Arc`. The driver writes/reads via a raw
+    /// pointer derived from the Arc; the Arc keeps the backing alive until
+    /// every holder (driver op + any out-of-band finalizer) drops their
+    /// clone. Used by the async-readahead prefetch path so the DMA target
+    /// outlives the I/O even if the prefetch entry is dropped first.
+    Shared {
+        vec: alloc::sync::Arc<alloc::vec::Vec<u8>>,
+    },
 }
 
 unsafe impl Send for BlockBuffer {}
@@ -91,18 +95,21 @@ impl BlockBuffer {
     pub fn len(&self) -> usize {
         match self {
             Self::Slice { len, .. } => *len,
+            Self::Shared { vec } => vec.len(),
         }
     }
 
     pub fn as_ptr(&self) -> *const u8 {
         match self {
             Self::Slice { ptr, .. } => *ptr,
+            Self::Shared { vec } => vec.as_ptr(),
         }
     }
 
     pub fn as_mut_ptr(&self) -> *mut u8 {
         match self {
             Self::Slice { ptr, .. } => *ptr,
+            Self::Shared { vec } => vec.as_ptr() as *mut u8,
         }
     }
 }

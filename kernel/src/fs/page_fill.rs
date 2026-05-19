@@ -40,11 +40,12 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use x86_64::structures::paging::FrameAllocator;
 
 use crate::{
     debug::lock_order::{RANK_IN_FLIGHT, RANK_PAGES},
+    drivers::block_io::BlockIoHandle,
     fs::{
         Error,
         inode::VfsInode,
@@ -128,10 +129,26 @@ pub struct PageFillHandle {
     pub waiters: WaitQueue,
     /// Fill state machine: `FILL_PENDING` → `FILL_SUCCESS | FILL_FAILED`.
     pub state: AtomicU8,
+    /// `Some` for async-readahead prefetch entries; `None` for inline fills.
+    /// When present, the first joiner parks on `block_handle.wait()`, then
+    /// CASes `finalized` and (on success) copies `buffer` into freshly
+    /// allocated `CachedPage` frames, inserts them under `inode.pages`,
+    /// and transitions `state` to `FILL_SUCCESS`. Later joiners observe
+    /// the terminal state and look the pages up directly.
+    pub prefetch: Option<PrefetchData>,
+}
+
+/// Per-prefetch state attached to a `PageFillHandle`. The first joiner
+/// finalizes; subsequent joiners wait on the parent handle's `waiters`.
+pub struct PrefetchData {
+    pub block_handle: Arc<BlockIoHandle>,
+    pub buffer: Arc<Vec<u8>>,
+    pub finalized: AtomicBool,
 }
 
 impl PageFillHandle {
-    /// Construct a new handle in `FILL_PENDING` state.
+    /// Construct a new handle in `FILL_PENDING` state for an inline fill
+    /// (no async prefetch metadata).
     pub fn new(inode: Weak<VfsInode>, page_idx: u64, len: u64) -> Arc<Self> {
         Arc::new(Self {
             inode,
@@ -139,6 +156,30 @@ impl PageFillHandle {
             len,
             waiters: WaitQueue::new(),
             state: AtomicU8::new(FILL_PENDING),
+            prefetch: None,
+        })
+    }
+
+    /// Construct a new prefetch handle. The block I/O has already been
+    /// submitted; `block_handle` becomes terminal when the drive completes.
+    pub fn new_prefetch(
+        inode: Weak<VfsInode>,
+        page_idx: u64,
+        len: u64,
+        block_handle: Arc<BlockIoHandle>,
+        buffer: Arc<Vec<u8>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            inode,
+            page_idx,
+            len,
+            waiters: WaitQueue::new(),
+            state: AtomicU8::new(FILL_PENDING),
+            prefetch: Some(PrefetchData {
+                block_handle,
+                buffer,
+                finalized: AtomicBool::new(false),
+            }),
         })
     }
 
@@ -269,6 +310,153 @@ fn in_flight_remove_by_ptr(inode: &VfsInode, ptr: *const PageFillHandle, page_id
 }
 
 // ---------------------------------------------------------------------------
+// Prefetch finalization
+// ---------------------------------------------------------------------------
+
+/// First joiner that finds a prefetch entry runs this. Parks on the
+/// underlying `BlockIoHandle`, then CASes `finalized`. The winner allocates
+/// frames, copies the buffer into them, inserts under `inode.pages`,
+/// transitions `state` to `FILL_SUCCESS`, and removes the handle from
+/// `in_flight`. Subsequent joiners observe the terminal state and look the
+/// pages up directly via the existing slow-path retry.
+///
+/// Idempotent: if a prior joiner already finalized, the CAS fails and the
+/// function returns. The caller's outer loop re-checks `inode.pages` and
+/// returns the cached page.
+fn finalize_prefetch(inode: &Arc<VfsInode>, handle: &Arc<PageFillHandle>) {
+    let prefetch = match handle.prefetch.as_ref() {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Park on the I/O. wait_until per the spurious-wake park contract.
+    let block_result = prefetch.block_handle.wait();
+
+    // Only the CAS winner does the finalization work.
+    if prefetch
+        .finalized
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    if let Err(_e) = block_result {
+        // I/O failed: publish FAILED so joiners retry.
+        handle.finish_failed();
+        in_flight_remove_all(inode, handle);
+        INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
+        return;
+    }
+
+    // Allocate frames for the prefetched range. If allocation fails midway
+    // partway through, drop what we already allocated and publish FAILED.
+    let mut frames: Vec<FrameDrop> = Vec::with_capacity(handle.len as usize);
+    for _ in 0..handle.len {
+        match frame_allocator().allocate_frame() {
+            Some(f) => frames.push(FrameDrop::new(f)),
+            None => {
+                handle.finish_failed();
+                in_flight_remove_all(inode, handle);
+                INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
+                return;
+            }
+        }
+    }
+
+    // Copy buffer chunks into frames; build the (idx, page) list.
+    let mut pages_to_insert: Vec<(u64, Arc<CachedPage>)> = Vec::with_capacity(handle.len as usize);
+    for (i, fd) in frames.into_iter().enumerate() {
+        let data_offset = i * 4096;
+        {
+            let slice = unsafe { fd.frame_slice_mut() };
+            let available = prefetch.buffer.len().saturating_sub(data_offset);
+            let copy = available.min(4096);
+            if copy > 0 {
+                slice[..copy].copy_from_slice(&prefetch.buffer[data_offset..data_offset + copy]);
+            }
+            if copy < 4096 {
+                slice[copy..].fill(0);
+            }
+        }
+        let frame = fd.forget();
+        let page = Arc::new(CachedPage::new(frame));
+        pages_to_insert.push((handle.page_idx + i as u64, page));
+    }
+
+    // Publish all N pages under a single pages(40) critical section, then
+    // transition state and clear in_flight (publish-before-remove).
+    {
+        let mut pages = ranked_lock!(
+            RANK_PAGES,
+            "InodePages.pages (prefetch-finalize)",
+            inode.pages.pages
+        );
+        for (idx, page) in pages_to_insert {
+            pages.entry(idx).or_insert(page);
+        }
+    }
+    handle.finish_success();
+    in_flight_remove_all(inode, handle);
+    INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// issue_prefetch_bulk
+// ---------------------------------------------------------------------------
+
+/// Install a prefetch `PageFillHandle` covering `[start_page, start_page +
+/// page_count)` in `inode.pages.in_flight`. The caller has already submitted
+/// the block I/O and passes the resulting `block_handle` + `buffer`.
+///
+/// Returns `true` if the handle was installed. Returns `false` if any page
+/// in the range was already in flight (we bail rather than narrow); in that
+/// case the caller may choose to drop the buffer (and `block_handle`), or
+/// just let them complete and discard. Either way the `Shared` buffer Arc
+/// held by the AHCI op keeps the DMA target alive for the remaining I/O.
+pub fn issue_prefetch_bulk(
+    inode: &Arc<VfsInode>,
+    start_page: u64,
+    page_count: u64,
+    block_handle: Arc<BlockIoHandle>,
+    buffer: Arc<Vec<u8>>,
+) -> bool {
+    assert!(
+        page_count > 0,
+        "issue_prefetch_bulk: page_count must be > 0"
+    );
+    let handle = PageFillHandle::new_prefetch(
+        Arc::downgrade(inode),
+        start_page,
+        page_count,
+        block_handle,
+        buffer,
+    );
+
+    let installed = {
+        let mut inflight = inode
+            .pages
+            .in_flight
+            .lock_ranked(RANK_IN_FLIGHT, "InodePages.in_flight (prefetch-install)");
+        let any_conflict =
+            (start_page..(start_page + page_count)).any(|idx| inflight.contains_key(&idx));
+        if any_conflict {
+            false
+        } else {
+            for idx in start_page..(start_page + page_count) {
+                inflight.insert(idx, Arc::clone(&handle));
+            }
+            true
+        }
+    };
+    if installed {
+        INFLIGHT_INSTALLS.fetch_add(1, Ordering::Relaxed);
+        INFLIGHT_CURRENT.fetch_add(1, Ordering::Relaxed);
+    }
+    installed
+}
+
+// ---------------------------------------------------------------------------
 // inline_fill_no_handle (Task 1.7b)
 // ---------------------------------------------------------------------------
 
@@ -378,8 +566,17 @@ pub fn get_or_fill_async_sync(
         if let Some(handle) = handle_opt {
             // Slow path: join an existing in-flight fill.
             INFLIGHT_JOINS.fetch_add(1, Ordering::Relaxed);
-            // Park until the fill reaches a terminal state.
-            // Outer loop on real condition per CLAUDE.md "Park/wake protocol".
+
+            if handle.prefetch.is_some() {
+                // Prefetch entry: first joiner does the finalization work.
+                // finalize_prefetch is idempotent via the `finalized` CAS;
+                // late joiners do nothing here and fall through to the
+                // standard wait below (state may already be terminal).
+                finalize_prefetch(inode, &handle);
+            }
+
+            // Park until the fill reaches a terminal state. Outer loop on
+            // real condition per the kernel's park/wake protocol.
             handle
                 .waiters
                 .wait_until(|| handle.load_state() != FILL_PENDING);
@@ -418,6 +615,9 @@ pub fn get_or_fill_async_sync(
         if let Err(existing) = install_result {
             // Lost the install race; park on the winner's handle.
             INFLIGHT_JOINS.fetch_add(1, Ordering::Relaxed);
+            if existing.prefetch.is_some() {
+                finalize_prefetch(inode, &existing);
+            }
             existing
                 .waiters
                 .wait_until(|| existing.load_state() != FILL_PENDING);
@@ -625,6 +825,9 @@ pub fn get_or_fill_bulk_async_sync(
         if let Some(conflict) = park_on {
             // Bulk join: park on the conflicting fill, then retry.
             INFLIGHT_JOINS.fetch_add(1, Ordering::Relaxed);
+            if conflict.prefetch.is_some() {
+                finalize_prefetch(inode, &conflict);
+            }
             conflict
                 .waiters
                 .wait_until(|| conflict.load_state() != FILL_PENDING);

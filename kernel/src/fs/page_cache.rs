@@ -390,6 +390,30 @@ pub trait PageCacheOps {
         Err(Error::Unsupported)
     }
 
+    /// Submit an async read for `count` bytes starting at `offset` and return
+    /// immediately with the block-I/O handle and the shared buffer (still
+    /// being DMA'd into). The first joiner in `page_fill` parks on the
+    /// handle, then copies the buffer into freshly allocated `CachedPage`s.
+    ///
+    /// Returns `None` if the implementation cannot satisfy the request as a
+    /// single submit (e.g. range crosses multiple non-contiguous extents).
+    /// Default returns `None`; callers must fall back to the sync
+    /// `fill_pages_bulk` path.
+    fn submit_prefetch_pages(
+        &self,
+        _ino: u64,
+        _offset: usize,
+        _count: usize,
+    ) -> Result<
+        Option<(
+            alloc::sync::Arc<crate::drivers::block_io::BlockIoHandle>,
+            alloc::sync::Arc<alloc::vec::Vec<u8>>,
+        )>,
+        Error,
+    > {
+        Ok(None)
+    }
+
     /// Write a page of file data to disk from `buf`.
     fn flush_page(
         &self,
