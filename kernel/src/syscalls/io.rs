@@ -196,12 +196,19 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             };
             let op = vfs::VfsOp {
                 fs: fs.clone(),
-                relative: file.relative.clone().unwrap_or_else(|| Path::parse("").unwrap()),
+                // Invariant: relative is Some iff fs is Some (set together at open time).
+                relative: file.relative.clone().expect("fs set without relative path"),
                 inode: file.inode.clone(),
                 mount_id: file.mount_id,
             };
 
-            match vfs::write_from_user(&op, file.offset as usize, buffer_ptr, capped_count, file.append) {
+            match vfs::write_from_user(
+                &op,
+                file.offset as usize,
+                buffer_ptr,
+                capped_count,
+                file.append,
+            ) {
                 Ok(written) => {
                     let new_fd = FileDescriptor::FsFile(FsFile {
                         offset: file.offset + written,
@@ -531,7 +538,8 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             let offset = file.offset as usize;
 
             // Fast path: devfs devices can be read directly without the FS Mailbox.
-            let (bytes_read, ra) = if let Some(device) = crate::fs::devfs::try_lookup_from_full_path(&file.path)
+            let (bytes_read, ra) = if let Some(device) =
+                crate::fs::devfs::try_lookup_from_full_path(&file.path)
             {
                 match device.read(offset, count) {
                     Ok(data) => {
@@ -560,7 +568,8 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 };
                 let op = vfs::VfsOp {
                     fs: fs.clone(),
-                    relative: file.relative.clone().unwrap_or_else(|| Path::parse("").unwrap()),
+                    // Invariant: relative is Some iff fs is Some (set together at open time).
+                    relative: file.relative.clone().expect("fs set without relative path"),
                     inode: file.inode.clone(),
                     mount_id: file.mount_id,
                 };

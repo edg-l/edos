@@ -17,23 +17,18 @@ fn main() {
         }
     };
 
+    // Signal 0 is the POSIX "probe process existence" no-op; allowed alongside 1..=31.
+    let parse_signal = |s: &str| -> Option<u32> {
+        s.parse::<u32>().ok().filter(|&n| n < 32)
+    };
     let signal = if args.len() > 2 {
         let s = args[2].trim();
-        if let Some(stripped) = s.strip_prefix('-') {
-            match stripped.parse::<u32>() {
-                Ok(n) if n > 0 && n < 32 => n,
-                _ => {
-                    eprintln!("kill: invalid signal: {}", args[2]);
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            match s.parse::<u32>() {
-                Ok(n) if n > 0 && n < 32 => n,
-                _ => {
-                    eprintln!("kill: invalid signal: {}", args[2]);
-                    std::process::exit(1);
-                }
+        let raw = s.strip_prefix('-').unwrap_or(s);
+        match parse_signal(raw) {
+            Some(n) => n,
+            None => {
+                eprintln!("kill: invalid signal: {}", args[2]);
+                std::process::exit(1);
             }
         }
     } else {

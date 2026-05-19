@@ -9,12 +9,14 @@ fn main() {
     }
 
     let mut delim = '\t';
+    let mut delim_set = false;
     let mut fields: Vec<usize> = Vec::new();
 
     let mut files: Vec<String> = Vec::new();
     for arg in &args[1..] {
         if let Some(d) = arg.strip_prefix("-d") {
             delim = d.chars().next().unwrap_or('\t');
+            delim_set = true;
         } else if let Some(f) = arg.strip_prefix("-f") {
             for part in f.split(',') {
                 if let Ok(n) = part.parse::<usize>() {
@@ -28,7 +30,7 @@ fn main() {
         }
     }
 
-    if fields.is_empty() || delim == '\0' {
+    if fields.is_empty() || !delim_set {
         eprintln!("cut: -f and -d are required");
         std::process::exit(1);
     }

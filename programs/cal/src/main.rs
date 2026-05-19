@@ -76,7 +76,8 @@ fn day_of_week(y: u32, m: u32, d: u32) -> usize {
     let y = y as usize;
     let m = m as usize;
     let d = d as usize;
-    (d + (13 * (m + 1)) / 5 + y + y / 4 - y / 100 + y / 400) % 7
+    // Zeller returns 0=Saturday; shift so 0=Sunday to match the "Su Mo Tu We Th Fr Sa" header.
+    ((d + (13 * (m + 1)) / 5 + y + y / 4 - y / 100 + y / 400) % 7 + 6) % 7
 }
 
 /// Returns (day, month, year) for today.
@@ -161,10 +162,12 @@ fn print_month_calendar(month: u32, year: u32, now: &(u32, u32, u32)) {
 }
 
 fn print_year_calendar(year: u32, now: &(u32, u32, u32)) {
+    // 2 header lines (month name + weekday header) + up to 6 week rows.
+    const MONTH_BLOCK_LINES: usize = 8;
     println!("{:>30}", year);
     println!();
     for row in 0..4 {
-        let mut lines: Vec<String> = vec![String::new(); 8];
+        let mut lines: Vec<String> = vec![String::new(); MONTH_BLOCK_LINES];
         for col in 0..3 {
             let month = (row * 3 + col + 1) as u32;
             let name = MONTH_NAMES[(month - 1) as usize];
@@ -203,7 +206,7 @@ fn print_year_calendar(year: u32, now: &(u32, u32, u32)) {
                 lines[cur_line].push_str("  ");
                 cur_line += 1;
             }
-            while cur_line < 8 {
+            while cur_line < MONTH_BLOCK_LINES {
                 lines[cur_line].push_str(&" ".repeat(21));
                 lines[cur_line].push_str("  ");
                 cur_line += 1;

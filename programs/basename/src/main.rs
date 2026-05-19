@@ -8,7 +8,11 @@ fn main() {
         std::process::exit(1);
     }
 
-    let path = args[1].trim_end_matches('/');
+    // POSIX: `basename /` → `/`, `basename ""` → `""`. Only collapse trailing
+    // slashes when the path contains a non-slash component.
+    let raw = args[1].as_str();
+    let trimmed = raw.trim_end_matches('/');
+    let path = if trimmed.is_empty() { raw } else { trimmed };
     let name = path.rsplit('/').next().unwrap_or(path);
     let result = if args.len() > 2 {
         name.strip_suffix(args[2].as_str()).unwrap_or(name)
