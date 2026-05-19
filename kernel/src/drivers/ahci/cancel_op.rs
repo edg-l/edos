@@ -15,7 +15,7 @@
 //!   `owned_ops`; whichever path wins the state CAS owns hardware cleanup.
 
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::{
     drivers::{
@@ -113,6 +113,13 @@ pub struct AhciNcqOp {
     pub handle: Arc<BlockIoHandle>,
     pub buffer: BlockBuffer,
     pub completion: SlotCompletion,
+    /// Set after `issue_ncq_command` writes `SACT[slot]` / `CI[slot]`.
+    /// Until this flag is true, the IRQ dispatcher must skip this slot:
+    /// the op is in `ncq_waiters` but the hardware command has not yet
+    /// been issued, so `SACT[slot] == 0` does NOT mean "completed".
+    /// Treating it as completed in that window short-circuits the wait()
+    /// against a buffer the drive never wrote to.
+    pub issued: AtomicBool,
 }
 
 impl AhciNcqOp {
@@ -134,6 +141,7 @@ impl AhciNcqOp {
             handle,
             buffer,
             completion,
+            issued: AtomicBool::new(false),
         }
     }
 }

@@ -1228,6 +1228,20 @@ impl AhciPort {
             handle.complete(Err(ahci_err_to_block(e)));
             return Ok(handle);
         }
+
+        // Open the slot for IRQ-side completion. Release pairs with the
+        // dispatcher's Acquire load in `complete_ncq_slot`.
+        op.issued.store(true, Ordering::Release);
+
+        // Self-check: the drive may have completed between `issue_ncq_command`
+        // and this store, and an IRQ may have fired during the
+        // `!issued`-skip window. Run completion manually if SACT[slot] is
+        // already clear. The CAS inside `complete_ncq_slot` makes this
+        // race-safe versus a concurrent IRQ.
+        let sact = unsafe { ptr::read_volatile(&raw const (*self.port_regs).sact) };
+        if sact & (1u32 << slot) == 0 {
+            self.complete_ncq_slot(slot, &op);
+        }
         Ok(handle)
     }
 
@@ -1310,6 +1324,13 @@ impl AhciPort {
             handle.complete(Err(ahci_err_to_block(e)));
             return Ok(handle);
         }
+
+        // See `submit_ncq_read` for the issued+self-check rationale.
+        op.issued.store(true, Ordering::Release);
+        let sact = unsafe { ptr::read_volatile(&raw const (*self.port_regs).sact) };
+        if sact & (1u32 << slot) == 0 {
+            self.complete_ncq_slot(slot, &op);
+        }
         Ok(handle)
     }
 
@@ -1317,6 +1338,14 @@ impl AhciPort {
     /// `SACT[slot]` has cleared. CAS Pending→Completed gates the cleanup; the
     /// reset-generation check guards against COMRESET clearing SACT.
     fn complete_ncq_slot(&self, slot: usize, op: &Arc<AhciNcqOp>) {
+        // If the submitter hasn't issued the command yet, `SACT[slot] == 0`
+        // is a false positive — the op was just installed in `ncq_waiters`
+        // by `install_ncq_op` and the hardware write to SACT/CI is still
+        // pending. Skip; the submitter's post-issue self-check (or a later
+        // IRQ) will catch the real completion.
+        if !op.issued.load(Ordering::Acquire) {
+            return;
+        }
         if op
             .state
             .compare_exchange(
@@ -1383,6 +1412,11 @@ impl AhciPort {
             let Some(op) = op else {
                 continue;
             };
+            // Submitter is still in setup; their post-issue path will see
+            // the post-restart reset_generation mismatch and fail itself.
+            if !op.issued.load(Ordering::Acquire) {
+                continue;
+            }
             if op
                 .state
                 .compare_exchange(
