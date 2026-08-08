@@ -482,6 +482,20 @@ Re-sending is cheap insurance rather than the main point: an IPI to a CPU with
 interrupts off is latched and will fire, so a re-send only helps if one was
 genuinely lost.
 
+### Fixed: `pick_sched` sampled `thread_count` twice
+
+Not part of the stack or shootdown bugs; found by soaking for them. `pick_sched`
+made one pass to find the minimum `thread_count` and a second to find a
+scheduler matching it. Other CPUs spawn and exit throughout, so every count can
+rise above the sampled minimum in between, the second pass matches nothing, and
+it reaches `unreachable!()`. It now takes one pass keeping the best sample,
+starting at the rotation offset so the round-robin tie-break is unchanged.
+
+Worth noting how it turned up: a soak that mixed `mmaptest` into the
+`threadtest` loop, because `mmaptest` spawns a child of its own and roughly
+doubled the spawn rate. Varying the workload found a bug that repeating the same
+one never would.
+
 ---
 
 ## Things that will bite you
