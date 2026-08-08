@@ -1020,31 +1020,44 @@ Correctness first, because these are wrong rather than merely missing:
 1. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
    validation on the storage path.
 
+2. **Kill only reaches threads that enter the kernel.** A thread now
+   observes `killed` at the syscall boundary, which covers every real
+   program, but one spinning without syscalls never notices. That is why
+   `execve` bounds its sibling quiesce and returns EAGAIN rather than
+   assuming. Checking pending kills on the timer-interrupt return-to-user
+   path would close it, and would let exec replace the image of a process
+   with a spinning thread.
+
 Then the interface gaps that actually block programs:
 
-2. **`symlink`/`readlink`, `access`, `truncate`, `utimensat`,
+3. **`symlink`/`readlink`, `access`, `truncate`, `utimensat`,
    `nanosleep`, `sigprocmask`, the `*at` family, streaming
    `getdents`.** [audit] The remaining gaps from the audit's table, none
    of which block a program that exists today.
-3. **`std::net::TcpStream` in the std fork** is unimplemented, so `http`
+4. **`std::net::TcpStream` in the std fork** is unimplemented, so `http`
    and `wget` still cannot work even though the kernel side does now.
    `edos_lib::net` is the working path; `tcptest` shows the shape, and
    porting `http`/`wget` onto it is a small job.
-4. **No shutdown or reboot syscall**, so every stop is a power cut and
+5. **No shutdown or reboot syscall**, so every stop is a power cut and
    the journal replays on the next boot. init is the natural owner now.
 
 Then hygiene and quality:
 
-5. **228 `unwrap()`/`expect()` in kernel code.** [audit] Convert the ones
+6. **228 `unwrap()`/`expect()` in kernel code.** [audit] Convert the ones
    on I/O and parsing results; leave a comment on the structurally
    impossible ones.
-6. **Module READMEs for `fs/` (15.7k lines) and `drivers/` (13k).**
+7. **Module READMEs for `fs/` (15.7k lines) and `drivers/` (13k).**
    [audit]
 
 Then, by fun-per-effort:
 
 more tools > dynamic linker > PageCacheOps for FAT32+memfs > in-EDOS
 fsck > IPv6 > virtio-net
+
+Carried over and still true: the std fork's `OpenOptions` fix is commit
+`b7af81795f6` in `~/dev/rust`, **committed locally but never pushed**, so
+it exists on this machine only. Anyone rebuilding the toolchain elsewhere
+gets read-only file opens back.
 
 Far future, deliberately unscheduled: GPU driver work (see above).
 
