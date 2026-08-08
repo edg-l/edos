@@ -222,7 +222,35 @@ assertions.
   `dec_ref` runs on the returned value.
 - `SharedMemory::destroy()` takes a write guard with nothing else held.
 
-### `FUTEX_REGISTRY`, `PORT_TABLE`, window registries
+### `WINDOW_REGISTRY` and `WINDOW_EVENTS`
+
+Both `spin::RwLock`, in `window/registry.rs` and `window/input.rs`. Audited
+2026-08-08 after a hang in which all four CPUs spun on `WINDOW_REGISTRY.write()`
+(see `doc/bugs/2026-08-08-window-registry-stuck-reader.md`).
+
+The order is **`WINDOW_REGISTRY` before `WINDOW_EVENTS`**, and it holds
+everywhere:
+
+- The only nesting is `send_event`, which takes `WINDOW_EVENTS.read()` while a
+  `WINDOW_REGISTRY` read guard is live. It does a lock-free `ArrayQueue` push:
+  no allocation, no park.
+- `poll_events` pre-allocates its `Vec` before taking `WINDOW_EVENTS.read()`,
+  and its caller drops the registry guard first.
+- The `WINDOW_EVENTS` write paths (`get_or_create_event_queue`,
+  `remove_event_queue`) are called only after every registry guard has been
+  dropped, at `syscalls/window.rs:46`, `:83` and `window/mod.rs:32`.
+
+Because these are spin locks, hold *duration* matters more than order: a holder
+that parks stops every other CPU dead rather than just one caller. Nothing
+reachable under either guard may park or touch user memory. That rule was
+violated by `sys_window_list`, which held the read guard across
+`try_copy_to_user`, and is why the window list is now snapshotted before the
+copy.
+
+Ranking them is now possible, since the order is established; it would not have
+caught the hang, which was a hold-duration failure rather than an inversion.
+
+### `FUTEX_REGISTRY`, `PORT_TABLE`
 
 Leaf locks outside the FS and MM hot paths. Rank them if a real ordering concern
 ever surfaces.
