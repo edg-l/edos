@@ -61,6 +61,13 @@ name = "echo"
 version = "0.1.0"
 
 [[package]]
+name = "edos-init"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "edos-sh"
 version = "0.1.0"
 dependencies = [
