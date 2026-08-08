@@ -2,6 +2,7 @@ use core::{
     cell::UnsafeCell,
     ops::Deref,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    time::Duration,
 };
 
 use alloc::{
@@ -15,7 +16,7 @@ use x86_64::{
     VirtAddr,
     instructions::interrupts::without_interrupts,
     registers::control::Cr3,
-    structures::paging::{OffsetPageTable, PageTableFlags},
+    structures::paging::{OffsetPageTable, PageTableFlags, PhysFrame},
 };
 
 use intrusive_list::Link;
@@ -240,6 +241,301 @@ const TLS_REGION_STRIDE: u64 = 0x20000; // 128 KiB per-thread slot
 const TLS_GUARD_GAP: u64 = 0x20000; // Keep a gap below the user stack
 const TLS_TCB_MIN_SIZE: u64 = 64;
 const PAGE_SIZE: u64 = 4096;
+
+/// A complete process image in a fresh address space, not yet attached to any
+/// thread.
+///
+/// Building the image before touching the caller is what makes `execve`
+/// tractable: the new address space is fully constructed while the old one is
+/// still live and running this code, so a failure anywhere in the load leaves
+/// the caller untouched and the syscall can return an error.
+pub(crate) struct LoadedImage {
+    pub pml4_frame: PhysFrame,
+    pub memory_manager: MemoryManager,
+    pub vma_set: Arc<PreemptSpinlock<VmaSet>>,
+    pub entry_point: VirtAddr,
+    pub user_stack_pointer: u64,
+    pub argc: usize,
+    pub argv_ptr: u64,
+    pub envp_ptr: u64,
+    pub heap_break: u64,
+    pub tls: Option<UserThreadTls>,
+    pub tls_fs_base: u64,
+    pub stack_top: u64,
+}
+
+/// Build a fresh address space and load `inode` into it, with `argv`/`envp`
+/// already pushed onto the new user stack.
+///
+/// Shared by process creation ([`Thread::new_user`]) and `execve`, which differ
+/// only in what they attach the result to.
+pub(crate) fn load_process_image(
+    inode: &Arc<VfsInode>,
+    path: &Path,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<LoadedImage, ElfLoadError> {
+    let kernel_pml4 = boot_info().cr3;
+    let physical_memory_offset = boot_info().physical_memory_offset;
+    let kernel_table = unsafe { get_level_4_table(kernel_pml4) };
+    let page = unsafe { allocate_process_pml4(kernel_table) };
+
+    // Build the new page table via HHDM (no CR3 switch needed).
+    let child_page_table = unsafe { get_level_4_table((page, kernel_pml4.1)) };
+    let table = unsafe { OffsetPageTable::new(child_page_table, physical_memory_offset) };
+
+    let mut memory_manager = MemoryManager::new(table);
+    memory_manager.pml4_frame = Some(page);
+
+    // Build VmaSet early with the Stack VMA so copy_to_user can demand-fault
+    // stack pages during setup_user_stack.
+    let stack_top = USER_STACK_TOP.as_u64();
+    let vma_set = Arc::new(PreemptSpinlock::new(VmaSet::new()));
+    let stack_bottom = VirtAddr::new(stack_top - USER_STACK_SIZE);
+    vma_set
+        .lock()
+        .insert(Vma {
+            start: stack_bottom,
+            end: USER_STACK_TOP,
+            prot: VmaProt::READ | VmaProt::WRITE,
+            flags: VmaFlags::PRIVATE | VmaFlags::GROWSDOWN | VmaFlags::LAZY,
+            backing: VmaBacking::Stack,
+        })
+        .map_err(|_| ElfLoadError::MappingFailed)?;
+    memory_manager.vmas = Some(vma_set.clone());
+
+    let (user_stack_pointer, argv_ptr, argc, envp_ptr) =
+        setup_user_stack(stack_top, argv, envp, &memory_manager)
+            .map_err(|_| ElfLoadError::MappingFailed)?;
+
+    let mut load_info = load_elf(inode, path, &mut memory_manager)?;
+
+    // Reloc table and VMA range live on the MemoryManager for lazy fault-time
+    // application; load_base is what relocated values are computed against.
+    memory_manager.reloc_table = load_info.reloc_table.take();
+    memory_manager.reloc_vma_range = load_info.reloc_vma_range.take();
+    memory_manager.load_base = load_info.load_base;
+
+    let mut tls_runtime: Option<UserThreadTls> = None;
+    let mut tls_fs_base = 0u64;
+
+    if let Some(template) = load_info.tls_template.take() {
+        let template = Arc::new(template);
+        let allocation = allocate_tls_region(&template, 0, &mut memory_manager)?;
+        tls_fs_base = allocation.fs_base;
+        vma_set
+            .lock()
+            .insert(allocation.vma)
+            .map_err(|_| ElfLoadError::MappingFailed)?;
+        tls_runtime = Some(allocation.runtime);
+    }
+
+    {
+        let mut vmas = vma_set.lock();
+        for vma in load_info.memory_regions {
+            vmas.insert(vma).map_err(|_| ElfLoadError::InvalidSegment)?;
+        }
+    }
+
+    Ok(LoadedImage {
+        pml4_frame: page,
+        memory_manager,
+        vma_set,
+        entry_point: load_info.entry_point,
+        user_stack_pointer,
+        argc,
+        argv_ptr,
+        envp_ptr,
+        heap_break: load_info.heap_break,
+        tls: tls_runtime,
+        tls_fs_base,
+        stack_top,
+    })
+}
+
+/// Unmap and release every user mapping in `user`'s address space.
+///
+/// Shared by process teardown and `execve`, which need exactly the same work
+/// and differ only in what happens next. Deliberately excluded:
+///
+/// - **The file descriptor table**, which survives an exec. Process exit closes
+///   it separately, before calling this.
+/// - **The PML4 frame**, because the caller decides what CR3 to run on next:
+///   exit switches to the kernel table and frees it, exec switches to the new
+///   image's table and frees the old one.
+/// - **Per-thread TLS**, which each thread releases in its own `free`.
+///
+/// The caller must hold no `mm` or `vmas` guard, and must have established that
+/// no other thread can still be running in this address space.
+pub(crate) fn release_user_mappings(user: &UserThread) {
+    // vmas (rank 70) is taken before mm (rank 80).
+    let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user.vmas).clone();
+    let mut memory_manager = ranked_lock!(RANK_USER_MM, "user.mm", user.memory_manager);
+    let stack_top = user.process_stack_top.load(Ordering::Acquire);
+    release_mappings(&mut memory_manager, &vmas, user.pid, stack_top);
+}
+
+/// The mapping teardown itself, over an address space that may already be
+/// detached from any process.
+///
+/// `execve` detaches the outgoing `MemoryManager` and `VmaSet` before calling
+/// this, so that the process is already running on its new address space and a
+/// preemption in the middle cannot restore a page table that is being freed.
+/// It also means the blocking parts here (a `MAP_SHARED` writeback can reach
+/// the disk) happen with nothing half-swapped.
+pub(crate) fn release_mappings(
+    memory_manager: &mut MemoryManager,
+    vmas: &VmaSet,
+    pid: u64,
+    stack_top: u64,
+) {
+    // Windows belong to the image being torn down; the pid may live on.
+    window::cleanup_process_windows(pid);
+    for vma in vmas.iter() {
+        match &vma.backing {
+            VmaBacking::Anonymous => {
+                let _ = memory_manager.unmap_memory(vma.start, vma.size());
+            }
+            VmaBacking::Tls => {
+                // Already cleaned up above (per-thread TLS cleanup)
+            }
+            VmaBacking::SharedMemory { shm_id } => {
+                use x86_64::structures::paging::{Mapper, Page, Size4KiB};
+                let page_count = (vma.size() + 0xFFF) / 4096;
+                for i in 0..page_count {
+                    let virt_addr = VirtAddr::new(vma.start.as_u64() + i * 4096);
+                    let page: Page<Size4KiB> = Page::containing_address(virt_addr);
+                    if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
+                        flush.flush();
+                    }
+                }
+                if let Some(shm) = SharedMemory::get(*shm_id) {
+                    shm.dec_ref();
+                }
+            }
+            VmaBacking::Physical { .. } => {
+                use x86_64::structures::paging::{Mapper, Page, Size4KiB};
+                let page_count = (vma.size() + 0xFFF) / 4096;
+                for i in 0..page_count {
+                    let virt_addr = VirtAddr::new(vma.start.as_u64() + i * 4096);
+                    let page: Page<Size4KiB> = Page::containing_address(virt_addr);
+                    if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
+                        flush.flush();
+                    }
+                }
+            }
+            VmaBacking::Stack => {
+                // Handled below by thread_stack_free
+            }
+            VmaBacking::FileBacked {
+                inode,
+                file_offset,
+                shared,
+                pages,
+                ..
+            } => {
+                // For MAP_SHARED: flush dirty pages to disk before exit so
+                // writes survive the process's death (Linux msync-on-exit
+                // semantics). Errors are logged, never prevent exit.
+                if *shared {
+                    crate::syscalls::memory::flush_shared_vma_pages(inode, *file_offset, pages);
+                }
+                // Unmap each present PTE and decrement the frame refcount
+                // that was bumped at fault-in time. Drop the pages Vec
+                // AFTER the dec_refcount loop so the Arc<CachedPage>
+                // refs are released last; the BTreeMap entry in
+                // inode.pages keeps the cache frame alive.
+                use x86_64::structures::paging::{Mapper, Page, Size4KiB};
+                let page_count = (vma.size() + 0xFFF) / 4096;
+                let mut fa = frame_allocator();
+                for i in 0..page_count {
+                    let virt_addr = VirtAddr::new(vma.start.as_u64() + i * 4096);
+                    let page: Page<Size4KiB> = Page::containing_address(virt_addr);
+                    if let Ok(phys) = memory_manager.mapper.translate_page(page) {
+                        if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
+                            flush.ignore();
+                            fa.dec_refcount(phys);
+                        }
+                    }
+                }
+                // VMA (including its inode Arc) drops at end of this
+                // arm. If this was the final Arc and the inode was
+                // previously orphaned, VfsInode::drop triggers
+                // FileSystem::evict_inode to free on-disk allocations.
+            }
+        }
+    }
+
+    thread_stack_free(memory_manager, stack_top);
+
+    // No TLB shootdown needed: each process has its own address space
+    // (address_space_refs starts at 1, COW fork creates a new PML4), and
+    // `execve` has already established that no sibling is left running in it.
+    memory_manager.clean_lower_half();
+}
+
+/// Terminate every other thread sharing `caller`'s address space and wait for
+/// them to release it.
+///
+/// `execve` replaces an address space that siblings may be executing in, so it
+/// must establish that no other CPU can touch it before anything is unmapped.
+/// `address_space_refs` reaching 1 is that proof: a thread only decrements it
+/// in `Thread::free`, after it has stopped running.
+///
+/// Returns false on timeout, in which case the caller must abandon the exec.
+/// A thread that never enters a syscall never observes `killed`, and unmapping
+/// an address space out from under a running thread would be memory corruption,
+/// so refusing is the only safe answer.
+pub(crate) fn quiesce_address_space(caller: &Arc<Thread>) -> bool {
+    use crate::thread::scheduler::{WakePriority, sched, thread_sleep};
+
+    let Some(caller_user) = caller.user.as_ref() else {
+        return true;
+    };
+    // `sys_clone` gives each thread its own `UserThread`, sharing the inner
+    // Arcs, so thread identity is not address-space identity. The refcount Arc
+    // is: it is created once per address space and cloned into every thread
+    // that joins it.
+    let caller_space = caller_user.read().address_space_refs.clone();
+
+    for thread in THREADS.list() {
+        if thread.id == caller.id {
+            continue;
+        }
+        let shares = thread
+            .user
+            .as_ref()
+            .is_some_and(|u| Arc::ptr_eq(&u.read().address_space_refs, &caller_space));
+        if !shares {
+            continue;
+        }
+
+        thread.killed.store(true, Ordering::Release);
+        thread.exit_code.store(0, Ordering::Release);
+        sched().wake_thread(&Arc::downgrade(&thread), WakePriority::Normal);
+    }
+
+    // One second is far longer than a thread needs to reach its next syscall
+    // boundary; anything still alive after it is not going to die on its own.
+    const ATTEMPTS: u32 = 200;
+    for _ in 0..ATTEMPTS {
+        if caller_user
+            .read()
+            .address_space_refs
+            .load(Ordering::Acquire)
+            == 1
+        {
+            return true;
+        }
+        thread_sleep(Duration::from_millis(5));
+    }
+
+    caller_user
+        .read()
+        .address_space_refs
+        .load(Ordering::Acquire)
+        == 1
+}
 
 pub(crate) struct TlsAllocation {
     pub runtime: UserThreadTls,
@@ -544,75 +840,26 @@ impl Thread {
     ) -> Result<Arc<Self>, ElfLoadError> {
         let kernel_stack_top = kthread_stack_alloc();
 
+        let image = load_process_image(&inode, path, argv, envp)?;
+
+        let LoadedImage {
+            pml4_frame: page,
+            memory_manager: process_memory_manager,
+            vma_set,
+            entry_point,
+            user_stack_pointer,
+            argc,
+            argv_ptr,
+            envp_ptr,
+            heap_break,
+            tls: tls_runtime,
+            tls_fs_base,
+            stack_top,
+        } = image;
+
         let kernel_pml4 = boot_info().cr3;
-        let physical_memory_offset = boot_info().physical_memory_offset;
-        let kernel_table = unsafe { get_level_4_table(kernel_pml4) };
-        let page = unsafe { allocate_process_pml4(kernel_table) };
-
-        // Build child's page table manager via HHDM (no CR3 switch needed).
-        let child_page_table = unsafe { get_level_4_table((page, kernel_pml4.1)) };
-        let table = unsafe { OffsetPageTable::new(child_page_table, physical_memory_offset) };
-
-        let mut process_memory_manager = MemoryManager::new(table);
-        process_memory_manager.pml4_frame = Some(page);
-
-        // Build VmaSet early with Stack VMA so copy_to_user can demand-fault
-        // stack pages during setup_user_stack.
-        let stack_top = USER_STACK_TOP.as_u64();
-        let vma_set = Arc::new(PreemptSpinlock::new(VmaSet::new()));
-        let stack_bottom = VirtAddr::new(stack_top - USER_STACK_SIZE);
-        vma_set
-            .lock()
-            .insert(Vma {
-                start: stack_bottom,
-                end: USER_STACK_TOP,
-                prot: VmaProt::READ | VmaProt::WRITE,
-                flags: VmaFlags::PRIVATE | VmaFlags::GROWSDOWN | VmaFlags::LAZY,
-                backing: VmaBacking::Stack,
-            })
-            .map_err(|_| ElfLoadError::MappingFailed)?;
-        process_memory_manager.vmas = Some(vma_set.clone());
-
-        // setup_user_stack now demand-faults stack pages via MemoryManager's VmaSet
-        let (user_stack_pointer, argv_ptr, argc, envp_ptr) =
-            setup_user_stack(stack_top, argv, envp, &process_memory_manager)
-                .map_err(|_| ElfLoadError::MappingFailed)?;
-
-        let mut load_info = load_elf(&inode, path, &mut process_memory_manager)?;
-
-        // Store reloc table and VMA range on the MemoryManager for lazy fault
-        // application in Phase 2. Also record the load base used to compute
-        // relocated values: `value = load_base + entry.addend`.
-        process_memory_manager.reloc_table = load_info.reloc_table.take();
-        process_memory_manager.reloc_vma_range = load_info.reloc_vma_range.take();
-        process_memory_manager.load_base = load_info.load_base;
 
         let id = ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, Ordering::Relaxed));
-
-        let mut tls_runtime: Option<UserThreadTls> = None;
-        let mut tls_fs_base = 0u64;
-
-        if let Some(template) = load_info.tls_template.take() {
-            let template = Arc::new(template);
-            let allocation = allocate_tls_region(&template, 0, &mut process_memory_manager)?;
-            tls_fs_base = allocation.fs_base;
-            vma_set
-                .lock()
-                .insert(allocation.vma)
-                .map_err(|_| ElfLoadError::MappingFailed)?;
-            tls_runtime = Some(allocation.runtime);
-        }
-
-        // Add ELF segment VMAs
-        {
-            let mut vmas = vma_set.lock();
-            for vma in load_info.memory_regions {
-                vmas.insert(vma).map_err(|_| ElfLoadError::InvalidSegment)?;
-            }
-        }
-
-        let entry_point = load_info.entry_point;
-        let heap_break = load_info.heap_break;
 
         let mut context = CpuContext::new_user_thread(entry_point.as_u64(), user_stack_pointer);
         context.rdi = argc as u64;
@@ -790,164 +1037,14 @@ impl Thread {
                 let fds: alloc::vec::Vec<(u64, super::pipe::FileDescriptor)> =
                     info.lock().fd_table.lock().drain_all();
                 for (_fd_num, descriptor) in fds {
-                    match descriptor {
-                        super::pipe::FileDescriptor::PipeRead(pipe) => {
-                            let notif = pipe.lock().close_reader();
-                            notif.flush();
-                        }
-                        super::pipe::FileDescriptor::PipeWrite(pipe) => {
-                            let notif = pipe.lock().close_writer();
-                            notif.flush();
-                        }
-                        super::pipe::FileDescriptor::PtySlave(pty) => {
-                            let mut guard = pty.lock();
-                            if guard.foreground_pid == Some(self.id.0) {
-                                guard.foreground_pid = None;
-                            }
-                            let notif = guard.close_slave();
-                            drop(guard);
-                            notif.flush();
-                        }
-                        super::pipe::FileDescriptor::PtyMaster(pty) => {
-                            let notif = pty.lock().close_master();
-                            notif.flush();
-                        }
-                        super::pipe::FileDescriptor::Socket(sock) => {
-                            let mut s = sock.lock();
-                            s.refcount = s.refcount.saturating_sub(1);
-                            if s.refcount > 0 {
-                                continue; // Other fds still reference this socket
-                            }
-                            s.closed = true;
-                            s.rx_wq.wake_all();
-                            if let Some(addr) = s.local_addr {
-                                let proto = if s.sock_type == crate::net::socket::SOCK_DGRAM {
-                                    17u8
-                                } else {
-                                    6u8
-                                };
-                                crate::net::socket::port_table()
-                                    .lock()
-                                    .remove(&(proto, addr.port));
-                            }
-                            let tcp_conn = s.tcp_conn.clone();
-                            drop(s);
-                            // For TCP sockets, send FIN to initiate graceful close
-                            if let Some(conn) = tcp_conn {
-                                let fin = conn.lock().build_fin();
-                                if let Some(fin_seg) = fin {
-                                    let remote_ip = conn.lock().remote_ip;
-                                    if let Some(stack_mutex) = crate::net::stack::NET_STACK.get() {
-                                        let mut stack = stack_mutex.lock();
-                                        let _ = stack.send_ip(
-                                            remote_ip,
-                                            crate::net::ipv4::IpProtocol::Tcp,
-                                            &fin_seg,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
+                    super::pipe::close_descriptor(descriptor, self.id.0);
                 }
             }
 
-            // Clean up windows owned by this process
-            window::cleanup_process_windows(user.pid);
-
-            // Unmap all VMAs, skipping Stack (handled by thread_stack_free below).
-            // Drop mm (rank 80) before taking vmas (rank 70), then re-acquire mm.
+            // The last thread out releases the address space. Everything but
+            // the fd table (already drained above) and the PML4 frame.
             drop(memory_manager);
-            let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user.vmas).clone();
-            memory_manager = ranked_lock!(RANK_USER_MM, "user.mm", user.memory_manager);
-            for vma in vmas.iter() {
-                match &vma.backing {
-                    VmaBacking::Anonymous => {
-                        let _ = memory_manager.unmap_memory(vma.start, vma.size());
-                    }
-                    VmaBacking::Tls => {
-                        // Already cleaned up above (per-thread TLS cleanup)
-                    }
-                    VmaBacking::SharedMemory { shm_id } => {
-                        use x86_64::structures::paging::{Mapper, Page, Size4KiB};
-                        let page_count = (vma.size() + 0xFFF) / 4096;
-                        for i in 0..page_count {
-                            let virt_addr = VirtAddr::new(vma.start.as_u64() + i * 4096);
-                            let page: Page<Size4KiB> = Page::containing_address(virt_addr);
-                            if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
-                                flush.flush();
-                            }
-                        }
-                        if let Some(shm) = SharedMemory::get(*shm_id) {
-                            shm.dec_ref();
-                        }
-                    }
-                    VmaBacking::Physical { .. } => {
-                        use x86_64::structures::paging::{Mapper, Page, Size4KiB};
-                        let page_count = (vma.size() + 0xFFF) / 4096;
-                        for i in 0..page_count {
-                            let virt_addr = VirtAddr::new(vma.start.as_u64() + i * 4096);
-                            let page: Page<Size4KiB> = Page::containing_address(virt_addr);
-                            if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
-                                flush.flush();
-                            }
-                        }
-                    }
-                    VmaBacking::Stack => {
-                        // Handled below by thread_stack_free
-                    }
-                    VmaBacking::FileBacked {
-                        inode,
-                        file_offset,
-                        shared,
-                        pages,
-                        ..
-                    } => {
-                        // For MAP_SHARED: flush dirty pages to disk before exit so
-                        // writes survive the process's death (Linux msync-on-exit
-                        // semantics). Errors are logged, never prevent exit.
-                        if *shared {
-                            crate::syscalls::memory::flush_shared_vma_pages(
-                                inode,
-                                *file_offset,
-                                pages,
-                            );
-                        }
-                        // Unmap each present PTE and decrement the frame refcount
-                        // that was bumped at fault-in time. Drop the pages Vec
-                        // AFTER the dec_refcount loop so the Arc<CachedPage>
-                        // refs are released last; the BTreeMap entry in
-                        // inode.pages keeps the cache frame alive.
-                        use x86_64::structures::paging::{Mapper, Page, Size4KiB};
-                        let page_count = (vma.size() + 0xFFF) / 4096;
-                        let mut fa = frame_allocator();
-                        for i in 0..page_count {
-                            let virt_addr = VirtAddr::new(vma.start.as_u64() + i * 4096);
-                            let page: Page<Size4KiB> = Page::containing_address(virt_addr);
-                            if let Ok(phys) = memory_manager.mapper.translate_page(page) {
-                                if let Ok((_, flush)) = memory_manager.mapper.unmap(page) {
-                                    flush.ignore();
-                                    fa.dec_refcount(phys);
-                                }
-                            }
-                        }
-                        // VMA (including its inode Arc) drops at end of this
-                        // arm. If this was the final Arc and the inode was
-                        // previously orphaned, VfsInode::drop triggers
-                        // FileSystem::evict_inode to free on-disk allocations.
-                    }
-                }
-            }
-
-            let stack_top = user.process_stack_top.load(Ordering::Acquire);
-            thread_stack_free(&mut memory_manager, stack_top);
-
-            // No TLB shootdown needed: each process has its own address space
-            // (address_space_refs starts at 1, COW fork creates a new PML4).
-            // The dying thread is the only one with this CR3 loaded, so no other
-            // CPU has user-space TLB entries for this address space.
-            memory_manager.clean_lower_half();
+            release_user_mappings(&user);
 
             switch_to_kernel_page();
 

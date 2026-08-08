@@ -342,3 +342,70 @@ impl Pollable for PollablePipe {
         inner.remove_poller(key);
     }
 }
+
+/// Shut a descriptor down: the side effects that must happen when the last
+/// reference in a process goes away, as opposed to merely dropping the value.
+///
+/// Pipes need an explicit close so the peer sees EOF, PTYs need their side
+/// closed and the foreground pid cleared, and sockets need their refcount
+/// dropped, their port released and a FIN sent. Shared by process exit and by
+/// `execve` closing its close-on-exec descriptors.
+pub fn close_descriptor(descriptor: FileDescriptor, owner_pid: u64) {
+    match descriptor {
+        FileDescriptor::PipeRead(pipe) => {
+            let notif = pipe.lock().close_reader();
+            notif.flush();
+        }
+        FileDescriptor::PipeWrite(pipe) => {
+            let notif = pipe.lock().close_writer();
+            notif.flush();
+        }
+        FileDescriptor::PtySlave(pty) => {
+            let mut guard = pty.lock();
+            if guard.foreground_pid == Some(owner_pid) {
+                guard.foreground_pid = None;
+            }
+            let notif = guard.close_slave();
+            drop(guard);
+            notif.flush();
+        }
+        FileDescriptor::PtyMaster(pty) => {
+            let notif = pty.lock().close_master();
+            notif.flush();
+        }
+        FileDescriptor::Socket(sock) => {
+            let mut s = sock.lock();
+            s.refcount = s.refcount.saturating_sub(1);
+            if s.refcount > 0 {
+                return; // Other fds still reference this socket
+            }
+            s.closed = true;
+            s.rx_wq.wake_all();
+            if let Some(addr) = s.local_addr {
+                let proto = if s.sock_type == crate::net::socket::SOCK_DGRAM {
+                    17u8
+                } else {
+                    6u8
+                };
+                crate::net::socket::port_table()
+                    .lock()
+                    .remove(&(proto, addr.port));
+            }
+            let tcp_conn = s.tcp_conn.clone();
+            drop(s);
+            // For TCP sockets, send FIN to initiate graceful close
+            if let Some(conn) = tcp_conn {
+                let fin = conn.lock().build_fin();
+                if let Some(fin_seg) = fin {
+                    let remote_ip = conn.lock().remote_ip;
+                    if let Some(stack_mutex) = crate::net::stack::NET_STACK.get() {
+                        let mut stack = stack_mutex.lock();
+                        let _ =
+                            stack.send_ip(remote_ip, crate::net::ipv4::IpProtocol::Tcp, &fin_seg);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}

@@ -13,7 +13,7 @@ use spin::{Mutex, RwLock};
 use x86_64::{
     VirtAddr,
     registers::{
-        control::{Cr3, Efer, EferFlags},
+        control::{Cr3, Cr3Flags, Efer, EferFlags},
         model_specific::{LStar, SFMask, Star},
         rflags::RFlags,
     },
@@ -295,6 +295,8 @@ const SYS_IOCTL: u64 = 16;
 const SYS_PIPE: u64 = 22;
 const SYS_EXIT: u64 = 60;
 const SYS_ERRNO: u64 = 0x400;
+const SYS_EXECVE: u64 = 59; // replace this process's image
+const SYS_FCNTL: u64 = 72; // descriptor flags and duplication
 const SYS_PREAD: u64 = 17; // read at an explicit offset
 const SYS_PWRITE: u64 = 18; // write at an explicit offset
 const SYS_GETPID: u64 = 39; // get process ID
@@ -542,6 +544,18 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let stdout_fd = ctx.r10;
             let stderr_fd = ctx.r8;
             ctx.rax = sys_spawn(path_ptr, argv_ptr, stdin_fd, stdout_fd, stderr_fd);
+        }
+        SYS_EXECVE => {
+            let path_ptr = ctx.rdi as *const u8;
+            let argv = ctx.rsi as *const *const u8;
+            let envp = ctx.rdx as *const *const u8;
+            ctx.rax = sys_execve(ctx, path_ptr, argv, envp);
+        }
+        SYS_FCNTL => {
+            let fd = ctx.rdi;
+            let cmd = ctx.rsi;
+            let arg = ctx.rdx;
+            ctx.rax = sys_fcntl(fd, cmd, arg) as u64;
         }
         SYS_DUP => {
             let oldfd = ctx.rdi;
@@ -832,6 +846,22 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             ctx.rax = !0u64;
         }
     }
+
+    // A thread marked for termination dies here rather than returning to user
+    // code. Before this, `killed` was observed on exactly one path (a PTY slave
+    // read), so a thread doing anything else ignored it — which `execve` cannot
+    // tolerate, since it must know every sibling has released the address space
+    // before that space is torn down.
+    //
+    // A thread that never makes a syscall still will not notice; `execve`
+    // bounds its wait rather than assuming otherwise.
+    if let Some(thread) = current_thread()
+        && thread.killed.load(Ordering::Acquire)
+    {
+        let code = thread.exit_code.load(Ordering::Acquire);
+        drop(thread);
+        crate::thread::scheduler::thread_exit(code);
+    }
 }
 
 pub fn sys_errno() -> u64 {
@@ -1073,6 +1103,72 @@ fn sys_dup(oldfd: u64) -> u64 {
 
     old_fd_descriptor.inc_refcount();
     table.allocate_fd(old_fd_descriptor)
+}
+
+// fcntl commands (values match Linux).
+const F_DUPFD: u64 = 0;
+const F_GETFD: u64 = 1;
+const F_SETFD: u64 = 2;
+const F_GETFL: u64 = 3;
+const F_SETFL: u64 = 4;
+const F_DUPFD_CLOEXEC: u64 = 1030;
+
+/// Only the close-on-exec flag exists.
+const FD_CLOEXEC: u64 = 1;
+
+/// `fcntl(fd, cmd, arg)`.
+///
+/// Supports the descriptor-flag and duplication commands. `F_GETFL`/`F_SETFL`
+/// return EINVAL rather than a plausible-looking zero: there is no
+/// `O_NONBLOCK` in this kernel, so a caller that "successfully" sets it would
+/// be told a lie it then relies on.
+fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let fd_table = info.lock().fd_table.clone();
+    let mut table = fd_table.lock();
+
+    if table.get_fd(fd).is_none() {
+        drop(table);
+        info.lock().errno = Errno::EBADF;
+        return -1;
+    }
+
+    match cmd {
+        F_GETFD => {
+            if table.is_cloexec(fd) {
+                FD_CLOEXEC as i64
+            } else {
+                0
+            }
+        }
+        F_SETFD => {
+            table.set_cloexec(fd, arg & FD_CLOEXEC != 0);
+            0
+        }
+        F_DUPFD | F_DUPFD_CLOEXEC => {
+            let Some(desc) = table.get_fd(fd).cloned() else {
+                drop(table);
+                info.lock().errno = Errno::EBADF;
+                return -1;
+            };
+            desc.inc_refcount();
+            let new_fd = table.allocate_fd_from(desc, arg);
+            table.set_cloexec(new_fd, cmd == F_DUPFD_CLOEXEC);
+            new_fd as i64
+        }
+        F_GETFL | F_SETFL => {
+            drop(table);
+            info.lock().errno = Errno::EINVAL;
+            -1
+        }
+        _ => {
+            drop(table);
+            info.lock().errno = Errno::EINVAL;
+            -1
+        }
+    }
 }
 
 fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
@@ -1564,6 +1660,311 @@ fn sys_spawn2(args_ptr: *const SpawnArgs) -> u64 {
         args.stderr_fd,
         0,
     )
+}
+
+/// `execve(path, argv, envp)`: replace this process's image, keeping its pid.
+///
+/// The sequence is dictated by one rule: nothing observable changes until the
+/// point of no return, and after that point nothing may fail.
+///
+/// 1. Copy path/argv/envp out of user memory. Everything after this reads only
+///    kernel memory, because the address space holding those strings is about
+///    to disappear.
+/// 2. Build the entire new image in a *fresh* address space, while the old one
+///    is still live. A failure here returns an error with the process intact,
+///    which is what POSIX requires of a failed exec.
+/// 3. Terminate the sibling threads and wait for them to release the address
+///    space. Failing this is the one case that can abandon a successful load.
+/// 4. Point of no return: switch to the kernel page table, release the old
+///    mappings, install the new ones, and rewrite the register context so the
+///    syscall returns into the new image instead of the caller.
+fn sys_execve(
+    ctx: &mut SyscallContext,
+    path_ptr: *const u8,
+    argv: *const *const u8,
+    envp: *const *const u8,
+) -> u64 {
+    use x86_64::registers::model_specific::FsBase;
+
+    use crate::{
+        fs::api as fs_api,
+        memory::frame_allocator::frame_allocator,
+        thread::{
+            pipe::close_descriptor,
+            thread::{load_process_image, quiesce_address_space},
+        },
+    };
+
+    const MAX_ARGC: usize = 64;
+    const MAX_ARG_LEN: usize = 4096;
+    const MAX_ARG_TOTAL: usize = 16 * 1024;
+    const MAX_ENVC: usize = 128;
+    const MAX_ENV_LEN: usize = 4096;
+    const MAX_ENV_TOTAL: usize = 32 * 1024;
+
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let Some(thread) = current_thread() else {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    };
+    let Some(user_arc) = thread.user.clone() else {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    };
+
+    x86_64::instructions::interrupts::enable();
+
+    // --- 1. Everything the new image needs, copied out of the old one ---
+
+    let path_bytes = match copy_user_c_string(path_ptr, MAX_PATH_LEN) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
+        }
+    };
+    let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    };
+    let path = match io::resolve_path(path_str, &info.lock().cwd.lock()) {
+        Ok(p) => p,
+        Err(_) => {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+    };
+
+    let mut argv_storage: Vec<Vec<u8>> = Vec::new();
+    argv_storage.push(format!("{path}").as_bytes().to_vec());
+    match parse_user_string_array(argv, MAX_ARGC, MAX_ARG_LEN, MAX_ARG_TOTAL) {
+        Ok(args) => argv_storage.extend(args),
+        Err(errno) => {
+            info.lock().errno = errno;
+            return !0u64;
+        }
+    }
+    let envp_storage = match parse_user_string_array(envp, MAX_ENVC, MAX_ENV_LEN, MAX_ENV_TOTAL) {
+        Ok(env) => env,
+        Err(errno) => {
+            info.lock().errno = errno;
+            return !0u64;
+        }
+    };
+
+    let inode = match fs_api::resolve_inode(&path) {
+        Ok(ino) => ino,
+        Err(_) => {
+            info.lock().errno = Errno::ENOENT;
+            return !0u64;
+        }
+    };
+
+    // --- 2. Build the new image beside the old one ---
+
+    let argv_slices: Vec<&[u8]> = argv_storage.iter().map(|a| a.as_slice()).collect();
+    let envp_slices: Vec<&[u8]> = envp_storage.iter().map(|e| e.as_slice()).collect();
+
+    let image = match load_process_image(&inode, &path, &argv_slices, &envp_slices) {
+        Ok(image) => image,
+        Err(e) => {
+            log!("execve: loading {path} failed: {e:?}");
+            info.lock().errno = Errno::ENOEXEC;
+            return !0u64;
+        }
+    };
+
+    // --- 3. The old address space must belong to this thread alone ---
+
+    if !quiesce_address_space(&thread) {
+        // The load succeeded but a sibling will not stop. Give the new image
+        // back rather than unmap an address space someone may still be running.
+        release_user_mappings_of_image(image);
+        info.lock().errno = Errno::EAGAIN;
+        return !0u64;
+    }
+
+    // --- 4. Point of no return ---
+
+    // Descriptors marked close-on-exec go before the swap, while user memory is
+    // still addressable for anything their teardown needs.
+    let cloexec = {
+        let fd_table = info.lock().fd_table.clone();
+        let doomed = fd_table.lock().take_cloexec();
+        doomed
+    };
+    let pid = info.lock().pid;
+    for (_fd, desc) in cloexec {
+        close_descriptor(desc, pid);
+    }
+
+    // Detach the outgoing address space and attach the new one in a single
+    // step, then start running on it. Only after that is the old one taken
+    // apart: `context_switch_to` reloads CR3 from `user.cr3` on every switch,
+    // so freeing a page table that is still published there would hand a
+    // preemption a dangling CR3.
+    let (parts, old) = install_image(&user_arc, &info, image);
+
+    unsafe { Cr3::write(parts.new_cr3.0, parts.new_cr3.1) };
+
+    let DetachedAddressSpace {
+        mut memory_manager,
+        vmas,
+        pml4,
+        stack_top,
+    } = old;
+    crate::thread::thread::release_mappings(&mut memory_manager, &vmas, pid, stack_top);
+    drop(memory_manager);
+    unsafe { frame_allocator().deallocate_frame(pml4) };
+
+    let LoadedImageParts {
+        entry_point,
+        user_stack_pointer,
+        argc,
+        argv_ptr,
+        envp_ptr,
+        tls_fs_base,
+        new_cr3: _,
+    } = parts;
+
+    thread.tls_base.store(tls_fs_base, Ordering::Release);
+    FsBase::write(VirtAddr::new(tls_fs_base));
+    thread.signal.reset_for_exec();
+
+    // Return into the new image: the syscall stub restores every register from
+    // this context and sysrets to `rip` with `rsp`, so rewriting it here is the
+    // whole of "start executing the new program".
+    *ctx = SyscallContext {
+        r15: 0,
+        r14: 0,
+        r13: 0,
+        r12: 0,
+        rbp: 0,
+        rbx: 0,
+        r10: 0,
+        r9: 0,
+        r8: 0,
+        rdx: envp_ptr,
+        rsi: argv_ptr,
+        rdi: argc as u64,
+        rax: 0,
+        rip: entry_point.as_u64(),
+        rflags: RFlags::INTERRUPT_FLAG.bits(),
+        rsp: user_stack_pointer,
+    };
+
+    0
+}
+
+struct LoadedImageParts {
+    entry_point: VirtAddr,
+    user_stack_pointer: u64,
+    argc: usize,
+    argv_ptr: u64,
+    envp_ptr: u64,
+    tls_fs_base: u64,
+    new_cr3: (x86_64::structures::paging::PhysFrame, Cr3Flags),
+}
+
+/// Move a freshly loaded image into the process, keeping every `Arc` identity.
+///
+/// The `MemoryManager` and `VmaSet` allocations are replaced *by content* rather
+/// than by pointer: `UserThreadInfo`, the `MemoryManager`'s own back-reference
+/// and any in-flight fault handler all hold clones of those `Arc`s, and swapping
+/// the pointers would leave them addressing the image that just died.
+/// The address space `execve` replaced, detached from the process and owned by
+/// the caller, which must tear it down.
+struct DetachedAddressSpace {
+    memory_manager: crate::memory::mapper::MemoryManager,
+    vmas: VmaSet,
+    pml4: x86_64::structures::paging::PhysFrame,
+    stack_top: u64,
+}
+
+fn install_image(
+    user_arc: &Arc<RwLock<crate::thread::UserThread>>,
+    info: &Arc<IrqSpinlock<UserThreadInfo>>,
+    image: crate::thread::thread::LoadedImage,
+) -> (LoadedImageParts, DetachedAddressSpace) {
+    let kernel_pml4_flags = crate::boot::boot_info().cr3.1;
+
+    let mut user = user_arc.write();
+
+    let mut new_mm = image.memory_manager;
+    // Take the VMAs out of the image's temporary Arc and into the one the
+    // process already publishes.
+    let new_vmas = core::mem::replace(&mut *image.vma_set.lock(), VmaSet::new());
+    new_mm.vmas = Some(user.vmas.clone());
+    let old_vmas = {
+        let mut vmas = ranked_lock!(RANK_VMAS, "exec::vmas", user.vmas);
+        core::mem::replace(&mut **vmas, new_vmas)
+    };
+    let old_mm = {
+        let mut mm = ranked_lock!(RANK_USER_MM, "exec::mm", user.memory_manager);
+        core::mem::replace(&mut **mm, new_mm)
+    };
+    let old_pml4 = user.cr3.0;
+    let old_stack_top = user.process_stack_top.load(Ordering::Acquire);
+
+    user.cr3 = (image.pml4_frame, kernel_pml4_flags);
+    user.tls = image.tls;
+    user.heap_break = image.heap_break;
+    user.process_stack_top
+        .store(image.stack_top, Ordering::Release);
+    // A fresh image has one thread again, so TLS slots restart above slot 0.
+    user.next_tls_slot.store(1, Ordering::Release);
+
+    info.lock()
+        .next_mmap_addr
+        .store(image.heap_break, Ordering::Release);
+
+    // Register the process as a mapper of the new file-backed VMAs so a later
+    // truncate can unmap them here. Collected under the VmaSet lock and
+    // registered outside it: inode.mappers outranks vmas.
+    let file_backed: Vec<Arc<crate::fs::inode::VfsInode>> = {
+        let vmas = ranked_lock!(RANK_VMAS, "exec::vmas", user.vmas);
+        vmas.iter()
+            .filter_map(|vma| match &vma.backing {
+                VmaBacking::FileBacked { inode, .. } => Some(Arc::clone(inode)),
+                _ => None,
+            })
+            .collect()
+    };
+    let weak = Arc::downgrade(user_arc);
+    for inode in file_backed {
+        ranked_lock!(RANK_MAPPERS, "inode.mappers", inode.mappers).push(weak.clone());
+    }
+
+    (
+        LoadedImageParts {
+            entry_point: image.entry_point,
+            user_stack_pointer: image.user_stack_pointer,
+            argc: image.argc,
+            argv_ptr: image.argv_ptr,
+            envp_ptr: image.envp_ptr,
+            tls_fs_base: image.tls_fs_base,
+            new_cr3: (image.pml4_frame, kernel_pml4_flags),
+        },
+        DetachedAddressSpace {
+            memory_manager: old_mm,
+            vmas: old_vmas,
+            pml4: old_pml4,
+            stack_top: old_stack_top,
+        },
+    )
+}
+
+/// Discard an image that was built but never installed.
+///
+/// Only the page tables and the frames the loader mapped exist yet; nothing
+/// else in the kernel refers to them.
+fn release_user_mappings_of_image(mut image: crate::thread::thread::LoadedImage) {
+    use crate::memory::frame_allocator::frame_allocator;
+
+    image.memory_manager.clean_lower_half();
+    unsafe { frame_allocator().deallocate_frame(image.pml4_frame) };
 }
 
 fn sys_clone(

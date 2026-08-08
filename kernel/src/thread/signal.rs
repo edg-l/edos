@@ -69,6 +69,20 @@ impl SignalState {
         self.handlers[signum as usize].swap(handler, Ordering::Relaxed)
     }
 
+    /// Reset dispositions across `execve`.
+    ///
+    /// POSIX: signals set to be ignored stay ignored, everything else returns
+    /// to the default, because the handlers belonged to the image being
+    /// replaced. Pending signals are kept — they were sent to the process,
+    /// which still exists.
+    pub fn reset_for_exec(&self) {
+        for handler in self.handlers.iter() {
+            if handler.load(Ordering::Relaxed) != SIG_IGN {
+                handler.store(SIG_DFL, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// Add a pending signal.
     pub fn send(&self, signum: u32) {
         if signum == 0 || signum >= 32 {
