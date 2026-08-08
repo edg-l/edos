@@ -73,6 +73,8 @@ pub enum Error {
     Corrupted,
     #[error("unsupported op")]
     Unsupported,
+    #[error("filesystem thread answered a request with the wrong reply")]
+    ProtocolMismatch,
 }
 
 #[repr(C)]

@@ -304,7 +304,13 @@ pub fn sys_list_partitions(buffer: *mut u8, size: u64) -> i64 {
 
     interrupts::enable();
 
-    let partitions = list_partitions();
+    let partitions = match list_partitions() {
+        Ok(parts) => parts,
+        Err(_) => {
+            info.lock().errno = Errno::EIO;
+            return -1;
+        }
+    };
 
     let mut current_ptr = buffer;
     let mut written = 0;

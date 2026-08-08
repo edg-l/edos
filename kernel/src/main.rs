@@ -295,7 +295,10 @@ extern "C" fn boot_load_thread(arg: *mut u8) -> ! {
 
 pub fn mount_system_fs() -> ! {
     log!("Starting mountfs thread");
-    let partitions = fs::api::list_partitions();
+    let partitions = match fs::api::list_partitions() {
+        Ok(parts) => parts,
+        Err(e) => panic!("cannot enumerate partitions, no root filesystem: {e}"),
+    };
 
     log!("Got partitions");
 

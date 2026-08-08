@@ -934,6 +934,7 @@ impl From<FsError> for Errno {
             FsError::InvalidFs => Errno::EINVAL,
             FsError::Corrupted => Errno::EIO,
             FsError::Unsupported => Errno::EIO,
+            FsError::ProtocolMismatch => Errno::EIO,
         }
     }
 }

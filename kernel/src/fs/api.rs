@@ -25,12 +25,26 @@ pub(super) fn send_request(request: FsRequest) -> FsResponse {
 
 // Global/management APIs
 
-pub fn list_partitions() -> Vec<Partition> {
-    let res = send_request(FsRequest::ListPartitions);
-    let FsResponse::Partitions(parts) = res else {
-        unreachable!("{:#?}", res)
-    };
-    parts
+/// The FS thread answers `ListPartitions` with `Partitions` and every other
+/// request with `Ok`. These two helpers are the only places that pairing is
+/// asserted, so a request variant added later cannot quietly reuse the wrong
+/// reply, and a mismatch is an error rather than a kernel panic.
+fn expect_ok(res: FsResponse) -> Result<(), Error> {
+    match res {
+        FsResponse::Ok(result) => result,
+        FsResponse::Partitions(_) => Err(Error::ProtocolMismatch),
+    }
+}
+
+fn expect_partitions(res: FsResponse) -> Result<Vec<Partition>, Error> {
+    match res {
+        FsResponse::Partitions(parts) => Ok(parts),
+        FsResponse::Ok(_) => Err(Error::ProtocolMismatch),
+    }
+}
+
+pub fn list_partitions() -> Result<Vec<Partition>, Error> {
+    expect_partitions(send_request(FsRequest::ListPartitions))
 }
 
 pub fn list_mounts() -> Vec<MountInfo> {
@@ -46,31 +60,22 @@ pub fn mount_partition(
     mount_point: Path,
     fs_type: FilesystemType,
 ) -> Result<(), Error> {
-    let FsResponse::Ok(result) = send_request(FsRequest::Mount {
+    expect_ok(send_request(FsRequest::Mount {
         device_id,
         partition_index,
         mount_point,
         fstype: fs_type,
-    }) else {
-        unreachable!()
-    };
-    result
+    }))
 }
 
 #[expect(unused)]
 pub fn unmount(mount_point: Path) -> Result<(), Error> {
-    let FsResponse::Ok(result) = send_request(FsRequest::Unmount { mount_point }) else {
-        unreachable!()
-    };
-    result
+    expect_ok(send_request(FsRequest::Unmount { mount_point }))
 }
 
 /// Register a partition dynamically (e.g. a USB storage device discovered after boot).
 pub fn register_partition(partition: Partition) -> Result<(), Error> {
-    let FsResponse::Ok(result) = send_request(FsRequest::RegisterPartition { partition }) else {
-        unreachable!()
-    };
-    result
+    expect_ok(send_request(FsRequest::RegisterPartition { partition }))
 }
 
 // Path-scoped APIs (resolve filesystem via VFS)
