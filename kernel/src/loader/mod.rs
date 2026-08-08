@@ -20,7 +20,7 @@ use crate::{
     memory::{
         frame_allocator::frame_allocator,
         mapper::MemoryManager,
-        vma::{Vma, VmaBacking, VmaFlags, VmaProt},
+        vma::{USER_VA_END, Vma, VmaBacking, VmaFlags, VmaProt},
     },
     println,
 };
@@ -68,6 +68,10 @@ pub enum ElfLoadError {
     /// Callers map this to ENOEXEC so non-page-cache binaries fail at spawn.
     #[error("NoPageCache")]
     NoPageCache,
+    /// A PT_LOAD segment does not lie wholly within the user half, or its
+    /// header fields do not describe a coherent range.
+    #[error("InvalidSegment")]
+    InvalidSegment,
 }
 
 /// Allocate a private frame, copy one page from the inode page cache into it,
@@ -308,7 +312,24 @@ pub fn load_elf(
                 continue;
             }
 
-            let vaddr = base_addr + p_vaddr;
+            // p_vaddr, p_memsz and p_filesz are attacker-controlled: any user can
+            // spawn any file it can read. Everything below builds VirtAddrs and
+            // VMA ranges out of them, so the segment is bounded to the user half
+            // first — VirtAddr::new panics on a non-canonical address, and a VMA
+            // reaching past USER_VA_END would map kernel space user-accessible.
+            let seg_start = base_addr
+                .as_u64()
+                .checked_add(p_vaddr)
+                .ok_or(ElfLoadError::InvalidSegment)?;
+            let seg_end = seg_start
+                .checked_add(p_memsz)
+                .ok_or(ElfLoadError::InvalidSegment)?;
+            // p_filesz > p_memsz would put the file-backed VMA past seg_end.
+            if seg_end > USER_VA_END || p_filesz > p_memsz {
+                return Err(ElfLoadError::InvalidSegment);
+            }
+
+            let vaddr = VirtAddr::new(seg_start);
             let page_aligned_vaddr = VirtAddr::new(vaddr.as_u64() & !0xfff);
             let vaddr_offset = vaddr.as_u64() - page_aligned_vaddr.as_u64();
 

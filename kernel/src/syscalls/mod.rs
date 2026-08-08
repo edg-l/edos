@@ -1571,7 +1571,7 @@ fn sys_clone(
         // Claim the range before mapping it. Threads of one process share an
         // address space, so two concurrent spawns searching for a free range
         // without claiming it would both land on the same stack.
-        let stack_bottom = crate::syscalls::memory::claim_range(
+        let Some(stack_bottom) = crate::syscalls::memory::claim_range(
             &parent_user,
             &parent_info,
             0,
@@ -1579,7 +1579,9 @@ fn sys_clone(
             VmaProt::READ | VmaProt::WRITE,
             VmaFlags::PRIVATE | VmaFlags::GROWSDOWN,
             VmaBacking::Stack,
-        );
+        ) else {
+            return !0u64;
+        };
 
         // Map the stack
         let page_flags =
@@ -1677,7 +1679,7 @@ fn sys_clone(
 
     // Add the new TLS VMA to the shared VmaSet; the stack was claimed above.
     if let Some(vma) = tls_region.take() {
-        ranked_lock!(RANK_VMAS, "sys_clone::tls_vma_insert", parent_vmas).insert(vma);
+        ranked_lock!(RANK_VMAS, "sys_clone::tls_vma_insert", parent_vmas).insert_validated(vma);
     }
 
     address_space_refs.fetch_add(1, Ordering::AcqRel);
@@ -1803,7 +1805,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
                     if let Some(shm) = SharedMemory::get(*shm_id) {
                         let _ = shm.inc_ref();
                     }
-                    cloned.insert(vma.clone());
+                    cloned.insert_validated(vma.clone());
                 }
                 VmaBacking::FileBacked {
                     inode,
@@ -1815,7 +1817,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
                     // Child gets a fresh pages vec (no shared Arc<CachedPage> refs).
                     // Child will re-fault and fill its own page slots lazily.
                     let num_pages = pages.len();
-                    cloned.insert(Vma {
+                    cloned.insert_validated(Vma {
                         start: vma.start,
                         end: vma.end,
                         prot: vma.prot,
@@ -1830,7 +1832,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
                     });
                 }
                 _ => {
-                    cloned.insert(vma.clone());
+                    cloned.insert_validated(vma.clone());
                 }
             }
         }

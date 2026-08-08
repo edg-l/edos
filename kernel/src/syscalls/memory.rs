@@ -14,7 +14,7 @@ use crate::{
         frame_allocator::frame_allocator,
         mapper::memory_mapper,
         pat,
-        vma::{Vma, VmaBacking, VmaFlags, VmaProt},
+        vma::{USER_VA_END, Vma, VmaBacking, VmaError, VmaFlags, VmaProt},
     },
     println, ranked_lock,
     syscalls::Errno,
@@ -40,13 +40,16 @@ pub const MS_ASYNC: u32 = 0x1;
 pub const MS_SYNC: u32 = 0x2;
 pub const MS_INVALIDATE: u32 = 0x4;
 
-/// Places a VMA and returns the address it covers.
+/// Places a VMA and returns the address it covers, or `None` after setting
+/// `errno` on the calling thread.
 ///
 /// With `addr == 0` the kernel picks the range; the search and the insert happen
 /// under one acquisition of the VmaSet lock, because a range is only free while
-/// that lock is held. An explicit `addr` is taken at the caller's word, and is
-/// inserted under the same lock so two callers naming the same address cannot
-/// each believe they own it.
+/// that lock is held. An explicit `addr` is taken at the caller's word as to
+/// *which* range it wants, and is inserted under the same lock so two callers
+/// naming the same address cannot each believe they own it. It is not taken at
+/// the caller's word as to whether that range exists: `addr` and `length` are
+/// untrusted, so the range is checked against the user half by `VmaSet::insert`.
 pub(super) fn claim_range(
     user_arc: &Arc<RwLock<UserThread>>,
     info: &Arc<IrqSpinlock<UserThreadInfo>>,
@@ -55,23 +58,47 @@ pub(super) fn claim_range(
     prot: VmaProt,
     flags: VmaFlags,
     backing: VmaBacking,
-) -> VirtAddr {
+) -> Option<VirtAddr> {
     let next_mmap_addr = info.lock().next_mmap_addr.clone();
-    let user_read = user_arc.read();
-    let mut vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
+    let result = {
+        let user_read = user_arc.read();
+        let mut vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
 
-    if addr == 0 {
-        vmas.reserve(&next_mmap_addr, length, prot, flags, backing)
-    } else {
-        let start = VirtAddr::new(addr);
-        vmas.insert(Vma {
-            start,
-            end: start + length,
-            prot,
-            flags,
-            backing,
-        });
-        start
+        if addr == 0 {
+            vmas.reserve(&next_mmap_addr, length, prot, flags, backing)
+        } else {
+            // `addr` is a raw user value: VirtAddr::new panics on a non-canonical
+            // one, and the sum can wrap, so both are checked before construction.
+            match addr
+                .checked_add(length)
+                .filter(|end| *end <= USER_VA_END)
+                .ok_or(VmaError::OutOfUserSpace)
+            {
+                Ok(end) => {
+                    let start = VirtAddr::new(addr);
+                    vmas.insert(Vma {
+                        start,
+                        end: VirtAddr::new(end),
+                        prot,
+                        flags,
+                        backing,
+                    })
+                    .map(|()| start)
+                }
+                Err(e) => Err(e),
+            }
+        }
+    };
+
+    match result {
+        Ok(start) => Some(start),
+        Err(e) => {
+            info.lock().errno = match e {
+                VmaError::OutOfUserSpace => Errno::EINVAL,
+                VmaError::NoSpace => Errno::ENOMEM,
+            };
+            None
+        }
     }
 }
 
@@ -169,6 +196,9 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
                 phys_base: phys_addr,
             },
         );
+        let Some(map_addr) = map_addr else {
+            return !0u64;
+        };
 
         let mut phys_flags = PageTableFlags::PRESENT
             | PageTableFlags::WRITABLE
@@ -240,6 +270,9 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             VmaFlags::PRIVATE | VmaFlags::LAZY,
             VmaBacking::Anonymous,
         );
+        let Some(map_addr) = map_addr else {
+            return !0u64;
+        };
 
         log_debug!("mmap: lazy mapped at {map_addr:p}");
         map_addr.as_u64()
@@ -351,7 +384,11 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             writable_mapping,
             pages: alloc::vec![None; num_pages],
         };
-        let map_addr = claim_range(&user_arc, &info, addr, length, vma_prot, vma_flags, backing);
+        let Some(map_addr) =
+            claim_range(&user_arc, &info, addr, length, vma_prot, vma_flags, backing)
+        else {
+            return !0u64;
+        };
 
         // D.1: Register this process in the inode's reverse map so that a future
         // truncate can walk all mappers and unmap PTEs past the new EOF.
@@ -703,13 +740,13 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
             VmaBacking::SharedMemory { .. } => {
                 // Re-insert and return error; SHM has its own unmap syscall.
                 let _user = user_arc.read();
-                ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert(vma);
+                ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert_validated(vma);
                 any_error = true;
             }
             VmaBacking::Tls | VmaBacking::Stack => {
                 // Kernel-managed; re-insert and return error.
                 let _user = user_arc.read();
-                ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert(vma);
+                ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert_validated(vma);
                 any_error = true;
             }
         }

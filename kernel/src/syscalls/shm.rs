@@ -117,7 +117,7 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
 
     // Claim the range before mapping frames into it, so a concurrent attach
     // cannot pick the same one.
-    let map_addr = claim_range(
+    let Some(map_addr) = claim_range(
         &user_arc,
         &info,
         addr_hint,
@@ -125,7 +125,9 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
         vma_prot,
         VmaFlags::SHARED,
         VmaBacking::SharedMemory { shm_id },
-    );
+    ) else {
+        return !0u64;
+    };
 
     // Hands the claimed range back on a failure path.
     let unclaim = || {
@@ -260,7 +262,7 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
                 _ => {
                     // Not a shared memory mapping, restore and return error
                     let _user = user_arc.read();
-                    ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert(vma);
+                    ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert_validated(vma);
                     info.lock().errno = Errno::EINVAL;
                     -1
                 }

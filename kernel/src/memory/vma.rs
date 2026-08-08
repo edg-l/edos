@@ -115,7 +115,15 @@ impl Vma {
 }
 
 /// Exclusive upper bound of the user half of the canonical address space.
-const USER_VA_END: u64 = 0x0000_8000_0000_0000;
+pub const USER_VA_END: u64 = 0x0000_8000_0000_0000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmaError {
+    /// The range wraps, or reaches past [`USER_VA_END`] into the kernel half.
+    OutOfUserSpace,
+    /// The user half holds no free gap of the requested length.
+    NoSpace,
+}
 
 /// Ordered collection of VMAs keyed by start address
 #[derive(Debug)]
@@ -164,7 +172,30 @@ impl VmaSet {
         self.vmas.get_mut(&key)
     }
 
-    pub fn insert(&mut self, vma: Vma) {
+    /// Insert a VMA, rejecting any range that is not wholly within the user half.
+    ///
+    /// Every range in a `VmaSet` becomes a `USER_ACCESSIBLE` mapping, and two of
+    /// the addresses that reach here are untrusted: an explicit `mmap` address
+    /// and an ELF `p_vaddr`. The bound is checked here rather than at those call
+    /// sites so that a future caller cannot forget it; the address-picking path
+    /// ([`Self::find_free_address`]) enforces the same bound on its own results.
+    pub fn insert(&mut self, vma: Vma) -> Result<(), VmaError> {
+        if vma.end < vma.start || vma.end.as_u64() > USER_VA_END {
+            return Err(VmaError::OutOfUserSpace);
+        }
+        self.vmas.insert(vma.start, vma);
+        Ok(())
+    }
+
+    /// Insert a range whose bound was already established: one handed back by an
+    /// unmap failure path, one copied from a parent's set on fork, or one the
+    /// kernel derived from `USER_STACK_TOP`. These callers have no error to
+    /// report and no untrusted input, so the bound is a debug assertion.
+    pub fn insert_validated(&mut self, vma: Vma) {
+        debug_assert!(
+            vma.end >= vma.start && vma.end.as_u64() <= USER_VA_END,
+            "insert_validated called with a range outside the user half"
+        );
         self.vmas.insert(vma.start, vma);
     }
 
@@ -274,16 +305,20 @@ impl VmaSet {
         prot: VmaProt,
         flags: VmaFlags,
         backing: VmaBacking,
-    ) -> VirtAddr {
-        let start = self.find_free_address(hint, length);
+    ) -> Result<VirtAddr, VmaError> {
+        let start = self.find_free_address(hint, length)?;
+        let end = start
+            .as_u64()
+            .checked_add(length)
+            .ok_or(VmaError::OutOfUserSpace)?;
         self.insert(Vma {
             start,
-            end: start + length,
+            end: VirtAddr::new(end),
             prot,
             flags,
             backing,
-        });
-        start
+        })?;
+        Ok(start)
     }
 
     /// Find a free virtual address range of `length` bytes.
@@ -293,8 +328,10 @@ impl VmaSet {
     /// exhausted the search wraps to the base and reuses holes left by
     /// `munmap`. Private because a returned address is only free while the lock
     /// is held; callers claim a range through [`Self::reserve`].
-    fn find_free_address(&self, hint: &AtomicU64, length: u64) -> VirtAddr {
-        let len = (length + 0xfff) & !0xfff;
+    fn find_free_address(&self, hint: &AtomicU64, length: u64) -> Result<VirtAddr, VmaError> {
+        // A length within a page of u64::MAX would wrap this to a small value and
+        // hand out a gap far shorter than the caller asked for.
+        let len = length.checked_add(0xfff).ok_or(VmaError::OutOfUserSpace)? & !0xfff;
 
         // The first caller defines the floor: below it lie the image, heap and
         // anything else the loader placed, none of which this allocator owns.
@@ -312,12 +349,10 @@ impl VmaSet {
         // fallback never runs, so freed ranges are never reused and the cursor
         // marches upward exactly as the old bump allocator did. The scan is
         // over a process's VMA list, which is tens of entries.
-        let found = self
-            .first_fit(base, len)
-            .expect("out of user virtual address space");
+        let found = self.first_fit(base, len).ok_or(VmaError::NoSpace)?;
 
         hint.store(found + len, Ordering::Relaxed);
-        VirtAddr::new(found)
+        Ok(VirtAddr::new(found))
     }
 
     /// Lowest gap of `len` bytes at or above `floor`, or `None` if the address

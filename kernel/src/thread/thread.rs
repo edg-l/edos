@@ -544,13 +544,16 @@ impl Thread {
         let stack_top = USER_STACK_TOP.as_u64();
         let vma_set = Arc::new(PreemptSpinlock::new(VmaSet::new()));
         let stack_bottom = VirtAddr::new(stack_top - USER_STACK_SIZE);
-        vma_set.lock().insert(Vma {
-            start: stack_bottom,
-            end: USER_STACK_TOP,
-            prot: VmaProt::READ | VmaProt::WRITE,
-            flags: VmaFlags::PRIVATE | VmaFlags::GROWSDOWN | VmaFlags::LAZY,
-            backing: VmaBacking::Stack,
-        });
+        vma_set
+            .lock()
+            .insert(Vma {
+                start: stack_bottom,
+                end: USER_STACK_TOP,
+                prot: VmaProt::READ | VmaProt::WRITE,
+                flags: VmaFlags::PRIVATE | VmaFlags::GROWSDOWN | VmaFlags::LAZY,
+                backing: VmaBacking::Stack,
+            })
+            .map_err(|_| ElfLoadError::MappingFailed)?;
         process_memory_manager.vmas = Some(vma_set.clone());
 
         // setup_user_stack now demand-faults stack pages via MemoryManager's VmaSet
@@ -576,7 +579,10 @@ impl Thread {
             let template = Arc::new(template);
             let allocation = allocate_tls_region(&template, 0, &mut process_memory_manager)?;
             tls_fs_base = allocation.fs_base;
-            vma_set.lock().insert(allocation.vma);
+            vma_set
+                .lock()
+                .insert(allocation.vma)
+                .map_err(|_| ElfLoadError::MappingFailed)?;
             tls_runtime = Some(allocation.runtime);
         }
 
@@ -584,7 +590,7 @@ impl Thread {
         {
             let mut vmas = vma_set.lock();
             for vma in load_info.memory_regions {
-                vmas.insert(vma);
+                vmas.insert(vma).map_err(|_| ElfLoadError::InvalidSegment)?;
             }
         }
 

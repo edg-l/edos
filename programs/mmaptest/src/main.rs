@@ -2,7 +2,9 @@ use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::time::Instant;
 
-use edos_lib::mem::{MAP_PRIVATE, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE, mmap, msync, munmap};
+use edos_lib::mem::{
+    MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE, mmap, msync, munmap,
+};
 use edos_lib::process;
 
 const PAGE: u64 = 4096;
@@ -687,6 +689,51 @@ fn test10(dir: &str) {
     );
 }
 
+// -----------------------------------------------------------------------
+// Test 11: an mmap address outside the user half is rejected, not mapped
+// -----------------------------------------------------------------------
+fn test11(dir: &str) {
+    // The kernel builds a VirtAddr and a VMA range straight out of these, and
+    // every VMA it holds becomes a user-accessible mapping. Each case must come
+    // back as a failed mmap; the failure being tested for is the kernel taking
+    // the value at its word.
+    let cases: [(&str, u64, u64); 5] = [
+        // Non-canonical: x86_64 has no such address at all.
+        ("non-canonical", 0x0000_9000_0000_0000, PAGE),
+        // Canonical, but in the kernel half.
+        ("kernel half", 0xffff_8000_0000_0000, PAGE),
+        // The last user page, extended one page past the top of the user half.
+        ("straddles the top", 0x0000_7fff_ffff_f000, 2 * PAGE),
+        // start + length wraps to a small address.
+        ("wrapping length", 0x0000_7000_0000_0000, u64::MAX - PAGE),
+        // Kernel-chosen address, but a length no gap can hold.
+        ("unsatisfiable length", 0, u64::MAX - PAGE),
+    ];
+
+    for (name, addr, length) in cases {
+        let p = mmap(
+            addr as *mut u8,
+            length,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        if p as u64 != u64::MAX {
+            fail(
+                11,
+                dir,
+                &format!(
+                    "mmap({}, addr={:#x}, len={:#x}) returned {:p}, expected failure",
+                    name, addr, length, p
+                ),
+            );
+        }
+    }
+
+    pass(11, dir, "out-of-bounds mmap addresses all rejected");
+}
+
 fn run_suite(dir: &str) {
     println!("mmaptest: running tests on [{}]", dir);
     let suite_start = Instant::now();
@@ -712,6 +759,7 @@ fn run_suite(dir: &str) {
     run(8, &test8);
     run(9, &test9);
     run(10, &test10);
+    run(11, &test11);
 
     let total_ms = suite_start.elapsed().as_millis();
     println!("mmaptest: all tests passed [{}] ({} ms)", dir, total_ms);
