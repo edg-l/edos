@@ -335,7 +335,7 @@ exists to keep exercising that.
 
 ---
 
-## Open bug: a CPU stops answering TLB shootdown IPIs, then double faults
+## Fixed: a CPU stopped answering TLB shootdown IPIs, then double faulted
 
 Reproducible in about a minute, which the `current_thread_info` panic never was.
 Drive `threadtest`, `threadtest hammer` and `threadtest nojoin` in a loop through
@@ -409,56 +409,52 @@ cpu 9:  [13] Steal  0->9 tid=46
 
 CPU 9 panicked in that switch with `cw: Low context address 0x1` — its
 `context` local had been overwritten while it idled. The same mechanism explains
-the impossible interrupt frames below and the double faults.
+the double faults and the impossible interrupt frames seen earlier, where
+`instruction_pointer` held a plausible RFLAGS value (`0x286`) and `code_segment`
+an index of 6400 against a seven-entry GDT.
 
-### Attempted and reverted: pivoting the tick to the scheduler stack
+### Fixed: leave the thread's stack before publishing the thread
 
-On branch `sched-idle-stack-pivot` (commit `37146fe`), not merged. It splits
-`on_tick` into `tick_prepare` (on the thread's stack, saves the outgoing
-context) and `tick_finish` (on the per-CPU scheduler stack, publishes the thread
-and picks the next), with the naked handler copying the 160-byte frame between
-them via `rep movsq`.
+Two paths kept using a kernel stack after handing the thread to somebody else.
+Both now pivot to the per-CPU scheduler stack first, which is the discipline
+`save_transition_switch` already followed and documented.
 
-It does not fix the failure and appears to add one: the same loop still dies at
-t=14.4s, now with the log prefix itself garbage (`<cpu-633166472:kernel>`, an
-uptime near `u64::MAX`), which means the GS-based per-CPU pointer is being read
-wrong. Either the frame copy is mis-sequenced, or something else on that path
-depends on staying on the original stack. Debug it before trusting the idea —
-the analysis above is solid, this particular implementation of it is not.
+**`thread_exit` is the one this workload hammered.** It called
+`reaper_enqueue(t)` and *then* `switch_away()`, which does `sub rsp, 160` and
+calls into Rust — on the dying thread's kernel stack, the stack `Thread::free`
+unmaps. The reaper runs on another CPU, so it may pull that stack out from under
+the exiting thread at any point after the enqueue. `threadtest` exits roughly
+forty threads per run, which is why it reproduced there and nowhere else.
+`thread_exit` now only marks the thread `Dying`; `switch_away` pivots, and
+`reap_and_schedule` posts to the reaper and picks the next thread from the
+scheduler stack.
 
-### Still open: a corrupted exception frame
+**The timer tick had the same shape.** `context_switch_to` writes the incoming
+thread's frame into a frame sitting on the *outgoing* thread's stack, after that
+thread has been enqueued and can already be running elsewhere. `on_tick` is
+split into `tick_prepare` (thread stack; saves the outgoing context, returns the
+stack to pivot to) and `tick_finish` (scheduler stack; enqueues and picks), with
+the naked handler copying the 160-byte frame between them. `CpuContext` gained a
+const assert on that 160, since three trampolines hard-code it.
 
-The same loop still dies, now as a reported panic rather than a silent wedge:
-`EXCEPTION: PAGE FAULT IN RING 0` at `idt.rs:239`, accessed address `0x0`, from a
-`threadtest` thread's kernel context. The interrupt frame it prints is not a
-frame at all:
+Verified on a **10-core** boot, the configuration that previously died on the
+first iteration: 25 iterations of the `threadtest` / `threadtest hammer` loop, 50
+clean completions, 697 threads spawned and reaped, no panic, no double fault, no
+shootdown timeout, no garbage in the log, every CPU idle afterwards. 47/47
+in-kernel tests.
 
-```
-instruction_pointer: 0x286                      <- an RFLAGS value
-code_segment:        index 6400                 <- the GDT has seven entries
-cpu_flags:           0xffffc00000008000 | ...   <- a kernel pointer
-stack_pointer:       0xffffc00020035ed8         <- plausible
-```
+**A warning about reading the evidence here.** An intermediate build had only the
+tick pivot, and it failed with the log prefix itself garbled
+(`<cpu-633166472:kernel>`, uptime near `u64::MAX`). That looked like the pivot
+had broken the GS-based per-CPU pointer. It had not: `_serial_print` formats on a
+thread's kernel stack, so the still-unfixed exit path was corrupting the logging
+path's own locals. Corrupted output names where corruption *landed*, not what
+caused it — the same trap as the serial log ending mid-line in the wedges above.
 
-`instruction_pointer` holding a plausible RFLAGS and `cpu_flags` holding a
-pointer says the frame is shifted, but no single-slot shift reproduces all four
-fields, so the stack memory itself is suspect rather than the frame layout.
-
-Consistent with the squatting above: two CPUs writing one kernel stack produces
-exactly this. A debug-only `Scheduler::validate_ctx` asserts that a frame
-returning to ring 0 resumes on that thread's own kernel stack, checked where it
-is written (`save_current_thread`) and where it is installed
-(`context_switch_to`); it has not fired, so the bad values are not arriving
-through the saved `CpuContext`.
-
-Reproducing: `--features trace` on a **10-core** boot fails on the first
-iteration of the loop, where 4 cores took 25 iterations or survived entirely.
-Use `--smp 10`; the extra concurrency is what makes this practical to work on.
-
-Also worth fixing regardless: `tlb_shootdown`'s timeout path force-clears
+Still worth fixing, and untouched: `tlb_shootdown`'s timeout path force-clears
 `pending_mask` and returns, so a CPU that never acknowledged keeps a stale
-translation and can then touch a recycled page. Latent now that the timeouts are
-gone, but the escape hatch is still wrong.
+translation and can then touch a recycled page. The timeouts are gone, but the
+escape hatch is still wrong.
 
 ---
 
