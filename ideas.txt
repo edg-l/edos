@@ -753,25 +753,28 @@ against the model rather than guessed at, and a `printf` can be added to
 the model itself. The catch: it is hardware from 2003. No shaders, no
 command processor, no GPU MMU.
 
-**virtio-gpu 3D (virgl), the API-facing half.** `virtio-gpu-gl` and
-`virtio-vga-gl` are compiled into the QEMU we run. Implementing it means
-contexts, resource create/attach, command-stream submission and fences,
-which is genuinely the object model every modern DRM driver uses, and it
-builds directly on the virtio-gpu code we already have.
+**virtio-gpu 3D, the API-facing half.** Extending our existing
+virtio-gpu driver past 2D means contexts, resource create/attach,
+command-stream submission and fences, which is genuinely the object
+model every modern DRM driver uses, and it builds on code we already
+have.
 
-What it does *not* teach, and this is most of the difficulty in a real
-driver: virgl commands are serialised GL calls the host translates,
-where real hardware takes a chip-specific packet stream (PM4 and
-friends) plus machine code the userspace driver compiled itself. Absent
-entirely: shader compilation to a hardware ISA, the GPU's own MMU and
-page tables, firmware loading, engine scheduling and preemption, clock
-and power management, and the VRAM/GTT hierarchy with migration and
-eviction.
+Target the modern capsets rather than virgl. **Venus** (Vulkan) and
+**native contexts** run a real Mesa driver in the guest and forward
+actual hardware ioctls over the transport, so the guest side is doing
+what a real driver does. Virgl is the older path: its command stream is
+essentially serialised GL calls the host translates, which is further
+from hardware and is not where the ecosystem went. QEMU exposes 3D
+through the `-gl` device variants (`virtio-gpu-gl`, `virtio-vga-gl`),
+which are compiled into the QEMU we run; the capset chosen on top of
+that is what decides whether this is virgl or venus.
 
-If this is ever picked up seriously, virtio-gpu **venus** (Vulkan) and
-**native contexts**, where the guest runs a real Mesa driver and the
-protocol forwards actual hardware ioctls, are closer to the real thing
-and are where the ecosystem went.
+What the virtio path does *not* teach, and this is most of the
+difficulty in a real driver: shader compilation to a hardware ISA, the
+GPU's own MMU and page tables, firmware loading, engine scheduling and
+preemption, clock and power management, and the VRAM/GTT hierarchy with
+migration and eviction. Those live on the `ati-vga` side of the fence,
+or on real silicon.
 
 **Passthrough is not currently an option on the dev box.** VFIO would
 need IOMMU enabled in firmware and on the kernel cmdline
