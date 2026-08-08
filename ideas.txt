@@ -954,52 +954,58 @@ Shipped this session, all verified on hardware unless noted:
   align-up, which wrapped for a length near `u64::MAX`. mmaptest test 11
   is the regression test; 11/11 on EFS and memfs.
 
+- **CPU affinity is enforced now, at the three points where a thread is
+  placed: spawn, wake and steal.** `thread_can_run_here` was stubbed to
+  `true` and `complete_wake` used the waker's CPU regardless, so a pin
+  held only until something woke the thread. `spawn_thread` was worse
+  than unenforced: its else-arm claimed another CPU would queue the
+  thread and nothing did, so un-stubbing the check without fixing it
+  would have lost threads. sched-test grew affinity-pinned and
+  affinity-waker (49 tests); the wake rounds are the part that fails
+  when the check is reverted.
+
 Open, roughly in priority order. Items marked [audit] come from
 doc/AUDIT.md, which has the file:line detail and the reasoning.
 
 Correctness first, because these are wrong rather than merely missing:
 
-1. **CPU affinity is enforced in one path out of three.** [audit]
-   Work-stealing honours it; `thread_can_run_here` is stubbed to `true`
-   and `complete_wake` ignores it. Enforce it or delete the field —
-   half-enforced is worse than absent, because callers believe it.
-2. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
+1. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
    validation on the storage path.
 
 Then the things that cost time on every operation:
 
-3. **`clock_gettime` reads the CMOS RTC on every call.** [audit] Several
+2. **`clock_gettime` reads the CMOS RTC on every call.** [audit] Several
    port round-trips per call, racy against the update-in-progress flag,
    and it returns hour/minute/second with no date, no epoch and no
    sub-second — so `SystemTime` cannot be built on it. Sample the RTC
    once at boot, answer from HPET/TSC plus that offset. This is the
    "real time vs time since boot" item from todo.txt.
-4. **A heap allocation per path-taking syscall.** [audit] Seven sites
+3. **A heap allocation per path-taking syscall.** [audit] Seven sites
    do `vec![0u8; 1024]` for a path; a stack buffer removes it.
 
 Then the interface gaps that actually block programs:
 
-5. **`fcntl`, and CLOEXEC at all.** [audit] Without it every fd leaks
+4. **`fcntl`, and CLOEXEC at all.** [audit] Without it every fd leaks
    across `spawn`, which is a correctness problem rather than a
    convenience gap, and `O_NONBLOCK` cannot be changed after open.
-6. **`pread`/`pwrite`.** [audit] Threads sharing an fd currently have to
+5. **`pread`/`pwrite`.** [audit] Threads sharing an fd currently have to
    `lseek`+`read`, which races by construction.
-7. **`getuid`/`setuid`.** [audit] `UserThreadInfo` already carries
+6. **`getuid`/`setuid`.** [audit] `UserThreadInfo` already carries
    `user_id`/`group_id` with no way to read or set them.
 
 Then hygiene and quality, in no particular order:
 
-8. **Shared state still on bare `spin::Mutex`.** [audit] Sockets, the
+7. **Shared state still on bare `spin::Mutex`.** [audit] Sockets, the
    block-device registry, the display. Not deadlock-prone — device IRQs
    only wake kthreads — but a preempted holder makes every other CPU
    spin, which is the failure that cost a whole session in the window
    registry.
-9. **TCP computes RTT and never uses it.** [audit] A fixed 1s RTO base
+8. **TCP computes RTT and never uses it.** [audit] A fixed 1s RTO base
    means a LAN retransmit is ~1000x later than it should be. RFC 6298
    smoothing is contained work against data already collected.
    Congestion control is a much larger, separate decision.
-10. **`fs/api.rs` panics on a response-type mismatch** rather than
-    returning an error. [audit]
+9. **`fs/api.rs` panics on a response-type mismatch** rather than
+   returning an error. [audit]
 
 Then, by fun-per-effort:
 

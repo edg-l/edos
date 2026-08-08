@@ -68,7 +68,7 @@ to zero and returned a gap far shorter than requested; it now uses `checked_add`
 and reports exhaustion as `VmaError::NoSpace` (ENOMEM) rather than panicking on
 an `expect`. mmaptest test 11 covers all five cases and is the regression test.
 
-### 1.2 CPU affinity is enforced in one place out of three — MEDIUM
+### 1.2 CPU affinity is enforced in one place out of three — FIXED
 
 `cpu_affinity` is a real field (`thread/thread.rs:141`) with a setter
 (`:420`), and the work-stealing path honours it (`scheduler.rs:865`). The other
@@ -83,9 +83,31 @@ So a thread pinned away from CPU 3 still runs on CPU 3 whenever it is woken
 there. Affinity currently reads as a feature but behaves as a hint that one
 code path respects.
 
-**Fix:** either enforce it in `complete_wake` and `thread_can_run_here`, or
-delete the field and its setter. Half-enforced affinity is worse than none,
-because callers will believe it.
+**Fixed** by enforcing it. Affinity is a *placement* property: `spawn_thread`,
+`complete_wake` and work-stealing choose a CPU, and `pick_and_run` runs whatever
+it pops without re-checking. All three consult `Thread::allows_cpu` now, and
+`pick_sched_for` returns the least loaded CPU a thread is allowed on.
+
+Two things this turned up that the entry above missed:
+
+- **`spawn_thread` would have lost the thread.** Its `else` arm was a bare
+  comment saying the thread "will be queued on its target cpu by that cpu's
+  scheduler" — nothing did. The stub returning `true` is the only reason that
+  never fired. It routes the thread now.
+- **A mask naming no registered CPU** falls back to running the thread rather
+  than dropping it, and `set_affinity_mask` documents that a mask set on an
+  already-running thread applies at its next placement, not immediately.
+
+`sched-test` gains `affinity-pinned` and `affinity-waker` (47 → 49 tests). The
+wake rounds are what make the test discriminating: yields re-enqueue on the CPU
+the thread is already on, so a yield-only test passes with affinity disabled
+entirely. Reverting `allows_cpu` to `true` fails the test on the first round
+with "pinned to cpu 3, ran on cpu 2 after wake 0", which was checked.
+
+### 1.2b Load is still measured as thread count
+
+Enforcing affinity does not change what `pick_sched_for` optimises: a sleeping
+thread still weighs the same as a CPU-bound one. See §4.
 
 ### 1.3 Shared state on bare `spin::Mutex` — MEDIUM
 
@@ -210,15 +232,15 @@ Seven sites do `vec![0u8; MAX_PATH_LEN]` with `MAX_PATH_LEN = 1024`
 compile-time constant, so this is a mechanical change that removes an allocation
 from every path-based syscall.
 
-### 2.4 `pick_sched` is quadratic — LOW
+### 2.4 `pick_sched` is quadratic — FIXED
 
 `thread/util.rs:112` calls `schedulers.iter().nth(idx)` inside a loop over all
 `n` schedulers, so picking a CPU is O(n²) in CPU count. n is at most 128 and
 typically ≤ 16, so this is small today and only worth fixing when the map is
 touched anyway.
 
-**Fix:** iterate once with `.iter().cycle().skip(start).take(n)`, or index a
-slice instead of a `LinearMap`.
+**Fixed** with `.iter().cycle().skip(start).take(n)`, taken while the map was
+open for the affinity filter (1.2).
 
 ### 2.5 TCP retransmit clones whole segments — LOW
 

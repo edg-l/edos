@@ -573,6 +573,46 @@ must come back as a failed `mmap`. 11/11 on both `/var` (EFS) and `/tmp`
 
 ---
 
+## Fixed: CPU affinity was a field, not a rule
+
+`cpu_affinity` had a setter and one enforcement point. `thread_can_run_here` was
+stubbed to `true` with the real check commented out beneath it, and
+`complete_wake` enqueued on the waker's CPU without consulting it, so a pin held
+only until something woke the thread.
+
+Affinity is a **placement** property in this kernel: `spawn_thread`,
+`complete_wake` and work-stealing pick the CPU, and `pick_and_run` runs whatever
+it pops without re-checking. That is the cheaper design and it is now the
+documented one — `set_affinity_mask` says a mask set on a running thread applies
+at its next placement, not immediately.
+
+The trap worth knowing: **un-stubbing `thread_can_run_here` alone would have
+lost threads.** `spawn_thread`'s `else` arm was a bare comment claiming the
+thread "will be queued on its target cpu by that cpu's scheduler", and nothing
+did. The stub returning `true` is the only reason that arm never ran. It routes
+through `pick_sched_for` now, and a mask naming no registered CPU runs the
+thread here rather than dropping it.
+
+Two notes on the test, because the first version of it was worthless:
+
+- **Yields do not test affinity.** They re-enqueue on the CPU the thread is
+  already on, so a thread that reached the right CPU by luck stays there. The
+  first `affinity-pinned` passed with `allows_cpu` hardcoded to `true`.
+- **Wakes do.** `complete_wake` prefers the waker's CPU, and the waker is
+  elsewhere most rounds, so the pin only survives a wake if the check is real.
+  With `allows_cpu` reverted the test dies on round 0: "pinned to cpu 3, ran on
+  cpu 2 after wake 0". Any future change here should be checked the same way —
+  revert the predicate, confirm the test fails.
+
+A third thing fell out of the same read: `pick_sched` called
+`schedulers.iter().nth(idx)` per candidate (audit 2.4), now one `cycle().skip()`
+pass.
+
+47 → 49 in-kernel tests, all passing, desktop and mmaptest/threadtest clean
+afterwards.
+
+---
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any
