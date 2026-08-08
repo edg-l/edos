@@ -825,6 +825,53 @@ same lesson: *the assert fires only on contention, so a rarely-contended
 wrong lock looks fine for months*. `current_cwd` / `set_current_cwd` clone
 the `Arc` out of the guard first, and every call site goes through them.
 
+## std::net is implemented, and that is where sockets belong now
+
+`http` and `wget` were ported onto `edos_lib` first, which worked but was a
+workaround: `std::net::TcpStream` returning "unsupported" was the actual
+defect. Every wrapper std needed already existed in `edos_rt`, and every
+syscall behind them already existed in the kernel (socket, bind, connect,
+listen, accept, sendto, recvfrom, shutdown, get/setsockopt, getpeername,
+getsockname) — nothing was wired to std, so the target fell through
+`cfg_select!` in `sys/net/connection/mod.rs` to the unsupported stubs.
+
+`library/std/src/sys/net/connection/edos.rs` in the fork implements
+`TcpStream`, `TcpListener`, `UdpSocket` and `lookup_host`. Options the
+kernel really has are real (timeouts, linger, nodelay, ttl, `SO_ERROR`);
+the rest report unsupported rather than lying, and IPv6 is rejected rather
+than truncated. `http`, `wget` and `dns` are plain std programs again, and
+`edos_lib::http` is gone.
+
+Verified: a 300000-byte file over `std::net` hashes identically to the
+host's copy, and `http edgl.dev` fetches a real page off the internet by
+name.
+
+**The toolchain loop has a trap.** Bumping the `edos_rt` pin and running
+`./x install` rebuilt nothing — bootstrap did not notice the lockfile
+change, reported success in 24 seconds, and userspace kept linking the old
+std. `touch library/std/src/lib.rs` forces it. A build that finishes far
+too quickly after a dependency bump has not done what you asked.
+
+## Resolution, and the query that still fails
+
+DNS lives in `edos_rt::net::lookup_a` now, behind `ToSocketAddrs`. The
+parser it replaced existed in two copies and desynchronised on a name that
+ends in a compression pointer after its labels (RFC 1035 4.1.4), reading
+the pointer's first byte as a length; that is why `dns edgl.dev` failed
+while `example.com` worked. It also reports *why* a lookup failed instead
+of answering every failure with "no A record", and the kernel now keeps the
+resolver address DHCP offered (`SYS_GETDNS`) rather than parsing it into a
+field nothing read.
+
+**Still open, and honestly so: the first DNS query after boot gets no
+reply.** The `sendto` that triggers ARP is dropped while the reply comes
+back ~85 us later; `dnsprobe example.com` right after boot prints `len=0`,
+and the same command again prints `len=61` and parses fine. The resolver
+retries, which UDP demands regardless, but the first query still fails and
+the reason the retry does not rescue it is not established. The kernel-side
+fix is to queue the datagram pending ARP the way `connect` waits, rather
+than dropping it. `programs/dnsprobe` exists for this.
+
 ## http and wget work now
 
 Both used `std::net::TcpStream`, which the std fork does not implement, so
