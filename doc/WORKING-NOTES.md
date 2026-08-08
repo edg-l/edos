@@ -685,8 +685,9 @@ Three things underneath had to change, and are worth knowing independently:
 - **A killed thread now dies at the syscall boundary.** `killed` was previously
   read on exactly one path — a PTY slave read — so a thread doing anything else
   ignored it. Kill was, in effect, "kill a shell foreground job blocked on
-  input". A thread that never enters a syscall still will not notice, which is
-  why exec bounds its wait and refuses rather than assuming.
+  input". A thread that makes no syscalls at all is caught by the timer tick
+  instead (see below); one spinning inside the kernel is still nobody's to kill,
+  which is why exec bounds its wait and refuses rather than assuming.
 
 **Two traps if you touch this:**
 
@@ -941,6 +942,47 @@ restarts before the fix, 0 in 106 after**. The pre-fix rate would have
 predicted about three. Keep the injection in mind for any future work on
 this path; the default timeout is untouched at 30s and the knob is inert
 unless the command line sets it.
+
+## A kill now reaches a thread that never enters the kernel
+
+`killed` was observed at the syscall return boundary, which covers every real
+program and misses the one case that mattered: a thread spinning in user code
+makes no syscalls, so nothing ever asked it to die. `execve` had to bound its
+sibling quiesce and refuse with EAGAIN for exactly that reason.
+
+The timer tick checks the same flag now, and the condition that makes it safe is
+**ring 3 in the interrupted frame**. There is no unwinding here, so a thread that
+dies holding a lock guard leaks it permanently — that is the reader leak in
+`bugs/2026-08-08-window-registry-reader-leak.md`. A frame from ring 3 proves the
+thread held nothing; a tick that caught it inside the kernel is left to the
+syscall boundary, where the same `exit_if_killed` runs. Both callers share that
+one function, so there is no second copy of the rule to keep in step.
+
+Placement is in `tick_prepare`, before the tick touches the runqueue: the thread
+is still Running, nothing has been published, and `thread_exit` pivots off its
+kernel stack the way it does from a syscall. EOI has already been sent by then,
+which matters — checking earlier would leave the ISR bit set on a CPU that is
+about to run somebody else.
+
+Two tests, and both were checked against the previous kernel:
+
+- **`programs/killtest`** signals a child in each mode. Test 1 spins in user
+  code, test 2 blocks in a syscall. It hands off through a pipe rather than a
+  sleep, because killing a child still inside its runtime's startup would
+  exercise the syscall boundary whichever mode was asked for, and it polls
+  `waitpid_nonblocking` with a bound, because the failure is a process that never
+  dies and a blocking `waitpid` would report that as this program hanging.
+- **`exectest` test 5** execs from a process whose four siblings spin without
+  syscalls.
+
+Without the check, killtest test 1 reports the child alive 1000 ms after the
+signal and exectest test 5 exits `EXEC_RETURNED`; exectest 1-4 still pass, so
+test 5 is the only one that depends on it. With it: killtest 2/2, exectest 5/5,
+threadtest + hammer + forktest clean, mmaptest 11/11 on both `/var` and `/tmp`,
+49/49 in-kernel.
+
+Still not covered, deliberately: a thread spinning **inside** the kernel. Nothing
+can kill that safely, so `execve` keeps its bounded wait and its EAGAIN.
 
 ## Things that will bite you
 

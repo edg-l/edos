@@ -168,7 +168,9 @@ pub struct Thread {
 
     pub exit_code: AtomicI32,
     /// Set when the process has been killed (e.g. by Ctrl+C). Sleeping syscalls
-    /// check this flag on wakeup and return EINTR to unblock the process.
+    /// check this flag on wakeup and return EINTR to unblock the process; the
+    /// thread then dies at whichever boundary it reaches first, the syscall
+    /// return or a timer tick out of user code.
     pub killed: AtomicBool,
 
     /// Wake-pending token. Wakers publish their intent here BEFORE probing
@@ -490,9 +492,11 @@ pub(crate) fn release_mappings(
 /// in `Thread::free`, after it has stopped running.
 ///
 /// Returns false on timeout, in which case the caller must abandon the exec.
-/// A thread that never enters a syscall never observes `killed`, and unmapping
-/// an address space out from under a running thread would be memory corruption,
-/// so refusing is the only safe answer.
+/// Unmapping an address space out from under a running thread would be memory
+/// corruption, so refusing is the only safe answer. A sibling observes `killed`
+/// at its next syscall boundary or, if it makes none, at its next timer tick
+/// out of user code; a sibling spinning inside the kernel is the case that can
+/// still outlast the wait.
 pub(crate) fn quiesce_address_space(caller: &Arc<Thread>) -> bool {
     use crate::thread::scheduler::{WakePriority, sched, thread_sleep};
 
@@ -1392,7 +1396,8 @@ pub fn allocate_thread_id() -> ThreadId {
 ///
 /// Sends SIGINT to the target process. The target thread will observe
 /// `killed == true` after waking from any blocking syscall (e.g. `sys_read`
-/// on a PTY slave) and return an error, causing the process to exit.
+/// on a PTY slave) and return an error, causing the process to exit. One that
+/// makes no syscalls at all dies at its next timer tick out of user code.
 pub fn kill_process(pid: u64) -> bool {
     kill_process_with_signal(pid, crate::thread::signal::SIGINT)
 }

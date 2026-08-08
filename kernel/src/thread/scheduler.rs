@@ -1286,9 +1286,33 @@ fn check_context(context: *mut CpuContext, who: &str) {
     Kernel -> Kernel:   RSP0 doesn't matter
 */
 
+/// Terminate the current thread if it has been marked killed.
+///
+/// Only sound where the thread holds nothing: there is no unwinding, so a
+/// thread that dies with a lock guard live leaks it permanently. The two places
+/// that qualify are the syscall return boundary and a timer tick that
+/// interrupted ring 3.
+pub fn exit_if_killed() {
+    if let Some(thread) = current_thread()
+        && thread.killed.load(Ordering::Acquire)
+    {
+        let code = thread.exit_code.load(Ordering::Acquire);
+        drop(thread);
+        thread_exit(code);
+    }
+}
+
 /// First half of a timer tick. See `Scheduler::tick_prepare`.
 pub fn tick_prepare(context: *mut CpuContext) -> u64 {
     check_context(context, "tick_prepare");
+    // A thread spinning in user code reaches no syscall boundary, so the tick
+    // is the only place it can observe a kill. Ring 3 in the interrupted frame
+    // proves it holds no kernel lock guard, which is what makes exiting here
+    // safe; a tick that caught it inside the kernel leaves it to the syscall
+    // boundary.
+    if unsafe { (*context).is_from_userspace() } {
+        exit_if_killed();
+    }
     sched().tick_prepare(context)
 }
 

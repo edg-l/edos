@@ -133,11 +133,28 @@ fn main() {
         Some("stage4") => {
             for i in 0..4 {
                 std::thread::spawn(move || {
-                    // Keep entering the kernel, which is where a thread
-                    // notices it has been killed.
+                    // These siblings keep entering the kernel, so they notice
+                    // the kill at a syscall boundary; stage 5 covers the ones
+                    // that never reach one.
                     loop {
                         std::thread::sleep(std::time::Duration::from_millis(2));
                         std::hint::black_box(i);
+                    }
+                });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            process::execve("/bin/true", &["true"], &[]);
+            std::process::exit(EXEC_RETURNED);
+        }
+        // The same, with siblings that make no syscalls at all. They can only
+        // notice the kill on a timer tick out of user code, which is the one
+        // path that lets exec quiesce a spinning thread instead of refusing.
+        Some("stage5") => {
+            for i in 0..4 {
+                std::thread::spawn(move || {
+                    let mut n = i as u64;
+                    loop {
+                        n = std::hint::black_box(n).wrapping_add(1);
                     }
                 });
             }
@@ -179,7 +196,10 @@ fn main() {
     }
     let code = process::waitpid(child);
     if code != OK {
-        fail("test 2", &format!("stage 2 exited {}: {}", code, describe(code)));
+        fail(
+            "test 2",
+            &format!("stage 2 exited {}: {}", code, describe(code)),
+        );
     }
     pass(
         "test 2",
@@ -213,10 +233,37 @@ fn main() {
     if code != 0 {
         fail(
             "test 4",
-            &format!("exec from a 5-thread process exited {}: {}", code, describe(code)),
+            &format!(
+                "exec from a 5-thread process exited {}: {}",
+                code,
+                describe(code)
+            ),
         );
     }
-    pass("test 4", "exec from a multithreaded process replaced the image");
+    pass(
+        "test 4",
+        "exec from a multithreaded process replaced the image",
+    );
+
+    // -------------------------------------------------------------------
+    // Test 5: exec from a process whose siblings never enter the kernel
+    // -------------------------------------------------------------------
+    let child = process::spawn(SELF_PATH, &["stage5"], 0, 1, 2);
+    if child == u64::MAX {
+        fail("test 5", "spawn failed");
+    }
+    let code = process::waitpid(child);
+    if code != 0 {
+        fail(
+            "test 5",
+            &format!(
+                "exec with 4 user-spinning siblings exited {}: {}",
+                code,
+                describe(code)
+            ),
+        );
+    }
+    pass("test 5", "exec quiesced siblings that make no syscalls");
 
     let _ = fs::remove_file(DATA_PATH);
     println!("exectest: all tests passed");

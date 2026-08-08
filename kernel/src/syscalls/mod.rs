@@ -73,8 +73,8 @@ mod window;
 use self::ioctl::sys_ioctl;
 use self::sync::{sys_futex_wait, sys_futex_wake};
 use crate::thread::scheduler::{
-    current_thread, current_thread_info, current_thread_weak, thread_exit, thread_park_while,
-    thread_sleep,
+    current_thread, current_thread_info, current_thread_weak, exit_if_killed, thread_exit,
+    thread_park_while, thread_sleep,
 };
 
 /// Properly decrement refcounts when a FileDescriptor is removed from a table
@@ -852,20 +852,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     }
 
     // A thread marked for termination dies here rather than returning to user
-    // code. Before this, `killed` was observed on exactly one path (a PTY slave
-    // read), so a thread doing anything else ignored it — which `execve` cannot
-    // tolerate, since it must know every sibling has released the address space
-    // before that space is torn down.
-    //
-    // A thread that never makes a syscall still will not notice; `execve`
-    // bounds its wait rather than assuming otherwise.
-    if let Some(thread) = current_thread()
-        && thread.killed.load(Ordering::Acquire)
-    {
-        let code = thread.exit_code.load(Ordering::Acquire);
-        drop(thread);
-        crate::thread::scheduler::thread_exit(code);
-    }
+    // code. This is one of the two boundaries where that is safe; the other is
+    // a timer tick that interrupted ring 3, which covers a thread that spins
+    // without ever making a syscall.
+    exit_if_killed();
 }
 
 pub fn sys_errno() -> u64 {
