@@ -9,7 +9,7 @@ use crate::thread::scheduler::{current_thread, current_thread_info};
 use crate::{
     debug::lock_order::{RANK_MAPPERS, RANK_USER_MM, RANK_VMAS},
     fs::{page_cache::CachedPage, vfs::fs_by_mount_id},
-    log,
+    log, log_debug,
     memory::{
         frame_allocator::frame_allocator,
         mapper::memory_mapper,
@@ -100,7 +100,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
     } else {
         format!("file-backed fd={r8} off={r9:#x}")
     };
-    log!(
+    log_debug!(
         "mmap: addr={addr:#x} len={length:#x} ({} KiB) prot={prot_str} {kind}",
         length / 1024
     );
@@ -209,7 +209,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         }
         drop(mm);
 
-        log!("mmap: mapped physical at {map_addr:p}");
+        log_debug!("mmap: mapped physical at {map_addr:p}");
         map_addr.as_u64()
     } else if (flags & MAP_ANONYMOUS) != 0 || r8 == u64::MAX {
         // Anonymous mapping (MAP_ANONYMOUS set, or fd == -1).
@@ -241,7 +241,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             VmaBacking::Anonymous,
         );
 
-        log!("mmap: lazy mapped at {map_addr:p}");
+        log_debug!("mmap: lazy mapped at {map_addr:p}");
         map_addr.as_u64()
     } else {
         // File-backed mapping.
@@ -562,7 +562,7 @@ pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
 }
 
 pub fn sys_munmap(addr: u64, length: u64) -> i32 {
-    log!("Unmapping {addr} {length}");
+    log_debug!("Unmapping {addr} {length}");
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
@@ -721,6 +721,6 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
         return -1;
     }
 
-    log!("Unmap success");
+    log_debug!("Unmap success");
     0
 }

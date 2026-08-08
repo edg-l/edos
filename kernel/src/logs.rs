@@ -1,4 +1,5 @@
 use alloc::{string::String, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 use crossbeam_queue::ArrayQueue;
 use spin::{Once, RwLock};
 
@@ -143,10 +144,45 @@ pub fn klogger() {
     }
 }
 
+/// Whether per-operation debug lines are emitted. Off unless the kernel command
+/// line carries `loglevel=debug`.
+///
+/// `log_debug!` sites sit on the mmap, munmap, spawn and thread-exit paths, so
+/// they fire thousands of times a second under any threaded workload. Each line
+/// costs a `String` allocation on the calling thread and, on the drain side, a
+/// byte-at-a-time UART write under a global lock — one VM exit per byte under
+/// KVM. Saturating that lock is what starved TLB shootdowns before
+/// `IrqSpinlock` stopped waiting with interrupts off.
+static LOG_DEBUG: AtomicBool = AtomicBool::new(false);
+
+pub fn set_debug_logging(enabled: bool) {
+    LOG_DEBUG.store(enabled, Ordering::Relaxed);
+}
+
+/// Read by `log_debug!` before it formats anything, so a disabled site costs
+/// one relaxed load and no allocation.
+#[inline]
+pub fn debug_logging() -> bool {
+    LOG_DEBUG.load(Ordering::Relaxed)
+}
+
 #[macro_export]
 macro_rules! log {
     // default logger
     ($fmt:literal $(, $arg:expr)*) => {
         $crate::logs::log(format_args!($fmt $(, $arg)*))
+    };
+}
+
+/// Per-operation detail, compiled in but silent unless `loglevel=debug`.
+///
+/// For lines that describe one mmap, one spawn, one exit. Anything reporting a
+/// failure belongs in `log!` so it is never lost.
+#[macro_export]
+macro_rules! log_debug {
+    ($fmt:literal $(, $arg:expr)*) => {
+        if $crate::logs::debug_logging() {
+            $crate::logs::log(format_args!($fmt $(, $arg)*))
+        }
     };
 }

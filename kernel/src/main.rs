@@ -105,6 +105,14 @@ fn main() -> ! {
     println!("Booting...");
     init();
 
+    // After init: parsing allocates, and the frame allocator comes up in there.
+    // Still ahead of every `log_debug!` site, which are all past this point.
+    let debug_logging = ParsedCmdline::parse_str(boot_info().cmdline)
+        .other_params
+        .iter()
+        .any(|(k, v)| k == "loglevel" && v.as_deref() == Some("debug"));
+    logs::set_debug_logging(debug_logging);
+
     let madt = acpi_madt();
     println!(
         "Found MADT:\n{:p}",

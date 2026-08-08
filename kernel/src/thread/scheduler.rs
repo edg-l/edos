@@ -1206,7 +1206,7 @@ pub fn thread_exit(code: i32) -> ! {
             let wall_ns = timer.ticks_to_nanos(now.saturating_sub(created));
             let cpu_ns = t.cpu_time_ns();
             let faults = t.demand_faults.load(Ordering::Relaxed);
-            crate::log!(
+            crate::log_debug!(
                 "exit: code={} wall={}.{:03}ms cpu={}.{:03}ms faults={}",
                 code,
                 wall_ns / 1_000_000,

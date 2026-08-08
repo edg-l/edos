@@ -12,7 +12,7 @@ use core::{sync::atomic::Ordering, time::Duration};
 
 use crate::{
     fs::{block_page_cache::BlockPageCache, vfs::flush_dirty_inodes},
-    log,
+    log, log_debug,
 };
 
 pub fn writeback_thread() -> ! {
@@ -59,7 +59,7 @@ pub fn writeback_thread() -> ! {
                 .writeback_bytes
                 .fetch_add(bytes, Ordering::Relaxed);
             if bytes > 0 {
-                log!("writeback: flushed {} bytes", bytes);
+                log_debug!("writeback: flushed {} bytes", bytes);
             }
 
             let completed_req = cache.flush_requested.load(Ordering::Acquire);
@@ -89,7 +89,7 @@ pub fn writeback_thread() -> ! {
             .fetch_add(bytes, Ordering::Relaxed);
 
         if bytes > 0 {
-            log!("writeback: flushed {} bytes", bytes);
+            log_debug!("writeback: flushed {} bytes", bytes);
         }
 
         // Mark this request as completed and wake any sync_all() waiters.

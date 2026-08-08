@@ -16,7 +16,7 @@ use crate::{
         path::Path,
         vfs::{fs_by_mount_id, get_or_fill_page},
     },
-    log,
+    log_debug,
     memory::{
         frame_allocator::frame_allocator,
         mapper::MemoryManager,
@@ -417,7 +417,7 @@ pub fn load_elf(
                 continue;
             }
 
-            log!("elf: TLS segment: filesz={} memsz={}", p_filesz, p_memsz);
+            log_debug!("elf: TLS segment: filesz={} memsz={}", p_filesz, p_memsz);
 
             let init_data = if p_filesz == 0 {
                 Vec::new()
@@ -622,7 +622,7 @@ pub fn load_elf(
     }
 
     if let Some(ref table) = built_reloc_table {
-        log!(
+        log_debug!(
             "elf: lazy reloc table: {} entries, {} pages",
             table.entry_count(),
             table.populated_buckets()
@@ -635,7 +635,7 @@ pub fn load_elf(
 
     let actual_entry = VirtAddr::new(load_base.as_u64() + e_entry);
 
-    log!(
+    log_debug!(
         "elf: loaded at {:#x}, entry={:#x} (file-backed path)",
         load_base.as_u64(),
         actual_entry.as_u64()

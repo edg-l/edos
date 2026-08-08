@@ -1327,7 +1327,7 @@ fn do_spawn(
     }
 
     let load_ns = spawn_start.elapsed().as_nanos() as u64;
-    crate::log!(
+    crate::log_debug!(
         "spawn: tid={} name={} load={}.{:03}ms",
         child_pid,
         path_str,
