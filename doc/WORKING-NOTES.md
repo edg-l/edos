@@ -451,10 +451,36 @@ thread's kernel stack, so the still-unfixed exit path was corrupting the logging
 path's own locals. Corrupted output names where corruption *landed*, not what
 caused it — the same trap as the serial log ending mid-line in the wedges above.
 
-Still worth fixing, and untouched: `tlb_shootdown`'s timeout path force-clears
-`pending_mask` and returns, so a CPU that never acknowledged keeps a stale
-translation and can then touch a recycled page. The timeouts are gone, but the
-escape hatch is still wrong.
+### Fixed: the shootdown timeout acknowledged flushes that never happened
+
+Separate from the stack bug, and wrong regardless of how often it fired.
+`tlb_shootdown`'s timeout force-cleared `pending_mask` and returned, on the
+reasoning that "the lagging CPUs will flush redundantly when they eventually
+process the IPI, which is safe". It is not safe. Returning tells the caller that
+no CPU holds the old translation, and the caller is entitled to free or reuse
+the page on the strength of that; a CPU that never acknowledged is still reading
+through the stale entry. The escape hatch traded a stall for silent corruption,
+and the 314-timeout run above was doing exactly that, 314 times.
+
+Three things were wrong and all three are fixed:
+
+- **Giving up at all.** The wait now re-sends the IPI to the CPUs still
+  outstanding and, if `ACK_ATTEMPTS` rounds pass with no acknowledgement,
+  panics naming the mask and range. A wedged CPU is a bug worth stopping for;
+  continuing is not a recovery, it is corruption with the evidence discarded.
+- **Acknowledgements that credit the wrong round.** `pending_mask` was reused
+  across rounds with nothing distinguishing them, so a late handler from a
+  timed-out round could clear a bit for the round in flight — reporting a flush
+  it never performed. A `generation` counter is bumped per round; the handler
+  captures it before flushing and only acknowledges if it still matches.
+  Skipping is safe: a round still waiting on that CPU has an IPI latched for it.
+- **The initiator could be descheduled holding `active`.** Every other CPU
+  wanting a shootdown spins on that flag, so the round now runs with preemption
+  suppressed, per the rule in `thread/preempt.rs`.
+
+Re-sending is cheap insurance rather than the main point: an IPI to a CPU with
+interrupts off is latched and will fire, so a re-send only helps if one was
+genuinely lost.
 
 ---
 
