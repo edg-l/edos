@@ -516,26 +516,30 @@ reaper correctness in general). Roadmap in dependency order:
 
 #1-#6 are all shipped. The foundations roadmap is closed.
 
-Residual from #6: `enter_ncq_mode` does not gate on
-`AhciPort.restarting`, so a submitter can install a fresh `AhciNcqOp`
-around the time a port reset runs.
+Residual from #6, now closed: a port restart could leave pending the very
+op it meant to fail. `fail_all_ncq_slots` skips a slot whose `issued` is
+still false, and `reset_generation` was bumped at the *end* of
+`restart_port`, after that pass; a submitter that stored `issued` in
+between and sampled `SACT` before the reset cleared it saw an unchanged
+generation and a set bit, so it returned and waited for a completion
+nobody would deliver. The next watchdog sweep found it up to 30s later.
 
-Traced 2026-08-08, and it is milder than the watchdog module comment
-implies. The existing generation machinery already self-heals it:
-`fail_all_ncq_slots` deliberately skips ops with `issued == false`, and
-the submitter's post-issue SACT self-check then observes the cleared
-bit, calls `complete_ncq_slot`, and fails the op on the
-`cur_gen != op.start_gen` mismatch. So an op caught mid-reset is failed
-promptly rather than left pending.
+The gate this entry used to propose is not what fixes that. Gating
+`enter_ncq_mode` on `restarting` keeps *new* submitters out; the one that
+strands is already past the gate when the reset begins. The fix is
+ordering: publish the generation before the fail-all pass, and have the
+submitter re-read it after storing `issued`, so the two cover each other.
+The gate went in anyway, as a throughput measure.
 
-The genuine residual is narrower: an op that is already `issued` with
-SACT still set when the reset finishes waits for the next watchdog
-sweep, costing up to 30s of latency. That is a latency bug, not a lost
-I/O, so gating `enter_ncq_mode` on `restarting` (and waking
-`mode_waitq` when it clears) is a robustness improvement rather than a
-correctness fix. Worth doing, but it touches the submit path of the
-storage stack, so it should land with runtime validation rather than on
-inspection alone.
+Validated rather than argued, since it touches the storage submit path.
+`ahci_ncq_timeout_ms=0` on the kernel command line makes the watchdog
+treat every in-flight op as hung, which is the only way to land resets
+inside submits at any useful rate — a real NCQ command against a backing
+file completes in well under a millisecond, so no sane positive timeout is
+ever reached. `/proc/ahci_stats` gained `stranded`, counting ops a sweep
+finds still pending from an earlier generation, which is the bug's exact
+fingerprint. Under forced restarts with mixed read/write load: 1 stranded
+in 33 restarts before the fix, 0 in 106 after.
 
 Note: the `.claude/plans/*.md` and `.claude/handoff/*.md` paths cited
 throughout this file are gone — that directory is not in the repo.
@@ -1003,6 +1007,13 @@ Shipped this session, all verified on hardware unless noted:
   orphans somewhere to go. Killing the WM restarts it and the desktop
   survives.
 
+- **A port restart no longer strands the op it meant to fail.** The AHCI
+  watchdog entry here proposed gating `enter_ncq_mode` on `restarting`;
+  that gate keeps new submitters out, and the op that strands is already
+  past it. Publishing `reset_generation` before the fail-all pass, and
+  re-reading it in the submitter after `issued`, is what closes it. Forced
+  restarts under load: 1 stranded in 33 before, 0 in 106 after.
+
 - **`http` and `wget` work.** They used `std::net::TcpStream`, which the
   std fork does not implement, so both failed at connect whatever the
   kernel did. `edos_lib::http` now carries the client the two shared, over
@@ -1040,10 +1051,7 @@ doc/AUDIT.md, which has the file:line detail and the reasoning.
 
 Correctness first, because these are wrong rather than merely missing:
 
-1. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
-   validation on the storage path.
-
-2. **Kill only reaches threads that enter the kernel.** A thread now
+1. **Kill only reaches threads that enter the kernel.** A thread now
    observes `killed` at the syscall boundary, which covers every real
    program, but one spinning without syscalls never notices. That is why
    `execve` bounds its sibling quiesce and returns EAGAIN rather than
@@ -1053,46 +1061,46 @@ Correctness first, because these are wrong rather than merely missing:
 
 Then the interface gaps that actually block programs:
 
-3. **`symlink`/`readlink`, `access`, `truncate`, `utimensat`,
+2. **`symlink`/`readlink`, `access`, `truncate`, `utimensat`,
    `nanosleep`, `sigprocmask`, the `*at` family, streaming
    `getdents`.** [audit] The remaining gaps from the audit's table, none
    of which block a program that exists today.
-4. **No shutdown or reboot syscall**, so every stop is a power cut and
+3. **No shutdown or reboot syscall**, so every stop is a power cut and
    the journal replays on the next boot. init is the natural owner now.
 
 Then hygiene and quality:
 
-5. **228 `unwrap()`/`expect()` in kernel code.** [audit] Convert the ones
+4. **228 `unwrap()`/`expect()` in kernel code.** [audit] Convert the ones
    on I/O and parsing results; leave a comment on the structurally
    impossible ones.
-6. **Module READMEs for `fs/` (15.7k lines) and `drivers/` (13k).**
+5. **Module READMEs for `fs/` (15.7k lines) and `drivers/` (13k).**
    [audit]
 
 Still open from the audit, but deliberately unhurried. These are not
 oversights; each has a reason it has not been done.
 
-7. **TCP retransmit clones whole segments.** [audit 2.5]
+6. **TCP retransmit clones whole segments.** [audit 2.5]
    `resends.push(seg.data.clone())` copies the full segment per retry.
    This was theoretical while no connection could be established; now
    that TCP moves real data it is a live cost under loss. `Arc<[u8]>`
    and clone the handle.
-8. **Scheduler quality, four items.** [audit 4] Load is measured as
+7. **Scheduler quality, four items.** [audit 4] Load is measured as
    `thread_count`, so a sleeping thread weighs the same as a CPU-bound
    one and `pick_sched`/`try_rebalance` balance the wrong quantity.
    There is no priority inheritance, so a high-priority waiter still
    queues behind a low-priority lock holder. The timeslice is a flat 5ms
    regardless of priority. The idle loop polls for steals on a backoff
    instead of being told by an IPI.
-9. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
+8. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
    flag and one request slot, so unrelated `munmap`s on different
    address spaces serialize. Deliberate and correct; it is the scaling
    wall once core counts rise. The real fix is a per-mm CPU mask so the
    IPI is skipped for address spaces no other CPU has loaded.
-10. **`find_free_address` scans from the base every call.** [audit 2.7]
-    O(VMAs) per mmap. The tradeoff is deliberate — a cursor would never
-    wrap and freed ranges would never be reused — and only worth
-    revisiting if it shows up in a profile.
-11. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
+9. **`find_free_address` scans from the base every call.** [audit 2.7]
+   O(VMAs) per mmap. The tradeoff is deliberate — a cursor would never
+   wrap and freed ranges would never be reused — and only worth
+   revisiting if it shows up in a profile.
+10. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
     NUL-terminated path while `SYS_STAT` takes pointer+length, so
     `edos_rt` allocates a `CString` for every open.
 

@@ -848,6 +848,42 @@ file on `/tmp` hashes the padding too and never matches the host, while
 `stat` and `cat` both look right. The same file on `/var` hashes correctly.
 Recorded in `todo.txt`; verify downloads on EFS until it is fixed.
 
+## Fixed: a port restart stranded the op it meant to fail
+
+The AHCI watchdog entry in `ideas.txt` proposed gating `enter_ncq_mode` on
+`AhciPort.restarting`. That gate is not the fix. It keeps *new* submitters
+out of a port being reset, and the op that strands is already past it.
+
+`fail_all_ncq_slots` skips a slot whose `issued` is still false, on the
+grounds that the submitter's own post-issue path will notice the generation
+change. But `reset_generation` was bumped at the *end* of `restart_port`,
+after that pass. A submitter that stored `issued` between the pass and the
+bump, and sampled `SACT` before the reset cleared it, saw an unchanged
+generation and its bit still set — so it returned and waited for a
+completion nobody would deliver. A watchdog sweep found it up to 30s later.
+
+The generation is published in `begin_restart`, before the fail-all pass,
+and the submitter re-reads it after storing `issued`. The orderings are
+complementary: either the submitter observes the bump and completes its own
+slot, or its store precedes the pass, which fails the op. The gate went in
+too, as a throughput measure.
+
+**How it was validated, which matters more than the patch.** A real NCQ
+command against a qcow2 backing file completes in well under a millisecond,
+so no sane watchdog timeout is ever reached and the race never occurs
+naturally — a 30 ms timeout produced zero firings under load.
+`ahci_ncq_timeout_ms=0` on the kernel command line instead makes a sweep
+treat *every* in-flight op as hung, so restarts land inside submits at
+whatever rate I/O is running. `/proc/ahci_stats` gained `stranded`, which
+counts ops a sweep finds still pending from an earlier generation — the
+bug's exact fingerprint, and zero by construction once the ordering holds.
+
+Under forced restarts with mixed read/write load: **1 stranded in 33
+restarts before the fix, 0 in 106 after**. The pre-fix rate would have
+predicted about three. Keep the injection in mind for any future work on
+this path; the default timeout is untouched at 30s and the knob is inert
+unless the command line sets it.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any
