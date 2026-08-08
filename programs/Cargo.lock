@@ -123,6 +123,10 @@ name = "false"
 version = "0.1.0"
 
 [[package]]
+name = "file"
+version = "0.1.0"
+
+[[package]]
 name = "find"
 version = "0.1.0"
 
@@ -244,6 +248,10 @@ version = "0.1.0"
 
 [[package]]
 name = "seq"
+version = "0.1.0"
+
+[[package]]
+name = "sha256sum"
 version = "0.1.0"
 
 [[package]]
