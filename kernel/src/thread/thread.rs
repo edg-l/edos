@@ -159,6 +159,13 @@ pub struct Thread {
 
     pub tls_base: AtomicU64,
 
+    /// Thread that created this one, or 0 for kernel threads and for children
+    /// whose creator has since exited without an init to inherit them.
+    ///
+    /// Only used for lifetime bookkeeping: an exit record nobody can collect is
+    /// dropped rather than kept forever, and orphans are handed to init.
+    pub parent: AtomicU64,
+
     pub exit_code: AtomicI32,
     /// Set when the process has been killed (e.g. by Ctrl+C). Sleeping syscalls
     /// check this flag on wakeup and return EINTR to unblock the process.
@@ -807,6 +814,7 @@ impl Thread {
             created_at_tick: AtomicU64::new(Instant::now().tick()),
             demand_faults: AtomicU32::new(0),
             tls_base: AtomicU64::new(0),
+            parent: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
             killed: AtomicBool::new(false),
@@ -929,6 +937,7 @@ impl Thread {
             created_at_tick: AtomicU64::new(Instant::now().tick()),
             demand_faults: AtomicU32::new(0),
             tls_base: AtomicU64::new(tls_fs_base),
+            parent: AtomicU64::new(0),
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
             killed: AtomicBool::new(false),
@@ -1203,8 +1212,17 @@ impl ThreadRegistry {
 // single global instance
 pub(super) static THREADS: ThreadRegistry = ThreadRegistry::new();
 
+/// An exited thread's status, plus the thread entitled to collect it.
+#[derive(Debug, Clone, Copy)]
+struct ExitRecord {
+    code: i32,
+    /// Whoever created the thread. When that thread dies, nothing can ever
+    /// `waitpid` this record, so it is dropped instead of kept forever.
+    parent: u64,
+}
+
 pub struct ThreadExitRegistry {
-    map: PreemptRwLock<BTreeMap<ThreadId, i32>>,
+    map: PreemptRwLock<BTreeMap<ThreadId, ExitRecord>>,
     /// Threads waiting for another thread to exit: child_tid -> Weak<Thread>.
     waiters: PreemptRwLock<BTreeMap<ThreadId, Weak<Thread>>>,
 }
@@ -1217,14 +1235,39 @@ impl ThreadExitRegistry {
         }
     }
 
-    pub fn insert(&self, tid: ThreadId, code: i32) {
+    pub fn insert(&self, tid: ThreadId, code: i32, parent: u64) {
         without_interrupts(|| {
-            self.map.write().insert(tid, code);
+            self.map.write().insert(tid, ExitRecord { code, parent });
         })
     }
 
     pub fn take(&self, tid: ThreadId) -> Option<i32> {
-        without_interrupts(|| self.map.write().remove(&tid))
+        without_interrupts(|| self.map.write().remove(&tid).map(|r| r.code))
+    }
+
+    /// Number of statuses waiting to be collected. Exposed through procfs so an
+    /// unbounded one is visible rather than inferred.
+    pub fn pending(&self) -> usize {
+        without_interrupts(|| self.map.read().len())
+    }
+
+    /// Drop every record whose collector was `parent`.
+    ///
+    /// Called when `parent` exits: `waitpid` names a specific thread, so a
+    /// status whose only interested party is gone can never be consumed.
+    fn discard_children_of(&self, parent: u64) -> usize {
+        without_interrupts(|| {
+            let mut map = self.map.write();
+            let doomed: alloc::vec::Vec<ThreadId> = map
+                .iter()
+                .filter(|(_, r)| r.parent == parent)
+                .map(|(&tid, _)| tid)
+                .collect();
+            for tid in &doomed {
+                map.remove(tid);
+            }
+            doomed.len()
+        })
     }
 
     /// Check if an exit code exists without consuming it.
@@ -1262,9 +1305,52 @@ impl ThreadExitRegistry {
 
 pub static EXITED_THREADS: ThreadExitRegistry = ThreadExitRegistry::new();
 
-pub fn record_thread_exit(tid: ThreadId, code: i32) {
-    EXITED_THREADS.insert(tid, code);
+/// The process that adopts orphans, or 0 before init has registered.
+static INIT_PID: AtomicU64 = AtomicU64::new(0);
+
+/// Declare which process inherits orphaned children. The kernel spawns init and
+/// then tells the registry, so reparenting has somewhere to point.
+pub fn set_init_pid(pid: u64) {
+    INIT_PID.store(pid, Ordering::Release);
+}
+
+pub fn init_pid() -> u64 {
+    INIT_PID.load(Ordering::Acquire)
+}
+
+/// Record an exited thread's status.
+///
+/// Runs on the exit path, which may have interrupts disabled, so it must not
+/// allocate and must not walk the thread registry: `parent` is read from the
+/// dying thread by the caller, which already holds it. The orphan bookkeeping
+/// that *does* need to allocate is [`adopt_orphans_of`], called from the reaper.
+pub fn record_thread_exit(tid: ThreadId, code: i32, parent: u64) {
+    EXITED_THREADS.insert(tid, code, parent);
     EXITED_THREADS.wake_waiter(tid);
+}
+
+/// Hand `tid`'s surviving children to init and drop the statuses of those that
+/// already exited.
+///
+/// `waitpid` names a specific thread, so once a creator is gone nothing can
+/// ever collect its children's statuses; keeping them is an unbounded leak.
+/// Called from the reaper, which is an ordinary kthread context: this walks the
+/// registry and allocates, neither of which the exit path itself may do.
+pub fn adopt_orphans_of(tid: ThreadId) {
+    let init = INIT_PID.load(Ordering::Acquire);
+    for thread in THREADS.list() {
+        if thread.parent.load(Ordering::Acquire) == tid.0 {
+            thread.parent.store(init, Ordering::Release);
+        }
+    }
+
+    let dropped = EXITED_THREADS.discard_children_of(tid.0);
+    if dropped > 0 {
+        crate::log_debug!(
+            "reap: dropped {dropped} uncollectable status(es) of {}",
+            tid.0
+        );
+    }
 }
 
 pub fn take_thread_exit_code(tid: ThreadId) -> Option<i32> {

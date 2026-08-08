@@ -1259,8 +1259,10 @@ pub fn exit_thread(tid: ThreadId) {
         t.state.store(State::Dying as u8, Ordering::Release);
         t.free();
         let code = t.exit_code.load(Ordering::Acquire);
-        record_thread_exit(tid, code);
+        let parent = t.parent.load(Ordering::Acquire);
+        record_thread_exit(tid, code, parent);
         let _ = THREADS.remove_info(tid);
+        crate::thread::thread::adopt_orphans_of(tid);
     }
 }
 
@@ -1779,10 +1781,14 @@ extern "C" fn reaper_thread() -> ! {
         while let Some(t) = reaper_queue().pop() {
             let tid = t.id;
             let code = t.exit_code.load(Ordering::Acquire);
+            let parent = t.parent.load(Ordering::Acquire);
             t.free();
-            record_thread_exit(tid, code);
+            record_thread_exit(tid, code, parent);
             let _ = THREADS.remove(tid);
             let _ = THREADS.remove_info(tid);
+            // Registry walk and allocation: fine here, forbidden on the exit
+            // path that queued this thread.
+            crate::thread::thread::adopt_orphans_of(tid);
         }
     }
 }

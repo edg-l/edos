@@ -70,7 +70,7 @@ impl Procfs {
     }
 
     fn render_process_table(entries: &[ThreadSnapshot]) -> String {
-        let mut table = String::from("PID   TYPE   STATE     PRIO CPU CPUms NAME\n");
+        let mut table = String::from("PID   PPID  TYPE   STATE     PRIO CPU CPUms NAME\n");
         for entry in entries {
             let ty = if entry.is_kernel { "kernel" } else { "user" };
             let state = format!("{:?}", entry.state);
@@ -78,10 +78,18 @@ impl Procfs {
             let cpu_ms = entry.cpu_time_ns / 1_000_000;
             let _ = writeln!(
                 table,
-                "{:<5} {:<6} {:<9} {:<4} {:<3} {:>6} {}",
-                entry.tid, ty, state, entry.priority, entry.cpu, cpu_ms, name
+                "{:<5} {:<5} {:<6} {:<9} {:<4} {:<3} {:>6} {}",
+                entry.tid, entry.parent, ty, state, entry.priority, entry.cpu, cpu_ms, name
             );
         }
+        // Statuses of exited threads that nobody has collected yet. A number
+        // that only grows means something is leaking exit records.
+        let _ = writeln!(
+            table,
+            "\npending exit statuses: {}   init pid: {}",
+            crate::thread::thread::EXITED_THREADS.pending(),
+            crate::thread::thread::init_pid()
+        );
         table
     }
 
@@ -473,6 +481,7 @@ impl FileSystem for Procfs {
 #[derive(Debug, Clone)]
 struct ThreadSnapshot {
     tid: u64,
+    parent: u64,
     name: String,
     state: State,
     priority: u8,
@@ -498,6 +507,7 @@ struct ThreadSnapshot {
 impl ThreadSnapshot {
     fn from_thread(thread: &Thread) -> Self {
         let tid = thread.id.0;
+        let parent = thread.parent.load(Ordering::Acquire);
         let name_str = thread.name.as_str();
         let name = if name_str.is_empty() {
             format!("thread-{tid}")
@@ -534,6 +544,7 @@ impl ThreadSnapshot {
 
         Self {
             tid,
+            parent,
             name,
             state,
             priority,

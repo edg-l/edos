@@ -1459,6 +1459,12 @@ fn do_spawn(
         (load_ns / 1_000) % 1_000
     );
 
+    // The spawner owns the child's exit record: when it dies, the record has no
+    // collector left and init inherits any child still running.
+    if let Some(parent) = current_thread() {
+        user_thread.parent.store(parent.id.0, Ordering::Release);
+    }
+
     queue_spawn_thread(user_thread);
 
     x86_64::instructions::interrupts::disable();
@@ -2136,6 +2142,7 @@ fn sys_clone(
         flags: AtomicU32::new(0),
         slice_deadline: AtomicU64::new(0),
         priority: AtomicU8::new(parent_thread.priority()),
+        parent: AtomicU64::new(parent_thread.id.0),
         sleep_deadline: AtomicU64::new(0),
         cpu_time_ns: AtomicU64::new(0),
         run_start_tick: AtomicU64::new(0),
@@ -2376,6 +2383,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         flags: AtomicU32::new(0),
         slice_deadline: AtomicU64::new(0),
         priority: AtomicU8::new(parent_thread.priority()),
+        parent: AtomicU64::new(parent_thread.id.0),
         sleep_deadline: AtomicU64::new(0),
         cpu_time_ns: AtomicU64::new(0),
         run_start_tick: AtomicU64::new(0),

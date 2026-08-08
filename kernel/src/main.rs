@@ -264,7 +264,7 @@ struct BootLoadRequest {
     name: alloc::string::String,
     argv0: alloc::vec::Vec<u8>,
     root: Path,
-    result_tx: Arc<Mailbox<Arc<Thread>, ()>>,
+    result_tx: Arc<Mailbox<Option<Arc<Thread>>, ()>>,
 }
 
 /// Boot loader kthread: builds a user `Thread` (ELF load + eager-faulted
@@ -275,21 +275,36 @@ struct BootLoadRequest {
 extern "C" fn boot_load_thread(arg: *mut u8) -> ! {
     let req: Box<BootLoadRequest> = unsafe { Box::from_raw(arg as *mut BootLoadRequest) };
     let path = req.root.join(&req.name).normalize();
-    let inode = fs::api::resolve_inode(&path)
-        .unwrap_or_else(|e| panic!("boot-load resolve_inode {}: {e:?}", req.name));
-    let env: [&[u8]; 3] = [b"PATH=/bin", b"HOME=/", b"PWD=/"];
-    let thread = Thread::new_user(
-        inode,
-        &path,
-        Some(req.name.clone()),
-        &[&req.argv0],
-        &env,
-        0,
-        0,
-        req.root.clone(),
-    )
-    .unwrap_or_else(|e| panic!("boot-load Thread::new_user {}: {e:?}", req.name));
-    req.result_tx.send(thread);
+
+    // A binary that will not load is a broken filesystem, not a broken kernel.
+    // Report it and leave the machine up: the serial console and dmesg are far
+    // more use for diagnosing this than a panic is.
+    let thread = fs::api::resolve_inode(&path)
+        .map_err(|e| alloc::format!("resolve_inode: {e:?}"))
+        .and_then(|inode| {
+            let env: [&[u8]; 3] = [b"PATH=/bin", b"HOME=/", b"PWD=/"];
+            Thread::new_user(
+                inode,
+                &path,
+                Some(req.name.clone()),
+                &[&req.argv0],
+                &env,
+                0,
+                0,
+                req.root.clone(),
+            )
+            .map_err(|e| alloc::format!("load: {e:?}"))
+        });
+
+    match thread {
+        Ok(thread) => {
+            req.result_tx.send(Some(thread));
+        }
+        Err(reason) => {
+            log!("boot-load {}: {reason}", req.name);
+            req.result_tx.send(None);
+        }
+    }
     kthread_exit(0)
 }
 
@@ -370,47 +385,38 @@ pub fn mount_system_fs() -> ! {
         log!("Failed to mount memfs at {:?}: {err:?}", dev_dir);
     }
 
-    log!("Spawning user threads via page-cache loader (parallel)");
+    // One userspace process is started: init. What else runs, and what happens
+    // when it dies, is init's policy rather than the kernel's.
+    let name = "bin/edos-init";
+    let tx: Arc<Mailbox<Option<Arc<Thread>>, ()>> = Arc::new(Mailbox::with_capacity(1));
+    let req = Box::new(BootLoadRequest {
+        name: name.to_string(),
+        argv0: b"edos-init".to_vec(),
+        root: root.clone(),
+        result_tx: tx.clone(),
+    });
+    queue_spawn_kthread_named_arg(
+        "boot-load",
+        boot_load_thread as *const () as u64,
+        Box::into_raw(req) as *mut u8,
+    );
 
-    // Fan out one boot-load kthread per binary. Each kthread builds a
-    // user Thread (ELF load + reloc page-faults) independently, so AHCI
-    // NCQ can overlap the per-inode page fills across all three binaries.
-    let binaries: [(&str, &[u8]); 3] = [
-        ("bin/edos-wm", b"edos-wm"),
-        ("bin/edos-taskbar", b"edos-taskbar"),
-        ("bin/edos-terminal", b"edos-terminal"),
-    ];
-
-    let mailboxes: alloc::vec::Vec<(&str, Arc<Mailbox<Arc<Thread>, ()>>)> = binaries
-        .iter()
-        .map(|(name, argv0)| {
-            let tx = Arc::new(Mailbox::with_capacity(1));
-            let req = Box::new(BootLoadRequest {
-                name: (*name).to_string(),
-                argv0: argv0.to_vec(),
-                root: root.clone(),
-                result_tx: tx.clone(),
-            });
-            queue_spawn_kthread_named_arg(
-                "boot-load",
-                boot_load_thread as *const () as u64,
-                Box::into_raw(req) as *mut u8,
+    let mut req = tx.recv();
+    match req.payload.take() {
+        Some(Some(thread)) => {
+            let tid = queue_spawn_thread(thread.clone());
+            crate::thread::thread::set_init_pid(tid.0);
+            log!(
+                "Spawned {} tid={} cpu={}",
+                name,
+                tid.0,
+                thread.cpu.load(core::sync::atomic::Ordering::Relaxed)
             );
-            (*name, tx)
-        })
-        .collect();
-
-    // Collect built threads in spawn order and queue them on the scheduler.
-    for (name, tx) in mailboxes {
-        let mut req = tx.recv();
-        let thread = req.payload.take().unwrap();
-        let tid = queue_spawn_thread(thread.clone());
-        log!(
-            "Spawned {} tid={} cpu={}",
-            name,
-            tid.0,
-            thread.cpu.load(core::sync::atomic::Ordering::Relaxed)
-        );
+        }
+        _ => {
+            log!("FATAL: {name} did not load; no userspace will run");
+            log!("The kernel stays up: use the serial console and dmesg to diagnose.");
+        }
     }
 
     kthread_exit(0)
