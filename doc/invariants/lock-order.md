@@ -170,7 +170,7 @@ classes because they govern different address spaces:
 | | Rank 80 | Rank 900 |
 |---|---|---|
 | Object | `UserThread.memory_manager` | global, via `memory_mapper()` |
-| Type | `Arc<spin::Mutex<MemoryManager>>` | `IrqSpinlock<MemoryManager>` |
+| Type | `Arc<PreemptSpinlock<MemoryManager>>` | `IrqSpinlock<MemoryManager>` |
 | Governs | user address space | kernel address space (kmap, device memory) |
 | Acquired | inside vmas (70) | alone, or on frame-allocator paths |
 

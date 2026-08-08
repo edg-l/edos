@@ -1,6 +1,7 @@
 # Window registry stuck reader: whole-GUI deadlock
 
-**Status:** fixed. The scheduler could pass over a runnable thread forever, which
+**Status:** fixed in `b453fb7` (scheduler and locking) with regression coverage in
+`cf53143`. The scheduler could pass over a runnable thread forever, which
 makes any spin lock shared across priorities a deadlock rather than a slowdown.
 Two scheduler defects are fixed and covered by a regression test
 (`starvation-victim` in `thread/sched_test.rs`), which without them shows a
