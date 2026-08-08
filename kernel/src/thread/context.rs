@@ -96,3 +96,7 @@ impl CpuContext {
         ))
     }
 }
+
+// The interrupt trampolines allocate and copy this frame as a fixed 160 bytes
+// (`sub rsp, 160`, `rep movsq` of 20 quadwords).
+const _: () = assert!(core::mem::size_of::<CpuContext>() == 160);

@@ -213,46 +213,117 @@ impl Scheduler {
         Some(ThreadId(tid))
     }
 
-    pub fn on_tick(&self, context: *mut CpuContext) {
+    /// First half of a timer tick, run on the interrupted thread's stack.
+    ///
+    /// Returns the per-CPU scheduler stack for the caller to pivot to, or 0 to
+    /// stay put. A non-zero return means the outgoing thread's context has been
+    /// saved and `tick_finish` is about to publish it — enqueue it, or go idle
+    /// and let a stealer take it. Publishing is the moment another CPU may
+    /// resume that thread, and it resumes on its own kernel stack, which is the
+    /// stack this tick is standing on. So the CPU has to leave first: the
+    /// voluntary path does the same pivot in `save_transition_switch`, and for
+    /// the same reason.
+    ///
+    /// A tick that arrives while this CPU is already idle needs no pivot. It is
+    /// on the scheduler stack, and no thread owns that.
+    pub fn tick_prepare(&self, context: *mut CpuContext) -> u64 {
         without_interrupts(|| {
             self.wake_sleepers();
             self.try_rebalance();
-            // When idle (current==0) and no work queued, skip maybe_preempt
-            // to prevent recursive run_idle (on_tick -> pick_and_run -> run_idle
-            // -> enable IRQs -> on_tick -> pick_and_run -> run_idle -> ...).
-            // When idle WITH work, we must call maybe_preempt so pick_and_run
-            // can pop the thread from the runqueue.
+
+            // Idle with an empty runqueue: nothing to do but re-arm and halt
+            // again. Recursing into run_idle here would nest a second idle
+            // loop under the first (on_tick -> pick_and_run -> run_idle ->
+            // enable IRQs -> on_tick -> ...).
             let idle = self.current.load(Ordering::Acquire) == 0;
-            if !idle || self.has_work.load(Ordering::Acquire) {
-                self.expire_timeslice();
-                self.maybe_preempt(context);
+            if idle && !self.has_work.load(Ordering::Acquire) {
+                return 0;
+            }
+            if idle {
+                // Work arrived while halted. `tick_finish` pops it; the frame
+                // is already on this CPU's own stack.
+                return 0;
             }
 
-            // Re-arm the one-shot APIC timer. context_switch_to arms it when
-            // switching threads, and run_idle arms it while halted, but if
-            // on_tick fires and neither preempts nor goes idle (single thread
-            // running, no work to steal), the timer would stay dead. This
-            // ensures the next earliest_deadline and timeslice are honored.
-            if !idle {
-                let now = Instant::now();
-                let ed = self.earliest_deadline.load(Ordering::Acquire);
-                // Re-arm to the sooner of: a default timeslice, or the
-                // earliest sleeper deadline.
-                let mut next = now + self.default_timeslice;
-                if ed != u64::MAX && ed != 0 {
-                    let dl = Instant::from_tick(ed);
-                    if dl < next {
-                        next = dl;
-                    }
-                }
-                let dur = next.duration_since(now);
-                // Clamp to at least 1us to avoid zero-length timers.
-                set_apic_timer(if dur.is_zero() {
-                    Duration::from_micros(1)
-                } else {
-                    dur
-                });
+            self.expire_timeslice();
+
+            // A spin lock is held here. Switching away would leave every CPU
+            // waiting on it spinning until this thread is scheduled again.
+            // `NEED_RESCHED` stays set, so the next tick performs the switch.
+            if !preempt_enabled() {
+                return 0;
             }
+            let Some(cur) = current_thread() else {
+                return 0;
+            };
+            if cur.flags.load(Ordering::Acquire) & Flags::NEED_RESCHED.bits() == 0 {
+                return 0;
+            }
+            cur.flags
+                .fetch_and(!Flags::NEED_RESCHED.bits(), Ordering::AcqRel);
+
+            // Save context BEFORE enqueue so work-stealers see valid ctx.
+            // Without this, a stealer could pop the thread and read stale
+            // register state (the ctx from the thread's last save, not the
+            // current interrupt frame).
+            self.save_current_thread(context);
+            get_percpu_data().scheduler_stack_top.get()
+        })
+    }
+
+    /// Second half of a timer tick. `pivoted` is what `tick_prepare` returned,
+    /// so `context` points into the per-CPU scheduler stack when it is true.
+    pub fn tick_finish(&self, context: *mut CpuContext, pivoted: bool) {
+        without_interrupts(|| {
+            if pivoted {
+                // Off the outgoing thread's stack now, so it is safe to let
+                // another CPU have it.
+                if let Some(cur) = current_thread()
+                    && cur.cas_state(State::Running, State::Ready)
+                {
+                    debug_assert!(
+                        !cur.rq_link.is_linked(),
+                        "tick_finish: thread {} already linked before re-enqueue",
+                        cur.id.0
+                    );
+                    let mut rq = self.rq.lock();
+                    let priority = cur.priority();
+                    rq.enqueue(cur.clone(), priority, false);
+                    self.has_work.store(true, Ordering::Release);
+                }
+                self.pick_and_run(context);
+                return;
+            }
+
+            if self.current.load(Ordering::Acquire) == 0 {
+                if self.has_work.load(Ordering::Acquire) {
+                    self.pick_and_run(context);
+                }
+                return;
+            }
+
+            // Neither preempted nor went idle (single thread running, no work
+            // to steal), so nothing else re-armed the one-shot APIC timer and
+            // it would stay dead. context_switch_to arms it when switching
+            // threads and run_idle arms it while halted.
+            let now = Instant::now();
+            let ed = self.earliest_deadline.load(Ordering::Acquire);
+            // Re-arm to the sooner of: a default timeslice, or the
+            // earliest sleeper deadline.
+            let mut next = now + self.default_timeslice;
+            if ed != u64::MAX && ed != 0 {
+                let dl = Instant::from_tick(ed);
+                if dl < next {
+                    next = dl;
+                }
+            }
+            let dur = next.duration_since(now);
+            // Clamp to at least 1us to avoid zero-length timers.
+            set_apic_timer(if dur.is_zero() {
+                Duration::from_micros(1)
+            } else {
+                dur
+            });
         })
     }
 
@@ -436,61 +507,6 @@ impl Scheduler {
         if deadline != 0 && Instant::now().tick() >= deadline {
             cur.mark_need_resched();
         }
-    }
-
-    pub fn maybe_preempt(&self, context: *mut CpuContext) {
-        // A spin lock is held here. Switching away would leave every CPU
-        // waiting on it spinning until this thread is scheduled again.
-        // `NEED_RESCHED` stays set, so the next tick performs the switch.
-        if !preempt_enabled() {
-            return;
-        }
-
-        let Some(cur) = current_thread() else {
-            self.pick_and_run(context); // was idle
-            return;
-        };
-
-        // Fast check without locking the runqueue.
-        let need = cur.flags.load(Ordering::Acquire) & Flags::NEED_RESCHED.bits() != 0;
-        // ingnore need resched for now
-        if !need {
-            return;
-        }
-
-        // Clear request and pick another.
-        cur.flags
-            .fetch_and(!Flags::NEED_RESCHED.bits(), Ordering::AcqRel);
-
-        // Save context BEFORE enqueue so work-stealers see valid ctx.
-        // Without this, a stealer could pop the thread and read stale
-        // register state (the ctx from the thread's last save, not the
-        // current interrupt frame).
-        self.save_current_thread(context);
-
-        // Requeue current if still runnable.
-        let state_now: State = cur.state.load(Ordering::Acquire).into();
-
-        #[allow(clippy::single_match)]
-        match state_now {
-            State::Running => {
-                // If another CPU already marked it Parked/Sleeping/Dying, don't requeue
-                if cur.cas_state(State::Running, State::Ready) {
-                    debug_assert!(
-                        !cur.rq_link.is_linked(),
-                        "maybe_preempt: thread {} already linked before re-enqueue",
-                        cur.id.0
-                    );
-                    let mut rq = self.rq.lock();
-                    rq.enqueue(cur.clone(), cur.priority(), false);
-                    self.has_work.store(true, Ordering::Release);
-                }
-            }
-            // If it was already moved elsewhere (Parked, Sleeping, Dying), skip requeue
-            _ => {}
-        }
-
-        self.pick_and_run(context);
     }
 
     fn pick_and_run(&self, context: *mut CpuContext) {
@@ -1202,26 +1218,16 @@ pub fn thread_exit(code: i32) -> ! {
         }
     }
 
-    // Fast path with interrupts disabled: mark Dying, detach from
-    // per-CPU, enqueue on reaper for deferred cleanup, then switch_away.
-    // Heavy cleanup (free, unmap, etc.) happens in the reaper thread
-    // with interrupts enabled.
-    //
-    // The scheduler is resolved inside the interrupt-off window: clearing
-    // `current` on the CPU the caller has since left would leave that CPU
-    // believing it is idle while it runs someone else.
+    // Mark Dying here, but do NOT hand the thread to the reaper yet: this is
+    // still running on that thread's kernel stack, and `Thread::free` unmaps
+    // it. `switch_away` pivots to the per-CPU scheduler stack first and
+    // `reap_and_schedule` posts it from there. Heavy cleanup (free, unmap)
+    // happens in the reaper with interrupts enabled.
     without_interrupts(|| unsafe {
-        let sc = sched();
-        sc.current.store(0, Ordering::Release);
-        get_percpu_data().set_current_thread(None);
-
         if let Some(t) = get_thread_by_id(tid) {
             t.exit_code.store(code, Ordering::Release);
             t.state.store(State::Dying as u8, Ordering::Release);
-            sc.thread_count.fetch_sub(1, Ordering::Relaxed);
-            reaper_enqueue(t);
         }
-
         switch_away();
     });
     loop {
@@ -1244,34 +1250,36 @@ pub fn exit_thread(tid: ThreadId) {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
-    /*
-        User -> User:       Update RSP0 to new process's kernel stack
-        User -> Kernel:     RSP0 doesn't matter
-        Kernel -> User:     Must update RSP0 to user's kernel stack
-        Kernel -> Kernel:   RSP0 doesn't matter
-    */
-
+/// Validate the frame pointer the interrupt trampoline handed us.
+fn check_context(context: *mut CpuContext, who: &str) {
     if context.is_null() {
-        panic!("null context ptr");
+        panic!("{who}: null context ptr");
     }
-
     if (context as u64) < 0xFFFF_0000_0000_0000u64 {
-        panic!("Low context address {context:p}");
+        panic!("{who}: low context address {context:p}");
     }
-
     if !context.is_aligned() {
-        panic!("Misaligned context: {context:p}");
+        panic!("{who}: misaligned context: {context:p}");
     }
+}
 
-    let cpu = get_percpu_data();
+/*
+    User -> User:       Update RSP0 to new process's kernel stack
+    User -> Kernel:     RSP0 doesn't matter
+    Kernel -> User:     Must update RSP0 to user's kernel stack
+    Kernel -> Kernel:   RSP0 doesn't matter
+*/
 
-    let sched: &'static Scheduler = unsafe { cpu.scheduler.get().as_ref().unwrap() };
+/// First half of a timer tick. See `Scheduler::tick_prepare`.
+pub fn tick_prepare(context: *mut CpuContext) -> u64 {
+    check_context(context, "tick_prepare");
+    sched().tick_prepare(context)
+}
 
-    sched.on_tick(context);
-
-    context
+/// Second half of a timer tick, on the scheduler stack if `pivoted`.
+pub fn tick_finish(context: *mut CpuContext, pivoted: bool) {
+    check_context(context, "tick_finish");
+    sched().tick_finish(context, pivoted);
 }
 
 // ---------------------------------------------------------------------------
@@ -1348,12 +1356,22 @@ extern "C" fn schedule_voluntary(context: *mut CpuContext) -> *mut CpuContext {
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch_away() {
     core::arch::naked_asm!(
+        // Leave the dying thread's kernel stack before anything publishes it.
+        // The frame below, and every Rust frame under it, would otherwise sit
+        // on memory the reaper is entitled to unmap the moment it sees the
+        // thread. Nothing on this stack is needed again — the thread is Dying.
+        "sub rsp, 8",
+        "and rsp, -16",
+        "cld",
+        "call {sched_stack}",
+        "mov rsp, rax",
+
         "sub rsp, 160",
         "mov rdi, rsp",
         "sub rsp, 8",
         "and rsp, -16",
         "cld",
-        "call {schedule_vol}",
+        "call {reap_and_sched}",
         "mov rsp, rax",
         "pop r15",
         "pop r14",
@@ -1371,8 +1389,36 @@ pub unsafe extern "C" fn switch_away() {
         "pop rcx",
         "pop rax",
         "iretq",
-        schedule_vol = sym schedule_voluntary,
+        sched_stack = sym scheduler_stack_top,
+        reap_and_sched = sym reap_and_schedule,
     );
+}
+
+/// Top of this CPU's scheduler stack, for the naked trampolines to pivot to.
+extern "C" fn scheduler_stack_top() -> u64 {
+    let top = get_percpu_data().scheduler_stack_top.get();
+    debug_assert!(top != 0, "scheduler stack not initialized");
+    top
+}
+
+/// Hand the dying thread to the reaper and pick the next one.
+///
+/// Runs on the per-CPU scheduler stack, so the thread's own stack is already
+/// free — which is the whole point of the pivot in `switch_away`.
+extern "C" fn reap_and_schedule(context: *mut CpuContext) -> *mut CpuContext {
+    check_context(context, "reap_and_schedule");
+    let sc = sched();
+    without_interrupts(|| {
+        if let Some(t) = current_thread() {
+            sc.current.store(0, Ordering::Release);
+            unsafe { get_percpu_data().set_current_thread(None) };
+            sc.thread_count.fetch_sub(1, Ordering::Relaxed);
+            reaper_enqueue(t);
+        }
+        sc.wake_sleepers();
+        sc.pick_and_run(context);
+    });
+    context
 }
 
 // ---------------------------------------------------------------------------
