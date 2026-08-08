@@ -312,56 +312,70 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
     let info = sched.current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let registry = WINDOW_REGISTRY.read();
-    let windows = registry.visible_windows_sorted();
-    let total_count = windows.len();
+    // Snapshot under the lock, copy to userspace outside it. `try_copy_to_user`
+    // can demand-fault, and a demand fault can park on a page fill; parking
+    // while holding this spin lock leaves every other CPU spinning on it for
+    // the duration of the I/O.
+    let (entries, total_count) = {
+        let registry = WINDOW_REGISTRY.read();
+        let windows = registry.visible_windows_sorted();
+        let total_count = windows.len();
 
-    if buffer_ptr.is_null() || max == 0 {
-        // Just return the count
-        return total_count as u64;
-    }
+        if buffer_ptr.is_null() || max == 0 {
+            // Just return the count
+            return total_count as u64;
+        }
 
-    let copy_count = total_count.min(max as usize);
+        let copy_count = total_count.min(max as usize);
+        let entries: alloc::vec::Vec<WindowListEntry> = windows
+            .iter()
+            .take(copy_count)
+            .map(|window| {
+                let mut title = [0u8; TITLE_MAX];
+                let title_bytes = window.title.as_bytes();
+                let copy_len = title_bytes.len().min(TITLE_MAX - 1);
+                title[..copy_len].copy_from_slice(&title_bytes[..copy_len]);
+
+                WindowListEntry {
+                    id: window.id,
+                    pid: window.pid,
+                    x: window.x,
+                    y: window.y,
+                    width: window.width,
+                    height: window.height,
+                    z_order: window.z_order,
+                    visible: window.visible as u32,
+                    buffer_shm_id: window.buffer_shm_id.unwrap_or(0),
+                    flags: window.flags,
+                    damaged: window.damaged as u32,
+                    _padding2: 0,
+                    title,
+                }
+            })
+            .collect();
+
+        (entries, total_count)
+    };
+
     let entry_size = core::mem::size_of::<WindowListEntry>();
-
-    for (i, window) in windows.iter().take(copy_count).enumerate() {
-        let offset = i * entry_size;
-
-        // Build entry inline
-        let mut title = [0u8; TITLE_MAX];
-        let title_bytes = window.title.as_bytes();
-        let copy_len = title_bytes.len().min(TITLE_MAX - 1);
-        title[..copy_len].copy_from_slice(&title_bytes[..copy_len]);
-
-        let entry = WindowListEntry {
-            id: window.id,
-            pid: window.pid,
-            x: window.x,
-            y: window.y,
-            width: window.width,
-            height: window.height,
-            z_order: window.z_order,
-            visible: window.visible as u32,
-            buffer_shm_id: window.buffer_shm_id.unwrap_or(0),
-            flags: window.flags,
-            damaged: window.damaged as u32,
-            _padding2: 0,
-            title,
-        };
-
+    for (i, entry) in entries.iter().enumerate() {
         let entry_bytes = unsafe {
-            core::slice::from_raw_parts(&entry as *const WindowListEntry as *const u8, entry_size)
+            core::slice::from_raw_parts(entry as *const WindowListEntry as *const u8, entry_size)
         };
 
-        if !unsafe { try_copy_to_user(buffer_ptr.add(offset), entry_bytes.as_ptr(), entry_size) } {
+        if !unsafe {
+            try_copy_to_user(
+                buffer_ptr.add(i * entry_size),
+                entry_bytes.as_ptr(),
+                entry_size,
+            )
+        } {
             info.lock().errno = Errno::EFAULT;
             return !0u64;
         }
     }
 
-    // Collect IDs of listed windows, then clear their damage flags.
-    let listed_ids: alloc::vec::Vec<u64> = windows.iter().take(copy_count).map(|w| w.id).collect();
-    drop(registry);
+    let listed_ids: alloc::vec::Vec<u64> = entries.iter().map(|e| e.id).collect();
     {
         let mut registry = WINDOW_REGISTRY.write();
         for id in listed_ids {
