@@ -19,7 +19,8 @@ Version 1.0 | Status: Draft
 11. [Block Size and Addressing](#11-block-size-and-addressing)
 12. [Block Groups](#12-block-groups)
 13. [Allocation Strategy](#13-allocation-strategy)
-14. [Design Decisions and Rationale](#14-design-decisions-and-rationale)
+14. [Journal](#14-journal)
+15. [Design Decisions and Rationale](#15-design-decisions-and-rationale)
 
 ---
 
@@ -35,13 +36,13 @@ EFS (EDOS Filesystem) is the native filesystem for EDOS. It is conceptually "ext
 - 256-byte inodes with 64-bit timestamps (nanosecond precision)
 - CRC32 checksums on all major on-disk structures
 - Feature flag system for forward and backward compatibility
-- Designed for SSD/NVMe storage -- no rotational-media optimizations
-- No journaling in v1; planned via incompatible feature flag in a future version
+- Designed for SSD/NVMe storage, with no rotational-media optimizations
+- Metadata-only write-ahead journal, mandatory (`INCOMPAT_JOURNAL`)
 
 **What EFS is not:**
 
 - Not a copy-on-write filesystem (no snapshots, no CoW semantics)
-- Not journaled in v1 (crash may leave filesystem in an inconsistent state; fsck required)
+- Not a data journal; file data is not crash-safe (`data=writeback` semantics)
 - Not optimized for spinning disk (no cylinder groups, no seek-time heuristics)
 
 **Version:** This document describes on-disk format version 1 (`superblock.version == 1`).
@@ -131,7 +132,11 @@ All multi-byte fields are stored **little-endian**.
 | 178 | 2 | `max_mount_count` | `u16` | Recommended maximum mount count before fsck. `0` = no limit |
 | 180 | 8 | `first_data_block` | `u64` | Block number of the first block not used by superblock or BGD table. Typically `2 + bgd_table_block_count` |
 | 188 | 4 | `checksum` | `u32` | CRC32 of the first 256 bytes of the superblock with this field zeroed during computation |
-| 192 | 64 | `reserved` | `[u8; 64]` | Reserved; must be zero |
+| 192 | 8 | `journal_first_block` | `u64` | First block of the journal extent, absolute within the partition. Valid only when `INCOMPAT_JOURNAL` is set (see Section 14) |
+| 200 | 4 | `journal_block_count` | `u32` | Blocks reserved for the journal, including its superblock |
+| 204 | 4 | `journal_sb_checksum` | `u32` | CRC32 of the journal superblock, so it can be sanity-checked without reading the journal |
+| 208 | 1 | `fsck_in_progress` | `u8` | Set to 1 while `efs-fsck --repair` runs, cleared on clean exit. If set at startup, fsck refuses to run without `--force` |
+| 209 | 47 | `reserved` | `[u8; 47]` | Reserved; must be zero |
 
 **Total defined size:** 256 bytes. Bytes 256 through end-of-block must be zero.
 
@@ -554,7 +559,7 @@ The superblock contains three 64-bit feature bitmasks that control compatibility
 ### Three Categories
 
 **`compatible_features`** (offset 56 in superblock):
-The filesystem may have features that an older driver does not understand. An older driver can still mount the filesystem read/write safely -- it will just ignore those features. Unknown bits are preserved verbatim on write.
+The filesystem may have features that an older driver does not understand. An older driver can still mount the filesystem read/write safely; it just ignores those features. Unknown bits are preserved verbatim on write.
 
 **`incompatible_features`** (offset 64 in superblock):
 The filesystem has on-disk format changes that an older driver would silently corrupt if it attempted to write (or even read) without understanding them. A driver that encounters an unknown bit in this field MUST refuse to mount.
@@ -565,8 +570,8 @@ The filesystem has metadata that an older driver would not update correctly if i
 ### Mount Policy (pseudocode)
 
 ```rust
-const KNOWN_INCOMPAT: u64 = 0;   // no incompatible features defined in v1
-const KNOWN_RO_COMPAT: u64 = 0;  // no RO-compat features defined in v1
+const KNOWN_INCOMPAT: u64 = INCOMPAT_JOURNAL;  // 0x1
+const KNOWN_RO_COMPAT: u64 = 0;                // none defined in v1
 
 if (sb.incompatible_features & !KNOWN_INCOMPAT) != 0 {
     return Err(MountError::UnknownIncompatFeature);
@@ -585,7 +590,9 @@ let read_only = (sb.read_only_features & !KNOWN_RO_COMPAT) != 0;
 
 #### Incompatible Features (`incompatible_features`)
 
-None defined in v1.
+| Bit | Name | Value | Meaning |
+|-----|------|-------|---------|
+| 0 | `INCOMPAT_JOURNAL` | `0x0000000000000001` | The filesystem carries a metadata journal, described in Section 14. A driver that cannot replay the journal must refuse to mount, read-only included, since unreplayed metadata makes the home locations stale. Set on every image `efs-mkfs` produces. |
 
 #### Read-Only Compatible Features (`read_only_features`)
 
@@ -734,7 +741,110 @@ The superblock's `free_blocks` and `free_inodes` are updated atomically with eve
 
 ---
 
-## 14. Design Decisions and Rationale
+## 14. Journal
+
+EFS uses a metadata-only write-ahead journal (WAL) for crash safety,
+inspired by ext3/jbd2 in `data=writeback` mode. File data is NOT
+journaled; only metadata mutations (inodes, bitmaps, BGDs, directory
+data blocks) are recorded in the journal before being applied to their
+home locations.
+
+### On-disk layout
+
+The journal occupies a contiguous extent reserved at `efs-mkfs` time
+(default 16 MiB). Its location is recorded in the EFS superblock:
+
+- `journal_first_block: u64`, first block of the journal extent
+- `journal_block_count: u32`, total blocks including the journal superblock
+- `journal_sb_checksum: u32`, CRC32 of the journal superblock
+
+The `INCOMPAT_JOURNAL` (0x1) feature bit must be set. The kernel
+refuses to mount images without it.
+
+### Journal superblock (block 0 of the extent)
+
+64 bytes, `repr(C, packed)`:
+
+| Offset | Size | Field         | Description                              |
+|--------|------|---------------|------------------------------------------|
+| 0      | 4    | magic         | `JOURNAL_MAGIC`, disk bytes `45 4A 53 21` (`"EJS!"`) |
+| 4      | 4    | version       | Must be 1                                |
+| 8      | 4    | block_count   | Total journal blocks                     |
+| 12     | 4    | block_size    | Must match FS block size (4096)          |
+| 16     | 8    | tail_seq      | Oldest live transaction seq              |
+| 24     | 8    | head_seq      | Next transaction seq                     |
+| 32     | 8    | tail_block    | Ring offset of oldest live data          |
+| 40     | 8    | head_block    | Ring offset of next write position       |
+| 48     | 4    | crc32         | CRC32 of struct with this field zeroed   |
+| 52     | 12   | reserved      | Must be zero                             |
+
+### Ring structure
+
+Block 0 = journal superblock. Blocks 1..block_count-1 form the ring
+(ring_size = block_count - 1). Ring positions wrap modulo ring_size.
+`journal_block_lba(idx) = (first_block + (idx % ring_size) + 1) * 8`.
+
+### Block types
+
+Every journal metadata block starts with a 24-byte `JournalBlockHeader`:
+
+| Offset | Size | Field | Description                                    |
+|--------|------|-------|------------------------------------------------|
+| 0      | 4    | magic | `JOURNAL_BLOCK_MAGIC`, disk bytes `45 4A 42 21` (`"EJB!"`) |
+| 4      | 1    | kind  | 1=Descriptor, 2=Commit, 3=Revoke              |
+| 5      | 3    | _pad  | Zero                                           |
+| 8      | 8    | seq   | Transaction sequence number                    |
+| 16     | 8    | tx_id | Transaction identifier                         |
+
+**Descriptor block**: lists fs_blocks whose data follows.
+Layout: header (24B) + entry_count (u32, 4B) + DescriptorEntry[N].
+Each DescriptorEntry is 16 bytes: `fs_block: u64`, `flags: u32`,
+`_reserved: u32`. Flag bit 0 = ESCAPED (first 4 bytes replaced with
+zeros because they matched JOURNAL_BLOCK_MAGIC).
+
+**Data blocks**: one 4096-byte block per descriptor entry, in order.
+Contains the metadata block content as-is (or escaped).
+
+**Revoke block**: lists blocks that must NOT be replayed from older txs.
+Layout: header (24B) + RevokeEntry[N] (16B each: `fs_block: u64`,
+`seq: u64`). Terminated by zero entry.
+
+**Commit block**: seals a transaction. Layout: header (24B) +
+`payload_crc: u32` (CRC32 of all data block bytes, in escaped form).
+Written with FUA for durability.
+
+### Transaction flow
+
+1. `TxHandle` (RAII) opened at each top-level metadata op.
+2. Helpers enroll dirty pages via `tx.enroll_block(dev, block, page)`.
+3. `free_block` also enrolls revoke records via `tx.enroll_revoke`.
+4. TxHandle::Drop merges staged blocks into the active transaction.
+5. Committer kthread (1s tick or kick) seals active -> writes
+   descriptor + data + optional revoke + flush_cache + FUA commit.
+6. Writeback gate: dirty pages skip flush until committed_seq >= their
+   enrolled seq.
+7. After checkpoint (home-location flush), advance_tail reclaims ring.
+
+### Mount-time replay
+
+Two-pass scan from tail_block:
+- Pass 1: collect committed txs and revoke set (fs_block -> max_revoke_seq)
+- Pass 2: apply data blocks to home locations, skipping revoked blocks
+  (revoke_seq >= tx_seq). Un-escape DESC_FLAG_ESCAPED blocks.
+
+After replay: flush_cache, write updated JSB (tail=head) with FUA.
+Idempotent: crash during replay re-replays on next boot.
+
+### Crash safety guarantees
+
+- Metadata committed to the journal survives power loss.
+- Partial transactions (no commit block) are discarded on replay.
+- Freed blocks are revoke-protected against stale replay.
+- File data is NOT crash-safe (data=writeback mode).
+
+---
+
+## 15. Design Decisions and Rationale
 
 ### Extents over indirect blocks
 
@@ -744,11 +854,11 @@ Extents also simplify the driver: no need to allocate and maintain indirect poin
 
 The tradeoff is that highly fragmented files (many small non-contiguous regions) need more extent entries than a pointer tree would. But fragmentation is bad for performance regardless of the metadata representation, and the allocation strategy (Section 13) is designed to minimize it.
 
-### No journaling in v1
+### Metadata-only journaling
 
-Journaling (write-ahead logging of metadata changes) prevents filesystem corruption on unclean shutdown. It is a significant engineering effort: transaction boundaries, log format, replay on mount, write ordering, and interaction with the page cache all require careful design.
+A journal costs write bandwidth: every metadata block is written twice, once to the log and once to its home location. Journaling file data as well would double the cost on the hot path, for a guarantee EDOS does not need. Metadata-only journaling (`data=writeback`, as in ext3 and jbd2) buys the property that actually matters, which is that the filesystem is always structurally consistent after a crash, and leaves file contents to `fsync`.
 
-For EDOS at this stage of development, the risk of corruption on crash is acceptable. The feature flag system (`incompatible_features`) provides a clean path to add journaling in a future version: set a new `INCOMPAT_JOURNAL` flag, add the journal inode and log area, and old drivers that encounter the flag will refuse to mount rather than silently corrupt the log.
+The journal is mandatory rather than optional. An optional journal means two code paths, two sets of crash semantics, and a class of bug that only shows up on images formatted the other way. `INCOMPAT_JOURNAL` is set on every image `efs-mkfs` writes, and the kernel refuses to mount without it.
 
 ### 256-byte inodes
 
@@ -836,8 +946,18 @@ FT_DIR      = 2
 FT_SYMLINK  = 7
 
 // Feature flags
-COMPAT_DISCARD = 0x0000000000000001
+COMPAT_DISCARD   = 0x0000000000000001
+INCOMPAT_JOURNAL = 0x0000000000000001
+
+// Journal
+JOURNAL_MAGIC       = 0x21534A45      // disk bytes 45 4A 53 21, "EJS!"
+JOURNAL_BLOCK_MAGIC = 0x21424A45      // disk bytes 45 4A 42 21, "EJB!"
+DESC_FLAG_ESCAPED   = 0x00000001
 ```
+
+Note the two magic conventions. `EFS_MAGIC` is the value `0x45465321`, which on
+disk (little-endian) reads `21 53 46 45`. The journal magics are the reverse: the
+literal is chosen so the bytes on disk spell the ASCII directly.
 
 ## Appendix: Structure Sizes Summary
 
@@ -852,6 +972,8 @@ COMPAT_DISCARD = 0x0000000000000001
 | Extent Index Entry (internal) | 12 bytes |
 | Directory Entry Header | 12 bytes |
 | Directory Entry (variable) | 12 + name_len bytes, rounded up to 4-byte alignment |
+| Journal Superblock | 64 bytes |
+| Journal Block Header | 24 bytes |
 
 ## Appendix: Inode data_area Layout (depth=0, 4K blocks)
 
@@ -874,104 +996,3 @@ Bytes 156 .. 167 : (same layout)
 ---- unused ------
 Bytes 168 .. 175 : (unused, zero)
 ```
-
-## Journal
-
-EFS uses a metadata-only write-ahead journal (WAL) for crash safety,
-inspired by ext3/jbd2 in `data=writeback` mode. File data is NOT
-journaled; only metadata mutations (inodes, bitmaps, BGDs, directory
-data blocks) are recorded in the journal before being applied to their
-home locations.
-
-### On-disk layout
-
-The journal occupies a contiguous extent reserved at `efs-mkfs` time
-(default 16 MiB). Its location is recorded in the EFS superblock:
-
-- `journal_first_block: u64` -- first block of the journal extent
-- `journal_block_count: u32` -- total blocks (including the journal SB)
-- `journal_sb_checksum: u32` -- CRC32 of the journal superblock
-
-The `INCOMPAT_JOURNAL` (0x1) feature bit must be set. The kernel
-refuses to mount images without it.
-
-### Journal superblock (block 0 of the extent)
-
-64 bytes, `repr(C, packed)`:
-
-| Offset | Size | Field         | Description                              |
-|--------|------|---------------|------------------------------------------|
-| 0      | 4    | magic         | `"EJS!"` (0x454A5321)                    |
-| 4      | 4    | version       | Must be 1                                |
-| 8      | 4    | block_count   | Total journal blocks                     |
-| 12     | 4    | block_size    | Must match FS block size (4096)          |
-| 16     | 8    | tail_seq      | Oldest live transaction seq              |
-| 24     | 8    | head_seq      | Next transaction seq                     |
-| 32     | 8    | tail_block    | Ring offset of oldest live data          |
-| 40     | 8    | head_block    | Ring offset of next write position       |
-| 48     | 4    | crc32         | CRC32 of struct with this field zeroed   |
-| 52     | 12   | reserved      | Must be zero                             |
-
-### Ring structure
-
-Block 0 = journal superblock. Blocks 1..block_count-1 form the ring
-(ring_size = block_count - 1). Ring positions wrap modulo ring_size.
-`journal_block_lba(idx) = (first_block + (idx % ring_size) + 1) * 8`.
-
-### Block types
-
-Every journal metadata block starts with a 24-byte `JournalBlockHeader`:
-
-| Offset | Size | Field | Description                                    |
-|--------|------|-------|------------------------------------------------|
-| 0      | 4    | magic | `"EJB!"` (0x454A4221)                          |
-| 4      | 1    | kind  | 1=Descriptor, 2=Commit, 3=Revoke              |
-| 5      | 3    | _pad  | Zero                                           |
-| 8      | 8    | seq   | Transaction sequence number                    |
-| 16     | 8    | tx_id | Transaction identifier                         |
-
-**Descriptor block**: lists fs_blocks whose data follows.
-Layout: header (24B) + entry_count (u32, 4B) + DescriptorEntry[N].
-Each DescriptorEntry is 16 bytes: `fs_block: u64`, `flags: u32`,
-`_reserved: u32`. Flag bit 0 = ESCAPED (first 4 bytes replaced with
-zeros because they matched JOURNAL_BLOCK_MAGIC).
-
-**Data blocks**: one 4096-byte block per descriptor entry, in order.
-Contains the metadata block content as-is (or escaped).
-
-**Revoke block**: lists blocks that must NOT be replayed from older txs.
-Layout: header (24B) + RevokeEntry[N] (16B each: `fs_block: u64`,
-`seq: u64`). Terminated by zero entry.
-
-**Commit block**: seals a transaction. Layout: header (24B) +
-`payload_crc: u32` (CRC32 of all data block bytes, in escaped form).
-Written with FUA for durability.
-
-### Transaction flow
-
-1. `TxHandle` (RAII) opened at each top-level metadata op.
-2. Helpers enroll dirty pages via `tx.enroll_block(dev, block, page)`.
-3. `free_block` also enrolls revoke records via `tx.enroll_revoke`.
-4. TxHandle::Drop merges staged blocks into the active transaction.
-5. Committer kthread (1s tick or kick) seals active -> writes
-   descriptor + data + optional revoke + flush_cache + FUA commit.
-6. Writeback gate: dirty pages skip flush until committed_seq >= their
-   enrolled seq.
-7. After checkpoint (home-location flush), advance_tail reclaims ring.
-
-### Mount-time replay
-
-Two-pass scan from tail_block:
-- Pass 1: collect committed txs and revoke set (fs_block -> max_revoke_seq)
-- Pass 2: apply data blocks to home locations, skipping revoked blocks
-  (revoke_seq >= tx_seq). Un-escape DESC_FLAG_ESCAPED blocks.
-
-After replay: flush_cache, write updated JSB (tail=head) with FUA.
-Idempotent: crash during replay re-replays on next boot.
-
-### Crash safety guarantees
-
-- Metadata committed to the journal survives power loss.
-- Partial transactions (no commit block) are discarded on replay.
-- Freed blocks are revoke-protected against stale replay.
-- File data is NOT crash-safe (data=writeback mode).

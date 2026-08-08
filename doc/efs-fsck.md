@@ -1,7 +1,7 @@
 # efs-fsck: EFS Filesystem Checker
 
 `efs-fsck` is a host-side tool that validates and optionally repairs an EFS
-filesystem image or raw block device.  It is the v1 checker: journal replay,
+filesystem image or raw block device. It is the v1 checker: journal replay,
 inode scan, bitmap rebuild and leak reclamation, directory-tree reachability,
 and superblock/BGD cross-check.
 
@@ -21,7 +21,7 @@ efs-fsck [OPTIONS] <IMAGE>
 
 | Flag | Description |
 |------|-------------|
-| `--repair` | Enable destructive fixes.  Without this flag fsck is read-only. |
+| `--repair` | Enable destructive fixes. Without this flag fsck is read-only. |
 | `--yes` / `-y` | Auto-accept all repair prompts without interactive confirmation. |
 | `--dry-run` / `-n` | Show what would be repaired without writing anything. |
 | `--verbose` / `-v` | Print `INFO`-level findings (scan stats, replay counts, etc.). |
@@ -63,11 +63,11 @@ multiple filesystems, but `efs-fsck` v1 returns exactly one code per run.
 
 ## Finding Categories
 
-Each finding is tagged with a severity and a category.  Severity levels:
+Each finding is tagged with a severity and a category. Severity levels:
 
-- `INFO` -- informational; only printed with `--verbose`.
-- `WARN` -- potential problem; does not affect exit code.
-- `ERROR` -- confirmed problem; triggers exit 4 if unrepaired.
+- `INFO`: informational, only printed with `--verbose`.
+- `WARN`: potential problem, does not affect the exit code.
+- `ERROR`: confirmed problem, triggers exit 4 if unrepaired.
 
 ### Journal (`journal`)
 
@@ -76,7 +76,7 @@ transaction ring.
 
 | Finding | Severity | Fixable | What fsck does |
 |---------|----------|---------|----------------|
-| `journal is dirty` (tail_seq != head_seq) | WARN | yes | With `--repair`: replays committed transactions to home locations, resets JSB (`tail = head`). Without `--repair`: reports and exits 0 (Warning). |
+| `journal is dirty` (tail_seq != head_seq) | ERROR | yes | With `--repair`: replays committed transactions to home locations, resets JSB (`tail = head`). Without `--repair`: reports and exits 4. |
 | JSB magic/version mismatch | ERROR | no | Refuses replay; suggests `--force` to skip. |
 | JSB CRC mismatch | ERROR | no | Same as above. |
 | JSB `block_size` != FS block_size | ERROR | no | Refuses replay. |
@@ -104,7 +104,7 @@ transaction ring.
 
 | Finding | Severity | Fixable | What fsck does |
 |---------|----------|---------|----------------|
-| `leaked block-bitmap bit at X` | WARN | yes | With `--repair`: clears the bit in the on-disk bitmap. Increments BGD `free_blocks_count`. |
+| `leaked block-bitmap bit at X` | ERROR | yes | With `--repair`: clears the bit in the on-disk bitmap. Increments BGD `free_blocks_count`. |
 | `missing bit in block-bitmap for index X` | ERROR | no | Reports only. A block appears referenced but is marked free; root-cause analysis is needed. |
 | `block X double-claimed by inodes A and B` | ERROR | no | Reports only. Manual resolution required. |
 
@@ -112,7 +112,7 @@ transaction ring.
 
 | Finding | Severity | Fixable | What fsck does |
 |---------|----------|---------|----------------|
-| `leaked inode-bitmap bit at X` | WARN | yes | With `--repair`: clears the bit in the on-disk inode bitmap. Increments BGD `free_inodes_count`. |
+| `leaked inode-bitmap bit at X` | ERROR | yes | With `--repair`: clears the bit in the on-disk inode bitmap. Increments BGD `free_inodes_count`. |
 | `missing bit in inode-bitmap for index X` | ERROR | no | Reports only. |
 
 ### Inode (`inode`)
@@ -156,14 +156,14 @@ transaction ring.
 
 ### Will NOT fix
 
-- Double-claimed blocks: two inodes reference the same extent block.  fsck
+- Double-claimed blocks: two inodes reference the same extent block. fsck
   reports both inodes; the user must decide which is canonical.
 - Broken `.` or `..` entries: directory structure corruption is too risky to
   auto-repair without knowing the intended parent.
 - Directory cycles: not auto-resolvable.
 - Malformed directory entries (`rec_len` violations, truncated headers).
 - Missing bitmap bits (`rebuilt=1, on-disk=0`): implies a reference to a block
-  the FS believed was free.  Deeper analysis required.
+  the FS believed was free. Deeper analysis required.
 - Extent trees with `depth > 0`: v1 fsck does not walk index nodes.
 - Directory block corruption: fsck never rewrites directory blocks in v1.
 
@@ -176,14 +176,14 @@ superblock (and all backup superblocks) before writing any repairs, and clears
 it on clean exit.
 
 If fsck is killed mid-repair (SIGKILL, power loss, panic), the sentinel remains
-set.  The next invocation refuses to run and prints:
+set. The next invocation refuses to run and prints:
 
 ```
 error: previous fsck did not complete cleanly (fsck_in_progress sentinel set).
        Run with --force to override.
 ```
 
-`--force` clears the sentinel and continues.  After a crash, it is advisable to
+`--force` clears the sentinel and continues. After a crash, it is advisable to
 run `efs-fsck --force --repair --yes` and then a second read-only pass to
 confirm the filesystem is clean.
 
@@ -199,11 +199,11 @@ confirm the filesystem is clean.
 - **No FAT32 or memfs**: `efs-fsck` only handles the EFS (`EFS!` magic) format.
   The kernel's other filesystem drivers (FAT32, memfs, procfs, devfs) are not
   supported.
-- **No online fsck**: running against a mounted block device is unsafe.  On
+- **No online fsck**: running against a mounted block device is unsafe. On
   Linux, fsck attempts an exclusive `flock`; if the device is locked, it exits
   with OperationalError unless `--force`.
 - **Large images beyond available RAM**: the in-memory bitmap and link-count map
-  are proportional to total_blocks and total_inodes respectively.  For very large
+  are proportional to total_blocks and total_inodes respectively. For very large
   images (hundreds of GiB) this may exceed available RAM; there is no streaming
   mode in v1.
 - **Cluster size != block size**: not supported by mkfs or fsck in v1.
@@ -214,39 +214,13 @@ confirm the filesystem is clean.
 
 ---
 
-## Known Phase 2/3 Bugs (as of initial release)
-
-The following discrepancies between the plan specification and the current
-implementation were discovered during Phase 6 testing.  They are tracked and
-will be fixed in a follow-up pass:
-
-1. **Dirty journal severity (Phase 2)**: In read-only mode, a dirty journal
-   (tail_seq != head_seq) is reported as `WARN` instead of `ERROR`.  Per the
-   plan, this should be `ERROR` to trigger exit 4.  Current behavior: exit 0.
-
-2. **Leaked bitmap message format (Phase 3/5)**: `bitmaps.rs` emits
-   `"leaked block-bitmap bitmap bit at X"` (extra "bitmap" word), but
-   `repair.rs` matches on `"leaked block-bitmap bit at X"`.  The repair
-   class silently skips all leaked-block fixes.  Same issue affects
-   `"leaked inode-bitmap bitmap bit at X"`.
-
-3. **Leaked bitmap severity (Phase 3/5)**: Leaked bitmap bits are `WARN`-
-   severity; `count_error_findings` only counts `ERROR`-severity findings.
-   Even after the message-format bug is fixed, repair of leaked bits would
-   produce exit 0 rather than exit 1.
-
-These bugs do not affect the `--repair` path for link-count mismatches or
-journal replay (both of which work correctly).
-
----
-
 ## Cross-references
 
-- `doc/efs.md` -- on-disk format specification (superblock, BGD, inode, extents,
+- `doc/efs.md`: on-disk format specification (superblock, BGD, inode, extents,
   directory entries, journal).
-- `tools/efs-mkfs/` -- filesystem formatter that creates images compatible with
+- `tools/efs-mkfs/`: filesystem formatter that creates images compatible with
   this checker.
-- `libs/efs-common/` -- shared on-disk struct definitions used by both mkfs and
+- `libs/efs-common/`: shared on-disk struct definitions used by both mkfs and
   fsck.
-- `kernel/src/fs/journal/` -- kernel-side journal implementation; replay logic
+- `kernel/src/fs/journal/`: kernel-side journal implementation, replay logic
   is ported to `tools/efs-fsck/src/replay.rs`.

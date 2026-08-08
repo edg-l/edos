@@ -75,7 +75,7 @@ skipped naturally without any special casing.
 ## 7. Limitations
 
 Only `R_X86_64_RELATIVE` (type 8) is supported. `JUMP_SLOT` (6) and
-`GLOB_DAT` (7) panic at load time -- EDOS binaries are static-PIE and must
+`GLOB_DAT` (7) panic at load time, since EDOS binaries are static-PIE and must
 not produce these. `IRELATIVE` is unhandled (would require calling resolvers
 at load time; not needed until a dynamic linker lands). A single writable
 PT_LOAD containing all reloc targets is asserted; binaries with relocs spread

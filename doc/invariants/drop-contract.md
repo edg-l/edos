@@ -1,90 +1,76 @@
 # Drop-Contract Invariant
 
-**Scope:** All `Drop` implementations on types reachable (directly or transitively)
-from a dying thread's data structures — including types reachable from `Thread::free`,
-from `VfsInode::drop`, and from any driver resource type that a thread owns.
+Sibling document: [`lock-order.md`](lock-order.md).
+
+> **Drop implementations on types reachable from a dying thread must be
+> non-blocking.**
+
+Scope: every `Drop` reachable, directly or transitively, from a dying thread's
+data structures. That includes anything reachable from `Thread::free`, from
+`VfsInode::drop`, and from any driver resource a thread owns.
+
+A conforming `Drop` must not:
+
+- issue AHCI or USB I/O, blocking or interrupt-driven;
+- acquire a `BlockingMutex`, or call `WaitQueue::wait_until`;
+- call `thread_park_while` or any other sleep primitive;
+- call `fs.evict_inode` directly, which reaches AHCI on EFS.
+
+If a `Drop` needs blocking work, it posts a descriptor to a dedicated kthread and
+returns immediately.
 
 ---
 
-## The invariant
+## Reference pattern: `VfsInode::drop`
 
-> **Drop implementations on types reachable from a dying thread must be non-blocking.**
+`VfsInode::drop` in `fs/inode.rs` is the canonical shape:
 
-Concretely, a conforming `Drop` must NOT:
-
-- Issue AHCI / USB I/O (neither blocking nor interrupt-driven waits).
-- Acquire a `BlockingMutex` or call `WaitQueue::wait_until`.
-- Call `thread_park_while` or any other sleep primitive.
-- Call `fs.evict_inode` directly (goes through AHCI on EFS).
-
-If a `Drop` needs blocking work, it must post a descriptor to a dedicated kthread
-and return immediately.
-
----
-
-## Reference pattern: `VfsInode::drop` → `EVICT_QUEUE`
-
-`VfsInode::drop` (at `kernel/src/fs/inode.rs`) is the canonical example:
-
-1. The drop site captures `(mount_id, ino)` — two `Copy` fields, no blocking work.
-2. It calls `fs::evict::post_evict(mount_id, ino)` which pushes an `EvictRequest`
-   onto a `crossbeam_queue::ArrayQueue<EvictRequest>`.
-3. The `evict-inode` kthread (spawned at boot in `init_evict_kthread`) drains the
-   queue and performs the potentially-blocking `fs.evict_inode` call.
-4. If the queue is full: synchronous fallback with a WARNING log (never lose an eviction),
-   or panic if the caller is the evict kthread itself (recursive runaway — see D8 in the
-   Foundation #2 plan).
+1. Capture `(mount_id, ino)`, two `Copy` fields. No blocking work.
+2. Call `fs::evict::post_evict(mount_id, ino)`, which pushes an `EvictRequest`
+   onto a `crossbeam_queue::ArrayQueue`.
+3. The `evict-inode` kthread, spawned at boot by `init_evict_kthread`, drains the
+   queue and performs the blocking `fs.evict_inode` call.
+4. If the queue is full: fall back to a synchronous evict with a warning, so an
+   eviction is never lost. If the caller *is* the evict kthread, panic instead;
+   that path is a recursive runaway.
 
 ---
 
-## Types this contract applies to
+## Conformance
 
-| Type | Status | Notes |
+Every `Drop` impl in the kernel, and why it conforms:
+
+| Type | Location | Why it is non-blocking |
 |---|---|---|
-| `VfsInode` | Conforming (Phase 1) | Uses `post_evict` kthread queue |
-| `CachedPage` | **No Drop today** | Will gain Drop in Foundation #3; must conform |
-| `CachedBlockPage` | Conforming | Frame dealloc only; non-blocking |
-| `PageGuard` | Conforming | `CachedPage::unpin` is atomic; non-blocking |
-| `TxHandle` | Conforming | Merges into active journal tx under spin lock; no I/O |
-| `SharedMemory` | Conforming | Frame dealloc under `IrqSpinlock`; non-blocking |
-| `MemoryManager` | Conforming | No Drop impl; cleanup done explicitly in `Thread::free` |
-| `FpuState` | Conforming | No Drop impl |
-| `SignalState` | Conforming | No Drop impl |
-| VMA (`Vma`) | Conforming | No Drop impl; resources freed in `Thread::free` arms |
-| `FileDescriptor` variants | Conforming | Closed explicitly in `Thread::free:716-782` via `wake_all`; no I/O |
+| `VfsInode` | `fs/inode.rs` | posts to the evict kthread |
+| `CachedPage` | `fs/page_cache.rs` | frame dealloc only |
+| `CachedBlockPage` | `fs/block_page_cache.rs` | frame dealloc only |
+| `PageGuard` | `fs/page_cache.rs` | `unpin` is a single atomic |
+| `BlockPageGuard` | `fs/block_page_cache.rs` | `unpin` is a single atomic |
+| `FrameDrop` | `memory/frame_drop.rs` | frame dealloc only |
+| `SharedMemory` | `memory/shared.rs` | frame dealloc under `IrqSpinlock` |
+| `TxHandle` | `fs/journal/tx.rs` | merges into the active tx under a spin lock, no I/O |
+| `UAccessGuard` | `util/uaccess.rs` | clears a per-CPU flag |
+
+Types with no `Drop` at all, freed explicitly in `Thread::free`: `MemoryManager`,
+`FpuState`, `SignalState`, `Vma`, and the `FileDescriptor` variants (closed via
+`wake_all`, no I/O).
 
 ---
 
-## Enforcement (debug builds)
+## Enforcement
 
-Phase 5 of Foundation #2 adds `debug_assert!` guards at blocking Drop sites.
-The guards fire if the calling thread is the reaper or evict kthread, which
-must never block.
+Debug builds assert that a blocking `Drop` never fires on a thread that must not
+block. Two helpers, both `#[inline]` and allocation-free, and both `false` before
+their kthread starts:
 
-### Helper functions
-
-| Function | Location |
+| Helper | Location |
 |---|---|
-| `current_thread_is_reaper()` | `kernel/src/thread/scheduler.rs` — compares `sched().current_thread_id()` against `REAPER_TID` |
-| `current_thread_is_evict_kthread()` | `kernel/src/fs/evict.rs` — compares `sched().current_thread_id()` against `EVICT_TID` |
+| `current_thread_is_reaper()` | `thread/scheduler.rs` |
+| `current_thread_is_evict_kthread()` | `fs/evict.rs` |
 
-Both return `false` before their respective kthreads are started (TID == 0).
-Both are `#[inline]` and alloc-free.
-
-### Types with guards
-
-| Type | Guard location | Reason |
-|---|---|---|
-| `VfsInode` | `kernel/src/fs/inode.rs`, `VfsInode::drop` | Was blocking before Phase 1; guard catches any future regression that re-introduces blocking code before the `post_evict` call |
-
-### Types without guards (all non-blocking; guard not needed)
-
-`CachedBlockPage`, `PageGuard`, `TxHandle`, `SharedMemory`, `MemoryManager`,
-`FpuState`, `SignalState`, `Vma`, `FileDescriptor` variants — all confirmed
-non-blocking by the Phase 0 drop audit. No guard is needed. If any of these
-gains blocking work in the future, add a guard at that time.
-
-### Guard shape
+`VfsInode::drop` carries the guard, because it was blocking historically and is the
+most likely place for a regression to land:
 
 ```rust
 #[cfg(debug_assertions)]
@@ -97,22 +83,17 @@ gains blocking work in the future, add a guard at that time.
 }
 ```
 
-These are compiled out in release builds. They catch regressions at development
-time before they serialise production exits.
+The other types need no guard while their drops stay trivial. Guards compile out
+in release builds; they exist to catch a regression during development, before it
+serialises production exits.
 
 ---
 
-## How to add a new type
+## Adding a `Drop`
 
-If you add a `Drop` impl to a type that may be reachable from a dying thread:
+If you add a `Drop` to a type reachable from a dying thread:
 
-1. Determine whether the body is blocking (I/O, mutex acquire, park).
-2. If non-blocking: add the type to the table above as "Conforming".
-3. If blocking: follow the `EVICT_QUEUE` pattern — extract a `Copy` descriptor,
-   push to a dedicated kthread queue, return immediately from `Drop`.
-4. Update this file and `doc/bugs/2026-04-16-drop-audit.md`.
-
----
-
-*See also:* `doc/bugs/2026-04-16-drop-audit.md` for the initial audit table and
-per-path reachability analysis.
+1. Decide whether the body blocks (I/O, mutex acquire, park).
+2. Non-blocking: add a row to the conformance table above.
+3. Blocking: follow the evict-queue pattern. Extract a `Copy` descriptor, push it
+   to a dedicated kthread queue, return immediately, and add the guard.

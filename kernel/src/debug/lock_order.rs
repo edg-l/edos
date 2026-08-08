@@ -17,13 +17,11 @@
 /// |   30 | `inode.lock` (per-inode)              |
 /// |   35 | `dentry_cache.inner`                  |
 /// |   40 | `inode.pages.pages`                   |
-/// |   42 | `InodePages.in_flight` (Foundation #5)|
+/// |   42 | `InodePages.in_flight`                |
 /// |   50 | `inode.pages.dirty_keys`              |
 /// |   60 | `inode.mappers`                       |
 /// |   70 | `UserThread.vmas`                     |
 /// |   80 | `UserThread.memory_manager`           |
-/// |   85 | kernel-global mapper                  |
-/// |   90 | `FRAME_ALLOCATOR`                     |
 /// |  100 | `DIRTY_INODES`                        |
 /// |  110 | `BlockPageCache.shards[N]`            |
 /// |  120 | `BlockPageCache.journals`             |

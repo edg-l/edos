@@ -1,65 +1,58 @@
-# EDOS Userspace Roadmap
+# Userspace Roadmap
 
-## Existing Programs (47)
+60 programs and 2 libraries, all in the `programs/` cargo workspace.
 
-**GUI system:** edos-wm, edos-terminal, edos-taskbar, wintest, edos_render (lib)
-**Shell:** edos-sh
-**File utils:** cat, cp, mv, rm, rmdir, mkdir, touch, stat, ls
-**Text processing:** grep, head, tail, wc, sort, uniq, tr, tee, hexdump
-**System info:** ps, free, uname, dmesg, df, mount
-**Network clients:** ping, dns, http, wget, sync
-**Audio:** play
-**Utilities:** seq, yes, sleep
-**Editor:** edos-vi
-**Misc:** echo, write, env
-**Tests:** alloctest, forktest, mmaptest, evicttest, lockordertest, inflighttest
-**Library:** edos_lib
+## What exists
 
-## Phase 1 — Quick wins, no kernel changes (DONE)
-
-| Program | Why it matters |
+| Area | Programs |
 |---|---|
-| `true` | Exit code 0. Required for shell conditionals. |
-| `false` | Exit code 1. Required for shell conditionals. |
-| `kill` | Send signals to processes. Uses existing `SYS_KILL`. |
-| `basename` | Strip directory prefix from path. Shell scripting staple. |
-| `dirname` | Strip last component from path. Shell scripting staple. |
-| `cut` | Select columns from delimited text. Complements text-processing toolkit. |
-| `cal` | Print calendar. Shows off date/time, pure userland. |
+| GUI | `edos-wm`, `edos-terminal`, `edos-taskbar`, `wintest` |
+| Shell | `edos-sh` |
+| Editor | `edos-vi` |
+| Files | `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `touch`, `stat`, `find`, `du`, `diff` |
+| Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs` |
+| System | `ps`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env` |
+| Network | `ping`, `dns`, `http`, `wget` |
+| Audio | `play` |
+| Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal` |
+| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest` |
+| Libraries | `edos_lib` (syscall wrappers), `edos_render` (textures, widgets, windows) |
 
-## Phase 2 — Kernel stress-testers (no kernel changes)
+## Done
 
-| Program | Why it matters |
-|---|---|
-| `find` | Recursive file search. Exercises readdir/stat at scale. |
-| `du` | Disk usage. Walks trees, calls stat. Small codebase, real use. |
-| `diff` | File comparison. Fundamental dev tool. Classic LCS algorithm. |
-| `xargs` | Build commands from stdin. Enables composability. Stress-tests spawn. |
+**Phase 1, shell conditionals and scripting staples.**
+`true`, `false`, `kill`, `basename`, `dirname`, `cut`, `cal`.
 
-## Phase 3 — Higher complexity, still pure userspace
+**Phase 2, kernel stress-testers.**
+`find` and `du` exercise readdir and stat at scale, `diff` is a classic LCS
+implementation, `xargs` stress-tests spawn and enables composability.
+
+## Phase 3: pure userspace, higher complexity
 
 | Program | Why it matters | Notes |
 |---|---|---|
-| `tar` | Archive creation/extraction. Useful for host↔guest file transfer. | Exercises create/open/read/write/close/unlink/mkdir at scale. |
-| `top` | Real-time system monitor. Requires terminal raw mode + refresh loop. | Will surface gaps in what procfs provides (per-process CPU time, memory RSS). |
-| `snake` | Terminal game with timer. Good demo of poll/time APIs. | Uses raw stdin mode. |
-| `file` | Detect file type by magic bytes. Standard Unix tool. | Pure userspace pattern matching. |
-| `hash` (sha256sum) | Cryptographic checksums. Exercises large-file read. | Pure Rust impl, no crates needed. |
+| `tar` | archive create and extract; useful for host to guest transfer | exercises open/read/write/unlink/mkdir at scale |
+| `top` | live system monitor | needs terminal raw mode and a refresh loop; will surface procfs gaps |
+| `file` | detect type by magic bytes | pure pattern matching |
+| `sha256sum` | checksums over large files | pure Rust, exercises large-file read |
+| `snake` | terminal game on a timer | good demo of poll and time APIs, raw stdin |
 
-## Phase 4 — Kernel-aware programs
+## Phase 4: kernel-aware
 
 | Program | Why it matters | Kernel gap |
 |---|---|---|
-| **TCP echo server** | Tests accept/listen/poll on sockets. Validates TCP state machine from userspace. | None (syscalls already exist). May surface accept backlog or poll wakeup bugs. |
-| **`netstat`** | Show listening/established sockets, TCP connection table. | Need `SYS_NETSTAT` or `/proc/net/tcp`. Kernel already tracks everything in `net/tcp.rs` CONNECTIONS; just needs a read path. Low effort, high payoff. |
-| **Image viewer** (BMP) | GUI app using window syscalls + shared memory. Tests render/compositor from a real app. | None (window syscalls exist). |
-| **`nproc`** | Print number of CPUs. Simple, exposes CPU count. | Currently no way to query from userspace. Trivial kernel addition. |
+| TCP echo server | validates the TCP state machine from userspace | none; may surface accept-backlog or poll-wakeup bugs |
+| `netstat` | listening and established sockets | needs a read path into `net/tcp.rs` `CONNECTIONS`, as `SYS_NETSTAT` or `/proc/net/tcp` |
+| BMP image viewer | a real GUI app over window syscalls and shared memory | none; exercises the compositor |
+| `nproc` | CPU count | needs `SYS_NPROC` or `/proc/cpuinfo` |
 
-## Known Kernel Gaps Found During Roadmap
+## Kernel gaps this roadmap exposes
 
-1. **procfs depth** — `top` needs per-process CPU time, memory RSS. Check if procfs entries provide this.
-2. **TCP connection introspection** — `netstat` needs a read path for the TCP connection table.
-3. **TCP accept backlog** — A server with concurrent connections will test SYN backlog queue behavior.
-4. **Large-file I/O** — `hash` (sha256sum) and `tar` stress the block/page cache with files > RAM.
-5. **Rapid spawn/exit** — `xargs` in loop mode spawns many short-lived processes. Tests reaper, zombie collection.
-6. **CPU count** — `nproc` needs `SYS_NPROC` or `/proc/cpuinfo`. Currently not exposed.
+1. **procfs depth.** `top` wants per-process CPU time and RSS.
+2. **TCP introspection.** `netstat` needs a read path for the connection table.
+3. **Accept backlog.** A concurrent server will test SYN backlog behaviour.
+4. **Large-file I/O.** `sha256sum` and `tar` push files larger than RAM through the
+   block and page caches.
+5. **Rapid spawn and exit.** `xargs` in loop mode hammers the reaper and zombie
+   collection.
+6. **CPU count.** Not exposed to userspace at all today.
