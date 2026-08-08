@@ -415,10 +415,27 @@ impl Thread {
         self.priority.load(Ordering::Acquire)
     }
 
-    #[expect(unused)]
+    /// Restrict this thread to the CPUs named by `mask`; zero means anywhere.
+    ///
+    /// Affinity is enforced where a thread is *placed* — spawn, wake, and
+    /// work-stealing — not where it is picked, so a mask set on a thread that
+    /// is already running takes effect at its next placement rather than
+    /// immediately. Set it before publishing the thread when the first
+    /// placement has to honour it.
     pub fn set_affinity_mask(&self, mask: u32) {
         self.cpu_affinity.store(mask, Ordering::Release);
         self.mark_need_resched();
+    }
+
+    /// Whether this thread's affinity permits `cpu`.
+    ///
+    /// An empty mask means unrestricted, which is every thread today. A set
+    /// mask is 32 bits wide and so cannot name a CPU above 31; a thread pinned
+    /// by mask never runs on those, which is why the shift is guarded rather
+    /// than wrapped.
+    pub fn allows_cpu(&self, cpu: u32) -> bool {
+        let mask = self.cpu_affinity.load(Ordering::Acquire);
+        mask == 0 || (cpu < 32 && mask & (1u32 << cpu) != 0)
     }
 
     pub fn begin_run(&self, start_tick: u64) {

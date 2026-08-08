@@ -91,6 +91,20 @@ pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> Th
     id
 }
 
+/// Spawn a kthread restricted to the CPUs named by `affinity`, a bitmask where
+/// bit N means lapic id N. The mask is set before the thread is published, so
+/// its first placement already honours it.
+#[cfg(feature = "sched-test")]
+pub fn queue_spawn_kthread_affine(name: &str, entry: u64, arg: *mut u8, affinity: u32) -> ThreadId {
+    let thread = Thread::new_kernel(Some(name.to_string()), entry, arg as u64);
+    let id = thread.id;
+    thread.set_affinity_mask(affinity);
+    pick_sched_for(&thread)
+        .unwrap_or_else(pick_sched)
+        .spawn_thread(thread);
+    id
+}
+
 /// Rotating hint for `pick_sched` tie-breaking. Bumped every call to spread
 /// new-thread placement across CPUs with equal `thread_count`. Prevents the
 /// boot-time skew where sorted-lapic iteration + lowest-first tie-break packs
@@ -98,6 +112,17 @@ pub fn queue_spawn_kthread_named_arg(name: &str, entry: u64, arg: *mut u8) -> Th
 static PICK_SCHED_ROTATION: AtomicU32 = AtomicU32::new(0);
 
 pub fn pick_sched() -> &'static Scheduler {
+    pick_sched_filtered(|_| true).expect("pick_sched: no schedulers registered")
+}
+
+/// Least-loaded scheduler whose CPU `t`'s affinity permits, or `None` when the
+/// mask names no registered CPU. Callers place the thread themselves in that
+/// case rather than dropping it.
+pub fn pick_sched_for(t: &Thread) -> Option<&'static Scheduler> {
+    pick_sched_filtered(|cpu| t.allows_cpu(cpu))
+}
+
+fn pick_sched_filtered(allowed: impl Fn(u32) -> bool) -> Option<&'static Scheduler> {
     // SCHEDULERS is keyed by lapic_id, which is NOT guaranteed to be
     // contiguous 0..num_cpus on real hardware. Iterate values directly.
     let schedulers = SCHEDULERS.read();
@@ -113,18 +138,19 @@ pub fn pick_sched() -> &'static Scheduler {
     // balanced system every scheduler has the same count, so the strict `<`
     // leaves the first one in rotation order winning, which spreads spawns
     // evenly. A CPU with a genuinely lower count still wins outright.
-    let start = PICK_SCHED_ROTATION.fetch_add(1, Ordering::Relaxed) as usize;
+    let start = PICK_SCHED_ROTATION.fetch_add(1, Ordering::Relaxed) as usize % n;
     let mut best: Option<(&'static Scheduler, u64)> = None;
-    for i in 0..n {
-        let idx = (start + i) % n;
-        let (_, sched) = schedulers.iter().nth(idx).unwrap();
+    for (_, sched) in schedulers.iter().cycle().skip(start).take(n) {
+        if !allowed(sched.cpu) {
+            continue;
+        }
         let count = sched.thread_count.load(Ordering::Acquire);
         match best {
             Some((_, best_count)) if best_count <= count => {}
             _ => best = Some((*sched, count)),
         }
     }
-    best.expect("pick_sched: no schedulers registered").0
+    best.map(|(sched, _)| sched)
 }
 
 /// Exits a kthread.

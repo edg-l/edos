@@ -36,6 +36,7 @@ use crate::{
         preempt::{debug_assert_preemptible, preempt_enabled},
         runqueue::RunQueue,
         thread::{Flags, State, THREADS, Thread, ThreadId, get_thread_by_id, record_thread_exit},
+        util::pick_sched_for,
     },
     timer::Instant,
     util::per_cpu::get_percpu_data,
@@ -174,11 +175,20 @@ impl Scheduler {
             // save_transition_switch pivots to the per-CPU scheduler stack
             // before publishing the thread, so the thread's kernel stack is
             // free when any CPU resumes it.
+            //
+            // Locality loses to affinity: a thread pinned away from the waker
+            // would sit in a runqueue whose CPU never picks it, and only a
+            // steal by an allowed CPU would rescue it.
+            let target: &Scheduler = if self.thread_can_run_here(thread) {
+                self
+            } else {
+                pick_sched_for(thread).unwrap_or(self)
+            };
             // Update thread.cpu so wake_thread_slow's Ready arm IPIs the
             // correct CPU.
-            thread.cpu.store(self.cpu, Ordering::Release);
+            thread.cpu.store(target.cpu, Ordering::Release);
             thread.state.store(State::Ready as u8, Ordering::Release);
-            Self::enqueue_ready(self, thread, priority);
+            Self::enqueue_ready(target, thread, priority);
         });
     }
 
@@ -558,10 +568,8 @@ impl Scheduler {
         }
     }
 
-    fn thread_can_run_here(&self, _t: &Thread) -> bool {
-        true
-        //let mask = t.cpu_affinity.load(Ordering::Acquire);
-        //mask == 0 || (mask & (1u32 << self.cpu)) != 0
+    fn thread_can_run_here(&self, t: &Thread) -> bool {
+        t.allows_cpu(self.cpu)
     }
 
     fn mark_running_thread_need_resched(&self) {
@@ -776,6 +784,17 @@ impl Scheduler {
 
     #[inline]
     pub fn spawn_thread(&self, thread: Arc<Thread>) {
+        // A thread this CPU may not run goes to one that may, rather than onto
+        // a runqueue whose CPU will never pick it. `pick_sched_for` only
+        // returns a CPU the affinity allows, so this recurses at most once; a
+        // mask naming no registered CPU falls through and runs here, because
+        // losing the thread is worse than ignoring the pin.
+        if !self.thread_can_run_here(&thread) {
+            if let Some(target) = pick_sched_for(&thread) {
+                target.spawn_thread(thread);
+                return;
+            }
+        }
         without_interrupts(|| {
             debug_assert!(
                 !thread.rq_link.is_linked(),
@@ -793,15 +812,11 @@ impl Scheduler {
             self.thread_count.fetch_add(1, Ordering::AcqRel);
             thread.state.store(State::Ready as u8, Ordering::Release);
             thread.cpu.store(self.cpu, Ordering::Release);
-            if self.thread_can_run_here(&thread) {
-                let mut rq = self.rq.lock();
-                rq.enqueue(thread.clone(), thread.priority(), false);
-                self.has_work.store(true, Ordering::Release);
-                drop(rq);
-                self.mark_running_thread_need_resched();
-            } else {
-                // will be queued on its target cpu by that cpu’s scheduler
-            }
+            let mut rq = self.rq.lock();
+            rq.enqueue(thread.clone(), thread.priority(), false);
+            self.has_work.store(true, Ordering::Release);
+            drop(rq);
+            self.mark_running_thread_need_resched();
 
             if self.cpu != get_percpu_data().lapic_id.get() {
                 sched().send_reschedule_ipi(self.cpu);
@@ -862,8 +877,7 @@ impl Scheduler {
                     rq.enqueue(thread, prio, false);
                     continue;
                 }
-                let affinity = thread.cpu_affinity.load(Ordering::Acquire);
-                if affinity != 0 && (affinity & (1u32 << self.cpu)) == 0 {
+                if !self.thread_can_run_here(&thread) {
                     // Thread can't run on this CPU -- push it back.
                     let prio = thread.priority();
                     rq.enqueue(thread, prio, false);

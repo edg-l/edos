@@ -16,7 +16,7 @@ use crate::{
             thread_park, thread_park_while, thread_sleep, thread_yield,
         },
         thread::{ThreadId, get_thread_weak},
-        util::queue_spawn_kthread_named_arg,
+        util::{queue_spawn_kthread_affine, queue_spawn_kthread_named_arg},
         waitqueue::WaitQueue,
     },
     timer::Instant,
@@ -88,9 +88,13 @@ struct TestHarness {
     starvation_progress: AtomicU64,
     starvation_progress_saturated: AtomicU64,
     starvation_progress_end: AtomicU64,
+    // affinity: the single CPU the pinned test thread is allowed on, plus the
+    // handshake cell the waker reads its tid from
+    affinity_target_cpu: u32,
+    affinity_tid: AtomicU64,
 }
 
-const TOTAL_TESTS: u32 = 47;
+const TOTAL_TESTS: u32 = 49;
 
 pub fn run_sched_tests() {
     println!("[sched-test] Starting scheduler tests ({TOTAL_TESTS} expected)...");
@@ -133,6 +137,10 @@ pub fn run_sched_tests() {
         starvation_progress: AtomicU64::new(0),
         starvation_progress_saturated: AtomicU64::new(0),
         starvation_progress_end: AtomicU64::new(0),
+        // Highest registered lapic id, so the pin is a CPU other than the boot
+        // one whenever the machine has more than one.
+        affinity_target_cpu: SCHEDULERS.read().keys().copied().max().unwrap_or(0),
+        affinity_tid: AtomicU64::new(0),
     });
 
     // --- Basic tests (8) ---
@@ -198,6 +206,19 @@ pub fn run_sched_tests() {
         spawn_test(&harness, "test-starve-spin", test_starvation_spinner);
     }
     spawn_test(&harness, "test-starve-victim", test_starvation_victim);
+
+    // Affinity: one thread pinned to a single CPU, asserting where it runs,
+    // and an unpinned partner that wakes it from wherever it happens to be (2)
+    spawn_test(&harness, "test-affinity-waker", test_affinity_waker);
+    {
+        let boxed = Box::into_raw(Box::new(harness.clone())) as *mut u8;
+        queue_spawn_kthread_affine(
+            "test-affinity",
+            test_affinity_pinned as *const () as u64,
+            boxed,
+            1u32 << harness.affinity_target_cpu,
+        );
+    }
 
     // Coordinator thread: waits for all tests, then exits QEMU.
     let boxed = Box::into_raw(Box::new(harness.clone())) as *mut u8;
@@ -816,6 +837,89 @@ extern "C" fn test_starvation_victim(arg: *mut u8) -> ! {
     );
 
     test_done(&h, "starvation-victim");
+    thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Affinity: a pinned thread only ever runs on a CPU its mask allows.
+//
+// Covers all three points where affinity is enforced: the initial placement in
+// spawn_thread, the wake placement in complete_wake, and the check that stops
+// another CPU from stealing the thread.
+//
+// The park/wake rounds are what make this test discriminating. Yields alone are
+// not: they re-enqueue on the CPU the thread is already on, so a thread that
+// reached the right CPU by luck stays there and the test passes with affinity
+// disabled entirely. A wake, by contrast, enqueues on the *waker's* CPU for
+// cache locality unless affinity overrides it, and the waker is somewhere else
+// most rounds.
+// ---------------------------------------------------------------------------
+
+const AFFINITY_YIELDS: u32 = 200;
+const AFFINITY_ROUNDS: u32 = 20;
+
+/// The CPU this thread is running on, read with preemption off so a migration
+/// cannot land between the read and the caller's comparison.
+fn current_cpu() -> u32 {
+    let _g = preempt_disable();
+    sched().cpu
+}
+
+extern "C" fn test_affinity_pinned(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    let target = h.affinity_target_cpu;
+    let tid = current_thread_id().unwrap();
+
+    let check = |where_: &str, round: u32| {
+        let cpu = current_cpu();
+        assert_eq!(
+            cpu, target,
+            "[sched-test] affinity: pinned to cpu {target}, ran on cpu {cpu} after {where_} {round}"
+        );
+    };
+
+    check("spawn", 0);
+
+    for round in 0..AFFINITY_ROUNDS {
+        h.affinity_tid.store(tid.0, Ordering::Release);
+        thread_park();
+        check("wake", round);
+    }
+
+    for round in 0..AFFINITY_YIELDS {
+        thread_yield();
+        check("yield", round);
+    }
+
+    h.affinity_tid.store(u64::MAX, Ordering::Release);
+    test_done(&h, "affinity-pinned");
+    thread_exit(0);
+}
+
+extern "C" fn test_affinity_waker(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+
+    // Driven by the sentinel rather than by a round count. A park whose
+    // wake-pending token is already set returns without blocking, so the pinned
+    // thread can burn a round without needing a wake; a waker counting its own
+    // rounds would then outlive the sentinel and block forever on an empty cell.
+    loop {
+        let tid = h.affinity_tid.swap(0, Ordering::AcqRel);
+        if tid == u64::MAX {
+            break;
+        }
+        if tid == 0 {
+            thread_yield();
+            continue;
+        }
+        // Let it reach the park. Waking earlier is handled by the wake-pending
+        // token (see the wake-before-park test), so this only keeps the rounds
+        // representative of a real wake.
+        thread_sleep(Duration::from_millis(2));
+        wake_tid(ThreadId(tid), WakePriority::Normal);
+    }
+
+    test_done(&h, "affinity-waker");
     thread_exit(0);
 }
 
