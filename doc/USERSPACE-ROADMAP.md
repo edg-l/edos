@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-61 programs and 2 libraries, all in the `programs/` cargo workspace.
+62 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -12,6 +12,7 @@
 | Files | `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `touch`, `stat`, `find`, `du`, `diff` |
 | Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs` |
 | Checksums | `sha256sum` |
+| Inspection | `file` |
 | System | `ps`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env` |
 | Network | `ping`, `dns`, `http`, `wget` |
 | Audio | `play` |
@@ -33,13 +34,17 @@ memory; exercises large-file read through the page cache. Verified against the
 NIST vectors and fuzzed against `hashlib` across 30 sizes, concentrating on the
 block-boundary cases (55/56/57, 63/64/65, 8191/8192/8193).
 
+**`file`** (Phase 3). Identifies a file from its leading 512 bytes: 20 magic
+signatures with longest-match wins, ELF class/endianness/type decoding, and a
+UTF-8 text heuristic. Classifications agree with GNU `file` on ELF binaries,
+scripts, text, empty files and directories.
+
 ## Phase 3: pure userspace, higher complexity
 
 | Program | Why it matters | Notes |
 |---|---|---|
 | `tar` | archive create and extract; useful for host to guest transfer | exercises open/read/write/unlink/mkdir at scale |
 | `top` | live system monitor | needs terminal raw mode and a refresh loop; will surface procfs gaps |
-| `file` | detect type by magic bytes | pure pattern matching |
 | `snake` | terminal game on a timer | good demo of poll and time APIs, raw stdin |
 
 ## Phase 4: kernel-aware
