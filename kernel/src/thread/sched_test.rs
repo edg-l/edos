@@ -11,7 +11,10 @@ use crate::{
         preempt::{PreemptSpinlock, preempt_disable, preempt_enabled},
         runqueue::DEFAULT_PRIORITY,
         rwlock::RwLock as BlockingRwLock,
-        scheduler::{SCHEDULERS, WakePriority, sched},
+        scheduler::{
+            SCHEDULERS, WakePriority, current_thread, current_thread_id, sched, thread_exit,
+            thread_park, thread_park_while, thread_sleep, thread_yield,
+        },
         thread::{ThreadId, get_thread_weak},
         util::queue_spawn_kthread_named_arg,
         waitqueue::WaitQueue,
@@ -224,32 +227,32 @@ fn test_done(harness: &TestHarness, name: &str) {
 
 extern "C" fn test_park_a(arg: *mut u8) -> ! {
     let h = get_harness(arg);
-    let tid = sched().current_thread_id().unwrap();
+    let tid = current_thread_id().unwrap();
     h.wake_target_tid.store(tid.0, Ordering::Release);
-    sched().thread_park();
+    thread_park();
     // Resumed - we were woken by B
     test_done(&h, "park-wake-a");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_park_b(arg: *mut u8) -> ! {
     let h = get_harness(arg);
     // Wait for A to store its TID
     while h.wake_target_tid.load(Ordering::Acquire) == 0 {
-        sched().thread_yield();
+        thread_yield();
     }
     // Give A time to actually park
-    sched().thread_sleep(Duration::from_millis(10));
+    thread_sleep(Duration::from_millis(10));
     let tid = ThreadId(h.wake_target_tid.load(Ordering::Acquire));
     wake_tid(tid, WakePriority::Normal);
     test_done(&h, "park-wake-b");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_sleep(arg: *mut u8) -> ! {
     let h = get_harness(arg);
     let start = Instant::now();
-    sched().thread_sleep(Duration::from_millis(50));
+    thread_sleep(Duration::from_millis(50));
     let elapsed = Instant::now().duration_since(start);
     assert!(
         elapsed.as_millis() >= 45,
@@ -257,66 +260,66 @@ extern "C" fn test_sleep(arg: *mut u8) -> ! {
         elapsed.as_millis()
     );
     test_done(&h, "sleep");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_yield_stress(arg: *mut u8) -> ! {
     let h = get_harness(arg);
     for _ in 0..1000 {
-        sched().thread_yield();
+        thread_yield();
     }
     test_done(&h, "yield-stress");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_park_while_abort(arg: *mut u8) -> ! {
     let h = get_harness(arg);
     // Condition is already false, thread_park_while should return without switching
-    sched().thread_park_while(|| false);
+    thread_park_while(|| false);
     test_done(&h, "park-while-abort");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_park_while_c(arg: *mut u8) -> ! {
     let h = get_harness(arg);
-    let tid = sched().current_thread_id().unwrap();
+    let tid = current_thread_id().unwrap();
     h.park_while_tid.store(tid.0, Ordering::Release);
     h.park_while_condition.store(true, Ordering::Release);
-    sched().thread_park_while(|| h.park_while_condition.load(Ordering::Acquire));
+    thread_park_while(|| h.park_while_condition.load(Ordering::Acquire));
     // Resumed - condition should now be false
     assert!(
         !h.park_while_condition.load(Ordering::Acquire),
         "[sched-test] park-while condition still true after wake"
     );
     test_done(&h, "park-while-c");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_park_while_d(arg: *mut u8) -> ! {
     let h = get_harness(arg);
     while h.park_while_tid.load(Ordering::Acquire) == 0 {
-        sched().thread_yield();
+        thread_yield();
     }
-    sched().thread_sleep(Duration::from_millis(10));
+    thread_sleep(Duration::from_millis(10));
     h.park_while_condition.store(false, Ordering::Release);
     let tid = ThreadId(h.park_while_tid.load(Ordering::Acquire));
     wake_tid(tid, WakePriority::Normal);
     test_done(&h, "park-while-d");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_context_saved(arg: *mut u8) -> ! {
     let h = get_harness(arg);
-    sched().thread_yield();
+    thread_yield();
     // After resuming from yield, context_saved should be false
     // (cleared by context_switch_to when we were scheduled back)
-    let cur = sched().current_thread().unwrap();
+    let cur = current_thread().unwrap();
     assert!(
         !cur.context_saved.load(Ordering::Acquire),
         "[sched-test] context_saved should be false for running thread"
     );
     test_done(&h, "context-saved");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -327,22 +330,22 @@ const PING_PONG_ROUNDS: u32 = 500;
 
 extern "C" fn test_ping(arg: *mut u8) -> ! {
     let h = get_harness(arg);
-    let tid = sched().current_thread_id().unwrap();
+    let tid = current_thread_id().unwrap();
     h.ping_tid.store(tid.0, Ordering::Release);
 
     // Wait for pong to register
     while h.pong_tid.load(Ordering::Acquire) == 0 {
-        sched().thread_yield();
+        thread_yield();
     }
     let pong = ThreadId(h.pong_tid.load(Ordering::Acquire));
 
     for _ in 0..PING_PONG_ROUNDS {
-        sched().thread_park();
+        thread_park();
         // Woken by pong. Wake pong back.
         wake_tid(pong, WakePriority::Normal);
     }
     // Final park - pong will wake us one last time
-    sched().thread_park();
+    thread_park();
 
     let count = h.ping_pong_count.load(Ordering::Acquire);
     assert!(
@@ -350,35 +353,35 @@ extern "C" fn test_ping(arg: *mut u8) -> ! {
         "[sched-test] ping-pong count mismatch: {count} != {PING_PONG_ROUNDS}"
     );
     test_done(&h, "ping-pong-ping");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_pong(arg: *mut u8) -> ! {
     let h = get_harness(arg);
-    let tid = sched().current_thread_id().unwrap();
+    let tid = current_thread_id().unwrap();
     h.pong_tid.store(tid.0, Ordering::Release);
 
     // Wait for ping to register
     while h.ping_tid.load(Ordering::Acquire) == 0 {
-        sched().thread_yield();
+        thread_yield();
     }
     let ping = ThreadId(h.ping_tid.load(Ordering::Acquire));
 
     // Give ping time to enter its first park
-    sched().thread_sleep(Duration::from_millis(5));
+    thread_sleep(Duration::from_millis(5));
 
     for _ in 0..PING_PONG_ROUNDS {
         // Wake ping
         wake_tid(ping, WakePriority::Normal);
         h.ping_pong_count.fetch_add(1, Ordering::AcqRel);
         // Park, wait for ping to wake us back
-        sched().thread_park();
+        thread_park();
     }
     // Wake ping one final time so it can finish
     wake_tid(ping, WakePriority::Normal);
 
     test_done(&h, "ping-pong-pong");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -410,19 +413,19 @@ extern "C" fn test_spawn_exit(arg: *mut u8) -> ! {
             start.elapsed().as_secs() < 5,
             "[sched-test] spawn-exit timeout: {done}/{SPAWN_EXIT_COUNT} done"
         );
-        sched().thread_sleep(Duration::from_millis(10));
+        thread_sleep(Duration::from_millis(10));
     }
 
     test_done(&h, "spawn-exit");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_ephemeral_thread(arg: *mut u8) -> ! {
     let h = get_harness(arg);
     // Do a yield to exercise the scheduler, then exit
-    sched().thread_yield();
+    thread_yield();
     h.spawn_exit_done.fetch_add(1, Ordering::AcqRel);
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -431,7 +434,7 @@ extern "C" fn test_ephemeral_thread(arg: *mut u8) -> ! {
 
 extern "C" fn test_multi_wake_sleeper(arg: *mut u8) -> ! {
     let h = get_harness(arg);
-    let tid = sched().current_thread_id().unwrap();
+    let tid = current_thread_id().unwrap();
 
     // Register in the first free slot
     for slot in &h.multi_wake_tids {
@@ -444,14 +447,14 @@ extern "C" fn test_multi_wake_sleeper(arg: *mut u8) -> ! {
     }
 
     // Park until the waker opens the gate
-    sched().thread_park_while(|| !h.multi_wake_gate.load(Ordering::Acquire));
+    thread_park_while(|| !h.multi_wake_gate.load(Ordering::Acquire));
 
     assert!(
         h.multi_wake_gate.load(Ordering::Acquire),
         "[sched-test] multi-wake gate not open after resume"
     );
     test_done(&h, "multi-wake-sleeper");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_multi_wake_waker(arg: *mut u8) -> ! {
@@ -467,11 +470,11 @@ extern "C" fn test_multi_wake_waker(arg: *mut u8) -> ! {
         if registered == 4 {
             break;
         }
-        sched().thread_yield();
+        thread_yield();
     }
 
     // Give sleepers time to actually park
-    sched().thread_sleep(Duration::from_millis(20));
+    thread_sleep(Duration::from_millis(20));
 
     // Open the gate and wake all 4
     h.multi_wake_gate.store(true, Ordering::Release);
@@ -483,7 +486,7 @@ extern "C" fn test_multi_wake_waker(arg: *mut u8) -> ! {
     }
 
     test_done(&h, "multi-wake-waker");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -499,7 +502,7 @@ const ABORT_RACE_ROUNDS: u32 = 200;
 
 extern "C" fn test_abort_race_parker(arg: *mut u8) -> ! {
     let h = get_harness(arg);
-    let tid = sched().current_thread_id().unwrap();
+    let tid = current_thread_id().unwrap();
     h.abort_race_tid.store(tid.0, Ordering::Release);
 
     for _ in 0..ABORT_RACE_ROUNDS {
@@ -511,7 +514,7 @@ extern "C" fn test_abort_race_parker(arg: *mut u8) -> ! {
         // `thread_park_while` may return spuriously, so the round is over
         // only once the condition itself is observed false.
         while h.abort_race_condition.load(Ordering::Acquire) {
-            sched().thread_park_while(|| h.abort_race_condition.load(Ordering::Acquire));
+            thread_park_while(|| h.abort_race_condition.load(Ordering::Acquire));
         }
     }
 
@@ -521,7 +524,7 @@ extern "C" fn test_abort_race_parker(arg: *mut u8) -> ! {
         "[sched-test] abort-race round mismatch: {rounds} != {ABORT_RACE_ROUNDS}"
     );
     test_done(&h, "abort-race-parker");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_abort_race_waker(arg: *mut u8) -> ! {
@@ -529,7 +532,7 @@ extern "C" fn test_abort_race_waker(arg: *mut u8) -> ! {
 
     // Wait for parker to register
     while h.abort_race_tid.load(Ordering::Acquire) == 0 {
-        sched().thread_yield();
+        thread_yield();
     }
     let parker = ThreadId(h.abort_race_tid.load(Ordering::Acquire));
 
@@ -545,11 +548,11 @@ extern "C" fn test_abort_race_waker(arg: *mut u8) -> ! {
         h.abort_race_condition.store(false, Ordering::Release);
         wake_tid(parker, WakePriority::Normal);
         // Yield to give parker a chance to run its next iteration
-        sched().thread_yield();
+        thread_yield();
     }
 
     test_done(&h, "abort-race-waker");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -602,7 +605,7 @@ extern "C" fn test_preempt_count(arg: *mut u8) -> ! {
     );
 
     test_done(&h, "preempt-count");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -621,18 +624,18 @@ extern "C" fn test_mutex_worker(arg: *mut u8) -> ! {
         let seen = *guard;
         // Yielding under the guard widens the window for a broken mutex to
         // interleave two writers; a correct one still serialises them.
-        sched().thread_yield();
+        thread_yield();
         *guard = seen + 1;
     }
     h.mutex_workers_done.fetch_add(1, Ordering::AcqRel);
     test_done(&h, "mutex-worker");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_mutex_check(arg: *mut u8) -> ! {
     let h = get_harness(arg);
     while h.mutex_workers_done.load(Ordering::Acquire) < MUTEX_WORKERS {
-        sched().thread_yield();
+        thread_yield();
     }
     let total = *h.mutex_counter.lock();
     let expected = MUTEX_WORKERS as u64 * MUTEX_INCREMENTS;
@@ -641,7 +644,7 @@ extern "C" fn test_mutex_check(arg: *mut u8) -> ! {
         "[sched-test] mutex: {total} increments survived, expected {expected}"
     );
     test_done(&h, "mutex-exclusion");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -666,7 +669,7 @@ extern "C" fn test_rwlock_reader(arg: *mut u8) -> ! {
         if h.rwlock_concurrent.load(Ordering::Acquire) >= RWLOCK_READERS {
             break;
         }
-        sched().thread_yield();
+        thread_yield();
     }
     h.rwlock_max_concurrent.fetch_max(
         h.rwlock_concurrent.load(Ordering::Acquire),
@@ -681,13 +684,13 @@ extern "C" fn test_rwlock_reader(arg: *mut u8) -> ! {
 
     h.rwlock_readers_done.fetch_add(1, Ordering::AcqRel);
     test_done(&h, "rwlock-reader");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_rwlock_writer(arg: *mut u8) -> ! {
     let h = get_harness(arg);
     while h.rwlock_readers_done.load(Ordering::Acquire) < RWLOCK_READERS {
-        sched().thread_yield();
+        thread_yield();
     }
 
     {
@@ -706,7 +709,7 @@ extern "C" fn test_rwlock_writer(arg: *mut u8) -> ! {
          so the lock is serialising them like a mutex"
     );
     test_done(&h, "rwlock-writer");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -727,7 +730,7 @@ extern "C" fn test_wq_waiter(arg: *mut u8) -> ! {
         .wait_until(|| h.waitqueue_ready.load(Ordering::Acquire));
     h.waitqueue_woken.fetch_add(1, Ordering::AcqRel);
     test_done(&h, "waitqueue-waiter");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_wq_waker(arg: *mut u8) -> ! {
@@ -737,7 +740,7 @@ extern "C" fn test_wq_waker(arg: *mut u8) -> ! {
     // waking after only the first has enrolled leaves the rest to park against
     // a condition nobody will publish again.
     while h.waitqueue_arrived.load(Ordering::Acquire) < WQ_WAITERS {
-        sched().thread_yield();
+        thread_yield();
     }
 
     h.waitqueue_ready.store(true, Ordering::Release);
@@ -745,10 +748,10 @@ extern "C" fn test_wq_waker(arg: *mut u8) -> ! {
 
     // Every waiter must make it out; a lost wake leaves one parked forever.
     while h.waitqueue_woken.load(Ordering::Acquire) < WQ_WAITERS {
-        sched().thread_yield();
+        thread_yield();
     }
     test_done(&h, "waitqueue-wake-all");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -765,8 +768,7 @@ const STARVATION_SPIN_MS: u64 = 400;
 
 extern "C" fn test_starvation_spinner(arg: *mut u8) -> ! {
     let h = get_harness(arg);
-    sched()
-        .current_thread()
+    current_thread()
         .unwrap()
         .set_priority(STARVATION_SPIN_PRIORITY);
 
@@ -791,7 +793,7 @@ extern "C" fn test_starvation_spinner(arg: *mut u8) -> ! {
             Ordering::Release,
         );
     }
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_starvation_victim(arg: *mut u8) -> ! {
@@ -814,7 +816,7 @@ extern "C" fn test_starvation_victim(arg: *mut u8) -> ! {
     );
 
     test_done(&h, "starvation-victim");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -825,17 +827,17 @@ extern "C" fn test_starvation_victim(arg: *mut u8) -> ! {
 
 extern "C" fn test_wbp_parker(arg: *mut u8) -> ! {
     let h = get_harness(arg);
-    let tid = sched().current_thread_id().unwrap();
+    let tid = current_thread_id().unwrap();
     h.wbp_tid.store(tid.0, Ordering::Release);
 
     // Signal that we're about to park, then park.
     // The waker will wake us BEFORE we actually enter park.
     h.wbp_parked.store(true, Ordering::Release);
-    sched().thread_park();
+    thread_park();
 
     // If we get here, the wake eventually succeeded
     test_done(&h, "wake-before-park-parker");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_wbp_waker(arg: *mut u8) -> ! {
@@ -843,7 +845,7 @@ extern "C" fn test_wbp_waker(arg: *mut u8) -> ! {
 
     // Wait for parker TID
     while h.wbp_tid.load(Ordering::Acquire) == 0 {
-        sched().thread_yield();
+        thread_yield();
     }
     let parker = ThreadId(h.wbp_tid.load(Ordering::Acquire));
 
@@ -857,7 +859,7 @@ extern "C" fn test_wbp_waker(arg: *mut u8) -> ! {
     wake_tid(parker, WakePriority::Normal);
 
     test_done(&h, "wake-before-park-waker");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -868,12 +870,12 @@ extern "C" fn test_wbp_waker(arg: *mut u8) -> ! {
 
 extern "C" fn test_sleep_interrupt_sleeper(arg: *mut u8) -> ! {
     let h = get_harness(arg);
-    let tid = sched().current_thread_id().unwrap();
+    let tid = current_thread_id().unwrap();
     h.sleep_int_tid.store(tid.0, Ordering::Release);
 
     let start = Instant::now();
     // Sleep for 10 seconds (will be woken early)
-    sched().thread_sleep(Duration::from_secs(10));
+    thread_sleep(Duration::from_secs(10));
     let elapsed = start.elapsed();
 
     // Should have been woken well before 10 seconds
@@ -883,24 +885,24 @@ extern "C" fn test_sleep_interrupt_sleeper(arg: *mut u8) -> ! {
         elapsed.as_millis()
     );
     test_done(&h, "sleep-interrupt-sleeper");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 extern "C" fn test_sleep_interrupt_waker(arg: *mut u8) -> ! {
     let h = get_harness(arg);
 
     while h.sleep_int_tid.load(Ordering::Acquire) == 0 {
-        sched().thread_yield();
+        thread_yield();
     }
     let sleeper = ThreadId(h.sleep_int_tid.load(Ordering::Acquire));
 
     // Give sleeper time to enter sleep
-    sched().thread_sleep(Duration::from_millis(5));
+    thread_sleep(Duration::from_millis(5));
     // Wake the sleeping thread early
     wake_tid(sleeper, WakePriority::Normal);
 
     test_done(&h, "sleep-interrupt-waker");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -950,13 +952,13 @@ extern "C" fn test_compute_across_yields(arg: *mut u8) -> ! {
         // Alternate between yield, sleep, and park_while to exercise
         // different context switch paths.
         match i % 4 {
-            0 => sched().thread_yield(),
-            1 => sched().thread_sleep(Duration::from_micros(1)),
+            0 => thread_yield(),
+            1 => thread_sleep(Duration::from_micros(1)),
             2 => {
                 // park_while with immediate false -> abort path (no switch)
-                sched().thread_park_while(|| false);
+                thread_park_while(|| false);
             }
-            _ => sched().thread_yield(),
+            _ => thread_yield(),
         }
     }
 
@@ -996,7 +998,7 @@ extern "C" fn test_compute_across_yields(arg: *mut u8) -> ! {
     );
 
     test_done(&h, "compute-across-yields");
-    sched().thread_exit(0);
+    thread_exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,6 +1023,6 @@ extern "C" fn test_coordinator(arg: *mut u8) -> ! {
             );
             qemu_exit(1); // failure (host sees exit code 3)
         }
-        sched().thread_sleep(Duration::from_millis(100));
+        thread_sleep(Duration::from_millis(100));
     }
 }

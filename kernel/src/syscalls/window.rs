@@ -3,7 +3,6 @@
 use alloc::string::String;
 
 use crate::{
-    thread::scheduler::sched,
     util::uaccess::{try_copy_to_user, try_read_user},
     window::{
         WindowEvent,
@@ -13,6 +12,7 @@ use crate::{
 };
 
 use super::Errno;
+use crate::thread::scheduler::current_thread_info;
 
 /// Create a new window.
 ///
@@ -24,8 +24,7 @@ use super::Errno;
 ///
 /// Returns: window ID on success, !0 on error (sets errno).
 pub fn sys_window_create(x: i64, y: i64, width: u64, height: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     // Validate dimensions
@@ -55,8 +54,7 @@ pub fn sys_window_create(x: i64, y: i64, width: u64, height: u64) -> u64 {
 ///
 /// Returns: 0 on success, !0 on error (sets errno).
 pub fn sys_window_destroy(window_id: WindowId) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let pid = info.lock().pid;
@@ -94,8 +92,7 @@ pub fn sys_window_destroy(window_id: WindowId) -> u64 {
 ///
 /// Returns: 0 on success, !0 on error (sets errno).
 pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let pid = info.lock().pid;
@@ -198,8 +195,7 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
 ///
 /// Returns: property value on success, !0 on error (sets errno).
 pub fn sys_window_get(window_id: WindowId, prop: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let registry = read_tracked(ReadSite::SysWindowGet);
@@ -239,8 +235,7 @@ pub fn sys_window_get(window_id: WindowId, prop: u64) -> u64 {
 ///
 /// Returns: number of events copied, or !0 on error (sets errno).
 pub fn sys_window_poll(window_id: WindowId, events_ptr: *mut WindowEvent, max: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let pid = info.lock().pid;
@@ -308,8 +303,7 @@ pub fn sys_window_poll(window_id: WindowId, events_ptr: *mut WindowEvent, max: u
 /// }
 /// ```
 pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     // Snapshot under the lock, copy to userspace outside it. `try_copy_to_user`
@@ -422,8 +416,7 @@ pub struct WindowListEntry {
 ///
 /// Returns: 0 on success, !0 on error (sets errno).
 pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if event_ptr.is_null() {

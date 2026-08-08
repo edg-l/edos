@@ -20,7 +20,7 @@ use crate::{
     log,
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
     net::device::NetDevice,
-    thread::{runqueue::IO_PRIORITY, scheduler::sched, util::queue_spawn_kthread_named},
+    thread::{runqueue::IO_PRIORITY, util::queue_spawn_kthread_named},
 };
 
 use self::{
@@ -29,6 +29,7 @@ use self::{
     },
     regs::*,
 };
+use crate::thread::scheduler::{current_thread, thread_park};
 
 pub const NUM_RX_DESC: usize = 256;
 pub const NUM_TX_DESC: usize = 256;
@@ -341,7 +342,7 @@ pub extern "C" fn e1000e_driver_main() -> ! {
         net::stack::{NET_STACK, NetStack},
     };
 
-    let thread = sched().current_thread().unwrap();
+    let thread = current_thread().unwrap();
     thread.set_priority(IO_PRIORITY);
     E1000E_DRIVER_THREAD_ID.call_once(|| Arc::downgrade(&thread));
 
@@ -354,7 +355,7 @@ pub extern "C" fn e1000e_driver_main() -> ! {
     let Some(pci_dev) = pci_dev else {
         log!("e1000e: no device found");
         loop {
-            sched().thread_park();
+            thread_park();
         }
     };
 
@@ -363,7 +364,7 @@ pub extern "C" fn e1000e_driver_main() -> ! {
         Err(e) => {
             log!("e1000e: init failed: {}", e);
             loop {
-                sched().thread_park();
+                thread_park();
             }
         }
     };
@@ -424,7 +425,7 @@ pub extern "C" fn e1000e_driver_main() -> ! {
 
     loop {
         // Park until an MSI-X interrupt wakes us (RX, TX, or LSC).
-        sched().thread_park();
+        thread_park();
 
         {
             let stack = crate::net::stack::net_stack().lock();

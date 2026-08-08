@@ -14,6 +14,10 @@ use crate::net::socket::PollableSocket;
 use crate::thread::pipe::PollablePipe;
 use crate::thread::poll::PollWaiter;
 use crate::thread::pty::{PollablePtyMaster, PollablePtySlave};
+use crate::thread::scheduler::{
+    current_thread, current_thread_info, current_thread_weak, thread_exit, thread_park_while,
+    thread_sleep,
+};
 use crate::util::uaccess::{
     UAccessError, try_copy_from_user, try_copy_string_from_user, try_copy_to_user, try_write_user,
 };
@@ -100,8 +104,7 @@ pub(super) fn resolve_path(
 }
 
 pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     let fd_table = {
         let mut guard = info.lock();
         guard.errno = Errno::Clear;
@@ -309,7 +312,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
 #[allow(unused)]
 pub fn sys_close(fd: u64) -> i32 {
     let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     let fd_table = {
         let mut guard = info.lock();
         guard.errno = Errno::Clear;
@@ -390,8 +393,7 @@ pub fn sys_close(fd: u64) -> i32 {
 }
 
 pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     let (fd_info, fd_table) = {
         let mut guard = info.lock();
         guard.errno = Errno::Clear;
@@ -497,11 +499,11 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 // If this thread has been killed (e.g. Ctrl+C), force-exit
                 // immediately. We can't rely on userspace to handle EINTR
                 // because Rust std's read_to_string retries EINTR in a loop.
-                let is_killed = sched.current_thread().map_or(false, |t| {
+                let is_killed = current_thread().map_or(false, |t| {
                     t.killed.load(core::sync::atomic::Ordering::Acquire)
                 });
                 if is_killed {
-                    sched.thread_exit(130); // 128 + SIGINT(2)
+                    thread_exit(130); // 128 + SIGINT(2)
                 }
 
                 let (result, eof, notif) = {
@@ -518,7 +520,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     Some(_) => {
                         input_wq.wait_until(|| {
                             let guard = pty.lock();
-                            let killed = sched.current_thread().map_or(false, |t| {
+                            let killed = current_thread().map_or(false, |t| {
                                 t.killed.load(core::sync::atomic::Ordering::Acquire)
                             });
                             !guard.input_buf.is_empty() || guard.closed_master || killed
@@ -661,8 +663,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
 }
 
 pub fn sys_getrandom(buffer_ptr: *mut u8, count: usize, flags: u64) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if buffer_ptr.is_null() {
@@ -768,8 +769,7 @@ fn read_from_stdin(max_count: usize) -> Result<alloc::vec::Vec<u8>, i64> {
 }
 
 pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if path_ptr.is_null() {
@@ -872,8 +872,7 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
 }
 
 pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if path_ptr.is_null() || buffer_ptr.is_null() {
@@ -980,7 +979,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     // Cache info before interrupts::enable() to avoid stale per-CPU scheduler
     // reference after thread migration. After enable, use `info` (Arc) directly
     // and call sched() freshly for sleep/park operations.
-    let info = sched().current_thread_info();
+    let info = current_thread_info();
 
     if fds_ptr.is_null() && count != 0 {
         info.lock().errno = Errno::EFAULT;
@@ -1032,7 +1031,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
             .collect::<Vec<_>>()
     };
 
-    let thread_weak = match sched().current_thread_weak() {
+    let thread_weak = match current_thread_weak() {
         Some(w) => w,
         None => {
             info.lock().errno = Errno::EINVAL;
@@ -1182,14 +1181,14 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                 } else {
                     remaining
                 };
-                sched().thread_sleep(sleep_dur);
+                thread_sleep(sleep_dur);
             }
             None => {
                 if waiter.arm() {
                     continue;
                 }
 
-                sched().thread_park_while(|| {
+                thread_park_while(|| {
                     base_ready + refresh_poll_contexts(&mut contexts, &mut fds) == 0
                 });
             }
@@ -1231,8 +1230,7 @@ fn cleanup_poll_contexts(contexts: &mut [PollContext]) {
 }
 
 pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if buffer_ptr.is_null() {
@@ -1269,8 +1267,7 @@ pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {
 }
 
 pub fn sys_chdir(path_ptr: *const u8) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if path_ptr.is_null() {
@@ -1346,8 +1343,7 @@ const SEEK_CUR: u32 = 1;
 const SEEK_END: u32 = 2;
 
 pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     let fd_table = {
         let mut guard = info.lock();
         guard.errno = Errno::Clear;
@@ -1401,8 +1397,7 @@ pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> i64 {
 
 /// Returns 1 if the fd refers to a terminal (StandardStream), 0 otherwise.
 pub fn sys_isatty(fd: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     let guard = info.lock();
     let fd_table = guard.fd_table.lock();
     match fd_table.get_fd(fd) {
@@ -1413,8 +1408,7 @@ pub fn sys_isatty(fd: u64) -> u64 {
 }
 
 pub fn sys_ftruncate(fd: u64, size: u64) -> i32 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let path = {
@@ -1442,8 +1436,7 @@ pub fn sys_ftruncate(fd: u64, size: u64) -> i32 {
 }
 
 pub fn sys_fsync(fd: u64) -> i32 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let (path, inode) = {
@@ -1494,8 +1487,7 @@ pub fn sys_sync() {
 }
 
 pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if old_path_ptr.is_null() || new_path_ptr.is_null() {
@@ -1592,8 +1584,7 @@ pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {
 /// The user pointer must point to a `[u64; 2]` buffer that receives
 /// `[master_fd, slave_fd]`.  Returns 0 on success, `!0u64` on error.
 pub fn sys_openpty(pipefd_ptr: *mut [u64; 2]) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
 
     info.lock().errno = Errno::Clear;
 

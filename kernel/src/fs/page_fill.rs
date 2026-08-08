@@ -43,6 +43,7 @@ use alloc::{
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use x86_64::structures::paging::FrameAllocator;
 
+use crate::thread::scheduler::current_thread;
 use crate::{
     debug::lock_order::{RANK_IN_FLIGHT, RANK_PAGES},
     drivers::block_io::BlockIoHandle,
@@ -53,7 +54,7 @@ use crate::{
     },
     memory::{frame_allocator::frame_allocator, frame_drop::FrameDrop},
     ranked_lock,
-    thread::{cancel::CancellableOp, scheduler::sched, waitqueue::WaitQueue},
+    thread::{cancel::CancellableOp, waitqueue::WaitQueue},
 };
 
 // ---------------------------------------------------------------------------
@@ -639,8 +640,7 @@ pub fn get_or_fill_async_sync(
 
         // Register with owned_ops for cancel hookup.
         let op: Arc<dyn CancellableOp> = Arc::clone(&handle) as Arc<dyn CancellableOp>;
-        let push_ok = sched()
-            .current_thread()
+        let push_ok = current_thread()
             .map(|t| t.owned_ops_push(op).is_ok())
             .unwrap_or(false);
 
@@ -667,7 +667,7 @@ pub fn get_or_fill_async_sync(
                 handle.finish_failed();
                 in_flight_remove_all(inode, &handle);
                 INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                sched().current_thread().map(|t| {
+                current_thread().map(|t| {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                 });
                 return Err(Error::IoError);
@@ -702,7 +702,7 @@ pub fn get_or_fill_async_sync(
                         handle.finish_success();
                         in_flight_remove_all(inode, &handle);
                         INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                        sched().current_thread().map(|t| {
+                        current_thread().map(|t| {
                             t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                         });
                         // Drop our guard and page; CachedPage::drop returns the frame.
@@ -718,7 +718,7 @@ pub fn get_or_fill_async_sync(
                 handle.finish_success();
                 in_flight_remove_all(inode, &handle);
                 INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                sched().current_thread().map(|t| {
+                current_thread().map(|t| {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                 });
                 return Ok(guard);
@@ -732,7 +732,7 @@ pub fn get_or_fill_async_sync(
                 handle.finish_failed();
                 in_flight_remove_all(inode, &handle);
                 INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                sched().current_thread().map(|t| {
+                current_thread().map(|t| {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                 });
                 return Err(e);
@@ -842,8 +842,7 @@ pub fn get_or_fill_bulk_async_sync(
 
         // --- Handle is installed. Register with owned_ops for cancel hookup. ---
         let op: Arc<dyn CancellableOp> = Arc::clone(&handle) as Arc<dyn CancellableOp>;
-        let push_ok = sched()
-            .current_thread()
+        let push_ok = current_thread()
             .map(|t| t.owned_ops_push(op).is_ok())
             .unwrap_or(false);
 
@@ -868,7 +867,7 @@ pub fn get_or_fill_bulk_async_sync(
                     handle.finish_failed();
                     in_flight_remove_all(inode, &handle);
                     INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                    sched().current_thread().map(|t| {
+                    current_thread().map(|t| {
                         t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                     });
                     // frames Vec drops here, returning all partially-allocated frames.
@@ -919,7 +918,7 @@ pub fn get_or_fill_bulk_async_sync(
                 handle.finish_success();
                 in_flight_remove_all(inode, &handle);
                 INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                sched().current_thread().map(|t| {
+                current_thread().map(|t| {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                 });
                 return Ok(());
@@ -930,7 +929,7 @@ pub fn get_or_fill_bulk_async_sync(
                 handle.finish_failed();
                 in_flight_remove_all(inode, &handle);
                 INFLIGHT_CURRENT.fetch_sub(1, Ordering::Relaxed);
-                sched().current_thread().map(|t| {
+                current_thread().map(|t| {
                     t.owned_ops_remove(Arc::as_ptr(&handle) as *const ());
                 });
                 return Err(e);

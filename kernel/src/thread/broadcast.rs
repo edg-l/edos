@@ -8,6 +8,9 @@ use alloc::{
 use crossbeam_queue::ArrayQueue;
 use spin::RwLock;
 
+use crate::thread::scheduler::{
+    current_thread_id, current_thread_weak, thread_park_while, thread_sleep,
+};
 use crate::thread::{
     scheduler::{WakePriority, sched},
     thread::{State, Thread, ThreadId},
@@ -44,7 +47,7 @@ impl<T> Subscriber<T> {
 
     pub fn recv(&self) -> T {
         debug_assert_eq!(
-            sched().current_thread_id(),
+            current_thread_id(),
             Some(self.owner_tid),
             "Subscriber::recv called from non-owner thread"
         );
@@ -52,14 +55,14 @@ impl<T> Subscriber<T> {
             if let Some(msg) = self.queue.pop() {
                 return msg;
             }
-            sched().thread_park_while(|| self.queue.is_empty());
+            thread_park_while(|| self.queue.is_empty());
         }
     }
 
     #[allow(dead_code)]
     pub fn recv_timeout(&self, dur: Duration) -> Option<T> {
         debug_assert_eq!(
-            sched().current_thread_id(),
+            current_thread_id(),
             Some(self.owner_tid),
             "Subscriber::recv_timeout called from non-owner thread"
         );
@@ -68,7 +71,7 @@ impl<T> Subscriber<T> {
             return Some(msg);
         }
         // Sleep until either wake or timeout, then re-check.
-        sched().thread_sleep(dur);
+        thread_sleep(dur);
         self.queue.pop()
     }
 }
@@ -88,8 +91,8 @@ impl<T: Clone> Broadcaster<T> {
     }
 
     pub fn subscribe(&self) -> Arc<Subscriber<T>> {
-        let owner_tid = sched().current_thread_id().unwrap();
-        let owner_handle = sched().current_thread_weak().unwrap();
+        let owner_tid = current_thread_id().unwrap();
+        let owner_handle = current_thread_weak().unwrap();
         // Single write lock: check-and-insert to avoid TOCTOU race (M7).
         let mut subs = self.subs.write();
         if let Some(existing) = subs.get(&owner_tid) {
@@ -105,9 +108,7 @@ impl<T: Clone> Broadcaster<T> {
     }
 
     pub fn unsubscribe(&self) {
-        self.subs
-            .write()
-            .remove(&sched().current_thread_id().unwrap());
+        self.subs.write().remove(&current_thread_id().unwrap());
     }
 
     pub fn broadcast(&self, msg: T) {

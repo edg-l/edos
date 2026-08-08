@@ -11,6 +11,7 @@ use pc_keyboard::{HandleControl, KeyEvent, Keyboard, ScancodeSet1, layouts};
 use spin::Once;
 use x86_64::structures::idt::InterruptStackFrame;
 
+use crate::thread::scheduler::{current_thread, thread_park_while};
 use crate::{
     apic::get_lapic,
     fs::{
@@ -22,7 +23,6 @@ use crate::{
     thread::{
         broadcast::{Broadcaster, Subscriber},
         mutex::BlockingMutex,
-        scheduler::sched,
         thread::Thread,
     },
 };
@@ -52,7 +52,7 @@ pub fn init() {
 pub extern "C" fn driver_main() -> ! {
     // PS/2 hardware init is done by ps2::init_ps2_controller() before
     // this thread is spawned. We only set up the driver thread state here.
-    let thread = sched().current_thread().unwrap();
+    let thread = current_thread().unwrap();
     KEYBOARD_THREAD_ID.call_once(|| Arc::downgrade(&thread));
     thread.set_priority(10);
 
@@ -70,7 +70,7 @@ pub extern "C" fn driver_main() -> ! {
 
     let mut raw_events: Vec<KeyEvent> = Vec::new();
     loop {
-        sched().thread_park_while(|| queue.is_empty());
+        thread_park_while(|| queue.is_empty());
 
         while let Some(scancode) = queue.pop() {
             if let Ok(Some(event)) = keyboard.add_byte(scancode) {

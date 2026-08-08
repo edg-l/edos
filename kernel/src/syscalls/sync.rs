@@ -1,11 +1,11 @@
 use alloc::{collections::btree_map::BTreeMap, sync::Arc};
 use core::{cell::Cell, time::Duration};
 
+use crate::thread::scheduler::current_thread_info;
 use crate::{
     syscalls::Errno,
     thread::{
         mutex::BlockingMutex,
-        scheduler::sched,
         waitqueue::{WaitOutcome, WaitQueue},
     },
     util::uaccess::try_read_user,
@@ -45,8 +45,7 @@ fn cleanup_if_empty(key: &FutexKey, queue: &Arc<WaitQueue>) {
 }
 
 pub fn sys_futex_wait(addr: *const u32, expected: u32, timeout_ns: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if addr.is_null() {
@@ -120,8 +119,7 @@ pub fn sys_futex_wait(addr: *const u32, expected: u32, timeout_ns: u64) -> u64 {
 }
 
 pub fn sys_futex_wake(addr: *const u32, count: u32) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if addr.is_null() {

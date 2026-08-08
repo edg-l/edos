@@ -3,6 +3,7 @@ use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use spin::Once;
 use thiserror::Error;
 
+use crate::thread::scheduler::current_thread;
 use crate::{
     drivers::ahci::{AhciError, api::list_devices},
     fs::{
@@ -17,9 +18,7 @@ use crate::{
     },
     log,
     memory::mapper::MemoryManager,
-    thread::{
-        mailbox::Mailbox, runqueue::IO_PRIORITY, scheduler::sched, util::queue_spawn_kthread_named,
-    },
+    thread::{mailbox::Mailbox, runqueue::IO_PRIORITY, util::queue_spawn_kthread_named},
 };
 
 pub mod api;
@@ -450,7 +449,7 @@ pub(super) enum FsResponse {
 
 pub extern "C" fn fs_main_thread() -> ! {
     log!("Started main fs");
-    let thread = sched().current_thread().unwrap();
+    let thread = current_thread().unwrap();
     thread.set_priority(IO_PRIORITY);
 
     let devices = list_devices();

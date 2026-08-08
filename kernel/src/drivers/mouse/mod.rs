@@ -11,6 +11,7 @@ use alloc::{
 use crossbeam_queue::ArrayQueue;
 use spin::Once;
 
+use crate::thread::scheduler::{current_thread, thread_park_while};
 use crate::{
     fs::{
         DevFsDevice, DevFsError, MmapRegion, PollState,
@@ -172,7 +173,7 @@ pub extern "C" fn driver_main() -> ! {
     // this thread is spawned. We only set up the driver thread state here.
     log!("Mouse driver thread started");
 
-    let thread = sched().current_thread().unwrap();
+    let thread = current_thread().unwrap();
     MOUSE_THREAD_ID.call_once(|| Arc::downgrade(&thread));
     thread.set_priority(10);
 
@@ -199,7 +200,7 @@ pub extern "C" fn driver_main() -> ! {
     let queue = SCANCODE_QUEUE.call_once(|| ArrayQueue::new(QUEUE_SIZE));
 
     loop {
-        sched().thread_park_while(|| queue.is_empty());
+        thread_park_while(|| queue.is_empty());
 
         while let Some(byte) = queue.pop() {
             // Sync: first byte must have bit 3 set (always-1 bit in PS/2 protocol)

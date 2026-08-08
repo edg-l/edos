@@ -1,9 +1,10 @@
 use alloc::{vec, vec::Vec};
 
+use crate::thread::scheduler::current_thread_info;
 use crate::{
     fs::{api as fs_api, devfs},
     syscalls::Errno,
-    thread::{pipe::FileDescriptor, scheduler::sched},
+    thread::pipe::FileDescriptor,
     util::uaccess::{try_copy_from_user, try_copy_to_user},
 };
 use x86_64::instructions::interrupts;
@@ -12,7 +13,7 @@ pub const IOCTL_FLAG_READ: u64 = 1;
 pub const IOCTL_FLAG_WRITE: u64 = 1 << 1;
 
 pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) -> i64 {
-    let info = sched().current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let descriptor = match info.lock().fd_table.lock().get_fd(fd).cloned() {

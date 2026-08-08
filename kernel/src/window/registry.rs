@@ -355,9 +355,7 @@ pub fn read_tracked(site: ReadSite) -> TrackedReadGuard<'static> {
 
     #[cfg(feature = "window-lock-debug")]
     {
-        let tid = crate::thread::scheduler::try_sched()
-            .and_then(|s| s.current_thread_id())
-            .map_or(0, |t| t.0);
+        let tid = crate::thread::scheduler::current_thread_id().map_or(0, |t| t.0);
         let tag = (tid << 8) | site as u64;
 
         WINDOW_REGISTRY_READER_ACQUIRES.fetch_add(1, Ordering::Relaxed);

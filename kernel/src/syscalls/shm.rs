@@ -8,6 +8,7 @@ use x86_64::{
 };
 
 use crate::syscalls::memory::claim_range;
+use crate::thread::scheduler::{current_thread, current_thread_info};
 use crate::{
     debug::lock_order::{RANK_USER_MM, RANK_VMAS},
     memory::{
@@ -16,7 +17,6 @@ use crate::{
     },
     ranked_lock,
     syscalls::Errno,
-    thread::scheduler::sched,
 };
 
 // Protection flags (match Linux)
@@ -33,8 +33,7 @@ const PROT_EXEC: u64 = 0x4;
 /// * Shared memory ID on success
 /// * -1 on error (errno set)
 pub fn sys_shm_create(size: u64) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if size == 0 {
@@ -70,8 +69,7 @@ pub fn sys_shm_create(size: u64) -> i64 {
 /// * Virtual address of the mapping on success
 /// * -1 on error (errno set)
 pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     // Look up the shared memory region
@@ -85,7 +83,7 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
 
     let size = shm.size() as u64;
 
-    let thread = match sched.current_thread() {
+    let thread = match current_thread() {
         Some(t) => t,
         None => {
             info.lock().errno = Errno::EINVAL;
@@ -204,13 +202,12 @@ pub fn sys_shm_map(shm_id: u64, addr_hint: u64, prot: u64) -> u64 {
 /// * 0 on success
 /// * -1 on error (errno set)
 pub fn sys_shm_unmap(addr: u64) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let map_addr = VirtAddr::new(addr);
 
-    let thread = match sched.current_thread() {
+    let thread = match current_thread() {
         Some(t) => t,
         None => {
             info.lock().errno = Errno::EINVAL;
@@ -302,8 +299,7 @@ pub fn sys_shm_size(shm_id: u64) -> i64 {
 /// * 0 on success
 /// * -1 on error (errno set)
 pub fn sys_shm_destroy(shm_id: u64) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     match SharedMemory::destroy(shm_id) {

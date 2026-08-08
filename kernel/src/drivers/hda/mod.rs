@@ -18,10 +18,11 @@ use crate::{
     interrupts::InterruptIndex,
     log,
     memory::{mapper::memory_mapper, valloc::vmalloc},
-    thread::{runqueue::IO_PRIORITY, scheduler::sched, util::queue_spawn_kthread_named},
+    thread::{runqueue::IO_PRIORITY, util::queue_spawn_kthread_named},
 };
 
 use self::regs::*;
+use crate::thread::scheduler::{current_thread, thread_park, thread_yield};
 
 // === Audio ioctl constants ===
 pub const AUDIO_IOCTL_SET_FORMAT: u64 = 1;
@@ -572,7 +573,7 @@ impl DevFsDevice for HdaDspDevice {
                         break;
                     }
                     // Yield to let the driver kthread process interrupts.
-                    sched().thread_yield();
+                    thread_yield();
                 }
                 // Stop the stream after drain so the DMA engine doesn't cycle silence.
                 {
@@ -598,7 +599,7 @@ pub fn init() {
 pub extern "C" fn hda_driver_main() -> ! {
     use crate::interrupts::io::HDA_DRIVER_THREAD_ID;
 
-    let thread = sched().current_thread().unwrap();
+    let thread = current_thread().unwrap();
     thread.set_priority(IO_PRIORITY);
     HDA_DRIVER_THREAD_ID.call_once(|| Arc::downgrade(&thread));
 
@@ -611,7 +612,7 @@ pub extern "C" fn hda_driver_main() -> ! {
     let Some(pci_dev) = pci_dev else {
         log!("hda: no device found");
         loop {
-            sched().thread_park();
+            thread_park();
         }
     };
 
@@ -626,7 +627,7 @@ pub extern "C" fn hda_driver_main() -> ! {
         Err(e) => {
             log!("hda: init failed: {}", e);
             loop {
-                sched().thread_park();
+                thread_park();
             }
         }
     };
@@ -641,7 +642,7 @@ pub extern "C" fn hda_driver_main() -> ! {
         Err(e) => {
             log!("hda: codec setup failed: {}", e);
             loop {
-                sched().thread_park();
+                thread_park();
             }
         }
     }
@@ -650,7 +651,7 @@ pub extern "C" fn hda_driver_main() -> ! {
     if let Err(e) = controller.setup_output_stream() {
         log!("hda: stream setup failed: {}", e);
         loop {
-            sched().thread_park();
+            thread_park();
         }
     }
 
@@ -683,7 +684,7 @@ pub extern "C" fn hda_driver_main() -> ! {
 
     // Main loop: park the thread, wake on interrupt, handle BCIS.
     loop {
-        sched().thread_park();
+        thread_park();
 
         let mut state = shared_state.lock();
         if state.controller.handle_stream_interrupt() {

@@ -8,6 +8,7 @@ use core::{hint::spin_loop, time::Duration};
 use alloc::{boxed::Box, string::ToString, sync::Arc};
 use x86_64::instructions::hlt;
 
+use crate::thread::scheduler::thread_sleep;
 use crate::{
     acpi::{acpi_madt, init_acpi},
     allocator::{enable_percpu_cache, init_heap, mark_gs_ready, print_alloc_stats},
@@ -20,7 +21,6 @@ use crate::{
     memory::frame_allocator::init_frame_allocator,
     thread::{
         mailbox::Mailbox,
-        scheduler::sched,
         thread::Thread,
         util::{
             kthread_exit, queue_spawn_kthread_named, queue_spawn_kthread_named_arg,
@@ -216,7 +216,6 @@ extern "C" fn test_thread(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
 extern "C" fn test_thread2(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
     let mb = *unsafe { Box::from_raw(arg) };
     log!("test2: Spawned test thread2");
-    let sched = sched();
     let mut counter = 0;
     loop {
         log!("test2: Sending request");
@@ -227,14 +226,13 @@ extern "C" fn test_thread2(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
         log!("test2: Got {c} expected {counter}");
         counter += 1;
 
-        sched.thread_sleep(Duration::from_millis(1000));
+        thread_sleep(Duration::from_millis(1000));
     }
 }
 
 extern "C" fn test_thread3(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
     let mb = *unsafe { Box::from_raw(arg) };
     log!("test3: Spawned test thread3");
-    let sched = sched();
     let mut counter = 100;
     loop {
         log!("test3: Sending request");
@@ -245,7 +243,7 @@ extern "C" fn test_thread3(arg: *mut Arc<Mailbox<u64, u64>>) -> ! {
         log!("test3: Got {c} expected {counter}");
         counter += 1;
 
-        sched.thread_sleep(Duration::from_millis(2000));
+        thread_sleep(Duration::from_millis(2000));
     }
 }
 

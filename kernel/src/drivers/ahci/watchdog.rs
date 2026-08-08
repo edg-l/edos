@@ -39,7 +39,7 @@
 
 use core::{sync::atomic::AtomicU64, time::Duration};
 
-use crate::thread::scheduler::sched;
+use crate::thread::scheduler::thread_sleep;
 
 /// Timeout after which an in-flight NCQ slot is considered hung.
 /// Matches Linux libata's `ATA_TMOUT_NCQ_SEC`.
@@ -56,7 +56,7 @@ pub static WATCHDOG_RESTARTS: AtomicU64 = AtomicU64::new(0);
 
 pub extern "C" fn watchdog_entry() -> ! {
     loop {
-        sched().thread_sleep(WATCHDOG_TICK);
+        thread_sleep(WATCHDOG_TICK);
         scan_once();
     }
 }

@@ -5,6 +5,7 @@ use spin::Mutex;
 
 use core::time::Duration;
 
+use crate::thread::scheduler::current_thread_info;
 use crate::{
     net::{
         ipv4,
@@ -16,15 +17,14 @@ use crate::{
         tcp::{TcpConnection, TcpState},
     },
     syscalls::Errno,
-    thread::{pipe::FileDescriptor, scheduler::sched},
+    thread::pipe::FileDescriptor,
     util::uaccess::{try_copy_to_user, try_read_user, try_write_user},
 };
 
 pub use crate::net::socket::SockAddrIn;
 
 pub fn sys_socket(domain: u64, sock_type: u64, _protocol: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if domain != AF_INET as u64 {
@@ -46,8 +46,7 @@ pub fn sys_socket(domain: u64, sock_type: u64, _protocol: u64) -> u64 {
 }
 
 pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if addr_ptr.is_null() || addr_len < core::mem::size_of::<SockAddrIn>() as u64 {
@@ -118,8 +117,7 @@ pub fn sys_bind(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
 }
 
 pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if addr_ptr.is_null() || addr_len < core::mem::size_of::<SockAddrIn>() as u64 {
@@ -282,8 +280,7 @@ pub fn sys_sendto(
     addr_ptr: *const SockAddrIn,
     addr_len: u64,
 ) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if buf_ptr.is_null() {
@@ -425,8 +422,7 @@ pub fn sys_recvfrom(
     addr_ptr: *mut SockAddrIn,
     addr_len_ptr: *mut u32,
 ) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if buf_ptr.is_null() {
@@ -515,8 +511,7 @@ pub fn sys_recvfrom(
 }
 
 pub fn sys_listen(fd: u64, backlog: u32) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let fd_table = info.lock().fd_table.clone();
@@ -557,8 +552,7 @@ pub fn sys_listen(fd: u64, backlog: u32) -> u64 {
 }
 
 pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let fd_table = info.lock().fd_table.clone();
@@ -686,8 +680,7 @@ const TCP_NODELAY: i32 = 1;
 const IP_TTL: i32 = 2;
 
 pub fn sys_shutdown(fd: u64, how: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let fd_table = info.lock().fd_table.clone();
@@ -731,8 +724,7 @@ pub fn sys_shutdown(fd: u64, how: u64) -> u64 {
 }
 
 pub fn sys_setsockopt(fd: u64, level: i32, optname: i32, val_ptr: *const u8, val_len: u32) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let fd_table = info.lock().fd_table.clone();
@@ -811,8 +803,7 @@ pub fn sys_getsockopt(
     val_ptr: *mut u8,
     val_len_ptr: *mut u32,
 ) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let fd_table = info.lock().fd_table.clone();
@@ -921,8 +912,7 @@ pub fn sys_getsockopt(
 }
 
 pub fn sys_getpeername(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let fd_table = info.lock().fd_table.clone();
@@ -965,8 +955,7 @@ pub fn sys_getpeername(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u3
 }
 
 pub fn sys_getsockname(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let fd_table = info.lock().fd_table.clone();

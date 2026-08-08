@@ -22,6 +22,7 @@ use alloc::sync::Weak;
 use crossbeam_queue::ArrayQueue;
 use spin::Once;
 
+use crate::thread::scheduler::{current_thread_id, thread_park_while};
 use crate::{
     fs::vfs::fs_by_mount_id,
     thread::{
@@ -63,8 +64,7 @@ pub static EVICT_DROPPED_COUNT: AtomicU64 = AtomicU64::new(0);
 /// cause recursive enqueue or deadlock). Compiled out in release builds.
 #[inline]
 pub fn current_thread_is_evict_kthread() -> bool {
-    use crate::thread::scheduler::sched;
-    let current = sched().current_thread_id().map(|t| t.0).unwrap_or(0);
+    let current = current_thread_id().map(|t| t.0).unwrap_or(0);
     current != 0 && current == EVICT_TID.load(Ordering::Acquire)
 }
 
@@ -172,7 +172,7 @@ pub fn init_evict_kthread() {
 
 extern "C" fn evict_kthread() -> ! {
     loop {
-        sched().thread_park_while(|| evict_queue().is_empty());
+        thread_park_while(|| evict_queue().is_empty());
 
         while let Some(req) = evict_queue().pop() {
             if let Some(fs) = fs_by_mount_id(req.mount_id) {

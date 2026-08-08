@@ -7,6 +7,7 @@ use crossbeam_queue::ArrayQueue;
 use spin::Once;
 use x86_64::{VirtAddr, instructions::hlt, structures::paging::PageTableFlags};
 
+use crate::thread::scheduler::thread_exit;
 use crate::{
     memory::{
         KTHREAD_STACK_REGION_SIZE, KTHREAD_STACK_SIZE, USER_STACK_SIZE, USER_STACK_TOP,
@@ -129,7 +130,7 @@ pub fn pick_sched() -> &'static Scheduler {
 
 /// Exits a kthread.
 pub fn kthread_exit(code: i32) -> ! {
-    sched().thread_exit(code)
+    thread_exit(code)
 }
 
 pub fn thread_stack_alloc(_manager: &mut MemoryManager) -> u64 {

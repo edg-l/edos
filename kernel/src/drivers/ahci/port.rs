@@ -376,7 +376,7 @@ impl AhciPort {
                     if start.elapsed().as_millis() > 500 {
                         return Err(AhciError::CommandTimeout);
                     }
-                    sched().thread_sleep(Duration::from_millis(1));
+                    thread_sleep(Duration::from_millis(1));
                 }
             }
 
@@ -390,7 +390,7 @@ impl AhciPort {
                     if start.elapsed().as_millis() > 500 {
                         return Err(AhciError::CommandTimeout);
                     }
-                    sched().thread_sleep(Duration::from_millis(1));
+                    thread_sleep(Duration::from_millis(1));
                 }
             }
         }
@@ -471,7 +471,7 @@ impl AhciPort {
             let mut sctl = ptr::read_volatile(&raw const (*self.port_regs).sctl);
             sctl = (sctl & !0xF) | 0x1;
             ptr::write_volatile(&raw mut (*self.port_regs).sctl, sctl);
-            sched().thread_sleep(Duration::from_millis(2));
+            thread_sleep(Duration::from_millis(2));
             sctl &= !0xF;
             ptr::write_volatile(&raw mut (*self.port_regs).sctl, sctl);
 
@@ -489,7 +489,7 @@ impl AhciPort {
                     );
                     return Err(AhciError::CommandTimeout);
                 }
-                sched().thread_sleep(Duration::from_millis(1));
+                thread_sleep(Duration::from_millis(1));
             }
 
             let sact = ptr::read_volatile(&raw const (*self.port_regs).sact);
@@ -679,7 +679,7 @@ impl AhciPort {
             .get()
             .cloned()
             .expect("AhciPort::set_weak_self must be called before any command submission");
-        let waiter = sched().current_thread_weak().unwrap_or_default();
+        let waiter = current_thread_weak().unwrap_or_default();
         let op = Arc::new(AhciSlotOp::new(port_weak, slot, waiter));
         **ranked_lock!(
             RANK_AHCI_SLOT,
@@ -688,7 +688,7 @@ impl AhciPort {
         ) = Some(Arc::clone(&op));
 
         // Register with owned_ops BEFORE parking inside f().
-        let current = sched().current_thread();
+        let current = current_thread();
         let push_ok = if let Some(ref t) = current {
             t.owned_ops_push(Arc::clone(&op) as ArcCancellableOp)
                 .is_ok()
@@ -1082,7 +1082,7 @@ impl AhciPort {
                 return Err(AhciError::CommandTimeout);
             }
 
-            sched().thread_park_while(|| {
+            thread_park_while(|| {
                 let ci = unsafe { ptr::read_volatile(&raw const (*port_regs).ci) };
                 let is = unsafe { ptr::read_volatile(&raw const (*port_regs).is) };
                 ci & (1 << slot) != 0 && is & PORT_IS_TFES == 0 && start.elapsed() < timeout
@@ -1125,7 +1125,7 @@ impl AhciPort {
             .get()
             .cloned()
             .expect("AhciPort::set_weak_self not called before submit");
-        let submitter = sched().current_thread_weak().unwrap_or_default();
+        let submitter = current_thread_weak().unwrap_or_default();
         let op = Arc::new(AhciNcqOp::new(
             weak_port, slot, submitter, start_gen, handle, buffer, completion,
         ));
@@ -1135,7 +1135,7 @@ impl AhciPort {
             self.ncq_waiters[slot]
         ) = Some(Arc::clone(&op));
 
-        if let Some(t) = sched().current_thread() {
+        if let Some(t) = current_thread() {
             if t.owned_ops_push(Arc::clone(&op) as ArcCancellableOp)
                 .is_err()
             {
@@ -1158,7 +1158,7 @@ impl AhciPort {
             Ordering::AcqRel,
             Ordering::Acquire,
         );
-        if let Some(t) = sched().current_thread() {
+        if let Some(t) = current_thread() {
             t.owned_ops_remove(Arc::as_ptr(op) as *const ());
         }
         let still_ours = {
@@ -1950,6 +1950,9 @@ impl AhciPort {
 
 use crate::drivers::block_io::{
     AsyncBlockDevice, BlockBuffer, BlockError, BlockIoHandle, WriteFlags,
+};
+use crate::thread::scheduler::{
+    current_thread, current_thread_weak, thread_park_while, thread_sleep,
 };
 
 fn ahci_err_to_block(e: AhciError) -> BlockError {

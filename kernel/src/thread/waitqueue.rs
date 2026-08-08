@@ -4,6 +4,7 @@ use heapless::Deque;
 use spin::Mutex;
 use x86_64::instructions::interrupts::{self, without_interrupts};
 
+use crate::thread::scheduler::{current_thread_weak, thread_park_while, thread_sleep};
 use crate::thread::{
     scheduler::{WakePriority, sched},
     thread::Thread,
@@ -129,7 +130,7 @@ impl WaitQueue {
             Sleep(Duration),
         }
 
-        let my_handle = sched().current_thread_weak().unwrap();
+        let my_handle = current_thread_weak().unwrap();
         let mut action: Option<SleepAction> = None;
 
         // Enqueue and check readiness inside without_interrupts to close the
@@ -162,10 +163,10 @@ impl WaitQueue {
         if let Some(chosen) = action {
             match chosen {
                 SleepAction::Park => {
-                    sched().thread_park_while(|| !ready());
+                    thread_park_while(|| !ready());
                 }
                 SleepAction::Sleep(dt) => {
-                    sched().thread_sleep(dt);
+                    thread_sleep(dt);
                 }
             }
         }

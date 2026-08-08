@@ -48,7 +48,7 @@ use crate::{
         irqlock::IrqSpinlock,
         mutex::BlockingMutex,
         pipe::{FileDescriptor, Pipe},
-        scheduler::{sched, switch_to_kernel_page},
+        scheduler::switch_to_kernel_page,
         signal::{self, SignalState},
         thread::{
             State, Thread, ThreadId, allocate_thread_id, get_thread_info_by_id, insert_thread,
@@ -72,6 +72,10 @@ mod window;
 
 use self::ioctl::sys_ioctl;
 use self::sync::{sys_futex_wait, sys_futex_wake};
+use crate::thread::scheduler::{
+    current_thread, current_thread_info, current_thread_weak, thread_exit, thread_park_while,
+    thread_sleep,
+};
 
 /// Properly decrement refcounts when a FileDescriptor is removed from a table
 /// without going through sys_close (e.g. dup2 replacing an existing fd).
@@ -489,7 +493,7 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             if code != 0 {
                 log!("exit: process exited with code {}", code);
             }
-            sched().thread_exit(code);
+            thread_exit(code);
         }
         SYS_GETPID => {
             ctx.rax = sys_getpid();
@@ -669,8 +673,7 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_KILL => {
             let pid = ctx.rdi;
             let signum = ctx.rsi as u32;
-            let sched = sched();
-            let info = sched.current_thread_info();
+            let info = current_thread_info();
             if signum == 0 || signum >= 32 {
                 info.lock().errno = Errno::EINVAL;
                 ctx.rax = !0u64;
@@ -684,12 +687,11 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_SIGACTION => {
             let signum = ctx.rdi as u32;
             let handler = ctx.rsi as u32; // 0=SIG_DFL, 1=SIG_IGN
-            let sched = sched();
-            let info = sched.current_thread_info();
+            let info = current_thread_info();
             if signum == 0 || signum >= 32 || signum == signal::SIGKILL {
                 info.lock().errno = Errno::EINVAL;
                 ctx.rax = !0u64;
-            } else if let Some(cur_thread) = sched.current_thread() {
+            } else if let Some(cur_thread) = current_thread() {
                 let prev = cur_thread.signal.set_handler(signum, handler);
                 ctx.rax = prev as u64;
             } else {
@@ -809,13 +811,11 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
 }
 
 pub fn sys_errno() -> u64 {
-    let sched = sched();
-    sched.current_thread_info().lock().errno as u64
+    current_thread_info().lock().errno as u64
 }
 
 fn sys_clock_gettime(buf_ptr: *mut u8) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if buf_ptr.is_null() {
@@ -912,15 +912,13 @@ impl From<FsError> for Errno {
 }
 
 fn sys_getpid() -> u64 {
-    let sched = sched();
-    sched.current_thread_info().lock().pid
+    current_thread_info().lock().pid
 }
 
 fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
     use crate::thread::thread::EXITED_THREADS;
 
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let target = ThreadId(pid);
@@ -939,13 +937,13 @@ fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
     }
 
     // Register as waiter so record_thread_exit wakes us
-    let current_weak = sched.current_thread_weak().unwrap();
+    let current_weak = current_thread_weak().unwrap();
     EXITED_THREADS.register_waiter(target, current_weak);
 
     // Park until the target has exited. thread_park_while may return
     // spuriously (stale wake token, etc.), so loop on the real condition.
     while !EXITED_THREADS.has_exited(target) {
-        sched.thread_park_while(|| !EXITED_THREADS.has_exited(target));
+        thread_park_while(|| !EXITED_THREADS.has_exited(target));
     }
 
     EXITED_THREADS.unregister_waiter(target);
@@ -964,20 +962,18 @@ fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
 }
 
 fn sys_sleep_ms(milliseconds: u64) -> u64 {
-    let scheduler = sched();
-    let info = scheduler.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let duration = Duration::from_millis(milliseconds);
 
-    scheduler.thread_sleep(duration);
+    thread_sleep(duration);
 
     0
 }
 
 fn sys_monotonic_time() -> u64 {
-    let scheduler = sched();
-    let info = scheduler.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     // HPET-driven uptime is monotonic with microsecond resolution.
@@ -986,8 +982,7 @@ fn sys_monotonic_time() -> u64 {
 }
 
 fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
 
     info.lock().errno = Errno::Clear;
 
@@ -1032,8 +1027,7 @@ fn sys_pipe(pipefd_ptr: *mut [u64; 2]) -> u64 {
 }
 
 fn sys_dup(oldfd: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
 
     info.lock().errno = Errno::Clear;
 
@@ -1054,8 +1048,7 @@ fn sys_dup(oldfd: u64) -> u64 {
 }
 
 fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
 
     info.lock().errno = Errno::Clear;
 
@@ -1149,8 +1142,7 @@ fn do_spawn(
     use crate::{fs::api as fs_api, thread::util::queue_spawn_thread};
 
     let spawn_start = crate::timer::Instant::now();
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
 
     // Save current cwd for child process
     let child_cwd = info.lock().cwd.lock().clone();
@@ -1364,8 +1356,7 @@ fn sys_spawn(
     const MAX_ARG_LEN: usize = 4096;
     const MAX_ARG_TOTAL: usize = 16 * 1024;
 
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
 
     info.lock().errno = Errno::Clear;
 
@@ -1451,8 +1442,7 @@ fn sys_spawn2(args_ptr: *const SpawnArgs) -> u64 {
     const MAX_ENV_LEN: usize = 4096;
     const MAX_ENV_TOTAL: usize = 64 * 1024;
 
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
 
     info.lock().errno = Errno::Clear;
 
@@ -1555,11 +1545,10 @@ fn sys_clone(
     _flags: u64,
     child_stack: u64,
 ) -> u64 {
-    let sched = sched();
-    let parent_thread = match sched.current_thread() {
+    let parent_thread = match current_thread() {
         Some(t) => t,
         None => {
-            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            current_thread_info().lock().errno = Errno::EINVAL;
             return !0u64;
         }
     };
@@ -1567,7 +1556,7 @@ fn sys_clone(
     let parent_user = match &parent_thread.user {
         Some(u) => u,
         None => {
-            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            current_thread_info().lock().errno = Errno::EINVAL;
             return !0u64;
         }
     };
@@ -1576,7 +1565,7 @@ fn sys_clone(
     // call owns, so a later failure can hand it back.
     let (user_stack_top, claimed_stack) = if child_stack == 0 {
         // Allocate a new user stack using internal mmap
-        let parent_info = sched.current_thread_info();
+        let parent_info = current_thread_info();
         let stack_size = 2 * 1024 * 1024u64; // 2MB stack
 
         // Claim the range before mapping it. Threads of one process share an
@@ -1679,7 +1668,7 @@ fn sys_clone(
                     drop(manager_guard);
                 }
                 kthread_stack_free(kernel_stack_top);
-                sched.current_thread_info().lock().errno = Errno::ENOMEM;
+                current_thread_info().lock().errno = Errno::ENOMEM;
                 return !0u64;
             }
         }
@@ -1739,7 +1728,7 @@ fn sys_clone(
     });
 
     // Clone parent's UserThreadInfo - share fd_table
-    let parent_info = sched.current_thread_info();
+    let parent_info = current_thread_info();
     let parent_info_guard = parent_info.lock();
 
     insert_thread(child_thread.clone());
@@ -1779,11 +1768,10 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         thread::fd::FileDescriptorTable,
     };
 
-    let sched = sched();
-    let parent_thread = match sched.current_thread() {
+    let parent_thread = match current_thread() {
         Some(t) => t,
         None => {
-            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            current_thread_info().lock().errno = Errno::EINVAL;
             return -1;
         }
     };
@@ -1791,7 +1779,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     let parent_user = match &parent_thread.user {
         Some(u) => u,
         None => {
-            sched.current_thread_info().lock().errno = Errno::EINVAL;
+            current_thread_info().lock().errno = Errno::EINVAL;
             return -1;
         }
     };
@@ -1860,7 +1848,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     drop(parent_user_read);
 
     // Read parent info
-    let parent_info = sched.current_thread_info();
+    let parent_info = current_thread_info();
     let parent_next_mmap = {
         let guard = parent_info.lock();
         guard.next_mmap_addr.load(Ordering::Acquire)
@@ -2056,8 +2044,7 @@ fn copy_user_c_string(ptr: *const u8, max_len: usize) -> Result<Vec<u8>, UAccess
 ///
 /// Returns RTT in microseconds on success, or u64::MAX on timeout / error.
 fn sys_ping(dst_ip_ptr: *const [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if dst_ip_ptr.is_null() {
@@ -2096,8 +2083,7 @@ fn sys_ping(dst_ip_ptr: *const [u8; 4], id: u16, seq: u16, timeout_ms: u64) -> u
 ///
 /// Returns the number of bytes written on success, or u64::MAX on error.
 fn sys_netinfo(buf_ptr: *mut u8, buf_len: usize) -> u64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if buf_ptr.is_null() || buf_len == 0 {

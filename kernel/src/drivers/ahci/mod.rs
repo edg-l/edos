@@ -11,6 +11,7 @@ use spin::Once;
 use thiserror::Error;
 use x86_64::instructions::hlt;
 
+use crate::thread::scheduler::{current_thread, thread_park_while};
 use crate::{
     drivers::{
         ahci::{controller::AhciController, port::AhciPort, structures::DeviceIdentifyInfo},
@@ -22,7 +23,6 @@ use crate::{
     log,
     thread::{
         runqueue::IO_PRIORITY,
-        scheduler::sched,
         thread::{Thread, get_thread_weak},
         util::queue_spawn_kthread_named,
     },
@@ -126,7 +126,7 @@ pub struct DetectedDevice {
 }
 
 pub extern "C" fn ahci_driver_main() -> ! {
-    let thread = sched().current_thread().unwrap();
+    let thread = current_thread().unwrap();
     thread.set_priority(IO_PRIORITY);
 
     let devices: Vec<PciDevice> = pci_manager().read().get_devices().to_vec();
@@ -239,7 +239,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
     // Interrupt dispatch loop.
     // MSI fires -> hardware ISR wakes this thread -> we dispatch per-slot wakeups.
     loop {
-        sched().thread_park_while(|| {
+        thread_park_while(|| {
             !controllers.iter().any(|c| {
                 let hba_is = unsafe { ptr::read_volatile(&raw const (*c.hba).is) };
                 hba_is != 0

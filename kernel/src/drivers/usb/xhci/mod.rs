@@ -41,6 +41,7 @@ use self::{
         TRB_TYPE_TRANSFER, TransferRing, Trb,
     },
 };
+use crate::thread::scheduler::{thread_park, thread_park_while, thread_sleep};
 
 /// PCI class/subclass/prog-if identifying an xHCI controller.
 const PCI_CLASS_SERIAL_BUS: u8 = 0x0C;
@@ -1064,7 +1065,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
         None => {
             println!("xhci: no controller found");
             loop {
-                sched().thread_park();
+                thread_park();
             }
         }
     };
@@ -1072,7 +1073,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
     if let Err(e) = controller.init() {
         println!("xhci: init failed: {}", e);
         loop {
-            sched().thread_park();
+            thread_park();
         }
     }
 
@@ -1445,11 +1446,11 @@ pub extern "C" fn xhci_driver_main() -> ! {
             let now = crate::timer::uptime_us();
             if now < repeat_next_us {
                 let wait_us = repeat_next_us - now;
-                sched().thread_sleep(Duration::from_micros(wait_us));
+                thread_sleep(Duration::from_micros(wait_us));
             }
         } else {
             // No key held: park indefinitely until interrupt or mailbox.
-            sched().thread_park_while(|| {
+            thread_park_while(|| {
                 let has_event = unsafe { (*er).peek() };
                 let has_mailbox = USB_BLOCK_MAILBOX.get().is_some_and(|mb| !mb.is_empty());
                 !has_event && !has_mailbox

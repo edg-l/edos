@@ -7,6 +7,7 @@
 
 use alloc::{sync::Arc, vec};
 
+use crate::thread::scheduler::thread_yield;
 use crate::{
     drivers::{
         block_io::{self, AsyncBlockDevice, BlockBuffer, BlockError, BlockIoHandle, WriteFlags},
@@ -29,7 +30,7 @@ fn send_and_wait(req: UsbBlockRequest) -> UsbBlockResponse {
         if let Some(mb) = USB_BLOCK_MAILBOX.get() {
             break mb;
         }
-        sched().thread_yield();
+        thread_yield();
     };
     let response = mailbox.send(req);
     if let Some(handle) = XHCI_DRIVER_THREAD_ID.get() {

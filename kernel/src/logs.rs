@@ -2,10 +2,11 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
 use spin::{Once, RwLock};
 
+use crate::thread::scheduler::current_thread;
 use crate::{
     fs::{DevFsDevice, register_device_str},
     serial::add_serial_log,
-    thread::{scheduler::sched, util::queue_spawn_kthread_named, waitqueue::WaitQueue},
+    thread::{util::queue_spawn_kthread_named, waitqueue::WaitQueue},
     timer::uptime_us,
     util::per_cpu::get_percpu_data,
 };
@@ -28,9 +29,7 @@ pub fn log(args: core::fmt::Arguments) {
     let cpu_idx = cpu.lapic_id.get();
 
     if !cpu.scheduler.get().is_null() {
-        let sched = sched();
-
-        if let Some(thread) = sched.current_thread() {
+        if let Some(thread) = current_thread() {
             let name = &*thread.name;
 
             // build prefix

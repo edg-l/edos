@@ -10,13 +10,11 @@ use crate::{
         mouse::{MOUSE_BROADCAST, MouseEvent},
     },
     log,
-    thread::{
-        broadcast::Subscriber, preempt::PreemptRwLock, scheduler::sched,
-        util::queue_spawn_kthread_named,
-    },
+    thread::{broadcast::Subscriber, preempt::PreemptRwLock, util::queue_spawn_kthread_named},
 };
 
 use super::registry::{ReadSite, WINDOW_REGISTRY, WindowId, decoration, flags, read_tracked};
+use crate::thread::scheduler::{current_thread, thread_park_while};
 
 /// Maximum number of queued events per window.
 const EVENT_QUEUE_SIZE: usize = 256;
@@ -277,7 +275,7 @@ pub fn send_event(window_id: WindowId, event: WindowEvent) {
 extern "C" fn input_routing_thread() -> ! {
     log!("Window input routing thread started");
 
-    let thread = sched().current_thread().unwrap();
+    let thread = current_thread().unwrap();
     thread.set_priority(10); // High priority for input
 
     // Subscribe to input broadcasts
@@ -285,7 +283,7 @@ extern "C" fn input_routing_thread() -> ! {
     let key_sub: Arc<Subscriber<KeyEvent>> = KEY_EVENT_BROADCAST.subscribe();
 
     loop {
-        sched().thread_park_while(|| mouse_sub.is_empty() && key_sub.is_empty());
+        thread_park_while(|| mouse_sub.is_empty() && key_sub.is_empty());
 
         while let Some(mouse_event) = mouse_sub.try_recv() {
             handle_mouse_event(mouse_event);

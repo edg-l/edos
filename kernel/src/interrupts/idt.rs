@@ -7,6 +7,7 @@ use x86_64::{
     structures::paging::PageTableFlags,
 };
 
+use crate::thread::scheduler::thread_exit;
 use crate::{
     apic::get_lapic,
     boot::boot_info,
@@ -22,7 +23,7 @@ use crate::{
     log,
     memory::cow::handle_cow_fault,
     println,
-    thread::{interrupt::timer_interrupt_handler, scheduler::sched},
+    thread::interrupt::timer_interrupt_handler,
     util::uaccess::current_cpu_uaccess,
 };
 
@@ -100,7 +101,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         log!("External: {}", error_code & 1 != 0);
         log!("Stack frame: {:#?}", stack_frame);
 
-        sched().thread_exit(135);
+        thread_exit(135);
     }
 }
 
@@ -110,7 +111,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3 {
         log!("Invalid opcode, forcing exit, {stack_frame:#?}");
-        sched().thread_exit(135);
+        thread_exit(135);
     } else {
         println!("EXCEPTION: invalid_opcode CHECK\n{stack_frame:#?}");
         panic!();
@@ -123,7 +124,7 @@ extern "x86-interrupt" fn alignment_check_handler(stack_frame: InterruptStackFra
 
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3 {
         log!("EXCEPTION: ALIGNMENT CHECK: ({value})\n{stack_frame:#?}");
-        sched().thread_exit(135);
+        thread_exit(135);
     } else {
         println!("EXCEPTION: ALIGNMENT CHECK: ({value})\n{stack_frame:#?}");
         panic!();
@@ -313,7 +314,7 @@ extern "x86-interrupt" fn page_fault_handler(
             }
         }
 
-        sched().thread_exit(11);
+        thread_exit(11);
     }
 }
 

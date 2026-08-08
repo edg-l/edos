@@ -23,9 +23,9 @@ use crate::{
         vma::{VmaBacking, VmaFlags, VmaProt, VmaSet},
     },
     ranked_lock,
-    thread::scheduler::sched,
 };
 
+use crate::thread::scheduler::current_thread;
 use x86_64::structures::idt::PageFaultErrorCode;
 
 /// Source of data for resolving a demand fault.
@@ -394,7 +394,7 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
     }
 
     // Get current thread's VmaSet
-    let thread = match sched().current_thread() {
+    let thread = match current_thread() {
         Some(t) => t,
         None => return false,
     };
@@ -468,7 +468,7 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
             )
         } {
             if mapped {
-                if let Some(t) = sched().current_thread() {
+                if let Some(t) = current_thread() {
                     t.demand_faults
                         .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
@@ -494,7 +494,7 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
     }
 
     if outcome.mapped {
-        if let Some(t) = sched().current_thread() {
+        if let Some(t) = current_thread() {
             t.demand_faults
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
@@ -522,7 +522,7 @@ pub fn store_cached_page_on_vma(
     // so every return path sees pin_count=0 at Arc drop time.
     cached_page.unpin();
 
-    let t = match sched().current_thread() {
+    let t = match current_thread() {
         Some(t) => t,
         None => return false,
     };

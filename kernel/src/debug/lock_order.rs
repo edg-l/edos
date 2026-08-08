@@ -74,6 +74,7 @@ pub const LOCK_RANK_DEPTH: usize = 16;
 // without `#[cfg(debug_assertions)]` so that `/proc/lock_order_stats` can read
 // them unconditionally; in release builds both counters stay at 0.
 
+use crate::thread::scheduler::{current_thread, current_thread_id};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Number of lock-order violations detected. Should always be 0 in a healthy
@@ -95,10 +96,10 @@ pub fn enter(rank: u16, site: &'static str) {
 
     // Pre-scheduler init (frame allocator / heap init run before the per-CPU
     // scheduler pointer is installed): no-op.
-    let Some(sched) = try_sched() else {
+    if try_sched().is_none() {
         return;
-    };
-    let Some(thread) = sched.current_thread() else {
+    }
+    let Some(thread) = current_thread() else {
         return;
     };
 
@@ -118,7 +119,7 @@ pub fn enter(rank: u16, site: &'static str) {
 
     // Single-owner sanity: the thread returned by current_thread() must be us.
     debug_assert_eq!(
-        sched.current_thread_id(),
+        current_thread_id(),
         Some(thread.id),
         "lock_order::enter: current_thread_id mismatch (concurrent access?)"
     );
@@ -180,10 +181,10 @@ pub fn enter(rank: u16, site: &'static str) {
 pub fn enter_same(rank: u16, site: &'static str) {
     use crate::thread::scheduler::try_sched;
 
-    let Some(sched) = try_sched() else {
+    if try_sched().is_none() {
         return;
-    };
-    let Some(thread) = sched.current_thread() else {
+    }
+    let Some(thread) = current_thread() else {
         return;
     };
 
@@ -197,7 +198,7 @@ pub fn enter_same(rank: u16, site: &'static str) {
     }
 
     debug_assert_eq!(
-        sched.current_thread_id(),
+        current_thread_id(),
         Some(thread.id),
         "lock_order::enter_same: current_thread_id mismatch"
     );
@@ -233,10 +234,10 @@ pub fn enter_same(rank: u16, site: &'static str) {
 pub fn exit(rank: u16, site: &'static str) {
     use crate::thread::scheduler::try_sched;
 
-    let Some(sched) = try_sched() else {
+    if try_sched().is_none() {
         return;
-    };
-    let Some(thread) = sched.current_thread() else {
+    }
+    let Some(thread) = current_thread() else {
         return;
     };
 

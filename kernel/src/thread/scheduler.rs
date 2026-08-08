@@ -198,16 +198,19 @@ impl Scheduler {
         }
     }
 
-    pub fn current_thread_id(&self) -> Option<ThreadId> {
+    /// The thread this CPU's scheduler last published as running, or `None`
+    /// when the CPU is idle.
+    ///
+    /// Scheduler-internal: it answers "what is *this scheduler's* CPU running",
+    /// which is only the caller's own identity when `self` was resolved in a
+    /// context that cannot migrate. Everything outside the scheduler wants the
+    /// free `current_thread_id`.
+    fn running_tid(&self) -> Option<ThreadId> {
         let tid = self.current.load(Ordering::Acquire);
         if tid == 0 {
             return None;
         }
         Some(ThreadId(tid))
-    }
-
-    pub fn current_thread(&self) -> Option<Arc<Thread>> {
-        get_percpu_data().current_thread()
     }
 
     pub fn on_tick(&self, context: *mut CpuContext) {
@@ -426,7 +429,7 @@ impl Scheduler {
     /// thread that simply keeps running, so without this a CPU-bound thread
     /// holds its CPU until something else happens to become runnable there.
     fn expire_timeslice(&self) {
-        let Some(cur) = self.current_thread() else {
+        let Some(cur) = current_thread() else {
             return;
         };
         let deadline = cur.slice_deadline.load(Ordering::Acquire);
@@ -443,7 +446,7 @@ impl Scheduler {
             return;
         }
 
-        let Some(cur) = self.current_thread() else {
+        let Some(cur) = current_thread() else {
             self.pick_and_run(context); // was idle
             return;
         };
@@ -546,7 +549,7 @@ impl Scheduler {
     }
 
     fn mark_running_thread_need_resched(&self) {
-        if let Some(current_tid) = self.current_thread_id() {
+        if let Some(current_tid) = self.running_tid() {
             if let Some(current_thread) = self.get_thread_by_id(current_tid) {
                 current_thread.mark_need_resched();
             }
@@ -554,7 +557,7 @@ impl Scheduler {
     }
 
     fn save_current_thread(&self, context: *mut CpuContext) {
-        if let Some(current) = self.current_thread() {
+        if let Some(current) = current_thread() {
             // If the thread was stolen and is now running on another CPU,
             // don't overwrite its ctx -- the new CPU owns it. Without this
             // check, a "double save" could write THIS CPU's interrupt frame
@@ -928,85 +931,6 @@ impl Scheduler {
         true
     }
 
-    #[inline]
-    pub fn thread_yield(&self) {
-        debug_assert_preemptible("thread_yield");
-        without_interrupts(|| unsafe {
-            save_transition_switch(transition_yield, core::ptr::null_mut());
-        });
-    }
-
-    pub fn thread_park(&self) {
-        debug_assert_preemptible("thread_park");
-        let Some(_cur) = self.current_thread() else {
-            return;
-        };
-        without_interrupts(|| unsafe {
-            save_transition_switch(transition_park, core::ptr::null_mut());
-        });
-    }
-
-    /// Park the current thread while `should_park` returns true.
-    ///
-    /// Sets state to Parked *before* calling the closure inside
-    /// `transition_park_while`, so any concurrent `try_wake()` sees Parked
-    /// and succeeds. This closes the lost-wakeup window that exists with
-    /// the bare `thread_park()`.
-    ///
-    /// Contract: **may return spuriously** — a stale wake-pending token
-    /// consumed during the transition will short-circuit the park even when
-    /// the condition still says park. Callers MUST loop on the actual
-    /// condition. This matches Rust std's `Thread::park` semantics. The
-    /// reason: looping inside this function would re-park without
-    /// re-enrolling the thread on a wait queue, breaking wait-queue
-    /// protocols where the producer pops the waiter exactly once.
-    pub fn thread_park_while<F: FnMut() -> bool>(&self, mut should_park: F) {
-        debug_assert_preemptible("thread_park_while");
-        let Some(_cur) = self.current_thread() else {
-            return;
-        };
-
-        // Wrapper to call the Rust closure through a C function pointer.
-        extern "C" fn check_wrapper<F: FnMut() -> bool>(ctx: *mut u8) -> bool {
-            let f = unsafe { &mut *(ctx as *mut F) };
-            f()
-        }
-
-        let mut ctx = ParkWhileCtx {
-            check_fn: check_wrapper::<F>,
-            check_ctx: &mut should_park as *mut F as *mut u8,
-        };
-        without_interrupts(|| unsafe {
-            save_transition_switch(
-                transition_park_while,
-                &mut ctx as *mut ParkWhileCtx as *mut u8,
-            );
-        });
-    }
-
-    #[inline]
-    pub fn thread_sleep(&self, dt: Duration) {
-        debug_assert_preemptible("thread_sleep");
-        let Some(_cur) = self.current_thread() else {
-            return;
-        };
-        let now = Instant::now();
-        let deadline_tick = (now + dt).tick();
-        let mut ctx = SleepCtx { deadline_tick };
-        without_interrupts(|| unsafe {
-            save_transition_switch(transition_sleep, &mut ctx as *mut SleepCtx as *mut u8);
-        });
-    }
-
-    /// Return a `Weak<Thread>` for the currently running thread on this CPU.
-    ///
-    /// Returns `None` when the CPU is idle (no current thread). `Arc::downgrade`
-    /// is a refcount bump only — allocator-free, safe in any context including
-    /// IRQ handlers.
-    pub fn current_thread_weak(&self) -> Option<Weak<Thread>> {
-        self.current_thread().as_ref().map(Arc::downgrade)
-    }
-
     /// Wake the thread identified by `handle` (thread-context variant).
     ///
     /// Safety properties:
@@ -1026,7 +950,7 @@ impl Scheduler {
     /// dangling (thread exited) or the self-skip fired.
     pub fn wake_thread(&self, handle: &Weak<Thread>, priority: WakePriority) -> bool {
         // Self-skip: compare control-block pointers before paying for upgrade.
-        if let Some(current_weak) = self.current_thread_weak() {
+        if let Some(current_weak) = current_thread_weak() {
             if Weak::ptr_eq(handle, &current_weak) {
                 return false;
             }
@@ -1107,59 +1031,165 @@ impl Scheduler {
             }
         });
     }
+}
 
-    pub fn thread_exit(&self, code: i32) -> ! {
-        let tid = self.current_thread_id().unwrap();
+/// The thread running on *this* CPU, or `None` when the CPU is idle.
+///
+/// Which thread is current belongs to the CPU executing right now, never to a
+/// `&Scheduler` value. A syscall runs with interrupts enabled, so its caller can
+/// be preempted between any two instructions and resume on another CPU; a
+/// `&Scheduler` obtained before that names the CPU the caller has left, whose
+/// `current` now belongs to a different thread entirely. Interrupts are off for
+/// the read so the per-CPU slot cannot change underneath it, and the returned
+/// `Arc` stays valid afterwards however the thread migrates.
+pub fn current_thread() -> Option<Arc<Thread>> {
+    without_interrupts(|| get_percpu_data().current_thread())
+}
 
-        // Log lifetime stats before the without_interrupts fast path (log! allocates).
-        if let Some(t) = get_thread_by_id(tid) {
-            let created = t.created_at_tick.load(Ordering::Acquire);
-            if let Some(timer) = crate::drivers::hpet::driver::get_hpet_timer()
-                && created != 0
-            {
-                let now = crate::timer::Instant::now().tick();
-                let wall_ns = timer.ticks_to_nanos(now.saturating_sub(created));
-                let cpu_ns = t.cpu_time_ns();
-                let faults = t.demand_faults.load(Ordering::Relaxed);
-                crate::log!(
-                    "exit: code={} wall={}.{:03}ms cpu={}.{:03}ms faults={}",
-                    code,
-                    wall_ns / 1_000_000,
-                    (wall_ns / 1_000) % 1_000,
-                    cpu_ns / 1_000_000,
-                    (cpu_ns / 1_000) % 1_000,
-                    faults
-                );
-            }
-        }
+/// `ThreadId` of the thread running on *this* CPU. See `current_thread`.
+pub fn current_thread_id() -> Option<ThreadId> {
+    without_interrupts(|| get_percpu_data().with_current_thread(|t| t.id))
+}
 
-        // Fast path with interrupts disabled: mark Dying, detach from
-        // per-CPU, enqueue on reaper for deferred cleanup, then switch_away.
-        // Heavy cleanup (free, unmap, etc.) happens in the reaper thread
-        // with interrupts enabled.
-        without_interrupts(|| unsafe {
-            self.current.store(0, Ordering::Release);
-            get_percpu_data().set_current_thread(None);
+/// A `Weak<Thread>` for the thread running on *this* CPU.
+///
+/// `Arc::downgrade` is a refcount bump only — allocator-free, so this is safe in
+/// any context including IRQ handlers.
+pub fn current_thread_weak() -> Option<Weak<Thread>> {
+    current_thread().as_ref().map(Arc::downgrade)
+}
 
-            if let Some(t) = get_thread_by_id(tid) {
-                t.exit_code.store(code, Ordering::Release);
-                t.state.store(State::Dying as u8, Ordering::Release);
-                self.thread_count.fetch_sub(1, Ordering::Relaxed);
-                reaper_enqueue(t);
-            }
+/// `UserThreadInfo` of the thread running on *this* CPU.
+///
+/// Panics if the caller is not a user thread. Every caller is a syscall handler,
+/// which by construction runs on behalf of one, and the id is read from this CPU
+/// rather than from a scheduler that may belong to another.
+pub fn current_thread_info() -> Arc<IrqSpinlock<UserThreadInfo>> {
+    let tid = current_thread_id().expect("current_thread_info: no thread running on this CPU");
+    THREADS
+        .get_info(tid)
+        .unwrap_or_else(|| panic!("current_thread_info: no UserThreadInfo for tid {}", tid.0))
+}
 
-            switch_away();
-        });
-        loop {
-            enable_and_hlt();
+#[inline]
+pub fn thread_yield() {
+    debug_assert_preemptible("thread_yield");
+    without_interrupts(|| unsafe {
+        save_transition_switch(transition_yield, core::ptr::null_mut());
+    });
+}
+
+pub fn thread_park() {
+    debug_assert_preemptible("thread_park");
+    let Some(_cur) = current_thread() else {
+        return;
+    };
+    without_interrupts(|| unsafe {
+        save_transition_switch(transition_park, core::ptr::null_mut());
+    });
+}
+
+/// Park the current thread while `should_park` returns true.
+///
+/// Sets state to Parked *before* calling the closure inside
+/// `transition_park_while`, so any concurrent `try_wake()` sees Parked
+/// and succeeds. This closes the lost-wakeup window that exists with
+/// the bare `thread_park()`.
+///
+/// Contract: **may return spuriously** — a stale wake-pending token
+/// consumed during the transition will short-circuit the park even when
+/// the condition still says park. Callers MUST loop on the actual
+/// condition. This matches Rust std's `Thread::park` semantics. The
+/// reason: looping inside this function would re-park without
+/// re-enrolling the thread on a wait queue, breaking wait-queue
+/// protocols where the producer pops the waiter exactly once.
+pub fn thread_park_while<F: FnMut() -> bool>(mut should_park: F) {
+    debug_assert_preemptible("thread_park_while");
+    let Some(_cur) = current_thread() else {
+        return;
+    };
+
+    // Wrapper to call the Rust closure through a C function pointer.
+    extern "C" fn check_wrapper<F: FnMut() -> bool>(ctx: *mut u8) -> bool {
+        let f = unsafe { &mut *(ctx as *mut F) };
+        f()
+    }
+
+    let mut ctx = ParkWhileCtx {
+        check_fn: check_wrapper::<F>,
+        check_ctx: &mut should_park as *mut F as *mut u8,
+    };
+    without_interrupts(|| unsafe {
+        save_transition_switch(
+            transition_park_while,
+            &mut ctx as *mut ParkWhileCtx as *mut u8,
+        );
+    });
+}
+
+#[inline]
+pub fn thread_sleep(dt: Duration) {
+    debug_assert_preemptible("thread_sleep");
+    let Some(_cur) = current_thread() else {
+        return;
+    };
+    let now = Instant::now();
+    let deadline_tick = (now + dt).tick();
+    let mut ctx = SleepCtx { deadline_tick };
+    without_interrupts(|| unsafe {
+        save_transition_switch(transition_sleep, &mut ctx as *mut SleepCtx as *mut u8);
+    });
+}
+
+pub fn thread_exit(code: i32) -> ! {
+    let tid = current_thread_id().expect("thread_exit: no thread running on this CPU");
+
+    // Log lifetime stats before the without_interrupts fast path (log! allocates).
+    if let Some(t) = get_thread_by_id(tid) {
+        let created = t.created_at_tick.load(Ordering::Acquire);
+        if let Some(timer) = crate::drivers::hpet::driver::get_hpet_timer()
+            && created != 0
+        {
+            let now = crate::timer::Instant::now().tick();
+            let wall_ns = timer.ticks_to_nanos(now.saturating_sub(created));
+            let cpu_ns = t.cpu_time_ns();
+            let faults = t.demand_faults.load(Ordering::Relaxed);
+            crate::log!(
+                "exit: code={} wall={}.{:03}ms cpu={}.{:03}ms faults={}",
+                code,
+                wall_ns / 1_000_000,
+                (wall_ns / 1_000) % 1_000,
+                cpu_ns / 1_000_000,
+                (cpu_ns / 1_000) % 1_000,
+                faults
+            );
         }
     }
 
-    pub fn current_thread_info(&self) -> Arc<IrqSpinlock<UserThreadInfo>> {
-        let tid = self.current_thread_id().unwrap();
-        THREADS
-            .get_info(tid)
-            .unwrap_or_else(|| panic!("current_thread_info: no UserThreadInfo for tid {}", tid.0))
+    // Fast path with interrupts disabled: mark Dying, detach from
+    // per-CPU, enqueue on reaper for deferred cleanup, then switch_away.
+    // Heavy cleanup (free, unmap, etc.) happens in the reaper thread
+    // with interrupts enabled.
+    //
+    // The scheduler is resolved inside the interrupt-off window: clearing
+    // `current` on the CPU the caller has since left would leave that CPU
+    // believing it is idle while it runs someone else.
+    without_interrupts(|| unsafe {
+        let sc = sched();
+        sc.current.store(0, Ordering::Release);
+        get_percpu_data().set_current_thread(None);
+
+        if let Some(t) = get_thread_by_id(tid) {
+            t.exit_code.store(code, Ordering::Release);
+            t.state.store(State::Dying as u8, Ordering::Release);
+            sc.thread_count.fetch_sub(1, Ordering::Relaxed);
+            reaper_enqueue(t);
+        }
+
+        switch_away();
+    });
+    loop {
+        enable_and_hlt();
     }
 }
 
@@ -1217,8 +1247,7 @@ pub extern "C" fn schedule(context: *mut CpuContext) -> *mut CpuContext {
 /// Called from save_transition_switch (naked asm) with interrupts disabled.
 /// Returns the per-CPU scheduler stack top so the asm trampoline can pivot RSP.
 extern "C" fn do_save_current_thread(context: *mut CpuContext) -> u64 {
-    let sched = sched();
-    let Some(current) = sched.current_thread() else {
+    let Some(current) = current_thread() else {
         let sched_stack = get_percpu_data().scheduler_stack_top.get();
         debug_assert!(sched_stack != 0, "scheduler stack not initialized");
         return sched_stack;
@@ -1243,7 +1272,7 @@ extern "C" fn do_save_current_thread(context: *mut CpuContext) -> u64 {
     let sched_stack = get_percpu_data().scheduler_stack_top.get();
     debug_assert!(sched_stack != 0, "scheduler stack not initialized");
     trace_event!(Save {
-        cpu: sched.cpu,
+        cpu: sched().cpu,
         tid: current.id.0,
         rip: unsafe {
             (*context)
@@ -1316,7 +1345,7 @@ pub unsafe extern "C" fn switch_away() {
 
 extern "C" fn transition_yield(_arg: *mut u8) -> bool {
     let sched = sched();
-    let Some(cur) = sched.current_thread() else {
+    let Some(cur) = current_thread() else {
         return true;
     };
     if cur.cas_state(State::Running, State::Ready) {
@@ -1330,8 +1359,7 @@ extern "C" fn transition_yield(_arg: *mut u8) -> bool {
 }
 
 extern "C" fn transition_park(_arg: *mut u8) -> bool {
-    let sched = sched();
-    let Some(cur) = sched.current_thread() else {
+    let Some(cur) = current_thread() else {
         return true;
     };
 
@@ -1368,8 +1396,7 @@ struct ParkWhileCtx {
 
 extern "C" fn transition_park_while(arg: *mut u8) -> bool {
     let ctx = unsafe { &*(arg as *const ParkWhileCtx) };
-    let sched = sched();
-    let Some(cur) = sched.current_thread() else {
+    let Some(cur) = current_thread() else {
         return true;
     };
 
@@ -1409,7 +1436,7 @@ struct SleepCtx {
 extern "C" fn transition_sleep(arg: *mut u8) -> bool {
     let ctx = unsafe { &*(arg as *const SleepCtx) };
     let sched = sched();
-    let Some(cur) = sched.current_thread() else {
+    let Some(cur) = current_thread() else {
         return true;
     };
 
@@ -1627,7 +1654,7 @@ pub static REAPER_TID: AtomicU64 = AtomicU64::new(0);
 /// reaper path. Compiled out in release builds.
 #[inline]
 pub fn current_thread_is_reaper() -> bool {
-    let current = sched().current_thread_id().map(|t| t.0).unwrap_or(0);
+    let current = current_thread_id().map(|t| t.0).unwrap_or(0);
     current != 0 && current == REAPER_TID.load(Ordering::Acquire)
 }
 
@@ -1651,7 +1678,7 @@ fn reaper_queue() -> &'static ArrayQueue<Arc<Thread>> {
 
 extern "C" fn reaper_thread() -> ! {
     loop {
-        sched().thread_park_while(|| reaper_queue().is_empty());
+        thread_park_while(|| reaper_queue().is_empty());
 
         while let Some(t) = reaper_queue().pop() {
             let tid = t.id;

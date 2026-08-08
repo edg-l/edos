@@ -6,6 +6,7 @@ use x86_64::{
     structures::paging::{PageTableFlags, mapper::TranslateResult},
 };
 
+use crate::thread::scheduler::thread_sleep;
 use crate::{
     apic::init::configure_device_interrupt,
     drivers::{
@@ -23,7 +24,6 @@ use crate::{
     interrupts::InterruptIndex,
     log,
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
-    thread::scheduler::sched,
     timer::Instant,
 };
 
@@ -190,7 +190,7 @@ impl AhciController {
             if start.elapsed().as_millis() > 5000 {
                 return Err(AhciError::CommandTimeout);
             }
-            sched().thread_sleep(core::time::Duration::from_millis(1));
+            thread_sleep(core::time::Duration::from_millis(1));
         }
 
         log!("AHCI controller reset complete");
@@ -208,7 +208,7 @@ impl AhciController {
             if start.elapsed().as_millis() > 1000 {
                 return Err(AhciError::CommandTimeout);
             }
-            sched().thread_sleep(core::time::Duration::from_millis(1));
+            thread_sleep(core::time::Duration::from_millis(1));
         }
 
         log!("AHCI enabled with interrupts");
@@ -252,7 +252,7 @@ impl AhciController {
                         if signature == 0xffffffff {
                             let mut attempts = 0;
                             while signature == 0xffffffff && attempts < 5 {
-                                sched().thread_sleep(core::time::Duration::from_millis(5));
+                                thread_sleep(core::time::Duration::from_millis(5));
                                 signature =
                                     unsafe { ptr::read_volatile(&raw const (*port_ptr).sig) };
                                 attempts += 1;
@@ -311,7 +311,7 @@ impl AhciController {
                     log!("Port {}: Timeout waiting for CR to clear", port_idx);
                     return Err(AhciError::CommandTimeout);
                 }
-                sched().thread_sleep(core::time::Duration::from_millis(1));
+                thread_sleep(core::time::Duration::from_millis(1));
             }
 
             // Clear any error conditions
@@ -338,7 +338,7 @@ impl AhciController {
                         log!("Port {}: Device not ready after spin-up", port_idx);
                         return Err(AhciError::InvalidDevice);
                     } else {
-                        sched().thread_sleep(core::time::Duration::from_millis(1));
+                        thread_sleep(core::time::Duration::from_millis(1));
                     }
                 } else {
                     break;

@@ -15,7 +15,7 @@ use crate::{
         vfs,
     },
     syscalls::io::resolve_path,
-    thread::{pipe::FileDescriptor, scheduler::sched},
+    thread::pipe::FileDescriptor,
     util::uaccess::{
         UAccessError, try_copy_from_user, try_copy_string_from_user, try_copy_to_user,
         try_write_user,
@@ -23,6 +23,7 @@ use crate::{
 };
 
 use super::Errno;
+use crate::thread::scheduler::current_thread_info;
 
 const MAX_PATH_LEN: usize = 1024;
 
@@ -136,8 +137,7 @@ pub fn sys_mount(
     path_ptr: *const u8,
     fs_type: *const u8,
 ) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let cwd = info.lock().cwd.lock().clone();
@@ -202,8 +202,7 @@ pub fn sys_mount(
 }
 
 pub fn sys_mkdir(path_ptr: *const u8) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let cwd = info.lock().cwd.lock().clone();
@@ -227,8 +226,7 @@ pub fn sys_mkdir(path_ptr: *const u8) -> i64 {
 }
 
 pub fn sys_rmdir(path_ptr: *const u8) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let cwd = info.lock().cwd.lock().clone();
@@ -252,8 +250,7 @@ pub fn sys_rmdir(path_ptr: *const u8) -> i64 {
 }
 
 pub fn sys_rmdir_all(path_ptr: *const u8) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let cwd = info.lock().cwd.lock().clone();
@@ -277,8 +274,7 @@ pub fn sys_rmdir_all(path_ptr: *const u8) -> i64 {
 }
 
 pub fn sys_unlink(path_ptr: *const u8) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
 
     info.lock().errno = Errno::Clear;
 
@@ -314,8 +310,7 @@ struct SysPartition {
 }
 
 pub fn sys_list_partitions(buffer: *mut u8, size: u64) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if buffer.is_null() {
@@ -358,8 +353,7 @@ pub fn sys_list_partitions(buffer: *mut u8, size: u64) -> i64 {
 }
 
 pub fn sys_list_mounts(buffer_ptr: *mut u8, buffer_size: usize) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if buffer_ptr.is_null() {
@@ -503,8 +497,7 @@ fn file_to_fstat_entry(file: &crate::fs::File) -> FstatEntry {
 }
 
 pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if fstat_buf.is_null() {
@@ -584,8 +577,7 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
 }
 
 pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut FstatEntry) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if fstat_buf.is_null() {
@@ -638,8 +630,7 @@ struct RawStatFs {
 }
 
 pub fn sys_statfs(path_ptr: *const u8, buf: *mut u8, buf_len: usize) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let cwd = info.lock().cwd.lock().clone();

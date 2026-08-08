@@ -5,6 +5,7 @@ use x86_64::{
     structures::paging::{Mapper, Page, PageTableFlags, Size4KiB},
 };
 
+use crate::thread::scheduler::{current_thread, current_thread_info};
 use crate::{
     debug::lock_order::{RANK_MAPPERS, RANK_USER_MM, RANK_VMAS},
     fs::{page_cache::CachedPage, vfs::fs_by_mount_id},
@@ -17,9 +18,7 @@ use crate::{
     },
     println, ranked_lock,
     syscalls::Errno,
-    thread::{
-        UserThread, UserThreadInfo, irqlock::IrqSpinlock, pipe::FileDescriptor, scheduler::sched,
-    },
+    thread::{UserThread, UserThreadInfo, irqlock::IrqSpinlock, pipe::FileDescriptor},
 };
 use spin::RwLock;
 
@@ -105,8 +104,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         "mmap: addr={addr:#x} len={length:#x} ({} KiB) prot={prot_str} {kind}",
         length / 1024
     );
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
 
     info.lock().errno = Errno::Clear;
 
@@ -118,7 +116,7 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
     let is_physical = (flags & MAP_PHYSICAL) != 0;
 
     // Access VmaSet from UserThread
-    let thread = match sched.current_thread() {
+    let thread = match current_thread() {
         Some(t) => t,
         None => {
             info.lock().errno = Errno::EINVAL;
@@ -446,8 +444,7 @@ pub fn flush_shared_vma_pages(
 /// Lock ordering: VmaSet lock is acquired to collect work (Arc<CachedPage> + fs info),
 /// then released before calling flush_page (which does AHCI I/O).
 pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     // MS_ASYNC: no-op for v1; pages are already marked dirty and the writeback
@@ -462,7 +459,7 @@ pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
         return -1;
     }
 
-    let thread = match sched.current_thread() {
+    let thread = match current_thread() {
         Some(t) => t,
         None => {
             info.lock().errno = Errno::EINVAL;
@@ -566,8 +563,7 @@ pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
 
 pub fn sys_munmap(addr: u64, length: u64) -> i32 {
     log!("Unmapping {addr} {length}");
-    let sched = sched();
-    let info = sched.current_thread_info();
+    let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     if length == 0 {
@@ -577,7 +573,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
 
     let map_addr = VirtAddr::new(addr);
 
-    let thread = match sched.current_thread() {
+    let thread = match current_thread() {
         Some(t) => t,
         None => {
             info.lock().errno = Errno::EINVAL;

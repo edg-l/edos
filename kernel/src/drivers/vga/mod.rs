@@ -2,6 +2,7 @@
 
 use alloc::{boxed::Box, vec::Vec};
 
+use crate::thread::scheduler::thread_park;
 use crate::{
     drivers::{
         pci::{pci_manager, structures::PciDevice},
@@ -43,6 +44,6 @@ extern "C" fn vga_thread(device: *mut PciDevice) {
     let controller = VgaController::new(*device).unwrap();
 
     loop {
-        sched().thread_park();
+        thread_park();
     }
 }

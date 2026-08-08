@@ -9,6 +9,7 @@ use super::fragment::ReassemblyTable;
 use super::socket::SocketNotifications;
 use super::tcp::TcpConnection;
 use super::{arp, ethernet, icmp, ipv4, socket, tcp, udp};
+use crate::thread::scheduler::{current_thread, thread_sleep};
 use socket::SocketAddr;
 
 pub static NET_STACK: spin::Once<Mutex<NetStack>> = spin::Once::new();
@@ -524,13 +525,11 @@ impl NetStack {
 /// Kernel thread that periodically checks TCP connections for retransmit timeouts
 /// and cleans up TIME_WAIT / Closed connections.
 pub extern "C" fn tcp_retransmit_main() -> ! {
-    use crate::thread::scheduler::sched;
-
-    let thread = sched().current_thread().unwrap();
+    let thread = current_thread().unwrap();
     thread.set_priority(crate::thread::runqueue::IO_PRIORITY);
 
     loop {
-        sched().thread_sleep(Duration::from_millis(200));
+        thread_sleep(Duration::from_millis(200));
 
         let Some(stack_mutex) = NET_STACK.get() else {
             continue;
