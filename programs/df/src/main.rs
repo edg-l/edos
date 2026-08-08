@@ -3,46 +3,10 @@
 //! Usage: df [path]
 //!   With no args, shows all mounted filesystems.
 
-use std::arch::asm;
+use edos_lib::sys::{SYS_LIST_MOUNTS, SYS_STATFS, syscall2, syscall3};
 use std::env;
 
-const SYS_STATFS: u64 = 254;
-const SYS_LIST_MOUNTS: u64 = 208;
 
-unsafe fn syscall2(num: u64, arg1: u64, arg2: u64) -> u64 {
-    let result: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg1,
-            in("rsi") arg2,
-            lateout("rax") result,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    result
-}
-
-unsafe fn syscall3(num: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
-    let result: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg1,
-            in("rsi") arg2,
-            in("rdx") arg3,
-            lateout("rax") result,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    result
-}
 
 #[repr(C)]
 #[derive(Clone, Copy)]

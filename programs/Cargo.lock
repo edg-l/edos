@@ -29,6 +29,9 @@ version = "0.1.0"
 [[package]]
 name = "df"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "diff"
@@ -209,6 +212,9 @@ dependencies = [
 [[package]]
 name = "mount"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "mv"
@@ -269,6 +275,9 @@ version = "0.1.0"
 [[package]]
 name = "sync"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "tail"
@@ -276,6 +285,10 @@ version = "0.1.0"
 
 [[package]]
 name = "tee"
+version = "0.1.0"
+
+[[package]]
+name = "threadtest"
 version = "0.1.0"
 
 [[package]]

@@ -2,8 +2,8 @@ use std::{fs::File, os::edos::io::FileExt};
 
 // Re-export noto-sans-mono-bitmap types for user programs
 pub use noto_sans_mono_bitmap::{FontWeight, RasterHeight};
+use edos_lib::sys::{SYS_MMAP, syscall5};
 use noto_sans_mono_bitmap::{get_raster, get_raster_width};
-use std::arch::asm;
 use std::fmt;
 
 /// Graphics operation error type
@@ -50,33 +50,12 @@ const FB_IOCTL_FLIP_RECT: u64 = 0x4642_0009;
 const FB_IOCTL_SET_CURSOR: u64 = 0x4642_0007;
 const FB_IOCTL_MOVE_CURSOR: u64 = 0x4642_0008;
 
-const SYS_MMAP: u64 = 9;
 const PROT_READ: u32 = 0x1;
 const PROT_WRITE: u32 = 0x2;
 const MAP_PRIVATE: u32 = 0x02;
 const MAP_PHYSICAL: u32 = 0x40;
 const MAP_WRITE_COMBINING: u32 = 0x80;
 
-#[inline(always)]
-unsafe fn syscall5(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            in("r10") a4,
-            in("r8") a5,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

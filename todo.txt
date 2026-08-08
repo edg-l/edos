@@ -17,16 +17,18 @@
 
 - direct copy and rename file
 
-- std fork: OpenOptions read/write/truncate/create_new were no-op stubs, so
-  every file opened read-only from the kernel's point of view and
-  mmap(MAP_SHARED, PROT_WRITE) was refused with EACCES. FIXED locally in
-  ~/dev/rust (library/std/src/sys/fs/edos.rs): the access mode now goes in
-  the low two bits and truncate sets 0x200. mmaptest goes from failing at
-  test 3 to all 10 passing on both /var and /tmp. NOT YET PUSHED to the
-  fork, and edos_rt still lacks RDONLY/WRONLY/RDWR/TRUNCATE constants, so
-  std spells the values out itself.
+- edos_lib duplicates edos_rt's syscall wrappers and SYS_* constants. Since
+  edos_rt 0.0.37 dropped no_mangle from them, a program can depend on the
+  crate directly, so the two lists could become one. Reconciling two sets of
+  syscall numbers is where a silent wrong-number bug would come from, so it
+  wants doing deliberately rather than as a drive-by.
 
-- std fork: decode_error_kind (sys/pal/edos/common.rs) maps only EACCES,
-  EEXIST, EINVAL, ENOENT, EPERM. Everything else shows as "uncategorized
-  error". Worth covering ENOTDIR, EISDIR, EIO, ENOSPC, EROFS, EPIPE,
-  EAGAIN, EINTR at least.
+- mkdir on an existing directory reports EIO, so std shows "other error" where
+  it should be AlreadyExists. The kernel's From<FsError> for Errno has no
+  EEXIST source: fs::Error has no AlreadyExists variant, so create_file and
+  mkdir cannot distinguish it. Now visible because userspace keeps the errno.
+
+- SYS_OPEN takes a NUL-terminated path while SYS_STAT takes pointer+length,
+  so edos_rt allocates a CString for every open. Settling on pointer+length
+  everywhere removes that allocation but changes the kernel ABI and every
+  caller.

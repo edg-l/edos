@@ -186,9 +186,9 @@
   is safe). VmaSet::split_at + remove_range enable partial munmap.
   Truncate walks a per-inode mappers reverse-map and unmaps invalidated
   PTEs across every live mapper process with per-process TLB shootdown.
-  Past-EOF access kills the faulting thread (code 11). sys_msync (SYS=34)
-  and edos_rt 0.0.35 (READ_ONLY/WRITE_ONLY/READ_WRITE OpenFlags wired
-  through the Rust std's OpenOptions.read/write). 7-test userspace
+  Past-EOF access kills the faulting thread (code 11). sys_msync (SYS=34),
+  and OpenOptions.read/write carry the access mode in the low two bits of
+  the open flags. 7-test userspace
   mmaptest (MAP_PRIVATE read, COW write, MAP_SHARED + msync, two-mapper
   visibility, past-EOF kill in forked child, truncate invalidation kill,
   fsync+msync round-trip) all pass on EFS. FAT32 / memfs return EINVAL
@@ -605,7 +605,7 @@ own workstream:
   not block, this one says guards must not be live where a thread can
   die.
 
-### Userspace allocator fragments without bound (2026-08-08)
+### Userspace allocator fragments without bound (FIXED, edos_rt 0.0.36)
 
 Presents as "edos-wm leaks heap": on a fully idle desktop the WM grows
 its heap by 64 KiB every 9.2 seconds, metronomically, and never gives
@@ -633,15 +633,28 @@ Any long-running program is affected; the WM is merely the busiest
 allocator. It is the same reason the VA cursor advanced ~940 MB per
 9.2s: every chunk was a fresh mapping.
 
-**Fixing this is not a change to this repo.** `edos_rt` is a separate
-crate published to crates.io and consumed through the Rust fork, so the
-loop is: patch, bump, publish, update `library/std/Cargo.toml` in the
-fork, rebuild the toolchain, rebuild programs. Publishing is
-irreversible, so it needs a deliberate decision rather than a drive-by.
+**The fix was not a change to this repo.** `edos_rt` is a separate crate
+published to crates.io and consumed through the Rust fork, so the loop
+was: patch, bump, publish, update `library/std/Cargo.toml` in the fork,
+rebuild the toolchain, rebuild programs.
 
-Minimum viable fix: keep the free list address-ordered and merge
-adjacent blocks on insert; record the true block size in the header so
-`dealloc` returns everything it was given.
+Fixed in `edos_rt` 0.0.36. The free list is address-ordered and a
+returned block absorbs whichever neighbours it touches; a merge cannot
+join two chunks, because each chunk's usable region is preceded by the
+chunk header inside the same mapping. Spans are rounded up to a
+`FreeBlock` and to 8 bytes, so nothing untrackable is produced and
+adjacent spans touch exactly. Chunks reserve the exact span and the
+header records that span, so padding and tails come back on free.
+
+Fragmentation also made allocation quadratic, since first fit walked an
+ever-growing list. `bench/allocstress` in the `edos_rt` repo compiles the
+allocator against a shimmed `mmap` on the host and asserts the pool
+plateaus: a 200-allocation working set that mapped 22 MB in 41s over 200k
+cycles now holds a flat 128 KiB in 21ms, unchanged at 2M cycles.
+
+The std fork pin was ten releases behind (0.0.26), so this also brought
+`msync`, file-backed `mmap` and the `OpenFlags` access-mode constants
+into std for the first time.
 
 ### User virtual address space is never reused (2026-08-08)
 
@@ -862,8 +875,7 @@ Shipped this session, all verified on hardware unless noted:
 - **`OpenOptions` actually opens files for writing.** `read`, `write`,
   `truncate` and `create_new` were no-op stubs in the std fork, so every
   file opened read-only as far as the kernel was concerned. mmaptest went
-  from failing at test 3 to all 10 passing on `/var` and `/tmp`. Fixed in
-  the fork working tree, not yet pushed.
+  from failing at test 3 to all 10 passing on `/var` and `/tmp`.
 - `sha256sum` and `file` (Phase 3 userspace).
 
 - **The window-registry hang is root-caused and fixed.** The holder was
@@ -888,12 +900,36 @@ Shipped this session, all verified on hardware unless noted:
   evict kthread exists for. mmaptest's unlink-while-mapped test
   panicked the kernel on trunk; now 10/10 on /var and /tmp.
 
+- **The userspace allocator no longer fragments without bound.** The WM's
+  metronomic 64 KiB-per-9.2s heap growth was `edos_rt`'s `PoolAllocator`
+  never coalescing. Fixed in 0.0.36 (details above), which also carried
+  the std fork's pin forward ten releases from 0.0.26.
+- **`edos_rt` 0.0.37: the rest of the runtime.** Reading the crate after
+  the allocator fix turned up more than the fragmentation did. The
+  syscall wrappers were `no_mangle extern "C"`, so every syscall paid an
+  out-of-line call plus a shuffle from the C argument registers into the
+  kernel's, and the exported symbols were what forced `edos_lib` and four
+  programs to hand-roll their own copies; they are inline Rust functions
+  now, which is sound because the kernel's entry stub restores every
+  argument register. `thread_join` asked for a non-blocking `waitpid` and
+  slept 1 ms in a loop, so every `JoinHandle::join` polled at 1 kHz.
+  `getrandom` returned a count that std's `fill_bytes` discarded, so a
+  short read left the tail of the buffer holding whatever was there
+  before. `IoError` folded every errno but three into `Unknown`, which is
+  why errors displayed as "uncategorized" no matter what
+  `decode_error_kind` mapped. The allocator now unmaps idle chunks
+  instead of only plateauing, honours alignment above a page on large
+  allocations (`mmap` alone returned them 4 KiB out), caches freed large
+  mappings within a 4 MiB bound, and uses the futex mutex rather than a
+  spin lock that a preempted holder turned into the userspace version of
+  the kernel starvation bug.
+
 Open, roughly in priority order:
 
-1. **Userspace allocator fragments without bound** (above). Cross-repo:
-   needs an `edos_rt` release.
-2. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
+1. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
    validation on the storage path.
+2. **`decode_error_kind` in the std fork maps only five errnos**, so
+   everything else displays as "uncategorized error".
 
 Then, by fun-per-effort:
 

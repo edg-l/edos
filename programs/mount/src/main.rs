@@ -4,49 +4,11 @@
 //!   mount                                    # list current mounts
 //!   mount <device_id> <partition_idx> <path> <fstype>  # mount a partition
 
-use std::arch::asm;
+use edos_lib::sys::{SYS_LIST_MOUNTS, SYS_LIST_PARTITIONS, SYS_MOUNT, syscall2, syscall4};
 use std::env;
 use std::process;
 
-const SYS_MOUNT: u64 = 202;
-const SYS_LIST_PARTITIONS: u64 = 203;
-const SYS_LIST_MOUNTS: u64 = 208;
 
-unsafe fn syscall2(num: u64, arg1: u64, arg2: u64) -> u64 {
-    let result: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg1,
-            in("rsi") arg2,
-            lateout("rax") result,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    result
-}
-
-unsafe fn syscall4(num: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
-    let result: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg1,
-            in("rsi") arg2,
-            in("rdx") arg3,
-            in("r10") arg4,
-            lateout("rax") result,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    result
-}
 
 fn list_mounts() {
     let mut buf = vec![0u8; 4096];

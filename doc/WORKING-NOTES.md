@@ -144,28 +144,93 @@ IRQ-reachable locks that correctly use `IrqSpinlock`.
 
 ---
 
-## Cross-repo, deliberately not done
+## Cross-repo state
 
-Both need a decision rather than a drive-by, because they leave this repo.
+The userspace allocator and the std fork both live outside this repo, and both
+are now current. Two traps to know before you touch either again.
 
-1. **The userspace allocator fragments without bound.** This is what looked like
-   an `edos-wm` heap leak: 64 KiB every 9.2s forever on an idle desktop. It is
-   `edos_rt`'s `PoolAllocator`, which never coalesces adjacent free blocks, drops
-   blocks smaller than `FreeBlock`, and loses the tail of exactly-fitting blocks.
-   Growth tracks allocation *rate*, not retention, which is why the period is so
-   exact. Every long-running program is affected. Fixing it means publishing to
-   crates.io, which is irreversible.
-2. **The std fork fix above is committed but unpushed** (`b7af81795f6` on
-   `edos_std_v2`). Push it, or the next person who rebuilds the toolchain from
-   a fresh clone loses the fix and mmaptest regresses to failing at test 3.
-   `edos_rt` still has no `RDONLY`/`WRONLY`/`RDWR`/`TRUNCATE` constants, so std
-   spells the values out itself; moving them into `edos_rt` is cleaner and needs
-   a release.
+**The `edos_rt` clone can be behind crates.io.** 0.0.34 and 0.0.35 were
+published from a tree that never landed in `github.com/edg-l/edos_rt`, so the
+repo was two releases behind and a patch on top of it would have silently
+reverted file-backed `mmap`, `msync` and the `OpenFlags` access-mode constants.
+Diff the clone against the published crate before editing:
 
-Also open, lower priority: `decode_error_kind` in the std fork maps only five
-errnos, so everything else displays as "uncategorized error", and the AHCI
-watchdog `restarting` gate, which is a latency issue rather than a lost I/O and
-should land with runtime validation because it touches the storage submit path.
+```bash
+curl -sL -o /tmp/rt.crate https://crates.io/api/v1/crates/edos_rt/<max_version>/download
+mkdir -p /tmp/rt && tar xzf /tmp/rt.crate -C /tmp/rt --strip-components=1
+diff -ru /tmp/rt/src ~/dev/edos_rt/src
+```
+
+**The std fork's pin is the version that actually runs.** `library/std/Cargo.toml`
+sat at `edos_rt = "0.0.26"` for ten releases while the crate moved on, and a
+`0.0.z` requirement is exact, so none of that work reached any program. It is now
+0.0.36. The full loop for an allocator or syscall-wrapper change is: patch
+`edos_rt`, bump, `cargo publish`, bump the pin, `cargo +nightly update
+--manifest-path library/Cargo.toml -p edos_rt`, `./x install` in `~/dev/rust`
+(prefix `~/dev/edos-toolchain`, linked as the `edos` toolchain), then
+`make programs`.
+
+`PoolAllocator` fragmentation is fixed in 0.0.36: the free list is
+address-ordered and coalescing, and the header records the whole reserved span
+rather than the requested size. 0.0.37 then released idle chunks back to the
+system, gave large allocations a header so alignment above a page is honoured,
+and added a bounded cache of freed large mappings. `bench/allocstress` in the
+`edos_rt` repo is the regression check; it compiles the allocator against a
+shimmed `mmap` on the host and fails if the pool does not plateau, if freeing
+everything does not hand the memory back, or if an over-aligned large request
+comes back misaligned.
+
+0.0.37 also carries the runtime fixes that came out of reading the rest of the
+crate: the syscall wrappers are inlinable Rust-ABI functions instead of
+`no_mangle extern "C"`, `thread_join` blocks in the kernel rather than polling
+at 1 kHz, `getrandom` fills the whole buffer instead of returning a count std
+discarded, `IoError` is the `Errno` itself so a caller can tell a missing path
+from a full disk, and `Mutex` only enters the kernel when a waiter is actually
+parked. `decode_error_kind` in the fork covers every `Errno` now, which was only
+possible once the errno stopped being folded away below it.
+
+Also open, lower priority: the AHCI watchdog `restarting` gate, which is a
+latency issue rather than a lost I/O and should land with runtime validation
+because it touches the storage submit path.
+
+---
+
+## Open bug: a syscall can run with a kthread as the per-CPU current thread
+
+`bin/threadtest` panicked the kernel once in roughly eight runs with
+
+```
+KERNEL PANIC: current_thread_info: no UserThreadInfo for tid 3
+  src/thread/scheduler.rs:1162
+```
+
+on `cpu-2`, while a kernel thread was current. `tid 3` is a kthread, and kthreads
+have no `UserThreadInfo`, so the lookup fails. What makes it interesting is that
+**every** caller of `current_thread_info()` is in `kernel/src/syscalls/`, so a
+syscall handler was running while this CPU's current thread was a kthread. The
+usual shape is
+
+```rust
+let sched = sched();                     // scheduler for whichever CPU we are on
+let info = sched.current_thread_info();  // ...re-derived from that CPU
+```
+
+A syscall runs with interrupts enabled (the entry stub does `sti`), so it can be
+preempted and resume on another CPU between those two lines, at which point the
+identity is read from the wrong CPU. The likely real fix is to stop re-deriving
+the caller: resolve `UserThreadInfo` once at syscall entry and pass it down,
+rather than asking "who is running here" repeatedly.
+
+Why it surfaced now: no program used `std::thread` before, so userspace never
+had several runnable threads competing across four CPUs. `threadtest` exists to
+keep exercising that. It is intermittent; six consecutive runs after the first
+sighting were all clean, so reproducing it wants a loop, `run-big`, or the
+`trace` feature (which dumps per-CPU trace buffers on panic).
+
+Not caused by `edos_rt` moving `thread_join` onto the blocking `waitpid`: the
+shell has always waited on children with `block = 1` through the same waiter
+machinery, and the no-join variant (`threadtest nojoin`) also survives, so the
+trigger is having many short-lived threads, not the join.
 
 ---
 

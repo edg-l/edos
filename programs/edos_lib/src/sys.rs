@@ -40,6 +40,11 @@ pub const SYS_RECVFROM: u64 = 246;
 pub const SYS_PING: u64 = 249;
 pub const SYS_NETINFO: u64 = 250;
 pub const SYS_FORK: u64 = 255;
+pub const SYS_SYNC: u64 = 162;
+pub const SYS_MOUNT: u64 = 202;
+pub const SYS_LIST_PARTITIONS: u64 = 203;
+pub const SYS_LIST_MOUNTS: u64 = 208;
+pub const SYS_STATFS: u64 = 254;
 
 pub const AF_INET: u32 = 2;
 pub const SOCK_STREAM: u32 = 1;
