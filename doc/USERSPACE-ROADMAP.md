@@ -51,7 +51,7 @@ scripts, text, empty files and directories.
 
 | Program | Why it matters | Kernel gap |
 |---|---|---|
-| TCP echo server | validates the TCP state machine from userspace | **blocked**: no connection can be established at all, see `bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md` |
+| TCP echo server | validates the TCP state machine from userspace | none; the client side works now (`tcptest`), the listen/accept path is untested |
 | `netstat` | listening and established sockets | needs a read path into `net/tcp.rs` `CONNECTIONS`, as `SYS_NETSTAT` or `/proc/net/tcp` |
 | BMP image viewer | a real GUI app over window syscalls and shared memory | none; exercises the compositor |
 | `nproc` | CPU count | needs `SYS_NPROC` or `/proc/cpuinfo` |

@@ -1003,29 +1003,35 @@ Shipped this session, all verified on hardware unless noted:
   orphans somewhere to go. Killing the WM restarts it and the desktop
   survives.
 
+- **TCP works.** `WaitQueue::wait_until_timeout` slept once and returned
+  on any wake, so connect's five-second wait for Established ended in
+  microseconds, tore the connection down, and RST'd the SYN-ACK that
+  arrived just after. No connection had ever been established. The timed
+  wait honours its deadline now, and sys_read's socket paths loop on
+  their own condition instead of reporting EOF on an empty buffer.
+  Verified with a 270 KB HTTP response; ping also stopped losing its
+  first packet. The RFC 6298 RTO from earlier is finally exercised.
+
 Open, roughly in priority order. Items marked [audit] come from
 doc/AUDIT.md, which has the file:line detail and the reasoning.
 
 Correctness first, because these are wrong rather than merely missing:
 
-1. **TCP cannot establish a connection.** [found by tcptest] The guest
-   answers the peer's SYN-ACK with an RST; the connection lookup misses
-   although the keys match. Predates this session and blocks every TCP
-   feature, including verifying the new RTO. The evidence gathered so
-   far, and the first thing to rule out, are in
-   doc/bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md.
-2. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
+1. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
    validation on the storage path.
 
 Then the interface gaps that actually block programs:
 
-3. **`symlink`/`readlink`, `access`, `truncate`, `utimensat`,
+2. **`symlink`/`readlink`, `access`, `truncate`, `utimensat`,
    `nanosleep`, `sigprocmask`, the `*at` family, streaming
    `getdents`.** [audit] The remaining gaps from the audit's table, none
    of which block a program that exists today.
-4. **`std::net::TcpStream` in the std fork** is unimplemented, so `http`
-   and `wget` cannot work even once the kernel bug above is fixed.
-   `edos_lib::net` is the working path; `tcptest` shows the shape.
+3. **`std::net::TcpStream` in the std fork** is unimplemented, so `http`
+   and `wget` still cannot work even though the kernel side does now.
+   `edos_lib::net` is the working path; `tcptest` shows the shape, and
+   porting `http`/`wget` onto it is a small job.
+4. **No shutdown or reboot syscall**, so every stop is a power cut and
+   the journal replays on the next boot. init is the natural owner now.
 
 Then hygiene and quality:
 

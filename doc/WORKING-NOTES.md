@@ -743,6 +743,40 @@ otherwise, and run `make test` — the failure was a timeout, not a panic.
 
 ---
 
+## TCP works now, and the bug was in the waitqueue
+
+`WaitQueue::wait_until_timeout` slept once and returned on any wake, without
+re-checking the predicate or the deadline. Since a wake token left by an earlier
+wait aborts the next sleep, `sys_connect` — which waits for ARP and then for
+Established, back to back — had its second wait return in microseconds, decided
+it had timed out, removed the connection and returned ECONNREFUSED. The SYN-ACK
+landed 0.2 ms later, matched nothing, and got an RST. **No TCP connection had
+ever been established in this kernel.**
+
+`sys_read`'s socket paths had the same bug at the call site: one `wait_until`,
+then treat an empty buffer as EOF, so every read returned 0 bytes.
+
+Both fixed; `doc/bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md` has the
+detail. Verified with `tcptest` against a host HTTP server: a 270367-byte
+response arrives intact, which finally exercises the RFC 6298 retransmit work.
+`ping` also stopped losing its first packet to the same spurious ARP timeout.
+
+**Two things to carry forward:**
+
+- **Do not make the untimed arm of `wait_internal` loop.** It looks like the
+  obvious symmetry and it stalls the boot: a caller whose predicate only becomes
+  true through work that same thread has yet to do never returns. Two of three
+  services failed to start. This has now looked correct twice.
+- **When a container appears to lose an entry, instrument every mutation before
+  theorising about the memory model.** The first investigation produced a
+  genuinely alarming table — same address, coherent neighbouring atomic,
+  `len=1` in one thread and `len=0` in another — and every observation in it was
+  accurate. What was missing was a trace on connect's own `remove`. A reader
+  that disagrees with a writer is far more likely to be a third writer you have
+  not looked at.
+
+---
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any

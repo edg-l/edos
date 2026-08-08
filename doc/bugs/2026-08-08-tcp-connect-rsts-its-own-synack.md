@@ -2,20 +2,12 @@
 
 ## Status
 
-**OPEN.** Not fixed, and not caused by any change in this session: a build
-from `3289aa4` (before the session's work) fails identically at the packet
-level. Reproducer landed as `programs/tcptest`.
-
-Nothing in the tree depended on this working, which is why it went unnoticed:
-`http` and `wget` use `std::net::TcpStream`, which the std fork does not
-implement ("operation not supported on this platform"), so no program has ever
-completed a TCP connection. `ping` (SYS_PING) and DNS (UDP) are unaffected and
-work.
+**FIXED** in `b87ca1b`. Reproducer kept as `programs/tcptest`.
 
 ## Symptoms
 
-A connect through the socket syscalls reaches SynSent, the peer answers, and
-the guest resets the connection immediately:
+A connect through the socket syscalls reached SynSent, the peer answered, and
+the guest reset the connection immediately:
 
 ```
 10.0.2.15.49152 > 10.0.2.2.8088: Flags [S],  seq 3838609347
@@ -23,66 +15,74 @@ the guest resets the connection immediately:
 10.0.2.15.49152 > 10.0.2.2.8088: Flags [R.]
 ```
 
-Userspace sees `connect` fail after the 5 s timeout with ECONNREFUSED. The
-serial log shows `tcp <peer> Closed -> SynSent`, an ARP request and reply, and
-then nothing further for that connection.
+Userspace saw `connect` fail with ECONNREFUSED. No TCP connection had ever been
+established in this kernel; it went unnoticed because `http` and `wget` use
+`std::net::TcpStream`, which the std fork does not implement, so nothing had
+ever tried.
 
-Reproduce with a listener on the host and:
+## Root cause
 
-```bash
-python3 -m http.server 8088 &          # on the host
-tcptest 10.0.2.2 8088 /                # in the guest
+`WaitQueue::wait_until_timeout` slept **once** and returned on any wake:
+
+```rust
+SleepAction::Sleep(dt) => {
+    thread_sleep(dt);   // no loop, no predicate re-check, no deadline check
+}
 ```
 
-## What is established
+`thread_sleep` returns early when the thread is woken, including by a
+wake-pending token left by an earlier wait. `sys_connect` waits twice in a row —
+first for the ARP reply, then for the connection to reach Established — so the
+ARP wake left a token that aborted the second sleep in microseconds. Connect
+found the state was still SynSent, treated that as its five-second timeout
+expiring, removed the connection from `tcp_connections`, and returned
+ECONNREFUSED. The SYN-ACK arrived 0.2 ms later, found no matching connection,
+and got the RST that `handle_tcp` sends for unknown segments.
 
-The RST comes from the "no connection found" arm of `NetStack::handle_tcp`
-(`net/stack.rs`), so the lookup `tcp_connections.get(&(local, remote))` misses.
-The keys are not the problem: instrumenting both sides showed byte-identical
-`local`/`remote` (10.0.2.15:49152 / 10.0.2.2:8088) on the insert in
-`sys_connect` and on the lookup in the receive path.
+The same mistake existed at a call site: `sys_read`'s socket paths called
+`wait_until` once and then treated an empty receive buffer as EOF, so every TCP
+read returned 0 bytes even after the connection was fixed.
 
-What the instrumentation actually showed is stranger, and is where the next
-session should start:
+This is the contract in
+[`2026-04-13-sched-park-wake-missed-wakeup.md`](2026-04-13-sched-park-wake-missed-wakeup.md):
+a park or sleep may return before its condition holds, so the condition must be
+looped on. `wait_until_timeout` was the one primitive that did not.
 
-| Observation | Value |
-|---|---|
-| `&NET_STACK` in both contexts | `0xffffffff801a2ad0` — identical |
-| `&stack.tcp_connections` in both contexts | `0xffffffff801a0bc8` — identical |
-| A plain `static AtomicU64` written in the user thread, read in the kthread | coherent |
-| An `AtomicU64` **field of `NetStack`**, written in the user thread, read in the kthread | coherent |
-| `tcp_connections.len()` right after insert, user thread (`/bin/tcptest`) | **1** |
-| `tcp_connections.len()` ~0.3 ms later, e1000e kthread, same CPU | **0** |
+## Fix
 
-So two contexts read different values from one address, while an atomic a few
-bytes away in the same struct stays coherent. Nothing removes entries in that
-window: the only remover is the sweep in `tcp_retransmit_main`, which was
-instrumented and logged no removals, and which only drops `Closed`/`TimeWait`.
+The timed arm loops until the predicate holds or the deadline has genuinely
+passed. `sys_read`'s TCP and UDP paths loop on their own condition.
 
-That combination is not explained by page-table divergence (the process PML4
-shares kernel-half entries with the kernel table, and the adjacent atomic is
-coherent), so the likely candidates are, in order:
+**The untimed arm was deliberately left parking once.** Making it loop as well
+looked symmetrical and stalled the boot: a caller whose predicate only becomes
+true through work that same thread has yet to do never returns. Two of three
+services failed to start. If you are tempted by that change, this is the second
+time it will have looked correct.
 
-1. **The logging is lying about ordering or values.** `log!` pushes to a queue
-   drained by a kthread; confirm it formats eagerly at the call site before
-   trusting any of the table above. This is the cheapest thing to rule out and
-   would invalidate the rest.
-2. A genuine miss with a subtler cause — e.g. the receive path running against
-   the map before the insert is visible, with the timestamps misleading.
-3. Real memory corruption localized to the BTreeMap's inline `length`/`root`.
+## Why the first investigation went wrong
 
-## If this reappears
+The original writeup recorded that the connection map read `len=1` in the
+connecting thread and `len=0` in the e1000e kthread microseconds later, at the
+same address, with an atomic in the same struct staying coherent — and reasoned
+towards memory corruption or page-table divergence.
 
-- Capture packets first; `-object filter-dump,id=dump0,netdev=net0,file=…`
-  added to the `scripts/edos-vm` QEMU line, then `tcpdump -nr`. A guest RST in
-  response to a SYN-ACK is this bug.
-- Distinguish from "no route/ARP": those show no SYN on the wire at all.
-- Distinguish from the retransmit path: `check_retransmit` runs from
-  `tcp-retransmit` every 200 ms and would show resends in the capture.
+Every one of those observations was accurate. The error was in what was *not*
+instrumented: the `remove` in connect's own failure path. Tracing every mutation
+of `tcp_connections` produced the answer in one run:
 
-## Related
+```
+12.344720  connect-insert       len=1
+12.345300  connect-fail-remove  len=0
+12.345528  rx SYN-ACK           len=0   -> RST
+```
 
-The retransmit timeout was rebuilt on RFC 6298 in `225f372`, which is correct
-by inspection but **cannot be exercised end to end until this is fixed**, since
-no connection reaches Established. The server path (`listen`/`accept`) was not
-tested and may or may not share the fault.
+The lesson is narrow and worth keeping: when a container appears to lose an
+entry, instrument **every mutation** before theorising about the memory model.
+A reader that disagrees with a writer is far more likely to be a third writer
+you have not looked at.
+
+## Verified
+
+`tcptest` against a host HTTP server: 214-byte and 270367-byte responses
+received intact, the latter spanning many segments. `ping` also recovers its
+first packet, which the same spurious ARP timeout had been losing.
