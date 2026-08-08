@@ -8,7 +8,7 @@ use crate::{
     window::{
         WindowEvent,
         input::{get_or_create_event_queue, poll_events, remove_event_queue},
-        registry::{WINDOW_REGISTRY, WindowId, property},
+        registry::{ReadSite, WINDOW_REGISTRY, WindowId, property, read_tracked},
     },
 };
 
@@ -202,7 +202,7 @@ pub fn sys_window_get(window_id: WindowId, prop: u64) -> u64 {
     let info = sched.current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let registry = WINDOW_REGISTRY.read();
+    let registry = read_tracked(ReadSite::SysWindowGet);
 
     if let Some(window) = registry.get_window(window_id) {
         match prop {
@@ -247,7 +247,7 @@ pub fn sys_window_poll(window_id: WindowId, events_ptr: *mut WindowEvent, max: u
 
     // Check ownership
     {
-        let registry = WINDOW_REGISTRY.read();
+        let registry = read_tracked(ReadSite::SysWindowPoll);
         if let Some(window) = registry.get_window(window_id) {
             if window.pid != pid {
                 info.lock().errno = Errno::EPERM;
@@ -317,7 +317,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
     // while holding this spin lock leaves every other CPU spinning on it for
     // the duration of the I/O.
     let (entries, total_count) = {
-        let registry = WINDOW_REGISTRY.read();
+        let registry = read_tracked(ReadSite::SysWindowList);
         let windows = registry.visible_windows_sorted();
         let total_count = windows.len();
 
@@ -435,7 +435,7 @@ pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent)
     // NOTE: no ownership check -- the WM and taskbar send events to windows they
     // don't own. Requires a WM privilege system to restrict properly (see M4).
     {
-        let registry = WINDOW_REGISTRY.read();
+        let registry = read_tracked(ReadSite::SysWindowSendEvent);
         if registry.get_window(window_id).is_none() {
             info.lock().errno = Errno::ENOENT;
             return !0u64;

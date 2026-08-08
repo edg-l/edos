@@ -15,6 +15,10 @@ lock-order-self-test = []
 ## EXPECTED to panic, halting the machine. Run in isolation with
 ## `make run-single`. Halts the machine by design.
 lock-order-self-test-inversion = []
+## Records the tid and call site of every live WINDOW_REGISTRY reader in
+## `WINDOW_REGISTRY_READERS`, so a reader that parks without releasing can be
+## named from outside the guest. Silent: no logging, no allocation.
+window-lock-debug = []
 
 [dependencies]
 limine = "0.6"

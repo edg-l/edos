@@ -266,3 +266,120 @@ impl WindowRegistry {
 
 /// Global window registry instance.
 pub static WINDOW_REGISTRY: RwLock<WindowRegistry> = RwLock::new(WindowRegistry::new());
+
+/// Identifies a `read_tracked` call site in the reader table.
+///
+/// Values are stable so an external debugger can decode a stuck slot without
+/// consulting the source; append rather than renumber.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub enum ReadSite {
+    CleanupProcessWindows = 1,
+    HandleMouseEvent = 2,
+    HandleKeyboardEvent = 3,
+    SysWindowGet = 4,
+    SysWindowPoll = 5,
+    SysWindowList = 6,
+    SysWindowSendEvent = 7,
+}
+
+/// Forensic table of live readers of `WINDOW_REGISTRY`.
+///
+/// A reader that parks without releasing leaves its slot occupied forever,
+/// which is exactly the state that wedges every writer. Reading this table from
+/// outside the guest names the thread:
+///
+/// ```text
+/// nm -C kernel | grep WINDOW_REGISTRY_READERS
+/// scripts/edos-vm qmp human-monitor-command '{"command-line":"x /8gx <addr>"}'
+/// ```
+///
+/// Each non-zero entry decodes as `(tid << 8) | site`.
+///
+/// Deliberately silent: no logging, no allocation, no serial output, because
+/// the paths involved run at compositor frame rate. Off by default so the same
+/// build can be run with and without it; instrumentation perturbs timing, and a
+/// race that only appears in one configuration is itself a finding.
+#[cfg(feature = "window-lock-debug")]
+pub static WINDOW_REGISTRY_READERS: [AtomicU64; READER_SLOTS] =
+    [const { AtomicU64::new(0) }; READER_SLOTS];
+
+/// Number of concurrent readers the table can name. Beyond this, acquisitions
+/// still succeed but go unrecorded and bump `WINDOW_REGISTRY_READER_OVERFLOW`.
+#[cfg(feature = "window-lock-debug")]
+pub const READER_SLOTS: usize = 8;
+
+/// Count of acquisitions that found no free slot.
+#[cfg(feature = "window-lock-debug")]
+pub static WINDOW_REGISTRY_READER_OVERFLOW: AtomicU64 = AtomicU64::new(0);
+
+/// Total tracked acquisitions since boot.
+///
+/// Live slots are held for microseconds, so sampling the table from outside
+/// almost never catches one. This counter is the positive control: if it is
+/// advancing, the table is being maintained and an all-zero table means "no
+/// reader is stuck", not "instrumentation is broken".
+#[cfg(feature = "window-lock-debug")]
+pub static WINDOW_REGISTRY_READER_ACQUIRES: AtomicU64 = AtomicU64::new(0);
+
+/// A read guard that records its holder while live.
+pub struct TrackedReadGuard<'a> {
+    guard: spin::RwLockReadGuard<'a, WindowRegistry>,
+    #[cfg(feature = "window-lock-debug")]
+    slot: Option<usize>,
+}
+
+impl core::ops::Deref for TrackedReadGuard<'_> {
+    type Target = WindowRegistry;
+
+    fn deref(&self) -> &WindowRegistry {
+        &self.guard
+    }
+}
+
+#[cfg(feature = "window-lock-debug")]
+impl Drop for TrackedReadGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot {
+            WINDOW_REGISTRY_READERS[slot].store(0, Ordering::Release);
+        }
+    }
+}
+
+/// Acquire `WINDOW_REGISTRY` for reading, recording the holder.
+///
+/// Without the `window-lock-debug` feature this is exactly `.read()`.
+pub fn read_tracked(site: ReadSite) -> TrackedReadGuard<'static> {
+    let guard = WINDOW_REGISTRY.read();
+
+    #[cfg(feature = "window-lock-debug")]
+    {
+        let tid = crate::thread::scheduler::try_sched()
+            .and_then(|s| s.current_thread_id())
+            .map_or(0, |t| t.0);
+        let tag = (tid << 8) | site as u64;
+
+        WINDOW_REGISTRY_READER_ACQUIRES.fetch_add(1, Ordering::Relaxed);
+
+        let mut slot = None;
+        for (i, entry) in WINDOW_REGISTRY_READERS.iter().enumerate() {
+            if entry
+                .compare_exchange(0, tag, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                slot = Some(i);
+                break;
+            }
+        }
+        if slot.is_none() {
+            WINDOW_REGISTRY_READER_OVERFLOW.fetch_add(1, Ordering::Relaxed);
+        }
+        return TrackedReadGuard { guard, slot };
+    }
+
+    #[cfg(not(feature = "window-lock-debug"))]
+    {
+        let _ = site;
+        TrackedReadGuard { guard }
+    }
+}

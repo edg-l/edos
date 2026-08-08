@@ -20,7 +20,7 @@ pub fn cleanup_process_windows(pid: u64) {
     // Get window IDs then destroy windows first, so the input thread can't
     // send events to windows whose queues we're about to remove.
     let window_ids: alloc::vec::Vec<WindowId> = {
-        let registry = registry::WINDOW_REGISTRY.read();
+        let registry = registry::read_tracked(registry::ReadSite::CleanupProcessWindows);
         registry.windows_for_pid(pid)
     };
 

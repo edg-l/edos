@@ -14,7 +14,7 @@ use crate::{
     thread::{broadcast::Subscriber, scheduler::sched, util::queue_spawn_kthread_named},
 };
 
-use super::registry::{WINDOW_REGISTRY, WindowId, decoration, flags};
+use super::registry::{ReadSite, WINDOW_REGISTRY, WindowId, decoration, flags, read_tracked};
 
 /// Maximum number of queued events per window.
 const EVENT_QUEUE_SIZE: usize = 256;
@@ -297,7 +297,7 @@ extern "C" fn input_routing_thread() -> ! {
 
 /// Handle a mouse event and route to appropriate window.
 fn handle_mouse_event(event: MouseEvent) {
-    let registry = WINDOW_REGISTRY.read();
+    let registry = read_tracked(ReadSite::HandleMouseEvent);
 
     // Find window whose CLIENT area contains the cursor (for event routing)
     let window_under_cursor = registry.window_at_client(event.x, event.y);
@@ -410,7 +410,7 @@ fn handle_mouse_event(event: MouseEvent) {
 
 /// Handle a raw key event (press/release) and route to focused window.
 fn handle_keyboard_event(event: KeyEvent) {
-    let registry = WINDOW_REGISTRY.read();
+    let registry = read_tracked(ReadSite::HandleKeyboardEvent);
 
     if let Some(focused_id) = registry.focused_window() {
         let code = event.code as u32;
