@@ -396,7 +396,7 @@ pub extern "C" fn e1000e_driver_main() -> ! {
             stack.subnet_mask = [255, 255, 255, 0];
             stack.gateway_ip = [10, 0, 2, 2];
         }
-        spin::Mutex::new(stack)
+        crate::thread::preempt::PreemptSpinlock::new(stack)
     });
 
     {

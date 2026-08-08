@@ -4,7 +4,9 @@ use alloc::vec::Vec;
 pub mod colors;
 pub mod framebuffer;
 
-use spin::{Mutex, Once};
+use spin::Once;
+
+use crate::thread::preempt::PreemptSpinlock as Mutex;
 
 use x86_64::{PhysAddr, VirtAddr, structures::paging::PageTableFlags};
 

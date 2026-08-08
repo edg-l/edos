@@ -10,7 +10,11 @@ use crate::{
         mouse::{MOUSE_BROADCAST, MouseEvent},
     },
     log,
-    thread::{broadcast::Subscriber, preempt::PreemptRwLock, util::queue_spawn_kthread_named},
+    thread::{
+        broadcast::Subscriber,
+        preempt::{PreemptRwLock, PreemptSpinlock},
+        util::queue_spawn_kthread_named,
+    },
 };
 
 use super::registry::{ReadSite, WINDOW_REGISTRY, WindowId, decoration, flags, read_tracked};
@@ -215,7 +219,7 @@ pub static WINDOW_EVENTS: PreemptRwLock<BTreeMap<WindowId, Arc<WindowEventQueue>
     PreemptRwLock::new(BTreeMap::new());
 
 /// Last mouse button state for detecting changes.
-static LAST_MOUSE_BUTTONS: spin::Mutex<u8> = spin::Mutex::new(0);
+static LAST_MOUSE_BUTTONS: PreemptSpinlock<u8> = PreemptSpinlock::new(0);
 
 /// Initialize the input routing system.
 pub fn init_input_routing() {

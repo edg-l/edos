@@ -18,7 +18,7 @@
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
-use spin::RwLock;
+use crate::thread::preempt::PreemptRwLock as RwLock;
 
 use crate::thread::waitqueue::WaitQueue;
 

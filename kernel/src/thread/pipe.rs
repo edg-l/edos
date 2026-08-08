@@ -1,3 +1,4 @@
+use crate::thread::preempt::PreemptSpinlock as Mutex;
 use crate::{
     fs::{
         FileSystem, PollState,
@@ -10,7 +11,6 @@ use crate::{
     util::uaccess::{try_copy_from_user, try_copy_to_user},
 };
 use alloc::{sync::Arc, vec::Vec};
-use spin::Mutex;
 
 #[derive(Debug, Clone)]
 pub enum FileDescriptor {

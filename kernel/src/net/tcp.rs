@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use crate::log;
+use crate::thread::preempt::PreemptSpinlock;
 use crate::thread::waitqueue::WaitQueue;
 use crate::timer::Instant;
 
@@ -185,6 +186,15 @@ pub enum TcpState {
     TimeWait,
 }
 
+/// Retransmit timeout bounds and smoothing constants, RFC 6298 section 2.
+///
+/// The 200 ms floor is below the 1 s the RFC suggests: this stack is used on a
+/// LAN where the round trip is under a millisecond, and section 2.4 permits a
+/// lower bound when the granularity of the clock allows it, which the HPET does.
+const INITIAL_RTO: Duration = Duration::from_secs(1);
+const MIN_RTO: Duration = Duration::from_millis(200);
+const MAX_RTO: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone)]
 pub struct RetransmitSegment {
     pub seq: u32,
@@ -224,11 +234,17 @@ pub struct TcpConnection {
     pub tx_wq: Arc<WaitQueue>,    // wake on window opening
     pub state_wq: Arc<WaitQueue>, // wake on state transitions (connect, close)
 
+    // Round-trip time estimator (RFC 6298). `srtt` is None until the first
+    // sample; `rto` is what check_retransmit actually waits.
+    pub srtt: Option<Duration>,
+    pub rttvar: Duration,
+    pub rto: Duration,
+
     // Close tracking
     pub fin_seq: Option<u32>, // Our FIN's sequence number (set when we send FIN)
     pub time_wait_until: Option<Instant>,
     /// Weak reference back to the owning Socket for poll notifications.
-    pub owner: Option<Weak<spin::Mutex<super::socket::Socket>>>,
+    pub owner: Option<Weak<PreemptSpinlock<super::socket::Socket>>>,
 }
 
 impl TcpConnection {
@@ -250,6 +266,9 @@ impl TcpConnection {
             mss: DEFAULT_MSS,
             rx_buffer: VecDeque::new(),
             retransmit_queue: Vec::new(),
+            srtt: None,
+            rttvar: Duration::ZERO,
+            rto: INITIAL_RTO,
             rx_wq: Arc::new(WaitQueue::new()),
             tx_wq: Arc::new(WaitQueue::new()),
             state_wq: Arc::new(WaitQueue::new()),
@@ -444,6 +463,22 @@ impl TcpConnection {
         if seq_gt(ack_num, self.snd_una) && seq_leq(ack_num, self.snd_nxt) {
             self.snd_una = ack_num;
             self.snd_wnd = window;
+
+            // Karn's algorithm: a retransmitted segment cannot be sampled,
+            // because there is no way to tell which copy the ACK answers.
+            let now = Instant::now();
+            let sample = self
+                .retransmit_queue
+                .iter()
+                .filter(|seg| {
+                    seg.retries == 0 && seq_leq(seg.seq.wrapping_add(seg.payload_len), ack_num)
+                })
+                .map(|seg| now.duration_since(seg.sent_at))
+                .max();
+            if let Some(rtt) = sample {
+                self.update_rto(rtt);
+            }
+
             // Remove acknowledged segments from retransmit queue
             self.retransmit_queue.retain(|seg| {
                 let seg_end = seg.seq.wrapping_add(seg.payload_len);
@@ -451,6 +486,28 @@ impl TcpConnection {
             });
             self.tx_wq.wake_all();
         }
+    }
+
+    /// Fold one round-trip measurement into the retransmit timeout, RFC 6298
+    /// section 2.2 and 2.3: `rttvar` tracks the mean deviation, `srtt` the
+    /// smoothed mean, and `RTO = srtt + 4 * rttvar` clamped to the bounds above.
+    fn update_rto(&mut self, rtt: Duration) {
+        match self.srtt {
+            None => {
+                self.rttvar = rtt / 2;
+                self.srtt = Some(rtt);
+            }
+            Some(srtt) => {
+                // |srtt - rtt|, then rttvar = 3/4 rttvar + 1/4 delta
+                let delta = if srtt > rtt { srtt - rtt } else { rtt - srtt };
+                self.rttvar = (self.rttvar * 3 + delta) / 4;
+                // srtt = 7/8 srtt + 1/8 rtt
+                self.srtt = Some((srtt * 7 + rtt) / 8);
+            }
+        }
+
+        let srtt = self.srtt.unwrap_or(rtt);
+        self.rto = (srtt + self.rttvar * 4).clamp(MIN_RTO, MAX_RTO);
     }
 
     fn fin_acked(&self, ack_num: u32) -> bool {
@@ -584,8 +641,11 @@ impl TcpConnection {
         let mut resends = Vec::new();
         let mut dead = false;
 
+        let base_rto = self.rto;
         for seg in &mut self.retransmit_queue {
-            let rto = Duration::from_secs(1) * (1 << seg.retries.min(5));
+            // Exponential backoff per RFC 6298 section 5.5, from the measured
+            // timeout rather than from a fixed second.
+            let rto = (base_rto * (1 << seg.retries.min(5))).min(MAX_RTO);
             if now.duration_since(seg.sent_at) >= rto {
                 if seg.retries >= 5 {
                     dead = true;

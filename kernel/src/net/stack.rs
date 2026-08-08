@@ -1,6 +1,6 @@
+use crate::thread::preempt::PreemptSpinlock as Mutex;
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::time::Duration;
-use spin::Mutex;
 
 use crate::{drivers::e1000e::E1000e, log, thread::waitqueue::WaitQueue, timer::Instant};
 

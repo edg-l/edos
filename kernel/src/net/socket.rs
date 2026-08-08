@@ -1,8 +1,8 @@
+use crate::thread::preempt::PreemptSpinlock as Mutex;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
-use spin::Mutex;
 
 use crate::fs::PollState;
 use crate::fs::handle::{PollEntry, PollKey, PollRegistration, Pollable};

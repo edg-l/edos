@@ -1,7 +1,7 @@
 //! Network socket syscalls: socket, bind, connect, sendto, recvfrom.
 
+use crate::thread::preempt::PreemptSpinlock as Mutex;
 use alloc::sync::Arc;
-use spin::Mutex;
 
 use core::time::Duration;
 
