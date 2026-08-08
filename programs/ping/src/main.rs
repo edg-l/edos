@@ -7,7 +7,7 @@ fn main() {
         return;
     }
 
-    let ip = match resolve_host(&args[1]) {
+    let ip = match edos_lib::net::resolve_host(&args[1]) {
         Some(ip) => ip,
         None => {
             eprintln!("Invalid IP address: {}", args[1]);
@@ -68,28 +68,4 @@ fn main() {
             min_whole, min_frac, avg_whole, avg_frac, max_whole, max_frac
         );
     }
-}
-
-fn resolve_host(s: &str) -> Option<[u8; 4]> {
-    if s == "localhost" {
-        return Some([127, 0, 0, 1]);
-    }
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() == 4 {
-        let mut ip = [0u8; 4];
-        let mut ok = true;
-        for (i, part) in parts.iter().enumerate() {
-            match part.parse() {
-                Ok(v) => ip[i] = v,
-                Err(_) => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if ok {
-            return Some(ip);
-        }
-    }
-    edos_lib::net::dns_resolve(s)
 }

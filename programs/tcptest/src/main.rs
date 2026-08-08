@@ -8,18 +8,6 @@ use std::env;
 
 use edos_lib::net::{self, SockAddrIn};
 
-fn parse_ip(s: &str) -> Option<[u8; 4]> {
-    let mut out = [0u8; 4];
-    let mut parts = s.split('.');
-    for slot in out.iter_mut() {
-        *slot = parts.next()?.parse().ok()?;
-    }
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(out)
-}
-
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
@@ -27,7 +15,7 @@ fn main() {
         std::process::exit(2);
     }
 
-    let Some(ip) = parse_ip(&args[1]) else {
+    let Some(ip) = net::parse_ipv4(&args[1]) else {
         eprintln!("tcptest: bad address {}", args[1]);
         std::process::exit(2);
     };
@@ -47,13 +35,22 @@ fn main() {
 
     let addr = SockAddrIn::new(ip, port);
     if net::connect(fd, &addr).is_err() {
-        eprintln!("tcptest: connect to {}.{}.{}.{}:{} failed", ip[0], ip[1], ip[2], ip[3], port);
+        eprintln!(
+            "tcptest: connect to {}.{}.{}.{}:{} failed",
+            ip[0], ip[1], ip[2], ip[3], port
+        );
         net::close(fd);
         std::process::exit(1);
     }
-    println!("connected to {}.{}.{}.{}:{}", ip[0], ip[1], ip[2], ip[3], port);
+    println!(
+        "connected to {}.{}.{}.{}:{}",
+        ip[0], ip[1], ip[2], ip[3], port
+    );
 
-    let request = format!("GET {} HTTP/1.0\r\nHost: {}.{}.{}.{}\r\n\r\n", path, ip[0], ip[1], ip[2], ip[3]);
+    let request = format!(
+        "GET {} HTTP/1.0\r\nHost: {}.{}.{}.{}\r\n\r\n",
+        path, ip[0], ip[1], ip[2], ip[3]
+    );
     match net::send(fd, request.as_bytes()) {
         Ok(n) => println!("sent {} bytes", n),
         Err(_) => {
