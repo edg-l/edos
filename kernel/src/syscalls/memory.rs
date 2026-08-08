@@ -14,7 +14,9 @@ use crate::{
         frame_allocator::frame_allocator,
         mapper::memory_mapper,
         pat,
-        vma::{USER_VA_END, Vma, VmaBacking, VmaError, VmaFlags, VmaProt},
+        vma::{
+            PAGE_SIZE, USER_VA_END, Vma, VmaBacking, VmaError, VmaFlags, VmaProt, page_round_up,
+        },
     },
     println, ranked_lock,
     syscalls::Errno,
@@ -69,8 +71,11 @@ pub(super) fn claim_range(
         } else {
             // `addr` is a raw user value: VirtAddr::new panics on a non-canonical
             // one, and the sum can wrap, so both are checked before construction.
-            match addr
-                .checked_add(length)
+            // The end is page-rounded for the same reason `reserve` rounds: a
+            // mapping owns every page it touches, and two mappings sharing one
+            // page destroy each other on a zero-fill fault or an unmap.
+            match page_round_up(length)
+                .and_then(|len| addr.checked_add(len))
                 .filter(|end| *end <= USER_VA_END)
                 .ok_or(VmaError::OutOfUserSpace)
             {
@@ -138,6 +143,14 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
     if length == 0 {
         info.lock().errno = Errno::EINVAL;
         return !0u64; // -1 (EINVAL)
+    }
+
+    // A mapping starts at a page boundary, so an address that is not one names a
+    // range the MMU cannot give. Rounding it silently would hand back memory the
+    // caller did not ask for and can overlap a neighbour.
+    if !addr.is_multiple_of(PAGE_SIZE) {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
     }
 
     let is_physical = (flags & MAP_PHYSICAL) != 0;
@@ -603,7 +616,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    if length == 0 {
+    if length == 0 || !addr.is_multiple_of(PAGE_SIZE) {
         info.lock().errno = Errno::EINVAL;
         return -1; // EINVAL
     }
@@ -625,7 +638,13 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
         }
     };
 
-    let unmap_end = VirtAddr::new(addr + length);
+    // A partial page cannot be unmapped, so the range covers every page it
+    // touches, matching the rounding `claim_range` applied when it was mapped.
+    let Some(end) = page_round_up(length).and_then(|len| addr.checked_add(len)) else {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    };
+    let unmap_end = VirtAddr::new(end);
 
     // Remove all VMAs fully covered by [map_addr, unmap_end), splitting straddlers.
     let removed_vmas = {

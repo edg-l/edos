@@ -340,12 +340,19 @@ name = "uniq"
 version = "0.1.0"
 
 [[package]]
+name = "vectest"
+version = "0.1.0"
+
+[[package]]
 name = "wc"
 version = "0.1.0"
 
 [[package]]
 name = "wget"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "wintest"

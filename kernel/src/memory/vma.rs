@@ -117,6 +117,14 @@ impl Vma {
 /// Exclusive upper bound of the user half of the canonical address space.
 pub const USER_VA_END: u64 = 0x0000_8000_0000_0000;
 
+/// Mapping granularity: the smallest region the MMU can give one mapping.
+pub const PAGE_SIZE: u64 = 4096;
+
+/// `addr` rounded up to the next page boundary, or `None` if that wraps.
+pub fn page_round_up(addr: u64) -> Option<u64> {
+    Some(addr.checked_add(PAGE_SIZE - 1)? & !(PAGE_SIZE - 1))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmaError {
     /// The range wraps, or reaches past [`USER_VA_END`] into the kernel half.
@@ -306,11 +314,21 @@ impl VmaSet {
         flags: VmaFlags,
         backing: VmaBacking,
     ) -> Result<VirtAddr, VmaError> {
+        // The MMU maps whole pages, so a mapping owns every page it touches. A
+        // VMA recording the unrounded length would end mid-page and let the next
+        // mapping start in that same page, where a zero-fill fault or an unmap
+        // on either one destroys the other's data.
+        let length = page_round_up(length).ok_or(VmaError::OutOfUserSpace)?;
+
         let start = self.find_free_address(hint, length)?;
         let end = start
             .as_u64()
             .checked_add(length)
             .ok_or(VmaError::OutOfUserSpace)?;
+        debug_assert!(
+            start.as_u64().is_multiple_of(PAGE_SIZE) && end.is_multiple_of(PAGE_SIZE),
+            "reserve produced a range that does not cover whole pages"
+        );
         self.insert(Vma {
             start,
             end: VirtAddr::new(end),
@@ -331,7 +349,7 @@ impl VmaSet {
     fn find_free_address(&self, hint: &AtomicU64, length: u64) -> Result<VirtAddr, VmaError> {
         // A length within a page of u64::MAX would wrap this to a small value and
         // hand out a gap far shorter than the caller asked for.
-        let len = length.checked_add(0xfff).ok_or(VmaError::OutOfUserSpace)? & !0xfff;
+        let len = page_round_up(length).ok_or(VmaError::OutOfUserSpace)?;
 
         // The first caller defines the floor: below it lie the image, heap and
         // anything else the loader placed, none of which this allocator owns.
@@ -357,19 +375,23 @@ impl VmaSet {
 
     /// Lowest gap of `len` bytes at or above `floor`, or `None` if the address
     /// space above `floor` cannot hold one.
+    ///
+    /// The cursor is page-aligned past every VMA end, so a gap never begins
+    /// inside a page another mapping already owns. Not every VMA covers whole
+    /// pages: an ELF segment's bound comes from `p_memsz`.
     fn first_fit(&self, floor: u64, len: u64) -> Option<u64> {
         let mut cursor = floor;
 
         // A VMA starting below the floor can still extend past it.
         if let Some((_, prev)) = self.vmas.range(..=VirtAddr::new(floor)).next_back() {
-            cursor = cursor.max(prev.end.as_u64());
+            cursor = cursor.max(page_round_up(prev.end.as_u64())?);
         }
 
         for (start, vma) in self.vmas.range(VirtAddr::new(floor)..) {
             if start.as_u64() >= cursor.checked_add(len)? {
                 return Some(cursor);
             }
-            cursor = cursor.max(vma.end.as_u64());
+            cursor = cursor.max(page_round_up(vma.end.as_u64())?);
         }
 
         (cursor.checked_add(len)? <= USER_VA_END).then_some(cursor)
