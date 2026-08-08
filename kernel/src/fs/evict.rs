@@ -52,6 +52,10 @@ pub static EVICT_DRAIN_COUNT: AtomicU64 = AtomicU64::new(0);
 /// ThreadId of the evict kthread, or 0 before it starts.
 pub static EVICT_TID: AtomicU64 = AtomicU64::new(0);
 
+/// Evictions abandoned because the queue was full on a thread that may not
+/// block. Non-zero means on-disk storage is leaked until `efs-fsck` runs.
+pub static EVICT_DROPPED_COUNT: AtomicU64 = AtomicU64::new(0);
+
 /// Returns true if the calling thread is the evict-inode kthread.
 ///
 /// Used by debug_assert guards in blocking `Drop` implementations to catch
@@ -85,14 +89,29 @@ pub fn post_evict(mount_id: usize, ino: u64) {
             }
         }
         Err(_) => {
-            // Queue full.
-            let current_tid = sched().current_thread_id().map(|t| t.0).unwrap_or(0);
-            if current_tid == EVICT_TID.load(Ordering::Acquire) {
+            // Queue full. The fallback below issues disk I/O, so it is only
+            // legal on a thread that may block.
+            if current_thread_is_evict_kthread() {
                 panic!(
                     "evict queue full on evict kthread -- recursive orphan drop runaway \
                      (mount={}, ino={})",
                     mount_id, ino
                 );
+            }
+            // The reaper reaches this through `VfsInode::drop` while tearing a
+            // dead thread down, and must not block: every process exit would
+            // queue behind the I/O. Give the eviction up instead. The inode's
+            // blocks stay allocated until `efs-fsck` reclaims them, which is a
+            // far smaller problem than stalling teardown.
+            if crate::thread::scheduler::current_thread_is_reaper() {
+                EVICT_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
+                crate::log!(
+                    "WARNING: evict queue full on reaper, leaking inode storage \
+                     (mount={}, ino={}); run efs-fsck to reclaim",
+                    mount_id,
+                    ino
+                );
+                return;
             }
             // Synchronous fallback with a WARNING log.
             if let Some(fs) = fs_by_mount_id(mount_id) {

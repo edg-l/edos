@@ -31,8 +31,21 @@ returns immediately.
 3. The `evict-inode` kthread, spawned at boot by `init_evict_kthread`, drains the
    queue and performs the blocking `fs.evict_inode` call.
 4. If the queue is full: fall back to a synchronous evict with a warning, so an
-   eviction is never lost. If the caller *is* the evict kthread, panic instead;
-   that path is a recursive runaway.
+   eviction is never lost. That fallback issues disk I/O, so it is only legal on
+   a thread that may block:
+   - on the evict kthread it is a recursive runaway, and panics;
+   - on the reaper it would stall every process teardown behind the I/O, so the
+     eviction is abandoned, counted in `/proc/evict_stats` as `dropped_count`,
+     and logged. The inode's blocks stay allocated until `efs-fsck` reclaims
+     them, which is far cheaper than blocking teardown.
+
+**Running on the reaper is expected, not a violation.** The reaper frees a dead
+thread's descriptors and VMAs, so it routinely drops the last reference to an
+orphaned inode; that is the exact case this pattern exists to make safe. The
+contract is that the drop never *blocks*, not that it never *runs* in those
+contexts, so the guard belongs on the blocking fallback rather than on `Drop`
+itself. A guard on `Drop` forbids the very path the design guarantees will
+happen — `mmaptest`'s unlink-while-mapped case panicked the kernel on it.
 
 ---
 
@@ -69,23 +82,25 @@ their kthread starts:
 | `current_thread_is_reaper()` | `thread/scheduler.rs` |
 | `current_thread_is_evict_kthread()` | `fs/evict.rs` |
 
-`VfsInode::drop` carries the guard, because it was blocking historically and is the
-most likely place for a regression to land:
+The helpers gate the *blocking* work, not the drop. `post_evict` uses them to
+decide what the queue-full fallback may do:
 
 ```rust
-#[cfg(debug_assertions)]
-{
-    debug_assert!(
-        !crate::thread::scheduler::current_thread_is_reaper()
-            && !crate::fs::evict::current_thread_is_evict_kthread(),
-        "blocking Drop (TypeName) fired on reaper or evict kthread"
-    );
+if current_thread_is_evict_kthread() {
+    panic!("recursive orphan drop runaway");
 }
+if current_thread_is_reaper() {
+    // Cannot block here; give the eviction up and let fsck reclaim.
+    EVICT_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
+    return;
+}
+// Any other thread may block.
+fs.evict_inode(ino)
 ```
 
-The other types need no guard while their drops stay trivial. Guards compile out
-in release builds; they exist to catch a regression during development, before it
-serialises production exits.
+Guarding `Drop` itself with these helpers is wrong: it fires on the legitimate
+path where the reaper releases the last reference to an orphaned inode. Put the
+check where the blocking call is.
 
 ---
 

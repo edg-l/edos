@@ -117,8 +117,12 @@ impl Procfs {
     }
 
     fn render_evict_stats() -> String {
-        use crate::fs::evict::evict_kthread_drain_count;
-        format!("drain_count: {}\n", evict_kthread_drain_count())
+        use crate::fs::evict::{EVICT_DROPPED_COUNT, evict_kthread_drain_count};
+        format!(
+            "drain_count: {}\ndropped_count: {}\n",
+            evict_kthread_drain_count(),
+            EVICT_DROPPED_COUNT.load(Ordering::Relaxed),
+        )
     }
 
     fn render_inflight_stats() -> String {
