@@ -279,10 +279,14 @@ impl VmaSet {
             self.mmap_base.store(base, Ordering::Relaxed);
         }
 
-        let floor = ((hint.load(Ordering::Relaxed) + 0xfff) & !0xfff).max(base);
+        // Always search from the base, never from the previous allocation.
+        // Starting at a cursor and only falling back to the base on exhaustion
+        // looks like an optimisation, but with 128 TiB above the cursor the
+        // fallback never runs, so freed ranges are never reused and the cursor
+        // marches upward exactly as the old bump allocator did. The scan is
+        // over a process's VMA list, which is tens of entries.
         let found = self
-            .first_fit(floor, len)
-            .or_else(|| self.first_fit(base, len))
+            .first_fit(base, len)
             .expect("out of user virtual address space");
 
         hint.store(found + len, Ordering::Relaxed);

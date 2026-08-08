@@ -830,20 +830,20 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
     match fs_api::file_info(&path) {
         Ok(_) => {
             if truncate {
-                if fs_api::truncate(&path, 0).is_err() {
-                    info.lock().errno = Errno::EINVAL;
+                if let Err(e) = fs_api::truncate(&path, 0) {
+                    info.lock().errno = Errno::from(e);
                     return -1;
                 }
             }
         }
-        Err(_) => {
+        Err(e) => {
             if create {
-                if fs_api::create_file(&path).is_err() {
-                    info.lock().errno = Errno::EINVAL;
+                if let Err(e) = fs_api::create_file(&path) {
+                    info.lock().errno = Errno::from(e);
                     return -1;
                 }
             } else {
-                info.lock().errno = Errno::EINVAL;
+                info.lock().errno = Errno::from(e);
                 return -1;
             }
         }
@@ -925,8 +925,8 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
     interrupts::enable();
     let files = match fs_api::list_files(&path) {
         Ok(files) => files,
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
+        Err(e) => {
+            info.lock().errno = Errno::from(e);
             return -1;
         }
     };

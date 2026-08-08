@@ -280,7 +280,11 @@ check-fsck:
 clean-sata:
 	rm -f sata-disk.img sata-disk.raw
 
+# Listed one per directory rather than brace-expanded: make runs recipes under
+# /bin/sh, which is dash on Debian, and dash does not do brace expansion. It
+# silently creates a single directory with the braces in its name instead.
+FILESYSTEM_DIRS := bin dev home lib var mnt opt root sys tmp
+
 .PHONY: filesystem
 filesystem:
-	mkdir -p filesystem
-	mkdir -p filesystem/{bin,dev,home,lib,var,mnt,opt,root,sys,tmp}
+	mkdir -p filesystem $(addprefix filesystem/,$(FILESYSTEM_DIRS))
