@@ -109,7 +109,7 @@ with "pinned to cpu 3, ran on cpu 2 after wake 0", which was checked.
 Enforcing affinity does not change what `pick_sched_for` optimises: a sleeping
 thread still weighs the same as a CPU-bound one. See §4.
 
-### 1.3 Shared state on bare `spin::Mutex` — MEDIUM
+### 1.3 Shared state on bare `spin::Mutex` — FIXED
 
 `thread/preempt.rs` opens with the rule: a spin lock is only bounded while its
 holder keeps running, so shared state wants `PreemptSpinlock`, and only state an
@@ -128,11 +128,11 @@ touched from interrupt context. It is a latency and starvation hazard — a
 holder can be preempted and every other CPU then spins behind it, which is
 exactly the failure that took a session to find in the window registry.
 
-**Fix:** convert to `PreemptSpinlock`/`PreemptRwLock`. Leave the deliberately
-unranked ones alone (`WaitQueue.inner`, the scheduler's `rq` and `sleepers`,
-`owned_ops`); `doc/invariants/lock-order.md` explains why they are exempt.
+**Fixed.** All five converted to `PreemptSpinlock`/`PreemptRwLock`. The
+deliberately unranked ones (`WaitQueue.inner`, the scheduler's `rq` and
+`sleepers`, `owned_ops`) were left alone per `doc/invariants/lock-order.md`.
 
-### 1.4 TCP measures RTT and then ignores it — MEDIUM
+### 1.4 TCP measures RTT and then ignores it — FIXED, but the entry was wrong
 
 `net/tcp.rs:588`
 
@@ -150,20 +150,31 @@ There is also no congestion control at all: no `cwnd`, no slow start, no SACK,
 no window scaling, no delayed ACK or Nagle. Fine for a hobby stack, but it means
 throughput is bounded by the retransmit policy the moment a packet is lost.
 
-**Fix:** the standard smoothed estimator (RFC 6298): keep `srtt`/`rttvar`,
-`RTO = srtt + 4*rttvar` clamped to a 200ms floor and 60s ceiling. That is a
-contained change against the RTT the code already collects. Congestion control
-is a much larger piece of work and should be its own decision.
+**The premise above is wrong.** The `rtt_us` at `net/stack.rs:364` belongs to
+the ICMP **ping waiter**, not to TCP; `TcpConnection` had no RTT field at all.
+So this was not "collected and ignored", it was never collected.
 
-### 1.5 A protocol mismatch in the FS request layer panics — LOW
+**Fixed** by adding the estimator: `srtt`/`rttvar`/`rto` per RFC 6298 section 2,
+sampled when an ACK retires a segment, skipping retransmitted segments per
+Karn's algorithm, `RTO = srtt + 4*rttvar` clamped to 200 ms (permitted by
+section 2.4 at HPET granularity) and 60 s. Backoff now multiplies the measured
+timeout rather than a fixed second.
+
+**Unverified end to end.** No TCP connection can reach Established today — see
+`doc/bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md`. Congestion control
+remains a separate, much larger decision.
+
+### 1.5 A protocol mismatch in the FS request layer panics — FIXED
 
 `fs/api.rs:31,55,63,71` — each request destructures the response it expects and
 `unreachable!()`s otherwise. That makes any future mismatch a kernel panic
 rather than an error return. The invariant is real today (one response type per
 request), so this is about brittleness, not a live bug.
 
-**Fix:** return `Err(Error::Internal)` instead, or make the request/response
-pairing type-level so a mismatch cannot compile.
+**Fixed** with `expect_ok`/`expect_partitions` in `fs/api.rs`: the pairing is
+asserted in two places instead of four, and a mismatch is
+`Error::ProtocolMismatch` rather than a panic. `list_partitions` returns a
+`Result` accordingly.
 
 ### 1.6 Stale comment claiming work-stealing is off — FIXED
 
@@ -184,7 +195,7 @@ misdescribes the code in a subsystem where people trust comments.
 
 ## 2. Performance
 
-### 2.1 `clock_gettime` reads the CMOS RTC on every call — HIGH
+### 2.1 `clock_gettime` reads the CMOS RTC on every call — FIXED
 
 `syscalls/mod.rs:826`
 
@@ -199,10 +210,14 @@ handles the update-in-progress flag — and the returned struct is
 `std::time::SystemTime` cannot be built on it, which is what `todo.txt` is
 describing as "add system time (real time)".
 
-**Fix:** sample the RTC once at boot into a wall-clock epoch offset, then answer
-`clock_gettime` from the HPET/TSC monotonic counter plus that offset. Return
-nanoseconds since the Unix epoch. Same call becomes a couple of register reads
-and gains resolution and a date.
+**Fixed** exactly that way: `timer::init_wall_clock` samples the RTC once after
+HPET init and pins it to the counter, and the syscall returns nanoseconds since
+the Unix epoch. One point the entry missed: waiting for the update-in-progress
+flag does not make an RTC read atomic, because the flag rises again shortly
+before each update, so a read can straddle a carry. `read_rtc` now repeats until
+two reads agree — a torn value would now be permanent rather than transient.
+Verified against the host clock: guest 18:01:12 UTC vs host 18:01:38 with 26 s
+of test runtime between them.
 
 ### 2.2 The kernel logs on the mmap and thread-exit hot paths — FIXED (b2b02f5)
 
@@ -223,14 +238,14 @@ line carries `loglevel=debug` — a dial rather than a rebuild. Failure paths
 stayed on `log!`. Six threadtest+hammer iterations went from dozens of lines
 each to zero; one threadtest with `loglevel=debug` still emits 37.
 
-### 2.3 A heap allocation per path-taking syscall — MEDIUM
+### 2.3 A heap allocation per path-taking syscall — FIXED
 
 Seven sites do `vec![0u8; MAX_PATH_LEN]` with `MAX_PATH_LEN = 1024`
 (`syscalls/io.rs:63`), one per `open`/`stat`/`mkdir`/`unlink`/`list_dir`/…
 
-**Fix:** a `heapless::Vec<u8, 1024>` or a stack array. The length is already a
-compile-time constant, so this is a mechanical change that removes an allocation
-from every path-based syscall.
+**Fixed** with `syscalls::copy_user_path`, which fills a caller-owned stack
+array and returns a `&str`. It also collapses seven copies of the same
+copy-validate-truncate block into one helper.
 
 ### 2.4 `pick_sched` is quadratic — FIXED
 
@@ -290,9 +305,19 @@ programs:
 | `*at` family | No `openat`/`unlinkat`; every path is resolved against cwd |
 | streaming `getdents` | `LIST_DIR` fills one caller-sized buffer; a huge directory has no continuation protocol |
 
-`fcntl` and the CLOEXEC gap are the two I would fix first: the absence of
-CLOEXEC is a correctness problem for any program that spawns children, not just
-a convenience gap.
+**The CLOEXEC recommendation above is wrong, and was checked before being
+acted on.** EDOS has no `exec`: `spawn` builds a fresh process and hands it
+exactly three descriptors (the caller's stdin/stdout/stderr, replaced in the
+child's otherwise-fresh table), so no descriptor leaks across it. `fork` copies
+the whole table, which is what fork is supposed to do and is not what CLOEXEC
+governs. There is also no `O_NONBLOCK` anywhere in the kernel, so `F_SETFL`
+would have nothing to set. A FD_CLOEXEC flag today would be a bit that nothing
+can ever observe; it becomes real work the day `exec` lands.
+
+`pread`/`pwrite` (audit-shipped, syscalls 17/18) and `getuid`/`getgid`
+(102/104) were the two worth doing, and are in. `setuid` was deliberately **not**
+added: with no permission model to enforce, a freely callable `setuid` is a
+privilege change that lies about being one.
 
 Also worth noting from `todo.txt`, still true: `edos_lib` duplicates `edos_rt`'s
 syscall wrappers, and `SYS_OPEN` takes a NUL-terminated path while `SYS_STAT`

@@ -964,48 +964,60 @@ Shipped this session, all verified on hardware unless noted:
   affinity-waker (49 tests); the wake rounds are the part that fails
   when the check is reverted.
 
+- **The audit's second half is done.** `clock_gettime` answers from the
+  monotonic counter with a real epoch (and `read_rtc` now retries until
+  two reads agree, since one torn read at boot would be permanent);
+  path-taking syscalls fill a stack buffer instead of allocating;
+  `pread`/`pwrite` and `getuid`/`getgid` exist; the five bare
+  `spin::Mutex` sites are preempt-safe; TCP has an RFC 6298 retransmit
+  timeout; `fs/api.rs` returns an error instead of panicking. New
+  programs `iotest` and `tcptest` cover the new syscalls.
+
+  Two audit recommendations were checked and **not** implemented,
+  because their premises are wrong. CLOEXEC has nothing to govern:
+  there is no `exec`, `spawn` hands the child exactly three
+  descriptors, and no `O_NONBLOCK` exists to set. `setuid` without a
+  permission model would be a privilege change that enforces nothing.
+
+  `iotest`'s eight-thread positional read found a real bug on the way:
+  `sys_read` took the fd-table BlockingMutex with interrupts disabled,
+  which starved a TLB shootdown into its timeout. Fixed.
+
+  `tcptest` found a bigger one, still open: no TCP connection can be
+  established at all, because the guest RSTs the SYN-ACK. It predates
+  this session. See doc/bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md.
+
 Open, roughly in priority order. Items marked [audit] come from
 doc/AUDIT.md, which has the file:line detail and the reasoning.
 
 Correctness first, because these are wrong rather than merely missing:
 
-1. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
+1. **TCP cannot establish a connection.** [found by tcptest] The guest
+   answers the peer's SYN-ACK with an RST; the connection lookup misses
+   although the keys match. Predates this session and blocks every TCP
+   feature, including verifying the new RTO. The evidence gathered so
+   far, and the first thing to rule out, are in
+   doc/bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md.
+2. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
    validation on the storage path.
-
-Then the things that cost time on every operation:
-
-2. **`clock_gettime` reads the CMOS RTC on every call.** [audit] Several
-   port round-trips per call, racy against the update-in-progress flag,
-   and it returns hour/minute/second with no date, no epoch and no
-   sub-second — so `SystemTime` cannot be built on it. Sample the RTC
-   once at boot, answer from HPET/TSC plus that offset. This is the
-   "real time vs time since boot" item from todo.txt.
-3. **A heap allocation per path-taking syscall.** [audit] Seven sites
-   do `vec![0u8; 1024]` for a path; a stack buffer removes it.
 
 Then the interface gaps that actually block programs:
 
-4. **`fcntl`, and CLOEXEC at all.** [audit] Without it every fd leaks
-   across `spawn`, which is a correctness problem rather than a
-   convenience gap, and `O_NONBLOCK` cannot be changed after open.
-5. **`pread`/`pwrite`.** [audit] Threads sharing an fd currently have to
-   `lseek`+`read`, which races by construction.
-6. **`getuid`/`setuid`.** [audit] `UserThreadInfo` already carries
-   `user_id`/`group_id` with no way to read or set them.
+3. **`symlink`/`readlink`, `access`, `truncate`, `utimensat`,
+   `nanosleep`, `sigprocmask`, the `*at` family, streaming
+   `getdents`.** [audit] The remaining gaps from the audit's table, none
+   of which block a program that exists today.
+4. **`std::net::TcpStream` in the std fork** is unimplemented, so `http`
+   and `wget` cannot work even once the kernel bug above is fixed.
+   `edos_lib::net` is the working path; `tcptest` shows the shape.
 
-Then hygiene and quality, in no particular order:
+Then hygiene and quality:
 
-7. **Shared state still on bare `spin::Mutex`.** [audit] Sockets, the
-   block-device registry, the display. Not deadlock-prone — device IRQs
-   only wake kthreads — but a preempted holder makes every other CPU
-   spin, which is the failure that cost a whole session in the window
-   registry.
-8. **TCP computes RTT and never uses it.** [audit] A fixed 1s RTO base
-   means a LAN retransmit is ~1000x later than it should be. RFC 6298
-   smoothing is contained work against data already collected.
-   Congestion control is a much larger, separate decision.
-9. **`fs/api.rs` panics on a response-type mismatch** rather than
-   returning an error. [audit]
+5. **228 `unwrap()`/`expect()` in kernel code.** [audit] Convert the ones
+   on I/O and parsing results; leave a comment on the structurally
+   impossible ones.
+6. **Module READMEs for `fs/` (15.7k lines) and `drivers/` (13k).**
+   [audit]
 
 Then, by fun-per-effort:
 

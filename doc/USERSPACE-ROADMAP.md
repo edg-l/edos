@@ -17,7 +17,7 @@
 | Network | `ping`, `dns`, `http`, `wget` |
 | Audio | `play` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal` |
-| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest` |
+| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest` |
 | Libraries | `edos_lib` (syscall wrappers), `edos_render` (textures, widgets, windows) |
 
 ## Done
@@ -51,7 +51,7 @@ scripts, text, empty files and directories.
 
 | Program | Why it matters | Kernel gap |
 |---|---|---|
-| TCP echo server | validates the TCP state machine from userspace | none; may surface accept-backlog or poll-wakeup bugs |
+| TCP echo server | validates the TCP state machine from userspace | **blocked**: no connection can be established at all, see `bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md` |
 | `netstat` | listening and established sockets | needs a read path into `net/tcp.rs` `CONNECTIONS`, as `SYS_NETSTAT` or `/proc/net/tcp` |
 | BMP image viewer | a real GUI app over window syscalls and shared memory | none; exercises the compositor |
 | `nproc` | CPU count | needs `SYS_NPROC` or `/proc/cpuinfo` |

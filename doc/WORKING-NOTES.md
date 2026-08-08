@@ -613,6 +613,45 @@ afterwards.
 
 ---
 
+## The rest of the audit, and two things it got wrong
+
+Shipped: `clock_gettime` off the RTC (sampled once at boot, pinned to the HPET,
+nanoseconds since the epoch); path syscalls on a stack buffer via
+`copy_user_path`; `pread`/`pwrite` and `getuid`/`getgid`; the five bare
+`spin::Mutex` sites on `PreemptSpinlock`; an RFC 6298 retransmit timeout for
+TCP; `fs/api.rs` returning `ProtocolMismatch` instead of panicking.
+
+Two audit recommendations were **checked and rejected**, which is the part worth
+remembering:
+
+- **CLOEXEC has nothing to govern.** There is no `exec` in this kernel. `spawn`
+  builds a fresh process and gives it exactly three descriptors; `fork` copies
+  the table, which is what fork does. No `O_NONBLOCK` exists either, so
+  `F_SETFL` would set nothing. The flag becomes real the day `exec` lands.
+- **`setuid` without a permission model** is a privilege change that enforces
+  nothing. `getuid`/`getgid` are in; the setter is not.
+
+Two bugs fell out of writing the tests rather than out of the audit:
+
+- **`sys_read` held the fd-table `BlockingMutex` with interrupts disabled.**
+  `sys_write` and `sys_close` clone the Arc, enable interrupts, then lock;
+  `sys_read` locked inside the `UserThreadInfo` `IrqSpinlock` scope. Eight
+  threads doing positional reads through one shared descriptor tripped the
+  contended-with-interrupts-off assert, and the spinning then starved a TLB
+  shootdown into its timeout. The same shape as the `IrqSpinlock` bug from
+  earlier in the session: *the assert fires on contention, so a rarely-contended
+  wrong lock looks fine for months.*
+- **TCP cannot connect at all**, and never could — a pre-session build fails
+  identically. `doc/bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md` has the
+  packet capture and the instrumentation results. It stayed hidden because
+  `http`/`wget` use `std::net::TcpStream`, which the std fork does not
+  implement, so nothing had ever completed a connection.
+
+The RFC 6298 work is therefore correct by inspection but **unverified end to
+end**; it cannot be exercised until a connection can reach Established.
+
+---
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any
