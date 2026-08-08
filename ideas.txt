@@ -516,12 +516,26 @@ reaper correctness in general). Roadmap in dependency order:
 
 #1-#6 are all shipped. The foundations roadmap is closed.
 
-Residual from #6, not yet fixed: `enter_ncq_mode` does not gate on
+Residual from #6: `enter_ncq_mode` does not gate on
 `AhciPort.restarting`, so a submitter can install a fresh `AhciNcqOp`
-between the watchdog taking the CAS guard and `restart_port` clearing
-SACT/CI. That op is torpedoed by the reset and its `BlockIoHandle`
-stays `Pending` until the next watchdog tick ~30s later. Documented in
-the module comment of `drivers/ahci/watchdog.rs`.
+around the time a port reset runs.
+
+Traced 2026-08-08, and it is milder than the watchdog module comment
+implies. The existing generation machinery already self-heals it:
+`fail_all_ncq_slots` deliberately skips ops with `issued == false`, and
+the submitter's post-issue SACT self-check then observes the cleared
+bit, calls `complete_ncq_slot`, and fails the op on the
+`cur_gen != op.start_gen` mismatch. So an op caught mid-reset is failed
+promptly rather than left pending.
+
+The genuine residual is narrower: an op that is already `issued` with
+SACT still set when the reset finishes waits for the next watchdog
+sweep, costing up to 30s of latency. That is a latency bug, not a lost
+I/O, so gating `enter_ncq_mode` on `restarting` (and waking
+`mode_waitq` when it clears) is a robustness improvement rather than a
+correctness fix. Worth doing, but it touches the submit path of the
+storage stack, so it should land with runtime validation rather than on
+inspection alone.
 
 Note: the `.claude/plans/*.md` and `.claude/handoff/*.md` paths cited
 throughout this file are gone — that directory is not in the repo.
