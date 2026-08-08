@@ -652,6 +652,56 @@ end**; it cannot be exercised until a connection can reach Established.
 
 ---
 
+## execve exists now
+
+`execve` (59) replaces a process image in place, with `fcntl` (72) and
+`FD_CLOEXEC` alongside it. The shape that matters, because it is what makes the
+operation safe:
+
+1. **Copy argv/envp/path out of user memory first.** The address space holding
+   those strings is about to be unmapped.
+2. **Build the new image in a fresh address space while the old one is live.**
+   A load failure then returns an error with the process untouched, which is
+   what POSIX requires of a failed exec. Only after the load succeeds is
+   anything destroyed.
+3. **Quiesce the siblings.** `address_space_refs` reaching 1 is the proof that
+   no other CPU can touch the space, because a thread only decrements it in
+   `Thread::free`, after it has stopped running.
+4. **Detach the old space and attach the new one in a single step, then tear
+   the old one down.** `context_switch_to` reloads CR3 from `user.cr3` on every
+   switch, so freeing a page table that is still published there hands a
+   preemption a dangling CR3. Detaching first also means the blocking part of
+   teardown (a `MAP_SHARED` writeback reaches the disk) happens with nothing
+   half-swapped.
+
+Three things underneath had to change, and are worth knowing independently:
+
+- **`Thread::new_user` is split.** `load_process_image` builds an address space
+  and an image; `new_user` attaches a new thread to it; `execve` attaches an
+  existing process to it. The loader/process seam used to be welded shut.
+- **`Thread::free`'s teardown is now `release_mappings`**, over a detached
+  `MemoryManager` and `VmaSet`, and its descriptor shutdown is
+  `pipe::close_descriptor`, shared with exec closing its close-on-exec fds.
+- **A killed thread now dies at the syscall boundary.** `killed` was previously
+  read on exactly one path — a PTY slave read — so a thread doing anything else
+  ignored it. Kill was, in effect, "kill a shell foreground job blocked on
+  input". A thread that never enters a syscall still will not notice, which is
+  why exec bounds its wait and refuses rather than assuming.
+
+**Two traps if you touch this:**
+
+- **Sibling threads are not keyed by `UserThread`.** `sys_clone` gives each
+  thread its *own* `Arc<RwLock<UserThread>>` sharing the inner Arcs, so
+  `Arc::ptr_eq` on the `UserThread` matches nothing. Address-space identity is
+  the `address_space_refs` Arc. Keying on the wrong one made the quiesce find
+  no siblings and time out, and `exectest`'s multithreaded case is what caught
+  it.
+- **`exectest`'s wake cases are the load-bearing ones.** Cases 1-3 pass with a
+  broken quiesce; only case 4 exercises it. Reverting the cloexec close alone
+  fails case 2, which was checked.
+
+---
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any

@@ -987,6 +987,14 @@ Shipped this session, all verified on hardware unless noted:
   established at all, because the guest RSTs the SYN-ACK. It predates
   this session. See doc/bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md.
 
+- **`execve` exists**, with `fcntl`/`FD_CLOEXEC`. The audit's CLOEXEC
+  item was rejected earlier for having nothing to govern; exec is what
+  gives it something. Along the way: `Thread::new_user` split into an
+  image loader and a thread attacher, the address-space teardown made
+  reusable, and `killed` finally observed at the syscall boundary rather
+  than only in a PTY read. `exectest` covers it, including exec from a
+  multithreaded process, which is the case that found the quiesce bug.
+
 Open, roughly in priority order. Items marked [audit] come from
 doc/AUDIT.md, which has the file:line detail and the reasoning.
 

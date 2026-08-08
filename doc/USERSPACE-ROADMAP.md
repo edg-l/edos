@@ -17,7 +17,7 @@
 | Network | `ping`, `dns`, `http`, `wget` |
 | Audio | `play` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal` |
-| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest` |
+| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest` |
 | Libraries | `edos_lib` (syscall wrappers), `edos_render` (textures, widgets, windows) |
 
 ## Done
