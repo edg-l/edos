@@ -65,6 +65,9 @@ make run-single
 # Run with GDB server
 make run-gdb
 
+# Run headless (no local display): VNC for a human, QMP for scripts
+make run-headless
+
 # Build only kernel or programs
 make kernel
 make programs
@@ -108,6 +111,10 @@ The toolchain installs to the path configured in `bootstrap.toml`. Programs in `
 5. Rebuild toolchain: `cd rust && ./x install`
 6. Rebuild programs: `cd edos-v2 && make all`
 
+`make run` needs a local X or Wayland session. Over SSH use `make run-headless`,
+which boots the same ISO with a VNC server and a QMP control socket; see
+`doc/vm-control.md` for screenshots, keyboard, and pointer control.
+
 ## Running on Real Hardware
 
 The ISO is hybrid and can be written directly to a USB stick:
@@ -140,7 +147,7 @@ chmod +x create-filesystem-image.sh
 make run-gdb
 
 # In another terminal
-make gdb   # Uses pwndbg
+make gdb   # Uses rust-gdb
 
 # Resolve kernel panic addresses
 addr2line -e kernel/target/x86_64-unknown-none/debug/edos-kernel -f 0xffffffff8009c422

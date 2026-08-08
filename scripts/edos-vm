@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+"""Drive a headless EDOS VM over QEMU's QMP socket.
+
+Boots the ISO with no local display, exposing a VNC server for humans and a QMP
+socket for scripts. Screenshots come back as PNG, keystrokes and pointer events
+go in as synthetic input, so the guest cannot tell them from a real keyboard.
+
+    scripts/edos-vm start
+    scripts/edos-vm shot /tmp/desktop.png
+    scripts/edos-vm type 'ls /bin'
+    scripts/edos-vm key ret
+    scripts/edos-vm log -n 40
+    scripts/edos-vm stop
+"""
+
+import argparse
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RUNDIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "edos-vm")
+SOCK = os.path.join(RUNDIR, "qmp.sock")
+PIDFILE = os.path.join(RUNDIR, "qemu.pid")
+SERIAL_LOG = os.path.join(REPO, "run_log.txt")
+
+# The guest decodes scancodes with a hard-coded Spanish 105-key ISO layout
+# (programs/edos_lib/src/keymap.rs), so a character maps to whichever physical
+# key carries it on that layout, not on US. Verified against a running guest.
+PLAIN = {
+    "-": "slash", "'": "minus", ".": "dot", ",": "comma",
+    "<": "less", "`": "bracket_left", "+": "bracket_right",
+    " ": "spc", "\t": "tab", "\n": "ret",
+}
+SHIFT = {
+    "/": "7", "?": "minus", ":": "dot", ";": "comma", ">": "less",
+    "^": "bracket_left", "*": "bracket_right",
+    "!": "1", '"': "2", "$": "4", "%": "5", "&": "6",
+    "(": "8", ")": "9", "=": "0",
+}
+ALTGR = {
+    "|": "1", "@": "2", "#": "3", "~": "4", "\\": "grave_accent",
+    "[": "bracket_left", "]": "bracket_right", "{": "apostrophe",
+    "}": "backslash",
+}
+
+# Mirrors the layout constants in programs/edos-taskbar/src/main.rs. Nothing
+# checks that these still agree, and a stale value just clicks the wrong button,
+# so move them in the same commit that moves the taskbar.
+TASKBAR_HEIGHT = 32
+LAUNCHER_X, LAUNCHER_WIDTH = 60, 64
+WINDOW_BUTTONS_X = LAUNCHER_X + LAUNCHER_WIDTH + 8
+BUTTON_WIDTH, BUTTON_GAP = 120, 4
+
+
+def taskbar_launcher(height):
+    """Centre of the `+ Term` button."""
+    return LAUNCHER_X + LAUNCHER_WIDTH // 2, height - TASKBAR_HEIGHT // 2
+
+
+def taskbar_window(index, height):
+    """Centre of the nth window button, 0-based, left to right."""
+    x = WINDOW_BUTTONS_X + index * (BUTTON_WIDTH + BUTTON_GAP) + BUTTON_WIDTH // 2
+    return x, height - TASKBAR_HEIGHT // 2
+
+
+def keystroke(ch):
+    """Return the QMP key list that produces `ch`, or None if unmapped."""
+    if ch.isdigit():
+        return [ch]
+    if "a" <= ch <= "z":
+        return [ch]
+    if "A" <= ch <= "Z":
+        return ["shift", ch.lower()]
+    for table, mod in ((PLAIN, None), (SHIFT, "shift"), (ALTGR, "alt_r")):
+        if ch in table:
+            return ([mod] if mod else []) + [table[ch]]
+    return None
+
+
+class Qmp:
+    def __init__(self, path=SOCK):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(10)
+        self.sock.connect(path)
+        self.io = self.sock.makefile("rw")
+        json.loads(self.io.readline())
+        self.cmd("qmp_capabilities")
+
+    def cmd(self, name, **args):
+        req = {"execute": name}
+        if args:
+            req["arguments"] = args
+        self.io.write(json.dumps(req) + "\n")
+        self.io.flush()
+        while True:
+            reply = json.loads(self.io.readline())
+            if "event" in reply:
+                continue
+            if "error" in reply:
+                raise SystemExit(f"qmp {name}: {reply['error']['desc']}")
+            return reply.get("return")
+
+    def send_key(self, keys, hold_ms=None):
+        args = {"keys": [{"type": "qcode", "data": k} for k in keys]}
+        if hold_ms:
+            args["hold-time"] = hold_ms
+        self.cmd("send-key", **args)
+
+
+def running():
+    if not os.path.exists(PIDFILE):
+        return None
+    with open(PIDFILE) as f:
+        pid = int(f.read().strip())
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return None
+    return pid
+
+
+def cmd_start(args):
+    if running():
+        raise SystemExit("already running; stop it first")
+
+    iso = os.path.join(REPO, "edos-x86_64.iso")
+    disk = os.path.join(REPO, "sata-disk.img")
+    for path, target in ((iso, "make all"), (disk, "make sata-disk.img")):
+        if not os.path.exists(path):
+            raise SystemExit(f"missing {os.path.basename(path)}; run `{target}` first")
+
+    os.makedirs(RUNDIR, exist_ok=True)
+    for stale in (SOCK, PIDFILE):
+        if os.path.exists(stale):
+            os.unlink(stale)
+
+    mem = args.mem
+    qemu = [
+        "qemu-system-x86_64",
+        "-M", "q35",
+        "-cpu", "qemu64,+sse4.1,+sse4.2,+x2apic,+fsgsbase",
+        "-accel", args.accel,
+        "-object", f"memory-backend-memfd,id=mem1,size={mem}",
+        "-machine", "memory-backend=mem1",
+        "-m", mem,
+        "-smp", str(args.smp),
+        "-drive", f"if=pflash,unit=0,format=raw,file={REPO}/ovmf/ovmf-code-x86_64.fd,readonly=on",
+        "-drive", f"if=pflash,unit=1,format=raw,file={REPO}/ovmf/ovmf-vars-x86_64.fd",
+        "-cdrom", iso,
+        "-drive", f"id=sata0,if=none,format=qcow2,file={disk},aio=io_uring,discard=unmap",
+        "-device", "ide-hd,drive=sata0,bus=ide.1",
+        # blob=on needs udmabuf and a local display; plain virtio-vga renders
+        # into a buffer QEMU itself owns, which is what VNC and screendump read.
+        "-vga", "none",
+        "-device", f"virtio-vga,xres={args.width},yres={args.height}",
+        # usb-mouse, not usb-tablet: the guest implements the HID *boot* mouse
+        # protocol only (kernel/src/drivers/usb/hid.rs), which is relative.
+        "-device", "qemu-xhci", "-device", "usb-kbd", "-device", "usb-mouse",
+        "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{args.ssh_fwd}-:23",
+        "-device", "e1000e,netdev=net0",
+        "-serial", f"file:{SERIAL_LOG}",
+        "-no-reboot",
+        "-display", "none",
+        "-vnc", f"{args.vnc_addr}:{args.vnc}",
+        "-qmp", f"unix:{SOCK},server,nowait",
+        "-pidfile", PIDFILE,
+        "-daemonize",
+    ]
+
+    # /dev/kvm is group-owned; re-exec under the group if the caller's session
+    # predates their membership. Absolute path because `sg` is also the name of
+    # the ast-grep binary, which shadows it on some PATHs.
+    if args.accel == "kvm" and not os.access("/dev/kvm", os.W_OK):
+        if os.path.exists("/usr/bin/sg"):
+            qemu = ["/usr/bin/sg", "kvm", "-c", " ".join(map(_quote, qemu))]
+        else:
+            raise SystemExit("/dev/kvm not writable; add yourself to the kvm group")
+
+    subprocess.run(qemu, check=True, cwd=REPO)
+    for _ in range(50):
+        if os.path.exists(SOCK):
+            break
+        time.sleep(0.1)
+    print(f"vnc      {args.vnc_addr}:{5900 + args.vnc} (display :{args.vnc})")
+    print(f"qmp      {SOCK}")
+    print(f"serial   {SERIAL_LOG}")
+
+
+def _quote(s):
+    return "'" + s.replace("'", "'\\''") + "'" if any(c in s for c in " \t'\"") else s
+
+
+def cmd_stop(args):
+    pid = running()
+    if not pid:
+        print("not running")
+        return
+    try:
+        Qmp().cmd("quit")
+    except OSError:
+        os.kill(pid, 15)
+    for _ in range(50):
+        if not running():
+            break
+        time.sleep(0.1)
+    for stale in (SOCK, PIDFILE):
+        if os.path.exists(stale):
+            os.unlink(stale)
+    print("stopped")
+
+
+def cmd_status(args):
+    pid = running()
+    if not pid:
+        print("not running")
+        return
+    q = Qmp()
+    status = q.cmd("query-status")
+    vnc = q.cmd("query-vnc")
+    print(f"pid {pid}, {status['status']}, vnc {vnc.get('host')}:{vnc.get('service')}")
+
+
+def cmd_shot(args):
+    out = os.path.abspath(args.file)
+    Qmp().cmd("screendump", filename=out, format="png")
+    print(out)
+
+
+def cmd_type(args):
+    q = Qmp()
+    text = " ".join(args.text)
+    for ch in text:
+        keys = keystroke(ch)
+        if keys is None:
+            raise SystemExit(f"no key for {ch!r} on the guest's Spanish ISO layout")
+        q.send_key(keys)
+        time.sleep(args.delay)
+    if args.enter:
+        q.send_key(["ret"])
+
+
+def cmd_key(args):
+    q = Qmp()
+    for combo in args.keys:
+        q.send_key(combo.split("+"))
+        time.sleep(args.delay)
+
+
+def cmd_move(args):
+    goto(Qmp(), args.x, args.y, args.width, args.height)
+
+
+def cmd_click(args):
+    q = Qmp()
+    goto(q, args.x, args.y, args.width, args.height)
+    for down in (True, False):
+        q.cmd("input-send-event", events=[
+            {"type": "btn", "data": {"button": args.button, "down": down}},
+        ])
+        time.sleep(0.05)
+
+
+# A boot-mouse report carries one signed byte per axis, so every motion is
+# delivered in steps this size or smaller.
+STEP = 120
+
+
+def goto(q, x, y, width, height):
+    """Place the pointer on an exact pixel using relative motion only.
+
+    The guest clamps the cursor to the screen rectangle and applies no
+    acceleration, so slamming it past the top-left corner is a reliable origin.
+    """
+    _drag(q, -width - STEP, -height - STEP)
+    _drag(q, x, y)
+
+
+def _drag(q, dx, dy):
+    while dx or dy:
+        sx = max(-STEP, min(STEP, dx))
+        sy = max(-STEP, min(STEP, dy))
+        events = []
+        if sx:
+            events.append({"type": "rel", "data": {"axis": "x", "value": sx}})
+        if sy:
+            events.append({"type": "rel", "data": {"axis": "y", "value": sy}})
+        q.cmd("input-send-event", events=events)
+        dx -= sx
+        dy -= sy
+        # One HID report per poll of the interrupt endpoint; firing them faster
+        # than the guest drains the ring silently loses motion.
+        time.sleep(0.012)
+
+
+def cmd_launch(args):
+    """Click the taskbar launcher, spawning a terminal."""
+    x, y = taskbar_launcher(args.height)
+    _click_at(x, y, args)
+
+
+def cmd_raise(args):
+    """Raise a window by its taskbar position, so typing reaches it."""
+    x, y = taskbar_window(args.index, args.height)
+    _click_at(x, y, args)
+
+
+def _click_at(x, y, args):
+    q = Qmp()
+    goto(q, x, y, args.width, args.height)
+    for down in (True, False):
+        q.cmd("input-send-event", events=[
+            {"type": "btn", "data": {"button": "left", "down": down}},
+        ])
+        time.sleep(0.05)
+
+
+def cmd_log(args):
+    if not os.path.exists(SERIAL_LOG):
+        raise SystemExit("no serial log yet")
+    with open(SERIAL_LOG, errors="replace") as f:
+        lines = f.readlines()
+    sys.stdout.write("".join(lines[-args.n:]))
+
+
+def cmd_qmp(args):
+    payload = json.loads(args.args) if args.args else {}
+    print(json.dumps(Qmp().cmd(args.command, **payload), indent=2))
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("start", help="boot the VM headless")
+    s.add_argument("--vnc", type=int, default=1, help="VNC display number (port 5900+N)")
+    s.add_argument("--vnc-addr", default="127.0.0.1", help="VNC bind address")
+    s.add_argument("--smp", type=int, default=4)
+    s.add_argument("--mem", default="2G")
+    s.add_argument("--accel", default="kvm", choices=["kvm", "tcg"])
+    s.add_argument("--width", type=int, default=1920)
+    s.add_argument("--height", type=int, default=1080)
+    s.add_argument("--ssh-fwd", type=int, default=2323,
+                   help="host port forwarded to guest TCP 23")
+    s.set_defaults(func=cmd_start)
+
+    sub.add_parser("stop", help="shut the VM down").set_defaults(func=cmd_stop)
+    sub.add_parser("status", help="show VM state").set_defaults(func=cmd_status)
+
+    s = sub.add_parser("shot", help="write a PNG screenshot")
+    s.add_argument("file", nargs="?", default="edos-shot.png")
+    s.set_defaults(func=cmd_shot)
+
+    s = sub.add_parser("type", help="type text into the guest")
+    s.add_argument("text", nargs="+")
+    s.add_argument("--delay", type=float, default=0.03)
+    s.add_argument("--enter", action="store_true", help="append Return")
+    s.set_defaults(func=cmd_type)
+
+    s = sub.add_parser("key", help="send raw qcodes, e.g. ret ctrl+c alt+f4")
+    s.add_argument("keys", nargs="+")
+    s.add_argument("--delay", type=float, default=0.05)
+    s.set_defaults(func=cmd_key)
+
+    for name, fn, extra in (("move", cmd_move, False), ("click", cmd_click, True)):
+        s = sub.add_parser(name, help=f"{name} the pointer at a pixel")
+        s.add_argument("x", type=int)
+        s.add_argument("y", type=int)
+        s.add_argument("--width", type=int, default=1920)
+        s.add_argument("--height", type=int, default=1080)
+        if extra:
+            s.add_argument("--button", default="left",
+                           choices=["left", "middle", "right"])
+        s.set_defaults(func=fn)
+
+    s = sub.add_parser("launch", help="click the taskbar launcher (new terminal)")
+    s.add_argument("--width", type=int, default=1920)
+    s.add_argument("--height", type=int, default=1080)
+    s.set_defaults(func=cmd_launch)
+
+    s = sub.add_parser("raise", help="raise the nth window via its taskbar button")
+    s.add_argument("index", type=int, help="0-based, left to right")
+    s.add_argument("--width", type=int, default=1920)
+    s.add_argument("--height", type=int, default=1080)
+    s.set_defaults(func=cmd_raise)
+
+    s = sub.add_parser("log", help="tail the guest serial log")
+    s.add_argument("-n", type=int, default=20)
+    s.set_defaults(func=cmd_log)
+
+    s = sub.add_parser("qmp", help="run an arbitrary QMP command")
+    s.add_argument("command")
+    s.add_argument("args", nargs="?", help="JSON object of arguments")
+    s.set_defaults(func=cmd_qmp)
+
+    args = p.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

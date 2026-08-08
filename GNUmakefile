@@ -114,6 +114,12 @@ run-gdb-4: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).i
 run-gdb-kvm: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
 	$(call run_qemu_uefi,iso,4,-no-shutdown -accel kvm -s -S)
 
+# Boot with no local display: VNC for a human, QMP for scripts and agents.
+# See scripts/edos-vm for screenshot, keyboard and pointer control.
+.PHONY: run-headless
+run-headless: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
+	scripts/edos-vm start
+
 .PHONY: run-capture
 run-capture: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img
 	$(call run_qemu_uefi,iso,4,-accel kvm -object filter-dump$(comma)id=dump0$(comma)netdev=net0$(comma)file=/tmp/edos.pcap)
@@ -156,8 +162,7 @@ run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NA
 	$(call run_qemu_uefi,hdd,4,)
 
 gdb:
-	#rust-gdb -x gdbinit
-	pwndbg -x gdbinit
+	rust-gdb -x gdbinit
 
 .PHONY: run-bios sata-disk.img
 run-bios: $(IMAGE_NAME).iso
@@ -174,13 +179,17 @@ run-hdd-bios: $(IMAGE_NAME).hdd
 		-hda $(IMAGE_NAME).hdd \
 		$(QEMUFLAGS)
 
-ovmf/ovmf-code-$(KARCH).fd:
-	mkdir -p ovmf
-	curl -Lo $@ https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/ovmf-code-$(KARCH).fd
+override OVMF_URL := https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/edk2-ovmf.tar.xz
 
-ovmf/ovmf-vars-$(KARCH).fd:
+# Upstream ships every architecture in one tarball; extract just this one.
+ovmf/edk2-ovmf.tar.xz:
 	mkdir -p ovmf
-	curl -Lo $@ https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/ovmf-vars-$(KARCH).fd
+	curl -Lo $@ $(OVMF_URL)
+
+ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd: ovmf/edk2-ovmf.tar.xz
+	tar -xJf $< -C ovmf --strip-components=1 \
+		edk2-ovmf/ovmf-code-$(KARCH).fd edk2-ovmf/ovmf-vars-$(KARCH).fd
+	touch ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd
 
 limine/limine:
 	rm -rf limine

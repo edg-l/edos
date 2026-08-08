@@ -658,6 +658,33 @@ calls would swap for `open("/dev/sdb")` + `pread`/`pwrite`/`fsync`.
 sector-aligned device node) may not be wired. If it isn't, that's the
 first piece to land before any in-EDOS fsck makes sense.
 
+### Addressing windows by name instead of by pixel
+
+`scripts/edos-vm` drives the GUI by clicking absolute pixels, and its
+taskbar coordinates are a hand-copied mirror of the constants in
+`programs/edos-taskbar/src/main.rs` (`LAUNCHER_X`, `LAUNCHER_WIDTH`,
+`BUTTON_WIDTH`, `TASKBAR_HEIGHT`). Any GUI layout change silently
+breaks every scripted click, with no compile error and no failing test
+-- the click just lands on the wrong button.
+
+Two ways out, cheap to expensive:
+
+1. **Expose the window registry through procfs.** `kernel/src/window/
+   registry.rs` already holds id, pid, rect, z-order and title, and
+   `SYS_WINDOW_LIST` (224) already returns it to userspace. A
+   `/proc/windows` line per window costs little and makes layout
+   introspectable. Still needs a channel out of the guest to help an
+   external driver.
+2. **A control daemon (the `edosd`/rcon idea above), speaking window
+   names.** `focus Terminal`, `launch term`, `click <window> <dx> <dy>`
+   resolved guest-side against the live registry. Pixels stop being the
+   interface, so GUI layout changes stop breaking automation, and
+   assertions can read text instead of screenshots.
+
+Until then, the mirrored constants are documented in
+`doc/vm-control.md` and must be updated in the same commit that moves
+the taskbar layout.
+
 ## Fun-per-effort ranking
 
 more tools > dynamic linker > PageCacheOps for FAT32+memfs > in-EDOS

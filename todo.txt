@@ -1,4 +1,8 @@
 
+- dns resolver: `dns example.com` resolves, `dns edgl.dev` says "No A record
+  found" though the domain has A records (both are Cloudflare-fronted, so it is
+  not CNAME flattening). Suspect answer-section parsing.
+
 - add a way to kill threads from user (user threads, maybe signals)
 
 - research what try_clone on pipe means, can pipes be cloned?
