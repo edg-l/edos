@@ -12,7 +12,7 @@ use crossbeam_queue::ArrayQueue;
 use heapless::{BinaryHeap, binary_heap::Min};
 use spin::{Mutex, Once, RwLock};
 use x86_64::{
-    VirtAddr,
+    PrivilegeLevel, VirtAddr,
     instructions::interrupts::{disable, enable, enable_and_hlt, without_interrupts},
     registers::{control::Cr3, model_specific::FsBase},
 };
@@ -556,6 +556,38 @@ impl Scheduler {
         }
     }
 
+    /// Panic if `ctx` could not have come from `thread`.
+    ///
+    /// A saved frame returning to ring 0 must resume on that thread's own
+    /// kernel stack; anything else becomes the CPU's `RSP` at the next `iretq`
+    /// and faults somewhere with no trace of who wrote it. `where_` names the
+    /// side that noticed, so a bad frame at restore-but-not-save means a
+    /// concurrent writer between the two.
+    #[cfg(debug_assertions)]
+    fn validate_ctx(thread: &Thread, ctx: &CpuContext, where_: &str) {
+        let frame = &ctx.interrupt_stack_frame;
+        let rsp = frame.stack_pointer.as_u64();
+        if frame.code_segment.rpl() == PrivilegeLevel::Ring3 {
+            return;
+        }
+        let top = thread.kstack_top;
+        let bottom = top.saturating_sub(KTHREAD_STACK_SIZE);
+        assert!(
+            rsp == 0 || (rsp > bottom && rsp <= top),
+            "{}: thread {} (name={}) has kernel RSP {:#x} outside its stack {:#x}..{:#x}, \
+             rip={:#x} cs={:#x} context_saved={}",
+            where_,
+            thread.id.0,
+            thread.name,
+            rsp,
+            bottom,
+            top,
+            frame.instruction_pointer.as_u64(),
+            frame.code_segment.0,
+            thread.context_saved.load(Ordering::Relaxed),
+        );
+    }
+
     fn save_current_thread(&self, context: *mut CpuContext) {
         if let Some(current) = current_thread() {
             // If the thread was stolen and is now running on another CPU,
@@ -570,6 +602,8 @@ impl Scheduler {
             let end_tick = Instant::now().tick();
             current.end_run(end_tick);
             unsafe {
+                #[cfg(debug_assertions)]
+                Self::validate_ctx(&current, &*context, "save_current_thread");
                 *current.ctx.lock() = (*context).clone();
                 if current.user.is_some() {
                     let fpu = &mut *current.fpu.get();
@@ -675,6 +709,8 @@ impl Scheduler {
             next.name,
             next.context_saved.load(Ordering::Relaxed),
         );
+        #[cfg(debug_assertions)]
+        Self::validate_ctx(&next, &ctx_snapshot, "context_switch_to");
         let user_rsp = ctx_snapshot.interrupt_stack_frame.stack_pointer.as_u64();
         unsafe { *context = ctx_snapshot };
 

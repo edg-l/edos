@@ -24,17 +24,35 @@ impl<T> IrqSpinlock<T> {
         }
     }
 
-    /// Disable local IRQs, take the lock, remember prior IF.
+    /// Take the lock, then disable local IRQs for the guard's lifetime.
+    ///
+    /// IRQs are off only while the lock is *held*, which is what keeps an IRQ
+    /// handler from deadlocking against the holder. Waiting happens with the
+    /// caller's original IF, because a CPU that spins with interrupts disabled
+    /// answers no IPIs for the whole wait: a TLB shootdown initiator on another
+    /// CPU then spins until its timeout and gives up on a flush that never
+    /// happened. Re-entering the same lock from an IRQ taken while waiting is
+    /// harmless — the waiter does not hold it yet.
     pub fn lock(&self) -> IrqLockGuard<'_, T> {
         let prev_if = interrupts::are_enabled();
-        if prev_if {
-            interrupts::disable();
-        }
-        // Take the lock with IRQs off to avoid deadlock with IRQ handlers.
-        let guard = self.inner.lock();
-        IrqLockGuard {
-            guard: Some(guard),
-            prev_if,
+        loop {
+            if prev_if {
+                interrupts::disable();
+            }
+            if let Some(guard) = self.inner.try_lock() {
+                return IrqLockGuard {
+                    guard: Some(guard),
+                    prev_if,
+                };
+            }
+            if prev_if {
+                interrupts::enable();
+            }
+            // Read-only spin off the contended cache line until it looks free,
+            // rather than hammering the CAS.
+            while self.inner.is_locked() {
+                core::hint::spin_loop();
+            }
         }
     }
 
