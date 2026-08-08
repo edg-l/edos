@@ -9,6 +9,9 @@ by running it, the entry says so — several plausible-looking findings were
 checked and discarded (noted at the end), and the ones left standing should be
 treated the same way until a test backs them.
 
+The prioritised follow-up list, folding these in with the pre-existing work,
+lives in `ideas.txt`.
+
 ---
 
 ## 1. Correctness
@@ -156,7 +159,7 @@ describing as "add system time (real time)".
 nanoseconds since the Unix epoch. Same call becomes a couple of register reads
 and gains resolution and a date.
 
-### 2.2 The kernel logs on the mmap and thread-exit hot paths — HIGH
+### 2.2 The kernel logs on the mmap and thread-exit hot paths — FIXED (b2b02f5)
 
 `syscalls/memory.rs` has 20 `log!` sites, including one per successful `mmap`
 (`:244 "mmap: lazy mapped at ..."`) and one per call at `:103`. `thread_exit`
@@ -169,9 +172,11 @@ lock, with a VM exit per byte. `threadtest` alone produced hundreds of lines a
 second in every soak, and the serial lock saturating is what starved TLB
 shootdowns before the `IrqSpinlock` fix.
 
-**Fix:** put the per-operation lines behind a `trace`-style feature or a runtime
-log level, so the default build does not allocate and serialize on every
-mapping. Keep the error paths unconditional.
+**Fixed** by `log_debug!`, which reads a relaxed atomic before formatting, so a
+disabled site costs one load and no allocation. Off unless the kernel command
+line carries `loglevel=debug` — a dial rather than a rebuild. Failure paths
+stayed on `log!`. Six threadtest+hammer iterations went from dozens of lines
+each to zero; one threadtest with `loglevel=debug` still emits 37.
 
 ### 2.3 A heap allocation per path-taking syscall — MEDIUM
 

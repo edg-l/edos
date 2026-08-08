@@ -58,6 +58,10 @@ scripts, text, empty files and directories.
 
 ## Kernel gaps this roadmap exposes
 
+These are the gaps *userspace programs* expose. For kernel-internal work —
+correctness, locking, perf hot spots and missing syscalls — see
+[`AUDIT.md`](AUDIT.md), with the prioritised list in `ideas.txt`.
+
 1. **procfs depth.** `top` wants per-process CPU time and RSS.
 2. **TCP introspection.** `netstat` needs a read path for the connection table.
 3. **Accept backlog.** A concurrent server will test SYN backlog behaviour.

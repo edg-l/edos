@@ -931,12 +931,69 @@ Shipped this session, all verified on hardware unless noted:
   picks the range under one acquisition of the VMA lock and inserts the
   VMA under another. See doc/WORKING-NOTES.md.
 
-Open, roughly in priority order:
+- **Per-operation logging is off by default.** The kernel logged a line
+  per mmap, munmap, spawn, ELF load and thread exit: a String allocation
+  on the calling thread, and a byte-at-a-time UART write under a global
+  lock on the drain side, one VM exit per byte under KVM. `log_debug!`
+  checks a relaxed atomic before formatting, so a disabled site costs one
+  load and nothing else. `loglevel=debug` on the kernel command line
+  brings them back without a rebuild. Six threadtest+hammer iterations
+  went from dozens of lines each to zero.
+- **`decode_error_kind` in the std fork is no longer five errnos.** The
+  mapping lives in `library/std/src/sys/pal/edos/common.rs` and covers 20.
+  The old entry here claiming five was stale.
 
-1. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
+Open, roughly in priority order. Items marked [audit] come from
+doc/AUDIT.md, which has the file:line detail and the reasoning.
+
+Correctness first, because these are wrong rather than merely missing:
+
+1. **The ELF loader maps segments at an unvalidated address.** [audit]
+   `base_addr + p_vaddr` is never checked against the user half, and
+   `VmaSet` only applies `USER_VA_END` to addresses it picks itself, not
+   to explicit inserts. Any user can spawn a crafted binary. Fix in
+   `VmaSet::insert` so every caller inherits the check.
+2. **CPU affinity is enforced in one path out of three.** [audit]
+   Work-stealing honours it; `thread_can_run_here` is stubbed to `true`
+   and `complete_wake` ignores it. Enforce it or delete the field —
+   half-enforced is worse than absent, because callers believe it.
+3. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
    validation on the storage path.
-2. **`decode_error_kind` in the std fork maps only five errnos**, so
-   everything else displays as "uncategorized error".
+
+Then the things that cost time on every operation:
+
+4. **`clock_gettime` reads the CMOS RTC on every call.** [audit] Several
+   port round-trips per call, racy against the update-in-progress flag,
+   and it returns hour/minute/second with no date, no epoch and no
+   sub-second — so `SystemTime` cannot be built on it. Sample the RTC
+   once at boot, answer from HPET/TSC plus that offset. This is the
+   "real time vs time since boot" item from todo.txt.
+5. **A heap allocation per path-taking syscall.** [audit] Seven sites
+   do `vec![0u8; 1024]` for a path; a stack buffer removes it.
+
+Then the interface gaps that actually block programs:
+
+6. **`fcntl`, and CLOEXEC at all.** [audit] Without it every fd leaks
+   across `spawn`, which is a correctness problem rather than a
+   convenience gap, and `O_NONBLOCK` cannot be changed after open.
+7. **`pread`/`pwrite`.** [audit] Threads sharing an fd currently have to
+   `lseek`+`read`, which races by construction.
+8. **`getuid`/`setuid`.** [audit] `UserThreadInfo` already carries
+   `user_id`/`group_id` with no way to read or set them.
+
+Then hygiene and quality, in no particular order:
+
+9. **Shared state still on bare `spin::Mutex`.** [audit] Sockets, the
+   block-device registry, the display. Not deadlock-prone — device IRQs
+   only wake kthreads — but a preempted holder makes every other CPU
+   spin, which is the failure that cost a whole session in the window
+   registry.
+10. **TCP computes RTT and never uses it.** [audit] A fixed 1s RTO base
+    means a LAN retransmit is ~1000x later than it should be. RFC 6298
+    smoothing is contained work against data already collected.
+    Congestion control is a much larger, separate decision.
+11. **`fs/api.rs` panics on a response-type mismatch** rather than
+    returning an error. [audit]
 
 Then, by fun-per-effort:
 

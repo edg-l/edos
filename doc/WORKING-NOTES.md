@@ -498,6 +498,36 @@ one never would.
 
 ---
 
+## Audit, and the logging that came out of it
+
+`doc/AUDIT.md` is a read-only pass over the whole tree: correctness, perf,
+missing syscalls, smells, plus a list of things that looked like findings and
+were checked and discarded. `ideas.txt` carries the prioritised follow-up.
+
+One item is already fixed, because it was on every hot path. The kernel logged a
+line per mmap, munmap, spawn, ELF load and thread exit. Each costs a `String`
+allocation on the calling thread, and the drain side writes to the UART a byte
+at a time under a global lock — one VM exit per byte under KVM. That is the same
+serial lock whose saturation starved TLB shootdowns before `IrqSpinlock` stopped
+waiting with interrupts off, so this was not a cosmetic cost.
+
+`log_debug!` reads a relaxed atomic before formatting, so a disabled site costs
+one load and no allocation. It is off unless the kernel command line carries
+`loglevel=debug`, which makes it a dial rather than a rebuild. Failure paths
+stayed on `log!`. Six `threadtest`+`hammer` iterations went from dozens of lines
+each to **zero**; one `threadtest` with `loglevel=debug` still emits 37.
+
+Two traps worth knowing if you touch this:
+
+- **`ParsedCmdline::parse_str` allocates**, so reading the log level has to
+  happen *after* `init()` brings the frame allocator up. Putting it before
+  panics at `frame_allocator.rs:24` before serial is useful.
+- **The serial log is no longer a way to count work.** Greps like
+  `bin/threadtest:u:.* exit: code=` return nothing by default now. Use the
+  terminal output, or boot with `loglevel=debug`.
+
+---
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any
