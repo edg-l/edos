@@ -51,6 +51,18 @@ impl HpetInstant {
         Duration::from_nanos(nanos)
     }
 
+    /// Time from `earlier` to `self`, or `None` when `self` is not later.
+    ///
+    /// [`Self::duration_since`] saturates to zero instead, which cannot tell a
+    /// deadline that has just arrived from one that passed long ago. Anything
+    /// computing the time left on a deadline needs that difference, since zero
+    /// remaining is a timeout and not an unbounded wait.
+    pub fn checked_duration_since(&self, earlier: HpetInstant) -> Option<Duration> {
+        let ticks = self.counter_value.checked_sub(earlier.counter_value)?;
+        let nanos = get_hpet_timer().unwrap().ticks_to_nanos(ticks);
+        Some(Duration::from_nanos(nanos))
+    }
+
     pub const fn from_tick(tick: u64) -> Self {
         Self {
             counter_value: tick,

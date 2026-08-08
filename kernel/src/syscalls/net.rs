@@ -5,7 +5,9 @@ use alloc::sync::Arc;
 
 use core::time::Duration;
 
+use crate::drivers::hpet::instant::HpetInstant;
 use crate::thread::scheduler::current_thread_info;
+use crate::thread::waitqueue::WaitOutcome;
 use crate::{
     net::{
         ipv4,
@@ -444,12 +446,42 @@ pub fn sys_recvfrom(
         }
     };
 
-    // Block until data arrives or socket is closed
-    let rx_wq = sock_arc.lock().rx_wq.clone();
-    rx_wq.wait_until(|| {
+    // `wait_until` returns on any wake, not only when the condition holds: a
+    // wake token left by an earlier wait aborts the park. Loop on the real
+    // condition, or the first receive on a socket reports an empty datagram
+    // the moment anything else has woken this thread. That is what made the
+    // first DNS query after boot come back with zero bytes.
+    let (rx_wq, timeout) = {
         let s = sock_arc.lock();
-        !s.rx_queue.is_empty() || s.closed
-    });
+        (s.rx_wq.clone(), s.recv_timeout)
+    };
+    let deadline = timeout.map(|timeout| HpetInstant::now() + timeout);
+    loop {
+        let ready = || {
+            let s = sock_arc.lock();
+            !s.rx_queue.is_empty() || s.closed
+        };
+        if ready() {
+            break;
+        }
+        // SO_RCVTIMEO, so a datagram that never arrives costs the caller its
+        // timeout rather than the thread. The remaining time comes off the
+        // deadline each round, since a spurious wake must not restart it.
+        let remaining = match deadline {
+            Some(deadline) => match deadline.checked_duration_since(HpetInstant::now()) {
+                Some(remaining) => Some(remaining),
+                None => {
+                    info.lock().errno = Errno::EAGAIN;
+                    return !0u64;
+                }
+            },
+            None => None,
+        };
+        if rx_wq.wait_until_timeout(ready, remaining) == WaitOutcome::TimedOut {
+            info.lock().errno = Errno::EAGAIN;
+            return !0u64;
+        }
+    }
 
     let (data, src) = {
         let mut s = sock_arc.lock();
@@ -576,15 +608,23 @@ pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) ->
         }
     }
 
-    // Block until accept_queue has an Established connection
+    // Loop on the condition, per the contract `wait_until` documents: a wake
+    // token left by an earlier wait aborts the park, and returning then would
+    // hand the caller EAGAIN on a listener that is simply idle.
     let rx_wq = sock_arc.lock().rx_wq.clone();
-    rx_wq.wait_until(|| {
-        let s = sock_arc.lock();
-        s.accept_queue
-            .iter()
-            .any(|conn_sock| conn_sock.lock().state == SocketState::Connected)
-            || s.closed
-    });
+    loop {
+        let ready = || {
+            let s = sock_arc.lock();
+            s.accept_queue
+                .iter()
+                .any(|conn_sock| conn_sock.lock().state == SocketState::Connected)
+                || s.closed
+        };
+        if ready() {
+            break;
+        }
+        rx_wq.wait_until(ready);
+    }
 
     let new_sock_arc = {
         let mut s = sock_arc.lock();
