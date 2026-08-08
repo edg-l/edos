@@ -104,28 +104,27 @@ pub fn pick_sched() -> &'static Scheduler {
     let n = schedulers.len();
     assert!(n > 0, "pick_sched: no schedulers registered");
 
-    // Find the minimum thread_count across all schedulers.
-    let mut min_count = u64::MAX;
-    for sched in schedulers.values() {
-        let c = sched.thread_count.load(Ordering::Acquire);
-        if c < min_count {
-            min_count = c;
-        }
-    }
-
-    // Round-robin across all schedulers matching `min_count`. On a balanced
-    // system every scheduler has the same count; the rotation then evenly
-    // distributes new spawns. If one CPU has a lower count, it wins until
-    // the others catch up.
+    // Sample each scheduler once and keep the best sample. `thread_count` moves
+    // under us as other CPUs spawn and exit, so a pass that computes a minimum
+    // followed by a pass that looks for it can match nothing at all: every
+    // count may have risen above the minimum in between.
+    //
+    // Starting at the rotation offset keeps the round-robin tie-break. On a
+    // balanced system every scheduler has the same count, so the strict `<`
+    // leaves the first one in rotation order winning, which spreads spawns
+    // evenly. A CPU with a genuinely lower count still wins outright.
     let start = PICK_SCHED_ROTATION.fetch_add(1, Ordering::Relaxed) as usize;
+    let mut best: Option<(&'static Scheduler, u64)> = None;
     for i in 0..n {
         let idx = (start + i) % n;
         let (_, sched) = schedulers.iter().nth(idx).unwrap();
-        if sched.thread_count.load(Ordering::Acquire) == min_count {
-            return sched;
+        let count = sched.thread_count.load(Ordering::Acquire);
+        match best {
+            Some((_, best_count)) if best_count <= count => {}
+            _ => best = Some((*sched, count)),
         }
     }
-    unreachable!("pick_sched: no scheduler matched min_count");
+    best.expect("pick_sched: no schedulers registered").0
 }
 
 /// Exits a kthread.
