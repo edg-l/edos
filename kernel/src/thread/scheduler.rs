@@ -454,8 +454,8 @@ impl Scheduler {
                 break;
             }
 
-            // Work-stealing disabled for debugging.
-            // TODO: re-enable after fixing context corruption.
+            // Poll for stealable work on an exponential backoff, so an idle CPU
+            // that finds nothing keeps halting rather than spinning.
             let steal_interval = 1u32 << cmp::min(steal_backoff, 4);
             if idle_ticks % steal_interval == 0 {
                 disable();
