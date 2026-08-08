@@ -16,7 +16,7 @@ lives in `ideas.txt`.
 
 ## 1. Correctness
 
-### 1.1 The ELF loader maps segments at an unvalidated address — HIGH
+### 1.1 The ELF loader maps segments at an unvalidated address — FIXED (see below)
 
 `loader/mod.rs:311`
 
@@ -42,10 +42,31 @@ I did not build the crafted ELF to prove the second, so treat it as
 "unvalidated input reaching a mapping decision" rather than a demonstrated
 escalation. It wants fixing either way.
 
-**Fix:** validate in `VmaSet::insert` rather than at the one call site, so
-every present and future caller inherits it: reject any range whose end exceeds
-`USER_VA_END` or that wraps. Use `checked_add` for `base_addr + p_vaddr`. A
-`debug_assert` is not enough here; the input is untrusted in release too.
+**Fixed.** The bound now lives in `VmaSet::insert`, which returns
+`Result<(), VmaError>` and rejects a range that wraps or ends past
+`USER_VA_END`; callers that hand back a range they already held (unmap
+rollback, fork's deep copy, the kernel-derived TLS region) go through
+`insert_validated`, which debug-asserts instead. The loader bounds
+`base_addr + p_vaddr + p_memsz` with `checked_add` before it builds a single
+`VirtAddr`, and rejects `p_filesz > p_memsz`, which would otherwise push the
+file-backed VMA past the checked end.
+
+The write-up above understated this. `sys_mmap` reaches the same insert with a
+raw user address and never validated it either, so the halt was one ordinary
+syscall away, no crafted ELF needed:
+
+```
+mmap(addr=0x0000_9000_0000_0000, len=0x1000)
+  -> claim_range -> VirtAddr::new
+  -> KERNEL PANIC: virtual address must be sign extended in bits 48 to 64
+```
+
+Reproduced on the pre-fix kernel from `mmaptest`, resolved to
+`syscalls/memory.rs:234` via the panic backtrace. `find_free_address` was also
+reachable with a length within a page of `u64::MAX`, where its align-up wrapped
+to zero and returned a gap far shorter than requested; it now uses `checked_add`
+and reports exhaustion as `VmaError::NoSpace` (ENOMEM) rather than panicking on
+an `expect`. mmaptest test 11 covers all five cases and is the regression test.
 
 ### 1.2 CPU affinity is enforced in one place out of three — MEDIUM
 
@@ -122,7 +143,7 @@ request), so this is about brittleness, not a live bug.
 **Fix:** return `Err(Error::Internal)` instead, or make the request/response
 pairing type-level so a mismatch cannot compile.
 
-### 1.6 Stale comment claiming work-stealing is off — LOW
+### 1.6 Stale comment claiming work-stealing is off — FIXED
 
 `scheduler.rs:456`
 
@@ -134,6 +155,8 @@ pairing type-level so a mismatch cannot compile.
 Stealing is not disabled — `try_steal_and_run` is called two lines below. The
 context corruption it refers to was fixed in `4b8d7c2`. The comment now
 misdescribes the code in a subsystem where people trust comments.
+
+**Fixed:** replaced with what the backoff actually does.
 
 ---
 

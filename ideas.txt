@@ -943,56 +943,62 @@ Shipped this session, all verified on hardware unless noted:
   mapping lives in `library/std/src/sys/pal/edos/common.rs` and covers 20.
   The old entry here claiming five was stale.
 
+- **Unvalidated addresses no longer reach a VMA insert.** The audit found
+  the ELF loader building a mapping out of `base_addr + p_vaddr` with no
+  bound on it. `sys_mmap` turned out to be the shorter path to the same
+  insert: `mmap(0x0000_9000_0000_0000, 4096)` from any program panicked
+  the kernel in `VirtAddr::new`, reproduced on the pre-fix kernel before
+  fixing it. The bound lives in `VmaSet::insert` now, so every caller
+  inherits it, with `insert_validated` for the paths handing back a range
+  they already held. `find_free_address` had the same shape of bug in its
+  align-up, which wrapped for a length near `u64::MAX`. mmaptest test 11
+  is the regression test; 11/11 on EFS and memfs.
+
 Open, roughly in priority order. Items marked [audit] come from
 doc/AUDIT.md, which has the file:line detail and the reasoning.
 
 Correctness first, because these are wrong rather than merely missing:
 
-1. **The ELF loader maps segments at an unvalidated address.** [audit]
-   `base_addr + p_vaddr` is never checked against the user half, and
-   `VmaSet` only applies `USER_VA_END` to addresses it picks itself, not
-   to explicit inserts. Any user can spawn a crafted binary. Fix in
-   `VmaSet::insert` so every caller inherits the check.
-2. **CPU affinity is enforced in one path out of three.** [audit]
+1. **CPU affinity is enforced in one path out of three.** [audit]
    Work-stealing honours it; `thread_can_run_here` is stubbed to `true`
    and `complete_wake` ignores it. Enforce it or delete the field —
    half-enforced is worse than absent, because callers believe it.
-3. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
+2. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
    validation on the storage path.
 
 Then the things that cost time on every operation:
 
-4. **`clock_gettime` reads the CMOS RTC on every call.** [audit] Several
+3. **`clock_gettime` reads the CMOS RTC on every call.** [audit] Several
    port round-trips per call, racy against the update-in-progress flag,
    and it returns hour/minute/second with no date, no epoch and no
    sub-second — so `SystemTime` cannot be built on it. Sample the RTC
    once at boot, answer from HPET/TSC plus that offset. This is the
    "real time vs time since boot" item from todo.txt.
-5. **A heap allocation per path-taking syscall.** [audit] Seven sites
+4. **A heap allocation per path-taking syscall.** [audit] Seven sites
    do `vec![0u8; 1024]` for a path; a stack buffer removes it.
 
 Then the interface gaps that actually block programs:
 
-6. **`fcntl`, and CLOEXEC at all.** [audit] Without it every fd leaks
+5. **`fcntl`, and CLOEXEC at all.** [audit] Without it every fd leaks
    across `spawn`, which is a correctness problem rather than a
    convenience gap, and `O_NONBLOCK` cannot be changed after open.
-7. **`pread`/`pwrite`.** [audit] Threads sharing an fd currently have to
+6. **`pread`/`pwrite`.** [audit] Threads sharing an fd currently have to
    `lseek`+`read`, which races by construction.
-8. **`getuid`/`setuid`.** [audit] `UserThreadInfo` already carries
+7. **`getuid`/`setuid`.** [audit] `UserThreadInfo` already carries
    `user_id`/`group_id` with no way to read or set them.
 
 Then hygiene and quality, in no particular order:
 
-9. **Shared state still on bare `spin::Mutex`.** [audit] Sockets, the
+8. **Shared state still on bare `spin::Mutex`.** [audit] Sockets, the
    block-device registry, the display. Not deadlock-prone — device IRQs
    only wake kthreads — but a preempted holder makes every other CPU
    spin, which is the failure that cost a whole session in the window
    registry.
-10. **TCP computes RTT and never uses it.** [audit] A fixed 1s RTO base
-    means a LAN retransmit is ~1000x later than it should be. RFC 6298
-    smoothing is contained work against data already collected.
-    Congestion control is a much larger, separate decision.
-11. **`fs/api.rs` panics on a response-type mismatch** rather than
+9. **TCP computes RTT and never uses it.** [audit] A fixed 1s RTO base
+   means a LAN retransmit is ~1000x later than it should be. RFC 6298
+   smoothing is contained work against data already collected.
+   Congestion control is a much larger, separate decision.
+10. **`fs/api.rs` panics on a response-type mismatch** rather than
     returning an error. [audit]
 
 Then, by fun-per-effort:

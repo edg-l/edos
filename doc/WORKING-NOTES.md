@@ -528,6 +528,51 @@ Two traps worth knowing if you touch this:
 
 ---
 
+## Fixed: an unvalidated address reached a VMA insert
+
+Audit item 1.1 was that the ELF loader builds a mapping out of
+`base_addr + p_vaddr` without ever bounding it, and that `VmaSet` applies
+`USER_VA_END` only to addresses it picks itself. The audit could not say how bad
+that was without building a crafted ELF.
+
+No crafted ELF was needed. `sys_mmap` reaches the same insert with a raw user
+address, and validated nothing beyond `length != 0`:
+
+```
+mmap(addr=0x0000_9000_0000_0000, len=0x1000)   # non-canonical, from any program
+  -> claim_range -> VirtAddr::new
+  -> KERNEL PANIC: virtual address must be sign extended in bits 48 to 64
+```
+
+Reproduced on a pre-fix kernel and resolved through the backtrace to
+`syscalls/memory.rs:234`. Every VMA a process holds becomes a `USER_ACCESSIBLE`
+mapping, so the canonical-but-kernel-half case (`0xffff_8000_…`) was the worse
+half of the same hole: it does not panic, it inserts.
+
+The check belongs in `VmaSet::insert`, which now returns `Result` and rejects a
+range that wraps or ends past `USER_VA_END`. Callers that hand back a range the
+set already held — unmap rollback, fork's deep copy, the TLS region the kernel
+derives from `USER_STACK_TOP` — call `insert_validated`, which debug-asserts
+instead; they have no error to report and no untrusted input. The loader bounds
+the segment with `checked_add` before constructing a single `VirtAddr`, and
+rejects `p_filesz > p_memsz`, which would otherwise push the file-backed VMA
+past the end that was checked.
+
+Two neighbours fell out of the same read:
+
+- **`find_free_address` had the same bug in its align-up.** `(length + 0xfff)`
+  wraps for a length within a page of `u64::MAX`, so it returned a gap far
+  shorter than requested. Now `checked_add`.
+- **Address-space exhaustion was an `expect`.** It reports `VmaError::NoSpace`
+  (ENOMEM) instead of panicking.
+
+`mmaptest` test 11 is the regression test: five cases (non-canonical, kernel
+half, straddling the top, wrapping length, unsatisfiable length), each of which
+must come back as a failed `mmap`. 11/11 on both `/var` (EFS) and `/tmp`
+(memfs), 47/47 in-kernel tests, forktest and threadtest clean.
+
+---
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any
