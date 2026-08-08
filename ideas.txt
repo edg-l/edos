@@ -732,6 +732,54 @@ SLAAC/DHCPv6 for address configuration, multicast. Source-only fragmentation
 (different model from IPv4). Not urgent since most targets work fine on v4,
 but needed for a complete real-hardware network stack.
 
+### GPU driver work (far future, no near-term plan)
+
+The virtio-gpu driver we have is 2D only: dirty-rect transfers, blob
+resources, hardware cursor. Two directions exist, and they teach
+opposite halves of what a real GPU driver is. Neither is scheduled;
+this is here so the options are written down rather than rediscovered.
+
+**`ati-vga`, the hardware-facing half.** QEMU emulates a real ATI Rage
+128 Pro / Radeon 9250 (`-device ati-vga,model=...`), with real MMIO
+registers, a real 2D engine and a hardware cursor. The r100/r200
+register documentation is public; it is what the classic `radeon` DRM
+driver was built from. Bring-up would be authentic: PCI BAR probing,
+MMIO programming, VRAM aperture setup, engine init, 2D blits, DMA.
+
+The advantage over real silicon is that the device model *is* the spec.
+`hw/display/ati.c` and `ati_2d.c` in the QEMU tree say exactly which
+registers are implemented and what each does, so a hang is diffed
+against the model rather than guessed at, and a `printf` can be added to
+the model itself. The catch: it is hardware from 2003. No shaders, no
+command processor, no GPU MMU.
+
+**virtio-gpu 3D (virgl), the API-facing half.** `virtio-gpu-gl` and
+`virtio-vga-gl` are compiled into the QEMU we run. Implementing it means
+contexts, resource create/attach, command-stream submission and fences,
+which is genuinely the object model every modern DRM driver uses, and it
+builds directly on the virtio-gpu code we already have.
+
+What it does *not* teach, and this is most of the difficulty in a real
+driver: virgl commands are serialised GL calls the host translates,
+where real hardware takes a chip-specific packet stream (PM4 and
+friends) plus machine code the userspace driver compiled itself. Absent
+entirely: shader compilation to a hardware ISA, the GPU's own MMU and
+page tables, firmware loading, engine scheduling and preemption, clock
+and power management, and the VRAM/GTT hierarchy with migration and
+eviction.
+
+If this is ever picked up seriously, virtio-gpu **venus** (Vulkan) and
+**native contexts**, where the guest runs a real Mesa driver and the
+protocol forwards actual hardware ioctls, are closer to the real thing
+and are where the ecosystem went.
+
+**Passthrough is not currently an option on the dev box.** VFIO would
+need IOMMU enabled in firmware and on the kernel cmdline
+(`/sys/kernel/iommu_groups` is empty today), and the only GPU is a
+GeForce GT 710 driving the host display. A from-scratch Kepler driver
+also means signed firmware for several engines; nouveau still cannot
+reclock Kepler properly.
+
 ### virtio-net
 Second NIC backend. Straightforward now that the stack and e1000e exist.
 Useful for VMs where e1000e emulation is slower than paravirtual.
@@ -833,6 +881,8 @@ Then, by fun-per-effort:
 
 more tools > dynamic linker > PageCacheOps for FAT32+memfs > in-EDOS
 fsck > IPv6 > virtio-net
+
+Far future, deliberately unscheduled: GPU driver work (see above).
 
 Storage-roadmap steps 1-4 are shipped (host fsck done). File-backed
 mmap, ElfSegment->FileBacked loader migration, lazy ELF relocation, and
