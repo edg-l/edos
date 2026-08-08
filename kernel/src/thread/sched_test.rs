@@ -7,9 +7,14 @@ use core::{
 use crate::{
     println,
     thread::{
-        scheduler::{WakePriority, sched},
+        mutex::BlockingMutex,
+        preempt::{PreemptSpinlock, preempt_disable, preempt_enabled},
+        runqueue::DEFAULT_PRIORITY,
+        rwlock::RwLock as BlockingRwLock,
+        scheduler::{SCHEDULERS, WakePriority, sched},
         thread::{ThreadId, get_thread_weak},
         util::queue_spawn_kthread_named_arg,
+        waitqueue::WaitQueue,
     },
     timer::Instant,
 };
@@ -62,9 +67,27 @@ struct TestHarness {
     wbp_parked: AtomicBool,
     // sleep-interrupt
     sleep_int_tid: AtomicU64,
+    // blocking mutex / rwlock / waitqueue
+    mutex_counter: BlockingMutex<u64>,
+    mutex_workers_done: AtomicU32,
+    rwlock_value: BlockingRwLock<u64>,
+    rwlock_concurrent: AtomicU32,
+    rwlock_max_concurrent: AtomicU32,
+    rwlock_readers_done: AtomicU32,
+    waitqueue: WaitQueue,
+    waitqueue_arrived: AtomicU32,
+    waitqueue_ready: AtomicBool,
+    waitqueue_woken: AtomicU32,
+    // priority starvation
+    starvation_spinners: u32,
+    starvation_started: AtomicU32,
+    starvation_finished: AtomicU32,
+    starvation_progress: AtomicU64,
+    starvation_progress_saturated: AtomicU64,
+    starvation_progress_end: AtomicU64,
 }
 
-const TOTAL_TESTS: u32 = 30;
+const TOTAL_TESTS: u32 = 47;
 
 pub fn run_sched_tests() {
     println!("[sched-test] Starting scheduler tests ({TOTAL_TESTS} expected)...");
@@ -91,6 +114,22 @@ pub fn run_sched_tests() {
         wbp_tid: AtomicU64::new(0),
         wbp_parked: AtomicBool::new(false),
         sleep_int_tid: AtomicU64::new(0),
+        mutex_counter: BlockingMutex::new(0),
+        mutex_workers_done: AtomicU32::new(0),
+        rwlock_value: BlockingRwLock::new(0),
+        rwlock_concurrent: AtomicU32::new(0),
+        rwlock_max_concurrent: AtomicU32::new(0),
+        rwlock_readers_done: AtomicU32::new(0),
+        waitqueue: WaitQueue::new(),
+        waitqueue_arrived: AtomicU32::new(0),
+        waitqueue_ready: AtomicBool::new(false),
+        waitqueue_woken: AtomicU32::new(0),
+        starvation_spinners: SCHEDULERS.read().len() as u32,
+        starvation_started: AtomicU32::new(0),
+        starvation_finished: AtomicU32::new(0),
+        starvation_progress: AtomicU64::new(0),
+        starvation_progress_saturated: AtomicU64::new(0),
+        starvation_progress_end: AtomicU64::new(0),
     });
 
     // --- Basic tests (8) ---
@@ -132,6 +171,30 @@ pub fn run_sched_tests() {
             boxed,
         );
     }
+
+    // Preemption counter semantics (1)
+    spawn_test(&harness, "test-preempt-count", test_preempt_count);
+    // BlockingMutex mutual exclusion under contention (MUTEX_WORKERS + 1)
+    for _ in 0..MUTEX_WORKERS {
+        spawn_test(&harness, "test-mutex-worker", test_mutex_worker);
+    }
+    spawn_test(&harness, "test-mutex-check", test_mutex_check);
+    // BlockingRwLock: readers share, writer excludes (RWLOCK_READERS + 1)
+    for _ in 0..RWLOCK_READERS {
+        spawn_test(&harness, "test-rwlock-reader", test_rwlock_reader);
+    }
+    spawn_test(&harness, "test-rwlock-writer", test_rwlock_writer);
+    // WaitQueue wake_all releases every waiter (WQ_WAITERS + 1)
+    for _ in 0..WQ_WAITERS {
+        spawn_test(&harness, "test-wq-waiter", test_wq_waiter);
+    }
+    spawn_test(&harness, "test-wq-waker", test_wq_waker);
+
+    // Priority starvation: one busy spinner per CPU plus one victim below them (1)
+    for _ in 0..harness.starvation_spinners {
+        spawn_test(&harness, "test-starve-spin", test_starvation_spinner);
+    }
+    spawn_test(&harness, "test-starve-victim", test_starvation_victim);
 
     // Coordinator thread: waits for all tests, then exits QEMU.
     let boxed = Box::into_raw(Box::new(harness.clone())) as *mut u8;
@@ -444,7 +507,12 @@ extern "C" fn test_abort_race_parker(arg: *mut u8) -> ! {
         // Park while condition is true. The waker will set it to false
         // and wake us. If the waker is fast enough, it wakes us before
         // we even check the condition, triggering the abort path.
-        sched().thread_park_while(|| h.abort_race_condition.load(Ordering::Acquire));
+        //
+        // `thread_park_while` may return spuriously, so the round is over
+        // only once the condition itself is observed false.
+        while h.abort_race_condition.load(Ordering::Acquire) {
+            sched().thread_park_while(|| h.abort_race_condition.load(Ordering::Acquire));
+        }
     }
 
     let rounds = h.abort_race_rounds.load(Ordering::Acquire);
@@ -470,15 +538,282 @@ extern "C" fn test_abort_race_waker(arg: *mut u8) -> ! {
         while !h.abort_race_condition.load(Ordering::Acquire) {
             core::hint::spin_loop();
         }
+        // Count the round before releasing the parker, so a parker that
+        // observes the condition false has necessarily observed the count.
+        h.abort_race_rounds.fetch_add(1, Ordering::AcqRel);
         // Immediately flip condition and wake -- NO sleep, race the parker
         h.abort_race_condition.store(false, Ordering::Release);
         wake_tid(parker, WakePriority::Normal);
-        h.abort_race_rounds.fetch_add(1, Ordering::AcqRel);
         // Yield to give parker a chance to run its next iteration
         sched().thread_yield();
     }
 
     test_done(&h, "abort-race-waker");
+    sched().thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Preemption counter
+// `preempt_disable` is what makes a spin lock bounded, so its nesting and its
+// balance on guard drop are load-bearing: a leaked count silently disables
+// preemption on that CPU for good.
+// ---------------------------------------------------------------------------
+
+extern "C" fn test_preempt_count(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+
+    assert!(preempt_enabled(), "[sched-test] preempt: disabled on entry");
+    {
+        let _outer = preempt_disable();
+        assert!(
+            !preempt_enabled(),
+            "[sched-test] preempt: still enabled inside a guard"
+        );
+        {
+            let _inner = preempt_disable();
+            assert!(
+                !preempt_enabled(),
+                "[sched-test] preempt: still enabled inside a nested guard"
+            );
+        }
+        assert!(
+            !preempt_enabled(),
+            "[sched-test] preempt: inner guard re-enabled preemption for the outer one"
+        );
+    }
+    assert!(
+        preempt_enabled(),
+        "[sched-test] preempt: count leaked after the outermost guard dropped"
+    );
+
+    // A lock guard must restore the count too, including on the read path.
+    let lock: PreemptSpinlock<u32> = PreemptSpinlock::new(0);
+    {
+        let mut g = lock.lock();
+        *g += 1;
+        assert!(
+            !preempt_enabled(),
+            "[sched-test] preempt: PreemptSpinlock guard did not suppress preemption"
+        );
+    }
+    assert!(
+        preempt_enabled(),
+        "[sched-test] preempt: PreemptSpinlock guard leaked the count"
+    );
+
+    test_done(&h, "preempt-count");
+    sched().thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// BlockingMutex: mutual exclusion under contention
+// Every worker does read-modify-write through the guard, so a lost update or a
+// torn increment shows up as a final count below the expected total.
+// ---------------------------------------------------------------------------
+
+const MUTEX_WORKERS: u32 = 4;
+const MUTEX_INCREMENTS: u64 = 500;
+
+extern "C" fn test_mutex_worker(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    for _ in 0..MUTEX_INCREMENTS {
+        let mut guard = h.mutex_counter.lock();
+        let seen = *guard;
+        // Yielding under the guard widens the window for a broken mutex to
+        // interleave two writers; a correct one still serialises them.
+        sched().thread_yield();
+        *guard = seen + 1;
+    }
+    h.mutex_workers_done.fetch_add(1, Ordering::AcqRel);
+    test_done(&h, "mutex-worker");
+    sched().thread_exit(0);
+}
+
+extern "C" fn test_mutex_check(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    while h.mutex_workers_done.load(Ordering::Acquire) < MUTEX_WORKERS {
+        sched().thread_yield();
+    }
+    let total = *h.mutex_counter.lock();
+    let expected = MUTEX_WORKERS as u64 * MUTEX_INCREMENTS;
+    assert!(
+        total == expected,
+        "[sched-test] mutex: {total} increments survived, expected {expected}"
+    );
+    test_done(&h, "mutex-exclusion");
+    sched().thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// BlockingRwLock: readers share, a writer excludes
+// ---------------------------------------------------------------------------
+
+const RWLOCK_READERS: u32 = 4;
+
+extern "C" fn test_rwlock_reader(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+
+    // Hold the read guard long enough to overlap with the other readers, and
+    // record the high-water mark of concurrent holders.
+    let guard = h.rwlock_value.read();
+    let live = h.rwlock_concurrent.fetch_add(1, Ordering::AcqRel) + 1;
+    h.rwlock_max_concurrent.fetch_max(live, Ordering::AcqRel);
+    // Hold until every reader is inside, so the overlap the writer asserts on
+    // is produced deterministically rather than by racing. Bounded, so a
+    // rwlock that wrongly serialises readers fails the assert instead of
+    // deadlocking the suite.
+    for _ in 0..2000 {
+        if h.rwlock_concurrent.load(Ordering::Acquire) >= RWLOCK_READERS {
+            break;
+        }
+        sched().thread_yield();
+    }
+    h.rwlock_max_concurrent.fetch_max(
+        h.rwlock_concurrent.load(Ordering::Acquire),
+        Ordering::AcqRel,
+    );
+    assert!(
+        *guard == 0,
+        "[sched-test] rwlock: writer mutated the value while a reader held it"
+    );
+    h.rwlock_concurrent.fetch_sub(1, Ordering::AcqRel);
+    drop(guard);
+
+    h.rwlock_readers_done.fetch_add(1, Ordering::AcqRel);
+    test_done(&h, "rwlock-reader");
+    sched().thread_exit(0);
+}
+
+extern "C" fn test_rwlock_writer(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    while h.rwlock_readers_done.load(Ordering::Acquire) < RWLOCK_READERS {
+        sched().thread_yield();
+    }
+
+    {
+        let mut guard = h.rwlock_value.write();
+        assert!(
+            h.rwlock_concurrent.load(Ordering::Acquire) == 0,
+            "[sched-test] rwlock: write guard acquired while readers were live"
+        );
+        *guard = 1;
+    }
+
+    let observed = h.rwlock_max_concurrent.load(Ordering::Acquire);
+    assert!(
+        observed > 1,
+        "[sched-test] rwlock: readers never overlapped (max {observed}), \
+         so the lock is serialising them like a mutex"
+    );
+    test_done(&h, "rwlock-writer");
+    sched().thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// WaitQueue: wake_all releases every waiter
+// A waiter left behind is the missed-wakeup shape from
+// doc/bugs/2026-04-13-sched-park-wake-missed-wakeup.md.
+// ---------------------------------------------------------------------------
+
+const WQ_WAITERS: u32 = 4;
+
+extern "C" fn test_wq_waiter(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    // Announce arrival before waiting. A waiter that has not reached the queue
+    // by the time the waker fires still observes the published condition on
+    // `wait_until`'s entry check, so no handshake window is left open.
+    h.waitqueue_arrived.fetch_add(1, Ordering::AcqRel);
+    h.waitqueue
+        .wait_until(|| h.waitqueue_ready.load(Ordering::Acquire));
+    h.waitqueue_woken.fetch_add(1, Ordering::AcqRel);
+    test_done(&h, "waitqueue-waiter");
+    sched().thread_exit(0);
+}
+
+extern "C" fn test_wq_waker(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+
+    // Wait for every waiter, not merely for the queue to become non-empty:
+    // waking after only the first has enrolled leaves the rest to park against
+    // a condition nobody will publish again.
+    while h.waitqueue_arrived.load(Ordering::Acquire) < WQ_WAITERS {
+        sched().thread_yield();
+    }
+
+    h.waitqueue_ready.store(true, Ordering::Release);
+    h.waitqueue.wake_all();
+
+    // Every waiter must make it out; a lost wake leaves one parked forever.
+    while h.waitqueue_woken.load(Ordering::Acquire) < WQ_WAITERS {
+        sched().thread_yield();
+    }
+    test_done(&h, "waitqueue-wake-all");
+    sched().thread_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Priority starvation
+// One CPU-bound spinner per CPU, all above DEFAULT_PRIORITY, occupy every
+// runqueue without ever parking or yielding. A thread below them must still
+// reach the CPU: strict priority order that never services a lower level turns
+// any lock shared across priorities into a deadlock, because the holder sits
+// Ready while the spinner above it waits on the lock it holds.
+// ---------------------------------------------------------------------------
+
+const STARVATION_SPIN_PRIORITY: u8 = DEFAULT_PRIORITY + 3;
+const STARVATION_SPIN_MS: u64 = 400;
+
+extern "C" fn test_starvation_spinner(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    sched()
+        .current_thread()
+        .unwrap()
+        .set_priority(STARVATION_SPIN_PRIORITY);
+
+    // The last spinner to start marks the point where every CPU is claimed.
+    if h.starvation_started.fetch_add(1, Ordering::AcqRel) + 1 == h.starvation_spinners {
+        h.starvation_progress_saturated.store(
+            h.starvation_progress.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(STARVATION_SPIN_MS);
+    while Instant::now() < deadline {
+        core::hint::spin_loop();
+    }
+
+    // The first spinner to finish marks the point where a CPU frees up, so
+    // the sampled interval covers only the fully saturated window.
+    if h.starvation_finished.fetch_add(1, Ordering::AcqRel) == 0 {
+        h.starvation_progress_end.store(
+            h.starvation_progress.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+    }
+    sched().thread_exit(0);
+}
+
+extern "C" fn test_starvation_victim(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+
+    // Stay runnable for the whole window at the default priority. Progress is
+    // sampled by the spinners, so a victim that is never picked shows the two
+    // samples equal rather than a timestamp taken after starvation ended.
+    while h.starvation_finished.load(Ordering::Acquire) < h.starvation_spinners {
+        h.starvation_progress.fetch_add(1, Ordering::Relaxed);
+        core::hint::spin_loop();
+    }
+
+    let saturated = h.starvation_progress_saturated.load(Ordering::Acquire);
+    let end = h.starvation_progress_end.load(Ordering::Acquire);
+    assert!(
+        end > saturated,
+        "[sched-test] starvation: victim made no progress while {} spinners held every CPU",
+        h.starvation_spinners
+    );
+
+    test_done(&h, "starvation-victim");
     sched().thread_exit(0);
 }
 
