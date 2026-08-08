@@ -61,6 +61,66 @@ pub fn getpid() -> u64 {
     unsafe { sys::syscall1(sys::SYS_GETPID, 0) }
 }
 
+/// Replace the current process image with `path`, keeping the pid.
+///
+/// Returns only on failure. Descriptors marked close-on-exec are closed;
+/// everything else, along with the cwd and pid, carries into the new image.
+pub fn execve(path: &str, args: &[&str], env: &[&str]) -> i64 {
+    let mut path_buf = std::vec::Vec::with_capacity(path.len() + 1);
+    path_buf.extend_from_slice(path.as_bytes());
+    path_buf.push(0);
+
+    let arg_bufs: std::vec::Vec<std::vec::Vec<u8>> = args
+        .iter()
+        .map(|a| {
+            let mut b = std::vec::Vec::with_capacity(a.len() + 1);
+            b.extend_from_slice(a.as_bytes());
+            b.push(0);
+            b
+        })
+        .collect();
+    let mut argv: std::vec::Vec<*const u8> = arg_bufs.iter().map(|b| b.as_ptr()).collect();
+    argv.push(core::ptr::null());
+
+    let env_bufs: std::vec::Vec<std::vec::Vec<u8>> = env
+        .iter()
+        .map(|e| {
+            let mut b = std::vec::Vec::with_capacity(e.len() + 1);
+            b.extend_from_slice(e.as_bytes());
+            b.push(0);
+            b
+        })
+        .collect();
+    let mut envp: std::vec::Vec<*const u8> = env_bufs.iter().map(|b| b.as_ptr()).collect();
+    envp.push(core::ptr::null());
+
+    unsafe {
+        sys::syscall3(
+            sys::SYS_EXECVE,
+            path_buf.as_ptr() as u64,
+            argv.as_ptr() as u64,
+            envp.as_ptr() as u64,
+        ) as i64
+    }
+}
+
+/// `fcntl` commands supported by the kernel.
+pub const F_DUPFD: u64 = 0;
+pub const F_GETFD: u64 = 1;
+pub const F_SETFD: u64 = 2;
+pub const F_DUPFD_CLOEXEC: u64 = 1030;
+pub const FD_CLOEXEC: u64 = 1;
+
+/// `fcntl(fd, cmd, arg)`. Returns a negative value on error.
+pub fn fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
+    unsafe { sys::syscall3(sys::SYS_FCNTL, fd, cmd, arg) as i64 }
+}
+
+/// Mark or unmark a descriptor close-on-exec.
+pub fn set_cloexec(fd: u64, on: bool) -> i64 {
+    fcntl(fd, F_SETFD, if on { FD_CLOEXEC } else { 0 })
+}
+
 /// Real user id of the calling process.
 pub fn getuid() -> u32 {
     unsafe { sys::syscall0(sys::SYS_GETUID) as u32 }
