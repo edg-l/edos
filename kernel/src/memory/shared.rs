@@ -4,14 +4,14 @@
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use spin::RwLock;
 use x86_64::structures::paging::{FrameAllocator, PhysFrame};
 
 use crate::memory::frame_allocator::frame_allocator;
+use crate::thread::preempt::PreemptRwLock;
 
 /// Global registry of shared memory regions
-pub static SHARED_MEMORY_REGISTRY: RwLock<BTreeMap<u64, Arc<SharedMemory>>> =
-    RwLock::new(BTreeMap::new());
+pub static SHARED_MEMORY_REGISTRY: PreemptRwLock<BTreeMap<u64, Arc<SharedMemory>>> =
+    PreemptRwLock::new(BTreeMap::new());
 
 /// Counter for generating unique shared memory IDs
 static NEXT_SHM_ID: AtomicU64 = AtomicU64::new(1);

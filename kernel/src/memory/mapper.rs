@@ -1,3 +1,4 @@
+use crate::thread::preempt::PreemptSpinlock;
 use alloc::sync::Arc;
 use core::ops::Range;
 use x86_64::{
@@ -59,7 +60,7 @@ pub struct MemoryManager {
     /// PML4 physical frame (user processes only, None for kernel mapper)
     pub pml4_frame: Option<PhysFrame>,
     /// VMA set (user processes only, None for kernel mapper)
-    pub vmas: Option<Arc<spin::Mutex<VmaSet>>>,
+    pub vmas: Option<Arc<PreemptSpinlock<VmaSet>>>,
     /// Parsed R_X86_64_RELATIVE table for lazy page-fault relocation application.
     /// Shared (Arc) so fork can clone it cheaply without re-parsing.
     pub reloc_table: Option<Arc<RelocTable>>,

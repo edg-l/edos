@@ -19,13 +19,36 @@ Locks deliberately left outside the system are listed under
 Rank constants live in `kernel/src/debug/lock_order.rs`. Violations panic at
 acquisition time in debug builds, via a per-thread rank stack.
 
+## Which lock primitive
+
+Order is only half the problem: a spin lock is bounded only while its holder
+keeps running, since every other CPU busy-waits behind it. Preemption is
+involuntary, so a bare `spin::Mutex`/`spin::RwLock` guard can be held by a
+descheduled thread.
+
+| Primitive | Use for |
+|---|---|
+| `IrqSpinlock` | state an interrupt handler can reach; disables interrupts |
+| `PreemptSpinlock` / `PreemptRwLock` | everything else shared between threads |
+| `BlockingMutex` / `BlockingRwLock` | anything held across I/O or a park |
+
+`Preempt*` suppresses preemption rather than interrupts, which is what a lock
+held across real work needs: `memory_manager` walks page tables and `vmas` walks
+the VMA tree, and charging those to interrupt latency would be far worse than
+the problem being solved. Nothing reachable under a `Preempt*` guard may park;
+`thread_park*`, `thread_sleep` and `thread_yield` debug-assert on it.
+
+The scheduler's own locks (`rq`, `sleepers`, `SCHEDULERS`, `WaitQueue.inner`)
+stay bare: they are taken by scheduler code in short, interrupt-disabled
+sections, and wrapping them would recurse into the preemption counter.
+
 ---
 
 ## Rank table
 
 | Rank | Lock | Type | Location |
 |-----:|------|------|----------|
-|  10 | `VFS` mount registry | `spin::RwLock<BTreeMap>` | `fs/vfs.rs` |
+|  10 | `VFS` mount registry | `PreemptRwLock<BTreeMap>` | `fs/vfs.rs` |
 |  30 | `inode.lock` (per-inode) | `BlockingRwLock<()>` | `fs/inode.rs` |
 |  32 | `EfsDriver.alloc_mutex` | `BlockingMutex<()>` | `fs/efs/mod.rs` |
 |  35 | `dentry_cache.inner` | `BlockingMutex<DentryCacheInner>` | `fs/dentry.rs` |
@@ -33,8 +56,8 @@ acquisition time in debug builds, via a per-thread rank stack.
 |  42 | `InodePages.in_flight` | `IrqSpinlock<BTreeMap>` | `fs/page_cache.rs` |
 |  50 | `InodePages.dirty_keys` | `BlockingMutex<Vec>` | `fs/page_cache.rs` |
 |  60 | `inode.mappers` | `BlockingMutex<Vec<Weak<..>>>` | `fs/inode.rs` |
-|  70 | `UserThread.vmas` | `Arc<spin::Mutex<VmaSet>>` | `thread/mod.rs` |
-|  80 | `UserThread.memory_manager` | `Arc<spin::Mutex<MemoryManager>>` | `thread/mod.rs` |
+|  70 | `UserThread.vmas` | `Arc<PreemptSpinlock<VmaSet>>` | `thread/mod.rs` |
+|  80 | `UserThread.memory_manager` | `Arc<PreemptSpinlock<MemoryManager>>` | `thread/mod.rs` |
 | 100 | `DIRTY_INODES` | `IrqSpinlock<Vec<Weak<VfsInode>>>` | `fs/vfs.rs` |
 | 110 | `BlockPageCache.shards[N]` | `BlockingMutex<ShardInner>` | `fs/block_page_cache.rs` |
 | 120 | `BlockPageCache.journals` | `BlockingMutex<BTreeMap>` | `fs/block_page_cache.rs` |
@@ -212,7 +235,7 @@ assertions.
 
 ### `SHARED_MEMORY_REGISTRY`
 
-`spin::RwLock<BTreeMap>` in `memory/shared.rs`. Never co-held with vmas (70) or mm
+`PreemptRwLock<BTreeMap>` in `memory/shared.rs`. Never co-held with vmas (70) or mm
 (80), because `syscalls/shm.rs` always drops the registry guard first:
 
 - `SharedMemory::get()` takes a read guard and immediately clones the `Arc`,
@@ -224,9 +247,13 @@ assertions.
 
 ### `WINDOW_REGISTRY` and `WINDOW_EVENTS`
 
-Both `spin::RwLock`, in `window/registry.rs` and `window/input.rs`. Audited
+Both `PreemptRwLock`, in `window/registry.rs` and `window/input.rs`. Audited
 2026-08-08 after a hang in which all four CPUs spun on `WINDOW_REGISTRY.write()`
 (see `doc/bugs/2026-08-08-window-registry-stuck-reader.md`).
+
+`PreemptRwLock` suppresses preemption for the guard's lifetime, so a critical
+section cannot be descheduled and other CPUs never spin for longer than the
+section itself.
 
 The order is **`WINDOW_REGISTRY` before `WINDOW_EVENTS`**, and it holds
 everywhere:
@@ -241,14 +268,30 @@ everywhere:
   dropped, at `syscalls/window.rs:46`, `:83` and `window/mod.rs:32`.
 
 Because these are spin locks, hold *duration* matters more than order: a holder
-that parks stops every other CPU dead rather than just one caller. Nothing
-reachable under either guard may park or touch user memory. That rule was
-violated by `sys_window_list`, which held the read guard across
+that stops making progress stops every other CPU dead rather than just one
+caller. Nothing reachable under either guard may park or touch user memory.
+That rule was violated by `sys_window_list`, which held the read guard across
 `try_copy_to_user`, and is why the window list is now snapshotted before the
 copy.
 
+A holder does not have to park to stall: preemption is involuntary, so any
+guard can be held by a `Ready` thread. What bounds that wait is the scheduler
+refusing to starve a runnable thread (`RunQueue::pop_next` services a lower
+level every `STARVE_STREAK_LIMIT` picks, and `Scheduler::expire_timeslice`
+ends a slice that has elapsed). Without both, a spin lock shared by threads at
+different priorities deadlocks outright: see
+`doc/bugs/2026-08-08-window-registry-stuck-reader.md`.
+
 Ranking them is now possible, since the order is established; it would not have
 caught the hang, which was a hold-duration failure rather than an inversion.
+
+Allocation still happens under both guards (`sys_window_list` builds its
+snapshot, `create_window` inserts into a `BTreeMap`), and therefore with
+interrupts disabled. That is an established pattern here — the allocator's own
+fast path runs inside `without_interrupts` and every level of it is an
+`IrqSpinlock` — and the amount allocated is bounded by the window count. A heap
+expansion landing inside one of these sections would be a long interrupts-off
+window; if that ever shows up as latency, reserve outside the guard.
 
 ### `FUTEX_REGISTRY`, `PORT_TABLE`
 

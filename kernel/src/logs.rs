@@ -113,7 +113,9 @@ impl DevFsDevice for LogDevfs {
         &self,
         _offset: usize,
         _length: usize,
-        _memory: alloc::sync::Arc<spin::Mutex<crate::memory::mapper::MemoryManager>>,
+        _memory: alloc::sync::Arc<
+            crate::thread::preempt::PreemptSpinlock<crate::memory::mapper::MemoryManager>,
+        >,
     ) -> Result<crate::fs::MmapRegion, crate::fs::DevFsError> {
         Err(crate::fs::DevFsError::Unsupported)
     }

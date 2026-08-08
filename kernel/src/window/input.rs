@@ -3,7 +3,6 @@
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{KeyEvent, KeyState};
-use spin::RwLock;
 
 use crate::{
     drivers::{
@@ -11,7 +10,10 @@ use crate::{
         mouse::{MOUSE_BROADCAST, MouseEvent},
     },
     log,
-    thread::{broadcast::Subscriber, scheduler::sched, util::queue_spawn_kthread_named},
+    thread::{
+        broadcast::Subscriber, preempt::PreemptRwLock, scheduler::sched,
+        util::queue_spawn_kthread_named,
+    },
 };
 
 use super::registry::{ReadSite, WINDOW_REGISTRY, WindowId, decoration, flags, read_tracked};
@@ -211,8 +213,8 @@ impl WindowEventQueue {
 }
 
 /// Global storage for window event queues.
-pub static WINDOW_EVENTS: RwLock<BTreeMap<WindowId, Arc<WindowEventQueue>>> =
-    RwLock::new(BTreeMap::new());
+pub static WINDOW_EVENTS: PreemptRwLock<BTreeMap<WindowId, Arc<WindowEventQueue>>> =
+    PreemptRwLock::new(BTreeMap::new());
 
 /// Last mouse button state for detecting changes.
 static LAST_MOUSE_BUTTONS: spin::Mutex<u8> = spin::Mutex::new(0);

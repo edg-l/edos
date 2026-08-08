@@ -20,6 +20,7 @@ use x86_64::{
 
 use intrusive_list::Link;
 
+use crate::thread::preempt::{PreemptRwLock, PreemptSpinlock};
 use crate::{
     boot::boot_info,
     debug::lock_order::{RANK_MAPPERS, RANK_USER_MM, RANK_VMAS},
@@ -185,7 +186,6 @@ pub struct Thread {
 
     // Intrusive runqueue link — only touched while the runqueue lock is held.
     pub rq_link: Link,
-    pub rq_boosted: AtomicBool,
 
     // Set after save_current_thread writes valid ctx, cleared when the
     // thread starts running via context_switch_to. Work-stealing skips
@@ -501,7 +501,6 @@ impl Thread {
             last_syscall: AtomicU32::new(NO_SYSCALL),
             signal: SignalState::new(),
             rq_link: Link::new(),
-            rq_boosted: AtomicBool::new(false),
             context_saved: AtomicBool::new(true),
             fpu: UnsafeCell::new(FpuState::default()),
             fpu_init: AtomicBool::new(false),
@@ -543,7 +542,7 @@ impl Thread {
         // Build VmaSet early with Stack VMA so copy_to_user can demand-fault
         // stack pages during setup_user_stack.
         let stack_top = USER_STACK_TOP.as_u64();
-        let vma_set = Arc::new(spin::Mutex::new(VmaSet::new()));
+        let vma_set = Arc::new(PreemptSpinlock::new(VmaSet::new()));
         let stack_bottom = VirtAddr::new(stack_top - USER_STACK_SIZE);
         vma_set.lock().insert(Vma {
             start: stack_bottom,
@@ -599,7 +598,7 @@ impl Thread {
 
         let name = Arc::new(name.unwrap_or_default());
 
-        let mm = Arc::new(Mutex::new(process_memory_manager));
+        let mm = Arc::new(PreemptSpinlock::new(process_memory_manager));
 
         let address_space_refs = Arc::new(AtomicUsize::new(1));
         let process_stack_top = Arc::new(AtomicU64::new(stack_top));
@@ -668,7 +667,6 @@ impl Thread {
             signal: SignalState::new(),
             user: Some(user_state),
             rq_link: Link::new(),
-            rq_boosted: AtomicBool::new(false),
             context_saved: AtomicBool::new(true),
             fpu: UnsafeCell::new(FpuState::default()),
             fpu_init: AtomicBool::new(false),
@@ -1037,15 +1035,15 @@ impl Thread {
 }
 
 pub struct ThreadRegistry {
-    pub(super) map: RwLock<BTreeMap<ThreadId, Arc<Thread>>>,
-    infos: RwLock<BTreeMap<ThreadId, Arc<IrqSpinlock<UserThreadInfo>>>>,
+    pub(super) map: PreemptRwLock<BTreeMap<ThreadId, Arc<Thread>>>,
+    infos: PreemptRwLock<BTreeMap<ThreadId, Arc<IrqSpinlock<UserThreadInfo>>>>,
 }
 
 impl ThreadRegistry {
     pub const fn new() -> Self {
         Self {
-            map: RwLock::new(BTreeMap::new()),
-            infos: RwLock::new(BTreeMap::new()),
+            map: PreemptRwLock::new(BTreeMap::new()),
+            infos: PreemptRwLock::new(BTreeMap::new()),
         }
     }
 
@@ -1086,16 +1084,16 @@ impl ThreadRegistry {
 pub(super) static THREADS: ThreadRegistry = ThreadRegistry::new();
 
 pub struct ThreadExitRegistry {
-    map: RwLock<BTreeMap<ThreadId, i32>>,
+    map: PreemptRwLock<BTreeMap<ThreadId, i32>>,
     /// Threads waiting for another thread to exit: child_tid -> Weak<Thread>.
-    waiters: RwLock<BTreeMap<ThreadId, Weak<Thread>>>,
+    waiters: PreemptRwLock<BTreeMap<ThreadId, Weak<Thread>>>,
 }
 
 impl ThreadExitRegistry {
     pub const fn new() -> Self {
         Self {
-            map: RwLock::new(BTreeMap::new()),
-            waiters: RwLock::new(BTreeMap::new()),
+            map: PreemptRwLock::new(BTreeMap::new()),
+            waiters: PreemptRwLock::new(BTreeMap::new()),
         }
     }
 

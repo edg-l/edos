@@ -1,3 +1,4 @@
+use crate::thread::preempt::PreemptSpinlock;
 use alloc::{
     boxed::Box,
     collections::btree_map::BTreeMap,
@@ -6,7 +7,6 @@ use alloc::{
     vec::Vec,
 };
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::{Mutex, RwLock};
 
 use crate::{
     debug::lock_order::{
@@ -24,6 +24,7 @@ use x86_64::{
     structures::paging::{Mapper, Page, Size4KiB},
 };
 
+use crate::thread::preempt::PreemptRwLock;
 use crate::{
     fs::gpt::FilesystemType,
     memory::{frame_allocator::frame_allocator, mapper::MemoryManager, vma::VmaBacking},
@@ -51,7 +52,7 @@ pub struct MountEntry {
     pub filesystem: FilesystemType,
 }
 
-static VFS: RwLock<BTreeMap<Path, MountEntry>> = RwLock::new(BTreeMap::new());
+static VFS: PreemptRwLock<BTreeMap<Path, MountEntry>> = PreemptRwLock::new(BTreeMap::new());
 
 /// Result of a VFS lookup: the filesystem, mount-relative path, and mount ID.
 /// Internal type used by resolve functions.
@@ -1058,7 +1059,7 @@ pub fn mmap(
     op: &VfsOp,
     offset: usize,
     length: usize,
-    memory: Arc<Mutex<MemoryManager>>,
+    memory: Arc<PreemptSpinlock<MemoryManager>>,
 ) -> Result<MmapRegion, Error> {
     op.fs.mmap(&op.relative, offset, length, memory)
 }

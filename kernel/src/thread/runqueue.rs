@@ -1,4 +1,4 @@
-use core::{array, cmp, sync::atomic::Ordering};
+use core::{array, cmp};
 
 use alloc::sync::Arc;
 use intrusive_list::IntrusiveList;
@@ -7,21 +7,29 @@ use crate::thread::thread::{State, Thread};
 
 pub const PRIORITY_LEVELS: usize = 16;
 const BOOST_DELTA: usize = 2;
-const BOOST_STREAK_LIMIT: usize = 2;
+
+/// Consecutive picks from one level before the highest non-empty lower level
+/// is serviced once.
+///
+/// Strict priority order alone lets a runnable thread be passed over forever,
+/// which turns any spin lock shared across priorities into a deadlock: the
+/// holder is `Ready` and never picked, while the higher-priority spinner never
+/// makes progress. This bounds that inversion to `STARVE_STREAK_LIMIT` picks.
+const STARVE_STREAK_LIMIT: usize = 2;
 
 pub const DEFAULT_PRIORITY: u8 = 7;
 pub const IO_PRIORITY: u8 = 8;
 
 pub(crate) struct RunQueue {
     queues: [IntrusiveList<Thread>; PRIORITY_LEVELS],
-    boosted_streak: usize,
+    starve_streak: usize,
 }
 
 impl RunQueue {
     pub(crate) fn new() -> Self {
         Self {
             queues: array::from_fn(|_| IntrusiveList::new()),
-            boosted_streak: 0,
+            starve_streak: 0,
         }
     }
 
@@ -45,15 +53,16 @@ impl RunQueue {
         } else {
             base_idx
         };
-        thread
-            .rq_boosted
-            .store(boosted && target_idx != base_idx, Ordering::Relaxed);
 
         let ptr = Arc::into_raw(thread) as *mut Thread;
         unsafe { self.queues[target_idx].push_back(ptr) };
     }
 
     /// Pop the highest-priority thread. Returns an Arc (reclaims the refcount).
+    ///
+    /// Every `STARVE_STREAK_LIMIT` consecutive picks, the highest non-empty
+    /// lower level is serviced instead, so a runnable thread behind a busy
+    /// higher-priority one is delayed but never passed over indefinitely.
     pub(crate) fn pop_next(&mut self) -> Option<Arc<Thread>> {
         for idx in (0..PRIORITY_LEVELS).rev() {
             if let Some(ptr) = self.queues[idx].pop_front() {
@@ -63,25 +72,24 @@ impl RunQueue {
                     "runqueue::pop_next: thread {} still linked after pop",
                     thread.id.0
                 );
-                let boosted = thread.rq_boosted.load(Ordering::Relaxed);
-                if boosted {
-                    self.boosted_streak += 1;
-                    if self.boosted_streak > BOOST_STREAK_LIMIT {
-                        if let Some(lower) = self.pop_lower_than(idx) {
-                            // Re-enqueue the boosted thread at the front.
-                            let requeue_ptr = Arc::into_raw(thread) as *mut Thread;
-                            unsafe { self.queues[idx].push_front(requeue_ptr) };
-                            return Some(lower);
-                        }
-                        self.boosted_streak = BOOST_STREAK_LIMIT;
+
+                self.starve_streak += 1;
+                if self.starve_streak > STARVE_STREAK_LIMIT {
+                    if let Some(lower) = self.pop_lower_than(idx) {
+                        // Put the passed-over thread back at the head of its
+                        // level so it is next in line there.
+                        let requeue_ptr = Arc::into_raw(thread) as *mut Thread;
+                        unsafe { self.queues[idx].push_front(requeue_ptr) };
+                        return Some(lower);
                     }
-                } else {
-                    self.boosted_streak = 0;
+                    // Nothing lower to service; stay at the limit so the next
+                    // pick checks again.
+                    self.starve_streak = STARVE_STREAK_LIMIT;
                 }
                 return Some(thread);
             }
         }
-        self.boosted_streak = 0;
+        self.starve_streak = 0;
         None
     }
 
@@ -89,12 +97,12 @@ impl RunQueue {
         for idx in (0..upper_idx).rev() {
             if let Some(ptr) = self.queues[idx].pop_front() {
                 let thread = unsafe { Arc::from_raw(ptr) };
-                let boosted = thread.rq_boosted.load(Ordering::Relaxed);
-                if boosted {
-                    self.boosted_streak = 1;
-                } else {
-                    self.boosted_streak = 0;
-                }
+                debug_assert!(
+                    !thread.rq_link.is_linked(),
+                    "runqueue::pop_lower_than: thread {} still linked after pop",
+                    thread.id.0
+                );
+                self.starve_streak = 0;
                 return Some(thread);
             }
         }
@@ -121,11 +129,9 @@ impl RunQueue {
                     "runqueue::pop_back_any: thread {} still linked after pop",
                     thread.id.0
                 );
-                // If we stole a boosted thread, reset the streak since
-                // we're disrupting the queue order.
-                if thread.rq_boosted.load(Ordering::Relaxed) {
-                    self.boosted_streak = 0;
-                }
+                // A steal disrupts the queue order, so the streak no longer
+                // describes what this queue has been servicing.
+                self.starve_streak = 0;
                 return Some(thread);
             }
         }

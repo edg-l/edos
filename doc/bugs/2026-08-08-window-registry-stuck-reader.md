@@ -1,16 +1,22 @@
 # Window registry stuck reader: whole-GUI deadlock
 
-**Status:** partially diagnosed. One confirmed defect fixed (see below); the
-root cause of the observed hang is **not** established, and the hang has not
-been reproduced. Observed once, after ~630s of continuous synthetic clicks and
-keystrokes through `scripts/edos-vm`.
+**Status:** fixed. The scheduler could pass over a runnable thread forever, which
+makes any spin lock shared across priorities a deadlock rather than a slowdown.
+Two scheduler defects are fixed and covered by a regression test
+(`starvation-victim` in `thread/sched_test.rs`), which without them shows a
+default-priority thread making *zero* progress.
+
+The hang itself was observed once, after ~630s of continuous synthetic clicks and
+keystrokes through `scripts/edos-vm`, and has not been re-observed with the
+instrumentation armed. Attributing it to starvation rests on the mechanism being
+proven to exist and to produce exactly the recorded signature, not on having
+caught it in the act. What would settle it is naming the holder with
+`--features window-lock-debug` and reading its `State`.
 
 A 3000-round instrumented soak afterwards (`scripts/window-lock-soak`, ~45
 minutes, 207k registry acquisitions) did not reproduce it, and the reader table
-stayed empty throughout. That run included the `sys_window_list` fix below, so
-it cannot distinguish "the fix removed the cause" from "the workload does not
-hit the trigger". Reproducing on a build with the fix reverted would separate
-the two.
+stayed empty throughout. That run included the `sys_window_list` fix below,
+which shrinks the exposure window by orders of magnitude without closing it.
 
 ---
 
@@ -59,22 +65,59 @@ there are no panics, no page faults, and no non-zero exits; all ten recorded
 exits are `code=0`, and the last one is at t=410s, 219 seconds before the hang at
 t=629s. Nothing died.
 
-### What remains
+### The holder was starved, not parked
 
-The reader count of 1 is therefore most likely *legitimate*: a thread acquired
-the read guard and then stopped making progress without releasing it. Since all
-four CPUs were spinning on `write()`, the holder was not running on any of them,
-so it was parked or otherwise descheduled while holding the guard.
+The reader count of 1 is *legitimate*: a thread acquired the read guard and then
+stopped making progress without releasing it. The register dump shows only that
+it was not **running** on any CPU. `Ready` fits that evidence as well as
+`Parked` does, and needs no lost wake to explain a permanent hang.
 
-That points at the park/wake machinery rather than at the window code
-specifically. Compare `doc/bugs/2026-04-13-sched-park-wake-missed-wakeup.md`: a
-lost wake leaves a thread parked forever, and if that thread holds a spin read
-guard, every writer then spins forever behind it.
+`Ready` is the better fit. Preemption is involuntary, so any thread can be
+preempted mid-guard, and two scheduler defects then made the wait unbounded:
 
-**The specific holder is not yet identified.** Naming it needs instrumentation
-that records the tid and site of each live reader, readable from outside the
-guest, so the next occurrence names the culprit instead of inviting another
-guess.
+1. **The timeslice was armed but never enforced.** `context_switch_to` computes
+   `slice_deadline` and arms the APIC timer to it, but `maybe_preempt` returns
+   early unless `NEED_RESCHED` is set, and nothing set it on expiry;
+   `slice_deadline` was read only by procfs. Preemption therefore happened only
+   when a thread was enqueued on that CPU or a wake nudged it.
+2. **Anti-starvation applied only to wake-boosted threads.** `pop_next` reached
+   `pop_lower_than` only when `rq_boosted` was set, which happens for
+   `WakePriority::Interrupt` wakes alone. A thread at a high *base* priority
+   reset the streak on every pick, so a lower level was never serviced.
+
+The window-input kthread runs at priority 10 (`window/input.rs`) and user
+threads default to 7. So: a user thread is preempted while holding the read
+guard; the mouse IRQ enqueues the input kthread on that same CPU; the kthread
+reaches `WINDOW_REGISTRY.write()` in `handle_mouse_event` and spins; `pop_next`
+prefers priority 10 forever and the holder is never picked again. Every other
+CPU then piles onto the write. That reproduces every recorded fact: one reader
+and no writer, nothing killed, the holder absent from all four register dumps,
+CPU 2 sitting in `handle_mouse_event`, and no recovery.
+
+Nothing rescues it. Work-stealing runs from `run_idle` and no CPU was idle;
+`try_rebalance` keys off `thread_count`, which counts assigned threads including
+parked ones, and needs an imbalance of two.
+
+### The fix
+
+Both defects are fixed in the scheduler, so the bound applies to every lock in
+the kernel rather than to this one:
+
+- `Scheduler::expire_timeslice` marks `NEED_RESCHED` once `slice_deadline` has
+  elapsed, giving the CPU back on a schedule instead of only on external events.
+- `RunQueue::pop_next` counts every pick, not just boosted ones, and services
+  the highest non-empty lower level every `STARVE_STREAK_LIMIT` picks.
+
+Separately, `WINDOW_REGISTRY` and `WINDOW_EVENTS` are now `IrqRwLock`, holding
+their guards with interrupts disabled so the sections cannot be preempted at
+all. With the scheduler fixed that is no longer required for correctness; it
+bounds how long other CPUs spin, and it is the standard rule for a spin lock
+shared across priorities.
+
+`starvation-victim` in `thread/sched_test.rs` is the regression test: one
+CPU-bound spinner per CPU above `DEFAULT_PRIORITY`, and a default-priority
+thread whose progress the spinners sample across the fully saturated window.
+With either fix disabled the victim advances by exactly 0.
 
 ### Confirmed defect, fixed
 
@@ -93,12 +136,19 @@ is *the* cause of this hang is unproven.
 ## Reasoning rules going forward
 
 - **Never hold a spin lock across a user-memory access.** A user copy can
-  demand-fault, and a demand fault can park. Snapshot into a kernel-owned buffer,
-  drop the guard, then copy out. This is the rule the FS layer already follows
-  for `inode.lock` and disk I/O, applied to userspace copies.
-- **A parked thread holding a spin read guard stops the whole machine.** Unlike a
-  blocking mutex, every other CPU busy-waits behind it. Anything that can park
-  must not be reachable with a spin guard live.
+  demand-fault, and the ring-0 branch of the page-fault handler services demand
+  faults *before* checking the uaccess fixup, on a path documented as blocking.
+  Snapshot into a kernel-owned buffer, drop the guard, then copy out. This is the
+  rule the FS layer already follows for `inode.lock` and disk I/O, applied to
+  userspace copies.
+- **A spin lock is only bounded if its holder is guaranteed to run.** Every other
+  CPU busy-waits behind the holder, so anything that can stop the holder
+  indefinitely — parking, or a scheduler that will not pick it — is a deadlock,
+  not a slowdown.
+- **"Not running" is not "parked".** A register dump shows which threads are
+  Running; it says nothing about whether the missing one is `Parked` or `Ready`.
+  Distinguishing them changes the diagnosis completely, so read the state rather
+  than inferring it.
 - **A guard held across a killable operation would also leak**, because there is
   no unwinding: the reaper frees the stack without running destructors. That did
   not happen here, but the hazard is real and worth avoiding for the same reason.
@@ -112,18 +162,21 @@ is *the* cause of this hang is unproven.
 
 ---
 
-## Remaining work
+## Audits
 
-1. **Instrument the holder.** Record tid and acquisition site for every live
-   reader in a debug-only static so the next occurrence names the thread.
-   Without this, any further root-cause claim is a guess.
-2. **Audit the other guard sites.** `sys_window_set` (`:128`) holds the *write*
-   guard across comparable work; `syscalls/window.rs:205, 250, 424` and
-   `window/input.rs:300, 413` hold read guards across `send_event`.
-3. **Audit park/wake compliance** in the window and graphics paths against the
-   contract in `doc/bugs/2026-04-13-sched-park-wake-missed-wakeup.md`:
-   `thread_park_while` may return spuriously, so every caller must loop.
-   `window/input.rs:286` does loop, and is fine.
+Both audits came back clean, which is what pushed the diagnosis out of the
+window code and into the scheduler.
+
+- **Guard sites.** Every use of `WINDOW_REGISTRY` and `WINDOW_EVENTS` lives in
+  `window/` and `syscalls/window.rs`: seven read sites, eight write sites.
+  `sys_window_set` hoists its `try_read_user` above the write guard and then only
+  assigns fields. `send_event` under a read guard is a lock-free `ArrayQueue`
+  push. No remaining site touches user memory under a guard. Allocation does
+  happen under a guard (`sys_window_list`, `create_window`), but the kernel
+  allocator is `IrqSpinlock` plus spin loops throughout and never parks.
+- **Park/wake compliance.** One `thread_park_while` exists in the whole window
+  path, `window/input.rs:286`, correctly wrapped in a loop that re-checks via
+  `try_recv`.
 
 Ranking `WINDOW_REGISTRY` would not have caught this; the failure is hold
 duration, not acquisition order.
@@ -138,7 +191,9 @@ duration, not acquisition order.
    `nm -C` the kernel for the symbol, then `x /1gx <addr>`.
 3. Decode: `& 1` is a live writer, `>> 2` is the reader count. A non-zero reader
    count with no writer, and no forward progress, means a stuck reader rather
-   than a lock cycle: look for a holder that parked, or died, with the guard live.
+   than a lock cycle: look for a holder that parked, was starved, or died with
+   the guard live. Name it with `--features window-lock-debug` and then read that
+   thread's `State` — `Ready` and `Parked` have completely different causes.
 4. Check the serial log for kills and non-zero exits before assuming a kill leak.
    Their absence means the holder is parked, not dead.
 

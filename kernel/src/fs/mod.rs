@@ -1,5 +1,6 @@
+use crate::thread::preempt::PreemptSpinlock;
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
-use spin::{Mutex, Once};
+use spin::Once;
 use thiserror::Error;
 
 use crate::{
@@ -202,7 +203,7 @@ pub trait FileSystem {
         _path: &Path,
         _offset: usize,
         _length: usize,
-        _memory: Arc<Mutex<MemoryManager>>,
+        _memory: Arc<PreemptSpinlock<MemoryManager>>,
     ) -> Result<MmapRegion, Error> {
         Err(Error::IoError)
     }

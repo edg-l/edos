@@ -1,3 +1,4 @@
+use crate::thread::preempt::PreemptSpinlock;
 use core::{
     arch::naked_asm,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
@@ -1722,7 +1723,6 @@ fn sys_clone(
         signal: SignalState::new(),
         user: Some(child_user),
         rq_link: Link::new(),
-        rq_boosted: AtomicBool::new(false),
         context_saved: AtomicBool::new(true),
         fpu: core::cell::UnsafeCell::new(crate::drivers::fpu::FpuState::default()),
         fpu_init: AtomicBool::new(false),
@@ -1887,7 +1887,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
 
     // Wrap the deep-cloned VmaSet in an Arc so it can be shared between
     // the child MemoryManager and UserThread.
-    let child_vma_set_arc = Arc::new(spin::Mutex::new(child_vma_set));
+    let child_vma_set_arc = Arc::new(PreemptSpinlock::new(child_vma_set));
 
     // Build a MemoryManager for the child via HHDM (no CR3 switch needed).
     // Explicitly clone reloc_table (Arc clone, cheap) and reloc_vma_range from
@@ -1905,7 +1905,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
             mm.reloc_vma_range = parent_mm.reloc_vma_range.clone();
             mm.load_base = parent_mm.load_base;
         }
-        Arc::new(Mutex::new(mm))
+        Arc::new(PreemptSpinlock::new(mm))
     };
 
     // Allocate kernel stack for the child.
@@ -1964,7 +1964,6 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         signal: SignalState::new(),
         user: Some(child_user_arc.clone()),
         rq_link: Link::new(),
-        rq_boosted: AtomicBool::new(false),
         context_saved: AtomicBool::new(true),
         fpu: {
             // Save parent's current FPU/SSE state and copy to child.

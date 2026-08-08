@@ -1,3 +1,4 @@
+use crate::thread::preempt::PreemptSpinlock;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::{
@@ -7,7 +8,7 @@ use alloc::{
 };
 use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{HandleControl, KeyEvent, Keyboard, ScancodeSet1, layouts};
-use spin::{Mutex, Once};
+use spin::Once;
 use x86_64::structures::idt::InterruptStackFrame;
 
 use crate::{
@@ -186,7 +187,7 @@ impl DevFsDevice for KeyboardDevice {
         &self,
         _offset: usize,
         _length: usize,
-        _memory: Arc<Mutex<MemoryManager>>,
+        _memory: Arc<PreemptSpinlock<MemoryManager>>,
     ) -> Result<MmapRegion, DevFsError> {
         Err(DevFsError::Unsupported)
     }

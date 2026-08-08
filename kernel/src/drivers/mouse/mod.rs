@@ -1,5 +1,6 @@
 //! PS/2 mouse driver with event broadcasting and DevFS interface.
 
+use crate::thread::preempt::PreemptSpinlock;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 
 use alloc::{
@@ -383,7 +384,7 @@ impl DevFsDevice for MouseDevice {
         &self,
         _offset: usize,
         _length: usize,
-        _memory: Arc<spin::Mutex<MemoryManager>>,
+        _memory: Arc<PreemptSpinlock<MemoryManager>>,
     ) -> Result<MmapRegion, DevFsError> {
         Err(DevFsError::Unsupported)
     }

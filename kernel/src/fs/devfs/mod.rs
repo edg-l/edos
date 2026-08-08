@@ -1,5 +1,6 @@
 //! Device filesystem for exposing kernel devices to userspace.
 
+use crate::thread::preempt::PreemptSpinlock;
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, BTreeSet},
@@ -7,7 +8,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use spin::{Mutex, Once, RwLock};
+use spin::{Once, RwLock};
 use thiserror::Error;
 
 use crate::{
@@ -64,7 +65,7 @@ pub trait DevFsDevice: Send + Sync {
         &self,
         _offset: usize,
         _length: usize,
-        _memory: Arc<Mutex<MemoryManager>>,
+        _memory: Arc<PreemptSpinlock<MemoryManager>>,
     ) -> Result<MmapRegion, DevFsError> {
         Err(DevFsError::Unsupported)
     }
@@ -376,7 +377,7 @@ impl FileSystem for DevFsHandle {
         path: &Path,
         offset: usize,
         length: usize,
-        memory: Arc<Mutex<MemoryManager>>,
+        memory: Arc<PreemptSpinlock<MemoryManager>>,
     ) -> Result<MmapRegion, fs::Error> {
         let normalized = path.normalize();
         let state = self.shared.read();

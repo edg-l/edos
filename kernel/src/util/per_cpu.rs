@@ -10,6 +10,7 @@ use x86_64::{
     structures::tss::TaskStateSegment,
 };
 
+use crate::thread::preempt::PreemptCount;
 use crate::{
     acpi::raw_current_apic_id,
     allocator::PerCpuCacheCell,
@@ -37,6 +38,9 @@ pub struct PerCpuData {
     pub scheduler_stack_top: Cell<u64>,
     /// Per-CPU heap allocation cache (avoids global heap lock contention).
     pub heap_cache: PerCpuCacheCell,
+    /// Nesting count of preemption suppression. Non-zero means a spin lock is
+    /// held here and `maybe_preempt` must leave this CPU alone.
+    pub preempt_count: PreemptCount,
 }
 
 // SAFETY: PerCpuData is only accessed by its owning CPU via GS base.
@@ -58,6 +62,7 @@ impl PerCpuData {
             uaccess: UAccessState::new(),
             scheduler_stack_top: Cell::new(0),
             heap_cache: PerCpuCacheCell::new(),
+            preempt_count: PreemptCount::new(0),
         }
     }
 

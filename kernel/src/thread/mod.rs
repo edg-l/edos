@@ -1,6 +1,6 @@
+use crate::thread::preempt::PreemptSpinlock;
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize};
-use spin::Mutex;
 use x86_64::{VirtAddr, registers::control::Cr3Flags, structures::paging::PhysFrame};
 
 use crate::{
@@ -23,6 +23,7 @@ pub mod pty;
 pub mod irqlock;
 pub mod mutex;
 pub mod poll;
+pub mod preempt;
 pub mod runqueue;
 pub mod rwlock;
 pub mod scheduler;
@@ -40,8 +41,8 @@ pub struct UserThread {
     pub pid: u64,
     /// Physical addr
     pub cr3: (PhysFrame, Cr3Flags),
-    pub memory_manager: Arc<Mutex<MemoryManager>>,
-    pub vmas: Arc<spin::Mutex<VmaSet>>,
+    pub memory_manager: Arc<PreemptSpinlock<MemoryManager>>,
+    pub vmas: Arc<PreemptSpinlock<VmaSet>>,
     pub tls: Option<UserThreadTls>,
     pub heap_break: u64,
     pub address_space_refs: Arc<AtomicUsize>,
@@ -70,7 +71,7 @@ pub struct UserThreadInfo {
     pub errno: Errno,
     pub fd_table: Arc<BlockingMutex<FileDescriptorTable>>,
     pub next_mmap_addr: Arc<AtomicU64>,
-    pub memory_manager: Arc<Mutex<MemoryManager>>,
+    pub memory_manager: Arc<PreemptSpinlock<MemoryManager>>,
     pub cwd: Arc<BlockingMutex<Path>>,
     pub user_id: u32,
     pub group_id: u32,

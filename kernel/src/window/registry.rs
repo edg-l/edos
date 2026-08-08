@@ -1,8 +1,8 @@
 //! Window registry and types for the window server.
 
+use crate::thread::preempt::{PreemptReadGuard, PreemptRwLock};
 use alloc::{collections::btree_map::BTreeMap, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use spin::RwLock;
 
 /// Unique identifier for a window.
 pub type WindowId = u64;
@@ -265,7 +265,8 @@ impl WindowRegistry {
 }
 
 /// Global window registry instance.
-pub static WINDOW_REGISTRY: RwLock<WindowRegistry> = RwLock::new(WindowRegistry::new());
+pub static WINDOW_REGISTRY: PreemptRwLock<WindowRegistry> =
+    PreemptRwLock::new(WindowRegistry::new());
 
 /// Identifies a `read_tracked` call site in the reader table.
 ///
@@ -324,7 +325,7 @@ pub static WINDOW_REGISTRY_READER_ACQUIRES: AtomicU64 = AtomicU64::new(0);
 
 /// A read guard that records its holder while live.
 pub struct TrackedReadGuard<'a> {
-    guard: spin::RwLockReadGuard<'a, WindowRegistry>,
+    guard: PreemptReadGuard<'a, WindowRegistry>,
     #[cfg(feature = "window-lock-debug")]
     slot: Option<usize>,
 }

@@ -1,7 +1,7 @@
 // Public api methods to send requests transparently
 
+use crate::thread::preempt::PreemptSpinlock;
 use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
-use spin::Mutex;
 
 use crate::{
     fs::{
@@ -170,7 +170,7 @@ pub fn mmap(
     path: &Path,
     offset: usize,
     length: usize,
-    memory: Arc<Mutex<MemoryManager>>,
+    memory: Arc<PreemptSpinlock<MemoryManager>>,
 ) -> Result<MmapRegion, Error> {
     let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
     vfs::mmap(&op, offset, length, memory)

@@ -33,6 +33,7 @@ use crate::{
         UserThreadInfo,
         context::CpuContext,
         irqlock::IrqSpinlock,
+        preempt::{debug_assert_preemptible, preempt_enabled},
         runqueue::RunQueue,
         thread::{Flags, State, THREADS, Thread, ThreadId, get_thread_by_id, record_thread_exit},
     },
@@ -220,6 +221,7 @@ impl Scheduler {
             // can pop the thread from the runqueue.
             let idle = self.current.load(Ordering::Acquire) == 0;
             if !idle || self.has_work.load(Ordering::Acquire) {
+                self.expire_timeslice();
                 self.maybe_preempt(context);
             }
 
@@ -416,7 +418,31 @@ impl Scheduler {
         false
     }
 
+    /// Request a reschedule once the running thread has used its timeslice.
+    ///
+    /// `context_switch_to` arms the APIC timer to `slice_deadline`, so the tick
+    /// that observes an elapsed deadline ends the slice. Enqueue and wake are
+    /// the only other sources of a preemption request, and neither fires for a
+    /// thread that simply keeps running, so without this a CPU-bound thread
+    /// holds its CPU until something else happens to become runnable there.
+    fn expire_timeslice(&self) {
+        let Some(cur) = self.current_thread() else {
+            return;
+        };
+        let deadline = cur.slice_deadline.load(Ordering::Acquire);
+        if deadline != 0 && Instant::now().tick() >= deadline {
+            cur.mark_need_resched();
+        }
+    }
+
     pub fn maybe_preempt(&self, context: *mut CpuContext) {
+        // A spin lock is held here. Switching away would leave every CPU
+        // waiting on it spinning until this thread is scheduled again.
+        // `NEED_RESCHED` stays set, so the next tick performs the switch.
+        if !preempt_enabled() {
+            return;
+        }
+
         let Some(cur) = self.current_thread() else {
             self.pick_and_run(context); // was idle
             return;
@@ -904,12 +930,14 @@ impl Scheduler {
 
     #[inline]
     pub fn thread_yield(&self) {
+        debug_assert_preemptible("thread_yield");
         without_interrupts(|| unsafe {
             save_transition_switch(transition_yield, core::ptr::null_mut());
         });
     }
 
     pub fn thread_park(&self) {
+        debug_assert_preemptible("thread_park");
         let Some(_cur) = self.current_thread() else {
             return;
         };
@@ -933,6 +961,7 @@ impl Scheduler {
     /// re-enrolling the thread on a wait queue, breaking wait-queue
     /// protocols where the producer pops the waiter exactly once.
     pub fn thread_park_while<F: FnMut() -> bool>(&self, mut should_park: F) {
+        debug_assert_preemptible("thread_park_while");
         let Some(_cur) = self.current_thread() else {
             return;
         };
@@ -957,6 +986,7 @@ impl Scheduler {
 
     #[inline]
     pub fn thread_sleep(&self, dt: Duration) {
+        debug_assert_preemptible("thread_sleep");
         let Some(_cur) = self.current_thread() else {
             return;
         };
