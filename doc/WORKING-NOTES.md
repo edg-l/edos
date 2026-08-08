@@ -50,33 +50,68 @@ fast for that long.
 `mmaptest` went from failing at test 1 to all 10 passing on both `/var` and
 `/tmp`.
 
+**`VfsInode::drop` no longer panics the kernel on the reaper.** The drop-contract
+guard asserted that the drop never *runs* on the reaper or evict kthread, but the
+contract is that it never *blocks*, and the whole point of posting to the evict
+kthread is to make the reaper path safe. The reaper frees a dead thread's FDs and
+VMAs, so it routinely releases the last reference to an orphaned inode:
+`mmaptest`'s unlink-while-mapped test panicked the kernel on trunk. The guard now
+sits on the one blocking path, the queue-full fallback in `post_evict`, where the
+reaper gives the eviction up (counted as `dropped_count` in `/proc/evict_stats`,
+reclaimed by `efs-fsck`) instead of stalling teardown behind disk I/O. `mmaptest`
+now passes 10/10 on both `/var` and `/tmp` with no panic.
+
+**`make test` is green for the first time, and covers more**, 47/47 (was 30).
+Added: the preemption counter's nesting and balance, `BlockingMutex` mutual
+exclusion under contention, `BlockingRwLock` reader sharing plus writer
+exclusion, and `WaitQueue::wake_all` releasing every waiter. Each was checked
+against a deliberately broken build first — the mutex test reports 500 of 2000
+increments when the guard is dropped across the read-modify-write, and the
+waitqueue test strands three waiters when `wake_all` is swapped for `wake_one`.
+Both handshakes are counter-based rather than timed: an earlier version waited
+only for the queue to become non-empty and flaked about once in twenty. It was red on trunk: the
+`abort-race` test called `thread_park_while` bare and treated any return as a
+completed round, which is the exact contract violation
+`bugs/2026-04-13-sched-park-wake-missed-wakeup.md` warns about. It now loops on
+its condition, and the waker counts a round before releasing the parker so the
+final count is not a race. Note that `make test` itself still fails to launch
+over SSH because it passes `-audiodev pipewire`; substitute `-audiodev none`.
+
 ---
 
-## The open bug that matters
+## The GUI deadlock was a scheduler bug, and is fixed
 
-**A window-registry reader got stuck and wedged the whole GUI**, with all four
-CPUs spinning on `WINDOW_REGISTRY.write()`. Full writeup in
+**A window-registry reader wedged the whole GUI**, with all four CPUs spinning
+on `WINDOW_REGISTRY.write()`. Full writeup in
 [`bugs/2026-08-08-window-registry-stuck-reader.md`](bugs/2026-08-08-window-registry-stuck-reader.md).
 
-It is **not root-caused.** What is established:
+The holder was never parked. It was **`Ready` and starved**: the register dump
+only proves it was not *running*, and the scheduler could pass over a runnable
+thread forever. Two defects made the wait unbounded, both now fixed:
 
-- The lock word read `0x4`, which is one reader and no writer, so a reader never
-  released rather than a lock cycle.
-- Nothing was killed. No panics, no faults, no non-zero exits, and the last
-  process exit was 219s before the hang. That rules out the obvious "no
-  unwinding, so a killed thread leaks its guard" theory.
-- Therefore the holder was **parked** while holding the guard, and was not
-  running on any CPU, which is why it never appeared in the register dump.
+- **The timeslice was armed but never enforced.** `context_switch_to` set
+  `slice_deadline` and armed the timer to it, but `maybe_preempt` bails unless
+  `NEED_RESCHED` is set and nothing set it on expiry; `slice_deadline` was read
+  only by procfs. A thread was preempted only when another became runnable on
+  its CPU. `Scheduler::expire_timeslice` now marks it.
+- **Anti-starvation only covered wake-boosted threads.** `pop_next` reached
+  `pop_lower_than` only when `rq_boosted` was set, which happens for
+  `WakePriority::Interrupt` wakes alone, so a high *base* priority thread
+  starved everything below it. It now counts every pick and services the highest
+  non-empty lower level every `STARVE_STREAK_LIMIT`.
 
-That points at the park/wake machinery rather than at the window code.
-`bugs/2026-04-13-sched-park-wake-missed-wakeup.md` describes the same failure
-shape from a lost wake, and the owner considers that code old and suspect.
+The window-input kthread runs at priority 10 and user threads at 7, so a
+preempted guard holder behind that kthread was never picked again. The same
+hazard applied to every spin lock shared across priorities, including `VFS`.
 
-**A 3000-round soak did not reproduce it**, but that run contained the
-`sys_window_list` fix, so it cannot separate "fixed" from "not triggered".
-Reverting that fix and soaking again would separate them.
+`starvation-victim` in `thread/sched_test.rs` is the regression test: one
+CPU-bound spinner per CPU above `DEFAULT_PRIORITY` plus a default-priority
+thread whose progress the spinners sample across the saturated window. With
+either fix disabled the victim advances by exactly 0; with both it advances by
+~800k.
 
-To catch it next time, rebuild with the instrumentation and read the table:
+The reader instrumentation is still there and still useful, since it names the
+holder rather than its state:
 
 ```bash
 make edos-x86_64.iso CARGO_FLAGS="--features window-lock-debug"
@@ -84,10 +119,28 @@ scripts/edos-vm start
 scripts/window-lock-soak 3000
 ```
 
-Slots decode as `(tid << 8) | site` and name the thread that never released.
-`WINDOW_REGISTRY_READER_ACQUIRES` is the positive control: live slots last
-microseconds, so an empty table only means something if that counter is moving.
-It reads about 259/sec on an idle desktop.
+Slots decode as `(tid << 8) | site`. `WINDOW_REGISTRY_READER_ACQUIRES` is the
+positive control: live slots last microseconds, so an empty table only means
+something if that counter is moving. It reads about 259/sec on an idle desktop.
+Having named a holder, read its `State`: `Ready` and `Parked` have completely
+different causes.
+
+On top of the scheduler fix, spin locks shared between threads now suppress
+preemption for the guard's lifetime (`thread/preempt.rs`): a per-CPU counter
+that `maybe_preempt` honours, plus `PreemptSpinlock`/`PreemptRwLock`. Converted:
+`WINDOW_REGISTRY`, `WINDOW_EVENTS`, `VFS` (rank 10), `UserThread.vmas` (70),
+`memory_manager` (80), `SHARED_MEMORY_REGISTRY`, and the thread registries.
+
+Suppressing preemption rather than interrupts is deliberate: `memory_manager`
+walks page tables and `vmas` walks the VMA tree, so disabling interrupts across
+them would trade a scheduling problem for a much worse interrupt-latency one.
+`thread_park*`, `thread_sleep` and `thread_yield` debug-assert that preemption
+is enabled, which doubles as an automated audit for "spin lock held across a
+park" — it stayed silent through boot, the stress tests and the FS paths.
+
+Still bare, deliberately: the scheduler's own `rq`/`sleepers`/`SCHEDULERS` and
+`WaitQueue.inner` (wrapping them would recurse into the counter), and the
+IRQ-reachable locks that correctly use `IrqSpinlock`.
 
 ---
 
@@ -126,5 +179,10 @@ should land with runtime validation because it touches the storage submit path.
   the build will cheerfully report success.
 - `sg` is also the name of the `ast-grep` binary. Scripts that need the group
   tool must use `/usr/bin/sg`.
+- **`alloctest` never exits, by design.** Its whole body is
+  `loop { let v = vec![0u32; 256]; black_box(&v); drop(v); }`, an allocator
+  soak with no termination condition. It is not a hang and not a bug. Anything
+  that runs the stress binaries in sequence will sit there forever and silently
+  buffer the rest of the input; run it last, or not at all.
 - Symbol addresses move on every kernel rebuild, so resolve them from
   `kernel/kernel` at runtime rather than hard-coding them.

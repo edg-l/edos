@@ -866,18 +866,33 @@ Shipped this session, all verified on hardware unless noted:
   the fork working tree, not yet pushed.
 - `sha256sum` and `file` (Phase 3 userspace).
 
+- **The window-registry hang is root-caused and fixed.** The holder was
+  never parked; it was Ready and starved. The scheduler armed a
+  timeslice it never enforced, and its anti-starvation path only
+  covered wake-boosted threads, so a priority-10 kthread spinning on a
+  lock held by a priority-7 thread deadlocked outright. Both fixed,
+  with `starvation-victim` in sched_test as the regression test. This
+  bounded every spin lock in the kernel, not just the window registry.
+- **`make test` is green (31/31)**, having been red on trunk: the
+  abort-race test was a bare `thread_park_while` caller.
+- **Spin locks shared between threads now suppress preemption**
+  (`thread/preempt.rs`: per-CPU counter honoured by `maybe_preempt`,
+  plus PreemptSpinlock/PreemptRwLock). Converted VFS, vmas,
+  memory_manager, shared memory, the thread registries and the window
+  locks. Preemption rather than interrupts, because vmas and mm are
+  held across tree and page-table walks. The park primitives
+  debug-assert preemption is enabled, which audits the whole class.
+- **VfsInode::drop no longer panics on the reaper.** The drop-contract
+  guard asserted "never runs here" when the contract is "never blocks",
+  and the reaper releasing an orphaned inode is exactly the case the
+  evict kthread exists for. mmaptest's unlink-while-mapped test
+  panicked the kernel on trunk; now 10/10 on /var and /tmp.
+
 Open, roughly in priority order:
 
-1. **The window-registry hang is not root-caused.** A reader was stuck
-   with nothing killed, so a thread parked holding the guard. Not
-   reproduced in 3000 soak rounds, though that run included the
-   `sys_window_list` fix and so cannot separate "fixed" from "not
-   triggered". Next occurrence: rebuild with `--features
-   window-lock-debug` and read `WINDOW_REGISTRY_READERS` to name the
-   holder. Suspicion points at the park/wake machinery.
-2. **Userspace allocator fragments without bound** (above). Cross-repo:
+1. **Userspace allocator fragments without bound** (above). Cross-repo:
    needs an `edos_rt` release.
-3. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
+2. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
    validation on the storage path.
 
 Then, by fun-per-effort:
