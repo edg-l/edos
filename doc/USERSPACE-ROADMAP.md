@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-60 programs and 2 libraries, all in the `programs/` cargo workspace.
+61 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -11,6 +11,7 @@
 | Editor | `edos-vi` |
 | Files | `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `touch`, `stat`, `find`, `du`, `diff` |
 | Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs` |
+| Checksums | `sha256sum` |
 | System | `ps`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env` |
 | Network | `ping`, `dns`, `http`, `wget` |
 | Audio | `play` |
@@ -27,6 +28,11 @@
 `find` and `du` exercise readdir and stat at scale, `diff` is a classic LCS
 implementation, `xargs` stress-tests spawn and enables composability.
 
+**`sha256sum`** (Phase 3). Streaming SHA-256, so a file never has to fit in
+memory; exercises large-file read through the page cache. Verified against the
+NIST vectors and fuzzed against `hashlib` across 30 sizes, concentrating on the
+block-boundary cases (55/56/57, 63/64/65, 8191/8192/8193).
+
 ## Phase 3: pure userspace, higher complexity
 
 | Program | Why it matters | Notes |
@@ -34,7 +40,6 @@ implementation, `xargs` stress-tests spawn and enables composability.
 | `tar` | archive create and extract; useful for host to guest transfer | exercises open/read/write/unlink/mkdir at scale |
 | `top` | live system monitor | needs terminal raw mode and a refresh loop; will surface procfs gaps |
 | `file` | detect type by magic bytes | pure pattern matching |
-| `sha256sum` | checksums over large files | pure Rust, exercises large-file read |
 | `snake` | terminal game on a timer | good demo of poll and time APIs, raw stdin |
 
 ## Phase 4: kernel-aware
