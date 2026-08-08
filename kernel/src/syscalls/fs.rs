@@ -13,7 +13,7 @@ use crate::{
         path::Path,
         vfs,
     },
-    syscalls::io::resolve_path,
+    syscalls::io::{current_cwd, resolve_path},
     thread::pipe::FileDescriptor,
     util::uaccess::{
         UAccessError, try_copy_from_user, try_copy_string_from_user, try_copy_to_user,
@@ -124,7 +124,7 @@ pub fn sys_mount(
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let cwd = info.lock().cwd.lock().clone();
+    let cwd = current_cwd(&info);
     let mount_point = match read_user_path(path_ptr, &cwd) {
         Ok(path) => path,
         Err(errno) => {
@@ -189,7 +189,7 @@ pub fn sys_mkdir(path_ptr: *const u8) -> i64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let cwd = info.lock().cwd.lock().clone();
+    let cwd = current_cwd(&info);
     let path = match read_user_path(path_ptr, &cwd) {
         Ok(path) => path,
         Err(errno) => {
@@ -213,7 +213,7 @@ pub fn sys_rmdir(path_ptr: *const u8) -> i64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let cwd = info.lock().cwd.lock().clone();
+    let cwd = current_cwd(&info);
     let path = match read_user_path(path_ptr, &cwd) {
         Ok(path) => path,
         Err(errno) => {
@@ -237,7 +237,7 @@ pub fn sys_rmdir_all(path_ptr: *const u8) -> i64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let cwd = info.lock().cwd.lock().clone();
+    let cwd = current_cwd(&info);
     let path = match read_user_path(path_ptr, &cwd) {
         Ok(path) => path,
         Err(errno) => {
@@ -262,7 +262,7 @@ pub fn sys_unlink(path_ptr: *const u8) -> i64 {
 
     info.lock().errno = Errno::Clear;
 
-    let cwd = info.lock().cwd.lock().clone();
+    let cwd = current_cwd(&info);
     let path = match read_user_path(path_ptr, &cwd) {
         Ok(path) => path,
         Err(errno) => {
@@ -575,7 +575,7 @@ pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut FstatEntry
         return -1;
     }
 
-    let cwd = info.lock().cwd.lock().clone();
+    let cwd = current_cwd(&info);
 
     let path = match read_user_path_with_len(path_ptr, path_len, &cwd) {
         Ok(p) => p,
@@ -623,7 +623,7 @@ pub fn sys_statfs(path_ptr: *const u8, buf: *mut u8, buf_len: usize) -> i64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let cwd = info.lock().cwd.lock().clone();
+    let cwd = current_cwd(&info);
     let path = match read_user_path(path_ptr, &cwd) {
         Ok(p) => p,
         Err(err) => {

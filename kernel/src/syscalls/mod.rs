@@ -1269,7 +1269,7 @@ fn do_spawn(
     let info = current_thread_info();
 
     // Save current cwd for child process
-    let child_cwd = info.lock().cwd.lock().clone();
+    let child_cwd = io::current_cwd(&info);
 
     x86_64::instructions::interrupts::enable();
 
@@ -1528,7 +1528,7 @@ fn sys_spawn(
         }
     };
 
-    let path = match resolve_path(path_str, &info.lock().cwd.lock()) {
+    let path = match resolve_path(path_str, &io::current_cwd(&info)) {
         Ok(path) => path,
         Err(_) => {
             info.lock().errno = Errno::EINVAL;
@@ -1627,7 +1627,7 @@ fn sys_spawn2(args_ptr: *const SpawnArgs) -> u64 {
         }
     };
 
-    let path = match resolve_path(path_str, &info.lock().cwd.lock()) {
+    let path = match resolve_path(path_str, &io::current_cwd(&info)) {
         Ok(path) => path,
         Err(_) => {
             info.lock().errno = Errno::EINVAL;
@@ -1735,7 +1735,7 @@ fn sys_execve(
         info.lock().errno = Errno::EINVAL;
         return !0u64;
     };
-    let path = match io::resolve_path(path_str, &info.lock().cwd.lock()) {
+    let path = match io::resolve_path(path_str, &io::current_cwd(&info)) {
         Ok(p) => p,
         Err(_) => {
             info.lock().errno = Errno::EINVAL;

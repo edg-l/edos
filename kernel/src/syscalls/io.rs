@@ -24,6 +24,8 @@ use crate::{
     log,
     syscalls::{Errno, MAX_PATH_LEN, PathBuf, copy_user_path},
     thread::{
+        UserThreadInfo,
+        irqlock::IrqSpinlock,
         mutex::BlockingMutex,
         pipe::{FileDescriptor, FsFile, OpenMode, StandardStream},
         pty::Pty,
@@ -84,6 +86,25 @@ fn file_attrs_to_u8(attrs: crate::fs::FileAttrs) -> u8 {
         result |= 8;
     }
     result
+}
+
+/// The calling thread's working directory.
+///
+/// The `cwd` mutex is taken only after the per-thread `IrqSpinlock` guard is
+/// gone. Writing this as one expression keeps that guard alive to the end of the
+/// statement, so the `BlockingMutex` would be acquired with interrupts disabled,
+/// and a contended acquisition there parks with them off.
+pub(super) fn current_cwd(info: &Arc<IrqSpinlock<UserThreadInfo>>) -> Path {
+    let cwd = info.lock().cwd.clone();
+    let path = cwd.lock().clone();
+    path
+}
+
+/// Replace the calling thread's working directory, taking the locks in the
+/// order [`current_cwd`] documents.
+pub(super) fn set_current_cwd(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path) {
+    let cwd = info.lock().cwd.clone();
+    *cwd.lock() = path;
 }
 
 pub(super) fn resolve_path(
@@ -802,7 +823,7 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         }
     };
 
-    let path = match resolve_path(path_str, &info.lock().cwd.lock()) {
+    let path = match resolve_path(path_str, &current_cwd(&info)) {
         Ok(path) => path,
         Err(_) => {
             info.lock().errno = Errno::EINVAL;
@@ -890,7 +911,7 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
         }
     };
 
-    let path = match resolve_path(path_str, &info.lock().cwd.lock()) {
+    let path = match resolve_path(path_str, &current_cwd(&info)) {
         Ok(path) => path,
         Err(_) => {
             info.lock().errno = Errno::EINVAL;
@@ -1222,7 +1243,7 @@ pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {
     }
 
     // Get current working directory as string
-    let cwd_str = info.lock().cwd.lock().to_string();
+    let cwd_str = current_cwd(&info).to_string();
     let cwd_bytes = cwd_str.as_bytes();
 
     // Need space for string + null terminator
@@ -1263,7 +1284,7 @@ pub fn sys_chdir(path_ptr: *const u8) -> i64 {
     };
 
     // Resolve the target path (absolute or relative to current cwd)
-    let new_path = match resolve_path(path_str, &info.lock().cwd.lock()) {
+    let new_path = match resolve_path(path_str, &current_cwd(&info)) {
         Ok(path) => path,
         Err(_) => {
             info.lock().errno = Errno::EINVAL;
@@ -1293,7 +1314,7 @@ pub fn sys_chdir(path_ptr: *const u8) -> i64 {
     }
 
     // Update the current working directory
-    *info.lock().cwd.lock() = new_path;
+    set_current_cwd(&info, new_path);
     0
 }
 
@@ -1605,7 +1626,7 @@ pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {
         }
     };
 
-    let old_path = match resolve_path(old_path_str, &info.lock().cwd.lock()) {
+    let old_path = match resolve_path(old_path_str, &current_cwd(&info)) {
         Ok(p) => p,
         Err(_) => {
             info.lock().errno = Errno::EINVAL;
@@ -1622,7 +1643,7 @@ pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {
         }
     };
 
-    let new_path = match resolve_path(new_path_str, &info.lock().cwd.lock()) {
+    let new_path = match resolve_path(new_path_str, &current_cwd(&info)) {
         Ok(p) => p,
         Err(_) => {
             info.lock().errno = Errno::EINVAL;
