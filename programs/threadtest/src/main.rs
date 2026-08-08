@@ -22,6 +22,42 @@ fn main() {
         return;
     }
 
+    // `threadtest hammer` drives the allocator from more threads than the
+    // machine has CPUs, and checks each block still holds what the owning
+    // thread wrote, so a block handed out twice shows up as wrong data.
+    if std::env::args().nth(1).as_deref() == Some("hammer") {
+        let bad = Arc::new(AtomicU64::new(0));
+        let workers: Vec<_> = (0..8u8)
+            .map(|t| {
+                let bad = Arc::clone(&bad);
+                thread::spawn(move || {
+                    let tag = t | 0x40;
+                    let mut held: Vec<Vec<u8>> = Vec::new();
+                    for i in 0..20_000usize {
+                        held.push(vec![tag; 16 + (i * 37) % 400]);
+                        if held.len() > 64 {
+                            let v = held.swap_remove(i % 64);
+                            if v.iter().any(|&b| b != tag) {
+                                bad.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    held.iter().filter(|v| v.iter().any(|&b| b != tag)).count()
+                })
+            })
+            .collect();
+        let mut mismatched = 0;
+        for w in workers {
+            mismatched += w.join().unwrap_or_else(|_| {
+                bad.fetch_add(1, Ordering::Relaxed);
+                0
+            });
+        }
+        let total = bad.load(Ordering::Relaxed) + mismatched as u64;
+        println!("hammer: {total} corrupt blocks");
+        return;
+    }
+
     let mut failures = 0;
 
     // Values come back through the join handle.

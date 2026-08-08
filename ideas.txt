@@ -919,10 +919,17 @@ Shipped this session, all verified on hardware unless noted:
   why errors displayed as "uncategorized" no matter what
   `decode_error_kind` mapped. The allocator now unmaps idle chunks
   instead of only plateauing, honours alignment above a page on large
-  allocations (`mmap` alone returned them 4 KiB out), caches freed large
-  mappings within a 4 MiB bound, and uses the futex mutex rather than a
-  spin lock that a preempted holder turned into the userspace version of
-  the kernel starvation bug.
+  allocations (`mmap` alone returned them 4 KiB out), and caches freed
+  large mappings within a 4 MiB bound. 0.0.38 then put the
+  allocator back on a spin lock (parking under a list walk bought
+  nothing) and stopped the inlined syscall wrappers promising that
+  argument registers survive a park.
+
+  Chasing corruption under eight allocating threads through the allocator
+  was a wrong turn twice over: the cause is in this repo. Concurrent
+  `mmap` hands the same address to several threads, because `sys_mmap`
+  picks the range under one acquisition of the VMA lock and inserts the
+  VMA under another. See doc/WORKING-NOTES.md.
 
 Open, roughly in priority order:
 

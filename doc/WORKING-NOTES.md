@@ -189,11 +189,66 @@ from a full disk, and `Mutex` only enters the kernel when a waiter is actually
 parked. `decode_error_kind` in the fork covers every `Errno` now, which was only
 possible once the errno stopped being folded away below it.
 
+0.0.38 followed, for two reasons that are worth separating from the bug below.
+The allocator's own locks went back to a spin lock: its critical sections are a
+few list operations long, so parking under them bought nothing and put a syscall
+in the middle of a list walk, and the preempted-holder hazard that motivated the
+change is bounded now that the kernel enforces the timeslice. The inline syscall
+wrappers also stopped declaring the argument registers as merely read; a syscall
+that parks resumes its caller through the scheduler rather than straight back out
+of the entry stub, and `in(...)` promises the compiler those registers survive
+that path too. They are `inout(...) => _`, which is what the out-of-line
+`extern "C"` call implied before inlining.
+
+Neither of those was the corruption. **Do not repeat the mistake of reading a
+timing change as a fix**: the spin-lock build looked clean for several runs and
+the futex build lost threads, which is what the difference in scheduling looks
+like when the real fault is a narrow race elsewhere. The next section is the
+actual cause.
+
 Also open, lower priority: the AHCI watchdog `restarting` gate, which is a
 latency issue rather than a lost I/O and should land with runtime validation
 because it touches the storage submit path.
 
 ---
+
+## Open bug: concurrent mmap hands the same address to several threads
+
+This is the one to fix first. It corrupts memory in any multi-threaded program.
+
+`bin/threadtest hammer` runs eight threads allocating hard. The serial log shows
+three of them receiving the *same* mapping:
+
+```
+thread-75: mmap: lazy mapped at 0x143b000
+thread-76: mmap: lazy mapped at 0x143b000
+thread-73: mmap: lazy mapped at 0x144b000
+thread-72: mmap: lazy mapped at 0x143b000
+```
+
+`sys_mmap` picks the address under one acquisition of the VMA lock
+(`syscalls/memory.rs:115`, `vmas.find_free_address`) and inserts the `Vma` under a
+separate, later one (`syscalls/memory.rs:212`). Two threads can therefore both run
+the first fit, both see the range free, and both take it. The window is small; it
+needs several threads calling `mmap` at once to hit.
+
+The consequence is exactly the corruption that looked like an allocator bug: two
+threads' `PoolAllocator` chunks alias the same pages, so one thread's free-list
+links land in the other's blocks, and `alloc` then faults reading a link from an
+address like `0x28`. Chasing it through the allocator wasted a lot of time, twice.
+
+Worth knowing: `find_free_address` became a first fit over the VMA tree in the
+same session that fixed the VA leak, and first fit **reuses** freed ranges, so a
+stale pointer now lands in live memory instead of an unmapped hole. That makes
+any aliasing far more damaging than it would have been under the old bump
+allocator.
+
+The fix has to make choosing and claiming a range atomic: either hold the VMA
+lock from the first fit through the insert, or have the VMA set reserve the range
+under one acquisition and hand back a placeholder the caller fills in. The
+straight "widen the guard" version needs checking against the mapping work that
+currently runs between the two points, which takes the mapper locks, so mind
+`doc/invariants/lock-order.md`.
 
 ## Open bug: a syscall can run with a kthread as the per-CPU current thread
 
