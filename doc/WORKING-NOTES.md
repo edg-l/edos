@@ -702,6 +702,47 @@ Three things underneath had to change, and are worth knowing independently:
 
 ---
 
+## There is an init process now
+
+`bin/edos-init` is the only thing the kernel starts. It supervises `edos-wm`,
+`edos-taskbar` and `edos-terminal` with a thread each — spawn, `waitpid`,
+restart with backoff, give up after five rapid failures — so which programs
+make up a session is userspace policy rather than something compiled into
+`main.rs`.
+
+Two consequences worth knowing:
+
+- **A binary that fails to load no longer panics the kernel.** `boot_load_thread`
+  used to `unwrap_or_else(|e| panic!(...))`, so a broken `/bin` took the machine
+  down. It logs and leaves the kernel up; if *init itself* will not load, that is
+  logged loudly and the serial console still works.
+- **Killing the window manager is survivable.** `kill <wm pid>` and init restarts
+  it; the desktop stays usable and input keeps routing, because windows live in
+  the kernel registry and the new WM adopts them. This was the outcome I was
+  least sure of and it works — verified twice, with a shell command typed into a
+  pre-existing terminal window afterwards.
+
+### Parentage, and the exit-status leak
+
+Threads now carry the id of whoever created them, and so do exit statuses.
+Before this, every exit inserted a status into `EXITED_THREADS` and only
+`waitpid` removed one, so any process nobody waited on leaked a record forever.
+When a creator dies, its children's statuses are dropped (nothing can name them
+any more) and its surviving children are handed to init. `/proc/processes` has a
+PPID column and prints the pending-status count, which stays at 2 across dozens
+of spawns.
+
+**The trap, and it cost a debug cycle:** this bookkeeping must not run on the
+exit path. A registry walk plus two `Vec` allocations there hung the scheduler
+suite at 48/49 — the exit path can run with interrupts disabled, which is
+exactly what `reaper_enqueue`'s "must not allocate" comment warns about. It runs
+in the reaper now, and `record_thread_exit` takes the parent from the dying
+thread the caller already holds, so it neither allocates nor takes a lock. If
+you add anything to thread exit, assume no allocation and no locks until proven
+otherwise, and run `make test` — the failure was a timeout, not a panic.
+
+---
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any

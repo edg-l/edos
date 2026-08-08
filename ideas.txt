@@ -995,6 +995,14 @@ Shipped this session, all verified on hardware unless noted:
   than only in a PTY read. `exectest` covers it, including exec from a
   multithreaded process, which is the case that found the quiesce bug.
 
+- **There is an init process.** `bin/edos-init` is the only thing the
+  kernel starts; it supervises the three GUI services and restarts them,
+  and a failed boot-load logs instead of panicking the kernel. Threads
+  carry a parent now, which fixed an unbounded leak of exit statuses
+  (nothing could ever collect a status whose waiter had died) and gives
+  orphans somewhere to go. Killing the WM restarts it and the desktop
+  survives.
+
 Open, roughly in priority order. Items marked [audit] come from
 doc/AUDIT.md, which has the file:line detail and the reasoning.
 
