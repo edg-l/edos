@@ -29,6 +29,8 @@ pub struct NetStack {
     pub local_ip: [u8; 4],
     pub subnet_mask: [u8; 4],
     pub gateway_ip: [u8; 4],
+    /// Resolver address, from the DHCP lease when the server offers one.
+    pub dns_server: [u8; 4],
     pub arp_cache: ArpCache,
     /// Keyed by (id, seq).
     pub ping_waiters: BTreeMap<(u16, u16), PingWaiter>,
@@ -52,6 +54,7 @@ impl NetStack {
             local_ip: [10, 0, 2, 15],
             subnet_mask: [255, 255, 255, 0],
             gateway_ip: [10, 0, 2, 2],
+            dns_server: [10, 0, 2, 3],
             arp_cache: ArpCache::new(),
             ping_waiters: BTreeMap::new(),
             tcp_connections: BTreeMap::new(),

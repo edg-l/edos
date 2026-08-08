@@ -1,4 +1,3 @@
-pub mod http;
 pub mod io;
 pub mod keymap;
 pub mod mem;

@@ -44,3 +44,14 @@
   byte count has no reason to decode anything; only the line/word modes do.
 
 - `hexdump -n <len>` is ignored, so it dumps the whole file.
+
+- The first DNS query after boot gets no reply. `sendto` to the resolver
+  triggers ARP and the datagram is dropped while the reply comes back ~85us
+  later ("net: arp: requesting 10.0.2.3" then "arp reply" in the log, with no
+  response to the query). `dnsprobe example.com` right after boot prints len=0;
+  the same command again prints len=61 and parses fine. edos_rt's resolver
+  retries, which was worth doing on its own (UDP is lossy), but the first query
+  still fails with a malformed/mismatched response, so the retry is not
+  sufficient and the reason is not yet established. The kernel-side fix is to
+  queue the datagram pending ARP resolution the way `connect` waits, instead of
+  dropping it. `dnsprobe` is in programs/ for exactly this.

@@ -1014,3 +1014,30 @@ pub fn sys_getsockname(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u3
         }
     }
 }
+
+/// Write the resolver address into a caller-supplied `[u8; 4]`.
+///
+/// A resolver is configuration, not a socket operation, and there is no
+/// filesystem convention for it here the way `/etc/resolv.conf` serves Unix,
+/// so userspace asks the stack that learned it from DHCP.
+pub fn sys_getdns(addr_ptr: *mut [u8; 4]) -> u64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if addr_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    let Some(stack) = crate::net::stack::NET_STACK.get() else {
+        info.lock().errno = Errno::ENOTCONN;
+        return !0u64;
+    };
+    let dns = stack.lock().dns_server;
+
+    if !unsafe { try_write_user(addr_ptr, dns) } {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+    0
+}

@@ -390,6 +390,9 @@ pub extern "C" fn e1000e_driver_main() -> ! {
             stack.local_ip = lease.ip;
             stack.subnet_mask = lease.subnet_mask;
             stack.gateway_ip = lease.gateway;
+            if lease.dns != [0, 0, 0, 0] {
+                stack.dns_server = lease.dns;
+            }
         } else {
             log!("e1000e: DHCP failed, using fallback 10.0.2.15");
             stack.local_ip = [10, 0, 2, 15];

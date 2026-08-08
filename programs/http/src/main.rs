@@ -1,7 +1,6 @@
 use std::env;
-use std::io::{self, Write};
-
-use edos_lib::http::{self, Url};
+use std::io::{self, Read, Write};
+use std::net::TcpStream;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -36,45 +35,86 @@ fn main() {
         return;
     };
 
-    let url = match Url::parse(url_arg) {
-        Ok(u) => u,
+    if url_arg.starts_with("https://") {
+        eprintln!("http: HTTPS is not supported (no TLS)");
+        return;
+    }
+
+    let (host, port, path) = parse_url(url_arg);
+
+    let addr = format!("{}:{}", host, port);
+    let mut stream = match TcpStream::connect(addr.as_str()) {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("http: {}: {}", url_arg, e);
+            eprintln!("http: connect to {}: {}", addr, e);
             return;
         }
     };
 
+    let request = format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        path, host
+    );
+
     if verbose {
-        for line in http::request_text(&url).lines() {
+        for line in request.lines() {
             eprintln!("> {}", line);
         }
     }
 
-    let response = match http::get(&url) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("http: {}:{}: {}", url.host, url.port, e);
-            return;
-        }
-    };
+    if let Err(e) = stream.write_all(request.as_bytes()) {
+        eprintln!("http: send: {}", e);
+        return;
+    }
+
+    let mut response = Vec::new();
+    if let Err(e) = stream.read_to_end(&mut response) {
+        eprintln!("http: recv: {}", e);
+        return;
+    }
+
+    let header_end = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(response.len());
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
     if include_headers {
         if verbose {
-            if let Ok(headers) = std::str::from_utf8(&response.head) {
+            if let Ok(headers) = std::str::from_utf8(&response[..header_end]) {
                 for line in headers.lines() {
                     eprintln!("< {}", line);
                 }
                 eprintln!("<");
             }
         } else {
-            let _ = out.write_all(&response.head);
+            let _ = out.write_all(&response[..header_end]);
             let _ = out.write_all(b"\r\n\r\n");
         }
     }
 
-    let _ = out.write_all(&response.body);
+    let body_start = (header_end + 4).min(response.len());
+    let _ = out.write_all(&response[body_start..]);
     let _ = out.flush();
+}
+
+/// Parse a URL into (host, port, path).
+/// Supports: "http://host:port/path", "host:port/path", "host/path", "host"
+fn parse_url(url: &str) -> (&str, u16, &str) {
+    let url = url.strip_prefix("http://").unwrap_or(url);
+
+    let (hostport, path) = match url.find('/') {
+        Some(i) => (&url[..i], &url[i..]),
+        None => (url, "/"),
+    };
+
+    match hostport.rfind(':') {
+        Some(i) => match hostport[i + 1..].parse::<u16>() {
+            Ok(port) => (&hostport[..i], port, path),
+            Err(_) => (hostport, 80, path),
+        },
+        None => (hostport, 80, path),
+    }
 }

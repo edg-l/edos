@@ -48,6 +48,10 @@ version = "0.1.0"
 [[package]]
 name = "dns"
 version = "0.1.0"
+
+[[package]]
+name = "dnsprobe"
+version = "0.1.0"
 dependencies = [
  "edos_lib",
 ]
@@ -180,9 +184,6 @@ version = "0.1.0"
 [[package]]
 name = "http"
 version = "0.1.0"
-dependencies = [
- "edos_lib",
-]
 
 [[package]]
 name = "inflighttest"
@@ -350,9 +351,6 @@ version = "0.1.0"
 [[package]]
 name = "wget"
 version = "0.1.0"
-dependencies = [
- "edos_lib",
-]
 
 [[package]]
 name = "wintest"

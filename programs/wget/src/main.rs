@@ -1,8 +1,32 @@
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::net::TcpStream;
 
-use edos_lib::http::{self, Url};
+fn parse_url(url: &str) -> (&str, u16, &str) {
+    let url = url.strip_prefix("http://").unwrap_or(url);
+
+    let (hostport, path) = match url.find('/') {
+        Some(i) => (&url[..i], &url[i..]),
+        None => (url, "/"),
+    };
+
+    match hostport.rfind(':') {
+        Some(i) => match hostport[i + 1..].parse::<u16>() {
+            Ok(port) => (&hostport[..i], port, path),
+            Err(_) => (hostport, 80, path),
+        },
+        None => (hostport, 80, path),
+    }
+}
+
+fn filename_from_path(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(i) if i + 1 < trimmed.len() => &trimmed[i + 1..],
+        _ => "index.html",
+    }
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -34,34 +58,57 @@ fn main() {
         std::process::exit(1);
     };
 
-    let url = match Url::parse(url_arg) {
-        Ok(u) => u,
+    if url_arg.starts_with("https://") {
+        eprintln!("wget: HTTPS is not supported (no TLS)");
+        std::process::exit(1);
+    }
+
+    let (host, port, path) = parse_url(url_arg);
+
+    let addr = format!("{}:{}", host, port);
+    let mut stream = match TcpStream::connect(addr.as_str()) {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("wget: {}: {}", url_arg, e);
+            eprintln!("wget: connect to {}: {}", addr, e);
             std::process::exit(1);
         }
     };
 
-    let response = match http::get(&url) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("wget: {}:{}: {}", url.host, url.port, e);
-            std::process::exit(1);
-        }
-    };
+    let request = format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        path, host
+    );
 
-    let dest = output.unwrap_or_else(|| url.filename());
+    if let Err(e) = stream.write_all(request.as_bytes()) {
+        eprintln!("wget: send: {}", e);
+        std::process::exit(1);
+    }
+
+    let mut response = Vec::new();
+    if let Err(e) = stream.read_to_end(&mut response) {
+        eprintln!("wget: recv: {}", e);
+        std::process::exit(1);
+    }
+
+    let header_end = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(response.len());
+    let body_start = (header_end + 4).min(response.len());
+    let body = &response[body_start..];
+
+    let dest = output.unwrap_or_else(|| filename_from_path(path));
 
     if dest == "-" {
         let stdout = io::stdout();
         let mut out = stdout.lock();
-        let _ = out.write_all(&response.body);
+        let _ = out.write_all(body);
         let _ = out.flush();
     } else {
-        if let Err(e) = fs::write(dest, &response.body) {
+        if let Err(e) = fs::write(dest, body) {
             eprintln!("wget: {}: {}", dest, e);
             std::process::exit(1);
         }
-        eprintln!("wget: saved to '{}' ({} bytes)", dest, response.body.len());
+        eprintln!("wget: saved to '{}' ({} bytes)", dest, body.len());
     }
 }

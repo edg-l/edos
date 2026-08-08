@@ -30,7 +30,6 @@ pub struct DhcpLease {
     pub ip: [u8; 4],
     pub subnet_mask: [u8; 4],
     pub gateway: [u8; 4],
-    #[expect(dead_code)]
     pub dns: [u8; 4],
     pub server_id: [u8; 4],
 }
