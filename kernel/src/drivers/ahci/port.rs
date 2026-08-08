@@ -449,10 +449,6 @@ impl AhciPort {
             cmd |= PORT_CMD_ST;
             ptr::write_volatile(&raw mut (*self.port_regs).cmd, cmd);
         }
-        // Publish: any NCQ waiter that captured the prior generation now
-        // sees a different value and must return IoError rather than
-        // interpreting its cleared SACT bit as success.
-        self.reset_generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
@@ -765,6 +761,14 @@ impl AhciPort {
     /// Enter NCQ mode (increment in-flight counter). Blocks if legacy mode is active.
     fn enter_ncq_mode(&self) {
         loop {
+            // A command issued into a port that is about to be torn down is
+            // dead on arrival. This is a throughput measure only: a submitter
+            // already past this point is what `begin_restart` orders against.
+            if self.restarting.load(Ordering::Acquire) {
+                self.mode_waitq
+                    .wait_until(|| !self.restarting.load(Ordering::Acquire));
+                continue;
+            }
             let current = self.mode.load(Ordering::Acquire);
             if current >= 0 {
                 if self
@@ -1242,7 +1246,13 @@ impl AhciPort {
         // already clear. The CAS inside `complete_ncq_slot` makes this
         // race-safe versus a concurrent IRQ.
         let sact = unsafe { ptr::read_volatile(&raw const (*self.port_regs).sact) };
-        if sact & (1u32 << slot) == 0 {
+        if sact & (1u32 << slot) == 0 || self.reset_generation.load(Ordering::Acquire) != start_gen
+        {
+            // A changed generation means a restart round opened while this
+            // command was being set up, so its fail-all pass may have walked
+            // this slot before `issued` was stored and left nothing to
+            // complete it. The CAS inside `complete_ncq_slot` settles the
+            // case where the pass did reach it.
             self.complete_ncq_slot(slot, &op);
         }
         Ok(handle)
@@ -1333,7 +1343,13 @@ impl AhciPort {
             .store(HpetInstant::now().tick(), Ordering::Relaxed);
         op.issued.store(true, Ordering::Release);
         let sact = unsafe { ptr::read_volatile(&raw const (*self.port_regs).sact) };
-        if sact & (1u32 << slot) == 0 {
+        if sact & (1u32 << slot) == 0 || self.reset_generation.load(Ordering::Acquire) != start_gen
+        {
+            // A changed generation means a restart round opened while this
+            // command was being set up, so its fail-all pass may have walked
+            // this slot before `issued` was stored and left nothing to
+            // complete it. The CAS inside `complete_ncq_slot` settles the
+            // case where the pass did reach it.
             self.complete_ncq_slot(slot, &op);
         }
         Ok(handle)
@@ -1404,6 +1420,25 @@ impl AhciPort {
     }
 
     /// IRQ-side failure for every in-flight NCQ op. Used by the TFES path.
+    /// Open a restart round, after winning the `restarting` CAS.
+    ///
+    /// The generation is published *before* `fail_all_ncq_slots` so that it
+    /// and a submit in progress cover each other. A submitter stores `issued`
+    /// and then re-reads the generation: either it sees this bump and
+    /// completes its own slot, or its store precedes the fail-all pass below,
+    /// which then fails the op. Bumping after the pass instead leaves the
+    /// gap between the two, where an op is skipped for not being issued yet
+    /// and then finds an unchanged generation and a still-set `SACT` bit.
+    fn begin_restart(&self) {
+        self.reset_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Close a restart round, releasing submitters held by `enter_ncq_mode`.
+    fn end_restart(&self) {
+        self.restarting.store(false, Ordering::Release);
+        self.mode_waitq.wake_all();
+    }
+
     fn fail_all_ncq_slots(&self, err: BlockError) {
         for slot in 0..AHCI_CMD_SLOTS {
             let op = {
@@ -1509,6 +1544,22 @@ impl AhciPort {
             );
             crate::drivers::ahci::watchdog::WATCHDOG_FIRINGS.fetch_add(1, Ordering::Relaxed);
 
+            // An op from an earlier generation is one a previous restart
+            // already torpedoed and then left pending, which the submit and
+            // restart paths order themselves to prevent. Counted rather than
+            // merely recovered, so a regression is visible in
+            // /proc/ahci_stats instead of only as latency.
+            if op.start_gen != self.reset_generation.load(Ordering::Acquire) {
+                crate::drivers::ahci::watchdog::NCQ_STRANDED.fetch_add(1, Ordering::Relaxed);
+                log!(
+                    "ahci: stranded op port={} slot={} gen={} now={}",
+                    self.port_idx,
+                    slot,
+                    op.start_gen,
+                    self.reset_generation.load(Ordering::Acquire)
+                );
+            }
+
             // Acquire the `restarting` CAS guard FIRST, then fail-all + restart.
             // If a TFES IRQ races us and wins the CAS, we skip entirely; its
             // `fail_all_ncq_slots` walks the whole slot array, so nothing is
@@ -1520,9 +1571,10 @@ impl AhciPort {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
+                self.begin_restart();
                 self.fail_all_ncq_slots(BlockError::Io);
                 let _ = self.restart_port();
-                self.restarting.store(false, Ordering::Release);
+                self.end_restart();
                 crate::drivers::ahci::watchdog::WATCHDOG_RESTARTS.fetch_add(1, Ordering::Relaxed);
             }
 
@@ -1557,9 +1609,10 @@ impl AhciPort {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
+                self.begin_restart();
                 self.fail_all_ncq_slots(BlockError::Io);
                 let _ = self.restart_port();
-                self.restarting.store(false, Ordering::Release);
+                self.end_restart();
             }
             return;
         }

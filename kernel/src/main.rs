@@ -110,11 +110,22 @@ fn main() -> ! {
 
     // After init: parsing allocates, and the frame allocator comes up in there.
     // Still ahead of every `log_debug!` site, which are all past this point.
-    let debug_logging = ParsedCmdline::parse_str(boot_info().cmdline)
+    let cmdline = ParsedCmdline::parse_str(boot_info().cmdline);
+    let debug_logging = cmdline
         .other_params
         .iter()
         .any(|(k, v)| k == "loglevel" && v.as_deref() == Some("debug"));
     logs::set_debug_logging(debug_logging);
+
+    if let Some(ms) = cmdline.other_params.iter().find_map(|(k, v)| {
+        (k == "ahci_ncq_timeout_ms")
+            .then_some(v.as_deref())
+            .flatten()
+            .and_then(|v| v.parse::<u64>().ok())
+    }) {
+        drivers::ahci::watchdog::set_ncq_timeout_ms(ms);
+        println!("ahci: NCQ watchdog timeout set to {ms} ms");
+    }
 
     let madt = acpi_madt();
     println!(

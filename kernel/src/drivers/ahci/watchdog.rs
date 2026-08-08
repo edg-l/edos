@@ -26,16 +26,20 @@
 //! disks can legitimately take 3-5 seconds for a marginal-sector remap;
 //! 5 seconds would produce false positives. 30 seconds is the standard.
 //!
-//! Known residual race
-//! --------------------
-//! `enter_ncq_mode` does not gate on `AhciPort.restarting`, so a new
-//! submitter can install a fresh `AhciNcqOp` into `ncq_waiters[slot]`
-//! between the moment the watchdog (or TFES) takes the CAS guard and the
-//! moment `restart_port` actually clears `SACT`/`CI`. That fresh op will
-//! be silently torpedoed by the port reset and its `BlockIoHandle` is
-//! left in `Pending`; the next watchdog tick catches it ~30s later. Worth
-//! fixing by having submit paths check `restarting` and back off, but
-//! out of scope for the watchdog itself.
+//! Racing a restart against a submit
+//! ---------------------------------
+//! A restart round and a submit in progress cover each other by ordering.
+//! The restarter bumps `reset_generation` *before* `fail_all_ncq_slots`,
+//! and the submitter re-reads it *after* storing `issued`. Either the
+//! submitter observes the bump and completes its own slot, or its
+//! `issued` store precedes the fail-all pass, which then fails the op.
+//! Neither leaves an op pending for a later sweep to find.
+//!
+//! `enter_ncq_mode` also refuses admission while `restarting` is set, so
+//! a submit that has not started yet waits for the reset instead of being
+//! issued into a port that is about to be torn down. That is a
+//! throughput measure, not the correctness one: a submitter already past
+//! the gate is what the ordering above exists for.
 
 use core::{sync::atomic::AtomicU64, time::Duration};
 
@@ -44,6 +48,37 @@ use crate::thread::scheduler::thread_sleep;
 /// Timeout after which an in-flight NCQ slot is considered hung.
 /// Matches Linux libata's `ATA_TMOUT_NCQ_SEC`.
 pub const NCQ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Effective timeout in milliseconds, so a boot can shorten it.
+///
+/// `ahci_ncq_timeout_ms=<n>` on the kernel command line drives the watchdog
+/// into restarting ports underneath live I/O, which is the only way to
+/// exercise the submit-versus-restart ordering at any useful rate: the real
+/// 30 s timeout needs a drive that has actually hung. Every restart it
+/// causes fails legitimate in-flight commands, so it is a test setting.
+pub static NCQ_TIMEOUT_MS: AtomicU64 = AtomicU64::new(NCQ_TIMEOUT.as_millis() as u64);
+
+/// Ops a sweep found still pending from an *earlier* reset generation.
+///
+/// This is the fingerprint of a submit stranded by a restart: the op was
+/// torpedoed by a port reset that had already run its fail-all pass, so
+/// nothing completed it and it waited here for a later sweep. Any non-zero
+/// value means the ordering in the module docs was violated.
+pub static NCQ_STRANDED: AtomicU64 = AtomicU64::new(0);
+
+/// Apply `ahci_ncq_timeout_ms=<n>` from the kernel command line.
+///
+/// Zero means every op a sweep finds in flight is treated as hung, which is
+/// the only setting that reliably lands a port reset inside a submit: a real
+/// NCQ command against a backing file completes in well under a millisecond,
+/// so any positive timeout large enough to be sane is never reached.
+pub fn set_ncq_timeout_ms(ms: u64) {
+    NCQ_TIMEOUT_MS.store(ms, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn ncq_timeout() -> Duration {
+    Duration::from_millis(NCQ_TIMEOUT_MS.load(core::sync::atomic::Ordering::Relaxed))
+}
 
 /// How often the watchdog sweeps all ports.
 pub const WATCHDOG_TICK: Duration = Duration::from_millis(1000);
@@ -56,7 +91,9 @@ pub static WATCHDOG_RESTARTS: AtomicU64 = AtomicU64::new(0);
 
 pub extern "C" fn watchdog_entry() -> ! {
     loop {
-        thread_sleep(WATCHDOG_TICK);
+        // Sweep at the tick, or faster when the timeout has been shortened
+        // for a test, so a short timeout is actually reachable.
+        thread_sleep(WATCHDOG_TICK.min(ncq_timeout().max(Duration::from_millis(1))));
         scan_once();
     }
 }
@@ -66,6 +103,6 @@ fn scan_once() {
         return;
     };
     for port in ports.iter() {
-        port.watchdog_sweep(NCQ_TIMEOUT);
+        port.watchdog_sweep(ncq_timeout());
     }
 }

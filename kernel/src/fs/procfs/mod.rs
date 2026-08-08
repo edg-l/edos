@@ -148,10 +148,16 @@ impl Procfs {
     }
 
     fn render_ahci_stats() -> String {
-        use crate::drivers::ahci::watchdog::{WATCHDOG_FIRINGS, WATCHDOG_RESTARTS};
+        use crate::drivers::ahci::watchdog::{
+            NCQ_STRANDED, NCQ_TIMEOUT_MS, WATCHDOG_FIRINGS, WATCHDOG_RESTARTS,
+        };
         let firings = WATCHDOG_FIRINGS.load(Ordering::Relaxed);
         let restarts = WATCHDOG_RESTARTS.load(Ordering::Relaxed);
-        format!("firings={firings} restarts={restarts}\n")
+        let stranded = NCQ_STRANDED.load(Ordering::Relaxed);
+        let timeout_ms = NCQ_TIMEOUT_MS.load(Ordering::Relaxed);
+        format!(
+            "firings={firings} restarts={restarts} stranded={stranded} timeout_ms={timeout_ms}\n"
+        )
     }
 
     fn render_block_cache() -> String {
