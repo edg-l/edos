@@ -32,3 +32,15 @@
   so edos_rt allocates a CString for every open. Settling on pointer+length
   everywhere removes that allocation but changes the kernel ABI and every
   caller.
+
+- memfs reads past EOF, returning zeros to the end of the last page. `stat` on
+  /tmp/hello.txt says 20 bytes and `cat` prints the right text, but sha256sum
+  hashes 4096 bytes and hexdump dumps to the page boundary, so a guest checksum
+  of a file on /tmp never matches the host's. The same file on /var (EFS) hashes
+  correctly, and /bin/true matches the host exactly, so the clamp that VFS
+  read() applies via file_size_ino is not reaching the memfs path.
+
+- `wc -c` refuses a binary file with "stream did not contain valid UTF-8". A
+  byte count has no reason to decode anything; only the line/word modes do.
+
+- `hexdump -n <len>` is ignored, so it dumps the whole file.

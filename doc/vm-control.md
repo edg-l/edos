@@ -141,17 +141,24 @@ by name instead of by pixel" in `ideas.txt`.
 ## Boot readiness
 
 The serial console is written to `run_log.txt`, truncated on every start, so the
-file always describes the current run. The desktop is up once the mount kthread
-has spawned the three GUI binaries:
+file always describes the current run. The kernel spawns only `bin/edos-init`,
+which starts the GUI services itself, so wait for the shell rather than for a
+kernel spawn line:
 
 ```bash
-until grep -q 'Spawned bin/edos-terminal' run_log.txt; do sleep 1; done
+until grep -q '\[Terminal\] Spawned shell' run_log.txt; do sleep 1; done
 ```
 
-Allow a few more seconds after that for `edos-terminal` to spawn its shell and
-draw the prompt. With KVM the whole boot to a spawned terminal takes about 1.5s;
-under TCG it is tens of seconds, which is the practical reason to care about
-acceleration here.
+That marker is the last thing to appear, so the prompt is drawable when it does.
+With KVM the whole boot takes about 6s; under TCG it is tens of seconds, which is
+the practical reason to care about acceleration here.
+
+A boot can also end in a panic, and a readiness loop that only watches for
+success waits out its whole timeout when that happens. Watch for both:
+
+```bash
+until grep -qE '\[Terminal\] Spawned shell|KERNEL PANIC' run_log.txt; do sleep 1; done
+```
 
 ---
 

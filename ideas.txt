@@ -1003,6 +1003,29 @@ Shipped this session, all verified on hardware unless noted:
   orphans somewhere to go. Killing the WM restarts it and the desktop
   survives.
 
+- **`http` and `wget` work.** They used `std::net::TcpStream`, which the
+  std fork does not implement, so both failed at connect whatever the
+  kernel did. `edos_lib::http` now carries the client the two shared, over
+  `edos_lib::net`. A 300000-byte file arrives byte-identical to the host's
+  copy. `dns_resolve` reports why a lookup failed instead of calling every
+  failure "no A record", and its answer walker no longer desynchronises on
+  a name that ends in a compression pointer after its labels.
+
+- **A mapping owns every page it touches.** `VmaSet::reserve` searched for
+  a page-rounded gap and recorded the VMA with the raw length, so mappings
+  whose length was not a page multiple shared a page with their
+  neighbour, and a zero-fill fault or an unmap on either one destroyed the
+  other. Any `Vec` grown past 64 KiB came back zeroed with its length
+  intact. First fit is what made it reachable: the old bump allocator was
+  page-aligned by construction. `vectest` is the regression test and
+  `doc/bugs/2026-08-08-mappings-sharing-a-page.md` the writeup.
+
+- **The cwd mutex is no longer taken with interrupts off.**
+  `info.lock().cwd.lock()` held the per-thread IrqSpinlock guard across the
+  `BlockingMutex` acquisition at eighteen call sites, which panicked the
+  kernel at boot and then wedged a second CPU behind the dead one's
+  unanswered TLB shootdown IPIs.
+
 - **TCP works.** `WaitQueue::wait_until_timeout` slept once and returned
   on any wake, so connect's five-second wait for Established ended in
   microseconds, tore the connection down, and RST'd the SYN-ACK that
@@ -1034,46 +1057,42 @@ Then the interface gaps that actually block programs:
    `nanosleep`, `sigprocmask`, the `*at` family, streaming
    `getdents`.** [audit] The remaining gaps from the audit's table, none
    of which block a program that exists today.
-4. **`std::net::TcpStream` in the std fork** is unimplemented, so `http`
-   and `wget` still cannot work even though the kernel side does now.
-   `edos_lib::net` is the working path; `tcptest` shows the shape, and
-   porting `http`/`wget` onto it is a small job.
-5. **No shutdown or reboot syscall**, so every stop is a power cut and
+4. **No shutdown or reboot syscall**, so every stop is a power cut and
    the journal replays on the next boot. init is the natural owner now.
 
 Then hygiene and quality:
 
-6. **228 `unwrap()`/`expect()` in kernel code.** [audit] Convert the ones
+5. **228 `unwrap()`/`expect()` in kernel code.** [audit] Convert the ones
    on I/O and parsing results; leave a comment on the structurally
    impossible ones.
-7. **Module READMEs for `fs/` (15.7k lines) and `drivers/` (13k).**
+6. **Module READMEs for `fs/` (15.7k lines) and `drivers/` (13k).**
    [audit]
 
 Still open from the audit, but deliberately unhurried. These are not
 oversights; each has a reason it has not been done.
 
-8. **TCP retransmit clones whole segments.** [audit 2.5]
+7. **TCP retransmit clones whole segments.** [audit 2.5]
    `resends.push(seg.data.clone())` copies the full segment per retry.
    This was theoretical while no connection could be established; now
    that TCP moves real data it is a live cost under loss. `Arc<[u8]>`
    and clone the handle.
-9. **Scheduler quality, four items.** [audit 4] Load is measured as
+8. **Scheduler quality, four items.** [audit 4] Load is measured as
    `thread_count`, so a sleeping thread weighs the same as a CPU-bound
    one and `pick_sched`/`try_rebalance` balance the wrong quantity.
    There is no priority inheritance, so a high-priority waiter still
    queues behind a low-priority lock holder. The timeslice is a flat 5ms
    regardless of priority. The idle loop polls for steals on a backoff
    instead of being told by an IPI.
-10. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
-    flag and one request slot, so unrelated `munmap`s on different
-    address spaces serialize. Deliberate and correct; it is the scaling
-    wall once core counts rise. The real fix is a per-mm CPU mask so the
-    IPI is skipped for address spaces no other CPU has loaded.
-11. **`find_free_address` scans from the base every call.** [audit 2.7]
+9. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
+   flag and one request slot, so unrelated `munmap`s on different
+   address spaces serialize. Deliberate and correct; it is the scaling
+   wall once core counts rise. The real fix is a per-mm CPU mask so the
+   IPI is skipped for address spaces no other CPU has loaded.
+10. **`find_free_address` scans from the base every call.** [audit 2.7]
     O(VMAs) per mmap. The tradeoff is deliberate — a cursor would never
     wrap and freed ranges would never be reused — and only worth
     revisiting if it shows up in a profile.
-12. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
+11. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
     NUL-terminated path while `SYS_STAT` takes pointer+length, so
     `edos_rt` allocates a `CString` for every open.
 

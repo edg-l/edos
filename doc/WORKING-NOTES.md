@@ -777,6 +777,77 @@ response arrives intact, which finally exercises the RFC 6298 retransmit work.
 
 ---
 
+## Fixed: two mappings shared a page, and one zeroed the other
+
+Any `Vec` grown past 64 KiB came back full of zeros with its length intact.
+It surfaced as a networking bug — `wget` saved 0 bytes of a 300 KB file —
+and was not one: `read_to_end` collected all 300204 bytes correctly, and the
+search for the `\r\n\r\n` terminator then found nothing, because the buffer
+had been zeroed underneath it.
+
+`VmaSet::reserve` searched for a gap of `length` rounded up to a page and
+then recorded the VMA with the raw `length`. `first_fit` starts its next
+search at a VMA's `end`, so a mapping that ended mid-page put the next one
+*inside that same page*, and either could then destroy the other: a
+zero-fill fault installs a fresh frame, and `munmap` of one unmaps a page
+the other still uses.
+
+The allocator hits it on the first chunk that is not exactly `CHUNK_SIZE`.
+Growing to 128 KiB maps a ~131136-byte chunk starting 65600 bytes into the
+previous chunk's last page; the copy lands there, the old chunk is freed,
+and `release_chunk` unmaps the shared page along with it.
+
+This was newly *reachable*, not newly written: the old bump allocator
+returned page-aligned addresses by construction, and first fit made the
+cursor follow VMA ends instead. `reserve` and `first_fit` work in whole
+pages now, `sys_mmap`/`sys_munmap` reject an unaligned address rather than
+rounding one silently, and `vectest` grows a `Vec` to 2 MiB verifying every
+byte after each step. Full writeup in
+[`bugs/2026-08-08-mappings-sharing-a-page.md`](bugs/2026-08-08-mappings-sharing-a-page.md).
+
+**Two things worth carrying forward.** A correct length says nothing about
+correct contents: every layer here reported the right byte count. And when a
+buffer is zero *from offset 0*, suspect its backing pages rather than its
+writer — a writer that skipped work leaves a hole, an unmapped-and-refaulted
+page leaves a zeroed prefix.
+
+## Fixed: the cwd mutex was taken with interrupts disabled
+
+`info.lock().cwd.lock()` reads as two locks taken in sequence and is not:
+the `UserThreadInfo` `IrqSpinlock` guard is a temporary that lives to the end
+of the statement, so the cwd `BlockingMutex` was acquired with interrupts
+off. Eighteen call sites did this. It panicked the kernel during boot, and
+the CPU that died then stopped answering TLB shootdown IPIs, so a second CPU
+panicked behind it with "never acknowledged a flush".
+
+The same shape as the `sys_read` fd-table bug earlier in the session, and the
+same lesson: *the assert fires only on contention, so a rarely-contended
+wrong lock looks fine for months*. `current_cwd` / `set_current_cwd` clone
+the `Arc` out of the guard first, and every call site goes through them.
+
+## http and wget work now
+
+Both used `std::net::TcpStream`, which the std fork does not implement, so
+they failed at connect no matter what the kernel did. `edos_lib::http` holds
+the client they had duplicated — URL parsing, resolution, request, and
+reading until the peer closes — over `edos_lib::net`.
+
+Verified against a host server: a 300000-byte file arrives byte-identical
+(sha256 matches the host's), and `http` prints a small body correctly.
+
+`dns_resolve` now reports *why* a lookup failed rather than answering every
+failure with "no A record", which matters because the DNS parser lived in two
+copies and neither could tell a send failure from an empty answer. Its answer
+walker also no longer desynchronises on a name that ends in a compression
+pointer after one or more labels (RFC 1035 4.1.4); only the question walker
+had handled that.
+
+**Watch out when checking a download from inside the guest.** memfs reads
+past EOF and returns zeros to the end of the last page, so `sha256sum` of a
+file on `/tmp` hashes the padding too and never matches the host, while
+`stat` and `cat` both look right. The same file on `/var` hashes correctly.
+Recorded in `todo.txt`; verify downloads on EFS until it is fixed.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any
