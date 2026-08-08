@@ -295,7 +295,11 @@ const SYS_IOCTL: u64 = 16;
 const SYS_PIPE: u64 = 22;
 const SYS_EXIT: u64 = 60;
 const SYS_ERRNO: u64 = 0x400;
+const SYS_PREAD: u64 = 17; // read at an explicit offset
+const SYS_PWRITE: u64 = 18; // write at an explicit offset
 const SYS_GETPID: u64 = 39; // get process ID
+const SYS_GETUID: u64 = 102; // real user id of the calling process
+const SYS_GETGID: u64 = 104; // real group id of the calling process
 const SYS_SPAWN: u64 = 57; // spawn process
 const SYS_DUP: u64 = 32; // duplicate file descriptor assigning lowest unused fd
 const SYS_DUP2: u64 = 33; // duplicate file descriptor to specific target
@@ -414,6 +418,20 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let fd = ctx.rdi;
             ctx.rax = io::sys_isatty(fd);
         }
+        SYS_PREAD => {
+            let fd = ctx.rdi;
+            let buffer_ptr = ctx.rsi as *mut u8;
+            let count = ctx.rdx as usize;
+            let offset = ctx.r10;
+            ctx.rax = io::sys_pread(fd, buffer_ptr, count, offset) as u64;
+        }
+        SYS_PWRITE => {
+            let fd = ctx.rdi;
+            let buffer_ptr = ctx.rsi as *const u8;
+            let count = ctx.rdx as usize;
+            let offset = ctx.r10;
+            ctx.rax = io::sys_pwrite(fd, buffer_ptr, count, offset) as u64;
+        }
         SYS_LSEEK => {
             let fd = ctx.rdi;
             let offset = ctx.rsi as i64;
@@ -497,6 +515,12 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         }
         SYS_GETPID => {
             ctx.rax = sys_getpid();
+        }
+        SYS_GETUID => {
+            ctx.rax = current_thread_info().lock().user_id as u64;
+        }
+        SYS_GETGID => {
+            ctx.rax = current_thread_info().lock().group_id as u64;
         }
         SYS_WAIT_PID => {
             let pid = ctx.rdi;
@@ -814,6 +838,13 @@ pub fn sys_errno() -> u64 {
     current_thread_info().lock().errno as u64
 }
 
+/// Writes nanoseconds since the Unix epoch as a little-endian `u64` into the
+/// caller's 8-byte buffer.
+///
+/// Answered from the monotonic counter plus the wall-clock offset sampled at
+/// boot, so the call costs a counter read rather than the several port
+/// round-trips an RTC read takes, and it carries a date and sub-second
+/// resolution that a raw RTC reading does not.
 fn sys_clock_gettime(buf_ptr: *mut u8) -> u64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
@@ -823,18 +854,12 @@ fn sys_clock_gettime(buf_ptr: *mut u8) -> u64 {
         return !0u64;
     }
 
-    let rtc = crate::drivers::rtc::read_rtc();
-    let data: [u8; 8] = [
-        rtc.hour,
-        rtc.minute,
-        rtc.second,
-        0,
-        rtc.day,
-        rtc.month,
-        (rtc.year & 0xFF) as u8,
-        ((rtc.year >> 8) & 0xFF) as u8,
-    ];
+    let Some(nanos) = crate::timer::wall_clock_nanos() else {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    };
 
+    let data = nanos.to_le_bytes();
     if !unsafe { try_copy_to_user(buf_ptr, data.as_ptr(), 8) } {
         info.lock().errno = Errno::EFAULT;
         return !0u64;
@@ -891,6 +916,8 @@ pub enum Errno {
     EPIPE,
     /// Address family not supported (e.g. IPv6 on IPv4-only system).
     EAFNOSUPPORT,
+    /// Seek on a descriptor that has no file offset (pipe, socket, tty).
+    ESPIPE,
     /// Placeholder for unknown or unmapped kernel error codes.
     UNKNOWN,
 }
@@ -2019,6 +2046,35 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     unsafe { Cr3::write(parent_cr3.0, parent_cr3.1) };
 
     child_id.0 as i64
+}
+
+/// Longest path a syscall accepts, NUL excluded.
+pub const MAX_PATH_LEN: usize = 1024;
+
+/// Caller-owned scratch space for [`copy_user_path`].
+pub type PathBuf = [u8; MAX_PATH_LEN];
+
+/// Copy a NUL-terminated path out of user memory and validate it as UTF-8.
+///
+/// The buffer belongs to the caller and is meant to be a stack array: a path is
+/// bounded by `MAX_PATH_LEN`, so `open`, `stat`, `mkdir`, `unlink`, `rename`
+/// and friends have no reason to reach the allocator on every call.
+pub fn copy_user_path<'a>(buf: &'a mut PathBuf, ptr: *const u8) -> Result<&'a str, Errno> {
+    if ptr.is_null() {
+        return Err(Errno::EFAULT);
+    }
+
+    let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), ptr, MAX_PATH_LEN) } {
+        Ok(len) => len,
+        Err(UAccessError::TooLong) => return Err(Errno::EINVAL),
+        Err(UAccessError::Fault) => return Err(Errno::EFAULT),
+    };
+
+    if len == 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    core::str::from_utf8(&buf[..len]).map_err(|_| Errno::EINVAL)
 }
 
 fn copy_user_c_string(ptr: *const u8, max_len: usize) -> Result<Vec<u8>, UAccessError> {

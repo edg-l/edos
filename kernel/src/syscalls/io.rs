@@ -18,13 +18,11 @@ use crate::thread::scheduler::{
     current_thread, current_thread_info, current_thread_weak, thread_exit, thread_park_while,
     thread_sleep,
 };
-use crate::util::uaccess::{
-    UAccessError, try_copy_from_user, try_copy_string_from_user, try_copy_to_user, try_write_user,
-};
+use crate::util::uaccess::{try_copy_from_user, try_copy_to_user, try_write_user};
 use crate::{
     drivers::{keyboard::KEY_EVENT_BROADCAST, random, tty},
     log,
-    syscalls::Errno,
+    syscalls::{Errno, MAX_PATH_LEN, PathBuf, copy_user_path},
     thread::{
         mutex::BlockingMutex,
         pipe::{FileDescriptor, FsFile, OpenMode, StandardStream},
@@ -60,7 +58,6 @@ struct PollContext {
     key: Option<PollKey>,
 }
 
-const MAX_PATH_LEN: usize = 1024;
 const MAX_RANDOM_LEN: usize = 1 << 20;
 
 fn file_kind_to_u8(kind: FileKind) -> u8 {
@@ -394,12 +391,10 @@ pub fn sys_close(fd: u64) -> i32 {
 
 pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
     let info = current_thread_info();
-    let (fd_info, fd_table) = {
+    let fd_table = {
         let mut guard = info.lock();
         guard.errno = Errno::Clear;
-        let ft = guard.fd_table.clone();
-        let fdi = ft.lock().get_fd(fd).cloned();
-        (fdi, ft)
+        guard.fd_table.clone()
     };
 
     if count == 0 {
@@ -411,7 +406,11 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
         return -1;
     }
 
+    // The fd table is a BlockingMutex, so it must not be acquired under the
+    // UserThreadInfo IrqSpinlock: threads of one process share the table, and a
+    // contended acquisition with interrupts off spins without answering IPIs.
     interrupts::enable();
+    let fd_info = fd_table.lock().get_fd(fd).cloned();
 
     match fd_info {
         Some(FileDescriptor::StandardStream(stream)) => match stream {
@@ -777,30 +776,11 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         return -1;
     }
 
-    let mut buf = vec![0u8; MAX_PATH_LEN];
-    let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), path_ptr, MAX_PATH_LEN) } {
-        Ok(len) => len,
-        Err(UAccessError::TooLong) => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
-        }
-        Err(UAccessError::Fault) => {
-            info.lock().errno = Errno::EFAULT;
-            return -1;
-        }
-    };
-
-    if len == 0 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
-    }
-
-    buf.truncate(len);
-
-    let path_str = match core::str::from_utf8(&buf) {
+    let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
+    let path_str = match copy_user_path(&mut buf, path_ptr) {
         Ok(s) => s,
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
+        Err(e) => {
+            info.lock().errno = e;
             return -1;
         }
     };
@@ -884,30 +864,11 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
         return 0;
     }
 
-    let mut buf = vec![0u8; MAX_PATH_LEN];
-    let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), path_ptr, MAX_PATH_LEN) } {
-        Ok(len) => len,
-        Err(UAccessError::TooLong) => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
-        }
-        Err(UAccessError::Fault) => {
-            info.lock().errno = Errno::EFAULT;
-            return -1;
-        }
-    };
-
-    if len == 0 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
-    }
-
-    buf.truncate(len);
-
-    let path_str = match core::str::from_utf8(&buf) {
+    let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
+    let path_str = match copy_user_path(&mut buf, path_ptr) {
         Ok(s) => s,
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
+        Err(e) => {
+            info.lock().errno = e;
             return -1;
         }
     };
@@ -1275,30 +1236,11 @@ pub fn sys_chdir(path_ptr: *const u8) -> i64 {
         return -1;
     }
 
-    let mut buf = vec![0u8; MAX_PATH_LEN];
-    let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), path_ptr, MAX_PATH_LEN) } {
-        Ok(len) => len,
-        Err(UAccessError::TooLong) => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
-        }
-        Err(UAccessError::Fault) => {
-            info.lock().errno = Errno::EFAULT;
-            return -1;
-        }
-    };
-
-    if len == 0 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
-    }
-
-    buf.truncate(len);
-
-    let path_str = match core::str::from_utf8(&buf) {
+    let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
+    let path_str = match copy_user_path(&mut buf, path_ptr) {
         Ok(s) => s,
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
+        Err(e) => {
+            info.lock().errno = e;
             return -1;
         }
     };
@@ -1341,6 +1283,148 @@ pub fn sys_chdir(path_ptr: *const u8) -> i64 {
 const SEEK_SET: u32 = 0;
 const SEEK_CUR: u32 = 1;
 const SEEK_END: u32 = 2;
+
+/// Read `count` bytes at an explicit `offset`, leaving the fd's own offset alone.
+///
+/// Threads of one process share a file descriptor table, and with it a single
+/// offset per fd, so `lseek` + `read` from two threads races by construction:
+/// one thread's seek can land between the other's seek and read. Only regular
+/// files have an offset to address; everything else is ESPIPE.
+///
+/// Readahead state is taken by value and dropped, so a positional read does not
+/// steer the sequential-access heuristic of whoever owns the descriptor.
+pub fn sys_pread(fd: u64, buffer_ptr: *mut u8, count: usize, offset: u64) -> i64 {
+    let info = current_thread_info();
+    let fd_table = {
+        let mut guard = info.lock();
+        guard.errno = Errno::Clear;
+        guard.fd_table.clone()
+    };
+
+    if count == 0 {
+        return 0;
+    }
+
+    if buffer_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+
+    // See sys_read: the fd table is a BlockingMutex and several threads share
+    // one table, so interrupts have to be back on before it is acquired.
+    interrupts::enable();
+    let fd_info = fd_table.lock().get_fd(fd).cloned();
+
+    let Some(FileDescriptor::FsFile(file)) = fd_info else {
+        info.lock().errno = match fd_info {
+            None => Errno::EBADF,
+            Some(_) => Errno::ESPIPE,
+        };
+        return -1;
+    };
+
+    let offset = offset as usize;
+
+    if let Some(device) = crate::fs::devfs::try_lookup_from_full_path(&file.path) {
+        return match device.read(offset, count) {
+            Ok(data) => {
+                let bytes_to_copy = data.len().min(count);
+                if bytes_to_copy == 0 {
+                    return 0;
+                }
+                if !unsafe { try_copy_to_user(buffer_ptr, data.as_ptr(), bytes_to_copy) } {
+                    info.lock().errno = Errno::EFAULT;
+                    return -1;
+                }
+                bytes_to_copy as i64
+            }
+            Err(_) => {
+                info.lock().errno = Errno::EIO;
+                -1
+            }
+        };
+    }
+
+    let Some(fs) = file.fs.as_ref() else {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    };
+    let op = vfs::VfsOp {
+        fs: fs.clone(),
+        // Invariant: relative is Some iff fs is Some (set together at open time).
+        relative: file.relative.clone().expect("fs set without relative path"),
+        inode: file.inode.clone(),
+        mount_id: file.mount_id,
+    };
+
+    let mut ra = file.ra;
+    match vfs::read_to_user(&op, &mut ra, offset, count, buffer_ptr) {
+        Ok(n) => n as i64,
+        Err(_) => {
+            info.lock().errno = Errno::EINVAL;
+            -1
+        }
+    }
+}
+
+/// Write `count` bytes at an explicit `offset`, leaving the fd's own offset alone.
+///
+/// The counterpart to [`sys_pread`], and ESPIPE on anything without an offset.
+/// `O_APPEND` is not consulted: POSIX specifies that pwrite writes at the given
+/// offset regardless, and a positional write that silently lands somewhere else
+/// would defeat the point of the call.
+pub fn sys_pwrite(fd: u64, buffer_ptr: *const u8, count: usize, offset: u64) -> i64 {
+    let info = current_thread_info();
+    let fd_table = {
+        let mut guard = info.lock();
+        guard.errno = Errno::Clear;
+        guard.fd_table.clone()
+    };
+
+    if count == 0 {
+        return 0;
+    }
+
+    if buffer_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+
+    // See sys_read: the fd table is a BlockingMutex and several threads share
+    // one table, so interrupts have to be back on before it is acquired.
+    interrupts::enable();
+    let fd_info = fd_table.lock().get_fd(fd).cloned();
+
+    let Some(FileDescriptor::FsFile(file)) = fd_info else {
+        info.lock().errno = match fd_info {
+            None => Errno::EBADF,
+            Some(_) => Errno::ESPIPE,
+        };
+        return -1;
+    };
+
+    const MAX_WRITE_SIZE: usize = 1024 * 1024; // 1 MiB
+    let capped_count = count.min(MAX_WRITE_SIZE);
+
+    let Some(fs) = file.fs.as_ref() else {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    };
+    let op = vfs::VfsOp {
+        fs: fs.clone(),
+        relative: file.relative.clone().expect("fs set without relative path"),
+        inode: file.inode.clone(),
+        mount_id: file.mount_id,
+    };
+
+    match vfs::write_from_user(&op, offset as usize, buffer_ptr, capped_count, false) {
+        Ok(written) => written as i64,
+        Err(_) => {
+            info.lock().errno = Errno::EINVAL;
+            -1
+        }
+    }
+}
 
 pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> i64 {
     let info = current_thread_info();
@@ -1495,31 +1579,11 @@ pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {
         return -1;
     }
 
-    let mut buf = vec![0u8; MAX_PATH_LEN];
-
-    let old_len =
-        match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), old_path_ptr, MAX_PATH_LEN) } {
-            Ok(len) => len,
-            Err(UAccessError::TooLong) => {
-                info.lock().errno = Errno::EINVAL;
-                return -1;
-            }
-            Err(UAccessError::Fault) => {
-                info.lock().errno = Errno::EFAULT;
-                return -1;
-            }
-        };
-
-    if old_len == 0 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
-    }
-
-    buf.truncate(old_len);
-    let old_path_str = match core::str::from_utf8(&buf) {
+    let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
+    let old_path_str = match copy_user_path(&mut buf, old_path_ptr) {
         Ok(s) => s,
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
+        Err(e) => {
+            info.lock().errno = e;
             return -1;
         }
     };
@@ -1532,31 +1596,11 @@ pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {
         }
     };
 
-    let mut buf2 = vec![0u8; MAX_PATH_LEN];
-
-    let new_len =
-        match unsafe { try_copy_string_from_user(buf2.as_mut_ptr(), new_path_ptr, MAX_PATH_LEN) } {
-            Ok(len) => len,
-            Err(UAccessError::TooLong) => {
-                info.lock().errno = Errno::EINVAL;
-                return -1;
-            }
-            Err(UAccessError::Fault) => {
-                info.lock().errno = Errno::EFAULT;
-                return -1;
-            }
-        };
-
-    if new_len == 0 {
-        info.lock().errno = Errno::EINVAL;
-        return -1;
-    }
-
-    buf2.truncate(new_len);
-    let new_path_str = match core::str::from_utf8(&buf2) {
+    let mut buf2: PathBuf = [0u8; MAX_PATH_LEN];
+    let new_path_str = match copy_user_path(&mut buf2, new_path_ptr) {
         Ok(s) => s,
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
+        Err(e) => {
+            info.lock().errno = e;
             return -1;
         }
     };

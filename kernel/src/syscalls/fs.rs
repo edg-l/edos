@@ -1,4 +1,3 @@
-use alloc::vec;
 use alloc::{ffi::CString, string::ToString};
 use bytemuck::{Pod, Zeroable};
 use x86_64::instructions::interrupts;
@@ -22,30 +21,16 @@ use crate::{
     },
 };
 
-use super::Errno;
+use super::{Errno, MAX_PATH_LEN, PathBuf, copy_user_path};
 use crate::thread::scheduler::current_thread_info;
-
-const MAX_PATH_LEN: usize = 1024;
 
 fn read_user_path(path_ptr: *const u8, cwd: &Path) -> Result<Path, Errno> {
     if path_ptr.is_null() {
         return Err(Errno::EFAULT);
     }
 
-    let mut buf = vec![0u8; MAX_PATH_LEN];
-    let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), path_ptr, MAX_PATH_LEN) } {
-        Ok(len) => len,
-        Err(UAccessError::TooLong) => return Err(Errno::EINVAL),
-        Err(UAccessError::Fault) => return Err(Errno::EFAULT),
-    };
-
-    if len == 0 {
-        return Err(Errno::EINVAL);
-    }
-
-    buf.truncate(len);
-
-    let path_str = core::str::from_utf8(&buf).map_err(|_| Errno::EINVAL)?;
+    let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
+    let path_str = copy_user_path(&mut buf, path_ptr)?;
     resolve_path(path_str, cwd).map_err(|_| Errno::EINVAL)
 }
 
@@ -62,12 +47,12 @@ fn read_user_path_with_len(
         return Err(Errno::EINVAL);
     }
 
-    let mut buf = vec![0u8; path_len];
+    let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
     if !unsafe { try_copy_from_user(buf.as_mut_ptr(), path_ptr, path_len) } {
         return Err(Errno::EFAULT);
     }
 
-    let path_str = core::str::from_utf8(&buf).map_err(|_| Errno::EINVAL)?;
+    let path_str = core::str::from_utf8(&buf[..path_len]).map_err(|_| Errno::EINVAL)?;
     resolve_path(path_str, cwd).map_err(|_| Errno::EINVAL)
 }
 
@@ -76,7 +61,7 @@ fn read_user_str(value_ptr: *const u8) -> Result<CString, Errno> {
         return Err(Errno::EFAULT);
     }
 
-    let mut buf = vec![0u8; MAX_PATH_LEN];
+    let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
     let len = match unsafe { try_copy_string_from_user(buf.as_mut_ptr(), value_ptr, MAX_PATH_LEN) }
     {
         Ok(len) => len,
@@ -84,8 +69,7 @@ fn read_user_str(value_ptr: *const u8) -> Result<CString, Errno> {
         Err(UAccessError::Fault) => return Err(Errno::EFAULT),
     };
 
-    buf.truncate(len);
-    CString::new(buf).map_err(|_| Errno::EINVAL)
+    CString::new(&buf[..len]).map_err(|_| Errno::EINVAL)
 }
 
 fn remove_dir_recursive(path: &Path) -> Result<(), Error> {
