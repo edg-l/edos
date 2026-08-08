@@ -43,7 +43,8 @@ fast for that long.
 - **`OpenOptions` opens files for writing.** `read`, `write`, `truncate` and
   `create_new` were no-op stubs in the std fork, so every file was read-only as
   far as the kernel was concerned. This is why `mmap(MAP_SHARED, PROT_WRITE)`
-  failed. **Fixed in `~/dev/rust` and not yet pushed.**
+  failed. Fixed in the fork as commit `b7af81795f6`, **committed locally in
+  `~/dev/rust` but not pushed**, so it exists on this machine only.
 - `sha256sum` and `file`, two Phase 3 userspace programs.
 
 `mmaptest` went from failing at test 1 to all 10 passing on both `/var` and
@@ -101,9 +102,12 @@ Both need a decision rather than a drive-by, because they leave this repo.
    Growth tracks allocation *rate*, not retention, which is why the period is so
    exact. Every long-running program is affected. Fixing it means publishing to
    crates.io, which is irreversible.
-2. **The std fork fix above is unpushed**, and `edos_rt` still has no
-   `RDONLY`/`WRONLY`/`RDWR`/`TRUNCATE` constants, so std spells the values out
-   itself. Adding them to `edos_rt` would be cleaner and also needs a release.
+2. **The std fork fix above is committed but unpushed** (`b7af81795f6` on
+   `edos_std_v2`). Push it, or the next person who rebuilds the toolchain from
+   a fresh clone loses the fix and mmaptest regresses to failing at test 3.
+   `edos_rt` still has no `RDONLY`/`WRONLY`/`RDWR`/`TRUNCATE` constants, so std
+   spells the values out itself; moving them into `edos_rt` is cleaner and needs
+   a release.
 
 Also open, lower priority: `decode_error_kind` in the std fork maps only five
 errnos, so everything else displays as "uncategorized error", and the AHCI
