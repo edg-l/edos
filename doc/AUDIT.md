@@ -1,0 +1,302 @@
+# Codebase audit, 2026-08-08
+
+A read-only pass over the whole tree looking for bugs, smells, perf hot spots and
+missing interfaces. ~48k lines of Rust across 205 files.
+
+Each finding says what is wrong, where, and what the fix looks like. Severity is
+my judgement of blast radius, not of effort. Where I did not confirm something
+by running it, the entry says so — several plausible-looking findings were
+checked and discarded (noted at the end), and the ones left standing should be
+treated the same way until a test backs them.
+
+---
+
+## 1. Correctness
+
+### 1.1 The ELF loader maps segments at an unvalidated address — HIGH
+
+`loader/mod.rs:311`
+
+```rust
+let vaddr = base_addr + p_vaddr;   // p_vaddr comes straight from the file
+```
+
+Nothing checks that the result lands in the user half. The value flows into a
+VMA insert and then into demand-fault mappings carrying `USER_ACCESSIBLE`.
+`VmaSet` knows the bound — `USER_VA_END` at `memory/vma.rs:118` — but only
+applies it in `first_fit` (`vma.rs:340`), the path that *chooses* an address.
+Inserts at an explicit address, which is what the loader does, are unchecked.
+
+Any user can spawn any file they can read, so the input is attacker-controlled.
+Two consequences, in increasing order of how much they matter:
+
+- A `p_vaddr` making the sum non-canonical panics in `VirtAddr::new`, so a
+  crafted binary halts the kernel.
+- A `p_vaddr` in the canonical higher half passes, and the loader inserts a VMA
+  over kernel address space in that process, mapped user-accessible.
+
+I did not build the crafted ELF to prove the second, so treat it as
+"unvalidated input reaching a mapping decision" rather than a demonstrated
+escalation. It wants fixing either way.
+
+**Fix:** validate in `VmaSet::insert` rather than at the one call site, so
+every present and future caller inherits it: reject any range whose end exceeds
+`USER_VA_END` or that wraps. Use `checked_add` for `base_addr + p_vaddr`. A
+`debug_assert` is not enough here; the input is untrusted in release too.
+
+### 1.2 CPU affinity is enforced in one place out of three — MEDIUM
+
+`cpu_affinity` is a real field (`thread/thread.rs:141`) with a setter
+(`:420`), and the work-stealing path honours it (`scheduler.rs:865`). The other
+two paths do not:
+
+- `Scheduler::thread_can_run_here` (`scheduler.rs:561`) is stubbed to `true`
+  with the real check commented out directly beneath it.
+- `Scheduler::complete_wake` enqueues on the *waker's* CPU for cache locality,
+  without consulting affinity at all.
+
+So a thread pinned away from CPU 3 still runs on CPU 3 whenever it is woken
+there. Affinity currently reads as a feature but behaves as a hint that one
+code path respects.
+
+**Fix:** either enforce it in `complete_wake` and `thread_can_run_here`, or
+delete the field and its setter. Half-enforced affinity is worse than none,
+because callers will believe it.
+
+### 1.3 Shared state on bare `spin::Mutex` — MEDIUM
+
+`thread/preempt.rs` opens with the rule: a spin lock is only bounded while its
+holder keeps running, so shared state wants `PreemptSpinlock`, and only state an
+interrupt handler can reach wants `IrqSpinlock`. Several places predate it:
+
+| Site | State |
+|---|---|
+| `net/stack.rs:286,304`, `syscalls/net.rs:36,37,197` | sockets and TCP connections |
+| `drivers/block_io.rs:233` | `DEVICES` registry, read on every I/O |
+| `graphics/mod.rs:44` | the display |
+| `window/input.rs:218` | `LAST_MOUSE_BUTTONS` |
+
+These are *not* deadlock hazards: every device IRQ handler
+(`interrupts/io.rs:26-58`) only wakes a driver kthread, so none of this is
+touched from interrupt context. It is a latency and starvation hazard — a
+holder can be preempted and every other CPU then spins behind it, which is
+exactly the failure that took a session to find in the window registry.
+
+**Fix:** convert to `PreemptSpinlock`/`PreemptRwLock`. Leave the deliberately
+unranked ones alone (`WaitQueue.inner`, the scheduler's `rq` and `sleepers`,
+`owned_ops`); `doc/invariants/lock-order.md` explains why they are exempt.
+
+### 1.4 TCP measures RTT and then ignores it — MEDIUM
+
+`net/tcp.rs:588`
+
+```rust
+let rto = Duration::from_secs(1) * (1 << seg.retries.min(5));
+```
+
+The retransmit timeout is a fixed 1s base with exponential backoff, and the
+connection is declared dead after 5 retries. Meanwhile `rtt_us` is measured and
+stored (`net/stack.rs:364`) and used only for reporting. On a LAN with a
+sub-millisecond RTT, a dropped segment costs a full second before the first
+resend — roughly three orders of magnitude worse than it should be.
+
+There is also no congestion control at all: no `cwnd`, no slow start, no SACK,
+no window scaling, no delayed ACK or Nagle. Fine for a hobby stack, but it means
+throughput is bounded by the retransmit policy the moment a packet is lost.
+
+**Fix:** the standard smoothed estimator (RFC 6298): keep `srtt`/`rttvar`,
+`RTO = srtt + 4*rttvar` clamped to a 200ms floor and 60s ceiling. That is a
+contained change against the RTT the code already collects. Congestion control
+is a much larger piece of work and should be its own decision.
+
+### 1.5 A protocol mismatch in the FS request layer panics — LOW
+
+`fs/api.rs:31,55,63,71` — each request destructures the response it expects and
+`unreachable!()`s otherwise. That makes any future mismatch a kernel panic
+rather than an error return. The invariant is real today (one response type per
+request), so this is about brittleness, not a live bug.
+
+**Fix:** return `Err(Error::Internal)` instead, or make the request/response
+pairing type-level so a mismatch cannot compile.
+
+### 1.6 Stale comment claiming work-stealing is off — LOW
+
+`scheduler.rs:456`
+
+```rust
+// Work-stealing disabled for debugging.
+// TODO: re-enable after fixing context corruption.
+```
+
+Stealing is not disabled — `try_steal_and_run` is called two lines below. The
+context corruption it refers to was fixed in `4b8d7c2`. The comment now
+misdescribes the code in a subsystem where people trust comments.
+
+---
+
+## 2. Performance
+
+### 2.1 `clock_gettime` reads the CMOS RTC on every call — HIGH
+
+`syscalls/mod.rs:826`
+
+```rust
+let rtc = crate::drivers::rtc::read_rtc();
+```
+
+Every call does several 0x70/0x71 port round-trips. Under KVM each is a VM exit;
+on real hardware the RTC is a genuinely slow device. It is also racy — nothing
+handles the update-in-progress flag — and the returned struct is
+`[hour, minute, second, 0, ...]`: no date, no epoch, no sub-second resolution.
+`std::time::SystemTime` cannot be built on it, which is what `todo.txt` is
+describing as "add system time (real time)".
+
+**Fix:** sample the RTC once at boot into a wall-clock epoch offset, then answer
+`clock_gettime` from the HPET/TSC monotonic counter plus that offset. Return
+nanoseconds since the Unix epoch. Same call becomes a couple of register reads
+and gains resolution and a date.
+
+### 2.2 The kernel logs on the mmap and thread-exit hot paths — HIGH
+
+`syscalls/memory.rs` has 20 `log!` sites, including one per successful `mmap`
+(`:244 "mmap: lazy mapped at ..."`) and one per call at `:103`. `thread_exit`
+logs a line per thread.
+
+Logging is asynchronous — `log()` pushes to a queue drained by a kthread — but
+the caller still pays a `String` allocation per event on the allocation hot
+path, and the drain side writes to the UART a byte at a time under a global
+lock, with a VM exit per byte. `threadtest` alone produced hundreds of lines a
+second in every soak, and the serial lock saturating is what starved TLB
+shootdowns before the `IrqSpinlock` fix.
+
+**Fix:** put the per-operation lines behind a `trace`-style feature or a runtime
+log level, so the default build does not allocate and serialize on every
+mapping. Keep the error paths unconditional.
+
+### 2.3 A heap allocation per path-taking syscall — MEDIUM
+
+Seven sites do `vec![0u8; MAX_PATH_LEN]` with `MAX_PATH_LEN = 1024`
+(`syscalls/io.rs:63`), one per `open`/`stat`/`mkdir`/`unlink`/`list_dir`/…
+
+**Fix:** a `heapless::Vec<u8, 1024>` or a stack array. The length is already a
+compile-time constant, so this is a mechanical change that removes an allocation
+from every path-based syscall.
+
+### 2.4 `pick_sched` is quadratic — LOW
+
+`thread/util.rs:112` calls `schedulers.iter().nth(idx)` inside a loop over all
+`n` schedulers, so picking a CPU is O(n²) in CPU count. n is at most 128 and
+typically ≤ 16, so this is small today and only worth fixing when the map is
+touched anyway.
+
+**Fix:** iterate once with `.iter().cycle().skip(start).take(n)`, or index a
+slice instead of a `LinearMap`.
+
+### 2.5 TCP retransmit clones whole segments — LOW
+
+`net/tcp.rs:596` — `resends.push(seg.data.clone())` copies the full segment on
+every resend. Under loss this allocates and memcpys per retry.
+
+**Fix:** keep segments in `Arc<[u8]>` and clone the handle.
+
+### 2.6 TLB shootdown is globally serialized — MEDIUM, by design
+
+`memory/tlb.rs` funnels every shootdown through one `active` flag and one global
+request slot, so unrelated `munmap`s on different CPUs in different address
+spaces serialize against each other. That is a deliberate simplification (the
+comment says so), and it is correct; it is also the obvious scaling wall once
+core counts rise.
+
+**Fix, when it matters:** per-CPU request slots, or skip the IPI entirely for
+address spaces no other CPU has loaded — track a per-mm CPU mask and shoot down
+only that set. The second is the bigger win and is the standard approach.
+
+### 2.7 `find_free_address` always scans from the base — LOW
+
+`memory/vma.rs:315` first-fits from `mmap_base` on every call, O(VMAs) per
+`mmap`. The comment explains this is deliberate: a cursor would never wrap given
+128 TiB of space above it, so freed ranges would never be reused. The tradeoff
+is right; noting it because the cost grows with a process's VMA count and there
+is a middle option (cursor plus an explicit wrap) if it ever shows up in a
+profile.
+
+---
+
+## 3. Missing syscalls and interfaces
+
+75 syscalls exist. The conspicuous absences, roughly by how much they block real
+programs:
+
+| Missing | Why it matters |
+|---|---|
+| `fcntl` | No way to set `O_NONBLOCK` after open, and no `FD_CLOEXEC` at all — every fd leaks across `spawn` |
+| `pread`/`pwrite` | Threads sharing an fd must `lseek`+`read`, which races by construction |
+| `readv`/`writev` | Every scatter/gather write becomes N syscalls or a copy |
+| `getuid`/`setuid`/`getgid` | `UserThreadInfo` already carries `user_id`/`group_id` with no way to read or set them |
+| `symlink`/`readlink` | No symlinks in a filesystem that otherwise looks POSIX |
+| `access`, `truncate`, `utimensat` | Ordinary tooling gaps; `todo.txt` already lists file times |
+| `nanosleep` | `SLEEP_MS` is millisecond-granularity only |
+| `sigprocmask` | `SIGACTION` and `KILL` exist, so signals are half-built |
+| `*at` family | No `openat`/`unlinkat`; every path is resolved against cwd |
+| streaming `getdents` | `LIST_DIR` fills one caller-sized buffer; a huge directory has no continuation protocol |
+
+`fcntl` and the CLOEXEC gap are the two I would fix first: the absence of
+CLOEXEC is a correctness problem for any program that spawns children, not just
+a convenience gap.
+
+Also worth noting from `todo.txt`, still true: `edos_lib` duplicates `edos_rt`'s
+syscall wrappers, and `SYS_OPEN` takes a NUL-terminated path while `SYS_STAT`
+takes pointer+length, so `edos_rt` allocates a `CString` for every open.
+
+---
+
+## 4. Scheduler
+
+Beyond affinity (1.2), things that look like the next real improvements:
+
+- **Load is measured as `thread_count`.** A sleeping thread weighs the same as a
+  CPU-bound one, so `pick_sched` and `try_rebalance` balance thread counts
+  rather than load. A runnable-count or decayed-utilization metric would place
+  threads far better for the same complexity.
+- **No priority inheritance.** The starvation fix bounds how long a low-priority
+  lock holder can be passed over, but a high-priority waiter still waits behind
+  it. This is the classic reason to add PI to the blocking primitives, and the
+  rank table already gives a place to hang it.
+- **The timeslice is a flat 5ms** regardless of priority, so priority affects
+  pick order but never share of CPU.
+- **The idle loop polls for steals** on a backoff (`run_idle`) rather than being
+  told. An IPI from a CPU that just enqueued work onto a long runqueue would cut
+  steal latency and let idle CPUs stay halted.
+
+---
+
+## 5. Smells
+
+- **228 `unwrap()`/`expect()` in kernel code.** Most are genuinely infallible
+  (see below) but the density makes the real ones hard to find. Worth a pass
+  that converts the ones on I/O and parsing results, and leaves a comment on the
+  ones that are structurally impossible.
+- **`fs/` is 15.7k lines and `drivers/` 13k**, together over half the kernel.
+  Nothing wrong, but both are past the size where a module-level README pays for
+  itself.
+- **Only 6 TODO markers in 48k lines**, which is genuinely good hygiene; one of
+  them (1.6) is stale.
+
+---
+
+## What I checked and discarded
+
+Recording these so the next pass does not re-litigate them:
+
+- **ELF header `unwrap()`s** (`loader/mod.rs:232-252`) — preceded by explicit
+  length checks at `:228`, `:291`, `:439`, so the fixed-size slices cannot fail.
+  Not a bug. The *address* validation is (1.1); the parsing is fine.
+- **`PS2_LOCK` taken in IRQ context** (`drivers/mod.rs:32`) — both callers are
+  interrupt handlers and x86 interrupt gates clear IF, so it cannot self-deadlock
+  on one CPU; cross-CPU it is a few port reads. Correct as written and
+  documented as such.
+- **Device IRQ handlers touching driver state** — they only wake a kthread
+  (`interrupts/io.rs:26-58`), which is what makes 1.3 a latency issue rather
+  than a deadlock.
+- **`run_idle` recursing into itself** — guarded by the idle/`has_work` check in
+  `tick_prepare`.
