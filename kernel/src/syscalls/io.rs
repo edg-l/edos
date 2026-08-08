@@ -605,16 +605,26 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                         return -1;
                     }
                 };
+                // `wait_until` parks once and returns; it does not guarantee the
+                // condition holds, because a wake token left by an earlier wait
+                // aborts the park. Loop on the real condition, or a read
+                // reports EOF the moment anything else has woken this thread —
+                // which is what made every TCP read return 0 bytes.
                 let rx_wq = conn.lock().rx_wq.clone();
-                rx_wq.wait_until(|| {
-                    let c = conn.lock();
-                    !c.rx_buffer.is_empty()
-                        || c.state == TcpState::Closed
-                        || c.state == TcpState::CloseWait
-                        || c.state == TcpState::TimeWait
-                });
+                let mut c = loop {
+                    let ready = || {
+                        let c = conn.lock();
+                        !c.rx_buffer.is_empty()
+                            || c.state == TcpState::Closed
+                            || c.state == TcpState::CloseWait
+                            || c.state == TcpState::TimeWait
+                    };
+                    if ready() {
+                        break conn.lock();
+                    }
+                    rx_wq.wait_until(ready);
+                };
 
-                let mut c = conn.lock();
                 if c.rx_buffer.is_empty() {
                     return 0; // EOF
                 }
@@ -629,11 +639,18 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 bytes_to_read as i64
             } else {
                 // UDP: blocking receive from rx_queue
+                // Same contract as the TCP path above: loop on the condition.
                 let rx_wq = sock.lock().rx_wq.clone();
-                rx_wq.wait_until(|| {
-                    let s = sock.lock();
-                    !s.rx_queue.is_empty() || s.closed
-                });
+                loop {
+                    let ready = || {
+                        let s = sock.lock();
+                        !s.rx_queue.is_empty() || s.closed
+                    };
+                    if ready() {
+                        break;
+                    }
+                    rx_wq.wait_until(ready);
+                }
                 let data_opt = {
                     let mut s = sock.lock();
                     if s.closed && s.rx_queue.is_empty() {

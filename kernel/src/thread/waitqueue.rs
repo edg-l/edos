@@ -9,6 +9,7 @@ use crate::thread::{
     scheduler::{WakePriority, sched},
     thread::Thread,
 };
+use crate::timer::Instant;
 
 /// Maximum number of threads that can wait on a single WaitQueue.
 /// Raised from 32 to 64 (Foundation #5 Task 0.4b): fault-storm / many-core
@@ -160,13 +161,29 @@ impl WaitQueue {
         // Perform the actual park/sleep with interrupts enabled.
         // thread_park_while sets Parked before checking the closure, so a waker
         // that fires after IRQs re-enable but before park will still succeed.
+        // The timed variant must honour its deadline: `thread_sleep` returns on
+        // any wake, including a token left by an earlier wait, so sleeping once
+        // told a caller that asked for five seconds that it had timed out
+        // microseconds later.
+        //
+        // The untimed arm deliberately still parks once and returns. Callers
+        // re-check their own condition and call again; looping here instead
+        // blocks a thread whose predicate is only made true by work that thread
+        // has yet to do, which stalls the boot.
         if let Some(chosen) = action {
             match chosen {
                 SleepAction::Park => {
                     thread_park_while(|| !ready());
                 }
                 SleepAction::Sleep(dt) => {
-                    thread_sleep(dt);
+                    let deadline = Instant::now() + dt;
+                    while !ready() {
+                        let now = Instant::now();
+                        if now >= deadline {
+                            break;
+                        }
+                        thread_sleep(deadline.duration_since(now));
+                    }
                 }
             }
         }
