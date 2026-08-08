@@ -506,18 +506,26 @@ reaper correctness in general). Roadmap in dependency order:
    `doc/bugs/2026-04-17-foundation-5.md` and
    `.claude/handoff/2026-04-17-3-foundation-5-phase-4-plus-ahci-ncq-hang.md`.
 
-6. **Generic async block I/O trait.** Today AHCI is the only disk.
-   Async readahead should live behind a generic trait so USB mass
-   storage, virtio-blk (future), and NVMe all get it. Light lift now
-   that #1-#5 are in place — `fill_fn` in `get_or_fill_async_sync` is
-   the natural seam: swap the sync backend for a `submit / wait` pair
-   whose `wait` parks on the completion-thread wake.
+6. **Generic async block I/O trait. DONE 2026-05-19.** `AsyncBlockDevice`
+   with AHCI callers migrated (Phase A, `04232c0`), USB MSC migrated and
+   BPC dispatch collapsed (Phase B, `35ad890`). AHCI NCQ submit/complete
+   split with an IRQ-driven dispatcher (Phase C1, `cf7938e`, fixed in
+   `83a5117`), async readahead via lazy finalization by the first joiner
+   (Phase C2, `83ddde9`), NCQ watchdog kthread (`22727bc`) and its
+   counters in `/proc/ahci_stats` (`c5455d1`).
 
-#1-#5 shipped. #6 is the next step and unblocks async NCQ readahead
-below, proper signal handling (cancellable waits foundation in place),
-safer thread cancellation, and the long-term I/O story across all
-block devices. See the async readahead entry below for the specific
-payoff on file-read performance.
+#1-#6 are all shipped. The foundations roadmap is closed.
+
+Residual from #6, not yet fixed: `enter_ncq_mode` does not gate on
+`AhciPort.restarting`, so a submitter can install a fresh `AhciNcqOp`
+between the watchdog taking the CAS guard and `restart_port` clearing
+SACT/CI. That op is torpedoed by the reset and its `BlockIoHandle`
+stays `Pending` until the next watchdog tick ~30s later. Documented in
+the module comment of `drivers/ahci/watchdog.rs`.
+
+Note: the `.claude/plans/*.md` and `.claude/handoff/*.md` paths cited
+throughout this file are gone — that directory is not in the repo.
+Treat the prose here as the record, not those links.
 
 ### Extend lock-order ranks to more subsystems (Foundation #4 follow-up)
 
@@ -552,7 +560,66 @@ Marginal cost per subsystem: one rank constant, one row in
 "site")`/ on ~10-30 sites. Per-subsystem cost a few hours; expected
 payoff is a real bug or two per subsystem based on fs audit yield.
 
-### Async NCQ pipelined readahead (blocked on Foundations above)
+### Guards held across kill points leak (TOP PRIORITY, 2026-08-08)
+
+Found by an agent-driven soak: ~630s of continuous synthetic input via
+`scripts/edos-vm` deadlocks the whole GUI. All four CPUs end up
+spinning in `spin::RwLock<WindowRegistry>::write`. The lock word reads
+`0x4`, which is one outstanding *reader* and no writer, so it is a
+leaked read guard, not a lock cycle.
+
+`sys_window_list` holds `WINDOW_REGISTRY.read()` across
+`try_copy_to_user` (`syscalls/window.rs:315` to `:356`). EDOS is
+`no_std` with no unwinding, so a thread killed during that copy never
+runs `RwLockReadGuard::drop` and the reader count is never decremented.
+`edos-wm` calls this every frame, so the window is hit constantly.
+
+Full writeup: `doc/bugs/2026-08-08-window-registry-reader-leak.md`.
+
+The narrow fix is to build entries into an owned Vec, drop the guard,
+then copy out. The general problem is bigger and worth treating as its
+own workstream:
+
+- Audit every lock guard that is live across `try_copy_to_user`,
+  `copy_from_user`, a demand fault, or a park. Each one is a permanent
+  leak the first time its holder is killed there.
+- Consider whether the reaper can do anything about guards at all.
+  Today it frees the stack and destructors never run. A per-thread list
+  of held ranked locks (`Thread.lock_ranks` already exists in debug
+  builds) could at least *detect* a thread dying with locks held.
+- This is the sibling of the drop contract: that one says drops must
+  not block, this one says guards must not be live where a thread can
+  die.
+
+### edos-wm leaks heap forever (2026-08-08)
+
+Idle desktop, no user input: `edos-wm` grows its heap by 64 KiB every
+9.2 seconds, dead regular, and never gives any back. 37 arena mmaps in
+630s, zero munmaps in the entire serial log. Every other process maps
+its arena exactly once, as expected. Roughly 25 MiB/hour of leak.
+Likely a per-frame allocation in the compositor that is retained
+rather than reused; `sys_window_list` returning an owned Vec each frame
+is a candidate.
+
+### User virtual address space is never reused (2026-08-08)
+
+`VmaSet::find_free_address` (`memory/vma.rs:247`) is a monotonic
+`hint.fetch_add(aligned_length)` bump allocator. Freed VA is never
+returned to the pool, so address space is consumed linearly with
+allocation *count*, independent of how much is live.
+
+Measured on an idle desktop: ~940 MB of user VA consumed per 9.2s,
+39.6 GiB over ten minutes, against only 2.4 MiB of live mappings. That
+is roughly a 15,000x amplification, and it exhausts the 128 TiB user
+half in about two weeks of uptime. The stride is far larger than the
+64 KiB being mapped because the compositor's per-frame mappings bump
+the same shared hint between the WM's heap growths.
+
+Fix direction: track free ranges properly (the VMA tree already has
+the information), or at minimum reset the hint when the address space
+is empty and reuse holes below it.
+
+### Async NCQ pipelined readahead (Foundations now shipped)
 
 Linux's async-marker readahead: when the user reads the last page of
 the current window, the kernel pre-fires the NEXT window's I/O so it
@@ -563,11 +630,11 @@ window follows the user rather than pulling ahead. Small-file whole-
 file prefetch (shipped 2026-04-15) covers files ≤ 2 MiB; async is
 needed for the large-file case.
 
-Design is already drafted in `.claude/plans/async-ncq-readahead.md`
-(5 phases, ~400 LOC). First review found 4 BLOCKERs, all of which
-trace back to the Foundations roadmap above. Do NOT try to implement
-this until the Foundations are in place; otherwise we will re-hit the
-same design walls.
+The Foundations this was blocked on are all shipped, and Phase C2
+(`83ddde9`) landed async readahead via lazy finalization by the first
+joiner. What remains is the pipelined async-marker behaviour proper:
+firing the *next* window's I/O when the user reads the last page of the
+current one, so the prefetch pulls ahead instead of following.
 
 Payoff once Foundations + this land: first-run mmaptest test 10 on
 /var EFS drops from ~500 ms (current, with whole-file prefetch) to
@@ -685,14 +752,31 @@ Until then, the mirrored constants are documented in
 `doc/vm-control.md` and must be updated in the same commit that moves
 the taskbar layout.
 
-## Fun-per-effort ranking
+## What to do next (reviewed 2026-08-08)
+
+Correctness first, because all three of these are live on `trunk` and
+the first one makes the GUI unusable:
+
+1. **Guards held across kill points** (above). The GUI deadlocks after
+   ~10 minutes of sustained input. Narrow fix in `sys_window_list`,
+   then audit every guard live across a user copy or a park.
+2. **User VA never reused** (`memory/vma.rs:247`). Two weeks of uptime
+   to exhaustion, and trivially triggered faster by any mmap-heavy
+   program.
+3. **edos-wm heap leak.** 25 MiB/hour on an idle desktop.
+
+Then, by fun-per-effort:
 
 more tools > dynamic linker > PageCacheOps for FAT32+memfs > in-EDOS
-fsck > async I/O > IPv6 > virtio-net
+fsck > IPv6 > virtio-net
 
-Note: storage-stack roadmap steps 1-4 are all shipped (host fsck done).
-File-backed mmap, ElfSegment->FileBacked loader migration, and lazy ELF
-relocation are all shipped. The next step in the memory/loader
-progression toward the dynamic linker is PageCacheOps for FAT32+memfs
-(so binaries on USB drives can exec) or PT_INTERP / dynamic linker
-support itself.
+Storage-roadmap steps 1-4 are shipped (host fsck done). File-backed
+mmap, ElfSegment->FileBacked loader migration, lazy ELF relocation, and
+the whole async block I/O foundations chain (#1-#6) are shipped. The
+next step in the memory/loader progression toward the dynamic linker is
+PageCacheOps for FAT32+memfs (so binaries on USB drives can exec), or
+PT_INTERP / dynamic linker support itself.
+
+The soak that found the deadlock is worth making routine: drive input
+through `scripts/edos-vm` for N minutes, watch for the serial log going
+quiet, dump registers on hang. See `doc/vm-control.md`.
