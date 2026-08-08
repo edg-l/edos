@@ -178,6 +178,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "iotest"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "kill"
 version = "0.1.0"
 dependencies = [

@@ -54,6 +54,36 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> isize {
     unsafe { sys::syscall3(sys::SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) as isize }
 }
 
+/// Read at an explicit offset without moving the descriptor's own offset.
+///
+/// Unlike `lseek` + `read`, this is safe to call from several threads sharing
+/// one descriptor: the offset is an argument rather than shared state. Only
+/// regular files support it; pipes, sockets and terminals return ESPIPE.
+pub fn pread(fd: u64, buf: &mut [u8], offset: u64) -> isize {
+    unsafe {
+        sys::syscall4(
+            sys::SYS_PREAD,
+            fd,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            offset,
+        ) as isize
+    }
+}
+
+/// Write at an explicit offset without moving the descriptor's own offset.
+pub fn pwrite(fd: u64, buf: &[u8], offset: u64) -> isize {
+    unsafe {
+        sys::syscall4(
+            sys::SYS_PWRITE,
+            fd,
+            buf.as_ptr() as u64,
+            buf.len() as u64,
+            offset,
+        ) as isize
+    }
+}
+
 /// Perform an ioctl on a file descriptor.
 /// Returns the ioctl result, or a negative error code.
 pub fn ioctl(fd: u64, request: u64, arg: u64) -> i64 {

@@ -61,6 +61,16 @@ pub fn getpid() -> u64 {
     unsafe { sys::syscall1(sys::SYS_GETPID, 0) }
 }
 
+/// Real user id of the calling process.
+pub fn getuid() -> u32 {
+    unsafe { sys::syscall0(sys::SYS_GETUID) as u32 }
+}
+
+/// Real group id of the calling process.
+pub fn getgid() -> u32 {
+    unsafe { sys::syscall0(sys::SYS_GETGID) as u32 }
+}
+
 /// Spawn a new process with redirected I/O.
 ///
 /// # Arguments
