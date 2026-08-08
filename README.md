@@ -1,183 +1,162 @@
-# EDOS
+<p align="center">
+  <img src="doc/logo.svg" alt="EDOS" width="560">
+</p>
 
-An x86_64 operating system written in Rust, featuring a graphical window manager, preemptive multitasking, TCP/IP networking, and a custom Rust standard library port.
+<p align="center">
+  A hobby operating system for x86_64, written from scratch in Rust.<br>
+  SMP preemptive kernel, its own filesystem, a TCP/IP stack, USB, and a
+  graphical window manager, with userspace programs built against a real
+  Rust <code>std</code>.
+</p>
 
-## Features
+<p align="center">
+  <a href="#quick-start">Quick start</a> &middot;
+  <a href="#what-it-does">What it does</a> &middot;
+  <a href="#building">Building</a> &middot;
+  <a href="#running">Running</a> &middot;
+  <a href="#documentation">Docs</a>
+</p>
 
-- **SMP kernel** with preemptive scheduler, work-stealing, per-CPU run queues
-- **Graphical window manager** with compositor, decorations, drag/resize, 60 FPS render loop
-- **Terminal emulator** with PTY support and ANSI escape codes
-- **Shell** with pipes, redirects, scripting (if/while/for/functions), job control
-- **FAT32 filesystem** on SATA/AHCI, plus memfs, procfs, devfs
-- **TCP/IP networking** with e1000e NIC driver, DHCP, DNS, HTTP
-- **Rust `std::net`** support (TcpStream, TcpListener, UdpSocket with DNS resolution)
-- **USB** via xHCI (keyboard, mouse, mass storage)
-- **Signals**, shared memory, futexes, pipes
+---
 
-### Network Stack
+## What it does
 
-Full TCP/IP stack in the kernel:
-- **e1000e NIC driver** with MSI-X interrupts (works on real Intel I219/I218 NICs)
-- **Ethernet, ARP, IPv4, ICMP** (ping works)
-- **UDP** with socket syscalls
-- **TCP** with full RFC 793 state machine, MSS negotiation, retransmit timer, dynamic receive window
-- **DHCP** client (auto-configures IP, mask, gateway, DNS)
-- **DNS** resolution (via `std::net` or standalone `dns` program)
-- **IP fragment reassembly** with interval merging and 30s timeout
-- **Loopback** (127.0.0.1) support
+EDOS boots on UEFI, brings up every core on the machine, and drops you into a
+compositing desktop with a terminal. Everything below the shell prompt is
+original code: the scheduler, the page cache, the filesystem, the network
+stack, the USB stack, and the window system.
 
-### User Programs
+| | |
+|---|---|
+| **Kernel** | SMP preemptive scheduler with per-CPU run queues and work stealing, demand paging, copy-on-write `fork`, TLB shootdown IPIs, futexes, signals, pipes, PTYs |
+| **Storage** | EFS, a custom extent-based filesystem with a metadata journal, on AHCI with NCQ. Page cache, block cache, write-back with journal gating |
+| **Network** | Ethernet, ARP, IPv4, ICMP, UDP, and a TCP state machine, plus DHCP and DNS. Works on real Intel I219/I218 NICs |
+| **Graphics** | virtio-gpu driver, userspace compositor, window decorations, shared-memory buffers, hardware cursor |
+| **USB** | xHCI with HID keyboard and mouse, and mass storage |
+| **Audio** | Intel HDA with a `/dev/dsp` node |
+| **Userspace** | 60+ programs against a forked Rust `std`, including a shell with job control and scripting, a vi-like editor, and the usual coreutils |
 
-- `edos-wm` -- Window manager/compositor
-- `edos-terminal` -- Terminal emulator
-- `edos-taskbar` -- System taskbar
-- `edos-sh` -- Shell with builtins (cd, ls, cat, echo, pwd, clear, ifconfig, etc.)
-- `http` -- curl-like HTTP client with DNS, URL parsing, `-i`/`-v` flags
-- `dns` -- DNS A-record lookup
-- `ping` -- ICMP ping with RTT stats
-- `wintest` -- Window system test app
+There is no init process. The kernel mounts the root filesystem and spawns the
+window manager, taskbar, and terminal directly.
+
+## Quick start
+
+```bash
+make all          # userspace, kernel, then a bootable ISO
+make run          # boot it in QEMU with KVM
+```
+
+`make run` needs a local X or Wayland session. Over SSH, use:
+
+```bash
+make run-headless             # VNC for you, QMP for scripts
+scripts/edos-vm shot out.png  # screenshot the guest
+scripts/edos-vm type 'ls /bin' --enter
+```
+
+See [`doc/vm-control.md`](doc/vm-control.md) for driving the VM without a
+display, including the two guest quirks that will otherwise waste your time.
 
 ## Building
 
-### Dependencies
+You need `xorriso`, `sgdisk`, `mtools`, and QEMU, plus a Rust nightly for the
+kernel.
 
-- GNU make
-- Rust (custom toolchain, see below)
-- `xorriso` (ISO creation)
-- `sgdisk`, `mtools` (disk image creation)
-- QEMU with x86_64 support (for running)
-
-### Build and Run
+Userspace is the awkward part: it links a **real `std`**, which means a custom
+toolchain named `edos`.
 
 ```bash
-# Build kernel, programs, and bootable ISO
-make all
-
-# Run in QEMU with KVM (4 cores, e1000e networking)
-make run
-
-# Run with network packet capture to /tmp/edos.pcap
-make run-capture
-
-# Run with single CPU
-make run-single
-
-# Run with GDB server
-make run-gdb
-
-# Run headless (no local display): VNC for a human, QMP for scripts
-make run-headless
-
-# Build only kernel or programs
-make kernel
-make programs
-
-# Type check without building
-make check
-
-# Format code
-make fmt
-```
-
-### Custom Rust Toolchain
-
-EDOS uses a custom Rust toolchain with standard library support for the `x86_64-unknown-edos` target.
-
-- **Toolchain**: [github.com/edg-l/rust](https://github.com/edg-l/rust/tree/edos_std_v2) (branch `edos_std_v2`)
-- **Runtime library**: [github.com/edg-l/edos_rt](https://github.com/edg-l/edos_rt) (published on crates.io)
-- **Target triple**: `x86_64-unknown-edos`
-
-Programs are built with `cargo +edos build --target x86_64-unknown-edos`.
-
-#### Toolchain Setup
-
-```bash
-# Clone the Rust fork
 git clone -b edos_std_v2 https://github.com/edg-l/rust.git
-
-# Build and install the toolchain
-cd rust
-./x install
+cd rust && ./x install
+rustup toolchain link edos <install-prefix>
 ```
 
-The toolchain installs to the path configured in `bootstrap.toml`. Programs in `programs/` reference it via `rust-toolchain.toml`.
+The fork is at [edg-l/rust](https://github.com/edg-l/rust/tree/edos_std_v2)
+(branch `edos_std_v2`), and its runtime crate is
+[edos_rt](https://github.com/edg-l/edos_rt). The target triple is
+`x86_64-unknown-edos`. Without the `edos` toolchain, `make programs` and
+`make all` fail, but `make -C kernel check` still works for kernel-only work.
 
-#### Updating edos_rt
+| Target | What it does |
+|---|---|
+| `make all` | programs, kernel, bootable ISO |
+| `make kernel` | kernel only |
+| `make programs` | userspace only, into `filesystem/bin/` |
+| `make check` | type-check the kernel |
+| `make fmt` | format the kernel |
+| `make test` | in-kernel scheduler test suite, headless |
 
-1. Make changes in the edos_rt repo
-2. Bump version in `Cargo.toml`
-3. `cargo publish` (or `cargo publish --allow-dirty`)
-4. Update the version in the Rust fork's `library/std/Cargo.toml`
-5. Rebuild toolchain: `cd rust && ./x install`
-6. Rebuild programs: `cd edos-v2 && make all`
+## Running
 
-`make run` needs a local X or Wayland session. Over SSH use `make run-headless`,
-which boots the same ISO with a VNC server and a QMP control socket; see
-`doc/vm-control.md` for screenshots, keyboard, and pointer control.
+| Target | What it does |
+|---|---|
+| `make run` | q35 + UEFI + KVM, 4 cores, virtio-gpu, e1000e, xHCI, HDA |
+| `make run-headless` | no local display; VNC plus a QMP control socket |
+| `make run-single` / `run-big` | 1 core / 16 cores |
+| `make run-gdb` then `make gdb` | paused with a gdbserver, then attach `rust-gdb` |
+| `make run-capture` | dump network traffic to `/tmp/edos.pcap` |
+| `make run-storage` | attach a USB mass-storage disk |
 
-## Running on Real Hardware
+The serial console is teed to `run_log.txt`, which is the first place to look
+when something hangs. Resolve a panic address with:
 
-The ISO is hybrid and can be written directly to a USB stick:
+```bash
+addr2line -e kernel/target/x86_64-unknown-none/debug/edos-kernel -f 0xffffffff8009c422
+```
+
+### On real hardware
+
+The ISO is hybrid, so it can go straight onto a USB stick:
 
 ```bash
 sudo dd if=edos-x86_64.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-The e1000e driver works on real Intel I219/I218/I217 NICs. DHCP will auto-configure networking if a DHCP server is available.
+The e1000e driver works on real Intel I219/I218/I217 NICs, and DHCP will
+configure networking if a server answers. For a writable filesystem, flash
+`sata-disk.img` to a spare drive.
 
-For the writable filesystem, flash `sata-disk.img` to a spare drive.
+## Layout
 
-## Prebuilt Releases
+```
+kernel/          no_std kernel crate, target x86_64-unknown-none
+  src/memory/    frame allocator, page tables, VMAs, COW, TLB shootdown
+  src/thread/    scheduler, blocking primitives, pipes, PTYs, signals, futexes
+  src/fs/        VFS, EFS, FAT32, memfs, devfs, procfs, page cache, journal
+  src/drivers/   ahci, e1000e, xhci, hda, virtio-gpu, hpet, pci, msi
+  src/net/       ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS
+  src/syscalls/  SYSCALL/SYSRET entry and dispatch
+  src/window/    window registry and input routing
+programs/        cargo workspace, target x86_64-unknown-edos, links real std
+libs/            shared between kernel and host tools
+tools/           host-side: efs-mkfs, efs-fsck
+doc/             specs, invariants, and post-mortems
+```
 
-Download from the releases page:
-1. `edos-x86_64.iso` -- bootable hybrid ISO
-2. `filesystem.tar.gz` -- root filesystem contents
-3. `create-filesystem-image.sh` -- helper to build the writable disk image
+## Documentation
+
+Start here before changing anything load-bearing:
+
+- [`doc/invariants/lock-order.md`](doc/invariants/lock-order.md) and
+  [`doc/invariants/drop-contract.md`](doc/invariants/drop-contract.md), the two
+  rules that break the system in non-obvious ways
+- [`doc/efs.md`](doc/efs.md), the on-disk filesystem format, and
+  [`doc/efs-fsck.md`](doc/efs-fsck.md) for the checker
+- [`doc/vm-control.md`](doc/vm-control.md), driving the VM headless
+- [`doc/bugs/`](doc/bugs/), post-mortems for hangs and races worth recognising
+  if they come back
+- [`doc/scripting.txt`](doc/scripting.txt), the shell scripting reference
+
+## Releases
+
+Prebuilt artifacts are on the releases page: the bootable ISO, a
+`filesystem.tar.gz`, and a script to rebuild the writable disk image.
 
 ```bash
-# Recreate the filesystem disk image
 chmod +x create-filesystem-image.sh
 ./create-filesystem-image.sh --output sata-disk.img
 ```
 
-## Debugging
+## License
 
-```bash
-# Start QEMU paused with GDB server
-make run-gdb
-
-# In another terminal
-make gdb   # Uses rust-gdb
-
-# Resolve kernel panic addresses
-addr2line -e kernel/target/x86_64-unknown-none/debug/edos-kernel -f 0xffffffff8009c422
-
-# Capture network traffic for Wireshark analysis
-make run-capture
-# Then: wireshark /tmp/edos.pcap
-```
-
-## Architecture
-
-```
-kernel/src/
-  memory/     -- Physical frame allocator, page tables, virtual allocator, shared memory
-  thread/     -- Scheduler, context switching, mutexes, pipes, PTYs, polling
-  syscalls/   -- SYSCALL/SYSRET interface (file I/O, memory, windows, networking, sync)
-  fs/         -- VFS with FAT32, memfs, procfs, devfs
-  drivers/    -- AHCI/SATA, e1000e NIC, keyboard, mouse, HPET, xHCI USB
-  net/        -- TCP/IP stack (ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, sockets)
-  graphics/   -- Framebuffer rendering, draw request queue
-  window/     -- Window registry, input routing, focus management
-
-programs/
-  edos_render -- Shared rendering library (textures, widgets, window syscall wrappers)
-  edos_lib    -- Userspace utility library (net helpers, SHM, process, I/O)
-  edos-wm     -- Window manager/compositor
-  edos-terminal -- Terminal emulator with PTY
-  edos-taskbar  -- System taskbar
-  edos-sh     -- Command-line shell
-  http        -- HTTP client (uses std::net)
-  dns         -- DNS lookup tool
-  ping        -- ICMP ping tool
-```
+See [LICENSE](LICENSE).

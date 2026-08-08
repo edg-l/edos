@@ -17,13 +17,14 @@
 
 - direct copy and rename file
 
-- edos_rt/std fork: OpenOptions ignores read/write. OpenFlags has only
-  NONE/CREATE/APPEND/TRUNCATE, no access-mode bits, and
-  library/std/src/sys/fs/edos.rs only ever sets APPEND and CREATE. So
-  .read(true).write(true) sends low bits 0, the kernel correctly decodes
-  ReadOnly, and mmap(MAP_SHARED, PROT_WRITE) is refused with EACCES.
-  This is what fails mmaptest test 3. Fix: add RDONLY=0/WRONLY=1/RDWR=2
-  to OpenFlags and set them from OpenOptions::read/write.
+- std fork: OpenOptions read/write/truncate/create_new were no-op stubs, so
+  every file opened read-only from the kernel's point of view and
+  mmap(MAP_SHARED, PROT_WRITE) was refused with EACCES. FIXED locally in
+  ~/dev/rust (library/std/src/sys/fs/edos.rs): the access mode now goes in
+  the low two bits and truncate sets 0x200. mmaptest goes from failing at
+  test 3 to all 10 passing on both /var and /tmp. NOT YET PUSHED to the
+  fork, and edos_rt still lacks RDONLY/WRONLY/RDWR/TRUNCATE constants, so
+  std spells the values out itself.
 
 - std fork: decode_error_kind (sys/pal/edos/common.rs) maps only EACCES,
   EEXIST, EINVAL, ENOENT, EPERM. Everything else shows as "uncategorized

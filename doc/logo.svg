@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 200" width="640" height="200" role="img" aria-label="EDOS">
+  <title>EDOS</title>
+  <defs>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#11161D"/>
+      <stop offset="1" stop-color="#0B0E14"/>
+    </linearGradient>
+    <linearGradient id="wordmark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#E6B450"/>
+      <stop offset="1" stop-color="#FFB454"/>
+    </linearGradient>
+  </defs>
+
+  <!-- window -->
+  <g transform="translate(24 30)">
+    <rect x="0" y="0" width="150" height="140" rx="10" fill="url(#screen)" stroke="#273747" stroke-width="2"/>
+    <path d="M0 12a10 10 0 0 1 10-10h130a10 10 0 0 1 10 10v18H0z" fill="#1B2733"/>
+    <circle cx="18" cy="16" r="4.5" fill="#F07178"/>
+    <circle cx="34" cy="16" r="4.5" fill="#E6B450"/>
+    <circle cx="50" cy="16" r="4.5" fill="#AAD94C"/>
+
+    <!-- prompt -->
+    <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="15">
+      <text x="16" y="60" fill="#59C2FF">/</text>
+      <text x="30" y="60" fill="#E6B450">$</text>
+      <rect x="44" y="48" width="9" height="16" fill="#FFB454">
+        <animate attributeName="opacity" values="1;1;0;0" dur="1.2s" repeatCount="indefinite"/>
+      </rect>
+      <rect x="16" y="76" width="86" height="6" rx="3" fill="#3D4C5F"/>
+      <rect x="16" y="92" width="112" height="6" rx="3" fill="#2E3B4B"/>
+      <rect x="16" y="108" width="64" height="6" rx="3" fill="#2E3B4B"/>
+    </g>
+  </g>
+
+  <!-- wordmark -->
+  <g transform="translate(206 0)">
+    <text x="0" y="112" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
+          font-size="76" font-weight="700" fill="url(#wordmark)" letter-spacing="6">EDOS</text>
+    <text x="4" y="146" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
+          font-size="16" fill="#7A8899" letter-spacing="1.5">an x86_64 operating system in Rust</text>
+  </g>
+</svg>

@@ -796,16 +796,38 @@ the taskbar layout.
 
 ## What to do next (reviewed 2026-08-08)
 
-Correctness first, because all three of these are live on `trunk` and
-the first one makes the GUI unusable:
+Shipped this session, all verified on hardware unless noted:
 
-1. **Guards held across kill points** (above). The GUI deadlocks after
-   ~10 minutes of sustained input. Narrow fix in `sys_window_list`,
-   then audit every guard live across a user copy or a park.
-2. **User VA never reused** (`memory/vma.rs:247`). Two weeks of uptime
-   to exhaustion, and trivially triggered faster by any mmap-heavy
-   program.
-3. **edos-wm heap leak.** 25 MiB/hour on an idle desktop.
+- **User VA is reused.** `find_free_address` is a first fit over the VMA
+  tree searching from the base every time. Mapping stride fell from
+  ~940 MB to 8-10 MB, and successive mmap/munmap cycles return the same
+  address.
+- **`sys_window_list` no longer holds a spin guard across a user copy.**
+  3000 soak rounds and 207k registry acquisitions with no stuck reader.
+- **Filesystem errors keep their errno** instead of being flattened to
+  EINVAL; missing paths report ENOENT.
+- **`make filesystem` creates the directories it claims to.** It relied
+  on brace expansion, which dash does not do, so `/var` never existed.
+- **`OpenOptions` actually opens files for writing.** `read`, `write`,
+  `truncate` and `create_new` were no-op stubs in the std fork, so every
+  file opened read-only as far as the kernel was concerned. mmaptest went
+  from failing at test 3 to all 10 passing on `/var` and `/tmp`. Fixed in
+  the fork working tree, not yet pushed.
+- `sha256sum` and `file` (Phase 3 userspace).
+
+Open, roughly in priority order:
+
+1. **The window-registry hang is not root-caused.** A reader was stuck
+   with nothing killed, so a thread parked holding the guard. Not
+   reproduced in 3000 soak rounds, though that run included the
+   `sys_window_list` fix and so cannot separate "fixed" from "not
+   triggered". Next occurrence: rebuild with `--features
+   window-lock-debug` and read `WINDOW_REGISTRY_READERS` to name the
+   holder. Suspicion points at the park/wake machinery.
+2. **Userspace allocator fragments without bound** (above). Cross-repo:
+   needs an `edos_rt` release.
+3. **AHCI watchdog `restarting` gate.** Latency only, needs runtime
+   validation on the storage path.
 
 Then, by fun-per-effort:
 

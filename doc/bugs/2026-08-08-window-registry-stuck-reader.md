@@ -3,8 +3,14 @@
 **Status:** partially diagnosed. One confirmed defect fixed (see below); the
 root cause of the observed hang is **not** established, and the hang has not
 been reproduced. Observed once, after ~630s of continuous synthetic clicks and
-keystrokes through `scripts/edos-vm`. A 400-round scripted soak afterwards did
-not reproduce it.
+keystrokes through `scripts/edos-vm`.
+
+A 3000-round instrumented soak afterwards (`scripts/window-lock-soak`, ~45
+minutes, 207k registry acquisitions) did not reproduce it, and the reader table
+stayed empty throughout. That run included the `sys_window_list` fix below, so
+it cannot distinguish "the fix removed the cause" from "the workload does not
+hit the trigger". Reproducing on a build with the fix reverted would separate
+the two.
 
 ---
 
