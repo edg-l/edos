@@ -382,6 +382,50 @@ IF-off wait for far longer than the shootdown's 10M-iteration timeout.
 Effect on the reproducer: **916 shootdown timeouts became 0**, and the machine
 survives the full loop where it previously stopped logging entirely at t=52s.
 
+### Root cause: an idle CPU squats on a thread's kernel stack
+
+`run_idle` holds `context` — a pointer to the interrupt frame — in a local
+across `enable()` and `enable_and_hlt()`. On the timer-preemption path that
+local and that frame both live on the **outgoing thread's kernel stack**,
+because `timer_interrupt_handler` never pivots RSP. The voluntary path does the
+opposite, and the comment on the scheduler-stack allocation in `init` says why:
+it pivots "so the outgoing thread's kernel stack is completely free before any
+waker can resume it".
+
+By the time `pick_and_run` reaches `run_idle`, `maybe_preempt` has already run
+`save_current_thread` (setting `context_saved = true`) and enqueued the thread,
+so any other CPU may steal it and resume it *on that same kernel stack* while
+this CPU is still idling on it. Two CPUs then write one stack, and the squatting
+lasts as long as the CPU stays idle.
+
+Caught with `--features trace` on a 10-core boot, first iteration of the loop:
+
+```
+cpu 0:  [36] Save   cpu=0 tid=46 rip=0x412cd9
+        [37] Switch cpu=0 46->50
+cpu 9:  [13] Steal  0->9 tid=46
+        [14] Switch cpu=9 0->46 rip=0x412cd9     <- from_tid 0: CPU 9 was idle
+```
+
+CPU 9 panicked in that switch with `cw: Low context address 0x1` — its
+`context` local had been overwritten while it idled. The same mechanism explains
+the impossible interrupt frames below and the double faults.
+
+### Attempted and reverted: pivoting the tick to the scheduler stack
+
+On branch `sched-idle-stack-pivot` (commit `37146fe`), not merged. It splits
+`on_tick` into `tick_prepare` (on the thread's stack, saves the outgoing
+context) and `tick_finish` (on the per-CPU scheduler stack, publishes the thread
+and picks the next), with the naked handler copying the 160-byte frame between
+them via `rep movsq`.
+
+It does not fix the failure and appears to add one: the same loop still dies at
+t=14.4s, now with the log prefix itself garbage (`<cpu-633166472:kernel>`, an
+uptime near `u64::MAX`), which means the GS-based per-CPU pointer is being read
+wrong. Either the frame copy is mis-sequenced, or something else on that path
+depends on staying on the original stack. Debug it before trusting the idea —
+the analysis above is solid, this particular implementation of it is not.
+
 ### Still open: a corrupted exception frame
 
 The same loop still dies, now as a reported panic rather than a silent wedge:
@@ -400,19 +444,21 @@ stack_pointer:       0xffffc00020035ed8         <- plausible
 pointer says the frame is shifted, but no single-slot shift reproduces all four
 fields, so the stack memory itself is suspect rather than the frame layout.
 
-Ruled out so far: the saved `CpuContext` on both sides of a context switch. A
-debug-only `Scheduler::validate_ctx` now asserts that a frame returning to ring 0
-resumes on that thread's own kernel stack, checked where it is written
-(`save_current_thread`) and where it is installed (`context_switch_to`), so a
-frame that is bad at restore but not at save would prove a concurrent writer
-between the two. It has not fired, so the corruption is upstream of both.
+Consistent with the squatting above: two CPUs writing one kernel stack produces
+exactly this. A debug-only `Scheduler::validate_ctx` asserts that a frame
+returning to ring 0 resumes on that thread's own kernel stack, checked where it
+is written (`save_current_thread`) and where it is installed
+(`context_switch_to`); it has not fired, so the bad values are not arriving
+through the saved `CpuContext`.
 
-Worth chasing next, in order: `tlb_shootdown`'s timeout path force-clears
+Reproducing: `--features trace` on a **10-core** boot fails on the first
+iteration of the loop, where 4 cores took 25 iterations or survived entirely.
+Use `--smp 10`; the extra concurrency is what makes this practical to work on.
+
+Also worth fixing regardless: `tlb_shootdown`'s timeout path force-clears
 `pending_mask` and returns, so a CPU that never acknowledged keeps a stale
-translation and can then touch a recycled page — latent even now that the
-timeouts are gone, because the escape hatch is still wrong. Then the `trace`
-feature, which dumps per-CPU trace buffers on panic and would show the switch
-history leading into the bad frame.
+translation and can then touch a recycled page. Latent now that the timeouts are
+gone, but the escape hatch is still wrong.
 
 ---
 
