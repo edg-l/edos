@@ -212,9 +212,10 @@ because it touches the storage submit path.
 
 ---
 
-## Open bug: concurrent mmap hands the same address to several threads
+## Fixed: concurrent mmap handed the same address to several threads
 
-This is the one to fix first. It corrupts memory in any multi-threaded program.
+Corrupted memory in any multi-threaded program. Fixed by making the claim atomic;
+kept here because the symptom sent two separate investigations into the allocator.
 
 `bin/threadtest hammer` runs eight threads allocating hard. The serial log shows
 three of them receiving the *same* mapping:
@@ -243,12 +244,35 @@ stale pointer now lands in live memory instead of an unmapped hole. That makes
 any aliasing far more damaging than it would have been under the old bump
 allocator.
 
-The fix has to make choosing and claiming a range atomic: either hold the VMA
-lock from the first fit through the insert, or have the VMA set reserve the range
-under one acquisition and hand back a placeholder the caller fills in. The
-straight "widen the guard" version needs checking against the mapping work that
-currently runs between the two points, which takes the mapper locks, so mind
-`doc/invariants/lock-order.md`.
+`VmaSet::reserve` now runs the first fit and inserts the VMA under the one
+acquisition the caller holds, and `find_free_address` is private, because an
+address it returns is only free while the lock is held. `syscalls::memory::
+claim_range` is the single entry point; there were **four** call sites, not one:
+
+- anonymous `mmap`
+- file-backed `mmap`
+- `MAP_PHYSICAL` `mmap`
+- `sys_shm_map`
+- the 2 MiB thread stack in `sys_clone` — the worst of them, since every
+  `std::thread::spawn` goes through it, so two concurrent spawns could share a
+  stack
+
+The two paths that can fail after claiming (physical `mmap`, `shm_map`) release
+the range on the way out. Widening the guard instead was the alternative, and was
+rejected: `vmas` is a `PreemptSpinlock`, so holding it across the page-table work
+would turn every mapping into one non-preemptible span, and anything added to
+that span that can park would then be a bug rather than merely slow.
+
+Verified over ten `threadtest hammer` runs (eight threads each) across two
+builds: no address appears twice within one address space, no faults, no panics.
+`mmaptest` (10/10), `threadtest` and `forktest` pass, and the in-kernel suite is
+47/47.
+
+Mind how you check for this. Duplicates have to be counted **per address space**,
+which means segmenting the log by process and keeping only that process's own
+threads. Two naive versions of the check both cried wolf on me: separate runs of
+a program are separate address spaces, and `mmaptest` execs two copies of `echo`
+that legitimately map at the same address.
 
 ## Open bug: a syscall can run with a kthread as the per-CPU current thread
 

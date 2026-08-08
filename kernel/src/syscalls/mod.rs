@@ -1572,18 +1572,25 @@ fn sys_clone(
         }
     };
 
-    // Allocate user stack if not provided
-    let (user_stack_top, stack_vma) = if child_stack == 0 {
+    // Allocate user stack if not provided. `claimed_stack` carries the range this
+    // call owns, so a later failure can hand it back.
+    let (user_stack_top, claimed_stack) = if child_stack == 0 {
         // Allocate a new user stack using internal mmap
         let parent_info = sched.current_thread_info();
         let stack_size = 2 * 1024 * 1024u64; // 2MB stack
 
-        let stack_bottom = {
-            let user_read = parent_user.read();
-            let next_mmap_addr = parent_info.lock().next_mmap_addr.clone();
-            let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
-            vmas.find_free_address(&next_mmap_addr, stack_size)
-        };
+        // Claim the range before mapping it. Threads of one process share an
+        // address space, so two concurrent spawns searching for a free range
+        // without claiming it would both land on the same stack.
+        let stack_bottom = crate::syscalls::memory::claim_range(
+            &parent_user,
+            &parent_info,
+            0,
+            stack_size,
+            VmaProt::READ | VmaProt::WRITE,
+            VmaFlags::PRIVATE | VmaFlags::GROWSDOWN,
+            VmaBacking::Stack,
+        );
 
         // Map the stack
         let page_flags =
@@ -1596,22 +1603,15 @@ fn sys_clone(
             .map_memory(stack_bottom, stack_size, page_flags)
             .is_err()
         {
+            let user_read = parent_user.read();
+            ranked_lock!(RANK_VMAS, "sys_clone::stack_unclaim", user_read.vmas)
+                .remove(&stack_bottom);
             parent_info.lock().errno = Errno::ENOMEM;
             return !0u64;
         }
 
-        let vma = Vma {
-            start: stack_bottom,
-            end: stack_bottom + stack_size,
-            prot: VmaProt::READ | VmaProt::WRITE,
-            flags: VmaFlags::PRIVATE | VmaFlags::GROWSDOWN,
-            backing: VmaBacking::Stack,
-        };
-
-        let stack_top_aligned =
-            (stack_bottom.as_u64() + stack_size) & !(STACK_ALIGNMENT as u64 - 1);
-
-        (stack_top_aligned, Some(vma))
+        let top = (stack_bottom.as_u64() + stack_size) & !(STACK_ALIGNMENT as u64 - 1);
+        (top, Some((stack_bottom, stack_size)))
     } else {
         (child_stack, None)
     };
@@ -1667,7 +1667,17 @@ fn sys_clone(
                 tls_runtime = Some(allocation.runtime);
             }
             Err(_) => {
-                drop(manager_guard);
+                // Unwind the stack claimed above, which this path used to leave
+                // mapped because the VMA had not been recorded yet.
+                if let Some((stack_bottom, stack_size)) = claimed_stack {
+                    let _ = manager_guard.unmap_memory(stack_bottom, stack_size);
+                    drop(manager_guard);
+                    let user_read = parent_user.read();
+                    ranked_lock!(RANK_VMAS, "sys_clone::stack_unclaim", user_read.vmas)
+                        .remove(&stack_bottom);
+                } else {
+                    drop(manager_guard);
+                }
                 kthread_stack_free(kernel_stack_top);
                 sched.current_thread_info().lock().errno = Errno::ENOMEM;
                 return !0u64;
@@ -1676,10 +1686,7 @@ fn sys_clone(
         drop(manager_guard);
     }
 
-    // Add the new stack and TLS VMAs to the shared VmaSet
-    if let Some(vma) = stack_vma {
-        ranked_lock!(RANK_VMAS, "sys_clone::stack_vma_insert", parent_vmas).insert(vma);
-    }
+    // Add the new TLS VMA to the shared VmaSet; the stack was claimed above.
     if let Some(vma) = tls_region.take() {
         ranked_lock!(RANK_VMAS, "sys_clone::tls_vma_insert", parent_vmas).insert(vma);
     }

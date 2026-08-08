@@ -259,14 +259,41 @@ impl VmaSet {
         removed
     }
 
+    /// Claims a free range of `length` bytes for a new VMA and returns its start.
+    ///
+    /// Finding the range and inserting the VMA happen under the one acquisition
+    /// the caller already holds. Splitting them across two acquisitions is a race
+    /// with no narrow window to argue about: two threads both run the search,
+    /// both see the same gap, and both map there, so their pages alias and each
+    /// scribbles over the other's. Building `backing` before the lock keeps the
+    /// allocation for a file-backed page vector outside the critical section.
+    pub fn reserve(
+        &mut self,
+        hint: &AtomicU64,
+        length: u64,
+        prot: VmaProt,
+        flags: VmaFlags,
+        backing: VmaBacking,
+    ) -> VirtAddr {
+        let start = self.find_free_address(hint, length);
+        self.insert(Vma {
+            start,
+            end: start + length,
+            prot,
+            flags,
+            backing,
+        });
+        start
+    }
+
     /// Find a free virtual address range of `length` bytes.
     ///
     /// `hint` is a cursor, not an allocator: the search starts there to keep
     /// consecutive mappings cheap to find, but when the space above it is
     /// exhausted the search wraps to the base and reuses holes left by
-    /// `munmap`. Callers hold the `VmaSet` lock, so the cursor needs no
-    /// atomicity beyond being shared between the threads of a process.
-    pub fn find_free_address(&self, hint: &AtomicU64, length: u64) -> VirtAddr {
+    /// `munmap`. Private because a returned address is only free while the lock
+    /// is held; callers claim a range through [`Self::reserve`].
+    fn find_free_address(&self, hint: &AtomicU64, length: u64) -> VirtAddr {
         let len = (length + 0xfff) & !0xfff;
 
         // The first caller defines the floor: below it lie the image, heap and

@@ -17,8 +17,11 @@ use crate::{
     },
     println, ranked_lock,
     syscalls::Errno,
-    thread::{pipe::FileDescriptor, scheduler::sched},
+    thread::{
+        UserThread, UserThreadInfo, irqlock::IrqSpinlock, pipe::FileDescriptor, scheduler::sched,
+    },
 };
+use spin::RwLock;
 
 // Protection flags (match Linux)
 const PROT_READ: u32 = 0x1;
@@ -37,6 +40,41 @@ pub const MAP_WRITE_COMBINING: u32 = 0x80;
 pub const MS_ASYNC: u32 = 0x1;
 pub const MS_SYNC: u32 = 0x2;
 pub const MS_INVALIDATE: u32 = 0x4;
+
+/// Places a VMA and returns the address it covers.
+///
+/// With `addr == 0` the kernel picks the range; the search and the insert happen
+/// under one acquisition of the VmaSet lock, because a range is only free while
+/// that lock is held. An explicit `addr` is taken at the caller's word, and is
+/// inserted under the same lock so two callers naming the same address cannot
+/// each believe they own it.
+pub(super) fn claim_range(
+    user_arc: &Arc<RwLock<UserThread>>,
+    info: &Arc<IrqSpinlock<UserThreadInfo>>,
+    addr: u64,
+    length: u64,
+    prot: VmaProt,
+    flags: VmaFlags,
+    backing: VmaBacking,
+) -> VirtAddr {
+    let next_mmap_addr = info.lock().next_mmap_addr.clone();
+    let user_read = user_arc.read();
+    let mut vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
+
+    if addr == 0 {
+        vmas.reserve(&next_mmap_addr, length, prot, flags, backing)
+    } else {
+        let start = VirtAddr::new(addr);
+        vmas.insert(Vma {
+            start,
+            end: start + length,
+            prot,
+            flags,
+            backing,
+        });
+        start
+    }
+}
 
 /// `r8` is overloaded: physical address for MAP_PHYSICAL, fd for file-backed mappings.
 /// `r9` is the file offset (used only for file-backed mappings).
@@ -109,14 +147,30 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             return !0u64;
         }
 
-        let map_addr = if addr == 0 {
-            let user_read = user_arc.read();
-            let next_mmap_addr = info.lock().next_mmap_addr.clone();
-            let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
-            vmas.find_free_address(&next_mmap_addr, length)
-        } else {
-            VirtAddr::new(addr)
-        };
+        let mut vma_prot = VmaProt::empty();
+        if prot & PROT_READ != 0 {
+            vma_prot |= VmaProt::READ;
+        }
+        if prot & PROT_WRITE != 0 {
+            vma_prot |= VmaProt::WRITE;
+        }
+        if prot & PROT_EXEC != 0 {
+            vma_prot |= VmaProt::EXEC;
+        }
+
+        // Claim the range before mapping it, so no other thread can pick the same
+        // one while these page tables are being written.
+        let map_addr = claim_range(
+            &user_arc,
+            &info,
+            addr,
+            length,
+            vma_prot,
+            VmaFlags::PRIVATE,
+            VmaBacking::Physical {
+                phys_base: phys_addr,
+            },
+        );
 
         let mut phys_flags = PageTableFlags::PRESENT
             | PageTableFlags::WRITABLE
@@ -146,35 +200,16 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
                 }
                 log!("Error mapping physical page");
                 drop(mm);
+                // Give the claimed range back; nothing is mapped there now.
+                {
+                    let _user = user_arc.read();
+                    ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).remove(&map_addr);
+                }
                 info.lock().errno = Errno::ENOMEM;
                 return !0u64;
             }
         }
         drop(mm);
-
-        let mut vma_prot = VmaProt::empty();
-        if prot & PROT_READ != 0 {
-            vma_prot |= VmaProt::READ;
-        }
-        if prot & PROT_WRITE != 0 {
-            vma_prot |= VmaProt::WRITE;
-        }
-        if prot & PROT_EXEC != 0 {
-            vma_prot |= VmaProt::EXEC;
-        }
-
-        {
-            let _user = user_arc.read();
-            ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert(Vma {
-                start: map_addr,
-                end: map_addr + length,
-                prot: vma_prot,
-                flags: VmaFlags::PRIVATE,
-                backing: VmaBacking::Physical {
-                    phys_base: phys_addr,
-                },
-            });
-        }
 
         log!("mmap: mapped physical at {map_addr:p}");
         map_addr.as_u64()
@@ -185,15 +220,6 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
             info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
-
-        let map_addr = if addr == 0 {
-            let user_read = user_arc.read();
-            let next_mmap_addr = info.lock().next_mmap_addr.clone();
-            let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
-            vmas.find_free_address(&next_mmap_addr, length)
-        } else {
-            VirtAddr::new(addr)
-        };
 
         let mut vma_prot = VmaProt::empty();
         if prot & PROT_READ != 0 {
@@ -207,16 +233,15 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         }
 
         // Lazy allocation - just record the VMA, don't allocate frames
-        {
-            let _user = user_arc.read();
-            ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert(Vma {
-                start: map_addr,
-                end: map_addr + length,
-                prot: vma_prot,
-                flags: VmaFlags::PRIVATE | VmaFlags::LAZY,
-                backing: VmaBacking::Anonymous,
-            });
-        }
+        let map_addr = claim_range(
+            &user_arc,
+            &info,
+            addr,
+            length,
+            vma_prot,
+            VmaFlags::PRIVATE | VmaFlags::LAZY,
+            VmaBacking::Anonymous,
+        );
 
         log!("mmap: lazy mapped at {map_addr:p}");
         map_addr.as_u64()
@@ -296,15 +321,6 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
 
         let num_pages = (length / 4096) as usize;
 
-        let map_addr = if addr == 0 {
-            let user_read = user_arc.read();
-            let next_mmap_addr = info.lock().next_mmap_addr.clone();
-            let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user_read.vmas);
-            vmas.find_free_address(&next_mmap_addr, length)
-        } else {
-            VirtAddr::new(addr)
-        };
-
         let writable_mapping = (prot & PROT_WRITE) != 0;
 
         let mut vma_prot = VmaProt::empty();
@@ -327,22 +343,17 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         // Note: no explicit FS pin here. The VMA holds `Arc<VfsInode>`, which
         // bumps the inode refcount; evict_inode fires only when the final Arc
         // (including this VMA's) is released. This is the Linux `i_count` model.
-        {
-            let _user = user_arc.read();
-            ranked_lock!(RANK_VMAS, "user.vmas", _user.vmas).insert(Vma {
-                start: map_addr,
-                end: map_addr + length,
-                prot: vma_prot,
-                flags: vma_flags,
-                backing: VmaBacking::FileBacked {
-                    inode: Arc::clone(&inode),
-                    file_offset,
-                    shared: is_shared,
-                    writable_mapping,
-                    pages: alloc::vec![None; num_pages],
-                },
-            });
-        }
+        //
+        // The page vector is built before the range is claimed, so the allocation
+        // stays outside the VmaSet lock.
+        let backing = VmaBacking::FileBacked {
+            inode: Arc::clone(&inode),
+            file_offset,
+            shared: is_shared,
+            writable_mapping,
+            pages: alloc::vec![None; num_pages],
+        };
+        let map_addr = claim_range(&user_arc, &info, addr, length, vma_prot, vma_flags, backing);
 
         // D.1: Register this process in the inode's reverse map so that a future
         // truncate can walk all mappers and unmap PTEs past the new EOF.
