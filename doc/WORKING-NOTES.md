@@ -863,14 +863,25 @@ of answering every failure with "no A record", and the kernel now keeps the
 resolver address DHCP offered (`SYS_GETDNS`) rather than parsing it into a
 field nothing read.
 
-**Still open, and honestly so: the first DNS query after boot gets no
-reply.** The `sendto` that triggers ARP is dropped while the reply comes
-back ~85 us later; `dnsprobe example.com` right after boot prints `len=0`,
-and the same command again prints `len=61` and parses fine. The resolver
-retries, which UDP demands regardless, but the first query still fails and
-the reason the retry does not rescue it is not established. The kernel-side
-fix is to queue the datagram pending ARP the way `connect` waits, rather
-than dropping it. `programs/dnsprobe` exists for this.
+**The first DNS query after boot used to get no reply, and the cause was
+not the ARP drop it looked like.** `sys_recvfrom` did a single
+`wait_until` and returned zero bytes if the queue was still empty. That
+call returns on *any* wake, so a token left by an earlier wait aborted the
+park and the receive reported an empty datagram immediately. The `sendto`
+that triggers ARP is indeed dropped, but a correct receive would simply
+have waited for the retry's answer.
+
+It also explains why the resolver's retry did not rescue it: every attempt
+returned just as fast, so the third read the *second* attempt's reply and
+rejected it on the transaction id — which is why the error was "malformed"
+rather than "no A record", and why chasing the parser was a dead end.
+
+This is the contract the TCP read path was fixed for earlier in the
+session; `recvfrom` and `accept` were the two places that kept the old
+shape. Both loop on the real condition now, and `recvfrom` honours
+`SO_RCVTIMEO`, which `setsockopt` had been storing with nothing reading it.
+Verified on four cold boots. `programs/dnsprobe` dumps a raw response if
+this area needs poking again.
 
 ## http and wget work now
 
