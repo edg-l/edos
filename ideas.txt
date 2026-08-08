@@ -591,15 +591,43 @@ own workstream:
   not block, this one says guards must not be live where a thread can
   die.
 
-### edos-wm leaks heap forever (2026-08-08)
+### Userspace allocator fragments without bound (2026-08-08)
 
-Idle desktop, no user input: `edos-wm` grows its heap by 64 KiB every
-9.2 seconds, dead regular, and never gives any back. 37 arena mmaps in
-630s, zero munmaps in the entire serial log. Every other process maps
-its arena exactly once, as expected. Roughly 25 MiB/hour of leak.
-Likely a per-frame allocation in the compositor that is retained
-rather than reused; `sys_window_list` returning an owned Vec each frame
-is a candidate.
+Presents as "edos-wm leaks heap": on a fully idle desktop the WM grows
+its heap by 64 KiB every 9.2 seconds, metronomically, and never gives
+any back. 24 consecutive growths at 9.18-9.30s spacing during a window
+with no input and no process churn, zero munmaps in the whole log.
+
+It is not a WM bug. The 64 KiB matches `CHUNK_SIZE` in `edos_rt`'s
+`PoolAllocator`, and that allocator has three compounding defects:
+
+1. **No coalescing.** `add_to_free_list` pushes blocks onto a singly
+   linked list and `split` carves them up, but adjacent free blocks are
+   never merged. Under a steady alloc/free workload the list shatters
+   into fragments that individually satisfy nothing, so
+   `allocate_new_chunk` grabs another 64 KiB. Growth is therefore
+   proportional to allocation *rate*, not to retention, which is why the
+   period is so exact.
+2. **Sub-16-byte blocks are dropped.** `add_to_free_list` returns early
+   when `size < size_of::<FreeBlock>()`, permanently losing the block.
+3. **The tail of an exactly-fitting block is lost.** When `split` takes
+   the "use entire block" branch it hands out a block larger than
+   requested, but `dealloc` records `total_size` as the *requested*
+   size, so the excess never returns to the list.
+
+Any long-running program is affected; the WM is merely the busiest
+allocator. It is the same reason the VA cursor advanced ~940 MB per
+9.2s: every chunk was a fresh mapping.
+
+**Fixing this is not a change to this repo.** `edos_rt` is a separate
+crate published to crates.io and consumed through the Rust fork, so the
+loop is: patch, bump, publish, update `library/std/Cargo.toml` in the
+fork, rebuild the toolchain, rebuild programs. Publishing is
+irreversible, so it needs a deliberate decision rather than a drive-by.
+
+Minimum viable fix: keep the free list address-ordered and merge
+adjacent blocks on insert; record the true block size in the header so
+`dealloc` returns everything it was given.
 
 ### User virtual address space is never reused (2026-08-08)
 
