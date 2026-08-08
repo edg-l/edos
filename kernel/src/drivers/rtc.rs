@@ -9,7 +9,7 @@ const RTC_YEAR: u16 = 0x09;
 const RTC_STATUS_A: u16 = 0x0A;
 const RTC_STATUS_B: u16 = 0x0B;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RtcDateTime {
     pub year: u16,
     pub month: u8,
@@ -19,8 +19,27 @@ pub struct RtcDateTime {
     pub second: u8,
 }
 
-/// Read current date/time from RTC
+/// Read the current date and time from the RTC.
+///
+/// Waiting for the update-in-progress flag to clear is not enough on its own:
+/// the flag rises again a few hundred microseconds before each update, so an
+/// update can begin part-way through the register reads and yield a value that
+/// mixes both sides of a carry (23:59:59 -> 23:00:00). Two consecutive reads
+/// that agree cannot straddle an update, so this repeats until they do. The
+/// wall clock samples the RTC exactly once at boot, which makes a torn read
+/// permanent rather than transient.
 pub fn read_rtc() -> RtcDateTime {
+    let mut previous = read_rtc_once();
+    loop {
+        let current = read_rtc_once();
+        if current == previous {
+            return current;
+        }
+        previous = current;
+    }
+}
+
+fn read_rtc_once() -> RtcDateTime {
     unsafe {
         // Wait for update to complete
         while is_updating() {

@@ -133,3 +133,54 @@ pub fn uptime_us() -> u64 {
         0
     }
 }
+
+/// The wall clock, pinned to the monotonic counter at a single point in time.
+///
+/// The RTC is a slow device — several port round-trips per read, each a VM exit
+/// under KVM — and it has no sub-second resolution, so it is read exactly once
+/// and every later answer is that reading plus HPET ticks.
+struct WallClockRef {
+    /// Nanoseconds since the Unix epoch at `at`.
+    epoch_nanos: u64,
+    at: Instant,
+}
+
+static WALL_CLOCK: spin::Once<WallClockRef> = spin::Once::new();
+
+/// Days from 1970-01-01 to a proleptic Gregorian date, for `m` in `[1, 12]`.
+///
+/// Howard Hinnant's `days_from_civil`:
+/// <https://howardhinnant.github.io/date_algorithms.html#days_from_civil>
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146097 + doe - 719468
+}
+
+/// Sample the RTC once and pin it to the monotonic counter.
+///
+/// Requires the HPET, so it runs after `drivers::hpet::driver::init`. The RTC is
+/// read as UTC, which is what QEMU presents by default; a machine whose RTC
+/// holds local time reports a wall clock offset by its timezone.
+pub fn init_wall_clock() {
+    WALL_CLOCK.call_once(|| {
+        let rtc = crate::drivers::rtc::read_rtc();
+        let days = days_from_civil(rtc.year as i64, rtc.month as i64, rtc.day as i64);
+        let secs =
+            days * 86_400 + rtc.hour as i64 * 3_600 + rtc.minute as i64 * 60 + rtc.second as i64;
+        WallClockRef {
+            epoch_nanos: secs.max(0) as u64 * 1_000_000_000,
+            at: Instant::now(),
+        }
+    });
+}
+
+/// Nanoseconds since the Unix epoch, or `None` before the RTC has been sampled.
+pub fn wall_clock_nanos() -> Option<u64> {
+    let reference = WALL_CLOCK.get()?;
+    let elapsed = Instant::now().duration_since(reference.at).as_nanos() as u64;
+    Some(reference.epoch_nanos.saturating_add(elapsed))
+}

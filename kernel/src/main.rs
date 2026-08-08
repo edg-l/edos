@@ -92,6 +92,9 @@ fn init() {
     println!("Calibrating timer");
     get_timer_calibration();
     init_boot_time();
+    // Pins the RTC reading to the monotonic counter; every later wall-clock
+    // answer derives from this one sample.
+    timer::init_wall_clock();
     smp::init();
     // Enable per-CPU cache globally only after all APs have their GS base set.
     // APs allocate (Box::new for PerCpuData) during init_gs_for_this_cpu before
