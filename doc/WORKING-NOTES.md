@@ -74,8 +74,9 @@ only for the queue to become non-empty and flaked about once in twenty. It was r
 completed round, which is the exact contract violation
 `bugs/2026-04-13-sched-park-wake-missed-wakeup.md` warns about. It now loops on
 its condition, and the waker counts a round before releasing the parker so the
-final count is not a race. Note that `make test` itself still fails to launch
-over SSH because it passes `-audiodev pipewire`; substitute `-audiodev none`.
+final count is not a race. Run it as `make test AUDIODEV=none` from a bare SSH
+login: the default `pipewire` backend has no session bus to talk to there, and
+QEMU refuses to start rather than falling back.
 
 ---
 
@@ -274,7 +275,7 @@ threads. Two naive versions of the check both cried wolf on me: separate runs of
 a program are separate address spaces, and `mmaptest` execs two copies of `echo`
 that legitimately map at the same address.
 
-## Open bug: a syscall can run with a kthread as the per-CPU current thread
+## Fixed: a syscall could run with a kthread as the per-CPU current thread
 
 `bin/threadtest` panicked the kernel once in roughly eight runs with
 
@@ -284,32 +285,134 @@ KERNEL PANIC: current_thread_info: no UserThreadInfo for tid 3
 ```
 
 on `cpu-2`, while a kernel thread was current. `tid 3` is a kthread, and kthreads
-have no `UserThreadInfo`, so the lookup fails. What makes it interesting is that
-**every** caller of `current_thread_info()` is in `kernel/src/syscalls/`, so a
-syscall handler was running while this CPU's current thread was a kthread. The
-usual shape is
+have no `UserThreadInfo`, so the lookup failed. Every caller of
+`current_thread_info()` lives in `kernel/src/syscalls/`, so a syscall handler was
+running while that CPU's current thread was a kthread.
+
+The receiver was the bug. `current_thread_info` was a method on `Scheduler`, and
+it answered from `self.current` — the field of **one CPU's** scheduler. Callers
+wrote
 
 ```rust
-let sched = sched();                     // scheduler for whichever CPU we are on
-let info = sched.current_thread_info();  // ...re-derived from that CPU
+let sched = sched();                     // the CPU we are on *now*
+let info = sched.current_thread_info();  // ...answered by that same CPU, later
 ```
 
-A syscall runs with interrupts enabled (the entry stub does `sti`), so it can be
-preempted and resume on another CPU between those two lines, at which point the
-identity is read from the wrong CPU. The likely real fix is to stop re-deriving
-the caller: resolve `UserThreadInfo` once at syscall entry and pass it down,
-rather than asking "who is running here" repeatedly.
+and a syscall runs with interrupts enabled (the entry stub does `sti`), so the
+caller can be preempted between those two lines and resume elsewhere. The
+`&'static Scheduler` then names the CPU it has left, whose `current` has moved on
+to another thread — a kthread, in the panic above.
 
-Why it surfaced now: no program used `std::thread` before, so userspace never
-had several runnable threads competing across four CPUs. `threadtest` exists to
-keep exercising that. It is intermittent; six consecutive runs after the first
-sighting were all clean, so reproducing it wants a loop, `run-big`, or the
-`trace` feature (which dumps per-CPU trace buffers on panic).
+Which thread is current is a property of the CPU executing right now, so it is no
+longer reachable through a `&Scheduler` at all. `current_thread`,
+`current_thread_id`, `current_thread_weak` and `current_thread_info` are free
+functions that read the per-CPU slot with interrupts off, which makes the read
+atomic against migration; the `Arc` they return stays valid however the thread
+moves afterwards. `Scheduler::current` survives as the private `running_tid`, for
+the scheduler internals that legitimately ask "what is *this* CPU running" from a
+context that cannot migrate.
 
-Not caused by `edos_rt` moving `thread_join` onto the blocking `waitpid`: the
-shell has always waited on children with `block = 1` through the same waiter
-machinery, and the no-join variant (`threadtest nojoin`) also survives, so the
-trigger is having many short-lived threads, not the join.
+**The rule to keep: `&Scheduler` never means "me".** It means one specific CPU's
+run queue. Anything phrased as "the current thread" belongs to the free functions.
+
+`thread_exit` had the same defect with worse consequences: it cleared
+`self.current` and decremented `self.thread_count`, so a migration mid-call left
+the *departed* CPU believing it was idle while it ran someone else. It is a free
+function now and resolves its scheduler inside the interrupt-off window.
+`thread_yield`, `thread_park`, `thread_park_while` and `thread_sleep` moved too;
+they never touched `self`, and leaving them as methods invited the same mistake.
+
+Two latent bugs fell out with it. `lock_order::enter` compared a per-CPU
+`current_thread()` against a scheduler-derived `current_thread_id()` and would
+have fired its single-owner assert on any migration between the two; both sides
+now read the same source. The `window-lock-debug` reader table recorded the tid
+of whichever CPU the guard was taken on, which is exactly the wrong tid for the
+instrumentation whose job is naming a stuck reader.
+
+Why it surfaced when it did: no program used `std::thread` before, so userspace
+never had several runnable threads competing across four CPUs. `threadtest`
+exists to keep exercising that.
+
+---
+
+## Open bug: a CPU stops answering TLB shootdown IPIs, then double faults
+
+Reproducible in about a minute, which the `current_thread_info` panic never was.
+Drive `threadtest`, `threadtest hammer` and `threadtest nojoin` in a loop through
+`scripts/edos-vm` on a 4-core boot. Around t=52s the log turns into nothing but
+
+```
+<cpu-2:bin/edos-wm:u:21> tlb_shootdown: timeout waiting for CPUs (mask=0x1), forcing clear
+```
+
+repeating (314 times in the observed run), and the desktop stops responding to
+input while the taskbar clock keeps redrawing. `mask=0x1` is CPU0, and CPU0 never
+acknowledges again. Register dump at that point:
+
+| CPU | RIP | state |
+|---|---|---|
+| 0 | `interrupts::idt::double_fault_handler` | halted |
+| 1-3 | `Scheduler::run_idle` | halted |
+
+So CPU0 wedged first, kept missing shootdown IPIs until it double faulted, and
+the rest of the machine went idle behind it.
+
+A second run wedged with a different tail, and that one named the cause: three
+CPUs spinning in `IrqSpinlock::lock` on the serial port with interrupts off, and
+the fourth spinning in `tlb_shootdown` waiting for their acknowledgement.
+
+This is **not** related to the identity fix above: it reproduces identically on
+the commit before it (`f51ab70`), and slightly sooner (t=52s vs t=76s, 6 vs 10
+completed `threadtest` runs).
+
+### Fixed: `IrqSpinlock` waited with interrupts disabled
+
+`IrqSpinlock::lock` disabled interrupts and *then* spun for the lock, so a CPU
+waiting on a contended one answered no IPIs for the whole wait — including TLB
+shootdowns. Interrupts only need to be off while the lock is *held*, which is
+what keeps an IRQ handler from deadlocking against the holder; taking an IRQ
+while still waiting is harmless, because the waiter does not hold it yet. It now
+disables, tries, and re-enables around a read-only spin on the contended line.
+
+The serial lock is what made this bite. Every thread exit logs a line, every
+UART byte is a VM exit under KVM, and `threadtest` spawns some forty threads a
+run, so under the loop above the serial lock is saturated and CPUs sit in that
+IF-off wait for far longer than the shootdown's 10M-iteration timeout.
+
+Effect on the reproducer: **916 shootdown timeouts became 0**, and the machine
+survives the full loop where it previously stopped logging entirely at t=52s.
+
+### Still open: a corrupted exception frame
+
+The same loop still dies, now as a reported panic rather than a silent wedge:
+`EXCEPTION: PAGE FAULT IN RING 0` at `idt.rs:239`, accessed address `0x0`, from a
+`threadtest` thread's kernel context. The interrupt frame it prints is not a
+frame at all:
+
+```
+instruction_pointer: 0x286                      <- an RFLAGS value
+code_segment:        index 6400                 <- the GDT has seven entries
+cpu_flags:           0xffffc00000008000 | ...   <- a kernel pointer
+stack_pointer:       0xffffc00020035ed8         <- plausible
+```
+
+`instruction_pointer` holding a plausible RFLAGS and `cpu_flags` holding a
+pointer says the frame is shifted, but no single-slot shift reproduces all four
+fields, so the stack memory itself is suspect rather than the frame layout.
+
+Ruled out so far: the saved `CpuContext` on both sides of a context switch. A
+debug-only `Scheduler::validate_ctx` now asserts that a frame returning to ring 0
+resumes on that thread's own kernel stack, checked where it is written
+(`save_current_thread`) and where it is installed (`context_switch_to`), so a
+frame that is bad at restore but not at save would prove a concurrent writer
+between the two. It has not fired, so the corruption is upstream of both.
+
+Worth chasing next, in order: `tlb_shootdown`'s timeout path force-clears
+`pending_mask` and returns, so a CPU that never acknowledged keeps a stale
+translation and can then touch a recycled page — latent even now that the
+timeouts are gone, because the escape hatch is still wrong. Then the `trace`
+feature, which dumps per-CPU trace buffers on panic and would show the switch
+history leading into the bad frame.
 
 ---
 

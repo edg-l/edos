@@ -43,6 +43,11 @@ DISPLAY_VGA := -device VGA,vgamem_mb=32
 DISPLAY_VIRTIO := -vga none -device virtio-vga,xres=1920,yres=1080,blob=on -display sdl
 DISPLAY_VIRTIO_GTK := -vga none -device virtio-vga,xres=1920,yres=1080,blob=on -display gtk,zoom-to-fit=off
 
+# Host audio backend for the emulated HDA device. `pipewire` needs a session
+# bus, which a bare SSH login does not have; `AUDIODEV=none` runs the same
+# device against a null backend.
+AUDIODEV ?= pipewire
+
 # QEMU runner function
 # $(1) = boot media type (iso/hdd)
 # $(2) = smp cores
@@ -66,7 +71,7 @@ define run_qemu_uefi
 		$(if $(4),$(4),$(DISPLAY_VIRTIO)) \
 		-device qemu-xhci -device usb-kbd -device usb-mouse \
 		-netdev user,id=net0 -device e1000e,netdev=net0 \
-		-audiodev pipewire,id=snd0 \
+		-audiodev $(AUDIODEV),id=snd0 \
 		-device intel-hda -device hda-output,audiodev=snd0 \
 		-smp $(2) \
 		$(3) \
