@@ -114,16 +114,33 @@ impl Vma {
     }
 }
 
+/// Exclusive upper bound of the user half of the canonical address space.
+const USER_VA_END: u64 = 0x0000_8000_0000_0000;
+
 /// Ordered collection of VMAs keyed by start address
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct VmaSet {
     vmas: BTreeMap<VirtAddr, Vma>,
+    /// Lowest address `find_free_address` may hand out, learned from the first
+    /// request. Zero until then. Wrapping the cursor back to this floor is what
+    /// lets freed ranges be reused instead of leaked.
+    mmap_base: AtomicU64,
+}
+
+impl Clone for VmaSet {
+    fn clone(&self) -> Self {
+        Self {
+            vmas: self.vmas.clone(),
+            mmap_base: AtomicU64::new(self.mmap_base.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl VmaSet {
     pub fn new() -> Self {
         Self {
             vmas: BTreeMap::new(),
+            mmap_base: AtomicU64::new(0),
         }
     }
 
@@ -242,31 +259,53 @@ impl VmaSet {
         removed
     }
 
-    /// Find free virtual address for a mapping of the given length,
-    /// starting from `hint` and advancing atomically.
+    /// Find a free virtual address range of `length` bytes.
+    ///
+    /// `hint` is a cursor, not an allocator: the search starts there to keep
+    /// consecutive mappings cheap to find, but when the space above it is
+    /// exhausted the search wraps to the base and reuses holes left by
+    /// `munmap`. Callers hold the `VmaSet` lock, so the cursor needs no
+    /// atomicity beyond being shared between the threads of a process.
     pub fn find_free_address(&self, hint: &AtomicU64, length: u64) -> VirtAddr {
-        let aligned_length = (length + 0xfff) & !0xfff;
+        let len = (length + 0xfff) & !0xfff;
 
-        loop {
-            let candidate_u64 = hint.fetch_add(aligned_length, Ordering::Relaxed);
-            let candidate = VirtAddr::new(candidate_u64);
-            let end_addr = candidate + aligned_length;
-
-            let mut overlaps = false;
-            for vma in self.vmas.values() {
-                let vma_end = vma.end;
-                if !(end_addr <= vma.start || candidate >= vma_end) {
-                    overlaps = true;
-                    break;
-                }
-                if vma.start > end_addr {
-                    break;
-                }
-            }
-
-            if !overlaps {
-                return candidate;
-            }
+        // The first caller defines the floor: below it lie the image, heap and
+        // anything else the loader placed, none of which this allocator owns.
+        let mut base = self.mmap_base.load(Ordering::Relaxed);
+        if base == 0 {
+            // Align up: every result derives from this floor or from a VMA end,
+            // so a misaligned base would misalign every mapping after it.
+            base = (hint.load(Ordering::Relaxed) + 0xfff) & !0xfff;
+            self.mmap_base.store(base, Ordering::Relaxed);
         }
+
+        let floor = ((hint.load(Ordering::Relaxed) + 0xfff) & !0xfff).max(base);
+        let found = self
+            .first_fit(floor, len)
+            .or_else(|| self.first_fit(base, len))
+            .expect("out of user virtual address space");
+
+        hint.store(found + len, Ordering::Relaxed);
+        VirtAddr::new(found)
+    }
+
+    /// Lowest gap of `len` bytes at or above `floor`, or `None` if the address
+    /// space above `floor` cannot hold one.
+    fn first_fit(&self, floor: u64, len: u64) -> Option<u64> {
+        let mut cursor = floor;
+
+        // A VMA starting below the floor can still extend past it.
+        if let Some((_, prev)) = self.vmas.range(..=VirtAddr::new(floor)).next_back() {
+            cursor = cursor.max(prev.end.as_u64());
+        }
+
+        for (start, vma) in self.vmas.range(VirtAddr::new(floor)..) {
+            if start.as_u64() >= cursor.checked_add(len)? {
+                return Some(cursor);
+            }
+            cursor = cursor.max(vma.end.as_u64());
+        }
+
+        (cursor.checked_add(len)? <= USER_VA_END).then_some(cursor)
     }
 }
