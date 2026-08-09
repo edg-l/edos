@@ -252,10 +252,10 @@ writeback will not check point a block whose transaction has not committed. So
 of commit-then-flush now; verified by `scripts/fs-regression` reading back cold
 after a reboot.
 
-Reference points: `edos-install` onto a blank 5 GB disk is 3.0 s (1.7 s
-formatting the root filesystem, 1.0 s in the final flush, everything else under
-0.2 s), and the installed disk reaches `edos-init` 1.44 s into the kernel and
-comes up to a full desktop with no ISO attached.
+Reference points: `edos-install` onto a blank 5 GB disk is 2.8 s, down from
+4.3 s (0.3 s formatting the root filesystem, ~2 s in the final flush,
+everything else under 0.2 s), and the installed disk reaches `edos-init` 1.46 s
+into the kernel and comes up to a full desktop with no ISO attached.
 
 FAT32 is not a limit anywhere measured: its I/O is already issued per cluster
 rather than per sector, and it only carries the ESP, a few megabytes the

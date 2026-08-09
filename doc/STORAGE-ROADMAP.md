@@ -56,7 +56,7 @@ long run of contiguous blocks it owns exclusively (raw device reads, EFS file
 data). It costs where the blocks are small, scattered, and contended. Check
 which one a path is before reaching for it.
 
-## 2. The install path (done)
+## 2. The install path (done: 4.3 s -> 2.8 s)
 
 `edos-install` on a blank 5 GB disk was 4.3 s: 1.6 s formatting the root
 filesystem, 2.3 s in the final flush, everything else under 0.2 s. Both of
@@ -75,9 +75,16 @@ Two things worth knowing from the measurement:
   soon as the pages were dirty and the writeback thread paid later.
   `writeback_bytes` over the sweep fell from 79 MB to 8 MB, which is the same
   fact from the other side. The new number is what the write actually costs.
-- `root formatted` did not move (1.6 -> 1.7 s). Whatever `efs-mkfs` spends its
-  time on, it is not whole-page device writes. That is the next thing to look
-  at for the install, and it wants measuring before guessing.
+- `root formatted` did not move at first (1.6 -> 1.7 s), which pointed at
+  `efs-mkfs` rather than the kernel. `zero_blocks` did a seek and a 4 KiB write
+  per block, and formatting a 5 GB filesystem zeroes about 13000 blocks between
+  the inode tables and the journal — at roughly 100 us per command that was the
+  entire phase. Zeroing in 1 MiB chunks took it to **0.3 s** and the install to
+  **2.8 s**.
+
+The install is now 2.8 s from 4.3 s, and the remaining 2.2 s of it is the final
+flush. That is the next thing to look at, and it is the same durable-write
+throughput that bounds everything else.
 
 ## 3. Fault-around for file-backed mappings## 3. Fault-around for file-backed mappings
 
