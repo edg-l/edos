@@ -69,6 +69,16 @@ pub fn write_inode(
     write_struct_at(file, layout, block_num, offset_in_block, inode)
 }
 
+/// Bytes written per call when zeroing a run of blocks.
+///
+/// One seek and large writes, rather than a seek and a write per block. The
+/// run is contiguous, so the device path turns each call into a single
+/// command; a block at a time is one command per block, and issuing a command
+/// costs far more than the sectors it carries. Formatting a 5 GB filesystem
+/// zeroes about 13000 blocks (inode tables plus the journal), which is the
+/// difference between a handful of commands and thirteen thousand.
+const ZERO_CHUNK_BYTES: usize = 1 << 20;
+
 /// Zero out `count` full blocks starting at `start_block`.
 pub fn zero_blocks(
     file: &mut File,
@@ -79,11 +89,16 @@ pub fn zero_blocks(
     if count == 0 {
         return Ok(());
     }
-    let zeros = vec![0u8; layout.block_size as usize];
-    for i in 0..count {
-        let offset = layout.block_offset(start_block + i);
-        file.seek(SeekFrom::Start(offset))?;
-        file.write_all(&zeros)?;
+    let block_size = layout.block_size as usize;
+    let blocks_per_chunk = (ZERO_CHUNK_BYTES / block_size).max(1);
+    let zeros = vec![0u8; blocks_per_chunk * block_size];
+
+    file.seek(SeekFrom::Start(layout.block_offset(start_block)))?;
+    let mut left = count as usize;
+    while left > 0 {
+        let n = left.min(blocks_per_chunk);
+        file.write_all(&zeros[..n * block_size])?;
+        left -= n;
     }
     Ok(())
 }
