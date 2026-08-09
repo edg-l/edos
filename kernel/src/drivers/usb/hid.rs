@@ -51,7 +51,10 @@ pub fn usb_hid_to_keycode(usage: u8) -> Option<KeyCode> {
         0x2E => Some(KeyCode::OemPlus),
         0x2F => Some(KeyCode::Oem4),
         0x30 => Some(KeyCode::Oem6),
-        0x31 => Some(KeyCode::Oem5),
+        // 0x31 is "Keyboard \ and |", the key left of Enter — `ç` on a Spanish
+        // ISO layout. The ISO key left of Z is 0x64 ("Non-US \ and |") below.
+        // Mapping both to Oem5 made the `ç` key type `<`.
+        0x31 => Some(KeyCode::Oem7),
         0x32 => Some(KeyCode::Oem7),
         0x33 => Some(KeyCode::Oem1),
         0x34 => Some(KeyCode::Oem3),
