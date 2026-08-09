@@ -1446,6 +1446,12 @@ pub fn kill_process_with_signal(pid: u64, signum: u32) -> bool {
         // Set pending signal
         thread.signal.send(signum);
 
+        // A blocked signal stays pending and acts on nothing until
+        // `sigprocmask` unblocks it. SIGKILL cannot be blocked.
+        if signum != signal::SIGKILL && thread.signal.is_blocked(signum) {
+            return true;
+        }
+
         // For default-terminate signals, set the killed flag and exit code
         match signal::default_action(signum) {
             signal::DefaultAction::Terminate => {
@@ -1467,5 +1473,29 @@ pub fn kill_process_with_signal(pid: u64, signum: u32) -> bool {
         true
     } else {
         false
+    }
+}
+
+/// Act on the pending signals a thread's mask no longer blocks.
+///
+/// Called after `sigprocmask` widens the deliverable set, on the thread's own
+/// behalf. A signal whose disposition is SIG_IGN is discarded; one whose
+/// default action is Terminate marks the thread killed, and it dies at the
+/// syscall return boundary in `exit_if_killed`.
+pub fn deliver_unblocked_signals(thread: &Thread) {
+    use crate::thread::signal;
+
+    let deliverable = thread.signal.take_deliverable();
+    for signum in 1..32u32 {
+        if deliverable & (1 << signum) == 0 || thread.signal.get_handler(signum) == signal::SIG_IGN
+        {
+            continue;
+        }
+        if let signal::DefaultAction::Terminate = signal::default_action(signum) {
+            thread.killed.store(true, Ordering::Release);
+            thread
+                .exit_code
+                .store(128 + signum as i32, Ordering::Release);
+        }
     }
 }

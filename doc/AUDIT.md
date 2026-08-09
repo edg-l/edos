@@ -289,14 +289,13 @@ profile.
 
 ## 3. Missing syscalls and interfaces
 
-88 syscalls exist. The conspicuous absences, roughly by how much they block real
+89 syscalls exist. The conspicuous absences, roughly by how much they block real
 programs:
 
 | Missing | Why it matters |
 |---|---|
 | `readv`/`writev` | Every scatter/gather write becomes N syscalls or a copy |
 | `setuid` | `UserThreadInfo` carries `user_id`/`group_id`; only the getters exist |
-| `sigprocmask` | `SIGACTION` and `KILL` exist, so signals are half-built |
 | `*at` family | No `openat`/`unlinkat`; every path is resolved against cwd |
 | streaming `getdents` | `LIST_DIR` fills one caller-sized buffer; a huge directory has no continuation protocol |
 

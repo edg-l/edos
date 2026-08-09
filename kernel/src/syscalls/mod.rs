@@ -55,8 +55,9 @@ use crate::{
         scheduler::switch_to_kernel_page,
         signal::{self, SignalState},
         thread::{
-            State, Thread, ThreadId, allocate_thread_id, get_thread_info_by_id, insert_thread,
-            insert_thread_info, kill_process_with_signal, take_thread_exit_code,
+            State, Thread, ThreadId, allocate_thread_id, deliver_unblocked_signals,
+            get_thread_info_by_id, insert_thread, insert_thread_info, kill_process_with_signal,
+            take_thread_exit_code,
         },
         util::{kthread_stack_alloc, kthread_stack_free},
     },
@@ -368,6 +369,7 @@ const SYS_OPENPTY: u64 = 227;
 const SYS_SPAWN2: u64 = 228;
 const SYS_KILL: u64 = 229;
 const SYS_SIGACTION: u64 = 230;
+const SYS_SIGPROCMASK: u64 = 233;
 const SYS_SHM_SIZE: u64 = 231;
 const SYS_PING: u64 = 249;
 const SYS_NETINFO: u64 = 250;
@@ -806,6 +808,31 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             } else {
                 info.lock().errno = Errno::EINVAL;
                 ctx.rax = !0u64;
+            }
+        }
+        SYS_SIGPROCMASK => {
+            // Signal sets are 32 bits wide here, so the mask is passed and the
+            // previous one returned by value rather than through pointers.
+            let how = ctx.rdi as u32;
+            let mask = ctx.rsi as u32;
+            let old = current_thread().map(|t| (t.signal.blocked(), t));
+            let new = old.as_ref().and_then(|(old, _)| match how {
+                signal::SIG_BLOCK => Some(old | mask),
+                signal::SIG_UNBLOCK => Some(old & !mask),
+                signal::SIG_SETMASK => Some(mask),
+                _ => None,
+            });
+            match (old, new) {
+                (Some((old, thread)), Some(new)) => {
+                    thread.signal.set_blocked(new);
+                    // Whatever the new mask stopped blocking is delivered now.
+                    deliver_unblocked_signals(&thread);
+                    ctx.rax = old as u64;
+                }
+                _ => {
+                    current_thread_info().lock().errno = Errno::EINVAL;
+                    ctx.rax = !0u64;
+                }
             }
         }
         SYS_SHM_SIZE => {

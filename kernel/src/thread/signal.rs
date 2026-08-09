@@ -15,6 +15,15 @@ pub const SIGCHLD: u32 = 17;
 pub const SIG_DFL: u32 = 0;
 pub const SIG_IGN: u32 = 1;
 
+/// `sigprocmask` operations.
+pub const SIG_BLOCK: u32 = 0;
+pub const SIG_UNBLOCK: u32 = 1;
+pub const SIG_SETMASK: u32 = 2;
+
+/// Signals that cannot be blocked. POSIX also names SIGSTOP, which does not
+/// exist here because nothing stops a process short of killing it.
+const UNBLOCKABLE: u32 = 1 << SIGKILL;
+
 /// Default action for a signal.
 pub enum DefaultAction {
     Terminate,
@@ -32,6 +41,9 @@ pub fn default_action(signum: u32) -> DefaultAction {
 pub struct SignalState {
     /// Bitmask of pending signals (bit N = signal N is pending).
     pub pending: AtomicU32,
+    /// Bitmask of blocked signals. A blocked signal stays pending until
+    /// `sigprocmask` unblocks it.
+    blocked: AtomicU32,
     /// Per-signal disposition. 0 = SIG_DFL, 1 = SIG_IGN.
     /// (No userspace handlers in this simplified version.)
     handlers: [AtomicU32; 32],
@@ -43,8 +55,38 @@ impl SignalState {
         const INIT: AtomicU32 = AtomicU32::new(0);
         Self {
             pending: AtomicU32::new(0),
+            blocked: AtomicU32::new(0),
             handlers: [INIT; 32],
         }
+    }
+
+    /// The set of signals currently blocked.
+    pub fn blocked(&self) -> u32 {
+        self.blocked.load(Ordering::Acquire)
+    }
+
+    /// Replace the blocked set, returning the previous one. Signals that
+    /// cannot be blocked are dropped from `mask` rather than rejected, as
+    /// POSIX requires of `sigprocmask`.
+    pub fn set_blocked(&self, mask: u32) -> u32 {
+        self.blocked.swap(mask & !UNBLOCKABLE, Ordering::AcqRel)
+    }
+
+    /// Whether `signum` is blocked.
+    pub fn is_blocked(&self, signum: u32) -> bool {
+        if signum == 0 || signum >= 32 {
+            return false;
+        }
+        self.blocked.load(Ordering::Acquire) & (1 << signum) != 0
+    }
+
+    /// Remove and return the pending signals the current mask does not block.
+    pub fn take_deliverable(&self) -> u32 {
+        let deliverable = self.pending.load(Ordering::Acquire) & !self.blocked();
+        if deliverable != 0 {
+            self.pending.fetch_and(!deliverable, Ordering::Release);
+        }
+        deliverable
     }
 
     /// Check if any signal is pending.

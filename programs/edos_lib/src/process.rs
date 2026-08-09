@@ -427,6 +427,27 @@ pub fn fork() -> i64 {
     unsafe { sys::syscall0(sys::SYS_FORK) as i64 }
 }
 
+pub const SIGHUP: u32 = 1;
+pub const SIGINT: u32 = 2;
+pub const SIGKILL: u32 = 9;
+pub const SIGPIPE: u32 = 13;
+pub const SIGTERM: u32 = 15;
+pub const SIGCHLD: u32 = 17;
+
+/// Signal dispositions accepted by [`sys_sigaction`].
+pub const SIG_DFL: u32 = 0;
+pub const SIG_IGN: u32 = 1;
+
+/// `sigprocmask` operations.
+pub const SIG_BLOCK: u32 = 0;
+pub const SIG_UNBLOCK: u32 = 1;
+pub const SIG_SETMASK: u32 = 2;
+
+/// Bit for `signum` in a signal mask.
+pub fn sigmask(signum: u32) -> u32 {
+    1 << signum
+}
+
 /// Send a signal to a process.
 ///
 /// Returns 0 on success, or a negative value on error.
@@ -440,4 +461,17 @@ pub fn sys_kill(pid: u64, signal: u32) -> i64 {
 /// Returns the previous disposition on success, or a negative value on error.
 pub fn sys_sigaction(signal: u32, handler: u64) -> i64 {
     unsafe { sys::syscall2(sys::SYS_SIGACTION, signal as u64, handler) as i64 }
+}
+
+/// Change the calling thread's blocked signal mask.
+///
+/// `how` is `SIG_BLOCK`, `SIG_UNBLOCK` or `SIG_SETMASK`. Signal sets are 32
+/// bits here, so the mask is passed and the previous one returned by value
+/// instead of through the `sigset_t` pointers POSIX uses. A blocked signal
+/// stays pending until it is unblocked, at which point it is delivered;
+/// `SIGKILL` cannot be blocked and is dropped from `mask`.
+///
+/// Returns the previous mask, or -1 on an unknown `how`.
+pub fn sigprocmask(how: u32, mask: u32) -> i64 {
+    unsafe { sys::syscall2(sys::SYS_SIGPROCMASK, how as u64, mask as u64) as i64 }
 }

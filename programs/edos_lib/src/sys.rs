@@ -43,6 +43,7 @@ pub const SYS_SHM_DESTROY: u64 = 218;
 pub const SYS_SHM_SIZE: u64 = 231;
 pub const SYS_KILL: u64 = 229;
 pub const SYS_SIGACTION: u64 = 230;
+pub const SYS_SIGPROCMASK: u64 = 233;
 pub const SYS_SOCKET: u64 = 240;
 pub const SYS_BIND: u64 = 241;
 pub const SYS_CONNECT: u64 = 242;

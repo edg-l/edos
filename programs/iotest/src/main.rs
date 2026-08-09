@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use edos_lib::io::{
-    AT_FDCWD, F_OK, R_OK, UTIME_NOW, UTIME_OMIT, Timespec, W_OK, X_OK, access, pread, pwrite,
+    AT_FDCWD, F_OK, R_OK, Timespec, UTIME_NOW, UTIME_OMIT, W_OK, X_OK, access, pread, pwrite,
     readlink, set_file_times, stat, symlink, truncate, utimensat,
 };
 use edos_lib::process;
@@ -349,10 +349,11 @@ fn test8(dir: &str) {
     if kept.len() != 100 || kept.iter().any(|&b| b != 0xCD) {
         fail(
             8,
-            &format!("shrink lost data: {} bytes, first {:#x}", kept.len(), kept
-                .first()
-                .copied()
-                .unwrap_or(0)),
+            &format!(
+                "shrink lost data: {} bytes, first {:#x}",
+                kept.len(),
+                kept.first().copied().unwrap_or(0)
+            ),
         );
     }
     if truncate(&path, 300) != 0 {
@@ -495,7 +496,10 @@ fn test10(dir: &str) {
         fail(10, "symlink with a relative target failed");
     }
     if fs::read(&rel_link).ok().as_deref() != Some(b"symlinked".as_slice()) {
-        fail(10, "relative target did not resolve against the link's directory");
+        fail(
+            10,
+            "relative target did not resolve against the link's directory",
+        );
     }
 
     // A dangling link is legal to create and readable, but not to open.
@@ -527,6 +531,72 @@ fn test10(dir: &str) {
     );
 }
 
+// -----------------------------------------------------------------------
+// Test 11: sigprocmask() holds a signal pending instead of acting on it
+// -----------------------------------------------------------------------
+fn test11() {
+    use edos_lib::process::{
+        SIG_BLOCK, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIGINT, SIGKILL, sigmask, sigprocmask,
+        sys_kill, sys_sigaction,
+    };
+
+    let original = sigprocmask(SIG_BLOCK, 0);
+    if original < 0 {
+        fail(11, "sigprocmask query failed");
+    }
+
+    // Blocking returns the mask that was in force, and a query sees the new one.
+    if sigprocmask(SIG_BLOCK, sigmask(SIGINT)) != original {
+        fail(11, "SIG_BLOCK did not return the previous mask");
+    }
+    if sigprocmask(SIG_BLOCK, 0) != original | sigmask(SIGINT) as i64 {
+        fail(11, "SIGINT is not in the mask after SIG_BLOCK");
+    }
+
+    // A blocked SIGINT is accepted and held: the default action would have
+    // killed this process, so reaching the next line is the assertion.
+    if sys_kill(process::getpid(), SIGINT) != 0 {
+        fail(11, "kill with a blocked signal failed");
+    }
+    if sigprocmask(SIG_BLOCK, 0) != original | sigmask(SIGINT) as i64 {
+        fail(11, "the mask changed under a blocked kill");
+    }
+
+    // Unblocking delivers what was held, so the disposition has to be SIG_IGN
+    // first or this process dies here.
+    if sys_sigaction(SIGINT, SIG_IGN as u64) < 0 {
+        fail(11, "sigaction SIG_IGN failed");
+    }
+    if sigprocmask(SIG_UNBLOCK, sigmask(SIGINT)) != original | sigmask(SIGINT) as i64 {
+        fail(11, "SIG_UNBLOCK did not return the previous mask");
+    }
+    if sigprocmask(SIG_BLOCK, 0) != original {
+        fail(11, "SIGINT is still in the mask after SIG_UNBLOCK");
+    }
+
+    // SIGKILL is silently dropped from the mask rather than refused.
+    if sigprocmask(SIG_SETMASK, sigmask(SIGKILL) | sigmask(SIGINT)) != original {
+        fail(11, "SIG_SETMASK did not return the previous mask");
+    }
+    if sigprocmask(SIG_BLOCK, 0) != sigmask(SIGINT) as i64 {
+        fail(11, "SIGKILL was accepted into the mask");
+    }
+
+    // An unknown operation is refused and leaves the mask alone.
+    if sigprocmask(99, 0) != -1 {
+        fail(11, "an unknown how was accepted");
+    }
+    if sigprocmask(SIG_SETMASK, original as u32) != sigmask(SIGINT) as i64 {
+        fail(11, "the mask changed under a rejected sigprocmask");
+    }
+
+    let _ = sys_sigaction(SIGINT, 0);
+    pass(
+        11,
+        "sigprocmask: blocked signals stay pending, SIGKILL unblockable, bad how refused",
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -542,6 +612,7 @@ fn main() {
     test8(dir);
     test9(dir);
     test10(dir);
+    test11();
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

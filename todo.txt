@@ -6,11 +6,13 @@
   correct the doc; a doc naming a caller that does not exist is the trap that
   hid the ACPI teardown bug.
 
-- `make test` exits non-zero even when the kernel prints ALL 49 TESTS PASSED,
-  because nothing translates the isa-debug-exit status back to a shell exit
-  code. Both `test` and `test-headless` behave this way, so neither can gate a
-  script without grepping the log for the pass line. Map the debug-exit value
-  to 0/1 in the runner.
+- Symlinks do not resolve on memfs: `iotest /tmp` fails test 10 with "read
+  through link: entity not found", while the identical `iotest /var` (EFS)
+  passes 11/11. `symlink()` and `readlink()` both work there, so the link is
+  created and its target is stored — what fails is opening a path whose final
+  component is a link. Suspect memfs's `walk` applies the follow_final flag
+  only on the intermediate components, or `open` reaches the node by a path
+  that does not go through `walk`. Verified in a guest on 2026-08-10.
 
 - Teach `efs-fsck` to read qcow2 directly. It opens the image with a plain
   `File`, so the development disk has to be flattened with `qemu-img convert`
