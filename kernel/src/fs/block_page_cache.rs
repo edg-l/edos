@@ -67,6 +67,24 @@ const DIRTY_EXPIRE_MS: u64 = 5_000;
 /// giving up and taking a detached page.
 const WRITE_PAGE_ATTEMPTS: usize = 3;
 
+/// Pages a single [`BlockPageCache::read_bytes`] batch may cover.
+///
+/// One request per page is issued, so this is also the number of commands
+/// offered to the device at once. Sized above the 32-deep NCQ queue so the
+/// queue stays full, and far below the 2048 pages the cache holds so a large
+/// read cannot evict its own earlier pages before they are copied out.
+const READ_BATCH_PAGES: usize = 64;
+
+/// Whether a newly allocated page needs its current on-disk contents.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fill {
+    /// Read the page in. Anything that will only patch part of it needs this,
+    /// or the untouched bytes come back as whatever the frame held.
+    FromDisk,
+    /// Skip the read: the caller overwrites every byte of the page.
+    Overwrite,
+}
+
 // ---------------------------------------------------------------------------
 // CachedBlockPage
 // ---------------------------------------------------------------------------
@@ -529,9 +547,10 @@ impl BlockPageCache {
         &self,
         device_id: u64,
         page_block_idx: u64,
+        fill: Fill,
     ) -> Result<(BlockPageGuard, bool), AhciError> {
         for attempt in 0..WRITE_PAGE_ATTEMPTS {
-            let got = self.read_page_tracked(device_id, page_block_idx)?;
+            let got = self.acquire_page(device_id, page_block_idx, fill)?;
             if got.1 || attempt + 1 == WRITE_PAGE_ATTEMPTS {
                 return Ok(got);
             }
@@ -557,6 +576,22 @@ impl BlockPageCache {
         device_id: u64,
         page_block_idx: u64,
     ) -> Result<(BlockPageGuard, bool), AhciError> {
+        self.acquire_page(device_id, page_block_idx, Fill::FromDisk)
+    }
+
+    /// Pin a page, reading its current contents only when the caller needs
+    /// them.
+    ///
+    /// Whether a page has to be filled from disk and whether the cache has
+    /// room for it are separate questions. A caller about to overwrite a whole
+    /// page has no use for what is on disk, and reading it first doubles the
+    /// I/O for no result.
+    fn acquire_page(
+        &self,
+        device_id: u64,
+        page_block_idx: u64,
+        fill: Fill,
+    ) -> Result<(BlockPageGuard, bool), AhciError> {
         assert!(
             Self::initialized(),
             "BlockPageCache::read_page called before init()"
@@ -575,7 +610,7 @@ impl BlockPageCache {
         }
         self.stats.misses.fetch_add(1, Ordering::Relaxed);
 
-        // Slow path: allocate frame, read from disk (no shard lock held).
+        // Slow path: allocate a frame (no shard lock held).
         let frame = frame_allocator()
             .allocate_frame()
             .ok_or(AhciError::IoError)?;
@@ -584,7 +619,9 @@ impl BlockPageCache {
             0,
             "frame_allocator returned unaligned frame"
         );
-        if let Err(e) = read_frame(device_id, page_block_idx, frame) {
+        if fill == Fill::FromDisk
+            && let Err(e) = read_frame(device_id, page_block_idx, frame)
+        {
             unsafe { frame_allocator().deallocate_frame(frame) };
             return Err(e);
         }
@@ -857,8 +894,10 @@ impl BlockPageCache {
         let len = sectors as usize * 512;
         let key = (device_id, page_block_idx);
 
-        // Pin the page (fills from disk if not cached).
-        let (guard, cached) = self.read_page_for_write(device_id, page_block_idx)?;
+        // Pin the page (fills from disk if not cached). The surrounding bytes
+        // survive this write, so they have to be read first.
+        let (guard, cached) =
+            self.read_page_for_write(device_id, page_block_idx, Fill::FromDisk)?;
 
         // Serialize writers on this page.
         {
@@ -878,12 +917,14 @@ impl BlockPageCache {
         self.publish_write(key, &guard, cached)
     }
 
-    /// Read-modify-write an arbitrary byte range on a device, spanning as many
-    /// pages as it covers.
+    /// Write an arbitrary byte range to a device, spanning as many pages as it
+    /// covers.
     ///
-    /// Raw device access from userspace lands here. Every page is read before
-    /// it is patched, so a write that covers part of a page leaves the rest
-    /// intact; nothing is rounded outward and no neighbouring sector is lost.
+    /// Raw device access from userspace lands here. A page the write only
+    /// partly covers is read before it is patched, so the bytes around the
+    /// write survive; nothing is rounded outward and no neighbouring sector is
+    /// lost. A page the write covers completely is not read at all, which is
+    /// what keeps a large sequential write from costing two I/Os per page.
     pub fn write_bytes(
         &self,
         device_id: u64,
@@ -898,7 +939,12 @@ impl BlockPageCache {
             let chunk = (PAGE_SIZE - offset_in_page).min(data.len() - written);
             let key = (device_id, page_block_idx);
 
-            let (guard, cached) = self.read_page_for_write(device_id, page_block_idx)?;
+            let fill = if chunk == PAGE_SIZE {
+                Fill::Overwrite
+            } else {
+                Fill::FromDisk
+            };
+            let (guard, cached) = self.read_page_for_write(device_id, page_block_idx, fill)?;
             {
                 let _wl = ranked_lock!(
                     RANK_PAGE_WRITE_LOCK,
@@ -932,15 +978,24 @@ impl BlockPageCache {
         let mut done = 0usize;
         while done < len {
             let pos = byte_offset + done as u64;
-            let page_block_idx = pos / PAGE_SIZE as u64;
-            let offset_in_page = (pos % PAGE_SIZE as u64) as usize;
-            let chunk = (PAGE_SIZE - offset_in_page).min(len - done);
+            let first_page = pos / PAGE_SIZE as u64;
+            let offset_in_first = (pos % PAGE_SIZE as u64) as usize;
+            let span = offset_in_first + (len - done);
+            let pages = span.div_ceil(PAGE_SIZE).min(READ_BATCH_PAGES);
 
-            let guard = self.read_page(device_id, page_block_idx)?;
-            out[done..done + chunk]
-                .copy_from_slice(&guard.as_slice()[offset_in_page..offset_in_page + chunk]);
-
-            done += chunk;
+            // One batch per group of pages rather than one command per page:
+            // `read_pages` submits every miss together, which is what puts more
+            // than one command in the device's queue at a time.
+            for (i, guard) in self
+                .read_pages(device_id, first_page, pages)?
+                .iter()
+                .enumerate()
+            {
+                let start = if i == 0 { offset_in_first } else { 0 };
+                let chunk = (PAGE_SIZE - start).min(len - done);
+                out[done..done + chunk].copy_from_slice(&guard.as_slice()[start..start + chunk]);
+                done += chunk;
+            }
         }
         Ok(out)
     }
