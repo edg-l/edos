@@ -1,11 +1,12 @@
 pub mod codec;
 pub mod regs;
 
+use crate::thread::preempt::PreemptSpinlock;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
-use spin::Mutex;
 use x86_64::{VirtAddr, structures::paging::PageTableFlags};
 
 use crate::{
+    debug::lock_order::RANK_HDA_STATE,
     drivers::{
         dma::{DmaBuffer, dma},
         msi,
@@ -18,6 +19,7 @@ use crate::{
     interrupts::InterruptIndex,
     log,
     memory::{mapper::memory_mapper, valloc::vmalloc},
+    ranked_lock,
     thread::{runqueue::IO_PRIORITY, util::queue_spawn_kthread_named},
 };
 
@@ -488,7 +490,7 @@ struct HdaPlaybackState {
 // === DevFs /dev/dsp device ===
 
 struct HdaDspDevice {
-    state: Arc<Mutex<HdaPlaybackState>>,
+    state: Arc<PreemptSpinlock<HdaPlaybackState>>,
 }
 
 impl DevFsDevice for HdaDspDevice {
@@ -498,7 +500,7 @@ impl DevFsDevice for HdaDspDevice {
     /// returns the byte count written. If the ring is full, returns 0 and the caller
     /// should retry. Data must be 48kHz, 16-bit, stereo (matching codec format).
     fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, DevFsError> {
-        let mut state = self.state.lock();
+        let mut state = ranked_lock!(RANK_HDA_STATE, "hda::dsp_write", self.state);
 
         if state.controller.audio_buffers.is_none() {
             return Err(DevFsError::IoError);
@@ -566,7 +568,7 @@ impl DevFsDevice for HdaDspDevice {
                 // Wait until all queued buffers have been consumed by DMA.
                 loop {
                     let done = {
-                        let state = self.state.lock();
+                        let state = ranked_lock!(RANK_HDA_STATE, "hda::drain_poll", self.state);
                         !state.stream_running || state.controller.entries_queued() == 0
                     };
                     if done {
@@ -577,7 +579,7 @@ impl DevFsDevice for HdaDspDevice {
                 }
                 // Stop the stream after drain so the DMA engine doesn't cycle silence.
                 {
-                    let mut state = self.state.lock();
+                    let mut state = ranked_lock!(RANK_HDA_STATE, "hda::drain_stop", self.state);
                     if state.stream_running {
                         state.controller.stop_stream();
                         state.stream_running = false;
@@ -665,7 +667,7 @@ pub extern "C" fn hda_driver_main() -> ! {
     controller.write32(INTCTL, intctl);
 
     // Wrap controller in shared state for the /dev/dsp device.
-    let shared_state = Arc::new(Mutex::new(HdaPlaybackState {
+    let shared_state = Arc::new(PreemptSpinlock::new(HdaPlaybackState {
         controller,
         pci_device: pci_dev,
         stream_running: false,
@@ -686,7 +688,7 @@ pub extern "C" fn hda_driver_main() -> ! {
     loop {
         thread_park();
 
-        let mut state = shared_state.lock();
+        let mut state = ranked_lock!(RANK_HDA_STATE, "hda::stream_irq", shared_state);
         if state.controller.handle_stream_interrupt() {
             // A BDL entry completed: advance read_cursor.
             if state.controller.read_cursor != state.controller.write_cursor {

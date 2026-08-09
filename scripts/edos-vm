@@ -164,6 +164,11 @@ def cmd_start(args):
         "-device", "qemu-xhci", "-device", "usb-kbd", "-device", "usb-mouse",
         "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{args.ssh_fwd}-:23",
         "-device", "e1000e,netdev=net0",
+        # audiodev=none, not pipewire: the guest HDA driver runs its DMA engine
+        # and interrupts either way, and pipewire refuses to start without a
+        # session bus, which is exactly the case this script exists for.
+        "-audiodev", "none,id=snd0",
+        "-device", "intel-hda", "-device", "hda-output,audiodev=snd0",
         "-serial", f"file:{SERIAL_LOG}",
         "-no-reboot",
         "-display", "none",

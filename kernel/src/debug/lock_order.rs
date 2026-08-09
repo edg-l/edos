@@ -47,7 +47,9 @@
 /// |  290 | `WINDOW_EVENTS`                       |
 /// |  300 | `LAST_MOUSE_BUTTONS`                  |
 /// |  310 | `Broadcaster.subs`                    |
-/// |  320 | `MOUSE_POLLERS` / `KEYBOARD_POLLERS`  |
+/// |  320 | device poller lists                   |
+/// |  330 | `HdaPlaybackState`                    |
+/// |  340 | `DevFs.shared`                        |
 
 // ---- Rank constants ---------------------------------------------------------
 
@@ -104,12 +106,19 @@ pub const RANK_TCP_CONN: u16 = 270;
 pub const RANK_WINDOW_REGISTRY: u16 = 280;
 pub const RANK_WINDOW_EVENTS: u16 = 290;
 pub const RANK_MOUSE_BUTTONS: u16 = 300;
-// Input-device delivery state, shared between the PS/2 and xHCI HID kthreads,
-// the window input thread and poll callers. Above the window band because the
-// window input thread is the one context that could hold a registry guard while
-// touching them; the driver kthreads hold nothing at all.
+// Device-node state behind devfs, reached from `DevFsDevice` callbacks under
+// `inode.lock` (30) and from the driver kthreads that feed them. Above the
+// window band because the window input thread is the one context that could
+// hold a registry guard while touching input state; the driver kthreads hold
+// nothing at all.
 pub const RANK_INPUT_SUBS: u16 = 310;
-pub const RANK_INPUT_POLLERS: u16 = 320;
+pub const RANK_DEVICE_POLLERS: u16 = 320;
+pub const RANK_HDA_STATE: u16 = 330;
+// The devfs device registry, above every device lock it dispatches to. Every
+// dispatching method releases the guard before calling into the device, and
+// ranking it outermost is what makes a future edit that forgets to panic
+// instead of quietly reintroducing a spin lock held across a device callback.
+pub const RANK_DEVFS_REGISTRY: u16 = 340;
 // Deep utility leaves — acquired from arbitrary contexts (AHCI DMA setup,
 // page-table edits, etc.). Must be higher than any caller's rank. Ordered
 // relative to each other because `MemoryManager::map_memory` acquires

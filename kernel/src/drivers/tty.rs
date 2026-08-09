@@ -2,7 +2,7 @@ use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
-    debug::lock_order::RANK_TTY_BUFFER,
+    debug::lock_order::{RANK_DEVICE_POLLERS, RANK_TTY_BUFFER},
     fs::{
         DevFsDevice, DevFsError, PollState,
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
@@ -79,7 +79,7 @@ fn poll_state_for_len(len: usize) -> PollState {
 }
 
 fn notify_pollers(state: PollState) {
-    let pollers = TTY_POLLERS.lock();
+    let pollers = ranked_lock!(RANK_DEVICE_POLLERS, "tty::notify_pollers", TTY_POLLERS);
     for (_, entry) in pollers.iter() {
         entry.update(state);
     }
@@ -182,7 +182,8 @@ impl Pollable for TtyPoll {
             }
         } else {
             let key = TTY_NEXT_POLL_KEY.fetch_add(1, Ordering::Relaxed);
-            TTY_POLLERS.lock().push((key, entry));
+            ranked_lock!(RANK_DEVICE_POLLERS, "tty::poll_register_list", TTY_POLLERS)
+                .push((key, entry));
             PollRegistration {
                 initial: state,
                 key: Some(key),
@@ -191,7 +192,8 @@ impl Pollable for TtyPoll {
     }
 
     fn unregister(&self, key: PollKey) {
-        TTY_POLLERS.lock().retain(|(stored, _)| *stored != key);
+        ranked_lock!(RANK_DEVICE_POLLERS, "tty::poll_unregister", TTY_POLLERS)
+            .retain(|(stored, _)| *stored != key);
     }
 }
 

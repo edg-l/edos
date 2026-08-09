@@ -15,7 +15,7 @@ use crate::ranked_lock;
 use crate::thread::scheduler::{current_thread, thread_park_while};
 use crate::{
     apic::get_lapic,
-    debug::lock_order::RANK_INPUT_POLLERS,
+    debug::lock_order::RANK_DEVICE_POLLERS,
     fs::{
         DevFsDevice, DevFsError, MmapRegion, PollState,
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
@@ -124,7 +124,7 @@ fn notify_keyboard_pollers() {
     // holding BlockingMutex while wake_thread spins (priority inversion).
     let snapshot: heapless::Vec<(Arc<PollEntry>, Arc<Subscriber<KeyEvent>>), 16> = {
         let pollers = ranked_lock!(
-            RANK_INPUT_POLLERS,
+            RANK_DEVICE_POLLERS,
             "keyboard::notify_pollers",
             KEYBOARD_POLLERS
         );
@@ -157,7 +157,7 @@ impl Pollable for KeyboardPoll {
         } else {
             let key = KEYBOARD_NEXT_POLL_KEY.fetch_add(1, Ordering::Relaxed);
             ranked_lock!(
-                RANK_INPUT_POLLERS,
+                RANK_DEVICE_POLLERS,
                 "keyboard::poll_register",
                 KEYBOARD_POLLERS
             )
@@ -171,7 +171,7 @@ impl Pollable for KeyboardPoll {
 
     fn unregister(&self, key: PollKey) {
         ranked_lock!(
-            RANK_INPUT_POLLERS,
+            RANK_DEVICE_POLLERS,
             "keyboard::poll_unregister",
             KEYBOARD_POLLERS
         )

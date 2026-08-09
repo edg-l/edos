@@ -1,6 +1,8 @@
 //! Device filesystem for exposing kernel devices to userspace.
 
-use crate::thread::preempt::PreemptSpinlock;
+use crate::debug::lock_order::RANK_DEVFS_REGISTRY;
+use crate::thread::preempt::{PreemptRwLock, PreemptSpinlock};
+use crate::{ranked_read, ranked_write};
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, BTreeSet},
@@ -8,7 +10,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use spin::{Once, RwLock};
+use spin::Once;
 use thiserror::Error;
 
 use crate::{
@@ -169,11 +171,11 @@ impl DevFs {
     }
 }
 
-static DEVFS_INSTANCE: Once<Arc<RwLock<DevFs>>> = Once::new();
+static DEVFS_INSTANCE: Once<Arc<PreemptRwLock<DevFs>>> = Once::new();
 
-fn global_devfs() -> Arc<RwLock<DevFs>> {
+fn global_devfs() -> Arc<PreemptRwLock<DevFs>> {
     DEVFS_INSTANCE
-        .call_once(|| Arc::new(RwLock::new(DevFs::new())))
+        .call_once(|| Arc::new(PreemptRwLock::new(DevFs::new())))
         .clone()
 }
 
@@ -182,7 +184,7 @@ fn root_path() -> Path {
 }
 
 pub struct DevFsHandle {
-    shared: Arc<RwLock<DevFs>>,
+    shared: Arc<PreemptRwLock<DevFs>>,
 }
 
 impl DevFsHandle {
@@ -196,43 +198,55 @@ impl DevFsHandle {
 impl FileSystem for DevFsHandle {
     fn list_files(&self, path: &Path) -> Result<Vec<File>, fs::Error> {
         let normalized = path.normalize();
-        let state = self.shared.read();
 
-        if !state.is_directory(&normalized) {
-            return Err(fs::Error::NotADir);
-        }
+        // Snapshot the matching nodes under the guard, then build entries
+        // outside it: `DeviceNode::file_entry` calls `DevFsDevice::size`, which
+        // is a driver callback and may take that device's own lock.
+        let (mut entries, nodes) = {
+            let state = ranked_read!(RANK_DEVFS_REGISTRY, "devfs::list_files", self.shared);
 
-        let mut entries = Vec::new();
+            if !state.is_directory(&normalized) {
+                return Err(fs::Error::NotADir);
+            }
 
-        for directory in state.directories.iter() {
-            if normalized.is_direct_parent(directory) {
-                let mut name = directory.filename();
-                if name.is_empty() {
-                    name = "/".to_string();
+            let mut entries = Vec::new();
+            for directory in state.directories.iter() {
+                if normalized.is_direct_parent(directory) {
+                    let mut name = directory.filename();
+                    if name.is_empty() {
+                        name = "/".to_string();
+                    }
+                    entries.push(File {
+                        name,
+                        kind: FileKind::Directory,
+                        size: 0,
+                        attrs: FileAttrs {
+                            readonly: false,
+                            hidden: false,
+                            system: false,
+                            archive: false,
+                        },
+                        created: None,
+                        accessed: None,
+                        modified: None,
+                    });
                 }
-                entries.push(File {
-                    name,
-                    kind: FileKind::Directory,
-                    size: 0,
-                    attrs: FileAttrs {
-                        readonly: false,
-                        hidden: false,
-                        system: false,
-                        archive: false,
-                    },
-                    created: None,
-                    accessed: None,
-                    modified: None,
-                });
             }
-        }
 
-        for (device_path, device) in state.devices.iter() {
-            if normalized.is_direct_parent(device_path) {
-                let mut entry = device.file_entry();
-                entry.name = device_path.filename();
-                entries.push(entry);
-            }
+            let nodes: Vec<(String, DeviceNode)> = state
+                .devices
+                .iter()
+                .filter(|(device_path, _)| normalized.is_direct_parent(device_path))
+                .map(|(device_path, node)| (device_path.filename(), node.clone()))
+                .collect();
+
+            (entries, nodes)
+        };
+
+        for (name, node) in nodes {
+            let mut entry = node.file_entry();
+            entry.name = name;
+            entries.push(entry);
         }
 
         Ok(entries)
@@ -240,7 +254,7 @@ impl FileSystem for DevFsHandle {
 
     fn read_bytes(&self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, fs::Error> {
         let normalized = path.normalize();
-        let state = self.shared.read();
+        let state = ranked_read!(RANK_DEVFS_REGISTRY, "devfs::read_bytes", self.shared);
         let device = state.get_device(&normalized).map(|d| d.device.clone());
         let is_dir = state.is_directory(&normalized);
         drop(state);
@@ -256,7 +270,7 @@ impl FileSystem for DevFsHandle {
 
     fn write_bytes(&self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, fs::Error> {
         let normalized = path.normalize();
-        let state = self.shared.read();
+        let state = ranked_read!(RANK_DEVFS_REGISTRY, "devfs::write_bytes", self.shared);
         let device = state.get_device(&normalized).map(|d| d.device.clone());
         let is_dir = state.is_directory(&normalized);
         drop(state);
@@ -287,19 +301,27 @@ impl FileSystem for DevFsHandle {
 
     fn remove_file(&self, path: &Path) -> Result<(), fs::Error> {
         let normalized = path.normalize();
-        let mut state = self.shared.write();
+        let mut state = ranked_write!(RANK_DEVFS_REGISTRY, "devfs::remove_file", self.shared);
         state.remove_device(&normalized).map_err(fs::Error::from)
     }
 
     fn file_info(&self, path: &Path) -> Result<File, fs::Error> {
         let normalized = path.normalize();
-        let state = self.shared.read();
+        // Same reason as `list_files`: `file_entry` reaches a driver callback,
+        // so the node is cloned out and the guard released first.
+        let (node, is_dir) = {
+            let state = ranked_read!(RANK_DEVFS_REGISTRY, "devfs::file_info", self.shared);
+            (
+                state.get_device(&normalized).cloned(),
+                state.is_directory(&normalized),
+            )
+        };
 
-        if let Some(device) = state.get_device(&normalized) {
+        if let Some(device) = node {
             let mut entry = device.file_entry();
             entry.name = normalized.filename();
             Ok(entry)
-        } else if state.is_directory(&normalized) {
+        } else if is_dir {
             let mut name = normalized.filename();
             if name.is_empty() {
                 name = "/".to_string();
@@ -328,7 +350,7 @@ impl FileSystem for DevFsHandle {
     }
 
     fn statfs(&self) -> Result<fs::StatFs, fs::Error> {
-        let state = self.shared.read();
+        let state = ranked_read!(RANK_DEVFS_REGISTRY, "devfs::statfs", self.shared);
         let devices = state.devices.len() as u64;
         let dirs = state.directories.len() as u64;
         let mut volume_name = [0u8; 64];
@@ -348,7 +370,7 @@ impl FileSystem for DevFsHandle {
 
     fn ioctl(&self, path: &Path, request: u64, arg: u64) -> Result<u64, fs::Error> {
         let normalized = path.normalize();
-        let state = self.shared.read();
+        let state = ranked_read!(RANK_DEVFS_REGISTRY, "devfs::ioctl", self.shared);
         let device = state.get_device(&normalized).map(|d| d.device.clone());
         drop(state);
 
@@ -361,7 +383,7 @@ impl FileSystem for DevFsHandle {
 
     fn poll(&self, path: &Path) -> Result<Box<dyn Pollable>, fs::Error> {
         let normalized = path.normalize();
-        let state = self.shared.read();
+        let state = ranked_read!(RANK_DEVFS_REGISTRY, "devfs::poll", self.shared);
         let device = state.get_device(&normalized).map(|d| d.device.clone());
         drop(state);
 
@@ -380,7 +402,7 @@ impl FileSystem for DevFsHandle {
         memory: Arc<PreemptSpinlock<MemoryManager>>,
     ) -> Result<MmapRegion, fs::Error> {
         let normalized = path.normalize();
-        let state = self.shared.read();
+        let state = ranked_read!(RANK_DEVFS_REGISTRY, "devfs::mmap", self.shared);
         let device = state.get_device(&normalized).map(|d| d.device.clone());
         drop(state);
 
@@ -397,7 +419,7 @@ pub fn register_device(path: &Path, device: Arc<dyn DevFsDevice>) -> Result<(), 
     println!("Registering device {path}");
     let normalized = path.normalize();
     let devfs = global_devfs();
-    let mut devfs = devfs.write();
+    let mut devfs = ranked_write!(RANK_DEVFS_REGISTRY, "devfs::register_device", devfs);
     devfs.insert_device(normalized, device)
 }
 
@@ -412,7 +434,7 @@ pub fn register_device_str(path: &str, device: Arc<dyn DevFsDevice>) -> Result<(
 /// This allows callers to bypass the FS Mailbox for devfs operations.
 pub fn lookup_device(path: &Path) -> Option<Arc<dyn DevFsDevice>> {
     let devfs = DEVFS_INSTANCE.get()?;
-    let devfs = devfs.read();
+    let devfs = ranked_read!(RANK_DEVFS_REGISTRY, "devfs::lookup_device", devfs);
     let normalized = path.normalize();
     devfs.get_device(&normalized).map(|d| d.device.clone())
 }
@@ -432,7 +454,7 @@ pub fn try_lookup_from_full_path(full_path: &Path) -> Option<Arc<dyn DevFsDevice
 pub fn unregister_device(path: &Path) -> Result<(), DevFsError> {
     let normalized = path.normalize();
     let devfs = global_devfs();
-    let mut devfs = devfs.write();
+    let mut devfs = ranked_write!(RANK_DEVFS_REGISTRY, "devfs::unregister_device", devfs);
     devfs.remove_device(&normalized)
 }
 
