@@ -1,5 +1,7 @@
 //! Window syscalls for the window server.
 
+use crate::debug::lock_order::RANK_WINDOW_REGISTRY;
+use crate::ranked_write;
 use alloc::string::String;
 
 use crate::{
@@ -61,7 +63,8 @@ pub fn sys_window_destroy(window_id: WindowId) -> u64 {
 
     // Check ownership and destroy in a single write lock to avoid TOCTOU.
     {
-        let mut registry = WINDOW_REGISTRY.write();
+        let mut registry =
+            ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_destroy", WINDOW_REGISTRY);
         if let Some(window) = registry.get_window(window_id) {
             if window.pid != pid {
                 info.lock().errno = Errno::EPERM;
@@ -122,7 +125,7 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
         }
     }
 
-    let mut registry = WINDOW_REGISTRY.write();
+    let mut registry = ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_set", WINDOW_REGISTRY);
 
     // Check window exists
     let window = match registry.get_window_mut(window_id) {
@@ -371,7 +374,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
 
     let listed_ids: alloc::vec::Vec<u64> = entries.iter().map(|e| e.id).collect();
     {
-        let mut registry = WINDOW_REGISTRY.write();
+        let mut registry = ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_list", WINDOW_REGISTRY);
         for id in listed_ids {
             if let Some(w) = registry.get_window_mut(id) {
                 w.damaged = false;
@@ -446,10 +449,18 @@ pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent)
 
     // Update kernel focus state to match WM focus decisions.
     if event.event_type == crate::window::input::WindowEventType::FocusGained as u32 {
-        let mut registry = WINDOW_REGISTRY.write();
+        let mut registry = ranked_write!(
+            RANK_WINDOW_REGISTRY,
+            "sys_window_send_event",
+            WINDOW_REGISTRY
+        );
         registry.set_focused(window_id);
     } else if event.event_type == crate::window::input::WindowEventType::FocusLost as u32 {
-        let mut registry = WINDOW_REGISTRY.write();
+        let mut registry = ranked_write!(
+            RANK_WINDOW_REGISTRY,
+            "sys_window_send_event",
+            WINDOW_REGISTRY
+        );
         if registry.focused_window() == Some(window_id) {
             registry.clear_focus();
         }
@@ -468,7 +479,7 @@ pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent)
 ///
 /// Returns: 0 on success, !0 on error.
 pub fn sys_window_damage(window_id: WindowId) -> u64 {
-    let mut registry = WINDOW_REGISTRY.write();
+    let mut registry = ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_damage", WINDOW_REGISTRY);
     if let Some(w) = registry.get_window_mut(window_id) {
         w.damaged = true;
         0

@@ -7,6 +7,18 @@ use crate::{
 };
 use alloc::{sync::Arc, vec::Vec};
 
+/// Outcome of a slave-side read.
+///
+/// `Eof` and `WouldBlock` are both zero bytes and mean opposite things: the
+/// first is Ctrl-D, which POSIX reports as a zero-length read, and the second
+/// means park until the master writes. Collapsing them is why Ctrl-D used to
+/// hang until the master closed.
+pub enum PtySlaveRead {
+    Data(Vec<u8>),
+    Eof,
+    WouldBlock,
+}
+
 pub const PTY_IOCTL_SET_RAW: u64 = 0x5001;
 pub const PTY_IOCTL_SET_CANONICAL: u64 = 0x5002;
 pub const PTY_IOCTL_GET_MODE: u64 = 0x5003;
@@ -257,27 +269,24 @@ impl Pty {
     }
 
     /// Slave reads keyboard input from input_buf (master wrote this).
-    ///
-    /// An empty return means either EOF-once (`eof_pending` consumed) or no data
-    /// yet; the caller distinguishes them by whether the master is closed.
-    pub fn slave_read(&mut self, count: usize) -> (Vec<u8>, PtyNotifications) {
+    pub fn slave_read(&mut self, count: usize) -> (PtySlaveRead, PtyNotifications) {
         if count == 0 {
-            return (Vec::new(), PtyNotifications::EMPTY);
+            return (PtySlaveRead::WouldBlock, PtyNotifications::EMPTY);
         }
 
         // Deliver EOF once when input is empty and eof_pending is set.
         if self.input_buf.is_empty() && self.eof_pending {
             self.eof_pending = false;
-            return (Vec::new(), self.notify_pollers());
+            return (PtySlaveRead::Eof, self.notify_pollers());
         }
 
         let available = count.min(self.input_buf.len());
         if available == 0 {
-            return (Vec::new(), PtyNotifications::EMPTY);
+            return (PtySlaveRead::WouldBlock, PtyNotifications::EMPTY);
         }
 
         let out: Vec<u8> = self.input_buf.drain(..available).collect();
-        (out, self.notify_pollers())
+        (PtySlaveRead::Data(out), self.notify_pollers())
     }
 
     /// Decrement master refcount; set closed_master when it reaches zero.

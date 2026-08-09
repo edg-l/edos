@@ -571,10 +571,16 @@ rare concurrent-load hangs. Candidates, ranked by fun-per-effort:
 2. **USB stack** — xHCI ring locks, device enumeration, HID dispatch.
    Foundation #2 drop-audit already noted async `block_api`
    interactions worth verifying.
-3. **Window system** — window registry, focus, input routing, shared
-   memory compositor. Multi-threaded (client + compositor + input
-   threads), ripe for latent inversions. User-facing so inversions
-   manifest as WM hangs.
+3. **Window system — DONE 2026-08-09.** Ranked `WINDOW_REGISTRY` 280,
+   `WINDOW_EVENTS` 290, `LAST_MOUSE_BUTTONS` 300. No inversions found:
+   the registry is strictly outside, the input thread already drops its
+   read guard before taking the write lock on a focus change, and
+   nothing on the event-queue side reaches back into the registry. The
+   read path is ranked inside `read_tracked`, which is the only way the
+   registry is read, so every read site is covered by one call.
+   `SHARED_MEMORY_REGISTRY` is deliberately left unranked here: it is
+   not a window lock, and `sys_shm_map` reaching `claim_range` (vmas 70)
+   means its rank has to come from an mm analysis, not this one.
 4. **HDA audio** — codec/stream/buffer locks. Currently marked "out
    of Phase 2 scope" in `doc/invariants/lock-order.md`.
 5. **devfs / PTY** — `tty_lock -> line_discipline -> char_device`

@@ -40,6 +40,9 @@
 /// |  250 | `PORT_TABLE`                          |
 /// |  260 | `Socket` (per-socket)                 |
 /// |  270 | `TcpConnection` (per-connection)      |
+/// |  280 | `WINDOW_REGISTRY`                     |
+/// |  290 | `WINDOW_EVENTS`                       |
+/// |  300 | `LAST_MOUSE_BUTTONS`                  |
 
 // ---- Rank constants ---------------------------------------------------------
 
@@ -78,6 +81,12 @@ pub const RANK_NET_STACK: u16 = 240;
 pub const RANK_PORT_TABLE: u16 = 250;
 pub const RANK_SOCKET: u16 = 260;
 pub const RANK_TCP_CONN: u16 = 270;
+// Window system. The input thread holds the registry across event delivery
+// (`handle_keyboard_event`), and nothing on the event-queue side reaches back
+// into the registry, so the registry is strictly outside.
+pub const RANK_WINDOW_REGISTRY: u16 = 280;
+pub const RANK_WINDOW_EVENTS: u16 = 290;
+pub const RANK_MOUSE_BUTTONS: u16 = 300;
 // Deep utility leaves — acquired from arbitrary contexts (AHCI DMA setup,
 // page-table edits, etc.). Must be higher than any caller's rank. Ordered
 // relative to each other because `MemoryManager::map_memory` acquires

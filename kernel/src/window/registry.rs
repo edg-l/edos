@@ -1,5 +1,6 @@
 //! Window registry and types for the window server.
 
+use crate::debug::lock_order::RANK_WINDOW_REGISTRY;
 use crate::thread::preempt::{PreemptReadGuard, PreemptRwLock};
 use alloc::{collections::btree_map::BTreeMap, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -323,6 +324,10 @@ pub static WINDOW_REGISTRY_READER_OVERFLOW: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "window-lock-debug")]
 pub static WINDOW_REGISTRY_READER_ACQUIRES: AtomicU64 = AtomicU64::new(0);
 
+/// Rank-stack label for every `read_tracked` acquisition. `ReadSite` names the
+/// call site for the reader table; the rank system only needs one label.
+const READ_SITE: &str = "window::read_tracked";
+
 /// A read guard that records its holder while live.
 pub struct TrackedReadGuard<'a> {
     guard: PreemptReadGuard<'a, WindowRegistry>,
@@ -338,12 +343,13 @@ impl core::ops::Deref for TrackedReadGuard<'_> {
     }
 }
 
-#[cfg(feature = "window-lock-debug")]
 impl Drop for TrackedReadGuard<'_> {
     fn drop(&mut self) {
+        #[cfg(feature = "window-lock-debug")]
         if let Some(slot) = self.slot {
             WINDOW_REGISTRY_READERS[slot].store(0, Ordering::Release);
         }
+        crate::debug::lock_order::exit(RANK_WINDOW_REGISTRY, READ_SITE);
     }
 }
 
@@ -351,6 +357,7 @@ impl Drop for TrackedReadGuard<'_> {
 ///
 /// Without the `window-lock-debug` feature this is exactly `.read()`.
 pub fn read_tracked(site: ReadSite) -> TrackedReadGuard<'static> {
+    crate::debug::lock_order::enter(RANK_WINDOW_REGISTRY, READ_SITE);
     let guard = WINDOW_REGISTRY.read();
 
     #[cfg(feature = "window-lock-debug")]

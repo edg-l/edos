@@ -14,7 +14,7 @@ use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
 use crate::net::socket::PollableSocket;
 use crate::thread::pipe::PollablePipe;
 use crate::thread::poll::PollWaiter;
-use crate::thread::pty::{PollablePtyMaster, PollablePtySlave};
+use crate::thread::pty::{PollablePtyMaster, PollablePtySlave, PtySlaveRead};
 use crate::thread::scheduler::{
     current_thread, current_thread_info, current_thread_weak, thread_exit, thread_park_while,
     thread_sleep,
@@ -552,22 +552,27 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     thread_exit(130); // 128 + SIGINT(2)
                 }
 
-                let (data, eof, notif) = {
+                let (result, hangup, notif) = {
                     let mut guard = ranked_lock!(RANK_PTY, "sys_read::pty_slave", pty);
-                    let (d, n) = guard.slave_read(count);
-                    let eof = guard.closed_master && guard.input_buf.is_empty();
-                    (d, eof, n)
+                    let (r, n) = guard.slave_read(count);
+                    let hangup = guard.closed_master && guard.input_buf.is_empty();
+                    (r, hangup, n)
                 };
                 notif.flush();
 
-                if !data.is_empty() {
-                    if !copy_out(buffer_ptr, &data) {
-                        info.lock().errno = Errno::EFAULT;
-                        break -1;
+                match result {
+                    PtySlaveRead::Data(data) => {
+                        if !copy_out(buffer_ptr, &data) {
+                            info.lock().errno = Errno::EFAULT;
+                            break -1;
+                        }
+                        break data.len() as i64;
                     }
-                    break data.len() as i64;
+                    // Ctrl-D: a zero-length read, which is how POSIX spells EOF.
+                    PtySlaveRead::Eof => break 0,
+                    PtySlaveRead::WouldBlock => {}
                 }
-                if eof {
+                if hangup {
                     break 0;
                 }
                 input_wq.wait_until(|| {

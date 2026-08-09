@@ -77,6 +77,9 @@ sections, and wrapping them would recurse into the preemption counter.
 | 250 | `PORT_TABLE` | `PreemptSpinlock<BTreeMap>` | `net/socket.rs` |
 | 260 | `Socket` (per-socket) | `Arc<PreemptSpinlock<Socket>>` | `net/socket.rs` |
 | 270 | `TcpConnection` (per-conn) | `Arc<PreemptSpinlock<TcpConnection>>` | `net/tcp.rs` |
+| 280 | `WINDOW_REGISTRY` | `PreemptRwLock<WindowRegistry>` | `window/registry.rs` |
+| 290 | `WINDOW_EVENTS` | `PreemptRwLock<BTreeMap>` | `window/input.rs` |
+| 300 | `LAST_MOUSE_BUTTONS` | `PreemptSpinlock<u8>` | `window/input.rs` |
 | 900 | kernel-global mapper | `IrqSpinlock<MemoryManager>` | `memory/mapper.rs` |
 | 910 | `FRAME_ALLOCATOR` | `IrqSpinlock<BitmapFrameAllocator>` | `memory/frame_allocator.rs` |
 

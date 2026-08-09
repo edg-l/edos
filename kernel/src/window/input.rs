@@ -1,5 +1,7 @@
 //! Input event routing for the window server.
 
+use crate::debug::lock_order::{RANK_MOUSE_BUTTONS, RANK_WINDOW_EVENTS, RANK_WINDOW_REGISTRY};
+use crate::{ranked_lock, ranked_read, ranked_write};
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
 use pc_keyboard::{KeyEvent, KeyState};
@@ -229,14 +231,14 @@ pub fn init_input_routing() {
 /// Get or create an event queue for a window.
 pub fn get_or_create_event_queue(window_id: WindowId) -> Arc<WindowEventQueue> {
     {
-        let queues = WINDOW_EVENTS.read();
+        let queues = ranked_read!(RANK_WINDOW_EVENTS, "window::queue_lookup", WINDOW_EVENTS);
         if let Some(queue) = queues.get(&window_id) {
             return queue.clone();
         }
     }
 
     // Re-check under write lock: another CPU may have inserted while we dropped the read lock.
-    let mut queues = WINDOW_EVENTS.write();
+    let mut queues = ranked_write!(RANK_WINDOW_EVENTS, "window::queue_create", WINDOW_EVENTS);
     if let Some(queue) = queues.get(&window_id) {
         return queue.clone();
     }
@@ -247,14 +249,14 @@ pub fn get_or_create_event_queue(window_id: WindowId) -> Arc<WindowEventQueue> {
 
 /// Remove the event queue for a window.
 pub fn remove_event_queue(window_id: WindowId) {
-    WINDOW_EVENTS.write().remove(&window_id);
+    ranked_write!(RANK_WINDOW_EVENTS, "window::queue_remove", WINDOW_EVENTS).remove(&window_id);
 }
 
 /// Poll events for a window, returns up to `max` events.
 pub fn poll_events(window_id: WindowId, max: usize) -> Vec<WindowEvent> {
     // Pre-allocate outside the lock to avoid heap allocation under spinlock.
     let mut events = Vec::with_capacity(max.min(EVENT_QUEUE_SIZE));
-    let queues = WINDOW_EVENTS.read();
+    let queues = ranked_read!(RANK_WINDOW_EVENTS, "window::poll_events", WINDOW_EVENTS);
     if let Some(queue) = queues.get(&window_id) {
         while events.len() < max {
             if let Some(event) = queue.pop() {
@@ -269,7 +271,7 @@ pub fn poll_events(window_id: WindowId, max: usize) -> Vec<WindowEvent> {
 
 /// Send an event to a specific window.
 pub fn send_event(window_id: WindowId, event: WindowEvent) {
-    let queues = WINDOW_EVENTS.read();
+    let queues = ranked_read!(RANK_WINDOW_EVENTS, "window::send_event", WINDOW_EVENTS);
     if let Some(queue) = queues.get(&window_id) {
         let _ = queue.push(event);
     }
@@ -314,11 +316,15 @@ fn handle_mouse_event(event: MouseEvent) {
     let focused = registry.focused_window();
 
     // Track button state changes
-    let mut last_buttons = LAST_MOUSE_BUTTONS.lock();
-    let buttons_changed = event.buttons != *last_buttons;
-    let button_pressed = event.buttons & !*last_buttons;
-    let button_released = !event.buttons & *last_buttons;
-    *last_buttons = event.buttons;
+    let mut last_buttons = ranked_lock!(
+        RANK_MOUSE_BUTTONS,
+        "window::mouse_buttons",
+        LAST_MOUSE_BUTTONS
+    );
+    let buttons_changed = event.buttons != **last_buttons;
+    let button_pressed = event.buttons & !**last_buttons;
+    let button_released = !event.buttons & **last_buttons;
+    **last_buttons = event.buttons;
     drop(last_buttons);
 
     // Handle focus change on mouse button press (uses decorated bounds so
@@ -333,7 +339,11 @@ fn handle_mouse_event(event: MouseEvent) {
                 drop(registry);
 
                 {
-                    let mut registry = WINDOW_REGISTRY.write();
+                    let mut registry = ranked_write!(
+                        RANK_WINDOW_REGISTRY,
+                        "window::focus_change",
+                        WINDOW_REGISTRY
+                    );
                     // Re-verify window still exists under write lock
                     if registry.get_window(target_window).is_some() {
                         registry.set_focused(target_window);

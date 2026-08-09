@@ -2,6 +2,9 @@
 //!
 //! Provides window management, input event routing, and compositor support.
 
+use crate::debug::lock_order::RANK_WINDOW_REGISTRY;
+use crate::ranked_write;
+
 pub mod input;
 pub mod registry;
 
@@ -24,9 +27,12 @@ pub fn cleanup_process_windows(pid: u64) {
         registry.windows_for_pid(pid)
     };
 
-    registry::WINDOW_REGISTRY
-        .write()
-        .destroy_windows_for_pid(pid);
+    ranked_write!(
+        RANK_WINDOW_REGISTRY,
+        "window::cleanup_pid",
+        registry::WINDOW_REGISTRY
+    )
+    .destroy_windows_for_pid(pid);
 
     for &id in &window_ids {
         input::remove_event_queue(id);
