@@ -62,7 +62,9 @@ impl Handler for AcpiHandler {
         let mut mapper = memory_mapper();
 
         let virt_start = VirtAddr::new(region.virtual_start.as_ptr() as u64);
-        match mapper.unmap_memory(virt_start, region.mapped_length as u64) {
+        // An ACPI table lives in firmware memory: unmap the range without
+        // returning the frames to the allocator, which never owned them.
+        match mapper.unmap_foreign_memory(virt_start, region.mapped_length as u64) {
             Ok(_) => {
                 vfree(virt_start, region.mapped_length as u64);
             }

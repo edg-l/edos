@@ -1,19 +1,10 @@
 
-- ACPI table teardown frees frames it never allocated. Booting with 16 vCPUs
-  panics deterministically during "Initializing acpi tables":
-
-    deallocate_frame: frame idx 521597 (phys 0x7f57d000) has refcount=0;
-    caller is freeing a non-allocator-owned frame (MMIO?) or double-freeing
-    frame_allocator.rs:452
-
-  Backtrace: acpi::AcpiTables::from_rsdp -> AcpiHandler::unmap_physical_region
-  -> MemoryManager::unmap_memory -> deallocate_frame (acpi/handler.rs:65).
-  `unmap_physical_region` must tear down the mapping WITHOUT freeing the
-  frames: an ACPI table lives in firmware memory the allocator does not own.
-  The assert is what caught it; without the refcount check the allocator would
-  hand out firmware pages. 4 and 8 vCPUs boot fine, so whether it fires depends
-  on where QEMU lays the (larger, 16-LAPIC) MADT — the bug is not smp-specific.
-  Repro: scripts/edos-vm start --smp 16.
+- `BitmapFrameAllocator::inc_or_set_refcount` documents itself as being used by
+  `map_address` / `map_address_range`, and nothing calls it. `map_address`
+  instead calls `set_frame_allocated`, which leaves the refcount at 0 — the
+  allocator's "reserved, never hand this out" state. Either wire it up or
+  correct the doc; a doc naming a caller that does not exist is the trap that
+  hid the ACPI teardown bug.
 
 - Two EFS whole-inode writes still escape RANK_EFS_INODE_RMW, both able to put
   back a stale extent list (the class 3375ac4 closed elsewhere). Unproven as

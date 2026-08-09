@@ -197,6 +197,30 @@ impl MemoryManager {
         Ok(page_range)
     }
 
+    /// Tear down a mapping onto physical memory the frame allocator does not
+    /// own: firmware tables, MMIO windows, anything the caller borrowed by
+    /// physical address rather than allocated.
+    ///
+    /// Such a frame is either outside the bitmap entirely or marked allocated
+    /// with a refcount of zero, which is the allocator's "reserved, never
+    /// hand this out" state. `unmap_memory` would clear that bit and put
+    /// firmware or device pages back in the free pool, so it must not be used
+    /// here.
+    pub fn unmap_foreign_memory(
+        &mut self,
+        addr: VirtAddr,
+        size: u64,
+    ) -> Result<PageRangeInclusive<Size4KiB>, UnmapError> {
+        let page_range = get_page_range(addr, size);
+
+        for page in page_range {
+            let (_, flush) = self.mapper.unmap(page)?;
+            flush.flush();
+        }
+
+        Ok(page_range)
+    }
+
     /// Unmap pages and return the freed frames WITHOUT deallocating them.
     /// The caller must free the frames after completing a TLB shootdown.
     pub fn unmap_memory_deferred(
