@@ -245,6 +245,18 @@ Rejected hypotheses, recorded so they are not retried:
   helper writes the inode itself, and the result was a segfault inside a
   `MAP_SHARED` mapping; reverted, keeping only the full-block read skip.
 
+Also fixed in that round: `sync` committed the journal and *then* flushed, but
+a flush pass enrols the metadata that maps the file data it writes, and
+writeback will not check point a block whose transaction has not committed. So
+`sync` returned with the extents for its own writes still in memory. Two rounds
+of commit-then-flush now; verified by `scripts/fs-regression` reading back cold
+after a reboot.
+
+Reference points, same build: `edos-install` onto a blank 5 GB disk is 4.3 s
+(1.6 s formatting the root filesystem, 2.3 s in the final flush, everything
+else under 0.2 s), and the installed disk reaches `edos-init` 1.49 s into the
+kernel and comes up to a full desktop with no ISO attached.
+
 Still open, as performance rather than correctness:
 
 - **4 KiB access is bounded by per-command cost**, roughly 100 us, on both

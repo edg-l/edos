@@ -56,14 +56,31 @@ long run of contiguous blocks it owns exclusively (raw device reads, EFS file
 data). It costs where the blocks are small, scattered, and contended. Check
 which one a path is before reaching for it.
 
-## 2. Fault-around for file-backed mappings
+## 2. Coalesce `write_bytes`, which is the install path
+
+`edos-install` on a blank 5 GB disk takes 4.3 s end to end, and two phases own
+almost all of it: formatting the root filesystem (1.6 s) and the final flush
+(2.3 s). Everything else — partitioning, the ESP, copying 78 files, the
+bootloader — is 0.2 s or less.
+
+Both of those go through `BlockPageCache::write_bytes`, which still walks a
+byte range one page at a time. It is the write-side twin of the `read_bytes`
+change that took raw sequential reads from 37 to 886 MiB/s, and the same
+argument applies: `/dev/sdX` writes are long runs of contiguous blocks with no
+other writer. `write_bytes` already skips the read for a full-page overwrite;
+what it does not do is issue one command per run.
+
+`fsbench raw` is read-only on purpose, so measuring this first means adding a
+raw write sweep guarded to an unmounted device.
+
+## 3. Fault-around for file-backed mappings
 
 `mmap load 4MiB` faults in at 33 MiB/s against 1714 MiB/s for `read` of the
 same bytes. Roughly 50x, and the mechanism is one fault and one fill per 4 KiB
 page. Mapping the neighbouring pages that are already in the page cache on each
 fault (Linux maps 16) should close most of it.
 
-## 3. Detached pages are a crash-consistency risk, not just a slow path
+## 4. Detached pages are a crash-consistency risk, not just a slow path
 
 A clean benchmark run reports `detached_fallbacks: +2626`. When a shard is
 full, `read_page_for_write` gives up after `WRITE_PAGE_ATTEMPTS` and returns a
@@ -77,7 +94,7 @@ exceptionally, and the 8 MiB cache (8 shards x 256 pages) is too small for the
 metadata working set. Size the cache to the working set, and treat a detached
 write as something to count and alarm on rather than to absorb silently.
 
-## 4. The allocating write path rewrites the inode per block
+## 5. The allocating write path rewrites the inode per block
 
 `write 512B` allocating runs at 3.8 MiB/s against 16.1 MiB/s overwriting the
 same blocks. `ensure_block_for_logical` does a `read_inode`, an extent parse
@@ -88,7 +105,7 @@ writes the inode itself, so it cannot simply be substituted: doing that
 produced a segfault inside a `MAP_SHARED` mapping. Give it a mapping-only mode
 whose caller owns the inode write.
 
-## 5. Small, cheap
+## 6. Small, cheap
 
 *(`sys_mmap`'s per-mapping log is done — it is `log_debug!` now.)*
 
