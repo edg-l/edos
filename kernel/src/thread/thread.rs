@@ -379,9 +379,38 @@ pub(crate) fn load_process_image(
 pub(crate) fn release_user_mappings(user: &UserThread) {
     // vmas (rank 70) is taken before mm (rank 80).
     let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user.vmas).clone();
+    // Before mm, never under it: writing a shared mapping back goes through
+    // the VFS (rank 10), and `sys_mmap` resolves its path under the VFS and
+    // then takes mm. Doing both in that order here would be the inversion of
+    // that, and the two together are a deadlock.
+    flush_shared_mappings(&vmas);
     let mut memory_manager = ranked_lock!(RANK_USER_MM, "user.mm", user.memory_manager);
     let stack_top = user.process_stack_top.load(Ordering::Acquire);
     release_mappings(&mut memory_manager, &vmas, user.pid, stack_top);
+}
+
+/// Write back every dirty page of every `MAP_SHARED` file mapping in `vmas`.
+///
+/// Linux's msync-on-exit semantics: a process that stored through a shared
+/// mapping and exited without unmapping still has its writes reach the disk.
+///
+/// Separate from [`release_mappings`] because of the lock ladder, not for
+/// tidiness. This reaches the filesystem, so it must run with no `mm` guard
+/// held; the unmapping that follows needs that guard. Errors are logged and
+/// never stop the teardown.
+pub(crate) fn flush_shared_mappings(vmas: &VmaSet) {
+    for vma in vmas.iter() {
+        if let VmaBacking::FileBacked {
+            inode,
+            file_offset,
+            shared: true,
+            pages,
+            ..
+        } = &vma.backing
+        {
+            crate::syscalls::memory::flush_shared_vma_pages(inode, *file_offset, pages);
+        }
+    }
 }
 
 /// The mapping teardown itself, over an address space that may already be
@@ -390,8 +419,9 @@ pub(crate) fn release_user_mappings(user: &UserThread) {
 /// `execve` detaches the outgoing `MemoryManager` and `VmaSet` before calling
 /// this, so that the process is already running on its new address space and a
 /// preemption in the middle cannot restore a page table that is being freed.
-/// It also means the blocking parts here (a `MAP_SHARED` writeback can reach
-/// the disk) happen with nothing half-swapped.
+///
+/// Shared mappings must already have been written back by
+/// [`flush_shared_mappings`]: this function only unmaps.
 pub(crate) fn release_mappings(
     memory_manager: &mut MemoryManager,
     vmas: &VmaSet,
@@ -443,12 +473,9 @@ pub(crate) fn release_mappings(
                 pages,
                 ..
             } => {
-                // For MAP_SHARED: flush dirty pages to disk before exit so
-                // writes survive the process's death (Linux msync-on-exit
-                // semantics). Errors are logged, never prevent exit.
-                if *shared {
-                    crate::syscalls::memory::flush_shared_vma_pages(inode, *file_offset, pages);
-                }
+                // Shared pages were written back by `flush_shared_mappings`
+                // before the mm guard this runs under was taken.
+                let _ = (inode, file_offset, shared, pages);
                 // Unmap each present PTE and decrement the frame refcount
                 // that was bumped at fault-in time. Drop the pages Vec
                 // AFTER the dec_refcount loop so the Arc<CachedPage>

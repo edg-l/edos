@@ -1843,6 +1843,7 @@ fn sys_execve(
         pml4,
         stack_top,
     } = old;
+    crate::thread::thread::flush_shared_mappings(&vmas);
     crate::thread::thread::release_mappings(&mut memory_manager, &vmas, pid, stack_top);
     drop(memory_manager);
     unsafe { frame_allocator().deallocate_frame(pml4) };
