@@ -1651,21 +1651,17 @@ pub fn sys_sync() {
         x86_64::instructions::interrupts::are_enabled(),
         "sys_sync called with interrupts disabled"
     );
-    // Two rounds of commit-then-flush, not one.
+    // Commit-then-flush, repeated to a fixed point.
     //
     // A flush pass writes file data out and enrols the metadata that maps it
-    // into the journal's active transaction. Writeback refuses to check point
-    // a block whose transaction has not committed, so after a single round
-    // that metadata is neither committed nor written: `sync` would return with
-    // the extents for the data it just wrote still in memory, and a crash
-    // would leave the file pointing at nothing. The second round commits what
-    // the first round enrolled and then checkpoints it.
-    // Repeat until it converges rather than a fixed two rounds. Each flush
-    // enrols the metadata that maps the data it just wrote, so a round always
-    // creates work for the next one; stopping at a fixed count leaves a
-    // committed transaction whose blocks never reached their home locations,
-    // and the next mount replays it. Bounded so a workload dirtying metadata
-    // as fast as we flush cannot spin here forever.
+    // into the journal's active transaction, and writeback refuses to check
+    // point a block whose transaction has not committed. So a round always
+    // creates work for the next one: stopping at a fixed count leaves that
+    // metadata neither committed nor written, `sync` returns with the extents
+    // for the data it just wrote still in memory, and the next mount replays a
+    // transaction whose blocks never reached their home locations. Bounded so
+    // a workload dirtying metadata as fast as we flush cannot spin here
+    // forever.
     const SYNC_MAX_ROUNDS: usize = 8;
     let mut converged = false;
     for _ in 0..SYNC_MAX_ROUNDS {

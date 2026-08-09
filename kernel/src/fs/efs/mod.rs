@@ -427,7 +427,6 @@ impl EfsDriver {
             return Ok(inode.data_area[offset..end].to_vec());
         }
 
-        // Extent tree (depth 0 only for v1).
         self.read_via_extents(inode, offset, to_read)
     }
 

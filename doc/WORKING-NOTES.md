@@ -27,9 +27,9 @@ host — the guest terminal is far too short to hold a full run.
 - [`fsbench.md`](fsbench.md) — how to run it, what each number means, and the
   record of what the 2026-08-09 round found and fixed.
 - [`STORAGE-ROADMAP.md`](STORAGE-ROADMAP.md) — what is worth doing next, in
-  order, with the evidence for each, **and a list of three experiments that
-  were tried and refuted.** Read that list before optimising: two of the three
-  sounded obviously right and made the system slower.
+  order, with the evidence for each, **and a list of five experiments that
+  measurement refuted.** Read that list before optimising: two of them sounded
+  obviously right and made the system slower.
 
 Two traps that round produced, both of which made a number mean the opposite of
 what it said:

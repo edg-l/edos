@@ -100,12 +100,15 @@ Everything above the driver is therefore exonerated: the page cache, the
 byte-range API and the copy path all deliver over a gigabyte per second when
 the device underneath is memory.
 
-`/proc/ahci_stats` now reports `ncq_max_inflight`, and that is what identifies
-the remaining cost. A sweep that submits 64 commands per batch reaches a
-high-water mark of **9** outstanding commands against a queue negotiated at
-depth 32. The commands do overlap, so the driver is not fully serial, but the
-queue never fills: submission cannot outrun completion. The ~100 us per page is
-being spent getting a command *issued*, not waiting for QEMU to answer it.
+`/proc/ahci_stats` now reports `ncq_max_inflight`. A sweep that submits 64
+commands per batch reaches a high-water mark of **9** outstanding commands
+against a queue negotiated at depth 32.
+
+That number was read at the time as "submission cannot outrun completion, so
+the ~100 us per page is the cost of issuing a command". **That reading is
+wrong**, and a later round refuted it: every I/O path in the kernel except
+`BlockPageCache::read_pages` is submit-then-wait, so nothing ever asks for
+depth in the first place. See `STORAGE-ROADMAP.md` §1.
 
 Batching `read_bytes` through `read_pages`, so all misses are submitted before
 any is waited on, moved the number by nothing: 37.8 -> 37.9 MiB/s. Depth was
@@ -170,8 +173,7 @@ bulk commands up to 992 KiB: 21 MiB/s at 512 B, 151 at 4 KiB, 1047 at 64 KiB,
 ### 3. `mmap` is the slowest way to touch a file
 
 `mmap load 4MiB` faults in at 25 MiB/s against 1739 MiB/s for a `read` of the
-same bytes, roughly 70x. `sys_mmap` also logs a line per file-backed mapping,
-which floods `run_log.txt` during any run that remaps in a loop.
+same bytes, roughly 70x.
 
 ## Bugs this turned up
 
@@ -275,9 +277,10 @@ is already past it. Neither is where the remaining headroom is.
 
 Small-block access is: 4 KiB costs about 100 us per command on both read and
 write, which caps the system near 10k IOPS against the 50-100k a real SATA SSD
-does at queue depth 32. `ncq_max_inflight` peaks at 9 out of a negotiated 32
-even when 64 commands are submitted at once, so the cost is in issuing a
-command, not in waiting for one.
+does at queue depth 32. What that 100 us buys is a dependent round trip —
+submit, park, device, MSI, dispatcher, wake — because every I/O path but one
+waits on the command it just submitted. `STORAGE-ROADMAP.md` §1 has the
+inventory.
 
 FAT32 is not a limit anywhere measured: its I/O is already issued per cluster
 rather than per sector, and it only carries the ESP, a few megabytes the
@@ -286,8 +289,11 @@ would benefit from the same treatment if it ever carries real load.
 
 Still open, as performance rather than correctness:
 
-- **4 KiB access is bounded by per-command cost**, roughly 100 us, on both
-  read and write. Coalescing cannot help a single page; readahead and write
-  clustering are what would.
+- **4 KiB access costs a round trip**, roughly 100 us, on both read and write.
+  Coalescing cannot help a single page; readahead and write clustering keeping
+  commands outstanding are what would.
 - **`mmap` fault-in reads at 33 MiB/s** against 1714 MiB/s for `read` of the
-  same bytes, and `sys_mmap` logs a line per file-backed mapping.
+  same bytes.
+
+Both carry forward as `STORAGE-ROADMAP.md` §1 and §2, which is where the
+current framing and the priority order live.

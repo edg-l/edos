@@ -2,7 +2,8 @@
 
 What to do next, in priority order, with the evidence for each. Measure with
 `fsbench` before and after; `doc/fsbench.md` holds the record of what has
-already been done and what the numbers mean.
+already been done and what the numbers mean, and `doc/bugs/` holds the
+post-mortems for what broke on the way.
 
 **The `/var` suite cannot resolve a small change.** Its metadata and warm-read
 numbers swing by a factor of three between boots of one unchanged binary: three
@@ -13,7 +14,9 @@ builds — so anything below a few tens of percent has to be measured there, or
 with many repetitions. Also reformat between arms (`make clean-sata && make
 sata-disk.img`): `make all` only rebuilds the image when `filesystem/` changes,
 so successive suites otherwise run against a disk carrying the previous runs'
-files and leaked inodes.
+files and leaked inodes. And read `/proc/efs_stats` **after** the benchmark
+process exits — fsbench prints its counter deltas before closing its
+descriptors, so `orphans_dropped` reads 0 mid-run and 513 afterwards.
 
 Where things stand as of 2026-08-09:
 
@@ -64,125 +67,6 @@ completion-side cuts in the refuted list below, both of which were neutral.
 Coalescing cannot help here — one page is one command — so this is
 per-operation work, not another run-length fix.
 
-An unrelated defect found while reading the completion path: `on_port_irq`
-reads `SACT` and then loads each slot's op, so a command issued between those
-two reads is completed by the dispatcher before its data has landed. `issued`
-does not close the window, since the submitter stores it after writing SACT.
-Narrow and never observed, but real; re-reading `SACT` before completing a slot
-would close it.
-
-## 1b. `fsync` could panic the kernel (FIXED)
-
-`Journal::committed_seq` took the `BlockingMutex<JournalState>`, and
-`force_commit_and_wait` handed `|| self.committed_seq() >= target_seq` to
-`commit_wq.wait_until_timeout`. `WaitQueue::wait_internal` evaluates its
-readiness predicate inside `without_interrupts`, and `BlockingMutex::lock`
-debug-asserts interrupts are enabled when it has to block. So an `fsync` that
-re-checked its predicate while the committer kthread held `state` panicked the
-kernel; the CPU then stopped acknowledging IPIs and `tlb_shootdown` panicked on
-top of it. Caught once during a `fsbench /var` run on trunk — racy, not
-deterministic, which is why the suite usually completed.
-
-Two more call sites had the same shape: the committer kthread's own
-`has_pending_work()` predicate, and `Mailbox::recv`, which re-checked its
-`BlockingMutex<VecDeque>` under the same interrupts-off rule.
-
-Fixed by making every wait predicate lock-free rather than by relaxing the
-assert. `committed_seq` is now mirrored into an `AtomicU64` published under the
-state lock by `set_committed_seq`, so the field and its mirror cannot drift;
-the committer uses a `try_lock` hint biased towards "there is work"; `Mailbox`
-reuses the `try_lock`-based `is_empty` it already had. The requirement is
-documented on `WaitQueue::wait_until`.
-
-## 1c. A file cannot have more than 13 fragments
-
-`MAX_INLINE_EXTENTS` is `(INODE_DATA_AREA_SIZE - sizeof(EfsExtentHeader)) /
-sizeof(EfsExtent)` = `(176 - 12) / 12` = **13**. Every file's block map is that
-flat list, inline in the inode. Once a file needs a fourteenth discontiguous
-run, `ensure_block_for_logical` and `ensure_blocks_for_logical_batch` fail the
-`extents.push` and return `Error::Unsupported` (`fs/efs/mod.rs:915`, `:1057`).
-
-Caught by `fsbench /var -t 4000`, which fails `write 1MiB + fsync each` with
-
-```
-sys_fsync: flush_file(/var/fsbench.fsync) error: Unsupported
-```
-
-once the suite's earlier phases have fragmented the free space. A 1 MiB file is
-256 blocks, so it only takes moderate fragmentation. The same call sits on the
-writeback path, so this is not only a failing `fsync`: the data never reaches
-disk.
-
-The format already anticipates the fix. `EfsExtentHeader` carries a `depth`
-field, `EfsExtentIndex` is defined for internal nodes, and the reader rejects
-`depth != 0` with "v1 only supports depth-0" (`fs/efs/mod.rs:466`). Implementing
-depth-1 raises the ceiling to 13 index entries times whatever a 4 KiB leaf
-block holds, which is far past anything reachable. It touches the extent
-reader, both `ensure_block*` paths, truncate/free, `efs-fsck`, `efs-mkfs` and
-`doc/efs.md` §extents.
-
-Until then the ceiling is real and silent, and the allocator's contiguity
-behaviour is what decides how often a file hits it.
-
-## 1d. The block leak (FIXED)
-
-`efs-fsck` reported ~19k leaked block-bitmap bits after a `fsbench /var` run:
-bits set with no inode referencing them.
-
-The cause was a read-modify-write race on the allocation bitmaps. `alloc_block`
-reads a bitmap block, sets a bit and writes the block back, and took
-`alloc_mutex` to do it. `free_block` did exactly the same thing to clear a bit
-and took **no lock at all**; `alloc_inode` and `free_inode` were the same pair.
-The mutex's comment only ever considered two allocators racing each other. With
-an allocation and a free interleaved, whichever writes second restores the
-other's bit: a freed bit that stays set is a leaked block, an allocated bit
-that gets cleared is a block handed out twice. Both appeared in fsck output
-("leaked" and "missing bit").
-
-Renamed `bitmap_mutex` and taken on every bitmap read-modify-write. After a
-75-second run allocating 309074 blocks, fsck reports **zero** findings — 0
-leaked, 0 missing, 0 orphans — against 18721 leaked before.
-
-Two things `/proc/efs_stats` ruled out on the way, both previously blamed here:
-
-- **Not the tx-abort path.** `tx_aborts` is 0 across a run. The comment in
-  `ensure_blocks_for_logical_batch` about `alloc_block` writing the bitmap
-  before its transaction commits describes a real hazard that never fires.
-- **Not orphan eviction.** `orphans_marked` and `orphans_dropped` both read 513
-  after a run. Sampling them *during* the run shows 0 dropped, because the
-  benchmark prints its counters before closing its descriptors — read them
-  after the process exits or they say the opposite of the truth.
-
-A second, independent race was fixed while looking: the whole-inode
-read-modify-write in `update_size` against the one in
-`ensure_block*_for_logical`, which loses extents rather than bitmap bits. See
-`RANK_EFS_INODE_RMW`.
-
-## 1e. `sync` left the journal needing replay (FIXED)
-
-After a clean `sync`, `efs-fsck` found a committed, un-checkpointed transaction
-still in the ring; a mount would replay it.
-
-`sys_sync` ran a fixed two rounds of commit-then-flush. That is not a fixed
-point: every checkpoint pass enrols the metadata mapping the data it just
-wrote, so each round creates work for the next. It now loops until no journal
-reports committed work outstanding, bounded at 8 rounds, and logs if it hits
-the cap.
-
-Two things had to be right for that loop to terminate. It tests only
-*committed* work (`sealed` plus `committed_pending`): the open transaction is
-refilled by every flush and is never replayed, so counting it never converges.
-And it advances the tail *inside* the loop, because `committed_pending` is
-drained by `advance_tail` and nothing else, so testing before that call can
-never go false.
-
-`efs-fsck` also grew an accurate dirtiness test. `tail_seq != head_seq` is not
-one: `head_seq` names the open transaction, so a clean journal normally sits
-one apart. It now scans the ring and reports dirty only when it finds a
-committed transaction to replay, sharing that scan with replay itself. That is
-what proved this was a real bug rather than the false positive it first looked
-like.
-
 ## 2. mmap fault-around
 
 A map, fault in 4 MiB, unmap cycle is 124 ms: 1024 pages at 121 us each,
@@ -232,25 +116,67 @@ commit, a FUA commit block and a drive cache flush per `fsync` — but real
 hardware with FUA loses two to three times, not eight. Worth attributing across
 those three before deciding there is nothing to take.
 
-## 6. Small, cheap
+## 6. Tooling
 
-- `scripts/fs-regression` still has to be run by hand after `make all`. Wire it
-  into a make target alongside `fsbench`, so a durability regression and a
-  throughput regression are caught by the same command.
-- The evict queue holds 256 entries and fills during an ordinary create/unlink
-  burst. The *synchronous fallback* arm is rate-limited and counted in
-  `/proc/evict_stats`. The *reaper* arm used to discard the request outright,
-  logging one unconditional line per inode and leaking that inode's blocks
-  until `efs-fsck` ran; a single `fsbench /var` run emitted several hundred.
-  Fixed: the reaper now parks the request on an unbounded overflow list
-  (`EVICT_OVERFLOW`, rank 350) which the kthread drains ahead of the ring, so
-  nothing is lost and there is no capacity cliff to tune.
-  `EVICT_DROPPED_COUNT` survives as queue-pressure telemetry; it no longer
-  counts leaks.
-- A blank 1 GB disk once reported `/dev/sda holds 197120 bytes` to userspace,
-  while a 5 GB image on the same path reported correctly. Seen once, not
-  reproduced deliberately. Worth ten minutes on `BlockDevNode::size` and the
+`scripts/fs-regression` still has to be run by hand after `make all`. Wire it
+into a make target alongside `fsbench`, so a durability regression and a
+throughput regression are caught by the same command.
+
+## Correctness items still open
+
+Not performance, but found by this work and unfixed.
+
+- **An intermittent segfault in `mmap store 4MiB + msync`**, roughly one
+  `fsbench /var` run in six: `KILL: PF addr=... User write to unmapped page`.
+  Unexplained. Item 4 above records a past `MAP_SHARED` segfault near the
+  batch-allocation path, which is the first place to look.
+- **`sys_sync` sometimes logs `journal still pending after 8 rounds`** even
+  though the resulting image is fsck-clean. The bound is doing its job, but the
+  loop takes more rounds to converge than the mechanism suggests it should
+  (`kernel/src/syscalls/io.rs`).
+- **A full filesystem is indistinguishable from an I/O error.** `alloc_block`
+  returns `Error::IoError` when no group has a free block; `fs::Error` has no
+  no-space variant, so userspace cannot report ENOSPC. `/proc/efs_stats`
+  `alloc_failed` counts the case.
+- **`AhciPort::mmio_lock` is a bare `spin::Mutex`** (`drivers/ahci/port.rs`),
+  which CLAUDE.md rules out for state shared between threads: a preempted
+  holder makes every other CPU spin. The hold is two MMIO writes, so this is
+  latent rather than live.
+- **A blank 1 GB disk once reported `/dev/sda holds 197120 bytes`** to
+  userspace, while a 5 GB image on the same path reported correctly. Seen once,
+  not reproduced deliberately. Worth ten minutes on `BlockDevNode::size` and the
   IDENTIFY path before trusting small-disk sizes.
+
+## Recently closed
+
+Kept as an index; the mechanism is in the post-mortem or the spec named on each
+line.
+
+- **`fsync` could panic the kernel** — a wait predicate that took a
+  `BlockingMutex`, evaluated inside `without_interrupts` (`8992a30`,
+  `doc/bugs/2026-08-09-fsync-panicked-on-a-wait-predicate.md`).
+- **A file could not have more than 13 fragments.** `MAX_INLINE_EXTENTS` is 13
+  and that flat inline list was the whole block map, so a moderately fragmented
+  1 MiB file failed `fsync` with `Unsupported` while writeback dropped the data.
+  Depth-1 extent trees raise the ceiling to 4420 extents (`072106b`,
+  `doc/efs.md` §6.4).
+- **~19k leaked blocks per run** — an unsynchronized read-modify-write of the
+  allocation bitmap, plus a second one on the whole inode (`6a15410`, `3375ac4`,
+  `doc/bugs/2026-08-09-efs-lost-bitmap-and-inode-updates.md`).
+- **`sync` left the journal needing replay** — a fixed two rounds of
+  commit-then-flush is not a fixed point (`6a15410`,
+  `doc/bugs/2026-08-09-sync-that-left-the-journal-dirty.md`).
+- **A command could be completed before its data landed.** `on_port_irq` read
+  SACT once and then walked the slots, so a command issued between the two
+  reads paired with a clear bit; `issued` does not close the window, since the
+  submitter stores it after writing SACT. `complete_ncq_slot` now re-reads SACT
+  once it has observed `issued` (`9fb3af5`).
+- **The reaper discarded evictions it could not queue**, leaking that inode's
+  blocks until `efs-fsck` ran — several hundred per `fsbench /var` run. The
+  reaper now parks the request on an unbounded overflow list (`EVICT_OVERFLOW`,
+  rank 350) which the kthread drains ahead of the ring, so there is no capacity
+  cliff to tune. `EVICT_DROPPED_COUNT` survives as queue-pressure telemetry; it
+  no longer counts leaks (`bf669f6`).
 
 ## What has been tried and did not work
 
@@ -274,7 +200,6 @@ measurement.
   inside a ±6% noise band. Kept anyway, since it is strictly less work with
   identical semantics, but it is not a throughput fix and should not be cited
   as one.
-
 - **Coalescing `flush_dirty_once`.** The premise was that
   `checkpoint_and_advance` calls into it, so it must be what a slow commit is
   made of. `block_cache.writeback_bytes` is about 4 MB per run, a tenth of a

@@ -286,7 +286,8 @@
 
 ## EFS Remaining
 
-- Extent tree depth > 0 (v1 limit, max file ~1.66GB with inline extents)
+- Extent tree depth > 1 (v1 reads and writes depth 0 and 1; the ceiling is
+  4420 extents, ~565GB, and the on-disk format needs no change to go deeper)
 - FileTime: VFS uses FAT-style packed date/time, EFS timestamps lossy-converted
 
 ## Boot Race / Heap Expansion Bug (fixed)
