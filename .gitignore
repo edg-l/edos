@@ -6,6 +6,8 @@
 target/
 out/
 sata-disk.img
+live-root.img
+install-test.img
 /filesystem
 .gdb_history
 __pycache__/

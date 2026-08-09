@@ -934,10 +934,11 @@ covers the common boot case. Code reuse: `libs/efs-common` is already
 `no_std` and works in userspace; the host crate's `std::fs::File`
 calls would swap for `open("/dev/sdb")` + `pread`/`pwrite`/`fsync`.
 
-**Prereq investigation**: check `kernel/src/fs/devfs/` to see what
-`/dev/sda` exposes today. Raw block-device-as-file (open+pread on a
-sector-aligned device node) may not be wired. If it isn't, that's the
-first piece to land before any in-EDOS fsck makes sense.
+**Prereq: done.** `/dev/sda`, `/dev/sdb`, `/dev/ram0` are block-device
+nodes (`kernel/src/fs/devfs/block.rs`), byte-addressed through the block
+page cache, with ioctls for flush, sector count, rescan and is-mounted.
+`edos-install` already uses them, so an in-EDOS fsck has everything it
+needs.
 
 ### Addressing windows by name instead of by pixel
 
