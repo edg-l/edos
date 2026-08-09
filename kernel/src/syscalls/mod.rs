@@ -22,6 +22,7 @@ use x86_64::{
 
 use crate::{
     debug::lock_order::{RANK_MAPPERS, RANK_USER_MM, RANK_VMAS},
+    debug::lock_order::{RANK_PIPE, RANK_PTY},
     fs::Error as FsError,
     gdt::selectors,
     log,
@@ -82,16 +83,24 @@ use crate::thread::scheduler::{
 fn close_fd_refcount(desc: FileDescriptor) {
     match desc {
         FileDescriptor::PipeRead(pipe) => {
-            pipe.lock().close_reader().flush();
+            ranked_lock!(RANK_PIPE, "fd::drop_reader", pipe)
+                .close_reader()
+                .flush();
         }
         FileDescriptor::PipeWrite(pipe) => {
-            pipe.lock().close_writer().flush();
+            ranked_lock!(RANK_PIPE, "fd::drop_writer", pipe)
+                .close_writer()
+                .flush();
         }
         FileDescriptor::PtyMaster(pty) => {
-            pty.lock().close_master().flush();
+            ranked_lock!(RANK_PTY, "fd::drop_master", pty)
+                .close_master()
+                .flush();
         }
         FileDescriptor::PtySlave(pty) => {
-            pty.lock().close_slave().flush();
+            ranked_lock!(RANK_PTY, "fd::drop_slave", pty)
+                .close_slave()
+                .flush();
         }
         FileDescriptor::Socket(sock) => {
             let mut s = sock.lock();
@@ -1440,7 +1449,7 @@ fn do_spawn(
         let child_info = get_thread_info_by_id(user_thread.id).unwrap();
         let child_fd_table = child_info.lock().fd_table.clone();
         if let Some(FileDescriptor::PtySlave(pty)) = child_fd_table.lock().get_fd(0).cloned() {
-            pty.lock().foreground_pid = Some(child_pid);
+            ranked_lock!(RANK_PTY, "sys_spawn::foreground", pty).foreground_pid = Some(child_pid);
         }
     }
 

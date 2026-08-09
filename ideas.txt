@@ -640,12 +640,10 @@ Still worth doing, and not covered by the above:
 
 `lock_order::assert_no_guards_held`, called from `thread_exit`, is the
 regression guard. Every path that ends a thread funnels through there,
-so it is the one place the rule can be checked. Its coverage is the
-honest limit: the per-thread stack records **ranked** locks only, so of
-the six sites swept it would have caught the two `inode.lock` ones and
-been blind to the pipe, pty and TTY guards. Ranking those three is what
-would close that gap, and it is a rank-table change that wants its own
-validation rather than a drive-by.
+so it is the one place the rule can be checked. The per-thread stack records
+**ranked** locks only, so the three unranked ones the sweep touched were
+ranked to make them visible: `TTY_BUFFER` 210, `Pipe` 220, `Pty` 230.
+All six sites are now covered.
 
 Where the rule can actually be broken today is narrower than "anywhere
 a thread dies", which is worth writing down because it bounds the

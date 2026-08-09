@@ -1019,18 +1019,30 @@ Every path that ends a thread funnels through there, so it is the one place the
 rule can be checked, and it costs an `is_empty()` on a debug build.
 
 **It covers ranked locks only**, because that is what the per-thread stack
-records. Of the six sites above it would have caught the two `inode.lock` ones
-and been blind to the pipe, pty and TTY guards. Ranking those three would close
-the gap; that is a rank-table change and wants its own validation.
+records. The three locks the sweep touched that were unranked are now ranked, so
+all six sites are covered: `TTY_BUFFER` 210, `Pipe` 220, `Pty` 230.
+
+Those ranks are pinned by two constraints, and the reasoning is in
+`invariants/lock-order.md`. Above 30, because `/dev/tty0` is a devfs device and
+devfs has no `PageCacheOps`, so writing to it runs `TtyDevice::write` under
+`inode.lock`. Below 900, because appending to any of these buffers allocates and
+a heap expansion reaches the frame allocator. Nothing ranked is acquired while
+one of them is held, which is the property to re-check before adding anything to
+those critical sections.
 
 Proven in both directions, since an assert never seen to fire is decoration:
 
-- **Negative:** 49/49 in-kernel, plus killtest, exectest, threadtest (~40 thread
-  exits) and forktest on a booted desktop, with no fire.
-- **Positive:** pushing a fake rank in the `SYS_EXIT` arm immediately before
-  `thread_exit` panics on the first program exit with `thread 27 died at
-  thread_exit holding 1 ranked guard(s), innermost 'positive-control' (rank
-  10)`. Reverted afterwards.
+- **Negative:** 49/49 in-kernel, then killtest, exectest, threadtest, forktest,
+  iotest, mmaptest 11/11 and `lockordertest: PASS (inversions=0, max_depth=4)`
+  on a booted desktop, plus `echo x > /dev/tty0` and `cat /dev/tty0` to force
+  the `inode.lock` → `TTY_BUFFER` ordering. `/proc/lock_order_stats` reported
+  `inversions: 0` throughout.
+- **Positive, twice.** Pushing a fake rank in the `SYS_EXIT` arm panics on the
+  first program exit: `thread 27 died at thread_exit holding 1 ranked guard(s),
+  innermost 'positive-control' (rank 10)`. Then, after ranking, holding a real
+  `TTY_BUFFER` guard across the exit panics with `innermost
+  'tty::positive-control' (rank 210)` — which is the proof the widened coverage
+  is real and not just a bigger table. Both reverted.
 
 Worth knowing when reading this class: **the hang that opened the entry in
 `ideas.txt` was re-diagnosed as starvation**, not a leaked guard, by

@@ -33,6 +33,9 @@
 /// |  180 | `AhciPort.slot_waiters[i]`            |
 /// |  190 | `AhciPort.mmio_lock`                  |
 /// |  200 | `PCI_CONFIG_LOCK`                     |
+/// |  210 | `TTY_BUFFER`                          |
+/// |  220 | `Pipe` (per-pipe)                     |
+/// |  230 | `Pty` (per-pty)                       |
 
 // ---- Rank constants ---------------------------------------------------------
 
@@ -57,6 +60,13 @@ pub const RANK_AHCI_LEGACY: u16 = 170;
 pub const RANK_AHCI_SLOT: u16 = 180;
 pub const RANK_AHCI_MMIO: u16 = 190;
 pub const RANK_PCI_CONFIG: u16 = 200;
+// IPC and console endpoints. Ranked above the FS ladder because the devfs
+// device callbacks that reach `TTY_BUFFER` run under `inode.lock` (30), and
+// below the deep leaves because appending to any of these buffers allocates.
+// Nothing ranked is acquired while one of them is held.
+pub const RANK_TTY_BUFFER: u16 = 210;
+pub const RANK_PIPE: u16 = 220;
+pub const RANK_PTY: u16 = 230;
 // Deep utility leaves — acquired from arbitrary contexts (AHCI DMA setup,
 // page-table edits, etc.). Must be higher than any caller's rank. Ordered
 // relative to each other because `MemoryManager::map_memory` acquires

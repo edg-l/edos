@@ -6,6 +6,7 @@ use core::time::Duration;
 
 use x86_64::instructions::interrupts;
 
+use crate::debug::lock_order::{RANK_PIPE, RANK_PTY};
 use crate::fs::block_page_cache::BlockPageCache;
 use crate::fs::handle::{PollEntry, PollKey, Pollable};
 use crate::fs::vfs;
@@ -21,7 +22,7 @@ use crate::thread::scheduler::{
 use crate::util::uaccess::{try_copy_from_user, try_copy_to_user, try_write_user};
 use crate::{
     drivers::{keyboard::KEY_EVENT_BROADCAST, random, tty},
-    log,
+    log, ranked_lock,
     syscalls::{Errno, MAX_PATH_LEN, PathBuf, copy_user_path},
     thread::{
         UserThreadInfo,
@@ -193,7 +194,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 return !0u64;
             };
             let (written, notif) = {
-                let mut pipe = pipe.lock();
+                let mut pipe = ranked_lock!(RANK_PIPE, "sys_write::pipe", pipe);
                 pipe.write(&data)
             };
             notif.flush();
@@ -209,7 +210,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 return !0u64;
             };
             let (written, notif) = {
-                let mut guard = pty.lock();
+                let mut guard = ranked_lock!(RANK_PTY, "sys_write::pty_master", pty);
                 guard.master_write(&data)
             };
             notif.flush();
@@ -221,7 +222,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 return !0u64;
             };
             let (written, notif) = {
-                let mut guard = pty.lock();
+                let mut guard = ranked_lock!(RANK_PTY, "sys_write::pty_slave", pty);
                 guard.slave_write(&data)
             };
             notif.flush();
@@ -380,12 +381,12 @@ pub fn sys_close(fd: u64) -> i32 {
             0
         }
         Some(FileDescriptor::PtyMaster(pty)) => {
-            let notif = pty.lock().close_master();
+            let notif = ranked_lock!(RANK_PTY, "sys_close::pty_master", pty).close_master();
             notif.flush();
             0
         }
         Some(FileDescriptor::PtySlave(pty)) => {
-            let notif = pty.lock().close_slave();
+            let notif = ranked_lock!(RANK_PTY, "sys_close::pty_slave", pty).close_slave();
             notif.flush();
             0
         }
@@ -480,7 +481,9 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             }
         },
         Some(FileDescriptor::PipeRead(pipe)) => {
-            let reader_wq = pipe.lock().reader_wq.clone();
+            let reader_wq = ranked_lock!(RANK_PIPE, "sys_read::pipe_wq", pipe)
+                .reader_wq
+                .clone();
             // Block until data is available or all writers are closed (EOF).
             loop {
                 // Drain under the guard, copy out after releasing it. Bytes are
@@ -488,7 +491,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 // caller passed a bad buffer; holding the guard across the copy
                 // instead would leak it permanently on a kill.
                 let (data, closed, notif) = {
-                    let mut guard = pipe.lock();
+                    let mut guard = ranked_lock!(RANK_PIPE, "sys_read::pipe", pipe);
                     let (d, n) = guard.read(count);
                     (d, guard.closed && guard.buffer.is_empty(), n)
                 };
@@ -506,7 +509,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 }
                 // No data but writer still open: park until woken by write/close
                 reader_wq.wait_until(|| {
-                    let guard = pipe.lock();
+                    let guard = ranked_lock!(RANK_PIPE, "sys_read::pipe_wait", pipe);
                     !guard.buffer.is_empty() || guard.closed
                 });
             }
@@ -521,7 +524,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             // (e.g. the terminal emulator) and must not block, or it cannot
             // forward keyboard input to the slave -- causing a deadlock.
             let (data, notif) = {
-                let mut guard = pty.lock();
+                let mut guard = ranked_lock!(RANK_PTY, "sys_read::pty_master", pty);
                 guard.master_read(count)
             };
             notif.flush();
@@ -537,7 +540,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
         }
         Some(FileDescriptor::PtySlave(pty)) => {
             // Clone the input_wq Arc before entering the loop (avoids holding lock while blocking).
-            let input_wq = pty.lock().input_wq();
+            let input_wq = ranked_lock!(RANK_PTY, "sys_read::pty_wq", pty).input_wq();
             loop {
                 // If this thread has been killed (e.g. Ctrl+C), force-exit
                 // immediately. We can't rely on userspace to handle EINTR
@@ -550,7 +553,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 }
 
                 let (data, eof, notif) = {
-                    let mut guard = pty.lock();
+                    let mut guard = ranked_lock!(RANK_PTY, "sys_read::pty_slave", pty);
                     let (d, n) = guard.slave_read(count);
                     let eof = guard.closed_master && guard.input_buf.is_empty();
                     (d, eof, n)
@@ -568,7 +571,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     break 0;
                 }
                 input_wq.wait_until(|| {
-                    let guard = pty.lock();
+                    let guard = ranked_lock!(RANK_PTY, "sys_read::pty_wait", pty);
                     let killed = current_thread().map_or(false, |t| {
                         t.killed.load(core::sync::atomic::Ordering::Acquire)
                     });

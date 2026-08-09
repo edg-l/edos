@@ -2,11 +2,13 @@ use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
+    debug::lock_order::RANK_TTY_BUFFER,
     fs::{
         DevFsDevice, DevFsError, PollState,
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
         register_device_str,
     },
+    ranked_lock,
     thread::{broadcast::Broadcaster, mutex::BlockingMutex},
     util::uaccess::try_copy_from_user,
 };
@@ -35,7 +37,7 @@ fn push_bytes(data: &[u8]) {
     let mut should_notify = false;
     let mut resulting_state = None;
     {
-        let mut buffer = TTY_BUFFER.lock();
+        let mut buffer = ranked_lock!(RANK_TTY_BUFFER, "tty::push_bytes", TTY_BUFFER);
         for &byte in data {
             match byte {
                 b'\x08' | b'\x7f' => {
@@ -121,7 +123,7 @@ pub fn write_from_user(user_ptr: *const u8, len: usize) -> Option<usize> {
         }
 
         {
-            let mut buffer = TTY_BUFFER.lock();
+            let mut buffer = ranked_lock!(RANK_TTY_BUFFER, "tty::write_from_user", TTY_BUFFER);
             for &byte in &chunk[..to_copy] {
                 match byte {
                     b'\x08' | b'\x7f' => {
@@ -167,7 +169,7 @@ struct TtyPoll;
 impl Pollable for TtyPoll {
     fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
         let state = {
-            let buffer = TTY_BUFFER.lock();
+            let buffer = ranked_lock!(RANK_TTY_BUFFER, "tty::poll_register", TTY_BUFFER);
             poll_state_for_len(buffer.len())
         };
 
@@ -200,7 +202,7 @@ impl DevFsDevice for TtyDevice {
         }
 
         let mut result = Vec::new();
-        let mut buffer = TTY_BUFFER.lock();
+        let mut buffer = ranked_lock!(RANK_TTY_BUFFER, "tty::device_read", TTY_BUFFER);
 
         while result.len() < count {
             match buffer.pop_front() {
@@ -225,6 +227,6 @@ impl DevFsDevice for TtyDevice {
     }
 
     fn size(&self) -> u64 {
-        TTY_BUFFER.lock().len() as u64
+        ranked_lock!(RANK_TTY_BUFFER, "tty::device_size", TTY_BUFFER).len() as u64
     }
 }

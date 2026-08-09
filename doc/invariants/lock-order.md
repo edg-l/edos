@@ -70,6 +70,9 @@ sections, and wrapping them would recurse into the preemption counter.
 | 180 | `AhciPort.ncq_waiters[i]` | `spin::Mutex<Option<Arc<AhciNcqOp>>>` | `drivers/ahci/port.rs` |
 | 190 | `AhciPort.mmio_lock` | `spin::Mutex<()>` | `drivers/ahci/port.rs` |
 | 200 | `PCI_CONFIG_LOCK` | `spin::Mutex<()>` | `drivers/pci/config.rs` |
+| 210 | `TTY_BUFFER` | `BlockingMutex<VecDeque<u8>>` | `drivers/tty.rs` |
+| 220 | `Pipe` (per-pipe) | `Arc<BlockingMutex<Pipe>>` | `thread/pipe.rs` |
+| 230 | `Pty` (per-pty) | `Arc<BlockingMutex<Pty>>` | `thread/pty.rs` |
 | 900 | kernel-global mapper | `IrqSpinlock<MemoryManager>` | `memory/mapper.rs` |
 | 910 | `FRAME_ALLOCATOR` | `IrqSpinlock<BitmapFrameAllocator>` | `memory/frame_allocator.rs` |
 
@@ -152,6 +155,26 @@ an inner lock. Same rank, and never co-held with each other.
 **190, `AhciPort.mmio_lock`.** Very short raw MMIO read-modify-write. True leaf.
 
 **200, `PCI_CONFIG_LOCK`.** Config-space read-modify-write. Acquired alone.
+
+**210, `TTY_BUFFER`. 220, `Pipe`. 230, `Pty`.** IPC and console endpoints, and
+the only ranks reached from the syscall read/write path rather than from the FS
+ladder. Two constraints fix where they sit. They must be **above 30**, because
+`/dev/tty0` is a devfs device and devfs has no `PageCacheOps`, so a write to it
+runs `TtyDevice::write` under `inode.lock` from `vfs::write_from_user`'s
+non-page-cache branch. They must be **below 900**, because appending to any of
+these buffers allocates and a heap expansion reaches the frame allocator.
+
+Nothing ranked is acquired while one of them is held: the bodies do buffer
+manipulation and, for the pty, line-discipline work. That is what makes them
+safe to place anywhere in that window, and it is the property to re-check before
+adding anything to those critical sections.
+
+The three are never co-held with each other. Their relative order is therefore
+arbitrary and only exists so the tracker has a total order.
+
+**They are ranked primarily so `assert_no_guards_held` can see them.** A guard on
+an unranked lock is invisible to the per-thread stack, so a thread dying while
+holding one is undetectable. See "Guards and thread death" below.
 
 **900, kernel-global mapper.** Reached via `memory_mapper()`. Kernel-address-space
 edits plus per-page virtual-to-physical translation during DMA setup. A deep leaf,
@@ -315,6 +338,42 @@ with each other, so they are unranked.
 | `MemFs.inner` | memfs | node tree |
 
 ---
+
+## Guards and thread death
+
+Rank order stops two threads deadlocking against each other. It says nothing
+about a thread that stops running while holding a guard, which is a separate way
+to lose a lock forever.
+
+There is no unwinding in this kernel. A thread killed while holding a guard never
+runs that guard's `Drop`, so the lock is never released and every later acquirer
+blocks for good. This is the sibling of the drop contract: that one says a `Drop`
+must not block, this one says **a guard must not be live where a thread can die.**
+
+`lock_order::assert_no_guards_held`, called at the top of `thread_exit`, is the
+enforcement. Every path that ends a thread funnels through there. It sees ranked
+locks only, which is the practical reason to rank a lock that is otherwise a
+leaf: an unranked guard is invisible to it.
+
+The places a thread can actually die are fewer than they look, and knowing which
+bounds any audit of this:
+
+| Kill point | Can a guard be live? |
+|---|---|
+| GPF, invalid opcode, alignment check, page fault (ring 3) | No — interrupted user code holds nothing |
+| Timer tick (`tick_prepare`, ring-3 frame only) | No — same reason; the ring-3 check *is* the proof |
+| `exit_if_killed` at the syscall return boundary | No — the body returned and dropped its guards |
+| Page fault, ring 0, inside a `try_copy_*` | No — takes the uaccess fixup and returns EFAULT |
+| An explicit `thread_exit()` inside a syscall body | **Yes.** Two exist; both are currently outside their guards |
+
+The subtle one is the user copy. In the ring-0 branch of `page_fault_handler`,
+`handle_demand_fault` runs *before* the uaccess fixup so a copy touching a
+lazily-mapped page gets it mapped rather than failing — and that handler blocks
+on NCQ I/O, block-page-cache contention and vma waitqueues, with interrupts
+re-enabled. So a guard live across `try_copy_to_user` / `try_copy_from_user`
+spans a park. Buffer first, lock second: copy out of user space before taking the
+lock, and drain into an owned buffer under the lock and copy out after dropping
+it.
 
 ## Adding a lock
 

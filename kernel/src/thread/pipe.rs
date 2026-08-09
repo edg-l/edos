@@ -1,5 +1,6 @@
 use crate::thread::preempt::PreemptSpinlock as Mutex;
 use crate::{
+    debug::lock_order::{RANK_PIPE, RANK_PTY},
     fs::{
         FileSystem, PollState,
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
@@ -7,6 +8,7 @@ use crate::{
         path::Path,
     },
     net::socket::Socket,
+    ranked_lock,
     thread::{mutex::BlockingMutex, pty::Pty, waitqueue::WaitQueue},
 };
 use alloc::{sync::Arc, vec::Vec};
@@ -31,16 +33,16 @@ impl FileDescriptor {
     pub fn inc_refcount(&self) {
         match self {
             FileDescriptor::PipeRead(pipe) => {
-                pipe.lock().readers += 1;
+                ranked_lock!(RANK_PIPE, "fd::inc_refcount", pipe).readers += 1;
             }
             FileDescriptor::PipeWrite(pipe) => {
-                pipe.lock().writers += 1;
+                ranked_lock!(RANK_PIPE, "fd::inc_refcount", pipe).writers += 1;
             }
             FileDescriptor::PtyMaster(pty) => {
-                pty.lock().masters += 1;
+                ranked_lock!(RANK_PTY, "fd::inc_refcount", pty).masters += 1;
             }
             FileDescriptor::PtySlave(pty) => {
-                pty.lock().slaves += 1;
+                ranked_lock!(RANK_PTY, "fd::inc_refcount", pty).slaves += 1;
             }
             FileDescriptor::Socket(sock) => {
                 sock.lock().refcount += 1;
@@ -301,15 +303,15 @@ impl Pollable for PollablePipe {
 pub fn close_descriptor(descriptor: FileDescriptor, owner_pid: u64) {
     match descriptor {
         FileDescriptor::PipeRead(pipe) => {
-            let notif = pipe.lock().close_reader();
+            let notif = ranked_lock!(RANK_PIPE, "pipe::close_reader", pipe).close_reader();
             notif.flush();
         }
         FileDescriptor::PipeWrite(pipe) => {
-            let notif = pipe.lock().close_writer();
+            let notif = ranked_lock!(RANK_PIPE, "pipe::close_writer", pipe).close_writer();
             notif.flush();
         }
         FileDescriptor::PtySlave(pty) => {
-            let mut guard = pty.lock();
+            let mut guard = ranked_lock!(RANK_PTY, "pipe::close_slave", pty);
             if guard.foreground_pid == Some(owner_pid) {
                 guard.foreground_pid = None;
             }
@@ -318,7 +320,7 @@ pub fn close_descriptor(descriptor: FileDescriptor, owner_pid: u64) {
             notif.flush();
         }
         FileDescriptor::PtyMaster(pty) => {
-            let notif = pty.lock().close_master();
+            let notif = ranked_lock!(RANK_PTY, "pipe::close_master", pty).close_master();
             notif.flush();
         }
         FileDescriptor::Socket(sock) => {
