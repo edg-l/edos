@@ -518,22 +518,19 @@ pub fn read_mmap(dir: &str, bytes: u64, budget: Budget) -> Report {
         return run.finish();
     }
 
+    let fd = file.as_raw_fd();
     while run.keep_going() {
-        // Remap every pass: an established mapping has no faults left to take,
-        // so reusing it would measure a memory read and call it file I/O.
-        let ptr = mmap(
-            core::ptr::null_mut(),
-            len,
-            PROT_READ,
-            MAP_SHARED,
-            file.as_raw_fd(),
-            0,
-        );
-        if ptr.is_null() || ptr as isize == -1 {
-            run.fail("mmap failed".to_string());
-            break;
-        }
-        let done = run.op(len, || {
+        // Map, touch and unmap inside one timed operation. Remapping every
+        // pass is the point: an established mapping has no faults left to
+        // take. Leaving the mmap and munmap outside the timing was worse than
+        // imprecise — it reported a rate computed over the whole loop while
+        // the latency column covered only the memory sweep, and the two
+        // disagreed by a factor of sixty.
+        let done = run.op(len, || -> Result<(), String> {
+            let ptr = mmap(core::ptr::null_mut(), len, PROT_READ, MAP_SHARED, fd, 0);
+            if ptr.is_null() || ptr as isize == -1 {
+                return Err("mmap failed".to_string());
+            }
             let src = unsafe { core::slice::from_raw_parts(ptr, len as usize) };
             let mut sum = 0u64;
             for &b in src {
@@ -541,9 +538,9 @@ pub fn read_mmap(dir: &str, bytes: u64, budget: Budget) -> Report {
             }
             // Keep the loop from being optimized away without printing.
             core::hint::black_box(sum);
-            Ok::<(), String>(())
+            munmap(ptr, len);
+            Ok(())
         });
-        munmap(ptr, len);
         if done.is_none() {
             break;
         }

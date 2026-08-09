@@ -86,14 +86,44 @@ The install is now 2.8 s from 4.3 s, and the remaining 2.2 s of it is the final
 flush. That is the next thing to look at, and it is the same durable-write
 throughput that bounds everything else.
 
-## 3. Fault-around for file-backed mappings## 3. Fault-around for file-backed mappings
+## 3. The mmap fault path costs 121 us per page
 
-`mmap load 4MiB` faults in at 33 MiB/s against 1714 MiB/s for `read` of the
-same bytes. Roughly 50x, and the mechanism is one fault and one fill per 4 KiB
-page. Mapping the neighbouring pages that are already in the page cache on each
-fault (Linux maps 16) should close most of it.
+A full map, fault in 4 MiB, unmap cycle is 124 ms — 1024 pages at 121 us each,
+against 527 us for a `read` of the same 4 MiB. But the cost is **not** filling
+pages from disk, which is what it looked like before the benchmark was fixed.
 
-## 4. Detached pages are a crash-consistency risk, not just a slow path
+Two corrections got to that:
+
+- `fsbench`'s mmap test timed only the memory sweep and left the `mmap` and
+  `munmap` outside the operation, so it reported a rate computed over the whole
+  loop while the latency column covered a fraction of it. The two disagreed by
+  a factor of sixty. Both calls are inside the timed operation now.
+- The test remaps the same file every pass, so after the first pass every page
+  is already in the inode page cache. Whatever those 121 us are, no device is
+  involved.
+
+**Filling ahead was tried and reverted.** On a fault, fill a run of pages
+through the existing `get_or_fill_bulk_async_sync` rather than one, so a
+sequential walk pays one command per run. It moved the number by nothing
+(26.3 -> 28.6 MiB/s, inside run-to-run noise), for the reason above: the pages
+were already cached, so the fill-ahead correctly did nothing. It also broke the
+mmap store test on the first attempt — a bulk fill publishes failure for its
+whole range, so including the faulting page in that range let a bulk failure
+kill the faulting thread. Narrowing the range to exclude the faulting page
+fixed that, but an unproven change in the page fault handler is not worth
+keeping.
+
+What the measurement points at instead is **fault-around**: mapping several
+PTEs per fault rather than one, so 1024 pages cost far fewer than 1024 faults.
+That is a change to `FaultOutcome` and the VMA page-slot bookkeeping, which
+currently carry exactly one page each. `munmap` of a large mapping is on the
+same path and worth timing at the same time.
+
+Anything attempting this should first measure a **cold** mmap — `fsbench write`,
+reboot, `fsbench read` — so the fill cost and the fault cost can be told apart
+rather than assumed.
+
+## 4. Detached pages are a crash-consistency risk## 4. Detached pages are a crash-consistency risk, not just a slow path
 
 A clean benchmark run reports `detached_fallbacks: +2626`. When a shard is
 full, `read_page_for_write` gives up after `WRITE_PAGE_ATTEMPTS` and returns a
