@@ -8,6 +8,8 @@ out/
 sata-disk.img
 live-root.img
 install-test.img
+fs-regression.img
+fresh.img
 /filesystem
 .gdb_history
 __pycache__/

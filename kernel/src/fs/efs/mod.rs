@@ -296,6 +296,7 @@ impl EfsDriver {
         // j_first_block is already a partition-relative EFS block number.
         let journal = Journal::new(
             partition.device_id,
+            starting_lba,
             j_first_block,
             jsb_block_count,
             post_replay_head_seq,

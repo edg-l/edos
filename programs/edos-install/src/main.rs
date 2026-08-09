@@ -217,6 +217,13 @@ fn main() {
         ));
     }
 
+    let started = std::time::Instant::now();
+    let mut phase = started;
+    let lap = |label: &str, phase: &mut std::time::Instant| {
+        println!("  {label} in {:.1}s", phase.elapsed().as_secs_f32());
+        *phase = std::time::Instant::now();
+    };
+
     println!("Writing partition table...");
     gpt::write(
         &mut dev,
@@ -240,6 +247,7 @@ fn main() {
     )
     .unwrap_or_else(|e| fail(&format!("failed to write GPT: {e}")));
 
+    lap("partitioned", &mut phase);
     println!("Formatting the ESP (FAT32)...");
     let mut volume_id = [0u8; 4];
     edos_lib::getrandom(&mut volume_id);
@@ -257,6 +265,7 @@ fn main() {
     }
     drop(dev);
 
+    lap("ESP formatted", &mut phase);
     println!("Formatting the root filesystem (EFS)...");
     efs_mkfs::format(&efs_mkfs::Format {
         target: Path::new(&device_path),
@@ -278,6 +287,7 @@ fn main() {
         fail("failed to flush the device");
     }
 
+    lap("root formatted", &mut phase);
     println!("Re-reading the partition table...");
     let found = device_ioctl(&dev, BLOCK_IOCTL_RESCAN);
     if found < 0 {
@@ -306,18 +316,23 @@ fn main() {
     mount(device_id, root_idx, ROOT_MOUNT, "efs");
     mount(device_id, esp_idx, ESP_MOUNT, "fat32");
 
+    lap("mounted", &mut phase);
     println!("Copying the system...");
     let copied = copy::copy_root("/", ROOT_MOUNT, SKIP_TOP_LEVEL)
         .unwrap_or_else(|e| fail(&format!("failed to copy the system: {e}")));
     println!("  {copied} files");
 
+    lap("system copied", &mut phase);
     println!("Installing the bootloader...");
     install_boot_files(&guid::format(&root_guid));
 
+    lap("bootloader installed", &mut phase);
     if device_ioctl(&dev, BLOCK_IOCTL_FLUSH) < 0 {
         fail("failed to flush the device");
     }
     unsafe { edos_lib::sys::syscall0(edos_lib::sys::SYS_SYNC) };
+    lap("flushed", &mut phase);
+    println!("Total: {:.1}s", started.elapsed().as_secs_f32());
 
     println!(
         "\nDone. Remove the installation media and reboot.\n\

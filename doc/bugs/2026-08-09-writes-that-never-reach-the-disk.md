@@ -25,7 +25,7 @@ and `efs-fsck` reported the filesystem clean.
 
 ## Root cause
 
-There is no single bug here. There is one design seam, crossed in eight
+There is no single bug here. There is one design seam, crossed in nine
 places.
 
 **The seam: two caches, and paths that bypass one of them.** File data
@@ -72,6 +72,15 @@ wins whenever it flushes afterwards.
   paths now report the checkpoint, and `sync` persists the tail it earned
   (a stale tail makes the next mount replay transactions whose blocks have
   since been overwritten, reverting good data).
+- **The journal wrote its ring at partition-relative LBAs.** `Journal` was
+  handed a block number counted from the start of the partition and used it
+  as an absolute LBA, so on any partition not starting at LBA 0 the ring and
+  the superblock landed ahead of the partition, on top of file data, while
+  the mount kept reading the superblock at the correct address. It stayed
+  hidden because the kernel only rewrites that superblock when the tail
+  advances, and the tail never advanced until the fixes above; the first
+  successful `advance_tail` is what exposed it. The journal now adds the
+  partition's starting LBA.
 
 ## Reasoning rules going forward
 
@@ -92,6 +101,9 @@ wins whenever it flushes afterwards.
 - **A full journal is a checkpoint request, not an error.** Anything that
   returns an error there deadlocks against the only mechanism that could
   clear the condition.
+- **A block number is meaningless without its frame of reference.** The
+  journal's was partition-relative and its consumer treated it as absolute.
+  Name the unit in the field, and convert at one boundary.
 
 ## How to catch a recurrence
 
@@ -101,6 +113,12 @@ page cache. If the cold hash equals the SHA-256 of that many zero bytes,
 the data never left memory:
 
     python3 -c "import hashlib;print(hashlib.sha256(b'\0'*SIZE).hexdigest())"
+
+`scripts/fs-regression` does exactly this and is the regression test for
+everything here: it writes a set of files on a scratch partition, reboots,
+and verifies them from a cold cache. `--fat32` runs the same check against
+FAT32. It needs a normal ISO, so run `make all` first -- `make test` leaves
+a `sched-test` build behind, which boots straight into the suite.
 
 For the livelock, `grep -c 'seal_and_commit error' run_log.txt` after a
 40 MB `cp` should be 0. A nonzero `detached fallback` count is not fatal

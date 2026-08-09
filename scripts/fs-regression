@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Durability regression: do writes survive a reboot?
+
+Writes a set of files on a scratch disk, reboots the machine, and verifies
+them from a cold cache. The reboot is the whole point: every corruption this
+guards against read back correctly while the data was still in the page cache
+and was zeros or stale afterwards, so a same-boot check passes on a broken
+kernel. See doc/bugs/2026-08-09-writes-that-never-reach-the-disk.md.
+
+    scripts/fs-regression            # EFS on a scratch partition
+    scripts/fs-regression --fat32    # same, on a FAT32 partition
+
+Exits 0 on FSTEST PASS, 1 on anything else.
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import time
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VM = os.path.join(REPO, "scripts", "edos-vm")
+SERIAL = os.path.join(REPO, "run_log.txt")
+DISK = os.path.join(REPO, "fs-regression.img")
+# Distinct from the live root's GUID so the ramdisk stays the boot root.
+PART_GUID = "cccccccc-3333-3333-3333-333333333333"
+PART_OFFSET = 1048576
+PART_FIRST_LBA = 2048
+PART_LAST_LBA = 2097118
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
+
+
+def vm(*args):
+    return run([VM, *args])
+
+
+def build_disk(fat32):
+    if os.path.exists(DISK):
+        os.unlink(DISK)
+    run(["qemu-img", "create", "-f", "raw", DISK, "1G"])
+    ptype = "ef00" if fat32 else "0700"
+    run(["sgdisk", DISK, "-n", f"1:{PART_FIRST_LBA}:{PART_LAST_LBA}", "-t", f"1:{ptype}",
+         "-c", "1:SCRATCH", f"--partition-guid=1:{PART_GUID}"])
+    if fat32:
+        # mformat writes the BPB the kernel's FAT32 driver expects.
+        run(["mformat", "-F", "-i", f"{DISK}@@{PART_OFFSET}", "::"])
+    else:
+        mkfs = os.path.join(REPO, "tools/efs-mkfs/target/release/efs-mkfs")
+        if not os.path.exists(mkfs):
+            run(["cargo", "build", "--release", "--manifest-path",
+                 os.path.join(REPO, "tools/efs-mkfs/Cargo.toml")])
+        # Size the filesystem to the partition, not to the file: inferring it
+        # puts the journal past the partition end, where the kernel does not
+        # look, and the mount then fails with a zeroed journal superblock.
+        total = PART_OFFSET + (PART_LAST_LBA - PART_FIRST_LBA + 1) * 512
+        run([mkfs, "--partition-offset", str(PART_OFFSET), "--size", str(total),
+             "--label", "SCRATCH", DISK])
+
+
+def boot():
+    vm("start", "--disk", DISK)
+    time.sleep(26)
+    vm("click", "400", "300")
+    time.sleep(1)
+
+
+def type_line(text):
+    vm("type", text, "--enter")
+    time.sleep(3)
+
+
+def serial_tail(since):
+    # Read as bytes: `since` is a byte offset, and the log carries ANSI escapes
+    # and multi-byte sequences, so slicing a decoded string drops the tail.
+    with open(SERIAL, "rb") as f:
+        return f.read()[since:].decode("utf-8", errors="replace")
+
+
+def phase(fs_type, command):
+    """Boot, mount the scratch partition, run one half of fstest."""
+    boot()
+    mark = os.path.getsize(SERIAL)
+    type_line("mkdir /mnt/scratch")
+    type_line(f"mount 0 0 /mnt/scratch {fs_type}")
+    if "Failed to mount" in serial_tail(mark):
+        out = serial_tail(mark)
+        vm("stop")
+        print(out[-1500:])
+        sys.exit("scratch partition did not mount; the test would have run on the live root")
+    type_line(f"fstest {command} /mnt/scratch/t")
+    # The larger files take a moment to write and flush.
+    time.sleep(20 if command == "write" else 10)
+    out = serial_tail(mark)
+    vm("stop")
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--fat32", action="store_true", help="test FAT32 instead of EFS")
+    ap.add_argument("--keep", action="store_true", help="keep the scratch disk")
+    args = ap.parse_args()
+
+    fs_type = "fat32" if args.fat32 else "efs"
+    iso = os.path.join(REPO, "edos-x86_64.iso")
+    if not os.path.exists(iso):
+        sys.exit("missing edos-x86_64.iso; run `make all` first")
+
+    subprocess.run([VM, "stop"], capture_output=True)
+    build_disk(args.fat32)
+
+    print(f"[1/2] writing on {fs_type}...")
+    out = phase(fs_type, "write")
+    if "FSTEST WROTE" not in out:
+        print(out[-2000:])
+        sys.exit(f"write phase did not report success on {fs_type}")
+
+    print("[2/2] rebooting and verifying from a cold cache...")
+    out = phase(fs_type, "verify")
+
+    if not args.keep and os.path.exists(DISK):
+        os.unlink(DISK)
+
+    if "FSTEST PASS" in out:
+        print(re.search(r"FSTEST PASS.*", out).group(0))
+        print(f"fs-regression: {fs_type} OK")
+        return 0
+
+    for line in out.splitlines():
+        if "FSTEST" in line:
+            print(line.strip())
+    print(f"fs-regression: {fs_type} FAILED")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -95,8 +95,19 @@ impl DevFsDevice for LogDevfs {
         }
     }
 
-    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, crate::fs::DevFsError> {
-        Err(crate::fs::DevFsError::Unsupported)
+    /// Append a line to the kernel log.
+    ///
+    /// Writable so a userspace program can leave a record where the serial
+    /// log will carry it: that is the only channel a host-side harness can
+    /// read a guest program's verdict from. Offsets are ignored; each write
+    /// is one message.
+    fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, crate::fs::DevFsError> {
+        let text = alloc::string::String::from_utf8_lossy(data);
+        let text = text.trim_end_matches(['\n', '\r']);
+        if !text.is_empty() {
+            crate::log!("{}", text);
+        }
+        Ok(data.len())
     }
 
     fn ioctl(&self, _request: u64, _arg: u64) -> Result<u64, crate::fs::DevFsError> {

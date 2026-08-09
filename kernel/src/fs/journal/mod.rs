@@ -144,7 +144,13 @@ const CHECKPOINT_ATTEMPTS: usize = 3;
 
 pub struct Journal {
     pub device_id: u64,
+    /// First journal block, counted from the start of the partition.
     first_block: u64,
+    /// LBA the partition starts at. Journal blocks are partition-relative, so
+    /// every LBA the journal computes has to add this; without it the ring and
+    /// the superblock land ahead of the partition, on top of file data, and
+    /// the superblock the mount reads is never the one being written.
+    partition_start_lba: u64,
     block_count: u32,
     pub(crate) state: BlockingMutex<JournalState>,
     /// Woken whenever a transaction is committed.
@@ -165,6 +171,7 @@ impl Journal {
     /// at mount time.
     pub fn new(
         device_id: u64,
+        partition_start_lba: u64,
         first_block: u64,
         block_count: u32,
         head_seq: u64,
@@ -173,6 +180,7 @@ impl Journal {
     ) -> Arc<Journal> {
         Arc::new(Journal {
             device_id,
+            partition_start_lba,
             first_block,
             block_count,
             state: BlockingMutex::new(JournalState {
@@ -200,7 +208,7 @@ impl Journal {
         // journal_block_idx wraps around the ring, excluding block 0 (the JSB).
         let ring_size = self.block_count as u64 - 1;
         let ring_idx = (journal_block_idx % ring_size) + 1;
-        (self.first_block + ring_idx) * SECTORS_PER_BLOCK as u64
+        self.partition_start_lba + (self.first_block + ring_idx) * SECTORS_PER_BLOCK as u64
     }
 
     // ---- Block builder helpers ----------------------------------------------
@@ -327,7 +335,7 @@ impl Journal {
 
         // The journal SB lives at the very first journal block (block 0 of the
         // journal region = first_block of the partition journal extent).
-        let lba = self.first_block * SECTORS_PER_BLOCK as u64;
+        let lba = self.partition_start_lba + self.first_block * SECTORS_PER_BLOCK as u64;
         let mut block = vec![0u8; BLOCK_SIZE];
         write_struct(&mut block, 0, &jsb);
         block_write_fua(self.device_id, lba, SECTORS_PER_BLOCK, &block)
@@ -817,7 +825,7 @@ mod tests {
     /// header fields at offset 0.
     #[test]
     fn descriptor_block_header_fields() {
-        let journal = Journal::new(0, 100, 256, 1, 1);
+        let journal = Journal::new(0, 2048, 100, 256, 1, 1);
         let entries = [
             DescriptorEntry { fs_block: 42 },
             DescriptorEntry { fs_block: 99 },
