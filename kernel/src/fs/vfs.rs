@@ -1055,11 +1055,19 @@ pub fn flush_file(op: &VfsOp) -> Result<(), Error> {
         // the active journal tx; the `flush_inode` call below then seals that
         // tx via `force_commit_and_wait`, guaranteeing the batch is durable
         // before we return.
+        let t0 = crate::timer::Instant::now();
         if let Some(pc_ops) = op.fs.as_page_cache_ops() {
             let ino = inode.ino;
             inode
                 .pages
                 .flush_dirty_bulk(|pages| pc_ops.flush_pages_bulk(ino, pages, None))?;
+        }
+        let elapsed = t0.elapsed();
+        if elapsed.as_millis() >= 1_000 {
+            crate::log!(
+                "vfs flush_file: slow: {} ms flushing the inode page cache",
+                elapsed.as_millis()
+            );
         }
         match op.fs.flush_inode(inode.ino) {
             Err(Error::Unsupported) => {}
