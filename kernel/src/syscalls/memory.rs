@@ -421,11 +421,11 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, r8: u64, r9: u64)
         }
 
         if is_shared {
-            log!(
+            log_debug!(
                 "mmap: file-backed MAP_SHARED at {map_addr:p} len={length:#x} off={file_offset:#x}"
             );
         } else {
-            log!(
+            log_debug!(
                 "mmap: file-backed MAP_PRIVATE at {map_addr:p} len={length:#x} off={file_offset:#x}"
             );
         }
