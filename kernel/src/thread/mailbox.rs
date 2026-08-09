@@ -110,11 +110,13 @@ impl<T, R> Mailbox<T, R> {
                     return req;
                 }
             }
-            // Park until a sender wakes us. The closure re-checks under lock
-            // to avoid lost wakeups.
-            let _ = self.not_empty.wait_until(|| {
-                !ranked_lock!(RANK_MAILBOX_QUEUE, "Mailbox::recv_wait", self.queue).is_empty()
-            });
+            // Park until a sender wakes us. `is_empty` re-checks with
+            // `try_lock`, which a wait-queue predicate must: predicates run
+            // with interrupts disabled, and blocking on a contended
+            // `BlockingMutex` there panics. A contended queue reads as
+            // non-empty, so the loop above re-checks under the real lock
+            // rather than parking on a stale answer.
+            let _ = self.not_empty.wait_until(|| !self.is_empty());
         }
     }
 

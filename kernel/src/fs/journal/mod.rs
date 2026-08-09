@@ -155,6 +155,14 @@ pub struct Journal {
     partition_start_lba: u64,
     block_count: u32,
     pub(crate) state: BlockingMutex<JournalState>,
+    /// Lock-free mirror of [`JournalState::committed_seq`].
+    ///
+    /// `force_commit_and_wait` uses this as its wait-queue predicate, and a
+    /// predicate runs with interrupts disabled, so it cannot take
+    /// `state`. Published under the `state` lock at every write to
+    /// `JournalState::committed_seq`; `commit_wq` is only woken afterwards,
+    /// so a waiter that observes a wake sees the sequence that caused it.
+    committed_seq_pub: AtomicU64,
     /// Woken whenever a transaction is committed.
     pub commit_wq: WaitQueue,
     /// Woken when the committer should process immediately (e.g. force_commit).
@@ -195,6 +203,7 @@ impl Journal {
                 committed_pending: VecDeque::new(),
                 committed_seq: head_seq.saturating_sub(1),
             }),
+            committed_seq_pub: AtomicU64::new(head_seq.saturating_sub(1)),
             commit_wq: WaitQueue::new(),
             commit_kick_wq: WaitQueue::new(),
             checkpoint_tracker: BlockingMutex::new(BTreeMap::new()),
@@ -395,7 +404,14 @@ impl Journal {
     // ---- Committed seq accessor --------------------------------------------
 
     pub fn committed_seq(&self) -> u64 {
-        ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state).committed_seq
+        self.committed_seq_pub.load(Ordering::Acquire)
+    }
+
+    /// Record `seq` as committed. The caller holds the state guard, so the
+    /// field and its lock-free mirror move together and cannot drift.
+    fn set_committed_seq(&self, state: &mut JournalState, seq: u64) {
+        state.committed_seq = seq;
+        self.committed_seq_pub.store(seq, Ordering::Release);
     }
 
     // ---- Writeback gating --------------------------------------------------
@@ -500,6 +516,22 @@ impl Journal {
     pub fn has_pending_work(&self) -> bool {
         let s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
         !s.active.is_empty() || !s.sealed.is_empty()
+    }
+
+    /// [`has_pending_work`] for a wait-queue predicate, which runs with
+    /// interrupts disabled and so must never block on `state`.
+    ///
+    /// A contended lock reads as "there is work": the committer then wakes,
+    /// re-checks under the real lock, and finds nothing if that was wrong.
+    /// The opposite bias would let it park through a pending transaction
+    /// until the 5 s timeout.
+    ///
+    /// [`has_pending_work`]: Journal::has_pending_work
+    pub fn has_pending_work_hint(&self) -> bool {
+        match self.state.try_lock() {
+            Some(s) => !s.active.is_empty() || !s.sealed.is_empty(),
+            None => true,
+        }
     }
 
     // ---- kick_committer -----------------------------------------------------
@@ -699,7 +731,7 @@ impl Journal {
             if tx.is_empty() {
                 // Nothing to write; just bump committed_seq.
                 let mut s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
-                s.committed_seq = tx.seq;
+                self.set_committed_seq(&mut s, tx.seq);
                 drop(s);
                 self.commit_wq.wake_all();
                 continue;
@@ -828,7 +860,7 @@ impl Journal {
             {
                 let mut s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
                 s.head_block = ring_pos;
-                s.committed_seq = tx.seq;
+                self.set_committed_seq(&mut s, tx.seq);
                 s.committed_pending.push_back((tx.seq, needed));
             }
             self.commit_wq.wake_all();

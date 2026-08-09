@@ -26,7 +26,7 @@ pub fn committer_thread() -> ! {
             // (matches Linux jbd2 default commit interval), then process all.
             let wq = &journals[0].commit_kick_wq;
             wq.wait_until_timeout(
-                || journals.iter().any(|j| j.has_pending_work()),
+                || journals.iter().any(|j| j.has_pending_work_hint()),
                 Some(Duration::from_secs(5)),
             );
         }

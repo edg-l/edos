@@ -40,11 +40,22 @@ impl WaitQueue {
     }
 
     /// Put the current thread to sleep until woken.
+    ///
+    /// **`ready` must not block.** It is evaluated inside
+    /// `without_interrupts` to close the enqueue-versus-wake window, so a
+    /// predicate that acquires a contended `BlockingMutex` trips that
+    /// primitive's interrupts-enabled assertion and panics the kernel. Read
+    /// atomics, or probe a lock with `try_lock` and bias the unavailable case
+    /// towards "ready" so the caller re-checks under the real lock.
     pub fn wait_until<F: Fn() -> bool>(&self, ready: F) -> WaitOutcome {
         self.wait_internal(ready, None)
     }
 
     /// Put the current thread to sleep until woken or the timeout elapses.
+    ///
+    /// `ready` carries the same non-blocking requirement as [`wait_until`].
+    ///
+    /// [`wait_until`]: WaitQueue::wait_until
     pub fn wait_until_timeout<F: Fn() -> bool>(
         &self,
         ready: F,
