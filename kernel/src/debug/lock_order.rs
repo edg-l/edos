@@ -36,6 +36,10 @@
 /// |  210 | `TTY_BUFFER`                          |
 /// |  220 | `Pipe` (per-pipe)                     |
 /// |  230 | `Pty` (per-pty)                       |
+/// |  240 | `NET_STACK`                           |
+/// |  250 | `PORT_TABLE`                          |
+/// |  260 | `Socket` (per-socket)                 |
+/// |  270 | `TcpConnection` (per-connection)      |
 
 // ---- Rank constants ---------------------------------------------------------
 
@@ -67,6 +71,13 @@ pub const RANK_PCI_CONFIG: u16 = 200;
 pub const RANK_TTY_BUFFER: u16 = 210;
 pub const RANK_PIPE: u16 = 220;
 pub const RANK_PTY: u16 = 230;
+// Networking. The order is fixed by the receive path: `handle_udp`/`handle_tcp`
+// run as `&mut self` on the stack, take the port table to find the socket, and
+// a socket's `poll_state` locks its connection.
+pub const RANK_NET_STACK: u16 = 240;
+pub const RANK_PORT_TABLE: u16 = 250;
+pub const RANK_SOCKET: u16 = 260;
+pub const RANK_TCP_CONN: u16 = 270;
 // Deep utility leaves — acquired from arbitrary contexts (AHCI DMA setup,
 // page-table edits, etc.). Must be higher than any caller's rank. Ordered
 // relative to each other because `MemoryManager::map_memory` acquires

@@ -1,6 +1,8 @@
 pub mod descriptors;
 pub mod regs;
 
+use crate::debug::lock_order::RANK_NET_STACK;
+use crate::ranked_lock;
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{Ordering, compiler_fence};
 use x86_64::{
@@ -403,7 +405,11 @@ pub extern "C" fn e1000e_driver_main() -> ! {
     });
 
     {
-        let s = crate::net::stack::net_stack().lock();
+        let s = ranked_lock!(
+            RANK_NET_STACK,
+            "e1000e::stack_read",
+            crate::net::stack::net_stack()
+        );
         log!(
             "e1000e: network ready, IP {}.{}.{}.{}",
             s.local_ip[0],
@@ -421,7 +427,11 @@ pub extern "C" fn e1000e_driver_main() -> ! {
 
     // Enable interrupts now that the stack is published.
     {
-        let stack = crate::net::stack::net_stack().lock();
+        let stack = ranked_lock!(
+            RANK_NET_STACK,
+            "e1000e::stack",
+            crate::net::stack::net_stack()
+        );
         let _ = stack.nic.handle_interrupt(); // clear any stale ICR from DHCP
         stack.nic.enable_interrupts();
     }
@@ -431,7 +441,11 @@ pub extern "C" fn e1000e_driver_main() -> ! {
         thread_park();
 
         {
-            let stack = crate::net::stack::net_stack().lock();
+            let stack = ranked_lock!(
+                RANK_NET_STACK,
+                "e1000e::stack",
+                crate::net::stack::net_stack()
+            );
             let icr = stack.nic.handle_interrupt();
 
             if icr & IMS_LSC != 0 {
@@ -445,7 +459,8 @@ pub extern "C" fn e1000e_driver_main() -> ! {
         // and flushed after dropping the NetStack lock.
         loop {
             let (packet, notifs) = {
-                let mut stack = crate::net::stack::net_stack().lock();
+                let mut stack =
+                    ranked_lock!(RANK_NET_STACK, "e1000e::rx", crate::net::stack::net_stack());
                 let pkt = match stack.nic.receive() {
                     Some((buf, len)) => {
                         let data =
@@ -468,7 +483,11 @@ pub extern "C" fn e1000e_driver_main() -> ! {
             match packet {
                 Some(data) => {
                     let notifs = {
-                        let mut stack = crate::net::stack::net_stack().lock();
+                        let mut stack = ranked_lock!(
+                            RANK_NET_STACK,
+                            "e1000e::rx",
+                            crate::net::stack::net_stack()
+                        );
                         stack.handle_rx(&data);
                         core::mem::take(&mut stack.pending_socket_notifs)
                     };

@@ -22,7 +22,9 @@ use x86_64::{
 
 use crate::{
     debug::lock_order::{RANK_MAPPERS, RANK_USER_MM, RANK_VMAS},
-    debug::lock_order::{RANK_PIPE, RANK_PTY},
+    debug::lock_order::{
+        RANK_NET_STACK, RANK_PIPE, RANK_PORT_TABLE, RANK_PTY, RANK_SOCKET, RANK_TCP_CONN,
+    },
     fs::Error as FsError,
     gdt::selectors,
     log,
@@ -103,32 +105,45 @@ fn close_fd_refcount(desc: FileDescriptor) {
                 .flush();
         }
         FileDescriptor::Socket(sock) => {
-            let mut s = sock.lock();
+            let mut s = ranked_lock!(RANK_SOCKET, "fd::drop_socket", sock);
             s.refcount = s.refcount.saturating_sub(1);
             if s.refcount > 0 {
                 return; // Other fds still reference this socket
             }
             s.closed = true;
             s.rx_wq.wake_all();
-            if let Some(addr) = s.local_addr {
+            // The port-table key is read here and released after the socket
+            // guard is dropped, never under it. `handle_tcp` holds the port
+            // table across a socket lock, so taking them the other way round
+            // here is an AB/BA against the receive path: closing a listening
+            // socket while a segment arrives for it would wedge both CPUs on
+            // preempt spinlocks.
+            let bound = s.local_addr.map(|addr| {
                 let proto = if s.sock_type == crate::net::socket::SOCK_DGRAM {
                     17u8
                 } else {
                     6u8
                 };
-                crate::net::socket::port_table()
-                    .lock()
-                    .remove(&(proto, addr.port));
-            }
+                (proto, addr.port)
+            });
             let tcp_conn = s.tcp_conn.clone();
             drop(s);
+            if let Some(key) = bound {
+                ranked_lock!(
+                    RANK_PORT_TABLE,
+                    "fd::drop_socket_port",
+                    crate::net::socket::port_table()
+                )
+                .remove(&key);
+            }
             // For TCP sockets, send FIN to initiate graceful close
             if let Some(conn) = tcp_conn {
-                let fin = conn.lock().build_fin();
+                let fin = ranked_lock!(RANK_TCP_CONN, "fd::drop_fin", conn).build_fin();
                 if let Some(fin_seg) = fin {
-                    let remote_ip = conn.lock().remote_ip;
+                    let remote_ip = ranked_lock!(RANK_TCP_CONN, "fd::drop_remote", conn).remote_ip;
                     if let Some(stack_mutex) = crate::net::stack::NET_STACK.get() {
-                        let mut stack = stack_mutex.lock();
+                        let mut stack =
+                            ranked_lock!(RANK_NET_STACK, "fd::drop_fin_send", stack_mutex);
                         let _ =
                             stack.send_ip(remote_ip, crate::net::ipv4::IpProtocol::Tcp, &fin_seg);
                     }

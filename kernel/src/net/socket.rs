@@ -4,10 +4,12 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
 
+use crate::debug::lock_order::{RANK_PORT_TABLE, RANK_SOCKET, RANK_TCP_CONN};
 use crate::fs::PollState;
 use crate::fs::handle::{PollEntry, PollKey, PollRegistration, Pollable};
 use crate::net::tcp::{TcpConnection, TcpState};
 use crate::thread::waitqueue::WaitQueue;
+use crate::{ranked_lock, ranked_lock_same};
 
 pub const AF_INET: u32 = 2;
 pub const SOCK_STREAM: u32 = 1;
@@ -132,15 +134,14 @@ impl Socket {
         if self.sock_type == SOCK_STREAM {
             if self.listening {
                 // Listening socket: readable when accept_queue has a Connected entry
-                if self
-                    .accept_queue
-                    .iter()
-                    .any(|qs| qs.lock().state == SocketState::Connected)
-                {
+                if self.accept_queue.iter().any(|qs| {
+                    ranked_lock_same!(RANK_SOCKET, "socket::poll_queued", qs).state
+                        == SocketState::Connected
+                }) {
                     state.readable = true;
                 }
             } else if let Some(ref conn) = self.tcp_conn {
-                let c = conn.lock();
+                let c = ranked_lock!(RANK_TCP_CONN, "socket::poll_conn", conn);
                 if !c.rx_buffer.is_empty()
                     || c.state == TcpState::CloseWait
                     || c.state == TcpState::Closed
@@ -221,7 +222,7 @@ impl PollableSocket {
 
 impl Pollable for PollableSocket {
     fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
-        let mut s = self.inner.lock();
+        let mut s = ranked_lock!(RANK_SOCKET, "socket::poll_register", self.inner);
         let state = s.poll_state();
         entry.update(state);
         if state.matches(entry.interests()) {
@@ -239,7 +240,7 @@ impl Pollable for PollableSocket {
     }
 
     fn unregister(&self, key: PollKey) {
-        self.inner.lock().remove_poller(key);
+        ranked_lock!(RANK_SOCKET, "socket::poll_unregister", self.inner).remove_poller(key);
     }
 }
 
@@ -261,7 +262,7 @@ const EPHEMERAL_RANGE: u16 = 65535 - EPHEMERAL_START + 1; // 16384
 /// Allocate an ephemeral port and insert `sock` into the port table atomically.
 /// Returns the allocated port, or None if all ports are in use.
 pub fn allocate_ephemeral_port(protocol: u8, sock: Arc<Mutex<Socket>>) -> Option<u16> {
-    let mut table = port_table().lock();
+    let mut table = ranked_lock!(RANK_PORT_TABLE, "socket::alloc_port", port_table());
     for _ in 0..1000 {
         let raw = EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed);
         let port = EPHEMERAL_START + (raw % EPHEMERAL_RANGE);

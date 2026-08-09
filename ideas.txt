@@ -558,10 +558,16 @@ its first boot cycle (journal `tracker->state`, thread teardown
 high-ROI way to shake out latent inversions before they manifest as
 rare concurrent-load hangs. Candidates, ranked by fun-per-effort:
 
-1. **Networking stack** — TCP state machine, socket tables, route
-   table, ARP cache, e1000e/virtio-net driver locks. TCP nested
-   locking (socket lock -> send queue -> retransmit timer) is a
-   classic inversion trap. Probably the highest payoff.
+1. **Networking stack — DONE 2026-08-09.** Ranked `NET_STACK` 240,
+   `PORT_TABLE` 250, `Socket` 260, `TcpConnection` 270, in the order the
+   receive path fixes. Yield: two pre-existing AB/BA inversions, both
+   taking the port table while holding something that belongs inside it
+   (`tcp_retransmit_main` cleanup under a connection guard, and
+   `close_descriptor` under a socket guard). Both sat between a syscall
+   and a driver kthread that run concurrently, and neither is visible by
+   reading either function alone. Details in
+   `doc/invariants/lock-order.md`. Route table and ARP cache live inside
+   `NetStack` and need no separate rank.
 2. **USB stack** — xHCI ring locks, device enumeration, HID dispatch.
    Foundation #2 drop-audit already noted async `block_api`
    interactions worth verifying.

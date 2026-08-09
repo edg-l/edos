@@ -73,6 +73,10 @@ sections, and wrapping them would recurse into the preemption counter.
 | 210 | `TTY_BUFFER` | `BlockingMutex<VecDeque<u8>>` | `drivers/tty.rs` |
 | 220 | `Pipe` (per-pipe) | `Arc<BlockingMutex<Pipe>>` | `thread/pipe.rs` |
 | 230 | `Pty` (per-pty) | `Arc<BlockingMutex<Pty>>` | `thread/pty.rs` |
+| 240 | `NET_STACK` | `PreemptSpinlock<NetStack>` | `net/stack.rs` |
+| 250 | `PORT_TABLE` | `PreemptSpinlock<BTreeMap>` | `net/socket.rs` |
+| 260 | `Socket` (per-socket) | `Arc<PreemptSpinlock<Socket>>` | `net/socket.rs` |
+| 270 | `TcpConnection` (per-conn) | `Arc<PreemptSpinlock<TcpConnection>>` | `net/tcp.rs` |
 | 900 | kernel-global mapper | `IrqSpinlock<MemoryManager>` | `memory/mapper.rs` |
 | 910 | `FRAME_ALLOCATOR` | `IrqSpinlock<BitmapFrameAllocator>` | `memory/frame_allocator.rs` |
 
@@ -175,6 +179,33 @@ arbitrary and only exists so the tracker has a total order.
 **They are ranked primarily so `assert_no_guards_held` can see them.** A guard on
 an unranked lock is invisible to the per-thread stack, so a thread dying while
 holding one is undetectable. See "Guards and thread death" below.
+
+**240 to 270, networking.** The order is fixed by the receive path, not chosen:
+`handle_udp`/`handle_tcp` run as `&mut self` on the stack (so `NET_STACK` is
+already held), take the port table to find the socket, and a socket's
+`poll_state` locks its connection. That gives
+`NET_STACK -> PORT_TABLE -> SOCKET -> TCP_CONN`.
+
+Ranking them turned up two pre-existing AB/BA inversions, both of the same
+shape — taking the port table while holding something that belongs inside it:
+
+- **`tcp_retransmit_main`'s cleanup** took `port_table` inside the `retain`
+  closure, while the connection guard was live, to free the ephemeral port.
+  That is `TCP_CONN -> PORT_TABLE`, closing the cycle
+  `PORT_TABLE -> SOCKET -> TCP_CONN -> PORT_TABLE`. It survived only because
+  the socket held under the port table in `handle_tcp` is always a *listening*
+  one, whose `poll_state` reads the accept queue instead of a connection.
+  Nothing enforced that. Fixed by collecting the freed ports under the guard
+  and removing them after it.
+- **`close_descriptor`'s socket arm** took `port_table` while the socket guard
+  was live, which is `SOCKET -> PORT_TABLE` against the receive path's
+  `PORT_TABLE -> SOCKET`. Closing a listening socket while a segment arrived
+  for it would have wedged two CPUs on preempt spinlocks. Fixed by reading the
+  key under the guard and removing after the existing `drop(s)`.
+
+Both are the reason the rank system pays for itself here: neither is visible by
+reading either function alone, and both sit between a syscall and a driver
+kthread that genuinely run at the same time.
 
 **900, kernel-global mapper.** Reached via `memory_mapper()`. Kernel-address-space
 edits plus per-page virtual-to-physical translation during DMA setup. A deep leaf,

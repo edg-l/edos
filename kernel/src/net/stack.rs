@@ -1,4 +1,6 @@
+use crate::debug::lock_order::{RANK_NET_STACK, RANK_PORT_TABLE, RANK_SOCKET, RANK_TCP_CONN};
 use crate::thread::preempt::PreemptSpinlock as Mutex;
+use crate::{ranked_lock, ranked_lock_same};
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::time::Duration;
 
@@ -141,12 +143,13 @@ impl NetStack {
 
         const MAX_UDP_RX_QUEUE: usize = 128;
         let sock_arc = {
-            let port_table = socket::port_table().lock();
+            let port_table =
+                ranked_lock!(RANK_PORT_TABLE, "stack::udp_lookup", socket::port_table());
             port_table.get(&(17, udp_hdr.dst_port)).cloned()
         };
 
         if let Some(sock_arc) = sock_arc {
-            let mut s = sock_arc.lock();
+            let mut s = ranked_lock!(RANK_SOCKET, "stack::udp_deliver", sock_arc);
             if !s.closed {
                 if s.rx_queue.len() >= MAX_UDP_RX_QUEUE {
                     return; // Drop packet: queue full
@@ -192,7 +195,8 @@ impl NetStack {
         };
 
         if let Some(conn) = self.tcp_connections.get(&(local, remote)).cloned() {
-            let responses = conn.lock().handle_segment(&tcp_hdr, tcp_payload, payload);
+            let responses = ranked_lock!(RANK_TCP_CONN, "stack::handle_segment", conn)
+                .handle_segment(&tcp_hdr, tcp_payload, payload);
             for seg in responses {
                 let _ = self.send_ip(remote.ip, ipv4::IpProtocol::Tcp, &seg);
             }
@@ -200,11 +204,12 @@ impl NetStack {
             // Notify the owning socket's pollers after every handle_segment.
             // This covers: data arrival, FIN (CloseWait), RST (Closed), state transitions.
             {
-                let c = conn.lock();
+                let c = ranked_lock!(RANK_TCP_CONN, "stack::notify_owner", conn);
                 if let Some(ref owner_weak) = c.owner {
                     if let Some(owner) = owner_weak.upgrade() {
                         drop(c);
-                        let notif = owner.lock().notify_pollers();
+                        let notif = ranked_lock!(RANK_SOCKET, "stack::notify_owner_sock", owner)
+                            .notify_pollers();
                         self.pending_socket_notifs.push(notif);
                     }
                 }
@@ -212,17 +217,20 @@ impl NetStack {
 
             // If this connection just became Established (passive open), update the
             // queued socket state and wake the listening socket so accept() can dequeue it.
-            if conn.lock().state == tcp::TcpState::Established {
+            if ranked_lock!(RANK_TCP_CONN, "stack::conn_state", conn).state
+                == tcp::TcpState::Established
+            {
                 let dst_port = tcp_hdr.dst_port;
                 // Lock port_table first, then socket -- consistent order with sys_bind.
-                let pt = socket::port_table().lock();
+                let pt = ranked_lock!(RANK_PORT_TABLE, "stack::estab_lookup", socket::port_table());
                 if let Some(listen_sock) = pt.get(&(6u8, dst_port)) {
-                    let mut ls = listen_sock.lock();
+                    let mut ls = ranked_lock!(RANK_SOCKET, "stack::estab_listen", listen_sock);
                     if ls.listening {
                         // Mark the matching queued socket as Connected
                         let wq = ls.rx_wq.clone();
                         for queued in ls.accept_queue.iter() {
-                            let mut qs = queued.lock();
+                            let mut qs =
+                                ranked_lock_same!(RANK_SOCKET, "stack::estab_queued", queued);
                             if let Some(ref qconn) = qs.tcp_conn {
                                 if Arc::ptr_eq(qconn, &conn) {
                                     qs.state = socket::SocketState::Connected;
@@ -242,13 +250,13 @@ impl NetStack {
         } else if tcp_hdr.flags & tcp::SYN != 0 && tcp_hdr.flags & tcp::ACK == 0 {
             // Incoming SYN: check for a listening socket on this port
             let listen_sock_opt = {
-                let pt = socket::port_table().lock();
+                let pt = ranked_lock!(RANK_PORT_TABLE, "stack::syn_lookup", socket::port_table());
                 pt.get(&(6u8, tcp_hdr.dst_port)).cloned()
             };
 
             if let Some(listen_sock) = listen_sock_opt {
                 let (is_listening, backlog_ok) = {
-                    let ls = listen_sock.lock();
+                    let ls = ranked_lock!(RANK_SOCKET, "stack::syn_listen", listen_sock);
                     (ls.listening, (ls.accept_queue.len() as u32) < ls.backlog)
                 };
 
@@ -306,9 +314,12 @@ impl NetStack {
                     // State will be updated to Connected when ACK arrives (SynReceived -> Established)
                     let new_sock_arc = Arc::new(Mutex::new(new_sock));
                     // Set backref from TcpConnection to owning Socket
-                    conn_arc.lock().owner = Some(Arc::downgrade(&new_sock_arc));
+                    ranked_lock!(RANK_TCP_CONN, "stack::syn_owner", conn_arc).owner =
+                        Some(Arc::downgrade(&new_sock_arc));
 
-                    listen_sock.lock().accept_queue.push_back(new_sock_arc);
+                    ranked_lock!(RANK_SOCKET, "stack::syn_enqueue", listen_sock)
+                        .accept_queue
+                        .push_back(new_sock_arc);
 
                     let _ = self.send_ip(ip_hdr.src_addr, ipv4::IpProtocol::Tcp, &syn_ack);
                     return;
@@ -540,15 +551,15 @@ pub extern "C" fn tcp_retransmit_main() -> ! {
 
         // Collect connections to check (clone Arcs, not the connections themselves).
         let connections: Vec<_> = {
-            let stack = stack_mutex.lock();
+            let stack = ranked_lock!(RANK_NET_STACK, "stack::rtx_snapshot", stack_mutex);
             stack.tcp_connections.values().cloned().collect()
         };
 
         for conn in connections {
-            let resends = conn.lock().check_retransmit();
+            let resends = ranked_lock!(RANK_TCP_CONN, "stack::check_rtx", conn).check_retransmit();
             if !resends.is_empty() {
-                let remote_ip = conn.lock().remote_ip;
-                let mut stack = stack_mutex.lock();
+                let remote_ip = ranked_lock!(RANK_TCP_CONN, "stack::rtx_remote", conn).remote_ip;
+                let mut stack = ranked_lock!(RANK_NET_STACK, "stack::rtx_send", stack_mutex);
                 for seg in resends {
                     let _ = stack.send_ip(remote_ip, super::ipv4::IpProtocol::Tcp, &seg);
                 }
@@ -556,22 +567,43 @@ pub extern "C" fn tcp_retransmit_main() -> ! {
         }
 
         // Clean up TIME_WAIT and Closed connections.
+        //
+        // The freed ports are collected under the connection guard and released
+        // afterwards, never under it. Taking the port table while holding a
+        // connection is the one edge that would close a cycle: the receive path
+        // holds the port table across a socket lock (`handle_tcp`), and a
+        // socket's `poll_state` locks its connection, so port table -> socket ->
+        // connection -> port table. It does not deadlock today only because the
+        // socket held under the port table there is always a *listening* one,
+        // whose `poll_state` reads the accept queue instead of a connection —
+        // an invariant nothing enforces. Ordering the port table strictly
+        // outside connections removes the cycle instead of relying on it.
         {
-            let mut stack = stack_mutex.lock();
+            let mut stack = ranked_lock!(RANK_NET_STACK, "stack::cleanup", stack_mutex);
             let now = Instant::now();
+            let mut freed_ports: Vec<u16> = Vec::new();
             stack.tcp_connections.retain(|_, conn| {
-                let c = conn.lock();
+                let c = ranked_lock!(RANK_TCP_CONN, "stack::cleanup_conn", conn);
                 let remove = if c.state == super::tcp::TcpState::TimeWait {
                     c.time_wait_until.is_none_or(|until| now >= until)
                 } else {
                     c.state == super::tcp::TcpState::Closed
                 };
                 if remove {
-                    // Clean up ephemeral port from port table
-                    socket::port_table().lock().remove(&(6u8, c.local_port));
+                    freed_ports.push(c.local_port);
                 }
                 !remove
             });
+            if !freed_ports.is_empty() {
+                let mut pt = ranked_lock!(
+                    RANK_PORT_TABLE,
+                    "stack::cleanup_ports",
+                    socket::port_table()
+                );
+                for port in freed_ports {
+                    pt.remove(&(6u8, port));
+                }
+            }
         }
     }
 }
@@ -591,7 +623,7 @@ pub fn syscall_ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout: Duration) -> Op
     // Register waiter before sending so the reply can never arrive before we
     // are ready to receive it.
     {
-        let mut stack = net_stack().lock();
+        let mut stack = ranked_lock!(RANK_NET_STACK, "syscall_ping", net_stack());
         stack.ping_waiters.insert(
             (id, seq),
             PingWaiter {
@@ -605,7 +637,8 @@ pub fn syscall_ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout: Duration) -> Op
     // Send the ping, retrying up to 3 times if ARP resolution is pending.
     let mut sent = false;
     for attempt in 0..3u32 {
-        let result = net_stack().lock().send_ping(dst_ip, id, seq);
+        let result =
+            ranked_lock!(RANK_NET_STACK, "syscall_ping", net_stack()).send_ping(dst_ip, id, seq);
         match result {
             Ok(()) => {
                 sent = true;
@@ -615,7 +648,7 @@ pub fn syscall_ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout: Duration) -> Op
                 // Get the ARP waiter while still holding the lock, then drop
                 // it before sleeping.
                 let arp_wq = {
-                    let mut stack = net_stack().lock();
+                    let mut stack = ranked_lock!(RANK_NET_STACK, "syscall_ping", net_stack());
                     let resolve_ip = if stack.is_local_subnet(&dst_ip) {
                         dst_ip
                     } else {
@@ -628,7 +661,7 @@ pub fn syscall_ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout: Duration) -> Op
                 let sleep_dur = Duration::from_millis(100);
                 arp_wq.wait_until_timeout(
                     || {
-                        let stack = net_stack().lock();
+                        let stack = ranked_lock!(RANK_NET_STACK, "syscall_ping", net_stack());
                         let resolve_ip = if stack.is_local_subnet(&dst_ip) {
                             dst_ip
                         } else {
@@ -650,7 +683,9 @@ pub fn syscall_ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout: Duration) -> Op
 
     if !sent {
         // Clean up waiter and return failure.
-        net_stack().lock().ping_waiters.remove(&(id, seq));
+        ranked_lock!(RANK_NET_STACK, "syscall_ping", net_stack())
+            .ping_waiters
+            .remove(&(id, seq));
         return None;
     }
 
