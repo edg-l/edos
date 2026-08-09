@@ -36,6 +36,17 @@ make test-headless    # kernel sched-test suite; `make test` needs a desktop
 make storage-check    # scripts/fs-regression (EFS then FAT32) + scripts/fsbench-run
 ```
 
+Both exit 0 only when the run passed. The sched-test suite reports through
+`isa-debug-exit`, so qemu's own status is 1 for a pass and 3 for a failure;
+`make test` translates that, and a guest that dies before reporting a verdict is
+a failure too.
+
+**A rebuilt program does not reach the guest until the disk is rebuilt.** Every
+`run` target attaches `sata-disk.img`, and root selection prefers it over the
+live-root ramdisk, so the guest runs whatever `/bin` that image holds. `make
+all` does not rebuild it: after changing a program, run `make sata-disk.img` or
+the guest silently executes the previous binary.
+
 `scripts/fs-regression` and `scripts/fsbench-run` both share the boot, focus and
 serial-log helpers in `scripts/vmdrive.py`, so a change to how the guest is
 driven belongs there rather than in either script.

@@ -147,15 +147,24 @@ run-trace: programs limine/limine ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KA
 	$(MAKE) $(IMAGE_NAME).iso
 	$(call run_qemu_uefi,iso,4,-accel kvm -m 2G)
 
+# The suite reports through isa-debug-exit, which the host sees as
+# `(code << 1) | 1`: 1 for a passing run, 3 for a failing one, and anything
+# else for a guest that died before reporting. Translate that to a shell
+# exit status, or every run looks like a failed one.
+sched_test_status = ; rc=$$?; \
+	if [ $$rc -eq 1 ]; then exit 0; \
+	elif [ $$rc -eq 3 ]; then echo "sched-test: suite reported failures"; exit 1; \
+	else echo "sched-test: qemu exited $$rc without a verdict"; exit 1; fi
+
 .PHONY: test
 test: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features sched-test"
-	$(call run_qemu_uefi,iso,4,-accel kvm -display none)
+	$(call run_qemu_uefi,iso,4,-accel kvm -display none) $(sched_test_status)
 
 .PHONY: test-single
 test-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features sched-test"
-	$(call run_qemu_uefi,iso,1,-display none)
+	$(call run_qemu_uefi,iso,1,-display none) $(sched_test_status)
 
 # The same suite as `test`, against a null audio backend. `test` binds the
 # host's PipeWire session, which a bare SSH login does not have, so this is the
