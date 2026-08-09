@@ -23,6 +23,7 @@ use std::os::fd::AsRawFd;
 
 use edos_lib::io::{pread, pwrite};
 use edos_lib::mem::{MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE, mmap, msync, munmap};
+use edos_lib::sys::{SYS_SYNC, syscall0};
 
 use crate::harness::{Budget, Report, Rng, Runner, human_bytes};
 
@@ -239,6 +240,12 @@ pub fn write_durable(dir: &str, chunk: usize, budget: Budget) -> Report {
             return run.finish();
         }
     };
+
+    // Drain first, untimed. Every test before this one returned as soon as its
+    // bytes were in the page cache, so without this the first `fsync` pays for
+    // their backlog and the number measures which test happened to run first
+    // rather than what a durable write costs.
+    unsafe { syscall0(SYS_SYNC) };
 
     let mut offset = 0u64;
     while run.keep_going() {
