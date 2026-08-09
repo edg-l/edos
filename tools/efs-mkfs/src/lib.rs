@@ -238,8 +238,7 @@ pub fn format(spec: &Format) -> std::io::Result<()> {
         layout.total_blocks, layout.block_group_count, layout.total_inodes, journal_blocks,
     );
 
-    let (mut allocator, mut bgds) =
-        mkfs::format(&mut file, &layout, spec.label, journal_blocks)?;
+    let (mut allocator, mut bgds) = mkfs::format(&mut file, &layout, spec.label, journal_blocks)?;
 
     if let Some(pop_dir) = spec.populate {
         if !pop_dir.is_dir() {

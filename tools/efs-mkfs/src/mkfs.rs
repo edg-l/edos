@@ -2,13 +2,13 @@ use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::time::SystemTime;
 
+use crate::random::uuid_v4;
 use efs_common::{
     EFS_MAGIC, EFS_ROOT_INO, EFS_VERSION, EXTENT_MAGIC, EfsBlockGroupDesc, EfsExtent,
     EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, INCOMPAT_JOURNAL, JOURNAL_MAGIC,
     JournalSuperblock, MAX_INLINE_EXTENTS, S_IFDIR, checksum_block_group_desc, checksum_inode,
     checksum_superblock, journal_sb_checksum,
 };
-use crate::random::uuid_v4;
 
 use crate::alloc::Allocator;
 use crate::disk::{write_block, write_inode, zero_blocks};
@@ -129,38 +129,6 @@ pub fn set_inode_extent(inode: &mut EfsInode, logical_block: u32, phys_start: u6
         unsafe { std::slice::from_raw_parts(&extent as *const _ as *const u8, extent_size) };
     inode.data_area[..header_size].copy_from_slice(hdr_bytes);
     inode.data_area[header_size..header_size + extent_size].copy_from_slice(ext_bytes);
-}
-
-/// Add an extent entry to an inode that already has an extent tree initialised.
-/// `entry_index` is 0-based (after the header).
-pub fn add_inode_extent(
-    inode: &mut EfsInode,
-    entry_index: usize,
-    logical_block: u32,
-    phys_start: u64,
-    length: u16,
-) {
-    let header_size = std::mem::size_of::<EfsExtentHeader>();
-    let extent_size = std::mem::size_of::<EfsExtent>();
-    let extent = EfsExtent {
-        logical_block,
-        length,
-        start_hi: (phys_start >> 32) as u16,
-        start_lo: phys_start as u32,
-    };
-    let off = header_size + entry_index * extent_size;
-    let ext_bytes =
-        unsafe { std::slice::from_raw_parts(&extent as *const _ as *const u8, extent_size) };
-    inode.data_area[off..off + extent_size].copy_from_slice(ext_bytes);
-
-    // Update entries count in the header.
-    let entries_off = 2usize; // offset of `entries` field inside EfsExtentHeader
-    let cur = u16::from_le_bytes([
-        inode.data_area[entries_off],
-        inode.data_area[entries_off + 1],
-    ]);
-    let new_entries = cur.max((entry_index + 1) as u16);
-    inode.data_area[entries_off..entries_off + 2].copy_from_slice(&new_entries.to_le_bytes());
 }
 
 /// Initialise an empty extent tree header in the inode's data_area.

@@ -1,8 +1,9 @@
 use std::io;
 
 use efs_common::{
-    EXTENT_MAGIC, EfsBlockGroupDesc, EfsExtent, EfsExtentHeader, EfsInode, EfsSuperblock,
+    EXTENT_MAGIC, EfsBlockGroupDesc, EfsExtent, EfsExtentIndex, EfsInode, EfsSuperblock,
     INODE_DATA_AREA_SIZE, INODE_FLAG_INLINE_DATA, MAX_INLINE_EXTENTS, checksum_inode,
+    entries_per_node, read_node_entry, read_node_header,
 };
 
 use crate::bitmaps::InodeInfo;
@@ -57,7 +58,7 @@ pub fn scan_all_inodes(
 
             let inode: EfsInode = disk.read_struct_at(inode_block, offset_in_block)?;
 
-            if let Some(info) = verify_inode(&inode, ino, sb, report) {
+            if let Some(info) = verify_inode(disk, &inode, ino, sb, report) {
                 group_block_count_found += info.extents.iter().map(|&(_, l)| l as u64).sum::<u64>();
                 group_inode_count_found += 1;
                 all_infos.push(info);
@@ -83,9 +84,14 @@ pub fn scan_all_inodes(
 
 /// Verify a single inode and return an `InodeInfo` if it is structurally sound.
 ///
-/// Returns `None` on a fatal structural error (header magic wrong, depth != 0,
-/// etc.) so the caller skips bitmap seeding for this inode.
+/// Returns `None` on a fatal structural error (header magic wrong, depth out
+/// of range, etc.) so the caller skips bitmap seeding for this inode.
+///
+/// The returned extents cover the inode's data blocks *and*, for a depth-1
+/// tree, its leaf blocks: both are allocated, so both have to be seeded into
+/// the rebuilt bitmap or the leaves are reported as leaked.
 fn verify_inode(
+    disk: &mut Disk,
     inode: &EfsInode,
     ino: u64,
     sb: &EfsSuperblock,
@@ -141,11 +147,19 @@ fn verify_inode(
         // Inline inodes have no extent blocks to track.
         Vec::new()
     } else {
-        // (d) Parse extent header from the first 12 bytes of data_area.
-        // SAFETY: data_area is [u8; 176] (>= size_of::<EfsExtentHeader>() = 12);
-        // read_unaligned has no alignment requirement.
-        let hdr: EfsExtentHeader =
-            unsafe { std::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader) };
+        // (d) Parse the extent node in data_area. `depth == 0` puts the
+        // file's extents there directly; `depth == 1` puts index entries
+        // there, each naming a leaf block that holds the extents.
+        let Some(hdr) = read_node_header(&inode.data_area) else {
+            report.push(Finding {
+                severity: Severity::Error,
+                category: Category::Inode,
+                message: format!("inode {ino}: data_area too small for an extent header"),
+                fixable: false,
+                context: None,
+            });
+            return None;
+        };
 
         if hdr.magic != EXTENT_MAGIC {
             report.push(Finding {
@@ -160,12 +174,12 @@ fn verify_inode(
             });
             return None;
         }
-        if hdr.depth != 0 {
+        if hdr.depth > 1 {
             report.push(Finding {
                 severity: Severity::Error,
                 category: Category::Inode,
                 message: format!(
-                    "inode {ino}: extent tree depth {} != 0 (v1 only supports leaf nodes)",
+                    "inode {ino}: extent tree depth {} > 1 (v1 supports depth 0 and 1)",
                     hdr.depth
                 ),
                 fixable: false,
@@ -200,73 +214,112 @@ fn verify_inode(
             return None;
         }
 
-        // (task 3.5) Validate each leaf extent.
-        let hdr_size = std::mem::size_of::<EfsExtentHeader>();
-        let ext_size = std::mem::size_of::<EfsExtent>();
         let mut collected: Vec<(u64, u16)> = Vec::with_capacity(hdr.entries as usize);
-        let mut fatal = false;
 
-        for i in 0..hdr.entries as usize {
-            let off = hdr_size + i * ext_size;
-            if off + ext_size > INODE_DATA_AREA_SIZE {
-                // Should not happen given entries <= MAX_INLINE_EXTENTS, but guard.
-                report.push(Finding {
-                    severity: Severity::Error,
-                    category: Category::Inode,
-                    message: format!("inode {ino}: extent index {i} out of data_area bounds"),
-                    fixable: false,
-                    context: None,
-                });
-                fatal = true;
-                break;
+        if hdr.depth == 0 {
+            if !collect_leaf_extents(
+                &inode.data_area,
+                hdr.entries as usize,
+                ino,
+                total_blocks,
+                report,
+                &mut collected,
+            ) {
+                return None;
             }
-            // SAFETY: the `off + size_of::<EfsExtent>() > data_area.len()` check
-            // above guarantees the read stays in bounds; read_unaligned has no
-            // alignment requirement.
-            let ext: EfsExtent = unsafe {
-                std::ptr::read_unaligned(inode.data_area[off..].as_ptr() as *const EfsExtent)
-            };
+        } else {
+            report.push(Finding {
+                severity: Severity::Info,
+                category: Category::Inode,
+                message: format!(
+                    "inode {ino}: depth-1 extent tree with {} leaf block(s)",
+                    hdr.entries
+                ),
+                fixable: false,
+                context: None,
+            });
+            let per_leaf = entries_per_node(disk.block_size as usize);
+            for i in 0..hdr.entries as usize {
+                let Some(idx) = read_node_entry::<EfsExtentIndex>(&inode.data_area, i) else {
+                    report.push(Finding {
+                        severity: Severity::Error,
+                        category: Category::Inode,
+                        message: format!("inode {ino}: index entry {i} out of data_area bounds"),
+                        fixable: false,
+                        context: None,
+                    });
+                    return None;
+                };
+                let child = idx.child_block();
+                if child == 0 || child >= total_blocks {
+                    report.push(Finding {
+                        severity: Severity::Error,
+                        category: Category::Inode,
+                        message: format!(
+                            "inode {ino}: extent index {i} child block {child} outside 1..{total_blocks}"
+                        ),
+                        fixable: false,
+                        context: None,
+                    });
+                    return None;
+                }
 
-            let phys = ext.physical_start();
-            let len = ext.length;
+                let leaf = match disk.read_block(child) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        report.push(Finding {
+                            severity: Severity::Error,
+                            category: Category::Inode,
+                            message: format!(
+                                "inode {ino}: cannot read extent leaf block {child}: {e}"
+                            ),
+                            fixable: false,
+                            context: None,
+                        });
+                        return None;
+                    }
+                };
+                let Some(leaf_hdr) = read_node_header(&leaf) else {
+                    report.push(Finding {
+                        severity: Severity::Error,
+                        category: Category::Inode,
+                        message: format!("inode {ino}: extent leaf block {child} is too small"),
+                        fixable: false,
+                        context: None,
+                    });
+                    return None;
+                };
+                if leaf_hdr.magic != EXTENT_MAGIC
+                    || leaf_hdr.depth != 0
+                    || leaf_hdr.entries as usize > per_leaf
+                {
+                    report.push(Finding {
+                        severity: Severity::Error,
+                        category: Category::Inode,
+                        message: format!(
+                            "inode {ino}: extent leaf block {child} malformed (magic {:#06x}, depth {}, entries {})",
+                            leaf_hdr.magic, leaf_hdr.depth, leaf_hdr.entries
+                        ),
+                        fixable: false,
+                        context: None,
+                    });
+                    return None;
+                }
 
-            // Bit 15 of length is reserved; valid range 1..=32767.
-            if len == 0 || len >= 32768 {
-                report.push(Finding {
-                    severity: Severity::Error,
-                    category: Category::Inode,
-                    message: format!(
-                        "inode {ino}: extent {i} has invalid length {len} (must be 1..=32767)"
-                    ),
-                    fixable: false,
-                    context: None,
-                });
-                fatal = true;
-                continue;
+                // The leaf block is itself allocated storage.
+                collected.push((child, 1));
+
+                if !collect_leaf_extents(
+                    &leaf,
+                    leaf_hdr.entries as usize,
+                    ino,
+                    total_blocks,
+                    report,
+                    &mut collected,
+                ) {
+                    return None;
+                }
             }
-
-            // Out-of-bounds check.
-            if phys + len as u64 > total_blocks {
-                report.push(Finding {
-                    severity: Severity::Error,
-                    category: Category::Inode,
-                    message: format!(
-                        "inode {ino}: extent {i} physical range {phys}..{} exceeds total_blocks {total_blocks}",
-                        phys + len as u64
-                    ),
-                    fixable: false,
-                    context: None,
-                });
-                // Mark as unreferenceable but still record it if we can.
-                // Don't seed bitmap for out-of-bounds extents.
-                continue;
-            }
-
-            collected.push((phys, len));
-        }
-
-        if fatal {
-            return None;
         }
 
         collected
@@ -279,4 +332,68 @@ fn verify_inode(
         is_dir: inode.is_dir(),
         extents,
     })
+}
+
+/// Validate the leaf extents in `node` and append them to `collected`.
+///
+/// Returns `false` when the node is structurally broken and the inode should
+/// be skipped entirely. An extent that is merely out of bounds is reported and
+/// dropped, so the rest of the file is still accounted for.
+fn collect_leaf_extents(
+    node: &[u8],
+    count: usize,
+    ino: u64,
+    total_blocks: u64,
+    report: &mut Report,
+    collected: &mut Vec<(u64, u16)>,
+) -> bool {
+    let mut ok = true;
+    for i in 0..count {
+        let Some(ext) = read_node_entry::<EfsExtent>(node, i) else {
+            report.push(Finding {
+                severity: Severity::Error,
+                category: Category::Inode,
+                message: format!("inode {ino}: extent index {i} out of node bounds"),
+                fixable: false,
+                context: None,
+            });
+            return false;
+        };
+
+        let phys = ext.physical_start();
+        let len = ext.length;
+
+        // Bit 15 of length is reserved; valid range 1..=32767.
+        if len == 0 || len >= 32768 {
+            report.push(Finding {
+                severity: Severity::Error,
+                category: Category::Inode,
+                message: format!(
+                    "inode {ino}: extent {i} has invalid length {len} (must be 1..=32767)"
+                ),
+                fixable: false,
+                context: None,
+            });
+            ok = false;
+            continue;
+        }
+
+        if phys + len as u64 > total_blocks {
+            report.push(Finding {
+                severity: Severity::Error,
+                category: Category::Inode,
+                message: format!(
+                    "inode {ino}: extent {i} physical range {phys}..{} exceeds total_blocks {total_blocks}",
+                    phys + len as u64
+                ),
+                fixable: false,
+                context: None,
+            });
+            // Unreferenceable: do not seed the bitmap with it.
+            continue;
+        }
+
+        collected.push((phys, len));
+    }
+    ok
 }

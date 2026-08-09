@@ -394,21 +394,29 @@ loop:
         // (if no entry found, the block is not mapped)
 ```
 
-### 6.5 v1 Driver Limitation
+### 6.5 Supported Tree Depths
 
-The v1 EFS driver only supports `depth = 0` (all extents fit in the inode's `data_area`, no tree indirection). If a driver encounters an inode with `header.depth > 0`, it must return an error (e.g., `EOPNOTSUPP`) and must not attempt to interpret the tree.
+The v1 driver reads and writes `depth = 0` and `depth = 1`. A `depth > 1` node is rejected with `EOPNOTSUPP` and must not be interpreted.
 
-This limitation caps the maximum file size at:
+The shape is chosen by how many extents the file needs, and a file moves between the two in either direction as it grows and is truncated:
+
+- **`depth = 0`** — up to 13 extents live in `data_area` directly. No tree blocks are allocated.
+- **`depth = 1`** — `data_area` holds up to 13 `EfsExtentIndex` entries. Each names a leaf block holding an `EfsExtentHeader` plus up to `(block_size - 12) / 12` extents (340 at a 4K block size).
+
+What each depth can address:
 
 ```
-max_extents_inline  = 13
 max_blocks_per_extent = 32767   (15-bit length field, high bit reserved)
-max_file_size       = 13 * 32767 * block_size
-                    = 13 * 32767 * 4096
-                    = ~1.66 GB  (at 4K block size)
+
+depth 0: 13 extents          -> 13 * 32767 * 4096         = ~1.66 GB
+depth 1: 13 * 340 = 4420     -> 4420 * 32767 * 4096       = ~565 GB
 ```
 
-The on-disk format fully supports trees of arbitrary depth. A future v1 driver update or a v2 format can enable depth > 0 support without changing the on-disk layout.
+The depth-0 ceiling is not about file *size*: it is 13 discontiguous runs. A 1 MB file written onto fragmented free space needs more than 13 and used to fail with `EOPNOTSUPP` from `fsync` while writeback silently dropped the data. Depth 1 is what removes that.
+
+**Leaf blocks are allocated storage.** They are marked in the block bitmap like any data block, they are freed when the file is truncated back inside the inline limit or unlinked, and `efs-fsck` counts them when rebuilding the bitmap. They are deliberately *not* counted in `EfsInode::blocks`, which records data blocks only.
+
+The on-disk format supports trees of arbitrary depth, so raising the ceiling again needs no layout change.
 
 ---
 

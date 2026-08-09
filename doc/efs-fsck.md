@@ -123,7 +123,9 @@ transaction ring.
 | `link_count == 0` but inode bitmap says allocated | ERROR | no | Reports only; treated as structural corruption. |
 | Inline-data inode `size > INODE_DATA_AREA_SIZE` | ERROR | no | Reports only. |
 | Extent header magic mismatch | ERROR | no | Reports only. |
-| Extent `depth > 0` | ERROR | no | Reports only (v1 supports depth 0 only). |
+| Extent `depth > 1` | ERROR | no | Reports only (v1 supports depth 0 and 1). |
+| Extent index child block outside `1..total_blocks` | ERROR | no | Reports only; inode skipped. |
+| Extent leaf block malformed (magic, `depth != 0`, entry overflow) | ERROR | no | Reports only; inode skipped. |
 | Extent `physical_start + length > total_blocks` | ERROR | no | Reports only; extent not applied to rebuilt bitmap. |
 | Extent `length == 0` | ERROR | no | Reports only. |
 
@@ -164,7 +166,7 @@ transaction ring.
 - Malformed directory entries (`rec_len` violations, truncated headers).
 - Missing bitmap bits (`rebuilt=1, on-disk=0`): implies a reference to a block
   the FS believed was free. Deeper analysis required.
-- Extent trees with `depth > 0`: v1 fsck does not walk index nodes.
+- Extent trees with `depth > 1`: fsck walks depth-1 index nodes but not deeper ones.
 - Directory block corruption: fsck never rewrites directory blocks in v1.
 
 ---
@@ -191,9 +193,10 @@ confirm the filesystem is clean.
 
 ## Limitations (v1)
 
-- **Extent tree depth > 0**: v1 EFS only emits depth-0 (leaf-only) extent trees.
-  If a depth > 0 header is encountered, fsck reports an error and skips that
-  inode's blocks. No extent index nodes are walked.
+- **Extent tree depth > 1**: EFS emits depth-0 and depth-1 trees, and fsck
+  walks both — a depth-1 inode's leaf blocks are validated and seeded into the
+  rebuilt block bitmap alongside its data blocks. A `depth > 1` header is
+  reported as an error and that inode's blocks are skipped.
 - **No `lost+found`**: orphan inodes are offered for deletion, not recovery.
   A `lost+found` directory is a v2 feature.
 - **No FAT32 or memfs**: `efs-fsck` only handles the EFS (`EFS!` magic) format.

@@ -8,10 +8,12 @@ use alloc::vec::Vec;
 use efs_common::{
     DIR_ENTRY_HEADER_SIZE, EFS_ROOT_INO, EXTENT_MAGIC, EfsBlockGroupDesc, EfsDirEntryHeader,
     EfsExtent, EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, FT_REG_FILE, INCOMPAT_JOURNAL,
-    INODE_DATA_AREA_SIZE, INODE_FLAG_INLINE_DATA, JOURNAL_MAGIC, JournalSuperblock,
-    MAX_INLINE_EXTENTS, S_IFDIR, S_IFMT, S_IFREG, checksum_inode, dir_entry_min_size,
-    journal_sb_checksum,
+    INODE_DATA_AREA_SIZE, INODE_FLAG_INLINE_DATA, JOURNAL_MAGIC, JournalSuperblock, S_IFDIR,
+    S_IFMT, S_IFREG, checksum_inode, dir_entry_min_size, journal_sb_checksum,
 };
+
+mod extents;
+use extents::ExtentMap;
 
 use super::block_device::BlockDevice;
 use super::block_page_cache::BlockPageCache;
@@ -87,33 +89,6 @@ const BGD_SIZE: usize = core::mem::size_of::<EfsBlockGroupDesc>();
 
 /// Size of one inode on disk.
 const INODE_SIZE: usize = core::mem::size_of::<EfsInode>();
-
-/// Stack-allocated extent list (max 13 extents, no heap allocation).
-#[derive(Clone)]
-struct ExtentList {
-    extents: [EfsExtent; MAX_INLINE_EXTENTS],
-    len: usize,
-}
-
-impl ExtentList {
-    fn as_slice(&self) -> &[EfsExtent] {
-        &self.extents[..self.len]
-    }
-
-    fn as_mut_slice(&mut self) -> &mut [EfsExtent] {
-        &mut self.extents[..self.len]
-    }
-
-    fn push(&mut self, ext: EfsExtent) -> bool {
-        if self.len < MAX_INLINE_EXTENTS {
-            self.extents[self.len] = ext;
-            self.len += 1;
-            true
-        } else {
-            false
-        }
-    }
-}
 
 // ---- Driver struct ------------------------------------------------------------
 
@@ -455,19 +430,11 @@ impl EfsDriver {
         byte_offset: usize,
         count: usize,
     ) -> Result<Vec<u8>, Error> {
-        let hdr: EfsExtentHeader = unsafe {
-            core::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader)
-        };
-        if hdr.magic != EXTENT_MAGIC {
+        let extents = self.load_extent_map(inode)?;
+        let ext_slice = extents.as_slice();
+        if ext_slice.is_empty() {
             return Err(Error::Corrupted);
         }
-        if hdr.depth != 0 {
-            // v1 only supports depth-0 (flat extent list).
-            return Err(Error::Unsupported);
-        }
-
-        let extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
-        let ext_slice = extents.as_slice();
         let block_size = self.block_size() as usize;
         let spb = self.sectors_per_block();
 
@@ -536,34 +503,6 @@ impl EfsDriver {
 
         Ok(result)
     }
-
-    fn parse_inline_extents(
-        &self,
-        data_area: &[u8; INODE_DATA_AREA_SIZE],
-        count: usize,
-    ) -> Result<ExtentList, Error> {
-        let header_size = core::mem::size_of::<EfsExtentHeader>();
-        let extent_size = core::mem::size_of::<EfsExtent>();
-        let max_count = (INODE_DATA_AREA_SIZE - header_size) / extent_size;
-        let count = count.min(max_count).min(MAX_INLINE_EXTENTS);
-
-        let mut list = ExtentList {
-            extents: [EfsExtent {
-                logical_block: 0,
-                length: 0,
-                start_hi: 0,
-                start_lo: 0,
-            }; MAX_INLINE_EXTENTS],
-            len: count,
-        };
-        for i in 0..count {
-            let offset = header_size + i * extent_size;
-            list.extents[i] = unsafe {
-                core::ptr::read_unaligned(data_area[offset..].as_ptr() as *const EfsExtent)
-            };
-        }
-        Ok(list)
-    }
 }
 
 // ---- Directory operations -----------------------------------------------------
@@ -593,13 +532,7 @@ impl EfsDriver {
             return Ok(inode.data_area[..dir_size.min(INODE_DATA_AREA_SIZE)].to_vec());
         }
         let block_size = self.block_size() as usize;
-        let hdr: EfsExtentHeader = unsafe {
-            core::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader)
-        };
-        if hdr.magic != EXTENT_MAGIC || hdr.depth != 0 {
-            return Err(Error::Corrupted);
-        }
-        let extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
+        let extents = self.load_extent_map(inode)?;
         let mut result = vec![0u8; dir_size];
         let mut result_pos = 0usize;
         for ext in extents.as_slice() {
@@ -868,22 +801,10 @@ impl EfsDriver {
         tx: &mut TxHandle<'_>,
     ) -> Result<u64, Error> {
         let inode = self.read_inode(ino)?;
-        let hdr: EfsExtentHeader = unsafe {
-            core::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader)
-        };
-        if hdr.magic != EXTENT_MAGIC || hdr.depth != 0 {
-            return Err(Error::Corrupted);
-        }
+        let mut extents = self.load_extent_map(&inode)?;
 
-        let extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
-
-        // Check if already mapped.
-        for ext in extents.as_slice() {
-            if ext.logical_block <= logical_block
-                && logical_block < ext.logical_block + ext.length as u32
-            {
-                return Ok(ext.physical_start() + (logical_block - ext.logical_block) as u64);
-            }
+        if let Some(phys) = extents.lookup(logical_block) {
+            return Ok(phys);
         }
 
         // Allocate a new block.
@@ -892,53 +813,10 @@ impl EfsDriver {
         let block_size = self.block_size() as usize;
         self.write_block(phys_block, &vec![0u8; block_size], tx)?;
 
-        // Can we extend an existing extent?
-        let mut new_extents = extents.clone();
-        let mut extended = false;
-        for ext in new_extents.as_mut_slice().iter_mut() {
-            if ext.logical_block + ext.length as u32 == logical_block
-                && ext.physical_start() + ext.length as u64 == phys_block
-            {
-                ext.length += 1;
-                extended = true;
-                break;
-            }
-        }
+        extents.insert(logical_block, phys_block);
 
-        if !extended {
-            if !new_extents.push(EfsExtent {
-                logical_block,
-                length: 1,
-                start_hi: (phys_block >> 32) as u16,
-                start_lo: phys_block as u32,
-            }) {
-                return Err(Error::Unsupported);
-            }
-        }
-
-        // Write back updated extents into inode.
         let mut updated = inode;
-        let hdr_size = core::mem::size_of::<EfsExtentHeader>();
-        let ext_size = core::mem::size_of::<EfsExtent>();
-        let new_hdr = EfsExtentHeader {
-            magic: EXTENT_MAGIC,
-            entries: new_extents.len as u16,
-            max_entries: efs_common::MAX_INLINE_EXTENTS as u16,
-            depth: 0,
-            reserved: 0,
-        };
-        let hdr_bytes: &[u8] = unsafe {
-            core::slice::from_raw_parts(&new_hdr as *const EfsExtentHeader as *const u8, hdr_size)
-        };
-        updated.data_area[..hdr_size].copy_from_slice(hdr_bytes);
-        for (i, ext) in new_extents.as_slice().iter().enumerate() {
-            let off = hdr_size + i * ext_size;
-            let ext_bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(ext as *const EfsExtent as *const u8, ext_size)
-            };
-            updated.data_area[off..off + ext_size].copy_from_slice(ext_bytes);
-        }
-        updated.blocks = new_extents.as_slice().iter().map(|e| e.length as u64).sum();
+        self.store_extent_map(&mut updated, &extents, tx)?;
         updated.checksum = checksum_inode(&updated);
         self.write_inode(ino, &updated, tx)?;
 
@@ -990,28 +868,12 @@ impl EfsDriver {
             inode = self.read_inode(ino)?;
         }
 
-        let hdr: EfsExtentHeader = unsafe {
-            core::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader)
-        };
-        if hdr.magic != EXTENT_MAGIC || hdr.depth != 0 {
-            return Err(Error::Corrupted);
-        }
-
-        let mut extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
+        let mut extents = self.load_extent_map(&inode)?;
         let mut phys_blocks = Vec::with_capacity(logical_blocks.len());
 
         // (c) Walk logical blocks, reusing existing mappings or allocating new ones.
         for &lb in logical_blocks {
-            // Check if already mapped by an existing extent.
-            let existing = extents.as_slice().iter().find_map(|e| {
-                if e.logical_block <= lb && lb < e.logical_block + e.length as u32 {
-                    Some(e.physical_start() + (lb - e.logical_block) as u64)
-                } else {
-                    None
-                }
-            });
-
-            if let Some(phys) = existing {
+            if let Some(phys) = extents.lookup(lb) {
                 phys_blocks.push(phys);
                 continue;
             }
@@ -1033,56 +895,12 @@ impl EfsDriver {
             // `device.write_page` on `BlockPageCache`, which is 480 in-memory
             // writes to the same cached page — acceptable for v1 since they are
             // all in-memory and the final journaled state is correct.
-            // Coalesce with any existing extent that is contiguous both
-            // logically and physically — mirrors `ensure_block_for_logical`
-            // which iterates ALL extents, not just the last one.
-            let mut extended = false;
-            for ext in extents.as_mut_slice().iter_mut() {
-                if ext.logical_block + ext.length as u32 == lb
-                    && ext.physical_start() + ext.length as u64 == phys_block
-                {
-                    ext.length += 1;
-                    extended = true;
-                    break;
-                }
-            }
-
-            if !extended {
-                if !extents.push(EfsExtent {
-                    logical_block: lb,
-                    length: 1,
-                    start_hi: (phys_block >> 32) as u16,
-                    start_lo: phys_block as u32,
-                }) {
-                    return Err(Error::Unsupported);
-                }
-            }
-
+            extents.insert(lb, phys_block);
             phys_blocks.push(phys_block);
         }
 
         // (d) Write updated inode ONCE with final extent list.
-        let hdr_size = core::mem::size_of::<EfsExtentHeader>();
-        let ext_size = core::mem::size_of::<EfsExtent>();
-        let new_hdr = EfsExtentHeader {
-            magic: EXTENT_MAGIC,
-            entries: extents.len as u16,
-            max_entries: MAX_INLINE_EXTENTS as u16,
-            depth: 0,
-            reserved: 0,
-        };
-        let hdr_bytes: &[u8] = unsafe {
-            core::slice::from_raw_parts(&new_hdr as *const EfsExtentHeader as *const u8, hdr_size)
-        };
-        inode.data_area[..hdr_size].copy_from_slice(hdr_bytes);
-        for (i, ext) in extents.as_slice().iter().enumerate() {
-            let off = hdr_size + i * ext_size;
-            let ext_bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(ext as *const EfsExtent as *const u8, ext_size)
-            };
-            inode.data_area[off..off + ext_size].copy_from_slice(ext_bytes);
-        }
-        inode.blocks = extents.as_slice().iter().map(|e| e.length as u64).sum();
+        self.store_extent_map(&mut inode, &extents, tx)?;
         if let Some(sz) = new_size {
             if sz > inode.size {
                 inode.size = sz;
@@ -2267,18 +2085,7 @@ impl EfsDriver {
         tx: &mut TxHandle<'_>,
     ) -> Result<(), Error> {
         if file_inode.flags & INODE_FLAG_INLINE_DATA == 0 {
-            let hdr: EfsExtentHeader = unsafe {
-                core::ptr::read_unaligned(file_inode.data_area.as_ptr() as *const EfsExtentHeader)
-            };
-            if hdr.magic == EXTENT_MAGIC && hdr.depth == 0 {
-                let extents =
-                    self.parse_inline_extents(&file_inode.data_area, hdr.entries as usize)?;
-                for ext in extents.as_slice() {
-                    for i in 0..ext.length as u64 {
-                        self.free_block(ext.physical_start() + i, tx)?;
-                    }
-                }
-            }
+            self.free_extent_storage(file_inode, tx)?;
         }
         self.free_inode(file_ino, tx)
     }
@@ -2292,16 +2099,8 @@ impl EfsDriver {
         tx: &mut TxHandle<'_>,
     ) -> Result<(), Error> {
         // Free data blocks.
-        let hdr: EfsExtentHeader = unsafe {
-            core::ptr::read_unaligned(dir_inode.data_area.as_ptr() as *const EfsExtentHeader)
-        };
-        if hdr.magic == EXTENT_MAGIC && hdr.depth == 0 {
-            let extents = self.parse_inline_extents(&dir_inode.data_area, hdr.entries as usize)?;
-            for ext in extents.as_slice() {
-                for i in 0..ext.length as u64 {
-                    self.free_block(ext.physical_start() + i, tx)?;
-                }
-            }
+        if dir_inode.flags & INODE_FLAG_INLINE_DATA == 0 {
+            self.free_extent_storage(dir_inode, tx)?;
         }
 
         self.free_inode(dir_ino, tx)?;
@@ -2407,73 +2206,41 @@ impl EfsDriver {
         if inode.flags & INODE_FLAG_INLINE_DATA == 0 {
             let block_size = self.block_size() as u64;
             let new_blocks = (size + block_size - 1) / block_size;
-            let hdr: EfsExtentHeader = unsafe {
-                core::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader)
-            };
-            if hdr.magic == EXTENT_MAGIC && hdr.depth == 0 {
-                let extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
-                let mut new_extents = ExtentList {
-                    extents: [EfsExtent {
-                        logical_block: 0,
-                        length: 0,
-                        start_hi: 0,
-                        start_lo: 0,
-                    }; MAX_INLINE_EXTENTS],
-                    len: 0,
-                };
+            // An inode with no readable extent node has no blocks to release;
+            // fall through to the plain size update rather than failing the
+            // truncate.
+            let extents = self.load_extent_map(inode).unwrap_or_default();
+            let mut kept: Vec<EfsExtent> = Vec::with_capacity(extents.len());
 
-                for ext in extents.as_slice() {
-                    let ext_start = ext.logical_block as u64;
-                    let ext_end = ext_start + ext.length as u64;
-                    if ext_start >= new_blocks {
-                        for i in 0..ext.length as u64 {
-                            self.free_block(ext.physical_start() + i, tx)?;
-                        }
-                    } else if ext_end > new_blocks {
-                        let keep = (new_blocks - ext_start) as u16;
-                        let free_start = ext.physical_start() + keep as u64;
-                        for i in 0..(ext.length - keep) as u64 {
-                            self.free_block(free_start + i, tx)?;
-                        }
-                        let mut trimmed = *ext;
-                        trimmed.length = keep;
-                        new_extents.push(trimmed);
-                    } else {
-                        new_extents.push(*ext);
+            for ext in extents.as_slice() {
+                let ext_start = ext.logical_block as u64;
+                let ext_end = ext_start + ext.length as u64;
+                if ext_start >= new_blocks {
+                    for i in 0..ext.length as u64 {
+                        self.free_block(ext.physical_start() + i, tx)?;
                     }
+                } else if ext_end > new_blocks {
+                    let keep = (new_blocks - ext_start) as u16;
+                    let free_start = ext.physical_start() + keep as u64;
+                    for i in 0..(ext.length - keep) as u64 {
+                        self.free_block(free_start + i, tx)?;
+                    }
+                    let mut trimmed = *ext;
+                    trimmed.length = keep;
+                    kept.push(trimmed);
+                } else {
+                    kept.push(*ext);
                 }
-
-                // Rebuild extent tree in inode.
-                let mut updated = *inode;
-                let hdr_size = core::mem::size_of::<EfsExtentHeader>();
-                let ext_size = core::mem::size_of::<EfsExtent>();
-                let new_hdr = EfsExtentHeader {
-                    magic: EXTENT_MAGIC,
-                    entries: new_extents.len as u16,
-                    max_entries: efs_common::MAX_INLINE_EXTENTS as u16,
-                    depth: 0,
-                    reserved: 0,
-                };
-                let hdr_bytes: &[u8] = unsafe {
-                    core::slice::from_raw_parts(
-                        &new_hdr as *const EfsExtentHeader as *const u8,
-                        hdr_size,
-                    )
-                };
-                updated.data_area[..hdr_size].copy_from_slice(hdr_bytes);
-                for (i, ext) in new_extents.as_slice().iter().enumerate() {
-                    let off = hdr_size + i * ext_size;
-                    let eb: &[u8] = unsafe {
-                        core::slice::from_raw_parts(ext as *const EfsExtent as *const u8, ext_size)
-                    };
-                    updated.data_area[off..off + ext_size].copy_from_slice(eb);
-                }
-                updated.blocks = new_extents.as_slice().iter().map(|e| e.length as u64).sum();
-                updated.size = size;
-                updated.mtime_sec = current_unix_time();
-                updated.checksum = checksum_inode(&updated);
-                return self.write_inode(ino, &updated, tx);
             }
+
+            // Rebuild the map, which also collapses the tree back inline and
+            // frees its now-surplus nodes once the survivors fit in the inode.
+            let mut updated = *inode;
+            self.store_extent_map(&mut updated, &ExtentMap::from_sorted(kept), tx)?;
+            updated.size = size;
+            updated.mtime_sec = current_unix_time();
+            updated.checksum = checksum_inode(&updated);
+            return self.write_inode(ino, &updated, tx);
         }
 
         // Inline or empty.
@@ -2546,26 +2313,8 @@ impl PageCacheOps for EfsDriver {
         }
 
         // Extent-based read: one page == one block (block_size == 4096).
-        let hdr: EfsExtentHeader = unsafe {
-            core::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader)
-        };
-        if hdr.magic != EXTENT_MAGIC || hdr.depth != 0 {
-            return Err(Error::Corrupted);
-        }
-
-        let extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
-        let logical_block = page_index as u32;
-
-        let extent = extents
-            .as_slice()
-            .iter()
-            .find(|e| {
-                e.logical_block <= logical_block
-                    && logical_block < e.logical_block + e.length as u32
-            })
-            .ok_or(Error::Corrupted)?;
-
-        let phys_block = extent.physical_start() + (logical_block - extent.logical_block) as u64;
+        let extents = self.load_extent_map(&inode)?;
+        let phys_block = extents.lookup(page_index as u32).ok_or(Error::Corrupted)?;
         let lba = self.block_to_lba(phys_block);
         let spb = self.sectors_per_block();
 
@@ -2630,14 +2379,11 @@ impl PageCacheOps for EfsDriver {
             return Ok(None);
         }
 
-        // Parse extents.
-        let hdr: EfsExtentHeader = unsafe {
-            core::ptr::read_unaligned(inode.data_area.as_ptr() as *const EfsExtentHeader)
-        };
-        if hdr.magic != EXTENT_MAGIC || hdr.depth != 0 {
+        // Prefetch is an optimisation, so a map this path cannot use is a
+        // fallback to the sync fill rather than an error.
+        let Ok(extents) = self.load_extent_map(&inode) else {
             return Ok(None);
-        }
-        let extents = self.parse_inline_extents(&inode.data_area, hdr.entries as usize)?;
+        };
 
         let block_size = self.block_size() as usize;
         let logical_start = (offset / block_size) as u32;

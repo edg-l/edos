@@ -4,15 +4,16 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use efs_common::{
-    EFS_ROOT_INO, EfsBlockGroupDesc, EfsInode, FT_DIR, FT_REG_FILE, FT_SYMLINK,
-    INODE_DATA_AREA_SIZE, INODE_FLAG_INLINE_DATA, MAX_INLINE_EXTENTS, S_IFDIR, S_IFLNK, S_IFREG,
-    checksum_inode,
+    EFS_ROOT_INO, EXTENT_MAGIC, EfsBlockGroupDesc, EfsExtent, EfsExtentHeader, EfsExtentIndex,
+    EfsInode, FT_DIR, FT_REG_FILE, FT_SYMLINK, INODE_DATA_AREA_SIZE, INODE_FLAG_INLINE_DATA,
+    MAX_INLINE_EXTENTS, S_IFDIR, S_IFLNK, S_IFREG, checksum_inode, entries_per_node,
+    write_node_entry, write_node_header,
 };
 
 use crate::alloc::Allocator;
 use crate::disk::{read_block, write_block, write_inode};
 use crate::layout::Layout;
-use crate::mkfs::{add_inode_extent, init_extent_tree, now_timestamp, set_inode_extent};
+use crate::mkfs::{init_extent_tree, now_timestamp, set_inode_extent};
 
 /// A directory being built: its inode number, the data blocks allocated so far,
 /// and the write cursor within those blocks.
@@ -130,20 +131,11 @@ fn add_dir_entry(
     })?;
     state.blocks.push(new_phys);
 
-    // Update directory inode with new extent entry.
+    // The inode's extent node is rebuilt from `state.blocks` once the
+    // directory is complete; writing entries here indexed by logical block
+    // both assumed one extent per block and ran off the end of `data_area`
+    // past the thirteenth.
     let logical_block = state.blocks.len() as u32 - 1;
-    if logical_block == 1 {
-        // Second block: inode already has extent for logical 0; add entry 1.
-        add_inode_extent(dir_inode, 1, logical_block, new_phys, 1);
-    } else {
-        add_inode_extent(
-            dir_inode,
-            logical_block as usize,
-            logical_block,
-            new_phys,
-            1,
-        );
-    }
     dir_inode.blocks += 1;
     dir_inode.size += block_size as u64;
 
@@ -204,9 +196,10 @@ fn create_file_inode(
         let block_size = layout.block_size as usize;
         let num_blocks = content.len().div_ceil(block_size);
 
-        init_extent_tree(&mut inode);
-
-        // Try to allocate contiguous run.
+        // Collect the runs first, then encode. `alloc_blocks` returns short
+        // runs whenever it crosses a group boundary or a gap, so a file is
+        // routinely several extents and the encoding depends on how many.
+        let mut runs: Vec<EfsExtent> = Vec::new();
         let mut written_blocks = 0usize;
         let mut logical = 0u32;
         while written_blocks < num_blocks {
@@ -225,23 +218,19 @@ fn create_file_inode(
                 write_block(file, layout, phys_start + i as u64, &block_buf)?;
             }
 
-            let entry_idx = if logical == 0 { 0 } else { logical as usize };
-            if logical == 0 {
-                set_inode_extent(&mut inode, logical, phys_start, got as u16);
-            } else {
-                if entry_idx >= MAX_INLINE_EXTENTS {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "file too large: exceeds inline extent limit",
-                    ));
-                }
-                add_inode_extent(&mut inode, entry_idx, logical, phys_start, got as u16);
-            }
+            runs.push(EfsExtent {
+                logical_block: logical,
+                length: got as u16,
+                start_hi: (phys_start >> 32) as u16,
+                start_lo: phys_start as u32,
+            });
 
             inode.blocks += got as u64;
             written_blocks += got as usize;
             logical += got;
         }
+
+        write_extent_tree(file, layout, allocator, preferred_group, &mut inode, &runs)?;
     }
 
     inode.checksum = checksum_inode(&inode);
@@ -489,6 +478,14 @@ fn populate_dir(
 
     // Update parent dir inode: size may have grown, link_count gets +1 per subdir ".." back-ref.
     dir_inode.link_count += child_dirs as u16;
+    write_extent_tree(
+        file,
+        layout,
+        allocator,
+        (dir_data_block / layout.blocks_per_group as u64) as usize,
+        &mut dir_inode,
+        &runs_from_blocks(&dir_state.blocks),
+    )?;
     dir_inode.checksum = checksum_inode(&dir_inode);
     write_inode(file, layout, parent_ino, &dir_inode)?;
 
@@ -572,4 +569,122 @@ pub fn populate(
     }
 
     Ok(())
+}
+
+/// Encode `runs` into the inode's extent node, spilling into leaf blocks when
+/// there are more runs than fit inline.
+///
+/// A flat inline list holds `MAX_INLINE_EXTENTS` (13) extents. Past that the
+/// node becomes depth 1: the inline entries are `EfsExtentIndex` entries, each
+/// naming an allocated leaf block holding up to `entries_per_node(block_size)`
+/// extents. This mirrors what the kernel driver's `store_extent_map` writes, so
+/// a populated image and a written-to image have the same shape.
+fn write_extent_tree(
+    file: &mut File,
+    layout: &Layout,
+    allocator: &mut Allocator,
+    preferred_group: usize,
+    inode: &mut EfsInode,
+    runs: &[EfsExtent],
+) -> io::Result<()> {
+    let block_size = layout.block_size as usize;
+    let per_leaf = entries_per_node(block_size);
+
+    inode.data_area = [0u8; INODE_DATA_AREA_SIZE];
+
+    if runs.len() <= MAX_INLINE_EXTENTS {
+        write_node_header(
+            &mut inode.data_area,
+            &EfsExtentHeader {
+                magic: EXTENT_MAGIC,
+                entries: runs.len() as u16,
+                max_entries: MAX_INLINE_EXTENTS as u16,
+                depth: 0,
+                reserved: 0,
+            },
+        );
+        for (i, ext) in runs.iter().enumerate() {
+            write_node_entry(&mut inode.data_area, i, ext);
+        }
+        return Ok(());
+    }
+
+    let leaf_count = runs.len().div_ceil(per_leaf);
+    if leaf_count > MAX_INLINE_EXTENTS {
+        return Err(io::Error::other(format!(
+            "file needs {} extents, past the depth-1 ceiling of {}",
+            runs.len(),
+            MAX_INLINE_EXTENTS * per_leaf
+        )));
+    }
+
+    write_node_header(
+        &mut inode.data_area,
+        &EfsExtentHeader {
+            magic: EXTENT_MAGIC,
+            entries: leaf_count as u16,
+            max_entries: MAX_INLINE_EXTENTS as u16,
+            depth: 1,
+            reserved: 0,
+        },
+    );
+
+    for i in 0..leaf_count {
+        let chunk = &runs[i * per_leaf..((i + 1) * per_leaf).min(runs.len())];
+        let (leaf_block, got) = allocator
+            .alloc_blocks(1, preferred_group)
+            .filter(|&(_, got)| got == 1)
+            .ok_or_else(|| io::Error::other("filesystem full allocating an extent leaf"))?;
+        let _ = got;
+
+        let mut node = vec![0u8; block_size];
+        write_node_header(
+            &mut node,
+            &EfsExtentHeader {
+                magic: EXTENT_MAGIC,
+                entries: chunk.len() as u16,
+                max_entries: per_leaf as u16,
+                depth: 0,
+                reserved: 0,
+            },
+        );
+        for (j, ext) in chunk.iter().enumerate() {
+            write_node_entry(&mut node, j, ext);
+        }
+        write_block(file, layout, leaf_block, &node)?;
+
+        write_node_entry(
+            &mut inode.data_area,
+            i,
+            &EfsExtentIndex {
+                logical_block: chunk[0].logical_block,
+                reserved: 0,
+                leaf_hi: (leaf_block >> 32) as u16,
+                leaf_lo: leaf_block as u32,
+            },
+        );
+    }
+
+    Ok(())
+}
+
+/// Turn a directory's ordered list of physical data blocks into extents,
+/// coalescing each physically contiguous run into one.
+fn runs_from_blocks(blocks: &[u64]) -> Vec<EfsExtent> {
+    let mut runs: Vec<EfsExtent> = Vec::new();
+    for (logical, &phys) in blocks.iter().enumerate() {
+        if let Some(last) = runs.last_mut() {
+            if last.physical_start() + last.length as u64 == phys && last.length < i16::MAX as u16 {
+                last.length += 1;
+                continue;
+            }
+        }
+        runs.push(EfsExtent {
+            logical_block: logical as u32,
+            length: 1,
+            start_hi: (phys >> 32) as u16,
+            start_lo: phys as u32,
+        });
+    }
+    runs
 }
