@@ -1,16 +1,18 @@
 use core::fmt::{self, Write};
 
 use spin::Once;
-use uart_16550::SerialPort;
+use uart_16550::{Config, Uart16550Tty, backend::PioBackend};
 
 use crate::{thread::irqlock::IrqSpinlock, timer::uptime_us, util::per_cpu::get_percpu_data};
 
-static SERIAL_DBG: Once<IrqSpinlock<SerialPort>> = Once::new();
+static SERIAL_DBG: Once<IrqSpinlock<Uart16550Tty<PioBackend>>> = Once::new();
 
 pub fn init() {
     SERIAL_DBG.call_once(|| {
-        let mut port = unsafe { uart_16550::SerialPort::new(0x3F8) };
-        port.init();
+        // SAFETY: 0x3F8 is the standard COM1 base; the kernel is the only user
+        // of it, for the whole lifetime of the device.
+        let port =
+            unsafe { Uart16550Tty::new_port(0x3F8, Config::default()) }.expect("COM1 init failed");
         IrqSpinlock::new(port)
     });
 }

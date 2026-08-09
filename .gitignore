@@ -8,6 +8,7 @@ out/
 sata-disk.img
 /filesystem
 .gdb_history
+__pycache__/
 run_log.txt
 usb-test.img
 /logs/

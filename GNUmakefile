@@ -196,9 +196,18 @@ ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd: ovmf/edk2-ovmf.tar.xz
 		edk2-ovmf/ovmf-code-$(KARCH).fd edk2-ovmf/ovmf-vars-$(KARCH).fd
 	touch ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd
 
+# Limine 12 ships its binary distribution as a release tarball; the
+# `vN.x-binary` git branch this used to clone stops at v11. The tarball carries
+# the same files that branch did, plus the Makefile that builds the host tool.
+LIMINE_VERSION := 12.5.2
+LIMINE_URL := https://github.com/limine-bootloader/limine/releases/download/v$(LIMINE_VERSION)/limine-binary.tar.xz
+
 limine/limine:
-	rm -rf limine
-	git clone https://github.com/limine-bootloader/limine.git --branch=v11.x-binary --depth=1
+	rm -rf limine limine-binary limine-binary.tar.xz
+	curl -sSfL -o limine-binary.tar.xz $(LIMINE_URL)
+	tar -xJf limine-binary.tar.xz
+	rm -f limine-binary.tar.xz
+	mv limine-binary limine
 	$(MAKE) -C limine
 
 .PHONY: kernel

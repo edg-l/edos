@@ -7,7 +7,7 @@ use alloc::{
     vec::Vec,
 };
 use crossbeam_queue::ArrayQueue;
-use pc_keyboard::{HandleControl, KeyEvent, Keyboard, ScancodeSet1, layouts};
+use pc_keyboard::{HandleControl, KeyEvent, PS2Keyboard, ScancodeSet1, layouts};
 use spin::Once;
 use x86_64::structures::idt::InterruptStackFrame;
 
@@ -60,7 +60,7 @@ pub extern "C" fn driver_main() -> ! {
 
     // Layout doesn't matter -- we only use add_byte() for scancode→KeyCode,
     // not process_keyevent() for character decoding. Decoding is done in userspace.
-    let mut keyboard = Keyboard::new(
+    let mut keyboard = PS2Keyboard::new(
         ScancodeSet1::new(),
         layouts::Us104Key,
         HandleControl::Ignore,
