@@ -532,13 +532,23 @@ impl Journal {
     /// Seal the active transaction (if non-empty) and block until it is fully
     /// committed to the journal ring.  Used by sys_sync and sys_fsync.
     pub fn force_commit_and_wait(&self) -> Result<(), AhciError> {
+        // The target is the highest sequence that will actually be committed,
+        // which is not always the active one: `seal_active` leaves an empty
+        // active transaction in place, so its sequence is never sealed and
+        // never committed. Waiting on it when the active transaction is empty
+        // and sealed ones are pending can only ever reach `active.seq - 1`,
+        // and the wait below then runs to its full deadline.
         let target_seq = {
             let state = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
-            if state.active.is_empty() && state.sealed.is_empty() {
-                // Nothing pending — already fully committed.
-                return Ok(());
+            if state.active.is_empty() {
+                match state.sealed.back() {
+                    Some(tx) => tx.seq,
+                    // Nothing pending — already fully committed.
+                    None => return Ok(()),
+                }
+            } else {
+                state.active.seq
             }
-            state.active.seq
         };
 
         self.kick_committer();
