@@ -4,12 +4,16 @@ What is left after the 2026-08-09 fsbench round, ordered by what the numbers
 say rather than by how interesting it is. Every item names the evidence that
 motivates it; re-measure with `fsbench` before and after.
 
-The pattern behind the first item has now paid off three times: **issuing a
-command costs far more than the sectors it carries.** Coalescing contiguous
-blocks into one command took raw device reads from 37 to 886 MiB/s, `sync()`
-after a write phase from 28.7 s to 21 us, and `mmap store + msync` from 8.8 to
-1059 MiB/s. Anywhere a loop still does one 4 KiB command at a time is worth the
-same treatment.
+One pattern paid off three times in that round: **issuing a command costs far
+more than the sectors it carries.** Coalescing contiguous blocks into one
+command took raw device reads from 37 to 886 MiB/s, `sync()` after a write
+phase from 28.7 s to 21 us, and `mmap store + msync` from 8.8 to 1059 MiB/s.
+
+It is not a universal lever, and item 1 below is the counter-example: a fourth
+application of it regressed the system and was reverted. Coalescing pays where
+a path is throughput-bound on a long run of contiguous blocks it owns
+exclusively. It costs where the blocks are small, scattered, and contended by
+other work.
 
 ## 1. Find where the journal commit actually spends its time
 
