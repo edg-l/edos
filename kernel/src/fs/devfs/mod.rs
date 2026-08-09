@@ -19,6 +19,8 @@ use crate::{
     println,
 };
 
+pub mod block;
+
 #[derive(Debug, Error, Clone)]
 pub enum DevFsError {
     #[error("path already registered")]
@@ -31,16 +33,19 @@ pub enum DevFsError {
     Unsupported,
     #[error("i/o error")]
     IoError,
+    #[error("device or resource busy")]
+    Busy,
 }
 
 impl From<DevFsError> for fs::Error {
     fn from(value: DevFsError) -> Self {
         match value {
             DevFsError::NotFound => fs::Error::FileNotFound,
-            DevFsError::AlreadyExists
-            | DevFsError::InvalidPath
-            | DevFsError::Unsupported
-            | DevFsError::IoError => fs::Error::IoError,
+            DevFsError::Busy => fs::Error::Busy,
+            DevFsError::InvalidPath => fs::Error::InvalidArgument,
+            DevFsError::AlreadyExists | DevFsError::Unsupported | DevFsError::IoError => {
+                fs::Error::IoError
+            }
         }
     }
 }

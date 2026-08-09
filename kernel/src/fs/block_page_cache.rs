@@ -55,7 +55,7 @@ const NUM_SHARDS: usize = 8;
 /// LRU entries per shard.
 const SHARD_CAPACITY: usize = 256;
 /// Page size in bytes.
-const PAGE_SIZE: usize = 4096;
+pub const PAGE_SIZE: usize = 4096;
 /// Sectors per 4 KiB page.
 const SECTORS_PER_PAGE: u16 = 8;
 /// A dirty page is only written back if it has been dirty for at least this
@@ -63,6 +63,9 @@ const SECTORS_PER_PAGE: u16 = 8;
 /// we use 5s since our metadata volume is small). Forced flushes (sync/fsync)
 /// ignore this and flush everything immediately.
 const DIRTY_EXPIRE_MS: u64 = 5_000;
+/// How many times a writer drains the cache waiting for a shard slot before
+/// giving up and taking a detached page.
+const WRITE_PAGE_ATTEMPTS: usize = 3;
 
 // ---------------------------------------------------------------------------
 // CachedBlockPage
@@ -435,20 +438,26 @@ impl BlockPageCache {
     /// AFTER releasing the shard lock so `frame_allocator()` is acquired with
     /// no BPC rank on the stack). Otherwise evict an LRU entry (if any, same
     /// deferred-drop treatment) and insert.
+    /// Insert `new_page`, or resolve a race with a concurrent filler.
+    ///
+    /// Returns the page to use and whether it is actually in the cache. A
+    /// `false` means the shard was full of pinned or dirty pages and the page
+    /// is *detached*: writeback will never find it, so a writer holding one
+    /// must push the bytes to disk itself rather than marking it dirty.
     fn insert_or_resolve_race(
         &self,
         shard: &mut ShardInner,
         key: Key,
         new_page: Arc<CachedBlockPage>,
         to_drop: &mut Vec<Arc<CachedBlockPage>>,
-    ) -> Arc<CachedBlockPage> {
+    ) -> (Arc<CachedBlockPage>, bool) {
         if let Some(existing) = shard.lru.get(&key) {
             // Another thread filled this page while we were doing I/O.
             // `new_page` has to be dropped outside the shard lock (its Drop
             // calls frame_allocator, rank 90 < BPC.shard 110).
             let resolved = Arc::clone(existing);
             to_drop.push(new_page);
-            return resolved;
+            return (resolved, true);
         }
 
         // Evict LRU entries that are neither pinned nor dirty until we make room.
@@ -478,7 +487,7 @@ impl BlockPageCache {
                             key.1
                         );
                     }
-                    return new_page;
+                    return (new_page, false);
                 }
             };
             // pop the evicted Arc into `to_drop`; it drops outside the shard
@@ -491,7 +500,7 @@ impl BlockPageCache {
         }
 
         shard.lru.put(key, Arc::clone(&new_page));
-        new_page
+        (new_page, true)
     }
 
     // ---- Public API ------------------------------------------------------
@@ -502,6 +511,49 @@ impl BlockPageCache {
         device_id: u64,
         page_block_idx: u64,
     ) -> Result<BlockPageGuard, AhciError> {
+        Ok(self.read_page_tracked(device_id, page_block_idx)?.0)
+    }
+
+    /// As [`read_page_tracked`], but waits for cache space rather than
+    /// accepting a detached page.
+    ///
+    /// A detached page has to be written straight to its home location, which
+    /// puts it on the disk *before* the journal has committed it: a replay
+    /// after a crash would then overwrite newer data with the journal's older
+    /// copy. Draining the cache and retrying keeps every write inside the
+    /// ordering the journal guarantees. The detached page is still returned as
+    /// a last resort, because failing the write outright is worse.
+    ///
+    /// [`read_page_tracked`]: Self::read_page_tracked
+    fn read_page_for_write(
+        &self,
+        device_id: u64,
+        page_block_idx: u64,
+    ) -> Result<(BlockPageGuard, bool), AhciError> {
+        for attempt in 0..WRITE_PAGE_ATTEMPTS {
+            let got = self.read_page_tracked(device_id, page_block_idx)?;
+            if got.1 || attempt + 1 == WRITE_PAGE_ATTEMPTS {
+                return Ok(got);
+            }
+            // Drop our pin first: it is one of the things keeping the shard
+            // from making room. Flush inline: a writer can be the writeback
+            // thread itself, which must not wait on its own pass.
+            drop(got);
+            let _ = self.flush_dirty_once(true);
+        }
+        unreachable!("loop returns on its last iteration")
+    }
+
+    /// As [`read_page`], and also reports whether the page is in the cache.
+    /// Writers need to know: see [`insert_or_resolve_race`].
+    ///
+    /// [`read_page`]: Self::read_page
+    /// [`insert_or_resolve_race`]: Self::insert_or_resolve_race
+    fn read_page_tracked(
+        &self,
+        device_id: u64,
+        page_block_idx: u64,
+    ) -> Result<(BlockPageGuard, bool), AhciError> {
         assert!(
             Self::initialized(),
             "BlockPageCache::read_page called before init()"
@@ -515,7 +567,7 @@ impl BlockPageCache {
             let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
             if let Some(page) = shard.lru.get(&key) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                return Ok(BlockPageGuard::new(Arc::clone(page)));
+                return Ok((BlockPageGuard::new(Arc::clone(page)), true));
             }
         }
         self.stats.misses.fetch_add(1, Ordering::Relaxed);
@@ -536,12 +588,12 @@ impl BlockPageCache {
 
         let new_page = Arc::new(CachedBlockPage::new(key, frame));
         let mut to_drop: Vec<Arc<CachedBlockPage>> = Vec::with_capacity(2);
-        let resolved = {
+        let (resolved, cached) = {
             let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
             self.insert_or_resolve_race(&mut shard, key, new_page, &mut to_drop)
         };
         drop(to_drop);
-        Ok(BlockPageGuard::new(resolved))
+        Ok((BlockPageGuard::new(resolved), cached))
     }
 
     /// Fetch multiple consecutive pages, issuing bulk I/O for misses.
@@ -663,7 +715,7 @@ impl BlockPageCache {
             let key = (device_id, start_page + mi as u64);
             let si = shard_index(key);
             let new_page = Arc::new(CachedBlockPage::new(key, frames[fi].unwrap()));
-            let resolved = {
+            let (resolved, _cached) = {
                 let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
                 self.insert_or_resolve_race(&mut shard, key, new_page, &mut to_drop)
             };
@@ -672,6 +724,50 @@ impl BlockPageCache {
         drop(to_drop);
 
         Ok(guards.into_iter().map(|g| g.unwrap()).collect())
+    }
+
+    /// Tell the device's journal that `key` has reached its home location.
+    ///
+    /// Every path that writes an enrolled block out must call this. A block
+    /// written by any other route leaves its entry in the checkpoint tracker,
+    /// the journal tail never advances past it, and the ring wedges once it
+    /// fills: commits then fail forever with no way to reclaim space.
+    fn note_checkpointed(&self, key: Key) {
+        let journals = ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals);
+        if let Some(j) = journals.get(&key.0) {
+            if let Some(seq) = j.enrolled_seq(key.0, key.1) {
+                j.note_checkpointed(key.0, key.1, seq);
+            }
+        }
+    }
+
+    /// Record a freshly written page.
+    ///
+    /// A cached page is marked dirty and left to writeback. A detached page is
+    /// invisible to writeback, so its bytes go to the device now; dropping it
+    /// otherwise loses the write silently.
+    fn publish_write(
+        &self,
+        key: Key,
+        page: &CachedBlockPage,
+        cached: bool,
+    ) -> Result<(), AhciError> {
+        if !cached {
+            write_frame(key.0, key.1, page.frame)?;
+            self.note_checkpointed(key);
+            return Ok(());
+        }
+
+        let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[shard_index(key)]);
+        if shard.dirty.insert(key) {
+            self.stats.dirty_pages.fetch_add(1, Ordering::Relaxed);
+        }
+        let shard_dirty_len = shard.dirty.len();
+        drop(shard);
+        if shard_dirty_len > SHARD_CAPACITY / 4 {
+            self.kick_writeback();
+        }
+        Ok(())
     }
 
     /// Write a full page. Write-back: marks the page dirty for the background
@@ -691,10 +787,10 @@ impl BlockPageCache {
         let si = shard_index(key);
 
         // Get or create the cached page.
-        let guard = {
+        let (guard, cached) = {
             let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
             if let Some(page) = shard.lru.get(&key) {
-                BlockPageGuard::new(Arc::clone(page))
+                (BlockPageGuard::new(Arc::clone(page)), true)
             } else {
                 drop(shard);
                 // Allocate fresh frame (no read needed -- full overwrite).
@@ -703,12 +799,12 @@ impl BlockPageCache {
                     .ok_or(AhciError::IoError)?;
                 let new_page = Arc::new(CachedBlockPage::new(key, frame));
                 let mut to_drop: Vec<Arc<CachedBlockPage>> = Vec::with_capacity(2);
-                let resolved = {
+                let (resolved, cached) = {
                     let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
                     self.insert_or_resolve_race(&mut shard, key, new_page, &mut to_drop)
                 };
                 drop(to_drop);
-                BlockPageGuard::new(resolved)
+                (BlockPageGuard::new(resolved), cached)
             }
         };
 
@@ -722,24 +818,12 @@ impl BlockPageCache {
             // SAFETY: we hold write_lock.
             let dest = unsafe { guard.as_mut_slice() };
             dest.copy_from_slice(data);
-            guard.mark_dirty();
-        }
-
-        // Insert into dirty set; kick writeback if shard pressure threshold reached.
-        {
-            let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
-            let newly_inserted = shard.dirty.insert(key);
-            if newly_inserted {
-                self.stats.dirty_pages.fetch_add(1, Ordering::Relaxed);
-            }
-            let shard_dirty_len = shard.dirty.len();
-            drop(shard);
-            if shard_dirty_len > SHARD_CAPACITY / 4 {
-                self.kick_writeback();
+            if cached {
+                guard.mark_dirty();
             }
         }
 
-        Ok(())
+        self.publish_write(key, &guard, cached)
     }
 
     /// Read-modify-write: update a sub-sector range within a page then mark dirty.
@@ -769,10 +853,9 @@ impl BlockPageCache {
         let offset_in_page = ((lba % SECTORS_PER_PAGE as u64) * 512) as usize;
         let len = sectors as usize * 512;
         let key = (device_id, page_block_idx);
-        let si = shard_index(key);
 
         // Pin the page (fills from disk if not cached).
-        let guard = self.read_page(device_id, page_block_idx)?;
+        let (guard, cached) = self.read_page_for_write(device_id, page_block_idx)?;
 
         // Serialize writers on this page.
         {
@@ -784,24 +867,79 @@ impl BlockPageCache {
             // SAFETY: we hold write_lock.
             let dest = unsafe { guard.as_mut_slice() };
             dest[offset_in_page..offset_in_page + len].copy_from_slice(data);
-            guard.mark_dirty();
-        }
-
-        // Insert into dirty set; kick writeback if shard pressure threshold reached.
-        {
-            let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
-            let newly_inserted = shard.dirty.insert(key);
-            if newly_inserted {
-                self.stats.dirty_pages.fetch_add(1, Ordering::Relaxed);
-            }
-            let shard_dirty_len = shard.dirty.len();
-            drop(shard);
-            if shard_dirty_len > SHARD_CAPACITY / 4 {
-                self.kick_writeback();
+            if cached {
+                guard.mark_dirty();
             }
         }
 
+        self.publish_write(key, &guard, cached)
+    }
+
+    /// Read-modify-write an arbitrary byte range on a device, spanning as many
+    /// pages as it covers.
+    ///
+    /// Raw device access from userspace lands here. Every page is read before
+    /// it is patched, so a write that covers part of a page leaves the rest
+    /// intact; nothing is rounded outward and no neighbouring sector is lost.
+    pub fn write_bytes(
+        &self,
+        device_id: u64,
+        byte_offset: u64,
+        data: &[u8],
+    ) -> Result<(), AhciError> {
+        let mut written = 0usize;
+        while written < data.len() {
+            let pos = byte_offset + written as u64;
+            let page_block_idx = pos / PAGE_SIZE as u64;
+            let offset_in_page = (pos % PAGE_SIZE as u64) as usize;
+            let chunk = (PAGE_SIZE - offset_in_page).min(data.len() - written);
+            let key = (device_id, page_block_idx);
+
+            let (guard, cached) = self.read_page_for_write(device_id, page_block_idx)?;
+            {
+                let _wl = ranked_lock!(
+                    RANK_PAGE_WRITE_LOCK,
+                    "BPC.page.write_lock",
+                    guard.write_lock
+                );
+                // SAFETY: we hold write_lock.
+                let dest = unsafe { guard.as_mut_slice() };
+                dest[offset_in_page..offset_in_page + chunk]
+                    .copy_from_slice(&data[written..written + chunk]);
+                if cached {
+                    guard.mark_dirty();
+                }
+            }
+
+            self.publish_write(key, &guard, cached)?;
+            written += chunk;
+        }
         Ok(())
+    }
+
+    /// Copy an arbitrary byte range out of a device, spanning as many pages as
+    /// it covers.
+    pub fn read_bytes(
+        &self,
+        device_id: u64,
+        byte_offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, AhciError> {
+        let mut out = alloc::vec![0u8; len];
+        let mut done = 0usize;
+        while done < len {
+            let pos = byte_offset + done as u64;
+            let page_block_idx = pos / PAGE_SIZE as u64;
+            let offset_in_page = (pos % PAGE_SIZE as u64) as usize;
+            let chunk = (PAGE_SIZE - offset_in_page).min(len - done);
+
+            let guard = self.read_page(device_id, page_block_idx)?;
+            out[done..done + chunk]
+                .copy_from_slice(&guard.as_slice()[offset_in_page..offset_in_page + chunk]);
+
+            done += chunk;
+        }
+        Ok(out)
     }
 
     /// Signal the writeback thread that there is work to do.
@@ -982,6 +1120,14 @@ impl BlockPageCache {
                     to_drop.push(evicted);
                 }
             }
+            // Anything still dirty was missed by the flush above; write it now
+            // rather than dropping the page. Evicting dirty data silently is
+            // indistinguishable from filesystem corruption later.
+            let still_dirty: Vec<Arc<CachedBlockPage>> = to_drop
+                .iter()
+                .filter(|p| p.is_dirty())
+                .map(Arc::clone)
+                .collect();
             // Remove device entries from the dirty set.
             let dirty_keys: Vec<Key> = shard
                 .dirty
@@ -992,6 +1138,21 @@ impl BlockPageCache {
             for key in dirty_keys {
                 if shard.dirty.remove(&key) {
                     self.stats.dirty_pages.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+            drop(shard);
+
+            for page in still_dirty {
+                if let Err(e) = write_frame(page.key.0, page.key.1, page.frame) {
+                    log!(
+                        "block_page_cache: writing back dirty page ({}, {}) during invalidate failed: {:?}",
+                        page.key.0,
+                        page.key.1,
+                        e
+                    );
+                } else {
+                    page.clear_dirty();
+                    self.note_checkpointed(page.key);
                 }
             }
         }

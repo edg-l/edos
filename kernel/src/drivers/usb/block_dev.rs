@@ -17,7 +17,10 @@ use crate::{
     thread::scheduler::{WakePriority, sched},
 };
 
-pub struct UsbBlockDevice;
+pub struct UsbBlockDevice {
+    /// Capacity reported by READ CAPACITY during enumeration.
+    block_count: u64,
+}
 
 fn xhci_to_block(_e: XhciError) -> BlockError {
     BlockError::Io
@@ -113,12 +116,16 @@ impl AsyncBlockDevice for UsbBlockDevice {
         handle.complete(Ok(()));
         Ok(handle)
     }
+
+    fn sector_count(&self) -> u64 {
+        self.block_count
+    }
 }
 
 /// Register the singleton USB mass-storage device under `device_id` in the
 /// kernel-wide block-io registry. Called from the xHCI driver thread once a
 /// USB MSC device has been enumerated and the mailbox is ready.
-pub fn register(device_id: u64) {
-    let dev: Arc<dyn AsyncBlockDevice> = Arc::new(UsbBlockDevice);
+pub fn register(device_id: u64, block_count: u64) {
+    let dev: Arc<dyn AsyncBlockDevice> = Arc::new(UsbBlockDevice { block_count });
     block_io::register(device_id, dev);
 }

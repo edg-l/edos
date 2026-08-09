@@ -1367,7 +1367,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
         // Register this USB mass-storage device with the kernel-wide block-io
         // registry so fs/* can submit reads/writes via the AsyncBlockDevice
         // trait without knowing about the underlying mailbox transport.
-        crate::drivers::usb::block_dev::register(device_id);
+        crate::drivers::usb::block_dev::register(device_id, block_count);
         let partition = crate::fs::gpt::Partition {
             index: 0,
             starting_lba: 0,

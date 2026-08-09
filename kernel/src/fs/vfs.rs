@@ -42,7 +42,7 @@ static NEXT_MOUNT_ID: AtomicUsize = AtomicUsize::new(1);
 // while getting preempted, then the same CPU takes a page fault that calls
 // `register_dirty_inode` -- deadlock. IrqSpinlock disables interrupts while
 // held, preventing the recursive acquire.
-static DIRTY_INODES: IrqSpinlock<Vec<alloc::sync::Weak<VfsInode>>> = IrqSpinlock::new(Vec::new());
+static DIRTY_INODES: IrqSpinlock<Vec<Arc<VfsInode>>> = IrqSpinlock::new(Vec::new());
 
 pub struct MountEntry {
     pub fs: Arc<dyn FileSystem + Send + Sync>,
@@ -1138,32 +1138,31 @@ pub fn fs_by_mount_id(mount_id: usize) -> Option<Arc<dyn super::FileSystem + Sen
     None
 }
 
-/// Register an inode as having dirty MAP_SHARED pages, so the writeback
-/// kthread can flush it periodically. Duplicate registrations are deduplicated.
+/// Register an inode as having dirty pages, so the writeback kthread flushes
+/// it. Duplicate registrations are deduplicated.
+///
+/// The list holds a *strong* reference on purpose: closing the last descriptor
+/// must not free pages that have never reached the disk. Writeback drops the
+/// reference once it has flushed the inode, so the pin lasts exactly as long
+/// as there is unwritten data.
 pub fn register_dirty_inode(inode: &Arc<VfsInode>) {
-    let weak = Arc::downgrade(inode);
     let mut list = DIRTY_INODES.lock_ranked(RANK_DIRTY_INODES, "DIRTY_INODES");
-    // Deduplicate: if already present, skip.
-    let already = list
-        .iter()
-        .any(|w| w.upgrade().map(|a| Arc::ptr_eq(&a, inode)).unwrap_or(false));
-    if !already {
-        list.push(weak);
+    if !list.iter().any(|held| Arc::ptr_eq(held, inode)) {
+        list.push(Arc::clone(inode));
     }
 }
 
-/// Flush dirty MAP_SHARED pages for all registered dirty inodes.
-/// Called by the writeback kthread on its periodic pass.
-/// Removes tombstoned (dropped) entries from the list as a side effect.
+/// Flush dirty pages for every registered dirty inode, then release the
+/// writeback pin taken by `register_dirty_inode`.
+///
+/// Called by the writeback kthread on every pass. Taking the list wholesale
+/// means an inode dirtied again during the flush re-registers and is picked up
+/// by the next pass, rather than being dropped here with data still in memory.
 pub fn flush_dirty_inodes() {
-    // Snapshot live inodes under the lock; flush outside it to avoid blocking
-    // the lock during AHCI I/O.
+    // Take the list; flush outside the lock to avoid holding it across I/O.
     let live: Vec<Arc<VfsInode>> = {
         let mut list = DIRTY_INODES.lock_ranked(RANK_DIRTY_INODES, "DIRTY_INODES");
-        let live: Vec<Arc<VfsInode>> = list.iter().filter_map(|w| w.upgrade()).collect();
-        // Compact tombstoned entries.
-        list.retain(|w| w.upgrade().is_some());
-        live
+        core::mem::take(&mut *list)
     };
 
     for inode in live {

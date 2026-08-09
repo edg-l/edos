@@ -605,8 +605,8 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                         }
                         (bytes_to_copy, ra) // devfs doesn't mutate ra
                     }
-                    Err(_) => {
-                        info.lock().errno = Errno::EIO;
+                    Err(e) => {
+                        info.lock().errno = Errno::from(crate::fs::Error::from(e));
                         return -1;
                     }
                 }
@@ -1406,8 +1406,8 @@ pub fn sys_pread(fd: u64, buffer_ptr: *mut u8, count: usize, offset: u64) -> i64
                 }
                 bytes_to_copy as i64
             }
-            Err(_) => {
-                info.lock().errno = Errno::EIO;
+            Err(e) => {
+                info.lock().errno = Errno::from(crate::fs::Error::from(e));
                 -1
             }
         };
@@ -1636,6 +1636,16 @@ pub fn sys_sync() {
         }
     }
     BlockPageCache::global().sync_all();
+
+    // Publish the tail the flush just earned. Replay starts at the tail
+    // recorded in the journal superblock, so a stale tail makes the next mount
+    // re-apply transactions whose blocks have since been checkpointed and
+    // overwritten -- it reverts good data with older journal copies.
+    for journal in BlockPageCache::global().all_journals() {
+        if let Err(e) = journal.advance_tail() {
+            log!("sys_sync: advance_tail error: {:?}", e);
+        }
+    }
 }
 
 pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {

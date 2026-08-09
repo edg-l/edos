@@ -137,6 +137,11 @@ pub(crate) struct JournalState {
 
 // ---- Journal ----------------------------------------------------------------
 
+/// How many times a commit will checkpoint and re-check before giving up on
+/// finding ring space. Two passes are enough when anything is checkpointable;
+/// a third would only spin on a transaction that cannot fit at all.
+const CHECKPOINT_ATTEMPTS: usize = 3;
+
 pub struct Journal {
     pub device_id: u64,
     first_block: u64,
@@ -375,6 +380,19 @@ impl Journal {
         }
     }
 
+    /// Sequence the block at `(dev, block)` is enrolled under, if any.
+    ///
+    /// Callers that wrote a block out without going through the tracked
+    /// writeback path use this to report the checkpoint afterwards.
+    pub fn enrolled_seq(&self, dev: u64, block: u64) -> Option<u64> {
+        let tracker = ranked_lock!(
+            RANK_JOURNAL_TRACKER,
+            "Journal.checkpoint_tracker",
+            self.checkpoint_tracker
+        );
+        tracker.get(&(dev, block)).copied()
+    }
+
     /// Called by writeback after a page has been successfully flushed to its
     /// home location.  Removes the tracker entry only if the enrolled seq still
     /// matches (a later tx may have re-enrolled the block with a higher seq).
@@ -500,18 +518,68 @@ impl Journal {
     ///
     /// This may be called from the committer kthread or synchronously from
     /// `force_commit_and_wait`.  I/O is performed without holding the state lock.
+    /// Write enrolled blocks back to their home locations and advance the tail
+    /// past whatever that freed. This is the only thing that reclaims ring
+    /// space, so the commit path calls it when the ring is full.
+    fn checkpoint_and_advance(&self) -> Result<(), AhciError> {
+        // Flush inline rather than waiting for the writeback kthread: this can
+        // run *on* that thread (writeback -> filesystem flush -> journal), and
+        // waiting for a pass to finish from inside one deadlocks.
+        crate::fs::block_page_cache::BlockPageCache::global().flush_dirty_once(true)?;
+        self.advance_tail()
+    }
+
+    /// Largest number of blocks one transaction may enroll.
+    ///
+    /// A sealed transaction has to fit in the ring in one piece: it is written
+    /// as descriptor + data + commit before the tail can advance past it. A
+    /// transaction larger than the ring can therefore never commit, and since
+    /// writeback refuses to check point blocks belonging to an uncommitted
+    /// transaction, the ring would never drain either. Half the ring leaves
+    /// room for the descriptor, commit and revoke blocks.
+    pub fn max_tx_blocks(&self) -> usize {
+        ((self.block_count as u64 - 1) / 2) as usize
+    }
+
+    /// Move the active transaction to the sealed queue. Returns true if there
+    /// was anything to seal. Caller holds the state lock.
+    fn seal_active(&self, s: &mut JournalState) -> bool {
+        if s.active.is_empty() {
+            return false;
+        }
+        let next_seq = s.head_seq + 1;
+        let next_tx_id = self.next_tx_id();
+        let new_active = Transaction::new(next_seq, next_tx_id);
+        let tx = core::mem::replace(&mut s.active, new_active);
+        s.sealed.push_back(tx);
+        s.head_seq = next_seq;
+        true
+    }
+
+    /// Seal the active transaction if it has grown to [`max_tx_blocks`], so it
+    /// is committed on its own rather than growing past what the ring can hold.
+    ///
+    /// [`max_tx_blocks`]: Self::max_tx_blocks
+    pub fn seal_if_full(&self) -> bool {
+        let limit = self.max_tx_blocks();
+        let sealed = {
+            let mut s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
+            if s.active.enrolled_blocks.len() < limit {
+                return false;
+            }
+            self.seal_active(&mut s)
+        };
+        if sealed {
+            self.kick_committer();
+        }
+        sealed
+    }
+
     pub fn seal_and_commit(&self) -> Result<(), AhciError> {
         // Step 1: move active tx to sealed queue if non-empty.
         {
             let mut s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
-            if !s.active.is_empty() {
-                let next_seq = s.head_seq + 1;
-                let next_tx_id = self.next_tx_id();
-                let new_active = Transaction::new(next_seq, next_tx_id);
-                let tx = core::mem::replace(&mut s.active, new_active);
-                s.sealed.push_back(tx);
-                s.head_seq = next_seq;
-            }
+            self.seal_active(&mut s);
             if s.sealed.is_empty() {
                 return Ok(());
             }
@@ -577,18 +645,43 @@ impl Journal {
             };
             let needed = 1 + n_data + n_revoke + 1;
 
-            // Check ring capacity in blocks (not tx count).
-            let (ring_pos_start, ring_size) = {
+            // Check ring capacity in blocks (not tx count). A full ring is not
+            // an error on its own: the space is held by committed transactions
+            // whose blocks have not reached their home locations yet. Write
+            // them back and advance the tail, which is what frees the ring.
+            //
+            // Doing this here rather than returning an error is what keeps a
+            // sustained write from wedging: the committer cannot make progress
+            // without space, and space cannot appear without a checkpoint.
+            let ring_size = self.block_count as u64 - 1; // block 0 is JSB
+            let mut ring_pos_start = None;
+            for attempt in 0..CHECKPOINT_ATTEMPTS {
                 let s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
-                let ring_size = self.block_count as u64 - 1; // block 0 is JSB
                 let used = s.head_block.wrapping_sub(s.tail_block);
-                if needed > ring_size.saturating_sub(used) {
-                    drop(s);
-                    let mut s2 = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
-                    s2.sealed.push_front(tx);
-                    return Err(AhciError::IoError);
+                if needed <= ring_size.saturating_sub(used) {
+                    ring_pos_start = Some(s.head_block);
+                    break;
                 }
-                (s.head_block, ring_size)
+                drop(s);
+
+                if attempt + 1 == CHECKPOINT_ATTEMPTS {
+                    break;
+                }
+                self.checkpoint_and_advance()?;
+            }
+
+            let Some(ring_pos_start) = ring_pos_start else {
+                // Still no room after checkpointing: this transaction is larger
+                // than the ring can ever hold. Put it back so a later, smaller
+                // commit is not lost, and report it.
+                let mut s2 = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
+                s2.sealed.push_front(tx);
+                crate::log!(
+                    "journal: transaction needs {} blocks, ring holds {}",
+                    needed,
+                    ring_size
+                );
+                return Err(AhciError::IoError);
             };
 
             let mut ring_pos = ring_pos_start;

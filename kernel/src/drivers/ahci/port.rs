@@ -1,6 +1,6 @@
 use core::{
     ptr,
-    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -128,6 +128,9 @@ pub struct AhciPort {
     ncq_enabled: AtomicBool,
     ncq_depth: AtomicU8,
     supports_fua: AtomicBool,
+    /// Capacity in 512-byte sectors, from IDENTIFY. Zero until the device has
+    /// been identified.
+    sector_count: AtomicU64,
 
     // DMA regions (immutable after init)
     command_list: DmaRegion<[CommandHeader; AHCI_CMD_SLOTS]>,
@@ -276,6 +279,7 @@ impl AhciPort {
             ncq_enabled: AtomicBool::new(false),
             ncq_depth: AtomicU8::new(0),
             supports_fua: AtomicBool::new(false),
+            sector_count: AtomicU64::new(0),
             command_list,
             fis_area,
             command_tables,
@@ -506,6 +510,12 @@ impl AhciPort {
 
     pub fn set_device_type(&mut self, device_type: DeviceType) {
         self.device_type = device_type;
+    }
+
+    /// Publish the capacity IDENTIFY reported, so raw access through `/dev`
+    /// can bounds-check against it.
+    pub fn set_sector_count(&self, sectors: u64) {
+        self.sector_count.store(sectors, Ordering::Release);
     }
 
     /// Store the weak self-reference. Called immediately after `Arc::new(port)`
@@ -2135,6 +2145,10 @@ impl AsyncBlockDevice for AhciPort {
 
     fn submit_flush(&self) -> Result<Arc<BlockIoHandle>, BlockError> {
         Ok(sync_handle(self.flush_cache()))
+    }
+
+    fn sector_count(&self) -> u64 {
+        self.sector_count.load(Ordering::Acquire)
     }
 
     fn submit_read_batch(

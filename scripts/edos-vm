@@ -125,15 +125,27 @@ def running():
     return pid
 
 
+def _is_qcow2(path):
+    with open(path, "rb") as f:
+        return f.read(4) == b"QFI\xfb"
+
+
 def cmd_start(args):
     if running():
         raise SystemExit("already running; stop it first")
 
     iso = os.path.join(REPO, "edos-x86_64.iso")
-    disk = os.path.join(REPO, "sata-disk.img")
-    for path, target in ((iso, "make all"), (disk, "make sata-disk.img")):
+    disk = args.disk if os.path.isabs(args.disk) else os.path.join(REPO, args.disk)
+    required = [(disk, f"create {args.disk}")]
+    if not args.no_cdrom:
+        required.append((iso, "make all"))
+    for path, target in required:
         if not os.path.exists(path):
             raise SystemExit(f"missing {os.path.basename(path)}; run `{target}` first")
+
+    # qcow2 for the default image, raw for the scratch disks an install test
+    # writes; guessing wrong makes QEMU refuse the drive.
+    disk_format = "qcow2" if disk.endswith(".img") and _is_qcow2(disk) else "raw"
 
     os.makedirs(RUNDIR, exist_ok=True)
     for stale in (SOCK, PIDFILE):
@@ -152,8 +164,7 @@ def cmd_start(args):
         "-smp", str(args.smp),
         "-drive", f"if=pflash,unit=0,format=raw,file={REPO}/ovmf/ovmf-code-x86_64.fd,readonly=on",
         "-drive", f"if=pflash,unit=1,format=raw,file={REPO}/ovmf/ovmf-vars-x86_64.fd",
-        "-cdrom", iso,
-        "-drive", f"id=sata0,if=none,format=qcow2,file={disk},aio=io_uring,discard=unmap",
+        "-drive", f"id=sata0,if=none,format={disk_format},file={disk},aio=io_uring,discard=unmap",
         "-device", "ide-hd,drive=sata0,bus=ide.1",
         # blob=on needs udmabuf and a local display; plain virtio-vga renders
         # into a buffer QEMU itself owns, which is what VNC and screendump read.
@@ -177,6 +188,9 @@ def cmd_start(args):
         "-pidfile", PIDFILE,
         "-daemonize",
     ]
+
+    if not args.no_cdrom:
+        qemu += ["-cdrom", iso]
 
     # /dev/kvm is group-owned; re-exec under the group if the caller's session
     # predates their membership. Absolute path because `sg` is also the name of
@@ -351,6 +365,10 @@ def main():
     s.add_argument("--accel", default="kvm", choices=["kvm", "tcg"])
     s.add_argument("--width", type=int, default=1920)
     s.add_argument("--height", type=int, default=1080)
+    s.add_argument("--disk", default="sata-disk.img",
+                   help="disk image attached as the SATA drive")
+    s.add_argument("--no-cdrom", action="store_true",
+                   help="boot without the ISO, e.g. to test an installed disk")
     s.add_argument("--ssh-fwd", type=int, default=2323,
                    help="host port forwarded to guest TCP 23")
     s.set_defaults(func=cmd_start)

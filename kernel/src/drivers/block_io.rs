@@ -214,6 +214,11 @@ pub trait AsyncBlockDevice: Send + Sync {
     /// Submit a cache flush. May be a no-op on devices without a write cache.
     fn submit_flush(&self) -> Result<Arc<BlockIoHandle>, BlockError>;
 
+    /// Capacity in 512-byte sectors, or 0 while the device has not been
+    /// identified yet. Bounds checks for raw access through `/dev` come from
+    /// here, so a driver that cannot answer must report 0 rather than guess.
+    fn sector_count(&self) -> u64;
+
     /// Submit `N` reads at once. Default falls back to serial submits;
     /// drivers with hardware-level batching (AHCI NCQ) override.
     fn submit_read_batch(
@@ -242,4 +247,11 @@ pub fn register(device_id: u64, device: Arc<dyn AsyncBlockDevice>) {
 /// that id is registered.
 pub fn lookup(device_id: u64) -> Option<Arc<dyn AsyncBlockDevice>> {
     DEVICES.read().get(&device_id).cloned()
+}
+
+/// Ids of every registered block device, ascending. This is what partition
+/// discovery iterates, so a driver becomes scannable by registering here and
+/// nothing else.
+pub fn list() -> Vec<u64> {
+    DEVICES.read().keys().copied().collect()
 }

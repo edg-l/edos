@@ -2,7 +2,7 @@ use limine::{
     BaseRevision, RequestsEndMarker, RequestsStartMarker,
     request::{
         DtbRequest, ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest, MemmapRequest,
-        MemmapResponse, MpRequest, RsdpRequest, StackSizeRequest,
+        MemmapResponse, ModulesRequest, MpRequest, RsdpRequest, StackSizeRequest,
     },
 };
 use spin::Once;
@@ -19,6 +19,9 @@ use crate::{
     thread::irqlock::IrqSpinlock,
     util::per_cpu::init_gs_for_bsp_static,
 };
+
+/// Basename of the Limine module carrying the live root filesystem image.
+pub const LIVE_ROOT_MODULE: &str = "live-root.img";
 
 /// Sets the base revision to the latest revision supported by the crate.
 /// See specification for further info.
@@ -63,6 +66,12 @@ static DEVICE_TREE_BLOB_REQUEST: DtbRequest = DtbRequest::new();
 #[unsafe(link_section = ".requests")]
 pub static MP_REQUEST: MpRequest = MpRequest::new(0);
 
+// Modules loaded from the boot medium. Used for the live root image the ISO
+// carries; see `drivers::ramdisk`.
+#[used]
+#[unsafe(link_section = ".requests")]
+static MODULES_REQUEST: ModulesRequest = ModulesRequest::new();
+
 /// Define the start and end markers for Limine requests.
 #[used]
 #[unsafe(link_section = ".requests_start_marker")]
@@ -81,7 +90,25 @@ pub struct BootInfo {
     pub cmdline: &'static str,
     pub device_tree_blob: Option<usize>,
     pub cr3: (PhysFrame, Cr3Flags),
+    /// The live root image, when the boot medium carried one.
+    pub live_root: Option<BootModule>,
 }
+
+/// A module Limine loaded for us.
+///
+/// `addr` is a kernel virtual address: from base revision 4 on, Limine reports
+/// response pointers through the higher-half direct map, so no conversion is
+/// needed. The bytes live in bootloader-reclaimable memory, which the frame
+/// allocator never hands out (it frees only `MEMMAP_USABLE`), so they stay
+/// valid and privately owned for the life of the boot.
+#[derive(Clone, Copy)]
+pub struct BootModule {
+    pub addr: *mut u8,
+    pub len: usize,
+}
+
+unsafe impl Send for BootModule {}
+unsafe impl Sync for BootModule {}
 
 /// Extracted framebuffer data from Limine, safe to share across threads.
 pub struct BootFramebuffer {
@@ -154,6 +181,21 @@ unsafe extern "C" fn kmain() -> ! {
         .response()
         .map(|x| x.dtb_ptr as usize - physical_memory_offset as usize);
 
+    // The live root module, if the boot medium carried one. Matched by
+    // basename so the ISO layout can move without touching this.
+    let live_root = MODULES_REQUEST.response().and_then(|r| {
+        r.modules()
+            .iter()
+            .find(|m| m.path().ends_with(LIVE_ROOT_MODULE))
+            .map(|m| {
+                let data = m.data();
+                BootModule {
+                    addr: data.as_ptr() as *mut u8,
+                    len: data.len(),
+                }
+            })
+    });
+
     let physical_memory_offset = VirtAddr::new(physical_memory_offset);
 
     let cr3 = Cr3::read();
@@ -169,6 +211,7 @@ unsafe extern "C" fn kmain() -> ! {
         cmdline,
         device_tree_blob,
         cr3,
+        live_root,
     };
 
     BOOT_INFO.call_once(|| boot_info);

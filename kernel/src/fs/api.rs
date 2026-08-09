@@ -32,19 +32,33 @@ pub(super) fn send_request(request: FsRequest) -> FsResponse {
 fn expect_ok(res: FsResponse) -> Result<(), Error> {
     match res {
         FsResponse::Ok(result) => result,
-        FsResponse::Partitions(_) => Err(Error::ProtocolMismatch),
+        FsResponse::Partitions(_) | FsResponse::Count(_) => Err(Error::ProtocolMismatch),
     }
 }
 
 fn expect_partitions(res: FsResponse) -> Result<Vec<Partition>, Error> {
     match res {
         FsResponse::Partitions(parts) => Ok(parts),
-        FsResponse::Ok(_) => Err(Error::ProtocolMismatch),
+        FsResponse::Ok(_) | FsResponse::Count(_) => Err(Error::ProtocolMismatch),
+    }
+}
+
+fn expect_count(res: FsResponse) -> Result<usize, Error> {
+    match res {
+        FsResponse::Count(result) => result,
+        FsResponse::Ok(_) | FsResponse::Partitions(_) => Err(Error::ProtocolMismatch),
     }
 }
 
 pub fn list_partitions() -> Result<Vec<Partition>, Error> {
     expect_partitions(send_request(FsRequest::ListPartitions))
+}
+
+/// Re-read `device_id`'s partition table, replacing whatever was known about
+/// it. Fails with `Busy` if the device backs a mounted filesystem. Returns the
+/// number of partitions now known for the device.
+pub fn rescan_partitions(device_id: u64) -> Result<usize, Error> {
+    expect_count(send_request(FsRequest::RescanPartitions { device_id }))
 }
 
 pub fn list_mounts() -> Vec<MountInfo> {

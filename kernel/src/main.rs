@@ -14,8 +14,9 @@ use crate::{
     allocator::{enable_percpu_cache, init_heap, mark_gs_ready, print_alloc_stats},
     boot::boot_info,
     cmdline::ParsedCmdline,
+    drivers::ramdisk::RAMDISK_DEVICE_ID,
     fs::{
-        gpt::{FilesystemType, format_uuid},
+        gpt::{FilesystemType, Partition, format_uuid},
         path::Path,
     },
     memory::frame_allocator::init_frame_allocator,
@@ -319,6 +320,75 @@ extern "C" fn boot_load_thread(arg: *mut u8) -> ! {
     kthread_exit(0)
 }
 
+/// Pick the partition to mount as root, or `None` to fall back to memfs.
+///
+/// `root=UUID=<guid>` selects by partition GUID. An installed disk and the
+/// live image the machine booted from carry the same GUID, so a match on a
+/// real disk wins over the ramdisk; `root=live` forces the ramdisk. Nothing
+/// here is positional: a UUID that matches nothing mounts nothing, rather than
+/// falling back to whichever partition happened to enumerate first.
+fn select_root_partition(partitions: &[Partition], root: Option<&str>) -> Option<usize> {
+    let Some(root) = root.map(str::trim) else {
+        println!("Empty cmdline, using memfs as root.");
+        return None;
+    };
+
+    let is_live = |p: &Partition| p.device_id == RAMDISK_DEVICE_ID;
+
+    if root == "live" {
+        let found = partitions.iter().position(is_live);
+        if found.is_none() {
+            log!("root=live, but no live root image was loaded");
+        }
+        return found;
+    }
+
+    let candidates = || -> alloc::vec::Vec<usize> {
+        match root.split_once('=') {
+            Some(("UUID", value)) => partitions
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| format_uuid(&p.unique_partition_guid).eq_ignore_ascii_case(value))
+                .map(|(i, _)| i)
+                .collect(),
+            _ => {
+                log!("Unsupported root {root:?}, only UUID= and live are supported");
+                alloc::vec::Vec::new()
+            }
+        }
+    }();
+
+    // An installed disk wins over the live image that booted it.
+    let chosen = candidates
+        .iter()
+        .copied()
+        .find(|&i| !is_live(&partitions[i]))
+        .or_else(|| candidates.first().copied());
+
+    match chosen {
+        Some(i) => log!(
+            "Root partition: {} on device {}",
+            root,
+            partitions[i].device_id
+        ),
+        None => {
+            log!("No partition matches {root}. Partitions seen:");
+            for (i, p) in partitions.iter().enumerate() {
+                log!(
+                    "  [{i}] device {} index {} guid {} fs {:?} name {:?}",
+                    p.device_id,
+                    p.index,
+                    format_uuid(&p.unique_partition_guid),
+                    p.filesystem,
+                    p.name
+                );
+            }
+        }
+    }
+
+    chosen
+}
+
 pub fn mount_system_fs() -> ! {
     log!("Starting mountfs thread");
     let partitions = match fs::api::list_partitions() {
@@ -330,35 +400,10 @@ pub fn mount_system_fs() -> ! {
 
     let cmdline = ParsedCmdline::parse_str(boot_info().cmdline);
 
-    let mut part_idx = 0;
-
-    if cmdline.root.is_none() {
-        println!("Empty cmdline, using memfs as root.");
-    } else {
-        let mut keyval = cmdline.root.as_ref().unwrap().trim().split("=");
-        let root_type = keyval.next();
-        let root_value = keyval.next();
-
-        if let Some(root_type) = root_type
-            && let Some(root_value) = root_value
-        {
-            if root_type == "UUID" {
-                for (i, part) in partitions.iter().enumerate() {
-                    if format_uuid(&part.unique_partition_guid).eq_ignore_ascii_case(root_value) {
-                        part_idx = i;
-                        log!("Found root partition with uuid {}", root_value);
-                        break;
-                    }
-                }
-            } else {
-                log!("Unsupported root type, only UUID is supported");
-            }
-        }
-    }
+    let part_idx = select_root_partition(&partitions, cmdline.root.as_deref());
 
     let root = Path::parse("/").unwrap();
-    if !partitions.is_empty() && cmdline.root.is_some() {
-        let part = &partitions[part_idx];
+    if let Some(part) = part_idx.map(|i| &partitions[i]) {
         log!("Partition name {:?}", part.name);
 
         log!("Mounting root filesystem (EFS)");

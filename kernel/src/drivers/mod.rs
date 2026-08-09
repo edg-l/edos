@@ -78,6 +78,7 @@ pub mod keyboard;
 pub mod mouse;
 pub mod msi;
 pub mod pci;
+pub mod ramdisk;
 pub mod random;
 pub mod rtc;
 pub mod tty;
@@ -90,6 +91,7 @@ pub fn init_drivers() {
     unsafe { fpu::init_fpu() };
     pci::init(); // pci init is blocking
     ahci::init(); // must be after pci
+    ramdisk::init(); // must be before fs::init scans for partitions
     usb::init(); // must be after pci
     e1000e::init(); // must be after pci
     hda::init(); // must be after pci

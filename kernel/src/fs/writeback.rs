@@ -2,11 +2,15 @@
 //!
 //! Spawned once during boot after AHCI drivers are initialized. Loops forever:
 //!   - Waits up to 5 seconds on `writeback_wq` for a kick or periodic tick.
-//!   - On wake (or timeout), increments `flush_requested` to treat a timer
-//!     expiry as an implicit request, then checks whether there is work to do.
-//!   - Calls `flush_dirty_once()` to write all dirty pages in one pass.
-//!   - Also calls `flush_dirty_inodes()` to flush dirty MAP_SHARED inode pages.
-//!   - Records the completed request number and wakes `sync_done_wq`.
+//!   - A timer expiry runs an unforced pass, which respects `dirty_expire` and
+//!     leaves recently-dirtied pages alone.
+//!   - A kick (`sync`, `fsync`, `flush_device`) runs a forced pass that writes
+//!     every dirty page, then publishes the request number and wakes waiters.
+//!
+//! The two kinds of pass are kept strictly apart. `flush_requested` /
+//! `flush_completed` count only kicks, so an unforced periodic pass can never
+//! satisfy a caller waiting for durability: that caller would go on to drop
+//! pages the pass had skipped.
 
 use core::{sync::atomic::Ordering, time::Duration};
 
@@ -14,6 +18,46 @@ use crate::{
     fs::{block_page_cache::BlockPageCache, vfs::flush_dirty_inodes},
     log, log_debug,
 };
+
+/// Run one pass and account for it. Returns bytes written.
+///
+/// Three steps, because the two caches feed each other in one direction only:
+/// flushing a file page writes *through* the block page cache, so it creates
+/// block-cache dirt, while a block flush creates nothing.
+///
+///   1. Drain the block cache. This also frees shard capacity, without which
+///      step 2 gets nothing but detached pages and makes no progress.
+///   2. Flush file pages from the inode page cache and MAP_SHARED mappings.
+///   3. Drain the block cache again, for what step 2 just dirtied.
+///
+/// Skipping step 3 is what makes a `sync` return with the caller's last write
+/// still in memory: the size lands (it is written synchronously) but the data
+/// and the metadata the flush allocated do not.
+fn run_pass(cache: &BlockPageCache, force: bool) -> u64 {
+    let mut bytes = flush_blocks(cache, force);
+    flush_dirty_inodes();
+    bytes += flush_blocks(cache, force);
+
+    cache.stats.writeback_runs.fetch_add(1, Ordering::Relaxed);
+    cache
+        .stats
+        .writeback_bytes
+        .fetch_add(bytes, Ordering::Relaxed);
+    if bytes > 0 {
+        log_debug!("writeback: flushed {} bytes", bytes);
+    }
+    bytes
+}
+
+fn flush_blocks(cache: &BlockPageCache, force: bool) -> u64 {
+    match cache.flush_dirty_once(force) {
+        Ok(b) => b,
+        Err(e) => {
+            log!("writeback: flush error {:?}", e);
+            0
+        }
+    }
+}
 
 pub fn writeback_thread() -> ! {
     loop {
@@ -32,67 +76,19 @@ pub fn writeback_thread() -> ! {
                 Some(Duration::from_secs(5)),
             );
 
-            // Re-check: if still req == done, this was a periodic timer wake.
-            // Use force=false to respect dirty_expire. If someone kicked while
-            // we slept, force=true to honor sync/fsync semantics.
-            let new_req = cache.flush_requested.load(Ordering::Acquire);
-            let forced = new_req != done;
-            if !forced {
-                // Periodic timer: bump requested so we run one pass.
-                cache.flush_requested.fetch_add(1, Ordering::Release);
+            // A kick arrived while we slept: let the next iteration serve it as
+            // a forced pass rather than answering it with this unforced one.
+            if cache.flush_requested.load(Ordering::Acquire) != done {
+                continue;
             }
 
-            let bytes = match cache.flush_dirty_once(forced) {
-                Ok(b) => b,
-                Err(e) => {
-                    log!("writeback: flush error {:?}", e);
-                    0
-                }
-            };
-
-            // Second pass: flush dirty pages from MAP_SHARED file-backed mappings.
-            flush_dirty_inodes();
-
-            cache.stats.writeback_runs.fetch_add(1, Ordering::Relaxed);
-            cache
-                .stats
-                .writeback_bytes
-                .fetch_add(bytes, Ordering::Relaxed);
-            if bytes > 0 {
-                log_debug!("writeback: flushed {} bytes", bytes);
-            }
-
-            let completed_req = cache.flush_requested.load(Ordering::Acquire);
-            cache
-                .flush_completed
-                .store(completed_req, Ordering::Release);
-            cache.sync_done_wq.wake_all();
+            run_pass(cache, false);
             continue;
         }
 
-        // Explicit kick (sync/fsync): force=true, flush everything.
-        let bytes = match cache.flush_dirty_once(true) {
-            Ok(b) => b,
-            Err(e) => {
-                log!("writeback: flush error {:?}", e);
-                0
-            }
-        };
-
-        // Second pass: flush dirty MAP_SHARED inode pages.
-        flush_dirty_inodes();
-
-        cache.stats.writeback_runs.fetch_add(1, Ordering::Relaxed);
-        cache
-            .stats
-            .writeback_bytes
-            .fetch_add(bytes, Ordering::Relaxed);
-
-        if bytes > 0 {
-            log_debug!("writeback: flushed {} bytes", bytes);
-        }
-
-        // Mark this request as completed and wake any sync_all() waiters.
+        // Explicit kick (sync/fsync/flush_device): write everything, then
+        // publish the request number so waiters can rely on it.
+        run_pass(cache, true);
         cache.flush_completed.store(req, Ordering::Release);
         cache.sync_done_wq.wake_all();
     }

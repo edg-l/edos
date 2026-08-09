@@ -99,8 +99,22 @@ impl Drop for TxHandle<'_> {
             "Journal.checkpoint_tracker",
             self.journal.checkpoint_tracker
         );
-        for &key in staged_blocks.keys() {
-            tracker.insert(key, active_seq);
+        for (&key, page) in staged_blocks.iter() {
+            // A clean page is already at its home location: the block cache
+            // had no room for it and wrote it through. There is nothing left
+            // to check point, and tracking it would pin the journal tail
+            // forever, because writeback only ever visits dirty pages.
+            if page.is_dirty() {
+                tracker.insert(key, active_seq);
+            }
         }
+        drop(tracker);
+
+        // Keep the active transaction inside what the ring can commit in one
+        // piece. Without this a long run of writes grows a single transaction
+        // past the ring, and it can then never commit: the ring cannot drain
+        // because writeback will not check point blocks of an uncommitted
+        // transaction.
+        self.journal.seal_if_full();
     }
 }

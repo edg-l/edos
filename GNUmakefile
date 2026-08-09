@@ -218,10 +218,11 @@ kernel: programs
 check: programs
 	$(MAKE) -C kernel check
 
-$(IMAGE_NAME).iso: limine/limine kernel
+$(IMAGE_NAME).iso: limine/limine kernel live-root.img
 	rm -rf iso_root
 	mkdir -p iso_root/boot
-	cp -v kernel/kernel iso_root/boot/
+	objcopy --strip-debug kernel/kernel iso_root/boot/kernel
+	cp -v live-root.img iso_root/boot/
 	mkdir -p iso_root/boot/limine
 	cp -v limine.conf iso_root/boot/limine/
 	mkdir -p iso_root/EFI/BOOT
@@ -253,7 +254,7 @@ $(IMAGE_NAME).hdd: limine/limine kernel
 clean:
 	$(MAKE) -C kernel clean
 	$(MAKE) -C programs clean
-	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
+	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd live-root.img
 
 .PHONY: distclean
 distclean: clean clean-sata
@@ -273,6 +274,32 @@ DISK_UUID := 12345678-1234-5678-9abc-123456789abc
 PARTITION_UUID := 87654321-4321-8765-cba9-987654321fed
 FILESYSTEM_SERIAL := 305419896
 FILESYSTEM_FILES := $(shell find filesystem -type f ! -name '*.rlib' ! -name '*.a' 2>/dev/null)
+
+# The live root carried inside the ISO as a Limine module: a complete GPT disk
+# image, so the kernel discovers it exactly like a real disk. Sized from the
+# populated tree rather than hard-coded, because it is resident in RAM for the
+# whole boot. Depends on the phony `programs` so a newly added binary cannot be
+# missed by the parse-time FILESYSTEM_FILES snapshot; the ISO rebuilds on every
+# `make` anyway.
+live-root.img: kernel limine/limine $(FILESYSTEM_FILES) tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
+	mkdir -p filesystem/boot
+	# Stripped: this copy is only ever loaded, never symbolized. Debug info
+	# stays in kernel/kernel, which is what addr2line reads. 40 MB -> 2.5 MB,
+	# which is most of the ISO and most of an install's write volume.
+	objcopy --strip-debug kernel/kernel filesystem/boot/kernel
+	cp limine/BOOTX64.EFI filesystem/boot/BOOTX64.EFI
+	@set -e; \
+	used=$$(du -sb filesystem | cut -f1); \
+	size=$$(( used * 14 / 10 )); \
+	min=$$(( 64 * 1024 * 1024 )); \
+	if [ $$size -lt $$min ]; then size=$$min; fi; \
+	size=$$(( (size + 1048575) / 1048576 * 1048576 )); \
+	echo "live-root.img: filesystem/ is $$(( used / 1048576 )) MiB, image $$(( size / 1048576 )) MiB"; \
+	rm -f live-root.img; \
+	qemu-img create -f raw live-root.img $$size >/dev/null
+	sgdisk live-root.img -n 1:2048 -t 1:0700 -c 1:"EDOS_DATA" --partition-guid=1:$(PARTITION_UUID)
+	cargo build --release --manifest-path tools/efs-mkfs/Cargo.toml
+	tools/efs-mkfs/target/release/efs-mkfs --partition-offset 1048576 --populate filesystem/ --label EDOS live-root.img
 
 sata-disk.img: $(FILESYSTEM_FILES) tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
 	qemu-img create -f raw sata-disk.raw 5G
@@ -297,7 +324,7 @@ clean-sata:
 # Listed one per directory rather than brace-expanded: make runs recipes under
 # /bin/sh, which is dash on Debian, and dash does not do brace expansion. It
 # silently creates a single directory with the braces in its name instead.
-FILESYSTEM_DIRS := bin dev home lib var mnt opt root sys tmp
+FILESYSTEM_DIRS := bin boot dev home lib var mnt opt root sys tmp
 
 .PHONY: filesystem
 filesystem:

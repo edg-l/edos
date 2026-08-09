@@ -5,7 +5,10 @@ use thiserror::Error;
 
 use crate::thread::scheduler::current_thread;
 use crate::{
-    drivers::ahci::{AhciError, api::list_devices},
+    drivers::{
+        ahci::{AhciError, api::list_devices},
+        block_io,
+    },
     fs::{
         efs::EfsDriver,
         fat32::Fatfs,
@@ -73,6 +76,10 @@ pub enum Error {
     Corrupted,
     #[error("unsupported op")]
     Unsupported,
+    #[error("device or resource busy")]
+    Busy,
+    #[error("invalid argument")]
+    InvalidArgument,
     #[error("filesystem thread answered a request with the wrong reply")]
     ProtocolMismatch,
 }
@@ -441,12 +448,59 @@ pub(super) enum FsRequest {
     RegisterPartition {
         partition: Partition,
     },
+    // Re-read one device's partition table, e.g. after `edos-install` wrote a
+    // new one through /dev/sda.
+    RescanPartitions {
+        device_id: u64,
+    },
 }
 
 #[derive(Debug)]
 pub(super) enum FsResponse {
     Partitions(Vec<Partition>),
     Ok(Result<(), Error>),
+    Count(Result<usize, Error>),
+}
+
+/// Read one block device's partition table. GPT first, MBR as a fallback, an
+/// empty list when neither parses.
+///
+/// Boot-time discovery and `RescanPartitions` both go through here, so a disk
+/// partitioned by `edos-install` is described exactly like one found at boot.
+fn scan_device(device_id: u64) -> Vec<Partition> {
+    // Skip CD/DVD (ATAPI) devices. We have no ISO9660 filesystem driver and
+    // the first ATAPI READ on a freshly-initialized device is ~600ms under
+    // QEMU's emulated media-ready latency. When CD-ROM support lands, mount it
+    // explicitly via the mount syscall — detect_filesystem still handles ATAPI
+    // correctly.
+    if crate::drivers::ahci::is_atapi(device_id) {
+        log!("Skipping ATAPI device {}", device_id);
+        return Vec::new();
+    }
+
+    match parse_gpt(device_id) {
+        Ok(found) => {
+            log!("GPT found on device {}", device_id);
+            print_partitions(&found);
+            found
+        }
+        Err(gpt_err) => {
+            log!("GPT parsing failed on device {device_id}: {gpt_err}, trying MBR");
+            match parse_mbr(device_id) {
+                Ok(found) => {
+                    log!("MBR found on device {}", device_id);
+                    crate::fs::mbr::print_partitions(&found);
+                    found
+                }
+                Err(mbr_err) => {
+                    log!(
+                        "Both GPT and MBR parsing failed on device {device_id} - GPT: {gpt_err}, MBR: {mbr_err}"
+                    );
+                    Vec::new()
+                }
+            }
+        }
+    }
 }
 
 pub extern "C" fn fs_main_thread() -> ! {
@@ -454,48 +508,24 @@ pub extern "C" fn fs_main_thread() -> ! {
     let thread = current_thread().unwrap();
     thread.set_priority(IO_PRIORITY);
 
-    let devices = list_devices();
+    // AHCI publishes its ports into the block-io registry at the end of its
+    // probe, and `list_devices` blocks until that happens. Waiting here keeps
+    // boot-time discovery deterministic; the ids themselves come from the
+    // registry, which also holds the live-root ramdisk and, later, USB storage.
+    let _ = list_devices();
     log!("Listed devices");
 
     let requests = FS_REQUESTS.call_once(|| Arc::new(Mailbox::with_capacity(16)));
 
     let mut partitions: Vec<Partition> = Vec::new();
 
-    for device in &devices {
-        // Skip CD/DVD (ATAPI) devices. We have no ISO9660 filesystem
-        // driver and the first ATAPI READ on a freshly-initialized
-        // device is ~600ms under QEMU's emulated media-ready latency.
-        // When CD-ROM support lands, mount it explicitly via the mount
-        // syscall — detect_filesystem still handles ATAPI correctly.
-        if crate::drivers::ahci::is_atapi(device.id) {
-            log!("Skipping ATAPI device {} at boot", device.id);
-            continue;
-        }
-        match parse_gpt(device.id) {
-            Ok(found_partitions) => {
-                log!("GPT found on device {}", device.id);
-                print_partitions(&found_partitions);
-                partitions.extend(found_partitions);
-            }
-            Err(gpt_err) => {
-                log!("GPT parsing failed: {}, trying MBR", gpt_err);
-                match parse_mbr(device.id) {
-                    Ok(found_partitions) => {
-                        log!("MBR found on device {}", device.id);
-                        crate::fs::mbr::print_partitions(&found_partitions);
-                        partitions.extend(found_partitions);
-                    }
-                    Err(mbr_err) => {
-                        log!(
-                            "Both GPT and MBR parsing failed - GPT: {}, MBR: {}",
-                            gpt_err,
-                            mbr_err
-                        );
-                    }
-                }
-            }
-        }
+    for device_id in block_io::list() {
+        partitions.extend(scan_device(device_id));
     }
+
+    // Raw device nodes, so a disk with no partition table is still reachable
+    // from userspace (that is what `edos-install` starts from).
+    devfs::block::register_all();
 
     // Main loop: handle management requests
     loop {
@@ -506,13 +536,49 @@ pub extern "C" fn fs_main_thread() -> ! {
                 req.reply(FsResponse::Partitions(partitions.clone()));
             }
             FsRequest::RegisterPartition { partition } => {
-                log!(
-                    "fs: registered partition: {} (device {})",
-                    partition.name,
-                    partition.device_id
-                );
-                partitions.push(partition);
+                // Idempotent: a device registered in block_io just before the
+                // boot scan ran can be described by both paths.
+                let known = partitions
+                    .iter()
+                    .any(|p| p.device_id == partition.device_id && p.index == partition.index);
+                if known {
+                    log!(
+                        "fs: partition {} (device {}) already known",
+                        partition.name,
+                        partition.device_id
+                    );
+                } else {
+                    log!(
+                        "fs: registered partition: {} (device {})",
+                        partition.name,
+                        partition.device_id
+                    );
+                    partitions.push(partition);
+                }
+                // The device behind it appeared after boot, so it has no node yet.
+                devfs::block::register_all();
                 req.reply(FsResponse::Ok(Ok(())));
+            }
+            FsRequest::RescanPartitions { device_id } => {
+                let result = if vfs::list_mounts()
+                    .iter()
+                    .any(|m| m.device_id as u64 == device_id && m.filesystem.is_device_backed())
+                {
+                    log!("fs: refusing to rescan device {device_id}, it backs a mount");
+                    Err(Error::Busy)
+                } else {
+                    // Drop cached blocks first: the caller wrote this device
+                    // through /dev/sd*, and anything still cached from the
+                    // previous table would be read back by the next mount.
+                    block_page_cache::BlockPageCache::global().invalidate_device(device_id);
+                    partitions.retain(|p| p.device_id != device_id);
+                    let found = scan_device(device_id);
+                    let count = found.len();
+                    partitions.extend(found);
+                    log!("fs: rescanned device {device_id}, {count} partition(s)");
+                    Ok(count)
+                };
+                req.reply(FsResponse::Count(result));
             }
             FsRequest::Mount {
                 device_id,

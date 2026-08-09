@@ -966,6 +966,8 @@ pub enum Errno {
     EAFNOSUPPORT,
     /// Seek on a descriptor that has no file offset (pipe, socket, tty).
     ESPIPE,
+    /// Device or resource is in use, e.g. a disk that backs a live mount.
+    EBUSY,
     /// Placeholder for unknown or unmapped kernel error codes.
     UNKNOWN,
 }
@@ -982,6 +984,8 @@ impl From<FsError> for Errno {
             FsError::InvalidFs => Errno::EINVAL,
             FsError::Corrupted => Errno::EIO,
             FsError::Unsupported => Errno::EIO,
+            FsError::Busy => Errno::EBUSY,
+            FsError::InvalidArgument => Errno::EINVAL,
             FsError::ProtocolMismatch => Errno::EIO,
         }
     }

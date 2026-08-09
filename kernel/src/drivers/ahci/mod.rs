@@ -193,6 +193,8 @@ pub extern "C" fn ahci_driver_main() -> ! {
                     0
                 };
 
+                arc.set_sector_count(device_info.sectors);
+
                 // Allocate per-slot DMA pools and command tables.
                 if let Err(e) = arc.init_io_pools(ncq_depth, device_info.supports_fua) {
                     log!("Failed to init I/O pools for port {}: {:?}", port_idx, e);

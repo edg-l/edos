@@ -108,6 +108,20 @@ pub enum FilesystemType {
     Unknown,
 }
 
+impl FilesystemType {
+    /// True for filesystems that live on a block device, so `device_id` on a
+    /// mount actually names one. Memfs, devfs and procfs all mount with
+    /// device 0 and would otherwise look like they occupy the first disk.
+    pub fn is_device_backed(&self) -> bool {
+        match self {
+            Self::Fat12 | Self::Fat16 | Self::Fat32 | Self::Efs | Self::Ntfs | Self::Iso9660 => {
+                true
+            }
+            Self::Memfs | Self::Devfs | Self::Procfs | Self::Unknown => false,
+        }
+    }
+}
+
 impl GptHeader {
     /// Check if the GPT signature is valid
     pub fn is_valid(&self) -> bool {

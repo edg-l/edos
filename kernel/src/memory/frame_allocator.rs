@@ -68,6 +68,19 @@ pub fn init_frame_allocator(memory_regions: &'static MemmapResponse) {
     FRAME_ALLOCATOR.call_once(|| IrqSpinlock::new(allocator));
 }
 
+/// True when `frame` can never be handed out: either it is already allocated,
+/// or it falls outside the range the bitmap covers.
+///
+/// Used to assert that memory the kernel borrows from the bootloader (Limine
+/// modules, which live in bootloader-reclaimable regions) is not also in the
+/// allocator's free pool.
+pub fn is_frame_reserved(frame: PhysFrame) -> bool {
+    let alloc = frame_allocator();
+    alloc
+        .frame_to_index(frame)
+        .is_none_or(|index| alloc.is_frame_allocated(index))
+}
+
 /// Find suitable memory for bitmap storage
 fn find_bitmap_storage(
     memory_regions: &MemmapResponse,
