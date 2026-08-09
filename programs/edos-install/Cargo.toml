@@ -1,0 +1,9 @@
+[package]
+name = "edos-install"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+edos_lib = { path = "../edos_lib" }
+efs-common = { path = "../../libs/efs-common" }
+efs-mkfs-core = { path = "../../tools/efs-mkfs" }

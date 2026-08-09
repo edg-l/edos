@@ -1,7 +1,11 @@
 [package]
-name = "efs-mkfs"
+name = "efs-mkfs-core"
 version = "0.1.0"
 edition = "2024"
+
+[lib]
+name = "efs_mkfs"
+path = "src/lib.rs"
 
 [[bin]]
 name = "efs-mkfs"
@@ -9,4 +13,3 @@ path = "src/main.rs"
 
 [dependencies]
 efs-common = { path = "../../libs/efs-common" }
-uuid = { version = "1", features = ["v4"] }

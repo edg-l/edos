@@ -8,7 +8,7 @@ use efs_common::{
     JournalSuperblock, MAX_INLINE_EXTENTS, S_IFDIR, checksum_block_group_desc, checksum_inode,
     checksum_superblock, journal_sb_checksum,
 };
-use uuid::Uuid;
+use crate::random::uuid_v4;
 
 use crate::alloc::Allocator;
 use crate::disk::{write_block, write_inode, zero_blocks};
@@ -247,7 +247,7 @@ pub fn format(
     // ---- Build the superblock ----
     let (now_sec, now_nsec) = now_timestamp();
     let _ = now_nsec;
-    let uuid = Uuid::new_v4();
+    let uuid = uuid_v4();
 
     let mut volume_name = [0u8; 64];
     if let Some(lbl) = label {
@@ -277,7 +277,7 @@ pub fn format(
         compatible_features: 0,
         incompatible_features: INCOMPAT_JOURNAL,
         read_only_features: 0,
-        uuid: *uuid.as_bytes(),
+        uuid,
         volume_name,
         mount_time: 0,
         write_time: now_sec,

@@ -72,6 +72,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "edos-install"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+ "efs-common",
+ "efs-mkfs-core",
+]
+
+[[package]]
 name = "edos-sh"
 version = "0.1.0"
 dependencies = [
@@ -119,6 +128,24 @@ version = "0.1.0"
 dependencies = [
  "edos_lib",
  "noto-sans-mono-bitmap",
+]
+
+[[package]]
+name = "efs-common"
+version = "0.1.0"
+
+[[package]]
+name = "efs-mkfs"
+version = "0.1.0"
+dependencies = [
+ "efs-mkfs-core",
+]
+
+[[package]]
+name = "efs-mkfs-core"
+version = "0.1.0"
+dependencies = [
+ "efs-common",
 ]
 
 [[package]]
