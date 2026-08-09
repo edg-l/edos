@@ -662,6 +662,99 @@ pub fn sys_truncate(path_ptr: *const u8, path_len: usize, size: u64) -> i64 {
     }
 }
 
+/// Create a symbolic link at `path` holding `target`. The target is stored
+/// verbatim, so a relative one resolves against the link's own directory and a
+/// dangling one is legal, as in POSIX.
+pub fn sys_symlink(
+    target_ptr: *const u8,
+    target_len: usize,
+    path_ptr: *const u8,
+    path_len: usize,
+) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if target_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+    if target_len == 0 || target_len > MAX_PATH_LEN {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let mut target_buf: PathBuf = [0u8; MAX_PATH_LEN];
+    if !unsafe { try_copy_from_user(target_buf.as_mut_ptr(), target_ptr, target_len) } {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+    let target = match core::str::from_utf8(&target_buf[..target_len]) {
+        Ok(s) => s,
+        Err(_) => {
+            info.lock().errno = Errno::EINVAL;
+            return -1;
+        }
+    };
+
+    let cwd = current_cwd(&info);
+    let path = match read_user_path_with_len(path_ptr, path_len, &cwd) {
+        Ok(p) => p,
+        Err(err) => {
+            info.lock().errno = err;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    match crate::fs::api::symlink(target, &path) {
+        Ok(()) => 0,
+        Err(err) => {
+            info.lock().errno = Errno::from(err);
+            -1
+        }
+    }
+}
+
+/// Copy the target of the symbolic link at `path` into `buf`, without a
+/// terminating NUL. Returns the number of bytes written, which is `buf_len`
+/// when the target was truncated, as in POSIX.
+pub fn sys_readlink(path_ptr: *const u8, path_len: usize, buf: *mut u8, buf_len: usize) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if buf.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+
+    let cwd = current_cwd(&info);
+    let path = match read_user_path_with_len(path_ptr, path_len, &cwd) {
+        Ok(p) => p,
+        Err(err) => {
+            info.lock().errno = err;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    let target = match crate::fs::api::read_link(&path) {
+        Ok(t) => t,
+        Err(err) => {
+            info.lock().errno = Errno::from(err);
+            return -1;
+        }
+    };
+
+    let count = target.len().min(buf_len);
+    if count > 0 && !unsafe { try_copy_to_user(buf, target.as_ptr(), count) } {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+    count as i64
+}
+
 /// One half of `utimensat`'s `times` argument, as POSIX `struct timespec`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -677,8 +770,6 @@ const UTIME_OMIT: i64 = (1 << 30) - 2;
 
 /// `dirfd` naming the calling process's working directory.
 const AT_FDCWD: i64 = -100;
-/// Operate on the link itself rather than its target.
-const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 
 /// utimensat(dirfd, path, path_len, times, flags) -> 0 on success, -1 on error
 ///
@@ -703,8 +794,9 @@ pub fn sys_utimensat(
         info.lock().errno = Errno::EBADF;
         return -1;
     }
-    // EDOS has no symlinks, so following one is the same as not following it.
-    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
+    // `set_times` resolves through symbolic links, so a request not to follow
+    // one cannot be honoured and is refused rather than quietly ignored.
+    if flags != 0 {
         info.lock().errno = Errno::EINVAL;
         return -1;
     }

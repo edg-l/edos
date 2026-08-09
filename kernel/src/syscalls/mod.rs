@@ -37,8 +37,8 @@ use crate::{
     syscalls::{
         fs::{
             FstatEntry, UserTimespec, sys_access, sys_fstat, sys_list_mounts, sys_list_partitions,
-            sys_mkdir, sys_mount, sys_rmdir, sys_rmdir_all, sys_stat, sys_truncate, sys_unlink,
-            sys_utimensat,
+            sys_mkdir, sys_mount, sys_readlink, sys_rmdir, sys_rmdir_all, sys_stat, sys_symlink,
+            sys_truncate, sys_unlink, sys_utimensat,
         },
         io::{
             SelectFd, sys_chdir, sys_close, sys_getcwd, sys_getrandom, sys_list_dir, sys_open,
@@ -315,6 +315,8 @@ const SYS_LSEEK: u64 = 12;
 const SYS_FTRUNCATE: u64 = 13;
 const SYS_TRUNCATE: u64 = 76; // resize a file named by path
 const SYS_UTIMENSAT: u64 = 280; // stamp a file's access and modification times
+const SYS_SYMLINK: u64 = 88; // create a symbolic link
+const SYS_READLINK: u64 = 89; // read a symbolic link's target
 const SYS_FSYNC: u64 = 14;
 const SYS_RENAME: u64 = 82;
 const SYS_ISATTY: u64 = 15;
@@ -527,6 +529,20 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let path_len = ctx.rsi as usize;
             let size = ctx.rdx;
             ctx.rax = sys_truncate(path_ptr, path_len, size) as u64;
+        }
+        SYS_SYMLINK => {
+            let target_ptr = ctx.rdi as *const u8;
+            let target_len = ctx.rsi as usize;
+            let path_ptr = ctx.rdx as *const u8;
+            let path_len = ctx.r10 as usize;
+            ctx.rax = sys_symlink(target_ptr, target_len, path_ptr, path_len) as u64;
+        }
+        SYS_READLINK => {
+            let path_ptr = ctx.rdi as *const u8;
+            let path_len = ctx.rsi as usize;
+            let buf = ctx.rdx as *mut u8;
+            let buf_len = ctx.r10 as usize;
+            ctx.rax = sys_readlink(path_ptr, path_len, buf, buf_len) as u64;
         }
         SYS_UTIMENSAT => {
             let dirfd = ctx.rdi as i64;
@@ -998,6 +1014,8 @@ pub enum Errno {
     ESPIPE,
     /// Device or resource is in use, e.g. a disk that backs a live mount.
     EBUSY,
+    /// Too many symbolic links were traversed resolving one path.
+    ELOOP,
     /// Placeholder for unknown or unmapped kernel error codes.
     UNKNOWN,
 }
@@ -1016,6 +1034,7 @@ impl From<FsError> for Errno {
             FsError::Unsupported => Errno::EIO,
             FsError::Busy => Errno::EBUSY,
             FsError::InvalidArgument => Errno::EINVAL,
+            FsError::TooManyLinks => Errno::ELOOP,
             FsError::ProtocolMismatch => Errno::EIO,
         }
     }

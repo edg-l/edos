@@ -76,3 +76,10 @@
   `edos_lib::time::nanosleep` reaches it; pointing std at it needs an edos_rt
   release and a fork pin bump.
 
+
+- `make test AUDIODEV=none` intermittently reports "[sched-test] ping-pong count
+  mismatch: 499 != 500" and then TIMEOUT at 47/49; the immediate re-run of the
+  same ISO passed 49/49. One wakeup in the ping-pong pair is being lost or
+  arriving after the counter is read. Seen once on 2026-08-10; catch the failing
+  run's full log before chasing it, since the counter is the only evidence
+  printed today.

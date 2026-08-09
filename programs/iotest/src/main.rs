@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use edos_lib::io::{
     AT_FDCWD, F_OK, R_OK, UTIME_NOW, UTIME_OMIT, Timespec, W_OK, X_OK, access, pread, pwrite,
-    set_file_times, stat, truncate, utimensat,
+    readlink, set_file_times, stat, symlink, truncate, utimensat,
 };
 use edos_lib::process;
 use edos_lib::time;
@@ -444,6 +444,89 @@ fn test9(dir: &str) {
     );
 }
 
+// -----------------------------------------------------------------------
+// Test 10: symlink()/readlink() and resolution through a link
+// -----------------------------------------------------------------------
+fn test10(dir: &str) {
+    let target = format!("{}/iotest_t10_target.dat", dir);
+    let link = format!("{}/iotest_t10_link.dat", dir);
+    let dangling = format!("{}/iotest_t10_dangling.dat", dir);
+    let _ = fs::remove_file(&target);
+    let _ = fs::remove_file(&link);
+    let _ = fs::remove_file(&dangling);
+
+    fs::write(&target, b"symlinked").unwrap_or_else(|e| fail(10, &format!("write target: {}", e)));
+
+    if symlink(&target, &link) != 0 {
+        fail(10, "symlink failed");
+    }
+
+    // readlink reports the target verbatim, without a terminating NUL.
+    let mut buf = [0u8; 256];
+    let n = readlink(&link, &mut buf);
+    if n < 0 {
+        fail(10, "readlink failed");
+    }
+    if &buf[..n as usize] != target.as_bytes() {
+        fail(10, "readlink returned a different target");
+    }
+
+    // A short buffer truncates rather than failing.
+    let mut small = [0u8; 4];
+    if readlink(&link, &mut small) != 4 || &small != &target.as_bytes()[..4] {
+        fail(10, "readlink into a short buffer");
+    }
+
+    // Reads and stats through the link see the target's contents.
+    let via_link =
+        fs::read(&link).unwrap_or_else(|e| fail(10, &format!("read through link: {}", e)));
+    if via_link != b"symlinked" {
+        fail(10, "read through the link returned the wrong contents");
+    }
+    let st = stat(&link).unwrap_or_else(|| fail(10, "stat through the link"));
+    if st.size != 9 {
+        fail(10, "stat through the link reported the wrong size");
+    }
+
+    // A relative target resolves against the link's own directory.
+    let rel_link = format!("{}/iotest_t10_rel.dat", dir);
+    let _ = fs::remove_file(&rel_link);
+    if symlink("iotest_t10_target.dat", &rel_link) != 0 {
+        fail(10, "symlink with a relative target failed");
+    }
+    if fs::read(&rel_link).ok().as_deref() != Some(b"symlinked".as_slice()) {
+        fail(10, "relative target did not resolve against the link's directory");
+    }
+
+    // A dangling link is legal to create and readable, but not to open.
+    if symlink("/iotest_t10_nowhere", &dangling) != 0 {
+        fail(10, "symlink to a nonexistent target was refused");
+    }
+    if readlink(&dangling, &mut buf) != "/iotest_t10_nowhere".len() as i64 {
+        fail(10, "readlink of a dangling link");
+    }
+    if fs::read(&dangling).is_ok() {
+        fail(10, "reading through a dangling link succeeded");
+    }
+
+    // readlink refuses a plain file, and unlinking a link leaves the target.
+    if readlink(&target, &mut buf) >= 0 {
+        fail(10, "readlink accepted a regular file");
+    }
+    fs::remove_file(&link).unwrap_or_else(|e| fail(10, &format!("unlink the link: {}", e)));
+    if !fs::metadata(&target).is_ok() {
+        fail(10, "unlinking the link removed its target");
+    }
+
+    let _ = fs::remove_file(&rel_link);
+    let _ = fs::remove_file(&dangling);
+    let _ = fs::remove_file(&target);
+    pass(
+        10,
+        "symlink/readlink: absolute, relative and dangling links resolve and unlink correctly",
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -458,6 +541,7 @@ fn main() {
     test7();
     test8(dir);
     test9(dir);
+    test10(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

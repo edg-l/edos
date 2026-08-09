@@ -949,6 +949,22 @@ pub fn create_file(op: &VfsOp) -> Result<(), Error> {
     result
 }
 
+pub fn symlink(op: &VfsOp, target: &str) -> Result<(), Error> {
+    let parent_inode = resolve_parent_inode(op);
+    let _guard = parent_inode
+        .as_ref()
+        .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
+    let result = op.fs.symlink(target, &op.relative);
+    if result.is_ok() {
+        dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
+    }
+    result
+}
+
+pub fn read_link(op: &VfsOp) -> Result<String, Error> {
+    op.fs.read_link(&op.relative)
+}
+
 pub fn create_dir(op: &VfsOp) -> Result<(), Error> {
     let parent_inode = resolve_parent_inode(op);
     let _guard = parent_inode
@@ -984,10 +1000,13 @@ pub fn remove_file(op: &VfsOp) -> Result<(), Error> {
     let _guard = parent_inode
         .as_ref()
         .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
+    // `op.inode` was resolved by following symbolic links, so on a link it is
+    // the target's inode. Unlinking the link must not orphan the target.
+    let is_symlink = op.fs.read_link(&op.relative).is_ok();
     let result = op.fs.remove_file(&op.relative);
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
-        if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0) {
+        if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0 && !is_symlink) {
             inode.mark_orphan();
         }
     }

@@ -101,8 +101,6 @@ pub const UTIME_OMIT: i64 = (1 << 30) - 2;
 
 /// `dirfd` naming the calling process's working directory.
 pub const AT_FDCWD: i64 = -100;
-/// Operate on the link itself rather than its target.
-pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 
 /// Set the access and modification times of `path`: `times[0]` is the access
 /// time and `times[1]` the modification time, and `None` stamps both with the
@@ -137,6 +135,37 @@ pub fn set_file_times(path: &str, atime_secs: i64, mtime_secs: i64) -> i64 {
         },
     ];
     utimensat(AT_FDCWD, path, Some(&times), 0)
+}
+
+/// Create a symbolic link at `path` holding `target`. The target is stored
+/// verbatim: a relative one resolves against the link's own directory, and a
+/// link to a path that does not exist is legal. Returns 0 on success and -1 on
+/// error.
+pub fn symlink(target: &str, path: &str) -> i64 {
+    unsafe {
+        sys::syscall4(
+            sys::SYS_SYMLINK,
+            target.as_ptr() as u64,
+            target.len() as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+        ) as i64
+    }
+}
+
+/// Read the target of the symbolic link at `path` into `buf`, without a
+/// terminating NUL. Returns the number of bytes written, which equals
+/// `buf.len()` when the target was truncated, or -1 on error.
+pub fn readlink(path: &str, buf: &mut [u8]) -> i64 {
+    unsafe {
+        sys::syscall4(
+            sys::SYS_READLINK,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        ) as i64
+    }
 }
 
 /// What `stat` reports about a file.

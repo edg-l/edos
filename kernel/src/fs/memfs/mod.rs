@@ -11,14 +11,18 @@
 //! have its data silently overwritten. This mirrors the v1 design and will
 //! be revisited if memfs gains a use case beyond /tmp.
 
-use alloc::{collections::btree_map::BTreeMap, string::String, vec::Vec};
+use alloc::{
+    collections::btree_map::BTreeMap,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use crate::{
     fs::{Error, FileSystem, memfs::node::Node, page_cache::PageCacheOps, path::Path},
     thread::rwlock::RwLock as BlockingRwLock,
 };
 
-use super::{FileKind, FileTime};
+use super::{FileKind, FileTime, MAX_SYMLINK_HOPS, splice_symlink};
 
 mod node;
 
@@ -36,27 +40,59 @@ impl MemfsInner {
         self.nodes.get_mut(&id).ok_or(Error::Corrupted)
     }
 
+    /// Resolve a path, following symbolic links including one named by the
+    /// last component.
     fn find_node(&self, path: &Path) -> Result<Option<u32>, Error> {
-        let mut current = self.nodes.get(&0).unwrap();
+        self.walk(path, true)
+    }
 
-        for component in path.components() {
-            let mut found = false;
-            for child in &current.childs {
-                let child_node = self.get_node(*child)?;
+    /// Resolve a path whose last component is left unfollowed, so a symbolic
+    /// link resolves to the link itself.
+    fn find_node_nofollow(&self, path: &Path) -> Result<Option<u32>, Error> {
+        self.walk(path, false)
+    }
 
-                if &child_node.file.name == component {
-                    current = child_node;
-                    found = true;
-                    break;
+    fn walk(&self, path: &Path, follow_final: bool) -> Result<Option<u32>, Error> {
+        let mut components: Vec<String> = path.components().to_vec();
+        let mut hops = 0u32;
+
+        'walk: loop {
+            let mut current = self.nodes.get(&0).unwrap();
+            let mut resolved: Vec<String> = Vec::new();
+
+            let mut index = 0;
+            while index < components.len() {
+                let mut found = None;
+                for child in &current.childs {
+                    let child_node = self.get_node(*child)?;
+                    if child_node.file.name == components[index] {
+                        found = Some(child_node);
+                        break;
+                    }
                 }
+                let Some(node) = found else {
+                    return Ok(None);
+                };
+
+                let is_last = index + 1 == components.len();
+                if node.file.kind == FileKind::Symlink && (!is_last || follow_final) {
+                    hops += 1;
+                    if hops > MAX_SYMLINK_HOPS {
+                        return Err(Error::TooManyLinks);
+                    }
+                    let target =
+                        core::str::from_utf8(&node.content).map_err(|_| Error::Corrupted)?;
+                    components = splice_symlink(&resolved, target, &components[index + 1..]);
+                    continue 'walk;
+                }
+
+                current = node;
+                resolved.push(components[index].clone());
+                index += 1;
             }
 
-            if !found {
-                return Ok(None);
-            }
+            return Ok(Some(current.id));
         }
-
-        Ok(Some(current.id))
     }
 
     fn get_all_child_ids(&self, id: u32) -> Result<Vec<u32>, Error> {
@@ -164,6 +200,53 @@ impl FileSystem for Memfs {
         } else {
             Err(Error::FileNotFound)
         }
+    }
+
+    fn symlink(&self, target: &str, path: &Path) -> Result<(), Error> {
+        if target.is_empty() {
+            return Err(Error::InvalidArgument);
+        }
+        let path = path.normalize();
+        let Some(parent) = path.parent() else {
+            return Err(Error::InvalidArgument);
+        };
+
+        let mut inner = self.inner.write();
+        let Some(parent_node_id) = inner.find_node(&parent)? else {
+            return Err(Error::FileNotFound);
+        };
+        if inner.get_node(parent_node_id)?.file.kind != FileKind::Directory {
+            return Err(Error::NotADir);
+        }
+        if inner.find_node_nofollow(&path)?.is_some() {
+            return Err(Error::InvalidArgument);
+        }
+
+        let current_id = inner.next_id;
+        let next_id = current_id.checked_add(1).ok_or(Error::IoError)?;
+        let mut node = Node::new(current_id, path.filename(), FileKind::Symlink);
+        node.content = target.as_bytes().to_vec();
+        node.file.size = target.len() as u64;
+
+        inner.get_node_mut(parent_node_id)?.childs.push(node.id);
+        inner.next_id = next_id;
+        inner.nodes.insert(node.id, node);
+        Ok(())
+    }
+
+    fn read_link(&self, path: &Path) -> Result<String, Error> {
+        let path = path.normalize();
+        let inner = self.inner.read();
+        let Some(node_id) = inner.find_node_nofollow(&path)? else {
+            return Err(Error::FileNotFound);
+        };
+        let node = inner.get_node(node_id)?;
+        if node.file.kind != FileKind::Symlink {
+            return Err(Error::InvalidArgument);
+        }
+        core::str::from_utf8(&node.content)
+            .map(ToString::to_string)
+            .map_err(|_| Error::Corrupted)
     }
 
     fn create_file(&self, path: &Path) -> Result<(), Error> {
@@ -312,7 +395,8 @@ impl FileSystem for Memfs {
                 if child.file.name == name {
                     idx = Some(i);
 
-                    if child.file.kind != FileKind::File {
+                    // Unlinking a symbolic link removes the link, never its target.
+                    if !matches!(child.file.kind, FileKind::File | FileKind::Symlink) {
                         return Err(Error::NotAFile);
                     }
                     break;

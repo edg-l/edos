@@ -1184,9 +1184,9 @@ doc/AUDIT.md, which has the file:line detail and the reasoning.
 
 The interface gaps that actually block programs:
 
-1. **`symlink`/`readlink`, `sigprocmask`, the `*at`
-   family, streaming `getdents`.** [audit] The remaining gaps from the
-   audit's table, none of which block a program that exists today.
+1. **`sigprocmask`, the `*at` family, streaming `getdents`.** [audit]
+   The remaining gaps from the audit's table, none of which block a
+   program that exists today.
 2. **No shutdown or reboot syscall**, so every stop is a power cut and
    the journal replays on the next boot. init is the natural owner now.
 

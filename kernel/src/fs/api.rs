@@ -1,7 +1,12 @@
 // Public api methods to send requests transparently
 
 use crate::thread::preempt::PreemptSpinlock;
-use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 
 use crate::{
     fs::{
@@ -124,6 +129,19 @@ pub fn write_bytes_owned(path: &Path, offset: usize, data: Vec<u8>) -> Result<u6
 pub fn create_file(path: &Path) -> Result<(), Error> {
     let op = vfs::resolve_mount(path).ok_or(Error::FileNotFound)?;
     vfs::create_file(&op)
+}
+
+/// Create a symbolic link at `path` holding `target` verbatim. The target is
+/// not resolved or validated: a dangling link is legal, as in POSIX.
+pub fn symlink(target: &str, path: &Path) -> Result<(), Error> {
+    let op = vfs::resolve_mount(path).ok_or(Error::FileNotFound)?;
+    vfs::symlink(&op, target)
+}
+
+/// Read the target of the symbolic link at `path` without following it.
+pub fn read_link(path: &Path) -> Result<String, Error> {
+    let op = vfs::resolve_mount(path).ok_or(Error::FileNotFound)?;
+    vfs::read_link(&op)
 }
 
 pub fn create_dir(path: &Path) -> Result<(), Error> {

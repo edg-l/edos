@@ -9,9 +9,10 @@ use alloc::vec::Vec;
 
 use efs_common::{
     DIR_ENTRY_HEADER_SIZE, EFS_ROOT_INO, EXTENT_MAGIC, EfsBlockGroupDesc, EfsDirEntryHeader,
-    EfsExtent, EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, FT_REG_FILE, INCOMPAT_JOURNAL,
-    INODE_DATA_AREA_SIZE, INODE_FLAG_INLINE_DATA, JOURNAL_MAGIC, JournalSuperblock, S_IFDIR,
-    S_IFMT, S_IFREG, checksum_inode, dir_entry_min_size, journal_sb_checksum,
+    EfsExtent, EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, FT_REG_FILE, FT_SYMLINK,
+    INCOMPAT_JOURNAL, INODE_DATA_AREA_SIZE, INODE_FLAG_INLINE_DATA, JOURNAL_MAGIC,
+    JournalSuperblock, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG, checksum_inode, dir_entry_min_size,
+    journal_sb_checksum,
 };
 
 mod extents;
@@ -74,7 +75,10 @@ fn block_write_fua(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result
     Ok(())
 }
 use super::path::Path;
-use super::{DateTime, Error, File, FileAttrs, FileKind, FileSystem, FileTime};
+use super::{
+    DateTime, Error, File, FileAttrs, FileKind, FileSystem, FileTime, MAX_SYMLINK_HOPS,
+    splice_symlink,
+};
 use crate::{
     debug::lock_order::{RANK_EFS_BITMAP, RANK_EFS_INODE_RMW, RANK_EFS_MUTABLE},
     log, ranked_lock,
@@ -620,22 +624,66 @@ impl EfsDriver {
     }
 
     /// Resolve a path to (inode_number, inode), avoiding a redundant read_inode after resolution.
+    /// Symbolic links are followed, including one named by the last component.
     fn resolve_path_inode(&self, path: &Path) -> Result<(u64, EfsInode), Error> {
-        if path.is_root() {
-            let inode = self.read_inode(EFS_ROOT_INO)?;
-            return Ok((EFS_ROOT_INO, inode));
-        }
-
-        let mut current_ino = EFS_ROOT_INO;
-        for component in path.components() {
-            match self.lookup_in_dir(current_ino, component.as_str())? {
-                Some((ino, _)) => current_ino = ino,
-                None => return Err(Error::FileNotFound),
-            }
-        }
-        let inode = self.read_inode(current_ino)?;
-        Ok((current_ino, inode))
+        self.resolve_path_walk(path, true)
     }
+
+    /// Resolve a path whose last component is left unfollowed, so a symbolic
+    /// link resolves to the link itself. Links in the leading components are
+    /// still followed.
+    fn resolve_path_inode_nofollow(&self, path: &Path) -> Result<(u64, EfsInode), Error> {
+        self.resolve_path_walk(path, false)
+    }
+
+    fn resolve_path_walk(&self, path: &Path, follow_final: bool) -> Result<(u64, EfsInode), Error> {
+        let mut components: Vec<String> = path.components().to_vec();
+        let mut hops = 0u32;
+
+        'walk: loop {
+            let mut current_ino = EFS_ROOT_INO;
+            let mut resolved: Vec<String> = Vec::new();
+
+            let mut index = 0;
+            while index < components.len() {
+                let ino = match self.lookup_in_dir(current_ino, components[index].as_str())? {
+                    Some((ino, _)) => ino,
+                    None => return Err(Error::FileNotFound),
+                };
+                let inode = self.read_inode(ino)?;
+                let is_last = index + 1 == components.len();
+
+                if inode.mode & S_IFMT == S_IFLNK && (!is_last || follow_final) {
+                    hops += 1;
+                    if hops > MAX_SYMLINK_HOPS {
+                        return Err(Error::TooManyLinks);
+                    }
+                    let target = symlink_target(&inode)?;
+                    components = splice_symlink(&resolved, &target, &components[index + 1..]);
+                    continue 'walk;
+                }
+
+                current_ino = ino;
+                resolved.push(components[index].clone());
+                index += 1;
+            }
+
+            let inode = self.read_inode(current_ino)?;
+            return Ok((current_ino, inode));
+        }
+    }
+}
+
+/// Read a symbolic link's target out of its inode. Targets are always stored
+/// inline, since `symlink` refuses one longer than the inode data area.
+fn symlink_target(inode: &EfsInode) -> Result<String, Error> {
+    let len = inode.size as usize;
+    if inode.flags & INODE_FLAG_INLINE_DATA == 0 || len > INODE_DATA_AREA_SIZE {
+        return Err(Error::Corrupted);
+    }
+    core::str::from_utf8(&inode.data_area[..len])
+        .map(ToString::to_string)
+        .map_err(|_| Error::Corrupted)
 }
 
 // ---- Write path: file data ----------------------------------------------------
@@ -1540,6 +1588,8 @@ fn inode_to_file(name: String, inode: &EfsInode) -> File {
         FileKind::Directory
     } else if inode.mode & S_IFMT == S_IFREG {
         FileKind::File
+    } else if inode.mode & S_IFMT == S_IFLNK {
+        FileKind::Symlink
     } else {
         FileKind::Special
     };
@@ -1774,10 +1824,10 @@ impl FileSystem for EfsDriver {
         let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
 
         let parent_ino = self.resolve_path(&parent)?;
-        let file_ino = self.resolve_path(&path)?;
-        let file_inode = self.read_inode(file_ino)?;
+        // Unlinking a symbolic link removes the link, never its target.
+        let (file_ino, file_inode) = self.resolve_path_inode_nofollow(&path)?;
 
-        if file_inode.mode & S_IFMT != S_IFREG {
+        if !matches!(file_inode.mode & S_IFMT, S_IFREG | S_IFLNK) {
             return Err(Error::NotAFile);
         }
 
@@ -1822,6 +1872,44 @@ impl FileSystem for EfsDriver {
                 Err(e)
             }
         }
+    }
+
+    fn symlink(&self, target: &str, path: &Path) -> Result<(), Error> {
+        if target.is_empty() || target.len() > INODE_DATA_AREA_SIZE {
+            return Err(Error::InvalidArgument);
+        }
+        let path = path.normalize();
+        let name = path
+            .last_component()
+            .ok_or(Error::InvalidArgument)?
+            .to_string();
+        let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
+
+        let parent_ino = self.resolve_path(&parent)?;
+        if self.read_inode(parent_ino)?.mode & S_IFMT != S_IFDIR {
+            return Err(Error::NotADir);
+        }
+        if self.lookup_in_dir(parent_ino, &name)?.is_some() {
+            return Err(Error::InvalidArgument);
+        }
+
+        let mut tx = self.journal.begin_tx();
+        match self.symlink_inner(parent_ino, &name, target, &mut tx) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                tx.abort();
+                Err(e)
+            }
+        }
+    }
+
+    fn read_link(&self, path: &Path) -> Result<String, Error> {
+        let path = path.normalize();
+        let (_ino, inode) = self.resolve_path_inode_nofollow(&path)?;
+        if inode.mode & S_IFMT != S_IFLNK {
+            return Err(Error::InvalidArgument);
+        }
+        symlink_target(&inode)
     }
 
     fn file_info(&self, path: &Path) -> Result<File, Error> {
@@ -1932,6 +2020,23 @@ impl FileSystem for EfsDriver {
 // ---- _inner helpers (called by FileSystem trait methods, take &mut TxHandle) ---
 
 impl EfsDriver {
+    fn symlink_inner(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        target: &str,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
+        let new_ino = self.alloc_inode(tx)?;
+        let mut inode = new_inode(S_IFLNK | 0o777, INODE_FLAG_INLINE_DATA);
+        inode.data_area[..target.len()].copy_from_slice(target.as_bytes());
+        inode.size = target.len() as u64;
+        inode.checksum = checksum_inode(&inode);
+        self.write_inode(new_ino, &inode, tx)?;
+        self.add_dir_entry(parent_ino, name, new_ino, FT_SYMLINK, tx)?;
+        Ok(())
+    }
+
     fn create_file_inner(
         &self,
         parent_ino: u64,

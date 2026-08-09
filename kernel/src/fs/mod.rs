@@ -1,5 +1,10 @@
 use crate::thread::preempt::PreemptSpinlock;
-use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 use spin::Once;
 use thiserror::Error;
 
@@ -81,6 +86,8 @@ pub enum Error {
     Busy,
     #[error("invalid argument")]
     InvalidArgument,
+    #[error("too many levels of symbolic links")]
+    TooManyLinks,
     #[error("filesystem thread answered a request with the wrong reply")]
     ProtocolMismatch,
 }
@@ -197,6 +204,30 @@ impl MmapRegion {
     }
 }
 
+/// Maximum symbolic links a single path resolution may traverse.
+pub const MAX_SYMLINK_HOPS: u32 = 8;
+
+/// Splice a symbolic link's target into the path being resolved. `prefix` is
+/// the components resolved before the link, `rest` the ones that followed it.
+/// An absolute target discards the prefix; `.` and `..` are folded lexically.
+pub fn splice_symlink(prefix: &[String], target: &str, rest: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        prefix.to_vec()
+    };
+    for component in target.split('/').chain(rest.iter().map(String::as_str)) {
+        match component {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            other => out.push(other.to_string()),
+        }
+    }
+    out
+}
+
 pub trait FileSystem {
     // Read-only operations (&self) -- can run concurrently via RwLock.
     fn list_files(&self, path: &Path) -> Result<Vec<File>, Error>;
@@ -248,6 +279,16 @@ pub trait FileSystem {
 
     fn rename(&self, _old_path: &Path, _new_path: &Path) -> Result<(), Error> {
         Err(Error::IoError)
+    }
+
+    /// Create a symbolic link at `path` holding `target` verbatim.
+    fn symlink(&self, _target: &str, _path: &Path) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+
+    /// Read the target of the symbolic link at `path` without following it.
+    fn read_link(&self, _path: &Path) -> Result<String, Error> {
+        Err(Error::Unsupported)
     }
 
     /// Stamp the access and modification times, in whole Unix seconds. `None`
@@ -323,7 +364,6 @@ pub struct StatFs {
 pub enum FileKind {
     File,
     Directory,
-    #[expect(unused)]
     Symlink,
     Special,
 }
