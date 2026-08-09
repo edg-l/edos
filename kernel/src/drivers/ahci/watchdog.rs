@@ -89,6 +89,28 @@ pub static WATCHDOG_FIRINGS: AtomicU64 = AtomicU64::new(0);
 /// Total number of port restarts triggered by the watchdog.
 pub static WATCHDOG_RESTARTS: AtomicU64 = AtomicU64::new(0);
 
+/// NCQ commands currently issued and not yet completed, across all ports.
+pub static NCQ_INFLIGHT: AtomicU64 = AtomicU64::new(0);
+
+/// High-water mark of [`NCQ_INFLIGHT`].
+///
+/// This is how you tell a path that submits one command at a time from one
+/// that fills the queue: a sequential read of many pages should drive this to
+/// the negotiated depth, and a peak of 1 means every command waited for the
+/// one before it.
+pub static NCQ_MAX_INFLIGHT: AtomicU64 = AtomicU64::new(0);
+
+/// Record one NCQ command becoming outstanding.
+pub fn ncq_inflight_inc() {
+    let now = NCQ_INFLIGHT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    NCQ_MAX_INFLIGHT.fetch_max(now, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Record one NCQ command completing.
+pub fn ncq_inflight_dec() {
+    NCQ_INFLIGHT.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+}
+
 pub extern "C" fn watchdog_entry() -> ! {
     loop {
         // Sweep at the tick, or faster when the timeout has been shortened

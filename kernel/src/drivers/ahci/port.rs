@@ -1249,6 +1249,7 @@ impl AhciPort {
         op.issue_time
             .store(HpetInstant::now().tick(), Ordering::Relaxed);
         op.issued.store(true, Ordering::Release);
+        crate::drivers::ahci::watchdog::ncq_inflight_inc();
 
         // Self-check: the drive may have completed between `issue_ncq_command`
         // and this store, and an IRQ may have fired during the
@@ -1352,6 +1353,7 @@ impl AhciPort {
         op.issue_time
             .store(HpetInstant::now().tick(), Ordering::Relaxed);
         op.issued.store(true, Ordering::Release);
+        crate::drivers::ahci::watchdog::ncq_inflight_inc();
         let sact = unsafe { ptr::read_volatile(&raw const (*self.port_regs).sact) };
         if sact & (1u32 << slot) == 0 || self.reset_generation.load(Ordering::Acquire) != start_gen
         {
@@ -1389,6 +1391,7 @@ impl AhciPort {
         {
             return; // already terminal (cancel raced and won)
         }
+        crate::drivers::ahci::watchdog::ncq_inflight_dec();
         let cur_gen = self.reset_generation.load(Ordering::Acquire);
         let result = if cur_gen != op.start_gen {
             Err(BlockError::Io)
