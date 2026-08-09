@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use edos_lib::io::{F_OK, R_OK, W_OK, X_OK, access, pread, pwrite};
+use edos_lib::io::{F_OK, R_OK, W_OK, X_OK, access, pread, pwrite, truncate};
 use edos_lib::process;
 use edos_lib::time;
 
@@ -318,6 +318,38 @@ fn test7() {
     );
 }
 
+// -----------------------------------------------------------------------
+// Test 8: path-based truncate() resizes and refuses what it cannot resize
+// -----------------------------------------------------------------------
+fn test8(dir: &str) {
+    let path = format!("{}/iotest_t8.dat", dir);
+    fs::write(&path, vec![0xCDu8; CHUNK]).unwrap_or_else(|e| fail(8, &format!("create: {}", e)));
+
+    for size in [100u64, 300, 0] {
+        if truncate(&path, size) != 0 {
+            fail(8, &format!("truncate to {} failed", size));
+        }
+        let got = fs::metadata(&path).unwrap_or_else(|e| fail(8, &format!("stat: {}", e)));
+        if got.len() != size {
+            fail(8, &format!("truncate to {} left {} bytes", size, got.len()));
+        }
+    }
+
+    if truncate(dir, 0) == 0 {
+        fail(8, "truncate resized a directory");
+    }
+    let missing = format!("{}/iotest_t8_missing.dat", dir);
+    if truncate(&missing, 0) == 0 {
+        fail(8, "truncate accepted a nonexistent path");
+    }
+
+    let _ = fs::remove_file(&path);
+    pass(
+        8,
+        "truncate: shrink, grow, empty, directory and missing refused",
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -330,6 +362,7 @@ fn main() {
     test5();
     test6(dir);
     test7();
+    test8(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

@@ -72,6 +72,20 @@ pub fn access(path: &str, mode: u32) -> i64 {
     }
 }
 
+/// Resize the file named by `path` to `size` bytes, extending it with zeros
+/// when it grows. Returns 0 on success and -1 on error; a directory is
+/// refused.
+pub fn truncate(path: &str, size: u64) -> i64 {
+    unsafe {
+        sys::syscall3(
+            sys::SYS_TRUNCATE,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            size,
+        ) as i64
+    }
+}
+
 /// Read from a file descriptor using a raw syscall.
 /// Returns bytes read, 0 for no data available, or negative for error/EOF.
 pub fn sys_read(fd: u64, buf: &mut [u8]) -> isize {

@@ -652,6 +652,47 @@ pub fn sys_access(path_ptr: *const u8, path_len: usize, mode: u32) -> i64 {
     0
 }
 
+/// truncate(path, path_len, size) -> 0 on success, -1 on error.
+///
+/// The path-based form of `ftruncate`, for the callers that have a name and no
+/// descriptor. A directory is refused rather than resized.
+pub fn sys_truncate(path_ptr: *const u8, path_len: usize, size: u64) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let cwd = current_cwd(&info);
+
+    let path = match read_user_path_with_len(path_ptr, path_len, &cwd) {
+        Ok(p) => p,
+        Err(err) => {
+            info.lock().errno = err;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    match file_info(&path) {
+        Ok(finfo) if finfo.kind == FileKind::Directory => {
+            info.lock().errno = Errno::EISDIR;
+            return -1;
+        }
+        Ok(_) => {}
+        Err(err) => {
+            info.lock().errno = Errno::from(err);
+            return -1;
+        }
+    }
+
+    match crate::fs::api::truncate(&path, size) {
+        Ok(()) => 0,
+        Err(err) => {
+            info.lock().errno = Errno::from(err);
+            -1
+        }
+    }
+}
+
 /// statfs(path, buf, buf_len) -> 0 on success, -1 on error
 #[repr(C)]
 #[derive(Clone, Copy)]
