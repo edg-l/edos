@@ -56,24 +56,30 @@ long run of contiguous blocks it owns exclusively (raw device reads, EFS file
 data). It costs where the blocks are small, scattered, and contended. Check
 which one a path is before reaching for it.
 
-## 2. Coalesce `write_bytes`, which is the install path
+## 2. The install path (done)
 
-`edos-install` on a blank 5 GB disk takes 4.3 s end to end, and two phases own
-almost all of it: formatting the root filesystem (1.6 s) and the final flush
-(2.3 s). Everything else — partitioning, the ESP, copying 78 files, the
-bootloader — is 0.2 s or less.
+`edos-install` on a blank 5 GB disk was 4.3 s: 1.6 s formatting the root
+filesystem, 2.3 s in the final flush, everything else under 0.2 s. Both of
+those go through `BlockPageCache::write_bytes`, which staged every page through
+the cache even when the write covered the page completely.
 
-Both of those go through `BlockPageCache::write_bytes`, which still walks a
-byte range one page at a time. It is the write-side twin of the `read_bytes`
-change that took raw sequential reads from 37 to 886 MiB/s, and the same
-argument applies: `/dev/sdX` writes are long runs of contiguous blocks with no
-other writer. `write_bytes` already skips the read for a full-page overwrite;
-what it does not do is issue one command per run.
+Sending a whole-page run straight to the device instead took raw sequential
+writes at 1 MiB from 44 to 280 MiB/s, dropped `detached_fallbacks` over the
+sweep from 12562 to zero, and took the install to **3.0 s** with the final
+flush at 1.0 s.
 
-`fsbench raw` is read-only on purpose, so measuring this first means adding a
-raw write sweep guarded to an unmounted device.
+Two things worth knowing from the measurement:
 
-## 3. Fault-around for file-backed mappings
+- The 64 KiB raw write reads *slower* afterwards (43 -> 32 MiB/s). That is the
+  old number having been inflated by write-back deferral: the call returned as
+  soon as the pages were dirty and the writeback thread paid later.
+  `writeback_bytes` over the sweep fell from 79 MB to 8 MB, which is the same
+  fact from the other side. The new number is what the write actually costs.
+- `root formatted` did not move (1.6 -> 1.7 s). Whatever `efs-mkfs` spends its
+  time on, it is not whole-page device writes. That is the next thing to look
+  at for the install, and it wants measuring before guessing.
+
+## 3. Fault-around for file-backed mappings## 3. Fault-around for file-backed mappings
 
 `mmap load 4MiB` faults in at 33 MiB/s against 1714 MiB/s for `read` of the
 same bytes. Roughly 50x, and the mechanism is one fault and one fill per 4 KiB
