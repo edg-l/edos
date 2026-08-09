@@ -20,23 +20,15 @@ import subprocess
 import sys
 import time
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VM = os.path.join(REPO, "scripts", "edos-vm")
-SERIAL = os.path.join(REPO, "run_log.txt")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from vmdrive import REPO, VM, boot, run, serial_mark, serial_tail, type_line, vm  # noqa: E402
+
 DISK = os.path.join(REPO, "fs-regression.img")
 # Distinct from the live root's GUID so the ramdisk stays the boot root.
 PART_GUID = "cccccccc-3333-3333-3333-333333333333"
 PART_OFFSET = 1048576
 PART_FIRST_LBA = 2048
 PART_LAST_LBA = 2097118
-
-
-def run(cmd, **kw):
-    return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
-
-
-def vm(*args):
-    return run([VM, *args])
 
 
 def build_disk(fat32):
@@ -62,29 +54,10 @@ def build_disk(fat32):
              "--label", "SCRATCH", DISK])
 
 
-def boot():
-    vm("start", "--disk", DISK)
-    time.sleep(26)
-    vm("click", "400", "300")
-    time.sleep(1)
-
-
-def type_line(text):
-    vm("type", text, "--enter")
-    time.sleep(3)
-
-
-def serial_tail(since):
-    # Read as bytes: `since` is a byte offset, and the log carries ANSI escapes
-    # and multi-byte sequences, so slicing a decoded string drops the tail.
-    with open(SERIAL, "rb") as f:
-        return f.read()[since:].decode("utf-8", errors="replace")
-
-
 def phase(fs_type, command):
     """Boot, mount the scratch partition, run one half of fstest."""
-    boot()
-    mark = os.path.getsize(SERIAL)
+    boot(DISK)
+    mark = serial_mark()
     type_line("mkdir /mnt/scratch")
     type_line(f"mount 0 0 /mnt/scratch {fs_type}")
     if "Failed to mount" in serial_tail(mark):

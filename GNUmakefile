@@ -157,6 +157,23 @@ test-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features sched-test"
 	$(call run_qemu_uefi,iso,1,-display none)
 
+# The same suite as `test`, against a null audio backend. `test` binds the
+# host's PipeWire session, which a bare SSH login does not have, so this is the
+# form that runs from a terminal with no desktop behind it.
+.PHONY: test-headless
+test-headless:
+	$(MAKE) test AUDIODEV=none
+
+# Storage regressions, both halves. `fs-regression` reboots between writing and
+# verifying, so it catches data that never reached the disk; `fsbench-run`
+# verifies every pattern it writes and reports throughput. Both drive a real
+# guest through scripts/edos-vm and need the ISO already built.
+.PHONY: storage-check
+storage-check: $(IMAGE_NAME).iso
+	scripts/fs-regression
+	scripts/fs-regression --fat32
+	scripts/fsbench-run
+
 
 .PHONY: run-kvm
 run-emu: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso sata-disk.img

@@ -1,0 +1,64 @@
+"""Shared helpers for scripts that drive the guest through `scripts/edos-vm`.
+
+Everything here assumes the guest constraints documented in
+`doc/vm-control.md`: the mouse is relative-only so a window must be clicked
+before it accepts keystrokes, and the serial log is a byte stream carrying ANSI
+escapes rather than text.
+"""
+
+import os
+import subprocess
+import time
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VM = os.path.join(REPO, "scripts", "edos-vm")
+SERIAL = os.path.join(REPO, "run_log.txt")
+
+# The desktop takes this long to reach a shell prompt on a warm host.
+BOOT_SECONDS = 26
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
+
+
+def vm(*args):
+    return run([VM, *args])
+
+
+def boot(disk=None):
+    """Boot the guest and give the terminal keyboard focus."""
+    vm("start", *(("--disk", disk) if disk else ()))
+    time.sleep(BOOT_SECONDS)
+    vm("click", "400", "300")
+    time.sleep(1)
+
+
+def type_line(text, settle=3):
+    vm("type", text, "--enter")
+    time.sleep(settle)
+
+
+def serial_mark():
+    return os.path.getsize(SERIAL)
+
+
+def serial_tail(since):
+    # Read as bytes: `since` is a byte offset, and the log carries ANSI escapes
+    # and multi-byte sequences, so slicing a decoded string drops the tail.
+    with open(SERIAL, "rb") as f:
+        return f.read()[since:].decode("utf-8", errors="replace")
+
+
+def wait_for(since, needle, timeout, poll=3):
+    """Wait for `needle` to appear in the serial log after `since`.
+
+    Returns the log tail once it appears, or None on timeout.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        out = serial_tail(since)
+        if needle in out:
+            return out
+        time.sleep(poll)
+    return None

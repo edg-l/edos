@@ -116,12 +116,6 @@ commit, a FUA commit block and a drive cache flush per `fsync` — but real
 hardware with FUA loses two to three times, not eight. Worth attributing across
 those three before deciding there is nothing to take.
 
-## 6. Tooling
-
-`scripts/fs-regression` still has to be run by hand after `make all`. Wire it
-into a make target alongside `fsbench`, so a durability regression and a
-throughput regression are caught by the same command.
-
 ## Correctness items still open
 
 Not performance, but found by this work and unfixed.
@@ -152,6 +146,10 @@ Not performance, but found by this work and unfixed.
 Kept as an index; the mechanism is in the post-mortem or the spec named on each
 line.
 
+- **Both storage regressions now run from one command.** `make storage-check`
+  drives `scripts/fs-regression` (EFS then FAT32) and `scripts/fsbench-run`,
+  which share their VM-driving helpers in `scripts/vmdrive.py`
+  (`doc/vm-control.md`).
 - **`fsync` could panic the kernel** — a wait predicate that took a
   `BlockingMutex`, evaluated inside `without_interrupts` (`8992a30`,
   `doc/bugs/2026-08-09-fsync-panicked-on-a-wait-predicate.md`).

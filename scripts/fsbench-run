@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Throughput regression: boot the guest, run `fsbench`, report the result.
+
+`fsbench` verifies every pattern it writes, so a run that finishes without a
+failure line is both a throughput measurement and a write-path check. `-l`
+mirrors the report to /dev/klog, which is how a headless run gets read: the
+guest terminal holds far fewer lines than the report prints.
+
+    scripts/fsbench-run              # the suite on /var (EFS)
+    scripts/fsbench-run /tmp         # same, on the memory filesystem
+    scripts/fsbench-run --mode raw /dev/sda
+
+Exits 0 when the suite reports no failures, 1 otherwise.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from vmdrive import REPO, VM, boot, serial_mark, serial_tail, type_line, vm, wait_for  # noqa: E402
+
+# A default-budget suite is around 25 s of work; allow for a loaded host.
+SUITE_TIMEOUT = 300
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("path", nargs="?", default="/var", help="filesystem or device to measure")
+    ap.add_argument("--mode", default="all", help="fsbench mode: all, write, read, raw")
+    ap.add_argument("--quick", action="store_true", help="200 ms per test instead of 700")
+    args = ap.parse_args()
+
+    iso = os.path.join(REPO, "edos-x86_64.iso")
+    if not os.path.exists(iso):
+        sys.exit("missing edos-x86_64.iso; run `make all` first")
+
+    subprocess.run([VM, "stop"], capture_output=True)
+    boot()
+
+    mark = serial_mark()
+    cmd = f"fsbench {args.mode} {args.path} -l" + (" -q" if args.quick else "")
+    type_line(cmd)
+
+    # The suite ends with its own "total N.Ns" line; anything else is a hang.
+    out = wait_for(mark, "total ", SUITE_TIMEOUT)
+    vm("stop")
+
+    if out is None:
+        print(serial_tail(mark)[-2000:])
+        print(f"fsbench-run: {cmd} did not finish within {SUITE_TIMEOUT}s")
+        return 1
+
+    report = out[out.find("fsbench ") :] if "fsbench " in out else out
+    print(report.strip())
+
+    for bad in ("VERIFY FAIL", "test(s) failed", "KILL:"):
+        if bad in out:
+            print(f"fsbench-run: {args.path} FAILED ({bad})")
+            return 1
+
+    print(f"fsbench-run: {args.path} OK")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

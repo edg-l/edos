@@ -28,6 +28,18 @@ scripts/edos-vm log -n 40          # tail the guest serial log
 scripts/edos-vm stop
 ```
 
+Three make targets drive the guest for you and need no display either:
+
+```bash
+make test-headless    # kernel sched-test suite; `make test` needs a desktop
+                      # session for its PipeWire audio backend, this does not
+make storage-check    # scripts/fs-regression (EFS then FAT32) + scripts/fsbench-run
+```
+
+`scripts/fs-regression` and `scripts/fsbench-run` both share the boot, focus and
+serial-log helpers in `scripts/vmdrive.py`, so a change to how the guest is
+driven belongs there rather than in either script.
+
 Watching from another machine, tunnel the VNC port and point any viewer at
 `localhost:5901`:
 
