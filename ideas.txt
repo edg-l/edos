@@ -581,11 +581,17 @@ payoff is a real bug or two per subsystem based on fs audit yield.
 
 ### Guards held across kill points leak (AUDITED AND FIXED, 2026-08-09)
 
-Found by an agent-driven soak: ~630s of continuous synthetic input via
-`scripts/edos-vm` deadlocks the whole GUI. All four CPUs end up
-spinning in `spin::RwLock<WindowRegistry>::write`. The lock word reads
-`0x4`, which is one outstanding *reader* and no writer, so it is a
-leaked read guard, not a lock cycle.
+**The evidence this entry was opened on was re-diagnosed.** A ~630s soak
+deadlocked the GUI with all four CPUs spinning on
+`spin::RwLock<WindowRegistry>::write` and the lock word reading `0x4`,
+which was read as one leaked *reader*. The post-mortem concluded
+otherwise: the holder was `Ready` and starved, not killed, and the fix
+was in the scheduler. See
+`doc/bugs/2026-08-08-window-registry-stuck-reader.md`.
+
+So this class has never been caught in the act. It is kept, and was
+swept, because the mechanism is real and provable by inspection rather
+than because that hang was an instance of it.
 
 `sys_window_list` held `WINDOW_REGISTRY.read()` across
 `try_copy_to_user`. EDOS is `no_std` with no unwinding, so a thread
@@ -593,7 +599,7 @@ killed during that copy never runs `RwLockReadGuard::drop` and the
 reader count is never decremented. `edos-wm` calls this every frame, so
 the window was hit constantly.
 
-Full writeup: `doc/bugs/2026-08-08-window-registry-reader-leak.md`.
+Full writeup: `doc/bugs/2026-08-08-window-registry-stuck-reader.md`.
 
 `sys_window_list` was the instance; the sweep for the rest found five
 more, all of the same shape and all now fixed. The window is narrower
@@ -631,6 +637,27 @@ Still worth doing, and not covered by the above:
 - This is the sibling of the drop contract: that one says drops must
   not block, this one says guards must not be live where a thread can
   die.
+
+`lock_order::assert_no_guards_held`, called from `thread_exit`, is the
+regression guard. Every path that ends a thread funnels through there,
+so it is the one place the rule can be checked. Its coverage is the
+honest limit: the per-thread stack records **ranked** locks only, so of
+the six sites swept it would have caught the two `inode.lock` ones and
+been blind to the pipe, pty and TTY guards. Ranking those three is what
+would close that gap, and it is a rank-table change that wants its own
+validation rather than a drive-by.
+
+Where the rule can actually be broken today is narrower than "anywhere
+a thread dies", which is worth writing down because it bounds the
+search. Every ring-3 kill point — GPF, invalid opcode, alignment check,
+page fault, the timer tick — interrupts user code, where the thread
+provably holds nothing. `exit_if_killed` runs at the syscall return
+boundary, after the body has returned and its guards are dropped. A
+ring-0 uaccess fault takes the fixup and returns EFAULT rather than
+killing. That leaves explicit `thread_exit()` calls inside syscall
+bodies, of which there are two: `sys_exit`'s own (holds nothing) and
+the pty slave read's SIGINT exit, which is checked at the top of the
+loop before the guard is taken.
 
 ### Userspace allocator fragments without bound (FIXED, edos_rt 0.0.36)
 

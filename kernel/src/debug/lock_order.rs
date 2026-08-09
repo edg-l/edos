@@ -271,7 +271,63 @@ pub fn exit(rank: u16, site: &'static str) {
     }
 }
 
+/// Assert the calling thread holds no ranked lock, at a point where it is about
+/// to stop running for good.
+///
+/// There is no unwinding here, so a thread that dies holding a guard leaks it
+/// permanently: the lock is never released and every later acquirer blocks
+/// forever. The sibling of the drop contract — that one says a `Drop` must not
+/// block, this one says a guard must not be live where a thread can die.
+///
+/// Covers ranked locks only, which is what the per-thread stack records. A
+/// guard on an unranked lock (`BlockingMutex<Pipe>`, `BlockingMutex<Pty>`,
+/// `TTY_BUFFER`) is invisible here; ranking those is what would widen it.
+#[cfg(debug_assertions)]
+pub fn assert_no_guards_held(context: &str) {
+    use crate::thread::scheduler::try_sched;
+
+    if try_sched().is_none() {
+        return;
+    }
+    let Some(thread) = current_thread() else {
+        return;
+    };
+
+    // See `enter()` for rationale: bogus Arc pointer means skip tracking, so
+    // the stack it would report is not trustworthy either.
+    let ptr = alloc::sync::Arc::as_ptr(&thread) as usize;
+    if ptr < 0xffff_8000_0000_0000 {
+        crate::serial::emergency_write(
+            b"lock_order: skipping exit check due to bogus thread Arc\n",
+        );
+        return;
+    }
+
+    let stack = unsafe { &mut *thread.lock_ranks.get() };
+    if stack.is_empty() {
+        return;
+    }
+
+    let mut msg = heapless::String::<256>::new();
+    use core::fmt::Write as _;
+    let _ = write!(
+        msg,
+        "thread {} died at {} holding {} ranked guard(s), innermost '{}' (rank {}); \
+         a guard live where a thread can die leaks the lock permanently",
+        thread.id.0,
+        context,
+        stack.len(),
+        stack.last().map(|(_, s)| *s).unwrap_or("<none>"),
+        stack.last().map(|(r, _)| *r).unwrap_or(0),
+    );
+    panic!("{}", msg.as_str());
+}
+
 // ---- no-op release stubs ----------------------------------------------------
+
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+pub fn assert_no_guards_held(_context: &str) {}
 
 #[cfg(not(debug_assertions))]
 #[inline(always)]

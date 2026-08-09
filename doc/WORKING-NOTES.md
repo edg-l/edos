@@ -933,7 +933,7 @@ sibling quiesce and refuse with EAGAIN for exactly that reason.
 The timer tick checks the same flag now, and the condition that makes it safe is
 **ring 3 in the interrupted frame**. There is no unwinding here, so a thread that
 dies holding a lock guard leaks it permanently — that is the reader leak in
-`bugs/2026-08-08-window-registry-reader-leak.md`. A frame from ring 3 proves the
+`bugs/2026-08-08-window-registry-stuck-reader.md`. A frame from ring 3 proves the
 thread held nothing; a tick that caught it inside the kernel is left to the
 syscall boundary, where the same `exit_if_killed` runs. Both callers share that
 one function, so there is no second copy of the rule to keep in step.
@@ -1012,10 +1012,39 @@ Verified on a headless boot: `echo hello | wc -c` → 6, `ls /bin | wc -l` → 7
 exectest 5/5, mmaptest 11/11 on `/var`, 49/49 in-kernel, no panic and no
 shootdown timeout in the log.
 
-**Nothing enforces this.** The fixes are all "the code no longer does that";
-there is no assert. The per-thread `lock_ranks` stack already exists in debug
-builds and is the obvious place to hang a "died holding a guard" check, which
-is the one thing that would keep this from regressing.
+### The regression guard, and exactly what it covers
+
+`lock_order::assert_no_guards_held` is called at the top of `thread_exit`.
+Every path that ends a thread funnels through there, so it is the one place the
+rule can be checked, and it costs an `is_empty()` on a debug build.
+
+**It covers ranked locks only**, because that is what the per-thread stack
+records. Of the six sites above it would have caught the two `inode.lock` ones
+and been blind to the pipe, pty and TTY guards. Ranking those three would close
+the gap; that is a rank-table change and wants its own validation.
+
+Proven in both directions, since an assert never seen to fire is decoration:
+
+- **Negative:** 49/49 in-kernel, plus killtest, exectest, threadtest (~40 thread
+  exits) and forktest on a booted desktop, with no fire.
+- **Positive:** pushing a fake rank in the `SYS_EXIT` arm immediately before
+  `thread_exit` panics on the first program exit with `thread 27 died at
+  thread_exit holding 1 ranked guard(s), innermost 'positive-control' (rank
+  10)`. Reverted afterwards.
+
+Worth knowing when reading this class: **the hang that opened the entry in
+`ideas.txt` was re-diagnosed as starvation**, not a leaked guard, by
+`bugs/2026-08-08-window-registry-stuck-reader.md`. The class has never been
+caught in the act. It was swept because the mechanism is provable by
+inspection, not because that deadlock was an instance of it.
+
+Where the rule can be broken at all is narrower than "anywhere a thread dies".
+Every ring-3 kill point (GPF, invalid opcode, alignment check, page fault, the
+timer tick) interrupts user code, where the thread provably holds nothing;
+`exit_if_killed` runs after the syscall body returned and dropped its guards; a
+ring-0 uaccess fault takes the fixup and returns EFAULT rather than killing.
+That leaves explicit `thread_exit()` inside a syscall body, of which there are
+two, both currently safe.
 
 ## Things that will bite you
 

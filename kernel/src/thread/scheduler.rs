@@ -1210,6 +1210,10 @@ pub fn thread_sleep(dt: Duration) {
 pub fn thread_exit(code: i32) -> ! {
     let tid = current_thread_id().expect("thread_exit: no thread running on this CPU");
 
+    // Every path that ends a thread funnels through here, so this is the one
+    // place the "no guard live where a thread can die" rule can be checked.
+    crate::debug::lock_order::assert_no_guards_held("thread_exit");
+
     // Log lifetime stats before the without_interrupts fast path (log! allocates).
     if let Some(t) = get_thread_by_id(tid) {
         let created = t.created_at_tick.load(Ordering::Acquire);
