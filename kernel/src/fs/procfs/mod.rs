@@ -125,11 +125,14 @@ impl Procfs {
     }
 
     fn render_evict_stats() -> String {
-        use crate::fs::evict::{EVICT_DROPPED_COUNT, evict_kthread_drain_count};
+        use crate::fs::evict::{
+            EVICT_DROPPED_COUNT, EVICT_SYNC_FALLBACK_COUNT, evict_kthread_drain_count,
+        };
         format!(
-            "drain_count: {}\ndropped_count: {}\n",
+            "drain_count: {}\ndropped_count: {}\nsync_fallback_count: {}\n",
             evict_kthread_drain_count(),
             EVICT_DROPPED_COUNT.load(Ordering::Relaxed),
+            EVICT_SYNC_FALLBACK_COUNT.load(Ordering::Relaxed),
         )
     }
 
@@ -149,14 +152,18 @@ impl Procfs {
 
     fn render_ahci_stats() -> String {
         use crate::drivers::ahci::watchdog::{
-            NCQ_STRANDED, NCQ_TIMEOUT_MS, WATCHDOG_FIRINGS, WATCHDOG_RESTARTS,
+            NCQ_INFLIGHT, NCQ_MAX_INFLIGHT, NCQ_STRANDED, NCQ_TIMEOUT_MS, WATCHDOG_FIRINGS,
+            WATCHDOG_RESTARTS,
         };
         let firings = WATCHDOG_FIRINGS.load(Ordering::Relaxed);
         let restarts = WATCHDOG_RESTARTS.load(Ordering::Relaxed);
         let stranded = NCQ_STRANDED.load(Ordering::Relaxed);
         let timeout_ms = NCQ_TIMEOUT_MS.load(Ordering::Relaxed);
+        let inflight = NCQ_INFLIGHT.load(Ordering::Relaxed);
+        let max_inflight = NCQ_MAX_INFLIGHT.load(Ordering::Relaxed);
         format!(
-            "firings={firings} restarts={restarts} stranded={stranded} timeout_ms={timeout_ms}\n"
+            "firings={firings} restarts={restarts} stranded={stranded} timeout_ms={timeout_ms} \
+             ncq_inflight={inflight} ncq_max_inflight={max_inflight}\n"
         )
     }
 

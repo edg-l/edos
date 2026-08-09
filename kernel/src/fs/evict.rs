@@ -37,6 +37,9 @@ use crate::{
 
 const EVICT_QUEUE_CAP: usize = 256;
 
+/// Log one `synchronous fallback` warning per this many occurrences.
+const EVICT_FALLBACK_LOG_INTERVAL: u64 = 512;
+
 #[derive(Copy, Clone)]
 pub struct EvictRequest {
     pub mount_id: usize,
@@ -56,6 +59,13 @@ pub static EVICT_TID: AtomicU64 = AtomicU64::new(0);
 /// Evictions abandoned because the queue was full on a thread that may not
 /// block. Non-zero means on-disk storage is leaked until `efs-fsck` runs.
 pub static EVICT_DROPPED_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Evictions the caller had to perform itself because the queue was full.
+///
+/// A burst of unlinks fills a 256-deep queue in well under a second, so this
+/// is counted rather than logged per occurrence: the log line is worth having
+/// once, and after that only the rate matters.
+pub static EVICT_SYNC_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Returns true if the calling thread is the evict-inode kthread.
 ///
@@ -113,23 +123,30 @@ pub fn post_evict(mount_id: usize, ino: u64) {
                 );
                 return;
             }
-            // Synchronous fallback with a WARNING log.
-            if let Some(fs) = fs_by_mount_id(mount_id) {
-                if let Err(e) = fs.evict_inode(ino) {
-                    crate::log!(
-                        "WARNING: evict queue full, synchronous fallback \
-                         (mount={}, ino={}) failed: {:?}",
-                        mount_id,
-                        ino,
-                        e
-                    );
-                } else {
-                    crate::log!(
-                        "WARNING: evict queue full, synchronous fallback (mount={}, ino={})",
-                        mount_id,
-                        ino
-                    );
-                }
+            // Synchronous fallback. Counted always, logged sparsely: an unlink
+            // burst produces thousands of these, and a per-inode line buries
+            // everything else in the log without adding information. A failure
+            // is rare and specific, so that one is always logged.
+            let Some(fs) = fs_by_mount_id(mount_id) else {
+                return;
+            };
+            let n = EVICT_SYNC_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+            if let Err(e) = fs.evict_inode(ino) {
+                crate::log!(
+                    "WARNING: evict queue full, synchronous fallback \
+                     (mount={}, ino={}) failed: {:?}",
+                    mount_id,
+                    ino,
+                    e
+                );
+            } else if n % EVICT_FALLBACK_LOG_INTERVAL == 0 {
+                crate::log!(
+                    "WARNING: evict queue full, synchronous fallback \
+                     (mount={}, ino={}); {} so far",
+                    mount_id,
+                    ino,
+                    n + 1
+                );
             }
         }
     }
