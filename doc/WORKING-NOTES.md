@@ -6,6 +6,43 @@ session.
 
 ---
 
+## Start here for anything about storage performance
+
+`programs/fsbench` measures the filesystem across idioms and depths: a memory
+filesystem, a raw block device, and EFS. **Do not benchmark storage by hand or
+write a one-off test — run it.** It also verifies what it wrote, and prints the
+delta of every relevant `/proc` counter, which is what turns a number into a
+diagnosis.
+
+```bash
+fsbench -l /var              # EFS: writes, reads, metadata, verify
+fsbench -l raw /dev/sda      # the block layer and AHCI ceiling
+fsbench -l rawwrite /dev/sdX # destructive; refused on a mounted device
+fsbench -l /tmp              # memfs: the syscall and copy ceiling
+```
+
+`-l` mirrors the report to `/dev/klog`, which lands in `run_log.txt` on the
+host — the guest terminal is far too short to hold a full run.
+
+- [`fsbench.md`](fsbench.md) — how to run it, what each number means, and the
+  record of what the 2026-08-09 round found and fixed.
+- [`STORAGE-ROADMAP.md`](STORAGE-ROADMAP.md) — what is worth doing next, in
+  order, with the evidence for each, **and a list of three experiments that
+  were tried and refuted.** Read that list before optimising: two of the three
+  sounded obviously right and made the system slower.
+
+Two traps that round produced, both of which made a number mean the opposite of
+what it said:
+
+- A throughput figure is meaningless unless you know whether the work was
+  deferred. A buffered `write` returns at page-cache speed; only the `fsync`
+  rows and `sync()` measure the disk.
+- Reading back in the same boot reads the page cache. Cold numbers need
+  `fsbench write`, a reboot, then `fsbench read`, which is also what
+  `scripts/fs-regression` does for durability.
+
+---
+
 ## The big change: the OS is now driven by an agent, not by hand
 
 `make run` needs a local display, which is useless over SSH. `scripts/edos-vm`

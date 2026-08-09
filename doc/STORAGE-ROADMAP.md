@@ -1,188 +1,140 @@
 # Storage roadmap
 
-What is left after the 2026-08-09 fsbench round, ordered by what the numbers
-say rather than by how interesting it is. Every item names the evidence that
-motivates it; re-measure with `fsbench` before and after.
+What to do next, in priority order, with the evidence for each. Measure with
+`fsbench` before and after; `doc/fsbench.md` holds the record of what has
+already been done and what the numbers mean.
 
-One pattern paid off three times in that round: **issuing a command costs far
-more than the sectors it carries.** Coalescing contiguous blocks into one
-command took raw device reads from 37 to 886 MiB/s, `sync()` after a write
-phase from 28.7 s to 21 us, and `mmap store + msync` from 8.8 to 1059 MiB/s.
+Where things stand as of 2026-08-09:
 
-It is not a universal lever, and item 1 below is the counter-example: a fourth
-application of it regressed the system and was reverted. Coalescing pays where
-a path is throughput-bound on a long run of contiguous blocks it owns
-exclusively. It costs where the blocks are small, scattered, and contended by
-other work.
-
-## 1. The journal commit (largely done)
-
-A process's first `fsync` after a write phase that buffered hundreds of
-megabytes cost 6-12 s, all of it inside `force_commit_and_wait`.
-
-Most of it was `seal_and_commit` writing each enrolled block with its own
-command. Coalescing the ring writes took that fsync to 1.6-2.5 s and the whole
-suite from 20.6 s to 10.1 s, and dropped `detached_fallbacks` over a run from
-2201 to 580 as a side effect: the ring frees sooner, so writers stop being
-handed detached pages. Note this is the *opposite* result to the reverted
-experiment below, and for the reason given there — the ring is contiguous and
-exclusively owned, the block cache's dirty set is neither.
-
-What is left of the commit cost is the 1.6-2.5 s that remains. Measure again
-before assuming where it is.
-
-**Coalescing `flush_dirty_once` was tried and reverted.** The reasoning was that
-`checkpoint_and_advance` calls into it and it writes one command per 4 KiB page,
-so it must be what the commit is made of. It is not: `block_cache.writeback_bytes`
-is about 4 MB per run, which even at the old per-page rate is a tenth of a
-second, nowhere near the 6-12 s being attributed. The number was sitting in the
-counters the whole time and would have refuted the idea before any code was
-written.
-
-Measured, the change was a clear regression, because the dirty pages in this
-cache are metadata that the rest of the system is actively reading and writing,
-and holding a run of page `write_lock`s across one large DMA stalls all of them
-for the length of the batch instead of one page at a time:
-
-| | Before | Coalesced |
+| | Measured | Against |
 |---|---|---|
-| `stat` | 37444 ops/s | 14731 |
-| `readdir` | 258715 entries/s | 73754 |
-| `sync()` after write phase | 21 us | 187 ms |
-| `write 4KiB + fsync` | 12.25 s | 12.63 s |
+| raw device read, 1 MiB | 886 MiB/s | 1130 MiB/s over a ramdisk |
+| raw device write, 1 MiB | 543 MiB/s | preallocated image; 280 on a sparse one |
+| file read, 1 MiB, warm | 1766 MiB/s | memory speed |
+| buffered file write, 1 MiB | 318-425 MiB/s | page cache, not the disk |
+| durable write, 1 MiB + fsync | 28-55 MiB/s | |
+| 4 KiB, read or write | ~30 MiB/s | ~100 us per command |
+| mmap fault | 121 us per page | 0.5 us per page for `read` |
+| `edos-install`, blank 5 GB disk | 2.8 s | was 4.3 s |
 
-The lesson generalises: coalescing pays where a path is throughput-bound on a
-long run of contiguous blocks it owns exclusively (raw device reads, EFS file
-data). It costs where the blocks are small, scattered, and contended. Check
-which one a path is before reaching for it.
+**Sequential bandwidth is finished.** 886 MiB/s read and 543 MiB/s write sit
+either side of SATA III's 600 MB/s line rate, so on real hardware there is
+nothing left to win there. Everything below is per-operation cost.
 
-## 2. The install path (done: 4.3 s -> 2.8 s)
+## 1. Per-command cost — the next thing
 
-`edos-install` on a blank 5 GB disk was 4.3 s: 1.6 s formatting the root
-filesystem, 2.3 s in the final flush, everything else under 0.2 s. Both of
-those go through `BlockPageCache::write_bytes`, which staged every page through
-the cache even when the write covered the page completely.
+4 KiB access costs about 100 us per command on both read and write, capping the
+system near 10k IOPS where a real SATA SSD does 50-100k at queue depth 32. This
+is the one remaining number that would still matter on real hardware.
 
-Sending a whole-page run straight to the device instead took raw sequential
-writes at 1 MiB from 44 to 280 MiB/s, dropped `detached_fallbacks` over the
-sweep from 12562 to zero, and took the install to **3.0 s** with the final
-flush at 1.0 s.
+`/proc/ahci_stats` says where it is not: `ncq_max_inflight` peaks at **9** out
+of a negotiated 32 even when a batch hands the driver 64 commands at once. The
+device is not the constraint — we cannot feed it. The cost is in getting a
+command issued.
 
-Two things worth knowing from the measurement:
+Candidates, in the order they appear in `submit_ncq_read`:
 
-- The 64 KiB raw write reads *slower* afterwards (43 -> 32 MiB/s). That is the
-  old number having been inflated by write-back deferral: the call returned as
-  soon as the pages were dirty and the writeback thread paid later.
-  `writeback_bytes` over the sweep fell from 79 MB to 8 MB, which is the same
-  fact from the other side. The new number is what the write actually costs.
-- `root formatted` did not move at first (1.6 -> 1.7 s), which pointed at
-  `efs-mkfs` rather than the kernel. `zero_blocks` did a seek and a 4 KiB write
-  per block, and formatting a 5 GB filesystem zeroes about 13000 blocks between
-  the inode tables and the journal — at roughly 100 us per command that was the
-  entire phase. Zeroing in 1 MiB chunks took it to **0.3 s** and the install to
-  **2.8 s**.
+- `install_ncq_op`: an `Arc` allocation and an `owned_ops` push per command,
+  plus the ranked lock on `ncq_waiters[slot]`.
+- `enter_ncq_mode` / `exit_ncq_mode` around every submission.
+- `issue_ncq_command`: MMIO register writes, each a VM exit under QEMU, plus
+  the post-issue `read_volatile` of SACT.
 
-The install is now 2.8 s from 4.3 s, and the remaining 2.2 s of it is the final
-flush. That is the next thing to look at, and it is the same durable-write
-throughput that bounds everything else.
-
-## 3. The mmap fault path costs 121 us per page
-
-A full map, fault in 4 MiB, unmap cycle is 124 ms — 1024 pages at 121 us each,
-against 527 us for a `read` of the same 4 MiB. But the cost is **not** filling
-pages from disk, which is what it looked like before the benchmark was fixed.
-
-Two corrections got to that:
-
-- `fsbench`'s mmap test timed only the memory sweep and left the `mmap` and
-  `munmap` outside the operation, so it reported a rate computed over the whole
-  loop while the latency column covered a fraction of it. The two disagreed by
-  a factor of sixty. Both calls are inside the timed operation now.
-- The test remaps the same file every pass, so after the first pass every page
-  is already in the inode page cache. Whatever those 121 us are, no device is
-  involved.
-
-**Filling ahead was tried and reverted.** On a fault, fill a run of pages
-through the existing `get_or_fill_bulk_async_sync` rather than one, so a
-sequential walk pays one command per run. It moved the number by nothing
-(26.3 -> 28.6 MiB/s, inside run-to-run noise), for the reason above: the pages
-were already cached, so the fill-ahead correctly did nothing. It also broke the
-mmap store test on the first attempt — a bulk fill publishes failure for its
-whole range, so including the faulting page in that range let a bulk failure
-kill the faulting thread. Narrowing the range to exclude the faulting page
-fixed that, but an unproven change in the page fault handler is not worth
-keeping.
-
-What the measurement points at instead is **fault-around**: mapping several
-PTEs per fault rather than one, so 1024 pages cost far fewer than 1024 faults.
-That is a change to `FaultOutcome` and the VMA page-slot bookkeeping, which
-currently carry exactly one page each. `munmap` of a large mapping is on the
-same path and worth timing at the same time.
-
-Anything attempting this should first measure a **cold** mmap — `fsbench write`,
-reboot, `fsbench read` — so the fill cost and the fault cost can be told apart
-rather than assumed.
-
-## 4. Per-command cost, which is what is actually left
-
-Sequential bandwidth is finished: 886 MiB/s read and 543 MiB/s write against a
-preallocated image, either side of SATA III's 600 MB/s line rate. On real
-hardware there is nothing left to win there.
-
-4 KiB access is a different story. It costs about 100 us per command on both
-read and write, capping the system near 10k IOPS where a real SATA SSD does
-50-100k at queue depth 32. `ncq_max_inflight` peaks at **9** out of a
-negotiated 32 even when a batch submits 64 commands at once, so the cost is in
-getting a command issued rather than in waiting for the device. Per-command
-work worth attacking, in the order it appears in `submit_ncq_read`:
-`install_ncq_op`'s `Arc` allocation and `owned_ops` push, the ranked lock on
-`ncq_waiters[slot]`, and the MMIO writes in `issue_ncq_command` (each a VM exit
-under QEMU).
+Profile before cutting. The cheapest first step is to time the phases of one
+submission and find which of the three owns the 100 us, rather than assuming.
+Note the figure is measured on a dev-profile kernel, where the lock-order
+tracker runs on every `ranked_lock!`; how much of the 100 us is that has never
+been quantified, so treat 100 us as an upper bound on the real work.
 
 Coalescing cannot help here — one page is one command — so this is
 per-operation work, not another run-length fix.
 
-## 5. Detached pages are a crash-consistency risk## 4. Detached pages are a crash-consistency risk, not just a slow path
+## 2. mmap fault-around
 
-A clean benchmark run reports `detached_fallbacks: +2626`. When a shard is
-full, `read_page_for_write` gives up after `WRITE_PAGE_ATTEMPTS` and returns a
-detached page, and `publish_write` then writes it straight to its home location
-— ahead of the journal committing it. The comment on `read_page_for_write`
-states the consequence: a replay after a crash overwrites newer data with the
-journal's older copy.
+A map, fault in 4 MiB, unmap cycle is 124 ms: 1024 pages at 121 us each,
+against 527 us for a `read` of the same bytes. The pages are already in the
+inode page cache during that test, so no device is involved — the cost is the
+fault path itself.
 
-Thousands per run means the escape hatch is firing routinely rather than
-exceptionally, and the 8 MiB cache (8 shards x 256 pages) is too small for the
-metadata working set. Size the cache to the working set, and treat a detached
-write as something to count and alarm on rather than to absorb silently.
+The fix is mapping several PTEs per fault rather than one, so 1024 pages cost
+far fewer than 1024 faults. That means changing `FaultOutcome` and the VMA
+page-slot bookkeeping, which today carry exactly one page each. `munmap` of a
+large mapping is on the same path and worth timing alongside it.
 
-## 6. The allocating write path rewrites the inode per block
+Measure a **cold** mmap first — `fsbench write`, reboot, `fsbench read` — so
+fill cost and fault cost can be told apart rather than assumed.
 
-`write 512B` allocating runs at 3.8 MiB/s against 16.1 MiB/s overwriting the
-same blocks. `ensure_block_for_logical` does a `read_inode`, an extent parse
-and a `write_inode` for every 4 KiB block.
+## 3. Detached pages are a crash-consistency risk, not just a slow path
+
+When a shard is full, `read_page_for_write` gives up after
+`WRITE_PAGE_ATTEMPTS` and returns a detached page, and `publish_write` writes it
+straight to its home location — ahead of the journal committing it. The comment
+on `read_page_for_write` states the consequence: a replay after a crash
+overwrites newer data with the journal's older copy.
+
+Raw device writes no longer produce any (12562 -> 0, since whole-page runs
+bypass the cache entirely), and the journal ring change cut the rest from 2626
+to roughly 750 per benchmark run. Several hundred is still an escape hatch
+firing routinely rather than exceptionally, and the 8 MiB cache (8 shards x 256
+pages) remains small for the metadata working set. Size the cache to the
+working set, and treat a detached write as something to alarm on rather than
+absorb silently.
+
+## 4. The allocating write path rewrites the inode per block
+
+`write 512B` allocating runs at ~3.6 MiB/s against ~16 MiB/s overwriting the
+same blocks. `ensure_block_for_logical` does a `read_inode`, an extent parse and
+a `write_inode` for every 4 KiB block.
 
 `ensure_blocks_for_logical_batch` already does the batched version, but it also
-writes the inode itself, so it cannot simply be substituted: doing that
+writes the inode itself, so it cannot simply be substituted — doing that
 produced a segfault inside a `MAP_SHARED` mapping. Give it a mapping-only mode
 whose caller owns the inode write.
 
-## 7. Small, cheap
+## 5. Durable writes are far below buffered
 
-*(`sys_mmap`'s per-mapping log is done — it is `log_debug!` now.)*
+28-55 MiB/s against 318-425 buffered. Some of that is inherent — a journal
+commit, a FUA commit block and a drive cache flush per `fsync` — but real
+hardware with FUA loses two to three times, not eight. Worth attributing across
+those three before deciding there is nothing to take.
+
+## 6. Small, cheap
 
 - `scripts/fs-regression` still has to be run by hand after `make all`. Wire it
   into a make target alongside `fsbench`, so a durability regression and a
-  throughput regression are both caught by the same command.
+  throughput regression are caught by the same command.
 - The evict queue holds 256 entries and fills during an ordinary create/unlink
   burst, falling back to synchronous eviction. The log flood is fixed and the
   fallback is counted in `/proc/evict_stats`; the capacity and the drain rate
   behind it are not.
+- A blank 1 GB disk once reported `/dev/sda holds 197120 bytes` to userspace,
+  while a 5 GB image on the same path reported correctly. Seen once, not
+  reproduced deliberately. Worth ten minutes on `BlockDevNode::size` and the
+  IDENTIFY path before trusting small-disk sizes.
 
-## Before chasing the per-command floor
+## What has been tried and did not work
 
-4 KiB access is bounded by roughly 100 us per command on both read and write,
-and coalescing cannot help a single page. Before attributing that to the driver,
-do one release-profile run: the kernel builds dev-profile with debug assertions,
-so the lock-order tracker runs on every `ranked_lock!`, and how much of the
-100 us is tracker overhead rather than real work is currently unknown.
+Three experiments cost a build-and-boot each and are recorded so they are not
+repeated. All three came from reasoning that sounded right and was refuted by
+measurement.
+
+- **Coalescing `flush_dirty_once`.** The premise was that
+  `checkpoint_and_advance` calls into it, so it must be what a slow commit is
+  made of. `block_cache.writeback_bytes` is about 4 MB per run, a tenth of a
+  second even at the old rate — the counter was already printing and refuted
+  the idea before any code was written. Measured, it cut `stat` from 37444 to
+  14731 ops/s and `readdir` from 258715 to 73754, because those dirty pages are
+  metadata the rest of the system is actively using and holding a run of page
+  locks across one large DMA stalls all of them.
+- **Writer preference for `enter_legacy_mode`**, to stop a FLUSH CACHE starving
+  behind NCQ traffic. Made `write 1MiB + fsync` go from 97 ms to 30 s.
+- **Fill-ahead in the page fault handler.** Neutral (26.3 -> 28.6 MiB/s), and
+  it first shipped a segfault: a bulk fill publishes failure for its whole
+  range, so including the faulting page let a bulk failure kill the faulting
+  thread.
+
+The general rule they add up to: **coalescing pays where a path is
+throughput-bound on a long run of contiguous blocks it owns exclusively** — raw
+device I/O, EFS file data, the journal ring. It costs where the blocks are
+small, scattered, or contended by other work. Check which one a path is before
+reaching for it, and check the counters that would refute the premise first.
