@@ -905,6 +905,20 @@ The userspace chain was never the problem and needs no work:
 terminal widget tracks the ctrl modifier, and the line discipline maps
 0x04 to `LineAction::Eof` and 0x03 to `LineAction::Interrupt`.
 
+### Non-ASCII keyboard input is double-UTF-8-encoded
+Typing a non-ASCII key writes the wrong bytes. The `ç` key on the Spanish
+ISO layout produces `c3 83 c2 a7` in a file rather than `c3 a7`: that is
+`ç` encoded to UTF-8 once, then each of those two bytes reinterpreted as
+a char and encoded again. Reproduce with `echo <ç> > /tmp/k.txt` then
+`hexdump -C /tmp/k.txt`.
+
+The terminal widget collects `Vec<char>` and `write_str`s a real UTF-8
+`String`, and the PTY line discipline is byte-oriented and pushes bytes
+through unchanged, so the doubling is above that — most likely a
+byte-to-`char` cast on the shell's read or echo path. Worth fixing before
+any more layout work: it makes every accented key untestable, and it is
+why a wrong keycode mapping for `ç` went unnoticed until 2026-08-10.
+
 ### More userspace tools
 - chmod/chown (once EFS has permission support)
 - printenv (alias for env)
