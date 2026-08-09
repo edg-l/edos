@@ -169,7 +169,7 @@ run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NA
 gdb:
 	rust-gdb -x gdbinit
 
-.PHONY: run-bios sata-disk.img
+.PHONY: run-bios
 run-bios: $(IMAGE_NAME).iso
 	qemu-system-$(KARCH) \
 		-M q35 \
@@ -177,7 +177,7 @@ run-bios: $(IMAGE_NAME).iso
 		-boot d \
 		$(QEMUFLAGS)
 
-.PHONY: run-hdd-bios sata-disk.img
+.PHONY: run-hdd-bios
 run-hdd-bios: $(IMAGE_NAME).hdd
 	qemu-system-$(KARCH) \
 		-M q35 \
@@ -273,15 +273,32 @@ programs:
 DISK_UUID := 12345678-1234-5678-9abc-123456789abc
 PARTITION_UUID := 87654321-4321-8765-cba9-987654321fed
 FILESYSTEM_SERIAL := 305419896
-FILESYSTEM_FILES := $(shell find filesystem -type f ! -name '*.rlib' ! -name '*.a' 2>/dev/null)
+
+# What the disk images are built from. A `$(shell find filesystem ...)` cannot
+# serve here: make expands it while reading this file, before `programs` has
+# run, so a binary added by this same invocation is missing from the list and
+# the images silently ship without it.
+#
+# The manifest is regenerated after `programs` instead, and rewritten only when
+# the tree really changed. Its recipe therefore runs on every invocation while
+# its timestamp moves only on a real change, which is what lets the images stay
+# up to date without rebuilding the persistent sata-disk.img every time.
+define update-manifest
+find filesystem -type f ! -name '*.rlib' ! -name '*.a' ! -name '.manifest*' \
+	-printf '%T@ %s %p\n' | sort > filesystem/.manifest.new; \
+cmp -s filesystem/.manifest.new filesystem/.manifest \
+	|| mv -f filesystem/.manifest.new filesystem/.manifest; \
+rm -f filesystem/.manifest.new
+endef
+
+filesystem/.manifest: filesystem programs
+	@$(update-manifest)
 
 # The live root carried inside the ISO as a Limine module: a complete GPT disk
 # image, so the kernel discovers it exactly like a real disk. Sized from the
 # populated tree rather than hard-coded, because it is resident in RAM for the
-# whole boot. Depends on the phony `programs` so a newly added binary cannot be
-# missed by the parse-time FILESYSTEM_FILES snapshot; the ISO rebuilds on every
-# `make` anyway.
-live-root.img: kernel limine/limine $(FILESYSTEM_FILES) tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
+# whole boot.
+live-root.img: kernel limine/limine filesystem/.manifest tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
 	mkdir -p filesystem/boot
 	# Stripped: this copy is only ever loaded, never symbolized. Debug info
 	# stays in kernel/kernel, which is what addr2line reads. 40 MB -> 2.5 MB,
@@ -301,7 +318,7 @@ live-root.img: kernel limine/limine $(FILESYSTEM_FILES) tools/efs-mkfs/src/*.rs 
 	cargo build --release --manifest-path tools/efs-mkfs/Cargo.toml
 	tools/efs-mkfs/target/release/efs-mkfs --partition-offset 1048576 --populate filesystem/ --label EDOS live-root.img
 
-sata-disk.img: $(FILESYSTEM_FILES) tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
+sata-disk.img: filesystem/.manifest tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
 	qemu-img create -f raw sata-disk.raw 5G
 	sgdisk sata-disk.raw -n 1:2048 -t 1:0700 -c 1:"EDOS_DATA" --partition-guid=1:$(PARTITION_UUID)
 	cargo build --release --manifest-path tools/efs-mkfs/Cargo.toml
