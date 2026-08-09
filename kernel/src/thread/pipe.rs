@@ -8,7 +8,6 @@ use crate::{
     },
     net::socket::Socket,
     thread::{mutex::BlockingMutex, pty::Pty, waitqueue::WaitQueue},
-    util::uaccess::{try_copy_from_user, try_copy_to_user},
 };
 use alloc::{sync::Arc, vec::Vec};
 
@@ -104,31 +103,6 @@ impl Pipe {
         (written, self.notify_pollers())
     }
 
-    /// Write directly from user space into pipe buffer.
-    /// Returns bytes written, or None on fault.
-    pub fn write_from_user(
-        &mut self,
-        user_ptr: *const u8,
-        len: usize,
-    ) -> (Option<usize>, PipeNotifications) {
-        if len == 0 {
-            return (Some(0), PipeNotifications::EMPTY);
-        }
-
-        // Reserve space in buffer
-        let start = self.buffer.len();
-        self.buffer.resize(start + len, 0);
-
-        // Copy directly from user space
-        if !unsafe { try_copy_from_user(self.buffer[start..].as_mut_ptr(), user_ptr, len) } {
-            // Rollback on fault
-            self.buffer.truncate(start);
-            return (None, PipeNotifications::EMPTY);
-        }
-
-        (Some(len), self.notify_pollers())
-    }
-
     pub fn read(&mut self, count: usize) -> (Vec<u8>, PipeNotifications) {
         let available = count.min(self.buffer.len());
         let mut out = self.buffer[..available].to_vec();
@@ -138,32 +112,6 @@ impl Pipe {
             out.clear();
         }
         (out, notif)
-    }
-
-    /// Read directly from pipe buffer to user space.
-    /// Returns bytes read, or None on fault.
-    pub fn read_to_user(
-        &mut self,
-        user_ptr: *mut u8,
-        count: usize,
-    ) -> (Option<usize>, PipeNotifications) {
-        if count == 0 {
-            return (Some(0), PipeNotifications::EMPTY);
-        }
-
-        let available = count.min(self.buffer.len());
-        if available == 0 {
-            return (Some(0), PipeNotifications::EMPTY);
-        }
-
-        // Copy directly from pipe buffer to user space
-        if !unsafe { try_copy_to_user(user_ptr, self.buffer.as_ptr(), available) } {
-            return (None, PipeNotifications::EMPTY);
-        }
-
-        // Remove copied bytes from buffer
-        self.buffer.drain(..available);
-        (Some(available), self.notify_pollers())
     }
 
     fn poll_state(&self) -> PollState {

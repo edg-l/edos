@@ -95,41 +95,33 @@ pub fn write_from_user(user_ptr: *const u8, len: usize) -> Option<usize> {
     let mut should_notify = false;
     let mut resulting_state = None;
     let mut total_processed = 0usize;
+    let mut faulted = false;
+    let mut chunk = [0u8; CHUNK_SIZE];
 
-    {
-        let mut buffer = TTY_BUFFER.lock();
-        let mut chunk = [0u8; CHUNK_SIZE];
+    // The buffer lock is taken per chunk rather than for the whole write, so it
+    // is never live across the user copy: a copy can demand fault and park, and
+    // a thread killed while parked never runs the guard's Drop, which would
+    // leave every console writer blocked for good. The cost is that writes
+    // longer than CHUNK_SIZE may interleave with another writer's; a TTY makes
+    // no atomicity guarantee above that.
+    while total_processed < len {
+        let remaining = len - total_processed;
+        let to_copy = remaining.min(CHUNK_SIZE);
 
-        while total_processed < len {
-            let remaining = len - total_processed;
-            let to_copy = remaining.min(CHUNK_SIZE);
+        if !unsafe {
+            try_copy_from_user(chunk.as_mut_ptr(), user_ptr.add(total_processed), to_copy)
+        } {
+            faulted = true;
+            break;
+        }
 
-            // Batch copy from user space to stack buffer
-            if !unsafe {
-                try_copy_from_user(chunk.as_mut_ptr(), user_ptr.add(total_processed), to_copy)
-            } {
-                // Fault - return what we processed so far
-                if should_notify {
-                    resulting_state = Some(poll_state_for_len(buffer.len()));
-                }
-                drop(buffer);
-                if should_notify {
-                    notify_pollers(resulting_state.unwrap());
-                    TTY_NOTIFY.broadcast(());
-                }
-                return if total_processed > 0 {
-                    Some(total_processed)
-                } else {
-                    None
-                };
-            }
+        // Echo chunk to serial for debug visibility
+        if let Ok(s) = core::str::from_utf8(&chunk[..to_copy]) {
+            crate::serial::add_serial_log(s);
+        }
 
-            // Echo chunk to serial for debug visibility
-            if let Ok(s) = core::str::from_utf8(&chunk[..to_copy]) {
-                crate::serial::add_serial_log(s);
-            }
-
-            // Process the chunk
+        {
+            let mut buffer = TTY_BUFFER.lock();
             for &byte in &chunk[..to_copy] {
                 match byte {
                     b'\x08' | b'\x7f' => {
@@ -147,12 +139,11 @@ pub fn write_from_user(user_ptr: *const u8, len: usize) -> Option<usize> {
                     }
                 }
             }
-            total_processed += to_copy;
+            if should_notify {
+                resulting_state = Some(poll_state_for_len(buffer.len()));
+            }
         }
-
-        if should_notify {
-            resulting_state = Some(poll_state_for_len(buffer.len()));
-        }
+        total_processed += to_copy;
     }
 
     if should_notify {
@@ -160,7 +151,10 @@ pub fn write_from_user(user_ptr: *const u8, len: usize) -> Option<usize> {
         TTY_NOTIFY.broadcast(());
     }
 
-    Some(len)
+    if faulted && total_processed == 0 {
+        return None;
+    }
+    Some(total_processed)
 }
 
 pub fn init() {

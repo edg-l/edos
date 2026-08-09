@@ -34,6 +34,33 @@ use crate::{
     timer::Instant,
 };
 
+/// Copy `count` bytes out of user space into a kernel buffer, or `None` on fault.
+///
+/// A user copy can demand fault and park (`handle_demand_fault` runs before the
+/// uaccess fixup and may wait on disk I/O). EDOS has no unwinding, so a thread
+/// killed while parked there never runs the Drop of any guard its caller holds.
+/// Buffering through this helper is what lets a caller do the copy *before*
+/// taking a lock rather than under it.
+fn copy_in(user_ptr: *const u8, count: usize) -> Option<Vec<u8>> {
+    if count == 0 {
+        return Some(Vec::new());
+    }
+    let mut buf = vec![0u8; count];
+    if !unsafe { try_copy_from_user(buf.as_mut_ptr(), user_ptr, count) } {
+        return None;
+    }
+    Some(buf)
+}
+
+/// Copy a kernel buffer into user space. Counterpart to [`copy_in`]: the caller
+/// releases its guards first, then copies out.
+fn copy_out(user_ptr: *mut u8, data: &[u8]) -> bool {
+    if data.is_empty() {
+        return true;
+    }
+    unsafe { try_copy_to_user(user_ptr, data.as_ptr(), data.len()) }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct DirEntry {
@@ -158,51 +185,47 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             }
         },
         Some(FileDescriptor::PipeWrite(pipe)) => {
-            // Direct copy from user to pipe, flush notifications after dropping lock.
-            let (result, notif) = {
+            // Copy out of user space before taking the pipe lock: a user copy can
+            // demand fault and park, and a thread killed while parked never runs
+            // the guard's Drop, which would leave the pipe locked for good.
+            let Some(data) = copy_in(buffer_ptr, count) else {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
+            };
+            let (written, notif) = {
                 let mut pipe = pipe.lock();
-                pipe.write_from_user(buffer_ptr, count)
+                pipe.write(&data)
             };
             notif.flush();
-            match result {
-                Some(n) => n as u64,
-                None => {
-                    info.lock().errno = Errno::EFAULT;
-                    !0u64
-                }
-            }
+            written as u64
         }
         Some(FileDescriptor::PipeRead(_)) => {
             info.lock().errno = Errno::EINVAL;
             !0u64
         }
         Some(FileDescriptor::PtyMaster(pty)) => {
-            let (result, notif) = {
+            let Some(data) = copy_in(buffer_ptr, count) else {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
+            };
+            let (written, notif) = {
                 let mut guard = pty.lock();
-                guard.master_write_from_user(buffer_ptr, count)
+                guard.master_write(&data)
             };
             notif.flush();
-            match result {
-                Some(n) => n as u64,
-                None => {
-                    info.lock().errno = Errno::EFAULT;
-                    !0u64
-                }
-            }
+            written as u64
         }
         Some(FileDescriptor::PtySlave(pty)) => {
-            let (result, notif) = {
+            let Some(data) = copy_in(buffer_ptr, count) else {
+                info.lock().errno = Errno::EFAULT;
+                return !0u64;
+            };
+            let (written, notif) = {
                 let mut guard = pty.lock();
-                guard.slave_write_from_user(buffer_ptr, count)
+                guard.slave_write(&data)
             };
             notif.flush();
-            match result {
-                Some(n) => n as u64,
-                None => {
-                    info.lock().errno = Errno::EFAULT;
-                    !0u64
-                }
-            }
+            written as u64
         }
         Some(FileDescriptor::FsFile(file)) => {
             const MAX_WRITE_SIZE: usize = 1024 * 1024; // 1 MiB
@@ -460,29 +483,32 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             let reader_wq = pipe.lock().reader_wq.clone();
             // Block until data is available or all writers are closed (EOF).
             loop {
-                let (result, closed, notif) = {
+                // Drain under the guard, copy out after releasing it. Bytes are
+                // lost if the copy then faults, which only happens when the
+                // caller passed a bad buffer; holding the guard across the copy
+                // instead would leak it permanently on a kill.
+                let (data, closed, notif) = {
                     let mut guard = pipe.lock();
-                    let (r, n) = guard.read_to_user(buffer_ptr, count);
-                    (r, guard.closed && guard.buffer.is_empty(), n)
+                    let (d, n) = guard.read(count);
+                    (d, guard.closed && guard.buffer.is_empty(), n)
                 };
                 notif.flush();
 
-                match result {
-                    Some(n) if n > 0 => break n as i64,
-                    Some(_) if closed => break 0, // EOF: no data and all writers closed
-                    Some(_) => {
-                        // No data but writer still open: park until woken by write/close
-                        reader_wq.wait_until(|| {
-                            let guard = pipe.lock();
-                            !guard.buffer.is_empty() || guard.closed
-                        });
-                        continue;
-                    }
-                    None => {
+                if !data.is_empty() {
+                    if !copy_out(buffer_ptr, &data) {
                         info.lock().errno = Errno::EFAULT;
                         break -1;
                     }
+                    break data.len() as i64;
                 }
+                if closed {
+                    break 0; // EOF: no data and all writers closed
+                }
+                // No data but writer still open: park until woken by write/close
+                reader_wq.wait_until(|| {
+                    let guard = pipe.lock();
+                    !guard.buffer.is_empty() || guard.closed
+                });
             }
         }
         Some(FileDescriptor::PipeWrite(_)) => {
@@ -494,23 +520,20 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             // is available. The master side is typically used in a poll loop
             // (e.g. the terminal emulator) and must not block, or it cannot
             // forward keyboard input to the slave -- causing a deadlock.
-            let (result, eof, notif) = {
+            let (data, notif) = {
                 let mut guard = pty.lock();
-                let (r, n) = guard.master_read_to_user(buffer_ptr, count);
-                let eof = guard.closed_slave && guard.output_buf.is_empty();
-                (r, eof, n)
+                guard.master_read(count)
             };
             notif.flush();
 
-            match result {
-                Some(n) if n > 0 => n as i64,
-                Some(_) if eof => 0,
-                Some(_) => 0, // No data yet, return immediately
-                None => {
-                    info.lock().errno = Errno::EFAULT;
-                    -1
-                }
+            if data.is_empty() {
+                return 0; // EOF, or no data yet
             }
+            if !copy_out(buffer_ptr, &data) {
+                info.lock().errno = Errno::EFAULT;
+                return -1;
+            }
+            data.len() as i64
         }
         Some(FileDescriptor::PtySlave(pty)) => {
             // Clone the input_wq Arc before entering the loop (avoids holding lock while blocking).
@@ -526,32 +549,31 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     thread_exit(130); // 128 + SIGINT(2)
                 }
 
-                let (result, eof, notif) = {
+                let (data, eof, notif) = {
                     let mut guard = pty.lock();
-                    let (r, n) = guard.slave_read_to_user(buffer_ptr, count);
+                    let (d, n) = guard.slave_read(count);
                     let eof = guard.closed_master && guard.input_buf.is_empty();
-                    (r, eof, n)
+                    (d, eof, n)
                 };
                 notif.flush();
 
-                match result {
-                    Some(n) if n > 0 => break n as i64,
-                    Some(_) if eof => break 0,
-                    Some(_) => {
-                        input_wq.wait_until(|| {
-                            let guard = pty.lock();
-                            let killed = current_thread().map_or(false, |t| {
-                                t.killed.load(core::sync::atomic::Ordering::Acquire)
-                            });
-                            !guard.input_buf.is_empty() || guard.closed_master || killed
-                        });
-                        continue;
-                    }
-                    None => {
+                if !data.is_empty() {
+                    if !copy_out(buffer_ptr, &data) {
                         info.lock().errno = Errno::EFAULT;
                         break -1;
                     }
+                    break data.len() as i64;
                 }
+                if eof {
+                    break 0;
+                }
+                input_wq.wait_until(|| {
+                    let guard = pty.lock();
+                    let killed = current_thread().map_or(false, |t| {
+                        t.killed.load(core::sync::atomic::Ordering::Acquire)
+                    });
+                    !guard.input_buf.is_empty() || guard.closed_master || killed
+                });
             }
         }
         Some(FileDescriptor::FsFile(file)) => {

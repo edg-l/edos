@@ -4,7 +4,6 @@ use crate::{
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
     },
     thread::{mutex::BlockingMutex, waitqueue::WaitQueue},
-    util::uaccess::{try_copy_from_user, try_copy_to_user},
 };
 use alloc::{sync::Arc, vec::Vec};
 
@@ -196,24 +195,19 @@ impl Pty {
     }
 
     /// Master writes keyboard input into input_buf (slave reads this).
-    pub fn master_write_from_user(
-        &mut self,
-        user_ptr: *const u8,
-        len: usize,
-    ) -> (Option<usize>, PtyNotifications) {
+    ///
+    /// `data` is already in kernel memory: the caller copies it out of user
+    /// space before taking the pty lock, because a user copy can demand fault
+    /// and park, and a thread killed while parked never runs the guard's Drop.
+    pub fn master_write(&mut self, data: &[u8]) -> (usize, PtyNotifications) {
+        let len = data.len();
         if len == 0 {
-            return (Some(0), PtyNotifications::EMPTY);
-        }
-
-        // Copy from user space into a temporary buffer first.
-        let mut tmp = alloc::vec![0u8; len];
-        if !unsafe { try_copy_from_user(tmp.as_mut_ptr(), user_ptr, len) } {
-            return (None, PtyNotifications::EMPTY);
+            return (0, PtyNotifications::EMPTY);
         }
 
         // Process each byte through the line discipline.
         let mut kill_pid: Option<u64> = None;
-        for byte in tmp {
+        for &byte in data {
             // Borrow fields separately to satisfy the borrow checker.
             let action =
                 self.line_disc
@@ -231,80 +225,59 @@ impl Pty {
 
         let mut notif = self.notify_pollers();
         notif.kill_pid = kill_pid;
-        (Some(len), notif)
+        (len, notif)
     }
 
     /// Master reads program output from output_buf (slave wrote this).
-    pub fn master_read_to_user(
-        &mut self,
-        user_ptr: *mut u8,
-        count: usize,
-    ) -> (Option<usize>, PtyNotifications) {
+    ///
+    /// Returns the drained bytes; the caller copies them to user space after
+    /// releasing the pty lock.
+    pub fn master_read(&mut self, count: usize) -> (Vec<u8>, PtyNotifications) {
         if count == 0 {
-            return (Some(0), PtyNotifications::EMPTY);
+            return (Vec::new(), PtyNotifications::EMPTY);
         }
 
         let available = count.min(self.output_buf.len());
         if available == 0 {
-            return (Some(0), PtyNotifications::EMPTY);
+            return (Vec::new(), PtyNotifications::EMPTY);
         }
 
-        if !unsafe { try_copy_to_user(user_ptr, self.output_buf.as_ptr(), available) } {
-            return (None, PtyNotifications::EMPTY);
-        }
-
-        self.output_buf.drain(..available);
-        (Some(available), self.notify_pollers())
+        let out: Vec<u8> = self.output_buf.drain(..available).collect();
+        (out, self.notify_pollers())
     }
 
     /// Slave writes program output into output_buf (master reads this).
-    pub fn slave_write_from_user(
-        &mut self,
-        user_ptr: *const u8,
-        len: usize,
-    ) -> (Option<usize>, PtyNotifications) {
-        if len == 0 {
-            return (Some(0), PtyNotifications::EMPTY);
+    pub fn slave_write(&mut self, data: &[u8]) -> (usize, PtyNotifications) {
+        if data.is_empty() {
+            return (0, PtyNotifications::EMPTY);
         }
 
-        let start = self.output_buf.len();
-        self.output_buf.resize(start + len, 0);
-
-        if !unsafe { try_copy_from_user(self.output_buf[start..].as_mut_ptr(), user_ptr, len) } {
-            self.output_buf.truncate(start);
-            return (None, PtyNotifications::EMPTY);
-        }
-
-        (Some(len), self.notify_pollers())
+        self.output_buf.extend_from_slice(data);
+        (data.len(), self.notify_pollers())
     }
 
     /// Slave reads keyboard input from input_buf (master wrote this).
-    pub fn slave_read_to_user(
-        &mut self,
-        user_ptr: *mut u8,
-        count: usize,
-    ) -> (Option<usize>, PtyNotifications) {
+    ///
+    /// An empty return means either EOF-once (`eof_pending` consumed) or no data
+    /// yet; the caller distinguishes them by whether the master is closed.
+    pub fn slave_read(&mut self, count: usize) -> (Vec<u8>, PtyNotifications) {
         if count == 0 {
-            return (Some(0), PtyNotifications::EMPTY);
+            return (Vec::new(), PtyNotifications::EMPTY);
         }
 
         // Deliver EOF once when input is empty and eof_pending is set.
         if self.input_buf.is_empty() && self.eof_pending {
             self.eof_pending = false;
-            return (Some(0), self.notify_pollers());
+            return (Vec::new(), self.notify_pollers());
         }
 
         let available = count.min(self.input_buf.len());
         if available == 0 {
-            return (Some(0), PtyNotifications::EMPTY);
+            return (Vec::new(), PtyNotifications::EMPTY);
         }
 
-        if !unsafe { try_copy_to_user(user_ptr, self.input_buf.as_ptr(), available) } {
-            return (None, PtyNotifications::EMPTY);
-        }
-
-        self.input_buf.drain(..available);
-        (Some(available), self.notify_pollers())
+        let out: Vec<u8> = self.input_buf.drain(..available).collect();
+        (out, self.notify_pollers())
     }
 
     /// Decrement master refcount; set closed_master when it reaches zero.

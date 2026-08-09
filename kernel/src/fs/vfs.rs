@@ -627,18 +627,21 @@ pub fn write_from_user(
         if let Some(pc_ops) = op.fs.as_page_cache_ops() {
             return page_cache_write_from_user(inode, pc_ops, actual_offset, count, user_ptr);
         }
-        // No page-cache ops; reacquire the write lock for the synchronous
-        // driver call (no parking expected on these paths).
-        let _guard = op
-            .inode
-            .as_ref()
-            .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
+        // Fill the buffer before taking the lock: a user copy can demand fault
+        // and park, and a thread killed while parked never runs the guard's
+        // Drop, which would leave the inode write-locked for good.
         let mut buffer = alloc::vec![0u8; count];
         if !unsafe {
             crate::util::uaccess::try_copy_from_user(buffer.as_mut_ptr(), user_ptr, count)
         } {
             return Err(Error::IoError);
         }
+        // No page-cache ops; reacquire the write lock for the synchronous
+        // driver call (no parking expected on these paths).
+        let _guard = op
+            .inode
+            .as_ref()
+            .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
         match op.fs.write_bytes_ino(inode.ino, actual_offset, &buffer) {
             Err(Error::Unsupported) => {}
             result => return result,
@@ -711,6 +714,12 @@ pub fn read_to_user(
     count: usize,
     user_ptr: *mut u8,
 ) -> Result<usize, Error> {
+    // Bytes produced by the inode-based fallback, copied out after the guard is
+    // released. A user copy can demand fault and park, and a thread killed while
+    // parked never runs the guard's Drop, so the reader count would never be
+    // decremented.
+    let mut fallback: Option<Vec<u8>> = None;
+
     let file_size_opt =
         {
             let _guard = op
@@ -726,13 +735,8 @@ pub fn read_to_user(
                     match op.fs.read_bytes_ino(inode.ino, offset, count) {
                         Err(Error::Unsupported) => None,
                         Ok(data) => {
-                            let n = data.len();
-                            if !unsafe {
-                                crate::util::uaccess::try_copy_to_user(user_ptr, data.as_ptr(), n)
-                            } {
-                                return Err(Error::IoError);
-                            }
-                            return Ok(n);
+                            fallback = Some(data);
+                            None
                         }
                         Err(e) => return Err(e),
                     }
@@ -741,6 +745,14 @@ pub fn read_to_user(
                 None
             }
         };
+
+    if let Some(data) = fallback {
+        let n = data.len();
+        if !unsafe { crate::util::uaccess::try_copy_to_user(user_ptr, data.as_ptr(), n) } {
+            return Err(Error::IoError);
+        }
+        return Ok(n);
+    }
 
     let file_size = match file_size_opt {
         Some(s) => s,

@@ -964,6 +964,59 @@ threadtest + hammer + forktest clean, mmaptest 11/11 on both `/var` and `/tmp`,
 Still not covered, deliberately: a thread spinning **inside** the kernel. Nothing
 can kill that safely, so `execve` keeps its bounded wait and its EAGAIN.
 
+## Fixed: five more guards live across a user copy
+
+`sys_window_list` was one instance of a class, and the sweep for the rest of it
+found five more. The rule the class breaks: **a lock guard must not be live
+across a user copy.**
+
+Why the copy is a park point, which is the part that is not obvious: in the
+ring-0 branch of `page_fault_handler`, `handle_demand_fault` runs *before* the
+uaccess fixup, deliberately, so that a `try_copy_*` touching a lazily-mapped
+page gets it mapped instead of failing. That handler blocks — NCQ I/O,
+block-page-cache shard contention, vma waitqueues — with interrupts re-enabled.
+EDOS has no unwinding, so a thread killed while parked there never runs the
+guard's `Drop` and the lock is held for the life of the machine.
+
+| Site | Guard | Consequence of a kill there |
+|---|---|---|
+| `Pipe::{write_from_user,read_to_user}` | `BlockingMutex<Pipe>` | that pipe wedges; every reader and writer parks forever |
+| `Pty::{master,slave}_{write_from_user,read_to_user}` | `BlockingMutex<Pty>` | the terminal wedges |
+| `tty::write_from_user` | `TTY_BUFFER` | stdout dies for every process |
+| `vfs::read_to_user` (non-page-cache path) | `inode.lock` read | that procfs/devfs inode is unreadable |
+| `vfs::write_from_user` (non-page-cache path) | `inode.lock` write | that inode is unreadable *and* unwritable |
+
+The fix is one shape everywhere: **buffer first, lock second.** Writes copy out
+of user space before taking the lock; reads drain into an owned `Vec` under the
+lock and copy out after dropping it. `copy_in`/`copy_out` in `syscalls/io.rs`
+are the helpers. The pipe and pty types lost their `*_from_user` / `*_to_user`
+methods entirely, which is what stops the pattern coming back: the types no
+longer know what a user pointer is.
+
+Two deliberate trade-offs, both narrower than the leak they replace:
+
+- **A read that faults on the copy loses the drained bytes.** It used to copy
+  first and drain only on success. A fault here means the caller passed a bad
+  buffer, and the alternative (peek, copy, then drain under a second
+  acquisition) lets two concurrent readers see the same bytes.
+- **TTY writes longer than 256 bytes may interleave with another writer's**,
+  since the buffer lock is now taken per chunk instead of for the whole write.
+  A TTY makes no atomicity guarantee above that.
+
+Checked and already correct, because they snapshot into owned memory first:
+`sys_ioctl`, `sys_window_poll`, `sys_list_mounts`.
+
+Verified on a headless boot: `echo hello | wc -c` → 6, `ls /bin | wc -l` → 70,
+`cat /proc/meminfo | head -3` (the exact vfs fallback path that was fixed),
+`dmesg | wc -c` → 7328 bytes through the rewritten pipe path, killtest 2/2,
+exectest 5/5, mmaptest 11/11 on `/var`, 49/49 in-kernel, no panic and no
+shootdown timeout in the log.
+
+**Nothing enforces this.** The fixes are all "the code no longer does that";
+there is no assert. The per-thread `lock_ranks` stack already exists in debug
+builds and is the obvious place to hang a "died holding a guard" check, which
+is the one thing that would keep this from regressing.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any

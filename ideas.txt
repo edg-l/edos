@@ -579,7 +579,7 @@ Marginal cost per subsystem: one rank constant, one row in
 "site")`/ on ~10-30 sites. Per-subsystem cost a few hours; expected
 payoff is a real bug or two per subsystem based on fs audit yield.
 
-### Guards held across kill points leak (TOP PRIORITY, 2026-08-08)
+### Guards held across kill points leak (AUDITED AND FIXED, 2026-08-09)
 
 Found by an agent-driven soak: ~630s of continuous synthetic input via
 `scripts/edos-vm` deadlocks the whole GUI. All four CPUs end up
@@ -595,19 +595,39 @@ the window was hit constantly.
 
 Full writeup: `doc/bugs/2026-08-08-window-registry-reader-leak.md`.
 
-The narrow fix landed: `sys_window_list` snapshots under the guard and
-copies outside it. The general problem is bigger than that one call
-site and is still open as its own workstream. The kill-on-tick work
-makes it more reachable, not less — though a tick only kills on a
-ring-3 frame, which is the proof the thread held nothing:
+`sys_window_list` was the instance; the sweep for the rest found five
+more, all of the same shape and all now fixed. The window is narrower
+than "anywhere a thread dies": it is a guard live across a user copy.
+`handle_demand_fault` runs *before* the uaccess fixup in the ring-0
+branch of the page-fault handler and legitimately blocks (NCQ I/O,
+block-page-cache contention, vma waitqueues), so a copy touching a
+lazily-mapped or file-backed user page parks with interrupts on.
 
-- Audit every lock guard that is live across `try_copy_to_user`,
-  `copy_from_user`, a demand fault, or a park. Each one is a permanent
-  leak the first time its holder is killed there.
+- `Pipe::write_from_user` / `read_to_user` copied under the
+  `BlockingMutex<Pipe>` guard. Deleted; `sys_write`/`sys_read` buffer
+  through `copy_in`/`copy_out` and call the plain `write`/`read`.
+- `Pty::{master,slave}_{write_from_user,read_to_user}` did the same
+  under `BlockingMutex<Pty>`. Now `master_write`/`master_read`/
+  `slave_write`/`slave_read` take and return kernel buffers.
+- `tty::write_from_user` held `TTY_BUFFER` across a chunked copy loop,
+  which is stdout for every process. The lock is now taken per chunk.
+- `vfs::read_to_user` held `inode.lock` (read) across the copy on the
+  non-page-cache path — procfs and devfs reads. The bytes come out
+  under the guard, the copy happens after it.
+- `vfs::write_from_user` held `inode.lock` (write) across the copy on
+  the same path. The buffer is filled before the lock is taken.
+
+Checked and clean, because they already snapshot into owned memory
+first: `sys_ioctl`, `sys_window_poll`, `sys_list_mounts`.
+
+Still worth doing, and not covered by the above:
+
 - Consider whether the reaper can do anything about guards at all.
   Today it frees the stack and destructors never run. A per-thread list
   of held ranked locks (`Thread.lock_ranks` already exists in debug
-  builds) could at least *detect* a thread dying with locks held.
+  builds) could at least *detect* a thread dying with locks held. That
+  is the guard against this class regressing, since nothing about the
+  fixes above is enforced by the compiler.
 - This is the sibling of the drop contract: that one says drops must
   not block, this one says guards must not be live where a thread can
   die.
