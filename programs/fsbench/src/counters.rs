@@ -14,6 +14,7 @@ const SOURCES: &[&str] = &[
     "/proc/ahci_stats",
     "/proc/inflight_stats",
     "/proc/evict_stats",
+    "/proc/efs_stats",
 ];
 
 /// Counters whose value is a current level rather than a running total.

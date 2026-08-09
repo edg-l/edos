@@ -100,6 +100,16 @@ while held.
 (memfs, efs, fat32). Legal inner ranks: 32, 35, 40, 50, 60, 70, 80, and the deep
 leaves 900 and 910.
 
+**31, `EfsDriver.inode_rmw`.** An EFS inode is 256 bytes written as a unit, and
+several paths read one, change a single field and write the whole struct back:
+`update_size` stamps size, `ensure_block*_for_logical` appends extents,
+`truncate_inner` trims them. Unserialized, the size write puts back the extent
+list as it was before the append, and the blocks that append allocated stay set
+in the block bitmap with nothing referencing them --- a steady leak proportional
+to write volume, with no error reported anywhere. Held across block-cache I/O,
+so it is a `BlockingMutex`; entry points take it once and call the `_locked`
+inner variants, since it is not reentrant.
+
 **32, `EfsDriver.alloc_mutex`.** Serializes bitmap allocation (`alloc_inode`,
 `alloc_block`) across CPUs, so `mutable` (160) can be released across block-cache
 I/O without two allocators picking the same bit. Taken at the top of every EFS

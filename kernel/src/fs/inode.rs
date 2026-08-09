@@ -32,7 +32,7 @@
 //! See doc/invariants/lock-order.md for the full rank table and enforcement.
 
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::RwLock;
 
 use crate::thread::{UserThread, mutex::BlockingMutex, rwlock::RwLock as BlockingRwLock};
@@ -75,6 +75,7 @@ impl VfsInode {
     }
 
     pub fn mark_orphan(&self) {
+        ORPHANS_MARKED.fetch_add(1, Ordering::Relaxed);
         self.orphan.store(true, Ordering::Release);
     }
 
@@ -82,6 +83,12 @@ impl VfsInode {
         self.orphan.load(Ordering::Acquire)
     }
 }
+
+/// Inodes marked orphan by `unlink`, and orphans whose last reference was
+/// released. Storage is only reclaimed on the second, so a gap between them is
+/// inodes and blocks that no longer have a name and have not been freed.
+pub static ORPHANS_MARKED: AtomicU64 = AtomicU64::new(0);
+pub static ORPHANS_DROPPED: AtomicU64 = AtomicU64::new(0);
 
 impl Drop for VfsInode {
     fn drop(&mut self) {
@@ -92,6 +99,7 @@ impl Drop for VfsInode {
         if !self.is_orphan() || self.ino == 0 {
             return;
         }
+        ORPHANS_DROPPED.fetch_add(1, Ordering::Relaxed);
 
         // Running here on the reaper is expected, not a violation: the reaper
         // frees a dead thread's descriptors and VMAs, so it routinely releases

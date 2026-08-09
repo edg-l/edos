@@ -15,6 +15,7 @@
 /// |-----:|---------------------------------------|
 /// |   10 | `VFS` mount registry                  |
 /// |   30 | `inode.lock` (per-inode)              |
+/// |   31 | `EfsDriver.inode_rmw`                 |
 /// |   32 | `EfsDriver.alloc_mutex`               |
 /// |   35 | `dentry_cache.inner`                  |
 /// |   40 | `inode.pages.pages`                   |
@@ -58,6 +59,13 @@
 
 pub const RANK_VFS: u16 = 10;
 pub const RANK_INODE: u16 = 30;
+// Serializes an inode's read-modify-write cycle inside EFS. `update_size` and
+// `ensure_block*_for_logical` both read an inode, change a different field, and
+// write the whole 256-byte struct back; without this the size write drops the
+// extents the other just added, orphaning their blocks in the bitmap. Held
+// across BPC I/O, so it sits above `inode.lock` (30) and below the alloc mutex
+// (32) that block allocation takes underneath it.
+pub const RANK_EFS_INODE_RMW: u16 = 31;
 pub const RANK_EFS_ALLOC: u16 = 32;
 pub const RANK_DENTRY: u16 = 35;
 pub const RANK_PAGES: u16 = 40;

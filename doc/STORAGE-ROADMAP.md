@@ -124,6 +124,62 @@ reader, both `ensure_block*` paths, truncate/free, `efs-fsck`, `efs-mkfs` and
 Until then the ceiling is real and silent, and the allocator's contiguity
 behaviour is what decides how often a file hits it.
 
+## 1d. Where the block leak actually is
+
+`efs-fsck` reports thousands of leaked block-bitmap bits after a `fsbench /var`
+run: bits set with no inode referencing them. `/proc/efs_stats` now carries the
+counters needed to place it (`blocks_allocated`, `blocks_freed`, `alloc_failed`,
+`tx_aborts`, `orphans_marked`, `orphans_dropped`).
+
+What the counters already rule out:
+
+- **Not the tx-abort path.** `ensure_blocks_for_logical_batch` carries a comment
+  blaming `alloc_block` writing the bitmap through the block cache before its
+  transaction commits. `tx_aborts` is **0** across a whole run, and
+  `alloc_failed` is 0 with it. That mechanism is real but never fires here.
+- **Not orphan eviction.** `orphans_marked` and `orphans_dropped` both read 513
+  after a run: every unlinked inode reaches its final `Arc` drop and is evicted.
+  Sampling this *during* the run shows 0 dropped, because the counters are read
+  before the benchmark closes its descriptors. Read them after the process
+  exits, or the numbers say the opposite of the truth.
+- **Not the alloc/free gap on its own.** `blocks_allocated - blocks_freed` is
+  about 13% of allocations, but most of that is legitimately referenced by files
+  still on disk at the end. Only fsck can distinguish referenced from leaked;
+  the counters bound the problem, they do not measure it.
+
+One real defect was found and fixed on the way (see `RANK_EFS_INODE_RMW`): the
+whole-inode read-modify-write in `update_size` raced the one in
+`ensure_block*_for_logical`, so a size stamp could put back an extent list from
+before an append and strand the blocks it had allocated. Serializing it did not
+measurably move the leak — 9861 unfreed before, 9667 after, against a slightly
+larger allocation count — so it was not the main source. It is kept because the
+same race also loses extents, which is data loss, not just space.
+
+A small run tells a different story from a large one: after replaying its
+journal, the `-q` image comes back with **zero** fsck findings, while `-t 4000`
+runs leak ~20k blocks with a clean journal. Whatever is left scales with volume
+and is not visible at small sizes. The next step is to have fsck print the
+owning inode for a leaked run of blocks, so the allocation site can be named
+instead of guessed at.
+
+## 1e. `tail_seq != head_seq` is not a dirty journal
+
+`efs-fsck` calls the journal dirty whenever the superblock's `tail_seq` differs
+from `head_seq`, and reports it after a clean `sync` (`tail_seq=77
+head_seq=78`). That is one behind, which is the ordinary steady state:
+`seal_active` bumps `head_seq` for the new empty active transaction, and
+`advance_tail` only pulls `tail_seq` up to it when nothing is pending, writing
+the superblock `if changed`. Any activity after the last `advance_tail` leaves
+the pair one apart with nothing to replay.
+
+So this is a false positive in fsck rather than a checkpointing bug in `sync`,
+and it matters because `--repair` acts on it: `sys_sync` warns that replaying
+transactions whose blocks have already been checkpointed "reverts good data
+with older journal copies". Before changing either side, establish what the
+on-disk `head_seq` is meant to mean — the next sequence to allocate, or the
+last one committed — and make the superblock writer and the checker agree. It
+is deliberately left unfixed here rather than guessed at.
+
 ## 2. mmap fault-around
 
 A map, fault in 4 MiB, unmap cycle is 124 ms: 1024 pages at 121 us each,

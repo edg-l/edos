@@ -1,5 +1,7 @@
 // EFS kernel driver.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
@@ -74,7 +76,7 @@ fn block_write_fua(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result
 use super::path::Path;
 use super::{Error, File, FileAttrs, FileKind, FileSystem, FileTime};
 use crate::{
-    debug::lock_order::{RANK_EFS_ALLOC, RANK_EFS_MUTABLE},
+    debug::lock_order::{RANK_EFS_ALLOC, RANK_EFS_INODE_RMW, RANK_EFS_MUTABLE},
     log, ranked_lock,
     thread::mutex::BlockingMutex,
 };
@@ -111,6 +113,8 @@ pub struct EfsDriver {
     /// allocators picking the same bit. Rank 105 (above `DIRTY_INODES` 100,
     /// below `BPC.shard` 110).
     alloc_mutex: BlockingMutex<()>,
+    /// Serializes read-modify-write of an inode. See `RANK_EFS_INODE_RMW`.
+    inode_rmw: BlockingMutex<()>,
     /// Mutable FS metadata (superblock + block group descriptors).
     mutable: BlockingMutex<EfsMutableState>,
 }
@@ -293,6 +297,7 @@ impl EfsDriver {
             inodes_per_group,
             journal,
             alloc_mutex: BlockingMutex::new(()),
+            inode_rmw: BlockingMutex::new(()),
             mutable: BlockingMutex::new(EfsMutableState {
                 superblock,
                 bgd_table,
@@ -794,7 +799,21 @@ impl EfsDriver {
     }
 
     /// Return the physical block for the given logical block, allocating if needed.
+    /// Map `logical_block`, allocating a block if it is not mapped yet.
+    ///
+    /// Takes the inode read-modify-write guard; callers that already hold it
+    /// must use [`Self::ensure_block_for_logical_locked`].
     fn ensure_block_for_logical(
+        &self,
+        ino: u64,
+        logical_block: u32,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<u64, Error> {
+        let _rmw = ranked_lock!(RANK_EFS_INODE_RMW, "EfsDriver.inode_rmw", self.inode_rmw);
+        self.ensure_block_for_logical_locked(ino, logical_block, tx)
+    }
+
+    fn ensure_block_for_logical_locked(
         &self,
         ino: u64,
         logical_block: u32,
@@ -855,6 +874,7 @@ impl EfsDriver {
         if logical_blocks.is_empty() {
             return Ok(Vec::new());
         }
+        let _rmw = ranked_lock!(RANK_EFS_INODE_RMW, "EfsDriver.inode_rmw", self.inode_rmw);
 
         // (a) Read inode once.
         let mut inode = self.read_inode(ino)?;
@@ -915,6 +935,17 @@ impl EfsDriver {
 }
 
 // ---- Bitmap operations --------------------------------------------------------
+
+/// Blocks handed out by `alloc_block`, and blocks returned by `free_block`.
+///
+/// The gap between them, minus the blocks live files actually reference, is
+/// how much space an allocation path lost track of. `efs-fsck` can only report
+/// the total after the fact; these say which side it came from while the
+/// system is running.
+pub static EFS_BLOCKS_ALLOCATED: AtomicU64 = AtomicU64::new(0);
+pub static EFS_BLOCKS_FREED: AtomicU64 = AtomicU64::new(0);
+/// Allocation attempts that found no free block in any group.
+pub static EFS_ALLOC_FAILED: AtomicU64 = AtomicU64::new(0);
 
 impl EfsDriver {
     /// Allocate a free block and return its absolute block number.
@@ -979,9 +1010,11 @@ impl EfsDriver {
                     tx.enroll_block(self.device.device_id, sb_page_idx, guard.page_arc());
                 }
 
+                EFS_BLOCKS_ALLOCATED.fetch_add(1, Ordering::Relaxed);
                 return Ok(abs_block);
             }
         }
+        EFS_ALLOC_FAILED.fetch_add(1, Ordering::Relaxed);
         Err(Error::IoError)
     }
 
@@ -1030,6 +1063,7 @@ impl EfsDriver {
         let freed_page_idx = self.block_to_lba(block) / 8;
         tx.enroll_revoke(self.device.device_id, freed_page_idx);
 
+        EFS_BLOCKS_FREED.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -2192,6 +2226,9 @@ impl EfsDriver {
         size: u64,
         tx: &mut TxHandle<'_>,
     ) -> Result<(), Error> {
+        // Rewrites the whole inode (size and extent list), so it takes the
+        // same guard as the other read-modify-write paths.
+        let _rmw = ranked_lock!(RANK_EFS_INODE_RMW, "EfsDriver.inode_rmw", self.inode_rmw);
         let current_size = inode.size;
         if size >= current_size {
             // Growing: just update size (sparse).
@@ -2439,6 +2476,10 @@ impl PageCacheOps for EfsDriver {
         buf: &[u8],
         _valid_bytes: usize,
     ) -> Result<(), Error> {
+        // One guard for the whole convert-then-map sequence: both halves
+        // rewrite the inode, and a concurrent `update_size` between them would
+        // put the pre-conversion copy back.
+        let _rmw = ranked_lock!(RANK_EFS_INODE_RMW, "EfsDriver.inode_rmw", self.inode_rmw);
         let inode = self.read_inode(ino)?;
         let mut tx = self.journal.begin_tx();
 
@@ -2454,7 +2495,7 @@ impl PageCacheOps for EfsDriver {
 
         // Extent-based write.
         let logical_block = page_index as u32;
-        let phys_block = match self.ensure_block_for_logical(ino, logical_block, &mut tx) {
+        let phys_block = match self.ensure_block_for_logical_locked(ino, logical_block, &mut tx) {
             Ok(b) => b,
             Err(e) => {
                 tx.abort();
@@ -2477,6 +2518,11 @@ impl PageCacheOps for EfsDriver {
     }
 
     fn update_size(&self, ino: u64, new_size: u64) -> Result<(), Error> {
+        // Whole-inode read-modify-write: without this guard a concurrent
+        // `ensure_block*` writes its new extent list between our read and our
+        // write, and stamping the size puts the old list back. The blocks it
+        // allocated stay set in the bitmap with nothing pointing at them.
+        let _rmw = ranked_lock!(RANK_EFS_INODE_RMW, "EfsDriver.inode_rmw", self.inode_rmw);
         let inode = self.read_inode(ino)?;
         if new_size <= inode.size {
             return Ok(());

@@ -10,12 +10,21 @@ use alloc::{
     sync::Arc,
 };
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use super::Journal;
 use crate::{
     debug::lock_order::{RANK_JOURNAL_STATE, RANK_JOURNAL_TRACKER},
     fs::block_page_cache::CachedBlockPage,
     ranked_lock,
 };
+
+/// Transactions abandoned by `abort()`.
+///
+/// An abort discards staged enrollments but not the side effects the caller
+/// already applied, so blocks allocated inside one stay marked in the bitmap
+/// with nothing referencing them. Non-zero means space is being lost.
+pub static TX_ABORTS: AtomicU64 = AtomicU64::new(0);
 
 /// RAII handle for a single logical transaction.
 ///
@@ -55,6 +64,9 @@ impl<'a> TxHandle<'a> {
     /// Abort this transaction.  On drop, staged enrollments will be discarded
     /// rather than merged into the active transaction.
     pub fn abort(&mut self) {
+        if !self.aborted {
+            TX_ABORTS.fetch_add(1, Ordering::Relaxed);
+        }
         self.aborted = true;
     }
 }

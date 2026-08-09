@@ -136,6 +136,22 @@ impl Procfs {
         )
     }
 
+    fn render_efs_stats() -> String {
+        use crate::fs::efs::{EFS_ALLOC_FAILED, EFS_BLOCKS_ALLOCATED, EFS_BLOCKS_FREED};
+        use crate::fs::inode::{ORPHANS_DROPPED, ORPHANS_MARKED};
+        use crate::fs::journal::tx::TX_ABORTS;
+        format!(
+            "blocks_allocated: {}\nblocks_freed: {}\nalloc_failed: {}\ntx_aborts: {}\n\
+             orphans_marked: {}\norphans_dropped: {}\n",
+            EFS_BLOCKS_ALLOCATED.load(Ordering::Relaxed),
+            EFS_BLOCKS_FREED.load(Ordering::Relaxed),
+            EFS_ALLOC_FAILED.load(Ordering::Relaxed),
+            TX_ABORTS.load(Ordering::Relaxed),
+            ORPHANS_MARKED.load(Ordering::Relaxed),
+            ORPHANS_DROPPED.load(Ordering::Relaxed),
+        )
+    }
+
     fn render_inflight_stats() -> String {
         use crate::fs::page_fill::{
             INFLIGHT_CANCELS, INFLIGHT_CURRENT, INFLIGHT_INSTALLS, INFLIGHT_JOINS, INFLIGHT_RETRIES,
@@ -221,6 +237,7 @@ impl Procfs {
                 "meminfo" => Ok(ProcNode::MemInfo),
                 "block_cache" => Ok(ProcNode::BlockCacheStats),
                 "evict_stats" => Ok(ProcNode::EvictStats),
+                "efs_stats" => Ok(ProcNode::EfsStats),
                 "lock_order_stats" => Ok(ProcNode::LockOrderStats),
                 "inflight_stats" => Ok(ProcNode::InflightStats),
                 "ahci_stats" => Ok(ProcNode::AhciStats),
@@ -280,6 +297,9 @@ impl FileSystem for Procfs {
                     evict_stats.len(),
                 ));
 
+                let efs_stats = Self::render_efs_stats();
+                files.push(Self::file_entry("efs_stats".to_string(), efs_stats.len()));
+
                 let lock_order_stats = Self::render_lock_order_stats();
                 files.push(Self::file_entry(
                     "lock_order_stats".to_string(),
@@ -323,6 +343,7 @@ impl FileSystem for Procfs {
             | ProcNode::MemInfo
             | ProcNode::BlockCacheStats
             | ProcNode::EvictStats
+            | ProcNode::EfsStats
             | ProcNode::LockOrderStats
             | ProcNode::InflightStats
             | ProcNode::AhciStats
@@ -361,6 +382,10 @@ impl FileSystem for Procfs {
             }
             ProcNode::BlockCacheStats => {
                 let content = Self::render_block_cache();
+                Ok(Self::read_text(content, offset, count))
+            }
+            ProcNode::EfsStats => {
+                let content = Self::render_efs_stats();
                 Ok(Self::read_text(content, offset, count))
             }
             ProcNode::EvictStats => {
@@ -419,6 +444,10 @@ impl FileSystem for Procfs {
             ProcNode::BlockCacheStats => {
                 let content = Self::render_block_cache();
                 Ok(Self::file_entry("block_cache".to_string(), content.len()))
+            }
+            ProcNode::EfsStats => {
+                let content = Self::render_efs_stats();
+                Ok(Self::file_entry("efs_stats".to_string(), content.len()))
             }
             ProcNode::EvictStats => {
                 let content = Self::render_evict_stats();
@@ -701,6 +730,7 @@ enum ProcNode {
     MemInfo,
     BlockCacheStats,
     EvictStats,
+    EfsStats,
     LockOrderStats,
     InflightStats,
     AhciStats,
