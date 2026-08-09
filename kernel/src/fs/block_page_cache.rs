@@ -67,13 +67,16 @@ const DIRTY_EXPIRE_MS: u64 = 5_000;
 /// giving up and taking a detached page.
 const WRITE_PAGE_ATTEMPTS: usize = 3;
 
+/// Pages one AHCI command may carry, from the 248-entry PRDT (992 KiB).
+const MAX_RUN_PAGES: usize = 248;
+
 /// Pages a single [`BlockPageCache::read_bytes`] batch may cover.
 ///
-/// One request per page is issued, so this is also the number of commands
-/// offered to the device at once. Sized above the 32-deep NCQ queue so the
-/// queue stays full, and far below the 2048 pages the cache holds so a large
-/// read cannot evict its own earlier pages before they are copied out.
-const READ_BATCH_PAGES: usize = 64;
+/// Matched to what one command can carry, so a sequential read of a large
+/// range becomes one command per batch. Well under the 2048 pages the cache
+/// holds, so a large read cannot evict its own earlier pages before they are
+/// copied out.
+const READ_BATCH_PAGES: usize = MAX_RUN_PAGES;
 
 /// Whether a newly allocated page needs its current on-disk contents.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -711,22 +714,43 @@ impl BlockPageCache {
                 return Err(AhciError::InvalidDevice);
             }
         };
-        let reqs: Vec<(u64, u32, BlockBuffer)> = miss_indices
-            .iter()
-            .enumerate()
-            .map(|(fi, &mi)| {
-                let lba = (start_page + mi as u64) * SECTORS_PER_PAGE as u64;
-                let buf = frame_slice(frames[fi].unwrap());
-                (
-                    lba,
-                    SECTORS_PER_PAGE as u32,
-                    BlockBuffer::Slice {
-                        ptr: buf.as_mut_ptr(),
-                        len: PAGE_SIZE,
-                    },
-                )
-            })
-            .collect();
+        // Consecutive misses become one command rather than one per page.
+        //
+        // Issuing a command is far more expensive than transferring the
+        // sectors it carries: the same drive that answers a per-page sweep at
+        // 37 MiB/s answers EFS at over 1.7 GiB/s, and the only difference is
+        // that EFS asks for up to 992 KiB at a time. Cache frames are not
+        // physically adjacent, so each run reads into one contiguous staging
+        // buffer and is scattered into its frames afterwards; the copy costs
+        // a fraction of the command it replaces.
+        let mut runs: Vec<(usize, usize)> = Vec::new(); // (first index into miss_indices, length)
+        for (fi, &mi) in miss_indices.iter().enumerate() {
+            match runs.last_mut() {
+                Some((first, len))
+                    if miss_indices[*first + *len - 1] + 1 == mi && *len < MAX_RUN_PAGES =>
+                {
+                    *len += 1;
+                }
+                _ => runs.push((fi, 1)),
+            }
+        }
+
+        let mut staging: Vec<Vec<u8>> = Vec::with_capacity(runs.len());
+        let mut reqs: Vec<(u64, u32, BlockBuffer)> = Vec::with_capacity(runs.len());
+        for &(first, len) in &runs {
+            let mut buf = vec![0u8; len * PAGE_SIZE];
+            let lba = (start_page + miss_indices[first] as u64) * SECTORS_PER_PAGE as u64;
+            reqs.push((
+                lba,
+                (len * SECTORS_PER_PAGE as usize) as u32,
+                BlockBuffer::Slice {
+                    ptr: buf.as_mut_ptr(),
+                    len: buf.len(),
+                },
+            ));
+            staging.push(buf);
+        }
+
         let handles = match dev.submit_read_batch(reqs) {
             Ok(h) => h,
             Err(e) => {
@@ -747,6 +771,13 @@ impl BlockPageCache {
                 unsafe { frame_allocator().deallocate_frame(*f) };
             }
             return Err(e);
+        }
+
+        for (&(first, len), buf) in runs.iter().zip(staging.iter()) {
+            for i in 0..len {
+                let dest = frame_slice(frames[first + i].unwrap());
+                dest.copy_from_slice(&buf[i * PAGE_SIZE..(i + 1) * PAGE_SIZE]);
+            }
         }
 
         // Insert pages into cache, resolving any races.
@@ -1136,15 +1167,25 @@ impl BlockPageCache {
     /// Uses the writeback sequencing protocol: kicks the thread, waits for the
     /// pass to complete, then issues the hardware flush command.
     pub fn flush_device(&self, device_id: u64) -> Result<(), AhciError> {
+        let t0 = crate::timer::Instant::now();
         let req = self.flush_requested.fetch_add(1, Ordering::Release) + 1;
         self.writeback_wq.wake_all();
         self.wait_for_flush(req);
+        let t1 = crate::timer::Instant::now();
 
         // submit_flush is a no-op on devices without a hardware write cache
         // (USB MSC today), and issues FLUSH CACHE EXT on AHCI.
         let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
         let h = dev.submit_flush()?;
         h.wait()?;
+        let t2 = crate::timer::Instant::now();
+        if t2.duration_since(t0).as_millis() >= 1_000 {
+            log!(
+                "flush_device: slow: {} ms writeback wait, {} ms device flush",
+                t1.duration_since(t0).as_millis(),
+                t2.duration_since(t1).as_millis()
+            );
+        }
         Ok(())
     }
 
