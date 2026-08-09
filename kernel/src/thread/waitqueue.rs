@@ -177,12 +177,31 @@ impl WaitQueue {
                 }
                 SleepAction::Sleep(dt) => {
                     let deadline = Instant::now() + dt;
-                    while !ready() {
+                    loop {
                         let now = Instant::now();
-                        if now >= deadline {
+                        if ready() || now >= deadline {
                             break;
                         }
                         thread_sleep(deadline.duration_since(now));
+
+                        // A wake pops the waiter off the queue, so waking
+                        // without the predicate being true leaves this thread
+                        // unregistered: every later wake would miss it and it
+                        // would sleep out its whole deadline before noticing.
+                        // Re-enrol, then re-check, so a wake landing between
+                        // the two is not lost either.
+                        let done = interrupts::without_interrupts(|| {
+                            let mut q = self.inner.lock();
+                            if q.iter().all(|w| !Weak::ptr_eq(w, &my_handle)) {
+                                q.push_back(my_handle.clone())
+                                    .expect("WaitQueue overflow: too many waiters");
+                            }
+                            drop(q);
+                            ready()
+                        });
+                        if done {
+                            break;
+                        }
                     }
                 }
             }
