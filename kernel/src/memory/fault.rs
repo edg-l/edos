@@ -51,6 +51,40 @@ pub struct FaultInfo {
     pub source: FaultSource,
 }
 
+/// Why a demand fault declined to install a page.
+///
+/// A fault the handler refuses kills the faulting thread, and the address
+/// alone does not say whether the mapping was missing, the permissions were
+/// wrong, or the filesystem could not produce the page. The kill path prints
+/// this so the log names the cause.
+#[derive(Clone, Copy, Debug)]
+pub enum FaultReject {
+    /// A protection violation, which belongs to the COW handler.
+    Protection,
+    /// No current thread, or a kernel thread with no address space.
+    NoUserThread,
+    /// No VMA covers the address.
+    NoVma,
+    /// The VMA is not demand-faultable, or its backing is not supported.
+    NotFaultable,
+    /// Write to a VMA without `PROT_WRITE`.
+    WriteToReadOnly,
+    /// Instruction fetch from a VMA without `PROT_EXEC`.
+    ExecOnNoExec,
+    /// The mount backing the mapping is gone.
+    MountGone,
+    /// The page starts at or beyond EOF (SIGBUS-equivalent).
+    PastEof { page_idx: u64, file_size: u64 },
+    /// The filesystem could not fill the page.
+    FillFailed { page_idx: u64 },
+    /// Out of physical frames.
+    NoFrame,
+    /// The PTE could not be installed and the page is still not present.
+    MapFailed,
+    /// The lazy-relocation path could not produce the page.
+    RelocFailed,
+}
+
 /// Look up VMA for a fault address and extract fault resolution info.
 /// Returns None if no VMA covers the address, the VMA isn't lazy, or
 /// the backing type isn't supported for demand faulting.
@@ -105,6 +139,8 @@ pub fn lookup_fault_vma(vmas: &VmaSet, fault_addr: VirtAddr) -> Option<FaultInfo
 pub struct FaultOutcome {
     /// True if the page is now mapped (successfully faulted in or was already present).
     pub mapped: bool,
+    /// Why the page was not mapped. `None` whenever `mapped` is true.
+    pub reject: Option<FaultReject>,
     /// For FileBacked faults: the `Arc<CachedPage>` and VMA page-slot index that must be
     /// stored back into the VMA's `pages` vec.  The caller must re-acquire the VmaSet lock
     /// and call `vma.store_cached_page(slot, arc)` (or equivalent) to keep the Arc alive
@@ -141,6 +177,7 @@ pub fn fault_in_page(
             None => {
                 return FaultOutcome {
                     mapped: false,
+                    reject: Some(FaultReject::MountGone),
                     cached_page: None,
                 };
             }
@@ -152,6 +189,10 @@ pub fn fault_in_page(
             if page_idx * 4096 >= file_size {
                 return FaultOutcome {
                     mapped: false,
+                    reject: Some(FaultReject::PastEof {
+                        page_idx: *page_idx,
+                        file_size,
+                    }),
                     cached_page: None,
                 };
             }
@@ -165,6 +206,9 @@ pub fn fault_in_page(
             Err(_) => {
                 return FaultOutcome {
                     mapped: false,
+                    reject: Some(FaultReject::FillFailed {
+                        page_idx: *page_idx,
+                    }),
                     cached_page: None,
                 };
             }
@@ -190,6 +234,7 @@ pub fn fault_in_page(
             }
             FaultOutcome {
                 mapped: true,
+                reject: None,
                 cached_page: Some((*vma_page_slot, cached_page)),
             }
         } else if is_page_present(cr3, page_addr, phys_offset) {
@@ -198,6 +243,7 @@ pub fn fault_in_page(
             cached_page.unpin();
             FaultOutcome {
                 mapped: true,
+                reject: None,
                 cached_page: None,
             }
         } else {
@@ -205,6 +251,7 @@ pub fn fault_in_page(
             cached_page.unpin();
             FaultOutcome {
                 mapped: false,
+                reject: Some(FaultReject::MapFailed),
                 cached_page: None,
             }
         }
@@ -217,6 +264,7 @@ pub fn fault_in_page(
             None => {
                 return FaultOutcome {
                     mapped: false,
+                    reject: Some(FaultReject::NoFrame),
                     cached_page: None,
                 };
             }
@@ -235,6 +283,7 @@ pub fn fault_in_page(
             x86_64::instructions::tlb::flush(page_addr);
             FaultOutcome {
                 mapped: true,
+                reject: None,
                 cached_page: None,
             }
         } else {
@@ -243,12 +292,14 @@ pub fn fault_in_page(
                 unsafe { frame_allocator().deallocate_frame(frame) };
                 FaultOutcome {
                     mapped: true,
+                    reject: None,
                     cached_page: None,
                 }
             } else {
                 unsafe { frame_allocator().deallocate_frame(frame) };
                 FaultOutcome {
                     mapped: false,
+                    reject: Some(FaultReject::MapFailed),
                     cached_page: None,
                 }
             }
@@ -387,20 +438,23 @@ unsafe fn fault_in_reloc_page(
 ///
 /// # Safety
 /// Must be called from the page fault handler with the faulting thread's CR3 active.
-pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErrorCode) -> bool {
+pub unsafe fn handle_demand_fault(
+    fault_addr: VirtAddr,
+    error_code: PageFaultErrorCode,
+) -> Result<(), FaultReject> {
     // Don't handle protection violations here (those go to COW handler)
     if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
-        return false;
+        return Err(FaultReject::Protection);
     }
 
     // Get current thread's VmaSet
     let thread = match current_thread() {
         Some(t) => t,
-        None => return false,
+        None => return Err(FaultReject::NoUserThread),
     };
     let user = match &thread.user {
         Some(u) => u,
-        None => return false,
+        None => return Err(FaultReject::NoUserThread),
     };
 
     // Read the VmaSet under spin lock (IST-safe)
@@ -409,22 +463,22 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
 
     let vma = match vmas.find(fault_addr) {
         Some(v) => v,
-        None => return false, // No VMA covers this address
+        None => return Err(FaultReject::NoVma),
     };
 
     // Permission checks from the hardware error code
     let is_write = error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE);
     if is_write && !vma.prot.contains(VmaProt::WRITE) {
-        return false; // Write to read-only VMA
+        return Err(FaultReject::WriteToReadOnly);
     }
     let is_exec = error_code.contains(PageFaultErrorCode::INSTRUCTION_FETCH);
     if is_exec && !vma.prot.contains(VmaProt::EXEC) {
-        return false; // Execute on no-exec VMA
+        return Err(FaultReject::ExecOnNoExec);
     }
 
     let fault_info = match lookup_fault_vma(&vmas, fault_addr) {
         Some(info) => info,
-        None => return false,
+        None => return Err(FaultReject::NotFaultable),
     };
 
     // Reloc-page early path: if this fault hits the writable PT_LOAD VMA and
@@ -467,13 +521,14 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
                 load_base,
             )
         } {
-            if mapped {
-                if let Some(t) = current_thread() {
-                    t.demand_faults
-                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                }
+            if !mapped {
+                return Err(FaultReject::RelocFailed);
             }
-            return mapped;
+            if let Some(t) = current_thread() {
+                t.demand_faults
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            return Ok(());
         }
         // Fall through to normal path if reloc path declines (e.g. not FileBacked).
     }
@@ -493,13 +548,14 @@ pub unsafe fn handle_demand_fault(fault_addr: VirtAddr, error_code: PageFaultErr
         let _ = store_cached_page_on_vma(fault_addr, cached_page);
     }
 
-    if outcome.mapped {
-        if let Some(t) = current_thread() {
-            t.demand_faults
-                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        }
+    if !outcome.mapped {
+        return Err(outcome.reject.unwrap_or(FaultReject::MapFailed));
     }
-    outcome.mapped
+    if let Some(t) = current_thread() {
+        t.demand_faults
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 /// Re-acquire the current thread's VmaSet lock, find the FileBacked VMA that

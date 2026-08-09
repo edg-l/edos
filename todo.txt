@@ -1,4 +1,41 @@
 
+- ACPI table teardown frees frames it never allocated. Booting with 16 vCPUs
+  panics deterministically during "Initializing acpi tables":
+
+    deallocate_frame: frame idx 521597 (phys 0x7f57d000) has refcount=0;
+    caller is freeing a non-allocator-owned frame (MMIO?) or double-freeing
+    frame_allocator.rs:452
+
+  Backtrace: acpi::AcpiTables::from_rsdp -> AcpiHandler::unmap_physical_region
+  -> MemoryManager::unmap_memory -> deallocate_frame (acpi/handler.rs:65).
+  `unmap_physical_region` must tear down the mapping WITHOUT freeing the
+  frames: an ACPI table lives in firmware memory the allocator does not own.
+  The assert is what caught it; without the refcount check the allocator would
+  hand out firmware pages. 4 and 8 vCPUs boot fine, so whether it fires depends
+  on where QEMU lays the (larger, 16-LAPIC) MADT — the bug is not smp-specific.
+  Repro: scripts/edos-vm start --smp 16.
+
+- Two EFS whole-inode writes still escape RANK_EFS_INODE_RMW, both able to put
+  back a stale extent list (the class 3375ac4 closed elsewhere). Unproven as
+  the cause of anything; found by audit, not by a failure.
+  1. `write_file_data` (fs/efs/mod.rs:646) re-reads the inode at :671 and
+     writes it at :677 with no guard, so an `ensure_block*` landing between
+     the two loses its extent.
+  2. `truncate_inner` (:2221) takes the guard but copies `*inode` from a
+     parameter the CALLER read before the guard was held, so the copy it
+     writes can already be stale.
+  If either fires on a mapped file, the lost extent makes `fill_page` fail and
+  a fault on that page kills the thread with FillFailed — which is one
+  candidate mechanism for the intermittent mmap segfault below.
+
+- Intermittent segfault in fsbench's `mmap store 4MiB + msync`, recorded at
+  ~1 run in 6 on 2026-08-09, NOT reproduced since: 37 suite runs across 4 and
+  8 vCPUs on a freshly formatted disk, all clean. The KILL line now names why
+  the fault handler declined (FaultReject), so the next occurrence should be
+  self-diagnosing rather than needing another bisect. Check the `reject=` field
+  first: PastEof means a size shrank under the mapping, FillFailed means the
+  block map lost the page, NoVma means the mapping itself went away.
+
 - research what try_clone on pipe means, can pipes be cloned?
 
 - users, file perms

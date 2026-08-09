@@ -194,7 +194,7 @@ extern "x86-interrupt" fn page_fault_handler(
             // same reason. Ring-0 faulters are uaccess-style copy_from/to_user
             // paths that tolerate being preempted during the fixup.
             x86_64::instructions::interrupts::enable();
-            if unsafe { crate::memory::fault::handle_demand_fault(address, error_code) } {
+            if unsafe { crate::memory::fault::handle_demand_fault(address, error_code) }.is_ok() {
                 return;
             }
             x86_64::instructions::interrupts::disable();
@@ -258,9 +258,11 @@ extern "x86-interrupt" fn page_fault_handler(
         }
 
         // Demand paging: handle non-present pages backed by VMAs
+        let mut reject = None;
         if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
-            if unsafe { crate::memory::fault::handle_demand_fault(address, error_code) } {
-                return;
+            match unsafe { crate::memory::fault::handle_demand_fault(address, error_code) } {
+                Ok(()) => return,
+                Err(r) => reject = Some(r),
             }
         }
 
@@ -268,7 +270,7 @@ extern "x86-interrupt" fn page_fault_handler(
         // faulting code itself held the serial lock, we still get output
         // instead of deadlocking.
         crate::emergency_println!(
-            "KILL: PF addr={:p} rip={:p} err={error_code:?} ({error_desc})",
+            "KILL: PF addr={:p} rip={:p} err={error_code:?} ({error_desc}) reject={reject:?}",
             address,
             stack_frame.instruction_pointer
         );
