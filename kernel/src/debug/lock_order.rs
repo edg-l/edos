@@ -15,6 +15,7 @@
 /// |-----:|---------------------------------------|
 /// |   10 | `VFS` mount registry                  |
 /// |   30 | `inode.lock` (per-inode)              |
+/// |   32 | `EfsDriver.alloc_mutex`               |
 /// |   35 | `dentry_cache.inner`                  |
 /// |   40 | `inode.pages.pages`                   |
 /// |   42 | `InodePages.in_flight`                |
@@ -50,6 +51,8 @@
 /// |  320 | device poller lists                   |
 /// |  330 | `HdaPlaybackState`                    |
 /// |  340 | `DevFs.shared`                        |
+/// |  900 | kernel-global mapper                  |
+/// |  910 | `FRAME_ALLOCATOR`                     |
 
 // ---- Rank constants ---------------------------------------------------------
 
