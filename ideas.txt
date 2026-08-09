@@ -594,10 +594,25 @@ rare concurrent-load hangs. Candidates, ranked by fun-per-effort:
    the earlier "never co-held with vmas or mm" reading was wrong — it
    audited `syscalls/shm.rs` alone and missed `sys_fork`'s deep copy
    (under vmas 70) and `release_mappings` (under mm 80).
-4. **HDA audio** — codec/stream/buffer locks. Currently marked "out
-   of Phase 2 scope" in `doc/invariants/lock-order.md`.
-5. **devfs / PTY** — `tty_lock -> line_discipline -> char_device`
-   kind of chains.
+4. **HDA audio — DONE 2026-08-10.** One lock, not three: the whole
+   driver (controller registers, BDL ring cursors, stream flag) sits
+   behind `HdaPlaybackState`, rank 330. It was a bare `spin::Mutex`
+   held across a memcpy loop into the DMA ring, shared between
+   `/dev/dsp` writers and the HDA kthread; now a `PreemptSpinlock`.
+   No inversions.
+5. **devfs / PTY — DONE 2026-08-10.** `DevFs.shared` is rank 340,
+   deliberately above every device lock it dispatches to, so a guard
+   held across a driver callback panics instead of passing quietly.
+   That caught a real one on the first `ls /dev`: `list_files` and
+   `file_info` called `DeviceNode::file_entry` under the registry read
+   guard, and `file_entry` reads `DevFsDevice::size`, which for
+   `/dev/tty0` takes the rank-210 `BlockingMutex` — a spin lock held
+   across a lock that can park. Both snapshot the nodes and build their
+   entries after releasing the guard now. `TTY_POLLERS` also joined the
+   device-poller class at 320 alongside the mouse and keyboard lists.
+
+With that the list is finished; see "Every subsystem on the list is
+ranked now" in `doc/invariants/lock-order.md`.
 
 Marginal cost per subsystem: one rank constant, one row in
 `doc/invariants/lock-order.md`, and s/`.lock()`/`.lock_ranked(RANK,

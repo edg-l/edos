@@ -55,6 +55,11 @@ without `password=on` publishes an unauthenticated console.
 | `log [-n N]` | tails `run_log.txt` |
 | `qmp <cmd> [json]` | escape hatch for any QMP command |
 
+The machine matches `make run`'s devices, including Intel HDA with
+`-audiodev none`: the guest driver runs its DMA engine and interrupts with no
+host audio sink, which is what exercises `/dev/dsp`. `-audiodev pipewire`, as
+`make run` uses, refuses to start without a session bus.
+
 ---
 
 ## Guest constraints

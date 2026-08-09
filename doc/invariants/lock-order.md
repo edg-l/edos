@@ -84,7 +84,9 @@ sections, and wrapping them would recurse into the preemption counter.
 | 290 | `WINDOW_EVENTS` | `PreemptRwLock<BTreeMap>` | `window/input.rs` |
 | 300 | `LAST_MOUSE_BUTTONS` | `PreemptSpinlock<u8>` | `window/input.rs` |
 | 310 | `Broadcaster.subs` | `PreemptRwLock<BTreeMap>` | `thread/broadcast.rs` |
-| 320 | `MOUSE_POLLERS` / `KEYBOARD_POLLERS` | `BlockingMutex<Vec>` | `drivers/{mouse,keyboard}/mod.rs` |
+| 320 | device poller lists | `BlockingMutex<Vec>` | `drivers/{mouse,keyboard}/mod.rs`, `drivers/tty.rs` |
+| 330 | `HdaPlaybackState` | `Arc<PreemptSpinlock<..>>` | `drivers/hda/mod.rs` |
+| 340 | `DevFs.shared` | `Arc<PreemptRwLock<DevFs>>` | `fs/devfs/mod.rs` |
 | 900 | kernel-global mapper | `IrqSpinlock<MemoryManager>` | `memory/mapper.rs` |
 | 910 | `FRAME_ALLOCATOR` | `IrqSpinlock<BitmapFrameAllocator>` | `memory/frame_allocator.rs` |
 
@@ -268,20 +270,52 @@ The registry is only ever read through `read_tracked`, so the rank enter/exit
 lives inside that function and its guard's `Drop` — one call covers every read
 site in the kernel. Write sites use `ranked_write!` individually.
 
-**310, `Broadcaster.subs`. 320, `MOUSE_POLLERS` / `KEYBOARD_POLLERS`.** Input
-delivery state, written by the PS/2 keyboard and mouse kthreads and by the xHCI
-driver thread, read by the window input thread and by poll callers. They are
-ranked above the window band because the window input thread is the one context
-that could hold a registry guard while touching them; the driver kthreads hold
-nothing at all when they broadcast. Never co-held with each other:
-`MousePoll::register` calls `subscribe` and lets that guard go before taking the
-poller list.
+**310, `Broadcaster.subs`. 320, device poller lists.** Input delivery state,
+written by the PS/2 keyboard and mouse kthreads and by the xHCI driver thread,
+read by the window input thread and by poll callers. Rank 320 covers
+`MOUSE_POLLERS`, `KEYBOARD_POLLERS` and `TTY_POLLERS` as one class: three
+instances of the same "list of `PollEntry`s to update" pattern, never co-held
+with each other. They are ranked above the window band because the window input
+thread is the one context that could hold a registry guard while touching them;
+the driver kthreads hold nothing at all when they broadcast. `Broadcaster.subs`
+is never co-held with a poller list: `MousePoll::register` calls `subscribe` and
+lets that guard go before taking the list, and `tty::push_bytes` drops
+`TTY_BUFFER` before notifying.
 
 `Broadcaster.subs` was a bare `spin::RwLock` and is now a `PreemptRwLock`. It is
 shared between threads, so a descheduled holder used to stall every other CPU
 behind it — the shape of the 2026-08-08 window-registry hang. `subscribe` also
 built its 256-slot `ArrayQueue` under the write guard; the allocation now
 happens before the lock is taken.
+
+**330, `HdaPlaybackState`.** The whole audio driver behind one lock: the
+controller registers, the BDL ring cursors and the stream-running flag. Held by
+`/dev/dsp` writers (under `inode.lock`, 30) and by the HDA kthread when a BCIS
+interrupt advances the read cursor. It was a bare `spin::Mutex` — held across a
+memcpy loop into the DMA ring, so a descheduled writer stalled the audio IRQ
+thread — and is a `PreemptSpinlock` now. `AUDIO_IOCTL_DRAIN` polls in a loop and
+drops the guard before each `thread_yield`, which the park assertions enforce.
+
+**340, `DevFs.shared`.** The devfs device registry, deliberately outermost: it
+must be released before dispatching into a `DevFsDevice`, and ranking it above
+every device lock is what turns "forgot to drop the guard" into a panic instead
+of a spin lock held across a driver callback.
+
+That is not hypothetical. Ranking it caught exactly that on the first `ls /dev`:
+
+```
+lock order violation: tried to acquire 'tty::device_size' (rank 210)
+while holding 'devfs::list_files' (rank 340);
+full stack: [inode.lock(30), devfs::list_files(340)]
+```
+
+`read_bytes`, `write_bytes`, `ioctl`, `poll` and `mmap` all drop the guard
+before calling the device. `list_files` and `file_info` did not, because their
+call into the driver does not look like a dispatch: `DeviceNode::file_entry`
+reads `DevFsDevice::size`, and for `/dev/tty0` that takes the rank-210
+`BlockingMutex`. A spin lock held across a *blocking* mutex acquisition is the
+serious half — the holder can park with the registry still locked. Both now
+snapshot the nodes under the guard and build their `File` entries after it.
 
 **900, kernel-global mapper.** Reached via `memory_mapper()`. Kernel-address-space
 edits plus per-page virtual-to-physical translation during DMA setup. A deep leaf,
@@ -340,6 +374,14 @@ fast path runs inside `without_interrupts` and every level of it is an
 `IrqSpinlock` — and the amount allocated is bounded by the window count. A heap
 expansion landing inside one of these sections would be a long interrupts-off
 window; if that ever shows up as latency, reserve outside the guard.
+
+### Every subsystem on the list is ranked now
+
+`ideas.txt`'s extension list is finished: FS/MM, AHCI, IPC and console,
+networking, the window system, USB, the input path, shared memory, audio and
+devfs. What is left outside the system is the
+[Non-ranked locks](#non-ranked-locks) section, and every entry there has a
+reason rather than a backlog position.
 
 ### The USB stack owns no locks
 
@@ -456,7 +498,6 @@ with each other, so they are unranked.
 | `Fatfs.write_lock` | fat32 | serializes fat32 mutations |
 | `Fatfs.inode_table` | fat32 | per-instance side table |
 | `Fatfs.fs_info` | fat32 | FS info sector cache |
-| `DevFs.shared` | devfs | device registry |
 | `MemFs.inner` | memfs | node tree |
 
 ---

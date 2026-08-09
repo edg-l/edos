@@ -1139,7 +1139,41 @@ mm) is wrong for exactly that second reason.
   attached — which is the default machine. Both halves now sit behind
   `dispatch_key_events` / `dispatch_mouse_event`.
 
-Still unranked, in the order `ideas.txt` suggests: HDA audio, devfs.
+**Audio and devfs finished the list (same day).** `HdaPlaybackState` is rank
+330 and devfs's `DevFs.shared` is 340. Both were bare spin locks over
+thread-shared state, the same primitive error as `Broadcaster.subs`: HDA's was
+held across a memcpy loop into the DMA ring, between `/dev/dsp` writers and the
+audio kthread. `TTY_POLLERS` also joined the device-poller class at 320.
+
+**Ranking devfs paid for itself on the first `ls /dev`:**
+
+```
+lock order violation: tried to acquire 'tty::device_size' (rank 210)
+while holding 'devfs::list_files' (rank 340);
+full stack: [inode.lock(30), devfs::list_files(340)]
+```
+
+`read_bytes`, `write_bytes`, `ioctl`, `poll` and `mmap` all release the registry
+guard before calling into a device. `list_files` and `file_info` did not,
+because their call into the driver does not *look* like a dispatch:
+`DeviceNode::file_entry` reads `DevFsDevice::size`, which for `/dev/tty0` takes
+the rank-210 `BlockingMutex`. That is a spin lock held across a lock that can
+park. Both snapshot the nodes under the guard and build their `File` entries
+after it now. Ranking the registry *above* the device locks is what makes the
+mistake loud; ranking it below would have been legal and silent.
+
+**`scripts/edos-vm` had no audio device at all**, so `hda: no device found` and
+the driver never initialized — the primary way this OS gets exercised could not
+test audio. It now passes `-audiodev none,id=snd0 -device intel-hda -device
+hda-output,audiodev=snd0`. `none` rather than `pipewire`: the guest DMA engine
+and interrupts run either way, and pipewire refuses to start without a session
+bus, which is the exact case that script exists for.
+
+Still bare `spin::Mutex`/`RwLock` over thread-shared state, worth the same
+treatment and not yet audited: the `log` ring buffer in `logs.rs` (careful, it
+must stay reachable from paths that cannot take locks), `random.rs`'s RNG state,
+`PCI_MANAGER`, and `ALLOWED_PHYS_RANGES`. The scheduler's own locks,
+`PCI_CONFIG_LOCK` and the AHCI slot/mmio locks stay bare on purpose.
 
 **A trap worth naming: rewriting lock calls mechanically can drop a `!`.**
 Wrapping `wait_until(|| !self.queue.lock().is_empty())` in `ranked_lock!` lost
