@@ -53,8 +53,11 @@
   std::fs::write now correctly truncate existing files.
 - **Per-file fsync** - SYS_FSYNC syscall (14) with per-inode flush path.
   EFS/FAT32 flush_inode() flushes drive write cache only (skips
-  superblock/BGD/FSInfo). File::sync_all()/sync_data() wired through
-  Rust std. AHCI FUA detection (IDENTIFY word 84 bit 6) and FUA write
+  superblock/BGD/FSInfo). File::sync_all()/sync_data() reach it through
+  Rust std; the std fork's sys/fs/edos.rs stubs returned Ok(()) without
+  calling anything until 2026-08-09, so every caller before that was
+  told its data was durable when nothing had been flushed.
+  AHCI FUA detection (IDENTIFY word 84 bit 6) and FUA write
   commands (WRITE DMA FUA EXT, WRITE FPDMA QUEUED FUA) added for
   future use.
 - **AHCI zero-copy DMA** - Build PRDT entries directly from caller
