@@ -58,6 +58,7 @@ sections, and wrapping them would recurse into the preemption counter.
 |  60 | `inode.mappers` | `BlockingMutex<Vec<Weak<..>>>` | `fs/inode.rs` |
 |  70 | `UserThread.vmas` | `Arc<PreemptSpinlock<VmaSet>>` | `thread/mod.rs` |
 |  80 | `UserThread.memory_manager` | `Arc<PreemptSpinlock<MemoryManager>>` | `thread/mod.rs` |
+|  90 | `SHARED_MEMORY_REGISTRY` | `PreemptRwLock<BTreeMap>` | `memory/shared.rs` |
 | 100 | `DIRTY_INODES` | `IrqSpinlock<Vec<Weak<VfsInode>>>` | `fs/vfs.rs` |
 | 110 | `BlockPageCache.shards[N]` | `BlockingMutex<ShardInner>` | `fs/block_page_cache.rs` |
 | 120 | `BlockPageCache.journals` | `BlockingMutex<BTreeMap>` | `fs/block_page_cache.rs` |
@@ -70,6 +71,8 @@ sections, and wrapping them would recurse into the preemption counter.
 | 180 | `AhciPort.ncq_waiters[i]` | `spin::Mutex<Option<Arc<AhciNcqOp>>>` | `drivers/ahci/port.rs` |
 | 190 | `AhciPort.mmio_lock` | `spin::Mutex<()>` | `drivers/ahci/port.rs` |
 | 200 | `PCI_CONFIG_LOCK` | `spin::Mutex<()>` | `drivers/pci/config.rs` |
+| 204 | `Mailbox.queue` | `BlockingMutex<VecDeque>` | `thread/mailbox.rs` |
+| 206 | `ResponseInner.value` | `BlockingMutex<Option<R>>` | `thread/mailbox.rs` |
 | 210 | `TTY_BUFFER` | `BlockingMutex<VecDeque<u8>>` | `drivers/tty.rs` |
 | 220 | `Pipe` (per-pipe) | `Arc<BlockingMutex<Pipe>>` | `thread/pipe.rs` |
 | 230 | `Pty` (per-pty) | `Arc<BlockingMutex<Pty>>` | `thread/pty.rs` |
@@ -80,6 +83,8 @@ sections, and wrapping them would recurse into the preemption counter.
 | 280 | `WINDOW_REGISTRY` | `PreemptRwLock<WindowRegistry>` | `window/registry.rs` |
 | 290 | `WINDOW_EVENTS` | `PreemptRwLock<BTreeMap>` | `window/input.rs` |
 | 300 | `LAST_MOUSE_BUTTONS` | `PreemptSpinlock<u8>` | `window/input.rs` |
+| 310 | `Broadcaster.subs` | `PreemptRwLock<BTreeMap>` | `thread/broadcast.rs` |
+| 320 | `MOUSE_POLLERS` / `KEYBOARD_POLLERS` | `BlockingMutex<Vec>` | `drivers/{mouse,keyboard}/mod.rs` |
 | 900 | kernel-global mapper | `IrqSpinlock<MemoryManager>` | `memory/mapper.rs` |
 | 910 | `FRAME_ALLOCATOR` | `IrqSpinlock<BitmapFrameAllocator>` | `memory/frame_allocator.rs` |
 
@@ -130,6 +135,23 @@ Acquired alone or inside vmas (70). Distinct class from the rank-900 kernel mapp
 > `map_memory`) so the fast path is taken. See `memory/mapper.rs` and
 > `allocate_tls_region` in `thread/thread.rs`.
 
+**90, `SHARED_MEMORY_REGISTRY`.** Inside *both* address-space locks. Two paths
+co-hold it with them, which is why the earlier "never co-held with vmas (70) or
+mm (80)" reading was wrong — it audited `syscalls/shm.rs` alone and missed the
+two callers outside that file:
+
+- `sys_fork`'s deep copy resolves each `SharedMemory` VMA's region
+  (`SharedMemory::get`, then `inc_ref`) with the rank-70 vmas guard live.
+- `release_mappings` does the same under the rank-80 page-table guard: it
+  unmaps the region's pages and drops the process's reference in one pass, and
+  `Thread::free` holds that guard across the whole call.
+
+The shm syscalls themselves take it alone. `get` clones the `Arc` and drops the
+guard before any address-space work, `destroy` takes a write guard with nothing
+else held, and `dec_ref`'s write guard is entered only after the vmas guard has
+gone. Its own inner reach is the frame allocator (910), when the last `Arc`
+drops under the write guard in `dec_ref`.
+
 **100, `DIRTY_INODES`.** Reached from `register_dirty_inode` (on the rank-30
 `inode.lock` path) and from the writeback kthread (holding nothing). Takes no inner
 lock.
@@ -162,6 +184,23 @@ an inner lock. Same rank, and never co-held with each other.
 **190, `AhciPort.mmio_lock`.** Very short raw MMIO read-modify-write. True leaf.
 
 **200, `PCI_CONFIG_LOCK`.** Config-space read-modify-write. Acquired alone.
+
+**204, `Mailbox.queue`. 206, `ResponseInner.value`.** The request/response
+transport between a caller and a driver kthread: `USB_BLOCK_MAILBOX` carries
+USB mass-storage reads and writes, `FS_REQUESTS` carries mounts and partition
+registration. Ranked as one class each rather than per instance, which is sound
+because no path holds one mailbox's queue guard while taking another's: `send`,
+`recv`, `try_recv` and `forward` all scope the guard to a single push or pop.
+
+They sit just above the AHCI band because a USB block request is issued from the
+same FS depth an AHCI command is — under `inode.lock` (30) or `EfsDriver`'s
+`alloc_mutex` (32) — and the two device stacks are never co-held. The 2-unit
+spacing is because the driver band below and the console band above leave no
+10-unit gap; both are leaves, so nothing will need to slot between them.
+
+`Mailbox::is_empty` stays outside the system: it is a `try_lock` probe, called
+with interrupts disabled from the xHCI dispatcher, and the macros have no
+try_lock form.
 
 **210, `TTY_BUFFER`. 220, `Pipe`. 230, `Pty`.** IPC and console endpoints, and
 the only ranks reached from the syscall read/write path rather than from the FS
@@ -229,9 +268,20 @@ The registry is only ever read through `read_tracked`, so the rank enter/exit
 lives inside that function and its guard's `Drop` — one call covers every read
 site in the kernel. Write sites use `ranked_write!` individually.
 
-`SHARED_MEMORY_REGISTRY` is deliberately NOT ranked with these. It is not a
-window lock, and `sys_shm_map` reaches `claim_range` (vmas, rank 70), so its
-rank has to come from an mm-side analysis rather than being guessed at here.
+**310, `Broadcaster.subs`. 320, `MOUSE_POLLERS` / `KEYBOARD_POLLERS`.** Input
+delivery state, written by the PS/2 keyboard and mouse kthreads and by the xHCI
+driver thread, read by the window input thread and by poll callers. They are
+ranked above the window band because the window input thread is the one context
+that could hold a registry guard while touching them; the driver kthreads hold
+nothing at all when they broadcast. Never co-held with each other:
+`MousePoll::register` calls `subscribe` and lets that guard go before taking the
+poller list.
+
+`Broadcaster.subs` was a bare `spin::RwLock` and is now a `PreemptRwLock`. It is
+shared between threads, so a descheduled holder used to stall every other CPU
+behind it — the shape of the 2026-08-08 window-registry hang. `subscribe` also
+built its 256-slot `ArrayQueue` under the write guard; the allocation now
+happens before the lock is taken.
 
 **900, kernel-global mapper.** Reached via `memory_mapper()`. Kernel-address-space
 edits plus per-page virtual-to-physical translation during DMA setup. A deep leaf,
@@ -241,6 +291,81 @@ called from arbitrary driver and FS contexts. Never co-held with a per-process
 **910, `FRAME_ALLOCATOR`.** Deep leaf, brief hold, no inner locks, called from
 everywhere (BPC fills, page-table frame allocation, fault handlers). Ranked above
 the kernel mapper so `map_memory` walks `900 -> 910`, which is ascending.
+
+### Window locks: hold duration, not just order
+
+Ranks 280 and 290, both `PreemptRwLock`, in `window/registry.rs` and
+`window/input.rs`. Audited 2026-08-08 after a hang in which all four CPUs spun
+on `WINDOW_REGISTRY.write()` (see
+`doc/bugs/2026-08-08-window-registry-stuck-reader.md`). The ranks came later and
+would not have caught that hang: it was a hold-duration failure, not an
+inversion. This section is why the two are worth reading about beyond their row
+in the table.
+
+`PreemptRwLock` suppresses preemption for the guard's lifetime, so a critical
+section cannot be descheduled and other CPUs never spin for longer than the
+section itself.
+
+The order is **`WINDOW_REGISTRY` before `WINDOW_EVENTS`**, and it holds
+everywhere:
+
+- The only nesting is `send_event`, which takes `WINDOW_EVENTS.read()` while a
+  `WINDOW_REGISTRY` read guard is live. It does a lock-free `ArrayQueue` push:
+  no allocation, no park.
+- `poll_events` pre-allocates its `Vec` before taking `WINDOW_EVENTS.read()`,
+  and its caller drops the registry guard first.
+- The `WINDOW_EVENTS` write paths (`get_or_create_event_queue`,
+  `remove_event_queue`) are called only after every registry guard has been
+  dropped, at `syscalls/window.rs:46`, `:83` and `window/mod.rs:32`.
+
+Because these are spin locks, hold *duration* matters more than order: a holder
+that stops making progress stops every other CPU dead rather than just one
+caller. Nothing reachable under either guard may park or touch user memory.
+That rule was violated by `sys_window_list`, which held the read guard across
+`try_copy_to_user`, and is why the window list is now snapshotted before the
+copy.
+
+A holder does not have to park to stall: preemption is involuntary, so any
+guard can be held by a `Ready` thread. What bounds that wait is the scheduler
+refusing to starve a runnable thread (`RunQueue::pop_next` services a lower
+level every `STARVE_STREAK_LIMIT` picks, and `Scheduler::expire_timeslice`
+ends a slice that has elapsed). Without both, a spin lock shared by threads at
+different priorities deadlocks outright: see
+`doc/bugs/2026-08-08-window-registry-stuck-reader.md`.
+
+Allocation still happens under both guards (`sys_window_list` builds its
+snapshot, `create_window` inserts into a `BTreeMap`), and therefore with
+interrupts disabled. That is an established pattern here — the allocator's own
+fast path runs inside `without_interrupts` and every level of it is an
+`IrqSpinlock` — and the amount allocated is bounded by the window count. A heap
+expansion landing inside one of these sections would be a long interrupts-off
+window; if that ever shows up as latency, reserve outside the guard.
+
+### The USB stack owns no locks
+
+Ranking USB (2026-08-10) turned up nothing to rank inside it, and that is the
+finding rather than a gap in the sweep. `XhciController` is reached only as
+`&mut self` from `xhci_driver_main`; the MSI-X handler wakes that thread and
+touches no controller state, and command rings, the device slot table and HID
+report state are all local to it. Every other thread reaches the controller
+through a channel instead of a lock:
+
+| Edge | Mechanism | Rank |
+|---|---|---|
+| block I/O in, replies out | `USB_BLOCK_MAILBOX` | 204 / 206 |
+| HID key and mouse events out | `KEY_EVENT_BROADCAST`, `MOUSE_BROADCAST` | 310 |
+| `/dev/kbd`, `/dev/mouse` poll wakeups | poller lists | 320 |
+
+Those are the ranks the sweep added, and none of them is USB-specific: the same
+mailbox carries FS mount requests and the same broadcasters carry PS/2 input.
+
+One real defect came out of it, on the delivery side rather than the locking
+side. The USB HID paths broadcast to subscribers but never updated the poll
+entries, which the PS/2 paths did — so with a USB keyboard or mouse attached
+(the default under `make run`, and `USB_*_ACTIVE` suppresses the PS/2 producer),
+`poll()` on `/dev/kbd` or `/dev/mouse` never reported readable. Both halves now
+sit behind `dispatch_key_events` / `dispatch_mouse_event`, so a future producer
+cannot do one without the other.
 
 ### Two mappers, two ranks
 
@@ -313,70 +438,10 @@ Internal to park/wake plumbing, never held across user code, never a multi-lock
 participant. Violations surface as deadlocks caught by the existing park/wake
 assertions.
 
-### `SHARED_MEMORY_REGISTRY`
+### `FUTEX_REGISTRY`
 
-`PreemptRwLock<BTreeMap>` in `memory/shared.rs`. Never co-held with vmas (70) or mm
-(80), because `syscalls/shm.rs` always drops the registry guard first:
-
-- `SharedMemory::get()` takes a read guard and immediately clones the `Arc`,
-  dropping the guard before any vmas or mm acquisition.
-- `SharedMemory::dec_ref()` may take a write guard when the refcount hits zero, but
-  only after `vmas.lock()` has been dropped; the VMA is removed first, then
-  `dec_ref` runs on the returned value.
-- `SharedMemory::destroy()` takes a write guard with nothing else held.
-
-### `WINDOW_REGISTRY` and `WINDOW_EVENTS`
-
-Both `PreemptRwLock`, in `window/registry.rs` and `window/input.rs`. Audited
-2026-08-08 after a hang in which all four CPUs spun on `WINDOW_REGISTRY.write()`
-(see `doc/bugs/2026-08-08-window-registry-stuck-reader.md`).
-
-`PreemptRwLock` suppresses preemption for the guard's lifetime, so a critical
-section cannot be descheduled and other CPUs never spin for longer than the
-section itself.
-
-The order is **`WINDOW_REGISTRY` before `WINDOW_EVENTS`**, and it holds
-everywhere:
-
-- The only nesting is `send_event`, which takes `WINDOW_EVENTS.read()` while a
-  `WINDOW_REGISTRY` read guard is live. It does a lock-free `ArrayQueue` push:
-  no allocation, no park.
-- `poll_events` pre-allocates its `Vec` before taking `WINDOW_EVENTS.read()`,
-  and its caller drops the registry guard first.
-- The `WINDOW_EVENTS` write paths (`get_or_create_event_queue`,
-  `remove_event_queue`) are called only after every registry guard has been
-  dropped, at `syscalls/window.rs:46`, `:83` and `window/mod.rs:32`.
-
-Because these are spin locks, hold *duration* matters more than order: a holder
-that stops making progress stops every other CPU dead rather than just one
-caller. Nothing reachable under either guard may park or touch user memory.
-That rule was violated by `sys_window_list`, which held the read guard across
-`try_copy_to_user`, and is why the window list is now snapshotted before the
-copy.
-
-A holder does not have to park to stall: preemption is involuntary, so any
-guard can be held by a `Ready` thread. What bounds that wait is the scheduler
-refusing to starve a runnable thread (`RunQueue::pop_next` services a lower
-level every `STARVE_STREAK_LIMIT` picks, and `Scheduler::expire_timeslice`
-ends a slice that has elapsed). Without both, a spin lock shared by threads at
-different priorities deadlocks outright: see
-`doc/bugs/2026-08-08-window-registry-stuck-reader.md`.
-
-Ranking them is now possible, since the order is established; it would not have
-caught the hang, which was a hold-duration failure rather than an inversion.
-
-Allocation still happens under both guards (`sys_window_list` builds its
-snapshot, `create_window` inserts into a `BTreeMap`), and therefore with
-interrupts disabled. That is an established pattern here — the allocator's own
-fast path runs inside `without_interrupts` and every level of it is an
-`IrqSpinlock` — and the amount allocated is bounded by the window count. A heap
-expansion landing inside one of these sections would be a long interrupts-off
-window; if that ever shows up as latency, reserve outside the guard.
-
-### `FUTEX_REGISTRY`, `PORT_TABLE`
-
-Leaf locks outside the FS and MM hot paths. Rank them if a real ordering concern
-ever surfaces.
+Leaf lock outside the FS and MM hot paths. Rank it if a real ordering concern
+ever surfaces. `PORT_TABLE` used to be listed here and is now rank 250.
 
 ---
 

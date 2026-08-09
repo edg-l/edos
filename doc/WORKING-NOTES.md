@@ -128,8 +128,9 @@ different causes.
 On top of the scheduler fix, spin locks shared between threads now suppress
 preemption for the guard's lifetime (`thread/preempt.rs`): a per-CPU counter
 that `maybe_preempt` honours, plus `PreemptSpinlock`/`PreemptRwLock`. Converted:
-`WINDOW_REGISTRY`, `WINDOW_EVENTS`, `VFS` (rank 10), `UserThread.vmas` (70),
-`memory_manager` (80), `SHARED_MEMORY_REGISTRY`, and the thread registries.
+`WINDOW_REGISTRY` (280), `WINDOW_EVENTS` (290), `VFS` (10), `UserThread.vmas`
+(70), `memory_manager` (80), `SHARED_MEMORY_REGISTRY` (90), the input
+`Broadcaster` (310), and the thread registries.
 
 Suppressing preemption rather than interrupts is deliberate: `memory_manager`
 walks page tables and `vmas` walks the VMA tree, so disabling interrupts across
@@ -1102,8 +1103,67 @@ throughout. Note what that does *not* show: it proves the new order is
 self-consistent under load, not that the old code would have deadlocked. The
 case for both bugs is structural, from the code, not from a reproduction.
 
-Still unranked, in the order `ideas.txt` suggests: USB (xHCI rings, enumeration,
-HID dispatch), HDA audio, devfs.
+## USB, shared memory and the input path are ranked too
+
+The follow-up sweep (2026-08-10) added ranks 204/206 (`Mailbox.queue`,
+`ResponseInner.value`), 90 (`SHARED_MEMORY_REGISTRY`) and 310/320
+(`Broadcaster.subs`, the `/dev/kbd` + `/dev/mouse` poller lists). No inversions
+appeared; `/proc/lock_order_stats` read `inversions: 0, max_depth: 3` on a
+booted desktop after mmaptest 11/11, forktest, lockordertest, and a window
+opened and closed to drive the shm teardown path.
+
+**USB has no locks of its own, and that is the result rather than a gap.**
+`XhciController` is only ever `&mut self` inside its driver thread; the MSI-X
+handler just wakes that thread. Every other thread reaches it through a channel,
+so what the sweep actually ranked was the channels — a mailbox shared with the
+FS mount path, and broadcasters shared with PS/2 input.
+
+**The shm registry's old rationale was wrong, and that is why it stayed
+unranked.** `invariants/lock-order.md` said it was never co-held with vmas (70)
+or mm (80). That was an audit of `syscalls/shm.rs` alone: `sys_fork`'s deep copy
+resolves each SHM VMA's region under the vmas guard, and `release_mappings` does
+the same under the page-table guard, which `Thread::free` holds across the whole
+call. Rank 90 sits inside both. The first attempt at 75 (inside vmas, outside
+mm) is wrong for exactly that second reason.
+
+**Two real defects came out of the USB half**, neither of them an ordering bug:
+
+- `Broadcaster.subs` was a bare `spin::RwLock` shared between driver kthreads,
+  the window input thread and syscall context — a descheduled holder stalls
+  every other CPU, the shape of the window-registry hang. Now `PreemptRwLock`,
+  and `subscribe` builds its 256-slot `ArrayQueue` before taking the guard
+  instead of under it.
+- The USB HID paths broadcast to subscribers but never notified pollers, while
+  the PS/2 paths did. Since `USB_*_ACTIVE` suppresses the PS/2 producer, `poll()`
+  on `/dev/kbd` or `/dev/mouse` never reported readable with a USB device
+  attached — which is the default machine. Both halves now sit behind
+  `dispatch_key_events` / `dispatch_mouse_event`.
+
+Still unranked, in the order `ideas.txt` suggests: HDA audio, devfs.
+
+**A trap worth naming: rewriting lock calls mechanically can drop a `!`.**
+Wrapping `wait_until(|| !self.queue.lock().is_empty())` in `ranked_lock!` lost
+the negation, and the kernel hung at boot right after the root mount with the
+serial log simply stopping — the FS mailbox thread waiting on an inverted
+predicate. The symptom looks like a deadlock in whatever ran last, not like a
+typo. Re-read predicates after a macro rewrite.
+
+## Ctrl+C kills the foreground job, and always did
+
+Verified in the VM on 2026-08-10: `sleep 30` and a stdin-blocked `cat` both die
+on Ctrl+C with the prompt returning, and Ctrl+C at an idle prompt leaves the
+shell alive. `ideas.txt` claimed the kill delivery behind `LineAction::Interrupt`
+was the one missing piece; it was already there (`PtyNotifications::kill_pid` ->
+`flush()` -> `kill_process`) and the entry had gone stale.
+
+**What keeps the shell alive is not the foreground bookkeeping.** `sys_spawn`
+registers any child whose fd 0 is a PTY slave as `foreground_pid`, including the
+session shell the terminal spawns, so at an idle prompt Ctrl+C really is
+delivered to the shell. `edos-sh` sets SIGINT to SIG_IGN at startup and
+`kill_process_with_signal` returns early on SIG_IGN. A negative-control kernel
+that registers the shell unconditionally still leaves it alive, which is how
+that was established — a plausible-looking "the shell would be killed" fix was
+built, refuted by the control, and reverted.
 
 ## Ctrl-D ends a stdin read now
 

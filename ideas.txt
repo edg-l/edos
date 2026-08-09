@@ -568,9 +568,19 @@ rare concurrent-load hangs. Candidates, ranked by fun-per-effort:
    reading either function alone. Details in
    `doc/invariants/lock-order.md`. Route table and ARP cache live inside
    `NetStack` and need no separate rank.
-2. **USB stack** — xHCI ring locks, device enumeration, HID dispatch.
-   Foundation #2 drop-audit already noted async `block_api`
-   interactions worth verifying.
+2. **USB stack — DONE 2026-08-10.** No locks to rank inside it: the
+   `XhciController` is reached only as `&mut self` from its driver
+   thread, and every other thread goes through a channel. The ranks the
+   sweep added are the channels themselves — `Mailbox.queue` 204 and
+   `ResponseInner.value` 206 (USB block I/O and FS mount requests),
+   `Broadcaster.subs` 310, and the `/dev/kbd` + `/dev/mouse` poller
+   lists 320. No inversions. Two real fixes came out of it:
+   `Broadcaster.subs` was a bare `spin::RwLock` shared between kthreads
+   and syscall context (now `PreemptRwLock`, and `subscribe` allocates
+   its 256-slot queue before taking the guard), and the USB HID paths
+   broadcast without notifying pollers, so `poll()` on `/dev/kbd` and
+   `/dev/mouse` never fired with a USB device attached. Details in
+   `doc/invariants/lock-order.md`.
 3. **Window system — DONE 2026-08-09.** Ranked `WINDOW_REGISTRY` 280,
    `WINDOW_EVENTS` 290, `LAST_MOUSE_BUTTONS` 300. No inversions found:
    the registry is strictly outside, the input thread already drops its
@@ -578,9 +588,12 @@ rare concurrent-load hangs. Candidates, ranked by fun-per-effort:
    nothing on the event-queue side reaches back into the registry. The
    read path is ranked inside `read_tracked`, which is the only way the
    registry is read, so every read site is covered by one call.
-   `SHARED_MEMORY_REGISTRY` is deliberately left unranked here: it is
-   not a window lock, and `sys_shm_map` reaching `claim_range` (vmas 70)
-   means its rank has to come from an mm analysis, not this one.
+   `SHARED_MEMORY_REGISTRY` was left unranked here and got its rank from
+   an mm-side analysis on 2026-08-10: rank 90, inside both address-space
+   locks. The reason it could not be guessed from the window side is that
+   the earlier "never co-held with vmas or mm" reading was wrong — it
+   audited `syscalls/shm.rs` alone and missed `sys_fork`'s deep copy
+   (under vmas 70) and `release_mappings` (under mm 80).
 4. **HDA audio** — codec/stream/buffer locks. Currently marked "out
    of Phase 2 scope" in `doc/invariants/lock-order.md`.
 5. **devfs / PTY** — `tty_lock -> line_discipline -> char_device`
@@ -844,9 +857,25 @@ EfsDriver::read_via_extents reads one extent at a time. For fragmented files
 spanning multiple extents, could issue all extent reads concurrently via
 ncq_read_batch.
 
-### SIGINT delivery to foreground processes
-Ctrl+C in the terminal doesn't kill foreground processes. Need proper
-signal delivery from PTY/terminal to the foreground process group.
+### SIGINT delivery to foreground processes — DONE (verified 2026-08-10)
+Ctrl+C kills the foreground job. The chain works end to end and was
+verified in the VM: `sleep 30` and a stdin-blocked `cat` both die on
+Ctrl+C and the prompt returns, and Ctrl+C at an idle prompt leaves the
+shell alive. Nothing was missing in the kernel — `LineAction::Interrupt`
+already set `PtyNotifications::kill_pid` from the pty's `foreground_pid`
+and `flush()` already called `kill_process`; the entry below was written
+before that path was re-read.
+
+What protects the shell is not the foreground bookkeeping: `edos-sh`
+sets SIGINT to SIG_IGN at startup (`main.rs`, `sys_sigaction(2, 1)`) and
+`kill_process_with_signal` returns early on SIG_IGN. Confirmed with a
+negative control — a kernel that registers the session shell as the
+foreground job unconditionally still leaves it alive.
+
+Still open, if job control ever matters: `foreground_pid` is a single pid
+rather than a process group, so Ctrl+C reaches the direct child only, and
+once that child exits the slot goes empty instead of reverting to the
+shell.
 
 The "tools that read stdin hang with no way out" half of this is fixed:
 Ctrl-D now ends the read. `Pty::slave_read` used to return an empty `Vec`
@@ -859,9 +888,7 @@ command is swallowed as stdin.
 The userspace chain was never the problem and needs no work:
 `edos_lib::keymap::map_keycode` already maps ctrl+a..z to 0x01..0x1a, the
 terminal widget tracks the ctrl modifier, and the line discipline maps
-0x04 to `LineAction::Eof` and 0x03 to `LineAction::Interrupt`. What is
-missing for Ctrl+C specifically is only the kill delivery behind
-`LineAction::Interrupt`.
+0x04 to `LineAction::Eof` and 0x03 to `LineAction::Interrupt`.
 
 ### More userspace tools
 - chmod/chown (once EFS has permission support)
