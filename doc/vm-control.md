@@ -176,7 +176,11 @@ until grep -qE '\[Terminal\] Spawned shell|KERNEL PANIC' run_log.txt; do sleep 1
   because `sg` is also the name of the `ast-grep` binary.
 - **OVMF firmware**, fetched by the makefile into `ovmf/`. Upstream ships every
   architecture in one `edk2-ovmf.tar.xz`, not as loose `.fd` files.
-- **`sata-disk.img` and the ISO**, from `make all` and `make sata-disk.img`.
+- **The ISO**, from `make all`. It carries its own root, so it boots on its own.
+- **`sata-disk.img`**, from `make sata-disk.img`, which every `run` target attaches
+  and the kernel prefers over the live root. Without it the guest still boots, but
+  nothing written survives a restart, which quietly breaks any script that expects
+  state to persist across one.
 
 ---
 

@@ -10,6 +10,10 @@
 </p>
 
 <p align="center">
+  <strong><a href="https://edos.edgl.dev">edos.edgl.dev</a></strong>
+</p>
+
+<p align="center">
   <a href="#quick-start">Quick start</a> &middot;
   <a href="#what-it-does">What it does</a> &middot;
   <a href="#building">Building</a> &middot;
@@ -106,15 +110,27 @@ addr2line -e kernel/target/x86_64-unknown-none/debug/edos-kernel -f 0xffffffff80
 
 ### On real hardware
 
-The ISO is hybrid, so it can go straight onto a USB stick:
+The ISO is hybrid and carries its own root filesystem, so it goes straight onto
+a USB stick and boots to the desktop with nothing else attached:
 
 ```bash
 sudo dd if=edos-x86_64.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
+The live root is a GPT image loaded as a Limine module and served from RAM. It
+is writable, and it forgets everything on reboot. To keep what you write,
+install to a disk from the live desktop:
+
+```
+/ $ edos-install /dev/sda
+```
+
+That partitions the target, formats an ESP and an EFS root, copies the live
+system across, and writes Limine with the new root's GUID. Reboot without the
+stick and the machine comes up on its own disk.
+
 The e1000e driver works on real Intel I219/I218/I217 NICs, and DHCP will
-configure networking if a server answers. For a writable filesystem, flash
-`sata-disk.img` to a spare drive.
+configure networking if a server answers.
 
 ## Layout
 
@@ -149,13 +165,11 @@ Start here before changing anything load-bearing:
 
 ## Releases
 
-Prebuilt artifacts are on the releases page: the bootable ISO, a
-`filesystem.tar.gz`, and a script to rebuild the writable disk image.
-
-```bash
-chmod +x create-filesystem-image.sh
-./create-filesystem-image.sh --output sata-disk.img
-```
+One file on the [releases page](https://github.com/edg-l/edos-v2/releases):
+`edos-x86_64.iso`. Write it to a USB stick or hand it to QEMU, and it boots to
+the desktop on its own. See [On real hardware](#on-real-hardware) for
+installing to a disk, and [edos.edgl.dev/downloads](https://edos.edgl.dev/downloads/)
+for the QEMU invocation.
 
 ## License
 

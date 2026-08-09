@@ -9,54 +9,56 @@ Getting there took eight write-path fixes in the kernel, none of them
 specific to the installer. See
 `doc/bugs/2026-08-09-writes-that-never-reach-the-disk.md`.
 
-The goal is to be able to hand someone one file. Today the ISO is not a
-distributable artifact: it carries Limine and the kernel and nothing else, and
-the kernel then goes looking for a root filesystem that only exists inside a
-second file. This spec turns the ISO into a live image that boots to the desktop
-on its own, and then adds an installer that copies that live system onto a disk.
+The goal was to be able to hand someone one file. The ISO now carries a live
+root that boots to the desktop by itself, and `edos-install` copies that live
+system onto a disk.
+
+The phase sections below are the original plan, kept because the reasoning still
+explains why the shipped code looks the way it does. They are written in the
+imperative; read them as a description of what was built, with the departures
+called out inline.
 
 ---
 
-## Where we are
+## What this replaced
 
-`edos-x86_64.iso` is built by `GNUmakefile:212-228` from an `iso_root` tree that
-holds exactly three things: `boot/kernel`, `boot/limine/*`, and
-`EFI/BOOT/BOOTX64.EFI`. There is no root filesystem on it.
+`edos-x86_64.iso` used to be built from an `iso_root` tree holding exactly three
+things: `boot/kernel`, `boot/limine/*`, and `EFI/BOOT/BOOTX64.EFI`. There was no
+root filesystem on it.
 
-`limine.conf` passes:
+`limine.conf` passed, and still passes:
 
 ```
 cmdline: root=UUID=87654321-4321-8765-cba9-987654321fed rootfstype=efs
 ```
 
-`mount_system_fs` (`kernel/src/main.rs:322`) calls `fs::api::list_partitions()`,
-matches that UUID against each partition's `unique_partition_guid`, and mounts
-the match. That UUID only exists on `sata-disk.img`, a 5G qcow2 built by
-`GNUmakefile:268-274`: `sgdisk` writes one GPT partition with
-`--partition-guid=1:$(PARTITION_UUID)`, and the host-side `efs-mkfs` formats it
-and populates it from `filesystem/` (34 MB today, nearly all of it
-`filesystem/bin`).
+`mount_system_fs` called `fs::api::list_partitions()`, matched that UUID against
+each partition's `unique_partition_guid`, and mounted the match. That UUID only
+existed on `sata-disk.img`, a 5G qcow2 where `sgdisk` writes one GPT partition
+with `--partition-guid=1:$(PARTITION_UUID)` and the host-side `efs-mkfs` formats
+and populates it from `filesystem/` (34 MB, nearly all of it `filesystem/bin`).
 
-So booting requires both files, and on real hardware it requires flashing a 5G
-image to a second physical drive before the machine is usable. That is the
-problem to fix.
+So booting required both files, and on real hardware it required flashing a 5G
+image to a second physical drive before the machine was usable. That was the
+problem.
 
-Relevant existing pieces:
+The pieces that already existed, and what each one was missing:
 
 | Piece | Where | Note |
 |---|---|---|
 | `AsyncBlockDevice` trait | `kernel/src/drivers/block_io.rs:194` | `submit_read`, `submit_write`, `submit_flush`, optional `submit_read_batch` |
 | Block device registry | `kernel/src/drivers/block_io.rs` | `register(device_id, Arc<dyn AsyncBlockDevice>)` / `lookup`; no enumeration |
 | GPT parsing | `kernel/src/fs/gpt.rs` | device-agnostic: reads through `block_io::lookup` |
-| EFS formatter | `tools/efs-mkfs`, `libs/efs-common` | plain Rust, host-side today |
+| EFS formatter | `tools/efs-mkfs`, `libs/efs-common` | plain Rust, host-side only at the time |
 | FAT32 driver with a write path | `kernel/src/fs/fat32/write.rs` | needed for the ESP |
 | devfs registration | `kernel/src/fs/devfs/mod.rs:418` | `register_device(path, Arc<dyn DevFsDevice>)` |
 | Block page cache | `kernel/src/fs/block_page_cache.rs` | keyed `(device_id, page_block_idx)`; no invalidate-device call |
 
-Missing: any Limine module request, any RAM-backed block device, and any block
-device node in devfs.
+Absent entirely: any Limine module request, any RAM-backed block device, and any
+block device node in devfs.
 
-Two structural facts the phases below depend on, both easy to get wrong:
+Two structural facts the phases below depend on, both easy to get wrong, and both
+true of the tree as it stood:
 
 - **Partition discovery is AHCI-only.** `fs::init` (`kernel/src/fs/mod.rs:457`)
   builds its partition list from `ahci::api::list_devices()`, which returns
