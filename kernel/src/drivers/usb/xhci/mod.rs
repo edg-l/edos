@@ -1496,10 +1496,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                 &prev_kbd_report,
                                 &report,
                             );
-                            if !key_events.as_slice().is_empty() {
-                                crate::drivers::keyboard::KEY_EVENT_BROADCAST
-                                    .broadcast_many(key_events.as_slice());
-                            }
+                            crate::drivers::keyboard::dispatch_key_events(key_events.as_slice());
                             prev_kbd_report = report;
 
                             // Update key repeat state from the current report.
@@ -1581,7 +1578,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
             let now = crate::timer::uptime_us();
             if now >= repeat_next_us {
                 let event = pc_keyboard::KeyEvent::new(key, pc_keyboard::KeyState::Down);
-                crate::drivers::keyboard::KEY_EVENT_BROADCAST.broadcast(event);
+                crate::drivers::keyboard::dispatch_key_events(&[event]);
                 repeat_next_us = now + REPEAT_INTERVAL_US;
             }
         }

@@ -11,8 +11,10 @@ use alloc::{
 use crossbeam_queue::ArrayQueue;
 use spin::Once;
 
+use crate::ranked_lock;
 use crate::thread::scheduler::{current_thread, thread_park_while};
 use crate::{
+    debug::lock_order::RANK_INPUT_POLLERS,
     fs::{
         DevFsDevice, DevFsError, MmapRegion, PollState,
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
@@ -275,8 +277,7 @@ fn process_packet(packet: &[u8]) {
     };
 
     if !USB_MOUSE_ACTIVE.load(Ordering::Relaxed) {
-        MOUSE_BROADCAST.broadcast(event);
-        notify_mouse_pollers();
+        dispatch_mouse_event(event);
     }
 }
 
@@ -290,11 +291,22 @@ fn mouse_poll_state(subscriber: &Subscriber<MouseEvent>) -> PollState {
     }
 }
 
+/// Deliver a mouse event to subscribers and to anyone polling `/dev/mouse`.
+///
+/// The two halves belong together: pushing onto the subscriber queues without
+/// updating the poll entries leaves a `poll()` on `/dev/mouse` blocked
+/// forever. Every producer — PS/2 here, USB HID boot reports in
+/// `drivers::usb::hid` — goes through this.
+pub(crate) fn dispatch_mouse_event(event: MouseEvent) {
+    MOUSE_BROADCAST.broadcast(event);
+    notify_mouse_pollers();
+}
+
 fn notify_mouse_pollers() {
     // Snapshot poller entries under lock, then notify outside to avoid
     // holding BlockingMutex while wake_thread spins (priority inversion).
     let snapshot: heapless::Vec<(Arc<PollEntry>, Arc<Subscriber<MouseEvent>>), 16> = {
-        let pollers = MOUSE_POLLERS.lock();
+        let pollers = ranked_lock!(RANK_INPUT_POLLERS, "mouse::notify_pollers", MOUSE_POLLERS);
         let mut v = heapless::Vec::new();
         for (_, entry, subscriber) in pollers.iter() {
             debug_assert!(
@@ -330,7 +342,8 @@ impl Pollable for MousePoll {
             }
         } else {
             let key = MOUSE_NEXT_POLL_KEY.fetch_add(1, Ordering::Relaxed);
-            MOUSE_POLLERS.lock().push((key, entry, subscriber));
+            ranked_lock!(RANK_INPUT_POLLERS, "mouse::poll_register", MOUSE_POLLERS)
+                .push((key, entry, subscriber));
             PollRegistration {
                 initial: state,
                 key: Some(key),
@@ -339,7 +352,8 @@ impl Pollable for MousePoll {
     }
 
     fn unregister(&self, key: PollKey) {
-        MOUSE_POLLERS.lock().retain(|(stored, _, _)| *stored != key);
+        ranked_lock!(RANK_INPUT_POLLERS, "mouse::poll_unregister", MOUSE_POLLERS)
+            .retain(|(stored, _, _)| *stored != key);
     }
 }
 

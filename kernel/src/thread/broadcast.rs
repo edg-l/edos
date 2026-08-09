@@ -6,8 +6,9 @@ use alloc::{
     sync::{Arc, Weak},
 };
 use crossbeam_queue::ArrayQueue;
-use spin::RwLock;
 
+use crate::debug::lock_order::RANK_INPUT_SUBS;
+use crate::thread::preempt::PreemptRwLock;
 use crate::thread::scheduler::{
     current_thread_id, current_thread_weak, thread_park_while, thread_sleep,
 };
@@ -15,6 +16,7 @@ use crate::thread::{
     scheduler::{WakePriority, sched},
     thread::{State, Thread, ThreadId},
 };
+use crate::{ranked_read, ranked_write};
 
 /// Default capacity for subscriber queues. Events are dropped when full.
 const SUBSCRIBER_QUEUE_CAP: usize = 256;
@@ -78,14 +80,14 @@ impl<T> Subscriber<T> {
 
 /// Broadcaster with many subscribers
 pub struct Broadcaster<T> {
-    subs: RwLock<BTreeMap<ThreadId, Arc<Subscriber<T>>>>,
+    subs: PreemptRwLock<BTreeMap<ThreadId, Arc<Subscriber<T>>>>,
     broadcast_count: AtomicU32,
 }
 
 impl<T: Clone> Broadcaster<T> {
     pub const fn new() -> Self {
         Self {
-            subs: RwLock::new(BTreeMap::new()),
+            subs: PreemptRwLock::new(BTreeMap::new()),
             broadcast_count: AtomicU32::new(0),
         }
     }
@@ -93,22 +95,25 @@ impl<T: Clone> Broadcaster<T> {
     pub fn subscribe(&self) -> Arc<Subscriber<T>> {
         let owner_tid = current_thread_id().unwrap();
         let owner_handle = current_thread_weak().unwrap();
-        // Single write lock: check-and-insert to avoid TOCTOU race (M7).
-        let mut subs = self.subs.write();
-        if let Some(existing) = subs.get(&owner_tid) {
-            return existing.clone();
-        }
+        // Build the subscriber before taking the lock: the queue is a
+        // 256-slot allocation and the guard suppresses preemption.
         let sub = Arc::new(Subscriber {
             owner_tid,
             owner_handle,
             queue: ArrayQueue::new(SUBSCRIBER_QUEUE_CAP),
         });
+        // Single write lock: check-and-insert to avoid a TOCTOU race.
+        let mut subs = ranked_write!(RANK_INPUT_SUBS, "Broadcaster::subscribe", self.subs);
+        if let Some(existing) = subs.get(&owner_tid) {
+            return existing.clone();
+        }
         subs.insert(owner_tid, sub.clone());
         sub
     }
 
     pub fn unsubscribe(&self) {
-        self.subs.write().remove(&current_thread_id().unwrap());
+        ranked_write!(RANK_INPUT_SUBS, "Broadcaster::unsubscribe", self.subs)
+            .remove(&current_thread_id().unwrap());
     }
 
     pub fn broadcast(&self, msg: T) {
@@ -120,7 +125,7 @@ impl<T: Clone> Broadcaster<T> {
         // Collect into stack-allocated buffer to avoid heap allocation.
         let mut targets: heapless::Vec<Arc<Subscriber<T>>, 32> = heapless::Vec::new();
         {
-            let subs = self.subs.read();
+            let subs = ranked_read!(RANK_INPUT_SUBS, "Broadcaster::broadcast", self.subs);
             for sub in subs.values() {
                 debug_assert!(
                     targets.push(sub.clone()).is_ok(),
@@ -146,7 +151,7 @@ impl<T: Clone> Broadcaster<T> {
         let sched = sched();
         let mut targets: heapless::Vec<Arc<Subscriber<T>>, 32> = heapless::Vec::new();
         {
-            let subs = self.subs.read();
+            let subs = ranked_read!(RANK_INPUT_SUBS, "Broadcaster::broadcast_many", self.subs);
             for sub in subs.values() {
                 debug_assert!(
                     targets.push(sub.clone()).is_ok(),
@@ -164,7 +169,7 @@ impl<T: Clone> Broadcaster<T> {
 
     pub fn cleanup(&self) {
         // Single write lock with retain avoids heap allocation.
-        let mut subs = self.subs.write();
+        let mut subs = ranked_write!(RANK_INPUT_SUBS, "Broadcaster::cleanup", self.subs);
         subs.retain(|_, sub| {
             sub.owner_handle
                 .upgrade()

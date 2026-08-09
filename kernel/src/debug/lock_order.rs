@@ -22,6 +22,7 @@
 /// |   60 | `inode.mappers`                       |
 /// |   70 | `UserThread.vmas`                     |
 /// |   80 | `UserThread.memory_manager`           |
+/// |   90 | `SHARED_MEMORY_REGISTRY`              |
 /// |  100 | `DIRTY_INODES`                        |
 /// |  110 | `BlockPageCache.shards[N]`            |
 /// |  120 | `BlockPageCache.journals`             |
@@ -33,6 +34,8 @@
 /// |  180 | `AhciPort.slot_waiters[i]`            |
 /// |  190 | `AhciPort.mmio_lock`                  |
 /// |  200 | `PCI_CONFIG_LOCK`                     |
+/// |  204 | `Mailbox.queue`                       |
+/// |  206 | `ResponseInner.value`                 |
 /// |  210 | `TTY_BUFFER`                          |
 /// |  220 | `Pipe` (per-pipe)                     |
 /// |  230 | `Pty` (per-pty)                       |
@@ -43,6 +46,8 @@
 /// |  280 | `WINDOW_REGISTRY`                     |
 /// |  290 | `WINDOW_EVENTS`                       |
 /// |  300 | `LAST_MOUSE_BUTTONS`                  |
+/// |  310 | `Broadcaster.subs`                    |
+/// |  320 | `MOUSE_POLLERS` / `KEYBOARD_POLLERS`  |
 
 // ---- Rank constants ---------------------------------------------------------
 
@@ -56,6 +61,11 @@ pub const RANK_DIRTY_KEYS: u16 = 50;
 pub const RANK_MAPPERS: u16 = 60;
 pub const RANK_VMAS: u16 = 70;
 pub const RANK_USER_MM: u16 = 80;
+// Shared-memory region registry. Inside both address-space locks: `sys_fork`'s
+// deep copy resolves each `SharedMemory` VMA's region under the vmas guard, and
+// `release_mappings` does the same under the page-table guard while unmapping
+// the region's pages.
+pub const RANK_SHM_REGISTRY: u16 = 90;
 pub const RANK_DIRTY_INODES: u16 = 100;
 pub const RANK_BPC_SHARD: u16 = 110;
 pub const RANK_BPC_JOURNALS: u16 = 120;
@@ -67,6 +77,13 @@ pub const RANK_AHCI_LEGACY: u16 = 170;
 pub const RANK_AHCI_SLOT: u16 = 180;
 pub const RANK_AHCI_MMIO: u16 = 190;
 pub const RANK_PCI_CONFIG: u16 = 200;
+// Request/response transport between a caller and a driver kthread, used by
+// `USB_BLOCK_MAILBOX` and `FS_REQUESTS`. Sits just above the AHCI band because
+// a USB block request is issued from the same FS depth an AHCI command is, and
+// the two are never co-held. 2-unit spacing: the driver band below and the
+// console band above leave no 10-unit gap, and both are leaves.
+pub const RANK_MAILBOX_QUEUE: u16 = 204;
+pub const RANK_MAILBOX_RESPONSE: u16 = 206;
 // IPC and console endpoints. Ranked above the FS ladder because the devfs
 // device callbacks that reach `TTY_BUFFER` run under `inode.lock` (30), and
 // below the deep leaves because appending to any of these buffers allocates.
@@ -87,6 +104,12 @@ pub const RANK_TCP_CONN: u16 = 270;
 pub const RANK_WINDOW_REGISTRY: u16 = 280;
 pub const RANK_WINDOW_EVENTS: u16 = 290;
 pub const RANK_MOUSE_BUTTONS: u16 = 300;
+// Input-device delivery state, shared between the PS/2 and xHCI HID kthreads,
+// the window input thread and poll callers. Above the window band because the
+// window input thread is the one context that could hold a registry guard while
+// touching them; the driver kthreads hold nothing at all.
+pub const RANK_INPUT_SUBS: u16 = 310;
+pub const RANK_INPUT_POLLERS: u16 = 320;
 // Deep utility leaves — acquired from arbitrary contexts (AHCI DMA setup,
 // page-table edits, etc.). Must be higher than any caller's rank. Ordered
 // relative to each other because `MemoryManager::map_memory` acquires
@@ -310,8 +333,8 @@ pub fn exit(rank: u16, site: &'static str) {
 /// block, this one says a guard must not be live where a thread can die.
 ///
 /// Covers ranked locks only, which is what the per-thread stack records. A
-/// guard on an unranked lock (`BlockingMutex<Pipe>`, `BlockingMutex<Pty>`,
-/// `TTY_BUFFER`) is invisible here; ranking those is what would widen it.
+/// guard on an unranked lock (`Thread.owned_ops`, `WaitQueue.inner`, the
+/// scheduler's own locks) is invisible here; ranking a lock is what widens it.
 #[cfg(debug_assertions)]
 pub fn assert_no_guards_held(context: &str) {
     use crate::thread::scheduler::try_sched;

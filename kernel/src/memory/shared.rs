@@ -6,8 +6,10 @@ use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use x86_64::structures::paging::{FrameAllocator, PhysFrame};
 
+use crate::debug::lock_order::RANK_SHM_REGISTRY;
 use crate::memory::frame_allocator::frame_allocator;
 use crate::thread::preempt::PreemptRwLock;
+use crate::{ranked_read, ranked_write};
 
 /// Global registry of shared memory regions
 pub static SHARED_MEMORY_REGISTRY: PreemptRwLock<BTreeMap<u64, Arc<SharedMemory>>> =
@@ -92,7 +94,8 @@ impl SharedMemory {
         });
 
         // Register in global registry
-        SHARED_MEMORY_REGISTRY.write().insert(id, shm.clone());
+        ranked_write!(RANK_SHM_REGISTRY, "shm::new", SHARED_MEMORY_REGISTRY)
+            .insert(id, shm.clone());
 
         Ok(shm)
     }
@@ -134,7 +137,8 @@ impl SharedMemory {
     pub fn dec_ref(&self) {
         let prev = self.ref_count.fetch_sub(1, Ordering::AcqRel);
         if prev == 1 && self.destroyed.load(Ordering::Acquire) {
-            SHARED_MEMORY_REGISTRY.write().remove(&self.id);
+            ranked_write!(RANK_SHM_REGISTRY, "shm::dec_ref", SHARED_MEMORY_REGISTRY)
+                .remove(&self.id);
         }
     }
 
@@ -145,7 +149,9 @@ impl SharedMemory {
 
     /// Look up a shared memory region by ID
     pub fn get(id: u64) -> Option<Arc<SharedMemory>> {
-        SHARED_MEMORY_REGISTRY.read().get(&id).cloned()
+        ranked_read!(RANK_SHM_REGISTRY, "shm::get", SHARED_MEMORY_REGISTRY)
+            .get(&id)
+            .cloned()
     }
 
     /// Mark a shared memory region for destruction.
@@ -154,7 +160,7 @@ impl SharedMemory {
     /// Otherwise, marks for deferred removal: the last `dec_ref()` that brings
     /// ref_count to 0 will remove the entry (like Linux `IPC_RMID`).
     pub fn destroy(id: u64) -> Result<(), SharedMemoryError> {
-        let mut registry = SHARED_MEMORY_REGISTRY.write();
+        let mut registry = ranked_write!(RANK_SHM_REGISTRY, "shm::destroy", SHARED_MEMORY_REGISTRY);
         let shm = registry.get(&id).ok_or(SharedMemoryError::NotFound)?;
         shm.destroyed.store(true, Ordering::Release);
         if shm.ref_count() > 0 {

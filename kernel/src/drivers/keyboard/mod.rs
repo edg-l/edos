@@ -11,9 +11,11 @@ use pc_keyboard::{HandleControl, KeyEvent, Keyboard, ScancodeSet1, layouts};
 use spin::Once;
 use x86_64::structures::idt::InterruptStackFrame;
 
+use crate::ranked_lock;
 use crate::thread::scheduler::{current_thread, thread_park_while};
 use crate::{
     apic::get_lapic,
+    debug::lock_order::RANK_INPUT_POLLERS,
     fs::{
         DevFsDevice, DevFsError, MmapRegion, PollState,
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
@@ -78,13 +80,10 @@ pub extern "C" fn driver_main() -> ! {
             }
         }
 
-        if !raw_events.is_empty() && !USB_KEYBOARD_ACTIVE.load(Ordering::Relaxed) {
-            KEY_EVENT_BROADCAST.broadcast_many(&raw_events);
-            notify_keyboard_pollers();
-            raw_events.clear();
-        } else {
-            raw_events.clear();
+        if !USB_KEYBOARD_ACTIVE.load(Ordering::Relaxed) {
+            dispatch_key_events(&raw_events);
         }
+        raw_events.clear();
 
         KEY_EVENT_BROADCAST.cleanup();
     }
@@ -106,11 +105,29 @@ fn keyboard_poll_state(subscriber: &Subscriber<KeyEvent>) -> PollState {
     }
 }
 
+/// Deliver key events to subscribers and to anyone polling `/dev/kbd`.
+///
+/// The two halves belong together: pushing onto the subscriber queues without
+/// updating the poll entries leaves a `poll()` on `/dev/kbd` blocked forever.
+/// Every producer — PS/2 here, USB HID in the xHCI driver thread — goes
+/// through this.
+pub(crate) fn dispatch_key_events(events: &[KeyEvent]) {
+    if events.is_empty() {
+        return;
+    }
+    KEY_EVENT_BROADCAST.broadcast_many(events);
+    notify_keyboard_pollers();
+}
+
 fn notify_keyboard_pollers() {
     // Snapshot poller entries under lock, then notify outside to avoid
     // holding BlockingMutex while wake_thread spins (priority inversion).
     let snapshot: heapless::Vec<(Arc<PollEntry>, Arc<Subscriber<KeyEvent>>), 16> = {
-        let pollers = KEYBOARD_POLLERS.lock();
+        let pollers = ranked_lock!(
+            RANK_INPUT_POLLERS,
+            "keyboard::notify_pollers",
+            KEYBOARD_POLLERS
+        );
         let mut v = heapless::Vec::new();
         for (_, entry, subscriber) in pollers.iter() {
             debug_assert!(
@@ -139,7 +156,12 @@ impl Pollable for KeyboardPoll {
             }
         } else {
             let key = KEYBOARD_NEXT_POLL_KEY.fetch_add(1, Ordering::Relaxed);
-            KEYBOARD_POLLERS.lock().push((key, entry, subscriber));
+            ranked_lock!(
+                RANK_INPUT_POLLERS,
+                "keyboard::poll_register",
+                KEYBOARD_POLLERS
+            )
+            .push((key, entry, subscriber));
             PollRegistration {
                 initial: state,
                 key: Some(key),
@@ -148,9 +170,12 @@ impl Pollable for KeyboardPoll {
     }
 
     fn unregister(&self, key: PollKey) {
-        KEYBOARD_POLLERS
-            .lock()
-            .retain(|(stored, _, _)| *stored != key);
+        ranked_lock!(
+            RANK_INPUT_POLLERS,
+            "keyboard::poll_unregister",
+            KEYBOARD_POLLERS
+        )
+        .retain(|(stored, _, _)| *stored != key);
     }
 }
 

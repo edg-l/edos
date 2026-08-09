@@ -1,6 +1,6 @@
 use pc_keyboard::{KeyCode, KeyEvent, KeyState};
 
-use crate::drivers::mouse::{MOUSE_BROADCAST, MouseEvent, apply_relative_move};
+use crate::drivers::mouse::{MouseEvent, apply_relative_move, dispatch_mouse_event};
 
 /// Map USB HID keyboard usage code (page 0x07) to pc_keyboard::KeyCode.
 /// Returns None for unmapped/reserved codes.
@@ -230,6 +230,6 @@ pub fn process_boot_mouse_report(report: &[u8], report_len: usize) -> Option<Mou
     let scroll = if report_len >= 4 { report[3] as i8 } else { 0 };
 
     let event = apply_relative_move(dx, dy, buttons, scroll);
-    MOUSE_BROADCAST.broadcast(event);
+    dispatch_mouse_event(event);
     Some(event)
 }

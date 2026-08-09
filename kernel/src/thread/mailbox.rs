@@ -2,6 +2,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::{collections::vec_deque::VecDeque, sync::Arc};
 
+use crate::debug::lock_order::{RANK_MAILBOX_QUEUE, RANK_MAILBOX_RESPONSE};
+use crate::ranked_lock;
 use crate::thread::{mutex::BlockingMutex, waitqueue::WaitQueue};
 
 /*
@@ -48,7 +50,9 @@ impl<R> Response<R> {
                 .waitq
                 .wait_until(|| self.inner.ready.load(Ordering::Acquire));
         }
-        self.inner.value.lock().take().unwrap()
+        ranked_lock!(RANK_MAILBOX_RESPONSE, "Response::wait", self.inner.value)
+            .take()
+            .unwrap()
     }
 }
 
@@ -91,7 +95,7 @@ impl<T, R> Mailbox<T, R> {
         };
 
         {
-            let mut q = self.queue.lock();
+            let mut q = ranked_lock!(RANK_MAILBOX_QUEUE, "Mailbox::send", self.queue);
             q.push_back(req);
         }
         self.not_empty.wake_one();
@@ -101,14 +105,16 @@ impl<T, R> Mailbox<T, R> {
     pub fn recv(&self) -> Request<T, R> {
         loop {
             {
-                let mut q = self.queue.lock();
+                let mut q = ranked_lock!(RANK_MAILBOX_QUEUE, "Mailbox::recv", self.queue);
                 if let Some(req) = q.pop_front() {
                     return req;
                 }
             }
             // Park until a sender wakes us. The closure re-checks under lock
             // to avoid lost wakeups.
-            let _ = self.not_empty.wait_until(|| !self.queue.lock().is_empty());
+            let _ = self.not_empty.wait_until(|| {
+                !ranked_lock!(RANK_MAILBOX_QUEUE, "Mailbox::recv_wait", self.queue).is_empty()
+            });
         }
     }
 
@@ -123,14 +129,14 @@ impl<T, R> Mailbox<T, R> {
 
     /// Non-blocking receive: returns `Some(request)` if one is available, `None` otherwise.
     pub fn try_recv(&self) -> Option<Request<T, R>> {
-        self.queue.lock().pop_front()
+        ranked_lock!(RANK_MAILBOX_QUEUE, "Mailbox::try_recv", self.queue).pop_front()
     }
 
     #[allow(dead_code)]
     pub fn reply(req: Request<T, R>, val: R) {
         {
-            let mut slot = req.resp.value.lock();
-            *slot = Some(val);
+            let mut slot = ranked_lock!(RANK_MAILBOX_RESPONSE, "Mailbox::reply", req.resp.value);
+            **slot = Some(val);
         }
         // Fence ensures the value write is globally visible before ready flag.
         // The BlockingMutex release and ready store are on different atomics,
@@ -148,7 +154,7 @@ impl<T, R> Mailbox<T, R> {
         };
 
         {
-            let mut q = self.queue.lock();
+            let mut q = ranked_lock!(RANK_MAILBOX_QUEUE, "Mailbox::forward", self.queue);
             q.push_back(new_req);
         }
         self.not_empty.wake_one();
@@ -158,8 +164,8 @@ impl<T, R> Mailbox<T, R> {
 impl<T, R> Request<T, R> {
     pub fn reply(&self, val: R) {
         {
-            let mut slot = self.resp.value.lock();
-            *slot = Some(val);
+            let mut slot = ranked_lock!(RANK_MAILBOX_RESPONSE, "Request::reply", self.resp.value);
+            **slot = Some(val);
         }
         core::sync::atomic::fence(Ordering::Release);
         self.resp.ready.store(true, Ordering::Relaxed);
