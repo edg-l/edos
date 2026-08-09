@@ -76,7 +76,10 @@ swept region of the image is unallocated, so QEMU answers those reads from
 nothing at all: what the guest measures is the guest's own overhead plus QEMU's
 AHCI device model, with host storage removed from the question entirely.
 
-### 1. The AHCI path is the wall, and it is a submission cost
+### 1. Command count, not queue depth, bounded the raw device
+
+*(Fixed. The numbers below are what led to it; see the end of this section for
+the result.)*
 
 The same `read_bytes` code, the same block page cache, the same eviction
 pressure, against two different devices:
@@ -104,15 +107,28 @@ depth 32. The commands do overlap, so the driver is not fully serial, but the
 queue never fills: submission cannot outrun completion. The ~100 us per page is
 being spent getting a command *issued*, not waiting for QEMU to answer it.
 
-Batching `read_bytes` through the existing `read_pages` (which submits all
-misses via `submit_read_batch` before waiting) was tried and moved the number
-by nothing: 37.8 -> 37.9 MiB/s. It is kept because it is the correct shape and
-it is what made the depth measurement meaningful, but it is not the fix. The
-next step is to find what costs 100 us inside `submit_ncq_read` — the
-candidates are the per-command `Arc`/`owned_ops` bookkeeping in
-`install_ncq_op`, the `enter_ncq_mode`/`exit_ncq_mode` pair, and the
-`SlotCompletion::PoolRead` bounce copy taken whenever
-`virt_buffer_to_sg_list` declines the caller's buffer.
+Batching `read_bytes` through `read_pages`, so all misses are submitted before
+any is waited on, moved the number by nothing: 37.8 -> 37.9 MiB/s. Depth was
+never the problem.
+
+What was: `read_pages` issued **one command per page**. EFS reads the same
+drive at over 1.7 GiB/s because `read_via_extents` asks for up to 992 KiB at a
+time. Coalescing consecutive misses into one command each closes almost all of
+the gap:
+
+| Request | Per page | Coalesced | Ramdisk (no AHCI) |
+|---|---|---|---|
+| 4 KiB | 31 MiB/s | 32 MiB/s | 143 MiB/s |
+| 64 KiB | 39 MiB/s | **364 MiB/s** | 892 MiB/s |
+| 1 MiB | 37 MiB/s | **886 MiB/s** | 1130 MiB/s |
+
+`ncq_max_inflight` drops to 1 afterwards, which is the confirmation: a 1 MiB
+read is now a single command, so there is nothing left to queue.
+
+4 KiB is unchanged because a 4 KiB read is one page and has nothing to
+coalesce with. Each command costs roughly 100 us of submission regardless of
+size, so single-page access is bounded by that; readahead, not batching, is
+what would help there.
 
 ### 2. Every write number except the fsync rows measures the page cache
 
@@ -183,24 +199,32 @@ Fixed:
   questions, and `write_bytes` conflated them by always going through
   `read_page_for_write`. A page the write covers completely is no longer read.
 
-Open, with the mechanism identified:
+Not bugs, on investigation:
 
-- **Lock-order violation on process teardown with a dirty `MAP_SHARED` file
-  mapping.** `release_mappings` runs with `user.mm` (rank 80) held and calls
-  `flush_shared_vma_pages`, which calls `fs_by_mount_id` and takes `VFS`
-  (rank 10). `sys_mmap` takes them the other way round — resolve the path
-  under VFS, then take mm — so this is a genuine inversion, not just a tracker
-  complaint. Debug builds panic in `lock_order.rs`. Any program that maps a
-  file `MAP_SHARED`, writes to it and exits without unmapping reaches it.
-  The fix is to hoist the flush out of the locked region: have
-  `release_mappings` return the (inode, offset, dirty pages) work list and let
-  its two callers run it after dropping the mm guard. `VfsInode` carries only
-  a `mount_id`, never a filesystem handle, which is what forces the registry
-  lookup at a point where the ladder forbids it; this is the same shape as the
-  deferred `evict_inode`, and the same deferral answers it.
-- **The first `fsync` after a heavy write phase stalls for 30-40 s.** Measured
-  at 34.16 s and 40.66 s on two runs, for a single 4 KiB write plus fsync,
-  while a 1 MiB write plus fsync a moment later costs 97 ms. It emits no
-  journal timeout line, so it is not the `force_commit_and_wait` bug above;
-  the remaining suspects are `fs_api::flush_file` and an AHCI command that
-  only the 30 s NCQ watchdog retires.
+- **The "30 s fsync stall" is arithmetic.** The write phase leaves roughly
+  650 MiB buffered in per-inode page caches, and the first call that forces
+  durability pays to drain it at the write path's real rate of 5-11 MiB/s.
+  650 / 10 is about 60 s, and the 28-40 s figures observed sit in that range.
+  It surfaces on whichever call happens to be first, which is why it moved
+  between `fsync` and `sync()` between runs. `sys_fsync` now logs any call
+  over a second split by stage, so the next one that is genuinely anomalous
+  can be told apart from this.
+
+  A rejected hypothesis, recorded so it is not retried: `enter_legacy_mode`
+  starving behind `enter_ncq_mode`. Giving legacy commands writer preference
+  made things worse, not better — `write 1MiB + fsync` went from 97 ms to
+  30 s — and was reverted.
+
+Still open, as performance rather than correctness:
+
+- **EFS durable writes run at 5-11 MiB/s.** `write_via_extents` walks one
+  4 KiB block at a time and, for each, does a `read_inode`, a `block_read` and
+  a `block_write` — a read-modify-write per block even when the write covers
+  the whole block, and one command per block. This is the same defect the
+  block page cache had on the read side, in the filesystem instead, and the
+  same two fixes apply: skip the read when a full block is overwritten, and
+  coalesce contiguous blocks into one command. Buffered writes hide it (a
+  `write(2)` returns at page-cache speed) which is why it only shows up as
+  drain time.
+- **`mmap` is roughly 70x slower than `read` for the same bytes**, and
+  `sys_mmap` logs a line per file-backed mapping.
