@@ -1647,13 +1647,23 @@ pub fn sys_sync() {
         x86_64::instructions::interrupts::are_enabled(),
         "sys_sync called with interrupts disabled"
     );
-    // Commit all pending journal transactions before flushing pages.
-    for journal in BlockPageCache::global().all_journals() {
-        if let Err(e) = journal.force_commit_and_wait() {
-            log!("sys_sync: journal commit error: {:?}", e);
+    // Two rounds of commit-then-flush, not one.
+    //
+    // A flush pass writes file data out and enrols the metadata that maps it
+    // into the journal's active transaction. Writeback refuses to check point
+    // a block whose transaction has not committed, so after a single round
+    // that metadata is neither committed nor written: `sync` would return with
+    // the extents for the data it just wrote still in memory, and a crash
+    // would leave the file pointing at nothing. The second round commits what
+    // the first round enrolled and then checkpoints it.
+    for _ in 0..2 {
+        for journal in BlockPageCache::global().all_journals() {
+            if let Err(e) = journal.force_commit_and_wait() {
+                log!("sys_sync: journal commit error: {:?}", e);
+            }
         }
+        BlockPageCache::global().sync_all();
     }
-    BlockPageCache::global().sync_all();
 
     // Publish the tail the flush just earned. Replay starts at the tail
     // recorded in the journal superblock, so a stale tail makes the next mount
