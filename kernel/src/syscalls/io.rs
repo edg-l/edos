@@ -1608,6 +1608,10 @@ pub fn sys_fsync(fd: u64) -> i32 {
     interrupts::enable();
     let started = crate::timer::Instant::now();
     if let Err(e) = fs_api::flush_file(&path, inode) {
+        // Logged for the same reason as the journal arm below: a failing
+        // fsync reaches userspace as a bare errno, and without the kind here
+        // there is nothing to attribute it to.
+        log!("sys_fsync: flush_file({}) error: {:?}", path, e);
         info.lock().errno = Errno::from(e);
         return -1;
     }
