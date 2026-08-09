@@ -355,6 +355,17 @@ impl PageCacheOps for Fatfs {
                 .map_err(|_| Error::IoError)?;
             h.wait().map_err(|_| Error::IoError)?;
 
+            // These sectors went to the device behind the block page cache,
+            // which may still hold them from a directory or format read. Drop
+            // its copy so a later writeback cannot put it back on top.
+            let first_page = lba / 8;
+            let last_page = (lba + sectors_to_write as u64 - 1) / 8;
+            crate::fs::block_page_cache::BlockPageCache::global().invalidate_pages(
+                self.partition.device_id as u64,
+                first_page,
+                last_page - first_page + 1,
+            );
+
             buf_pos += take;
             file_pos += take;
         }

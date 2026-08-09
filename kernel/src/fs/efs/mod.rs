@@ -2705,6 +2705,8 @@ impl PageCacheOps for EfsDriver {
             tx.abort();
             return Err(e.into());
         }
+        // Written behind the block cache's back; drop its now-stale copy.
+        BlockPageCache::global().invalidate_pages(self.device.device_id, lba / 8, 1);
 
         Ok(())
     }
@@ -2821,6 +2823,9 @@ impl PageCacheOps for EfsDriver {
                     tx.abort();
                     return Err(e.into());
                 }
+                // This block just went to the device behind the block cache's
+                // back; drop any page it still holds for it.
+                BlockPageCache::global().invalidate_pages(self.device.device_id, lba / 8, 1);
             }
 
             // tx drops here, merging enrolled metadata into the active journal tx.

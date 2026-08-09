@@ -162,6 +162,12 @@ lock.
 (120), `write_lock` (140). Sibling of the journal ranks 130 and 150, never co-held
 with them.
 
+`invalidate_pages` is called by the filesystems right after they write file data
+straight to the device, so it runs on a path that has already released
+`EfsDriver.mutable` (160). Taking 110 there is only legal because of that: the
+evicted pages are dropped outside the shard lock, since `CachedBlockPage::drop`
+frees a frame (910).
+
 **120, `BlockPageCache.journals`.** Brief; returns an `Arc<Journal>`. Leaf within
 the block-cache subsystem.
 

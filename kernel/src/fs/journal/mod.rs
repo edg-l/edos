@@ -380,6 +380,51 @@ impl Journal {
         }
     }
 
+    /// Drop tracker entries for blocks that are no longer dirty in the block
+    /// page cache.
+    ///
+    /// An entry only clears when someone reports the block reaching its home
+    /// location, and not every writer goes through the tracked writeback path:
+    /// the journal writes its own blocks, and filesystems write file data
+    /// straight to the device. A block that is not dirty anywhere is at home
+    /// by definition, so holding its entry only pins the tail -- and a pinned
+    /// tail eventually stops the ring, which stops commits, which loses the
+    /// metadata those commits carried.
+    ///
+    /// Snapshot first, query second, remove third: the tracker (130) must not
+    /// be held while asking the block cache (110), which ranks below it.
+    fn prune_checkpointed(&self) {
+        let keys: Vec<(u64, u64)> = {
+            let tracker = ranked_lock!(
+                RANK_JOURNAL_TRACKER,
+                "Journal.checkpoint_tracker",
+                self.checkpoint_tracker
+            );
+            tracker.keys().copied().collect()
+        };
+        if keys.is_empty() {
+            return;
+        }
+
+        let cache = crate::fs::block_page_cache::BlockPageCache::global();
+        let at_home: Vec<(u64, u64)> = keys
+            .into_iter()
+            .filter(|&(dev, block)| !cache.is_dirty(dev, block))
+            .collect();
+        if at_home.is_empty() {
+            return;
+        }
+
+        let mut tracker = ranked_lock!(
+            RANK_JOURNAL_TRACKER,
+            "Journal.checkpoint_tracker",
+            self.checkpoint_tracker
+        );
+        for key in at_home {
+            tracker.remove(&key);
+        }
+    }
+
     /// Sequence the block at `(dev, block)` is enrolled under, if any.
     ///
     /// Callers that wrote a block out without going through the tracked
@@ -429,6 +474,8 @@ impl Journal {
     /// and checkpointed (all enrolled blocks flushed to their home locations).
     /// Persists the new tail to the journal superblock.
     pub fn advance_tail(&self) -> Result<(), AhciError> {
+        self.prune_checkpointed();
+
         let min_journaled_seq = {
             // Hoist committed_seq() read before taking checkpoint_tracker to avoid
             // a tracker -> state lock-order inversion (see doc/invariants/lock-order.md,
@@ -538,7 +585,10 @@ impl Journal {
     /// transaction, the ring would never drain either. Half the ring leaves
     /// room for the descriptor, commit and revoke blocks.
     pub fn max_tx_blocks(&self) -> usize {
-        ((self.block_count as u64 - 1) / 2) as usize
+        // A quarter of the ring: the cap is checked when a handle merges, so
+        // the active transaction can overshoot it by one handle's worth, and
+        // the result still has to fit alongside what the ring already holds.
+        ((self.block_count as u64 - 1) / 4) as usize
     }
 
     /// Move the active transaction to the sealed queue. Returns true if there
@@ -674,12 +724,17 @@ impl Journal {
                 // Still no room after checkpointing: this transaction is larger
                 // than the ring can ever hold. Put it back so a later, smaller
                 // commit is not lost, and report it.
-                let mut s2 = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
-                s2.sealed.push_front(tx);
+                let (head, tail) = {
+                    let mut s2 = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
+                    s2.sealed.push_front(tx);
+                    (s2.head_block, s2.tail_block)
+                };
                 crate::log!(
-                    "journal: transaction needs {} blocks, ring holds {}",
+                    "journal: transaction needs {} blocks; ring holds {}, head {}, tail {}",
                     needed,
-                    ring_size
+                    ring_size,
+                    head,
+                    tail
                 );
                 return Err(AhciError::IoError);
             };

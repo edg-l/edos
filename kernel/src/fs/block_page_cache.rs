@@ -536,10 +536,13 @@ impl BlockPageCache {
                 return Ok(got);
             }
             // Drop our pin first: it is one of the things keeping the shard
-            // from making room. Flush inline: a writer can be the writeback
-            // thread itself, which must not wait on its own pass.
+            // from making room, then let writeback run. Kicking rather than
+            // flushing inline: a writer reaches here holding filesystem locks
+            // that rank *above* the shard lock, so doing the flush on this
+            // thread would invert the order.
             drop(got);
-            let _ = self.flush_dirty_once(true);
+            self.kick_writeback();
+            crate::thread::scheduler::thread_yield();
         }
         unreachable!("loop returns on its last iteration")
     }
@@ -1088,6 +1091,46 @@ impl BlockPageCache {
         let h = dev.submit_flush()?;
         h.wait()?;
         Ok(())
+    }
+
+    /// True when this block is dirty in the cache, i.e. its home copy is
+    /// older than what the cache holds.
+    pub fn is_dirty(&self, device_id: u64, page_block_idx: u64) -> bool {
+        let key = (device_id, page_block_idx);
+        let shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[shard_index(key)]);
+        shard.dirty.contains(&key)
+    }
+
+    /// Drop cached pages for `count` pages starting at `first_page`.
+    ///
+    /// For callers that write those blocks straight to the device, bypassing
+    /// this cache: whatever is cached is older than what they just wrote, so
+    /// it is discarded rather than written back. Leaving it would let a later
+    /// writeback pass put the stale copy back on top of the new data.
+    pub fn invalidate_pages(&self, device_id: u64, first_page: u64, count: u64) {
+        let mut to_drop: Vec<Arc<CachedBlockPage>> = Vec::new();
+        for page in first_page..first_page + count {
+            let key = (device_id, page);
+            let mut shard =
+                ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[shard_index(key)]);
+            if let Some(evicted) = shard.lru.pop(&key) {
+                to_drop.push(evicted);
+            }
+            if shard.dirty.remove(&key) {
+                self.stats.dirty_pages.fetch_sub(1, Ordering::Relaxed);
+            }
+            drop(shard);
+
+            // The caller has just put this block at its home location, so it
+            // is checkpointed whether or not it was ever flushed from here.
+            // Skipping this leaves the entry in the journal's tracker, and a
+            // tracker entry that never clears pins the tail: the ring fills,
+            // commits start failing, and every write after that crawls.
+            self.note_checkpointed(key);
+        }
+        // Frames free in CachedBlockPage::drop, which takes the frame
+        // allocator (rank 910); drop outside the shard lock (110).
+        drop(to_drop);
     }
 
     /// Remove all cached pages for a device (e.g., on unmount).

@@ -865,14 +865,20 @@ fn page_cache_write_core(
         let slice = unsafe { guard.as_slice_mut() };
         source(data_pos, &mut slice[write_start..write_end])?;
         data_pos += write_len;
-
-        inode.pages.mark_dirty(page_idx as u64);
     }
 
-    register_dirty_inode(inode);
-
+    // Publish the size before the pages become flushable. A writeback pass
+    // that sees a dirty page past the recorded end of file treats it as
+    // nothing to write and clears the dirty flag, so marking pages first
+    // loses whatever the pass caught in that window -- reliably the first
+    // page of a new file, which is written before any size has been stamped.
     let new_size = end_offset as u64;
     pc_ops.update_size(ino, new_size)?;
+
+    for page_idx in start_page..=end_page {
+        inode.pages.mark_dirty(page_idx as u64);
+    }
+    register_dirty_inode(inode);
 
     Ok(count as u64)
 }
