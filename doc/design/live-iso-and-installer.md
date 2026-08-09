@@ -1,7 +1,13 @@
 # Live ISO and `edos-install`
 
-Implemented. This describes the shipped design; where the implementation
-departs from the original plan, the reason is given inline.
+Implemented and verified end to end: `make all` produces one ISO that boots
+standalone, and `edos-install /dev/sda` produces a disk that boots to the
+desktop on its own. This describes the shipped design; where the
+implementation departs from the original plan, the reason is given inline.
+
+Getting there took eight write-path fixes in the kernel, none of them
+specific to the installer. See
+`doc/bugs/2026-08-09-writes-that-never-reach-the-disk.md`.
 
 The goal is to be able to hand someone one file. Today the ISO is not a
 distributable artifact: it carries Limine and the kernel and nothing else, and
