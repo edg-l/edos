@@ -122,6 +122,11 @@ pub const RANK_HDA_STATE: u16 = 330;
 // ranking it outermost is what makes a future edit that forgets to panic
 // instead of quietly reintroducing a spin lock held across a device callback.
 pub const RANK_DEVFS_REGISTRY: u16 = 340;
+// Orphan-eviction overflow list. Acquired from arbitrary drop contexts,
+// including the reaper tearing a dead thread down, so it outranks anything a
+// `VfsInode::drop` could still be holding. Never held across a call into a
+// filesystem: both sides take it, move the Vec, and release.
+pub const RANK_EVICT_OVERFLOW: u16 = 350;
 // Deep utility leaves — acquired from arbitrary contexts (AHCI DMA setup,
 // page-table edits, etc.). Must be higher than any caller's rank. Ordered
 // relative to each other because `MemoryManager::map_memory` acquires

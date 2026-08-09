@@ -87,6 +87,7 @@ sections, and wrapping them would recurse into the preemption counter.
 | 320 | device poller lists | `BlockingMutex<Vec>` | `drivers/{mouse,keyboard}/mod.rs`, `drivers/tty.rs` |
 | 330 | `HdaPlaybackState` | `Arc<PreemptSpinlock<..>>` | `drivers/hda/mod.rs` |
 | 340 | `DevFs.shared` | `Arc<PreemptRwLock<DevFs>>` | `fs/devfs/mod.rs` |
+| 350 | `EVICT_OVERFLOW` | `PreemptSpinlock<Vec<EvictRequest>>` | `fs/evict.rs` |
 | 900 | kernel-global mapper | `IrqSpinlock<MemoryManager>` | `memory/mapper.rs` |
 | 910 | `FRAME_ALLOCATOR` | `IrqSpinlock<BitmapFrameAllocator>` | `memory/frame_allocator.rs` |
 
@@ -301,6 +302,12 @@ interrupt advances the read cursor. It was a bare `spin::Mutex` — held across 
 memcpy loop into the DMA ring, so a descheduled writer stalled the audio IRQ
 thread — and is a `PreemptSpinlock` now. `AUDIO_IOCTL_DRAIN` polls in a loop and
 drops the guard before each `thread_yield`, which the park assertions enforce.
+
+**350, `EVICT_OVERFLOW`.** Holds orphan-eviction requests the reaper could not
+fit in the 256-entry ring. Reachable from any `VfsInode::drop`, including the
+reaper's, so it outranks everything such a drop could still hold. Both sides
+take it, move the `Vec`, and release: the evict kthread must not hold it across
+`evict_inode`, which does disk I/O and takes EFS locks far below this rank.
 
 **340, `DevFs.shared`.** The devfs device registry, deliberately outermost: it
 must be released before dispatching into a `DevFsDevice`, and ranking it above

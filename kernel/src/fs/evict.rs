@@ -8,6 +8,10 @@
 //! # Design decisions
 //!
 //! - Queue capacity 256 (D3). Realistic orphan bursts are 0-2 per death.
+//! - If the queue is full AND the caller is the reaper: park the request on an
+//!   unbounded overflow list. The reaper may neither block for ring space nor
+//!   evict inline, and discarding the request leaks the inode's blocks until
+//!   `efs-fsck` runs.
 //! - If the queue is full AND the caller is NOT the evict kthread: fall back
 //!   to synchronous `evict_inode` with a WARNING log (never lose an eviction).
 //! - If the queue is full AND the caller IS the evict kthread: panic.
@@ -18,10 +22,13 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use alloc::sync::Weak;
+use alloc::{sync::Weak, vec::Vec};
 use crossbeam_queue::ArrayQueue;
 use spin::Once;
 
+use crate::debug::lock_order::RANK_EVICT_OVERFLOW;
+use crate::ranked_lock;
+use crate::thread::preempt::PreemptSpinlock;
 use crate::thread::scheduler::{current_thread_id, thread_park_while};
 use crate::{
     fs::vfs::fs_by_mount_id,
@@ -56,8 +63,22 @@ pub static EVICT_DRAIN_COUNT: AtomicU64 = AtomicU64::new(0);
 /// ThreadId of the evict kthread, or 0 before it starts.
 pub static EVICT_TID: AtomicU64 = AtomicU64::new(0);
 
-/// Evictions abandoned because the queue was full on a thread that may not
-/// block. Non-zero means on-disk storage is leaked until `efs-fsck` runs.
+/// Evictions the reaper could not fit in the ring, held until the evict
+/// kthread drains them.
+///
+/// The reaper must not block, so it cannot wait for ring space, and it must
+/// not perform the eviction itself. Dropping the request instead leaks the
+/// inode's blocks until `efs-fsck` runs, which an ordinary create/unlink burst
+/// triggered several hundred times per `fsbench` run. Growing the ring only
+/// moves the cliff; this has no fixed capacity, so there is no cliff.
+///
+/// Pushing allocates, which is legal here: the heap is an `IrqSpinlock`, and
+/// this path already frees memory as inodes drop.
+static EVICT_OVERFLOW: PreemptSpinlock<Vec<EvictRequest>> = PreemptSpinlock::new(Vec::new());
+
+/// Evictions deferred to [`EVICT_OVERFLOW`] because the ring was full on a
+/// thread that may not block. Storage is reclaimed once the kthread drains
+/// them, so this is queue-pressure telemetry and not a leak count.
 pub static EVICT_DROPPED_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Evictions the caller had to perform itself because the queue was full.
@@ -110,17 +131,15 @@ pub fn post_evict(mount_id: usize, ino: u64) {
             }
             // The reaper reaches this through `VfsInode::drop` while tearing a
             // dead thread down, and must not block: every process exit would
-            // queue behind the I/O. Give the eviction up instead. The inode's
-            // blocks stay allocated until `efs-fsck` reclaims them, which is a
-            // far smaller problem than stalling teardown.
+            // queue behind the I/O. Park the request on the unbounded overflow
+            // list instead, which the kthread drains ahead of the ring.
             if crate::thread::scheduler::current_thread_is_reaper() {
                 EVICT_DROPPED_COUNT.fetch_add(1, Ordering::Relaxed);
-                crate::log!(
-                    "WARNING: evict queue full on reaper, leaking inode storage \
-                     (mount={}, ino={}); run efs-fsck to reclaim",
-                    mount_id,
-                    ino
-                );
+                ranked_lock!(RANK_EVICT_OVERFLOW, "evict::overflow", EVICT_OVERFLOW)
+                    .push(EvictRequest { mount_id, ino });
+                if let Some(handle) = EVICT_HANDLE.get() {
+                    sched().wake_thread(handle, WakePriority::Normal);
+                }
                 return;
             }
             // Synchronous fallback. Counted always, logged sparsely: an unlink
@@ -189,21 +208,43 @@ pub fn init_evict_kthread() {
 
 extern "C" fn evict_kthread() -> ! {
     loop {
-        thread_park_while(|| evict_queue().is_empty());
+        thread_park_while(|| evict_queue().is_empty() && overflow_is_empty());
+
+        // Overflow first: those are the oldest requests, deferred by a reaper
+        // that found the ring full. Take the whole list and release the guard
+        // before evicting — `evict_inode` performs disk I/O, and the lock is
+        // reachable from any thread dropping an inode.
+        let overflow = core::mem::take(&mut **ranked_lock!(
+            RANK_EVICT_OVERFLOW,
+            "evict::overflow drain",
+            EVICT_OVERFLOW
+        ));
+        for req in overflow {
+            evict_one(req);
+        }
 
         while let Some(req) = evict_queue().pop() {
-            if let Some(fs) = fs_by_mount_id(req.mount_id) {
-                if let Err(e) = fs.evict_inode(req.ino) {
-                    crate::log!(
-                        "evict_kthread: evict_inode(mount={}, ino={}) failed: {:?}",
-                        req.mount_id,
-                        req.ino,
-                        e
-                    );
-                } else {
-                    EVICT_DRAIN_COUNT.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+            evict_one(req);
         }
+    }
+}
+
+fn overflow_is_empty() -> bool {
+    ranked_lock!(RANK_EVICT_OVERFLOW, "evict::overflow probe", EVICT_OVERFLOW).is_empty()
+}
+
+fn evict_one(req: EvictRequest) {
+    let Some(fs) = fs_by_mount_id(req.mount_id) else {
+        return;
+    };
+    if let Err(e) = fs.evict_inode(req.ino) {
+        crate::log!(
+            "evict_kthread: evict_inode(mount={}, ino={}) failed: {:?}",
+            req.mount_id,
+            req.ino,
+            e
+        );
+    } else {
+        EVICT_DRAIN_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }
