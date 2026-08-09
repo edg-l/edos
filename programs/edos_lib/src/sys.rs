@@ -27,6 +27,7 @@ pub const SYS_GETGID: u64 = 104;
 pub const SYS_WAIT_PID: u64 = 40;
 pub const SYS_SPAWN: u64 = 57;
 pub const SYS_RENAME: u64 = 82;
+pub const SYS_NANOSLEEP: u64 = 35;
 pub const SYS_CLOCK_GETTIME: u64 = 226;
 pub const SYS_OPENPTY: u64 = 227;
 pub const SYS_SPAWN2: u64 = 228;

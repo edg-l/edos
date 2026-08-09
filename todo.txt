@@ -69,3 +69,9 @@
 
 - `hexdump -n <len>` is ignored, so it dumps the whole file. hexdump parses no
   flags at all: everything after argv[0] is treated as a filename.
+
+- `std::thread::sleep` still rounds every request down to whole milliseconds:
+  the fork's `sys/thread/edos.rs` calls `edos_rt::process::sleep_ms`, so a
+  sub-millisecond sleep returns immediately. SYS_NANOSLEEP (35) now exists and
+  `edos_lib::time::nanosleep` reaches it; pointing std at it needs an edos_rt
+  release and a fork pin bump.

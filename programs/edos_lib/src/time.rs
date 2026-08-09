@@ -1,6 +1,29 @@
-//! Wall-clock time.
+//! Wall-clock time and sleeping.
 
 use crate::sys;
+
+/// POSIX `timespec`, laid out as the kernel reads it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Timespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+/// Sleep until at least `seconds` plus `nanos` have elapsed. Returns 0, or -1
+/// if the request is not a duration (`nanos` outside `0..1_000_000_000`, or a
+/// negative `seconds`).
+///
+/// Unlike `std::thread::sleep`, which rounds the request down to whole
+/// milliseconds, this honours the nanoseconds it is given. Nothing can cut the
+/// sleep short, so there is no remaining time to read back.
+pub fn nanosleep(seconds: i64, nanos: i64) -> i64 {
+    let req = Timespec {
+        tv_sec: seconds,
+        tv_nsec: nanos,
+    };
+    unsafe { sys::syscall2(sys::SYS_NANOSLEEP, &req as *const Timespec as u64, 0) as i64 }
+}
 
 /// Broken-down UTC wall-clock time.
 #[derive(Debug, Clone, Copy)]

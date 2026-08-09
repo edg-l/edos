@@ -289,7 +289,7 @@ profile.
 
 ## 3. Missing syscalls and interfaces
 
-83 syscalls exist. The conspicuous absences, roughly by how much they block real
+84 syscalls exist. The conspicuous absences, roughly by how much they block real
 programs:
 
 | Missing | Why it matters |
@@ -298,7 +298,6 @@ programs:
 | `setuid` | `UserThreadInfo` carries `user_id`/`group_id`; only the getters exist |
 | `symlink`/`readlink` | No symlinks in a filesystem that otherwise looks POSIX |
 | path-based `truncate`, `utimensat` | Ordinary tooling gaps; `todo.txt` already lists file times |
-| `nanosleep` | `SLEEP_MS` is millisecond-granularity only |
 | `sigprocmask` | `SIGACTION` and `KILL` exist, so signals are half-built |
 | `*at` family | No `openat`/`unlinkat`; every path is resolved against cwd |
 | streaming `getdents` | `LIST_DIR` fills one caller-sized buffer; a huge directory has no continuation protocol |

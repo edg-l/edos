@@ -340,6 +340,7 @@ const SYS_RMDIR_ALL: u64 = 206;
 const SYS_UNLINK: u64 = 207;
 const SYS_LIST_MOUNTS: u64 = 208;
 const SYS_SLEEP_MS: u64 = 209;
+const SYS_NANOSLEEP: u64 = 35; // sleep with nanosecond-resolution request
 const SYS_MONOTONIC_TIME: u64 = 210;
 const SYS_CLONE: u64 = 211;
 const SYS_FUTEX_WAIT: u64 = 212;
@@ -617,6 +618,11 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_SLEEP_MS => {
             let milliseconds = ctx.rdi;
             ctx.rax = sys_sleep_ms(milliseconds);
+        }
+        SYS_NANOSLEEP => {
+            let req_ptr = ctx.rdi as *const Timespec;
+            let rem_ptr = ctx.rsi as *mut Timespec;
+            ctx.rax = sys_nanosleep(req_ptr, rem_ptr);
         }
         SYS_MONOTONIC_TIME => {
             ctx.rax = sys_monotonic_time();
@@ -1055,6 +1061,54 @@ fn sys_sleep_ms(milliseconds: u64) -> u64 {
     let duration = Duration::from_millis(milliseconds);
 
     thread_sleep(duration);
+
+    0
+}
+
+/// POSIX `timespec`, as userspace lays it out for [`sys_nanosleep`].
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Timespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+/// nanosleep(req, rem) -> 0 on success, -1 on error.
+///
+/// Sleeps until at least `req` has elapsed. A sleep ends on any wake, not only
+/// on its deadline, so the remaining time is re-slept rather than reported: the
+/// call returning is a promise the request was honoured.
+///
+/// `rem` is accepted for the POSIX signature and never written. A signal EDOS
+/// delivers to a sleeping thread either is ignored or kills it, so the EINTR
+/// case a caller would read the remainder for cannot happen.
+fn sys_nanosleep(req_ptr: *const Timespec, _rem_ptr: *mut Timespec) -> u64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let Some(req) = (unsafe { try_read_user(req_ptr) }) else {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    };
+
+    if req.tv_sec < 0 || !(0..1_000_000_000).contains(&req.tv_nsec) {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    }
+
+    let deadline =
+        crate::timer::Instant::now() + Duration::new(req.tv_sec as u64, req.tv_nsec as u32);
+
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(crate::timer::Instant::now()) else {
+            break;
+        };
+        if remaining.is_zero() {
+            break;
+        }
+        thread_sleep(remaining);
+        exit_if_killed();
+    }
 
     0
 }

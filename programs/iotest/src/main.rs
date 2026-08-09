@@ -5,6 +5,7 @@ use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use edos_lib::io::{F_OK, R_OK, W_OK, X_OK, access, pread, pwrite};
 use edos_lib::process;
@@ -230,7 +231,10 @@ fn test6(dir: &str) {
         (R_OK | W_OK, "R_OK|W_OK"),
     ] {
         if access(&path, mode) != 0 {
-            fail(6, &format!("access({}, {}) denied an existing file", path, name));
+            fail(
+                6,
+                &format!("access({}, {}) denied an existing file", path, name),
+            );
         }
     }
 
@@ -261,6 +265,59 @@ fn test6(dir: &str) {
     pass(6, "access: existence, modes, directories, unlink, bad mode");
 }
 
+// -----------------------------------------------------------------------
+// Test 7: nanosleep() honours sub-millisecond requests and rejects non-durations
+// -----------------------------------------------------------------------
+fn test7() {
+    for (sec, nanos, what) in [
+        (0i64, 1_000_000_000i64, "nanos == one second"),
+        (0, -1, "negative nanos"),
+        (-1, 0, "negative seconds"),
+    ] {
+        if time::nanosleep(sec, nanos) == 0 {
+            fail(7, &format!("nanosleep accepted {}", what));
+        }
+    }
+
+    // 20 sleeps of 500us must add up. A millisecond-granularity sleep would
+    // round each one to zero and return immediately.
+    let start = Instant::now();
+    for _ in 0..20 {
+        if time::nanosleep(0, 500_000) != 0 {
+            fail(7, "nanosleep(0, 500_000) failed");
+        }
+    }
+    let elapsed = start.elapsed();
+    if elapsed < Duration::from_millis(10) {
+        fail(
+            7,
+            &format!(
+                "20 x 500us slept only {:?}, so sub-ms requests are dropped",
+                elapsed
+            ),
+        );
+    }
+
+    // A single longer sleep must not return early. The monotonic clock is
+    // microsecond-resolution, so allow one millisecond of truncation.
+    let start = Instant::now();
+    if time::nanosleep(0, 120_000_000) != 0 {
+        fail(7, "nanosleep(0, 120ms) failed");
+    }
+    let elapsed = start.elapsed();
+    if elapsed < Duration::from_millis(119) {
+        fail(
+            7,
+            &format!("nanosleep(0, 120ms) returned after {:?}", elapsed),
+        );
+    }
+
+    pass(
+        7,
+        "nanosleep: sub-ms resolution, full duration, bad requests rejected",
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -272,6 +329,7 @@ fn main() {
     test4();
     test5();
     test6(dir);
+    test7();
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

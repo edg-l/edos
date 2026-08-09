@@ -1185,10 +1185,9 @@ doc/AUDIT.md, which has the file:line detail and the reasoning.
 The interface gaps that actually block programs:
 
 1. **`symlink`/`readlink`, path-based `truncate`, `utimensat`,
-   `nanosleep`, `sigprocmask`, the `*at` family, streaming
-   `getdents`.** [audit] The remaining gaps from the audit's table, none
-   of which block a program that exists today. (`SYS_FTRUNCATE` covers
-   the fd-based form; `SYS_SLEEP_MS` the millisecond-resolution sleep.)
+   `sigprocmask`, the `*at` family, streaming `getdents`.** [audit] The
+   remaining gaps from the audit's table, none of which block a program
+   that exists today. (`SYS_FTRUNCATE` covers the fd-based form.)
 2. **No shutdown or reboot syscall**, so every stop is a power cut and
    the journal replays on the next boot. init is the natural owner now.
 
