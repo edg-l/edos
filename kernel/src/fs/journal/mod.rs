@@ -81,6 +81,8 @@ const SECTORS_PER_BLOCK: u16 = 8;
 
 /// Block size in bytes (must match the filesystem block size).
 const BLOCK_SIZE: usize = 4096;
+/// Ring blocks one AHCI command may carry, from the 248-entry PRDT.
+const MAX_RUN_BLOCKS: u64 = 248;
 
 // ---- Transaction ------------------------------------------------------------
 
@@ -295,6 +297,36 @@ impl Journal {
     ) -> Result<(), AhciError> {
         let lba = self.journal_block_lba(journal_block_idx);
         block_write(self.device_id, lba, SECTORS_PER_BLOCK, data)
+    }
+
+    /// Write consecutive ring blocks, coalescing them into as few commands as
+    /// the ring layout allows.
+    ///
+    /// The ring is contiguous on disk and only the committer ever writes it, so
+    /// a transaction's data blocks are exactly the shape where one large
+    /// command beats many small ones: a long run of adjacent blocks owned
+    /// exclusively by this caller. Runs are cut where the ring wraps back to
+    /// its first block, and at the most one command can carry.
+    pub fn write_journal_blocks(&self, start_idx: u64, data: &[u8]) -> Result<(), AhciError> {
+        debug_assert!(data.len() % BLOCK_SIZE == 0);
+        let ring_size = self.block_count as u64 - 1;
+        let total = (data.len() / BLOCK_SIZE) as u64;
+        let mut done = 0u64;
+        while done < total {
+            let idx = (start_idx + done) % ring_size;
+            let until_wrap = ring_size - idx;
+            let run = (total - done).min(until_wrap).min(MAX_RUN_BLOCKS);
+            let off = done as usize * BLOCK_SIZE;
+            let len = run as usize * BLOCK_SIZE;
+            block_write(
+                self.device_id,
+                self.journal_block_lba(idx),
+                SECTORS_PER_BLOCK * run as u16,
+                &data[off..off + len],
+            )?;
+            done += run;
+        }
+        Ok(())
     }
 
     /// Write one 4096-byte journal block with Force Unit Access for durability.
@@ -765,12 +797,14 @@ impl Journal {
             ring_pos += 1;
 
             // Write data blocks (one per enrolled page, possibly escaped).
+            // The CRC below needs them contiguous anyway, so the same buffer
+            // is what goes to the device.
             let mut payload_bytes: Vec<u8> = Vec::with_capacity(n_data as usize * BLOCK_SIZE);
             for block_data in &data_blocks {
-                self.write_journal_block(ring_pos % ring_size, block_data)?;
                 payload_bytes.extend_from_slice(block_data);
-                ring_pos += 1;
             }
+            self.write_journal_blocks(ring_pos, &payload_bytes)?;
+            ring_pos += n_data;
 
             // Write revoke block if needed.
             if !revoke_entries.is_empty() {
