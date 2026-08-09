@@ -335,6 +335,31 @@ fn test8(dir: &str) {
         }
     }
 
+    // Contents survive a shrink, and the bytes a later grow exposes read as
+    // zero. Written after the size checks so the file starts from a known
+    // length rather than whatever the loop left.
+    fs::write(&path, vec![0xCDu8; CHUNK]).unwrap_or_else(|e| fail(8, &format!("rewrite: {}", e)));
+    if truncate(&path, 100) != 0 {
+        fail(8, "truncate to 100 failed");
+    }
+    let kept = fs::read(&path).unwrap_or_else(|e| fail(8, &format!("read after shrink: {}", e)));
+    if kept.len() != 100 || kept.iter().any(|&b| b != 0xCD) {
+        fail(
+            8,
+            &format!("shrink lost data: {} bytes, first {:#x}", kept.len(), kept
+                .first()
+                .copied()
+                .unwrap_or(0)),
+        );
+    }
+    if truncate(&path, 300) != 0 {
+        fail(8, "truncate to 300 failed");
+    }
+    let grown = fs::read(&path).unwrap_or_else(|e| fail(8, &format!("read after grow: {}", e)));
+    if grown.len() != 300 || grown[..100] != kept[..] || grown[100..].iter().any(|&b| b != 0) {
+        fail(8, "grow after shrink did not zero-fill");
+    }
+
     if truncate(dir, 0) == 0 {
         fail(8, "truncate resized a directory");
     }
@@ -346,7 +371,7 @@ fn test8(dir: &str) {
     let _ = fs::remove_file(&path);
     pass(
         8,
-        "truncate: shrink, grow, empty, directory and missing refused",
+        "truncate: shrink keeps data, grow zero-fills, directory and missing refused",
     );
 }
 

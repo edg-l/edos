@@ -17,7 +17,7 @@ use crate::{
 
 use super::{
     Error, File, FileAttrs, FileKind, FileSystem, MmapRegion, MountInfo, StatFs, dentry,
-    handle::Pollable, inode::VfsInode, page_fill, path::Path, readahead::ReadaheadState,
+    handle::Pollable, icache, inode::VfsInode, page_fill, path::Path, readahead::ReadaheadState,
 };
 use x86_64::{
     VirtAddr,
@@ -151,7 +151,11 @@ fn resolve_inode_for(
 
     let ino = fs.resolve_inode(relative).ok()?;
     let info = fs.file_info(relative).ok()?;
-    let inode = VfsInode::new(mount_id, ino, info.kind);
+    // Through the inode cache, not `VfsInode::new`: a dentry miss on a path
+    // whose inode is still live (invalidated by truncate/rename, or evicted by
+    // the dentry LRU) must return that same inode, or the file ends up with two
+    // page caches. See fs/icache.rs.
+    let inode = icache::get_or_insert(mount_id, ino, info.kind);
     dc.insert(mount_id, relative.clone(), inode.clone());
     Some(inode)
 }
@@ -905,6 +909,7 @@ pub fn truncate(op: &VfsOp, size: u64) -> Result<(), Error> {
         // See doc/invariants/lock-order.md for the full rank table.
         invalidate_mappings_above(inode, size);
         inode.pages.invalidate_from(from_page as u64);
+        inode.pages.zero_tail(size);
     }
     result
 }

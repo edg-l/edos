@@ -18,6 +18,7 @@
 /// |   31 | `EfsDriver.inode_rmw`                 |
 /// |   32 | `EfsDriver.bitmap_mutex`              |
 /// |   35 | `dentry_cache.inner`                  |
+/// |   36 | `INODE_CACHE`                         |
 /// |   40 | `inode.pages.pages`                   |
 /// |   42 | `InodePages.in_flight`                |
 /// |   50 | `inode.pages.dirty_keys`              |
@@ -68,6 +69,11 @@ pub const RANK_INODE: u16 = 30;
 pub const RANK_EFS_INODE_RMW: u16 = 31;
 pub const RANK_EFS_BITMAP: u16 = 32;
 pub const RANK_DENTRY: u16 = 35;
+// `(mount_id, ino) -> Weak<VfsInode>` map that gives an on-disk inode a single
+// `VfsInode`, and with it a single page cache, across dentry invalidations.
+// Taken by `resolve_inode_for` after the dentry lookup misses, never while the
+// dentry lock is held.
+pub const RANK_ICACHE: u16 = 36;
 pub const RANK_PAGES: u16 = 40;
 pub const RANK_IN_FLIGHT: u16 = 42; // forward ref for Foundation #5
 pub const RANK_DIRTY_KEYS: u16 = 50;

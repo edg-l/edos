@@ -351,6 +351,26 @@ impl InodePages {
     /// has no other holder (FileBacked VMA, PageGuard, etc.) runs its Drop
     /// and returns the frame to the allocator. Arcs still held elsewhere
     /// stay alive until their last holder drops.
+    /// Zero the part of the cached last page that lies past `size`.
+    ///
+    /// A shrink leaves the surviving page holding the bytes it had before, so
+    /// growing the file again would read them back instead of the zeros POSIX
+    /// promises. The tail is past EOF, so it is not marked dirty: writeback
+    /// clamps to the file size and would never emit it.
+    ///
+    /// # Safety
+    /// Caller must hold the inode lock for write, as `truncate` does.
+    pub fn zero_tail(&self, size: u64) {
+        let offset = (size % PAGE_SIZE as u64) as usize;
+        if offset == 0 {
+            return;
+        }
+        let map = ranked_lock!(RANK_PAGES, "InodePages.pages", self.pages);
+        if let Some(page) = map.get(&(size / PAGE_SIZE as u64)) {
+            unsafe { page.as_slice_mut()[offset..].fill(0) };
+        }
+    }
+
     pub fn invalidate_from(&self, from_page: u64) {
         let evicted: Vec<Arc<CachedPage>> = {
             let mut map = ranked_lock!(RANK_PAGES, "InodePages.pages", self.pages);

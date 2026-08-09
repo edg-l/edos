@@ -76,13 +76,3 @@
   `edos_lib::time::nanosleep` reaches it; pointing std at it needs an edos_rt
   release and a fork pin bump.
 
-- Shrinking a file loses its contents. In the guest, `iotest /var` with the
-  content-checking form of test 8: write 512 bytes of 0xCD, truncate the path
-  to 100, read back -> length is 100 (correct) but every byte reads 0. Found
-  through the new SYS_TRUNCATE (76), which only calls fs::api::truncate, so
-  SYS_FTRUNCATE reaches the same code and is presumed to lose data the same
-  way -- confirm that first, it decides whether the defect is in vfs::truncate
-  or below it. Suspect the shrink dropping the file's dirty page-cache pages
-  instead of writing them back, in which case the same write followed by a
-  read with no truncate at all must survive (it does: test 1 passes). iotest
-  test 8 currently asserts sizes and refusals only, so it does NOT cover this.

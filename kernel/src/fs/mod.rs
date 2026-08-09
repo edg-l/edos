@@ -34,6 +34,7 @@ pub mod evict;
 pub mod fat32;
 pub mod gpt;
 pub mod handle;
+pub mod icache;
 pub mod inode;
 pub mod journal;
 pub mod mbr;

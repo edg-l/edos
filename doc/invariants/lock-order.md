@@ -52,6 +52,7 @@ sections, and wrapping them would recurse into the preemption counter.
 |  30 | `inode.lock` (per-inode) | `BlockingRwLock<()>` | `fs/inode.rs` |
 |  32 | `EfsDriver.bitmap_mutex` | `BlockingMutex<()>` | `fs/efs/mod.rs` |
 |  35 | `dentry_cache.inner` | `BlockingMutex<DentryCacheInner>` | `fs/dentry.rs` |
+|  36 | `INODE_CACHE` | `BlockingMutex<BTreeMap<(usize,u64), Weak<VfsInode>>>` | `fs/icache.rs` |
 |  40 | `InodePages.pages` | `BlockingMutex<BTreeMap>` | `fs/page_cache.rs` |
 |  42 | `InodePages.in_flight` | `IrqSpinlock<BTreeMap>` | `fs/page_cache.rs` |
 |  50 | `InodePages.dirty_keys` | `BlockingMutex<Vec>` | `fs/page_cache.rs` |
@@ -122,6 +123,12 @@ reads free (handed out twice). Taken above `inode_rmw` (31), which several
 callers already hold when they allocate or free.
 **35, `dentry_cache.inner`.** Always acquired after `inode.lock`. Leaf on the
 dentry side.
+
+**36, `INODE_CACHE`.** Maps `(mount_id, ino)` to a `Weak<VfsInode>` so a path
+whose dentry entry was invalidated resolves back to the inode that already owns
+the file's page cache. Leaf, and taken only by `resolve_inode_for` once the
+dentry lookup has missed and released its lock — above 35 because a dentry
+invalidation drops its `Arc<VfsInode>` with the dentry lock held.
 
 **40, `InodePages.pages`.** Inner: `dirty_keys` (50). Never held across disk I/O;
 the fill paths drop it before calling `fill_fn`.
