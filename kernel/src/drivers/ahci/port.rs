@@ -145,6 +145,12 @@ pub struct AhciPort {
     // Slot management -- atomic for lock-free NCQ slot allocation.
     free_slots: AtomicU32,
 
+    // Slots this port can ever hand out, fixed by `init_io_pools`. Together
+    // with `free_slots` this gives the set of slots that currently hold a
+    // waiter (`usable & !free`), which is what an IRQ pass walks instead of
+    // all 32.
+    usable_slots: AtomicU32,
+
     // Brief spinlock for MMIO register writes (SACT + CI read-modify-write).
     mmio_lock: spin::Mutex<()>,
 
@@ -285,6 +291,7 @@ impl AhciPort {
             command_tables,
             slot_pools: Once::new(),
             free_slots: AtomicU32::new(1), // Only slot 0 available until init_io_pools
+            usable_slots: AtomicU32::new(1),
             mmio_lock: spin::Mutex::new(()),
             slot_waiters: [const { spin::Mutex::new(None) }; AHCI_CMD_SLOTS],
             ncq_waiters: [const { spin::Mutex::new(None) }; AHCI_CMD_SLOTS],
@@ -348,6 +355,7 @@ impl AhciPort {
             // ATAPI: slot 0 only (for control commands)
             1
         };
+        self.usable_slots.store(mask, Ordering::Release);
         self.free_slots.store(mask, Ordering::Release);
 
         if use_ncq {
@@ -657,6 +665,15 @@ impl AhciPort {
             self.slot_waitq
                 .wait_until(|| self.free_slots.load(Ordering::Acquire) != 0);
         }
+    }
+
+    /// Slots currently handed out to a submitter.
+    ///
+    /// A slot is allocated before its waiter is installed and freed after the
+    /// waiter is cleared, so this is a superset of the slots holding a waiter
+    /// and never misses one.
+    fn busy_slots(&self) -> u32 {
+        self.usable_slots.load(Ordering::Acquire) & !self.free_slots.load(Ordering::Acquire)
     }
 
     /// Return a slot to the free pool.
@@ -1379,6 +1396,22 @@ impl AhciPort {
         if !op.issued.load(Ordering::Acquire) {
             return;
         }
+        // Re-read SACT now that `issued` has been observed. The caller's
+        // sample may predate `issue_ncq_command`: the submitter writes SACT
+        // and only then stores `issued`, so a caller that read SACT first and
+        // this op second can pair a clear bit with a command that had not yet
+        // been issued, and complete it before its data has landed. Sampling
+        // after the `issued` load orders the two.
+        //
+        // A changed generation still completes: the op is being failed by a
+        // restart round, whose COMRESET clears SACT on its own schedule.
+        let cur_gen = self.reset_generation.load(Ordering::Acquire);
+        if cur_gen == op.start_gen {
+            let sact = unsafe { ptr::read_volatile(&raw const (*self.port_regs).sact) };
+            if sact & (1u32 << slot) != 0 {
+                return;
+            }
+        }
         if op
             .state
             .compare_exchange(
@@ -1392,6 +1425,9 @@ impl AhciPort {
             return; // already terminal (cancel raced and won)
         }
         crate::drivers::ahci::watchdog::ncq_inflight_dec();
+        // Re-read rather than reusing the value above: a restart round may
+        // have opened between the SACT check and winning the CAS, and its
+        // fail-all pass would then have skipped this already-terminal op.
         let cur_gen = self.reset_generation.load(Ordering::Acquire);
         let result = if cur_gen != op.start_gen {
             Err(BlockError::Io)
@@ -1630,9 +1666,20 @@ impl AhciPort {
             return;
         }
 
+        // Only slots handed out to a submitter can hold a waiter, and an idle
+        // port is the common case: walking all 32 twice costs 64 tracked lock
+        // acquisitions per pass to find nothing. Sample the busy set before
+        // reading SACT so a slot allocated after this point is left to the
+        // submitter's own post-issue self-check rather than inspected here
+        // against a SACT value that predates its command.
+        let busy = self.busy_slots();
+
         // NCQ slots: check SACT for clears
         let sact = unsafe { ptr::read_volatile(&raw const (*self.port_regs).sact) };
-        for slot in 0..AHCI_CMD_SLOTS {
+        let mut pending = busy & !sact;
+        while pending != 0 {
+            let slot = pending.trailing_zeros() as usize;
+            pending &= pending - 1;
             let op = {
                 ranked_lock!(
                     RANK_AHCI_SLOT,
@@ -1642,14 +1689,15 @@ impl AhciPort {
                 .clone()
             };
             if let Some(op) = op {
-                if sact & (1 << slot) == 0 {
-                    self.complete_ncq_slot(slot, &op);
-                }
+                self.complete_ncq_slot(slot, &op);
             }
         }
 
         // Legacy slots: wake submitters polling CI.
-        for slot in 0..AHCI_CMD_SLOTS {
+        let mut waiters = busy;
+        while waiters != 0 {
+            let slot = waiters.trailing_zeros() as usize;
+            waiters &= waiters - 1;
             let op = {
                 ranked_lock!(
                     RANK_AHCI_SLOT,
