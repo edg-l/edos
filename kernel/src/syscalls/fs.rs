@@ -603,6 +603,55 @@ pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut FstatEntry
     0
 }
 
+/// Bits of the `mode` argument to `sys_access`, as in POSIX `<unistd.h>`.
+const X_OK: u32 = 1;
+const W_OK: u32 = 2;
+const R_OK: u32 = 4;
+const ACCESS_MODE_BITS: u32 = X_OK | W_OK | R_OK;
+
+/// access(path, path_len, mode) -> 0 if the access is permitted, -1 otherwise
+///
+/// EDOS carries no per-file permission bits and every process runs with the
+/// same credentials, so the answer is existence plus the read-only attribute:
+/// `W_OK` on a read-only file is denied with EACCES, and `R_OK` and `X_OK` are
+/// granted for anything that exists. `mode` of 0 (`F_OK`) is an existence test.
+pub fn sys_access(path_ptr: *const u8, path_len: usize, mode: u32) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if mode & !ACCESS_MODE_BITS != 0 {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let cwd = current_cwd(&info);
+
+    let path = match read_user_path_with_len(path_ptr, path_len, &cwd) {
+        Ok(p) => p,
+        Err(err) => {
+            info.lock().errno = err;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    let file = match file_info(&path) {
+        Ok(file) => file,
+        Err(err) => {
+            info.lock().errno = Errno::from(err);
+            return -1;
+        }
+    };
+
+    if mode & W_OK != 0 && file.attrs.readonly {
+        info.lock().errno = Errno::EACCES;
+        return -1;
+    }
+
+    0
+}
+
 /// statfs(path, buf, buf_len) -> 0 on success, -1 on error
 #[repr(C)]
 #[derive(Clone, Copy)]

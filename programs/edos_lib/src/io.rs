@@ -48,6 +48,30 @@ pub fn open(path: &str, flags: u64) -> i64 {
     unsafe { sys::syscall2(sys::SYS_OPEN, path_buf.as_ptr() as u64, flags) as i64 }
 }
 
+/// Mode bits for [`access`], as in POSIX `<unistd.h>`.
+pub const F_OK: u32 = 0;
+pub const X_OK: u32 = 1;
+pub const W_OK: u32 = 2;
+pub const R_OK: u32 = 4;
+
+/// Test a path against an access mode. Returns 0 if the access is permitted
+/// and -1 otherwise; `F_OK` is an existence test.
+///
+/// EDOS has no per-file permission bits and every process runs with the same
+/// credentials, so the answer is existence plus the read-only attribute:
+/// `W_OK` on a read-only file is denied, `R_OK` and `X_OK` are granted for
+/// anything that exists.
+pub fn access(path: &str, mode: u32) -> i64 {
+    unsafe {
+        sys::syscall3(
+            sys::SYS_ACCESS,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            mode as u64,
+        ) as i64
+    }
+}
+
 /// Read from a file descriptor using a raw syscall.
 /// Returns bytes read, 0 for no data available, or negative for error/EOF.
 pub fn sys_read(fd: u64, buf: &mut [u8]) -> isize {

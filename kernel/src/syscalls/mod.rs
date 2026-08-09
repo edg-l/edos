@@ -36,8 +36,8 @@ use crate::{
     println, ranked_lock,
     syscalls::{
         fs::{
-            FstatEntry, sys_fstat, sys_list_mounts, sys_list_partitions, sys_mkdir, sys_mount,
-            sys_rmdir, sys_rmdir_all, sys_stat, sys_unlink,
+            FstatEntry, sys_access, sys_fstat, sys_list_mounts, sys_list_partitions, sys_mkdir,
+            sys_mount, sys_rmdir, sys_rmdir_all, sys_stat, sys_unlink,
         },
         io::{
             SelectFd, sys_chdir, sys_close, sys_getcwd, sys_getrandom, sys_list_dir, sys_open,
@@ -308,6 +308,7 @@ const SYS_POLL: u64 = 7;
 const SYS_FSTAT: u64 = 8;
 const SYS_MMAP: u64 = 9;
 const SYS_STAT: u64 = 10;
+const SYS_ACCESS: u64 = 21; // check a path against an access mode
 const SYS_MUNMAP: u64 = 11;
 const SYS_LSEEK: u64 = 12;
 const SYS_FTRUNCATE: u64 = 13;
@@ -510,6 +511,12 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let path_len = ctx.rsi as usize;
             let fstat_buf = ctx.rdx as *mut FstatEntry;
             ctx.rax = sys_stat(path_ptr, path_len, fstat_buf) as u64;
+        }
+        SYS_ACCESS => {
+            let path_ptr = ctx.rdi as *const u8;
+            let path_len = ctx.rsi as usize;
+            let mode = ctx.rdx as u32;
+            ctx.rax = sys_access(path_ptr, path_len, mode) as u64;
         }
         SYS_MMAP => {
             let addr = ctx.rdi;

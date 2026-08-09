@@ -6,7 +6,7 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::thread;
 
-use edos_lib::io::{pread, pwrite};
+use edos_lib::io::{F_OK, R_OK, W_OK, X_OK, access, pread, pwrite};
 use edos_lib::process;
 use edos_lib::time;
 
@@ -216,6 +216,51 @@ fn test5() {
     );
 }
 
+// -----------------------------------------------------------------------
+// Test 6: access() answers for files, directories and missing paths
+// -----------------------------------------------------------------------
+fn test6(dir: &str) {
+    let path = format!("{}/iotest_t6.dat", dir);
+    fs::write(&path, b"access").unwrap_or_else(|e| fail(6, &format!("create: {}", e)));
+
+    for (mode, name) in [
+        (F_OK, "F_OK"),
+        (R_OK, "R_OK"),
+        (W_OK, "W_OK"),
+        (R_OK | W_OK, "R_OK|W_OK"),
+    ] {
+        if access(&path, mode) != 0 {
+            fail(6, &format!("access({}, {}) denied an existing file", path, name));
+        }
+    }
+
+    // A directory is searchable, and the root always exists.
+    if access(dir, X_OK) != 0 {
+        fail(6, &format!("access({}, X_OK) denied a directory", dir));
+    }
+    if access("/", F_OK) != 0 {
+        fail(6, "access(/, F_OK) says the root does not exist");
+    }
+
+    let missing = format!("{}/iotest_t6_missing.dat", dir);
+    if access(&missing, F_OK) == 0 {
+        fail(6, "access reported a nonexistent path as present");
+    }
+
+    // The file has to be gone the moment it is unlinked, not at the next sync.
+    fs::remove_file(&path).unwrap_or_else(|e| fail(6, &format!("remove: {}", e)));
+    if access(&path, F_OK) == 0 {
+        fail(6, "access still sees a file that was unlinked");
+    }
+
+    // Bits outside R_OK|W_OK|X_OK are not a mode.
+    if access("/", 0x40) == 0 {
+        fail(6, "access accepted an undefined mode bit");
+    }
+
+    pass(6, "access: existence, modes, directories, unlink, bad mode");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -226,6 +271,7 @@ fn main() {
     test3();
     test4();
     test5();
+    test6(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

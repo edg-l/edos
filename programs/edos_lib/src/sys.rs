@@ -10,6 +10,7 @@ pub const SYS_POLL: u64 = 7;
 pub const SYS_LSEEK: u64 = 12;
 pub const SYS_FTRUNCATE: u64 = 13;
 pub const SYS_ISATTY: u64 = 15;
+pub const SYS_ACCESS: u64 = 21;
 pub const SYS_MMAP: u64 = 9;
 pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_IOCTL: u64 = 16;
