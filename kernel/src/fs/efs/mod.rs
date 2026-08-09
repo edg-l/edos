@@ -23,6 +23,9 @@ use crate::drivers::block_io::{self, BlockBuffer, WriteFlags};
 
 /// Submit a sector-level read and park on the handle. Returns an `AhciError`
 /// so existing call sites can `?`-propagate without further mapping.
+/// Blocks one AHCI command may carry, from the 248-entry PRDT (992 KiB).
+const MAX_RUN_BLOCKS: usize = 248;
+
 fn block_read(device_id: u64, lba: u64, sectors: u16, buf: &mut [u8]) -> Result<(), AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
     let handle = dev.submit_read(
@@ -840,9 +843,14 @@ impl EfsDriver {
             // INVARIANT: file-data writes bypass BlockPageCache to stay consistent
             // with the read path (read_via_extents) which also bypasses it. Only
             // metadata (inode, bitmap, BGD) goes through the journaled block cache.
+            //
+            // A block the write covers completely is not read first: there is
+            // nothing of it left to preserve.
             let lba = self.block_to_lba(phys_block);
             let mut block_data = vec![0u8; block_size];
-            block_read(self.device.device_id, lba, spb, &mut block_data)?;
+            if copy_len != block_size {
+                block_read(self.device.device_id, lba, spb, &mut block_data)?;
+            }
             block_data[offset_in_block..offset_in_block + copy_len]
                 .copy_from_slice(&data[written..written + copy_len]);
             block_write(self.device.device_id, lba, spb, &block_data)?;
@@ -1906,12 +1914,22 @@ impl FileSystem for EfsDriver {
     fn flush_inode(&self, _ino: u64) -> Result<(), Error> {
         // Open an empty TxHandle (no enrollments) so that on drop it merges
         // nothing into the active tx; then force-commit the journal and flush.
+        let t0 = crate::timer::Instant::now();
         let tx = self.journal.begin_tx();
         drop(tx); // merges empty set — no-op on active tx
         self.journal
             .force_commit_and_wait()
             .map_err(|_| Error::IoError)?;
+        let t1 = crate::timer::Instant::now();
         self.device.flush()?;
+        let t2 = crate::timer::Instant::now();
+        if t2.duration_since(t0).as_millis() >= 1_000 {
+            log!(
+                "efs flush_inode: slow: {} ms journal commit, {} ms device flush",
+                t1.duration_since(t0).as_millis(),
+                t2.duration_since(t1).as_millis()
+            );
+        }
         Ok(())
     }
 
@@ -2817,16 +2835,46 @@ impl PageCacheOps for EfsDriver {
 
             // Write file data directly to AHCI — do not route through
             // BlockPageCache (same invariant as single-page flush_page).
-            for ((_, page), &phys_block) in chunk.iter().zip(phys_blocks.iter()) {
-                let lba = self.block_to_lba(phys_block);
-                let buf = unsafe { page.as_slice() };
-                if let Err(e) = block_write(self.device.device_id, lba, spb, &buf[..needed_bytes]) {
+            //
+            // One command per run of physically contiguous blocks, not one per
+            // page. Issuing a command costs far more than the sectors it
+            // carries, and a sequential file's blocks are contiguous, so this
+            // is the difference between one command and several hundred.
+            // Cache pages are separate frames, so each run is assembled into a
+            // staging buffer first; the copy is a fraction of the commands it
+            // replaces.
+            let mut run_start = 0usize;
+            while run_start < chunk.len() {
+                let mut run_len = 1usize;
+                while run_start + run_len < chunk.len()
+                    && run_len < MAX_RUN_BLOCKS
+                    && phys_blocks[run_start + run_len] == phys_blocks[run_start + run_len - 1] + 1
+                {
+                    run_len += 1;
+                }
+
+                let mut staging = vec![0u8; run_len * needed_bytes];
+                for i in 0..run_len {
+                    let buf = unsafe { chunk[run_start + i].1.as_slice() };
+                    staging[i * needed_bytes..(i + 1) * needed_bytes]
+                        .copy_from_slice(&buf[..needed_bytes]);
+                }
+
+                let lba = self.block_to_lba(phys_blocks[run_start]);
+                let sectors = spb as usize * run_len;
+                if let Err(e) = block_write(self.device.device_id, lba, sectors as u16, &staging) {
                     tx.abort();
                     return Err(e.into());
                 }
-                // This block just went to the device behind the block cache's
-                // back; drop any page it still holds for it.
-                BlockPageCache::global().invalidate_pages(self.device.device_id, lba / 8, 1);
+                // These blocks just went to the device behind the block
+                // cache's back; drop any pages it still holds for them.
+                BlockPageCache::global().invalidate_pages(
+                    self.device.device_id,
+                    lba / 8,
+                    run_len as u64,
+                );
+
+                run_start += run_len;
             }
 
             // tx drops here, merging enrolled metadata into the active journal tx.
