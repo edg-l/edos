@@ -199,32 +199,52 @@ Fixed:
   questions, and `write_bytes` conflated them by always going through
   `read_page_for_write`. A page the write covers completely is no longer read.
 
-Not bugs, on investigation:
+Fixed after the first round:
 
-- **The "30 s fsync stall" is arithmetic.** The write phase leaves roughly
-  650 MiB buffered in per-inode page caches, and the first call that forces
-  durability pays to drain it at the write path's real rate of 5-11 MiB/s.
-  650 / 10 is about 60 s, and the 28-40 s figures observed sit in that range.
-  It surfaces on whichever call happens to be first, which is why it moved
-  between `fsync` and `sync()` between runs. `sys_fsync` now logs any call
-  over a second split by stage, so the next one that is genuinely anomalous
-  can be told apart from this.
+- **A timed waiter that wakes early is never woken again.** `wake_one` and
+  `wake_all` pop entries off the queue, so being woken unregisters the waiter,
+  and the timed arm of `WaitQueue::wait_internal` looped and slept again
+  without re-enrolling. Any wake arriving while the predicate was still false
+  consumed the registration, every later wake missed the thread, and it slept
+  out its whole deadline before noticing the condition had become true.
+  `force_commit_and_wait` hit this: it waits for a target sequence while the
+  committer wakes `commit_wq` for each transaction it finishes, so an
+  intermediate wake landed first and the caller sat on its 30 s deadline and
+  then returned success — silently, with no timeout logged, because it had not
+  actually timed out. That is where the "exactly 30.000 s" came from.
+- **EFS wrote file data one 4 KiB page per command.** `flush_pages_bulk`
+  batched the block mapping and then issued one command per page; the same
+  defect as the block page cache's read path, in the filesystem. Contiguous
+  blocks now go out as one command, and `write_via_extents` no longer reads a
+  block it is going to overwrite completely.
 
-  A rejected hypothesis, recorded so it is not retried: `enter_legacy_mode`
-  starving behind `enter_ncq_mode`. Giving legacy commands writer preference
-  made things worse, not better — `write 1MiB + fsync` went from 97 ms to
+Result on the same run:
+
+| | Before | After |
+|---|---|---|
+| `sync()` after the write phase | 28.7 s | **21 us** |
+| `write 1MiB + fsync each` | 4.6 MiB/s | **17.8 MiB/s** |
+| `mmap store 4MiB + msync` | 8.8 MiB/s | **1059 MiB/s** |
+| whole suite | 86 s | **19.9 s** |
+
+The first `fsync` of a process still costs seconds (12 s here) after a write
+phase that buffered hundreds of megabytes, but that is now the journal commit
+doing real work rather than a wait sitting on a deadline, and it is attributed
+as such in the log.
+
+Rejected hypotheses, recorded so they are not retried:
+
+- `enter_legacy_mode` starving behind `enter_ncq_mode`. Giving legacy commands
+  writer preference made things worse — `write 1MiB + fsync` went from 97 ms to
   30 s — and was reverted.
+- Routing `write_via_extents` through `ensure_blocks_for_logical_batch`. That
+  helper writes the inode itself, and the result was a segfault inside a
+  `MAP_SHARED` mapping; reverted, keeping only the full-block read skip.
 
 Still open, as performance rather than correctness:
 
-- **EFS durable writes run at 5-11 MiB/s.** `write_via_extents` walks one
-  4 KiB block at a time and, for each, does a `read_inode`, a `block_read` and
-  a `block_write` — a read-modify-write per block even when the write covers
-  the whole block, and one command per block. This is the same defect the
-  block page cache had on the read side, in the filesystem instead, and the
-  same two fixes apply: skip the read when a full block is overwritten, and
-  coalesce contiguous blocks into one command. Buffered writes hide it (a
-  `write(2)` returns at page-cache speed) which is why it only shows up as
-  drain time.
-- **`mmap` is roughly 70x slower than `read` for the same bytes**, and
-  `sys_mmap` logs a line per file-backed mapping.
+- **4 KiB access is bounded by per-command cost**, roughly 100 us, on both
+  read and write. Coalescing cannot help a single page; readahead and write
+  clustering are what would.
+- **`mmap` fault-in reads at 33 MiB/s** against 1714 MiB/s for `read` of the
+  same bytes, and `sys_mmap` logs a line per file-backed mapping.
