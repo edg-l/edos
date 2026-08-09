@@ -210,6 +210,29 @@ Both are the reason the rank system pays for itself here: neither is visible by
 reading either function alone, and both sit between a syscall and a driver
 kthread that genuinely run at the same time.
 
+**280 to 300, window system.** The input thread holds the registry across event
+delivery (`handle_keyboard_event` sends key events while its read guard is
+live), and nothing on the event-queue side — `send_event`, `poll_events`,
+`get_or_create_event_queue`, `remove_event_queue` — reaches back into the
+registry. So the registry is strictly outside, and `WINDOW_EVENTS` is a leaf
+relative to it. `LAST_MOUSE_BUTTONS` is taken under the registry read in
+`handle_mouse_event` and explicitly dropped before anything else, so it is never
+co-held with `WINDOW_EVENTS`; its rank exists only to give the tracker a total
+order.
+
+No inversions were found here, unlike the FS and networking sweeps. The two
+sites that look like violations are already correct on purpose:
+`handle_mouse_event` drops its read guard before upgrading to a write lock on a
+focus change, and `cleanup_process_windows` scopes its read guard in a block.
+
+The registry is only ever read through `read_tracked`, so the rank enter/exit
+lives inside that function and its guard's `Drop` — one call covers every read
+site in the kernel. Write sites use `ranked_write!` individually.
+
+`SHARED_MEMORY_REGISTRY` is deliberately NOT ranked with these. It is not a
+window lock, and `sys_shm_map` reaches `claim_range` (vmas, rank 70), so its
+rank has to come from an mm-side analysis rather than being guessed at here.
+
 **900, kernel-global mapper.** Reached via `memory_mapper()`. Kernel-address-space
 edits plus per-page virtual-to-physical translation during DMA setup. A deep leaf,
 called from arbitrary driver and FS contexts. Never co-held with a per-process

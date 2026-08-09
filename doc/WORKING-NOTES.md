@@ -1058,6 +1058,53 @@ ring-0 uaccess fault takes the fixup and returns EFAULT rather than killing.
 That leaves explicit `thread_exit()` inside a syscall body, of which there are
 two, both currently safe.
 
+## Lock-order ranks now cover IPC, networking and the window system
+
+Three subsystems ranked on top of the FS/MM ladder that Foundation #4 shipped:
+TTY/pipe/pty 210-230, networking 240-270, window system 280-300. The rank table
+in [`invariants/lock-order.md`](invariants/lock-order.md) is authoritative and
+has the per-lock reasoning; this is the summary of what it bought.
+
+**Networking was the payoff: two pre-existing AB/BA inversions**, both shaped as
+"take the port table while holding something that belongs inside it".
+
+- `tcp_retransmit_main`'s cleanup freed the ephemeral port inside the `retain`
+  closure with the connection guard live, closing the cycle
+  `PORT_TABLE -> SOCKET -> TCP_CONN -> PORT_TABLE`. It never deadlocked only
+  because the socket held under the port table in `handle_tcp` is always a
+  *listening* one, whose `poll_state` reads the accept queue instead of locking a
+  connection. Nothing enforced that.
+- `close_descriptor`'s socket arm took the port table under the socket guard,
+  against the receive path's opposite order. This one needs no invariant to
+  break: closing a listening socket while a segment arrives for it wedges two
+  CPUs on preempt spinlocks — a syscall against the e1000e rx kthread.
+
+Both now collect what they need under the guard and release it after. **Neither
+is visible by reading either function alone**; the rank system found them
+because no total order existed over the observed nestings. That is the argument
+for doing this to a subsystem at all.
+
+**The window system was already consistent** — no inversions. Worth recording so
+nobody re-derives it: `handle_mouse_event` already drops its read guard before
+upgrading to a write lock, `cleanup_process_windows` already scopes its guard,
+and the event-queue side never reaches back into the registry.
+
+**Ranking is also what makes a lock visible to `assert_no_guards_held`.** That
+assert only sees ranked locks, so the pipe/pty/TTY ranks exist as much for the
+dying-thread check as for ordering. If you add a lock that a syscall can hold
+across a park, rank it even if it is a leaf.
+
+Validation was the tracker itself, which panics on a wrong rank rather than
+passing quietly: 49/49 in-kernel, a booted desktop with DHCP/ARP/ping/DNS and
+repeated `http` fetches over the real internet, a synthetic click-and-type soak,
+and `lockordertest: PASS`. `/proc/lock_order_stats` read `inversions: 0`
+throughout. Note what that does *not* show: it proves the new order is
+self-consistent under load, not that the old code would have deadlocked. The
+case for both bugs is structural, from the code, not from a reproduction.
+
+Still unranked, in the order `ideas.txt` suggests: USB (xHCI rings, enumeration,
+HID dispatch), HDA audio, devfs.
+
 ## Ctrl-D ends a stdin read now
 
 `Pty::slave_read` returned an empty `Vec` for two different things — Ctrl-D
