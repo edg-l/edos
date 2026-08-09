@@ -123,7 +123,26 @@ Anything attempting this should first measure a **cold** mmap — `fsbench write
 reboot, `fsbench read` — so the fill cost and the fault cost can be told apart
 rather than assumed.
 
-## 4. Detached pages are a crash-consistency risk## 4. Detached pages are a crash-consistency risk, not just a slow path
+## 4. Per-command cost, which is what is actually left
+
+Sequential bandwidth is finished: 886 MiB/s read and 543 MiB/s write against a
+preallocated image, either side of SATA III's 600 MB/s line rate. On real
+hardware there is nothing left to win there.
+
+4 KiB access is a different story. It costs about 100 us per command on both
+read and write, capping the system near 10k IOPS where a real SATA SSD does
+50-100k at queue depth 32. `ncq_max_inflight` peaks at **9** out of a
+negotiated 32 even when a batch submits 64 commands at once, so the cost is in
+getting a command issued rather than in waiting for the device. Per-command
+work worth attacking, in the order it appears in `submit_ncq_read`:
+`install_ncq_op`'s `Arc` allocation and `owned_ops` push, the ranked lock on
+`ncq_waiters[slot]`, and the MMIO writes in `issue_ncq_command` (each a VM exit
+under QEMU).
+
+Coalescing cannot help here — one page is one command — so this is
+per-operation work, not another run-length fix.
+
+## 5. Detached pages are a crash-consistency risk## 4. Detached pages are a crash-consistency risk, not just a slow path
 
 A clean benchmark run reports `detached_fallbacks: +2626`. When a shard is
 full, `read_page_for_write` gives up after `WRITE_PAGE_ATTEMPTS` and returns a
@@ -137,7 +156,7 @@ exceptionally, and the 8 MiB cache (8 shards x 256 pages) is too small for the
 metadata working set. Size the cache to the working set, and treat a detached
 write as something to count and alarm on rather than to absorb silently.
 
-## 5. The allocating write path rewrites the inode per block
+## 6. The allocating write path rewrites the inode per block
 
 `write 512B` allocating runs at 3.8 MiB/s against 16.1 MiB/s overwriting the
 same blocks. `ensure_block_for_logical` does a `read_inode`, an extent parse
@@ -148,7 +167,7 @@ writes the inode itself, so it cannot simply be substituted: doing that
 produced a segfault inside a `MAP_SHARED` mapping. Give it a mapping-only mode
 whose caller owns the inode write.
 
-## 6. Small, cheap
+## 7. Small, cheap
 
 *(`sys_mmap`'s per-mapping log is done — it is `log_debug!` now.)*
 

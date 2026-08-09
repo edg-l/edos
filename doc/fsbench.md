@@ -257,6 +257,28 @@ Reference points: `edos-install` onto a blank 5 GB disk is 2.8 s, down from
 everything else under 0.2 s), and the installed disk reaches `edos-init` 1.46 s
 into the kernel and comes up to a full desktop with no ISO attached.
 
+Sequential writes are not the problem they looked like. Raw device writes read
+280 MiB/s against 886 MiB/s for reads on the identical path, which looked like
+a write-path defect. It was mostly the host: the test image is a sparse qcow2,
+so every write allocates a cluster and updates an L2 table, while the reads
+came from *unallocated* regions QEMU answers with zeros for free. Repeating the
+sweep against a fully preallocated image of the same size:
+
+| Request | Sparse qcow2 | Preallocated |
+|---|---|---|
+| 1 MiB | 280 MiB/s | **543 MiB/s** |
+| 4 KiB | 34 MiB/s | 30 MiB/s |
+
+543 MiB/s is 569 MB/s, which is SATA III's line rate — on real hardware
+sequential writes would be at the physical limit, and the 886 MiB/s read figure
+is already past it. Neither is where the remaining headroom is.
+
+Small-block access is: 4 KiB costs about 100 us per command on both read and
+write, which caps the system near 10k IOPS against the 50-100k a real SATA SSD
+does at queue depth 32. `ncq_max_inflight` peaks at 9 out of a negotiated 32
+even when 64 commands are submitted at once, so the cost is in issuing a
+command, not in waiting for one.
+
 FAT32 is not a limit anywhere measured: its I/O is already issued per cluster
 rather than per sector, and it only carries the ESP, a few megabytes the
 installer writes in 0.0 s. It does not coalesce contiguous clusters, so it
