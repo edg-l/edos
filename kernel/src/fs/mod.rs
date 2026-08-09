@@ -250,6 +250,17 @@ pub trait FileSystem {
         Err(Error::IoError)
     }
 
+    /// Stamp the access and modification times, in whole Unix seconds. `None`
+    /// leaves that timestamp as it stands.
+    fn set_times(
+        &self,
+        _path: &Path,
+        _atime: Option<u64>,
+        _mtime: Option<u64>,
+    ) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+
     // --- Inode-based fast-path methods ---
     // Drivers that support direct inode access override these to skip path walks.
     // Default returns Unsupported; the VFS falls back to path-based methods.
@@ -395,6 +406,15 @@ impl DateTime {
             tenth: self.tenth,
         }
     }
+
+    /// Seconds since 1970-01-01T00:00:00Z.
+    pub fn to_unix_secs(self) -> u64 {
+        let days = days_since_epoch(self.year as i64, self.month as i64, self.day as i64);
+        if days < 0 {
+            return 0;
+        }
+        days as u64 * 86400 + self.hour as u64 * 3600 + self.min as u64 * 60 + self.sec as u64
+    }
 }
 
 impl FileTime {
@@ -427,6 +447,65 @@ impl FileTime {
     pub fn now() -> Self {
         DateTime::now().to_file_time()
     }
+
+    /// Encode a Unix timestamp. The FS encoding keeps seconds in 2-second
+    /// ticks and cannot represent anything before 1980, so those inputs land
+    /// on the epoch's first representable instant.
+    pub fn from_unix_secs(secs: u64) -> Self {
+        let sec = (secs % 60) as u8;
+        let total_mins = secs / 60;
+        let min = (total_mins % 60) as u8;
+        let total_hours = total_mins / 60;
+        let hour = (total_hours % 24) as u8;
+        let mut days = (total_hours / 24) as u32;
+
+        let mut year = 1970i32;
+        loop {
+            let days_in_year: u32 = if is_leap_year(year) { 366 } else { 365 };
+            if days < days_in_year {
+                break;
+            }
+            days -= days_in_year;
+            year += 1;
+        }
+
+        let months: [u32; 12] = if is_leap_year(year) {
+            [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        } else {
+            [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        };
+        let mut month = 1u8;
+        for &m in &months {
+            if days < m {
+                break;
+            }
+            days -= m;
+            month += 1;
+        }
+        let day = days as u8 + 1;
+
+        DateTime {
+            year,
+            month,
+            day,
+            hour,
+            min,
+            sec,
+            tenth: 0,
+        }
+        .to_file_time()
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// Days from 1970-01-01 to the given civil date (Howard Hinnant's `days_from_civil`).
+fn days_since_epoch(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let m = if month <= 2 { month + 12 } else { month };
+    365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + day - 719469
 }
 
 // Mailbox between FS API callers and FS main thread

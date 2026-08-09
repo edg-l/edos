@@ -74,7 +74,7 @@ fn block_write_fua(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result
     Ok(())
 }
 use super::path::Path;
-use super::{Error, File, FileAttrs, FileKind, FileSystem, FileTime};
+use super::{DateTime, Error, File, FileAttrs, FileKind, FileSystem, FileTime};
 use crate::{
     debug::lock_order::{RANK_EFS_BITMAP, RANK_EFS_INODE_RMW, RANK_EFS_MUTABLE},
     log, ranked_lock,
@@ -1532,75 +1532,7 @@ fn clear_bit(bitmap: &mut [u8], bit: usize) {
 
 fn current_unix_time() -> u64 {
     // Use the kernel RTC for a reasonable timestamp.
-    let rtc = crate::drivers::rtc::read_rtc();
-    // Convert to Unix timestamp: compute days from 1970.
-    let year = rtc.year as i64;
-    let month = rtc.month as i64;
-    let day = rtc.day as i64;
-
-    let days = days_since_epoch(year, month, day);
-    let secs =
-        days as u64 * 86400 + rtc.hour as u64 * 3600 + rtc.minute as u64 * 60 + rtc.second as u64;
-    secs
-}
-
-fn days_since_epoch(year: i64, month: i64, day: i64) -> i64 {
-    // Days from 1970-01-01.
-    let y = if month <= 2 { year - 1 } else { year };
-    let m = if month <= 2 { month + 12 } else { month };
-    let d = day;
-    365 * y + y / 4 - y / 100 + y / 400 + (153 * m + 8) / 5 + d - 719469
-}
-
-fn unix_to_filetime(secs: u64) -> FileTime {
-    let sec = (secs % 60) as u8;
-    let total_mins = secs / 60;
-    let min = (total_mins % 60) as u8;
-    let total_hours = total_mins / 60;
-    let hour = (total_hours % 24) as u8;
-    let mut days = (total_hours / 24) as u32;
-
-    let mut year = 1970i32;
-    loop {
-        let days_in_year: u32 = if is_leap_year(year) { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-
-    let months: [u32; 12] = if is_leap_year(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut month = 1u8;
-    for &m in &months {
-        if days < m {
-            break;
-        }
-        days -= m;
-        month += 1;
-    }
-    let day = days as u8 + 1;
-
-    let fat_year = if year >= 1980 {
-        (year - 1980) as u16
-    } else {
-        0
-    };
-    let date = (fat_year << 9) | ((month as u16) << 5) | (day as u16);
-    let time = ((hour as u16) << 11) | ((min as u16) << 5) | ((sec as u16) / 2);
-    FileTime {
-        date,
-        time,
-        tenth: 0,
-    }
-}
-
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    DateTime::now().to_unix_secs()
 }
 
 fn inode_to_file(name: String, inode: &EfsInode) -> File {
@@ -1622,9 +1554,9 @@ fn inode_to_file(name: String, inode: &EfsInode) -> File {
             system: false,
             archive: false,
         },
-        created: Some(unix_to_filetime(inode.ctime_sec)),
-        accessed: Some(unix_to_filetime(inode.atime_sec)),
-        modified: Some(unix_to_filetime(inode.mtime_sec)),
+        created: Some(FileTime::from_unix_secs(inode.ctime_sec)),
+        accessed: Some(FileTime::from_unix_secs(inode.atime_sec)),
+        modified: Some(FileTime::from_unix_secs(inode.mtime_sec)),
     }
 }
 
@@ -1921,6 +1853,36 @@ impl FileSystem for EfsDriver {
 
         let mut tx = self.journal.begin_tx();
         match self.truncate_inner(ino, size, &mut tx) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                tx.abort();
+                Err(e)
+            }
+        }
+    }
+
+    fn set_times(&self, path: &Path, atime: Option<u64>, mtime: Option<u64>) -> Result<(), Error> {
+        let path = path.normalize();
+        let ino = self.resolve_path_inode(&path)?.0;
+
+        // Whole-inode read-modify-write: read under the guard so a concurrent
+        // size or extent update is not put back stale.
+        let _rmw = ranked_lock!(RANK_EFS_INODE_RMW, "EfsDriver.inode_rmw", self.inode_rmw);
+        let mut updated = self.read_inode(ino)?;
+        if let Some(secs) = atime {
+            updated.atime_sec = secs;
+            updated.atime_nsec = 0;
+        }
+        if let Some(secs) = mtime {
+            updated.mtime_sec = secs;
+            updated.mtime_nsec = 0;
+        }
+        updated.ctime_sec = current_unix_time();
+        updated.ctime_nsec = 0;
+        updated.checksum = efs_common::checksum_inode(&updated);
+
+        let mut tx = self.journal.begin_tx();
+        match self.write_inode(ino, &updated, &mut tx) {
             Ok(v) => Ok(v),
             Err(e) => {
                 tx.abort();

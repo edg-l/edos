@@ -414,46 +414,15 @@ pub struct FstatEntry {
 }
 
 fn file_to_fstat_entry(file: &crate::fs::File) -> FstatEntry {
-    let created = file
-        .created
-        .and_then(|ft| ft.to_datetime())
-        .map(|dt| {
-            // Convert to Unix timestamp approximation
-            // This is a simplified conversion - real implementation would be more precise
-            ((dt.year - 1970) as u64 * 365 * 24 * 3600)
-                + (dt.month as u64 * 30 * 24 * 3600)
-                + (dt.day as u64 * 24 * 3600)
-                + (dt.hour as u64 * 3600)
-                + (dt.min as u64 * 60)
-                + (dt.sec as u64)
-        })
-        .unwrap_or(0);
+    let unix_secs = |time: Option<crate::fs::FileTime>| {
+        time.and_then(|ft| ft.to_datetime())
+            .map(|dt| dt.to_unix_secs())
+            .unwrap_or(0)
+    };
 
-    let accessed = file
-        .accessed
-        .and_then(|ft| ft.to_datetime())
-        .map(|dt| {
-            ((dt.year - 1970) as u64 * 365 * 24 * 3600)
-                + (dt.month as u64 * 30 * 24 * 3600)
-                + (dt.day as u64 * 24 * 3600)
-                + (dt.hour as u64 * 3600)
-                + (dt.min as u64 * 60)
-                + (dt.sec as u64)
-        })
-        .unwrap_or(0);
-
-    let modified = file
-        .modified
-        .and_then(|ft| ft.to_datetime())
-        .map(|dt| {
-            ((dt.year - 1970) as u64 * 365 * 24 * 3600)
-                + (dt.month as u64 * 30 * 24 * 3600)
-                + (dt.day as u64 * 24 * 3600)
-                + (dt.hour as u64 * 3600)
-                + (dt.min as u64 * 60)
-                + (dt.sec as u64)
-        })
-        .unwrap_or(0);
+    let created = unix_secs(file.created);
+    let accessed = unix_secs(file.accessed);
+    let modified = unix_secs(file.modified);
 
     let mut attrs = 0u16;
     if file.attrs.readonly {
@@ -691,6 +660,116 @@ pub fn sys_truncate(path_ptr: *const u8, path_len: usize, size: u64) -> i64 {
             -1
         }
     }
+}
+
+/// One half of `utimensat`'s `times` argument, as POSIX `struct timespec`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct UserTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+/// `tv_nsec` values that name a time instead of carrying one, as in Linux
+/// `<sys/stat.h>`: take the current time, or leave the timestamp alone.
+const UTIME_NOW: i64 = (1 << 30) - 1;
+const UTIME_OMIT: i64 = (1 << 30) - 2;
+
+/// `dirfd` naming the calling process's working directory.
+const AT_FDCWD: i64 = -100;
+/// Operate on the link itself rather than its target.
+const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+
+/// utimensat(dirfd, path, path_len, times, flags) -> 0 on success, -1 on error
+///
+/// `times` points at two `timespec`s, access then modification; a null pointer
+/// stamps both with the current time. `UTIME_NOW` and `UTIME_OMIT` in `tv_nsec`
+/// have their POSIX meanings. Timestamps are stored to whole seconds, so
+/// `tv_nsec` is otherwise dropped.
+///
+/// `dirfd` must be `AT_FDCWD`: relative resolution against an open directory
+/// arrives with the rest of the `*at` family.
+pub fn sys_utimensat(
+    dirfd: i64,
+    path_ptr: *const u8,
+    path_len: usize,
+    times: *const UserTimespec,
+    flags: u64,
+) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if dirfd != AT_FDCWD {
+        info.lock().errno = Errno::EBADF;
+        return -1;
+    }
+    // EDOS has no symlinks, so following one is the same as not following it.
+    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let cwd = current_cwd(&info);
+    let path = match read_user_path_with_len(path_ptr, path_len, &cwd) {
+        Ok(p) => p,
+        Err(err) => {
+            info.lock().errno = err;
+            return -1;
+        }
+    };
+
+    let (atime, mtime) = if times.is_null() {
+        (Some(now_unix_secs()), Some(now_unix_secs()))
+    } else {
+        let mut pair = [UserTimespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        }; 2];
+        let copied = unsafe {
+            try_copy_from_user(
+                pair.as_mut_ptr() as *mut u8,
+                times as *const u8,
+                core::mem::size_of::<UserTimespec>() * 2,
+            )
+        };
+        if !copied {
+            info.lock().errno = Errno::EFAULT;
+            return -1;
+        }
+
+        let resolve = |ts: UserTimespec| match ts.tv_nsec {
+            UTIME_OMIT => Ok(None),
+            UTIME_NOW => Ok(Some(now_unix_secs())),
+            n if !(0..1_000_000_000).contains(&n) || ts.tv_sec < 0 => Err(Errno::EINVAL),
+            _ => Ok(Some(ts.tv_sec as u64)),
+        };
+
+        match (resolve(pair[0]), resolve(pair[1])) {
+            (Ok(a), Ok(m)) => (a, m),
+            _ => {
+                info.lock().errno = Errno::EINVAL;
+                return -1;
+            }
+        }
+    };
+
+    if atime.is_none() && mtime.is_none() {
+        return 0;
+    }
+
+    interrupts::enable();
+
+    match crate::fs::api::set_times(&path, atime, mtime) {
+        Ok(()) => 0,
+        Err(err) => {
+            info.lock().errno = Errno::from(err);
+            -1
+        }
+    }
+}
+
+fn now_unix_secs() -> u64 {
+    crate::fs::DateTime::now().to_unix_secs()
 }
 
 /// statfs(path, buf, buf_len) -> 0 on success, -1 on error

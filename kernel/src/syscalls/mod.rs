@@ -36,8 +36,9 @@ use crate::{
     println, ranked_lock,
     syscalls::{
         fs::{
-            FstatEntry, sys_access, sys_fstat, sys_list_mounts, sys_list_partitions, sys_mkdir,
-            sys_mount, sys_rmdir, sys_rmdir_all, sys_stat, sys_truncate, sys_unlink,
+            FstatEntry, UserTimespec, sys_access, sys_fstat, sys_list_mounts, sys_list_partitions,
+            sys_mkdir, sys_mount, sys_rmdir, sys_rmdir_all, sys_stat, sys_truncate, sys_unlink,
+            sys_utimensat,
         },
         io::{
             SelectFd, sys_chdir, sys_close, sys_getcwd, sys_getrandom, sys_list_dir, sys_open,
@@ -313,6 +314,7 @@ const SYS_MUNMAP: u64 = 11;
 const SYS_LSEEK: u64 = 12;
 const SYS_FTRUNCATE: u64 = 13;
 const SYS_TRUNCATE: u64 = 76; // resize a file named by path
+const SYS_UTIMENSAT: u64 = 280; // stamp a file's access and modification times
 const SYS_FSYNC: u64 = 14;
 const SYS_RENAME: u64 = 82;
 const SYS_ISATTY: u64 = 15;
@@ -525,6 +527,14 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let path_len = ctx.rsi as usize;
             let size = ctx.rdx;
             ctx.rax = sys_truncate(path_ptr, path_len, size) as u64;
+        }
+        SYS_UTIMENSAT => {
+            let dirfd = ctx.rdi as i64;
+            let path_ptr = ctx.rsi as *const u8;
+            let path_len = ctx.rdx as usize;
+            let times = ctx.r10 as *const UserTimespec;
+            let flags = ctx.r8;
+            ctx.rax = sys_utimensat(dirfd, path_ptr, path_len, times, flags) as u64;
         }
         SYS_MMAP => {
             let addr = ctx.rdi;

@@ -7,7 +7,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use edos_lib::io::{F_OK, R_OK, W_OK, X_OK, access, pread, pwrite, truncate};
+use edos_lib::io::{
+    AT_FDCWD, F_OK, R_OK, UTIME_NOW, UTIME_OMIT, Timespec, W_OK, X_OK, access, pread, pwrite,
+    set_file_times, stat, truncate, utimensat,
+};
 use edos_lib::process;
 use edos_lib::time;
 
@@ -375,6 +378,72 @@ fn test8(dir: &str) {
     );
 }
 
+// -----------------------------------------------------------------------
+// Test 9: utimensat() stamps the times a later stat reports
+// -----------------------------------------------------------------------
+fn test9(dir: &str) {
+    let path = format!("{}/iotest_t9.dat", dir);
+    fs::write(&path, b"t9").unwrap_or_else(|e| fail(9, &format!("create: {}", e)));
+
+    // Even seconds: the on-disk encoding keeps 2-second ticks, so an odd
+    // second would not survive the round trip.
+    const ATIME: i64 = 1_000_000_000;
+    const MTIME: i64 = 1_100_000_000;
+    if set_file_times(&path, ATIME, MTIME) != 0 {
+        fail(9, "set_file_times failed");
+    }
+    let got = stat(&path).unwrap_or_else(|| fail(9, "stat after set_file_times"));
+    if got.accessed != ATIME as u64 || got.modified != MTIME as u64 {
+        fail(
+            9,
+            &format!(
+                "times not stamped: accessed {} modified {}",
+                got.accessed, got.modified
+            ),
+        );
+    }
+
+    // UTIME_OMIT leaves its timestamp alone; UTIME_NOW moves it forward.
+    let times = [
+        Timespec {
+            tv_sec: 0,
+            tv_nsec: UTIME_NOW,
+        },
+        Timespec {
+            tv_sec: 0,
+            tv_nsec: UTIME_OMIT,
+        },
+    ];
+    if utimensat(AT_FDCWD, &path, Some(&times), 0) != 0 {
+        fail(9, "utimensat with UTIME_NOW/UTIME_OMIT failed");
+    }
+    let got = stat(&path).unwrap_or_else(|| fail(9, "stat after UTIME_NOW"));
+    if got.modified != MTIME as u64 {
+        fail(9, "UTIME_OMIT changed the modification time");
+    }
+    if got.accessed <= ATIME as u64 {
+        fail(9, "UTIME_NOW did not move the access time forward");
+    }
+
+    // A bad dirfd, an undefined flag and a missing path are all refused.
+    if utimensat(3, &path, None, 0) == 0 {
+        fail(9, "utimensat accepted a dirfd other than AT_FDCWD");
+    }
+    if utimensat(AT_FDCWD, &path, None, 0x4000) == 0 {
+        fail(9, "utimensat accepted an undefined flag");
+    }
+    let missing = format!("{}/iotest_t9_missing.dat", dir);
+    if utimensat(AT_FDCWD, &missing, None, 0) == 0 {
+        fail(9, "utimensat accepted a nonexistent path");
+    }
+
+    let _ = fs::remove_file(&path);
+    pass(
+        9,
+        "utimensat: explicit times stamped, UTIME_NOW/UTIME_OMIT honoured, bad args refused",
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -388,6 +457,7 @@ fn main() {
     test6(dir);
     test7();
     test8(dir);
+    test9(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

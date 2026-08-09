@@ -86,6 +86,86 @@ pub fn truncate(path: &str, size: u64) -> i64 {
     }
 }
 
+/// POSIX `struct timespec`, as passed to [`utimensat`].
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Timespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+/// `tv_nsec` values that name a time instead of carrying one: take the current
+/// time, or leave the timestamp alone.
+pub const UTIME_NOW: i64 = (1 << 30) - 1;
+pub const UTIME_OMIT: i64 = (1 << 30) - 2;
+
+/// `dirfd` naming the calling process's working directory.
+pub const AT_FDCWD: i64 = -100;
+/// Operate on the link itself rather than its target.
+pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+
+/// Set the access and modification times of `path`: `times[0]` is the access
+/// time and `times[1]` the modification time, and `None` stamps both with the
+/// current time. Returns 0 on success and -1 on error.
+///
+/// `dirfd` must be [`AT_FDCWD`]; relative paths resolve against the working
+/// directory. Timestamps are stored to whole seconds.
+pub fn utimensat(dirfd: i64, path: &str, times: Option<&[Timespec; 2]>, flags: u64) -> i64 {
+    let times_ptr = times.map(|t| t.as_ptr() as u64).unwrap_or(0);
+    unsafe {
+        sys::syscall5(
+            sys::SYS_UTIMENSAT,
+            dirfd as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            times_ptr,
+            flags,
+        ) as i64
+    }
+}
+
+/// Set both timestamps of `path` to whole-second Unix times.
+pub fn set_file_times(path: &str, atime_secs: i64, mtime_secs: i64) -> i64 {
+    let times = [
+        Timespec {
+            tv_sec: atime_secs,
+            tv_nsec: 0,
+        },
+        Timespec {
+            tv_sec: mtime_secs,
+            tv_nsec: 0,
+        },
+    ];
+    utimensat(AT_FDCWD, path, Some(&times), 0)
+}
+
+/// What `stat` reports about a file.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Stat {
+    pub size: u64,
+    /// Creation, access and modification times, in whole Unix seconds.
+    pub created: u64,
+    pub accessed: u64,
+    pub modified: u64,
+    pub attrs: u16,
+    pub kind: u8,
+}
+
+/// Stat a path. Returns `None` when it cannot be resolved.
+pub fn stat(path: &str) -> Option<Stat> {
+    let mut out = Stat::default();
+    let rc = unsafe {
+        sys::syscall3(
+            sys::SYS_STAT,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            &mut out as *mut Stat as u64,
+        ) as i64
+    };
+    if rc == 0 { Some(out) } else { None }
+}
+
 /// Read from a file descriptor using a raw syscall.
 /// Returns bytes read, 0 for no data available, or negative for error/EOF.
 pub fn sys_read(fd: u64, buf: &mut [u8]) -> isize {

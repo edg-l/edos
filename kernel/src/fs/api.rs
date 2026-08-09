@@ -200,6 +200,11 @@ pub fn truncate(path: &Path, size: u64) -> Result<(), Error> {
     vfs::truncate(&op, size)
 }
 
+pub fn set_times(path: &Path, atime: Option<u64>, mtime: Option<u64>) -> Result<(), Error> {
+    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
+    vfs::set_times(&op, atime, mtime)
+}
+
 pub fn rename(old_path: &Path, new_path: &Path) -> Result<(), Error> {
     let old_op = vfs::resolve(old_path).ok_or(Error::FileNotFound)?;
     let new_op = vfs::resolve(new_path).ok_or(Error::FileNotFound)?;

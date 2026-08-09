@@ -914,6 +914,14 @@ pub fn truncate(op: &VfsOp, size: u64) -> Result<(), Error> {
     result
 }
 
+pub fn set_times(op: &VfsOp, atime: Option<u64>, mtime: Option<u64>) -> Result<(), Error> {
+    let _guard = op
+        .inode
+        .as_ref()
+        .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
+    op.fs.set_times(&op.relative, atime, mtime)
+}
+
 pub fn ioctl(op: &VfsOp, request: u64, arg: u64) -> Result<u64, Error> {
     let _guard = op
         .inode

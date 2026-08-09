@@ -18,7 +18,7 @@ use crate::{
     thread::rwlock::RwLock as BlockingRwLock,
 };
 
-use super::FileKind;
+use super::{FileKind, FileTime};
 
 mod node;
 
@@ -398,6 +398,20 @@ impl FileSystem for Memfs {
         } else {
             Err(Error::FileNotFound)
         }
+    }
+
+    fn set_times(&self, path: &Path, atime: Option<u64>, mtime: Option<u64>) -> Result<(), Error> {
+        let path = path.normalize();
+        let mut inner = self.inner.write();
+        let node_id = inner.find_node(&path)?.ok_or(Error::FileNotFound)?;
+        let node = inner.get_node_mut(node_id)?;
+        if let Some(secs) = atime {
+            node.file.accessed = Some(FileTime::from_unix_secs(secs));
+        }
+        if let Some(secs) = mtime {
+            node.file.modified = Some(FileTime::from_unix_secs(secs));
+        }
+        Ok(())
     }
 
     fn read_bytes_ino(&self, ino: u64, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
