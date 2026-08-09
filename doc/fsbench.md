@@ -218,6 +218,10 @@ Fixed after the first round:
   blocks now go out as one command, and `write_via_extents` no longer reads a
   block it is going to overwrite completely.
 
+A later round coalesced the journal ring writes too — `seal_and_commit` wrote
+each enrolled block with its own command — which took the first `fsync` from
+12.6 s to 1.6 s and the whole suite from 20.6 s to 10.1 s.
+
 Result on the same run:
 
 | | Before | After |

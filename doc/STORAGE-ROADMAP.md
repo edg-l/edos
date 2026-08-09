@@ -15,12 +15,21 @@ a path is throughput-bound on a long run of contiguous blocks it owns
 exclusively. It costs where the blocks are small, scattered, and contended by
 other work.
 
-## 1. Find where the journal commit actually spends its time
+## 1. The journal commit (largely done)
 
 A process's first `fsync` after a write phase that buffered hundreds of
-megabytes costs 6-12 s, and `sys_fsync`'s own log attributes almost all of it
-to `force_commit_and_wait`. Where it goes inside `seal_and_commit` is not yet
-known. Measure before changing anything.
+megabytes cost 6-12 s, all of it inside `force_commit_and_wait`.
+
+Most of it was `seal_and_commit` writing each enrolled block with its own
+command. Coalescing the ring writes took that fsync to 1.6-2.5 s and the whole
+suite from 20.6 s to 10.1 s, and dropped `detached_fallbacks` over a run from
+2201 to 580 as a side effect: the ring frees sooner, so writers stop being
+handed detached pages. Note this is the *opposite* result to the reverted
+experiment below, and for the reason given there — the ring is contiguous and
+exclusively owned, the block cache's dirty set is neither.
+
+What is left of the commit cost is the 1.6-2.5 s that remains. Measure again
+before assuming where it is.
 
 **Coalescing `flush_dirty_once` was tried and reverted.** The reasoning was that
 `checkpoint_and_advance` calls into it and it writes one command per 4 KiB page,
@@ -81,8 +90,8 @@ whose caller owns the inode write.
 
 ## 5. Small, cheap
 
-- `sys_mmap` logs a line per file-backed mapping and floods `run_log.txt`
-  during any run that remaps in a loop. Drop it to `log_debug!`.
+*(`sys_mmap`'s per-mapping log is done — it is `log_debug!` now.)*
+
 - `scripts/fs-regression` still has to be run by hand after `make all`. Wire it
   into a make target alongside `fsbench`, so a durability regression and a
   throughput regression are both caught by the same command.
