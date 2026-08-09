@@ -670,6 +670,57 @@ pub fn raw_read(device: &str, chunk: usize, skip: u64, span: u64, budget: Budget
     run.finish()
 }
 
+/// Sequential writes straight to a block device, skipping the filesystem.
+///
+/// Destructive, which is why it is its own mode rather than part of a sweep.
+/// The kernel refuses writes to a device with a mounted filesystem on it, so
+/// the running system cannot be damaged by accident; an unmounted disk with
+/// data on it can, and that is the caller's to know.
+pub fn raw_write(device: &str, chunk: usize, skip: u64, span: u64, budget: Budget) -> Report {
+    let name = format!("write {}", human_bytes(chunk as u64));
+    let mut run = Runner::new(&name, "raw device, seq", budget);
+
+    let file = match OpenOptions::new().write(true).open(device) {
+        Ok(f) => f,
+        Err(e) => {
+            run.fail(format!("open {device} for writing: {e}"));
+            return run.finish();
+        }
+    };
+    let fd = file.as_raw_fd() as u64;
+
+    let capacity = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if capacity < chunk as u64 {
+        run.fail(format!("{device} holds {capacity} bytes"));
+        return run.finish();
+    }
+    let skip = if skip + chunk as u64 >= capacity {
+        0
+    } else {
+        skip
+    };
+    let span = span.min(capacity - skip);
+
+    let mut offset = skip;
+    let end = skip + span;
+    while run.keep_going() {
+        if offset + chunk as u64 > end {
+            offset = skip;
+        }
+        let at = offset;
+        let buf = pattern_buf(chunk as u64, at, chunk);
+        let done = run.op(chunk as u64, || match pwrite(fd, &buf, at) {
+            n if n == chunk as isize => Ok(()),
+            n => Err(format!("pwrite at {at} returned {n}")),
+        });
+        if done.is_none() {
+            break;
+        }
+        offset += chunk as u64;
+    }
+    run.finish()
+}
+
 // -----------------------------------------------------------------------
 // Verification
 // -----------------------------------------------------------------------

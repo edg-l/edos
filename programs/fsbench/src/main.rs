@@ -62,6 +62,7 @@ enum Mode {
     Write,
     Read,
     Raw,
+    RawWrite,
     Clean,
 }
 
@@ -72,6 +73,7 @@ impl Mode {
             Mode::Write => "write",
             Mode::Read => "read",
             Mode::Raw => "raw",
+            Mode::RawWrite => "rawwrite",
             Mode::Clean => "clean",
         }
     }
@@ -153,6 +155,8 @@ Modes:
   write   write and metadata only; leaves its files for a later read run
   read    read only, against files a previous `write` run left behind
   raw     sequential reads straight from a block device, no filesystem
+  rawwrite  sequential writes straight to a block device. DESTROYS whatever is
+          on it; refused while a filesystem on that device is mounted
   clean   remove every file the suite creates
 
 Paths:
@@ -215,6 +219,7 @@ fn parse_args() -> Options {
             "write" => opts.mode = Mode::Write,
             "read" => opts.mode = Mode::Read,
             "raw" => opts.mode = Mode::Raw,
+            "rawwrite" => opts.mode = Mode::RawWrite,
             "clean" => opts.mode = Mode::Clean,
             _ => opts.path = first,
         }
@@ -229,7 +234,7 @@ fn parse_args() -> Options {
     }
     if opts.path.is_empty() {
         opts.path = match opts.mode {
-            Mode::Raw => "/dev/sda".to_string(),
+            Mode::Raw | Mode::RawWrite => "/dev/sda".to_string(),
             _ => "/var".to_string(),
         };
     }
@@ -270,6 +275,13 @@ fn main() -> ExitCode {
             out.header("RAW DEVICE READ");
             for &chunk in SWEEP {
                 let report = workloads::raw_read(&opts.path, chunk, RAW_SKIP, RAW_SPAN, budget);
+                failures += out.report(&report);
+            }
+        }
+        Mode::RawWrite => {
+            out.header("RAW DEVICE WRITE");
+            for &chunk in SWEEP {
+                let report = workloads::raw_write(&opts.path, chunk, RAW_SKIP, RAW_SPAN, budget);
                 failures += out.report(&report);
             }
         }

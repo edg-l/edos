@@ -70,6 +70,10 @@ const WRITE_PAGE_ATTEMPTS: usize = 3;
 /// Pages one AHCI command may carry, from the 248-entry PRDT (992 KiB).
 const MAX_RUN_PAGES: usize = 248;
 
+/// Pages a single whole-page write run may cover. Bounded by what one command
+/// can carry.
+const WRITE_BATCH_PAGES: usize = MAX_RUN_PAGES;
+
 /// Pages a single [`BlockPageCache::read_bytes`] batch may cover.
 ///
 /// Matched to what one command can carry, so a sequential read of a large
@@ -371,6 +375,25 @@ fn read_frame(device_id: u64, page_block_idx: u64, frame: PhysFrame) -> Result<(
             ptr: buf.as_mut_ptr(),
             len: PAGE_SIZE,
         },
+    )?;
+    h.wait()?;
+    Ok(())
+}
+
+/// Issue one write covering `data`, which spans consecutive pages starting at
+/// `first_page`. `data.len()` must be a whole number of pages.
+fn write_frames(device_id: u64, first_page: u64, data: &[u8]) -> Result<(), AhciError> {
+    debug_assert!(!data.is_empty() && data.len() % PAGE_SIZE == 0);
+    let lba = first_page * SECTORS_PER_PAGE as u64;
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let h = dev.submit_write(
+        lba,
+        (data.len() / 512) as u32,
+        BlockBuffer::Slice {
+            ptr: data.as_ptr() as *mut u8,
+            len: data.len(),
+        },
+        WriteFlags::NONE,
     )?;
     h.wait()?;
     Ok(())
@@ -969,6 +992,21 @@ impl BlockPageCache {
             let offset_in_page = (pos % PAGE_SIZE as u64) as usize;
             let chunk = (PAGE_SIZE - offset_in_page).min(data.len() - written);
             let key = (device_id, page_block_idx);
+
+            // A run of whole pages goes straight to the device in one command.
+            // Nothing of those pages survives the write, so there is no reason
+            // to stage them through the cache one at a time; any copy the cache
+            // holds is older than what is being written and is dropped. Only a
+            // partial head or tail page still needs the read-modify-write path,
+            // and there are at most two of those however long the write is.
+            if offset_in_page == 0 && data.len() - written >= PAGE_SIZE {
+                let pages = ((data.len() - written) / PAGE_SIZE).min(WRITE_BATCH_PAGES);
+                let bytes = pages * PAGE_SIZE;
+                write_frames(device_id, page_block_idx, &data[written..written + bytes])?;
+                self.invalidate_pages(device_id, page_block_idx, pages as u64);
+                written += bytes;
+                continue;
+            }
 
             let fill = if chunk == PAGE_SIZE {
                 Fill::Overwrite
