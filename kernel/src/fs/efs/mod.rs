@@ -654,23 +654,31 @@ impl EfsDriver {
             return Ok(self.read_inode(ino)?.size);
         }
 
-        let inode = self.read_inode(ino)?;
         let end_offset = byte_offset + data.len();
-        let new_size = (end_offset as u64).max(inode.size);
 
-        if inode.flags & INODE_FLAG_INLINE_DATA != 0 {
-            // Can we still fit inline?
-            if end_offset <= INODE_DATA_AREA_SIZE {
-                return self.write_inline(ino, &inode, byte_offset, data, new_size, tx);
+        // `write_inline` and `convert_inline_to_extents` both put back a whole
+        // inode built from this read, so it happens under the guard. The guard
+        // is dropped before `write_via_extents`, which takes it per block.
+        {
+            let _rmw = ranked_lock!(RANK_EFS_INODE_RMW, "EfsDriver.inode_rmw", self.inode_rmw);
+            let inode = self.read_inode(ino)?;
+            if inode.flags & INODE_FLAG_INLINE_DATA != 0 {
+                // Can we still fit inline?
+                if end_offset <= INODE_DATA_AREA_SIZE {
+                    let new_size = (end_offset as u64).max(inode.size);
+                    return self.write_inline(ino, &inode, byte_offset, data, new_size, tx);
+                }
+                // Must convert to extent mode before writing.
+                self.convert_inline_to_extents(ino, &inode, tx)?;
             }
-            // Must convert to extent mode before writing.
-            self.convert_inline_to_extents(ino, &inode, tx)?;
         }
 
         self.write_via_extents(ino, byte_offset, data, tx)?;
+
+        let _rmw = ranked_lock!(RANK_EFS_INODE_RMW, "EfsDriver.inode_rmw", self.inode_rmw);
         let mut updated = self.read_inode(ino)?;
-        if new_size > updated.size {
-            updated.size = new_size;
+        if end_offset as u64 > updated.size {
+            updated.size = end_offset as u64;
         }
         updated.mtime_sec = current_unix_time();
         updated.checksum = checksum_inode(&updated);
@@ -1912,7 +1920,7 @@ impl FileSystem for EfsDriver {
         }
 
         let mut tx = self.journal.begin_tx();
-        match self.truncate_inner(ino, &inode, size, &mut tx) {
+        match self.truncate_inner(ino, size, &mut tx) {
             Ok(v) => Ok(v),
             Err(e) => {
                 tx.abort();
@@ -2218,16 +2226,12 @@ impl EfsDriver {
         Ok(())
     }
 
-    fn truncate_inner(
-        &self,
-        ino: u64,
-        inode: &EfsInode,
-        size: u64,
-        tx: &mut TxHandle<'_>,
-    ) -> Result<(), Error> {
+    fn truncate_inner(&self, ino: u64, size: u64, tx: &mut TxHandle<'_>) -> Result<(), Error> {
         // Rewrites the whole inode (size and extent list), so it takes the
-        // same guard as the other read-modify-write paths.
+        // same guard as the other read-modify-write paths and reads the inode
+        // under it: a copy taken before the guard can already be stale.
         let _rmw = ranked_lock!(RANK_EFS_INODE_RMW, "EfsDriver.inode_rmw", self.inode_rmw);
+        let inode = &self.read_inode(ino)?;
         let current_size = inode.size;
         if size >= current_size {
             // Growing: just update size (sparse).
