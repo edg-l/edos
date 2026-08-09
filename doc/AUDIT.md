@@ -289,30 +289,28 @@ profile.
 
 ## 3. Missing syscalls and interfaces
 
-75 syscalls exist. The conspicuous absences, roughly by how much they block real
+82 syscalls exist. The conspicuous absences, roughly by how much they block real
 programs:
 
 | Missing | Why it matters |
 |---|---|
-| `fcntl` | No way to set `O_NONBLOCK` after open, and no `FD_CLOEXEC` at all — every fd leaks across `spawn` |
-| `pread`/`pwrite` | Threads sharing an fd must `lseek`+`read`, which races by construction |
 | `readv`/`writev` | Every scatter/gather write becomes N syscalls or a copy |
-| `getuid`/`setuid`/`getgid` | `UserThreadInfo` already carries `user_id`/`group_id` with no way to read or set them |
+| `setuid` | `UserThreadInfo` carries `user_id`/`group_id`; only the getters exist |
 | `symlink`/`readlink` | No symlinks in a filesystem that otherwise looks POSIX |
-| `access`, `truncate`, `utimensat` | Ordinary tooling gaps; `todo.txt` already lists file times |
+| `access`, path-based `truncate`, `utimensat` | Ordinary tooling gaps; `todo.txt` already lists file times |
 | `nanosleep` | `SLEEP_MS` is millisecond-granularity only |
 | `sigprocmask` | `SIGACTION` and `KILL` exist, so signals are half-built |
 | `*at` family | No `openat`/`unlinkat`; every path is resolved against cwd |
 | streaming `getdents` | `LIST_DIR` fills one caller-sized buffer; a huge directory has no continuation protocol |
 
-**The CLOEXEC recommendation above is wrong, and was checked before being
-acted on.** EDOS has no `exec`: `spawn` builds a fresh process and hands it
-exactly three descriptors (the caller's stdin/stdout/stderr, replaced in the
-child's otherwise-fresh table), so no descriptor leaks across it. `fork` copies
-the whole table, which is what fork is supposed to do and is not what CLOEXEC
-governs. There is also no `O_NONBLOCK` anywhere in the kernel, so `F_SETFL`
-would have nothing to set. A FD_CLOEXEC flag today would be a bit that nothing
-can ever observe; it becomes real work the day `exec` lands.
+**The CLOEXEC entry was rejected on its original premise and later became
+real.** When this audit was written EDOS had no `exec`: `spawn` built a fresh
+process and handed it exactly three descriptors, `fork` copied the whole table
+(which is what fork is for and not what CLOEXEC governs), and there was no
+`O_NONBLOCK` for `F_SETFL` to set. `FD_CLOEXEC` would have been a bit nothing
+could observe. `execve` (59) is what gave it something to govern, and `fcntl`
+(72) with `FD_CLOEXEC` shipped alongside it. `O_NONBLOCK` still does not exist,
+so `F_SETFL` remains unimplemented on purpose.
 
 `pread`/`pwrite` (audit-shipped, syscalls 17/18) and `getuid`/`getgid`
 (102/104) were the two worth doing, and are in. `setuid` was deliberately **not**
@@ -355,7 +353,7 @@ Beyond affinity (1.2), things that look like the next real improvements:
   Nothing wrong, but both are past the size where a module-level README pays for
   itself.
 - **Only 6 TODO markers in 48k lines**, which is genuinely good hygiene; one of
-  them (1.6) is stale.
+  them (1.6) was stale and is gone, leaving 5.
 
 ---
 

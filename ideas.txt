@@ -191,9 +191,8 @@
   the open flags. 7-test userspace
   mmaptest (MAP_PRIVATE read, COW write, MAP_SHARED + msync, two-mapper
   visibility, past-EOF kill in forked child, truncate invalidation kill,
-  fsync+msync round-trip) all pass on EFS. FAT32 / memfs return EINVAL
-  (no PageCacheOps). Side win: fixed a latent map_address bug where
-  read-only user mappings created intermediate PML2 entries without
+  fsync+msync round-trip) all pass on EFS. Side win: fixed a latent
+  map_address bug where read-only user mappings created PML2 entries without
   WRITABLE, poisoning the 2 MiB range for later writable mappings (was
   causing wm to crash after 30s of SHM cycling); debug_assert_permissive
   _parents catches regressions.
@@ -210,9 +209,7 @@
   inode.mappers for truncate invalidation. VmaBacking::ElfSegment,
   load_elf_from_bytes, FaultSource::ElfData and their fault/free arms all
   deleted. Wins: page-cache reuse across re-exec, sharing across fork, no
-  per-process full-binary copy. Prerequisite for the dynamic linker. Note:
-  binaries on FAT32 / memfs return ENOEXEC until those FSes implement
-  PageCacheOps.
+  per-process full-binary copy. Prerequisite for the dynamic linker.
 - **Arc/Weak thread handles (Foundation #1, 2026-04-16)** - Replaced
   raw TID storage in every sync primitive and IRQ-reachable static with
   `Weak<Thread>`. `Scheduler::wake_thread` / `wake_thread_irq` now take
@@ -262,18 +259,17 @@
 
 ## Network Stack Remaining
 
-- TCP: SACK, window scaling, Nagle's algorithm, adaptive RTO (SRTT/RTTVAR)
+- TCP: SACK, window scaling, Nagle's algorithm
 - DHCP lease renewal
 - IPv6 (header format, NDP, ICMPv6, SLAAC/DHCPv6, source-only fragmentation)
-- DNS: proper resolver (currently hardcoded transaction ID, no caching)
+- DNS: no answer caching, so every lookup is a query on the wire
 - `sys_recvfrom`: MSG_TRUNC support, validate caller's addr_len
-- Use `next_ip_id()` in IPv4 build (currently always id=0)
+- Use `next_ip_id()` in IPv4 build (currently always id=0; `send_ping`
+  calls it and discards the result)
 
 ## EFS Remaining
 
 - Extent tree depth > 0 (v1 limit, max file ~1.66GB with inline extents)
-- Journaling (feature flag reserved, significant complexity)
-- fsck tool
 - FileTime: VFS uses FAT-style packed date/time, EFS timestamps lossy-converted
 
 ## Boot Race / Heap Expansion Bug (fixed)
@@ -392,9 +388,9 @@ follow-ups worth doing when scheduler load-balancing matters:
 Observed 2026-04-15: mouse kthread can take up to 5 seconds to
 start running because `pick_sched()` at spawn time placed it on the
 same CPU as the e1000e driver kthread, which was blocked on DHCP
-for ~5 seconds. Meanwhile `edos-wm` spawned by `system-mount` at
-~1.5s tried `open("/dev/mouse")`, got `InvalidInput` (device not
-yet registered in devfs), panicked, and exited. No automatic retry.
+for ~5 seconds. Meanwhile `edos-wm` tried `open("/dev/mouse")`, got
+`InvalidInput` (device not yet registered in devfs), panicked, and
+exited.
 
 Two issues conflate here:
 1. Scheduler places cooperative-blocked-driver kthreads and
@@ -403,13 +399,18 @@ Two issues conflate here:
 2. Userspace programs assume their required `/dev/*` entries exist
    at program start. They don't (drivers register async).
 
+The crash is no longer fatal to the session: `bin/edos-init` supervises
+`edos-wm` and restarts it with backoff. That is a retry loop one level
+up rather than a fix — `InputState::new` still `expect`s the open, so a
+slow mouse kthread costs a restart cycle instead of a wait.
+
 Fix options, ranked:
-- (best) `system-mount` should wait for `/dev/mouse` and `/dev/kbd`
-  to exist before spawning `edos-wm` (and any program that depends
-  on input). Possibly a generic "wait for device" syscall or a
-  `/dev/.ready` sentinel.
-- edos-wm retries `open("/dev/mouse")` with backoff instead of
-  panicking on first failure.
+- (best) init should wait for `/dev/mouse` and `/dev/kbd` to exist
+  before spawning `edos-wm` (and any program that depends on input).
+  Possibly a generic "wait for device" syscall or a `/dev/.ready`
+  sentinel.
+- edos-wm retries `open("/dev/mouse")` with backoff in-process instead
+  of dying and being respawned.
 - `queue_spawn_kthread_named_on(cpu)` variant so mouse and keyboard
   go to specifically different CPUs from network drivers.
 - Convert DHCP wait from `thread_park_while` on a 5s hard timeout
@@ -586,17 +587,19 @@ spinning in `spin::RwLock<WindowRegistry>::write`. The lock word reads
 `0x4`, which is one outstanding *reader* and no writer, so it is a
 leaked read guard, not a lock cycle.
 
-`sys_window_list` holds `WINDOW_REGISTRY.read()` across
-`try_copy_to_user` (`syscalls/window.rs:315` to `:356`). EDOS is
-`no_std` with no unwinding, so a thread killed during that copy never
-runs `RwLockReadGuard::drop` and the reader count is never decremented.
-`edos-wm` calls this every frame, so the window is hit constantly.
+`sys_window_list` held `WINDOW_REGISTRY.read()` across
+`try_copy_to_user`. EDOS is `no_std` with no unwinding, so a thread
+killed during that copy never runs `RwLockReadGuard::drop` and the
+reader count is never decremented. `edos-wm` calls this every frame, so
+the window was hit constantly.
 
 Full writeup: `doc/bugs/2026-08-08-window-registry-reader-leak.md`.
 
-The narrow fix is to build entries into an owned Vec, drop the guard,
-then copy out. The general problem is bigger and worth treating as its
-own workstream:
+The narrow fix landed: `sys_window_list` snapshots under the guard and
+copies outside it. The general problem is bigger than that one call
+site and is still open as its own workstream. The kill-on-tick work
+makes it more reachable, not less — though a tick only kills on a
+ring-3 frame, which is the proof the thread held nothing:
 
 - Audit every lock guard that is live across `try_copy_to_user`,
   `copy_from_user`, a demand fault, or a park. Each one is a permanent
@@ -660,24 +663,6 @@ The std fork pin was ten releases behind (0.0.26), so this also brought
 `msync`, file-backed `mmap` and the `OpenFlags` access-mode constants
 into std for the first time.
 
-### User virtual address space is never reused (2026-08-08)
-
-`VmaSet::find_free_address` (`memory/vma.rs:247`) is a monotonic
-`hint.fetch_add(aligned_length)` bump allocator. Freed VA is never
-returned to the pool, so address space is consumed linearly with
-allocation *count*, independent of how much is live.
-
-Measured on an idle desktop: ~940 MB of user VA consumed per 9.2s,
-39.6 GiB over ten minutes, against only 2.4 MiB of live mappings. That
-is roughly a 15,000x amplification, and it exhausts the 128 TiB user
-half in about two weeks of uptime. The stride is far larger than the
-64 KiB being mapped because the compositor's per-frame mappings bump
-the same shared hint between the WM's heap growths.
-
-Fix direction: track free ranges properly (the VMA tree already has
-the information), or at minimum reset the hint when the address space
-is empty and reuse holes below it.
-
 ### Async NCQ pipelined readahead (Foundations now shipped)
 
 Linux's async-marker readahead: when the user reads the last page of
@@ -722,13 +707,6 @@ matches ext4's delayed allocation + multi-block allocator (mballoc).
 Payoffs: fewer extent-tree entries on disk (less metadata to flush),
 fewer bitmap updates (one BGD transaction per big alloc, not 480),
 contiguous data on disk (faster reads later).
-
-### PageCacheOps for FAT32 + memfs
-Today only EFS implements PageCacheOps, so file-backed mmap (and the
-new FileBacked ELF loader) returns EINVAL/ENOEXEC on FAT32 and memfs.
-Binaries copied to a USB FAT32 drive cannot exec, and mmap'ing files on
-/tmp falls back to read+anon. Wiring PageCacheOps through both drivers
-unblocks both paths.
 
 ### Dynamic Linker (ld.so)
 ELF dynamic linking: PT_INTERP, PT_DYNAMIC parsing, symbol resolution
@@ -818,7 +796,7 @@ foreground process group.
 ### More userspace tools
 - chmod/chown (once EFS has permission support)
 - printenv (alias for env)
-- basename, dirname, id, whoami, date
+- id, whoami, date
 
 ### In-EDOS fsck (`/bin/fsck`)
 Host `efs-fsck` is the canonical recovery tool. A thinner in-EDOS
@@ -1061,18 +1039,20 @@ doc/AUDIT.md, which has the file:line detail and the reasoning.
 
 The interface gaps that actually block programs:
 
-1. **`symlink`/`readlink`, `access`, `truncate`, `utimensat`,
+1. **`symlink`/`readlink`, `access`, path-based `truncate`, `utimensat`,
    `nanosleep`, `sigprocmask`, the `*at` family, streaming
    `getdents`.** [audit] The remaining gaps from the audit's table, none
-   of which block a program that exists today.
+   of which block a program that exists today. (`SYS_FTRUNCATE` covers
+   the fd-based form; `SYS_SLEEP_MS` the millisecond-resolution sleep.)
 2. **No shutdown or reboot syscall**, so every stop is a power cut and
    the journal replays on the next boot. init is the natural owner now.
 
 Then hygiene and quality:
 
-3. **228 `unwrap()`/`expect()` in kernel code.** [audit] Convert the ones
-   on I/O and parsing results; leave a comment on the structurally
-   impossible ones.
+3. **`unwrap()`/`expect()` density in kernel code.** [audit] 228 when the
+   audit was written and rising with every feature, so recount rather
+   than trusting the figure. Convert the ones on I/O and parsing
+   results; leave a comment on the structurally impossible ones.
 4. **Module READMEs for `fs/` (15.7k lines) and `drivers/` (13k).**
    [audit]
 
@@ -1106,22 +1086,15 @@ oversights; each has a reason it has not been done.
 
 Then, by fun-per-effort:
 
-more tools > dynamic linker > PageCacheOps for FAT32+memfs > in-EDOS
-fsck > IPv6 > virtio-net
-
-Carried over and still true: the std fork's `OpenOptions` fix is commit
-`b7af81795f6` in `~/dev/rust`, **committed locally but never pushed**, so
-it exists on this machine only. Anyone rebuilding the toolchain elsewhere
-gets read-only file opens back.
+more tools > dynamic linker > in-EDOS fsck > IPv6 > virtio-net
 
 Far future, deliberately unscheduled: GPU driver work (see above).
 
 Storage-roadmap steps 1-4 are shipped (host fsck done). File-backed
-mmap, ElfSegment->FileBacked loader migration, lazy ELF relocation, and
-the whole async block I/O foundations chain (#1-#6) are shipped. The
-next step in the memory/loader progression toward the dynamic linker is
-PageCacheOps for FAT32+memfs (so binaries on USB drives can exec), or
-PT_INTERP / dynamic linker support itself.
+mmap, ElfSegment->FileBacked loader migration, lazy ELF relocation,
+PageCacheOps across EFS/FAT32/memfs, and the whole async block I/O
+foundations chain (#1-#6) are shipped. The next step in the
+memory/loader progression is PT_INTERP / dynamic linker support itself.
 
 The soak that found the deadlock is worth making routine: drive input
 through `scripts/edos-vm` for N minutes, watch for the serial log going

@@ -1,21 +1,12 @@
 
-- dns resolver: `dns example.com` resolves, `dns edgl.dev` says "No A record
-  found" though the domain has A records (both are Cloudflare-fronted, so it is
-  not CNAME flattening). Suspect answer-section parsing.
-
-- add a way to kill threads from user (user threads, maybe signals)
-
 - research what try_clone on pipe means, can pipes be cloned?
-
-- add system time (real time) as opposed to just time since boot
-
-- seek and related syscalls
 
 - users, file perms
 
 - set file time syscall?
 
-- direct copy and rename file
+- direct copy file (rename exists as SYS_RENAME; a copy that stays in the kernel
+  does not, so `cp` reads and writes through userspace)
 
 - edos_lib duplicates edos_rt's syscall wrappers and SYS_* constants. Since
   edos_rt 0.0.37 dropped no_mangle from them, a program can depend on the
@@ -37,11 +28,17 @@
   /tmp/hello.txt says 20 bytes and `cat` prints the right text, but sha256sum
   hashes 4096 bytes and hexdump dumps to the page boundary, so a guest checksum
   of a file on /tmp never matches the host's. The same file on /var (EFS) hashes
-  correctly, and /bin/true matches the host exactly, so the clamp that VFS
-  read() applies via file_size_ino is not reaching the memfs path.
+  correctly, and /bin/true matches the host exactly.
+  RE-VERIFY BEFORE CHASING: the mechanism originally written here (VFS read()'s
+  file_size_ino clamp not reaching memfs) is contradicted by the code. memfs has
+  implemented PageCacheOps since ddfb50a, its file_size_ino returns
+  node.content.len(), and vfs::read clamps count to it before page_cache_read.
+  Suspect the write path inflating node.content to a page boundary instead, and
+  confirm the symptom still reproduces before touching the read path.
 
 - `wc -c` refuses a binary file with "stream did not contain valid UTF-8". A
   byte count has no reason to decode anything; only the line/word modes do.
+  (wc reads via fs::read_to_string unconditionally.)
 
-- `hexdump -n <len>` is ignored, so it dumps the whole file.
-
+- `hexdump -n <len>` is ignored, so it dumps the whole file. hexdump parses no
+  flags at all: everything after argv[0] is treated as a filename.

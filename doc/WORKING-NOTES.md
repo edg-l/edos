@@ -1,4 +1,4 @@
-# Working notes, session of 2026-08-08
+# Working notes, sessions of 2026-08-08 and 2026-08-09
 
 State of the tree, what changed, and what is still open. Written for whoever
 picks this up next, which will usually be an agent with no memory of the
@@ -43,8 +43,7 @@ fast for that long.
 - **`OpenOptions` opens files for writing.** `read`, `write`, `truncate` and
   `create_new` were no-op stubs in the std fork, so every file was read-only as
   far as the kernel was concerned. This is why `mmap(MAP_SHARED, PROT_WRITE)`
-  failed. Fixed in the fork as commit `b7af81795f6`, **committed locally in
-  `~/dev/rust` but not pushed**, so it exists on this machine only.
+  failed. Fixed in the fork as commit `b7af81795f6`, on `origin/edos_std_v2`.
 - `sha256sum` and `file`, two Phase 3 userspace programs.
 
 `mmaptest` went from failing at test 1 to all 10 passing on both `/var` and
@@ -206,10 +205,6 @@ timing change as a fix**: the spin-lock build looked clean for several runs and
 the futex build lost threads, which is what the difference in scheduling looks
 like when the real fault is a narrow race elsewhere. The next section is the
 actual cause.
-
-Also open, lower priority: the AHCI watchdog `restarting` gate, which is a
-latency issue rather than a lost I/O and should land with runtime validation
-because it touches the storage submit path.
 
 ---
 
@@ -884,24 +879,9 @@ shape. Both loop on the real condition now, and `recvfrom` honours
 Verified on four cold boots. `programs/dnsprobe` dumps a raw response if
 this area needs poking again.
 
-## http and wget work now
+## Checking a downloaded file from inside the guest
 
-Both used `std::net::TcpStream`, which the std fork does not implement, so
-they failed at connect no matter what the kernel did. `edos_lib::http` holds
-the client they had duplicated — URL parsing, resolution, request, and
-reading until the peer closes — over `edos_lib::net`.
-
-Verified against a host server: a 300000-byte file arrives byte-identical
-(sha256 matches the host's), and `http` prints a small body correctly.
-
-`dns_resolve` now reports *why* a lookup failed rather than answering every
-failure with "no A record", which matters because the DNS parser lived in two
-copies and neither could tell a send failure from an empty answer. Its answer
-walker also no longer desynchronises on a name that ends in a compression
-pointer after one or more labels (RFC 1035 4.1.4); only the question walker
-had handled that.
-
-**Watch out when checking a download from inside the guest.** memfs reads
+**Watch out.** memfs reads
 past EOF and returns zeros to the end of the last page, so `sha256sum` of a
 file on `/tmp` hashes the padding too and never matches the host, while
 `stat` and `cat` both look right. The same file on `/var` hashes correctly.

@@ -1,11 +1,12 @@
 # Userspace Roadmap
 
-62 programs and 2 libraries, all in the `programs/` cargo workspace.
+70 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
 | Area | Programs |
 |---|---|
+| Init | `edos-init` (the only process the kernel starts; supervises the GUI session) |
 | GUI | `edos-wm`, `edos-terminal`, `edos-taskbar`, `wintest` |
 | Shell | `edos-sh` |
 | Editor | `edos-vi` |
@@ -14,10 +15,10 @@
 | Checksums | `sha256sum` |
 | Inspection | `file` |
 | System | `ps`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env` |
-| Network | `ping`, `dns`, `http`, `wget` |
+| Network | `ping`, `dns`, `http`, `wget`, `dnsprobe` |
 | Audio | `play` |
-| Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal` |
-| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest` |
+| Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
+| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest` |
 | Libraries | `edos_lib` (syscall wrappers), `edos_render` (textures, widgets, windows) |
 
 ## Done
