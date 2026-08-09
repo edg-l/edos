@@ -1058,6 +1058,31 @@ ring-0 uaccess fault takes the fixup and returns EFAULT rather than killing.
 That leaves explicit `thread_exit()` inside a syscall body, of which there are
 two, both currently safe.
 
+## Ctrl-D ends a stdin read now
+
+`Pty::slave_read` returned an empty `Vec` for two different things — Ctrl-D
+(`eof_pending` consumed) and "no data yet" — so the caller could not tell them
+apart and parked in both cases. A program reading stdin (`wc`, `sort`, `cat`
+with no args) therefore hung with no way out unless the master closed. It
+returns `PtySlaveRead::{Data,Eof,WouldBlock}` now, and `sys_read` breaks with 0
+on `Eof`, which is how POSIX spells EOF.
+
+Verified against a negative control, because the first end-to-end test was wrong
+in a way worth recording: with `Eof` folded back into no-data, `wc -l` hangs and
+the next command is swallowed as stdin; with the fix it prints the count and
+returns to the prompt.
+
+**The userspace chain was never broken, and a too-narrow grep said otherwise.**
+`grep ctrl programs/edos-terminal/src/` finds nothing, which looks like "the
+terminal has no ctrl handling". The handling is one layer down:
+`edos_lib::keymap::map_keycode` maps ctrl+a..z to 0x01..0x1a and the terminal
+*widget* in `edos_render` tracks the modifier. Grep the widget and the keymap,
+not just the program.
+
+**And `scripts/edos-vm key` splits combos on `+`, not `-`.** `key ctrl-d` sends
+one bogus qcode and silently does nothing, which reads exactly like a missing
+feature. `key ctrl+d` is correct, as the script's own help says.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any

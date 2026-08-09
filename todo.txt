@@ -1,13 +1,4 @@
 
-- edos-terminal does not translate Ctrl+<key> into a control byte at all, so
-  Ctrl-D never reaches the pty as 0x04 and Ctrl-C never reaches it as 0x03. The
-  kernel side of both is in place: the line discipline maps 0x04 to LineAction::Eof
-  and 0x03 to LineAction::Interrupt, and slave_read now reports EOF distinctly
-  (PtySlaveRead::Eof) rather than as an empty read. Verified by inspection that
-  no ctrl handling exists in programs/edos-terminal. Fixing this is what makes
-  both Ctrl-D and the SIGINT idea in ideas.txt actually reachable; map
-  ctrl+a..z to 0x01..0x1a.
-
 - research what try_clone on pipe means, can pipes be cloned?
 
 - users, file perms

@@ -845,10 +845,23 @@ spanning multiple extents, could issue all extent reads concurrently via
 ncq_read_batch.
 
 ### SIGINT delivery to foreground processes
-Ctrl+C in the terminal doesn't kill foreground processes. Tools that read
-stdin (wc, sort, uniq, tee, tr, cat with no args) hang with no way to
-interrupt them. Need proper signal delivery from PTY/terminal to the
-foreground process group.
+Ctrl+C in the terminal doesn't kill foreground processes. Need proper
+signal delivery from PTY/terminal to the foreground process group.
+
+The "tools that read stdin hang with no way out" half of this is fixed:
+Ctrl-D now ends the read. `Pty::slave_read` used to return an empty `Vec`
+for both "Ctrl-D" and "nothing yet", so the caller could not tell EOF from
+would-block and parked; it returns `PtySlaveRead::{Data,Eof,WouldBlock}`
+now and `sys_read` breaks with 0 on `Eof`. Verified against a negative
+control: with `Eof` folded back into no-data, `wc -l` hangs and the next
+command is swallowed as stdin.
+
+The userspace chain was never the problem and needs no work:
+`edos_lib::keymap::map_keycode` already maps ctrl+a..z to 0x01..0x1a, the
+terminal widget tracks the ctrl modifier, and the line discipline maps
+0x04 to `LineAction::Eof` and 0x03 to `LineAction::Interrupt`. What is
+missing for Ctrl+C specifically is only the kill delivery behind
+`LineAction::Interrupt`.
 
 ### More userspace tools
 - chmod/chown (once EFS has permission support)
