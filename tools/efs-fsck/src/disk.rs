@@ -16,7 +16,19 @@ impl Disk {
         partition_offset: u64,
         block_size: u32,
     ) -> io::Result<Self> {
-        let file = OpenOptions::new().read(true).write(repair).open(path)?;
+        let mut file = OpenOptions::new().read(true).write(repair).open(path)?;
+        let mut magic = [0u8; 4];
+        if file.read(&mut magic)? == 4 && magic == *b"QFI\xfb" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} is a qcow2 image; fsck reads raw images and block devices only. \
+                     Convert it first: qemu-img convert -O raw {} <raw image>",
+                    path.display(),
+                    path.display()
+                ),
+            ));
+        }
         Ok(Disk {
             file,
             partition_offset,

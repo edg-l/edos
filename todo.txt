@@ -6,11 +6,17 @@
   correct the doc; a doc naming a caller that does not exist is the trap that
   hid the ACPI teardown bug.
 
-- `efs-fsck sata-disk.img` says "superblock read failed: bad magic", and so
-  does `--partition-offset 1048576`, so the durability arm of the storage
-  checks currently cannot run against the development disk. doc/efs-fsck.md
-  claims qcow2 input works. Find the offset the tool actually wants (or teach
-  it to read the GPT) and record the working invocation in that doc.
+- `make test` exits non-zero even when the kernel prints ALL 49 TESTS PASSED,
+  because nothing translates the isa-debug-exit status back to a shell exit
+  code. Both `test` and `test-headless` behave this way, so neither can gate a
+  script without grepping the log for the pass line. Map the debug-exit value
+  to 0/1 in the runner.
+
+- Teach `efs-fsck` to read qcow2 directly. It opens the image with a plain
+  `File`, so the development disk has to be flattened with `qemu-img convert`
+  first; `Disk::open` now says so instead of reporting "bad magic". Read-only
+  qcow2 is a header plus L1/L2 lookup, which would make the durability arm run
+  against `sata-disk.img` unmodified.
 
 - Intermittent segfault in fsbench's `mmap store 4MiB + msync`, recorded at
   ~1 run in 6 on 2026-08-09, NOT reproduced since: 37 suite runs across 4 and

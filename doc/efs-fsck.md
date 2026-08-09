@@ -15,7 +15,9 @@ See also: `doc/efs.md` for the on-disk format specification.
 efs-fsck [OPTIONS] <IMAGE>
 ```
 
-`<IMAGE>` may be a raw image file, a qcow2 image, or a raw block device.
+`<IMAGE>` may be a raw image file or a block device. Container formats are not
+decoded: the development disk `sata-disk.img` is qcow2 and has to be converted
+before it can be checked (see below).
 
 ### Options
 
@@ -41,6 +43,20 @@ efs-fsck --partition-offset 1048576 sata-disk.raw
 # Block device
 efs-fsck /dev/sdb1
 ```
+
+### Checking the development disk
+
+`sata-disk.img` is qcow2, so it has to be flattened first. Its EFS partition is
+the one GPT partition `make sata-disk.img` creates, at the usual 1 MiB gap:
+
+```
+qemu-img convert -O raw sata-disk.img /tmp/sata.raw
+efs-fsck --partition-offset 1048576 /tmp/sata.raw
+```
+
+Stop the VM first: a check of a disk a running guest is still writing reports
+findings that are only in-flight state. The conversion is a copy, so `--repair`
+on it fixes nothing on the original.
 
 ---
 
