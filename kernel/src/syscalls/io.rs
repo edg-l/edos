@@ -1606,10 +1606,12 @@ pub fn sys_fsync(fd: u64) -> i32 {
     };
 
     interrupts::enable();
+    let started = crate::timer::Instant::now();
     if let Err(e) = fs_api::flush_file(&path, inode) {
         info.lock().errno = Errno::from(e);
         return -1;
     }
+    let flushed = crate::timer::Instant::now();
 
     // Commit any pending journal transactions so data is durable.
     for journal in BlockPageCache::global().all_journals() {
@@ -1619,8 +1621,24 @@ pub fn sys_fsync(fd: u64) -> i32 {
             return -1;
         }
     }
+    let done = crate::timer::Instant::now();
+
+    // An fsync is expected to cost milliseconds. Anything past a second is a
+    // stall worth attributing, and the split says which half owns it.
+    let total = done.duration_since(started);
+    if total.as_millis() >= FSYNC_SLOW_MS {
+        log!(
+            "sys_fsync: slow: {} ms total ({} ms flush_file, {} ms journal commit)",
+            total.as_millis(),
+            flushed.duration_since(started).as_millis(),
+            done.duration_since(flushed).as_millis()
+        );
+    }
     0
 }
+
+/// An fsync taking at least this long is logged with its breakdown.
+const FSYNC_SLOW_MS: u128 = 1_000;
 
 /// Flush all dirty block cache pages to disk. Always succeeds from the
 /// caller's perspective (errors are logged by the writeback thread).
