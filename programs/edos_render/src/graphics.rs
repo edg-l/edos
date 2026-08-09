@@ -1,8 +1,8 @@
 use std::{fs::File, os::edos::io::FileExt};
 
 // Re-export noto-sans-mono-bitmap types for user programs
-pub use noto_sans_mono_bitmap::{FontWeight, RasterHeight};
 use edos_lib::sys::{SYS_MMAP, syscall5};
+pub use noto_sans_mono_bitmap::{FontWeight, RasterHeight};
 use noto_sans_mono_bitmap::{get_raster, get_raster_width};
 use std::fmt;
 
@@ -55,7 +55,6 @@ const PROT_WRITE: u32 = 0x2;
 const MAP_PRIVATE: u32 = 0x02;
 const MAP_PHYSICAL: u32 = 0x40;
 const MAP_WRITE_COMBINING: u32 = 0x80;
-
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

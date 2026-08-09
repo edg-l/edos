@@ -95,13 +95,7 @@ fn compute_edit_script(lines1: &[&str], lines2: &[&str]) -> Vec<Edit> {
 }
 
 /// Print the edit script as unified diff with context hunks.
-fn print_unified_diff(
-    path1: &str,
-    path2: &str,
-    edits: &[Edit],
-    lines1: &[&str],
-    lines2: &[&str],
-) {
+fn print_unified_diff(path1: &str, path2: &str, edits: &[Edit], lines1: &[&str], lines2: &[&str]) {
     println!("--- {}", path1);
     println!("+++ {}", path2);
 

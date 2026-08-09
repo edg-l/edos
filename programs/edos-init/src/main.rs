@@ -92,7 +92,11 @@ fn supervise(service: &'static Service) {
 }
 
 fn main() {
-    println!("init: pid {}, starting {} services", process::getpid(), SERVICES.len());
+    println!(
+        "init: pid {}, starting {} services",
+        process::getpid(),
+        SERVICES.len()
+    );
 
     // One supervisor thread per service, because waitpid names a single child
     // and each service restarts on its own schedule.

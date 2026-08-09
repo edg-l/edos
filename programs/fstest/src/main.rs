@@ -89,7 +89,11 @@ fn main() {
                             let zeros = got.iter().all(|&b| b == 0);
                             report(&format!(
                                 "FSTEST FAIL: {path} differs at byte {at}{}",
-                                if zeros { " (all zeros: never written)" } else { "" }
+                                if zeros {
+                                    " (all zeros: never written)"
+                                } else {
+                                    ""
+                                }
                             ));
                             bad += 1;
                         }

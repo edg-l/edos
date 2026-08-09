@@ -68,11 +68,7 @@ fn month_lengths(y: u32) -> [u32; 12] {
 }
 
 fn day_of_week(y: u32, m: u32, d: u32) -> usize {
-    let (y, m) = if m < 3 {
-        (y - 1, m + 12)
-    } else {
-        (y, m)
-    };
+    let (y, m) = if m < 3 { (y - 1, m + 12) } else { (y, m) };
     let y = y as usize;
     let m = m as usize;
     let d = d as usize;

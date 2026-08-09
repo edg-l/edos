@@ -6,8 +6,6 @@
 use edos_lib::sys::{SYS_LIST_MOUNTS, SYS_STATFS, syscall2, syscall3};
 use std::env;
 
-
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct RawStatFs {

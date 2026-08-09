@@ -18,9 +18,7 @@ fn main() {
     };
 
     // Signal 0 is the POSIX "probe process existence" no-op; allowed alongside 1..=31.
-    let parse_signal = |s: &str| -> Option<u32> {
-        s.parse::<u32>().ok().filter(|&n| n < 32)
-    };
+    let parse_signal = |s: &str| -> Option<u32> { s.parse::<u32>().ok().filter(|&n| n < 32) };
     let signal = if args.len() > 2 {
         let s = args[2].trim();
         let raw = s.strip_prefix('-').unwrap_or(s);

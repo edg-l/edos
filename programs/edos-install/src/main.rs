@@ -86,7 +86,9 @@ fn mount(device_id: u64, partition_idx: u64, at: &str, fs_type: &str) {
         )
     } as i64;
     if ret < 0 {
-        fail(&format!("failed to mount device {device_id} partition {partition_idx} at {at}"));
+        fail(&format!(
+            "failed to mount device {device_id} partition {partition_idx} at {at}"
+        ));
     }
 }
 

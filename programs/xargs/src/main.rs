@@ -71,11 +71,7 @@ fn run_command(cmd: &str, cmd_args: &[String], extra_args: &[String]) -> i32 {
     match pid {
         Some(pid) => {
             let status = edos_lib::process::waitpid(pid);
-            if status != 0 {
-                1
-            } else {
-                0
-            }
+            if status != 0 { 1 } else { 0 }
         }
         None => {
             eprintln!("xargs: command not found: {}", cmd);

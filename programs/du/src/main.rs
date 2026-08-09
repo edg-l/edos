@@ -33,7 +33,11 @@ fn walk_print(dir: &Path, human: bool) {
     let (total, children) = dir_size_with_children(dir);
     for (child_name, child_size) in children {
         let child_path = dir.join(&child_name);
-        print_size(child_path.to_str().unwrap_or(&child_name), child_size, human);
+        print_size(
+            child_path.to_str().unwrap_or(&child_name),
+            child_size,
+            human,
+        );
     }
     print_size(dir.to_str().unwrap_or("."), total, human);
 }

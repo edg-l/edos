@@ -127,12 +127,19 @@ fn test2(dir: &str) {
     if bad != 0 {
         fail(
             2,
-            &format!("{} of {} concurrent preads read the wrong chunk", bad, THREADS * 64),
+            &format!(
+                "{} of {} concurrent preads read the wrong chunk",
+                bad,
+                THREADS * 64
+            ),
         );
     }
     pass(
         2,
-        &format!("{} threads x 64 preads on one shared fd, all correct", THREADS),
+        &format!(
+            "{} threads x 64 preads on one shared fd, all correct",
+            THREADS
+        ),
     );
 }
 
@@ -144,7 +151,10 @@ fn test3() {
     // stdin is a terminal or a pipe here, never a regular file.
     let n = pread(0, &mut buf, 0);
     if n >= 0 {
-        fail(3, &format!("pread on stdin returned {}, expected failure", n));
+        fail(
+            3,
+            &format!("pread on stdin returned {}, expected failure", n),
+        );
     }
     let n = pread(9999, &mut buf, 0);
     if n >= 0 {
@@ -187,7 +197,10 @@ fn test5() {
         }
     }
     if !moved_sub_second {
-        fail(5, "clock did not advance within a second: no sub-second resolution");
+        fail(
+            5,
+            "clock did not advance within a second: no sub-second resolution",
+        );
     }
 
     let t = time::clock_gettime().unwrap_or_else(|| fail(5, "clock_gettime failed"));

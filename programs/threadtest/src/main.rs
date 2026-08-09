@@ -4,8 +4,8 @@
 //! kernel; the sleeping worker below is the case where a polling join would
 //! spin through its whole sleep.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -61,9 +61,7 @@ fn main() {
     let mut failures = 0;
 
     // Values come back through the join handle.
-    let handles: Vec<_> = (0..8u64)
-        .map(|i| thread::spawn(move || i * i))
-        .collect();
+    let handles: Vec<_> = (0..8u64).map(|i| thread::spawn(move || i * i)).collect();
     let sum: u64 = handles.into_iter().map(|h| h.join().unwrap()).sum();
     let expected: u64 = (0..8u64).map(|i| i * i).sum();
     if sum == expected {

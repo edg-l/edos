@@ -8,8 +8,6 @@ use edos_lib::sys::{SYS_LIST_MOUNTS, SYS_LIST_PARTITIONS, SYS_MOUNT, syscall2, s
 use std::env;
 use std::process;
 
-
-
 fn list_mounts() {
     let mut buf = vec![0u8; 4096];
     let ret = unsafe { syscall2(SYS_LIST_MOUNTS, buf.as_mut_ptr() as u64, buf.len() as u64) };
