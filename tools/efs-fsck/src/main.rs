@@ -111,7 +111,11 @@ fn main() {
                         fixable: false,
                         context: None,
                     });
-                } else if tail_seq != head_seq {
+                } else if tail_seq != head_seq
+                    && replay::scan_committed(&mut disk, &sb)
+                        .map(|(txs, _)| !txs.is_empty())
+                        .unwrap_or(true)
+                {
                     if args.repair {
                         match replay::replay(&mut disk, &sb) {
                             Ok(result) => {

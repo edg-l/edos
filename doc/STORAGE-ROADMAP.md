@@ -124,61 +124,64 @@ reader, both `ensure_block*` paths, truncate/free, `efs-fsck`, `efs-mkfs` and
 Until then the ceiling is real and silent, and the allocator's contiguity
 behaviour is what decides how often a file hits it.
 
-## 1d. Where the block leak actually is
+## 1d. The block leak (FIXED)
 
-`efs-fsck` reports thousands of leaked block-bitmap bits after a `fsbench /var`
-run: bits set with no inode referencing them. `/proc/efs_stats` now carries the
-counters needed to place it (`blocks_allocated`, `blocks_freed`, `alloc_failed`,
-`tx_aborts`, `orphans_marked`, `orphans_dropped`).
+`efs-fsck` reported ~19k leaked block-bitmap bits after a `fsbench /var` run:
+bits set with no inode referencing them.
 
-What the counters already rule out:
+The cause was a read-modify-write race on the allocation bitmaps. `alloc_block`
+reads a bitmap block, sets a bit and writes the block back, and took
+`alloc_mutex` to do it. `free_block` did exactly the same thing to clear a bit
+and took **no lock at all**; `alloc_inode` and `free_inode` were the same pair.
+The mutex's comment only ever considered two allocators racing each other. With
+an allocation and a free interleaved, whichever writes second restores the
+other's bit: a freed bit that stays set is a leaked block, an allocated bit
+that gets cleared is a block handed out twice. Both appeared in fsck output
+("leaked" and "missing bit").
 
-- **Not the tx-abort path.** `ensure_blocks_for_logical_batch` carries a comment
-  blaming `alloc_block` writing the bitmap through the block cache before its
-  transaction commits. `tx_aborts` is **0** across a whole run, and
-  `alloc_failed` is 0 with it. That mechanism is real but never fires here.
+Renamed `bitmap_mutex` and taken on every bitmap read-modify-write. After a
+75-second run allocating 309074 blocks, fsck reports **zero** findings — 0
+leaked, 0 missing, 0 orphans — against 18721 leaked before.
+
+Two things `/proc/efs_stats` ruled out on the way, both previously blamed here:
+
+- **Not the tx-abort path.** `tx_aborts` is 0 across a run. The comment in
+  `ensure_blocks_for_logical_batch` about `alloc_block` writing the bitmap
+  before its transaction commits describes a real hazard that never fires.
 - **Not orphan eviction.** `orphans_marked` and `orphans_dropped` both read 513
-  after a run: every unlinked inode reaches its final `Arc` drop and is evicted.
-  Sampling this *during* the run shows 0 dropped, because the counters are read
-  before the benchmark closes its descriptors. Read them after the process
-  exits, or the numbers say the opposite of the truth.
-- **Not the alloc/free gap on its own.** `blocks_allocated - blocks_freed` is
-  about 13% of allocations, but most of that is legitimately referenced by files
-  still on disk at the end. Only fsck can distinguish referenced from leaked;
-  the counters bound the problem, they do not measure it.
+  after a run. Sampling them *during* the run shows 0 dropped, because the
+  benchmark prints its counters before closing its descriptors — read them
+  after the process exits or they say the opposite of the truth.
 
-One real defect was found and fixed on the way (see `RANK_EFS_INODE_RMW`): the
-whole-inode read-modify-write in `update_size` raced the one in
-`ensure_block*_for_logical`, so a size stamp could put back an extent list from
-before an append and strand the blocks it had allocated. Serializing it did not
-measurably move the leak — 9861 unfreed before, 9667 after, against a slightly
-larger allocation count — so it was not the main source. It is kept because the
-same race also loses extents, which is data loss, not just space.
+A second, independent race was fixed while looking: the whole-inode
+read-modify-write in `update_size` against the one in
+`ensure_block*_for_logical`, which loses extents rather than bitmap bits. See
+`RANK_EFS_INODE_RMW`.
 
-A small run tells a different story from a large one: after replaying its
-journal, the `-q` image comes back with **zero** fsck findings, while `-t 4000`
-runs leak ~20k blocks with a clean journal. Whatever is left scales with volume
-and is not visible at small sizes. The next step is to have fsck print the
-owning inode for a leaked run of blocks, so the allocation site can be named
-instead of guessed at.
+## 1e. `sync` left the journal needing replay (FIXED)
 
-## 1e. `tail_seq != head_seq` is not a dirty journal
+After a clean `sync`, `efs-fsck` found a committed, un-checkpointed transaction
+still in the ring; a mount would replay it.
 
-`efs-fsck` calls the journal dirty whenever the superblock's `tail_seq` differs
-from `head_seq`, and reports it after a clean `sync` (`tail_seq=77
-head_seq=78`). That is one behind, which is the ordinary steady state:
-`seal_active` bumps `head_seq` for the new empty active transaction, and
-`advance_tail` only pulls `tail_seq` up to it when nothing is pending, writing
-the superblock `if changed`. Any activity after the last `advance_tail` leaves
-the pair one apart with nothing to replay.
+`sys_sync` ran a fixed two rounds of commit-then-flush. That is not a fixed
+point: every checkpoint pass enrols the metadata mapping the data it just
+wrote, so each round creates work for the next. It now loops until no journal
+reports committed work outstanding, bounded at 8 rounds, and logs if it hits
+the cap.
 
-So this is a false positive in fsck rather than a checkpointing bug in `sync`,
-and it matters because `--repair` acts on it: `sys_sync` warns that replaying
-transactions whose blocks have already been checkpointed "reverts good data
-with older journal copies". Before changing either side, establish what the
-on-disk `head_seq` is meant to mean — the next sequence to allocate, or the
-last one committed — and make the superblock writer and the checker agree. It
-is deliberately left unfixed here rather than guessed at.
+Two things had to be right for that loop to terminate. It tests only
+*committed* work (`sealed` plus `committed_pending`): the open transaction is
+refilled by every flush and is never replayed, so counting it never converges.
+And it advances the tail *inside* the loop, because `committed_pending` is
+drained by `advance_tail` and nothing else, so testing before that call can
+never go false.
+
+`efs-fsck` also grew an accurate dirtiness test. `tail_seq != head_seq` is not
+one: `head_seq` names the open transaction, so a clean journal normally sits
+one apart. It now scans the ring and reports dirty only when it finds a
+committed transaction to replay, sharing that scan with replay itself. That is
+what proved this was a real bug rather than the false positive it first looked
+like.
 
 ## 2. mmap fault-around
 

@@ -27,7 +27,7 @@ pub struct ReplayResult {
     pub blocks_written: u32,
 }
 
-struct CommittedTx {
+pub struct CommittedTx {
     seq: u64,
     entries: Vec<efs_common::DescriptorEntry>,
     data_blocks: Vec<Vec<u8>>,
@@ -56,7 +56,17 @@ fn read_ring_block(
 ///
 /// Returns a `ReplayResult` describing what was done. If the journal is already
 /// clean (`tail_seq == head_seq`), returns immediately with zero counts.
-pub fn replay(disk: &mut Disk, sb: &EfsSuperblock) -> io::Result<ReplayResult> {
+/// Walk the ring from the recorded tail and collect every transaction that is
+/// fully committed, together with the revoke set that applies to them.
+///
+/// This is what decides whether a journal has work outstanding. `tail_seq !=
+/// head_seq` does not: `head_seq` names the open transaction, which is never
+/// committed, so a perfectly clean journal normally sits one apart. Only a
+/// committed transaction found here needs replaying.
+pub fn scan_committed(
+    disk: &mut Disk,
+    sb: &EfsSuperblock,
+) -> io::Result<(Vec<CommittedTx>, BTreeMap<u64, u64>)> {
     let first_block = sb.journal_first_block;
     let block_size = sb.block_size() as usize;
 
@@ -64,15 +74,11 @@ pub fn replay(disk: &mut Disk, sb: &EfsSuperblock) -> io::Result<ReplayResult> {
     let jsb: JournalSuperblock = disk.read_struct_at(first_block, 0)?;
 
     let head_seq = jsb.head_seq;
-    let head_block = jsb.head_block;
     let tail_seq = jsb.tail_seq;
     let tail_block = jsb.tail_block;
 
     if head_seq == tail_seq {
-        return Ok(ReplayResult {
-            tx_count: 0,
-            blocks_written: 0,
-        });
+        return Ok((Vec::new(), BTreeMap::new()));
     }
 
     let ring_size = jsb.block_count as u64 - 1; // excludes JSB at ring index 0
@@ -185,6 +191,16 @@ pub fn replay(disk: &mut Disk, sb: &EfsSuperblock) -> io::Result<ReplayResult> {
             data_blocks,
         });
     }
+
+    Ok((committed_txs, revoke_set))
+}
+
+pub fn replay(disk: &mut Disk, sb: &EfsSuperblock) -> io::Result<ReplayResult> {
+    let first_block = sb.journal_first_block;
+    let jsb: JournalSuperblock = disk.read_struct_at(first_block, 0)?;
+    let head_seq = jsb.head_seq;
+    let head_block = jsb.head_block;
+    let (committed_txs, revoke_set) = scan_committed(disk, sb)?;
 
     // ---- Pass 2: apply committed txs to home FS locations ---------------------
 

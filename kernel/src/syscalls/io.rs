@@ -1660,13 +1660,44 @@ pub fn sys_sync() {
     // the extents for the data it just wrote still in memory, and a crash
     // would leave the file pointing at nothing. The second round commits what
     // the first round enrolled and then checkpoints it.
-    for _ in 0..2 {
+    // Repeat until it converges rather than a fixed two rounds. Each flush
+    // enrols the metadata that maps the data it just wrote, so a round always
+    // creates work for the next one; stopping at a fixed count leaves a
+    // committed transaction whose blocks never reached their home locations,
+    // and the next mount replays it. Bounded so a workload dirtying metadata
+    // as fast as we flush cannot spin here forever.
+    const SYNC_MAX_ROUNDS: usize = 8;
+    let mut converged = false;
+    for _ in 0..SYNC_MAX_ROUNDS {
         for journal in BlockPageCache::global().all_journals() {
             if let Err(e) = journal.force_commit_and_wait() {
                 log!("sys_sync: journal commit error: {:?}", e);
             }
         }
         BlockPageCache::global().sync_all();
+
+        // Retire what the flush just checkpointed before asking whether
+        // anything is left: `committed_pending` is drained by `advance_tail`
+        // and by nothing else, so testing before this can never go false.
+        for journal in BlockPageCache::global().all_journals() {
+            if let Err(e) = journal.advance_tail() {
+                log!("sys_sync: advance_tail error: {:?}", e);
+            }
+        }
+
+        if !BlockPageCache::global()
+            .all_journals()
+            .iter()
+            .any(|j| j.needs_checkpoint())
+        {
+            converged = true;
+            break;
+        }
+    }
+    if !converged {
+        // Reaching the cap means `sync` returned with a committed transaction
+        // still un-checkpointed, which the next mount will replay.
+        log!("sys_sync: journal still pending after {SYNC_MAX_ROUNDS} rounds");
     }
 
     // Publish the tail the flush just earned. Replay starts at the tail

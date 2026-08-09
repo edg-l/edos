@@ -76,7 +76,7 @@ fn block_write_fua(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result
 use super::path::Path;
 use super::{Error, File, FileAttrs, FileKind, FileSystem, FileTime};
 use crate::{
-    debug::lock_order::{RANK_EFS_ALLOC, RANK_EFS_INODE_RMW, RANK_EFS_MUTABLE},
+    debug::lock_order::{RANK_EFS_BITMAP, RANK_EFS_INODE_RMW, RANK_EFS_MUTABLE},
     log, ranked_lock,
     thread::mutex::BlockingMutex,
 };
@@ -112,7 +112,9 @@ pub struct EfsDriver {
     /// that `mutable` can be released across BPC I/O without two concurrent
     /// allocators picking the same bit. Rank 105 (above `DIRTY_INODES` 100,
     /// below `BPC.shard` 110).
-    alloc_mutex: BlockingMutex<()>,
+    /// Guards every read-modify-write of an allocation bitmap. See
+    /// `RANK_EFS_BITMAP`.
+    bitmap_mutex: BlockingMutex<()>,
     /// Serializes read-modify-write of an inode. See `RANK_EFS_INODE_RMW`.
     inode_rmw: BlockingMutex<()>,
     /// Mutable FS metadata (superblock + block group descriptors).
@@ -296,7 +298,7 @@ impl EfsDriver {
             block_size_log2,
             inodes_per_group,
             journal,
-            alloc_mutex: BlockingMutex::new(()),
+            bitmap_mutex: BlockingMutex::new(()),
             inode_rmw: BlockingMutex::new(()),
             mutable: BlockingMutex::new(EfsMutableState {
                 superblock,
@@ -952,9 +954,7 @@ impl EfsDriver {
     fn alloc_block(&self, tx: &mut TxHandle<'_>) -> Result<u64, Error> {
         let block_size = self.block_size() as usize;
 
-        // Serialize allocation across CPUs so that `mutable` can be released
-        // across BPC I/O without two allocators picking the same bit.
-        let _alloc = ranked_lock!(RANK_EFS_ALLOC, "EfsDriver.alloc", self.alloc_mutex);
+        let _bitmap = ranked_lock!(RANK_EFS_BITMAP, "EfsDriver.bitmap", self.bitmap_mutex);
 
         let (blocks_per_group, group_count) = {
             let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
@@ -1020,6 +1020,7 @@ impl EfsDriver {
 
     /// Free a block (by absolute block number).
     fn free_block(&self, block: u64, tx: &mut TxHandle<'_>) -> Result<(), Error> {
+        let _bitmap = ranked_lock!(RANK_EFS_BITMAP, "EfsDriver.bitmap", self.bitmap_mutex);
         let block_size = self.block_size() as usize;
         let (group, bit, bitmap_block) = {
             let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
@@ -1071,9 +1072,7 @@ impl EfsDriver {
     fn alloc_inode(&self, tx: &mut TxHandle<'_>) -> Result<u64, Error> {
         let block_size = self.block_size() as usize;
 
-        // Serialize allocation across CPUs so that `mutable` can be released
-        // across BPC I/O without two allocators picking the same bit.
-        let _alloc = ranked_lock!(RANK_EFS_ALLOC, "EfsDriver.alloc", self.alloc_mutex);
+        let _bitmap = ranked_lock!(RANK_EFS_BITMAP, "EfsDriver.bitmap", self.bitmap_mutex);
 
         let (inodes_per_group, group_count) = {
             let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
@@ -1135,6 +1134,7 @@ impl EfsDriver {
 
     /// Free an inode.
     fn free_inode(&self, ino: u64, tx: &mut TxHandle<'_>) -> Result<(), Error> {
+        let _bitmap = ranked_lock!(RANK_EFS_BITMAP, "EfsDriver.bitmap", self.bitmap_mutex);
         let block_size = self.block_size() as usize;
         let inodes_per_group = self.inodes_per_group as usize;
         let ino0 = (ino - 1) as usize;

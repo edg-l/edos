@@ -518,6 +518,19 @@ impl Journal {
         !s.active.is_empty() || !s.sealed.is_empty()
     }
 
+    /// Whether anything still has to be committed or checkpointed before the
+    /// journal would replay as empty.
+    ///
+    /// Only committed work counts. A replay applies committed transactions and
+    /// ignores the open one, and every checkpoint pass enrols fresh metadata
+    /// into that open transaction, so including it here never reaches a fixed
+    /// point: `sync` would loop until its cap on every call and still return
+    /// with the journal reporting pending.
+    pub fn needs_checkpoint(&self) -> bool {
+        let s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
+        !s.sealed.is_empty() || !s.committed_pending.is_empty()
+    }
+
     /// [`has_pending_work`] for a wait-queue predicate, which runs with
     /// interrupts disabled and so must never block on `state`.
     ///

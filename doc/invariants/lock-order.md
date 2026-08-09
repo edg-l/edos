@@ -50,7 +50,7 @@ sections, and wrapping them would recurse into the preemption counter.
 |-----:|------|------|----------|
 |  10 | `VFS` mount registry | `PreemptRwLock<BTreeMap>` | `fs/vfs.rs` |
 |  30 | `inode.lock` (per-inode) | `BlockingRwLock<()>` | `fs/inode.rs` |
-|  32 | `EfsDriver.alloc_mutex` | `BlockingMutex<()>` | `fs/efs/mod.rs` |
+|  32 | `EfsDriver.bitmap_mutex` | `BlockingMutex<()>` | `fs/efs/mod.rs` |
 |  35 | `dentry_cache.inner` | `BlockingMutex<DentryCacheInner>` | `fs/dentry.rs` |
 |  40 | `InodePages.pages` | `BlockingMutex<BTreeMap>` | `fs/page_cache.rs` |
 |  42 | `InodePages.in_flight` | `IrqSpinlock<BTreeMap>` | `fs/page_cache.rs` |
@@ -110,12 +110,16 @@ to write volume, with no error reported anywhere. Held across block-cache I/O,
 so it is a `BlockingMutex`; entry points take it once and call the `_locked`
 inner variants, since it is not reentrant.
 
-**32, `EfsDriver.alloc_mutex`.** Serializes bitmap allocation (`alloc_inode`,
-`alloc_block`) across CPUs, so `mutable` (160) can be released across block-cache
-I/O without two allocators picking the same bit. Taken at the top of every EFS
-alloc path, above every leaf the allocation transitively touches: BPC 110, journal
-120 to 150, `mutable` 160, AHCI 170 to 200, kernel mapper 900, frame alloc 910.
-
+**32, `EfsDriver.bitmap_mutex`.** Guards *every* read-modify-write of an
+allocation bitmap, not just allocation. `alloc_block`, `free_block`,
+`alloc_inode` and `free_inode` all read a bitmap block, flip one bit, and write
+the whole block back, and `mutable` is deliberately released across that I/O.
+Serializing only the allocators — which is what this lock originally did — lets
+a concurrent free read the same block, clear its own bit, and write back a copy
+that still has the allocator's bit clear, or vice versa. Either way one bit is
+lost: a freed block that stays marked (leaked space) or an allocated block that
+reads free (handed out twice). Taken above `inode_rmw` (31), which several
+callers already hold when they allocate or free.
 **35, `dentry_cache.inner`.** Always acquired after `inode.lock`. Leaf on the
 dentry side.
 
@@ -189,7 +193,7 @@ direction. See [Journal tracker and state](#journal-tracker-and-state).
 True leaf.
 
 **160, `EfsDriver.mutable`.** Taken by EFS callbacks under `inode.lock` (30), and
-under `alloc_mutex` (32) on alloc paths. A true leaf while held: every site releases
+under `bitmap_mutex` (32) on alloc and free paths. A true leaf while held: every site releases
 it before calling into the block page cache (110) or the journal (120, 130, 150).
 
 **170, `AhciPort.legacy_lock`.** Serializes non-NCQ commands. Nested:
@@ -213,7 +217,7 @@ because no path holds one mailbox's queue guard while taking another's: `send`,
 
 They sit just above the AHCI band because a USB block request is issued from the
 same FS depth an AHCI command is — under `inode.lock` (30) or `EfsDriver`'s
-`alloc_mutex` (32) — and the two device stacks are never co-held. The 2-unit
+`bitmap_mutex` (32) — and the two device stacks are never co-held. The 2-unit
 spacing is because the driver band below and the console band above leave no
 10-unit gap; both are leaves, so nothing will need to slot between them.
 
