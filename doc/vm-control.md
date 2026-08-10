@@ -74,7 +74,7 @@ without `password=on` publishes an unauthenticated console.
 
 | Command | Notes |
 |---|---|
-| `start` | `--vnc N`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--width/--height`, `--usb-disk [image]` |
+| `start` | `--vnc N`, `--vnc-addr`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--width/--height`, `--usb-disk [image]`, `--pointer tablet\|mouse` |
 | `stop` / `status` | `status` reports pid, run state, VNC address |
 | `shot [file]` | writes PNG via QMP `screendump` |
 | `type <text>` | `--enter` appends Return, `--delay` paces keystrokes |
@@ -101,8 +101,8 @@ host audio sink, which is what exercises `/dev/dsp`. `-audiodev pipewire`, as
 
 ## Guest constraints
 
-Three properties of the guest shape everything that drives it. They are not
-script bugs, and anything else driving the VM will hit all three.
+Two properties of the guest shape everything that drives it. They are not
+script bugs, and anything else driving the VM will hit both.
 
 ### The keyboard layout is Spanish ISO
 
@@ -123,27 +123,22 @@ Sending the US key for `/` types `-`, which turns `ls /bin` into `ls -bin`. The
 full table lives in `scripts/edos-vm`; change the guest layout and that table
 must change with it.
 
-### The mouse is HID boot protocol, so it is relative
+### The pointer is absolute, and the guest works that out for itself
 
-`kernel/src/drivers/usb/hid.rs` implements `process_boot_mouse_report` only,
-and `find_hid_interface` binds on the boot protocol code, so a `usb-tablet`
-(which declares no boot interface) enumerates and is then ignored. The machine
-uses `usb-mouse`.
+The machine uses `usb-tablet`. The guest reads each HID interface's report
+descriptor (`kernel/src/drivers/usb/hid/report.rs`) and binds whichever one
+describes a pointer, so it learns from the device whether an axis is a position
+or a displacement rather than assuming a layout.
 
-This is also why a VNC client's pointer drifts away from the guest cursor and
-leaves the window: with no absolute pointing device there is nothing for QEMU
-to warp the guest cursor to. The root-cause fix is a HID report-descriptor
-parser, which is item 0 of "What to do next" in `ideas.txt`.
+`scripts/edos-vm` therefore names a pixel in one event, and asks QEMU
+(`query-mice`) rather than assuming: `--pointer mouse` starts a relative
+`usb-mouse` instead, which still works and still needs the homing dance below.
 
-Reaching an exact pixel therefore means homing first: the guest clamps the
-cursor to the screen rectangle and applies no acceleration
-(`apply_relative_move`), so driving it hard into the top-left corner is a
-reliable origin to count from.
-
-A boot-mouse report carries one signed byte per axis, capping a step at 127px.
-Reports issued faster than the guest polls its interrupt endpoint are dropped,
-so steps need roughly 12ms of spacing. Motion that silently falls short is
-almost always this.
+**With a relative mouse, reaching an exact pixel means homing first**: the
+guest clamps the cursor to the screen rectangle and applies no acceleration,
+so driving it hard into the top-left corner is a reliable origin to count from,
+and a boot-mouse report caps a step at 127px with roughly 12ms between reports.
+None of that applies to the tablet.
 
 ### Keystrokes go to the focused window
 
@@ -264,8 +259,8 @@ until grep -qE '\[Terminal\] Spawned shell|KERNEL PANIC' run_log.txt; do sleep 1
 |---|---|
 | Typing does nothing | no window focused; click into one first |
 | Wrong characters typed | layout mismatch, see the Spanish ISO table |
-| Pointer stops short of the target | motion steps sent faster than the guest polls |
-| Clicks do nothing at all | `usb-tablet` instead of `usb-mouse` |
+| Pointer stops short of the target | a relative `--pointer mouse` guest, steps sent faster than it polls |
+| Clicks do nothing at all | the guest bound no pointer; check `xhci: pointer on interface` in the log |
 | Blank or frozen screenshot | guest panicked; check `run_log.txt` |
 | `Could not access KVM kernel module` | not in the `kvm` group in this session |
 | Viewer disconnects | QEMU exited, since QEMU *is* the VNC server |

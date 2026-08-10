@@ -1419,6 +1419,47 @@ costs a frame of empty window rather than a black hole.
 pair is freed immediately after, so the alternative is leaving the compositor
 holding a freed shm id.
 
+## The USB HID driver reads report descriptors now
+
+It bound a device on `bInterfaceClass == HID && bInterfaceProtocol == 1|2` and
+then decoded one fixed layout, so it understood exactly two devices: a boot
+keyboard and a boot mouse. Those protocol codes only mean anything on an
+interface that declares the *boot* subclass, so `usb-tablet` — which declares
+none — enumerated and was dropped, and the guest had no absolute pointer. Under
+VNC that shows up as the host pointer drifting away from the guest cursor and
+walking out of the window, which is a symptom two layers above the cause.
+
+`drivers/usb/hid/report.rs` parses the item stream into a field map: bit
+offset, width, signedness, usage, and whether the value is a position or a
+displacement. That last flag is the whole difference between a mouse and a
+tablet and it is stated by the Input item; nothing about a byte layout implies
+it. A pointer is now bound because its descriptor says it has X and Y.
+
+Things worth knowing if you touch it:
+
+- **The boot decoder is still there, as the fallback** for a descriptor that
+  will not parse. A device the driver used to handle must not be lost to a
+  parser bug.
+- **`SET_PROTOCOL` is only sent when the fixed layout is what will be decoded**,
+  and only to an interface that declares the boot subclass. Asking a tablet for
+  boot protocol stalls, and asking a mouse for it after reading its report
+  descriptor would replace the layout that was just parsed.
+- **The report length comes from the endpoint descriptor**, not from the four
+  bytes the boot layout happens to use: a tablet reports six.
+- `parse_pointer` only reads inside the collection that declares itself a
+  pointer or a mouse. A keyboard descriptor can carry an X/Y pair in a vendor
+  collection, and taking it would make the keyboard the pointer.
+- The sched-test suite parses both descriptors QEMU emits and checks the
+  decoded offsets, values, scaling and the absolute flag, plus that a keyboard
+  and a truncated descriptor are both refused. 49 → 50 tests.
+
+**A trap that cost a debug cycle, and it was in the host script.** QMP serves
+one client at a time. `pointer_is_absolute()` opened its own connection while
+the caller already held one, so it timed out, reported "not absolute", and the
+script silently fell back to relative motion — which QEMU *does* apply to a
+tablet, so the pointer still moved and only the clicks went missing. It takes
+the caller's connection now.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any

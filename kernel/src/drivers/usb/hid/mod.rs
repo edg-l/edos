@@ -1,6 +1,12 @@
 use pc_keyboard::{KeyCode, KeyEvent, KeyState};
 
-use crate::drivers::mouse::{MouseEvent, apply_relative_move, dispatch_mouse_event};
+use crate::drivers::mouse::{
+    MouseEvent, apply_absolute_move, apply_relative_move, dispatch_mouse_event, screen_size,
+};
+
+pub mod report;
+
+pub use report::{PointerReport, parse_pointer};
 
 /// Map USB HID keyboard usage code (page 0x07) to pc_keyboard::KeyCode.
 /// Returns None for unmapped/reserved codes.
@@ -233,6 +239,46 @@ pub fn process_boot_mouse_report(report: &[u8], report_len: usize) -> Option<Mou
     let scroll = if report_len >= 4 { report[3] as i8 } else { 0 };
 
     let event = apply_relative_move(dx, dy, buttons, scroll);
+    dispatch_mouse_event(event);
+    Some(event)
+}
+
+/// Process a report from a pointing device using the field map its own report
+/// descriptor gave us, and broadcast a `MouseEvent`.
+///
+/// This is what the boot path cannot do: a device says where its buttons and
+/// axes sit and whether those axes are positions or displacements, so a tablet
+/// and a mouse are decoded by the same code rather than by two hard-coded
+/// layouts and a guess about which one arrived.
+pub fn process_pointer_report(fields: &PointerReport, report: &[u8]) -> Option<MouseEvent> {
+    let body = fields.body(report)?;
+    let buttons = fields.buttons_of(body);
+    let scroll = fields
+        .wheel
+        .and_then(|w| w.read(body, 0))
+        .unwrap_or(0)
+        .clamp(-128, 127) as i8;
+
+    let (x_field, y_field) = (fields.x?, fields.y?);
+    let x = x_field.read(body, 0)?;
+    let y = y_field.read(body, 0)?;
+
+    let event = if fields.absolute() {
+        let (width, height) = screen_size();
+        apply_absolute_move(
+            x_field.scale(x, width),
+            y_field.scale(y, height),
+            buttons,
+            scroll,
+        )
+    } else {
+        apply_relative_move(
+            x.clamp(-32768, 32767) as i16,
+            y.clamp(-32768, 32767) as i16,
+            buttons,
+            scroll,
+        )
+    };
     dispatch_mouse_event(event);
     Some(event)
 }

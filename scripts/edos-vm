@@ -193,9 +193,11 @@ def cmd_start(args):
         # into a buffer QEMU itself owns, which is what VNC and screendump read.
         "-vga", "none",
         "-device", f"virtio-vga,xres={args.width},yres={args.height}",
-        # usb-mouse, not usb-tablet: the guest implements the HID *boot* mouse
-        # protocol only (kernel/src/drivers/usb/hid.rs), which is relative.
-        "-device", "qemu-xhci", "-device", "usb-kbd", "-device", "usb-mouse",
+        # usb-tablet reports absolute positions, which the guest reads out of
+        # the device's own HID report descriptor. usb-mouse is kept for testing
+        # the relative path, and is what a guest older than that parser needs.
+        "-device", "qemu-xhci", "-device", "usb-kbd",
+        "-device", f"usb-{args.pointer}",
         "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{args.ssh_fwd}-:23",
         "-device", "e1000e,netdev=net0",
         # audiodev=none, not pipewire: the guest HDA driver runs its DMA engine
@@ -320,15 +322,42 @@ def cmd_click(args):
 # delivered in steps this size or smaller.
 STEP = 120
 
+# QEMU's absolute axes run over this range whatever the guest resolution is.
+ABS_MAX = 32767
+
 
 def goto(q, x, y, width, height):
-    """Place the pointer on an exact pixel using relative motion only.
+    """Place the pointer on an exact pixel.
 
-    The guest clamps the cursor to the screen rectangle and applies no
-    acceleration, so slamming it past the top-left corner is a reliable origin.
+    With a tablet this is one event and it lands exactly; QEMU scales the axis
+    range and the guest scales it back through the logical maximum its report
+    descriptor declares. With a relative mouse there is no way to name a pixel,
+    so the pointer is slammed past the top-left corner -- the guest clamps to
+    the screen and applies no acceleration -- and counted from there.
     """
+    if pointer_is_absolute(q):
+        q.cmd("input-send-event", events=[
+            {"type": "abs", "data": {"axis": "x", "value": x * ABS_MAX // max(width - 1, 1)}},
+            {"type": "abs", "data": {"axis": "y", "value": y * ABS_MAX // max(height - 1, 1)}},
+        ])
+        time.sleep(0.02)
+        return
     _drag(q, -width - STEP, -height - STEP)
     _drag(q, x, y)
+
+
+def pointer_is_absolute(q):
+    """Whether the running guest has an absolute pointing device.
+
+    Asked of QEMU rather than assumed from this script's own default, since the
+    VM may have been started with --pointer mouse or by an older version. It
+    takes the caller's connection: QMP serves one client at a time, so opening
+    a second one here would block until the first went away.
+    """
+    try:
+        return any(m.get("current") and m.get("absolute") for m in q.cmd("query-mice"))
+    except (SystemExit, OSError, TypeError):
+        return False
 
 
 def _drag(q, dx, dy):
@@ -538,6 +567,8 @@ def main():
     s = sub.add_parser("start", help="boot the VM headless")
     s.add_argument("--vnc", type=int, default=1, help="VNC display number (port 5900+N)")
     s.add_argument("--vnc-addr", default="127.0.0.1", help="VNC bind address")
+    s.add_argument("--pointer", default="tablet", choices=["tablet", "mouse"],
+                   help="absolute (tablet) or relative (mouse) pointing device")
     s.add_argument("--smp", type=int, default=4)
     s.add_argument("--mem", default="2G")
     s.add_argument("--accel", default="kvm", choices=["kvm", "tcg"])

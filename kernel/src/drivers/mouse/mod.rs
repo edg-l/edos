@@ -161,6 +161,43 @@ pub fn apply_relative_move(dx: i16, dy: i16, buttons: u8, scroll: i8) -> MouseEv
     }
 }
 
+/// Update the global mouse position from a device that reports where the
+/// pointer *is* rather than how far it moved.
+///
+/// The deltas in the event are computed rather than reported, since a consumer
+/// that only wants to know whether the pointer moved should not have to care
+/// which kind of device produced it.
+pub fn apply_absolute_move(x: i32, y: i32, buttons: u8, scroll: i8) -> MouseEvent {
+    let max_x = SCREEN_WIDTH.load(Ordering::Relaxed);
+    let max_y = SCREEN_HEIGHT.load(Ordering::Relaxed);
+
+    let new_x = x.clamp(0, max_x - 1);
+    let new_y = y.clamp(0, max_y - 1);
+
+    let old_x = MOUSE_POSITION.0.swap(new_x, Ordering::Relaxed);
+    let old_y = MOUSE_POSITION.1.swap(new_y, Ordering::Relaxed);
+    MOUSE_BUTTONS.store(buttons, Ordering::Relaxed);
+
+    MouseEvent {
+        x: new_x,
+        y: new_y,
+        dx: (new_x - old_x).clamp(-32768, 32767) as i16,
+        dy: (new_y - old_y).clamp(-32768, 32767) as i16,
+        buttons,
+        scroll,
+        _padding: [0; 2],
+    }
+}
+
+/// The screen rectangle a pointer is clamped to, which is also what an
+/// absolute device's logical range is scaled onto.
+pub fn screen_size() -> (i32, i32) {
+    (
+        SCREEN_WIDTH.load(Ordering::Relaxed),
+        SCREEN_HEIGHT.load(Ordering::Relaxed),
+    )
+}
+
 /// Initialize the mouse driver (early init, no thread context required)
 pub fn init() {
     // Initialize the scancode queue early so interrupt handler can use it

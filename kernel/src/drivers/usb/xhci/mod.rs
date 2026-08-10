@@ -30,6 +30,8 @@ use crate::{
     },
 };
 
+use crate::drivers::usb::hid;
+
 use self::{
     device::{
         ConfigDescriptor, DESC_CONFIGURATION, DESC_DEVICE, DESC_ENDPOINT, DESC_INTERFACE,
@@ -833,6 +835,52 @@ impl XhciController {
         Ok(())
     }
 
+    /// Read an interface's HID report descriptor, which is what says where the
+    /// fields of its reports are and what they mean.
+    ///
+    /// The transfer can come back short; the caller gets what arrived rather
+    /// than a fixed length, because a pooled DMA buffer is not zeroed on reuse
+    /// and the tail would otherwise be the previous owner's bytes parsed as
+    /// descriptor items.
+    pub fn get_report_descriptor(
+        &mut self,
+        device: &mut UsbDevice,
+        interface: u8,
+        length: u16,
+    ) -> Result<Vec<u8>, XhciError> {
+        if length == 0 {
+            return Ok(Vec::new());
+        }
+        let buf = dma()
+            .allocate_sized(length as usize)
+            .map_err(|_| XhciError::InvalidDevice)?;
+        let phys = buf.phys_addr().as_u64();
+
+        let setup = SetupPacket {
+            bm_request_type: 0x81, // Device-to-host, Standard, Interface
+            b_request: 6,          // GET_DESCRIPTOR
+            w_value: 0x2200,       // Report descriptor, index 0
+            w_index: interface as u16,
+            w_length: length,
+        };
+
+        let result = self.control_transfer(device, setup, Some(phys), length, true);
+        let descriptor = match result {
+            Ok(len) => {
+                let len = len.min(length as usize);
+                let mut out = alloc::vec![0u8; len];
+                unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), out.as_mut_ptr(), len) };
+                Ok(out)
+            }
+            Err(e) => Err(e),
+        };
+
+        if let Err(e) = dma().dealloc(buf) {
+            println!("xhci: dma dealloc failed: {e}");
+        }
+        descriptor
+    }
+
     /// Send SET_PROTOCOL to switch a HID device to boot protocol.
     ///
     /// Boot protocol provides fixed 8-byte keyboard reports or 3-byte mouse reports.
@@ -1119,9 +1167,15 @@ pub extern "C" fn xhci_driver_main() -> ! {
     // keyboard_device holds the active HID keyboard device, its interrupt IN transfer ring,
     // and the endpoint's DCI (used for doorbell writes).
     let mut keyboard_device: Option<(UsbDevice, TransferRing, u32)> = None;
-    // mouse_device holds the active HID mouse device, its interrupt IN transfer ring,
-    // and the endpoint's DCI (used for doorbell writes).
+    // mouse_device holds the active pointing device, its interrupt IN transfer
+    // ring, and the endpoint's DCI (used for doorbell writes).
     let mut mouse_device: Option<(UsbDevice, TransferRing, u32)> = None;
+    // What its reports mean, from its own report descriptor. `None` means the
+    // device only offered the boot layout.
+    let mut mouse_fields: Option<hid::PointerReport> = None;
+    // Its interrupt endpoint's max packet size, which is how long a report can
+    // be; the boot layout's four bytes is a floor, not a fact about the device.
+    let mut mouse_report_len: usize = 4;
     // mass_storage_device holds the first USB mass storage device and its bulk transfer rings.
     // Block I/O requests arrive via USB_BLOCK_MAILBOX and are executed here.
     let mut mass_storage_device: Option<(
@@ -1222,22 +1276,79 @@ pub extern "C" fn xhci_driver_main() -> ! {
                         }
                     }
 
-                    // Check if this is a HID mouse and set it up (only use the first one found).
+                    // Check if this is a pointing device and set it up (only use
+                    // the first one found).
                     if mouse_device.is_none() {
-                        let mouse_info = device
+                        // Ask each HID interface what its reports mean, and take
+                        // the first that describes a pointer. Binding on the
+                        // descriptor rather than on a protocol code is what lets
+                        // an absolute device in: a tablet declares no boot
+                        // interface, so it has no protocol code to match on.
+                        let candidates = device
                             .config_data
                             .as_deref()
-                            .and_then(|d| find_hid_interface(d, HID_PROTOCOL_MOUSE));
+                            .map(find_hid_interfaces)
+                            .unwrap_or_default();
 
-                        if let Some((iface, ep)) = mouse_info {
-                            // Switch to boot protocol (0 = boot, 1 = report)
-                            if let Err(e) = controller.set_hid_protocol(
-                                &mut device,
-                                iface.b_interface_number,
-                                0,
-                            ) {
-                                println!("xhci: set mouse boot protocol failed: {:?}", e);
+                        let mut mouse_info = None;
+                        for (iface, ep, report_len) in candidates {
+                            let parsed = controller
+                                .get_report_descriptor(
+                                    &mut device,
+                                    iface.b_interface_number,
+                                    report_len,
+                                )
+                                .ok()
+                                .as_deref()
+                                .and_then(hid::parse_pointer);
+                            if let Some(fields) = parsed {
+                                mouse_info = Some((iface, ep, Some(fields)));
+                                break;
                             }
+                        }
+
+                        // A device whose descriptor will not parse, but which
+                        // declares itself a boot mouse, is still a mouse: keep
+                        // the fixed layout as the fallback rather than losing a
+                        // device the driver used to handle.
+                        let mouse_info = mouse_info.or_else(|| {
+                            device
+                                .config_data
+                                .as_deref()
+                                .and_then(|d| find_hid_interface(d, HID_PROTOCOL_MOUSE))
+                                .map(|(iface, ep)| (iface, ep, None))
+                        });
+
+                        if let Some((iface, ep, fields)) = mouse_info {
+                            // Boot protocol replaces the layout the report
+                            // descriptor just described, so it is only asked for
+                            // when the fixed layout is what will be decoded.
+                            // An interface with no boot subclass has no protocol
+                            // to set and stalls if asked.
+                            let boot_capable = iface.b_interface_sub_class == 1;
+                            let use_boot = fields.is_none();
+                            if boot_capable {
+                                let protocol = if use_boot { 0 } else { 1 };
+                                if let Err(e) = controller.set_hid_protocol(
+                                    &mut device,
+                                    iface.b_interface_number,
+                                    protocol,
+                                ) {
+                                    println!("xhci: set mouse protocol failed: {:?}", e);
+                                }
+                            }
+                            match &fields {
+                                Some(f) => println!(
+                                    "xhci: pointer on interface {}, {} axes",
+                                    iface.b_interface_number,
+                                    if f.absolute() { "absolute" } else { "relative" }
+                                ),
+                                None => println!(
+                                    "xhci: pointer on interface {}, boot protocol",
+                                    iface.b_interface_number
+                                ),
+                            }
+                            mouse_fields = fields;
 
                             // Copy packed fields before the mutable borrow
                             let ep_addr = ep.b_endpoint_address;
@@ -1257,6 +1368,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                 ep_interval,
                             ) {
                                 Ok(ring) => {
+                                    mouse_report_len = (ep_maxpkt as usize).clamp(4, 64);
                                     mouse_device = Some((device, ring, ep_dci));
                                 }
                                 Err(e) => {
@@ -1443,7 +1555,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
     const REPEAT_INTERVAL_US: u64 = 33_333; // ~30 Hz repeat rate
 
     let mouse_report_buf = dma()
-        .allocate_sized(4)
+        .allocate_sized(mouse_report_len)
         .expect("xhci: failed to allocate mouse HID report buf");
     let mouse_report_phys = mouse_report_buf.phys_addr().as_u64();
 
@@ -1462,7 +1574,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
     if let Some((ref mut dev, ref mut ring, ep_dci)) = mouse_device {
         let trb = Trb {
             parameter: mouse_report_phys,
-            status: 4,
+            status: mouse_report_len as u32,
             control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
         };
         ring.push(trb);
@@ -1535,10 +1647,8 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                 );
                             }
 
-                            let key_events = crate::drivers::usb::hid::process_boot_keyboard_report(
-                                &prev_kbd_report,
-                                &report,
-                            );
+                            let key_events =
+                                hid::process_boot_keyboard_report(&prev_kbd_report, &report);
                             crate::drivers::keyboard::dispatch_key_events(key_events.as_slice());
                             prev_kbd_report = report;
 
@@ -1548,7 +1658,7 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                 .iter()
                                 .rev()
                                 .find(|&&k| k != 0)
-                                .and_then(|&k| crate::drivers::usb::hid::usb_hid_to_keycode(k));
+                                .and_then(|&k| hid::usb_hid_to_keycode(k));
                             match held_key {
                                 Some(key) => {
                                     if repeat_key != Some(key) {
@@ -1576,24 +1686,33 @@ pub extern "C" fn xhci_driver_main() -> ! {
                                 unsafe { reg_write(controller.regs.doorbell(dev.slot_id), ep_dci) };
                             }
                         } else if is_mouse {
-                            // Read the 4-byte mouse report from the DMA buffer.
-                            // Use report_len = 4 to enable scroll wheel support.
-                            let mut report = [0u8; 4];
+                            // Read the report from the DMA buffer. Its length is
+                            // the endpoint's, not the boot layout's: an absolute
+                            // device reports six bytes and a boot mouse four.
+                            let mut report = [0u8; 64];
+                            let len = mouse_report_len.min(report.len());
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
                                     mouse_report_buf.as_ptr(),
                                     report.as_mut_ptr(),
-                                    4,
+                                    len,
                                 );
                             }
 
-                            crate::drivers::usb::hid::process_boot_mouse_report(&report, 4);
+                            match mouse_fields {
+                                Some(ref fields) => {
+                                    hid::process_pointer_report(fields, &report[..len]);
+                                }
+                                None => {
+                                    hid::process_boot_mouse_report(&report[..len], len.min(4));
+                                }
+                            }
 
                             // Resubmit the TRB to receive the next mouse report
                             if let Some((ref mut dev, ref mut ring, ep_dci)) = mouse_device {
                                 let trb = Trb {
                                     parameter: mouse_report_phys,
-                                    status: 4,
+                                    status: mouse_report_len as u32,
                                     control: ((TRB_TYPE_NORMAL as u32) << 10) | TRB_IOC,
                                 };
                                 ring.push(trb);
@@ -1760,6 +1879,48 @@ impl<'a> Iterator for DescriptorIter<'a> {
         self.offset += length;
         Some((desc_type, bytes))
     }
+}
+
+/// Every HID interface in a configuration that has an interrupt IN endpoint,
+/// with the length of the report descriptor its HID descriptor advertises.
+///
+/// Unlike `find_hid_interface` this matches on the class alone. The interface
+/// protocol code only means anything on an interface that declares the boot
+/// subclass, so matching on it is what makes every other HID device -- a
+/// tablet, a mouse with more than three buttons -- invisible.
+fn find_hid_interfaces(config_data: &[u8]) -> Vec<(InterfaceDescriptor, EndpointDescriptor, u16)> {
+    /// HID class descriptor, which carries the report descriptor's length.
+    const DESC_HID: u8 = 0x21;
+
+    let mut found = Vec::new();
+    let mut current_iface: Option<InterfaceDescriptor> = None;
+    let mut report_len: u16 = 0;
+
+    for (desc_type, bytes) in DescriptorIter::new(config_data) {
+        if desc_type == DESC_INTERFACE && bytes.len() >= 9 {
+            let iface =
+                unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const InterfaceDescriptor) };
+            current_iface = (iface.b_interface_class == USB_CLASS_HID).then_some(iface);
+            report_len = 0;
+        } else if desc_type == DESC_HID && bytes.len() >= 9 && current_iface.is_some() {
+            // bLength, bDescriptorType, bcdHID(2), bCountryCode, bNumDescriptors,
+            // then per subordinate descriptor: bDescriptorType, wDescriptorLength.
+            if bytes[6] == 0x22 {
+                report_len = u16::from_le_bytes([bytes[7], bytes[8]]);
+            }
+        } else if desc_type == DESC_ENDPOINT
+            && bytes.len() >= 7
+            && let Some(iface) = current_iface
+        {
+            let ep =
+                unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const EndpointDescriptor) };
+            if ep.b_endpoint_address & 0x80 != 0 && ep.bm_attributes & 0x03 == 3 {
+                found.push((iface, ep, report_len));
+                current_iface = None;
+            }
+        }
+    }
+    found
 }
 
 /// Search a configuration descriptor blob for a HID interface with the given boot protocol

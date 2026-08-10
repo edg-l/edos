@@ -94,7 +94,7 @@ struct TestHarness {
     affinity_tid: AtomicU64,
 }
 
-const TOTAL_TESTS: u32 = 49;
+const TOTAL_TESTS: u32 = 50;
 
 pub fn run_sched_tests() {
     println!("[sched-test] Starting scheduler tests ({TOTAL_TESTS} expected)...");
@@ -201,6 +201,10 @@ pub fn run_sched_tests() {
     }
     spawn_test(&harness, "test-wq-waker", test_wq_waker);
 
+    // HID report descriptors: the parser that decides what a pointing device's
+    // reports mean, checked against the two QEMU speaks (1)
+    spawn_test(&harness, "test-hid-report", test_hid_report);
+
     // Priority starvation: one busy spinner per CPU plus one victim below them (1)
     for _ in 0..harness.starvation_spinners {
         spawn_test(&harness, "test-starve-spin", test_starvation_spinner);
@@ -227,6 +231,13 @@ pub fn run_sched_tests() {
         test_coordinator as *const () as u64,
         boxed,
     );
+}
+
+extern "C" fn test_hid_report(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    crate::drivers::usb::hid::report::tests::check();
+    test_done(&h, "hid-report-descriptor");
+    thread_exit(0);
 }
 
 fn spawn_test(harness: &Arc<TestHarness>, name: &str, entry: extern "C" fn(*mut u8) -> !) {
