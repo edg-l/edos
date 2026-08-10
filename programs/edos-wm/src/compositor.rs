@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use edos_lib::shm::{PROT_READ, shm_map, shm_size, shm_unmap};
 use edos_render::graphics::{Color, RasterHeight, Screen, TextStyle};
-use edos_render::theme::Theme;
+use edos_render::theme::{Theme, lerp_color};
 use edos_render::window::{WindowListEntry, flags::FLAG_DOCK};
 
 use crate::cursor::Cursor;
@@ -102,24 +102,68 @@ impl ShmCache {
     }
 }
 
-/// Composite all visible windows onto the screen.
-/// Pre-compute the desktop gradient into a row buffer (one color per scanline).
-/// Returns a Vec of width*height pixels.
-pub fn build_gradient_cache(width: usize, height: usize) -> Vec<u32> {
-    use edos_render::theme::{Theme, lerp_color};
+/// Ordered-dither offsets, in sixteenths of one RGB step. The desktop spans
+/// around twenty units from its brightest point to its darkest, so rounding
+/// every pixel to the nearest step draws visible contour rings; offsetting by
+/// less than a step scatters each boundary instead.
+const DITHER: [u32; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
 
+/// Interpolate `a`..`b` and floor the result with a sub-step offset `d` of
+/// sixteenths, which is what keeps the desktop free of contour rings.
+fn mix_dithered(a: Color, b: Color, t: u8, d: u32) -> u32 {
+    let chan = |av: u8, bv: u8| {
+        let exact = av as u32 * (255 - t as u32) + bv as u32 * t as u32;
+        ((exact * 16 + d * 255) / (255 * 16)) as u8
+    };
+    Color::from_rgb(
+        chan(a.red(), b.red()),
+        chan(a.green(), b.green()),
+        chan(a.blue(), b.blue()),
+    )
+    .raw()
+}
+
+/// Pre-compute the desktop background, one color per pixel.
+///
+/// A vertical ramp gives the ground a direction, and a radial falloff over it
+/// puts the light above the middle of the screen: the ground is brightest
+/// where windows open and darkest at the frame, so a window reads as an object
+/// resting on it rather than a panel butted against the same flat fill.
+pub fn build_desktop_cache(width: usize, height: usize) -> Vec<u32> {
+    let theme = &Theme::DEFAULT;
     let mut buf = vec![0u32; width * height];
-    let top = Theme::DEFAULT.desktop_bg_top;
-    let bottom = Theme::DEFAULT.desktop_bg_bottom;
-    for row in 0..height {
-        let t = ((row as u64 * 255) / (height as u64 - 1).max(1)) as u8;
-        let color = lerp_color(top, bottom, t).raw();
-        let start = row * width;
-        buf[start..start + width].fill(color);
+    let cx = width as i64 / 2;
+    let cy = height as i64 * 38 / 100;
+    let far_x = cx.max(width as i64 - 1 - cx);
+    let far_y = cy.max(height as i64 - 1 - cy);
+    let max_d2 = (far_x * far_x + far_y * far_y).max(1);
+    let last_row = (height as i64 - 1).max(1);
+
+    for y in 0..height {
+        let dy = y as i64 - cy;
+        let ramp = lerp_color(
+            theme.desktop_bg_top,
+            theme.desktop_bg_bottom,
+            (y as i64 * 255 / last_row) as u8,
+        );
+        for (x, px) in buf[y * width..(y + 1) * width].iter_mut().enumerate() {
+            let dx = x as i64 - cx;
+            // 0 under the light, 255 at the corner furthest from it. Squared
+            // distance, so the falloff is gentle across the middle of the
+            // screen and gathers into the outer band.
+            let d2 = ((dx * dx + dy * dy) * 255 / max_d2) as u32;
+            let d = DITHER[(y & 3) * 4 + (x & 3)];
+            *px = if d2 < 128 {
+                mix_dithered(theme.desktop_glow, ramp, (d2 * 2) as u8, d)
+            } else {
+                mix_dithered(ramp, theme.desktop_edge, ((d2 - 128) * 2) as u8, d)
+            };
+        }
     }
     buf
 }
 
+/// Composite all visible windows onto the screen.
 pub fn composite(
     screen: &mut Screen,
     windows: &[WindowListEntry],
@@ -128,9 +172,9 @@ pub fn composite(
     shm_cache: &mut ShmCache,
     hovered_close_window: Option<u64>,
     hw_cursor: bool,
-    gradient_cache: &[u32],
+    desktop_cache: &[u32],
 ) {
-    // Blit cached desktop gradient background.
+    // Blit the cached desktop background.
     let screen_w = screen.width();
     let screen_h = screen.height();
     if let Some((pixels, stride)) = screen.pixels_mut() {
@@ -139,9 +183,9 @@ pub fn composite(
         for row in 0..h {
             let src_start = row * w;
             let dst_start = row * stride;
-            if src_start + w <= gradient_cache.len() {
+            if src_start + w <= desktop_cache.len() {
                 pixels[dst_start..dst_start + w]
-                    .copy_from_slice(&gradient_cache[src_start..src_start + w]);
+                    .copy_from_slice(&desktop_cache[src_start..src_start + w]);
             }
         }
     }

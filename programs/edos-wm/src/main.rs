@@ -385,7 +385,7 @@ fn main() {
     let mut input = InputState::new();
 
     // Pre-compute desktop gradient (avoids 1080 lerp+fill calls per frame).
-    let gradient_cache = compositor::build_gradient_cache(screen.width(), screen.height());
+    let desktop_cache = compositor::build_desktop_cache(screen.width(), screen.height());
 
     // Dirty region tracking
     let mut dirty = DirtyRegion::new();
@@ -567,7 +567,7 @@ fn main() {
             &mut shm_cache,
             hovered_close_window,
             hw_cursor,
-            &gradient_cache,
+            &desktop_cache,
         );
 
         // Transfer the dirty region to the host and flush.

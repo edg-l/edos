@@ -7,6 +7,10 @@ pub struct Theme {
     // Desktop
     pub desktop_bg_top: Color,
     pub desktop_bg_bottom: Color,
+    /// Brightest point of the desktop, under the light centre.
+    pub desktop_glow: Color,
+    /// Darkest point of the desktop, at the corners furthest from the light.
+    pub desktop_edge: Color,
 
     // Window decorations
     pub title_active_top: Color,
@@ -69,8 +73,10 @@ impl Theme {
     /// The default dark blue-gray theme.
     pub const DEFAULT: Theme = Theme {
         // Desktop (Ayu Dark inspired -- warm dark tones)
-        desktop_bg_top: Color::from_rgb(0x0F, 0x14, 0x19),
-        desktop_bg_bottom: Color::from_rgb(0x0A, 0x0E, 0x12),
+        desktop_bg_top: Color::from_rgb(0x11, 0x16, 0x1D),
+        desktop_bg_bottom: Color::from_rgb(0x0B, 0x0F, 0x15),
+        desktop_glow: Color::from_rgb(0x1B, 0x1D, 0x22),
+        desktop_edge: Color::from_rgb(0x06, 0x08, 0x0D),
 
         // Window decorations
         title_active_top: Color::from_rgb(0x1F, 0x24, 0x30),
