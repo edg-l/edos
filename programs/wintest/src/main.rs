@@ -9,15 +9,59 @@
 
 use std::time::Duration;
 
+use edos_render::metrics::{space, CONTROL_HEIGHT, TEXT_CELL_HEIGHT};
 use edos_render::widgets::layout::{Alignment, HBoxLayout, Insets, VBoxLayout};
 use edos_render::widgets::{
     Button, Checkbox, Label, Rect, Slider, TextInput, Widget, WidgetContainer, WidgetEvent,
 };
 use edos_render::window::{Window, WindowEvent, WindowEventType};
 
+/// Margin from the window edge to the content column.
+const MARGIN: u32 = space(5);
+/// Every row is one control tall, so sections share a baseline rhythm.
+const ROW_H: u32 = CONTROL_HEIGHT;
+/// Gap between rows of the same group.
+const ROW_GAP: u32 = space(2);
+/// Gap between groups, and between a group and its separator.
+const GROUP_GAP: u32 = space(4);
+const WIN_W: u32 = 450;
+const WIN_H: u32 = 450;
+const CONTENT_X: i32 = MARGIN as i32;
+const CONTENT_W: u32 = WIN_W - MARGIN * 2;
+/// Left edge of anything that hangs under a section label.
+const INDENT_X: i32 = CONTENT_X + space(20) as i32;
+
+/// Top of the row that follows one starting at `y`.
+const fn row_after(y: i32, gap: u32) -> i32 {
+    y + ROW_H as i32 + gap as i32
+}
+
+/// Top of text centred in a row starting at `y`.
+const fn row_text_y(y: i32) -> i32 {
+    y + (ROW_H as i32 - TEXT_CELL_HEIGHT as i32) / 2
+}
+
+/// A separator sits centred in the gap below the row starting at `y`.
+const fn row_rule_y(y: i32) -> i32 {
+    y + ROW_H as i32 + (GROUP_GAP / 2) as i32
+}
+
+const ROW_BUTTONS: i32 = (MARGIN + TEXT_CELL_HEIGHT + GROUP_GAP) as i32;
+const ROW_INPUT: i32 = row_after(ROW_BUTTONS, GROUP_GAP);
+const ROW_CHK1: i32 = row_after(ROW_INPUT, GROUP_GAP);
+const ROW_CHK2: i32 = row_after(ROW_CHK1, ROW_GAP);
+const ROW_VOLUME: i32 = row_after(ROW_CHK2, GROUP_GAP);
+const ROW_BRIGHTNESS: i32 = row_after(ROW_VOLUME, ROW_GAP);
+const ROW_SPEED: i32 = row_after(ROW_BRIGHTNESS, ROW_GAP);
+const ROW_STATUS: i32 = row_after(ROW_SPEED, GROUP_GAP);
+const ROW_FOOTER: i32 = row_after(ROW_STATUS, ROW_GAP);
+
+/// Width of a slider row's control column, leaving room for its value readout.
+const SLIDER_ROW_W: u32 = 300;
+
 fn main() {
     // Create a window for the widget demo
-    let mut window = match Window::new(100, 100, 450, 400) {
+    let mut window = match Window::new(100, 100, WIN_W, WIN_H) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("Failed to create window: {:?}", e);
@@ -42,7 +86,7 @@ fn main() {
     let btn_label = widgets.add(Label::new(0, 0, 0, "Buttons:"));
     let btn_hello = widgets.add(Button::new(0, 0, 0, "Say Hello"));
     let btn_count = widgets.add(Button::new(0, 0, 0, "Count"));
-    let btn_reset = widgets.add(Button::with_size(0, 0, 0, 80, 28, "Reset"));
+    let btn_reset = widgets.add(Button::with_size(0, 0, 0, space(20), ROW_H, "Reset"));
 
     // Text input section
     let input_label = widgets.add(Label::new(0, 0, 0, "Text Input:"));
@@ -71,18 +115,20 @@ fn main() {
 
     // Create main vertical layout
     let mut main_layout = VBoxLayout::new();
-    main_layout.set_padding(Insets::new(15, 20, 15, 20));
-    main_layout.set_spacing(10);
-    main_layout.set_bounds(Rect::new(0, 0, 450, 400));
+    main_layout.set_padding(Insets::new(MARGIN, MARGIN, MARGIN, MARGIN));
+    main_layout.set_spacing(ROW_GAP);
+    main_layout.set_bounds(Rect::new(0, 0, WIN_W, WIN_H));
 
     // Title
     main_layout.add(title_label);
 
     // Buttons row (use HBoxLayout)
     let mut button_row = HBoxLayout::new();
-    button_row.set_spacing(10);
-    button_row.set_bounds(Rect::new(20, 45, 410, 35));
-    button_row.add(btn_label);
+    button_row.set_spacing(GROUP_GAP);
+    button_row.set_bounds(Rect::new(CONTENT_X, ROW_BUTTONS, CONTENT_W, ROW_H));
+    button_row
+        .add(btn_label)
+        .set_alignment(Alignment::center_left());
     button_row.add(btn_hello);
     button_row.add(btn_count);
     button_row.add(btn_reset);
@@ -90,48 +136,52 @@ fn main() {
 
     // Input row
     let mut input_row = HBoxLayout::new();
-    input_row.set_spacing(10);
-    input_row.set_bounds(Rect::new(20, 90, 410, 30));
-    input_row.add(input_label);
+    input_row.set_spacing(ROW_GAP);
+    input_row.set_bounds(Rect::new(CONTENT_X, ROW_INPUT, CONTENT_W, ROW_H));
+    input_row
+        .add(input_label)
+        .set_alignment(Alignment::center_left());
     input_row.add(input_name);
     input_row.add(btn_greet);
 
     // Checkboxes - two rows
     let mut chk_row1 = HBoxLayout::new();
-    chk_row1.set_spacing(20);
-    chk_row1.set_bounds(Rect::new(20, 130, 410, 25));
-    chk_row1.add(chk_label);
+    chk_row1.set_spacing(GROUP_GAP);
+    chk_row1.set_bounds(Rect::new(CONTENT_X, ROW_CHK1, CONTENT_W, ROW_H));
+    chk_row1
+        .add(chk_label)
+        .set_alignment(Alignment::center_left());
     chk_row1.add(chk_sound);
     chk_row1.add(chk_auto);
     chk_row1.add_stretch(1.0);
 
     let mut chk_row2 = HBoxLayout::new();
-    chk_row2.set_spacing(20);
-    chk_row2.set_bounds(Rect::new(100, 155, 330, 25));
+    chk_row2.set_spacing(GROUP_GAP);
+    chk_row2.set_bounds(Rect::new(INDENT_X, ROW_CHK2, CONTENT_W - space(20), ROW_H));
     chk_row2.add(chk_dark);
     chk_row2.add(chk_notify);
     chk_row2.add_stretch(1.0);
 
     // Slider rows
     let mut vol_row = HBoxLayout::new();
-    vol_row.set_spacing(10);
-    vol_row.set_bounds(Rect::new(20, 195, 300, 30));
+    vol_row.set_spacing(ROW_GAP);
+    vol_row.set_bounds(Rect::new(CONTENT_X, ROW_VOLUME, SLIDER_ROW_W, ROW_H));
     vol_row
         .add(vol_label)
         .set_alignment(Alignment::center_left());
     vol_row.add(slider_vol);
 
     let mut bright_row = HBoxLayout::new();
-    bright_row.set_spacing(10);
-    bright_row.set_bounds(Rect::new(20, 235, 300, 30));
+    bright_row.set_spacing(ROW_GAP);
+    bright_row.set_bounds(Rect::new(CONTENT_X, ROW_BRIGHTNESS, SLIDER_ROW_W, ROW_H));
     bright_row
         .add(bright_label)
         .set_alignment(Alignment::center_left());
     bright_row.add(slider_bright);
 
     let mut speed_row = HBoxLayout::new();
-    speed_row.set_spacing(10);
-    speed_row.set_bounds(Rect::new(20, 275, 300, 30));
+    speed_row.set_spacing(ROW_GAP);
+    speed_row.set_bounds(Rect::new(CONTENT_X, ROW_SPEED, SLIDER_ROW_W, ROW_H));
     speed_row
         .add(speed_label)
         .set_alignment(Alignment::center_left());
@@ -139,9 +189,11 @@ fn main() {
 
     // Status row
     let mut status_row = HBoxLayout::new();
-    status_row.set_spacing(10);
-    status_row.set_bounds(Rect::new(20, 320, 410, 25));
-    status_row.add(status_label);
+    status_row.set_spacing(ROW_GAP);
+    status_row.set_bounds(Rect::new(CONTENT_X, ROW_STATUS, CONTENT_W, ROW_H));
+    status_row
+        .add(status_label)
+        .set_alignment(Alignment::center_left());
 
     // Apply all layouts
     main_layout.layout(&mut widgets);
@@ -175,7 +227,6 @@ fn main() {
     let mut brightness = 128;
     let mut speed = 1;
     let mut status_message = String::from("Ready");
-    let mut dark_mode = false;
 
     // Main loop
     loop {
@@ -239,12 +290,12 @@ fn main() {
                                     format!("Sound: {}", if enabled { "ON" } else { "OFF" });
                                 println!("Sound: {}", if enabled { "enabled" } else { "disabled" });
                             } else if id == chk_dark {
-                                dark_mode = value == 1;
+                                let enabled = value == 1;
                                 status_message =
-                                    format!("Dark mode: {}", if dark_mode { "ON" } else { "OFF" });
+                                    format!("Dark mode: {}", if enabled { "ON" } else { "OFF" });
                                 println!(
                                     "Dark mode: {}",
-                                    if dark_mode { "enabled" } else { "disabled" }
+                                    if enabled { "enabled" } else { "disabled" }
                                 );
                             } else if id == chk_auto {
                                 let enabled = value == 1;
@@ -286,33 +337,59 @@ fn main() {
             widgets.draw_all(buf, w, h);
 
             // Draw dynamic labels for slider values
+            let value_x = CONTENT_X + SLIDER_ROW_W as i32 + GROUP_GAP as i32;
             let vol_text = format!("{}%", volume);
-            Label::new(0, 320, 200, &vol_text).draw(buf, w, h);
+            Label::new(0, value_x, row_text_y(ROW_VOLUME), &vol_text).draw(buf, w, h);
 
             let bright_text = format!("{}", brightness);
-            Label::new(0, 320, 240, &bright_text).draw(buf, w, h);
+            Label::new(0, value_x, row_text_y(ROW_BRIGHTNESS), &bright_text).draw(buf, w, h);
 
             let speed_text = format!("{}x", speed);
-            Label::new(0, 320, 280, &speed_text).draw(buf, w, h);
+            Label::new(0, value_x, row_text_y(ROW_SPEED), &speed_text).draw(buf, w, h);
 
             // Draw status message
-            Label::with_color(0, 100, 320, &status_message, text_color).draw(buf, w, h);
-
-            // Draw click count
-            let count_text = format!("Clicks: {}", click_count);
-            Label::new(0, 350, 50, &count_text).draw(buf, w, h);
-
-            // Draw separator lines
-            draw_hline(buf, w, 20, 80, w - 40, 0xFFC0C0C0);
-            draw_hline(buf, w, 20, 185, w - 40, 0xFFC0C0C0);
-            draw_hline(buf, w, 20, 310, w - 40, 0xFFC0C0C0);
-
-            // Draw footer with keyboard hints
-            let hint_color = if dark_mode { 0xFF808080 } else { 0xFF606060 };
             Label::with_color(
                 0,
-                20,
-                365,
+                INDENT_X,
+                row_text_y(ROW_STATUS),
+                &status_message,
+                text_color,
+            )
+            .draw(buf, w, h);
+
+            // Draw click count, right-aligned on the status row
+            let count_text = format!("Clicks: {}", click_count);
+            let count_x =
+                CONTENT_X + CONTENT_W as i32 - (count_text.chars().count() as u32 * 8) as i32;
+            Label::new(0, count_x, row_text_y(ROW_STATUS), &count_text).draw(buf, w, h);
+
+            // Draw separator lines
+            let rule = edos_render::widgets::colors::INPUT_BORDER;
+            let rule_x = CONTENT_X as u32;
+            draw_hline(
+                buf,
+                w,
+                rule_x,
+                row_rule_y(ROW_BUTTONS) as u32,
+                CONTENT_W,
+                rule,
+            );
+            draw_hline(buf, w, rule_x, row_rule_y(ROW_CHK2) as u32, CONTENT_W, rule);
+            draw_hline(
+                buf,
+                w,
+                rule_x,
+                row_rule_y(ROW_SPEED) as u32,
+                CONTENT_W,
+                rule,
+            );
+
+            // Draw footer with keyboard hints
+            let hint_color = edos_render::widgets::colors::TEXT_PLACEHOLDER;
+            Label::with_color(
+                0,
+                CONTENT_X,
+                row_text_y(ROW_FOOTER),
                 "Tab: focus | Enter: submit | Arrows: adjust slider",
                 hint_color,
             )

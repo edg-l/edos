@@ -1,9 +1,10 @@
 //! Checkbox widget with label.
 
 use super::{
-    Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_rect, draw_rect_outline,
-    draw_text, text_height,
+    Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_focus_ring, draw_rect,
+    draw_rect_outline, draw_text, text_height,
 };
+use crate::metrics::{CHECKBOX_BOX, CHECKBOX_INSET, CONTROL_HEIGHT, LABEL_GAP};
 
 /// A toggleable checkbox with a label.
 pub struct Checkbox {
@@ -15,9 +16,6 @@ pub struct Checkbox {
     hovered: bool,
     focused: bool,
 }
-
-const BOX_SIZE: u32 = 16;
-const BOX_LABEL_GAP: u32 = 8;
 
 impl Checkbox {
     /// Create a new checkbox.
@@ -70,6 +68,12 @@ impl Checkbox {
     pub fn set_label(&mut self, label: &str) {
         self.label = label.to_string();
     }
+
+    /// Top of the box, centred in the control row so a checkbox lines up with
+    /// the taller controls beside it.
+    fn box_y(&self) -> i32 {
+        self.y + (CONTROL_HEIGHT as i32 - CHECKBOX_BOX as i32) / 2
+    }
 }
 
 impl Widget for Checkbox {
@@ -79,8 +83,8 @@ impl Widget for Checkbox {
 
     fn bounds(&self) -> Rect {
         let label_width = (self.label.len() as u32) * char_width();
-        let total_width = BOX_SIZE + BOX_LABEL_GAP + label_width;
-        Rect::new(self.x, self.y, total_width, BOX_SIZE.max(text_height()))
+        let total_width = CHECKBOX_BOX + LABEL_GAP + label_width;
+        Rect::new(self.x, self.y, total_width, CONTROL_HEIGHT)
     }
 
     fn set_position(&mut self, x: i32, y: i32) {
@@ -101,23 +105,22 @@ impl Widget for Checkbox {
             buffer_width,
             buffer_height,
             self.x,
-            self.y,
-            BOX_SIZE,
-            BOX_SIZE,
+            self.box_y(),
+            CHECKBOX_BOX,
+            CHECKBOX_BOX,
             bg_color,
         );
 
         // Draw focus ring if focused
         if self.focused {
-            draw_rect_outline(
+            draw_focus_ring(
                 buffer,
                 buffer_width,
                 buffer_height,
-                self.x - 2,
-                self.y - 2,
-                BOX_SIZE + 4,
-                BOX_SIZE + 4,
-                colors::FOCUS_RING,
+                self.x,
+                self.box_y(),
+                CHECKBOX_BOX,
+                CHECKBOX_BOX,
             );
         }
 
@@ -134,30 +137,29 @@ impl Widget for Checkbox {
             buffer_width,
             buffer_height,
             self.x,
-            self.y,
-            BOX_SIZE,
-            BOX_SIZE,
+            self.box_y(),
+            CHECKBOX_BOX,
+            CHECKBOX_BOX,
             border_color,
         );
 
         // Draw check mark if checked
         if self.checked {
-            let inset = 3u32;
             draw_rect(
                 buffer,
                 buffer_width,
                 buffer_height,
-                self.x + inset as i32,
-                self.y + inset as i32,
-                BOX_SIZE - inset * 2,
-                BOX_SIZE - inset * 2,
+                self.x + CHECKBOX_INSET as i32,
+                self.box_y() + CHECKBOX_INSET as i32,
+                CHECKBOX_BOX - CHECKBOX_INSET * 2,
+                CHECKBOX_BOX - CHECKBOX_INSET * 2,
                 colors::CHECKBOX_CHECK,
             );
         }
 
         // Draw label
-        let label_x = self.x + BOX_SIZE as i32 + BOX_LABEL_GAP as i32;
-        let label_y = self.y + (BOX_SIZE as i32 - text_height() as i32) / 2;
+        let label_x = self.x + CHECKBOX_BOX as i32 + LABEL_GAP as i32;
+        let label_y = self.y + (CONTROL_HEIGHT as i32 - text_height() as i32) / 2;
         draw_text(
             buffer,
             buffer_width,

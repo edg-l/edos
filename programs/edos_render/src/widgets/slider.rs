@@ -1,6 +1,11 @@
 //! Horizontal slider widget.
 
-use super::{Rect, Widget, WidgetEvent, WidgetId, colors, draw_rect, draw_rect_outline};
+use super::{
+    Rect, Widget, WidgetEvent, WidgetId, colors, draw_focus_ring, draw_rect, draw_rect_outline,
+};
+use crate::metrics::{
+    CONTROL_HEIGHT, SLIDER_THUMB_HEIGHT, SLIDER_THUMB_WIDTH, SLIDER_TRACK_HEIGHT,
+};
 use crate::theme::Theme;
 
 /// A horizontal value slider.
@@ -16,11 +21,6 @@ pub struct Slider {
     hovered: bool,
     focused: bool,
 }
-
-const SLIDER_HEIGHT: u32 = 20;
-const TRACK_HEIGHT: u32 = 6;
-const THUMB_WIDTH: u32 = 12;
-const THUMB_HEIGHT: u32 = 20;
 
 impl Slider {
     /// Create a new slider.
@@ -97,22 +97,32 @@ impl Slider {
             return self.x;
         }
         let range = (self.max - self.min) as f32;
-        let track_width = (self.width - THUMB_WIDTH) as f32;
+        let track_width = (self.width - SLIDER_THUMB_WIDTH) as f32;
         let ratio = (self.value - self.min) as f32 / range;
         self.x + (ratio * track_width) as i32
     }
 
     /// Calculate value from X position.
     fn value_from_x(&self, mouse_x: i32) -> i32 {
-        let track_width = (self.width - THUMB_WIDTH) as f32;
+        let track_width = (self.width - SLIDER_THUMB_WIDTH) as f32;
         let relative_x = (mouse_x - self.x) as f32;
         let ratio = (relative_x / track_width).clamp(0.0, 1.0);
         let range = (self.max - self.min) as f32;
         self.min + (ratio * range) as i32
     }
 
+    /// Top of the thumb, centred in the control row.
+    fn thumb_y(&self) -> i32 {
+        self.y + (CONTROL_HEIGHT as i32 - SLIDER_THUMB_HEIGHT as i32) / 2
+    }
+
     fn thumb_bounds(&self) -> Rect {
-        Rect::new(self.thumb_x(), self.y, THUMB_WIDTH, THUMB_HEIGHT)
+        Rect::new(
+            self.thumb_x(),
+            self.thumb_y(),
+            SLIDER_THUMB_WIDTH,
+            SLIDER_THUMB_HEIGHT,
+        )
     }
 }
 
@@ -122,7 +132,7 @@ impl Widget for Slider {
     }
 
     fn bounds(&self) -> Rect {
-        Rect::new(self.x, self.y, self.width, SLIDER_HEIGHT)
+        Rect::new(self.x, self.y, self.width, CONTROL_HEIGHT)
     }
 
     fn set_position(&mut self, x: i32, y: i32) {
@@ -132,7 +142,7 @@ impl Widget for Slider {
 
     fn draw(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
         // Draw track
-        let track_y = self.y + (SLIDER_HEIGHT as i32 - TRACK_HEIGHT as i32) / 2;
+        let track_y = self.y + (CONTROL_HEIGHT as i32 - SLIDER_TRACK_HEIGHT as i32) / 2;
         draw_rect(
             buffer,
             buffer_width,
@@ -140,12 +150,12 @@ impl Widget for Slider {
             self.x,
             track_y,
             self.width,
-            TRACK_HEIGHT,
+            SLIDER_TRACK_HEIGHT,
             colors::SLIDER_TRACK,
         );
 
         // Draw filled portion of track
-        let thumb_center = self.thumb_x() + THUMB_WIDTH as i32 / 2;
+        let thumb_center = self.thumb_x() + SLIDER_THUMB_WIDTH as i32 / 2;
         let filled_width = (thumb_center - self.x) as u32;
         draw_rect(
             buffer,
@@ -154,21 +164,20 @@ impl Widget for Slider {
             self.x,
             track_y,
             filled_width,
-            TRACK_HEIGHT,
+            SLIDER_TRACK_HEIGHT,
             Theme::DEFAULT.slider_thumb.raw(),
         );
 
         // Draw focus ring if focused
         if self.focused {
-            draw_rect_outline(
+            draw_focus_ring(
                 buffer,
                 buffer_width,
                 buffer_height,
-                self.x - 2,
-                self.y - 2,
-                self.width + 4,
-                SLIDER_HEIGHT + 4,
-                colors::FOCUS_RING,
+                self.x,
+                self.y,
+                self.width,
+                CONTROL_HEIGHT,
             );
         }
 
@@ -183,9 +192,9 @@ impl Widget for Slider {
             buffer_width,
             buffer_height,
             self.thumb_x(),
-            self.y,
-            THUMB_WIDTH,
-            THUMB_HEIGHT,
+            self.thumb_y(),
+            SLIDER_THUMB_WIDTH,
+            SLIDER_THUMB_HEIGHT,
             thumb_color,
         );
         draw_rect_outline(
@@ -193,9 +202,9 @@ impl Widget for Slider {
             buffer_width,
             buffer_height,
             self.thumb_x(),
-            self.y,
-            THUMB_WIDTH,
-            THUMB_HEIGHT,
+            self.thumb_y(),
+            SLIDER_THUMB_WIDTH,
+            SLIDER_THUMB_HEIGHT,
             colors::INPUT_BORDER,
         );
     }

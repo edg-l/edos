@@ -1,9 +1,10 @@
 //! Single-line text input widget.
 
 use super::{
-    Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_rect, draw_rect_outline,
-    draw_text, text_height,
+    Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_focus_ring, draw_rect,
+    draw_rect_outline, draw_text, text_height,
 };
+use crate::metrics::{CONTROL_HEIGHT, TEXT_PAD_X};
 
 /// A single-line text input field.
 pub struct TextInput {
@@ -18,9 +19,6 @@ pub struct TextInput {
     cursor_visible: bool,
     cursor_blink_counter: u32,
 }
-
-const INPUT_HEIGHT: u32 = 24;
-const PADDING: u32 = 4;
 
 // Scancodes
 const SCANCODE_BACKSPACE: u32 = 14;
@@ -145,7 +143,7 @@ impl Widget for TextInput {
     }
 
     fn bounds(&self) -> Rect {
-        Rect::new(self.x, self.y, self.width, INPUT_HEIGHT)
+        Rect::new(self.x, self.y, self.width, CONTROL_HEIGHT)
     }
 
     fn set_position(&mut self, x: i32, y: i32) {
@@ -162,21 +160,20 @@ impl Widget for TextInput {
             self.x,
             self.y,
             self.width,
-            INPUT_HEIGHT,
+            CONTROL_HEIGHT,
             colors::INPUT_BG,
         );
 
         // Draw focus ring if focused
         if self.focused {
-            draw_rect_outline(
+            draw_focus_ring(
                 buffer,
                 buffer_width,
                 buffer_height,
-                self.x - 2,
-                self.y - 2,
-                self.width + 4,
-                INPUT_HEIGHT + 4,
-                colors::FOCUS_RING,
+                self.x,
+                self.y,
+                self.width,
+                CONTROL_HEIGHT,
             );
         }
 
@@ -193,12 +190,12 @@ impl Widget for TextInput {
             self.x,
             self.y,
             self.width,
-            INPUT_HEIGHT,
+            CONTROL_HEIGHT,
             border_color,
         );
 
-        let text_x = self.x + PADDING as i32;
-        let text_y = self.y + (INPUT_HEIGHT as i32 - text_height() as i32) / 2;
+        let text_x = self.x + TEXT_PAD_X as i32;
+        let text_y = self.y + (CONTROL_HEIGHT as i32 - text_height() as i32) / 2;
 
         // Draw text or placeholder
         if self.text.is_empty() && !self.placeholder.is_empty() {
@@ -246,7 +243,7 @@ impl Widget for TextInput {
     fn on_mouse_button(&mut self, x: i32, y: i32, pressed: bool) -> Option<WidgetEvent> {
         if !pressed && self.bounds().contains(x, y) {
             // Click to position cursor
-            let text_x = self.x + PADDING as i32;
+            let text_x = self.x + TEXT_PAD_X as i32;
             let relative_x = (x - text_x).max(0) as u32;
             let char_pos = (relative_x / char_width()) as usize;
             self.cursor_pos = char_pos.min(self.text.len());

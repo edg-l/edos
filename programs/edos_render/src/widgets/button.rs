@@ -1,9 +1,10 @@
 //! Clickable button widget.
 
 use super::{
-    Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_rect, draw_rect_outline,
-    draw_text, text_height,
+    Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_focus_ring, draw_rect,
+    draw_rect_outline, draw_text, text_height,
 };
+use crate::metrics::{CONTROL_HEIGHT, CONTROL_PAD_X};
 
 /// A clickable button with a label.
 pub struct Button {
@@ -21,16 +22,14 @@ pub struct Button {
 impl Button {
     /// Create a new button that auto-sizes based on text.
     pub fn new(id: WidgetId, x: i32, y: i32, label: &str) -> Self {
-        let padding = 16;
-        let width = (label.len() as u32) * char_width() + padding * 2;
-        let height = text_height() + padding;
+        let width = (label.len() as u32) * char_width() + CONTROL_PAD_X * 2;
 
         Self {
             id,
             x,
             y,
             width,
-            height,
+            height: CONTROL_HEIGHT,
             label: label.to_string(),
             hovered: false,
             pressed: false,
@@ -102,15 +101,14 @@ impl Widget for Button {
 
         // Draw focus ring if focused
         if self.focused {
-            draw_rect_outline(
+            draw_focus_ring(
                 buffer,
                 buffer_width,
                 buffer_height,
-                self.x - 2,
-                self.y - 2,
-                self.width + 4,
-                self.height + 4,
-                colors::FOCUS_RING,
+                self.x,
+                self.y,
+                self.width,
+                self.height,
             );
         }
 

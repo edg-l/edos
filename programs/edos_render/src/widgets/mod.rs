@@ -191,6 +191,30 @@ pub fn draw_rect_outline(
     );
 }
 
+/// Draw the keyboard focus ring around a control, offset from its edge by
+/// [`crate::metrics::FOCUS_RING_GAP`] so the ring never touches the border.
+pub fn draw_focus_ring(
+    buffer: &mut [u32],
+    buffer_width: u32,
+    buffer_height: u32,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) {
+    let gap = crate::metrics::FOCUS_RING_GAP;
+    draw_rect_outline(
+        buffer,
+        buffer_width,
+        buffer_height,
+        x - gap as i32,
+        y - gap as i32,
+        width + gap * 2,
+        height + gap * 2,
+        colors::FOCUS_RING,
+    );
+}
+
 /// Helper function to draw text into a buffer.
 pub fn draw_text(
     buffer: &mut [u32],
@@ -271,5 +295,5 @@ pub fn char_width() -> u32 {
 
 /// Get the height of text in the default font.
 pub fn text_height() -> u32 {
-    16
+    crate::metrics::TEXT_CELL_HEIGHT
 }
