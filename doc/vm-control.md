@@ -74,7 +74,7 @@ without `password=on` publishes an unauthenticated console.
 
 | Command | Notes |
 |---|---|
-| `start` | `--vnc N`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--width/--height` |
+| `start` | `--vnc N`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--width/--height`, `--usb-disk [image]` |
 | `stop` / `status` | `status` reports pid, run state, VNC address |
 | `shot [file]` | writes PNG via QMP `screendump` |
 | `type <text>` | `--enter` appends Return, `--delay` paces keystrokes |
@@ -83,6 +83,12 @@ without `password=on` publishes an unauthenticated console.
 | `launch` / `raise N` | taskbar buttons by role, instead of raw pixels |
 | `log [-n N]` | tails `run_log.txt` |
 | `qmp <cmd> [json]` | escape hatch for any QMP command |
+
+`--usb-disk` hangs a `usb-storage` device off the same `qemu-xhci` the keyboard
+and mouse use, so the guest reaches it through its own xHCI and USB mass-storage
+drivers and registers it as `/dev/usb0`. It takes an optional image path and
+defaults to `usb-test.img`, which `make usb-test.img` creates; this is the
+headless equivalent of `make run-storage`, which needs a display.
 
 The machine matches `make run`'s devices, including Intel HDA with
 `-audiodev none`: the guest driver runs its DMA engine and interrupts with no

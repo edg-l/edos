@@ -1,4 +1,23 @@
 
+- Attaching a USB mass-storage device HANGS THE BOOT, reproduced deterministically
+  with `scripts/edos-vm start --usb-disk` (the same machine without the flag
+  reaches `[Term] FocusGained`). Enumeration is fine and the identity is correct,
+  so nothing before the first bulk read is at fault:
+    xhci: USB storage: vendor='QEMU' product='QEMU HARDDISK'
+    xhci: USB storage: 32768 blocks x 512 bytes = 16 MiB
+    usb-msc: registered /dev/usb0
+  The last line ever printed is `reading sector for gpt` (`fs/gpt.rs:248`), so
+  the `fs` kthread blocks inside `read_sectors_vec(usb0, lba 1, 1)` and never
+  reaches the `read gpt sector` line after it. Enumeration ran on the `kernel`
+  thread during xHCI init, so the difference is the calling context, not the
+  command: `MassStorage::read_sectors` -> `bot_transfer` waits for a transfer
+  event with no timeout, and nothing kills the boot when it never arrives.
+  Bisect from there: whether the event arrives at all (an xHCI interrupt or
+  doorbell missed once the dispatcher owns completions), and whether a lock the
+  fs kthread already holds keeps the dispatcher from delivering it. Give
+  `bot_transfer` a deadline regardless — a wedged device must fail the read
+  rather than wedge the boot.
+
 - The AHCI ATAPI commands read a fixed number of bytes out of a pooled DMA
   buffer without asking how many arrived, the same defect fixed in 7591982
   (xHCI descriptors) and in the USB mass-storage INQUIRY / READ CAPACITY
