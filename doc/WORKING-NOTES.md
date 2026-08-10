@@ -1504,6 +1504,27 @@ nothing. What a VNC viewer shows is the remote-framebuffer limit: a moving
 frame, and that has to be encoded and shipped. The cursor became smooth
 because on its own plane it ships *no pixels at all*.
 
+Then the same counter was asked what the *display* is being handed, because a
+guest that hits its frame rate can still be producing more than a remote
+viewer can carry. Dragging that window:
+
+**~250 MB/s of raw pixels**, about 3 MB per frame at 77 frames a second.
+
+That is the whole story of "dragging is not smooth over VNC/SPICE". A moving
+window's old and new rectangles both change, so the damage is roughly the
+window's area every frame, and a remote protocol has to compress and ship all
+of it. Gigabit ethernet carries 125 MB/s. The viewer is oversubscribed two to
+five times over, so it applies updates partially -- which is what reads as
+tearing, and it shows up first on a title bar because that is the crispest
+edge on screen. The guest is presenting whole frames: `transfer_and_flush`
+polls both commands to completion before returning, so nothing is being drawn
+into while the host reads it.
+
+This is also what SPICE's `streaming-video=filter` is for: it re-encodes a
+fast-changing rectangle as lossy video so it *fits*. Turning it off buys
+sharpness and spends smoothness. There is no setting that buys both, and no
+change inside the guest that makes a moving window stop being megabytes.
+
 Two things the numbers say that are worth keeping:
 
 - **The first frames are enormous** — one report at boot averages 240 ms with a

@@ -264,8 +264,13 @@ def cmd_start(args):
     # which caps a viewer near 33fps however fast the guest paints. VNC stays
     # the default because it needs no client beyond a VNC viewer.
     if args.display == "spice":
+        # streaming-video=off: SPICE otherwise watches for a fast-changing
+        # rectangle and re-encodes it as lossy video. A dragged window is
+        # exactly what trips that, and lossy video of sharp text and window
+        # edges reads as tearing. Bandwidth is not the scarce thing on a LAN.
         qemu += ["-spice",
-                 f"port={args.spice_port},addr={args.vnc_addr},disable-ticketing=on"]
+                 f"port={args.spice_port},addr={args.vnc_addr},disable-ticketing=on,"
+                 f"streaming-video={args.spice_streaming}"]
     else:
         qemu += ["-vnc", f"{args.vnc_addr}:{args.vnc}"]
 
@@ -633,6 +638,8 @@ def main():
     s.add_argument("--display", default="vnc", choices=["vnc", "spice"],
                    help="remote display protocol; spice streams damage, vnc polls")
     s.add_argument("--spice-port", type=int, default=5930)
+    s.add_argument("--spice-streaming", default="off", choices=["off", "filter", "all"],
+                   help="SPICE lossy video detection; off keeps text sharp")
     s.add_argument("--pointer", default="tablet", choices=["tablet", "mouse"],
                    help="absolute (tablet) or relative (mouse) pointing device")
     s.add_argument("--smp", type=int, default=4)

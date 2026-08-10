@@ -47,11 +47,21 @@ struct FrameStats {
     flip_us: u64,
     worst_us: u64,
     full_screens: u32,
+    /// Pixels handed to the display, which is what a remote viewer must carry.
+    sent_pixels: u64,
     last_report: Option<Instant>,
 }
 
 impl FrameStats {
-    fn record(&mut self, composite_us: u64, flip_us: u64, full_screen: bool, budget_ms: u64) {
+    fn record(
+        &mut self,
+        composite_us: u64,
+        flip_us: u64,
+        full_screen: bool,
+        budget_ms: u64,
+        sent_pixels: u64,
+    ) {
+        self.sent_pixels += sent_pixels;
         self.frames += 1;
         self.composite_us += composite_us;
         self.flip_us += flip_us;
@@ -75,7 +85,7 @@ impl FrameStats {
             let frames = self.frames.max(1) as u64;
             log_to_kernel(&format!(
                 "wm: {} of {} frames over {}ms budget; composite avg {}us flip avg {}us worst \
-                 {}us; {} full-screen",
+                 {}us; {} full-screen; {} KiB/s to the display",
                 self.over_budget,
                 self.frames,
                 budget_ms,
@@ -83,6 +93,7 @@ impl FrameStats {
                 self.flip_us / frames,
                 self.worst_us,
                 self.full_screens,
+                self.sent_pixels * 4 / 1024,
             ));
         }
         *self = FrameStats {
@@ -855,15 +866,18 @@ fn main() {
         // Transfer the dirty region to the host and flush.
         // With single-buffered virtio-gpu, we only need to transfer the
         // pixels that changed, even though the compositor rewrites everything.
+        let mut sent_pixels: u64 = 0;
         if dirty.full_screen {
+            sent_pixels = (screen.width() * screen.height()) as u64;
             screen.flip();
         } else if let Some(bounds) = dirty.merged_bounds() {
             if let Some(clipped) = bounds.clipped(screen.width() as u32, screen.height() as u32) {
+                sent_pixels = clipped.w as u64 * clipped.h as u64;
                 screen.flip_rect(clipped.x as u32, clipped.y as u32, clipped.w, clipped.h);
             }
         }
         let flip_us = flip_start.elapsed().as_micros() as u64;
-        frame_stats.record(composite_us, flip_us, dirty.full_screen, frame_time_ms);
+        frame_stats.record(composite_us, flip_us, dirty.full_screen, frame_time_ms, sent_pixels);
         dirty.clear();
         // Sleep remainder of frame budget to maintain frame rate.
         // Use a minimum sleep of 1ms to avoid sub-microsecond sleeps that
