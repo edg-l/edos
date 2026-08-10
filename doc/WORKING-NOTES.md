@@ -2169,3 +2169,41 @@ is the same one the collision test reads.
   cosmetic, but a screenshot taken mid-frame shows the cursor parked wherever
   the redraw had got to, which reads like a rendering bug in the program.
   Recorded in `todo.txt`.
+
+---
+
+## `imgview`, and where a wallpaper and a picture stop agreeing
+
+`programs/imgview` is the first ordinary GUI application in the tree: not the
+compositor, not the panel, not a toolkit demo, just a window with a picture in
+it. Most of it was already written — `edos_render::image` decodes the BMP and
+resamples it, which is what made the program small — but the part that could not
+be shared is the interesting one. A **wallpaper covers**: it scales until both
+axes are filled, crops the overflow about the centre, and never letterboxes,
+because a desktop with bars of dead colour at the edges is not a ground. A
+**viewer fits**: it scales until the whole picture is inside the frame, lets the
+surrounding surface show, and does not enlarge past 100%, because magnifying by
+default hides what the file actually contains. Those are opposite policies over
+the same arithmetic, so `scaled_to_cover` and `scaled_to_fit` now sit beside
+each other over one bilinear `resample_at`, which takes a per-axis step and a
+source origin; cover passes the smaller step twice with a centred origin, fit
+passes both steps with the origin at zero.
+
+The letterbox itself belongs to the caller, not to the scaler: only the program
+drawing knows what colour the surface behind the picture is. `imgview` fills
+with the theme background, so an image of another aspect ratio sits on the same
+ground as the rest of the shell.
+
+### Things that will bite you
+
+- **The kernel never sends a `Character` window event.** `WindowEvent::character`
+  exists in `kernel/src/window/input.rs` and nothing constructs it:
+  `handle_keyboard_event` routes `KeyPress`/`KeyRelease` carrying a raw
+  scancode, and that is all a client ever sees. The kernel has no keyboard
+  layout and should not grow one, so a program that wants letters maps them
+  itself with `edos_lib::keymap::{update_modifiers, map_keycode}` — which is
+  exactly what the widget container and the terminal already do. A viewer
+  written against `event.character()` compiles, runs, draws correctly and
+  silently ignores every key; the first screenshot after pressing one looks
+  identical to the one before it, which reads like a redraw bug rather than an
+  event that was never delivered.

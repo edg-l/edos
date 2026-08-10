@@ -298,6 +298,14 @@ name = "http"
 version = "0.1.0"
 
 [[package]]
+name = "imgview"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+ "edos_render",
+]
+
+[[package]]
 name = "inflighttest"
 version = "0.1.0"
 dependencies = [

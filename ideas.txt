@@ -2,6 +2,14 @@
 
 ## Done
 
+- **`imgview`** - a BMP viewer, and the first ordinary GUI application the
+  system has: one window, one image, `f` to fit it to the window and `1` to
+  show it at one image pixel per screen pixel. It decodes with the same
+  `edos_render::image` the compositor uses for a wallpaper; what it adds is
+  `fit_size`/`scaled_to_fit` beside the existing scale-to-cover, over one
+  shared bilinear resampler. Completes Phase 4 of the userspace roadmap bar
+  `netstat` and `nproc`, which both need new kernel surface.
+
 - **`tcpecho`** - a TCP echo server over `bind`/`listen`/`accept`, the first
   user of the listen side of the stack. Serves one connection at a time so the
   kernel backlog holds the next; `-p`, `-a`, `-1`, `-q`. It found two kernel

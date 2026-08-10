@@ -26,7 +26,6 @@ surface at all.
 |---|---|
 | File manager | `rename`, readdir at scale, symbolic links across mounts, the dentry cache under someone clicking fast |
 | System monitor with sparklines | The *rate* gap: every procfs counter is cumulative, so plotting forces differencing. Would pull on `/proc/ahci_stats`, `/proc/block_cache` and per-CPU load |
-| Image viewer | `edos_render` already has a BMP decoder and a bilinear scale-to-cover for wallpapers, so this is mostly wiring. Map the file and it exercises file-backed `mmap` |
 | Paint | Damage rectangles and shm compositing harder than anything else: small, frequent, scattered dirty rects, the opposite of the window-drag case already measured in `WORKING-NOTES.md` |
 | Minesweeper | Right-click. Nothing in the system uses a non-left mouse button, so that path is entirely untested |
 | Settings panel | Would force the keymap out of `edos_lib::keymap`'s hardcoded Spanish ISO layout into something selectable at runtime |

@@ -88,6 +88,16 @@ uses, and closing an accepted socket removed its *listener's* port-table entry,
 so a second connection was answered with RST. Both are written up in
 `doc/WORKING-NOTES.md`.
 
+**`imgview`** (Phase 4). A BMP viewer: one window, one image, either scaled to
+the window or shown at one image pixel per screen pixel and cropped. It decodes
+with the same `edos_render::image` the compositor uses for a wallpaper, which is
+what made it small; the part that is not shared is the policy a *viewer* needs
+and a ground does not. A wallpaper covers and crops, because a desktop must have
+no bare edges; a viewer fits and letterboxes, because the whole picture is the
+point, and it does not enlarge past 100%, because magnifying by default hides
+what the file actually contains. Those two live side by side over one bilinear
+resampler.
+
 Candidates beyond these phases, ranked by the kernel path each would exercise,
 are in [`PROGRAMS.md`](PROGRAMS.md).
 
@@ -100,7 +110,6 @@ Complete. Everything listed here shipped; see the Done section above.
 | Program | Why it matters | Kernel gap |
 |---|---|---|
 | `netstat` | listening and established sockets | needs a read path into `net/tcp.rs` `CONNECTIONS`, as `SYS_NETSTAT` or `/proc/net/tcp` |
-| BMP image viewer | a real GUI app over window syscalls and shared memory | none; exercises the compositor |
 | `nproc` | CPU count | needs `SYS_NPROC` or `/proc/cpuinfo` |
 
 ## `edos_render` is the shared surface
