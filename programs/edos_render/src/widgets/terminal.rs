@@ -20,6 +20,12 @@ pub mod terminal_colors {
     pub const SELECTION: u32 = Theme::DEFAULT.terminal_selection.raw();
 }
 
+/// Smallest gap kept between the widget edge and the character grid. The grid
+/// is centred inside the widget, so whatever the pixel-to-cell division leaves
+/// over is split around it and the real gap is never smaller than this.
+pub const MIN_PADDING_X: u32 = 6;
+pub const MIN_PADDING_Y: u32 = 4;
+
 /// Standard 16 ANSI colors (Ayu Dark palette).
 const ANSI_COLORS: [u32; 16] = [
     0xFF0A0E14, // 0: Black
@@ -118,8 +124,8 @@ impl Terminal {
     pub fn new(id: WidgetId, x: i32, y: i32, cols: usize, rows: usize) -> Self {
         let char_w = char_width();
         let char_h = text_height();
-        let width = (cols as u32) * char_w;
-        let height = (rows as u32) * char_h;
+        let width = (cols as u32) * char_w + 2 * MIN_PADDING_X;
+        let height = (rows as u32) * char_h + 2 * MIN_PADDING_Y;
 
         // Initialize buffer with empty rows
         let buffer: VecDeque<Vec<Cell>> = (0..rows).map(|_| vec![Cell::default(); cols]).collect();
@@ -162,15 +168,30 @@ impl Terminal {
 
     /// Create a terminal with explicit pixel dimensions (calculates cols/rows).
     pub fn with_size(id: WidgetId, x: i32, y: i32, width: u32, height: u32) -> Self {
-        let char_w = char_width();
-        let char_h = text_height();
-        let cols = (width / char_w) as usize;
-        let rows = (height / char_h) as usize;
+        let (cols, rows) = Self::grid_for_pixels(width, height);
 
         let mut term = Self::new(id, x, y, cols.max(1), rows.max(1));
         term.width = width;
         term.height = height;
         term
+    }
+
+    /// Character grid that fits inside `width` x `height` once the padding is
+    /// taken out.
+    fn grid_for_pixels(width: u32, height: u32) -> (usize, usize) {
+        let cols = width.saturating_sub(2 * MIN_PADDING_X) / char_width();
+        let rows = height.saturating_sub(2 * MIN_PADDING_Y) / text_height();
+        (cols as usize, rows as usize)
+    }
+
+    /// Top-left pixel of the character grid, centred inside the widget.
+    fn content_origin(&self) -> (i32, i32) {
+        let grid_w = (self.cols as u32) * char_width();
+        let grid_h = (self.rows as u32) * text_height();
+        (
+            self.x + (self.width.saturating_sub(grid_w) / 2) as i32,
+            self.y + (self.height.saturating_sub(grid_h) / 2) as i32,
+        )
     }
 
     /// Get the number of columns.
@@ -439,11 +460,13 @@ impl Terminal {
 
     /// Resize the terminal to fit the given pixel dimensions.
     pub fn resize_to_pixels(&mut self, pixel_width: u32, pixel_height: u32) {
-        let char_w = char_width();
-        let char_h = text_height();
-        let new_cols = (pixel_width / char_w) as usize;
-        let new_rows = (pixel_height / char_h) as usize;
-        if new_cols == 0 || new_rows == 0 || (new_cols == self.cols && new_rows == self.rows) {
+        let (new_cols, new_rows) = Self::grid_for_pixels(pixel_width, pixel_height);
+        if new_cols == 0 || new_rows == 0 {
+            return;
+        }
+        if new_cols == self.cols && new_rows == self.rows {
+            self.width = pixel_width;
+            self.height = pixel_height;
             return;
         }
 
@@ -589,8 +612,9 @@ impl Terminal {
         let char_w = char_width() as i32;
         let char_h = text_height() as i32;
 
-        let col = ((px - self.x) / char_w).clamp(0, (self.cols as i32) - 1) as usize;
-        let display_row = ((py - self.y) / char_h).clamp(0, (self.rows as i32) - 1) as usize;
+        let (origin_x, origin_y) = self.content_origin();
+        let col = ((px - origin_x) / char_w).clamp(0, (self.cols as i32) - 1) as usize;
+        let display_row = ((py - origin_y) / char_h).clamp(0, (self.rows as i32) - 1) as usize;
 
         let total_lines = self.history.len() + self.buffer.len();
         let viewport_bottom = total_lines.saturating_sub(self.scroll_offset);
@@ -789,6 +813,7 @@ impl Widget for Terminal {
 
         let char_w = char_width() as i32;
         let char_h = text_height() as i32;
+        let (origin_x, origin_y) = self.content_origin();
 
         // Draw each row of cells, accounting for scroll offset into history
         let history_len = self.history.len();
@@ -798,7 +823,7 @@ impl Widget for Terminal {
 
         for display_row in 0..self.rows {
             let line_idx = viewport_top + display_row;
-            let row_y = self.y + (display_row as i32) * char_h;
+            let row_y = origin_y + (display_row as i32) * char_h;
 
             let row_data: Option<&Vec<Cell>> = if line_idx < history_len {
                 self.history.get(line_idx)
@@ -808,7 +833,7 @@ impl Widget for Terminal {
 
             if let Some(row) = row_data {
                 for (col_idx, cell) in row.iter().enumerate() {
-                    let cell_x = self.x + (col_idx as i32) * char_w;
+                    let cell_x = origin_x + (col_idx as i32) * char_w;
                     let selected = self.is_cell_selected(line_idx, col_idx);
 
                     // Draw cell background: selection color takes priority
@@ -850,8 +875,8 @@ impl Widget for Terminal {
 
         // Draw cursor if focused, visible, and not scrolled back
         if self.scroll_offset == 0 && self.focused && self.cursor_visible {
-            let cursor_x = self.x + (self.cursor_col as i32) * char_w;
-            let cursor_y = self.y + (self.cursor_row as i32) * char_h;
+            let cursor_x = origin_x + (self.cursor_col as i32) * char_w;
+            let cursor_y = origin_y + (self.cursor_row as i32) * char_h;
 
             draw_rect(
                 buffer,

@@ -10,10 +10,6 @@ use edos_render::window::{Window, WindowEvent, WindowEventType};
 const TERMINAL_WIDTH: u32 = 640;
 const TERMINAL_HEIGHT: u32 = 480;
 
-/// Terminal character dimensions (cols x rows, derived from pixel size / char size)
-const TERMINAL_COLS: usize = TERMINAL_WIDTH as usize / 8; // 8px per char
-const TERMINAL_ROWS: usize = TERMINAL_HEIGHT as usize / 16; // 16px per char
-
 /// Shell path to spawn
 const SHELL_PATH: &str = "/bin/sh";
 
@@ -33,7 +29,7 @@ fn main() {
     }
 
     // Create terminal widget directly (not through WidgetContainer)
-    let mut terminal = Terminal::new(1, 0, 0, TERMINAL_COLS, TERMINAL_ROWS);
+    let mut terminal = Terminal::with_size(1, 0, 0, TERMINAL_WIDTH, TERMINAL_HEIGHT);
     terminal.set_focused(true);
 
     // Pre-render before showing window to avoid black frame
