@@ -1,70 +1,18 @@
 
-- Attaching a USB mass-storage device HANGS THE BOOT, reproduced deterministically
-  with `scripts/edos-vm start --usb-disk` (the same machine without the flag
-  reaches `[Term] FocusGained`). Enumeration is fine and the identity is correct,
-  so nothing before the first bulk read is at fault:
-    xhci: USB storage: vendor='QEMU' product='QEMU HARDDISK'
-    xhci: USB storage: 32768 blocks x 512 bytes = 16 MiB
-    usb-msc: registered /dev/usb0
-  The last line ever printed is `reading sector for gpt` (`fs/gpt.rs:248`), so
-  the `fs` kthread blocks inside `read_sectors_vec(usb0, lba 1, 1)` and never
-  reaches the `read gpt sector` line after it.
-  The fs kthread never touches the device itself: `UsbBlockDevice::submit_read`
-  (`drivers/usb/block_dev.rs:59`) hands the request to `USB_BLOCK_MAILBOX`,
-  wakes the xHCI thread, and blocks in `Response::wait`. Only the xHCI thread
-  ever calls `bot_transfer`, and that call is already bounded — `bulk_transfer`
-  (`drivers/usb/xhci/mod.rs:1029`) polls at most 10M times and then returns
-  `CommandTimeout` — so a deadline in `bot_transfer` is NOT the fix and would
-  not have unwedged this boot. The stall is in the mailbox round trip: either
-  the request is never picked up or the reply is never posted.
-  What the boot log rules in and out, in order:
-    - the xHCI thread reached the main loop (`xhci: initial enumeration
-      complete`, run_log line 121) and printed nothing afterwards, so it is
-      parked in the `thread_park_while` at `xhci/mod.rs:1469` and never
-      re-entered the mailbox drain at `:1618`.
-    - the park predicate re-checks `!mb.is_empty()` under `try_lock`, and a
-      contended lock reads as non-empty, so a lost wake from the predicate
-      racing `Mailbox::send` is ruled out. What is left is the wake itself:
-      `send_and_wait` calls `sched().wake_thread(XHCI_DRIVER_THREAD_ID, ...)`,
-      and the thread is idle with no HID traffic in a headless guest, so that
-      wake is the *only* thing that can run it. If it lands while the thread is
-      mid-transition into the park, nothing else ever arrives to retry it.
-    - the `<cpu-1:kernel>` tag on every xHCI line says NOTHING about which
-      thread ran them: the whole driver logs with `println!`, and
-      `serial::_serial_print` (`serial.rs:45`) hardcodes that prefix. Only
-      `log!` consults `current_thread()`. So the xHCI thread's identity is
-      still unobserved, and there is no evidence it is the wrong thread.
-    - the waiter is a real kthread and not a self-deadlock: the hanging
-      `reading sector for gpt` is tagged `<cpu-2:fs:k:14>` (run_log line 241),
-      from `log!`, so the fs kthread — not the xHCI thread — is the one
-      blocked in `Response::wait`. The gpt scan on the previous device
-      (lines 231-232) completed on that same thread.
-    - the wake is not a silent no-op either: `drivers::init` calls
-      `usb::init()` (`drivers/mod.rs:95`), which `call_once`s
-      `XHCI_DRIVER_THREAD_ID` before any filesystem is mounted, so
-      `send_and_wait`'s `if let Some(handle)` is taken.
-  MECHANISM, measured with `log!` on both sides of the mailbox
-  (`logs/iter32-usbdisk-run_log.txt`): THE WAKE IS NOT LOST. It is delivered
-  (`usb-msc: wake_thread -> true` at t=1.687) to a thread that has not reached
-  its event loop yet — the xHCI thread's FIRST EVER `loop wake` prints at
-  t=21.71, 20.8s after `xhci: initial enumeration complete` (t=0.89), and only
-  once the fs kthread's second 10s timeout has expired. So the driver thread is
-  blocked *between* enumeration and the loop, not parked inside it, and the two
-  threads deadlock until the timeout breaks it.
-  The only blocking call in that span is `crate::fs::api::register_partition`
-  (`xhci/mod.rs:1397`), which the xHCI driver thread runs inline — a filesystem
-  operation on the one thread that must stay free to answer block requests.
-  The fs kthread's partition scan of `/dev/usb0` then waits on a mailbox reply
-  that only that thread can post.
-  FIX: post the registration to a kthread (the `fs::evict::post_evict` shape)
-  so `xhci_driver_main` falls straight into its loop; the comment above that
-  block already claims the work is "deferred", and it is not. Confirm first
-  with one `log!` immediately after `register_partition` returns — if it prints
-  at ~21.7 the diagnosis is exact.
-  The fs side no longer waits forever: `send_and_wait` uses
-  `Response::wait_timeout(10s)` and fails the read with `BlockError::Timeout`,
-  so the symptom is now a logged `usb-msc: block request timed out` and a GPT
-  scan that falls back to MBR, rather than a wedged boot.
+- FIXED: attaching a USB mass-storage device hung the boot.
+  `xhci_driver_main` called `crate::fs::api::register_partition` inline, between
+  `xhci: initial enumeration complete` and the mailbox drain in its event loop.
+  Registration makes the fs kthread scan the new device for a partition table,
+  and `UsbBlockDevice::submit_read` posts those reads to `USB_BLOCK_MAILBOX` --
+  which only the xHCI thread drains. The two threads deadlocked: measured with
+  `log!` on both sides, the wake was delivered at t=1.687 to a thread whose
+  first loop iteration was at t=21.71, i.e. only after the fs kthread's second
+  10s timeout expired. Fix: registration is posted to a `usb-register` kthread
+  so `xhci_driver_main` falls straight into its loop. Verified with
+  `scripts/edos-vm start --usb-disk`: `fs: registered partition: USB Storage 0`
+  at t=1.691 and `[Terminal] Spawned shell`.
+  The fs side is also no longer unbounded: `send_and_wait` uses
+  `Response::wait_timeout(10s)` and fails the read with `BlockError::Timeout`.
 
 - The AHCI ATAPI commands read a fixed number of bytes out of a pooled DMA
   buffer without asking how many arrived, the same defect fixed in 7591982

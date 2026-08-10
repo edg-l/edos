@@ -6,7 +6,7 @@ pub mod rings;
 
 use core::time::Duration;
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use spin::Once;
 
 use x86_64::structures::paging::{PageTableFlags, mapper::MapToError};
@@ -23,7 +23,11 @@ use crate::{
     interrupts::InterruptIndex,
     memory::{get_virt_addr_from_phys_offset, mapper::memory_mapper},
     println,
-    thread::{mailbox::Mailbox, scheduler::sched},
+    thread::{
+        mailbox::Mailbox,
+        scheduler::sched,
+        util::{kthread_exit, queue_spawn_kthread_named_arg},
+    },
 };
 
 use self::{
@@ -1074,6 +1078,17 @@ impl XhciController {
     }
 }
 
+/// Hand a freshly enumerated USB mass-storage partition to the filesystem.
+/// Runs off the xHCI driver thread because registration triggers block reads
+/// that only that thread can answer.
+extern "C" fn usb_register_partition_thread(arg: *mut u8) -> ! {
+    let partition: Box<crate::fs::gpt::Partition> = unsafe { Box::from_raw(arg.cast()) };
+    if let Err(e) = crate::fs::api::register_partition(*partition) {
+        println!("xhci: failed to register USB partition: {:?}", e);
+    }
+    kthread_exit(0)
+}
+
 /// Main xHCI driver entry point, run as a kernel thread.
 pub extern "C" fn xhci_driver_main() -> ! {
     let mut controller = match XhciController::find_and_init() {
@@ -1376,15 +1391,17 @@ pub extern "C" fn xhci_driver_main() -> ! {
 
     println!("xhci: initial enumeration complete");
 
-    // Register USB partition now that all ports are scanned (deferred to avoid
-    // blocking the xHCI thread during port enumeration).
+    // Register the USB partition from a separate kthread. Registration makes
+    // the fs kthread scan the device for a partition table, and those reads are
+    // answered by this thread's mailbox drain below -- doing it inline would
+    // block the only thread that can complete them.
     if let Some((block_count, idx)) = pending_usb_partition {
         let device_id = 1000 + idx as u64;
         // Register this USB mass-storage device with the kernel-wide block-io
         // registry so fs/* can submit reads/writes via the AsyncBlockDevice
         // trait without knowing about the underlying mailbox transport.
         crate::drivers::usb::block_dev::register(device_id, block_count);
-        let partition = crate::fs::gpt::Partition {
+        let partition = Box::new(crate::fs::gpt::Partition {
             index: 0,
             starting_lba: 0,
             ending_lba: block_count.saturating_sub(1),
@@ -1394,10 +1411,12 @@ pub extern "C" fn xhci_driver_main() -> ! {
             filesystem: Some(crate::fs::gpt::FilesystemType::Fat32),
             device_id,
             unique_partition_guid: [0; 16],
-        };
-        if let Err(e) = crate::fs::api::register_partition(partition) {
-            println!("xhci: failed to register USB partition: {:?}", e);
-        }
+        });
+        queue_spawn_kthread_named_arg(
+            "usb-register",
+            usb_register_partition_thread as *const () as u64,
+            Box::into_raw(partition) as *mut u8,
+        );
     }
 
     // Allocate DMA buffers for HID reports and pre-fill the interrupt rings.
