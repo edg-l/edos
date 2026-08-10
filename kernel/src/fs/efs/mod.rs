@@ -2301,8 +2301,19 @@ impl EfsDriver {
         let inode = &self.read_inode(ino)?;
         let current_size = inode.size;
         if size >= current_size {
-            // Growing: just update size (sparse).
-            let mut updated = *inode;
+            // Growing: the file stays sparse, but an inline inode must leave
+            // inline mode first. Invariant: inline-mode inodes have
+            // `size <= INODE_DATA_AREA_SIZE`, and `read_file_data` slices
+            // `data_area` on the strength of it.
+            let base = if inode.flags & INODE_FLAG_INLINE_DATA != 0
+                && size > INODE_DATA_AREA_SIZE as u64
+            {
+                self.convert_inline_to_extents(ino, inode, tx)?;
+                self.read_inode(ino)?
+            } else {
+                *inode
+            };
+            let mut updated = base;
             updated.size = size;
             updated.mtime_sec = current_unix_time();
             updated.checksum = checksum_inode(&updated);
