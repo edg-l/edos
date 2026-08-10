@@ -63,6 +63,11 @@ pub enum WidgetEvent {
 }
 
 /// Trait that all widgets must implement.
+///
+/// `WidgetContainer` wraps every widget to assign it an id, and that wrapper
+/// forwards each method by hand. A method added here with a default body is
+/// inherited by the wrapper and never reaches the real widget, so add the
+/// forwarding there in the same change.
 pub trait Widget {
     /// Get the widget's unique identifier.
     fn id(&self) -> WidgetId;
@@ -93,6 +98,19 @@ pub trait Widget {
 
     /// Set the focused state of this widget.
     fn set_focused(&mut self, focused: bool);
+
+    /// Whether this widget currently accepts input.
+    ///
+    /// A disabled control stays on screen and stays legible: hiding it instead
+    /// makes the layout jump and leaves the user with no idea the action
+    /// exists. Widgets that cannot be disabled report `true` and ignore
+    /// `set_enabled`.
+    fn enabled(&self) -> bool {
+        true
+    }
+
+    /// Enable or disable the widget.
+    fn set_enabled(&mut self, _enabled: bool) {}
 }
 
 /// Color constants for widget rendering. Values are read from `Theme::DEFAULT`.
@@ -118,6 +136,12 @@ pub mod colors {
     pub const INPUT_BORDER: u32 = Theme::DEFAULT.input_border.raw();
     /// Border of a hovered or pressed control.
     pub const BORDER_HOVER: u32 = Theme::DEFAULT.border_hover.raw();
+    /// Fill of a control that is present but cannot be used.
+    pub const CONTROL_DISABLED: u32 = Theme::DEFAULT.control_disabled.raw();
+    /// Label of a control that is present but cannot be used.
+    pub const TEXT_DISABLED: u32 = Theme::DEFAULT.text_disabled.raw();
+    /// Text that names or explains a control rather than being one.
+    pub const LABEL_TEXT: u32 = Theme::DEFAULT.label_text.raw();
     /// Slider track color.
     pub const SLIDER_TRACK: u32 = Theme::DEFAULT.slider_track.raw();
     /// Slider thumb color.

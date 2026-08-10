@@ -10,6 +10,7 @@ pub struct HBoxLayout {
     bounds: Rect,
     padding: Insets,
     spacing: u32,
+    uniform_columns: bool,
 }
 
 impl HBoxLayout {
@@ -20,6 +21,7 @@ impl HBoxLayout {
             bounds: Rect::new(0, 0, 0, 0),
             padding: Insets::default(),
             spacing: 0,
+            uniform_columns: false,
         }
     }
 
@@ -42,6 +44,15 @@ impl HBoxLayout {
     /// Get the current padding.
     pub fn padding(&self) -> Insets {
         self.padding
+    }
+
+    /// Give every content-sized item the width of the widest one.
+    ///
+    /// Controls that each size to their own label put the next column at a
+    /// different x on every row, which reads as a broken grid. Items with an
+    /// explicit width keep it, so a fixed label column still leads the row.
+    pub fn set_uniform_columns(&mut self, uniform: bool) {
+        self.uniform_columns = uniform;
     }
 
     /// Set the spacing between items.
@@ -126,6 +137,22 @@ impl HBoxLayout {
             total_expand_weight += weight;
             if weight == 0.0 {
                 total_fixed_width += width_with_margin;
+            }
+        }
+
+        if self.uniform_columns {
+            let widest = preferred_widths
+                .iter()
+                .zip(&self.items)
+                .filter(|(_, item)| matches!(item.width_policy, SizePolicy::Preferred))
+                .map(|(w, _)| *w)
+                .max()
+                .unwrap_or(0);
+            for (width, item) in preferred_widths.iter_mut().zip(&self.items) {
+                if matches!(item.width_policy, SizePolicy::Preferred) {
+                    total_fixed_width = total_fixed_width - *width + widest;
+                    *width = widest;
+                }
             }
         }
 

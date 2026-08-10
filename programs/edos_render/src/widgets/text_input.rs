@@ -21,6 +21,7 @@ pub struct TextInput {
     /// boundary assertion. Byte offsets are derived at the point of use.
     cursor_pos: usize,
     focused: bool,
+    enabled: bool,
     placeholder: String,
     cursor_visible: bool,
     cursor_blink_counter: u32,
@@ -46,6 +47,7 @@ impl TextInput {
             text: String::new(),
             cursor_pos: 0,
             focused: false,
+            enabled: true,
             placeholder: String::new(),
             cursor_visible: true,
             cursor_blink_counter: 0,
@@ -62,6 +64,7 @@ impl TextInput {
             text: String::new(),
             cursor_pos: 0,
             focused: false,
+            enabled: true,
             placeholder: placeholder.to_string(),
             cursor_visible: true,
             cursor_blink_counter: 0,
@@ -200,7 +203,9 @@ impl Widget for TextInput {
         }
 
         // Draw border
-        let border_color = if self.focused {
+        let border_color = if !self.enabled {
+            colors::CONTROL_DISABLED
+        } else if self.focused {
             colors::FOCUS_RING
         } else {
             colors::INPUT_BORDER
@@ -238,7 +243,11 @@ impl Widget for TextInput {
                 text_x,
                 text_y,
                 &self.text,
-                colors::TEXT,
+                if self.enabled {
+                    colors::TEXT
+                } else {
+                    colors::TEXT_DISABLED
+                },
             );
         }
 
@@ -263,6 +272,9 @@ impl Widget for TextInput {
     }
 
     fn on_mouse_button(&mut self, x: i32, y: i32, pressed: bool) -> Option<WidgetEvent> {
+        if !self.enabled {
+            return None;
+        }
         if !pressed && self.bounds().contains(x, y) {
             // Click to position cursor
             let text_x = self.x + TEXT_PAD_X as i32;
@@ -275,6 +287,9 @@ impl Widget for TextInput {
     }
 
     fn on_char(&mut self, ch: char) -> Option<WidgetEvent> {
+        if !self.enabled {
+            return None;
+        }
         if !self.focused {
             return None;
         }
@@ -297,6 +312,9 @@ impl Widget for TextInput {
     }
 
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent> {
+        if !self.enabled {
+            return None;
+        }
         if !self.focused || !pressed {
             return None;
         }
@@ -334,7 +352,20 @@ impl Widget for TextInput {
     }
 
     fn focusable(&self) -> bool {
-        true
+        // A disabled control is skipped by Tab: focusing something that cannot
+        // act is a dead end the user has to Tab out of again.
+        self.enabled
+    }
+
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.focused = false;
+        }
     }
 
     fn set_focused(&mut self, focused: bool) {

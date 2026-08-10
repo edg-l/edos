@@ -17,6 +17,7 @@ pub struct Button {
     hovered: bool,
     pressed: bool,
     focused: bool,
+    enabled: bool,
 }
 
 impl Button {
@@ -34,6 +35,7 @@ impl Button {
             hovered: false,
             pressed: false,
             focused: false,
+            enabled: true,
         }
     }
 
@@ -49,6 +51,7 @@ impl Button {
             hovered: false,
             pressed: false,
             focused: false,
+            enabled: true,
         }
     }
 
@@ -79,6 +82,40 @@ impl Widget for Button {
 
     fn draw(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
         // Choose background color based on state
+        if !self.enabled {
+            draw_rect(
+                buffer,
+                buffer_width,
+                buffer_height,
+                self.x,
+                self.y,
+                self.width,
+                self.height,
+                colors::CONTROL_DISABLED,
+            );
+            draw_rect_outline(
+                buffer,
+                buffer_width,
+                buffer_height,
+                self.x,
+                self.y,
+                self.width,
+                self.height,
+                colors::CONTROL_DISABLED,
+            );
+            let label_w = text_width(&self.label);
+            draw_text(
+                buffer,
+                buffer_width,
+                buffer_height,
+                self.x + (self.width as i32 - label_w as i32) / 2,
+                self.y + (self.height as i32 - text_height() as i32) / 2,
+                &self.label,
+                colors::TEXT_DISABLED,
+            );
+            return;
+        }
+
         let bg_color = if self.pressed {
             colors::BUTTON_PRESSED
         } else if self.hovered {
@@ -146,6 +183,9 @@ impl Widget for Button {
     }
 
     fn on_mouse_move(&mut self, x: i32, y: i32) {
+        if !self.enabled {
+            return;
+        }
         self.hovered = self.bounds().contains(x, y);
         // Release press if mouse moves outside while pressed
         if !self.hovered {
@@ -154,6 +194,9 @@ impl Widget for Button {
     }
 
     fn on_mouse_button(&mut self, x: i32, y: i32, pressed: bool) -> Option<WidgetEvent> {
+        if !self.enabled {
+            return None;
+        }
         let inside = self.bounds().contains(x, y);
 
         if pressed && inside {
@@ -174,7 +217,7 @@ impl Widget for Button {
 
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent> {
         // Space or Enter activates the button when focused
-        if self.focused && pressed && (scancode == 28 || scancode == 57) {
+        if self.enabled && self.focused && pressed && (scancode == 28 || scancode == 57) {
             // 28 = Enter, 57 = Space
             Some(WidgetEvent::Clicked)
         } else {
@@ -183,10 +226,25 @@ impl Widget for Button {
     }
 
     fn focusable(&self) -> bool {
-        true
+        // A disabled control is skipped by Tab: focusing something that cannot
+        // act is a dead end the user has to Tab out of again.
+        self.enabled
     }
 
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
+    }
+
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.hovered = false;
+            self.pressed = false;
+            self.focused = false;
+        }
     }
 }

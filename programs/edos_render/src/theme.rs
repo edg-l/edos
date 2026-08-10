@@ -56,6 +56,10 @@ pub struct Theme {
     pub text_primary: Color,
     pub text_placeholder: Color,
     pub focus_ring: Color,
+    /// Fill of a control that is present but cannot be used.
+    pub control_disabled: Color,
+    /// Label of a control that is present but cannot be used.
+    pub text_disabled: Color,
     pub checkbox_check: Color,
     pub slider_track: Color,
     pub slider_thumb: Color,
@@ -117,6 +121,11 @@ impl Theme {
         text_primary: Color::from_rgb(0xCB, 0xCC, 0xC6), // Ayu fg
         text_placeholder: Color::from_rgb(0x5C, 0x63, 0x70),
         focus_ring: Color::from_rgb(0xE6, 0xB4, 0x50), // Ayu orange, the one accent
+        // A disabled control stays legible and stops inviting the pointer: the
+        // fill recedes toward the panel and the label loses contrast, so it
+        // reads as present-but-inert rather than as missing.
+        control_disabled: Color::from_rgb(0x16, 0x1B, 0x22),
+        text_disabled: Color::from_rgb(0x4B, 0x53, 0x5E),
         checkbox_check: Color::from_rgb(0x39, 0xBA, 0xE6),
         slider_track: Color::from_rgb(0x1A, 0x1F, 0x29),
         slider_thumb: Color::from_rgb(0x39, 0xBA, 0xE6),

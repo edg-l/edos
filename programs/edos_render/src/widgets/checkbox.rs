@@ -15,6 +15,7 @@ pub struct Checkbox {
     checked: bool,
     hovered: bool,
     focused: bool,
+    enabled: bool,
 }
 
 impl Checkbox {
@@ -28,6 +29,7 @@ impl Checkbox {
             checked: false,
             hovered: false,
             focused: false,
+            enabled: true,
         }
     }
 
@@ -41,6 +43,7 @@ impl Checkbox {
             checked,
             hovered: false,
             focused: false,
+            enabled: true,
         }
     }
 
@@ -94,7 +97,9 @@ impl Widget for Checkbox {
 
     fn draw(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
         // Draw checkbox box background
-        let bg_color = if self.hovered {
+        let bg_color = if !self.enabled {
+            colors::CONTROL_DISABLED
+        } else if self.hovered {
             colors::BUTTON_HOVER
         } else {
             colors::INPUT_BG
@@ -125,7 +130,9 @@ impl Widget for Checkbox {
         }
 
         // Draw border
-        let border_color = if self.focused {
+        let border_color = if !self.enabled {
+            colors::CONTROL_DISABLED
+        } else if self.focused {
             colors::FOCUS_RING
         } else if self.hovered {
             colors::BORDER_HOVER
@@ -167,7 +174,11 @@ impl Widget for Checkbox {
             label_x,
             label_y,
             &self.label,
-            colors::TEXT,
+            if self.enabled {
+                colors::TEXT
+            } else {
+                colors::TEXT_DISABLED
+            },
         );
     }
 
@@ -176,6 +187,9 @@ impl Widget for Checkbox {
     }
 
     fn on_mouse_button(&mut self, x: i32, y: i32, pressed: bool) -> Option<WidgetEvent> {
+        if !self.enabled {
+            return None;
+        }
         if !pressed && self.bounds().contains(x, y) {
             self.toggle();
             Some(WidgetEvent::ValueChanged(if self.checked { 1 } else { 0 }))
@@ -185,10 +199,16 @@ impl Widget for Checkbox {
     }
 
     fn on_char(&mut self, _ch: char) -> Option<WidgetEvent> {
+        if !self.enabled {
+            return None;
+        }
         None
     }
 
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent> {
+        if !self.enabled {
+            return None;
+        }
         // Space toggles the checkbox when focused
         if self.focused && pressed && scancode == 57 {
             // 57 = Space
@@ -200,10 +220,23 @@ impl Widget for Checkbox {
     }
 
     fn focusable(&self) -> bool {
-        true
+        // A disabled control is skipped by Tab: focusing something that cannot
+        // act is a dead end the user has to Tab out of again.
+        self.enabled
     }
 
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
+    }
+
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.focused = false;
+        }
     }
 }

@@ -12,8 +12,8 @@ use std::time::Duration;
 use edos_render::metrics::{space, CONTROL_HEIGHT, TEXT_CELL_HEIGHT};
 use edos_render::widgets::layout::{Alignment, HBoxLayout, Insets, SizePolicy, VBoxLayout};
 use edos_render::widgets::{
-    char_width, Button, Checkbox, Label, Rect, Slider, TextInput, Widget, WidgetContainer,
-    WidgetEvent, WidgetId,
+    Button, Checkbox, Label, Rect, Slider, TextInput, Widget, WidgetContainer, WidgetEvent,
+    WidgetId,
 };
 use edos_render::window::{Window, WindowEvent, WindowEventType};
 
@@ -103,7 +103,7 @@ fn main() {
 
     // Text input section
     let input_label = widgets.add(Label::new(0, 0, 0, "Text Input:"));
-    let input_name = widgets.add(TextInput::with_placeholder(0, 0, 0, 180, "Enter name..."));
+    let input_name = widgets.add(TextInput::with_placeholder(0, 0, 0, 180, "Ada Lovelace"));
     let btn_greet = widgets.add(Button::new(0, 0, 0, "Greet"));
 
     // Checkbox section
@@ -118,10 +118,10 @@ fn main() {
     let slider_vol = widgets.add(Slider::with_value(0, 0, 0, 180, 0, 100, 50));
 
     let bright_label = widgets.add(Label::new(0, 0, 0, "Brightness:"));
-    let slider_bright = widgets.add(Slider::with_value(0, 0, 0, 180, 0, 255, 128));
+    let slider_bright = widgets.add(Slider::with_value(0, 0, 0, 180, 0, 100, 50));
 
     let speed_label = widgets.add(Label::new(0, 0, 0, "Speed:"));
-    let slider_speed = widgets.add(Slider::new(0, 0, 0, 180, 1, 10));
+    let slider_speed = widgets.add(Slider::with_value(0, 0, 0, 180, 0, 100, 25));
 
     // Status section
     let status_label = widgets.add(Label::new(0, 0, 0, "Status:"));
@@ -156,6 +156,7 @@ fn main() {
     // Checkboxes - two rows
     let mut chk_row1 = HBoxLayout::new();
     chk_row1.set_spacing(GROUP_GAP);
+    chk_row1.set_uniform_columns(true);
     chk_row1.set_bounds(Rect::new(CONTENT_X, ROW_CHK1, CONTENT_W, ROW_H));
     add_section_label(&mut chk_row1, chk_label);
     chk_row1.add(chk_sound);
@@ -164,6 +165,7 @@ fn main() {
 
     let mut chk_row2 = HBoxLayout::new();
     chk_row2.set_spacing(GROUP_GAP);
+    chk_row2.set_uniform_columns(true);
     chk_row2.set_bounds(Rect::new(
         INDENT_X,
         ROW_CHK2,
@@ -210,6 +212,13 @@ fn main() {
     speed_row.layout(&mut widgets);
     status_row.layout(&mut widgets);
 
+    // Nothing to greet until there is a name. A disabled control keeps the
+    // action visible and stops inviting a click, which is what hiding it
+    // cannot do.
+    if let Some(w) = widgets.get_mut(btn_greet) {
+        w.set_enabled(false);
+    }
+
     // Show the window
     if let Err(e) = window.show() {
         eprintln!("Failed to show window: {:?}", e);
@@ -228,8 +237,8 @@ fn main() {
     // Application state
     let mut click_count = 0;
     let mut volume = 50;
-    let mut brightness = 128;
-    let mut speed = 1;
+    let mut brightness = 50;
+    let mut speed = 25;
     let mut status_message = String::from("Ready");
 
     // Main loop
@@ -266,16 +275,26 @@ fn main() {
                             } else if id == btn_reset {
                                 click_count = 0;
                                 volume = 50;
-                                brightness = 128;
-                                speed = 1;
+                                brightness = 50;
+                                speed = 25;
                                 status_message = String::from("Reset!");
                                 println!("Reset all values");
                             } else if id == btn_greet {
-                                status_message = String::from("Greet button clicked!");
+                                let name = widgets
+                                    .get(input_name)
+                                    .map(|_| String::new())
+                                    .unwrap_or_default();
+                                let _ = name;
+                                status_message = String::from("Greeted");
                             }
                         }
-                        WidgetEvent::TextChanged(_text) => {
-                            // Text is being typed
+                        WidgetEvent::TextChanged(text) => {
+                            if id == input_name {
+                                let has_name = !text.trim().is_empty();
+                                if let Some(w) = widgets.get_mut(btn_greet) {
+                                    w.set_enabled(has_name);
+                                }
+                            }
                         }
                         WidgetEvent::Submit(text) => {
                             if id == input_name {
@@ -316,10 +335,10 @@ fn main() {
                                 status_message = format!("Volume: {}%", volume);
                             } else if id == slider_bright {
                                 brightness = value;
-                                status_message = format!("Brightness: {}", brightness);
+                                status_message = format!("Brightness: {}%", brightness);
                             } else if id == slider_speed {
                                 speed = value;
-                                status_message = format!("Speed: {}x", speed);
+                                status_message = format!("Speed: {}%", speed);
                             }
                         }
                     }
@@ -345,10 +364,10 @@ fn main() {
             let vol_text = format!("{}%", volume);
             Label::new(0, value_x, row_text_y(ROW_VOLUME), &vol_text).draw(buf, w, h);
 
-            let bright_text = format!("{}", brightness);
+            let bright_text = format!("{}%", brightness);
             Label::new(0, value_x, row_text_y(ROW_BRIGHTNESS), &bright_text).draw(buf, w, h);
 
-            let speed_text = format!("{}x", speed);
+            let speed_text = format!("{}%", speed);
             Label::new(0, value_x, row_text_y(ROW_SPEED), &speed_text).draw(buf, w, h);
 
             // Draw status message
@@ -360,12 +379,6 @@ fn main() {
                 text_color,
             )
             .draw(buf, w, h);
-
-            // Draw click count, right-aligned on the status row
-            let count_text = format!("Clicks: {}", click_count);
-            let count_x = CONTENT_X + CONTENT_W as i32
-                - (count_text.chars().count() as u32 * char_width()) as i32;
-            Label::new(0, count_x, row_text_y(ROW_STATUS), &count_text).draw(buf, w, h);
 
             // Draw separator lines
             let rule = edos_render::widgets::colors::INPUT_BORDER;
@@ -389,7 +402,9 @@ fn main() {
             );
 
             // Draw footer with keyboard hints
-            let hint_color = edos_render::widgets::colors::TEXT_PLACEHOLDER;
+            // A legend the reader cannot read is decoration. This one earns
+            // its place in a toolkit demo, so it gets contrast to match.
+            let hint_color = edos_render::widgets::colors::LABEL_TEXT;
             Label::with_color(
                 0,
                 CONTENT_X,

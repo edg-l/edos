@@ -20,6 +20,7 @@ pub struct Slider {
     dragging: bool,
     hovered: bool,
     focused: bool,
+    enabled: bool,
 }
 
 impl Slider {
@@ -36,6 +37,7 @@ impl Slider {
             dragging: false,
             hovered: false,
             focused: false,
+            enabled: true,
         }
     }
 
@@ -61,6 +63,7 @@ impl Slider {
             dragging: false,
             hovered: false,
             focused: false,
+            enabled: true,
         }
     }
 
@@ -182,7 +185,9 @@ impl Widget for Slider {
         }
 
         // Draw thumb
-        let thumb_color = if self.dragging || self.hovered {
+        let thumb_color = if !self.enabled {
+            colors::TEXT_DISABLED
+        } else if self.dragging || self.hovered {
             Theme::DEFAULT.slider_thumb_hover.raw()
         } else {
             Theme::DEFAULT.slider_thumb.raw()
@@ -219,6 +224,9 @@ impl Widget for Slider {
     }
 
     fn on_mouse_button(&mut self, x: i32, y: i32, pressed: bool) -> Option<WidgetEvent> {
+        if !self.enabled {
+            return None;
+        }
         if pressed {
             if self.bounds().contains(x, y) {
                 self.dragging = true;
@@ -240,10 +248,16 @@ impl Widget for Slider {
     }
 
     fn on_char(&mut self, _ch: char) -> Option<WidgetEvent> {
+        if !self.enabled {
+            return None;
+        }
         None
     }
 
     fn on_key(&mut self, scancode: u32, pressed: bool) -> Option<WidgetEvent> {
+        if !self.enabled {
+            return None;
+        }
         if !self.focused || !pressed {
             return None;
         }
@@ -288,10 +302,23 @@ impl Widget for Slider {
     }
 
     fn focusable(&self) -> bool {
-        true
+        // A disabled control is skipped by Tab: focusing something that cannot
+        // act is a dead end the user has to Tab out of again.
+        self.enabled
     }
 
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
+    }
+
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.focused = false;
+        }
     }
 }

@@ -348,4 +348,12 @@ impl Widget for WidgetWrapper {
     fn set_focused(&mut self, focused: bool) {
         self.inner.set_focused(focused);
     }
+
+    fn enabled(&self) -> bool {
+        self.inner.enabled()
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        self.inner.set_enabled(enabled);
+    }
 }
