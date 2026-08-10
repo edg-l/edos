@@ -1598,6 +1598,34 @@ last block in the log is current. The menu does: it exists only while open, so
 `launch` notes where the log ends before clicking the launcher and only reads
 what lands after that.
 
+## procfs answers for per-process memory
+
+Writing a graphical process viewer turned up the gap: nothing anywhere said how
+much memory a process was using. The closest was the VMA *count*, which says
+how many mappings exist and nothing about their size.
+
+`/proc/processes` has an RSS column now and `/proc/<tid>/status` a `VM Size` and
+a `Resident` line. Virtual size is the sum of the VMA lengths and is free.
+Resident is counted from the page tables when read, and that is the decision
+worth recording: a page enters a user address space from demand paging,
+copy-on-write, `mmap`, shared memory and the loader, and leaves it from a dozen
+`unmap` sites, so a counter maintained at each of them drifts the first time one
+is missed — and a memory number that is quietly wrong is worse than no memory
+number. The walk descends only into *present* entries, so the lazily faulted
+mappings this kernel leans on cost one skipped entry rather than a probe per
+page; probing each page of each VMA instead would have been O(virtual size),
+which for a sparsely faulted mapping is most of the work for none of the answer.
+
+The lock order is `vmas` (70) then `memory_manager` (80), in that order, and
+holding the manager across the walk is also what stops the address space being
+torn down under it.
+
+A first reading, `/bin/edos-wm`: 471 VMAs, 51100 KiB of address space, 42660 KiB
+resident. `/bin/sh` 208 KiB and `/bin/ps` 60 KiB resident against ~300 KiB
+binaries, which is demand paging visible in a number for the first time. Kernel
+threads report `-` rather than a figure: they have no address space of their
+own, and reporting the kernel's would be a lie that adds up.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any
