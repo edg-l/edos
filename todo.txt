@@ -27,9 +27,19 @@
   The count is already available: `issue_command` zeroes the command header's
   `prdbc` before issuing (`port.rs:1026`) and the HBA writes the transferred
   byte count there on completion, so `execute_atapi_command` can read it back
-  after `wait_for_completion` and return it. Not done tonight because nothing
-  in the current QEMU setup exercises an ATAPI device, so gating those reads on
-  `prdbc` would ship an unverified behaviour change on the storage path.
+  after `wait_for_completion` and return it.
+  It IS verifiable today, and no new QEMU option is needed: the boot ISO is
+  attached with `-cdrom`, which on q35 lands on the ICH9 AHCI controller, not
+  on a legacy IDE bus — UEFI names it `PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x2,..)`
+  in `run_log.txt:2`, the same controller the guest driver claims. Port
+  discovery therefore takes the `SATA_SIG_ATAPI` arm (`controller.rs:269`) on
+  port 2 and `identify_device` dispatches to
+  `execute_atapi_inquiry_as_identify` (`port.rs:1914`) on every single boot, so
+  the defective read already runs in the default configuration. Verify a fix by
+  booting and reading the model string the ATAPI port reports in `dmesg`
+  ("QEMU DVD-ROM"); it should not change when the fix bounds the copy by
+  `prdbc`, and a truncated INQUIRY should now be rejected rather than padded
+  with the previous buffer owner's bytes.
 
 - An absolute symlink target is resolved in the wrong namespace. Root cause of
   `iotest /tmp` failing test 10 with "read through link: entity not found"
