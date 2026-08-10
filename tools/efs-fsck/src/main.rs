@@ -6,6 +6,7 @@ mod disk;
 mod exit_code;
 mod journal;
 mod layout;
+mod qcow2;
 mod repair;
 mod replay;
 mod report;

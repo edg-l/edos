@@ -15,9 +15,11 @@ See also: `doc/efs.md` for the on-disk format specification.
 efs-fsck [OPTIONS] <IMAGE>
 ```
 
-`<IMAGE>` may be a raw image file or a block device. Container formats are not
-decoded: the development disk `sata-disk.img` is qcow2 and has to be converted
-before it can be checked (see below).
+`<IMAGE>` may be a raw image file, a block device, or a qcow2 image. qcow2 is
+decoded read-only: `--repair` on one is refused, since writing it means
+allocating clusters and maintaining refcounts. A qcow2 image with a backing
+file, encryption, compressed clusters or any incompatible feature bit is
+rejected rather than half-read.
 
 ### Options
 
@@ -46,12 +48,18 @@ efs-fsck /dev/sdb1
 
 ### Checking the development disk
 
-`sata-disk.img` is qcow2, so it has to be flattened first. Its EFS partition is
-the one GPT partition `make sata-disk.img` creates, at the usual 1 MiB gap:
+`sata-disk.img` is checked in place. Its EFS partition is the one GPT partition
+`make sata-disk.img` creates, at the usual 1 MiB gap:
+
+```
+efs-fsck --partition-offset 1048576 sata-disk.img
+```
+
+Repairing it still needs a raw copy:
 
 ```
 qemu-img convert -O raw sata-disk.img /tmp/sata.raw
-efs-fsck --partition-offset 1048576 /tmp/sata.raw
+efs-fsck --repair --partition-offset 1048576 /tmp/sata.raw
 ```
 
 Stop the VM first: a check of a disk a running guest is still writing reports

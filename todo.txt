@@ -21,11 +21,14 @@
   lookup — too slow for `resolve()`; escalating only when the filesystem
   reports it hit an absolute target keeps the fast path free.
 
-- Teach `efs-fsck` to read qcow2 directly. It opens the image with a plain
-  `File`, so the development disk has to be flattened with `qemu-img convert`
-  first; `Disk::open` now says so instead of reporting "bad magic". Read-only
-  qcow2 is a header plus L1/L2 lookup, which would make the durability arm run
-  against `sata-disk.img` unmodified.
+- `efs-fsck --partition-offset 1048576 sata-disk.img` reports four orphan
+  inodes (reachable link count 0) after a boot that ran `iotest /var` and was
+  then stopped with `scripts/edos-vm stop`. Either an abrupt stop leaves inodes
+  the orphan list does not name, or one of iotest's unlink paths drops the last
+  link without marking the inode. Reproduce on a freshly formatted disk
+  (`make clean-sata && make sata-disk.img`) with one iotest run and nothing
+  else, then bisect by test number; a clean shutdown first would say which of
+  the two it is.
 
 - Intermittent segfault in fsbench's `mmap store 4MiB + msync`, recorded at
   ~1 run in 6 on 2026-08-09, NOT reproduced since: 37 suite runs across 4 and
