@@ -2092,3 +2092,44 @@ the middle.
   into a terminal that has not spawned its shell yet silently discards the
   line, and the screenshot then looks like the program did nothing. Take a shot
   and confirm the prompt is there before typing.
+
+---
+
+## `snake`, the first program with a clock nobody drives
+
+`programs/snake` completes Phase 3 of the roadmap. Everything before it either
+ran to completion or blocked on the user; this one has to redraw on a timer
+*and* answer the keyboard, and that combination has exactly one correct shape:
+each pass waits on `poll(stdin)` with whatever is left of the tick as its
+timeout. Sleeping the tick and then reading drops every key pressed during the
+sleep; reading without a timeout stops the clock.
+
+Three details are the whole game and are easy to get wrong in a way that still
+looks like it works:
+
+- **The tick deadline lives outside the input loop.** A key redraws the frame
+  so a turn looks instant, but it must not advance the snake (mashing keys
+  would speed the game up) and must not push the deadline back (holding a
+  direction down would stall it). Only the deadline passing moves the snake.
+- **A reversal is judged against the direction actually travelled**, not
+  against the last key. With one variable, pressing up-then-left inside a
+  single tick turns the snake back into its own neck; with `dir` (applied) and
+  `pending` (queued) it cannot.
+- **The tail cell is vacated before the collision test.** Moving the head into
+  the square the tail is leaving this tick is legal, and testing first reports
+  a self-collision on every straight move once the snake is longer than one.
+
+Food goes on the *n*-th free cell for a random *n* rather than on retried
+random cells: the rejection loop is slowest exactly when the board is nearly
+full, which is when the game matters. The occupancy grid that makes that cheap
+is the same one the collision test reads.
+
+### Things that will bite you
+
+- **`\x1b[?25l` and `\x1b[?25h` do nothing.** The terminal widget's CSI
+  parameter parser (`edos_render/src/widgets/terminal.rs`, `parse_csi_params`)
+  runs `parse::<usize>()` over `?25` and gets 0, and `l`/`h` are not
+  implemented finals, so the cursor stays visible in `top` and `snake`. It is
+  cosmetic, but a screenshot taken mid-frame shows the cursor parked wherever
+  the redraw had got to, which reads like a rendering bug in the program.
+  Recorded in `todo.txt`.

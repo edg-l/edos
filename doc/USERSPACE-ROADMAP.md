@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-81 programs and 2 libraries, all in the `programs/` cargo workspace.
+82 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -19,6 +19,7 @@
 | Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
 | Network | `ping`, `dns`, `http`, `wget`, `dnsprobe` |
 | Audio | `play` |
+| Games | `snake` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
 | Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest`, `sigtest`, `fstest`, `fsbench` |
 | Libraries | `edos_lib` (syscall wrappers), `edos_render` (fonts, text, icons, theme, widgets, windows) |
@@ -67,14 +68,23 @@ batch form, and a run whose stdout is not a terminal becomes batch on its own so
 `top | head` does not write cursor escapes into a pipe. The parser it shares with
 `edos-procview` lives in `edos_lib::procinfo`.
 
+**`snake`** (Phase 3). The first program here whose clock nobody drives: it has
+to redraw on a timer *and* answer the keyboard, so each frame is one `poll` on
+stdin with whatever is left of the tick as its timeout. Sleeping the tick and
+then reading would drop keys; reading without a timeout would stop the clock.
+The tick deadline is kept outside the input loop, so a keypress redraws the
+frame without moving the snake and without pushing the next move back — holding
+a direction down would otherwise stall the game. A board cell is two terminal
+columns, because a character cell is about twice as tall as it is wide. `-s`
+sets the starting tick and the speed ramp is derived from it; `-w` wraps at the
+walls instead of dying on them.
+
 Candidates beyond these phases, ranked by the kernel path each would exercise,
 are in [`PROGRAMS.md`](PROGRAMS.md).
 
 ## Phase 3: pure userspace, higher complexity
 
-| Program | Why it matters | Notes |
-|---|---|---|
-| `snake` | terminal game on a timer | good demo of poll and time APIs, raw stdin |
+Complete. Everything listed here shipped; see the Done section above.
 
 ## Phase 4: kernel-aware
 

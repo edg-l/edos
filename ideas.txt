@@ -2,6 +2,13 @@
 
 ## Done
 
+- **`snake`** - the terminal game on a timer, and the first program here whose
+  clock nobody drives: one `poll` on stdin per frame with what is left of the
+  tick as its timeout, so a key answers instantly without moving the snake or
+  pushing the next move back. Arrows or wasd/hjkl, `p` pauses, `r` replays,
+  `-s` sets the starting tick and derives the speed ramp, `-w` wraps at the
+  walls. Refuses to run without a terminal.
+
 - **`top`** - the thread table on a timer, in raw mode: live CPU share per
   thread from the growth of the kernel's monotonic `CPUms`, sortable by cpu,
   memory, total time or pid, kernel threads hideable with `u`. `-b`, `-n` and

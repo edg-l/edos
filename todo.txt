@@ -67,3 +67,9 @@
   devfs registry (`kernel/src/fs/devfs`), reads returning EOF and writes
   succeeding with the byte count. `/dev/zero` and `/dev/full` are the same
   shape and worth adding in the same change.
+
+- The terminal does not implement DECTCEM: `\x1b[?25l` / `\x1b[?25h` are
+  ignored, so `top` and `snake` cannot hide the cursor. `parse_csi_params` in
+  edos_render/src/widgets/terminal.rs drops the `?` (parse::<usize>() -> 0)
+  and `l`/`h` have no arm in execute_csi. Needs a private-parameter flag on the
+  CSI state plus the two arms.
