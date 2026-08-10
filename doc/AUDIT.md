@@ -338,10 +338,11 @@ Beyond affinity (1.2), things that look like the next real improvements:
 
 ## 5. Smells
 
-- **228 `unwrap()`/`expect()` in kernel code.** Most are genuinely infallible
-  (see below) but the density makes the real ones hard to find. Worth a pass
-  that converts the ones on I/O and parsing results, and leaves a comment on the
-  ones that are structurally impossible.
+- **204 `unwrap()`/`expect()` in kernel code.** Most are genuinely infallible
+  but the density makes the real ones hard to find. Worth a pass that converts
+  the ones on I/O and parsing results, and leaves a comment on the ones that are
+  structurally impossible. The ELF loader is done: its field reads go through
+  `le_u16`/`le_u32`/`le_u64`/`le_i64`, which bound-check.
 - **`fs/` is 15.7k lines and `drivers/` 13k**, together over half the kernel.
   Nothing wrong, but both are past the size where a module-level README pays for
   itself.
@@ -354,9 +355,13 @@ Beyond affinity (1.2), things that look like the next real improvements:
 
 Recording these so the next pass does not re-litigate them:
 
-- **ELF header `unwrap()`s** (`loader/mod.rs:232-252`) — preceded by explicit
-  length checks at `:228`, `:291`, `:439`, so the fixed-size slices cannot fail.
-  Not a bug. The *address* validation is (1.1); the parsing is fine.
+- **ELF header `unwrap()`s** — the fixed-size slices were preceded by explicit
+  length checks, so they could not fail. What the audit missed one layer down:
+  the *relocation* walk panicked the kernel outright on a reloc kind or a
+  malformed field, and any user can execute any file it can read. Both are
+  `ElfLoadError` returns now, and the loader validates `e_ident` itself rather
+  than trusting `sys_spawn`'s probe. `programs/exectest` test 6 is the
+  regression test.
 - **`PS2_LOCK` taken in IRQ context** (`drivers/mod.rs:32`) — both callers are
   interrupt handlers and x86 interrupt gates clear IF, so it cannot self-deadlock
   on one CPU; cross-CPU it is a few port reads. Correct as written and

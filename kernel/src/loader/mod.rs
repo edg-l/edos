@@ -72,6 +72,49 @@ pub enum ElfLoadError {
     /// header fields do not describe a coherent range.
     #[error("InvalidSegment")]
     InvalidSegment,
+    /// The file does not start with the ELF identification bytes.
+    #[error("NotAnElf")]
+    NotAnElf,
+    /// A relocation the loader understands, but whose fields are not coherent:
+    /// an `R_X86_64_RELATIVE` naming a symbol, a target past the 4 GiB the
+    /// reloc table addresses, or targets that no single writable `PT_LOAD`
+    /// contains.
+    #[error("InvalidRelocation")]
+    InvalidRelocation,
+    /// A relocation kind EDOS does not implement. Binaries are static-PIE, so
+    /// `SHT_REL` and the dynamic-symbol kinds never appear in a valid one.
+    #[error("UnsupportedRelocation")]
+    UnsupportedRelocation,
+}
+
+/// Read a little-endian integer out of an ELF structure.
+///
+/// Every field this loader parses is attacker-controlled: any user can spawn
+/// any file it can read, so a truncated or crafted header must produce an
+/// error rather than an out-of-bounds slice. Each returns `None` when the
+/// field does not lie wholly within `bytes`.
+fn le_u16(bytes: &[u8], off: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        bytes.get(off..off + 2)?.try_into().ok()?,
+    ))
+}
+
+fn le_u32(bytes: &[u8], off: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        bytes.get(off..off + 4)?.try_into().ok()?,
+    ))
+}
+
+fn le_u64(bytes: &[u8], off: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(
+        bytes.get(off..off + 8)?.try_into().ok()?,
+    ))
+}
+
+fn le_i64(bytes: &[u8], off: usize) -> Option<i64> {
+    Some(i64::from_le_bytes(
+        bytes.get(off..off + 8)?.try_into().ok()?,
+    ))
 }
 
 /// Allocate a private frame, copy one page from the inode page cache into it,
@@ -215,6 +258,11 @@ pub fn load_elf(
     const E_SHENTSIZE_OFF: usize = 0x3A;
     const E_SHNUM_OFF: usize = 0x3C;
 
+    const EI_CLASS: usize = 4;
+    const EI_DATA: usize = 5;
+    const ELFCLASS64: u8 = 2;
+    const ELFDATA2LSB: u8 = 1;
+
     const EM_X86_64: u16 = 62;
     const ET_EXEC: u16 = 2;
     const ET_DYN: u16 = 3;
@@ -229,31 +277,28 @@ pub fn load_elf(
     const SHDR_SIZE: usize = 64;
 
     let ehdr_bytes = read_file_range(path, 0, 64)?;
-    if ehdr_bytes.len() < 64 {
-        return Err(ElfLoadError::MissingSegments);
+    let short = || ElfLoadError::MissingSegments;
+
+    // e_ident: magic, then EI_CLASS=ELFCLASS64 and EI_DATA=ELFDATA2LSB. Without
+    // this every field below is read out of whatever the file happens to hold.
+    if ehdr_bytes.get(0..4) != Some(&[0x7f, b'E', b'L', b'F']) {
+        return Err(ElfLoadError::NotAnElf);
+    }
+    if ehdr_bytes.get(EI_CLASS) != Some(&ELFCLASS64)
+        || ehdr_bytes.get(EI_DATA) != Some(&ELFDATA2LSB)
+    {
+        return Err(ElfLoadError::UnsupportedArchitecture);
     }
 
-    let e_type = u16::from_le_bytes(ehdr_bytes[E_TYPE_OFF..E_TYPE_OFF + 2].try_into().unwrap());
-    let e_machine = u16::from_le_bytes(
-        ehdr_bytes[E_MACHINE_OFF..E_MACHINE_OFF + 2]
-            .try_into()
-            .unwrap(),
-    );
-    let e_entry = u64::from_le_bytes(ehdr_bytes[E_ENTRY_OFF..E_ENTRY_OFF + 8].try_into().unwrap());
-    let e_phoff = u64::from_le_bytes(ehdr_bytes[E_PHOFF_OFF..E_PHOFF_OFF + 8].try_into().unwrap());
-    let e_shoff = u64::from_le_bytes(ehdr_bytes[E_SHOFF_OFF..E_SHOFF_OFF + 8].try_into().unwrap());
-    let e_phentsize = u16::from_le_bytes(
-        ehdr_bytes[E_PHENTSIZE_OFF..E_PHENTSIZE_OFF + 2]
-            .try_into()
-            .unwrap(),
-    );
-    let e_phnum = u16::from_le_bytes(ehdr_bytes[E_PHNUM_OFF..E_PHNUM_OFF + 2].try_into().unwrap());
-    let e_shentsize = u16::from_le_bytes(
-        ehdr_bytes[E_SHENTSIZE_OFF..E_SHENTSIZE_OFF + 2]
-            .try_into()
-            .unwrap(),
-    );
-    let e_shnum = u16::from_le_bytes(ehdr_bytes[E_SHNUM_OFF..E_SHNUM_OFF + 2].try_into().unwrap());
+    let e_type = le_u16(&ehdr_bytes, E_TYPE_OFF).ok_or_else(short)?;
+    let e_machine = le_u16(&ehdr_bytes, E_MACHINE_OFF).ok_or_else(short)?;
+    let e_entry = le_u64(&ehdr_bytes, E_ENTRY_OFF).ok_or_else(short)?;
+    let e_phoff = le_u64(&ehdr_bytes, E_PHOFF_OFF).ok_or_else(short)?;
+    let e_shoff = le_u64(&ehdr_bytes, E_SHOFF_OFF).ok_or_else(short)?;
+    let e_phentsize = le_u16(&ehdr_bytes, E_PHENTSIZE_OFF).ok_or_else(short)?;
+    let e_phnum = le_u16(&ehdr_bytes, E_PHNUM_OFF).ok_or_else(short)?;
+    let e_shentsize = le_u16(&ehdr_bytes, E_SHENTSIZE_OFF).ok_or_else(short)?;
+    let e_shnum = le_u16(&ehdr_bytes, E_SHNUM_OFF).ok_or_else(short)?;
 
     if e_machine != EM_X86_64 {
         return Err(ElfLoadError::UnsupportedArchitecture);
@@ -298,14 +343,14 @@ pub fn load_elf(
 
     // Task 2.4: Build FileBacked + BSS VMAs for each PT_LOAD.
     for i in 0..e_phnum as usize {
-        let ph = &phdr_bytes[i * PHDR_SIZE..(i + 1) * PHDR_SIZE];
-        let p_type = u32::from_le_bytes(ph[0..4].try_into().unwrap());
-        let p_flags = u32::from_le_bytes(ph[4..8].try_into().unwrap());
-        let p_offset = u64::from_le_bytes(ph[8..16].try_into().unwrap());
-        let p_vaddr = u64::from_le_bytes(ph[16..24].try_into().unwrap());
-        let p_filesz = u64::from_le_bytes(ph[32..40].try_into().unwrap());
-        let p_memsz = u64::from_le_bytes(ph[40..48].try_into().unwrap());
-        let p_align = u64::from_le_bytes(ph[48..56].try_into().unwrap());
+        let base = i * PHDR_SIZE;
+        let p_type = le_u32(&phdr_bytes, base).ok_or_else(short)?;
+        let p_flags = le_u32(&phdr_bytes, base + 4).ok_or_else(short)?;
+        let p_offset = le_u64(&phdr_bytes, base + 8).ok_or_else(short)?;
+        let p_vaddr = le_u64(&phdr_bytes, base + 16).ok_or_else(short)?;
+        let p_filesz = le_u64(&phdr_bytes, base + 32).ok_or_else(short)?;
+        let p_memsz = le_u64(&phdr_bytes, base + 40).ok_or_else(short)?;
+        let p_align = le_u64(&phdr_bytes, base + 48).ok_or_else(short)?;
 
         if p_type == PT_LOAD {
             if p_memsz == 0 {
@@ -466,10 +511,10 @@ pub fn load_elf(
     let mut raw_relocs: Vec<(u32, i64)> = Vec::new();
 
     for i in 0..e_shnum as usize {
-        let sh = &shdr_bytes[i * SHDR_SIZE..(i + 1) * SHDR_SIZE];
-        let sh_type = u32::from_le_bytes(sh[4..8].try_into().unwrap());
-        let sh_offset = u64::from_le_bytes(sh[24..32].try_into().unwrap());
-        let sh_size = u64::from_le_bytes(sh[32..40].try_into().unwrap());
+        let base = i * SHDR_SIZE;
+        let sh_type = le_u32(&shdr_bytes, base + 4).ok_or_else(short)?;
+        let sh_offset = le_u64(&shdr_bytes, base + 24).ok_or_else(short)?;
+        let sh_size = le_u64(&shdr_bytes, base + 32).ok_or_else(short)?;
 
         match sh_type {
             SHT_RELA => {
@@ -481,10 +526,10 @@ pub fn load_elf(
                 let count = rela_bytes.len() / RELA_SIZE;
 
                 for j in 0..count {
-                    let entry = &rela_bytes[j * RELA_SIZE..(j + 1) * RELA_SIZE];
-                    let r_offset = u64::from_le_bytes(entry[0..8].try_into().unwrap());
-                    let r_info = u64::from_le_bytes(entry[8..16].try_into().unwrap());
-                    let r_addend = i64::from_le_bytes(entry[16..24].try_into().unwrap());
+                    let base = j * RELA_SIZE;
+                    let r_offset = le_u64(&rela_bytes, base).ok_or_else(short)?;
+                    let r_info = le_u64(&rela_bytes, base + 8).ok_or_else(short)?;
+                    let r_addend = le_i64(&rela_bytes, base + 16).ok_or_else(short)?;
                     let reloc_type = (r_info & 0xffff_ffff) as u32;
                     // r_sym upper 32 bits: for RELATIVE, must be zero (no symbol ref).
                     let r_sym = (r_info >> 32) as u32;
@@ -492,39 +537,25 @@ pub fn load_elf(
                     match reloc_type {
                         // R_X86_64_RELATIVE (type 8)
                         8 => {
-                            // Panic on non-zero symbol index: RELATIVE must not reference
-                            // a symbol (r_sym != 0 would indicate JUMP_SLOT or GLOB_DAT
-                            // misclassified here).
-                            assert!(
-                                r_sym == 0,
-                                "R_X86_64_RELATIVE with non-zero r_sym={} at r_offset={:#x}",
-                                r_sym,
-                                r_offset
-                            );
+                            // A non-zero symbol index means this is a JUMP_SLOT or
+                            // GLOB_DAT misclassified as RELATIVE, and the reloc
+                            // table has no symbol to resolve it against.
+                            if r_sym != 0 {
+                                return Err(ElfLoadError::InvalidRelocation);
+                            }
 
-                            // Phase 0 confirmed all reloc targets fit in u32.
-                            // Guard against future / malformed binaries that
-                            // might place a target above 4 GiB: silent
-                            // truncation would land in the wrong page bucket.
-                            assert!(
-                                r_offset <= u32::MAX as u64,
-                                "lazy reloc: R_X86_64_RELATIVE r_offset {:#x} \
-                                 exceeds u32 range; load image > 4 GiB unsupported",
-                                r_offset
-                            );
-                            let r_offset_u32 = r_offset as u32;
+                            // The reloc table buckets targets by a u32 offset from
+                            // the load base, so a target above 4 GiB would truncate
+                            // into the wrong page.
+                            if r_offset > u32::MAX as u64 {
+                                return Err(ElfLoadError::InvalidRelocation);
+                            }
 
-                            raw_relocs.push((r_offset_u32, r_addend));
+                            raw_relocs.push((r_offset as u32, r_addend));
                         }
-                        // JUMP_SLOT / GLOB_DAT: panic — EDOS binaries are static-PIE;
-                        // dynamic symbol relocs should never appear.
-                        6 | 7 => {
-                            panic!(
-                                "ELF: JUMP_SLOT/GLOB_DAT reloc (type {}) found — \
-                                 EDOS only supports static-PIE binaries",
-                                reloc_type
-                            );
-                        }
+                        // JUMP_SLOT / GLOB_DAT: EDOS binaries are static-PIE, so
+                        // dynamic symbol relocs have nothing to bind to.
+                        6 | 7 => return Err(ElfLoadError::UnsupportedRelocation),
                         _ => {
                             println!("Unsupported relocation type: {}", reloc_type);
                         }
@@ -532,9 +563,7 @@ pub fn load_elf(
                 }
             }
             // SHT_REL (9): unsupported on x86_64 (we use RELA only).
-            9 => {
-                panic!("REL relocation unsupported");
-            }
+            9 => return Err(ElfLoadError::UnsupportedRelocation),
             // SHT_INIT_ARRAY (14): noted but not invoked here; the runtime
             // handles init array calls in _start.
             14 => {
@@ -546,17 +575,17 @@ pub fn load_elf(
 
     // Resolve the reloc-bearing writable PT_LOAD by intersecting the parsed
     // RELATIVE entries with the writable PT_LOAD candidates. Per Phase 0 census,
-    // every current binary has exactly one such candidate; this assert correctly
-    // distinguishes "two writable PT_LOADs both with relocs" (panic) from
-    // "two writable PT_LOADs but only one has relocs" (fine).
+    // every current binary has exactly one such candidate. Two candidates that
+    // both carry relocs, or none that carries them, describe a binary the lazy
+    // reloc path cannot apply, so the load fails rather than the kernel.
     let (reloc_vma_range, reloc_skip_file_offset): (
         Option<core::ops::Range<VirtAddr>>,
         Option<u64>,
     ) = if raw_relocs.is_empty() {
         (None, None)
     } else {
-        let mut matched: Option<usize> = None;
-        for (idx, cand) in writable_candidates.iter().enumerate() {
+        let mut matched: Option<&WritableCandidate> = None;
+        for cand in writable_candidates.iter() {
             let start_off = cand.vma_range.start.as_u64() - load_base.as_u64();
             let end_off = cand.vma_range.end.as_u64() - load_base.as_u64();
             let any = raw_relocs.iter().any(|&(off, _)| {
@@ -564,20 +593,14 @@ pub fn load_elf(
                 off64 >= start_off && off64 < end_off
             });
             if any {
-                assert!(
-                    matched.is_none(),
-                    "lazy reloc: relocations span multiple writable PT_LOAD \
-                     segments; exactly one expected"
-                );
-                matched = Some(idx);
+                if matched.is_some() {
+                    return Err(ElfLoadError::InvalidRelocation);
+                }
+                matched = Some(cand);
             }
         }
-        let m = matched
-            .expect("lazy reloc: parsed RELATIVE entries but no writable PT_LOAD contains them");
-        (
-            Some(writable_candidates[m].vma_range.clone()),
-            Some(writable_candidates[m].file_offset),
-        )
+        let m = matched.ok_or(ElfLoadError::InvalidRelocation)?;
+        (Some(m.vma_range.clone()), Some(m.file_offset))
     };
 
     // Pre-fetch PT_LOAD file pages into the per-inode page cache via bulk AHCI
@@ -598,22 +621,21 @@ pub fn load_elf(
         }
     }
 
-    // Build the RelocTable for lazy fault-time application.
-    // When raw_relocs is non-empty, reloc_vma_range was set above (the
-    // resolution panics otherwise), so the unwrap is safe.
-    let built_reloc_table: Option<Arc<RelocTable>> = if raw_relocs.is_empty() {
-        None
-    } else {
-        let range = reloc_vma_range
-            .as_ref()
-            .expect("lazy reloc: raw_relocs non-empty implies reloc_vma_range is set");
-        let vma_page_start = (range.start.as_u64() - load_base.as_u64()) as u32;
-        let vma_page_count = ((range.end.as_u64() - range.start.as_u64()) / 4096) as usize;
-        Some(RelocTable::build(
-            raw_relocs,
-            vma_page_start,
-            vma_page_count,
-        ))
+    // Build the RelocTable for lazy fault-time application. A non-empty
+    // raw_relocs implies reloc_vma_range was set above, since the resolution
+    // returns an error otherwise.
+    let built_reloc_table: Option<Arc<RelocTable>> = match reloc_vma_range.as_ref() {
+        _ if raw_relocs.is_empty() => None,
+        None => return Err(ElfLoadError::InvalidRelocation),
+        Some(range) => {
+            let vma_page_start = (range.start.as_u64() - load_base.as_u64()) as u32;
+            let vma_page_count = ((range.end.as_u64() - range.start.as_u64()) / 4096) as usize;
+            Some(RelocTable::build(
+                raw_relocs,
+                vma_page_start,
+                vma_page_count,
+            ))
+        }
     };
 
     // Apply relocations to pages that were pre-faulted by

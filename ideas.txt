@@ -1201,10 +1201,12 @@ doc/AUDIT.md, which has the file:line detail and the reasoning.
 
 Hygiene and quality:
 
-1. **`unwrap()`/`expect()` density in kernel code.** [audit] 228 when the
-   audit was written and rising with every feature, so recount rather
-   than trusting the figure. Convert the ones on I/O and parsing
-   results; leave a comment on the structurally impossible ones.
+1. **`unwrap()`/`expect()` density in kernel code.** [audit] 204 across
+   `kernel/src`, so recount rather than trusting the figure. Convert the
+   ones on I/O and parsing results; leave a comment on the structurally
+   impossible ones. The ELF loader (`loader/mod.rs`) is done. Next by
+   count: `drivers/usb/xhci/mod.rs` (20), `fs/efs/mod.rs` (8),
+   `drivers/ahci/port.rs` (8), `acpi/mod.rs` (7).
 2. **Module READMEs for `fs/` (15.7k lines) and `drivers/` (13k).**
    [audit]
 

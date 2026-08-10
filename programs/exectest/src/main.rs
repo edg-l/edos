@@ -46,6 +46,55 @@ fn describe(code: i32) -> &'static str {
     }
 }
 
+/// A 64-byte little-endian ELF64 header for x86-64, with no program headers
+/// and one section header at `e_shoff`. Valid enough to reach the loader's
+/// section walk, which is what the malformed cases below want to exercise.
+fn elf_header(shnum: u16) -> Vec<u8> {
+    let mut h = vec![0u8; 64];
+    h[0..4].copy_from_slice(b"\x7fELF");
+    h[4] = 2; // EI_CLASS = ELFCLASS64
+    h[5] = 1; // EI_DATA  = ELFDATA2LSB
+    h[6] = 1; // EI_VERSION
+    h[0x10..0x12].copy_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+    h[0x12..0x14].copy_from_slice(&62u16.to_le_bytes()); // e_machine = EM_X86_64
+    h[0x14..0x18].copy_from_slice(&1u32.to_le_bytes()); // e_version
+    h[0x18..0x20].copy_from_slice(&0x401000u64.to_le_bytes()); // e_entry
+    h[0x28..0x30].copy_from_slice(&64u64.to_le_bytes()); // e_shoff
+    h[0x34..0x36].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    h[0x36..0x38].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    h[0x3A..0x3C].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    h[0x3C..0x3E].copy_from_slice(&shnum.to_le_bytes()); // e_shnum
+    h
+}
+
+/// An ELF whose header promises 64 bytes but whose file stops halfway.
+fn truncated_elf() -> Vec<u8> {
+    let mut h = elf_header(0);
+    h.truncate(32);
+    h
+}
+
+/// An ELF carrying one section of `sh_type` whose contents are `data`.
+fn elf_with_section(sh_type: u32, data: &[u8]) -> Vec<u8> {
+    let mut image = elf_header(1);
+    let mut sh = vec![0u8; 64];
+    sh[4..8].copy_from_slice(&sh_type.to_le_bytes());
+    sh[24..32].copy_from_slice(&128u64.to_le_bytes()); // sh_offset
+    sh[32..40].copy_from_slice(&(data.len() as u64).to_le_bytes()); // sh_size
+    image.extend_from_slice(&sh);
+    image.extend_from_slice(data);
+    image
+}
+
+/// One `Elf64_Rela` entry.
+fn rela_entry(r_offset: u64, r_info: u64, r_addend: i64) -> Vec<u8> {
+    let mut e = Vec::with_capacity(24);
+    e.extend_from_slice(&r_offset.to_le_bytes());
+    e.extend_from_slice(&r_info.to_le_bytes());
+    e.extend_from_slice(&r_addend.to_le_bytes());
+    e
+}
+
 /// Stage 1: set up process state, then replace this image with stage 2.
 fn stage1() -> ! {
     let inherited = File::open(DATA_PATH).unwrap_or_else(|_| std::process::exit(BAD_INHERITED_FD));
@@ -264,6 +313,39 @@ fn main() {
         );
     }
     pass("test 5", "exec quiesced siblings that make no syscalls");
+
+    // -------------------------------------------------------------------
+    // Test 6: a malformed ELF fails the exec instead of the kernel
+    // -------------------------------------------------------------------
+    // Every field of these files reaches the kernel's ELF parser, and any user
+    // can execute any file it can read, so each case must come back as an
+    // error with this process still running. They live on /var because the
+    // loader needs a page-cache filesystem.
+    for (name, image) in [
+        ("not an ELF", b"#no shebang here, just text\n".to_vec()),
+        ("truncated header", truncated_elf()),
+        ("SHT_REL section", elf_with_section(9, &[])),
+        (
+            "GLOB_DAT relocation",
+            elf_with_section(4, &rela_entry(0x1000, (1 << 32) | 7, 0)),
+        ),
+        (
+            "RELATIVE relocation naming a symbol",
+            elf_with_section(4, &rela_entry(0x1000, (1 << 32) | 8, 0)),
+        ),
+    ] {
+        let path = "/var/exectest_badelf";
+        fs::write(path, &image)
+            .unwrap_or_else(|e| fail("test 6", &format!("write {}: {}", path, e)));
+        if process::execve(path, &["badelf"], &[]) >= 0 {
+            fail("test 6", &format!("execve of a {} reported success", name));
+        }
+        if process::getpid() != pid_before {
+            fail("test 6", &format!("a {} disturbed the caller", name));
+        }
+    }
+    let _ = fs::remove_file("/var/exectest_badelf");
+    pass("test 6", "malformed ELF images are rejected, not fatal");
 
     let _ = fs::remove_file(DATA_PATH);
     println!("exectest: all tests passed");
