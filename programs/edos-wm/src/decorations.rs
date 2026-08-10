@@ -3,7 +3,10 @@
 use edos_render::window::{WindowListEntry, flags::FLAG_DOCK};
 
 /// Height of the title bar.
-pub const TITLE_HEIGHT: u64 = 24;
+///
+/// Deep enough for a line of interface type with room above and below, rather
+/// than the text cell with four pixels either side.
+pub const TITLE_HEIGHT: u64 = 32;
 
 /// Width of the window border.
 pub const BORDER_WIDTH: u64 = 1;
@@ -20,11 +23,31 @@ pub const TITLE_TEXT_HEIGHT: i64 = 16;
 /// Size of the drop shadow in pixels (drawn outside the decorated area).
 pub const SHADOW_SIZE: u64 = 5;
 
-/// Close button size in pixels (square).
-pub const CLOSE_BUTTON_SIZE: u64 = 20;
+/// Title-bar button size in pixels (square). Close, maximize and minimize all
+/// share it, so the group reads as one row.
+pub const CLOSE_BUTTON_SIZE: u64 = 24;
 
-/// Close button margin from the right border in pixels.
+/// Margin from the right border to the first title-bar button.
 pub const CLOSE_BUTTON_MARGIN: u64 = 4;
+
+/// Gap between adjacent title-bar buttons.
+pub const BUTTON_GAP: u64 = 2;
+
+/// Which title-bar button, counting from the right: close is 0.
+pub const BUTTON_CLOSE: u64 = 0;
+pub const BUTTON_MAXIMIZE: u64 = 1;
+pub const BUTTON_MINIMIZE: u64 = 2;
+
+/// X offset of a title-bar button from the window's left edge.
+pub fn button_x(window_width: u32, index: u64) -> i64 {
+    let right = BORDER_WIDTH as i64 + window_width as i64 - CLOSE_BUTTON_MARGIN as i64;
+    right - ((index + 1) * (CLOSE_BUTTON_SIZE + BUTTON_GAP)) as i64 + BUTTON_GAP as i64
+}
+
+/// Y offset of the title-bar buttons, centred in the bar.
+pub fn button_y() -> i64 {
+    BORDER_WIDTH as i64 + (TITLE_HEIGHT as i64 - CLOSE_BUTTON_SIZE as i64) / 2
+}
 
 /// Size of the resize grab zone in pixels.
 pub const RESIZE_BORDER: i64 = 8;
@@ -35,6 +58,8 @@ pub enum HitRegion {
     None,
     TitleBar,
     CloseButton,
+    MaximizeButton,
+    MinimizeButton,
     Client,
     ResizeTop,
     ResizeBottom,
@@ -92,22 +117,25 @@ pub fn effective_height_raw(flags: u64, height: u32) -> u64 {
     }
 }
 
+/// Which title-bar button a point falls on, if any.
+pub fn button_at(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> Option<u64> {
+    let px = screen_x as i64 - window.x as i64;
+    let py = screen_y as i64 - window.y as i64;
+    let top = button_y();
+    if py < top || py >= top + CLOSE_BUTTON_SIZE as i64 {
+        return None;
+    }
+    [BUTTON_CLOSE, BUTTON_MAXIMIZE, BUTTON_MINIMIZE]
+        .into_iter()
+        .find(|&index| {
+            let left = button_x(window.width, index);
+            px >= left && px < left + CLOSE_BUTTON_SIZE as i64
+        })
+}
+
 /// Check if a point is within the close button area of a window.
 fn is_in_close_button(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> bool {
-    let win_x = window.x as i64;
-    let win_y = window.y as i64;
-    let w = window.width as i64;
-
-    let close_x =
-        win_x + BORDER_WIDTH as i64 + w - CLOSE_BUTTON_MARGIN as i64 - CLOSE_BUTTON_SIZE as i64;
-    let close_y = win_y + BORDER_WIDTH as i64 + 2;
-    let close_w = CLOSE_BUTTON_SIZE as i64;
-    let close_h = CLOSE_BUTTON_SIZE as i64;
-
-    let px = screen_x as i64;
-    let py = screen_y as i64;
-
-    px >= close_x && px < close_x + close_w && py >= close_y && py < close_y + close_h
+    button_at(window, screen_x, screen_y) == Some(BUTTON_CLOSE)
 }
 
 /// Check if a point is within the title bar (for dragging).
@@ -163,9 +191,12 @@ pub fn hit_test(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> HitRe
     let from_top = py - win_y;
     let from_bottom = (win_y + total_h) - py;
 
-    // Check close button first (has highest priority in title area)
-    if is_in_close_button(window, screen_x, screen_y) {
-        return HitRegion::CloseButton;
+    // Title-bar buttons take priority over dragging the bar they sit in.
+    match button_at(window, screen_x, screen_y) {
+        Some(BUTTON_CLOSE) => return HitRegion::CloseButton,
+        Some(BUTTON_MAXIMIZE) => return HitRegion::MaximizeButton,
+        Some(BUTTON_MINIMIZE) => return HitRegion::MinimizeButton,
+        _ => {}
     }
 
     // Check title bar next (clicking title bar should drag, not resize)

@@ -1,64 +1,25 @@
-//! EDOS Taskbar - Shows running windows and allows switching between them.
+//! EDOS panel: the launcher, the running windows, and the machine's status.
 
 use std::time::Duration;
 
 use edos_lib::process::spawn;
 use edos_render::graphics::{Framebuffer, ScreenInfo};
+use edos_render::icons;
 use edos_render::theme::{draw_gradient_v, Theme};
-use edos_render::widgets::{draw_rect, draw_rect_outline, draw_text, text_height, text_width};
+use edos_render::widgets::{draw_rect, draw_text, text_height, text_width};
 use edos_render::window::{
-    flags::FLAG_DOCK, property, window_list, window_send_event, window_set, Window, WindowEvent,
-    WindowEventType, WindowListEntry,
+    flags::FLAG_DOCK, property, window_list, window_minimize, window_send_event, window_set,
+    Window, WindowEvent, WindowEventType, WindowListEntry,
 };
 
-/// Taskbar height in pixels.
-const TASKBAR_HEIGHT: u32 = 32;
+mod menu;
+mod panel;
+
+use panel::{Action, Hit};
 
 /// Maximum number of windows to track.
 const MAX_WINDOWS: usize = 32;
 
-/// Button width for each window entry.
-const BUTTON_WIDTH: u32 = 120;
-
-/// Padding between a window button's edge and its label.
-const LABEL_INSET: u32 = 8;
-
-/// Gap between adjacent window buttons.
-const BUTTON_GAP: i32 = 4;
-
-/// Height of every button in the bar.
-const BUTTON_HEIGHT: u32 = 24;
-
-/// Height of the accent underline marking the focused window's button.
-const ACCENT_HEIGHT: u32 = 2;
-
-/// Launcher button label.
-const LAUNCHER_LABEL: &str = "+ Term";
-
-/// Launcher button width in pixels.
-const LAUNCHER_WIDTH: u32 = 64;
-
-/// X position where the launcher button starts (after EDOS branding).
-const LAUNCHER_X: i32 = 60;
-
-/// X position where window buttons start (after launcher + gap).
-const WINDOW_BUTTONS_X: i32 = LAUNCHER_X + LAUNCHER_WIDTH as i32 + 8;
-
-/// X position of the wordmark, and of the hairline that closes its region.
-const BRANDING_X: i32 = 8;
-const BRANDING_RULE_X: i32 = 48;
-
-/// Padding between the clock and the right edge, and between the clock and the
-/// last window button.
-const CLOCK_PADDING: i32 = 12;
-const CLOCK_GAP: i32 = 16;
-
-/// Height of a line of text drawn by `draw_text`.
-fn text_line_height() -> i32 {
-    text_height() as i32
-}
-
-/// Get screen dimensions.
 fn get_screen_info() -> Option<ScreenInfo> {
     let fb = Framebuffer::new();
     fb.screen_info().ok()
@@ -86,31 +47,48 @@ fn fit_label(text: &str, max_width: u32) -> String {
     out
 }
 
-/// Draw `text` centered inside the rectangle at (`x`, `y`) sized `w` by `h`.
+/// Draw a button's fill, its icon and its label, left-aligned inside it.
 #[allow(clippy::too_many_arguments)]
-fn draw_centered_text(
+fn draw_button(
     buf: &mut [u32],
-    buf_w: u32,
-    buf_h: u32,
-    x: i32,
-    y: i32,
     w: u32,
     h: u32,
-    text: &str,
-    color: u32,
+    hit: &Hit,
+    icon: &icons::Mask,
+    label: &str,
+    fill: Option<u32>,
+    ink: u32,
 ) {
-    let text_x = x + (w as i32 - text_width(text) as i32) / 2;
-    let text_y = y + (h as i32 - text_line_height()) / 2;
-    draw_text(buf, buf_w, buf_h, text_x, text_y, text, color);
+    let y = panel::button_y();
+    if let Some(fill) = fill {
+        draw_rect(buf, w, h, hit.x, y, hit.width, panel::BUTTON_HEIGHT, fill);
+    }
+
+    // Icon and label are one group, centred together, so a button with a short
+    // label does not leave its icon stranded against the left padding.
+    let content_w = if label.is_empty() {
+        icons::SIZE as u32
+    } else {
+        icons::SIZE as u32 + panel::ICON_GAP + text_width(label)
+    };
+    let start = hit.x + (hit.width as i32 - content_w as i32) / 2;
+
+    let icon_y = y + (panel::BUTTON_HEIGHT as i32 - icons::SIZE as i32) / 2;
+    icons::draw(buf, w, h, start, icon_y, icon, ink);
+
+    if !label.is_empty() {
+        let text_y = y + (panel::BUTTON_HEIGHT as i32 - text_height() as i32) / 2;
+        let text_x = start + icons::SIZE as i32 + panel::ICON_GAP as i32;
+        draw_text(buf, w, h, text_x, text_y, label, ink);
+    }
 }
 
 fn main() {
-    eprintln!("[taskbar] starting");
-    // Get screen dimensions
+    eprintln!("[panel] starting");
     let screen_info = match get_screen_info() {
         Some(info) => info,
         None => {
-            eprintln!("Failed to get screen info");
+            eprintln!("[panel] no screen info");
             return;
         }
     };
@@ -118,118 +96,124 @@ fn main() {
     let screen_width = screen_info.width as u32;
     let screen_height = screen_info.height as u32;
 
-    // Create taskbar window at bottom of screen (no decorations)
-    let taskbar_y = (screen_height - TASKBAR_HEIGHT) as i32;
-    let mut window = match Window::new(0, taskbar_y, screen_width, TASKBAR_HEIGHT) {
+    let panel_y = (screen_height - panel::HEIGHT) as i32;
+    let mut window = match Window::new(0, panel_y, screen_width, panel::HEIGHT) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("Failed to create taskbar window: {:?}", e);
+            eprintln!("[panel] could not create window: {e:?}");
             return;
         }
     };
 
-    // Set dock flag (no decorations, not draggable)
+    // Undecorated and never focusable: the panel paints no focus state, so
+    // keystrokes landing in it would be invisible.
     if let Err(e) = window_set(window.id, property::FLAGS, FLAG_DOCK) {
-        eprintln!("Failed to set dock flag: {:?}", e);
+        eprintln!("[panel] could not set dock flags: {e:?}");
     }
-
-    if let Err(e) = window.set_title("Taskbar") {
-        eprintln!("Failed to set title: {:?}", e);
+    if let Err(e) = window.set_title("Panel") {
+        eprintln!("[panel] could not set title: {e:?}");
     }
-
     if let Err(e) = window.show() {
-        eprintln!("Failed to show taskbar: {:?}", e);
+        eprintln!("[panel] could not show: {e:?}");
         return;
     }
 
-    println!("[Taskbar] Started at y={} with FLAG_DOCK", taskbar_y);
-
-    // Event buffer
     let mut events = [WindowEvent::default(); 16];
-
-    // Window list buffer
     let mut entries = [WindowListEntry::default(); MAX_WINDOWS];
+    let mut hits: Vec<Hit> = Vec::new();
+    let mut hovered: Option<Action> = None;
+    let mut menu = menu::Menu::new();
 
-    // Track which windows we're showing buttons for: (window_id, btn_x)
-    let mut displayed_windows: Vec<(u64, i32)> = Vec::new();
-
-    // Main loop
     loop {
-        // Get current window list
         let window_count = match window_list(&mut entries) {
             Ok(count) => count.min(MAX_WINDOWS),
             Err(_) => 0,
         };
-
         let windows = &entries[..window_count];
 
-        // Filter out our own window and hidden windows
-        let my_window_id = window.id;
-        let mut visible_windows: Vec<&WindowListEntry> = windows
+        // Everything the user opened: our own panel and the menu are chrome,
+        // and a minimized window stays listed so there is a way back to it.
+        let my_id = window.id;
+        let menu_id = menu.window_id();
+        let mut tasks: Vec<&WindowListEntry> = windows
             .iter()
-            .filter(|w| w.id != my_window_id && w.visible != 0)
+            .filter(|w| w.id != my_id && Some(w.id) != menu_id && w.visible != 0)
+            .filter(|w| w.flags & FLAG_DOCK == 0)
             .collect();
-        // Sort by window ID for stable taskbar order (not z_order which changes on focus)
-        visible_windows.sort_by_key(|w| w.id);
+        // By id, not z_order: sorting by z_order makes every button jump the
+        // moment focus moves.
+        tasks.sort_by_key(|w| w.id);
 
-        // Focus comes from the kernel registry, which the window manager owns.
-        // Deriving it from z_order disagrees with the title-bar accent, since a
-        // raise also moves z_order.
-        let focused_window_id = visible_windows
+        let focused = tasks.iter().find(|w| w.is_focused()).map(|w| w.id);
+
+        let clock = match edos_lib::time::clock_gettime() {
+            Some(t) => format!("{:02}:{:02}", t.hour, t.minute),
+            None => String::from("--:--"),
+        };
+
+        let labelled: Vec<(&WindowListEntry, String)> = tasks
             .iter()
-            .find(|w| w.is_focused())
-            .map(|w| w.id);
+            .map(|entry| {
+                let title = entry.title_str();
+                let label = if title.is_empty() {
+                    format!("Window {}", entry.id)
+                } else {
+                    fit_label(
+                        title,
+                        panel::TASK_MAX_WIDTH
+                            - panel::BUTTON_PAD * 2
+                            - icons::SIZE as u32
+                            - panel::ICON_GAP,
+                    )
+                };
+                (*entry, label)
+            })
+            .collect();
 
-        // Handle taskbar events
+        let layout = panel::compute(window.width, &labelled, &clock);
+        hits = layout.hits;
+
         if let Ok(count) = window.poll_events(&mut events) {
             for event in &events[..count] {
                 match event.event_type() {
-                    Some(WindowEventType::CloseRequested) => {
-                        return;
-                    }
+                    Some(WindowEventType::CloseRequested) => return,
                     Some(WindowEventType::Resize) => {
-                        let new_w = event.x as u32;
-                        let new_h = event.y as u32;
+                        let (new_w, new_h) = (event.x as u32, event.y as u32);
                         if window.resize(new_w, new_h).is_err() {
-                            eprintln!("[Taskbar] Failed to resize");
+                            eprintln!("[panel] resize failed");
                         }
                     }
-                    Some(WindowEventType::MouseButton) => {
-                        if event.data == 1 {
-                            // Button press
-                            let click_x = event.x;
-                            let click_y = event.y;
-                            let h = window.height;
-                            let btn_h = BUTTON_HEIGHT as i32;
-                            let btn_y = (h as i32 - btn_h) / 2;
-
-                            // Check launcher button click
-                            if click_x >= LAUNCHER_X
-                                && click_x < LAUNCHER_X + LAUNCHER_WIDTH as i32
-                                && click_y >= btn_y
-                                && click_y < btn_y + btn_h
-                            {
-                                let _ = spawn("/bin/edos-terminal", &[], 0, 1, 2);
-                            }
-
-                            for (win_id, bx) in &displayed_windows {
-                                if click_x >= *bx
-                                    && click_x < *bx + BUTTON_WIDTH as i32
-                                    && click_y >= btn_y
-                                    && click_y < btn_y + btn_h
-                                {
-                                    let focus_event = WindowEvent {
+                    Some(WindowEventType::MouseMove) => {
+                        hovered = hits
+                            .iter()
+                            .find(|hit| hit.contains(event.x))
+                            .map(|hit| hit.action);
+                    }
+                    Some(WindowEventType::MouseButton) if event.data == 1 => {
+                        let Some(hit) = hits.iter().find(|hit| hit.contains(event.x)) else {
+                            continue;
+                        };
+                        match hit.action {
+                            Action::Launcher => menu.toggle(hit.x, panel_y),
+                            Action::Task(id) => {
+                                // A second click on the window that already has
+                                // focus puts it away, which is the only way to
+                                // clear the screen without moving windows off it.
+                                if focused == Some(id) {
+                                    let _ = window_minimize(id, true);
+                                } else {
+                                    let _ = window_minimize(id, false);
+                                    let event = WindowEvent {
                                         event_type: WindowEventType::FocusGained as u32,
                                         x: 0,
                                         y: 0,
                                         code: 0,
                                         data: 0,
                                     };
-                                    let _ = window_send_event(*win_id, &focus_event);
-                                    println!("[Taskbar] Clicked on window {}", win_id);
-                                    break;
+                                    let _ = window_send_event(id, &event);
                                 }
                             }
+                            Action::Volume | Action::Network | Action::Clock => {}
                         }
                     }
                     _ => {}
@@ -237,11 +221,11 @@ fn main() {
             }
         }
 
-        // Draw taskbar
+        menu.tick(windows);
+
         let w = window.width;
         let h = window.height;
         if let Some(buf) = window.buffer_mut() {
-            // Gradient background
             draw_gradient_v(
                 buf,
                 w,
@@ -253,164 +237,110 @@ fn main() {
                 Theme::DEFAULT.taskbar_bg_top,
                 Theme::DEFAULT.taskbar_bg_bottom,
             );
-
-            // Top separator line
             for x in 0..w {
                 buf[x as usize] = Theme::DEFAULT.taskbar_separator.raw();
             }
 
-            // Wordmark, then a hairline closing off the identity region
-            let text_y = (h as i32 - text_line_height()) / 2;
-            draw_text(
-                buf,
-                w,
-                h,
-                BRANDING_X,
-                text_y,
-                "EDOS",
-                Theme::DEFAULT.taskbar_branding_text.raw(),
-            );
-            draw_rect(
-                buf,
-                w,
-                h,
-                BRANDING_RULE_X,
-                8,
-                1,
-                h - 16,
-                Theme::DEFAULT.taskbar_separator.raw(),
-            );
+            let hover_fill = Theme::DEFAULT.taskbar_button_normal.raw();
+            for hit in &hits {
+                let is_hovered = hovered == Some(hit.action);
+                match hit.action {
+                    Action::Launcher => {
+                        let ink = if menu.is_open() {
+                            Theme::DEFAULT.taskbar_button_accent
+                        } else {
+                            Theme::DEFAULT.taskbar_text_active
+                        };
+                        let fill = (is_hovered || menu.is_open()).then_some(hover_fill);
+                        draw_button(buf, w, h, hit, &icons::APPS, "", fill, ink.raw());
+                    }
+                    Action::Task(id) => {
+                        let Some((entry, label)) =
+                            labelled.iter().find(|(entry, _)| entry.id == id)
+                        else {
+                            continue;
+                        };
+                        let is_focused = focused == Some(id);
+                        let ink = if is_focused {
+                            Theme::DEFAULT.taskbar_text_active
+                        } else if entry.is_minimized() {
+                            Theme::DEFAULT.text_placeholder
+                        } else {
+                            Theme::DEFAULT.taskbar_text
+                        };
+                        let fill = if is_focused {
+                            Some(Theme::DEFAULT.taskbar_button_active.raw())
+                        } else if is_hovered {
+                            Some(hover_fill)
+                        } else {
+                            None
+                        };
+                        draw_button(buf, w, h, hit, &icons::TERMINAL, label, fill, ink.raw());
 
-            // Launcher: the one action in the bar, so it is outlined rather than
-            // filled like the window buttons, which report state.
-            let btn_h = BUTTON_HEIGHT;
-            let btn_y = (h as i32 - btn_h as i32) / 2;
-
-            draw_rect(
-                buf,
-                w,
-                h,
-                LAUNCHER_X,
-                btn_y,
-                LAUNCHER_WIDTH,
-                btn_h,
-                Theme::DEFAULT.taskbar_button_normal.raw(),
-            );
-            draw_rect_outline(
-                buf,
-                w,
-                h,
-                LAUNCHER_X,
-                btn_y,
-                LAUNCHER_WIDTH,
-                btn_h,
-                Theme::DEFAULT.taskbar_button_border.raw(),
-            );
-            draw_centered_text(
-                buf,
-                w,
-                h,
-                LAUNCHER_X,
-                btn_y,
-                LAUNCHER_WIDTH,
-                btn_h,
-                LAUNCHER_LABEL,
-                Theme::DEFAULT.taskbar_text_active.raw(),
-            );
-
-            // Clock (right-aligned); window buttons stop short of it
-            let (hours, minutes) = if let Some(t) = edos_lib::time::clock_gettime() {
-                (t.hour as u64, t.minute as u64)
-            } else {
-                (0, 0)
-            };
-            let clock_text = format!("{:02}:{:02}", hours, minutes);
-            let clock_w = text_width(&clock_text) as i32;
-            let clock_x = w as i32 - clock_w - CLOCK_PADDING;
-            draw_text(
-                buf,
-                w,
-                h,
-                clock_x,
-                text_y,
-                &clock_text,
-                Theme::DEFAULT.taskbar_clock_text.raw(),
-            );
-
-            // Window buttons
-            let buttons_limit = clock_x - CLOCK_GAP;
-            let mut btn_x = WINDOW_BUTTONS_X;
-
-            displayed_windows.clear();
-
-            for win_entry in &visible_windows {
-                if btn_x + BUTTON_WIDTH as i32 > buttons_limit {
-                    break;
+                        if is_focused {
+                            draw_rect(
+                                buf,
+                                w,
+                                h,
+                                hit.x,
+                                panel::button_y() + panel::BUTTON_HEIGHT as i32
+                                    - panel::ACCENT_HEIGHT as i32,
+                                hit.width,
+                                panel::ACCENT_HEIGHT,
+                                Theme::DEFAULT.taskbar_button_accent.raw(),
+                            );
+                        }
+                    }
+                    Action::Volume => {
+                        let fill = is_hovered.then_some(hover_fill);
+                        draw_button(
+                            buf,
+                            w,
+                            h,
+                            hit,
+                            &icons::VOLUME,
+                            "",
+                            fill,
+                            Theme::DEFAULT.taskbar_text.raw(),
+                        );
+                    }
+                    Action::Network => {
+                        let fill = is_hovered.then_some(hover_fill);
+                        draw_button(
+                            buf,
+                            w,
+                            h,
+                            hit,
+                            &icons::NETWORK,
+                            "",
+                            fill,
+                            Theme::DEFAULT.taskbar_text.raw(),
+                        );
+                    }
+                    Action::Clock => {
+                        let fill = is_hovered.then_some(hover_fill);
+                        draw_button(
+                            buf,
+                            w,
+                            h,
+                            hit,
+                            &icons::CLOCK,
+                            &clock,
+                            fill,
+                            Theme::DEFAULT.taskbar_clock_text.raw(),
+                        );
+                    }
                 }
-                let title = win_entry.title_str();
-                let label = if title.is_empty() {
-                    format!("Win {}", win_entry.id)
-                } else {
-                    fit_label(title, BUTTON_WIDTH - LABEL_INSET * 2)
-                };
-
-                // The focused window reads as a raised chip underlined in the
-                // same accent the window's own title bar wears.
-                let is_focused = focused_window_id == Some(win_entry.id);
-                let (btn_color, label_color) = if is_focused {
-                    (
-                        Theme::DEFAULT.taskbar_button_active,
-                        Theme::DEFAULT.taskbar_text_active,
-                    )
-                } else {
-                    (
-                        Theme::DEFAULT.taskbar_button_normal,
-                        Theme::DEFAULT.taskbar_text,
-                    )
-                };
-
-                draw_rect(
-                    buf,
-                    w,
-                    h,
-                    btn_x,
-                    btn_y,
-                    BUTTON_WIDTH,
-                    btn_h,
-                    btn_color.raw(),
-                );
-
-                if is_focused {
-                    draw_rect(
-                        buf,
-                        w,
-                        h,
-                        btn_x,
-                        btn_y + (btn_h - ACCENT_HEIGHT) as i32,
-                        BUTTON_WIDTH,
-                        ACCENT_HEIGHT,
-                        Theme::DEFAULT.taskbar_button_accent.raw(),
-                    );
-                }
-
-                draw_centered_text(
-                    buf,
-                    w,
-                    h,
-                    btn_x,
-                    btn_y,
-                    BUTTON_WIDTH,
-                    btn_h,
-                    &label,
-                    label_color.raw(),
-                );
-
-                displayed_windows.push((win_entry.id, btn_x));
-                btn_x += BUTTON_WIDTH as i32 + BUTTON_GAP;
             }
         }
 
         window.swap_buffers();
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Launch a terminal. Kept here so the menu and any future shortcut agree on
+/// what "new terminal" means.
+pub fn launch_terminal() {
+    let _ = spawn("/bin/edos-terminal", &[], 0, 1, 2);
 }

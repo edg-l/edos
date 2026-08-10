@@ -2,11 +2,20 @@
 
 use std::time::{Duration, Instant};
 
+use std::collections::HashMap;
+
 use edos_render::graphics::Screen;
 use edos_render::window::{
     WindowEvent, WindowEventType, WindowListEntry, flags, focused_id, property, set_frame,
-    window_list, window_send_event, window_set,
+    window_list, window_minimize, window_send_event, window_set,
 };
+
+/// Height of the panel, which a maximized window must not cover.
+///
+/// The panel owns this number; duplicated here because there is no protocol
+/// for a panel to reserve a strut yet, and a maximized window that hides it
+/// leaves no way back to any other window.
+const PANEL_HEIGHT: u32 = 40;
 
 mod compositor;
 mod cursor;
@@ -107,6 +116,7 @@ fn find_window_at(windows: &[WindowListEntry], x: i32, y: i32) -> Option<&Window
 /// Focus itself is the kernel registry's: it already moves focus to the window
 /// under a press. Only the desktop-background case has to be reported, since
 /// the kernel leaves focus alone when no window is hit.
+#[allow(clippy::too_many_arguments)]
 fn handle_mouse_press(
     windows: &[WindowListEntry],
     mx: i32,
@@ -114,6 +124,9 @@ fn handle_mouse_press(
     drag_state: &mut Option<DragState>,
     resize_state: &mut Option<ResizeState>,
     focused_window_id: Option<u64>,
+    screen_w: u32,
+    screen_h: u32,
+    maximized: &mut HashMap<u64, (i32, i32, u32, u32)>,
 ) {
     let window = match find_window_at(windows, mx, my) {
         Some(w) => w,
@@ -137,6 +150,13 @@ fn handle_mouse_press(
     match region {
         HitRegion::CloseButton => {
             let _ = window_send_event(window_id, &WindowEvent::close_requested());
+        }
+        HitRegion::MinimizeButton => {
+            // The panel keeps the button, so there is a way back.
+            let _ = window_minimize(window_id, true);
+        }
+        HitRegion::MaximizeButton => {
+            toggle_maximized(window, screen_w, screen_h, maximized);
         }
         HitRegion::TitleBar => {
             *drag_state = Some(DragState {
@@ -303,6 +323,58 @@ fn publish_frames(windows: &[WindowListEntry]) {
     }
 }
 
+/// Fill the working area, or put the window back where it was.
+///
+/// The previous geometry is remembered here rather than in the kernel: what
+/// counts as "restored" is a window manager's policy, and the kernel has no
+/// business holding a second position for a window.
+fn toggle_maximized(
+    window: &WindowListEntry,
+    screen_w: u32,
+    screen_h: u32,
+    maximized: &mut HashMap<u64, (i32, i32, u32, u32)>,
+) {
+    let id = window.id;
+    if let Some((x, y, w, h)) = maximized.remove(&id) {
+        let _ = window_set(id, property::X, x as i64 as u64);
+        let _ = window_set(id, property::Y, y as i64 as u64);
+        let _ = window_set(id, property::WIDTH, w as u64);
+        let _ = window_set(id, property::HEIGHT, h as u64);
+        let event = WindowEvent {
+            event_type: WindowEventType::Resize as u32,
+            x: w as i32,
+            y: h as i32,
+            code: 0,
+            data: 0,
+        };
+        let _ = window_send_event(id, &event);
+        return;
+    }
+
+    maximized.insert(id, (window.x, window.y, window.width, window.height));
+
+    // The working area, not the screen: a maximized window that covers the
+    // panel hides the only way to get back to any other window.
+    let frame_w = decorations::BORDER_WIDTH as u32 * 2;
+    let frame_h = decorations::TITLE_HEIGHT as u32 + decorations::BORDER_WIDTH as u32;
+    let avail_h = screen_h.saturating_sub(PANEL_HEIGHT);
+    let new_w = screen_w.saturating_sub(frame_w).max(1);
+    let new_h = avail_h.saturating_sub(frame_h).max(1);
+
+    let _ = window_set(id, property::X, 0);
+    let _ = window_set(id, property::Y, 0);
+    let _ = window_set(id, property::WIDTH, new_w as u64);
+    let _ = window_set(id, property::HEIGHT, new_h as u64);
+    let event = WindowEvent {
+        event_type: WindowEventType::Resize as u32,
+        x: new_w as i32,
+        y: new_h as i32,
+        code: 0,
+        data: 0,
+    };
+    let _ = window_send_event(id, &event);
+}
+
 /// Invalidate drag/resize state if their target windows no longer exist.
 ///
 /// Focus needs no equivalent: the registry re-focuses the topmost survivor when
@@ -405,6 +477,7 @@ fn main() {
     // Interaction state
     let mut drag_state: Option<DragState> = None;
     let mut resize_state: Option<ResizeState> = None;
+    let mut maximized: HashMap<u64, (i32, i32, u32, u32)> = HashMap::new();
     let mut hovered_close_window: Option<u64>;
 
     // Shared memory mapping cache
@@ -483,6 +556,9 @@ fn main() {
                 &mut drag_state,
                 &mut resize_state,
                 focused_window_id,
+                screen.info().width as u32,
+                screen.info().height as u32,
+                &mut maximized,
             );
         }
         handle_drag(&mut drag_state, mx, my, left_held);

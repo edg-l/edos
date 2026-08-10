@@ -147,13 +147,18 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
 
     // X, Y, WIDTH, HEIGHT can be set by any process (for window manager)
     // Other properties require ownership
-    // X/Y/WIDTH/HEIGHT/FRAME are the window manager's to set, and it does not
-    // own the windows it manages. They stay unowned until there is a way to say
-    // which process *is* the window manager; until then any process can move a
-    // window it did not create.
+    // Position, size, frame and minimized state are the shell's to set, and
+    // the window manager and panel do not own the windows they manage. They
+    // stay unowned until there is a way to say which process *is* the shell;
+    // until then any process can move or put away a window it did not create.
     let requires_ownership = !matches!(
         prop,
-        property::X | property::Y | property::WIDTH | property::HEIGHT | property::FRAME
+        property::X
+            | property::Y
+            | property::WIDTH
+            | property::HEIGHT
+            | property::FRAME
+            | property::MINIMIZED
     );
 
     if requires_ownership && window.pid != pid {

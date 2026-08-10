@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use edos_lib::shm::{PROT_READ, shm_map, shm_size, shm_unmap};
 use edos_render::font::{self, Weight};
 use edos_render::graphics::{Color, Screen};
+use edos_render::icons;
 use edos_render::text::Style;
 use edos_render::theme::{Theme, lerp_color};
 use edos_render::window::{WindowListEntry, flags::FLAG_DOCK};
@@ -13,6 +14,27 @@ use crate::cursor::Cursor;
 use crate::decorations::{
     self, ACCENT_HEIGHT, BORDER_WIDTH, SHADOW_SIZE, TITLE_HEIGHT, TITLE_PADDING, TITLE_TEXT_HEIGHT,
 };
+
+/// Draw a monochrome icon mask onto the screen, one pixel at a time.
+///
+/// Small enough that a per-pixel write costs nothing next to the rest of a
+/// frame, and it keeps the mask format the same one the panel uses.
+fn draw_icon(screen: &mut Screen, x: i64, y: i64, mask: &icons::Mask, color: Color) {
+    for (row, bits) in mask.iter().enumerate() {
+        for col in 0..icons::SIZE {
+            if bits & (1 << (icons::SIZE - 1 - col)) == 0 {
+                continue;
+            }
+            let _ = screen.draw_rect(
+                (x + col as i64) as u64,
+                (y + row as i64) as u64,
+                1,
+                1,
+                color,
+            );
+        }
+    }
+}
 
 /// Cache for shared memory mappings to avoid map/unmap on every frame.
 pub struct ShmCache {
@@ -369,59 +391,73 @@ fn draw_window_direct(
         }
     }
 
-    // --- Close button (rounded corners) ---
-    // Positioned from the right border, vertically centered in the title bar.
+    // --- Title bar buttons: minimize, maximize, close ---
+    // Right to left, so the destructive one is furthest from where the hand
+    // rests after dragging the bar.
     let btn_size = decorations::CLOSE_BUTTON_SIZE as i64;
-    let close_rx = bw + w - decorations::CLOSE_BUTTON_MARGIN as i64 - btn_size;
-    let close_ry = bw + (title_bar_h - btn_size) / 2;
+    let btn_ry = decorations::button_y();
+    let close_hovered = hovered_close_window == Some(window.id);
 
-    // Closing is destructive and rarely wanted, so it stays quiet until the
-    // pointer is on it: a muted glyph at rest, a red field under the cursor.
-    let hovered = hovered_close_window == Some(window.id);
-    if hovered {
-        draw_clipped_rect(
-            screen,
-            close_rx,
-            close_ry,
-            btn_size,
-            btn_size,
-            Theme::DEFAULT.close_button_hover,
-        );
+    for index in [
+        decorations::BUTTON_MINIMIZE,
+        decorations::BUTTON_MAXIMIZE,
+        decorations::BUTTON_CLOSE,
+    ] {
+        let bx = decorations::button_x(window.width, index);
+        let is_close = index == decorations::BUTTON_CLOSE;
 
-        // Cut the 4 corner pixels to simulate rounding (replace with title bar color at that row).
-        // Corner rows are 0 and btn_size-1 relative to the button.
-        for &corner_row in &[0i64, btn_size - 1] {
-            let title_row = (close_ry - bw) + corner_row; // row index within the title gradient
-            let t_corner = ((title_row * 255) / (title_bar_h - 1).max(1)).min(255) as u8;
-            let corner_color = edos_render::theme::lerp_color(title_top, title_bottom, t_corner);
-            draw_clipped_rect(screen, close_rx, close_ry + corner_row, 1, 1, corner_color);
+        // Closing is destructive and rarely wanted, so it stays quiet until the
+        // pointer is on it: a muted glyph at rest, a red field under the cursor.
+        if is_close && close_hovered {
             draw_clipped_rect(
                 screen,
-                close_rx + btn_size - 1,
-                close_ry + corner_row,
-                1,
-                1,
-                corner_color,
+                bx,
+                btn_ry,
+                btn_size,
+                btn_size,
+                Theme::DEFAULT.close_button_hover,
             );
+            for &corner_row in &[0i64, btn_size - 1] {
+                let title_row = (btn_ry - bw) + corner_row;
+                let t_corner = ((title_row * 255) / (title_bar_h - 1).max(1)).min(255) as u8;
+                let corner_color =
+                    edos_render::theme::lerp_color(title_top, title_bottom, t_corner);
+                draw_clipped_rect(screen, bx, btn_ry + corner_row, 1, 1, corner_color);
+                draw_clipped_rect(
+                    screen,
+                    bx + btn_size - 1,
+                    btn_ry + corner_row,
+                    1,
+                    1,
+                    corner_color,
+                );
+            }
         }
-    }
 
-    // Draw 10x10 X glyph centered inside the 20x20 button.
-    let x_offset_x = close_rx + (btn_size - 10) / 2;
-    let x_offset_y = close_ry + (btn_size - 10) / 2;
-    let close_abs_x = window.x as i64 + x_offset_x;
-    let close_abs_y = window.y as i64 + x_offset_y;
-    if close_abs_x >= 0
-        && close_abs_y >= 0
-        && close_abs_x + 10 <= screen_w
-        && close_abs_y + 10 <= screen_h
-    {
-        let glyph = if hovered {
+        let glyph = if is_close && close_hovered {
             Theme::DEFAULT.close_glyph_hover
         } else {
             Theme::DEFAULT.close_glyph
         };
-        draw_close_x(screen, close_abs_x as u64, close_abs_y as u64, glyph);
+        let abs_x = window.x as i64 + bx;
+        let abs_y = window.y as i64 + btn_ry;
+        if abs_x < 0 || abs_y < 0 || abs_x + btn_size > screen_w || abs_y + btn_size > screen_h {
+            continue;
+        }
+        if is_close {
+            let gx = abs_x + (btn_size - 10) / 2;
+            let gy = abs_y + (btn_size - 10) / 2;
+            draw_close_x(screen, gx as u64, gy as u64, glyph);
+        } else {
+            let mask = if index == decorations::BUTTON_MAXIMIZE {
+                &icons::MAXIMIZE
+            } else {
+                &icons::MINIMIZE
+            };
+            let gx = abs_x + (btn_size - icons::SIZE as i64) / 2;
+            let gy = abs_y + (btn_size - icons::SIZE as i64) / 2;
+            draw_icon(screen, gx, gy, mask, glyph);
+        }
     }
 
     // --- Content area background ---
