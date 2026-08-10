@@ -1388,6 +1388,17 @@ link, address, gateway, resolver and MAC from a new `/proc/net`. That file
 exists because `SYS_NETINFO` renders the same state *for a terminal*, ANSI
 colour codes and all, and a UI parsing that would be reading a display format.
 
+**`std` reaches the whole syscall table** (`edos_rt` 0.0.42, fork pin bumped):
+symlinks, file times, `is_symlink`, vectored I/O, `nanosleep`, a `ReadDir` that
+streams through `getdents` a chunk at a time instead of demanding a buffer for
+the whole directory, `access` behind `try_exists`, and `openat` so an open no
+longer allocates a `CString`.
+
+One of the nineteen was not a wrapper. `File::set_times` needs to stamp a file
+the caller holds *open*, and `SYS_UTIMENSAT` took a path; a `File` has only a
+descriptor. The kernel grew the POSIX form — a null path means the file `dirfd`
+names — which is `futimens`, covered by `iotest` test 9.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any

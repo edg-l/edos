@@ -83,34 +83,37 @@ Two things that break silently rather than loudly:
   `chars().count() * char_width()` is wrong everywhere except a mono grid. Use
   `widgets::text_width`.
 
-## The std fork lags the syscall table
+## The std fork caught up with the syscall table
 
 Every program here is ordinary `std` Rust, so a syscall the fork does not know
 about is a syscall no program can use without dropping to `edos_lib`. Nineteen
-syscalls landed without the fork moving, and these std APIs are `unsupported()`
-or emulated as a result (`library/std/src/sys/*/edos.rs` in the `edos_std_v2`
-branch):
+syscalls had landed without the fork moving; `edos_rt` 0.0.42 and the shims in
+`library/std/src/sys/*/edos.rs` on `edos_std_v2` close that gap:
 
-| std API | Stub today | Syscall that closes it |
+| std API | Was | Now |
 |---|---|---|
 | `fs::symlink`, `fs::read_link` | `unsupported()` | `SYS_SYMLINK` 88, `SYS_READLINK` 89 |
-| `fs::set_times`, `File::set_times` | `unsupported()` | `SYS_UTIMENSAT` 280 |
-| `FileAttr::modified`/`accessed` | `unsupported()` | none; `SYS_STAT` already carries the times |
+| `fs::set_times`, `File::set_times` | `unsupported()` | `SYS_UTIMENSAT` 280, the second through `futimens` |
+| `FileAttr::modified`/`accessed`/`created` | `unsupported()` | the times `SYS_STAT` already carried |
+| `FileType::is_symlink` | always `false` | the kind a directory listing reports |
 | `File::read_vectored`/`write_vectored` | `unsupported()`, `is_*_vectored() == false` | `SYS_READV` 19, `SYS_WRITEV` 20 |
-| `thread::sleep` | rounds to `SYS_SLEEP_MS`, so sub-ms sleeps are 0 or 1 ms | `SYS_NANOSLEEP` 35 |
-| `ReadDir` | one `SYS_LIST_DIR` call sized to the whole directory | `SYS_GETDENTS` 78 streams it |
+| `thread::sleep` | rounded to `SYS_SLEEP_MS`, so sub-ms sleeps were 0 or 1 ms | `SYS_NANOSLEEP` 35 |
+| `ReadDir` | one `SYS_LIST_DIR` call sized to the whole directory | `SYS_GETDENTS` 78, a chunk at a time |
 | `Path::try_exists` | a full `stat` | `SYS_ACCESS` 21 with `F_OK` |
-| `OpenOptions::open` | allocates a `CString` per open | `SYS_OPENAT` 257 takes pointer+length |
+| `OpenOptions::open` | allocated a `CString` per open | `SYS_OPENAT` 257 takes pointer+length |
+
+`futimens` is new kernel work rather than a wrapper: `SYS_UTIMENSAT` took a path
+and a `File` has only a descriptor, so a null path now means "the file this
+descriptor names", which is the POSIX form. `iotest` test 9 covers it.
 
 Three stay unsupported on purpose: `fs::hard_link` (the kernel has no hard
 links), `set_times_nofollow` (`utimensat` rejects `AT_SYMLINK_NOFOLLOW`, which
 `set_times` cannot honour), and the `File::lock` family (no advisory locking).
+`lstat` is `stat`, because nothing below it can decline to follow a link;
+`readlink` is what reports on the link itself.
 
-The work is mechanical and already prototyped: `programs/edos_lib` has a tested
-wrapper for each of these, and `programs/iotest` covers them. Porting means
-moving the wrapper into `edos_rt`, publishing it, and unstubbing the std shim.
-See the `edos_rt` publish loop in the README; a `0.0.z` requirement is exact, so
-the fork's pin has to move in the same pass.
+The publish loop this needs is in the README, and a `0.0.z` requirement is
+exact, so the fork's pin has to move in the same pass.
 
 ## Kernel gaps this roadmap exposes
 

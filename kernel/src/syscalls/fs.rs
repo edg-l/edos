@@ -94,6 +94,21 @@ pub(super) fn read_user_path_at(
     Ok(base.join(path_str).normalize())
 }
 
+/// The path a descriptor was opened by, whatever kind of file it names.
+fn fd_path(fd: i64) -> Result<Path, Errno> {
+    if fd < 0 {
+        return Err(Errno::EBADF);
+    }
+    let info = current_thread_info();
+    let fd_table = info.lock().fd_table.clone();
+    let descriptor = fd_table.lock();
+    match descriptor.get_fd(fd as u64) {
+        Some(FileDescriptor::FsFile(file)) => Ok(file.path.clone()),
+        Some(_) => Err(Errno::EINVAL),
+        None => Err(Errno::EBADF),
+    }
+}
+
 /// The directory a `*at` descriptor names.
 fn at_dir_path(dirfd: i64) -> Result<Path, Errno> {
     if dirfd < 0 {
@@ -1020,7 +1035,15 @@ pub fn sys_utimensat(
         return -1;
     }
 
-    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
+    // No path means `dirfd` names the file itself, which is POSIX `futimens`
+    // and the only way to set the times of a file a caller holds open: `std`'s
+    // `File` carries a descriptor and never the name it was opened by.
+    let resolved = if path_ptr.is_null() && path_len == 0 {
+        fd_path(dirfd)
+    } else {
+        read_user_path_at(dirfd, path_ptr, path_len)
+    };
+    let path = match resolved {
         Ok(p) => p,
         Err(err) => {
             info.lock().errno = err;

@@ -1,4 +1,10 @@
 //! Exercises positional I/O, process ids and the wall clock.
+//!
+//! `can_vector` is unstable upstream and this is a nightly-only target anyway:
+//! whether `File` *reports* vectored support is the thing test 19 checks, since
+//! a platform that quietly says no gets the one-buffer-at-a-time fallback and
+//! passes every other check.
+#![feature(can_vector)]
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
@@ -8,8 +14,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use edos_lib::io::{
-    AT_FDCWD, F_OK, R_OK, Timespec, UTIME_NOW, UTIME_OMIT, W_OK, X_OK, access, pread, pwrite,
-    readlink, set_file_times, stat, symlink, truncate, utimensat,
+    AT_FDCWD, F_OK, R_OK, Timespec, UTIME_NOW, UTIME_OMIT, W_OK, X_OK, access, close, futimens,
+    open, pread, pwrite, readlink, set_file_times, stat, symlink, truncate, utimensat,
 };
 use edos_lib::process;
 use edos_lib::time;
@@ -440,10 +446,37 @@ fn test9(dir: &str) {
         fail(9, "utimensat accepted a nonexistent path");
     }
 
+    // No path stamps the file the descriptor already names, which is the only
+    // form reachable from a runtime that hands out descriptors and not names.
+    const FUTIME: i64 = 1_200_000_000;
+    let fd = open(&path, 0);
+    if fd < 0 {
+        fail(9, "open for futimens failed");
+    }
+    let times = [
+        Timespec {
+            tv_sec: FUTIME,
+            tv_nsec: 0,
+        },
+        Timespec {
+            tv_sec: FUTIME,
+            tv_nsec: 0,
+        },
+    ];
+    if futimens(fd as u64, Some(&times)) != 0 {
+        fail(9, "futimens failed");
+    }
+    close(fd as u64);
+    let got = stat(&path).unwrap_or_else(|| fail(9, "stat after futimens"));
+    if got.modified != FUTIME as u64 {
+        fail(9, "futimens did not stamp the modification time");
+    }
+
     let _ = fs::remove_file(&path);
     pass(
         9,
-        "utimensat: explicit times stamped, UTIME_NOW/UTIME_OMIT honoured, bad args refused",
+        "utimensat: explicit times stamped, UTIME_NOW/UTIME_OMIT honoured, futimens stamps an \
+         open file, bad args refused",
     );
 }
 
@@ -1170,6 +1203,136 @@ fn test18(dir: &str) {
     pass(18, "readv/writev move a buffer list in order");
 }
 
+// -----------------------------------------------------------------------
+// Test 19: the std surface that used to report "unsupported"
+// -----------------------------------------------------------------------
+//
+// Every other test here calls `edos_lib`, which reaches the kernel directly.
+// This one goes through `std` on purpose: the wrappers worked for years while
+// the same operations were `unsupported()` one layer up, and that gap is
+// exactly what nothing was testing.
+fn test19(dir: &str) {
+    use std::io::{IoSlice, IoSliceMut, Read, Seek, SeekFrom, Write};
+    use std::time::{Duration, Instant, SystemTime};
+
+    let path = format!("{}/iotest_t19.dat", dir);
+    let link = format!("{}/iotest_t19.link", dir);
+    let _ = fs::remove_file(&link);
+    fs::write(&path, b"nineteen").unwrap_or_else(|e| fail(19, &format!("create: {}", e)));
+
+    // Symbolic links, through std rather than through the syscall wrapper.
+    #[allow(deprecated)]
+    fs::soft_link(&path, &link).unwrap_or_else(|e| fail(19, &format!("soft_link: {}", e)));
+    match fs::read_link(&link) {
+        Ok(target) if target.to_string_lossy() == path => {}
+        Ok(target) => fail(19, &format!("read_link gave {:?}, want {}", target, path)),
+        Err(e) => fail(19, &format!("read_link: {}", e)),
+    }
+    match fs::read(&link) {
+        Ok(got) if got == b"nineteen" => {}
+        Ok(_) => fail(19, "reading through the link gave the wrong bytes"),
+        Err(e) => fail(19, &format!("read through link: {}", e)),
+    }
+
+    // Timestamps: `stat` always carried them, `Metadata` used to refuse them.
+    let times = fs::FileTimes::new()
+        .set_accessed(SystemTime::UNIX_EPOCH + Duration::from_secs(1_300_000_000))
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_400_000_000));
+    let file = OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|e| fail(19, &format!("open for set_times: {}", e)));
+    file.set_times(times)
+        .unwrap_or_else(|e| fail(19, &format!("File::set_times: {}", e)));
+    drop(file);
+    let meta = fs::metadata(&path).unwrap_or_else(|e| fail(19, &format!("metadata: {}", e)));
+    let modified = meta
+        .modified()
+        .unwrap_or_else(|e| fail(19, &format!("Metadata::modified: {}", e)));
+    let secs = modified
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_else(|e| fail(19, &format!("modified before the epoch: {}", e)))
+        .as_secs();
+    if secs != 1_400_000_000 {
+        fail(19, &format!("modified is {}, want 1400000000", secs));
+    }
+
+    // `read_dir` streams now; it still has to find what it is asked for.
+    let entries = fs::read_dir(dir).unwrap_or_else(|e| fail(19, &format!("read_dir: {}", e)));
+    let mut found = false;
+    let mut link_is_symlink = false;
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| fail(19, &format!("read_dir entry: {}", e)));
+        if entry.file_name() == std::ffi::OsStr::new("iotest_t19.dat") {
+            found = true;
+        }
+        if entry.file_name() == std::ffi::OsStr::new("iotest_t19.link") {
+            link_is_symlink = entry
+                .file_type()
+                .unwrap_or_else(|e| fail(19, &format!("file_type: {}", e)))
+                .is_symlink();
+        }
+    }
+    if !found {
+        fail(19, "read_dir did not list a file it had just created");
+    }
+    if !link_is_symlink {
+        fail(19, "read_dir reported the symlink as an ordinary file");
+    }
+
+    // Vectored I/O through `Write`/`Read`, which used to report itself
+    // unavailable and fall back to one buffer at a time.
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .unwrap_or_else(|e| fail(19, &format!("reopen: {}", e)));
+    if !file.is_write_vectored() {
+        fail(19, "File still reports no vectored write");
+    }
+    let n = file
+        .write_vectored(&[IoSlice::new(b"one-"), IoSlice::new(b"two")])
+        .unwrap_or_else(|e| fail(19, &format!("write_vectored: {}", e)));
+    if n != 7 {
+        fail(19, &format!("write_vectored wrote {}, want 7", n));
+    }
+    file.seek(SeekFrom::Start(0))
+        .unwrap_or_else(|e| fail(19, &format!("seek: {}", e)));
+    let (mut head, mut tail) = ([0u8; 4], [0u8; 3]);
+    let n = file
+        .read_vectored(&mut [IoSliceMut::new(&mut head), IoSliceMut::new(&mut tail)])
+        .unwrap_or_else(|e| fail(19, &format!("read_vectored: {}", e)));
+    if n != 7 || &head != b"one-" || &tail != b"two" {
+        fail(19, "read_vectored filled the buffers wrongly");
+    }
+    drop(file);
+
+    // `try_exists` is `access` now, and still has to answer correctly.
+    if !std::path::Path::new(&path).try_exists().unwrap_or(false) {
+        fail(19, "try_exists denied a file that exists");
+    }
+    let missing = format!("{}/iotest_t19_missing.dat", dir);
+    if std::path::Path::new(&missing).try_exists().unwrap_or(true) {
+        fail(19, "try_exists claimed a missing file exists");
+    }
+
+    // A sub-millisecond sleep used to round to zero and return at once.
+    let start = Instant::now();
+    std::thread::sleep(Duration::from_micros(200));
+    if start.elapsed() < Duration::from_micros(200) {
+        fail(19, "thread::sleep returned before the time it was given");
+    }
+
+    let _ = fs::remove_file(&link);
+    let _ = fs::remove_file(&path);
+    pass(
+        19,
+        "std reaches symlinks, file times, streaming read_dir, vectored I/O, \
+         access and nanosleep",
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -1193,6 +1356,7 @@ fn main() {
     test16(dir);
     test17(dir);
     test18(dir);
+    test19(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

@@ -84,16 +84,11 @@
   syscall numbers is where a silent wrong-number bug would come from, so it
   wants doing deliberately rather than as a drive-by.
 
-- SYS_OPEN takes a NUL-terminated path while SYS_STAT takes pointer+length,
-  so edos_rt allocates a CString for every open. Settling on pointer+length
-  everywhere removes that allocation but changes the kernel ABI and every
-  caller.
-
-- `std::thread::sleep` still rounds every request down to whole milliseconds:
-  the fork's `sys/thread/edos.rs` calls `edos_rt::process::sleep_ms`, so a
-  sub-millisecond sleep returns immediately. SYS_NANOSLEEP (35) now exists and
-  `edos_lib::time::nanosleep` reaches it; pointing std at it needs an edos_rt
-  release and a fork pin bump.
+- SYS_OPEN takes a NUL-terminated path while SYS_STAT takes pointer+length.
+  edos_rt no longer pays for it (FileDesc::new goes through SYS_OPENAT with
+  AT_FDCWD, which needs no CString), but edos_lib and every program that calls
+  it still use the NUL-terminated forms, and the kernel still carries both.
+  Settling on pointer+length everywhere changes the ABI and every caller.
 
 
 - `make test AUDIODEV=none` intermittently fails on the ping-pong pair, and the

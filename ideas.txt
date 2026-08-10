@@ -315,6 +315,12 @@
   attenuating); the network button reports link, address, gateway, resolver and
   MAC, read from a new `/proc/net` rather than parsed out of `SYS_NETINFO`,
   which renders the same state with ANSI colour for a terminal.
+- **`std` reaches the whole syscall table.** `edos_rt` 0.0.42 and the shims on
+  `edos_std_v2` close the nineteen syscalls the fork had never been moved for:
+  symlinks, file times, vectored I/O, `nanosleep`, streaming `ReadDir`, `access`
+  behind `try_exists`, and `openat` so an open no longer allocates a `CString`.
+  `File::set_times` needed the kernel to grow POSIX `futimens`: a null path now
+  means the file the descriptor names.
 - **A window-manager privilege.** Moving, resizing, framing, minimizing and
   posting events to a window you do not own were ungated: any process could do
   any of them to any window. They now need the shell privilege, which init
@@ -1262,22 +1268,9 @@ Known defects, mechanism written out in `todo.txt`:
    by hand. See "Addressing windows by name instead of by pixel" below
    for what closes it.
 
-
-Reach, not correctness:
-
-4. **19 syscalls exist that `std` cannot reach.** The syscall table is
-   closed but the Rust fork was never moved with it, so
-   `std::fs::{symlink,read_link,set_times}`, `File::set_times`,
-   `FileAttr::{modified,accessed}`, vectored `read`/`write` and
-   `thread::sleep`'s sub-millisecond resolution are still
-   `unsupported()` or emulated in `library/std/src/sys/*/edos.rs`.
-   Everything they need is already in `edos_lib`; the work is porting
-   the wrappers into `edos_rt` and unstubbing the std shims.
-   See doc/USERSPACE-ROADMAP.md.
-
 Hygiene and quality:
 
-5. **`unwrap()`/`expect()` density in kernel code.** [audit] 204 across
+4. **`unwrap()`/`expect()` density in kernel code.** [audit] 204 across
    `kernel/src`, so recount rather than trusting the figure. Convert the
    ones on I/O and parsing results; leave a comment on the structurally
    impossible ones. The ELF loader (`loader/mod.rs`) is done. Next by
@@ -1289,38 +1282,40 @@ Hygiene and quality:
    `init()` into `find_and_init()`. The rest are DMA-allocation
    `expect()`s on a `-> !` thread. Reading them did turn up a real
    defect (short control transfers parsed as descriptors), now fixed.
-6. **Module READMEs for `fs/` (17.5k lines) and `drivers/` (13.6k).**
+5. **Module READMEs for `fs/` (17.5k lines) and `drivers/` (13.6k).**
    [audit]
 
 Still open from the audit, but deliberately unhurried. These are not
 oversights; each has a reason it has not been done.
 
-7. **TCP retransmit clones whole segments.** [audit 2.5]
+6. **TCP retransmit clones whole segments.** [audit 2.5]
    `resends.push(seg.data.clone())` copies the full segment per retry.
    This was theoretical while no connection could be established; now
    that TCP moves real data it is a live cost under loss. `Arc<[u8]>`
    and clone the handle.
-8. **Scheduler quality, four items.** [audit 4] Load is measured as
+7. **Scheduler quality, four items.** [audit 4] Load is measured as
    `thread_count`, so a sleeping thread weighs the same as a CPU-bound
    one and `pick_sched`/`try_rebalance` balance the wrong quantity.
    There is no priority inheritance, so a high-priority waiter still
    queues behind a low-priority lock holder. The timeslice is a flat 5ms
    regardless of priority. The idle loop polls for steals on a backoff
    instead of being told by an IPI.
-9. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
+8. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
    flag and one request slot, so unrelated `munmap`s on different
    address spaces serialize. Deliberate and correct; it is the scaling
    wall once core counts rise. The real fix is a per-mm CPU mask so the
    IPI is skipped for address spaces no other CPU has loaded.
-10. **`find_free_address` scans from the base every call.** [audit 2.7]
+9. **`find_free_address` scans from the base every call.** [audit 2.7]
    O(VMAs) per mmap. The tradeoff is deliberate — a cursor would never
    wrap and freed ranges would never be reused — and only worth
    revisiting if it shows up in a profile.
-11. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
-   NUL-terminated path while `SYS_STAT` takes pointer+length, so
-   `edos_rt` allocates a `CString` for every open. `SYS_OPENAT` takes
-   pointer+length and `AT_FDCWD` behaves exactly like `SYS_OPEN`, so
-   `edos_rt` can drop the allocation today without a kernel change.
+10. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
+   NUL-terminated path while `SYS_STAT` takes pointer+length. `edos_rt`
+   no longer pays for it — `FileDesc::new` goes through `SYS_OPENAT`
+   with `AT_FDCWD`, which behaves exactly like `SYS_OPEN` and needs no
+   `CString` — but `edos_lib`, `edos-sh` and the coreutils still call
+   the NUL-terminated forms of open, unlink, rename, mkdir and rmdir,
+   and the kernel still carries both entry points.
 
 Then, by fun-per-effort:
 

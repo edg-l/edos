@@ -48,6 +48,11 @@ pub fn open(path: &str, flags: u64) -> i64 {
     unsafe { sys::syscall2(sys::SYS_OPEN, path_buf.as_ptr() as u64, flags) as i64 }
 }
 
+/// Close a file descriptor. Returns 0 on success, or negative on error.
+pub fn close(fd: u64) -> i64 {
+    unsafe { sys::syscall1(sys::SYS_CLOSE, fd) as i64 }
+}
+
 /// One directory entry as the kernel writes it, immediately followed in the
 /// buffer by `name_len` bytes of name.
 #[repr(C)]
@@ -197,6 +202,16 @@ pub fn utimensat(dirfd: i64, path: &str, times: Option<&[Timespec; 2]>, flags: u
             flags,
         ) as i64
     }
+}
+
+/// Set the times of the file `fd` already names, POSIX `futimens`.
+///
+/// The only way to stamp a file a caller holds open rather than one it can
+/// name: a descriptor is what a language runtime hands out, and the path it was
+/// opened by is not something it keeps.
+pub fn futimens(fd: u64, times: Option<&[Timespec; 2]>) -> i64 {
+    let times_ptr = times.map(|t| t.as_ptr() as u64).unwrap_or(0);
+    unsafe { sys::syscall5(sys::SYS_UTIMENSAT, fd, 0, 0, times_ptr, 0) as i64 }
 }
 
 /// Set both timestamps of `path` to whole-second Unix times.
