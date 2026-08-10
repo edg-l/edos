@@ -1,11 +1,14 @@
 //! Window compositing for the window manager.
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 
 use edos_lib::shm::{PROT_READ, shm_map, shm_size, shm_unmap};
 use edos_render::font::{self, Weight};
 use edos_render::graphics::{Color, Screen};
 use edos_render::icons;
+use edos_render::image;
 use edos_render::text::Style;
 use edos_render::theme::{Theme, lerp_color};
 use edos_render::window::{WindowListEntry, flags::FLAG_DOCK};
@@ -147,31 +150,80 @@ fn mix_dithered(a: Color, b: Color, t: u8, d: u32) -> u32 {
     .raw()
 }
 
-/// Pre-compute the desktop background, one color per pixel.
-///
-/// A vertical ramp gives the ground a direction, and a radial falloff over it
-/// puts the light above the middle of the screen: the ground is brightest
-/// where windows open and darkest at the frame, so a window reads as an object
-/// resting on it rather than a panel butted against the same flat fill.
-/// Where the light sits, as a percentage of the screen height, for each
-/// background the user can cycle through.
-///
-/// Not wallpapers: the lit ground is the design, and moving the light changes
-/// the room without needing an image on disk or a decoder to read it. A real
-/// wallpaper would be a file the installer has to ship and the compositor has
-/// to scale, and it would replace the one part of this desktop that is not
-/// generic.
-pub const BACKGROUNDS: usize = 3;
+/// How many generated grounds there are, one per light position.
+pub const LIT_GROUNDS: usize = 3;
 
-pub fn build_desktop_cache(width: usize, height: usize) -> Vec<u32> {
-    build_desktop_cache_variant(width, height, 0)
+/// Where wallpapers are installed. Every readable BMP in it becomes one more
+/// background to cycle through.
+pub const WALLPAPER_DIR: &str = "/share/wallpapers";
+
+/// Where the desktop ground comes from.
+///
+/// The generated grounds come first and one of them is always available, so a
+/// machine with no wallpapers installed behaves exactly as it did before there
+/// was a decoder, and an unreadable image costs its own entry rather than the
+/// desktop.
+#[derive(Clone, Debug)]
+pub enum Background {
+    /// A lit ground, by light position.
+    Lit(usize),
+    /// An image file, scaled to cover the screen.
+    Wallpaper(PathBuf),
 }
 
-pub fn build_desktop_cache_variant(width: usize, height: usize, variant: usize) -> Vec<u32> {
+/// Every background the user can cycle through, generated ones first.
+pub fn available_backgrounds() -> Vec<Background> {
+    let mut all: Vec<Background> = (0..LIT_GROUNDS).map(Background::Lit).collect();
+    let Ok(entries) = fs::read_dir(WALLPAPER_DIR) else {
+        return all;
+    };
+    let mut wallpapers: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("bmp"))
+        })
+        .collect();
+    // By name, so the order a user sees does not depend on directory order.
+    wallpapers.sort();
+    all.extend(wallpapers.into_iter().map(Background::Wallpaper));
+    all
+}
+
+/// Render `background` at screen size, falling back to the first lit ground if
+/// the image cannot be read.
+pub fn build_desktop_cache(width: usize, height: usize, background: &Background) -> Vec<u32> {
+    let path = match background {
+        Background::Lit(variant) => return build_lit_ground(width, height, *variant),
+        Background::Wallpaper(path) => path,
+    };
+
+    let decoded = fs::read(path)
+        .map_err(|e| format!("{e}"))
+        .and_then(|bytes| image::decode_bmp(&bytes).map_err(|e| format!("{e:?}")));
+    match decoded {
+        Ok(image) => image.scaled_to_cover(width as u32, height as u32),
+        Err(reason) => {
+            eprintln!("[wm] {}: {reason}", path.display());
+            build_lit_ground(width, height, 0)
+        }
+    }
+}
+
+/// Pre-compute a lit ground, one colour per pixel.
+///
+/// A vertical ramp gives the ground a direction, and a radial falloff over it
+/// puts the light above the middle of the screen: the ground is brightest where
+/// windows open and darkest at the frame, so a window reads as an object
+/// resting on it rather than a panel butted against the same flat fill.
+/// `variant` moves the light, which changes the room without needing a file on
+/// disk or a decoder to read it.
+fn build_lit_ground(width: usize, height: usize, variant: usize) -> Vec<u32> {
     let theme = &Theme::DEFAULT;
     let mut buf = vec![0u32; width * height];
     // Light overhead, from the left, or from the right.
-    let cx = match variant % BACKGROUNDS {
+    let cx = match variant % LIT_GROUNDS {
         1 => width as i64 / 4,
         2 => width as i64 * 3 / 4,
         _ => width as i64 / 2,

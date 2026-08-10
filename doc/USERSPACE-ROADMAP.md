@@ -67,6 +67,7 @@ panel, the terminal and every widget at once. What lives in it:
 | `font` | Outline faces loaded from `/share/fonts` through `fontdue`, and the glyph cache. Lato for chrome, JetBrains Mono for character grids. Falls back to the built-in bitmap face when a file is missing, so a bad install costs type rather than the session. |
 | `text` | The one blitter and the one measurement path, so the window manager, the panel and the widgets agree on where a glyph sits and how wide a string is. |
 | `icons` | 16x16 monochrome masks, tinted at draw time so an icon takes the colour of its state. Hand-authored: a desktop with eight icons does not need a theme, a lookup path and a cache, each of which can be missing at boot. |
+| `image` | A BMP decoder (24- and 32-bit, uncompressed) and a bilinear scale-to-cover. BMP because it is the one raster format a machine can write without a library and this OS can read without one. Used for wallpapers; an image viewer would use the same two functions. |
 | `metrics` | One spacing scale derived from a single unit, and the shared control height. |
 | `theme` | Every colour in the shell. |
 | `widgets` | Controls, layout, and the terminal grid. |

@@ -519,10 +519,12 @@ fn main() {
     // Input device state (mouse + keyboard)
     let mut input = InputState::new();
 
-    // Pre-compute desktop gradient (avoids 1080 lerp+fill calls per frame).
+    // Pre-compute the desktop ground (avoids 1080 lerp+fill calls per frame,
+    // and a wallpaper is rescaled once rather than per frame).
+    let backgrounds = compositor::available_backgrounds();
     let mut background = 0usize;
     let mut desktop_cache =
-        compositor::build_desktop_cache_variant(screen.width(), screen.height(), background);
+        compositor::build_desktop_cache(screen.width(), screen.height(), &backgrounds[background]);
     let mut desktop_menu = desktop_menu::DesktopMenu::default();
 
     // Dirty region tracking
@@ -603,11 +605,11 @@ fn main() {
         // on a row or dismisses it.
         if left_pressed && desktop_menu.is_open() {
             if let Some(desktop_menu::Outcome::NextBackground) = desktop_menu.click(mx, my) {
-                background = (background + 1) % compositor::BACKGROUNDS;
-                desktop_cache = compositor::build_desktop_cache_variant(
+                background = (background + 1) % backgrounds.len();
+                desktop_cache = compositor::build_desktop_cache(
                     screen.width(),
                     screen.height(),
-                    background,
+                    &backgrounds[background],
                 );
                 dirty.full_screen = true;
             }

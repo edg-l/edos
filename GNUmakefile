@@ -367,7 +367,7 @@ clean-sata:
 # Listed one per directory rather than brace-expanded: make runs recipes under
 # /bin/sh, which is dash on Debian, and dash does not do brace expansion. It
 # silently creates a single directory with the braces in its name instead.
-FILESYSTEM_DIRS := bin boot dev home lib var mnt opt root sys tmp share share/fonts
+FILESYSTEM_DIRS := bin boot dev home lib var mnt opt root sys tmp share share/fonts share/wallpapers
 
 .PHONY: filesystem
 # Outline faces for the shell. Lato sets the chrome and JetBrains Mono the
@@ -383,7 +383,17 @@ FONT_COPIES := \
 	$(SANS_DIR)/Lato-Semibold.ttf:Sans-Semibold.ttf \
 	$(MONO_DIR)/JetBrainsMono-Regular.ttf:Mono-Regular.ttf
 
-filesystem:
+# The wallpapers the compositor offers alongside its generated grounds. Built
+# from a formula rather than committed, because this repo holds no binaries;
+# the rule depends on the script so an unchanged wallpaper keeps its timestamp
+# and does not drag both disk images through a rebuild.
+WALLPAPERS := filesystem/share/wallpapers/dusk.bmp
+
+$(WALLPAPERS): scripts/mkwallpaper.py
+	mkdir -p filesystem/share/wallpapers
+	python3 scripts/mkwallpaper.py filesystem/share/wallpapers
+
+filesystem: $(WALLPAPERS)
 	mkdir -p filesystem $(addprefix filesystem/,$(FILESYSTEM_DIRS))
 	@for pair in $(FONT_COPIES); do \
 		src=$${pair%%:*}; dst=$${pair##*:}; \
