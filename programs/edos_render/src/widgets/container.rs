@@ -2,12 +2,16 @@
 
 use super::{Widget, WidgetEvent, WidgetId};
 use crate::window::{WindowEvent, WindowEventType};
+use edos_lib::keymap::{Modifiers, map_keycode, update_modifiers};
 
 /// Container that manages widgets and routes events.
 pub struct WidgetContainer {
     widgets: Vec<Box<dyn Widget>>,
     focused: Option<WidgetId>,
     next_id: WidgetId,
+    /// Modifier state, tracked here because the kernel reports scancodes and
+    /// knows nothing about keyboard layouts.
+    mods: Modifiers,
 }
 
 impl WidgetContainer {
@@ -17,6 +21,7 @@ impl WidgetContainer {
             widgets: Vec::new(),
             focused: None,
             next_id: 1,
+            mods: Modifiers::default(),
         }
     }
 
@@ -131,6 +136,9 @@ impl WidgetContainer {
             }
             Some(WindowEventType::KeyPress) => {
                 let scancode = event.code;
+                if update_modifiers(&mut self.mods, scancode, true) {
+                    return results;
+                }
 
                 // Tab key cycles focus
                 if scancode == 15 {
@@ -141,11 +149,24 @@ impl WidgetContainer {
                         if let Some(evt) = w.on_key(scancode, true) {
                             results.push((focused_id, evt));
                         }
+                        // The kernel reports scancodes, never characters: it has
+                        // no keyboard layout and should not grow one. Text
+                        // reaches a widget only if the toolkit maps the key
+                        // here, the same way the terminal does.
+                        if let Some(ch) = map_keycode(scancode, &self.mods)
+                            && !ch.is_control()
+                            && let Some(evt) = w.on_char(ch)
+                        {
+                            results.push((focused_id, evt));
+                        }
                     }
                 }
             }
             Some(WindowEventType::KeyRelease) => {
                 let scancode = event.code;
+                if update_modifiers(&mut self.mods, scancode, false) {
+                    return results;
+                }
                 if let Some(focused_id) = self.focused {
                     if let Some(w) = self.widgets.iter_mut().find(|w| w.id() == focused_id) {
                         if let Some(evt) = w.on_key(scancode, false) {

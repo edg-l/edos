@@ -13,6 +13,12 @@ pub struct TextInput {
     y: i32,
     width: u32,
     text: String,
+    /// Cursor position measured in characters from the start of the text.
+    ///
+    /// Characters, not bytes: the cursor is drawn at `cursor_pos * char_width`
+    /// and moves one step per arrow key, so a byte index would land inside a
+    /// multi-byte character and the next `String::insert` would panic on the
+    /// boundary assertion. Byte offsets are derived at the point of use.
     cursor_pos: usize,
     focused: bool,
     placeholder: String,
@@ -70,7 +76,20 @@ impl TextInput {
     /// Set the text content.
     pub fn set_text(&mut self, text: &str) {
         self.text = text.to_string();
-        self.cursor_pos = self.text.len();
+        self.cursor_pos = self.char_len();
+    }
+
+    /// Length of the text in characters.
+    fn char_len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    /// Byte offset of the character the cursor sits on, or the end of the text.
+    fn cursor_byte(&self) -> usize {
+        self.text
+            .char_indices()
+            .nth(self.cursor_pos)
+            .map_or(self.text.len(), |(offset, _)| offset)
     }
 
     /// Get the placeholder text.
@@ -85,8 +104,9 @@ impl TextInput {
 
     /// Insert a character at the cursor position.
     fn insert_char(&mut self, ch: char) {
-        if self.cursor_pos <= self.text.len() {
-            self.text.insert(self.cursor_pos, ch);
+        if self.cursor_pos <= self.char_len() {
+            let at = self.cursor_byte();
+            self.text.insert(at, ch);
             self.cursor_pos += 1;
         }
     }
@@ -95,14 +115,16 @@ impl TextInput {
     fn delete_before(&mut self) {
         if self.cursor_pos > 0 {
             self.cursor_pos -= 1;
-            self.text.remove(self.cursor_pos);
+            let at = self.cursor_byte();
+            self.text.remove(at);
         }
     }
 
     /// Delete the character at the cursor.
     fn delete_at(&mut self) {
-        if self.cursor_pos < self.text.len() {
-            self.text.remove(self.cursor_pos);
+        if self.cursor_pos < self.char_len() {
+            let at = self.cursor_byte();
+            self.text.remove(at);
         }
     }
 
@@ -115,7 +137,7 @@ impl TextInput {
 
     /// Move cursor right.
     fn move_right(&mut self) {
-        if self.cursor_pos < self.text.len() {
+        if self.cursor_pos < self.char_len() {
             self.cursor_pos += 1;
         }
     }
@@ -127,7 +149,7 @@ impl TextInput {
 
     /// Move cursor to end.
     fn move_end(&mut self) {
-        self.cursor_pos = self.text.len();
+        self.cursor_pos = self.char_len();
     }
 
     /// Reset cursor blink state (make visible).
@@ -246,7 +268,7 @@ impl Widget for TextInput {
             let text_x = self.x + TEXT_PAD_X as i32;
             let relative_x = (x - text_x).max(0) as u32;
             let char_pos = (relative_x / char_width()) as usize;
-            self.cursor_pos = char_pos.min(self.text.len());
+            self.cursor_pos = char_pos.min(self.char_len());
             self.reset_cursor_blink();
         }
         None
