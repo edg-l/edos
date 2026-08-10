@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-85 programs and 2 libraries, all in the `programs/` cargo workspace.
+86 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -15,10 +15,11 @@
 | Archives | `tar` (ustar create, list and extract) |
 | Checksums | `sha256sum` |
 | Inspection | `file` |
-| System | `ps`, `top`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace`, `date` |
+| System | `ps`, `top`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace`, `date`, `watch` |
 | Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
-| Network | `ping`, `dns`, `http`, `wget`, `dnsprobe` |
+| Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho` |
 | Audio | `play` |
+| Images | `imgview` (BMP viewer) |
 | Games | `snake` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
 | Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest`, `sigtest`, `fstest`, `fsbench` |
@@ -107,6 +108,22 @@ no bare edges; a viewer fits and letterboxes, because the whole picture is the
 point, and it does not enlarge past 100%, because magnifying by default hides
 what the file actually contains. Those two live side by side over one bilinear
 resampler.
+
+**`watch`**. A command re-run on a timer with its output painted over the
+previous frame, and `-d` reverse-videoing the columns that changed since the
+last run. It runs the command through `sh -c` unless `-x` is given, so
+`watch 'ls /bin | wc -l'` is a pipeline, and it reads the child's pipe dry
+before waiting on it, since a command whose output exceeds the pipe buffer
+would otherwise deadlock the pair.
+
+Anything that clips or diffs another program's output has to parse the escape
+sequences in it: `ps` colours its state column, so counting escape bytes as
+columns clipped every line nine characters short and inserting a highlight in
+the middle of one printed its tail as text. `watch` splits a line into columns
+that each carry the escapes preceding them. Making the highlight visible also
+needed SGR 7 and 27 in `edos_render::widgets::terminal`, which had no reverse
+video at all — `top`'s inverse header and status bar had been rendering as
+plain text.
 
 Candidates beyond these phases, ranked by the kernel path each would exercise,
 are in [`PROGRAMS.md`](PROGRAMS.md).

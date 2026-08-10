@@ -2,6 +2,14 @@
 
 ## Done
 
+- **`watch`, a command on a timer** - re-runs a command every N seconds and
+  paints its output over the previous frame, with `-d` reverse-videoing the
+  columns that changed since the last run, `-x` to skip the `sh -c` the command
+  otherwise goes through, and `-e` to stop on the first non-zero exit. Escapes
+  in the watched command's own output are parsed out as zero-width, so clipping
+  to the screen width and diffing both count real columns. Needed SGR 7/27
+  (reverse video) in the terminal widget, which had never been implemented.
+
 - **`ln`, and links you can see** - `ln -s` creates symbolic links from the
   shell for the first time: one target into the working directory, one target
   to a named link, or several targets into a directory, with `-f` to replace

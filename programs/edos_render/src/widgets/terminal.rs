@@ -101,6 +101,9 @@ pub struct Terminal {
     current_fg: u32,
     current_bg: u32,
     bold: bool,
+    /// SGR 7: pen colours are swapped as each cell is written, so a cell keeps
+    /// the colours it was drawn with and nothing has to be re-inverted later.
+    reverse: bool,
 
     // Modifier key state
     modifiers: edos_lib::keymap::Modifiers,
@@ -155,6 +158,7 @@ impl Terminal {
             current_fg: terminal_colors::FOREGROUND,
             current_bg: terminal_colors::BACKGROUND,
             bold: false,
+            reverse: false,
             modifiers: edos_lib::keymap::Modifiers::default(),
             input_buffer: Vec::new(),
             selection_start: None,
@@ -290,11 +294,12 @@ impl Terminal {
 
                 // Write the character with current pen attributes
                 if self.cursor_row < self.rows && self.cursor_col < self.cols {
-                    self.buffer[self.cursor_row][self.cursor_col] = Cell {
-                        ch,
-                        fg: self.current_fg,
-                        bg: self.current_bg,
+                    let (fg, bg) = if self.reverse {
+                        (self.current_bg, self.current_fg)
+                    } else {
+                        (self.current_fg, self.current_bg)
                     };
+                    self.buffer[self.cursor_row][self.cursor_col] = Cell { ch, fg, bg };
                     self.cursor_col += 1;
 
                     // Wrap to next line if needed
@@ -413,12 +418,19 @@ impl Terminal {
                             self.current_fg = terminal_colors::FOREGROUND;
                             self.current_bg = terminal_colors::BACKGROUND;
                             self.bold = false;
+                            self.reverse = false;
                         }
                         1 => {
                             self.bold = true;
                         }
+                        7 => {
+                            self.reverse = true;
+                        }
                         22 => {
                             self.bold = false;
+                        }
+                        27 => {
+                            self.reverse = false;
                         }
                         30..=37 => {
                             let idx = (p - 30) + if self.bold { 8 } else { 0 };

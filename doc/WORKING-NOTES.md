@@ -2307,3 +2307,44 @@ Only path-based lookups go through the broken `lstat`.
   fixes it. Screenshot after the `key ret`, not after the `type`, or the shot
   shows a command that has not run and reads exactly like a program that
   printed nothing.
+
+## `watch`, and the escapes in other programs' output
+
+`watch` re-runs a command every N seconds and paints the result over the
+previous frame. Two things in it are worth keeping.
+
+**Reading the child's pipe dry comes before waiting on it.** The command runs
+with both its streams on one pipe; if the parent waited for exit first, any
+command whose output exceeds the pipe buffer would block in `write` while the
+parent blocked in `waitpid`, and the pair would sit there forever. Every
+capture-the-output-of-a-child program in this tree has to do it in that order.
+
+**A program's output is not a sequence of columns until its escape sequences
+are separated out.** `ps` colours its state column, `ls` colours file types.
+The first version of `watch` counted characters, and both column decisions it
+makes came out wrong on exactly those lines: clipping to the terminal width cut
+them about nine characters short, so `ps` names showed as a single letter, and
+`-d` inserting a highlight in the middle of a colour sequence printed the rest
+of that sequence as the literal text `7m4m`. It now splits a line into columns
+that each carry the escapes preceding them, so escapes are zero-width for both
+clipping and diffing. Tabs are expanded in the same pass, since the column a
+tab lands on is only known there.
+
+**`edos_render`'s terminal widget had no reverse video.** SGR 7 and 27 were
+ignored, which is why `-d` looked like a no-op at first — and why `top`'s
+inverse header and status bar had been rendering as plain text since `top` was
+written. The pen now carries a `reverse` flag and swaps the pen colours as each
+cell is written, so a highlight over coloured output keeps the colour. `watch`
+ends a highlight with SGR 27 rather than SGR 0 for the same reason.
+
+### Things that will bite you
+
+- **Anything that clips, wraps or diffs another program's output must parse
+  ANSI escapes.** Half this tree's CLI programs colour their output, so a
+  character count is not a column count, and cutting a line at a character
+  boundary can cut an escape sequence in half. `cells()` in
+  `programs/watch/src/main.rs` is the shape to copy.
+- **A frame ending in `\r\n` scrolls the screen.** Full-screen programs here
+  write the last row without a line feed, or the terminal scrolls and takes the
+  header with it. `top` and `watch` both do this; it is not obvious from either
+  until the header starts creeping off the top.
