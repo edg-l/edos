@@ -29,14 +29,27 @@
       and the thread is idle with no HID traffic in a headless guest, so that
       wake is the *only* thing that can run it. If it lands while the thread is
       mid-transition into the park, nothing else ever arrives to retry it.
-    - every xHCI line in the log is tagged `<cpu-1:kernel>`, the prefix
-      `logs.rs:53` uses when `current_thread()` is None, while every other
-      kthread prints `<cpu-N:name:k:tid>`. Either `xhci_driver_main` is not
-      running on the thread `usb::init` spawned and published as
-      `XHCI_DRIVER_THREAD_ID` — in which case the wake targets a thread that is
-      not in the loop and the hang is fully explained — or the prefix is lying.
-      Settle this first; it is one `log!` of `current_thread_id()` at the top of
-      `xhci_driver_main` and it decides the whole bisect.
+    - the `<cpu-1:kernel>` tag on every xHCI line says NOTHING about which
+      thread ran them: the whole driver logs with `println!`, and
+      `serial::_serial_print` (`serial.rs:45`) hardcodes that prefix. Only
+      `log!` consults `current_thread()`. So the xHCI thread's identity is
+      still unobserved, and there is no evidence it is the wrong thread.
+    - the waiter is a real kthread and not a self-deadlock: the hanging
+      `reading sector for gpt` is tagged `<cpu-2:fs:k:14>` (run_log line 241),
+      from `log!`, so the fs kthread — not the xHCI thread — is the one
+      blocked in `Response::wait`. The gpt scan on the previous device
+      (lines 231-232) completed on that same thread.
+    - the wake is not a silent no-op either: `drivers::init` calls
+      `usb::init()` (`drivers/mod.rs:95`), which `call_once`s
+      `XHCI_DRIVER_THREAD_ID` before any filesystem is mounted, so
+      `send_and_wait`'s `if let Some(handle)` is taken.
+    What is left is the wake itself against a thread parked in
+    `thread_park_while`. The next experiment needs `log!` (never `println!`)
+    on both sides: one line where the park returns in `xhci_driver_main`
+    (`xhci/mod.rs:1475`) reporting `current_thread_id()`, and one in
+    `send_and_wait` after `wake_thread` reporting the target's id and the
+    value `wake_thread` returned. That shows whether the wake reached a
+    thread that then failed to re-enter the drain, or never landed at all.
   Give the fs side a deadline regardless: `Response::wait` blocks forever, so a
   wedged or unwoken driver thread wedges the boot instead of failing the read.
 
