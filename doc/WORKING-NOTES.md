@@ -1348,6 +1348,30 @@ Traps this round produced, both of which cost a build cycle:
   fetched.** The panel's menu closed itself instantly because its absence from
   a stale list read as "destroyed".
 
+## The shell's loose ends, closed
+
+Four things the rebuild left open, and what each turned out to need.
+
+**Windows are addressable by name.** `/proc/windows` publishes the kernel
+registry, and the compositor copies that file into the kernel log on
+`Ctrl+Alt+W`; the serial console is the only channel out of a headless guest, so
+that keystroke is how the geometry reaches the host. `scripts/edos-vm windows`
+and `focus <title>` are the host side.
+
+Two details that are the whole difference between this working and looking like
+it works:
+
+- **The reported origin is the *outer* one and the reported size is the
+  *client* one**, with the frame as a separate column, because that is what the
+  kernel routes pointer events by. Clicking `x + w/2, y + h/2` lands in the
+  title bar of a tall window and on the desktop below a short one.
+- **Clicking a window's centre focuses whatever is on top of it.** `focus`
+  subtracts every higher-z window's rect from the target's client area and
+  clicks a point that survives, which is what raises a partly covered window;
+  the first version clicked the centre and confidently focused the wrong window
+  while reporting the right name. A fully covered window is reported, not
+  guessed at.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any
@@ -1384,9 +1408,11 @@ Traps this round produced, both of which cost a build cycle:
   guest rather than `edos-vm stop`: it syncs every filesystem and the resulting
   image checks clean with no `--repair` replay.
 - **`scripts/edos-vm` mirrors the panel's geometry and nothing enforces it.**
-  Task buttons are no longer addressable by index at all: they size to their
-  title and the list is centred, so scripted focus changes go through
-  `key alt+tab`. `launch <row>` drives the applications menu by row name.
+  That is now only true of the panel: `launch <row>` drives the applications
+  menu by row name from copied coordinates. *Windows* are addressed by title
+  (`edos-vm windows`, `edos-vm focus <title>`), which reads `/proc/windows` and
+  needs no layout constants. A minimized window has no geometry to click, so
+  bringing one back is still `Alt+Tab` or its task button.
 - **The sched-test suite has a known flake with two signatures**, both on a
   first run: `ping-pong count mismatch: 499 != 500`, and 48/49 TIMEOUT with
   ping-pong-pong never reporting. An immediate re-run passes. Recorded in

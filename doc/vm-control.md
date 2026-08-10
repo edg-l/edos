@@ -81,6 +81,8 @@ without `password=on` publishes an unauthenticated console.
 | `key <qcode>...` | e.g. `ret`, `ctrl+c`, `alt+f4` |
 | `click x y` / `move x y` | `--button left\|middle\|right` |
 | `launch [row]` | applications menu by row name, instead of raw pixels |
+| `windows` | the guest's window registry, by name |
+| `focus <name>` | click into a window found by title, `--dx/--dy` for a point in it |
 | `log [-n N]` | tails `run_log.txt` |
 | `qmp <cmd> [json]` | escape hatch for any QMP command |
 
@@ -142,7 +144,7 @@ almost always this.
 The window manager focuses on click. Click into a window before typing, or the
 keystrokes go nowhere. A new terminal also spawns at the *same* geometry as the
 existing one, landing exactly on top, so when driving blind never assume which
-window is frontmost; `Alt+Tab` to the one you want, or click its title bar.
+window is frontmost; `scripts/edos-vm focus <title>` picks the one you mean.
 
 ---
 
@@ -170,20 +172,42 @@ The mapping, for a screen `W x H`:
 | Launcher | 8 to 44 (centre 26) | `H - 20` |
 | Menu row *n* (0-based) | 68 | `H - 40 - 185 + 6 + 32n`, plus 13 from row 2 |
 
-**Task buttons are no longer addressable by index.** They size to their title
-and the list is centred, so their position depends on how many windows are open
-and what they are called. To change focus from a script, use `Alt+Tab`, which
-the window manager handles and which needs no geometry:
+**Task buttons are not addressable by index.** They size to their title and the
+list is centred, so their position depends on how many windows are open and what
+they are called. Address the window instead, which needs no panel geometry at
+all — see below.
+
+---
+
+## Addressing windows by name
+
+The kernel publishes its window registry at `/proc/windows`, and the window
+manager copies that file into the kernel log on `Ctrl+Alt+W`. The serial console
+is the only channel out of a headless guest, so that is how the geometry reaches
+the host:
 
 ```bash
-scripts/edos-vm key alt+tab
+scripts/edos-vm windows          # ID, PID, rect, state and title, per window
+scripts/edos-vm focus Terminal   # click into a window found by title
+scripts/edos-vm focus Term --dx 40 --dy 12   # ...at a point inside its client area
 ```
 
-The real fix is to stop addressing windows by pixel at all: the kernel window
-registry already tracks id, pid, rect, z-order and title, so exposing it (via
-procfs, or a guest-side control daemon that resolves window *names*) would make
-GUI layout changes stop breaking automation. Recorded under "Addressing windows
-by name instead of by pixel" in `ideas.txt`.
+`focus` matches case-insensitively, preferring an exact title, then a prefix,
+then a substring, and takes the topmost of several matches. It clicks a point of
+the target that nothing above it covers, so it raises a partly hidden window
+rather than focusing whatever is on top of it. A fully covered window is
+reported and left alone.
+
+Two things this does not do. It cannot restore a minimized window, which has no
+geometry on screen: use the panel's task button or `Alt+Tab`. And it reads the
+log rather than talking to the guest, so a dump costs a keystroke and about a
+second.
+
+`/proc/windows` reports the *outer* origin and the *client* size, with the
+manager's frame as a fourth column, because that is what the kernel routes
+pointer events by. The centre of a client area is therefore
+`(x + frame.left + w/2, y + frame.top + h/2)`, which `scripts/edos-vm` computes
+for you.
 
 ---
 

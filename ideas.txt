@@ -297,6 +297,13 @@
   `HBoxLayout::set_uniform_columns` so rows of controls line up.
 - **The kernel stopped knowing what a title bar is.** Each window carries the
   frame its manager gave it, through `property::FRAME`.
+- **Windows are addressable by name.** `/proc/windows` publishes the kernel
+  registry — id, pid, outer origin, client size, z-order, flags, frame and
+  title — and the compositor copies that file into the kernel log on
+  `Ctrl+Alt+W`, which is how the geometry reaches a host driving a headless
+  guest. `scripts/edos-vm windows` and `scripts/edos-vm focus <title>` are the
+  host side; `focus` clicks a point of the target that nothing above it covers,
+  so it raises a partly hidden window instead of focusing whatever is on top.
 - **A window-manager privilege.** Moving, resizing, framing, minimizing and
   posting events to a window you do not own were ungated: any process could do
   any of them to any window. They now need the shell privilege, which init
@@ -1201,32 +1208,20 @@ page cache, with ioctls for flush, sector count, rescan and is-mounted.
 `edos-install` already uses them, so an in-EDOS fsck has everything it
 needs.
 
-### Addressing windows by name instead of by pixel
+### Addressing windows by name instead of by pixel (DONE, and what is left)
 
-`scripts/edos-vm` drives the GUI by clicking absolute pixels, and its
-taskbar coordinates are a hand-copied mirror of the constants in
-`programs/edos-taskbar/src/main.rs` (`LAUNCHER_X`, `LAUNCHER_WIDTH`,
-`BUTTON_WIDTH`, `TASKBAR_HEIGHT`). Any GUI layout change silently
-breaks every scripted click, with no compile error and no failing test
--- the click just lands on the wrong button.
+Option 1 shipped: `/proc/windows` publishes the registry, the compositor
+copies it into the kernel log on `Ctrl+Alt+W`, and `scripts/edos-vm`
+grows `windows` and `focus <title>`. Windows no longer need pixels.
 
-Two ways out, cheap to expensive:
-
-1. **Expose the window registry through procfs.** `kernel/src/window/
-   registry.rs` already holds id, pid, rect, z-order and title, and
-   `SYS_WINDOW_LIST` (224) already returns it to userspace. A
-   `/proc/windows` line per window costs little and makes layout
-   introspectable. Still needs a channel out of the guest to help an
-   external driver.
-2. **A control daemon (the `edosd`/rcon idea above), speaking window
-   names.** `focus Terminal`, `launch term`, `click <window> <dx> <dy>`
-   resolved guest-side against the live registry. Pixels stop being the
-   interface, so GUI layout changes stop breaking automation, and
-   assertions can read text instead of screenshots.
-
-Until then, the mirrored constants are documented in
-`doc/vm-control.md` and must be updated in the same commit that moves
-the taskbar layout.
+The *panel* still does. `launch`, and the menu row coordinates behind
+it, remain a hand-copied mirror of
+`programs/edos-taskbar/src/{main,panel,menu}.rs`, because the panel's
+buttons are not windows and nothing publishes their layout. Option 2 --
+a control daemon speaking names for panel actions too, so a test can
+assert on text rather than a screenshot -- is what would close that,
+and would also let a script restore a minimized window, which has no
+on-screen geometry to click.
 
 ## What to do next (reviewed 2026-08-10)
 
@@ -1249,12 +1244,13 @@ Known defects, mechanism written out in `todo.txt`:
    on q35, so the defective path runs on every boot and the fix is
    verifiable against the `QEMU DVD-ROM` model string in `dmesg`.
 
-3. **The shell has no window-name addressing.** Task buttons size to
-   their title and the panel centres them, so `scripts/edos-vm` can no
-   longer click one by index and automation has to go through Alt+Tab.
-   Exposing the kernel window registry through procfs, or a guest-side
-   control daemon that resolves window *names*, fixes both this and the
-   older "addressing windows by pixel" entry below.
+3. **Panel actions still have no name addressing.** Windows do now
+   (`/proc/windows`, `scripts/edos-vm focus`), but the launcher and the
+   applications-menu rows are drawn by the panel and published by
+   nothing, so `scripts/edos-vm launch` still mirrors their coordinates
+   by hand. See "Addressing windows by name instead of by pixel" below
+   for what closes it.
+
 
 Reach, not correctness:
 

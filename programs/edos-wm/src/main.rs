@@ -33,6 +33,38 @@ use input::{InputAction, InputState};
 /// Maximum number of windows to track.
 const MAX_WINDOWS: usize = 64;
 
+/// Prefix on every line of a window dump, so a host-side reader can pick the
+/// block out of an interleaved serial log.
+const WINDOW_DUMP_TAG: &str = "windows|";
+
+/// Copy `/proc/windows` into the kernel log.
+///
+/// The serial console is the only channel out of a headless guest, so this is
+/// what lets something outside the machine address a window by its title
+/// instead of by a pixel copied out of the panel's layout. The lines are passed
+/// through rather than reformatted: procfs owns the format, and a second
+/// formatter here is a second thing to keep in step.
+fn dump_windows() {
+    use std::io::Write;
+
+    let text = match std::fs::read_to_string("/proc/windows") {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("[wm] /proc/windows: {e}");
+            return;
+        }
+    };
+    let Ok(mut klog) = std::fs::OpenOptions::new().write(true).open("/dev/klog") else {
+        eprintln!("[wm] /dev/klog is not writable");
+        return;
+    };
+    // One write per line, formatted first: each write to /dev/klog is one log
+    // message, and `write!` would split a line across several of them.
+    for line in text.lines() {
+        let _ = klog.write_all(format!("{WINDOW_DUMP_TAG} {line}").as_bytes());
+    }
+}
+
 /// Target frame time (approximately 60 FPS).
 const FRAME_TIME_MS_DEFAULT: u64 = 16;
 
@@ -544,6 +576,7 @@ fn main() {
                 };
                 let _ = window_send_event(next_id, &focus_event);
             }
+            InputAction::DumpWindows => dump_windows(),
             InputAction::None => {}
         }
 

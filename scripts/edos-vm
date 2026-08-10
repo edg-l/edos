@@ -9,6 +9,8 @@ go in as synthetic input, so the guest cannot tell them from a real keyboard.
     scripts/edos-vm shot /tmp/desktop.png
     scripts/edos-vm type 'ls /bin'
     scripts/edos-vm key ret
+    scripts/edos-vm windows
+    scripts/edos-vm focus Terminal
     scripts/edos-vm log -n 40
     scripts/edos-vm stop
 """
@@ -365,6 +367,156 @@ def _click_at(x, y, args):
         time.sleep(0.05)
 
 
+# The window manager copies /proc/windows into the kernel log on Ctrl+Alt+W,
+# tagging every line so it can be picked out of an interleaved serial log. The
+# columns are procfs's, in kernel/src/fs/procfs/mod.rs.
+WINDOW_DUMP_KEY = "ctrl+alt+w"
+WINDOW_DUMP_TAG = "windows|"
+
+
+class Window:
+    __slots__ = ("id", "pid", "x", "y", "w", "h", "z", "flags", "frame", "state", "title")
+
+    def __init__(self, fields, title):
+        (self.id, self.pid, self.x, self.y, self.w, self.h, self.z, self.flags) = (
+            int(f) for f in fields[:8]
+        )
+        self.frame = tuple(int(v) for v in fields[8].split(","))
+        self.state = fields[9]
+        self.title = title
+
+    def client_rect(self):
+        """The client area in screen coordinates.
+
+        The origin the kernel reports is the outer one, so the manager's frame
+        has to be added back: the reported origin plus half the size lands in
+        the title bar of a tall enough window and on the desktop of a short one.
+        """
+        x = self.x + self.frame[0]
+        y = self.y + self.frame[1]
+        return x, y, x + self.w, y + self.h
+
+    def outer_rect(self):
+        left, top, right, bottom = self.frame
+        return (self.x, self.y,
+                self.x + self.w + left + right,
+                self.y + self.h + top + bottom)
+
+    def on_screen(self):
+        return self.state in ("normal", "focused")
+
+    def __str__(self):
+        return (f"{self.id:<5} {self.pid:<5} {self.x:<6} {self.y:<6} {self.w:<5} "
+                f"{self.h:<5} {self.state:<9} {self.title}")
+
+
+def window_list():
+    """Ask the guest for its window registry and parse the reply.
+
+    The serial log is the only channel out of a headless guest, so the request
+    is a keystroke and the answer arrives in `run_log.txt`. Only the block
+    after the last header line is read, so an older dump cannot answer.
+    """
+    if not os.path.exists(SERIAL_LOG):
+        raise SystemExit("no serial log yet")
+
+    marker = os.path.getsize(SERIAL_LOG)
+    Qmp().send_key(WINDOW_DUMP_KEY.split("+"))
+    for _ in range(50):
+        time.sleep(0.1)
+        if os.path.getsize(SERIAL_LOG) > marker:
+            break
+    # The dump is several writes, so give the rest of it time to land.
+    time.sleep(0.2)
+
+    with open(SERIAL_LOG, errors="replace") as f:
+        tagged = [line.split(WINDOW_DUMP_TAG, 1)[1].strip()
+                  for line in f if WINDOW_DUMP_TAG in line]
+
+    windows = []
+    for line in tagged:
+        fields = line.split(None, 10)
+        if len(fields) < 10 or not fields[0].isdigit():
+            # The header line starts each block; anything before it is stale.
+            windows = []
+            continue
+        windows.append(Window(fields, fields[10] if len(fields) > 10 else ""))
+    return windows
+
+
+def find_window(name, windows):
+    """Resolve a window by title, case-insensitively, prefix before substring."""
+    name = name.lower()
+    for match in (lambda t: t == name,
+                  lambda t: t.startswith(name),
+                  lambda t: name in t):
+        hits = [w for w in windows if match(w.title.lower())]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            # Topmost wins: that is the one a person would say they meant.
+            return max(hits, key=lambda w: w.z)
+    raise SystemExit(f"no window matching {name!r}; open windows: "
+                     + ", ".join(repr(w.title) for w in windows))
+
+
+def cmd_windows(args):
+    windows = window_list()
+    if not windows:
+        raise SystemExit("no windows reported; is the window manager running?")
+    print(f"{'ID':<5} {'PID':<5} {'X':<6} {'Y':<6} {'W':<5} {'H':<5} {'STATE':<9} TITLE")
+    for window in windows:
+        print(window)
+
+
+def visible_point(window, windows):
+    """A point of `window`'s client area that nothing on top of it covers.
+
+    The window manager focuses whatever is under the pointer, so clicking the
+    centre of a window that something else overlaps focuses the *other* window
+    and silently does the opposite of what was asked. Everything above this one
+    in z-order is subtracted from its client area and the surviving point
+    nearest the centre wins.
+    """
+    left, top, right, bottom = window.client_rect()
+    above = [w.outer_rect() for w in windows
+             if w.z > window.z and w.id != window.id and w.on_screen()]
+
+    def covered(px, py):
+        return any(l <= px < r and t <= py < b for l, t, r, b in above)
+
+    cx, cy = (left + right) // 2, (top + bottom) // 2
+    # A grid rather than a rectangle subtraction: a dozen candidate points are
+    # enough to find a corner of a partly covered window, and the exact largest
+    # uncovered region is not worth the geometry.
+    steps = 9
+    candidates = [
+        (left + (right - left) * i // (steps + 1), top + (bottom - top) * j // (steps + 1))
+        for i in range(1, steps + 1)
+        for j in range(1, steps + 1)
+    ]
+    free = [(px, py) for px, py in candidates if not covered(px, py)]
+    if not free:
+        return cx, cy, False
+    return (*min(free, key=lambda p: abs(p[0] - cx) + abs(p[1] - cy)), True)
+
+
+def cmd_focus(args):
+    """Click into a window found by name, which is what focuses it."""
+    windows = window_list()
+    window = find_window(args.name, windows)
+    if args.dx is not None:
+        left, top, _, _ = window.client_rect()
+        x, y, clear = left + args.dx, top + args.dy, True
+    else:
+        x, y, clear = visible_point(window, windows)
+    if not clear:
+        print(f"warning: {window.title!r} is fully covered; the click will land "
+              "on whatever is on top of it", file=sys.stderr)
+    _click_at(x, y, args)
+    print(f"clicked {window.title!r} at {x},{y}")
+
+
 def cmd_log(args):
     if not os.path.exists(SERIAL_LOG):
         raise SystemExit("no serial log yet")
@@ -436,6 +588,18 @@ def main():
     s.add_argument("--width", type=int, default=1920)
     s.add_argument("--height", type=int, default=1080)
     s.set_defaults(func=cmd_launch)
+
+    sub.add_parser("windows", help="list the guest's windows by name").set_defaults(
+        func=cmd_windows)
+
+    s = sub.add_parser("focus", help="click into a window found by title")
+    s.add_argument("name")
+    s.add_argument("--dx", type=int, help="click this far into the client area instead"
+                                          " of its centre")
+    s.add_argument("--dy", type=int, default=0)
+    s.add_argument("--width", type=int, default=1920)
+    s.add_argument("--height", type=int, default=1080)
+    s.set_defaults(func=cmd_focus)
 
     s = sub.add_parser("log", help="tail the guest serial log")
     s.add_argument("-n", type=int, default=20)

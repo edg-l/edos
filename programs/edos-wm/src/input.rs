@@ -13,6 +13,12 @@ pub const RAW_F4: u32 = 4;
 /// KeyCode for Tab (pc_keyboard::KeyCode::Tab = 38).
 pub const RAW_TAB: u32 = 38;
 
+/// KeyCode for Left Control (pc_keyboard::KeyCode::LControl = 93).
+pub const RAW_LCTRL: u32 = 93;
+
+/// KeyCode for W (pc_keyboard::KeyCode::W = 40).
+pub const RAW_W: u32 = 40;
+
 /// Bit 31 set in /dev/kbd encoding means key release.
 const KEY_RELEASE_BIT: u32 = 0x8000_0000;
 
@@ -27,6 +33,8 @@ pub enum InputAction {
     AltF4 { focused_id: u64 },
     /// Alt+Tab cycled focus to the given window.
     AltTab { next_id: u64 },
+    /// Ctrl+Alt+W: copy the window registry into the kernel log.
+    DumpWindows,
 }
 
 /// Manages input device state (mouse + keyboard).
@@ -34,6 +42,7 @@ pub struct InputState {
     mouse_file: std::fs::File,
     kbd_file: Option<std::fs::File>,
     alt_held: bool,
+    ctrl_held: bool,
     last_mouse_buttons: u8,
 }
 
@@ -44,6 +53,7 @@ impl InputState {
             mouse_file: std::fs::File::open("/dev/mouse").expect("failed to open /dev/mouse"),
             kbd_file: std::fs::File::open("/dev/kbd").ok(),
             alt_held: false,
+            ctrl_held: false,
             last_mouse_buttons: 0,
         }
     }
@@ -103,15 +113,23 @@ impl InputState {
             let is_release = raw & KEY_RELEASE_BIT != 0;
             let key = raw & !KEY_RELEASE_BIT;
 
-            // Track Alt press/release
+            // Track modifier press/release
             if key == RAW_LALT {
                 self.alt_held = !is_release;
+                continue;
+            }
+            if key == RAW_LCTRL {
+                self.ctrl_held = !is_release;
                 continue;
             }
 
             // Only process key-down events for shortcuts
             if is_release {
                 continue;
+            }
+
+            if self.ctrl_held && self.alt_held && key == RAW_W {
+                return InputAction::DumpWindows;
             }
 
             if self.alt_held {
