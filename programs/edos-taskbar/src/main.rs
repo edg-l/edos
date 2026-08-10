@@ -204,7 +204,7 @@ fn main() {
 
         let focused = tasks.iter().find(|w| w.is_focused()).map(|w| w.id);
 
-        let clock = match edos_lib::time::clock_gettime() {
+        let clock = match edos_lib::time::local_time() {
             Some(t) => format!("{:02}:{:02}", t.hour, t.minute),
             None => String::from("--:--"),
         };

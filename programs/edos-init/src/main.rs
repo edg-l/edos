@@ -56,13 +56,18 @@ const BACKOFF_MS: &[u64] = &[100, 250, 500, 1000, 2000, 5000];
 /// binary that crashes on startup pins a CPU respawning forever.
 const MAX_RAPID_FAILURES: u32 = 5;
 
+/// Offset from UTC the session starts with, as an ISO 8601 offset. Change it
+/// with `export TZ=<offset>` in a shell, which every program that shell starts
+/// then picks up.
+const DEFAULT_TZ: &str = "+02:00";
+
 fn supervise(service: &'static Service) {
     let name = service.path.rsplit('/').next().unwrap_or(service.path);
     let mut failures: u32 = 0;
 
     loop {
         let started = Instant::now();
-        let pid = process::spawn(service.path, &[], 0, 1, 2);
+        let pid = process::spawn_with_env(service.path, &[], 0, 1, 2);
         if pid == u64::MAX {
             failures += 1;
             eprintln!("init: {name}: spawn failed (attempt {failures})");
@@ -114,6 +119,12 @@ fn main() {
         process::getpid(),
         SERVICES.len()
     );
+
+    // The session's clock offset from UTC. The kernel keeps time in UTC and
+    // there is no zone database, so this fixed ISO 8601 offset is the whole of
+    // the system's timezone support; it is inherited by every service and so by
+    // the panel clock and anything the shell runs.
+    unsafe { std::env::set_var("TZ", DEFAULT_TZ) };
 
     // One supervisor thread per service, because waitpid names a single child
     // and each service restarts on its own schedule.

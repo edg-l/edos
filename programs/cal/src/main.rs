@@ -76,37 +76,12 @@ fn day_of_week(y: u32, m: u32, d: u32) -> usize {
     ((d + (13 * (m + 1)) / 5 + y + y / 4 - y / 100 + y / 400) % 7 + 6) % 7
 }
 
-/// Returns (day, month, year) for today.
+/// Today, as (day, month, year) in the session's local time.
 fn current_date() -> (u32, u32, u32) {
-    let dur = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let mut days = (dur.as_secs() / 86400) as i64; // Days since 1970-01-01
-
-    // Walk from 1970-01-01 forward by years, then months
-    let mut y: i64 = 1970;
-    while days > 0 {
-        let dy = if is_leap(y as u32) { 366 } else { 365 };
-        if days >= dy {
-            days -= dy;
-            y += 1;
-        } else {
-            break;
-        }
+    match edos_lib::time::local_time() {
+        Some(t) => (t.day as u32, t.month as u32, t.year as u32),
+        None => (1, 1, 1970),
     }
-    let m_lens = month_lengths(y as u32);
-    let mut m: i64 = 1;
-    for ml in m_lens {
-        let ml = ml as i64;
-        if days >= ml {
-            days -= ml;
-            m += 1;
-        } else {
-            break;
-        }
-    }
-    let d = (days + 1) as u32;
-    (d, m as u32, y as u32)
 }
 
 /// Whether `(d, month, year)` is _today_ (according to the clock).

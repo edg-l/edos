@@ -25,7 +25,7 @@ pub fn nanosleep(seconds: i64, nanos: i64) -> i64 {
     unsafe { sys::syscall2(sys::SYS_NANOSLEEP, &req as *const Timespec as u64, 0) as i64 }
 }
 
-/// Broken-down UTC wall-clock time.
+/// Broken-down wall-clock time, in whichever zone the constructor was given.
 #[derive(Debug, Clone, Copy)]
 pub struct ClockTime {
     pub hour: u8,
@@ -34,6 +34,8 @@ pub struct ClockTime {
     pub day: u8,
     pub month: u8,
     pub year: u16,
+    /// Day of the week, 0 = Sunday.
+    pub weekday: u8,
 }
 
 /// Nanoseconds since the Unix epoch, or `None` if the syscall fails.
@@ -54,10 +56,60 @@ pub fn clock_gettime() -> Option<ClockTime> {
     clock_gettime_nanos().map(ClockTime::from_unix_nanos)
 }
 
+/// Current local time: UTC shifted by [`utc_offset_seconds`].
+pub fn local_time() -> Option<ClockTime> {
+    let secs = (clock_gettime_nanos()? / 1_000_000_000) as i64;
+    Some(ClockTime::from_unix_secs(
+        secs + utc_offset_seconds() as i64,
+    ))
+}
+
+/// The session's offset from UTC, in seconds east of Greenwich.
+///
+/// Read from `TZ`, which holds a fixed ISO 8601 offset — `+02:00`, `-0530`,
+/// `+02`, or `Z` — and not a POSIX zone rule or an IANA zone name. There is no
+/// zone database, so a name means UTC rather than an offset. `edos-init` sets
+/// the variable for the session; anything it cannot parse also means UTC.
+pub fn utc_offset_seconds() -> i32 {
+    std::env::var("TZ")
+        .ok()
+        .and_then(|tz| parse_utc_offset(&tz))
+        .unwrap_or(0)
+}
+
+/// Seconds east of Greenwich for an ISO 8601 offset, or `None` if `s` is not one.
+pub fn parse_utc_offset(s: &str) -> Option<i32> {
+    let s = s.trim();
+    if s.is_empty() || s == "Z" {
+        return Some(0);
+    }
+    let (sign, rest) = match s.as_bytes()[0] {
+        b'+' => (1, &s[1..]),
+        b'-' => (-1, &s[1..]),
+        _ => return None,
+    };
+    let (hh, mm) = match rest.split_once(':') {
+        Some((h, m)) => (h, m),
+        None if rest.len() == 4 => (&rest[..2], &rest[2..]),
+        None => (rest, "0"),
+    };
+    let hours: i32 = hh.parse().ok()?;
+    let minutes: i32 = mm.parse().ok()?;
+    if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
+        return None;
+    }
+    Some(sign * (hours * 3_600 + minutes * 60))
+}
+
 impl ClockTime {
     /// Break nanoseconds since the Unix epoch down into UTC date and time.
     pub fn from_unix_nanos(nanos: u64) -> Self {
-        let secs = (nanos / 1_000_000_000) as i64;
+        Self::from_unix_secs((nanos / 1_000_000_000) as i64)
+    }
+
+    /// Break seconds since the Unix epoch down into date and time fields. The
+    /// result is in whatever zone `secs` was already shifted into.
+    pub fn from_unix_secs(secs: i64) -> Self {
         let days = secs.div_euclid(86_400);
         let secs_of_day = secs.rem_euclid(86_400);
         let (year, month, day) = civil_from_days(days);
@@ -68,6 +120,8 @@ impl ClockTime {
             day,
             month,
             year,
+            // 1970-01-01 was a Thursday, three days before Sunday.
+            weekday: (days + 4).rem_euclid(7) as u8,
         }
     }
 }

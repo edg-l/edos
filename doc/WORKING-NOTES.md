@@ -1954,3 +1954,48 @@ Two kernel changes were needed, both in the wait path:
   `Stopped` afterwards. Suspected in the same area as the SIGCONT fix above:
   the flag is cleared, but something re-sets it or the process re-enters the
   park. Reproduce with `cat`, Ctrl+Z, `fg`, then `ps` from another shell.
+
+## The session has a timezone, and until now it had no environment at all
+
+The kernel keeps time as UTC — it reads the RTC once at boot and answers
+`clock_gettime` from a monotonic counter — and the panel clock formatted that
+directly, so the desktop clock was wrong by the local offset for anyone not on
+Greenwich. The fix is one offset, applied in one place:
+
+- `edos_lib::time::utc_offset_seconds` reads `TZ` and
+  `edos_lib::time::local_time` is UTC shifted by it. `ClockTime::from_unix_secs`
+  is the shared constructor; `from_unix_nanos` stays UTC and now delegates to it.
+  `ClockTime` also carries a `weekday`, which `date` needs and nothing computed
+  before.
+- **`TZ` holds a fixed ISO 8601 offset (`+02:00`, `-0530`, `+02`, `Z`), not a
+  POSIX zone rule and not an IANA name.** There is no zone database and no DST,
+  so a zone name parses as nothing and means UTC. This is deliberately *not*
+  POSIX `TZ` semantics, where `UTC+2` means two hours **west**; ours is signed
+  east, the way an ISO offset reads.
+- `edos-init` sets `TZ` for the session, so a fresh boot has it. `export TZ=…`
+  in a shell overrides it for everything that shell starts.
+- `programs/date` prints it, `-u` for UTC, and a `+FORMAT` subset (`%Y %m %d %H
+  %M %S %F %T %s %a %b %Z %n %t %%`). An unknown directive is passed through
+  with its `%`, so a typo is visible instead of silently dropped.
+- `cal` had its own year-by-year walk over the epoch to find today, in UTC. It
+  is `edos_lib::time::local_time` now, and 40 lines shorter.
+
+### The trap: nothing in the session had an environment
+
+`TZ` set in `edos-init` reached nothing, because `edos-init` spawned its
+services with `process::spawn`, which is `SYS_SPAWN` and passes **no envp at
+all** — and `ChildProcess::spawn_shell` did the same for the shell under the
+terminal. So every GUI process, and every shell in it, started with an empty
+environment; `HOME`, `PATH` and `PWD` only ever appeared to work because every
+reader has a hardcoded fallback. `SYS_SPAWN2` (path, argv, envp, three fds) had
+existed since the shell learned to pass its environment on, but only the shell
+used it.
+
+`edos_lib::process::spawn_with_env` is `spawn` over `SYS_SPAWN2` with the
+caller's environment, and init and `spawn_shell` both use it. The envp build is
+`current_env_strings`, shared with `spawn_program_with_fds` rather than written
+twice.
+
+**If a new session-wide setting does not reach a program, check which spawn it
+went through before looking anywhere else.** `SYS_SPAWN` is still there and
+still silently drops the environment.

@@ -19,6 +19,9 @@ version = "0.1.0"
 [[package]]
 name = "cal"
 version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "cat"
@@ -40,6 +43,13 @@ version = "0.1.0"
 [[package]]
 name = "cut"
 version = "0.1.0"
+
+[[package]]
+name = "date"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "df"

@@ -179,6 +179,63 @@ pub fn spawn(path: &str, args: &[&str], stdin_fd: u64, stdout_fd: u64, stderr_fd
     }
 }
 
+/// Spawn `path` with redirected I/O, passing the caller's environment on.
+///
+/// Same as [`spawn`] except that the child inherits the environment instead of
+/// starting with an empty one, which is how a session-wide setting such as `TZ`
+/// reaches the programs `edos-init` starts.
+///
+/// Returns the pid, or `u64::MAX` on error.
+pub fn spawn_with_env(
+    path: &str,
+    args: &[&str],
+    stdin_fd: u64,
+    stdout_fd: u64,
+    stderr_fd: u64,
+) -> u64 {
+    let Ok(c_path) = CString::new(path) else {
+        return u64::MAX;
+    };
+    let c_args: Vec<CString> = args.iter().filter_map(|a| CString::new(*a).ok()).collect();
+    let mut argv_ptrs: Vec<*const u8> = c_args.iter().map(|c| c.as_ptr() as *const u8).collect();
+    argv_ptrs.push(core::ptr::null());
+
+    let env_strings = current_env_strings();
+    let mut envp_ptrs: Vec<*const u8> = env_strings.iter().map(|s| s.as_ptr()).collect();
+    envp_ptrs.push(core::ptr::null());
+
+    let spawn_args = SpawnArgs {
+        path: c_path.as_ptr() as *const u8,
+        argv: argv_ptrs.as_ptr(),
+        envp: envp_ptrs.as_ptr(),
+        stdin_fd,
+        stdout_fd,
+        stderr_fd,
+    };
+    unsafe { sys::syscall1(sys::SYS_SPAWN2, &spawn_args as *const SpawnArgs as u64) }
+}
+
+/// The caller's environment as NUL-terminated `KEY=VALUE` byte strings, ready
+/// for a `SYS_SPAWN2` `envp`. Entries containing a NUL are dropped, since they
+/// cannot be represented as C strings.
+fn current_env_strings() -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for (key, val) in std::env::vars_os() {
+        let key_bytes = key.as_encoded_bytes();
+        let val_bytes = val.as_encoded_bytes();
+        if key_bytes.contains(&0) || val_bytes.contains(&0) {
+            continue;
+        }
+        let mut entry = Vec::with_capacity(key_bytes.len() + val_bytes.len() + 2);
+        entry.extend_from_slice(key_bytes);
+        entry.push(b'=');
+        entry.extend_from_slice(val_bytes);
+        entry.push(0);
+        out.push(entry);
+    }
+    out
+}
+
 /// Wait for a process to exit (blocking).
 /// Returns the exit code of the child process, or -1 on failure.
 pub fn waitpid(pid: u64) -> i32 {
@@ -302,7 +359,7 @@ impl ChildProcess {
     pub fn spawn_shell(shell_path: &str) -> Option<Self> {
         let (master_fd, slave_fd) = openpty()?;
 
-        let pid = spawn(
+        let pid = spawn_with_env(
             shell_path,
             &[],
             slave_fd, // shell's stdin
@@ -396,22 +453,7 @@ pub fn spawn_program_with_fds(
     let mut argv_ptrs: Vec<*const u8> = c_args.iter().map(|c| c.as_ptr() as *const u8).collect();
     argv_ptrs.push(std::ptr::null());
 
-    // Build envp from current process environment as "KEY=VALUE\0" byte strings
-    let mut env_strings: Vec<Vec<u8>> = Vec::new();
-    for (key, val) in std::env::vars_os() {
-        let key_bytes = key.as_encoded_bytes();
-        let val_bytes = val.as_encoded_bytes();
-        // Skip entries that contain NUL bytes since they can't be represented as C strings
-        if key_bytes.contains(&0) || val_bytes.contains(&0) {
-            continue;
-        }
-        let mut entry = Vec::with_capacity(key_bytes.len() + 1 + val_bytes.len() + 1);
-        entry.extend_from_slice(key_bytes);
-        entry.push(b'=');
-        entry.extend_from_slice(val_bytes);
-        entry.push(0); // NUL terminator
-        env_strings.push(entry);
-    }
+    let env_strings = current_env_strings();
     let mut envp_ptrs: Vec<*const u8> = env_strings.iter().map(|s| s.as_ptr()).collect();
     envp_ptrs.push(std::ptr::null());
 

@@ -1,24 +1,25 @@
 # Userspace Roadmap
 
-77 programs and 2 libraries, all in the `programs/` cargo workspace.
+79 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
 | Area | Programs |
 |---|---|
 | Init | `edos-init` (the only process the kernel starts; supervises the GUI session) |
-| GUI | `edos-wm` (compositor, decorations, desktop menu), `edos-terminal`, `edos-taskbar` (panel + applications menu), `wintest` |
+| GUI | `edos-wm` (compositor, decorations, desktop menu), `edos-terminal`, `edos-taskbar` (panel + applications menu), `edos-procview`, `wintest` |
 | Shell | `edos-sh` |
 | Editor | `edos-vi` |
 | Files | `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `touch`, `stat`, `find`, `du`, `diff` |
 | Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs` |
 | Checksums | `sha256sum` |
 | Inspection | `file` |
-| System | `ps`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace` |
+| System | `ps`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace`, `date` |
+| Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
 | Network | `ping`, `dns`, `http`, `wget`, `dnsprobe` |
 | Audio | `play` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
-| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest`, `sigtest` |
+| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest`, `sigtest`, `fstest`, `fsbench` |
 | Libraries | `edos_lib` (syscall wrappers), `edos_render` (fonts, text, icons, theme, widgets, windows) |
 
 ## Done
@@ -192,12 +193,18 @@ the shell half has not been written yet.
   through unchanged, a quoted or backslash-escaped word is never a pattern, and
   `*` does not pick up dotfiles. The command word itself is not expanded.
 
-## Next: time is UTC everywhere
+## Done: time is local now
 
-Nothing in the system has a timezone concept. The kernel reads the RTC as UTC
-(`timer.rs`), `edos_lib::time::ClockTime::from_unix_nanos` documents itself as
-UTC, and the panel clock formats that directly — so the desktop clock is wrong
-by the local offset for everyone not on UTC. There is also no `date` program, so
-the panel is the only way to read the time at all. Wants: an offset the session
-can carry (an environment variable is enough; `/etc` does not exist yet), one
-place in `edos_lib` that applies it, and `date`.
+The kernel still keeps time as UTC, which is right, and the session carries a
+fixed offset from it in `TZ` — an ISO 8601 offset such as `+02:00`, not a POSIX
+zone rule and not an IANA name, since there is no zone database and no DST.
+`edos_lib::time::local_time` is the one place that applies it, the panel clock
+and `cal` use it, and `programs/date` prints it with `-u` for UTC and a
+`+FORMAT` subset. `edos-init` sets `TZ` for the session; `export TZ=…`
+overrides it. Making that reach anything meant giving the session an
+environment at all: init and the terminal spawned through `SYS_SPAWN`, which
+passes no envp, and both use `process::spawn_with_env` over `SYS_SPAWN2` now.
+See `doc/WORKING-NOTES.md`.
+
+Still missing: a zone database, DST, and any way to *set* the clock
+(`settimeofday`), so the RTC the firmware hands over is the only source.

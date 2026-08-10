@@ -2,6 +2,14 @@
 
 ## Done
 
+- **Local time, and `date`** - the session carries a fixed UTC offset in `TZ`
+  (an ISO 8601 offset, not a POSIX zone rule: there is no zone database and no
+  DST), `edos_lib::time::local_time` is the single place that applies it, and
+  the panel clock and `cal` read it. `programs/date` prints local time, `-u`
+  prints UTC, and `+FORMAT` covers a strftime subset. Getting it to the panel
+  meant giving the session an environment: `edos-init` and the terminal spawned
+  through `SYS_SPAWN`, which passes no envp at all, and both go through
+  `process::spawn_with_env` over `SYS_SPAWN2` now. See `doc/WORKING-NOTES.md`.
 - **Shell job control** - Ctrl+Z suspends a foreground job, `jobs` lists it as
   Stopped, `fg` and `bg` resume it, and every stage of a pipeline shares one
   process group so a single Ctrl+C reaches all of it. `spawn_pipeline` returns
@@ -1298,7 +1306,7 @@ why a wrong keycode mapping for `ç` went unnoticed until 2026-08-10.
 ### More userspace tools
 - chmod/chown (once EFS has permission support)
 - printenv (alias for env)
-- id, whoami, date
+- id, whoami
 
 ### In-EDOS fsck (`/bin/fsck`)
 Host `efs-fsck` is the canonical recovery tool. A thinner in-EDOS
