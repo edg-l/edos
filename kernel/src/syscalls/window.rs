@@ -8,7 +8,7 @@ use crate::{
     util::uaccess::{try_copy_to_user, try_read_user},
     window::{
         WindowEvent,
-        input::{get_or_create_event_queue, poll_events, remove_event_queue},
+        input::{get_or_create_event_queue, poll_events, remove_event_queue, send_event},
         registry::{ReadSite, WINDOW_REGISTRY, WindowId, property, read_tracked},
     },
 };
@@ -185,6 +185,18 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
             info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
+    }
+
+    let refocused = if prop == property::FLAGS {
+        registry.release_dock_focus(window_id)
+    } else {
+        None
+    };
+    drop(registry);
+
+    if let Some(new_focus) = refocused {
+        send_event(window_id, WindowEvent::focus_lost());
+        send_event(new_focus, WindowEvent::focus_gained());
     }
 
     0

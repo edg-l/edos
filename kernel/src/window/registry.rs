@@ -171,13 +171,7 @@ impl WindowRegistry {
         if self.windows.remove(&id).is_some() {
             // Clear focus if this was the focused window
             if self.focused_window == Some(id) {
-                // Find the next window with highest z-order
-                self.focused_window = self
-                    .windows
-                    .values()
-                    .filter(|w| w.visible)
-                    .max_by_key(|w| w.z_order)
-                    .map(|w| w.id);
+                self.focused_window = self.topmost_focusable();
             }
             true
         } else {
@@ -195,16 +189,51 @@ impl WindowRegistry {
         self.windows.get_mut(&id)
     }
 
-    /// Set the focused window and bring it to the top.
+    /// The topmost visible window allowed to hold keyboard focus.
+    ///
+    /// A dock is chrome: it paints no focus state, so input landing in one is
+    /// invisible to the user. Focus never rests there.
+    fn topmost_focusable(&self) -> Option<WindowId> {
+        self.windows
+            .values()
+            .filter(|w| w.visible && w.flags & flags::FLAG_DOCK == 0)
+            .max_by_key(|w| w.z_order)
+            .map(|w| w.id)
+    }
+
+    /// Set the focused window and bring it to the top. Fails for a dock.
     pub fn set_focused(&mut self, id: WindowId) -> bool {
-        if let Some(window) = self.windows.get_mut(&id) {
-            // Bring to top with new z-order
-            window.z_order = Z_ORDER_COUNTER.fetch_add(1, Ordering::Relaxed);
-            self.focused_window = Some(id);
-            true
-        } else {
-            false
+        let Some(window) = self.windows.get_mut(&id) else {
+            return false;
+        };
+        if window.flags & flags::FLAG_DOCK != 0 {
+            return false;
         }
+        // Bring to top with new z-order
+        window.z_order = Z_ORDER_COUNTER.fetch_add(1, Ordering::Relaxed);
+        self.focused_window = Some(id);
+        true
+    }
+
+    /// Move focus off `id` if it has just declared itself a dock.
+    ///
+    /// A window is created before its flags are set, so a dock is auto-focused
+    /// like any other window and would otherwise keep focus for the rest of the
+    /// session. Returns the window that takes over, so the caller can deliver
+    /// the focus events outside the registry lock.
+    pub fn release_dock_focus(&mut self, id: WindowId) -> Option<WindowId> {
+        if self.focused_window != Some(id) {
+            return None;
+        }
+        let is_dock = self
+            .windows
+            .get(&id)
+            .is_some_and(|w| w.flags & flags::FLAG_DOCK != 0);
+        if !is_dock {
+            return None;
+        }
+        self.focused_window = self.topmost_focusable();
+        self.focused_window
     }
 
     /// Clear focus (no window focused).
