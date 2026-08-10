@@ -16,6 +16,7 @@ pub const SYS_STAT: u64 = 10;
 pub const SYS_UTIMENSAT: u64 = 280;
 pub const SYS_SYMLINK: u64 = 88;
 pub const SYS_READLINK: u64 = 89;
+pub const SYS_GETDENTS: u64 = 78;
 pub const SYS_MMAP: u64 = 9;
 pub const SYS_MUNMAP: u64 = 11;
 pub const SYS_IOCTL: u64 = 16;

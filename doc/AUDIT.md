@@ -289,7 +289,7 @@ profile.
 
 ## 3. Missing syscalls and interfaces
 
-89 syscalls exist. The conspicuous absences, roughly by how much they block real
+90 syscalls exist. The conspicuous absences, roughly by how much they block real
 programs:
 
 | Missing | Why it matters |
@@ -297,7 +297,6 @@ programs:
 | `readv`/`writev` | Every scatter/gather write becomes N syscalls or a copy |
 | `setuid` | `UserThreadInfo` carries `user_id`/`group_id`; only the getters exist |
 | `*at` family | No `openat`/`unlinkat`; every path is resolved against cwd |
-| streaming `getdents` | `LIST_DIR` fills one caller-sized buffer; a huge directory has no continuation protocol |
 
 **The CLOEXEC entry was rejected on its original premise and later became
 real.** When this audit was written EDOS had no `exec`: `spawn` built a fresh

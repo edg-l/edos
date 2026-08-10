@@ -48,6 +48,63 @@ pub fn open(path: &str, flags: u64) -> i64 {
     unsafe { sys::syscall2(sys::SYS_OPEN, path_buf.as_ptr() as u64, flags) as i64 }
 }
 
+/// One directory entry as the kernel writes it, immediately followed in the
+/// buffer by `name_len` bytes of name.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DirEntry {
+    pub name_len: u32,
+    /// 0=file, 1=directory, 2=symlink, 3=special, 4=device.
+    pub file_type: u8,
+    pub size: u64,
+    /// readonly=1, hidden=2, system=4, archive=8.
+    pub attrs: u8,
+    pub reserved: [u8; 2],
+}
+
+/// Read the entries of `path` into `buf`, starting at entry index `start`.
+///
+/// Returns the number of bytes written, or 0 once `start` is past the last
+/// entry. A directory larger than `buf` is enumerated by calling again with
+/// `start` advanced by the number of entries decoded; -1 with `EINVAL` means
+/// `buf` is too small to hold even the entry at `start`.
+pub fn getdents(path: &str, buf: &mut [u8], start: usize) -> i64 {
+    unsafe {
+        sys::syscall5(
+            sys::SYS_GETDENTS,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            start as u64,
+        ) as i64
+    }
+}
+
+/// Decode the first `len` bytes of a buffer filled by [`getdents`] into entries
+/// paired with their names. Stops at the first truncated record.
+pub fn parse_dents(buf: &[u8], len: usize) -> std::vec::Vec<(DirEntry, std::string::String)> {
+    let header = core::mem::size_of::<DirEntry>();
+    let mut out = std::vec::Vec::new();
+    let mut offset = 0usize;
+
+    while offset + header <= len {
+        let entry = unsafe { core::ptr::read_unaligned(buf[offset..].as_ptr() as *const DirEntry) };
+        let name_start = offset + header;
+        let name_end = name_start + entry.name_len as usize;
+        if name_end > len {
+            break;
+        }
+        out.push((
+            entry,
+            std::string::String::from_utf8_lossy(&buf[name_start..name_end]).into_owned(),
+        ));
+        offset = name_end;
+    }
+
+    out
+}
+
 /// Mode bits for [`access`], as in POSIX `<unistd.h>`.
 pub const F_OK: u32 = 0;
 pub const X_OK: u32 = 1;

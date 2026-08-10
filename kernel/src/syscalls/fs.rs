@@ -34,7 +34,7 @@ fn read_user_path(path_ptr: *const u8, cwd: &Path) -> Result<Path, Errno> {
     resolve_path(path_str, cwd).map_err(|_| Errno::EINVAL)
 }
 
-fn read_user_path_with_len(
+pub(super) fn read_user_path_with_len(
     path_ptr: *const u8,
     path_len: usize,
     cwd: &Path,

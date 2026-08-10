@@ -6,13 +6,27 @@
   correct the doc; a doc naming a caller that does not exist is the trap that
   hid the ACPI teardown bug.
 
-- Symlinks do not resolve on memfs: `iotest /tmp` fails test 10 with "read
-  through link: entity not found", while the identical `iotest /var` (EFS)
-  passes 11/11. `symlink()` and `readlink()` both work there, so the link is
-  created and its target is stored — what fails is opening a path whose final
-  component is a link. Suspect memfs's `walk` applies the follow_final flag
-  only on the intermediate components, or `open` reaches the node by a path
-  that does not go through `walk`. Verified in a guest on 2026-08-10.
+- An absolute symlink target is resolved in the wrong namespace. Root cause of
+  `iotest /tmp` failing test 10 with "read through link: entity not found"
+  while the identical `iotest /var` passes: VFS hands each filesystem a
+  MOUNT-RELATIVE path, and each filesystem resolves link targets from its own
+  root. `splice_symlink` discards the prefix for a target starting with `/`, so
+  a link at /tmp/link naming "/tmp/target" makes memfs look for `tmp/target`
+  under the memfs root, which has no `tmp`. EFS only works because it is
+  mounted at `/`, where mount-relative and absolute coincide. Relative targets
+  are unaffected on both.
+  The fix belongs in the VFS, which is the only layer that owns the namespace:
+  a filesystem must not follow an absolute target at all, and VFS must restart
+  resolution from the VFS root, crossing mounts, capped at MAX_SYMLINK_HOPS.
+  What makes it more than a one-liner: the follow/nofollow distinction
+  currently lives inside each filesystem's walk, so `read_link`, `remove_file`
+  and `symlink` (vfs.rs:952-1005) need a resolve entry point that leaves the
+  final component alone while every other op gets one that follows it, and the
+  followed path can land on a different mount than the one the link lives on,
+  so `VfsOp.fs` has to come from the target. Doing it by probing each path
+  prefix with `read_link` is the obvious shape and is O(N) fs walks per
+  lookup — too slow for `resolve()`; escalating only when the filesystem
+  reports it hit an absolute target keeps the fast path free.
 
 - Teach `efs-fsck` to read qcow2 directly. It opens the image with a plain
   `File`, so the development disk has to be flattened with `qemu-img convert`

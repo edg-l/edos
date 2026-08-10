@@ -597,6 +597,87 @@ fn test11() {
     );
 }
 
+// -----------------------------------------------------------------------
+// Test 12: getdents() enumerates a directory larger than the buffer
+// -----------------------------------------------------------------------
+fn test12(dir: &str) {
+    use edos_lib::io::{getdents, parse_dents};
+
+    let base = format!("{}/iotest_t12", dir);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir(&base).unwrap_or_else(|e| fail(12, &format!("create dir: {}", e)));
+
+    const COUNT: usize = 40;
+    for i in 0..COUNT {
+        fs::write(format!("{}/f{:03}", base, i), b"x")
+            .unwrap_or_else(|e| fail(12, &format!("create entry: {}", e)));
+    }
+
+    // A buffer that cannot hold the whole directory: every entry must still be
+    // reported exactly once across the calls needed to drain it.
+    let mut buf = [0u8; 256];
+    let mut names = Vec::new();
+    let mut start = 0usize;
+    let mut calls = 0;
+    loop {
+        let n = getdents(&base, &mut buf, start);
+        if n < 0 {
+            fail(12, "getdents failed");
+        }
+        if n == 0 {
+            break;
+        }
+        let entries = parse_dents(&buf, n as usize);
+        if entries.is_empty() {
+            fail(12, "a non-empty result decoded to no entries");
+        }
+        start += entries.len();
+        calls += 1;
+        if calls > COUNT {
+            fail(12, "getdents never reported the end of the directory");
+        }
+        for (entry, name) in entries {
+            if entry.name_len as usize != name.len() {
+                fail(12, "name_len does not match the name written after it");
+            }
+            names.push(name);
+        }
+    }
+
+    if calls < 2 {
+        fail(
+            12,
+            "the whole directory fit in one call, so nothing was streamed",
+        );
+    }
+    names.sort();
+    names.dedup();
+    let expected: Vec<String> = (0..COUNT).map(|i| format!("f{:03}", i)).collect();
+    if names != expected {
+        fail(12, "the streamed entries do not match the directory");
+    }
+
+    // Past the last entry is end of directory, not an error.
+    if getdents(&base, &mut buf, COUNT) != 0 {
+        fail(
+            12,
+            "reading past the last entry did not report end of directory",
+        );
+    }
+    // A buffer too small for the next entry is refused, so a caller cannot
+    // mistake it for the end and lose the tail.
+    let mut tiny = [0u8; 8];
+    if getdents(&base, &mut tiny, 0) != -1 {
+        fail(12, "a buffer too small for one entry was accepted");
+    }
+
+    let _ = fs::remove_dir_all(&base);
+    pass(
+        12,
+        "getdents: a directory larger than the buffer streams from an entry index",
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -613,6 +694,7 @@ fn main() {
     test9(dir);
     test10(dir);
     test11();
+    test12(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

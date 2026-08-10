@@ -304,6 +304,7 @@ const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
 const SYS_LIST_DIR: u64 = 4;
+const SYS_GETDENTS: u64 = 78; // read a directory from an entry index, for continuation
 const SYS_GETCWD: u64 = 5;
 const SYS_CHDIR: u64 = 6;
 const SYS_POLL: u64 = 7;
@@ -493,6 +494,14 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let buffer_ptr = ctx.rsi as *mut u8;
             let buffer_size = ctx.rdx as usize;
             ctx.rax = sys_list_dir(path_ptr, buffer_ptr, buffer_size) as u64;
+        }
+        SYS_GETDENTS => {
+            let path_ptr = ctx.rdi as *const u8;
+            let path_len = ctx.rsi as usize;
+            let buffer_ptr = ctx.rdx as *mut u8;
+            let buffer_size = ctx.r10 as usize;
+            let start = ctx.r8 as usize;
+            ctx.rax = io::sys_getdents(path_ptr, path_len, buffer_ptr, buffer_size, start) as u64;
         }
         SYS_GETCWD => {
             let buffer_ptr = ctx.rdi as *mut u8;

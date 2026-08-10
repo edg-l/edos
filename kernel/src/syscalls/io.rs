@@ -959,20 +959,34 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
         }
     };
 
-    // Serialize entries into user buffer
+    match write_dir_entries(&files, buffer_ptr, buffer_size, 0) {
+        Ok(written) => written as i64,
+        Err(e) => {
+            info.lock().errno = e;
+            -1
+        }
+    }
+}
+
+/// Serialize `files[start..]` into the user buffer as `DirEntry` records, each
+/// immediately followed by its `name_len` name bytes. Stops at the first entry
+/// that does not fit and returns the number of bytes written.
+fn write_dir_entries(
+    files: &[crate::fs::File],
+    buffer_ptr: *mut u8,
+    buffer_size: usize,
+    start: usize,
+) -> Result<usize, Errno> {
     let mut written = 0usize;
     let entry_size = core::mem::size_of::<DirEntry>();
 
-    for file in &files {
+    for file in files.iter().skip(start) {
         let name_bytes = file.name.as_bytes();
-        let total_entry_size = entry_size + name_bytes.len();
 
-        // Check if we have space for this entry
-        if written + total_entry_size > buffer_size {
+        if written + entry_size + name_bytes.len() > buffer_size {
             break;
         }
 
-        // Create DirEntry
         let entry = DirEntry {
             name_len: name_bytes.len() as u32,
             file_type: file_kind_to_u8(file.kind),
@@ -981,27 +995,80 @@ pub fn sys_list_dir(path_ptr: *const u8, buffer_ptr: *mut u8, buffer_size: usize
             reserved: [0, 0],
         };
 
-        // Copy DirEntry to user buffer
         let entry_bytes = unsafe {
             core::slice::from_raw_parts(&entry as *const DirEntry as *const u8, entry_size)
         };
         let user_entry_ptr = unsafe { buffer_ptr.add(written) };
         if !unsafe { try_copy_to_user(user_entry_ptr, entry_bytes.as_ptr(), entry_size) } {
-            info.lock().errno = Errno::EFAULT;
-            return -1;
+            return Err(Errno::EFAULT);
         }
         written += entry_size;
 
-        // Copy filename to user buffer
         let user_name_ptr = unsafe { buffer_ptr.add(written) };
         if !unsafe { try_copy_to_user(user_name_ptr, name_bytes.as_ptr(), name_bytes.len()) } {
-            info.lock().errno = Errno::EFAULT;
-            return -1;
+            return Err(Errno::EFAULT);
         }
         written += name_bytes.len();
     }
 
-    written as i64
+    Ok(written)
+}
+
+/// Read a directory starting at entry index `start`, so a directory larger than
+/// the caller's buffer can be enumerated across several calls. Returns the
+/// number of bytes written, 0 once `start` is past the last entry, and EINVAL
+/// when the entry at `start` alone is too large for the buffer.
+pub fn sys_getdents(
+    path_ptr: *const u8,
+    path_len: usize,
+    buffer_ptr: *mut u8,
+    buffer_size: usize,
+    start: usize,
+) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if buffer_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
+
+    let cwd = current_cwd(&info);
+    let path = match super::fs::read_user_path_with_len(path_ptr, path_len, &cwd) {
+        Ok(p) => p,
+        Err(e) => {
+            info.lock().errno = e;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+    let files = match fs_api::list_files(&path) {
+        Ok(files) => files,
+        Err(e) => {
+            info.lock().errno = Errno::from(e);
+            return -1;
+        }
+    };
+
+    if start >= files.len() {
+        return 0;
+    }
+
+    match write_dir_entries(&files, buffer_ptr, buffer_size, start) {
+        // A zero-byte result with entries left means the buffer can never hold
+        // the next one; reporting 0 would read as "end of directory" and the
+        // caller would silently lose the tail.
+        Ok(0) => {
+            info.lock().errno = Errno::EINVAL;
+            -1
+        }
+        Ok(written) => written as i64,
+        Err(e) => {
+            info.lock().errno = e;
+            -1
+        }
+    }
 }
 
 pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
