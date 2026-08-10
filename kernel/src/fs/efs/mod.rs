@@ -1833,8 +1833,9 @@ impl FileSystem for EfsDriver {
         let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
 
         let parent_ino = self.resolve_path(&parent)?;
-        let dir_ino = self.resolve_path(&path)?;
-        let dir_inode = self.read_inode(dir_ino)?;
+        // Unfollowed, so a symbolic link naming a directory is rejected as not
+        // a directory rather than removing the directory it names.
+        let (dir_ino, dir_inode) = self.resolve_path_inode_nofollow(&path)?;
 
         if dir_inode.mode & S_IFMT != S_IFDIR {
             return Err(Error::NotADir);
@@ -1989,8 +1990,9 @@ impl FileSystem for EfsDriver {
 
         let old_parent_ino = self.resolve_path(&old_parent_path)?;
         let new_parent_ino = self.resolve_path(&new_parent_path)?;
-        let target_ino = self.resolve_path(&old_path)?;
-        let target_inode = self.read_inode(target_ino)?;
+        // The name is what moves, not what it points at: renaming a symbolic
+        // link must move the link.
+        let (target_ino, target_inode) = self.resolve_path_inode_nofollow(&old_path)?;
 
         let mut tx = self.journal.begin_tx();
         match self.rename_inner(

@@ -1598,6 +1598,42 @@ last block in the log is current. The menu does: it exists only while open, so
 `launch` notes where the log ends before clicking the launcher and only reads
 what lands after that.
 
+## What the symlink rework broke, and what that says about the test suite
+
+A review of the finished diff found four regressions, all of the same shape and
+none caught by `iotest` passing on both filesystems. Worth writing down, because
+the shape is the lesson: **making a filesystem report an escape instead of
+resolving it turns every caller that did not expect an error into a caller that
+now fails.** The retry loop covers `fs::api`. Anything reaching the VFS by
+another door does not.
+
+- **Executing through a symbolic link stopped working.** `fs::api::resolve_inode`
+  is how the ELF loader reaches a binary — `do_spawn`, `execve`, and the boot
+  load of `bin/edos-init` — and it called `vfs::resolve` directly, outside the
+  loop. `ln -s /bin/ls /bin/ll; ll` failed with ENOEXEC while `cat /bin/ll`
+  worked, because the shebang probe goes through `read_bytes`, which retries.
+  A wrong errno on a path that demonstrably exists is the tell.
+- **`rename` and `rmdir` on EFS returned ELOOP and EIO.** Both resolved their
+  target with the *follow* variant while `fs::api` asked for nofollow. Two
+  pre-existing bugs fell out of fixing that: `mv link newname` used to make
+  `newname` a second name for the link's *target*, and `rmdir symlink-to-dir`
+  used to free the target directory. memfs had it right all along.
+- **`open(O_CREAT)` through a symlinked directory left a permanently broken
+  fd.** `create_file` retries and creates the file at the resolved path;
+  `open` then cached the *unresolved* one, so every later read and write on
+  that descriptor failed.
+
+The general hazard the design carries: `link_escape` is asked with the *API's*
+link mode, not the mode the filesystem operation actually walked with, and the
+two agree only by convention. Every op-follows / api-nofollow pair produces
+`Unsupported`, which surfaces as EIO. `rmdir` was the only live instance; a
+filesystem operation added later that follows a final component the API says to
+leave alone will do it again.
+
+`iotest` now covers all four: exec through a link, create-write-read through a
+linked directory, rename of a link, and `rmdir` refusing one. Plus a two-link
+cycle, which is the case that proves the new loop terminates rather than hangs.
+
 ## procfs answers for per-process memory
 
 Writing a graphical process viewer turned up the gap: nothing anywhere said how
@@ -1616,9 +1652,18 @@ mappings this kernel leans on cost one skipped entry rather than a probe per
 page; probing each page of each VMA instead would have been O(virtual size),
 which for a sparsely faulted mapping is most of the work for none of the answer.
 
-The lock order is `vmas` (70) then `memory_manager` (80), in that order, and
-holding the manager across the walk is also what stops the address space being
-torn down under it.
+The lock order is `vmas` (70) then `memory_manager` (80), in that order.
+
+Holding the manager is not on its own enough to make the walk safe, which was
+the other thing the review caught. The reaper calls `Thread::free` *before*
+dropping the thread from the registry, and procfs snapshots the registry into
+`Vec<Arc<Thread>>` first, so it can reach a `MemoryManager` whose PML4 frame is
+already back in the allocator and possibly reused — and `mapper` is an
+`OffsetPageTable<'static>` whose lifetime says nothing about that. Reading the
+VMA count was safe because a Rust structure stays allocated; this is the first
+reader that follows the raw frame pointer. `Thread::free` now calls
+`release_page_tables()` under the mm lock before freeing the frame, and
+`resident_bytes` returns 0 once that is set.
 
 A first reading, `/bin/edos-wm`: 471 VMAs, 51100 KiB of address space, 42660 KiB
 resident. `/bin/sh` 208 KiB and `/bin/ps` 60 KiB resident against ~300 KiB

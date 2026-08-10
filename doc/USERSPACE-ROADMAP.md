@@ -40,6 +40,9 @@ signatures with longest-match wins, ELF class/endianness/type decoding, and a
 UTF-8 text heuristic. Classifications agree with GNU `file` on ELF binaries,
 scripts, text, empty files and directories.
 
+Candidates beyond these phases, ranked by the kernel path each would exercise,
+are in [`PROGRAMS.md`](PROGRAMS.md).
+
 ## Phase 3: pure userspace, higher complexity
 
 | Program | Why it matters | Notes |

@@ -347,16 +347,23 @@ pub fn rename(old_path: &Path, new_path: &Path) -> Result<(), Error> {
     vfs::rename(&old_op, &new_op)
 }
 
-/// Resolve a VfsInode for a path (used by sys_open to cache in FsFile).
-pub fn resolve_vfs_inode_for_path(path: &Path) -> Option<Arc<VfsInode>> {
-    vfs::resolve(path).and_then(|op| op.inode)
-}
-
 /// Resolve a path to its VfsInode, returning `Err(Error::FileNotFound)` when
 /// the path does not exist or resolves to a directory with no backing inode.
-#[allow(dead_code)]
+///
+/// This is how the ELF loader reaches a binary, so it has to follow symbolic
+/// links like every other path API: `spawn`ing `/bin/ll -> /bin/ls` resolves
+/// the target's inode. `VfsOp::inode` alone cannot say why it is empty --
+/// `resolve` leaves it empty both for a path that does not exist and for one
+/// whose walk escaped its mount -- so the operation asks for the file's
+/// metadata, whose error carries that distinction back to the retry loop.
 pub fn resolve_inode(path: &Path) -> Result<Arc<VfsInode>, Error> {
-    vfs::resolve(path)
-        .and_then(|op| op.inode)
-        .ok_or(Error::FileNotFound)
+    on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
+        if let Some(inode) = op.inode.clone() {
+            return Ok(inode);
+        }
+        vfs::file_info(op)?;
+        // The path is there; it just has no inode of its own, as a directory
+        // on some filesystems does not.
+        Err(Error::FileNotFound)
+    })
 }

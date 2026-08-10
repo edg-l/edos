@@ -923,6 +923,12 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
                         return -1;
                     }
                 }
+                // `create_file` follows the symbolic links on the path, so the
+                // file exists somewhere `path` does not name. Ask again, now
+                // that there is something to find.
+                if let Ok((_, resolved)) = fs_api::file_info_resolved(&path) {
+                    path = resolved;
+                }
             } else {
                 info.lock().errno = Errno::from(e);
                 return -1;

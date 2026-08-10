@@ -78,6 +78,11 @@ pub struct MemoryManager {
     /// ELF load base for this process (used by the fault handler to compute
     /// relocated values: `value = load_base + entry.addend`).
     pub load_base: u64,
+    /// Set once the root page-table frame has been handed back to the frame
+    /// allocator, after which `mapper` points at memory that may already have
+    /// been reused. Nothing may follow it from that moment; see
+    /// [`MemoryManager::release_page_tables`].
+    released: bool,
 }
 
 #[expect(unused)]
@@ -90,7 +95,20 @@ impl MemoryManager {
             reloc_table: None,
             reloc_vma_range: None,
             load_base: 0,
+            released: false,
         }
+    }
+
+    /// Mark this address space's page tables as gone, so nothing reads them
+    /// after the root frame goes back to the allocator.
+    ///
+    /// `mapper` is an `OffsetPageTable<'static>` over a frame this manager does
+    /// not own, and teardown frees that frame while the manager itself lives on
+    /// behind an `Arc` that procfs and any other observer may still hold. The
+    /// lifetime says nothing about that, so the flag has to.
+    pub fn release_page_tables(&mut self) {
+        self.released = true;
+        self.pml4_frame = None;
     }
 
     /// Maps memory, the default flag is PRESENT, use extra flags for more.
@@ -370,6 +388,11 @@ impl MemoryManager {
     /// A page shared with another address space is counted in both, as
     /// `/proc/<pid>/status` on Linux counts it.
     pub fn resident_bytes(&self) -> u64 {
+        // The tables are gone; following `mapper` now would read a recycled
+        // frame and take its bytes for page-table entries.
+        if self.released {
+            return 0;
+        }
         let phys_off = boot_info().physical_memory_offset;
         // The user half is the low PML4 entries, one per 512 GiB.
         const PML4_ENTRY_SPAN: u64 = 512 * 1024 * 1024 * 1024;

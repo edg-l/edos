@@ -947,7 +947,13 @@ pub fn truncate(op: &VfsOp, size: u64) -> Result<(), Error> {
         .as_ref()
         .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
     let result = op.fs.truncate(&op.relative, size);
-    // Always run invalidators, even on FS failure. The FS may have partially
+    // An escape is the caller being told to try elsewhere, not a truncate that
+    // half happened: nothing was touched, and `op.relative` names a path this
+    // filesystem never resolved, so invalidating for it is at best pointless.
+    if matches!(result, Err(Error::LinkEscape)) {
+        return result;
+    }
+    // Otherwise always run invalidators, even on FS failure. The FS may have partially
     // applied the truncate (cluster chain trimmed but dirent size update
     // failed, or similar). Leaving stale pages in the cache would let reads
     // return data whose on-disk backing no longer exists. Dropping the

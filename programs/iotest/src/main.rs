@@ -583,6 +583,95 @@ fn test10(dir: &str) {
     let _ = fs::remove_file(&up_link);
     let _ = fs::remove_file(&up_file);
 
+    // Operations that act on a name rather than on what it names: renaming a
+    // link moves the link, and `rmdir` refuses one even when it points at an
+    // empty directory. Both used to reach through to the target, which is how
+    // a rename could turn a link into a second name for its target and an
+    // rmdir could delete a directory nobody named.
+    let dir_target = format!("{}/iotest_t10_dir", dir);
+    let dir_link = format!("{}/iotest_t10_dirlink", dir);
+    let moved_link = format!("{}/iotest_t10_moved.dat", dir);
+    let _ = fs::remove_file(&dir_link);
+    let _ = fs::remove_file(&moved_link);
+    let _ = fs::remove_dir(&dir_target);
+    fs::create_dir(&dir_target).unwrap_or_else(|e| fail(10, &format!("create dir: {}", e)));
+    if symlink(&dir_target, &dir_link) != 0 {
+        fail(10, "symlink to a directory failed");
+    }
+    if fs::remove_dir(&dir_link).is_ok() {
+        fail(10, "rmdir removed a symbolic link to a directory");
+    }
+    if !fs::metadata(&dir_target).is_ok() {
+        fail(10, "rmdir of a link removed the directory it named");
+    }
+    // Renaming the link moves the link: the target keeps its own name, and the
+    // moved name still reads as a link to it.
+    fs::rename(&dir_link, &moved_link)
+        .unwrap_or_else(|e| fail(10, &format!("rename a link: {}", e)));
+    if readlink(&moved_link, &mut buf) != dir_target.len() as i64 {
+        fail(10, "the renamed link no longer names its target");
+    }
+    if !fs::metadata(&dir_target).is_ok() {
+        fail(10, "renaming a link moved the directory it named");
+    }
+    let _ = fs::remove_file(&moved_link);
+    let _ = fs::remove_dir(&dir_target);
+
+    // A path whose *directory* is a symbolic link has to work end to end:
+    // creating a file through it, then writing and reading back through the
+    // descriptor that open returned. The descriptor caches where the file
+    // lives, so a create that resolves the link while the cache does not
+    // leaves an fd that fails every later read and write.
+    let via_dir = format!("{}/iotest_t10_via", dir);
+    let via_link = format!("{}/iotest_t10_vialink", dir);
+    let _ = fs::remove_file(&via_link);
+    let _ = fs::remove_file(&format!("{}/f.dat", via_dir));
+    let _ = fs::remove_dir(&via_dir);
+    fs::create_dir(&via_dir).unwrap_or_else(|e| fail(10, &format!("create via dir: {}", e)));
+    if symlink(&via_dir, &via_link) != 0 {
+        fail(10, "symlink to the containing directory failed");
+    }
+    let through = format!("{}/f.dat", via_link);
+    fs::write(&through, b"through a linked directory")
+        .unwrap_or_else(|e| fail(10, &format!("create through a linked directory: {}", e)));
+    if fs::read(&through).ok().as_deref() != Some(b"through a linked directory".as_slice()) {
+        fail(
+            10,
+            "a file created through a linked directory did not read back",
+        );
+    }
+    // And it really landed in the directory the link names.
+    if fs::read(&format!("{}/f.dat", via_dir)).ok().as_deref()
+        != Some(b"through a linked directory".as_slice())
+    {
+        fail(10, "the file did not land in the directory the link names");
+    }
+    let _ = fs::remove_file(&through);
+    let _ = fs::remove_file(&via_link);
+    let _ = fs::remove_dir(&via_dir);
+
+    // Running a program through a symbolic link. The loader resolves the
+    // binary's inode by a path of its own, separate from every resolution
+    // above, so it is its own case: `spawn` returning a failure here while
+    // `read` of the same path succeeds is exactly what a missed resolution
+    // looks like.
+    let exec_link = format!("{}/iotest_t10_true", dir);
+    let _ = fs::remove_file(&exec_link);
+    if symlink("/bin/true", &exec_link) != 0 {
+        fail(10, "symlink to a binary failed");
+    }
+    let pid = process::spawn(&exec_link, &[], 0, 1, 2);
+    if pid == u64::MAX || pid == 0 {
+        fail(10, "spawning a program through a symbolic link failed");
+    }
+    if process::waitpid(pid) != 0 {
+        fail(
+            10,
+            "a program spawned through a symbolic link did not exit 0",
+        );
+    }
+    let _ = fs::remove_file(&exec_link);
+
     // Two links naming each other must run out of hops rather than out of
     // patience. Absolute targets, so each hop goes back through the VFS: this
     // is the case where resolution restarts from the root and could otherwise

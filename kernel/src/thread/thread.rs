@@ -1088,6 +1088,13 @@ impl Thread {
 
             switch_to_kernel_page();
 
+            // The reaper frees a thread before dropping it from the registry,
+            // so a reader that snapshotted the registry -- procfs does -- can
+            // still hold an Arc to this thread and reach its MemoryManager
+            // after the frame below is back in the allocator. Say so under the
+            // lock, before the frame goes.
+            ranked_lock!(RANK_USER_MM, "user.mm", user.memory_manager).release_page_tables();
+
             let pml4 = user.cr3.0;
             unsafe { frame_allocator().deallocate_frame(pml4) };
         }

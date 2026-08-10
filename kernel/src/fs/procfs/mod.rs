@@ -3,8 +3,10 @@
 use core::{fmt::Write, sync::atomic::Ordering};
 
 use alloc::{
+    collections::btree_map::BTreeMap,
     format,
     string::{String, ToString},
+    sync::Arc,
     vec::Vec,
 };
 
@@ -27,9 +29,15 @@ impl Procfs {
     }
 
     fn collect_snapshots() -> Vec<ThreadSnapshot> {
+        // Threads of one process share an address space, so without this every
+        // thread of an N-threaded process walks the same page tables again,
+        // with preemption suppressed for the whole of each walk. Keyed by the
+        // shared `Arc`'s address, which is what "same address space" means
+        // here.
+        let mut resident = BTreeMap::new();
         let mut snapshots: Vec<ThreadSnapshot> = list_threads()
             .into_iter()
-            .map(|thread| ThreadSnapshot::from_thread(thread.as_ref()))
+            .map(|thread| ThreadSnapshot::from_thread(thread.as_ref(), &mut resident))
             .collect();
         snapshots.sort_by_key(|snap| snap.tid);
         snapshots
@@ -525,7 +533,7 @@ struct ThreadSnapshot {
 }
 
 impl ThreadSnapshot {
-    fn from_thread(thread: &Thread) -> Self {
+    fn from_thread(thread: &Thread, resident_cache: &mut BTreeMap<usize, u64>) -> Self {
         let tid = thread.id.0;
         let parent = thread.parent.load(Ordering::Acquire);
         let name_str = thread.name.as_str();
@@ -558,8 +566,17 @@ impl ThreadSnapshot {
                 };
                 // After the VMA set, never before: vmas is rank 70 and the
                 // memory manager 80.
-                let resident = ranked_lock!(RANK_USER_MM, "procfs::resident", user.memory_manager)
-                    .resident_bytes();
+                let key = Arc::as_ptr(&user.memory_manager) as *const u8 as usize;
+                let resident = match resident_cache.get(&key) {
+                    Some(bytes) => *bytes,
+                    None => {
+                        let bytes =
+                            ranked_lock!(RANK_USER_MM, "procfs::resident", user.memory_manager)
+                                .resident_bytes();
+                        resident_cache.insert(key, bytes);
+                        bytes
+                    }
+                };
                 (
                     Some(user.pid),
                     Some(user.heap_break),
