@@ -803,7 +803,14 @@ fn test14(dir: &str) {
         match fs::create_dir(format!("{}/{}", base, name)) {
             Ok(()) => fail(14, &format!("mkdir over an existing {} succeeded", name)),
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
-            Err(e) => fail(14, &format!("mkdir over {} gave {:?}, want AlreadyExists", name, e.kind())),
+            Err(e) => fail(
+                14,
+                &format!(
+                    "mkdir over {} gave {:?}, want AlreadyExists",
+                    name,
+                    e.kind()
+                ),
+            ),
         }
         if symlink("nowhere", &format!("{}/{}", base, name)) == 0 {
             fail(14, &format!("symlink over an existing {} succeeded", name));
@@ -820,7 +827,10 @@ fn test14(dir: &str) {
         .collect();
     names.sort();
     if names != ["file", "link", "sub"] {
-        fail(14, &format!("directory holds {:?}, want one entry each", names));
+        fail(
+            14,
+            &format!("directory holds {:?}, want one entry each", names),
+        );
     }
 
     // O_CREAT without O_EXCL still opens a file that already exists.
@@ -849,7 +859,10 @@ fn test15(dir: &str) {
         .unwrap_or_else(|e| fail(15, &format!("metadata: {}", e)))
         .len();
     if len != body.len() as u64 {
-        fail(15, &format!("metadata says {} bytes, wrote {}", len, body.len()));
+        fail(
+            15,
+            &format!("metadata says {} bytes, wrote {}", len, body.len()),
+        );
     }
 
     let read_back = fs::read(&path).unwrap_or_else(|e| fail(15, &format!("read: {}", e)));
@@ -953,6 +966,124 @@ fn test16(dir: &str) {
     pass(16, "a hole in a grown file reads as zeros");
 }
 
+// Test 17: renameat/symlinkat/readlinkat/faccessat take a directory descriptor
+//
+// The second tier of the `*at` family. Each one resolves its path the way
+// `openat` does, and `renameat` names two descriptors at once.
+fn test17(dir: &str) {
+    use edos_lib::io::{
+        AT_FDCWD, F_OK, W_OK, faccessat, fstatat, mkdirat, open, openat, readlinkat, renameat,
+        symlinkat,
+    };
+    use edos_lib::process::close;
+
+    let base = format!("{}/iotest_t17", dir);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir(&base).unwrap_or_else(|e| fail(17, &format!("create dir: {}", e)));
+
+    let dirfd = open(&base, 0);
+    if dirfd < 0 {
+        fail(17, "cannot open a directory as a descriptor");
+    }
+
+    let fd = openat(dirfd, "a", 0x40 | 1);
+    if fd < 0 {
+        fail(17, "openat with O_CREAT failed");
+    }
+    if pwrite(fd as u64, b"body", 0) != 4 {
+        fail(17, "write through an openat descriptor failed");
+    }
+    close(fd as u64);
+
+    // faccessat: a relative name resolves against the descriptor, an absolute
+    // one ignores it, and a flag that cannot be honoured is refused.
+    if faccessat(dirfd, "a", F_OK, 0) != 0 {
+        fail(17, "faccessat cannot see a file in its own directory");
+    }
+    if faccessat(dirfd, "a", W_OK, 0) != 0 {
+        fail(17, "faccessat denied write on a writable file");
+    }
+    if faccessat(dirfd, "missing", F_OK, 0) == 0 {
+        fail(17, "faccessat found a file that does not exist");
+    }
+    if faccessat(AT_FDCWD, &base, F_OK, 0) != 0 {
+        fail(17, "faccessat with AT_FDCWD cannot see an absolute path");
+    }
+    if faccessat(dirfd, "a", F_OK, 0x200) == 0 {
+        fail(17, "faccessat accepted a flag it cannot honour");
+    }
+
+    // symlinkat puts the link where newdirfd says; the target is stored
+    // verbatim and so resolves against the link's own directory.
+    if symlinkat("a", dirfd, "link") != 0 {
+        fail(17, "symlinkat failed");
+    }
+    if fs::read(format!("{}/link", base)).unwrap_or_default() != b"body" {
+        fail(
+            17,
+            "reading through a symlinkat link gave the wrong contents",
+        );
+    }
+    if symlinkat("a", dirfd, "link") == 0 {
+        fail(17, "symlinkat created a second entry for a taken name");
+    }
+
+    let mut buf = [0u8; 16];
+    let n = readlinkat(dirfd, "link", &mut buf);
+    if n != 1 || &buf[..1] != b"a" {
+        fail(17, &format!("readlinkat returned {} bytes, want 1", n));
+    }
+    // A buffer shorter than the target truncates rather than failing.
+    if symlinkat("abcd", dirfd, "long") != 0 {
+        fail(17, "symlinkat with a longer target failed");
+    }
+    let mut small = [0u8; 2];
+    if readlinkat(dirfd, "long", &mut small) != 2 || &small != b"ab" {
+        fail(17, "readlinkat did not truncate into a short buffer");
+    }
+    if readlinkat(dirfd, "a", &mut buf) != -1 {
+        fail(17, "readlinkat read a file that is not a link");
+    }
+
+    // renameat: old and new resolve against their own descriptors.
+    if mkdirat(dirfd, "sub") != 0 {
+        fail(17, "mkdirat failed");
+    }
+    let subfd = open(&format!("{}/sub", base), 0);
+    if subfd < 0 {
+        fail(17, "cannot open the subdirectory as a descriptor");
+    }
+    if renameat(dirfd, "a", subfd, "moved") != 0 {
+        fail(17, "renameat across two descriptors failed");
+    }
+    if fstatat(dirfd, "a", 0).is_some() {
+        fail(17, "the old name survived renameat");
+    }
+    match fstatat(subfd, "moved", 0) {
+        Some(st) if st.size == 4 => {}
+        Some(st) => fail(17, &format!("renameat left {} bytes, want 4", st.size)),
+        None => fail(17, "renameat did not create the new name"),
+    }
+    // An absolute path ignores its descriptor, and a closed one is refused.
+    if renameat(AT_FDCWD, &format!("{}/sub/moved", base), dirfd, "back") != 0 {
+        fail(17, "renameat with AT_FDCWD and an absolute path failed");
+    }
+    if fstatat(dirfd, "back", 0).is_none() {
+        fail(17, "renameat back to the parent did not land");
+    }
+    if renameat(4242, "back", dirfd, "nope") != -1 {
+        fail(17, "renameat accepted a closed descriptor");
+    }
+
+    close(subfd as u64);
+    close(dirfd as u64);
+    let _ = fs::remove_dir_all(&base);
+    pass(
+        17,
+        "renameat/symlinkat/readlinkat/faccessat resolve against a directory descriptor",
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -974,6 +1105,7 @@ fn main() {
     test14(dir);
     test15(dir);
     test16(dir);
+    test17(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

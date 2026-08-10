@@ -129,6 +129,25 @@ pub fn access(path: &str, mode: u32) -> i64 {
     }
 }
 
+/// [`access`] relative to the directory descriptor `dirfd`. An absolute path
+/// ignores `dirfd`, and [`AT_FDCWD`] names the working directory.
+///
+/// `flags` must be 0: `AT_EACCESS` asks about the effective ids, which are the
+/// only ids there are, and the walk always follows symbolic links, so
+/// `AT_SYMLINK_NOFOLLOW` is refused rather than quietly ignored.
+pub fn faccessat(dirfd: i64, path: &str, mode: u32, flags: u64) -> i64 {
+    unsafe {
+        sys::syscall5(
+            sys::SYS_FACCESSAT,
+            dirfd as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            mode as u64,
+            flags,
+        ) as i64
+    }
+}
+
 /// Resize the file named by `path` to `size` bytes, extending it with zeros
 /// when it grows. Returns 0 on success and -1 on error; a directory is
 /// refused.
@@ -211,6 +230,22 @@ pub fn symlink(target: &str, path: &str) -> i64 {
     }
 }
 
+/// [`symlink`] with the link's own path taken relative to the directory
+/// descriptor `newdirfd`. The target is stored verbatim either way, so
+/// `newdirfd` names where the link goes, never what it points at.
+pub fn symlinkat(target: &str, newdirfd: i64, path: &str) -> i64 {
+    unsafe {
+        sys::syscall5(
+            sys::SYS_SYMLINKAT,
+            target.as_ptr() as u64,
+            target.len() as u64,
+            newdirfd as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+        ) as i64
+    }
+}
+
 /// Read the target of the symbolic link at `path` into `buf`, without a
 /// terminating NUL. Returns the number of bytes written, which equals
 /// `buf.len()` when the target was truncated, or -1 on error.
@@ -222,6 +257,37 @@ pub fn readlink(path: &str, buf: &mut [u8]) -> i64 {
             path.len() as u64,
             buf.as_mut_ptr() as u64,
             buf.len() as u64,
+        ) as i64
+    }
+}
+
+/// [`readlink`] relative to the directory descriptor `dirfd`. An absolute path
+/// ignores `dirfd`, and [`AT_FDCWD`] names the working directory.
+pub fn readlinkat(dirfd: i64, path: &str, buf: &mut [u8]) -> i64 {
+    unsafe {
+        sys::syscall5(
+            sys::SYS_READLINKAT,
+            dirfd as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        ) as i64
+    }
+}
+
+/// Rename `old` to `new`, each resolved against its own directory descriptor,
+/// so one call can name two of them. Returns 0 on success and -1 on error.
+pub fn renameat(olddirfd: i64, old: &str, newdirfd: i64, new: &str) -> i64 {
+    unsafe {
+        sys::syscall6(
+            sys::SYS_RENAMEAT,
+            olddirfd as u64,
+            old.as_ptr() as u64,
+            old.len() as u64,
+            newdirfd as u64,
+            new.as_ptr() as u64,
+            new.len() as u64,
         ) as i64
     }
 }

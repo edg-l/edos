@@ -36,10 +36,10 @@ use crate::{
     println, ranked_lock,
     syscalls::{
         fs::{
-            FstatEntry, UserTimespec, sys_access, sys_fstat, sys_fstatat, sys_list_mounts,
-            sys_list_partitions, sys_mkdir, sys_mkdirat, sys_mount, sys_readlink, sys_rmdir,
-            sys_rmdir_all, sys_stat, sys_symlink, sys_truncate, sys_unlink, sys_unlinkat,
-            sys_utimensat,
+            FstatEntry, UserTimespec, sys_access, sys_faccessat, sys_fstat, sys_fstatat,
+            sys_list_mounts, sys_list_partitions, sys_mkdir, sys_mkdirat, sys_mount, sys_readlink,
+            sys_readlinkat, sys_renameat, sys_rmdir, sys_rmdir_all, sys_stat, sys_symlink,
+            sys_symlinkat, sys_truncate, sys_unlink, sys_unlinkat, sys_utimensat,
         },
         io::{
             SelectFd, sys_chdir, sys_close, sys_getcwd, sys_getrandom, sys_list_dir, sys_open,
@@ -322,6 +322,10 @@ const SYS_OPENAT: u64 = 257; // open relative to a directory descriptor
 const SYS_MKDIRAT: u64 = 258; // create a directory relative to a directory descriptor
 const SYS_FSTATAT: u64 = 262; // stat relative to a directory descriptor
 const SYS_UNLINKAT: u64 = 263; // remove a file or directory relative to one
+const SYS_RENAMEAT: u64 = 264; // rename between two directory descriptors
+const SYS_SYMLINKAT: u64 = 266; // create a symbolic link relative to one
+const SYS_READLINKAT: u64 = 267; // read a link's target relative to one
+const SYS_FACCESSAT: u64 = 269; // check an access mode relative to one
 const SYS_SYMLINK: u64 = 88; // create a symbolic link
 const SYS_READLINK: u64 = 89; // read a symbolic link's target
 const SYS_FSYNC: u64 = 14;
@@ -587,6 +591,39 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let fstat_buf = ctx.r10 as *mut FstatEntry;
             let flags = ctx.r8;
             ctx.rax = sys_fstatat(dirfd, path_ptr, path_len, fstat_buf, flags) as u64;
+        }
+        SYS_RENAMEAT => {
+            let olddirfd = ctx.rdi as i64;
+            let old_ptr = ctx.rsi as *const u8;
+            let old_len = ctx.rdx as usize;
+            let newdirfd = ctx.r10 as i64;
+            let new_ptr = ctx.r8 as *const u8;
+            let new_len = ctx.r9 as usize;
+            ctx.rax = sys_renameat(olddirfd, old_ptr, old_len, newdirfd, new_ptr, new_len) as u64;
+        }
+        SYS_SYMLINKAT => {
+            let target_ptr = ctx.rdi as *const u8;
+            let target_len = ctx.rsi as usize;
+            let newdirfd = ctx.rdx as i64;
+            let path_ptr = ctx.r10 as *const u8;
+            let path_len = ctx.r8 as usize;
+            ctx.rax = sys_symlinkat(target_ptr, target_len, newdirfd, path_ptr, path_len) as u64;
+        }
+        SYS_READLINKAT => {
+            let dirfd = ctx.rdi as i64;
+            let path_ptr = ctx.rsi as *const u8;
+            let path_len = ctx.rdx as usize;
+            let buf = ctx.r10 as *mut u8;
+            let buf_len = ctx.r8 as usize;
+            ctx.rax = sys_readlinkat(dirfd, path_ptr, path_len, buf, buf_len) as u64;
+        }
+        SYS_FACCESSAT => {
+            let dirfd = ctx.rdi as i64;
+            let path_ptr = ctx.rsi as *const u8;
+            let path_len = ctx.rdx as usize;
+            let mode = ctx.r10 as u32;
+            let flags = ctx.r8;
+            ctx.rax = sys_faccessat(dirfd, path_ptr, path_len, mode, flags) as u64;
         }
         SYS_UTIMENSAT => {
             let dirfd = ctx.rdi as i64;

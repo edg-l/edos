@@ -33,8 +33,6 @@
 
 - users, file perms
 
-- set file time syscall?
-
 - direct copy file (rename exists as SYS_RENAME; a copy that stays in the kernel
   does not, so `cp` reads and writes through userspace)
 

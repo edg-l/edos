@@ -1185,10 +1185,8 @@ doc/AUDIT.md, which has the file:line detail and the reasoning.
 The interface gaps that actually block programs:
 
 1. **The rest of the audit's syscall table.** [audit]
-   `readv`/`writev`, and the second tier of the `*at` family
-   (`renameat`, `symlinkat`, `readlinkat`, `faccessat`) now that
-   `openat`/`mkdirat`/`fstatat`/`unlinkat`/`utimensat` take a directory
-   descriptor. None of them block a program that exists today.
+   `readv`/`writev`: every scatter/gather write is N syscalls or a copy.
+   The whole `*at` family now takes a directory descriptor.
 2. **No shutdown or reboot syscall**, so every stop is a power cut and
    the journal replays on the next boot. init is the natural owner now.
 

@@ -1846,14 +1846,7 @@ pub fn sys_rename(old_path_ptr: *const u8, new_path_ptr: *const u8) -> i32 {
         }
     };
 
-    interrupts::enable();
-    match fs_api::rename(&old_path, &new_path) {
-        Ok(()) => 0,
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            -1
-        }
-    }
+    super::fs::rename_resolved(&old_path, &new_path) as i32
 }
 
 /// Opens a PTY master/slave pair and writes the two fd numbers to user space.

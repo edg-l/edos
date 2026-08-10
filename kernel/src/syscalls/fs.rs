@@ -724,24 +724,38 @@ const W_OK: u32 = 2;
 const R_OK: u32 = 4;
 const ACCESS_MODE_BITS: u32 = X_OK | W_OK | R_OK;
 
-/// access(path, path_len, mode) -> 0 if the access is permitted, -1 otherwise
+pub fn sys_access(path_ptr: *const u8, path_len: usize, mode: u32) -> i64 {
+    sys_faccessat(AT_FDCWD, path_ptr, path_len, mode, 0)
+}
+
+/// faccessat(dirfd, path, path_len, mode, flags) -> 0 if the access is
+/// permitted, -1 otherwise
 ///
 /// EDOS carries no per-file permission bits and every process runs with the
 /// same credentials, so the answer is existence plus the read-only attribute:
 /// `W_OK` on a read-only file is denied with EACCES, and `R_OK` and `X_OK` are
 /// granted for anything that exists. `mode` of 0 (`F_OK`) is an existence test.
-pub fn sys_access(path_ptr: *const u8, path_len: usize, mode: u32) -> i64 {
+///
+/// `flags` must be 0. `AT_EACCESS` asks about the effective ids, which are the
+/// only ids there are here, and `file_info` follows symbolic links, so
+/// `AT_SYMLINK_NOFOLLOW` cannot be honoured; both are refused rather than
+/// quietly ignored.
+pub fn sys_faccessat(
+    dirfd: i64,
+    path_ptr: *const u8,
+    path_len: usize,
+    mode: u32,
+    flags: u64,
+) -> i64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    if mode & !ACCESS_MODE_BITS != 0 {
+    if mode & !ACCESS_MODE_BITS != 0 || flags != 0 {
         info.lock().errno = Errno::EINVAL;
         return -1;
     }
 
-    let cwd = current_cwd(&info);
-
-    let path = match read_user_path_with_len(path_ptr, path_len, &cwd) {
+    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
         Ok(p) => p,
         Err(err) => {
             info.lock().errno = err;
@@ -808,12 +822,24 @@ pub fn sys_truncate(path_ptr: *const u8, path_len: usize, size: u64) -> i64 {
     }
 }
 
-/// Create a symbolic link at `path` holding `target`. The target is stored
-/// verbatim, so a relative one resolves against the link's own directory and a
-/// dangling one is legal, as in POSIX.
 pub fn sys_symlink(
     target_ptr: *const u8,
     target_len: usize,
+    path_ptr: *const u8,
+    path_len: usize,
+) -> i64 {
+    sys_symlinkat(target_ptr, target_len, AT_FDCWD, path_ptr, path_len)
+}
+
+/// Create a symbolic link at `path`, relative to the directory descriptor
+/// `newdirfd`, holding `target`. The target is stored verbatim, so a relative
+/// one resolves against the link's own directory and a dangling one is legal,
+/// as in POSIX; `newdirfd` therefore names where the link goes, never what it
+/// points at.
+pub fn sys_symlinkat(
+    target_ptr: *const u8,
+    target_len: usize,
+    newdirfd: i64,
     path_ptr: *const u8,
     path_len: usize,
 ) -> i64 {
@@ -842,8 +868,7 @@ pub fn sys_symlink(
         }
     };
 
-    let cwd = current_cwd(&info);
-    let path = match read_user_path_with_len(path_ptr, path_len, &cwd) {
+    let path = match read_user_path_at(newdirfd, path_ptr, path_len) {
         Ok(p) => p,
         Err(err) => {
             info.lock().errno = err;
@@ -862,10 +887,21 @@ pub fn sys_symlink(
     }
 }
 
-/// Copy the target of the symbolic link at `path` into `buf`, without a
-/// terminating NUL. Returns the number of bytes written, which is `buf_len`
-/// when the target was truncated, as in POSIX.
 pub fn sys_readlink(path_ptr: *const u8, path_len: usize, buf: *mut u8, buf_len: usize) -> i64 {
+    sys_readlinkat(AT_FDCWD, path_ptr, path_len, buf, buf_len)
+}
+
+/// Copy the target of the symbolic link at `path`, relative to the directory
+/// descriptor `dirfd`, into `buf` without a terminating NUL. Returns the number
+/// of bytes written, which is `buf_len` when the target was truncated, as in
+/// POSIX.
+pub fn sys_readlinkat(
+    dirfd: i64,
+    path_ptr: *const u8,
+    path_len: usize,
+    buf: *mut u8,
+    buf_len: usize,
+) -> i64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
@@ -874,8 +910,7 @@ pub fn sys_readlink(path_ptr: *const u8, path_len: usize, buf: *mut u8, buf_len:
         return -1;
     }
 
-    let cwd = current_cwd(&info);
-    let path = match read_user_path_with_len(path_ptr, path_len, &cwd) {
+    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
         Ok(p) => p,
         Err(err) => {
             info.lock().errno = err;
@@ -899,6 +934,54 @@ pub fn sys_readlink(path_ptr: *const u8, path_len: usize, buf: *mut u8, buf_len:
         return -1;
     }
     count as i64
+}
+
+/// renameat(olddirfd, old, old_len, newdirfd, new, new_len) -> 0 on success,
+/// -1 on error
+///
+/// Each path resolves against its own directory descriptor, so one rename can
+/// name two of them.
+pub fn sys_renameat(
+    olddirfd: i64,
+    old_ptr: *const u8,
+    old_len: usize,
+    newdirfd: i64,
+    new_ptr: *const u8,
+    new_len: usize,
+) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let old_path = match read_user_path_at(olddirfd, old_ptr, old_len) {
+        Ok(p) => p,
+        Err(err) => {
+            info.lock().errno = err;
+            return -1;
+        }
+    };
+    let new_path = match read_user_path_at(newdirfd, new_ptr, new_len) {
+        Ok(p) => p,
+        Err(err) => {
+            info.lock().errno = err;
+            return -1;
+        }
+    };
+
+    rename_resolved(&old_path, &new_path)
+}
+
+/// Rename an already-resolved path, shared with `sys_rename`, which takes
+/// NUL-terminated paths and so cannot go through [`read_user_path_at`].
+pub(super) fn rename_resolved(old: &Path, new: &Path) -> i64 {
+    interrupts::enable();
+
+    match crate::fs::api::rename(old, new) {
+        Ok(()) => 0,
+        Err(err) => {
+            current_thread_info().lock().errno = Errno::from(err);
+            -1
+        }
+    }
 }
 
 /// One half of `utimensat`'s `times` argument, as POSIX `struct timespec`.
