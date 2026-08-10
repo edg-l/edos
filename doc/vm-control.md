@@ -77,6 +77,34 @@ loopback and the SSH tunnel is the authentication. Binding it to a LAN address
 (`--vnc-addr`) without `password=on` publishes an unauthenticated console; the
 same is true of `--display spice`, which is started with `disable-ticketing`.
 
+### A remote display is capped at 33fps, in QEMU's source
+
+Whatever the guest does, QEMU services its display listeners on a timer:
+
+```c
+// include/ui/console.h, unchanged as of qemu 11.1
+#define GUI_REFRESH_INTERVAL_DEFAULT    30
+```
+
+VNC's own floor is that same constant (`VNC_REFRESH_INTERVAL_BASE`), and
+`ui/spice-display.c` sets no interval of its own, so both take the 30ms
+default. The compositor presents at 77fps into a 33fps pipe, which means two
+of every three frames are coalesced away and the survivors do not arrive
+evenly -- and uneven delivery is what "not smooth" looks like even when every
+delivered frame is whole.
+
+Measured, dragging a 640x480 window: the guest hands the display **255 MB/s**
+of raw pixels, SPICE compresses that to **0.6 MB/s** on the wire, and QEMU
+burns 28% of one core. Nothing is starved. The wire is not the problem, the
+host CPU is not the problem, and the compositor is not the problem.
+
+Capping the compositor to 30ms to match was tried and **not kept**: it trades
+smoothness on a local display, where 74Hz is real, for smoothness on a remote
+one, on a hypothesis nobody has confirmed by watching. The measurement that
+would settle it is an RFB client counting `FramebufferUpdate` messages per
+second during a drag; the fix, if it is confirmed, is a one-line patch to that
+constant in a locally built QEMU.
+
 ### SPICE, when VNC is not fast enough
 
 ```bash

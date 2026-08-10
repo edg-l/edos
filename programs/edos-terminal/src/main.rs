@@ -124,8 +124,12 @@ fn main() {
                         terminal.on_mouse_move(event.x as i32, event.y as i32);
                     }
                     Some(WindowEventType::MouseScroll) => {
-                        let delta = -(event.data as i32);
-                        terminal.scroll(delta);
+                        // HID reports a wheel turned away from the user as
+                        // positive, and the widget takes positive as "back into
+                        // history", which is the same direction: pushing the
+                        // wheel away shows earlier output. The sign passes
+                        // through unchanged.
+                        terminal.scroll(event.data as i32);
                     }
                     Some(WindowEventType::FocusGained) => {
                         eprintln!("[Term] FocusGained");

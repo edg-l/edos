@@ -162,6 +162,7 @@ fn dump_windows() {
 /// Target frame time (approximately 60 FPS).
 const FRAME_TIME_MS_DEFAULT: u64 = 16;
 
+
 /// Minimum window width in pixels.
 const MIN_WINDOW_WIDTH: u32 = 100;
 
