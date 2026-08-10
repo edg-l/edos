@@ -125,9 +125,15 @@ must change with it.
 
 ### The mouse is HID boot protocol, so it is relative
 
-`kernel/src/drivers/usb/hid.rs` implements `process_boot_mouse_report` only.
-A `usb-tablet` sends absolute reports in a different format and is silently
-ignored, so the machine uses `usb-mouse`.
+`kernel/src/drivers/usb/hid.rs` implements `process_boot_mouse_report` only,
+and `find_hid_interface` binds on the boot protocol code, so a `usb-tablet`
+(which declares no boot interface) enumerates and is then ignored. The machine
+uses `usb-mouse`.
+
+This is also why a VNC client's pointer drifts away from the guest cursor and
+leaves the window: with no absolute pointing device there is nothing for QEMU
+to warp the guest cursor to. The root-cause fix is a HID report-descriptor
+parser, which is item 0 of "What to do next" in `ideas.txt`.
 
 Reaching an exact pixel therefore means homing first: the guest clamps the
 cursor to the screen rectangle and applies no acceleration

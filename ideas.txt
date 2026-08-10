@@ -1245,6 +1245,65 @@ on-screen geometry to click.
 Open, roughly in priority order. Items marked [audit] come from
 doc/AUDIT.md, which has the file:line detail and the reasoning.
 
+Next:
+
+0. **The USB HID driver reads one hard-coded report layout, so every
+   device that is not a boot keyboard or a boot mouse is invisible.**
+   The symptom is that the guest cursor drifts away from the host's
+   under VNC and the pointer walks out of the window, because the only
+   mouse the guest accepts is relative. The cause is two layers below
+   that.
+
+   `find_hid_interface` (`drivers/usb/xhci/mod.rs`) binds an interface
+   on `bInterfaceClass == HID && bInterfaceProtocol == 1|2`, and those
+   protocol codes only mean anything on an interface that declares the
+   *boot* subclass. `process_boot_mouse_report` then hard-codes the
+   boot layout: byte 0 buttons, bytes 1-2 signed relative dx/dy.
+   Nothing anywhere reads a HID **report descriptor**, so a device that
+   does not speak that exact layout cannot be interpreted at all.
+   QEMU's `usb-tablet` declares `bInterfaceSubClass = 0` and
+   `bInterfaceProtocol = 0`, so it enumerates and is then dropped on
+   the floor — which is why `-device usb-tablet` is "silently ignored"
+   in `doc/vm-control.md` rather than merely unsupported.
+
+   The fix is the missing layer, not a second special case:
+
+   - Fetch the report descriptor (GET_DESCRIPTOR, type 0x22, to the
+     interface) through the `control_transfer` the driver already has.
+   - Parse the item stream: Usage Page, Usage, Logical Min/Max, Report
+     Size, Report Count, and Input, tracking collections for scope.
+   - Build a field map of (bit offset, bit width, signed, usage,
+     **absolute or relative**). That last bit is what distinguishes a
+     mouse from a tablet, and it comes from the Input item rather than
+     from guessing at a byte layout.
+   - Decode reports through the map: Button usage page for buttons,
+     Generic Desktop X/Y (0x30/0x31) for motion, Wheel (0x38) for
+     scroll. Absolute axes scale by their logical maximum to screen
+     coordinates.
+   - `mouse::apply_relative_move` gains a sibling that stores the
+     position instead of accumulating into it. The kernel already
+     keeps an absolute `MOUSE_POSITION` clamped to the screen, so the
+     consumption side is a few lines.
+   - Binding becomes "class HID, and the parsed descriptor has an X/Y
+     pair" rather than a protocol code. Keep the boot path as the
+     fallback for an interface whose descriptor will not parse, so
+     `usb-kbd` and `usb-mouse` stay on code that is known good.
+
+   Worth it beyond the cursor: it is the difference between supporting
+   two devices and supporting HID. It also removes the homing dance in
+   `scripts/edos-vm` (`goto` slams the pointer into a corner and counts
+   relative steps, ~12ms apart, because there is no absolute pointer),
+   which makes every scripted click exact instead of approximately
+   right, and lets the qemu line use `usb-tablet`.
+
+   Traps to expect: QEMU's tablet reports 16-bit X/Y over 0..32767 in a
+   6-byte report, and the point of the parser is to *derive* that
+   rather than hard-code it a second time; the interrupt endpoint's max
+   packet size has to come from the endpoint descriptor, since the
+   current code passes report lengths of 4 and 8 as constants; and with
+   both a mouse and a tablet attached the driver takes the first match,
+   which should become a deliberate choice.
+
 Known defects, mechanism written out in `todo.txt`:
 
 1. **An absolute symlink target resolves in the wrong namespace.** VFS
