@@ -54,6 +54,14 @@ impl InputState {
         read_mouse_state(&mut self.mouse_file).unwrap_or((0, 0, 0))
     }
 
+    /// Detect a right button press (0->1 transition).
+    ///
+    /// Read before `detect_left_press`, which is the call that advances the
+    /// stored button state for the frame.
+    pub fn right_pressed(&self, buttons: u8) -> bool {
+        (buttons & 0x02) != 0 && (self.last_mouse_buttons & 0x02) == 0
+    }
+
     /// Detect a left button press (0->1 transition). Updates internal state.
     pub fn detect_left_press(&mut self, buttons: u8) -> bool {
         let pressed = (buttons & 0x01) != 0 && (self.last_mouse_buttons & 0x01) == 0;

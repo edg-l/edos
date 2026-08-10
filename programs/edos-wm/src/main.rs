@@ -20,6 +20,7 @@ const PANEL_HEIGHT: u32 = 40;
 mod compositor;
 mod cursor;
 mod decorations;
+mod desktop_menu;
 mod dirty;
 mod input;
 
@@ -487,7 +488,10 @@ fn main() {
     let mut input = InputState::new();
 
     // Pre-compute desktop gradient (avoids 1080 lerp+fill calls per frame).
-    let desktop_cache = compositor::build_desktop_cache(screen.width(), screen.height());
+    let mut background = 0usize;
+    let mut desktop_cache =
+        compositor::build_desktop_cache_variant(screen.width(), screen.height(), background);
+    let mut desktop_menu = desktop_menu::DesktopMenu::default();
 
     // Dirty region tracking
     let mut dirty = DirtyRegion::new();
@@ -543,12 +547,38 @@ fn main() {
             InputAction::None => {}
         }
 
+        // Right click opens the desktop menu, which is the affordance every
+        // desktop has and this one did not.
+        let right_pressed = input.right_pressed(buttons);
+        if right_pressed && find_window_at(windows, mx, my).is_none() {
+            desktop_menu.open(
+                mx,
+                my,
+                screen.info().width as u32,
+                screen.info().height as u32,
+            );
+        }
+        if desktop_menu.is_open() {
+            desktop_menu.hover(mx, my);
+        }
+
         // Detect mouse button transitions
         let left_pressed = input.detect_left_press(buttons);
         let left_held = InputState::left_held(buttons);
 
-        // Handle mouse interactions
-        if left_pressed {
+        // A click while the menu is open belongs to the menu, whether it lands
+        // on a row or dismisses it.
+        if left_pressed && desktop_menu.is_open() {
+            if let Some(desktop_menu::Outcome::NextBackground) = desktop_menu.click(mx, my) {
+                background = (background + 1) % compositor::BACKGROUNDS;
+                desktop_cache = compositor::build_desktop_cache_variant(
+                    screen.width(),
+                    screen.height(),
+                    background,
+                );
+                dirty.full_screen = true;
+            }
+        } else if left_pressed {
             handle_mouse_press(
                 windows,
                 mx,
@@ -675,6 +705,17 @@ fn main() {
             hw_cursor,
             &desktop_cache,
         );
+        // Painted after compositing, so its rectangle has to be sent even
+        // when nothing else on the frame moved.
+        if let Some((ox, oy)) = desktop_menu.origin() {
+            desktop_menu.draw(&mut screen);
+            dirty.mark_dirty(dirty::DirtyRect::new(
+                ox,
+                oy,
+                desktop_menu::WIDTH as u32,
+                desktop_menu::height() as u32,
+            ));
+        }
 
         // Transfer the dirty region to the host and flush.
         // With single-buffered virtio-gpu, we only need to transfer the

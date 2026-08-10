@@ -153,10 +153,29 @@ fn mix_dithered(a: Color, b: Color, t: u8, d: u32) -> u32 {
 /// puts the light above the middle of the screen: the ground is brightest
 /// where windows open and darkest at the frame, so a window reads as an object
 /// resting on it rather than a panel butted against the same flat fill.
+/// Where the light sits, as a percentage of the screen height, for each
+/// background the user can cycle through.
+///
+/// Not wallpapers: the lit ground is the design, and moving the light changes
+/// the room without needing an image on disk or a decoder to read it. A real
+/// wallpaper would be a file the installer has to ship and the compositor has
+/// to scale, and it would replace the one part of this desktop that is not
+/// generic.
+pub const BACKGROUNDS: usize = 3;
+
 pub fn build_desktop_cache(width: usize, height: usize) -> Vec<u32> {
+    build_desktop_cache_variant(width, height, 0)
+}
+
+pub fn build_desktop_cache_variant(width: usize, height: usize, variant: usize) -> Vec<u32> {
     let theme = &Theme::DEFAULT;
     let mut buf = vec![0u32; width * height];
-    let cx = width as i64 / 2;
+    // Light overhead, from the left, or from the right.
+    let cx = match variant % BACKGROUNDS {
+        1 => width as i64 / 4,
+        2 => width as i64 * 3 / 4,
+        _ => width as i64 / 2,
+    };
     let cy = height as i64 * 38 / 100;
     let far_x = cx.max(width as i64 - 1 - cx);
     let far_y = cy.max(height as i64 - 1 - cy);
