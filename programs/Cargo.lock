@@ -453,6 +453,13 @@ name = "tail"
 version = "0.1.0"
 
 [[package]]
+name = "tar"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "tcptest"
 version = "0.1.0"
 dependencies = [

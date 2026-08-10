@@ -60,3 +60,8 @@
 - A stop or kill signal does not cut short sys_sleep_ms, so Ctrl+Z on
   `sleep 30` only takes effect 30s later. thread_sleep should return early
   when stop_requested or killed is set.
+
+- `mkdir -p` is silently a no-op: programs/mkdir does not implement -p, creates
+  nothing and exits 0, so the failure surfaces later as "cannot open for
+  writing" on the first write into the directory. Either implement -p over
+  create_dir_all or reject the flag.

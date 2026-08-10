@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-79 programs and 2 libraries, all in the `programs/` cargo workspace.
+80 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -12,6 +12,7 @@
 | Editor | `edos-vi` |
 | Files | `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `touch`, `stat`, `find`, `du`, `diff` |
 | Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs` |
+| Archives | `tar` (ustar create, list and extract) |
 | Checksums | `sha256sum` |
 | Inspection | `file` |
 | System | `ps`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace`, `date` |
@@ -48,6 +49,15 @@ the formatter carries no second copy of it. Follows children, shows what a
 blocked process is blocked in, and captures both what a call was handed and what
 it filled in. Written up in [`strace.md`](strace.md).
 
+**`tar`** (Phase 3). ustar (POSIX.1-1988), so the archives it writes are the
+ones every other implementation reads: `-c`, `-t`, `-x`, with `-v`, `-C`, and
+`-f` where `-` or no flag at all means the standard stream, which makes
+`tar -cf - dir | tar -xf - -C dest` a directory copy. Regular files,
+directories and symbolic links; a member whose name escapes the extraction
+directory is refused. Verified both directions against GNU tar rather than only
+against itself. See `doc/WORKING-NOTES.md` for the three header details that
+are easy to get subtly wrong.
+
 Candidates beyond these phases, ranked by the kernel path each would exercise,
 are in [`PROGRAMS.md`](PROGRAMS.md).
 
@@ -55,7 +65,6 @@ are in [`PROGRAMS.md`](PROGRAMS.md).
 
 | Program | Why it matters | Notes |
 |---|---|---|
-| `tar` | archive create and extract; useful for host to guest transfer | exercises open/read/write/unlink/mkdir at scale |
 | `top` | live system monitor in a terminal | needs terminal raw mode and a refresh loop. The graphical half shipped as `edos-procview`, and the procfs gap it found is closed: `/proc/processes` has an RSS column and `/proc/<tid>/status` carries `VM Size` and `Resident` |
 | `snake` | terminal game on a timer | good demo of poll and time APIs, raw stdin |
 

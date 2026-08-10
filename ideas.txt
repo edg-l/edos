@@ -2,6 +2,12 @@
 
 ## Done
 
+- **`tar`** - ustar (POSIX.1-1988) create, list and extract, with `-v`, `-C`,
+  and `-f` where `-` or no flag means the standard stream, so
+  `tar -cf - dir | tar -xf - -C dest` copies a tree. Regular files,
+  directories and symbolic links; a member whose name would escape the
+  extraction directory is refused. Reads and writes what GNU tar does, checked
+  in both directions rather than only round-tripped against itself.
 - **Local time, and `date`** - the session carries a fixed UTC offset in `TZ`
   (an ISO 8601 offset, not a POSIX zone rule: there is no zone database and no
   DST), `edos_lib::time::local_time` is the single place that applies it, and

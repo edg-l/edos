@@ -1999,3 +1999,54 @@ twice.
 **If a new session-wide setting does not reach a program, check which spawn it
 went through before looking anywhere else.** `SYS_SPAWN` is still there and
 still silently drops the environment.
+
+## `tar` exists, and it reads and writes what GNU tar does
+
+`programs/tar` is ustar (POSIX.1-1988), the format every other implementation
+falls back to: 512-byte header, 512-byte data blocks, two zero blocks to close.
+`-c`, `-t` and `-x`, with `-v`, `-f` (`-` or absent means the standard stream)
+and `-C`. Regular files, directories and symbolic links; the header module is
+`programs/tar/src/header.rs` and is the only place that knows a field offset.
+
+Interoperability is the whole point of picking ustar, so it was verified both
+directions against GNU tar on the host, not just round-tripped against itself:
+an archive our encoder wrote lists correctly under `tar tvf` with the right
+sizes, modes, link targets and mtimes, and an archive GNU tar wrote decodes
+here with the same. In the guest: create, list, extract and `diff` of the
+result, `tar -cf - dir | tar -tf -` through a pipe, a selective `tar -tf a.tar
+sub/dir`, and extracting a GNU-made archive off `/share`.
+
+Three things the format demands that are easy to get subtly wrong:
+
+- **The checksum covers the checksum field as eight spaces**, and is written as
+  six octal digits, a NUL, then a space. Writing it as seven digits plus NUL, or
+  as eight digits, is accepted by some readers and rejected by others.
+- **Numeric fields are `width - 1` octal digits plus NUL**, zero padded, not
+  space padded. The parser here accepts leading spaces and stops at the first
+  non-digit, because implementations disagree about the terminator.
+- **A path longer than 100 bytes splits into `prefix` and `name`** at a `/`,
+  and the split must leave both halves inside their fields. Take the *longest*
+  prefix that fits, so the remainder is as short as possible.
+
+### Things that will bite you
+
+- **`symlink_metadata` follows symlinks on this target**: `lstat` in the std
+  fork (`library/std/src/sys/fs/edos.rs`) is literally `stat`. Nothing in
+  userspace can ask "is this path a link" through `fs::Metadata`. What works is
+  `fs::read_link(path)` succeeding, which is what `tar` uses to classify an
+  entry. A `read_dir` entry's `file_type().is_symlink()` is also honest, since
+  that comes from the directory listing, but it is only available while walking
+  a directory.
+- **Creating a symlink needs `edos_lib::io::symlink`.** `std::fs` has no
+  portable symlink constructor and `std::os::edos` exposes only `ffi` and `io`,
+  so there is no `std::os::unix::fs::symlink` to reach for.
+- **`mkdir -p` is silently a no-op.** `programs/mkdir` does not implement `-p`;
+  it consumes the flag as an operand-ish argument, creates nothing, and exits
+  successfully, so a script that depends on it fails several commands later at
+  the first write into the directory that was never made. Recorded in
+  `todo.txt`. `tar -x` is unaffected: it uses `fs::create_dir_all`.
+- **`scripts/edos-vm type` can lose the front of a long line.** A single `type`
+  carrying four `;`-separated commands arrived with its first fifteen
+  characters missing, so `mkdir -p /tmp/t/sub; …` ran as `/sub; …` and the
+  failure looked like a shell parsing bug. Send one command per `type` and
+  read the screenshot before trusting what ran.

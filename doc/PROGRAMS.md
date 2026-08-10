@@ -44,7 +44,6 @@ surface at all.
 | `less` | `dmesg \| less` is missing, and `edos-vi` already proves raw mode works |
 | `sed`, even just `s///` | Multiplies the value of every text tool already there |
 | `watch` | Trivial against procfs, and immediately useful for the poll-and-look debugging this OS gets |
-| `tar` | Host-to-guest transfer without rebuilding a disk image |
 | `sntp` | The wall clock is sampled once at boot and drifts from there. One UDP round trip fixes it, and it is the only thing that would exercise the UDP client path outside `dns` |
 | `pstree` | `/proc/processes` already carries a PPID column that nothing renders as a tree. Small, and the supervision structure `edos-init` builds is currently invisible |
 
