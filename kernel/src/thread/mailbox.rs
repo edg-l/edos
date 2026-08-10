@@ -1,10 +1,14 @@
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use alloc::{collections::vec_deque::VecDeque, sync::Arc};
 
 use crate::debug::lock_order::{RANK_MAILBOX_QUEUE, RANK_MAILBOX_RESPONSE};
 use crate::ranked_lock;
 use crate::thread::{mutex::BlockingMutex, waitqueue::WaitQueue};
+use crate::timer::Instant;
 
 /*
 
@@ -53,6 +57,36 @@ impl<R> Response<R> {
         ranked_lock!(RANK_MAILBOX_RESPONSE, "Response::wait", self.inner.value)
             .take()
             .unwrap()
+    }
+
+    /// Wait for a reply, giving up after `timeout` and returning `None`.
+    ///
+    /// Abandoning a `Response` is safe: the replier writes through the shared
+    /// `ResponseInner`, which the outstanding `Request` keeps alive, and the
+    /// value is dropped with the last reference. It does, however, leave the
+    /// request in flight, so a caller that times out must not assume the
+    /// receiver is done with the payload it sent.
+    pub fn wait_timeout(self, timeout: Duration) -> Option<R> {
+        let start = Instant::now();
+        while !self.inner.ready.load(Ordering::Acquire) {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return None;
+            }
+            let _ = self.inner.waitq.wait_until_timeout(
+                || self.inner.ready.load(Ordering::Acquire),
+                Some(timeout - elapsed),
+            );
+        }
+        Some(
+            ranked_lock!(
+                RANK_MAILBOX_RESPONSE,
+                "Response::wait_timeout",
+                self.inner.value
+            )
+            .take()
+            .unwrap(),
+        )
     }
 }
 

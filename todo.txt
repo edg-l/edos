@@ -50,8 +50,11 @@
     `send_and_wait` after `wake_thread` reporting the target's id and the
     value `wake_thread` returned. That shows whether the wake reached a
     thread that then failed to re-enter the drain, or never landed at all.
-  Give the fs side a deadline regardless: `Response::wait` blocks forever, so a
-  wedged or unwoken driver thread wedges the boot instead of failing the read.
+  The fs side no longer waits forever: `send_and_wait` uses
+  `Response::wait_timeout(10s)` and fails the read with `BlockError::Timeout`,
+  so the symptom is now a logged `usb-msc: block request timed out` and a
+  failed GPT scan rather than a wedged boot. The lost wake itself is still
+  unexplained, and the next boot with `--usb-disk` should show which.
 
 - The AHCI ATAPI commands read a fixed number of bytes out of a pooled DMA
   buffer without asking how many arrived, the same defect fixed in 7591982

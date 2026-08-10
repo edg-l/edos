@@ -6,6 +6,7 @@
 //! same async surface as AHCI so fs/* sees one trait, not two.
 
 use alloc::{sync::Arc, vec};
+use core::time::Duration;
 
 use crate::thread::scheduler::thread_yield;
 use crate::{
@@ -26,7 +27,13 @@ fn xhci_to_block(_e: XhciError) -> BlockError {
     BlockError::Io
 }
 
-fn send_and_wait(req: UsbBlockRequest) -> UsbBlockResponse {
+/// How long a filesystem thread waits for the xHCI driver thread to answer a
+/// block request. A bulk transfer is bounded by `bulk_transfer`'s own poll
+/// limit, so anything past this means the driver thread is wedged or never
+/// picked the request up; failing the read beats wedging the caller forever.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn send_and_wait(req: UsbBlockRequest) -> Option<UsbBlockResponse> {
     // Spin-yield until the mailbox has been initialized by the xHCI driver
     // thread (mass-storage enumeration may not be done yet at first call).
     let mailbox = loop {
@@ -39,7 +46,14 @@ fn send_and_wait(req: UsbBlockRequest) -> UsbBlockResponse {
     if let Some(handle) = XHCI_DRIVER_THREAD_ID.get() {
         sched().wake_thread(handle, WakePriority::Normal);
     }
-    response.wait()
+    let reply = response.wait_timeout(REQUEST_TIMEOUT);
+    if reply.is_none() {
+        crate::log!(
+            "usb-msc: block request timed out after {}s",
+            REQUEST_TIMEOUT.as_secs()
+        );
+    }
+    reply
 }
 
 impl AsyncBlockDevice for UsbBlockDevice {
@@ -61,7 +75,8 @@ impl AsyncBlockDevice for UsbBlockDevice {
                 sectors: sectors as u16,
                 buffer: scratch,
             }) {
-                UsbBlockResponse::ReadResult(Ok(data)) => {
+                None => Err(BlockError::Timeout),
+                Some(UsbBlockResponse::ReadResult(Ok(data))) => {
                     let n = data.len().min(buf_len);
                     // SAFETY: caller's contract — buffer outlives the handle.
                     unsafe {
@@ -69,8 +84,8 @@ impl AsyncBlockDevice for UsbBlockDevice {
                     }
                     Ok(())
                 }
-                UsbBlockResponse::ReadResult(Err(e)) => Err(xhci_to_block(e)),
-                _ => unreachable!("USB driver replied with wrong response variant"),
+                Some(UsbBlockResponse::ReadResult(Err(e))) => Err(xhci_to_block(e)),
+                Some(_) => unreachable!("USB driver replied with wrong response variant"),
             }
         };
         drop(buffer);
@@ -98,9 +113,10 @@ impl AsyncBlockDevice for UsbBlockDevice {
                 sectors: sectors as u16,
                 data,
             }) {
-                UsbBlockResponse::WriteResult(Ok(_)) => Ok(()),
-                UsbBlockResponse::WriteResult(Err(e)) => Err(xhci_to_block(e)),
-                _ => unreachable!("USB driver replied with wrong response variant"),
+                None => Err(BlockError::Timeout),
+                Some(UsbBlockResponse::WriteResult(Ok(_))) => Ok(()),
+                Some(UsbBlockResponse::WriteResult(Err(e))) => Err(xhci_to_block(e)),
+                Some(_) => unreachable!("USB driver replied with wrong response variant"),
             }
         };
         drop(buffer);
