@@ -219,7 +219,7 @@ impl FileSystem for Memfs {
             return Err(Error::NotADir);
         }
         if inner.find_node_nofollow(&path)?.is_some() {
-            return Err(Error::InvalidArgument);
+            return Err(Error::AlreadyExists);
         }
 
         let current_id = inner.next_id;
