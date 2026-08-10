@@ -132,6 +132,10 @@ pub struct WindowListEntry {
     pub visible: u32,
     pub buffer_shm_id: u64,
     pub flags: u64,
+    /// The frame this window's manager last reported, packed as four u16
+    /// edges. Compare before writing: rewriting an unchanged frame is a
+    /// syscall and a registry write lock for nothing.
+    pub frame: u64,
     pub damaged: u32,
     /// Set for the window that currently holds input focus. The kernel window
     /// registry is the single source of truth; do not re-derive focus from
@@ -194,6 +198,7 @@ impl Default for WindowListEntry {
             visible: 0,
             buffer_shm_id: 0,
             flags: 0,
+            frame: 0,
             damaged: 0,
             focused: 0,
             minimized: 0,
@@ -222,11 +227,11 @@ pub mod property {
     pub const FLAGS: u64 = 8;
     /// Put the window away, or bring it back. Non-zero minimizes.
     pub const MINIMIZED: u64 = 9;
-    /// The frame the window manager draws, packed as
-    /// `(border_width << 32) | title_height`. Configures the whole session, not
-    /// the window it is set on, so that pointer routing in the kernel and the
-    /// frame the compositor paints cannot drift apart.
-    pub const DECORATION: u64 = 10;
+    /// Thickness of the window manager's frame around this window, packed as
+    /// four u16 edges: left, top, right, bottom, low bits first. Set by
+    /// whoever decorates the window, so pointer routing follows the frame that
+    /// is actually drawn instead of a second copy of the same constants.
+    pub const FRAME: u64 = 10;
 }
 
 /// Window flags.
@@ -346,18 +351,18 @@ pub fn window_minimize(id: WindowId, minimized: bool) -> Result<(), i64> {
     window_set(id, property::MINIMIZED, minimized as u64)
 }
 
-/// Tell the kernel the frame this window manager draws, so pointer routing
-/// lands where the decorations actually are.
+/// Report the frame drawn around a window, so pointer events land in its
+/// client area rather than in the decorations.
 ///
-/// Called once at startup on any window the caller owns. Without it the kernel
-/// keeps its built-in guess and input drifts from the drawing by the
-/// difference.
-pub fn publish_decoration(id: WindowId, title_height: u32, border_width: u32) -> Result<(), i64> {
-    window_set(
-        id,
-        property::DECORATION,
-        ((border_width as u64) << 32) | title_height as u64,
-    )
+/// Set by whoever draws the frame, per window, whenever the frame changes. A
+/// window nobody decorates keeps a frame of zero, which is the right answer:
+/// it owns every pixel it was given.
+pub fn set_frame(id: WindowId, left: u32, top: u32, right: u32, bottom: u32) -> Result<(), i64> {
+    let packed = (left as u64 & 0xFFFF)
+        | (top as u64 & 0xFFFF) << 16
+        | (right as u64 & 0xFFFF) << 32
+        | (bottom as u64 & 0xFFFF) << 48;
+    window_set(id, property::FRAME, packed)
 }
 
 pub fn window_damage(id: WindowId) -> Result<(), i64> {

@@ -14,6 +14,47 @@ static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 /// Counter for z-order assignment.
 static Z_ORDER_COUNTER: AtomicU32 = AtomicU32::new(1);
 
+/// Thickness of a window manager's frame on each side, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Frame {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl Frame {
+    /// An undecorated window: the window owns every pixel it was given.
+    pub const NONE: Frame = Frame {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+
+    /// Unpack the four u16 edges a client packs into one property value.
+    /// Returns `None` if any edge is implausible for a frame.
+    pub fn from_packed(value: u64) -> Option<Frame> {
+        let edge = |shift: u32| ((value >> shift) & 0xFFFF) as i32;
+        let frame = Frame {
+            left: edge(0),
+            top: edge(16),
+            right: edge(32),
+            bottom: edge(48),
+        };
+        let sane = |v: i32| (0..=256).contains(&v);
+        (sane(frame.left) && sane(frame.top) && sane(frame.right) && sane(frame.bottom))
+            .then_some(frame)
+    }
+
+    pub fn packed(&self) -> u64 {
+        (self.left as u64 & 0xFFFF)
+            | (self.top as u64 & 0xFFFF) << 16
+            | (self.right as u64 & 0xFFFF) << 32
+            | (self.bottom as u64 & 0xFFFF) << 48
+    }
+}
+
 /// Information about a window.
 #[derive(Debug, Clone)]
 pub struct WindowInfo {
@@ -44,6 +85,16 @@ pub struct WindowInfo {
     /// the user owns and expects to find in the panel, so it stays in the
     /// window list and only drops out of compositing and out of focus.
     pub minimized: bool,
+    /// Thickness of the frame the window manager draws around this window, as
+    /// (left, top, right, bottom).
+    ///
+    /// The kernel routes pointer events into client space, so it needs the
+    /// offset -- but not the reason for it. Whether that space is a title bar,
+    /// a shadow or nothing at all is the window manager's business, and it
+    /// reports the result per window through `property::FRAME`. A window
+    /// nobody has decorated has no frame, which is the correct answer for the
+    /// frames before the manager gets to it.
+    pub frame: Frame,
     /// Damage flag: set by client via SYS_WINDOW_DAMAGE, cleared by WM via window_list.
     pub damaged: bool,
 }
@@ -68,6 +119,7 @@ impl WindowInfo {
             buffer_shm_id: None,
             flags: 0,
             minimized: false,
+            frame: Frame::NONE,
             damaged: true, // newly created windows are damaged
         }
     }
@@ -88,17 +140,8 @@ impl WindowInfo {
         if !self.on_screen() {
             return false;
         }
-        let bare = (self.flags & flags::FLAG_UNDECORATED) != 0;
-        let client_x = if bare {
-            self.x
-        } else {
-            self.x + decoration::border_width()
-        };
-        let client_y = if bare {
-            self.y
-        } else {
-            self.y + decoration::title_height()
-        };
+        let client_x = self.x + self.frame.left;
+        let client_y = self.y + self.frame.top;
         let client_w = self.width as i32;
         let client_h = self.height as i32;
 
@@ -110,15 +153,8 @@ impl WindowInfo {
         if !self.on_screen() {
             return false;
         }
-        let bare = (self.flags & flags::FLAG_UNDECORATED) != 0;
-        let (total_w, total_h) = if bare {
-            (self.width as i32, self.height as i32)
-        } else {
-            (
-                self.width as i32 + decoration::border_width() * 2,
-                self.height as i32 + decoration::title_height() + decoration::border_width(),
-            )
-        };
+        let total_w = self.width as i32 + self.frame.left + self.frame.right;
+        let total_h = self.height as i32 + self.frame.top + self.frame.bottom;
 
         px >= self.x && px < self.x + total_w && py >= self.y && py < self.y + total_h
     }
@@ -136,10 +172,11 @@ pub mod property {
     pub const FLAGS: u64 = 8;
     /// Put the window away, or bring it back. Non-zero minimizes.
     pub const MINIMIZED: u64 = 9;
-    /// The frame the window manager draws, packed as
-    /// `(border_width << 32) | title_height`. Set on any window the caller
-    /// owns; it configures the session, not that window.
-    pub const DECORATION: u64 = 10;
+    /// Thickness of the window manager's frame around this window, packed as
+    /// four u16 edges: left, top, right, bottom, low bits first. Set by
+    /// whoever decorates the window, so pointer routing follows the frame that
+    /// is actually drawn.
+    pub const FRAME: u64 = 10;
 }
 
 /// Window flags.
@@ -157,39 +194,6 @@ pub mod flags {
     /// dismissed by focus loss. Kept as the name userspace sets.
     #[allow(dead_code)]
     pub const FLAG_DOCK: u64 = FLAG_UNDECORATED | FLAG_NO_FOCUS;
-}
-
-/// Geometry of the frame the window manager draws around a window.
-///
-/// The kernel routes pointer input, so it has to know where a window's client
-/// area starts. The window manager owns the actual numbers, and publishes them
-/// here at startup through `property::DECORATION`; these are the values a
-/// session gets before it does. Two copies of one constant is how input routing
-/// silently drifts from what is drawn.
-pub mod decoration {
-    use core::sync::atomic::{AtomicI32, Ordering};
-
-    static TITLE_HEIGHT: AtomicI32 = AtomicI32::new(24);
-    static BORDER_WIDTH: AtomicI32 = AtomicI32::new(1);
-
-    pub fn title_height() -> i32 {
-        TITLE_HEIGHT.load(Ordering::Relaxed)
-    }
-
-    pub fn border_width() -> i32 {
-        BORDER_WIDTH.load(Ordering::Relaxed)
-    }
-
-    /// Record the frame the window manager draws. Values outside a sane range
-    /// are refused, so a garbled value cannot make every window unclickable.
-    pub fn set(title_height: i32, border_width: i32) -> bool {
-        if !(0..=256).contains(&title_height) || !(0..=64).contains(&border_width) {
-            return false;
-        }
-        TITLE_HEIGHT.store(title_height, Ordering::Relaxed);
-        BORDER_WIDTH.store(border_width, Ordering::Relaxed);
-        true
-    }
 }
 
 /// Global window registry.

@@ -9,7 +9,7 @@ use crate::{
     window::{
         WindowEvent,
         input::{get_or_create_event_queue, poll_events, remove_event_queue, send_event},
-        registry::{ReadSite, WINDOW_REGISTRY, WindowId, decoration, property, read_tracked},
+        registry::{Frame, ReadSite, WINDOW_REGISTRY, WindowId, property, read_tracked},
     },
 };
 
@@ -134,24 +134,6 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
         }
     }
 
-    // DECORATION is not a property of any window: it tells the kernel where a
-    // decorated window's client area starts, so pointer routing lands where the
-    // window manager actually draws the frame. The window id is ignored.
-    //
-    // Unowned, like X/Y/WIDTH/HEIGHT below, because the window manager does not
-    // own the windows it manages -- and, like them, it stays unowned only until
-    // there is a way to say which process *is* the window manager. Until then
-    // any process can reshape input routing.
-    if prop == property::DECORATION {
-        let title_height = (value & 0xFFFF_FFFF) as i32;
-        let border_width = (value >> 32) as i32;
-        if !decoration::set(title_height, border_width) {
-            info.lock().errno = Errno::EINVAL;
-            return !0u64;
-        }
-        return 0;
-    }
-
     let mut registry = ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_set", WINDOW_REGISTRY);
 
     // Check window exists
@@ -165,9 +147,13 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
 
     // X, Y, WIDTH, HEIGHT can be set by any process (for window manager)
     // Other properties require ownership
+    // X/Y/WIDTH/HEIGHT/FRAME are the window manager's to set, and it does not
+    // own the windows it manages. They stay unowned until there is a way to say
+    // which process *is* the window manager; until then any process can move a
+    // window it did not create.
     let requires_ownership = !matches!(
         prop,
-        property::X | property::Y | property::WIDTH | property::HEIGHT
+        property::X | property::Y | property::WIDTH | property::HEIGHT | property::FRAME
     );
 
     if requires_ownership && window.pid != pid {
@@ -211,6 +197,13 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
         property::MINIMIZED => {
             // Handled below: it moves focus, which needs the whole registry
             // rather than the one window borrowed here.
+        }
+        property::FRAME => {
+            let Some(frame) = Frame::from_packed(value) else {
+                info.lock().errno = Errno::EINVAL;
+                return !0u64;
+            };
+            window.frame = frame;
         }
         _ => {
             info.lock().errno = Errno::EINVAL;
@@ -260,6 +253,7 @@ pub fn sys_window_get(window_id: WindowId, prop: u64) -> u64 {
             property::BUFFER_SHM => window.buffer_shm_id.unwrap_or(0),
             property::FLAGS => window.flags,
             property::MINIMIZED => window.minimized as u64,
+            property::FRAME => window.frame.packed(),
             property::TITLE_PTR => {
                 // Can't return a string through u64; titles are available
                 // via the WindowListEntry.title field in sys_window_list.
@@ -352,6 +346,7 @@ pub fn sys_window_poll(window_id: WindowId, events_ptr: *mut WindowEvent, max: u
 ///     visible: u32,
 ///     buffer_shm_id: u64,
 ///     flags: u64,
+///     frame: u64,
 ///     damaged: u32,
 ///     focused: u32,
 ///     minimized: u32,
@@ -398,6 +393,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
                     visible: window.visible as u32,
                     buffer_shm_id: window.buffer_shm_id.unwrap_or(0),
                     flags: window.flags,
+                    frame: window.frame.packed(),
                     damaged: window.damaged as u32,
                     focused: (focused == Some(window.id)) as u32,
                     minimized: window.minimized as u32,
@@ -457,6 +453,9 @@ pub struct WindowListEntry {
     pub visible: u32,
     pub buffer_shm_id: u64,
     pub flags: u64,
+    /// The frame the window's manager last reported, packed as four u16 edges.
+    /// Reported back so a manager can skip rewriting a frame it already set.
+    pub frame: u64,
     /// Set when the client has called SYS_WINDOW_DAMAGE since last list query.
     pub damaged: u32,
     /// Set for the window that currently holds input focus. The registry is the

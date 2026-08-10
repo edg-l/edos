@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use edos_render::graphics::Screen;
 use edos_render::window::{
-    WindowEvent, WindowEventType, WindowListEntry, focused_id, property, publish_decoration,
+    WindowEvent, WindowEventType, WindowListEntry, flags, focused_id, property, set_frame,
     window_list, window_send_event, window_set,
 };
 
@@ -275,6 +275,34 @@ fn handle_resize(resize_state: &mut Option<ResizeState>, mx: i32, my: i32, left_
     }
 }
 
+/// Tell the kernel the frame this compositor draws around each window, so a
+/// click lands in the client area the client thinks it has.
+///
+/// The kernel starts every window with no frame and only learns otherwise from
+/// here, which is why this runs every pass rather than once: a window created
+/// between two passes would otherwise route its pointer events into the title
+/// bar until something else changed. The window list reports the frame already
+/// recorded, so a pass where nothing changed makes no syscalls.
+fn publish_frames(windows: &[WindowListEntry]) {
+    for w in windows {
+        let (left, top, right, bottom) = if w.flags & flags::FLAG_UNDECORATED != 0 {
+            (0, 0, 0, 0)
+        } else {
+            (
+                decorations::BORDER_WIDTH as u32,
+                decorations::TITLE_HEIGHT as u32,
+                decorations::BORDER_WIDTH as u32,
+                decorations::BORDER_WIDTH as u32,
+            )
+        };
+        let packed =
+            (left as u64) | (top as u64) << 16 | (right as u64) << 32 | (bottom as u64) << 48;
+        if w.frame != packed {
+            let _ = set_frame(w.id, left, top, right, bottom);
+        }
+    }
+}
+
 /// Invalidate drag/resize state if their target windows no longer exist.
 ///
 /// Focus needs no equivalent: the registry re-focuses the topmost survivor when
@@ -340,17 +368,6 @@ fn determine_cursor_shape(
 fn main() {
     eprintln!("[wm] starting");
 
-    // The kernel routes pointer events into a window's client area, so it has
-    // to know how much of the window this compositor covers with a frame. Tell
-    // it once, from the constants that draw that frame, rather than letting it
-    // keep a second copy that drifts.
-    if let Err(e) = publish_decoration(
-        0,
-        decorations::TITLE_HEIGHT as u32,
-        decorations::BORDER_WIDTH as u32,
-    ) {
-        eprintln!("[wm] could not publish decoration metrics: {e}");
-    }
     // Initialize screen
     let mut screen = match Screen::get() {
         Ok(s) => s,
@@ -432,6 +449,7 @@ fn main() {
         };
 
         let windows = &mut entries[..window_count];
+        publish_frames(windows);
         let focused_window_id = focused_id(windows);
 
         // Process keyboard shortcuts (after window list so Alt+Tab has current data)
