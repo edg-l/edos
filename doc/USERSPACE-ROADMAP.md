@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-70 programs and 2 libraries, all in the `programs/` cargo workspace.
+75 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -14,7 +14,7 @@
 | Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs` |
 | Checksums | `sha256sum` |
 | Inspection | `file` |
-| System | `ps`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env` |
+| System | `ps`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown` |
 | Network | `ping`, `dns`, `http`, `wget`, `dnsprobe` |
 | Audio | `play` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
@@ -56,6 +56,35 @@ scripts, text, empty files and directories.
 | `netstat` | listening and established sockets | needs a read path into `net/tcp.rs` `CONNECTIONS`, as `SYS_NETSTAT` or `/proc/net/tcp` |
 | BMP image viewer | a real GUI app over window syscalls and shared memory | none; exercises the compositor |
 | `nproc` | CPU count | needs `SYS_NPROC` or `/proc/cpuinfo` |
+
+## The std fork lags the syscall table
+
+Every program here is ordinary `std` Rust, so a syscall the fork does not know
+about is a syscall no program can use without dropping to `edos_lib`. Nineteen
+syscalls landed without the fork moving, and these std APIs are `unsupported()`
+or emulated as a result (`library/std/src/sys/*/edos.rs` in the `edos_std_v2`
+branch):
+
+| std API | Stub today | Syscall that closes it |
+|---|---|---|
+| `fs::symlink`, `fs::read_link` | `unsupported()` | `SYS_SYMLINK` 88, `SYS_READLINK` 89 |
+| `fs::set_times`, `File::set_times` | `unsupported()` | `SYS_UTIMENSAT` 280 |
+| `FileAttr::modified`/`accessed` | `unsupported()` | none; `SYS_STAT` already carries the times |
+| `File::read_vectored`/`write_vectored` | `unsupported()`, `is_*_vectored() == false` | `SYS_READV` 19, `SYS_WRITEV` 20 |
+| `thread::sleep` | rounds to `SYS_SLEEP_MS`, so sub-ms sleeps are 0 or 1 ms | `SYS_NANOSLEEP` 35 |
+| `ReadDir` | one `SYS_LIST_DIR` call sized to the whole directory | `SYS_GETDENTS` 78 streams it |
+| `Path::try_exists` | a full `stat` | `SYS_ACCESS` 21 with `F_OK` |
+| `OpenOptions::open` | allocates a `CString` per open | `SYS_OPENAT` 257 takes pointer+length |
+
+Three stay unsupported on purpose: `fs::hard_link` (the kernel has no hard
+links), `set_times_nofollow` (`utimensat` rejects `AT_SYMLINK_NOFOLLOW`, which
+`set_times` cannot honour), and the `File::lock` family (no advisory locking).
+
+The work is mechanical and already prototyped: `programs/edos_lib` has a tested
+wrapper for each of these, and `programs/iotest` covers them. Porting means
+moving the wrapper into `edos_rt`, publishing it, and unstubbing the std shim.
+See the `edos_rt` publish loop in the README; a `0.0.z` requirement is exact, so
+the fork's pin has to move in the same pass.
 
 ## Kernel gaps this roadmap exposes
 

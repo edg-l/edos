@@ -1,4 +1,4 @@
-# Working notes, sessions of 2026-08-08 and 2026-08-09
+# Working notes, sessions of 2026-08-08 to 2026-08-10
 
 State of the tree, what changed, and what is still open. Written for whoever
 picks this up next, which will usually be an agent with no memory of the
@@ -1261,6 +1261,52 @@ not just the program.
 one bogus qcode and silently does nothing, which reads exactly like a missing
 feature. `key ctrl+d` is correct, as the script's own help says.
 
+## The syscall table is closed, and closing it found five data-loss bugs
+
+`doc/AUDIT.md` §3 listed eight missing interfaces; all eight now exist and the
+table is down to `setuid`, which is rejected there. 101 syscalls, each with an
+`edos_lib` wrapper and a case in `programs/iotest` — **`iotest /var` is the
+regression suite for the whole set, and it runs 18/18.**
+
+The syscalls are not the interesting part. Writing them found five bugs that
+predate them, every one a silent data corruption:
+
+- **`VfsInode` identity was keyed by the dentry cache**, so any invalidation
+  (truncate, rename, create, or the LRU at 256 entries) forked one file into two
+  inodes with independent page caches. A dirty page stayed on the first and read
+  back as zeros through the second, then landed on disk over newer data. Inodes
+  are keyed `(mount_id, ino)` through `fs/icache.rs` now.
+- **Every EFS timestamp was 93 days late** — the shared days-from-civil helper
+  used `(153*m+8)/5` instead of `(153*(m-3)+2)/5`.
+- **memfs kept two sizes**, so every short `/tmp` file reported and read back
+  padded to its last 4 KiB page.
+- **An EFS hole read as `Corrupted`** rather than zeros, and growing an inline
+  inode past the 176-byte inline area panicked the kernel.
+- **No filesystem checked whether a name was free**, so `mkdir`/`create`/
+  `symlink` over an existing entry added a *second* directory entry with the
+  same name.
+
+The lesson worth carrying: each was found by writing the syscall that exercised
+the layer, not by reading the layer.
+
+## One defect class, found in three drivers
+
+**A pooled DMA buffer is not zeroed on reuse, and every parser read a fixed size
+without asking how many bytes arrived.** A short transfer therefore returned the
+previous owner's bytes as device identity or as sector data. Fixed in xHCI
+descriptors (`7591982`) and USB mass storage (`41e2c41`, where `block_size == 0`
+also faulted the CPU and an oversized one made `read_sectors` loop forever).
+
+**AHCI ATAPI has the same defect and is still open.** `execute_atapi_command`
+drops the count the command header's `prdbc` already carries. It is verifiable
+today with no new QEMU option: `-cdrom` on q35 lands on the ICH9 AHCI
+controller, so the guest logs `Found ATAPI device on port 2` /
+`Model: QEMU QEMU DVD-ROM` on every boot. `todo.txt` has the fix and the recipe.
+
+If you add a driver that reads out of `DmaPool`, this is the first thing to
+check. `allocate_sized` does not zero, and documents why: it serves AHCI
+per-command buffers up to 2 MiB, so a memset per pop is a storage regression.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any
@@ -1278,3 +1324,25 @@ feature. `key ctrl+d` is correct, as the script's own help says.
   buffer the rest of the input; run it last, or not at all.
 - Symbol addresses move on every kernel rebuild, so resolve them from
   `kernel/kernel` at runtime rather than hard-coding them.
+- **`make all` does not rebuild `sata-disk.img`**, and every `run` target
+  attaches it and prefers it over the live-root ramdisk. A rebuilt program is
+  invisible to the guest until `make sata-disk.img`, so a screenshot looks
+  exactly as if the change did nothing.
+- **`make sata-disk.img` fails while a VM is running** — `qemu-img` reports
+  "Failed to get write lock" — and the guest then boots the old binary. Stop the
+  VM first.
+- **`make test` leaves the sched-test ISO in place.** A later `edos-vm start`
+  boots the test kernel rather than the desktop; re-run `make all` before manual
+  guest checks.
+- **`cargo check` from the repo root uses the wrong toolchain.** The root
+  `rust-toolchain.toml` says plain `nightly`, `kernel/` pins
+  `nightly-2026-03-06`, and the `x86_64` crate does not build on current
+  nightly. Use `make -C kernel check`.
+- **`efs-fsck` aborts before its dir-tree pass on a dirty journal**, so a "0
+  findings" line from a power-cut image proves nothing. Type `shutdown` in the
+  guest rather than `edos-vm stop`: it syncs every filesystem and the resulting
+  image checks clean with no `--repair` replay.
+- **The sched-test suite has a known flake with two signatures**, both on a
+  first run: `ping-pong count mismatch: 499 != 500`, and 48/49 TIMEOUT with
+  ping-pong-pong never reporting. An immediate re-run passes. Recorded in
+  `todo.txt`; it points at a lost or late wakeup, and it has never been chased.

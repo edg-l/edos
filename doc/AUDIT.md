@@ -343,7 +343,7 @@ Beyond affinity (1.2), things that look like the next real improvements:
   the ones on I/O and parsing results, and leaves a comment on the ones that are
   structurally impossible. The ELF loader is done: its field reads go through
   `le_u16`/`le_u32`/`le_u64`/`le_i64`, which bound-check.
-- **`fs/` is 15.7k lines and `drivers/` 13k**, together over half the kernel.
+- **`fs/` is 17.5k lines and `drivers/` 13.6k**, together over half the kernel's 61k.
   Nothing wrong, but both are past the size where a module-level README pays for
   itself.
 - **Only 6 TODO markers in 48k lines**, which is genuinely good hygiene; one of

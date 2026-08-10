@@ -116,6 +116,22 @@ commit, a FUA commit block and a drive cache flush per `fsync` — but real
 hardware with FUA loses two to three times, not eight. Worth attributing across
 those three before deciding there is nothing to take.
 
+## 6. Creating a file walks the path three times
+
+POSIX `EEXIST` on create is enforced in `vfs::create_file`/`create_dir`/
+`symlink`, the one layer that already holds the parent inode write lock across
+the create. The check costs `fs.file_info()`, plus `fs.read_link()` when that
+misses, and both bypass the dentry cache. Stacked on `open_resolved`'s own
+`file_info`, an `O_CREAT` open of a file that does not exist now walks the path
+three times where one would do.
+
+This is a real cost, not a bug, and it buys correctness that no filesystem
+provided before: all three used to append a second directory entry with the same
+name. It has not been measured. If `fsbench` metadata shows it, the fix is to
+let each filesystem report `AlreadyExists` from its own `create_file` — it
+already holds the parent — and delete the VFS pre-check, rather than threading a
+lookup result down through the trait.
+
 ## Correctness items still open
 
 Not performance, but found by this work and unfixed.

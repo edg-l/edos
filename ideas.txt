@@ -274,6 +274,218 @@
   (widened to u64), and a pre-existing ring-0 demand fault with IRQs
   disabled in idt.rs exposed by the new concurrency.
 
+### Sessions of 2026-08-08 to 2026-08-10
+
+Mechanism kept because it is not recoverable from the diff. Verified in a
+booted guest unless a line says otherwise.
+
+- **User VA is reused.** `find_free_address` is a first fit over the VMA
+  tree searching from the base every time. Mapping stride fell from
+  ~940 MB to 8-10 MB, and successive mmap/munmap cycles return the same
+  address.
+- **`sys_window_list` no longer holds a spin guard across a user copy.**
+  3000 soak rounds and 207k registry acquisitions with no stuck reader.
+- **Filesystem errors keep their errno** instead of being flattened to
+  EINVAL; missing paths report ENOENT.
+- **`make filesystem` creates the directories it claims to.** It relied
+  on brace expansion, which dash does not do, so `/var` never existed.
+- **`OpenOptions` actually opens files for writing.** `read`, `write`,
+  `truncate` and `create_new` were no-op stubs in the std fork, so every
+  file opened read-only as far as the kernel was concerned. mmaptest went
+  from failing at test 3 to all 10 passing on `/var` and `/tmp`.
+- `sha256sum` and `file` (Phase 3 userspace).
+
+- **The window-registry hang is root-caused and fixed.** The holder was
+  never parked; it was Ready and starved. The scheduler armed a
+  timeslice it never enforced, and its anti-starvation path only
+  covered wake-boosted threads, so a priority-10 kthread spinning on a
+  lock held by a priority-7 thread deadlocked outright. Both fixed,
+  with `starvation-victim` in sched_test as the regression test. This
+  bounded every spin lock in the kernel, not just the window registry.
+- **`make test` is green (31/31)**, having been red on trunk: the
+  abort-race test was a bare `thread_park_while` caller.
+- **Spin locks shared between threads now suppress preemption**
+  (`thread/preempt.rs`: per-CPU counter honoured by `maybe_preempt`,
+  plus PreemptSpinlock/PreemptRwLock). Converted VFS, vmas,
+  memory_manager, shared memory, the thread registries and the window
+  locks. Preemption rather than interrupts, because vmas and mm are
+  held across tree and page-table walks. The park primitives
+  debug-assert preemption is enabled, which audits the whole class.
+- **VfsInode::drop no longer panics on the reaper.** The drop-contract
+  guard asserted "never runs here" when the contract is "never blocks",
+  and the reaper releasing an orphaned inode is exactly the case the
+  evict kthread exists for. mmaptest's unlink-while-mapped test
+  panicked the kernel on trunk; now 10/10 on /var and /tmp.
+
+- **The userspace allocator no longer fragments without bound.** The WM's
+  metronomic 64 KiB-per-9.2s heap growth was `edos_rt`'s `PoolAllocator`
+  never coalescing. Fixed in 0.0.36 (details above), which also carried
+  the std fork's pin forward ten releases from 0.0.26.
+- **`edos_rt` 0.0.37: the rest of the runtime.** Reading the crate after
+  the allocator fix turned up more than the fragmentation did. The
+  syscall wrappers were `no_mangle extern "C"`, so every syscall paid an
+  out-of-line call plus a shuffle from the C argument registers into the
+  kernel's, and the exported symbols were what forced `edos_lib` and four
+  programs to hand-roll their own copies; they are inline Rust functions
+  now, which is sound because the kernel's entry stub restores every
+  argument register. `thread_join` asked for a non-blocking `waitpid` and
+  slept 1 ms in a loop, so every `JoinHandle::join` polled at 1 kHz.
+  `getrandom` returned a count that std's `fill_bytes` discarded, so a
+  short read left the tail of the buffer holding whatever was there
+  before. `IoError` folded every errno but three into `Unknown`, which is
+  why errors displayed as "uncategorized" no matter what
+  `decode_error_kind` mapped. The allocator now unmaps idle chunks
+  instead of only plateauing, honours alignment above a page on large
+  allocations (`mmap` alone returned them 4 KiB out), and caches freed
+  large mappings within a 4 MiB bound. 0.0.38 then put the
+  allocator back on a spin lock (parking under a list walk bought
+  nothing) and stopped the inlined syscall wrappers promising that
+  argument registers survive a park.
+
+  Chasing corruption under eight allocating threads through the allocator
+  was a wrong turn twice over: the cause is in this repo. Concurrent
+  `mmap` hands the same address to several threads, because `sys_mmap`
+  picks the range under one acquisition of the VMA lock and inserts the
+  VMA under another. See doc/WORKING-NOTES.md.
+
+- **Per-operation logging is off by default.** The kernel logged a line
+  per mmap, munmap, spawn, ELF load and thread exit: a String allocation
+  on the calling thread, and a byte-at-a-time UART write under a global
+  lock on the drain side, one VM exit per byte under KVM. `log_debug!`
+  checks a relaxed atomic before formatting, so a disabled site costs one
+  load and nothing else. `loglevel=debug` on the kernel command line
+  brings them back without a rebuild. Six threadtest+hammer iterations
+  went from dozens of lines each to zero.
+- **`decode_error_kind` in the std fork is no longer five errnos.** The
+  mapping lives in `library/std/src/sys/pal/edos/common.rs` and covers 20.
+  The old entry here claiming five was stale.
+
+- **Unvalidated addresses no longer reach a VMA insert.** The audit found
+  the ELF loader building a mapping out of `base_addr + p_vaddr` with no
+  bound on it. `sys_mmap` turned out to be the shorter path to the same
+  insert: `mmap(0x0000_9000_0000_0000, 4096)` from any program panicked
+  the kernel in `VirtAddr::new`, reproduced on the pre-fix kernel before
+  fixing it. The bound lives in `VmaSet::insert` now, so every caller
+  inherits it, with `insert_validated` for the paths handing back a range
+  they already held. `find_free_address` had the same shape of bug in its
+  align-up, which wrapped for a length near `u64::MAX`. mmaptest test 11
+  is the regression test; 11/11 on EFS and memfs.
+
+- **CPU affinity is enforced now, at the three points where a thread is
+  placed: spawn, wake and steal.** `thread_can_run_here` was stubbed to
+  `true` and `complete_wake` used the waker's CPU regardless, so a pin
+  held only until something woke the thread. `spawn_thread` was worse
+  than unenforced: its else-arm claimed another CPU would queue the
+  thread and nothing did, so un-stubbing the check without fixing it
+  would have lost threads. sched-test grew affinity-pinned and
+  affinity-waker (49 tests); the wake rounds are the part that fails
+  when the check is reverted.
+
+- **The audit's second half is done.** `clock_gettime` answers from the
+  monotonic counter with a real epoch (and `read_rtc` now retries until
+  two reads agree, since one torn read at boot would be permanent);
+  path-taking syscalls fill a stack buffer instead of allocating;
+  `pread`/`pwrite` and `getuid`/`getgid` exist; the five bare
+  `spin::Mutex` sites are preempt-safe; TCP has an RFC 6298 retransmit
+  timeout; `fs/api.rs` returns an error instead of panicking. New
+  programs `iotest` and `tcptest` cover the new syscalls.
+
+  Two audit recommendations were checked and **not** implemented,
+  because their premises are wrong. CLOEXEC has nothing to govern:
+  there is no `exec`, `spawn` hands the child exactly three
+  descriptors, and no `O_NONBLOCK` exists to set. `setuid` without a
+  permission model would be a privilege change that enforces nothing.
+
+  `iotest`'s eight-thread positional read found a real bug on the way:
+  `sys_read` took the fd-table BlockingMutex with interrupts disabled,
+  which starved a TLB shootdown into its timeout. Fixed.
+
+  `tcptest` found a bigger one, still open: no TCP connection can be
+  established at all, because the guest RSTs the SYN-ACK. It predates
+  this session. See doc/bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md.
+
+- **`execve` exists**, with `fcntl`/`FD_CLOEXEC`. The audit's CLOEXEC
+  item was rejected earlier for having nothing to govern; exec is what
+  gives it something. Along the way: `Thread::new_user` split into an
+  image loader and a thread attacher, the address-space teardown made
+  reusable, and `killed` finally observed at the syscall boundary rather
+  than only in a PTY read. `exectest` covers it, including exec from a
+  multithreaded process, which is the case that found the quiesce bug.
+
+- **There is an init process.** `bin/edos-init` is the only thing the
+  kernel starts; it supervises the three GUI services and restarts them,
+  and a failed boot-load logs instead of panicking the kernel. Threads
+  carry a parent now, which fixed an unbounded leak of exit statuses
+  (nothing could ever collect a status whose waiter had died) and gives
+  orphans somewhere to go. Killing the WM restarts it and the desktop
+  survives.
+
+- **A port restart no longer strands the op it meant to fail.** The AHCI
+  watchdog entry here proposed gating `enter_ncq_mode` on `restarting`;
+  that gate keeps new submitters out, and the op that strands is already
+  past it. Publishing `reset_generation` before the fail-all pass, and
+  re-reading it in the submitter after `issued`, is what closes it. Forced
+  restarts under load: 1 stranded in 33 before, 0 in 106 after.
+
+- **`http` and `wget` work.** They used `std::net::TcpStream`, which the
+  std fork does not implement, so both failed at connect whatever the
+  kernel did. `edos_lib::http` now carries the client the two shared, over
+  `edos_lib::net`. A 300000-byte file arrives byte-identical to the host's
+  copy. `dns_resolve` reports why a lookup failed instead of calling every
+  failure "no A record", and its answer walker no longer desynchronises on
+  a name that ends in a compression pointer after its labels.
+
+- **A mapping owns every page it touches.** `VmaSet::reserve` searched for
+  a page-rounded gap and recorded the VMA with the raw length, so mappings
+  whose length was not a page multiple shared a page with their
+  neighbour, and a zero-fill fault or an unmap on either one destroyed the
+  other. Any `Vec` grown past 64 KiB came back zeroed with its length
+  intact. First fit is what made it reachable: the old bump allocator was
+  page-aligned by construction. `vectest` is the regression test and
+  `doc/bugs/2026-08-08-mappings-sharing-a-page.md` the writeup.
+
+- **The cwd mutex is no longer taken with interrupts off.**
+  `info.lock().cwd.lock()` held the per-thread IrqSpinlock guard across the
+  `BlockingMutex` acquisition at eighteen call sites, which panicked the
+  kernel at boot and then wedged a second CPU behind the dead one's
+  unanswered TLB shootdown IPIs.
+
+- **TCP works.** `WaitQueue::wait_until_timeout` slept once and returned
+  on any wake, so connect's five-second wait for Established ended in
+  microseconds, tore the connection down, and RST'd the SYN-ACK that
+  arrived just after. No connection had ever been established. The timed
+  wait honours its deadline now, and sys_read's socket paths loop on
+  their own condition instead of reporting EOF on an empty buffer.
+  Verified with a 270 KB HTTP response; ping also stopped losing its
+  first packet. The RFC 6298 RTO from earlier is finally exercised.
+
+- **A kill reaches a thread that makes no syscalls.** The syscall return
+  boundary covered every real program but not one spinning in user code,
+  which is why `execve` had to bound its sibling quiesce and refuse with
+  EAGAIN. The timer tick now checks the same flag when the frame it
+  interrupted is ring 3, which is the proof the thread holds no guard —
+  there is no unwinding, so dying anywhere else leaks whatever it held.
+  `programs/killtest` covers both boundaries and `exectest` test 5 covers
+  exec with user-spinning siblings; both fail on the previous kernel and
+  the other four exectest cases do not.
+
+- **`shutdown` stops the machine properly.** `reboot(cmd)` (syscall
+  169, cmd 0 power off / 1 reset / 2 halt) syncs every filesystem, then
+  drives ACPI soft-off: PM1a_CNT comes from the FADT and SLP_TYPa is
+  decoded out of the DSDT's `\_S5_` package, with the emulator ports as
+  a fallback and `RST_CNT`/8042 for the reset. `programs/shutdown` is
+  the command. A guest stopped this way leaves a clean journal, so
+  `efs-fsck` runs its dir-tree pass without a `--repair` replay first.
+
+- **The audit's syscall table is closed.** `access`, `nanosleep`, path
+  `truncate`, `utimensat`, `symlink`/`readlink`, `sigprocmask`,
+  streaming `getdents`, both tiers of the `*at` family
+  (`openat`/`mkdirat`/`fstatat`/`unlinkat`/`renameat`/`symlinkat`/
+  `readlinkat`/`faccessat`) and `readv`/`writev`. 100 syscalls; only
+  `setuid` is left in doc/AUDIT.md §3, and it is rejected there. Each
+  has an `edos_lib` wrapper and a case in `programs/iotest`, which is
+  the regression suite for the lot.
+
 ## Network Stack Remaining
 
 - TCP: SACK, window scaling, Nagle's algorithm
@@ -985,223 +1197,42 @@ Until then, the mirrored constants are documented in
 `doc/vm-control.md` and must be updated in the same commit that moves
 the taskbar layout.
 
-## What to do next (reviewed 2026-08-08)
-
-Shipped this session, all verified on hardware unless noted:
-
-- **User VA is reused.** `find_free_address` is a first fit over the VMA
-  tree searching from the base every time. Mapping stride fell from
-  ~940 MB to 8-10 MB, and successive mmap/munmap cycles return the same
-  address.
-- **`sys_window_list` no longer holds a spin guard across a user copy.**
-  3000 soak rounds and 207k registry acquisitions with no stuck reader.
-- **Filesystem errors keep their errno** instead of being flattened to
-  EINVAL; missing paths report ENOENT.
-- **`make filesystem` creates the directories it claims to.** It relied
-  on brace expansion, which dash does not do, so `/var` never existed.
-- **`OpenOptions` actually opens files for writing.** `read`, `write`,
-  `truncate` and `create_new` were no-op stubs in the std fork, so every
-  file opened read-only as far as the kernel was concerned. mmaptest went
-  from failing at test 3 to all 10 passing on `/var` and `/tmp`.
-- `sha256sum` and `file` (Phase 3 userspace).
-
-- **The window-registry hang is root-caused and fixed.** The holder was
-  never parked; it was Ready and starved. The scheduler armed a
-  timeslice it never enforced, and its anti-starvation path only
-  covered wake-boosted threads, so a priority-10 kthread spinning on a
-  lock held by a priority-7 thread deadlocked outright. Both fixed,
-  with `starvation-victim` in sched_test as the regression test. This
-  bounded every spin lock in the kernel, not just the window registry.
-- **`make test` is green (31/31)**, having been red on trunk: the
-  abort-race test was a bare `thread_park_while` caller.
-- **Spin locks shared between threads now suppress preemption**
-  (`thread/preempt.rs`: per-CPU counter honoured by `maybe_preempt`,
-  plus PreemptSpinlock/PreemptRwLock). Converted VFS, vmas,
-  memory_manager, shared memory, the thread registries and the window
-  locks. Preemption rather than interrupts, because vmas and mm are
-  held across tree and page-table walks. The park primitives
-  debug-assert preemption is enabled, which audits the whole class.
-- **VfsInode::drop no longer panics on the reaper.** The drop-contract
-  guard asserted "never runs here" when the contract is "never blocks",
-  and the reaper releasing an orphaned inode is exactly the case the
-  evict kthread exists for. mmaptest's unlink-while-mapped test
-  panicked the kernel on trunk; now 10/10 on /var and /tmp.
-
-- **The userspace allocator no longer fragments without bound.** The WM's
-  metronomic 64 KiB-per-9.2s heap growth was `edos_rt`'s `PoolAllocator`
-  never coalescing. Fixed in 0.0.36 (details above), which also carried
-  the std fork's pin forward ten releases from 0.0.26.
-- **`edos_rt` 0.0.37: the rest of the runtime.** Reading the crate after
-  the allocator fix turned up more than the fragmentation did. The
-  syscall wrappers were `no_mangle extern "C"`, so every syscall paid an
-  out-of-line call plus a shuffle from the C argument registers into the
-  kernel's, and the exported symbols were what forced `edos_lib` and four
-  programs to hand-roll their own copies; they are inline Rust functions
-  now, which is sound because the kernel's entry stub restores every
-  argument register. `thread_join` asked for a non-blocking `waitpid` and
-  slept 1 ms in a loop, so every `JoinHandle::join` polled at 1 kHz.
-  `getrandom` returned a count that std's `fill_bytes` discarded, so a
-  short read left the tail of the buffer holding whatever was there
-  before. `IoError` folded every errno but three into `Unknown`, which is
-  why errors displayed as "uncategorized" no matter what
-  `decode_error_kind` mapped. The allocator now unmaps idle chunks
-  instead of only plateauing, honours alignment above a page on large
-  allocations (`mmap` alone returned them 4 KiB out), and caches freed
-  large mappings within a 4 MiB bound. 0.0.38 then put the
-  allocator back on a spin lock (parking under a list walk bought
-  nothing) and stopped the inlined syscall wrappers promising that
-  argument registers survive a park.
-
-  Chasing corruption under eight allocating threads through the allocator
-  was a wrong turn twice over: the cause is in this repo. Concurrent
-  `mmap` hands the same address to several threads, because `sys_mmap`
-  picks the range under one acquisition of the VMA lock and inserts the
-  VMA under another. See doc/WORKING-NOTES.md.
-
-- **Per-operation logging is off by default.** The kernel logged a line
-  per mmap, munmap, spawn, ELF load and thread exit: a String allocation
-  on the calling thread, and a byte-at-a-time UART write under a global
-  lock on the drain side, one VM exit per byte under KVM. `log_debug!`
-  checks a relaxed atomic before formatting, so a disabled site costs one
-  load and nothing else. `loglevel=debug` on the kernel command line
-  brings them back without a rebuild. Six threadtest+hammer iterations
-  went from dozens of lines each to zero.
-- **`decode_error_kind` in the std fork is no longer five errnos.** The
-  mapping lives in `library/std/src/sys/pal/edos/common.rs` and covers 20.
-  The old entry here claiming five was stale.
-
-- **Unvalidated addresses no longer reach a VMA insert.** The audit found
-  the ELF loader building a mapping out of `base_addr + p_vaddr` with no
-  bound on it. `sys_mmap` turned out to be the shorter path to the same
-  insert: `mmap(0x0000_9000_0000_0000, 4096)` from any program panicked
-  the kernel in `VirtAddr::new`, reproduced on the pre-fix kernel before
-  fixing it. The bound lives in `VmaSet::insert` now, so every caller
-  inherits it, with `insert_validated` for the paths handing back a range
-  they already held. `find_free_address` had the same shape of bug in its
-  align-up, which wrapped for a length near `u64::MAX`. mmaptest test 11
-  is the regression test; 11/11 on EFS and memfs.
-
-- **CPU affinity is enforced now, at the three points where a thread is
-  placed: spawn, wake and steal.** `thread_can_run_here` was stubbed to
-  `true` and `complete_wake` used the waker's CPU regardless, so a pin
-  held only until something woke the thread. `spawn_thread` was worse
-  than unenforced: its else-arm claimed another CPU would queue the
-  thread and nothing did, so un-stubbing the check without fixing it
-  would have lost threads. sched-test grew affinity-pinned and
-  affinity-waker (49 tests); the wake rounds are the part that fails
-  when the check is reverted.
-
-- **The audit's second half is done.** `clock_gettime` answers from the
-  monotonic counter with a real epoch (and `read_rtc` now retries until
-  two reads agree, since one torn read at boot would be permanent);
-  path-taking syscalls fill a stack buffer instead of allocating;
-  `pread`/`pwrite` and `getuid`/`getgid` exist; the five bare
-  `spin::Mutex` sites are preempt-safe; TCP has an RFC 6298 retransmit
-  timeout; `fs/api.rs` returns an error instead of panicking. New
-  programs `iotest` and `tcptest` cover the new syscalls.
-
-  Two audit recommendations were checked and **not** implemented,
-  because their premises are wrong. CLOEXEC has nothing to govern:
-  there is no `exec`, `spawn` hands the child exactly three
-  descriptors, and no `O_NONBLOCK` exists to set. `setuid` without a
-  permission model would be a privilege change that enforces nothing.
-
-  `iotest`'s eight-thread positional read found a real bug on the way:
-  `sys_read` took the fd-table BlockingMutex with interrupts disabled,
-  which starved a TLB shootdown into its timeout. Fixed.
-
-  `tcptest` found a bigger one, still open: no TCP connection can be
-  established at all, because the guest RSTs the SYN-ACK. It predates
-  this session. See doc/bugs/2026-08-08-tcp-connect-rsts-its-own-synack.md.
-
-- **`execve` exists**, with `fcntl`/`FD_CLOEXEC`. The audit's CLOEXEC
-  item was rejected earlier for having nothing to govern; exec is what
-  gives it something. Along the way: `Thread::new_user` split into an
-  image loader and a thread attacher, the address-space teardown made
-  reusable, and `killed` finally observed at the syscall boundary rather
-  than only in a PTY read. `exectest` covers it, including exec from a
-  multithreaded process, which is the case that found the quiesce bug.
-
-- **There is an init process.** `bin/edos-init` is the only thing the
-  kernel starts; it supervises the three GUI services and restarts them,
-  and a failed boot-load logs instead of panicking the kernel. Threads
-  carry a parent now, which fixed an unbounded leak of exit statuses
-  (nothing could ever collect a status whose waiter had died) and gives
-  orphans somewhere to go. Killing the WM restarts it and the desktop
-  survives.
-
-- **A port restart no longer strands the op it meant to fail.** The AHCI
-  watchdog entry here proposed gating `enter_ncq_mode` on `restarting`;
-  that gate keeps new submitters out, and the op that strands is already
-  past it. Publishing `reset_generation` before the fail-all pass, and
-  re-reading it in the submitter after `issued`, is what closes it. Forced
-  restarts under load: 1 stranded in 33 before, 0 in 106 after.
-
-- **`http` and `wget` work.** They used `std::net::TcpStream`, which the
-  std fork does not implement, so both failed at connect whatever the
-  kernel did. `edos_lib::http` now carries the client the two shared, over
-  `edos_lib::net`. A 300000-byte file arrives byte-identical to the host's
-  copy. `dns_resolve` reports why a lookup failed instead of calling every
-  failure "no A record", and its answer walker no longer desynchronises on
-  a name that ends in a compression pointer after its labels.
-
-- **A mapping owns every page it touches.** `VmaSet::reserve` searched for
-  a page-rounded gap and recorded the VMA with the raw length, so mappings
-  whose length was not a page multiple shared a page with their
-  neighbour, and a zero-fill fault or an unmap on either one destroyed the
-  other. Any `Vec` grown past 64 KiB came back zeroed with its length
-  intact. First fit is what made it reachable: the old bump allocator was
-  page-aligned by construction. `vectest` is the regression test and
-  `doc/bugs/2026-08-08-mappings-sharing-a-page.md` the writeup.
-
-- **The cwd mutex is no longer taken with interrupts off.**
-  `info.lock().cwd.lock()` held the per-thread IrqSpinlock guard across the
-  `BlockingMutex` acquisition at eighteen call sites, which panicked the
-  kernel at boot and then wedged a second CPU behind the dead one's
-  unanswered TLB shootdown IPIs.
-
-- **TCP works.** `WaitQueue::wait_until_timeout` slept once and returned
-  on any wake, so connect's five-second wait for Established ended in
-  microseconds, tore the connection down, and RST'd the SYN-ACK that
-  arrived just after. No connection had ever been established. The timed
-  wait honours its deadline now, and sys_read's socket paths loop on
-  their own condition instead of reporting EOF on an empty buffer.
-  Verified with a 270 KB HTTP response; ping also stopped losing its
-  first packet. The RFC 6298 RTO from earlier is finally exercised.
-
-- **A kill reaches a thread that makes no syscalls.** The syscall return
-  boundary covered every real program but not one spinning in user code,
-  which is why `execve` had to bound its sibling quiesce and refuse with
-  EAGAIN. The timer tick now checks the same flag when the frame it
-  interrupted is ring 3, which is the proof the thread holds no guard —
-  there is no unwinding, so dying anywhere else leaks whatever it held.
-  `programs/killtest` covers both boundaries and `exectest` test 5 covers
-  exec with user-spinning siblings; both fail on the previous kernel and
-  the other four exectest cases do not.
-
-- **`shutdown` stops the machine properly.** `reboot(cmd)` (syscall
-  169, cmd 0 power off / 1 reset / 2 halt) syncs every filesystem, then
-  drives ACPI soft-off: PM1a_CNT comes from the FADT and SLP_TYPa is
-  decoded out of the DSDT's `\_S5_` package, with the emulator ports as
-  a fallback and `RST_CNT`/8042 for the reset. `programs/shutdown` is
-  the command. A guest stopped this way leaves a clean journal, so
-  `efs-fsck` runs its dir-tree pass without a `--repair` replay first.
-
-- **The audit's syscall table is closed.** `access`, `nanosleep`, path
-  `truncate`, `utimensat`, `symlink`/`readlink`, `sigprocmask`,
-  streaming `getdents`, both tiers of the `*at` family
-  (`openat`/`mkdirat`/`fstatat`/`unlinkat`/`renameat`/`symlinkat`/
-  `readlinkat`/`faccessat`) and `readv`/`writev`. 100 syscalls; only
-  `setuid` is left in doc/AUDIT.md §3, and it is rejected there. Each
-  has an `edos_lib` wrapper and a case in `programs/iotest`, which is
-  the regression suite for the lot.
+## What to do next (reviewed 2026-08-10)
 
 Open, roughly in priority order. Items marked [audit] come from
 doc/AUDIT.md, which has the file:line detail and the reasoning.
 
+Known defects, mechanism written out in `todo.txt`:
+
+1. **An absolute symlink target resolves in the wrong namespace.** VFS
+   hands each filesystem a mount-relative path, so a link naming
+   `/tmp/target` makes memfs look under its own root. `iotest /tmp`
+   stops at test 10; `iotest /var` passes only because EFS is mounted
+   at `/`. The fix belongs in the VFS, which is the only layer that
+   owns the namespace, and needs follow/nofollow resolve entry points
+   because the target may live on another mount.
+2. **AHCI ATAPI reads a fixed size out of a pooled DMA buffer.** The
+   same defect already fixed in xHCI descriptors and USB mass storage.
+   `execute_atapi_command` drops the transferred count that the command
+   header's `prdbc` already carries. The boot ISO is an AHCI ATAPI port
+   on q35, so the defective path runs on every boot and the fix is
+   verifiable against the `QEMU DVD-ROM` model string in `dmesg`.
+
+Reach, not correctness:
+
+3. **19 syscalls exist that `std` cannot reach.** The syscall table is
+   closed but the Rust fork was never moved with it, so
+   `std::fs::{symlink,read_link,set_times}`, `File::set_times`,
+   `FileAttr::{modified,accessed}`, vectored `read`/`write` and
+   `thread::sleep`'s sub-millisecond resolution are still
+   `unsupported()` or emulated in `library/std/src/sys/*/edos.rs`.
+   Everything they need is already in `edos_lib`; the work is porting
+   the wrappers into `edos_rt` and unstubbing the std shims.
+   See doc/USERSPACE-ROADMAP.md.
+
 Hygiene and quality:
 
-1. **`unwrap()`/`expect()` density in kernel code.** [audit] 204 across
+4. **`unwrap()`/`expect()` density in kernel code.** [audit] 204 across
    `kernel/src`, so recount rather than trusting the figure. Convert the
    ones on I/O and parsing results; leave a comment on the structurally
    impossible ones. The ELF loader (`loader/mod.rs`) is done. Next by
@@ -1213,36 +1244,38 @@ Hygiene and quality:
    `init()` into `find_and_init()`. The rest are DMA-allocation
    `expect()`s on a `-> !` thread. Reading them did turn up a real
    defect (short control transfers parsed as descriptors), now fixed.
-2. **Module READMEs for `fs/` (15.7k lines) and `drivers/` (13k).**
+5. **Module READMEs for `fs/` (17.5k lines) and `drivers/` (13.6k).**
    [audit]
 
 Still open from the audit, but deliberately unhurried. These are not
 oversights; each has a reason it has not been done.
 
-3. **TCP retransmit clones whole segments.** [audit 2.5]
+6. **TCP retransmit clones whole segments.** [audit 2.5]
    `resends.push(seg.data.clone())` copies the full segment per retry.
    This was theoretical while no connection could be established; now
    that TCP moves real data it is a live cost under loss. `Arc<[u8]>`
    and clone the handle.
-4. **Scheduler quality, four items.** [audit 4] Load is measured as
+7. **Scheduler quality, four items.** [audit 4] Load is measured as
    `thread_count`, so a sleeping thread weighs the same as a CPU-bound
    one and `pick_sched`/`try_rebalance` balance the wrong quantity.
    There is no priority inheritance, so a high-priority waiter still
    queues behind a low-priority lock holder. The timeslice is a flat 5ms
    regardless of priority. The idle loop polls for steals on a backoff
    instead of being told by an IPI.
-5. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
+8. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
    flag and one request slot, so unrelated `munmap`s on different
    address spaces serialize. Deliberate and correct; it is the scaling
    wall once core counts rise. The real fix is a per-mm CPU mask so the
    IPI is skipped for address spaces no other CPU has loaded.
-6. **`find_free_address` scans from the base every call.** [audit 2.7]
+9. **`find_free_address` scans from the base every call.** [audit 2.7]
    O(VMAs) per mmap. The tradeoff is deliberate — a cursor would never
    wrap and freed ranges would never be reused — and only worth
    revisiting if it shows up in a profile.
-7. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
+10. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
    NUL-terminated path while `SYS_STAT` takes pointer+length, so
-   `edos_rt` allocates a `CString` for every open.
+   `edos_rt` allocates a `CString` for every open. `SYS_OPENAT` takes
+   pointer+length and `AT_FDCWD` behaves exactly like `SYS_OPEN`, so
+   `edos_rt` can drop the allocation today without a kernel change.
 
 Then, by fun-per-effort:
 
