@@ -8,15 +8,37 @@
     usb-msc: registered /dev/usb0
   The last line ever printed is `reading sector for gpt` (`fs/gpt.rs:248`), so
   the `fs` kthread blocks inside `read_sectors_vec(usb0, lba 1, 1)` and never
-  reaches the `read gpt sector` line after it. Enumeration ran on the `kernel`
-  thread during xHCI init, so the difference is the calling context, not the
-  command: `MassStorage::read_sectors` -> `bot_transfer` waits for a transfer
-  event with no timeout, and nothing kills the boot when it never arrives.
-  Bisect from there: whether the event arrives at all (an xHCI interrupt or
-  doorbell missed once the dispatcher owns completions), and whether a lock the
-  fs kthread already holds keeps the dispatcher from delivering it. Give
-  `bot_transfer` a deadline regardless — a wedged device must fail the read
-  rather than wedge the boot.
+  reaches the `read gpt sector` line after it.
+  The fs kthread never touches the device itself: `UsbBlockDevice::submit_read`
+  (`drivers/usb/block_dev.rs:59`) hands the request to `USB_BLOCK_MAILBOX`,
+  wakes the xHCI thread, and blocks in `Response::wait`. Only the xHCI thread
+  ever calls `bot_transfer`, and that call is already bounded — `bulk_transfer`
+  (`drivers/usb/xhci/mod.rs:1029`) polls at most 10M times and then returns
+  `CommandTimeout` — so a deadline in `bot_transfer` is NOT the fix and would
+  not have unwedged this boot. The stall is in the mailbox round trip: either
+  the request is never picked up or the reply is never posted.
+  What the boot log rules in and out, in order:
+    - the xHCI thread reached the main loop (`xhci: initial enumeration
+      complete`, run_log line 121) and printed nothing afterwards, so it is
+      parked in the `thread_park_while` at `xhci/mod.rs:1469` and never
+      re-entered the mailbox drain at `:1618`.
+    - the park predicate re-checks `!mb.is_empty()` under `try_lock`, and a
+      contended lock reads as non-empty, so a lost wake from the predicate
+      racing `Mailbox::send` is ruled out. What is left is the wake itself:
+      `send_and_wait` calls `sched().wake_thread(XHCI_DRIVER_THREAD_ID, ...)`,
+      and the thread is idle with no HID traffic in a headless guest, so that
+      wake is the *only* thing that can run it. If it lands while the thread is
+      mid-transition into the park, nothing else ever arrives to retry it.
+    - every xHCI line in the log is tagged `<cpu-1:kernel>`, the prefix
+      `logs.rs:53` uses when `current_thread()` is None, while every other
+      kthread prints `<cpu-N:name:k:tid>`. Either `xhci_driver_main` is not
+      running on the thread `usb::init` spawned and published as
+      `XHCI_DRIVER_THREAD_ID` — in which case the wake targets a thread that is
+      not in the loop and the hang is fully explained — or the prefix is lying.
+      Settle this first; it is one `log!` of `current_thread_id()` at the top of
+      `xhci_driver_main` and it decides the whole bisect.
+  Give the fs side a deadline regardless: `Response::wait` blocks forever, so a
+  wedged or unwoken driver thread wedges the boot instead of failing the read.
 
 - The AHCI ATAPI commands read a fixed number of bytes out of a pooled DMA
   buffer without asking how many arrived, the same defect fixed in 7591982
