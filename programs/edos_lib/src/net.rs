@@ -70,6 +70,33 @@ pub fn bind(fd: u64, addr: &SockAddrIn) -> Result<(), ()> {
     if ret == u64::MAX { Err(()) } else { Ok(()) }
 }
 
+/// Mark a bound TCP socket as accepting connections. `backlog` is the number of
+/// completed connections the kernel queues before it answers a SYN with RST.
+pub fn listen(fd: u64, backlog: u32) -> Result<(), ()> {
+    let ret = unsafe { sys::syscall2(sys::SYS_LISTEN, fd, backlog as u64) };
+    if ret == u64::MAX { Err(()) } else { Ok(()) }
+}
+
+/// Take the next completed connection off a listening socket, blocking until one
+/// arrives. Returns the new descriptor and the peer address.
+pub fn accept(fd: u64) -> Result<(u64, SockAddrIn), ()> {
+    let mut addr = SockAddrIn::new([0; 4], 0);
+    let mut addr_len = core::mem::size_of::<SockAddrIn>() as u32;
+    let ret = unsafe {
+        sys::syscall3(
+            sys::SYS_ACCEPT,
+            fd,
+            &mut addr as *mut SockAddrIn as u64,
+            &mut addr_len as *mut u32 as u64,
+        )
+    };
+    if ret == u64::MAX {
+        Err(())
+    } else {
+        Ok((ret, addr))
+    }
+}
+
 pub fn sendto(fd: u64, data: &[u8], addr: Option<&SockAddrIn>) -> Result<usize, ()> {
     let (addr_ptr, addr_len) = match addr {
         Some(a) => (

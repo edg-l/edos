@@ -2,6 +2,14 @@
 
 ## Done
 
+- **`tcpecho`** - a TCP echo server over `bind`/`listen`/`accept`, the first
+  user of the listen side of the stack. Serves one connection at a time so the
+  kernel backlog holds the next; `-p`, `-a`, `-1`, `-q`. It found two kernel
+  bugs immediately: `sys_listen` took the port table under the socket lock
+  (the rank tracker caught it), and closing an accepted socket removed its
+  listener's port-table entry so the second connection got RST. Both fixed;
+  see `doc/WORKING-NOTES.md`.
+
 - **`snake`** - the terminal game on a timer, and the first program here whose
   clock nobody drives: one `poll` on stdin per frame with what is left of the
   tick as its timeout, so a key answers instantly without moving the snake or

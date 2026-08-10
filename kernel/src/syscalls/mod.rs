@@ -142,12 +142,23 @@ fn close_fd_refcount(desc: FileDescriptor) {
             let tcp_conn = s.tcp_conn.clone();
             drop(s);
             if let Some(key) = bound {
-                ranked_lock!(
+                let mut table = ranked_lock!(
                     RANK_PORT_TABLE,
                     "fd::drop_socket_port",
                     crate::net::socket::port_table()
-                )
-                .remove(&key);
+                );
+                // A socket returned by accept() carries its listener's local
+                // port, and the table maps a port to the socket that owns it,
+                // so only that socket may take the entry out. Removing it for
+                // every close would unbind the listener the first time one of
+                // its connections ended, and the next SYN would be answered
+                // with RST.
+                if table
+                    .get(&key)
+                    .is_some_and(|owner| alloc::sync::Arc::ptr_eq(owner, &sock))
+                {
+                    table.remove(&key);
+                }
             }
             // For TCP sockets, send FIN to initiate graceful close
             if let Some(conn) = tcp_conn {

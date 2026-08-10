@@ -567,29 +567,39 @@ pub fn sys_listen(fd: u64, backlog: u32) -> u64 {
         }
     };
 
-    let mut s = ranked_lock!(RANK_SOCKET, "sys_listen", sock_arc);
-
-    if s.sock_type != SOCK_STREAM {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
-    }
-    if s.closed {
-        info.lock().errno = Errno::EBADF;
-        return !0u64;
-    }
-    if s.state == SocketState::Unbound {
-        info.lock().errno = Errno::EINVAL;
-        return !0u64;
-    }
+    // Validate and read the bound address under the socket lock, then release
+    // it. The port table ranks below the socket, and `handle_tcp` takes them in
+    // that order on the receive path, so a socket guard is never held across it.
+    let local_addr = {
+        let s = ranked_lock!(RANK_SOCKET, "sys_listen", sock_arc);
+        if s.sock_type != SOCK_STREAM {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+        if s.closed {
+            info.lock().errno = Errno::EBADF;
+            return !0u64;
+        }
+        if s.state == SocketState::Unbound {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+        s.local_addr
+    };
 
     // Register in port table under TCP protocol if not already present
-    if let Some(local_addr) = s.local_addr {
+    if let Some(local_addr) = local_addr {
         let mut table = ranked_lock!(RANK_PORT_TABLE, "sys_listen", port_table());
         if !table.contains_key(&(6u8, local_addr.port)) {
             table.insert((6u8, local_addr.port), sock_arc.clone());
         }
     }
 
+    let mut s = ranked_lock!(RANK_SOCKET, "sys_listen", sock_arc);
+    if s.closed {
+        info.lock().errno = Errno::EBADF;
+        return !0u64;
+    }
     s.listening = true;
     s.backlog = if backlog == 0 { 1 } else { backlog };
     0

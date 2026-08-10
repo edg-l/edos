@@ -79,6 +79,15 @@ columns, because a character cell is about twice as tall as it is wide. `-s`
 sets the starting tick and the speed ramp is derived from it; `-w` wraps at the
 walls instead of dying on them.
 
+**`tcpecho`** (Phase 4). `bind`, `listen`, `accept`, then echo the accepted
+descriptor until the peer closes it, one connection at a time so the kernel's
+backlog is what holds the next one. The first program to use the listen side of
+the stack at all, and it found two kernel bugs on its first run: `sys_listen`
+took the port table under the socket lock, inverting the order `handle_tcp`
+uses, and closing an accepted socket removed its *listener's* port-table entry,
+so a second connection was answered with RST. Both are written up in
+`doc/WORKING-NOTES.md`.
+
 Candidates beyond these phases, ranked by the kernel path each would exercise,
 are in [`PROGRAMS.md`](PROGRAMS.md).
 
@@ -90,7 +99,6 @@ Complete. Everything listed here shipped; see the Done section above.
 
 | Program | Why it matters | Kernel gap |
 |---|---|---|
-| TCP echo server | validates the TCP state machine from userspace | none; the client side works now (`tcptest`), the listen/accept path is untested |
 | `netstat` | listening and established sockets | needs a read path into `net/tcp.rs` `CONNECTIONS`, as `SYS_NETSTAT` or `/proc/net/tcp` |
 | BMP image viewer | a real GUI app over window syscalls and shared memory | none; exercises the compositor |
 | `nproc` | CPU count | needs `SYS_NPROC` or `/proc/cpuinfo` |

@@ -1763,6 +1763,42 @@ reading buffered into the kernel heap forever, so `yes | head -1` was an
 unbounded allocation rather than a broken pipe. It now returns `None`, which
 the caller turns into `EPIPE` *and* a `SIGPIPE`.
 
+## The listen side of TCP had never been run (2026-08-11)
+
+`programs/tcpecho` is the first thing to call `listen`/`accept`, and it panicked
+the kernel on the first call and then broke on the second connection. Both are
+fixed; the mechanisms are worth keeping.
+
+1. **`sys_listen` inverted the port-table order.** It held the socket lock
+   (rank 260) and took the port table (250) under it. `handle_tcp` takes them
+   the other way round on the receive path, so this was an AB/BA the rank
+   tracker caught on the very first call: "tried to acquire 'sys_listen' (rank
+   250) while holding 'sys_listen' (rank 260)". `sys_bind` had it right all
+   along — validate under the socket lock, drop it, take the port table, then
+   re-take the socket — and `sys_listen` now has the same shape.
+
+2. **Closing an accepted socket unbound its listener.** The socket close path
+   removes `(proto, local_port)` from the port table, and a socket returned by
+   `accept` carries the *listener's* local port. So the first connection to end
+   took the listening entry with it and the next SYN was answered with RST. The
+   table maps a port to the socket that owns it, so the entry is now removed
+   only when it names the socket being closed (`Arc::ptr_eq`).
+
+Two things this exposed that are **still open** (both in `todo.txt`): a segment
+is dropped outright on an ARP cache miss and never retried, so the first inbound
+connection after boot is lost; and the accept queue never drops an entry that
+never reached Connected, so every half-open SYN permanently occupies a backlog
+slot.
+
+### Things that will bite you
+
+- **The host reaches the guest on 127.0.0.1:2323**, forwarded to guest port 23
+  (`--ssh-fwd` in `scripts/edos-vm`). That is the only way in: user-mode slirp
+  has no route to the guest otherwise, so a server on any other port cannot be
+  tested from the host.
+- **The first connection after boot always fails**, because of the ARP drop
+  above. Warm the cache with a throwaway connection before judging a server.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any
