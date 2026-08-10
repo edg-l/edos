@@ -824,6 +824,8 @@ pub fn is_builtin(command: &str) -> bool {
             | "ifconfig"
             | "ip"
             | "jobs"
+            | "fg"
+            | "bg"
             | "wait"
     )
 }
@@ -926,6 +928,18 @@ pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
         "jobs" => {
             crate::JOB_LIST.lock().unwrap().print();
             return ExecResult::Success(0);
+        }
+        "fg" | "bg" => {
+            let code = if command == "fg" {
+                crate::cmd_fg(args)
+            } else {
+                crate::cmd_bg(args)
+            };
+            return if code == 0 {
+                ExecResult::Success(0)
+            } else {
+                ExecResult::Failed(code)
+            };
         }
         "wait" => {
             let code = if let Some(pid_str) = args.first() {

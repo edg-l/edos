@@ -1896,3 +1896,61 @@ expand to many.
   multi-line script construct; the interactive shell reads `for`, `do` and
   `done` as commands and reports them not found. This predates globbing and is
   unrelated to it, but it is the first thing you will try when testing a glob.
+
+---
+
+## The shell has job control
+
+`programs/edos-sh/src/jobs.rs` holds a `Job` with every stage's pid and the
+process group they share; `JobStatus` gained `Stopped`. Ctrl+Z suspends a
+foreground job, `jobs` lists it, `fg` and `bg` resume it, and one Ctrl+C
+reaches every stage of a pipeline.
+
+What makes it work, in the order it matters:
+
+- **`spawn_pipeline` returns the pids and no longer waits.** The caller decides
+  whether the job is foreground, which is the whole difference between a job
+  and a blocking call. It also groups the stages as it spawns: the first stage
+  leads, the rest `setpgid` into it.
+- **The kernel already put a spawned child in a group of its own** and made it
+  the terminal's foreground group, whenever its standard input is the pty
+  slave (`sys_spawn`). That is what made Ctrl+C work before any of this. The
+  consequence is that **the shell has to take the terminal back after every
+  job, background ones included** — `reclaim_terminal()`. Miss that and the
+  next Ctrl+C goes to a job nobody is looking at.
+- **A segment is expanded and its redirections opened exactly once**, by
+  `prepare_segment`, because expansion runs commands (`$(...)`). The result is
+  either a builtin the shell runs itself or a list of pipeline stages, and the
+  same value is what runs in the foreground or becomes a job. The previous
+  background path re-parsed the segment inside a fork, which would have run
+  every command substitution twice.
+- **A background external job is no longer forked.** It is spawned directly, so
+  the job is the pipeline itself and `fg` can hand it the terminal. Only a
+  background *builtin* still forks, and that fork calls `setpgid(0, 0)` so it
+  is not in the shell's group.
+
+Two kernel changes were needed, both in the wait path:
+
+- **`waitpid` with `WAIT_UNTRACED|WAIT_BLOCK` now blocks until the child exits
+  *or* stops.** It only blocked on exit before, so a shell waiting on a
+  foreground job would sleep through a Ctrl+Z. `stop_if_signalled` wakes the
+  registered waiter the same way an exit does, and the wait loop re-registers
+  each pass because waking consumes the registration. Without this the shell
+  would have had to poll.
+- **`SIGCONT` clears the target's `stopped` flag at delivery**, not when the
+  target next runs. `fg` sends SIGCONT and immediately waits; the resumed
+  process has not been scheduled yet, so the wait saw `stopped` still set,
+  reported the job stopped again and put it straight back in the job list.
+  Observed as `fg` printing `[2]+ Stopped cat` the instant it was typed.
+
+### Things that will bite you
+
+- **A stop takes effect at the target's next syscall boundary, so `sleep 30`
+  ignores Ctrl+Z until it wakes up.** Nothing is wrong with the shell: the
+  `[1]+ Stopped` line arrives 30 seconds later, and everything about it is
+  correct then. `sys_sleep_ms` does not return early on a pending stop or kill.
+  Test job control with `cat` — it is blocked in a pty read and stops at once.
+- `fg` resumes a job and runs it, but `/proc` still shows the resumed process
+  `Stopped` afterwards. Suspected in the same area as the SIGCONT fix above:
+  the flag is cleared, but something re-sets it or the process re-enters the
+  park. Reproduce with `cat`, Ctrl+Z, `fg`, then `ps` from another shell.

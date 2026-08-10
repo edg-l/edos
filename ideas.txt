@@ -2,6 +2,14 @@
 
 ## Done
 
+- **Shell job control** - Ctrl+Z suspends a foreground job, `jobs` lists it as
+  Stopped, `fg` and `bg` resume it, and every stage of a pipeline shares one
+  process group so a single Ctrl+C reaches all of it. `spawn_pipeline` returns
+  the stage pids instead of waiting, a background external job is spawned
+  directly rather than forked, and the shell takes the terminal back after
+  every job. Two kernel halves went with it: an untraced `waitpid` that blocks
+  until the child exits *or* stops, and `SIGCONT` clearing the target's
+  `stopped` flag at delivery. See `doc/WORKING-NOTES.md`.
 - **Signals grew up** - five kernel items, all covered by `programs/sigtest`.
   Process groups (`setpgid`/`getpgid`, `tcsetpgrp`/`tcgetpgrp`, `kill` with a
   negative pid) so Ctrl+C reaches a pipeline rather than one stage of it;
@@ -1256,10 +1264,9 @@ sets SIGINT to SIG_IGN at startup (`main.rs`, `sys_sigaction(2, 1)`) and
 negative control — a kernel that registers the session shell as the
 foreground job unconditionally still leaves it alive.
 
-Still open, if job control ever matters: `foreground_pid` is a single pid
-rather than a process group, so Ctrl+C reaches the direct child only, and
-once that child exits the slot goes empty instead of reverting to the
-shell.
+That half is closed: the terminal tracks a foreground process *group*
+(`Pty.foreground_pgid`), the shell puts every stage of a pipeline in one
+group, and it takes the terminal back with `tcsetpgrp` after each job.
 
 The "tools that read stdin hang with no way out" half of this is fixed:
 Ctrl-D now ends the read. `Pty::slave_read` used to return an empty `Vec`

@@ -53,3 +53,10 @@
   counter. Catch the failing run's full log before chasing it; the counter and
   the missing PASS line are the only evidence printed today.
 
+
+- fg resumes a job but /proc still shows the process Stopped afterwards.
+  Repro: cat, Ctrl+Z, fg, then ps. SIGCONT clears the flag at delivery now,
+  so something re-sets it or the target re-enters the park.
+- A stop or kill signal does not cut short sys_sleep_ms, so Ctrl+Z on
+  `sleep 30` only takes effect 30s later. thread_sleep should return early
+  when stop_requested or killed is set.

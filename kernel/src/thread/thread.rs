@@ -1590,6 +1590,11 @@ fn apply_default_action(thread: &Arc<Thread>, signum: u32) {
             // thread's park condition reads it, so the wake that follows sends
             // it back to userspace.
             thread.stop_requested.store(false, Ordering::Release);
+            // The target clears this too, on its way out of the park, but not
+            // until it next runs. A shell that resumes a job and immediately
+            // waits on it would otherwise be told it is still stopped and put
+            // it straight back in the job list.
+            thread.stopped.store(false, Ordering::Release);
         }
         signal::DefaultAction::Ignore => {}
     }

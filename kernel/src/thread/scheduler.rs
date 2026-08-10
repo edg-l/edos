@@ -1338,6 +1338,9 @@ pub fn stop_if_signalled() {
     }
 
     thread.stopped.store(true, Ordering::Release);
+    // A shell parked in an untraced `waitpid` on this process is waiting for
+    // exactly this: stopping ends that wait the same way exiting does.
+    crate::thread::thread::EXITED_THREADS.wake_waiter(thread.id);
     let watched = thread.clone();
     // A kill outranks a stop: SIGKILL must reach a suspended process, so the
     // park ends for that too and the caller's `exit_if_killed` finishes it.

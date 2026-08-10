@@ -1382,6 +1382,9 @@ fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> u64 {
 
     let target = ThreadId(pid);
     let block = flags & WAIT_BLOCK != 0;
+    let untraced = flags & WAIT_UNTRACED != 0;
+    let has_stopped =
+        || untraced && get_thread_by_id(target).is_some_and(|t| t.stopped.load(Ordering::Acquire));
 
     // Fast path: already exited
     if let Some(code) = take_thread_exit_code(target) {
@@ -1395,9 +1398,7 @@ fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> u64 {
     // A stopped child is reported before the blocking wait, because it is not
     // going to exit while it is suspended and a caller that blocked here would
     // never come back.
-    if flags & WAIT_UNTRACED != 0
-        && get_thread_by_id(target).is_some_and(|t| t.stopped.load(Ordering::Acquire))
-    {
+    if has_stopped() {
         if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, STATUS_STOPPED) } {
             info.lock().errno = Errno::EFAULT;
             return !0u64;
@@ -1409,17 +1410,28 @@ fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> u64 {
         return 0;
     }
 
-    // Register as waiter so record_thread_exit wakes us
+    // Register as waiter so record_thread_exit wakes us. `stop_if_signalled`
+    // wakes the same registration, and waking consumes it, so the loop
+    // re-registers on every pass.
     let current_weak = current_thread_weak().unwrap();
-    EXITED_THREADS.register_waiter(target, current_weak);
 
-    // Park until the target has exited. thread_park_while may return
-    // spuriously (stale wake token, etc.), so loop on the real condition.
-    while !EXITED_THREADS.has_exited(target) {
-        thread_park_while(|| !EXITED_THREADS.has_exited(target));
+    // Park until the target has exited, or — for an untraced wait — stopped.
+    // thread_park_while may return spuriously (stale wake token, etc.), so
+    // loop on the real condition.
+    while !EXITED_THREADS.has_exited(target) && !has_stopped() {
+        EXITED_THREADS.register_waiter(target, current_weak.clone());
+        thread_park_while(|| !EXITED_THREADS.has_exited(target) && !has_stopped());
     }
 
     EXITED_THREADS.unregister_waiter(target);
+
+    if !EXITED_THREADS.has_exited(target) {
+        if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, STATUS_STOPPED) } {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
+        }
+        return pid;
+    }
 
     // Now consume the exit code
     if let Some(code) = take_thread_exit_code(target) {

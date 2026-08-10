@@ -13,6 +13,8 @@ pub fn cmd_help() {
     println!("  exit              - Exit shell");
     println!("  kill [-SIGNAL] PID - Send signal to process");
     println!("  jobs              - List background jobs");
+    println!("  fg [%n]           - Resume a job in the foreground");
+    println!("  bg [%n]           - Resume a stopped job in the background");
     println!("  wait [PID]        - Wait for background job(s)");
     println!("  ifconfig          - Show network configuration");
     println!();

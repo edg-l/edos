@@ -172,12 +172,13 @@ the shell half has not been written yet.
    kernel heap forever; it now raises `SIGPIPE` and returns `EPIPE`.
 5. **`SIGCHLD`** is sent to the creator when a child exits.
 
-**Left:**
-
-6. **Shell job control.** `JobStatus` still has no `Stopped`, and there is no
-   `fg`, no `bg` and nothing that puts a pipeline in one process group. Every
-   kernel piece it needs now exists: `setpgid` at spawn, `tcsetpgrp` on
-   foreground, `waitpid_untraced` to notice a stop, `SIGCONT` to resume.
+6. **Shell job control.** `JobStatus` has `Stopped`, a job carries the pid of
+   every stage plus the process group they share, and `fg`/`bg` resume one.
+   `spawn_pipeline` puts the first stage in a group of its own and the rest
+   into it, so one Ctrl+C reaches a whole pipeline; the shell hands the
+   terminal over with `tcsetpgrp` and takes it back after every job,
+   background ones included. Still open: `fg` resumes a job but leaves it
+   marked stopped in `/proc` (see WORKING-NOTES).
 
 **Done:**
 

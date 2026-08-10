@@ -216,12 +216,25 @@ pub enum ChildState {
 /// is not. Plain [`waitpid_nonblocking`] cannot tell them apart because a
 /// stopped child never exits on its own.
 pub fn waitpid_untraced(pid: u64) -> Option<ChildState> {
+    wait_untraced(pid, WAIT_UNTRACED)
+}
+
+/// Wait for a child to exit *or* stop, blocking until one of the two happens.
+///
+/// This is the wait a shell does on a foreground job: it must come back both
+/// when the job finishes and when Ctrl+Z suspends it, and it must not spin in
+/// the meantime.
+pub fn waitpid_untraced_blocking(pid: u64) -> Option<ChildState> {
+    wait_untraced(pid, WAIT_BLOCK | WAIT_UNTRACED)
+}
+
+fn wait_untraced(pid: u64, flags: u64) -> Option<ChildState> {
     let mut status: i32 = -1;
     let ret = unsafe {
         sys::syscall3(
             sys::SYS_WAIT_PID,
             pid,
-            WAIT_UNTRACED,
+            flags,
             &mut status as *mut i32 as u64,
         )
     };
@@ -470,9 +483,14 @@ pub struct PipelineStage {
 }
 
 /// Spawn a pipeline of commands connected by pipes.
-pub fn spawn_pipeline(stages: &[PipelineStage]) {
+///
+/// Returns the pid of every stage, in pipeline order, and does not wait: the
+/// caller decides whether the job runs in the foreground and owns putting the
+/// stages in one process group. A stage that fails to spawn ends the pipeline,
+/// so a short vector means the rest never started.
+pub fn spawn_pipeline(stages: &[PipelineStage]) -> Vec<u64> {
     let mut prev_read_fd: Option<u64> = None;
-    let mut last_pid: Option<u64> = None;
+    let mut pids: Vec<u64> = Vec::with_capacity(stages.len());
 
     for (i, stage) in stages.iter().enumerate() {
         let is_last = i == stages.len() - 1;
@@ -487,7 +505,7 @@ pub fn spawn_pipeline(stages: &[PipelineStage]) {
                     if let Some(fd) = prev_read_fd {
                         close(fd);
                     }
-                    return;
+                    return pids;
                 }
             }
         } else {
@@ -511,23 +529,25 @@ pub fn spawn_pipeline(stages: &[PipelineStage]) {
             close(fd);
         }
 
-        if pid.is_none() {
+        let Some(pid) = pid else {
             eprintln!("Command not found: {}", stage.command);
             // Close the read end of the pipe we just created (if any)
             if let Some(fd) = read_fd {
                 close(fd);
             }
-            return;
-        }
+            return pids;
+        };
 
-        last_pid = pid;
+        // The first stage leads the job's process group and the rest join it,
+        // so one Ctrl+C reaches every stage.
+        let leader = *pids.first().unwrap_or(&pid);
+        setpgid(pid, leader);
+
+        pids.push(pid);
         prev_read_fd = read_fd;
     }
 
-    // Wait for the last process in the pipeline
-    if let Some(pid) = last_pid {
-        waitpid(pid);
-    }
+    pids
 }
 
 /// Fork the calling process (COW).
