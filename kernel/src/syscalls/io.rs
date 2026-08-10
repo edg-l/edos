@@ -1590,6 +1590,134 @@ pub fn sys_pwrite(fd: u64, buffer_ptr: *const u8, count: usize, offset: u64) -> 
     }
 }
 
+/// One scatter/gather buffer, laid out as POSIX `struct iovec`.
+///
+/// The pointer is carried as a `u64` rather than a raw pointer so the array can
+/// be copied out of user memory as plain bytes; it is a user address and is
+/// only ever handed back to the ordinary read and write paths, which validate
+/// it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct IoVec {
+    pub base: u64,
+    pub len: u64,
+}
+
+/// Most buffers one `readv`/`writev` accepts, POSIX `IOV_MAX`.
+const IOV_MAX: usize = 1024;
+
+/// Copy a user `iovec` array in, rejecting the shapes POSIX defines as EINVAL:
+/// more than `IOV_MAX` entries, or a total length that cannot be returned.
+fn copy_in_iovecs(iov_ptr: *const IoVec, iovcnt: usize) -> Result<Vec<IoVec>, Errno> {
+    if iovcnt > IOV_MAX {
+        return Err(Errno::EINVAL);
+    }
+    if iov_ptr.is_null() {
+        return Err(Errno::EFAULT);
+    }
+    let mut iovs = vec![IoVec { base: 0, len: 0 }; iovcnt];
+    let bytes = iovcnt * core::mem::size_of::<IoVec>();
+    if !unsafe { try_copy_from_user(iovs.as_mut_ptr() as *mut u8, iov_ptr as *const u8, bytes) } {
+        return Err(Errno::EFAULT);
+    }
+    let mut total: u64 = 0;
+    for iov in &iovs {
+        total = match total.checked_add(iov.len) {
+            Some(t) if t <= i64::MAX as u64 => t,
+            _ => return Err(Errno::EINVAL),
+        };
+    }
+    Ok(iovs)
+}
+
+/// Read into a list of buffers, filling each completely before moving to the
+/// next. Returns the total transferred, which is short whenever an underlying
+/// read is: a short read means the descriptor had nothing more to give, so
+/// continuing would either block or skip a gap.
+///
+/// Each buffer is a separate underlying read, so the buffers are filled in
+/// order but the sequence is not atomic against a concurrent reader on the
+/// same descriptor.
+pub fn sys_readv(fd: u64, iov_ptr: *const IoVec, iovcnt: usize) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if iovcnt == 0 {
+        return 0;
+    }
+    let iovs = match copy_in_iovecs(iov_ptr, iovcnt) {
+        Ok(iovs) => iovs,
+        Err(errno) => {
+            info.lock().errno = errno;
+            return -1;
+        }
+    };
+
+    let mut total: i64 = 0;
+    for iov in &iovs {
+        if iov.len == 0 {
+            continue;
+        }
+        let want = iov.len as usize;
+        let n = sys_read(fd, iov.base as *mut u8, want);
+        if n < 0 {
+            // POSIX: an error after a partial transfer is reported as that
+            // partial count, and the error is left for the next call to raise.
+            if total > 0 {
+                info.lock().errno = Errno::Clear;
+                return total;
+            }
+            return n;
+        }
+        total += n;
+        if (n as usize) < want {
+            break;
+        }
+    }
+    total
+}
+
+/// Write a list of buffers in order, stopping at the first short write. See
+/// [`sys_readv`] for the return convention; the same non-atomicity applies, so
+/// a `writev` to a pipe shared with another writer can interleave at a buffer
+/// boundary.
+pub fn sys_writev(fd: u64, iov_ptr: *const IoVec, iovcnt: usize) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if iovcnt == 0 {
+        return 0;
+    }
+    let iovs = match copy_in_iovecs(iov_ptr, iovcnt) {
+        Ok(iovs) => iovs,
+        Err(errno) => {
+            info.lock().errno = errno;
+            return -1;
+        }
+    };
+
+    let mut total: i64 = 0;
+    for iov in &iovs {
+        if iov.len == 0 {
+            continue;
+        }
+        let want = iov.len as usize;
+        let n = sys_write(fd, iov.base as *const u8, want);
+        if n == !0u64 {
+            if total > 0 {
+                info.lock().errno = Errno::Clear;
+                return total;
+            }
+            return -1;
+        }
+        total += n as i64;
+        if (n as usize) < want {
+            break;
+        }
+    }
+    total
+}
+
 pub fn sys_lseek(fd: u64, offset: i64, whence: u32) -> i64 {
     let info = current_thread_info();
     let fd_table = {

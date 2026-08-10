@@ -1084,6 +1084,92 @@ fn test17(dir: &str) {
     );
 }
 
+// Test 18: readv/writev move a list of buffers in one syscall
+//
+// The buffers are handled in order and each is filled or drained completely
+// before the next, so a short transfer ends the sequence.
+fn test18(dir: &str) {
+    use edos_lib::io::{readv, writev};
+    use std::io::{Seek, SeekFrom};
+
+    let path = format!("{}/iotest_t18.dat", dir);
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .unwrap_or_else(|e| fail(18, &format!("create: {}", e)));
+    let fd = file.as_raw_fd() as u64;
+
+    // An empty buffer contributes nothing and does not end the sequence.
+    let parts: [&[u8]; 4] = [b"alpha", b"", b"-beta", b"-gamma"];
+    let n = writev(fd, &parts);
+    if n != 16 {
+        fail(18, &format!("writev wrote {} bytes, want 16", n));
+    }
+    if writev(fd, &[]) != 0 {
+        fail(18, "writev of no buffers did not return 0");
+    }
+    file.sync_all()
+        .unwrap_or_else(|e| fail(18, &format!("sync: {}", e)));
+    match fs::read(&path) {
+        Ok(got) if got == b"alpha-beta-gamma" => {}
+        Ok(got) => fail(18, &format!("file holds {:?}, want alpha-beta-gamma", got)),
+        Err(e) => fail(18, &format!("read back: {}", e)),
+    }
+
+    // readv fills in the same order, through the descriptor's own offset.
+    file.seek(SeekFrom::Start(0))
+        .unwrap_or_else(|e| fail(18, &format!("seek: {}", e)));
+    let (mut a, mut b, mut c) = ([0u8; 5], [0u8; 5], [0u8; 6]);
+    {
+        let mut bufs: [&mut [u8]; 3] = [&mut a, &mut b, &mut c];
+        let n = readv(fd, &mut bufs);
+        if n != 16 {
+            fail(18, &format!("readv read {} bytes, want 16", n));
+        }
+    }
+    if &a != b"alpha" || &b != b"-beta" || &c != b"-gamma" {
+        fail(18, "readv scattered the bytes into the wrong buffers");
+    }
+
+    // A short read ends the sequence: three bytes remain, so the second buffer
+    // takes one of its four and the read stops there.
+    file.seek(SeekFrom::Start(13))
+        .unwrap_or_else(|e| fail(18, &format!("seek: {}", e)));
+    let (mut head, mut tail) = ([0u8; 2], [0u8; 4]);
+    {
+        let mut bufs: [&mut [u8]; 2] = [&mut head, &mut tail];
+        let n = readv(fd, &mut bufs);
+        if n != 3 {
+            fail(18, &format!("readv near EOF read {} bytes, want 3", n));
+        }
+    }
+    if &head != b"mm" || tail[0] != b'a' || tail[1..] != [0, 0, 0] {
+        fail(18, "a short readv did not stop at the end of the file");
+    }
+
+    // At EOF there is nothing to fill, which is 0 rather than an error.
+    let mut end = [0u8; 8];
+    {
+        let mut bufs: [&mut [u8]; 1] = [&mut end];
+        if readv(fd, &mut bufs) != 0 {
+            fail(18, "readv at EOF did not return 0");
+        }
+    }
+
+    // More buffers than IOV_MAX is refused outright.
+    let too_many: Vec<&[u8]> = vec![&b"x"[..]; 1025];
+    if writev(fd, &too_many) != -1 {
+        fail(18, "writev accepted more buffers than IOV_MAX");
+    }
+
+    drop(file);
+    let _ = fs::remove_file(&path);
+    pass(18, "readv/writev move a buffer list in order");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -1106,6 +1192,7 @@ fn main() {
     test15(dir);
     test16(dir);
     test17(dir);
+    test18(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

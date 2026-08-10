@@ -289,12 +289,11 @@ profile.
 
 ## 3. Missing syscalls and interfaces
 
-98 syscalls exist. The conspicuous absences, roughly by how much they block real
+100 syscalls exist. The conspicuous absences, roughly by how much they block real
 programs:
 
 | Missing | Why it matters |
 |---|---|
-| `readv`/`writev` | Every scatter/gather write becomes N syscalls or a copy |
 | `setuid` | `UserThreadInfo` carries `user_id`/`group_id`; only the getters exist |
 
 **The CLOEXEC entry was rejected on its original premise and later became

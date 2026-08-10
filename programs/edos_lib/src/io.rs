@@ -406,6 +406,36 @@ pub fn pread(fd: u64, buf: &mut [u8], offset: u64) -> isize {
     }
 }
 
+/// One scatter/gather buffer, laid out as POSIX `struct iovec`.
+#[repr(C)]
+struct IoVec {
+    base: u64,
+    len: u64,
+}
+
+fn iovecs(bufs: impl Iterator<Item = (*const u8, usize)>) -> Vec<IoVec> {
+    bufs.map(|(base, len)| IoVec {
+        base: base as u64,
+        len: len as u64,
+    })
+    .collect()
+}
+
+/// Read into several buffers with one syscall, filling each completely before
+/// moving to the next. Returns the total bytes read, which is short whenever an
+/// underlying read is, or a negative error code.
+pub fn readv(fd: u64, bufs: &mut [&mut [u8]]) -> isize {
+    let iovs = iovecs(bufs.iter().map(|b| (b.as_ptr(), b.len())));
+    unsafe { sys::syscall3(sys::SYS_READV, fd, iovs.as_ptr() as u64, iovs.len() as u64) as isize }
+}
+
+/// Write several buffers in order with one syscall. Returns the total bytes
+/// written, short at the first underlying short write, or a negative error code.
+pub fn writev(fd: u64, bufs: &[&[u8]]) -> isize {
+    let iovs = iovecs(bufs.iter().map(|b| (b.as_ptr(), b.len())));
+    unsafe { sys::syscall3(sys::SYS_WRITEV, fd, iovs.as_ptr() as u64, iovs.len() as u64) as isize }
+}
+
 /// Write at an explicit offset without moving the descriptor's own offset.
 pub fn pwrite(fd: u64, buf: &[u8], offset: u64) -> isize {
     unsafe {

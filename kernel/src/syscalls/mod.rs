@@ -340,6 +340,8 @@ const SYS_EXECVE: u64 = 59; // replace this process's image
 const SYS_FCNTL: u64 = 72; // descriptor flags and duplication
 const SYS_PREAD: u64 = 17; // read at an explicit offset
 const SYS_PWRITE: u64 = 18; // write at an explicit offset
+const SYS_READV: u64 = 19; // read into a list of buffers
+const SYS_WRITEV: u64 = 20; // write a list of buffers
 const SYS_GETPID: u64 = 39; // get process ID
 const SYS_GETUID: u64 = 102; // real user id of the calling process
 const SYS_GETGID: u64 = 104; // real group id of the calling process
@@ -477,6 +479,18 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let count = ctx.rdx as usize;
             let offset = ctx.r10;
             ctx.rax = io::sys_pwrite(fd, buffer_ptr, count, offset) as u64;
+        }
+        SYS_READV => {
+            let fd = ctx.rdi;
+            let iov_ptr = ctx.rsi as *const io::IoVec;
+            let iovcnt = ctx.rdx as usize;
+            ctx.rax = io::sys_readv(fd, iov_ptr, iovcnt) as u64;
+        }
+        SYS_WRITEV => {
+            let fd = ctx.rdi;
+            let iov_ptr = ctx.rsi as *const io::IoVec;
+            let iovcnt = ctx.rdx as usize;
+            ctx.rax = io::sys_writev(fd, iov_ptr, iovcnt) as u64;
         }
         SYS_LSEEK => {
             let fd = ctx.rdi;
