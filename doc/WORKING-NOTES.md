@@ -1481,6 +1481,39 @@ contain a pointer. That is worth knowing before it is read as a pointer that
 failed to move; it also means a screenshot is no longer a way to check where
 the pointer is.
 
+## What a frame costs, measured
+
+Asked whether dragging a window was slow, and whether the hardware cursor was
+covering for a slow compositor. It is not. `FrameStats` in the window manager
+times the composite and the transfer and reports only when frames miss their
+budget, so it is silent on a healthy machine.
+
+Dragging a 640x480 window across a 1920x1080 screen for five seconds, KVM,
+four cores:
+
+| | |
+|---|---|
+| frames per second | 77, against a 74Hz target |
+| composite | 1.56 ms average, 2.4-4.9 ms worst |
+| transfer (`flip_rect`) | 0.4 ms average |
+| frames over the 13 ms budget | **0** |
+
+So the guest composites a drag in about 2 ms of a 13 ms budget and misses
+nothing. What a VNC viewer shows is the remote-framebuffer limit: a moving
+640x480 window damages its old and new rectangles, some 2.4 MB of pixels per
+frame, and that has to be encoded and shipped. The cursor became smooth
+because on its own plane it ships *no pixels at all*.
+
+Two things the numbers say that are worth keeping:
+
+- **The first frames are enormous** — one report at boot averages 240 ms with a
+  2.16 s worst case, while fonts load and the shm buffers fault in. It is the
+  slow first paint at boot, not a steady-state problem.
+- **Cost scales with the screen, not with what changed.** The compositor
+  rewrites all 1920x1080 pixels every frame and only limits the *transfer* to
+  the dirty rectangle. 1.5 ms says that is affordable today; it is where to
+  look first if it stops being.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any

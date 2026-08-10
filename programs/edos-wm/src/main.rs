@@ -33,6 +33,73 @@ use input::{InputAction, InputState};
 /// Maximum number of windows to track.
 const MAX_WINDOWS: usize = 64;
 
+/// What a frame costs, reported only when frames are being missed.
+///
+/// A compositor with no frame-time counter cannot be tuned: "it feels slow" and
+/// "it is slow" are different claims and only one of them can be acted on. This
+/// stays silent while frames fit in their budget, so it costs a comparison per
+/// frame and nothing else.
+#[derive(Default)]
+struct FrameStats {
+    frames: u32,
+    over_budget: u32,
+    composite_us: u64,
+    flip_us: u64,
+    worst_us: u64,
+    full_screens: u32,
+    last_report: Option<Instant>,
+}
+
+impl FrameStats {
+    fn record(&mut self, composite_us: u64, flip_us: u64, full_screen: bool, budget_ms: u64) {
+        self.frames += 1;
+        self.composite_us += composite_us;
+        self.flip_us += flip_us;
+        self.worst_us = self.worst_us.max(composite_us + flip_us);
+        if full_screen {
+            self.full_screens += 1;
+        }
+        if composite_us + flip_us > budget_ms * 1000 {
+            self.over_budget += 1;
+        }
+
+        let now = Instant::now();
+        let due = self
+            .last_report
+            .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(1));
+        if !due {
+            return;
+        }
+        self.last_report = Some(now);
+        if self.over_budget > 0 {
+            let frames = self.frames.max(1) as u64;
+            log_to_kernel(&format!(
+                "wm: {} of {} frames over {}ms budget; composite avg {}us flip avg {}us worst \
+                 {}us; {} full-screen",
+                self.over_budget,
+                self.frames,
+                budget_ms,
+                self.composite_us / frames,
+                self.flip_us / frames,
+                self.worst_us,
+                self.full_screens,
+            ));
+        }
+        *self = FrameStats {
+            last_report: self.last_report,
+            ..Default::default()
+        };
+    }
+}
+
+/// Leave a line where the serial log will carry it.
+fn log_to_kernel(message: &str) {
+    use std::io::Write;
+    if let Ok(mut klog) = std::fs::OpenOptions::new().write(true).open("/dev/klog") {
+        let _ = klog.write_all(message.as_bytes());
+    }
+}
+
 /// Hand the display the current cursor image, returning whether it took it.
 ///
 /// The texture is ARGB with zero alpha where the cursor is transparent, which
@@ -524,6 +591,7 @@ fn main() {
     // False when the display has no cursor plane, and the software cursor is
     // composited as before.
     let mut hw_cursor = upload_cursor(&screen, &cursor);
+    let mut frame_stats = FrameStats::default();
     let mut uploaded_shape = cursor.shape();
 
     // Window list buffer
@@ -758,6 +826,7 @@ fn main() {
         }
 
         // Composite all windows into back buffer (always full composite).
+        let composite_start = Instant::now();
         compositor::composite(
             &mut screen,
             windows,
@@ -780,6 +849,9 @@ fn main() {
             ));
         }
 
+        let composite_us = composite_start.elapsed().as_micros() as u64;
+        let flip_start = Instant::now();
+
         // Transfer the dirty region to the host and flush.
         // With single-buffered virtio-gpu, we only need to transfer the
         // pixels that changed, even though the compositor rewrites everything.
@@ -790,6 +862,8 @@ fn main() {
                 screen.flip_rect(clipped.x as u32, clipped.y as u32, clipped.w, clipped.h);
             }
         }
+        let flip_us = flip_start.elapsed().as_micros() as u64;
+        frame_stats.record(composite_us, flip_us, dirty.full_screen, frame_time_ms);
         dirty.clear();
         // Sleep remainder of frame budget to maintain frame rate.
         // Use a minimum sleep of 1ms to avoid sub-microsecond sleeps that
