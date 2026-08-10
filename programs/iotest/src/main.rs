@@ -834,6 +834,45 @@ fn test14(dir: &str) {
     pass(14, "creating over a taken name reports AlreadyExists");
 }
 
+// Test 15: a file ends at its size, not at the end of its last page
+//
+// A short file whose data was written through the page cache must not read
+// back padded to 4096 bytes, and must not report a padded length.
+fn test15(dir: &str) {
+    let path = format!("{}/iotest_t15.bin", dir);
+    let _ = fs::remove_file(&path);
+
+    let body: Vec<u8> = (0..20).map(pattern).collect();
+    fs::write(&path, &body).unwrap_or_else(|e| fail(15, &format!("write: {}", e)));
+
+    let len = fs::metadata(&path)
+        .unwrap_or_else(|e| fail(15, &format!("metadata: {}", e)))
+        .len();
+    if len != body.len() as u64 {
+        fail(15, &format!("metadata says {} bytes, wrote {}", len, body.len()));
+    }
+
+    let read_back = fs::read(&path).unwrap_or_else(|e| fail(15, &format!("read: {}", e)));
+    if read_back != body {
+        fail(
+            15,
+            &format!("read {} bytes, want {}", read_back.len(), body.len()),
+        );
+    }
+
+    // Reading from the padding past EOF yields nothing, not a page of zeros.
+    let f = File::open(&path).unwrap_or_else(|e| fail(15, &format!("open: {}", e)));
+    let mut tail = [0u8; 64];
+    let n = pread(f.as_raw_fd() as u64, &mut tail, body.len() as u64);
+    if n != 0 {
+        fail(15, &format!("pread past EOF returned {}, want 0", n));
+    }
+    drop(f);
+
+    let _ = fs::remove_file(&path);
+    pass(15, "file length is the file, not its last page");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -853,6 +892,7 @@ fn main() {
     test12(dir);
     test13(dir);
     test14(dir);
+    test15(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

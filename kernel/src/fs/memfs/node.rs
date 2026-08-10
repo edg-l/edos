@@ -7,7 +7,11 @@ pub struct Node {
     pub id: u32,
     // If its a directory
     pub childs: Vec<u32>,
-    // If its a file,
+    /// Backing store for a file or the target of a symlink.
+    ///
+    /// This is storage, not the file: `file.size` is the authoritative length
+    /// and `content` may be longer, because a page writeback stores a whole
+    /// 4 KiB page. Everything reading file data clamps to `file.size`.
     pub content: Vec<u8>,
     pub file: File,
 }

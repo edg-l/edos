@@ -31,6 +31,40 @@ struct MemfsInner {
     next_id: u32,
 }
 
+/// Read from a node's storage, clamped to the file size.
+///
+/// `content` may be longer than `file.size`; see [`Node`].
+fn read_at(node: &Node, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
+    if node.file.kind != FileKind::File {
+        return Err(Error::NotAFile);
+    }
+    let size = (node.file.size as usize).min(node.content.len());
+    if offset >= size {
+        return Ok(Vec::new());
+    }
+    let end = size.min(offset + count);
+    Ok(node.content[offset..end].to_vec())
+}
+
+/// Write into a node's storage, growing the file size to cover the write.
+///
+/// Writing past the end of the file is rejected rather than sparse-filled.
+fn write_at(node: &mut Node, offset: usize, data: &[u8]) -> Result<u64, Error> {
+    if node.file.kind != FileKind::File {
+        return Err(Error::NotAFile);
+    }
+    if offset > node.file.size as usize {
+        return Err(Error::IoError);
+    }
+    let end = offset + data.len();
+    if end > node.content.len() {
+        node.content.resize(end, 0u8);
+    }
+    node.content[offset..end].copy_from_slice(data);
+    node.file.size = node.file.size.max(end as u64);
+    Ok(data.len() as u64)
+}
+
 impl MemfsInner {
     fn get_node(&self, id: u32) -> Result<&Node, Error> {
         self.nodes.get(&id).ok_or(Error::Corrupted)
@@ -152,21 +186,7 @@ impl FileSystem for Memfs {
         let path = path.normalize();
         let inner = self.inner.read();
         if let Some(node_id) = inner.find_node(&path)? {
-            let node = inner.get_node(node_id)?;
-
-            if node.file.kind != FileKind::File {
-                return Err(Error::NotAFile);
-            }
-
-            if offset >= node.content.len() {
-                return Ok(Vec::new());
-            }
-
-            let upper_bound = node.content.len().min(offset + count);
-
-            let data = node.content.get(offset..upper_bound).unwrap().to_vec();
-
-            Ok(data)
+            read_at(inner.get_node(node_id)?, offset, count)
         } else {
             Err(Error::FileNotFound)
         }
@@ -176,27 +196,7 @@ impl FileSystem for Memfs {
         let path = path.normalize();
         let mut inner = self.inner.write();
         if let Some(node_id) = inner.find_node(&path)? {
-            let node = inner.get_node_mut(node_id)?;
-
-            if node.file.kind != FileKind::File {
-                return Err(Error::NotAFile);
-            }
-
-            if offset > node.content.len() {
-                return Err(Error::IoError);
-            }
-
-            if offset == node.content.len() {
-                node.content.extend(data);
-                return Ok(data.len() as u64);
-            } else {
-                let tail = &mut node.content[offset..];
-                let overwrite_len = tail.len().min(data.len());
-                tail[..overwrite_len].copy_from_slice(&data[..overwrite_len]);
-                node.content.extend_from_slice(&data[overwrite_len..]);
-            }
-
-            Ok(data.len() as u64)
+            write_at(inner.get_node_mut(node_id)?, offset, data)
         } else {
             Err(Error::FileNotFound)
         }
@@ -471,13 +471,8 @@ impl FileSystem for Memfs {
             if node.file.kind != FileKind::File {
                 return Err(Error::NotAFile);
             }
-            let new_size = size as usize;
-            if new_size <= node.content.len() {
-                node.content.truncate(new_size);
-            } else {
-                node.content.resize(new_size, 0u8);
-            }
-            node.file.size = node.content.len() as u64;
+            node.content.resize(size as usize, 0u8);
+            node.file.size = size;
             Ok(())
         } else {
             Err(Error::FileNotFound)
@@ -501,43 +496,19 @@ impl FileSystem for Memfs {
     fn read_bytes_ino(&self, ino: u64, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
         let id = u32::try_from(ino).map_err(|_| Error::Corrupted)?;
         let inner = self.inner.read();
-        let node = inner.get_node(id)?;
-        if node.file.kind != FileKind::File {
-            return Err(Error::NotAFile);
-        }
-        if offset >= node.content.len() {
-            return Ok(Vec::new());
-        }
-        let upper_bound = node.content.len().min(offset + count);
-        Ok(node.content[offset..upper_bound].to_vec())
+        read_at(inner.get_node(id)?, offset, count)
     }
 
     fn write_bytes_ino(&self, ino: u64, offset: usize, data: &[u8]) -> Result<u64, Error> {
         let id = u32::try_from(ino).map_err(|_| Error::Corrupted)?;
         let mut inner = self.inner.write();
-        let node = inner.get_node_mut(id)?;
-        if node.file.kind != FileKind::File {
-            return Err(Error::NotAFile);
-        }
-        if offset > node.content.len() {
-            return Err(Error::IoError);
-        }
-        if offset == node.content.len() {
-            node.content.extend(data);
-        } else {
-            let tail = &mut node.content[offset..];
-            let overwrite_len = tail.len().min(data.len());
-            tail[..overwrite_len].copy_from_slice(&data[..overwrite_len]);
-            node.content.extend_from_slice(&data[overwrite_len..]);
-        }
-        Ok(data.len() as u64)
+        write_at(inner.get_node_mut(id)?, offset, data)
     }
 
     fn file_size_ino(&self, ino: u64) -> Result<u64, Error> {
         let id = u32::try_from(ino).map_err(|_| Error::Corrupted)?;
         let inner = self.inner.read();
-        let node = inner.get_node(id)?;
-        Ok(node.content.len() as u64)
+        Ok(inner.get_node(id)?.file.size)
     }
 
     fn as_page_cache_ops(&self) -> Option<&dyn PageCacheOps> {
@@ -614,7 +585,8 @@ impl FileSystem for Memfs {
 impl PageCacheOps for Memfs {
     /// Copy a 4 KiB page of file content into `buf`.
     ///
-    /// `node.content` is the source of truth. No disk I/O.
+    /// `node.content` is the backing store; the tail past `file.size` is not
+    /// part of the file and reads as zero. No disk I/O.
     fn fill_page(&self, ino: u64, page_index: u64, buf: &mut [u8]) -> Result<usize, Error> {
         debug_assert_eq!(buf.len(), 4096);
         let id = u32::try_from(ino).map_err(|_| Error::Corrupted)?;
@@ -624,11 +596,12 @@ impl PageCacheOps for Memfs {
             return Err(Error::NotAFile);
         }
         let offset = (page_index as usize) * 4096;
-        if offset >= node.content.len() {
+        let size = (node.file.size as usize).min(node.content.len());
+        if offset >= size {
             buf.fill(0);
             return Ok(0);
         }
-        let valid = core::cmp::min(node.content.len() - offset, 4096);
+        let valid = core::cmp::min(size - offset, 4096);
         buf[..valid].copy_from_slice(&node.content[offset..offset + valid]);
         buf[valid..].fill(0);
         Ok(valid)
@@ -636,11 +609,9 @@ impl PageCacheOps for Memfs {
 
     /// Write a page from the cache back into `node.content`.
     ///
-    /// VFS callers always pass `valid_bytes = 4096` regardless of the true tail;
-    /// trusting that would inflate the file because `node.content` IS the file
-    /// storage (unlike disk-backed FSes where block size and file size are
-    /// independent). Instead we copy the whole page into content but leave
-    /// `node.file.size` untouched; `update_size` is authoritative for size.
+    /// VFS callers always pass `valid_bytes = 4096` regardless of the true tail,
+    /// so the whole page goes into `content` and `file.size` is left alone;
+    /// `update_size` is the only thing that publishes a new size.
     ///
     /// Note: see module-level doc for the MAP_SHARED / path-based write
     /// coherency caveat.
@@ -664,9 +635,6 @@ impl PageCacheOps for Memfs {
             node.content.resize(end, 0u8);
         }
         node.content[offset..end].copy_from_slice(buf);
-        // Do NOT touch node.file.size here; update_size sets the authoritative
-        // size. Writing 4096 bytes into content past the real EOF is harmless
-        // because reads are clamped to file.size at the VFS layer.
         Ok(())
     }
 
