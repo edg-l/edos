@@ -45,7 +45,7 @@ scripts, text, empty files and directories.
 | Program | Why it matters | Notes |
 |---|---|---|
 | `tar` | archive create and extract; useful for host to guest transfer | exercises open/read/write/unlink/mkdir at scale |
-| `top` | live system monitor | needs terminal raw mode and a refresh loop; will surface procfs gaps |
+| `top` | live system monitor in a terminal | needs terminal raw mode and a refresh loop. The graphical half of this shipped as `edos-procview`, which already surfaced the procfs gap: **nothing reports per-process memory** — no RSS, no VM size, only a VMA count in `/proc/<tid>/status` |
 | `snake` | terminal game on a timer | good demo of poll and time APIs, raw stdin |
 
 ## Phase 4: kernel-aware

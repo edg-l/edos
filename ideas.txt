@@ -27,6 +27,10 @@
   opens, tagged like the window dump. `scripts/edos-vm` grows `panel` and
   `press <name>` and resolves `launch` rows by label, with no layout
   constant left in the script.
+- **edos-procview** - a graphical process viewer over `/proc/processes`,
+  `/proc/<tid>/status` and `/proc/meminfo`: a live table with keyboard and
+  pointer selection, a detail line per process, and kill behind a
+  confirmation.
 - **fsbench** - `programs/fsbench` measures filesystem throughput and latency
   across idioms (write/read at 512B..1MiB, BufWriter, fs::write, pwrite,
   random, mmap, fsync, metadata) and three depths (memfs, raw block device,
