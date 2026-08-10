@@ -120,6 +120,12 @@ pub const RANK_TCP_CONN: u16 = 270;
 // Window system. The input thread holds the registry across event delivery
 // (`handle_keyboard_event`), and nothing on the event-queue side reaches back
 // into the registry, so the registry is strictly outside.
+//
+// The shell table sits *outside* the registry: a syscall decides whether the
+// caller may manage other processes' windows before it touches the registry at
+// all, and holding both would be two locks of one rank co-held, which the
+// tracker rejects.
+pub const RANK_WINDOW_SHELL: u16 = 275;
 pub const RANK_WINDOW_REGISTRY: u16 = 280;
 pub const RANK_WINDOW_EVENTS: u16 = 290;
 pub const RANK_MOUSE_BUTTONS: u16 = 300;

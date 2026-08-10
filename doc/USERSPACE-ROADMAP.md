@@ -19,7 +19,7 @@
 | Audio | `play` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
 | Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest` |
-| Libraries | `edos_lib` (syscall wrappers), `edos_render` (textures, widgets, windows) |
+| Libraries | `edos_lib` (syscall wrappers), `edos_render` (fonts, text, icons, theme, widgets, windows) |
 
 ## Done
 
@@ -56,6 +56,31 @@ scripts, text, empty files and directories.
 | `netstat` | listening and established sockets | needs a read path into `net/tcp.rs` `CONNECTIONS`, as `SYS_NETSTAT` or `/proc/net/tcp` |
 | BMP image viewer | a real GUI app over window syscalls and shared memory | none; exercises the compositor |
 | `nproc` | CPU count | needs `SYS_NPROC` or `/proc/cpuinfo` |
+
+## `edos_render` is the shared surface
+
+Every graphical program links it, so a change here reaches the compositor, the
+panel, the terminal and every widget at once. What lives in it:
+
+| Module | What it owns |
+|---|---|
+| `font` | Outline faces loaded from `/share/fonts` through `fontdue`, and the glyph cache. Lato for chrome, JetBrains Mono for character grids. Falls back to the built-in bitmap face when a file is missing, so a bad install costs type rather than the session. |
+| `text` | The one blitter and the one measurement path, so the window manager, the panel and the widgets agree on where a glyph sits and how wide a string is. |
+| `icons` | 16x16 monochrome masks, tinted at draw time so an icon takes the colour of its state. Hand-authored: a desktop with eight icons does not need a theme, a lookup path and a cache, each of which can be missing at boot. |
+| `metrics` | One spacing scale derived from a single unit, and the shared control height. |
+| `theme` | Every colour in the shell. |
+| `widgets` | Controls, layout, and the terminal grid. |
+| `window` | Window syscalls, and the `WindowListEntry` ABI. |
+| `graphics` | Framebuffer, textures, `Screen`. |
+
+Two things that break silently rather than loudly:
+
+- **`WindowListEntry` mirrors the kernel's struct** in `kernel/src/syscalls/window.rs`
+  field for field. Change one without the other and the compositor reads garbage;
+  nothing catches it at compile time.
+- **Text is measured, not counted.** The chrome face is proportional, so
+  `chars().count() * char_width()` is wrong everywhere except a mono grid. Use
+  `widgets::text_width`.
 
 ## The std fork lags the syscall table
 

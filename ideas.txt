@@ -297,6 +297,13 @@
   `HBoxLayout::set_uniform_columns` so rows of controls line up.
 - **The kernel stopped knowing what a title bar is.** Each window carries the
   frame its manager gave it, through `property::FRAME`.
+- **A window-manager privilege.** Moving, resizing, framing, minimizing and
+  posting events to a window you do not own were ungated: any process could do
+  any of them to any window. They now need the shell privilege, which init
+  holds by being the process the kernel starts and hands to the compositor and
+  the panel per spawn. It dies with the process, so a reused pid inherits
+  nothing, and it follows a process's threads because this kernel has no
+  thread-group id. `wintest` carries the negative control.
 
 ### Sessions of 2026-08-08 to 2026-08-10
 

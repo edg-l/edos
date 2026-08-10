@@ -490,3 +490,24 @@ pub const REBOOT_HALT: u64 = 2;
 pub fn reboot(cmd: u64) -> i64 {
     unsafe { sys::syscall1(sys::SYS_REBOOT, cmd) as i64 }
 }
+
+/// Syscall number for appointing a shell process.
+const SYS_WINDOW_GRANT_SHELL: u64 = 234;
+
+/// Appoint a process as part of the shell, so it may manage windows it does
+/// not own: move, resize, frame, minimize, and send focus or close events.
+///
+/// Only a process that already holds the privilege may grant it, and the
+/// kernel seeds exactly one: `bin/edos-init`, the only process it starts.
+/// Which programs make up a session is init's policy, so appointing them is
+/// init's job rather than a race between whoever claims it first.
+///
+/// The grant is per pid and is dropped when the process exits, so a later
+/// process that reuses the number does not inherit it.
+pub fn grant_shell(pid: u64) -> Result<(), i64> {
+    let ret = unsafe { crate::sys::syscall1(SYS_WINDOW_GRANT_SHELL, pid) };
+    if ret == u64::MAX {
+        return Err(-1);
+    }
+    Ok(())
+}

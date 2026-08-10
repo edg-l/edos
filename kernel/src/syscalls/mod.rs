@@ -376,6 +376,9 @@ const SYS_WINDOW_POLL: u64 = 223;
 const SYS_WINDOW_LIST: u64 = 224;
 const SYS_WINDOW_SEND_EVENT: u64 = 225;
 const SYS_WINDOW_DAMAGE: u64 = 232;
+/// Appoint another process as part of the shell. Init only; see
+/// `kernel/src/window/shell.rs`.
+const SYS_WINDOW_GRANT_SHELL: u64 = 234;
 const SYS_CLOCK_GETTIME: u64 = 226;
 const SYS_OPENPTY: u64 = 227;
 const SYS_SPAWN2: u64 = 228;
@@ -868,6 +871,9 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_WINDOW_DAMAGE => {
             let window_id = ctx.rdi;
             ctx.rax = window::sys_window_damage(window_id);
+        }
+        SYS_WINDOW_GRANT_SHELL => {
+            ctx.rax = window::sys_window_grant_shell(ctx.rdi);
         }
         SYS_CLOCK_GETTIME => {
             let buf_ptr = ctx.rdi as *mut u8;
@@ -2463,6 +2469,15 @@ fn sys_clone(
     crate::thread::util::queue_spawn_thread(child_thread);
 
     // Parent returns child thread ID
+    // A thread of a shell process is part of that shell: init spawns a
+    // supervisor thread per service and grants from there, and a compositor is
+    // free to do its work off its main thread. The privilege is per thread id
+    // because that is what this kernel has -- there is no thread-group id yet,
+    // so `pid` is a thread's own id and a process is only a parent relation.
+    if crate::window::shell::is_shell(current_thread_info().lock().pid) {
+        crate::window::shell::grant(child_id.0);
+    }
+
     child_id.0
 }
 

@@ -15,7 +15,10 @@ use edos_render::widgets::{
     Button, Checkbox, Label, Rect, Slider, TextInput, Widget, WidgetContainer, WidgetEvent,
     WidgetId,
 };
-use edos_render::window::{Window, WindowEvent, WindowEventType};
+use edos_render::window::{
+    property, window_list, window_send_event, window_set, Window, WindowEvent, WindowEventType,
+    WindowListEntry,
+};
 
 /// Margin from the window edge to the content column.
 const MARGIN: u32 = space(5);
@@ -70,6 +73,38 @@ fn add_section_label(row: &mut HBoxLayout, label: WidgetId) {
     row.add(label)
         .set_width(SizePolicy::Fixed(LABEL_W))
         .set_alignment(Alignment::center_left());
+}
+
+/// Ids of windows this process did not create.
+fn windows_owned_by_others() -> Vec<u64> {
+    let mut entries = [WindowListEntry::default(); 32];
+    let count = window_list(&mut entries).unwrap_or(0).min(entries.len());
+    let me = edos_lib::process::getpid();
+    entries[..count]
+        .iter()
+        .filter(|w| w.pid != me)
+        .map(|w| w.id)
+        .collect()
+}
+
+/// Report whether the kernel refuses window management from a process that was
+/// never appointed to the shell.
+fn check_unprivileged(others: &[u64]) {
+    let Some(&victim) = others.first() else {
+        println!("wintest: no other window to test against, skipping privilege check");
+        return;
+    };
+    let moved = window_set(victim, property::X, 0).is_ok();
+    let minimized = window_set(victim, property::MINIMIZED, 1).is_ok();
+    let posted = window_send_event(victim, &WindowEvent::close_requested()).is_ok();
+
+    if moved || minimized || posted {
+        println!(
+            "wintest: FAIL privilege check on window {victim}: move={moved} minimize={minimized} event={posted}"
+        );
+    } else {
+        println!("wintest: PASS an unappointed process cannot manage another window");
+    }
 }
 
 fn main() {
@@ -218,6 +253,13 @@ fn main() {
     if let Some(w) = widgets.get_mut(btn_greet) {
         w.set_enabled(false);
     }
+
+    // Negative control for the shell privilege. wintest is an ordinary
+    // program: init never appoints it, so the kernel must refuse to let it
+    // move, put away, or post events to a window it does not own. Without a
+    // check that fails when the privilege is *not* enforced, "the session
+    // still works" proves nothing.
+    check_unprivileged(&windows_owned_by_others());
 
     // Show the window
     if let Err(e) = window.show() {

@@ -472,6 +472,7 @@ version = "0.1.0"
 name = "wintest"
 version = "0.1.0"
 dependencies = [
+ "edos_lib",
  "edos_render",
 ]
 

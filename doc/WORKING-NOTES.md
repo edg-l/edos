@@ -1327,6 +1327,17 @@ Two moves that matter beyond the pixels:
   one flag, and a menu needs the first without the second: it has no title bar,
   and it must take focus because losing focus is how it closes.
 
+- **Managing another process's window needs a privilege now.** It was ungated:
+  any process could move, resize, minimize or post a close event to any window.
+  Init holds the privilege by being the process the kernel starts, and grants it
+  per spawn to the compositor and the panel (`kernel/src/window/shell.rs`,
+  `SYS_WINDOW_GRANT_SHELL` 234). Two things fell out of writing it: the
+  privilege has to follow a process's *threads*, because `pid` here is a
+  thread's own id and there is no thread-group id, so a grant is propagated at
+  `sys_clone`; and the shell table must be ranked *outside* the window registry
+  and settled before it is taken, which the lock-order tracker caught on the
+  first boot.
+
 Traps this round produced, both of which cost a build cycle:
 
 - **`WidgetContainer` wraps every widget to assign it an id and forwards each

@@ -10,6 +10,7 @@ use crate::{
         WindowEvent,
         input::{get_or_create_event_queue, poll_events, remove_event_queue, send_event},
         registry::{Frame, ReadSite, WINDOW_REGISTRY, WindowId, property, read_tracked},
+        shell,
     },
 };
 
@@ -134,6 +135,10 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
         }
     }
 
+    // Settled before the registry is touched: the two locks must not be
+    // co-held, and this answer does not depend on the window.
+    let caller_is_shell = shell::is_shell(pid);
+
     let mut registry = ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_set", WINDOW_REGISTRY);
 
     // Check window exists
@@ -147,11 +152,11 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
 
     // X, Y, WIDTH, HEIGHT can be set by any process (for window manager)
     // Other properties require ownership
-    // Position, size, frame and minimized state are the shell's to set, and
-    // the window manager and panel do not own the windows they manage. They
-    // stay unowned until there is a way to say which process *is* the shell;
-    // until then any process can move or put away a window it did not create.
-    let requires_ownership = !matches!(
+    // Position, size, frame and minimized state are management operations: a
+    // compositor and a panel perform them on windows belonging to other
+    // processes, so ownership cannot be the test. The shell privilege is,
+    // which init hands out (see `window::shell`).
+    let management = matches!(
         prop,
         property::X
             | property::Y
@@ -161,7 +166,7 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
             | property::MINIMIZED
     );
 
-    if requires_ownership && window.pid != pid {
+    if window.pid != pid && !(management && caller_is_shell) {
         info.lock().errno = Errno::EPERM;
         return !0u64;
     }
@@ -491,13 +496,19 @@ pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent)
         return !0u64;
     }
 
-    // Check that the target window exists
-    // NOTE: no ownership check -- the WM and taskbar send events to windows they
-    // don't own. Requires a WM privilege system to restrict properly (see M4).
+    // A window's own process may post to itself; anyone else needs the shell
+    // privilege, because this is how focus is moved and how a close request is
+    // delivered, and neither should be available to any process that asks.
     {
+        let pid = info.lock().pid;
+        let caller_is_shell = shell::is_shell(pid);
         let registry = read_tracked(ReadSite::SysWindowSendEvent);
-        if registry.get_window(window_id).is_none() {
+        let Some(window) = registry.get_window(window_id) else {
             info.lock().errno = Errno::ENOENT;
+            return !0u64;
+        };
+        if window.pid != pid && !caller_is_shell {
+            info.lock().errno = Errno::EPERM;
             return !0u64;
         }
     }
@@ -533,6 +544,34 @@ pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent)
     // Send the event to the window's event queue
     crate::window::input::send_event(window_id, event);
 
+    0
+}
+
+/// Appoint another process as part of the shell, so it may manage windows it
+/// does not own.
+///
+/// Arguments:
+/// - rdi: pid to appoint
+///
+/// Returns: 0 on success, !0 on error (sets errno).
+///
+/// Only a process that already holds the privilege may grant it, and the
+/// kernel seeds exactly one holder: `bin/edos-init`, the only process it
+/// starts. What a session consists of is init's policy, so this is init's call
+/// to make rather than a race between whoever starts first.
+pub fn sys_window_grant_shell(target_pid: u64) -> u64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+    let pid = info.lock().pid;
+
+    if !shell::is_shell(pid) {
+        info.lock().errno = Errno::EPERM;
+        return !0u64;
+    }
+    if target_pid == 0 || !shell::grant(target_pid) {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    }
     0
 }
 

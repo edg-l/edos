@@ -7,6 +7,7 @@ use crate::ranked_write;
 
 pub mod input;
 pub mod registry;
+pub mod shell;
 
 pub use input::WindowEvent;
 pub use registry::WindowId;
@@ -20,6 +21,10 @@ pub fn init() {
 /// Destroy all windows owned by a process and clean up their event queues.
 /// Called during process exit.
 pub fn cleanup_process_windows(pid: u64) {
+    // Before the windows: a pid can be reused, and a later process must not
+    // inherit the authority this one was given.
+    shell::revoke(pid);
+
     // Get window IDs then destroy windows first, so the input thread can't
     // send events to windows whose queues we're about to remove.
     let window_ids: alloc::vec::Vec<WindowId> = {

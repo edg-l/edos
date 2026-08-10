@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use edos_lib::process;
+use edos_lib::process::grant_shell;
 
 struct Service {
     /// Binary to run.
@@ -16,20 +17,31 @@ struct Service {
     /// exhausts its restarts is left dead; an essential one is a louder problem
     /// but is still not worth rebooting the machine over.
     essential: bool,
+    /// Whether this service manages other processes' windows, and so needs the
+    /// privilege to move, resize, frame, minimize and focus them.
+    ///
+    /// Granted per spawn, since the privilege is per pid and dies with the
+    /// process. Init holds it because the kernel starts init and nothing else,
+    /// which makes "what a session is" init's decision rather than a race
+    /// between whichever program claims it first.
+    shell: bool,
 }
 
 const SERVICES: &[Service] = &[
     Service {
         path: "/bin/edos-wm",
         essential: true,
+        shell: true,
     },
     Service {
         path: "/bin/edos-taskbar",
         essential: false,
+        shell: true,
     },
     Service {
         path: "/bin/edos-terminal",
         essential: false,
+        shell: false,
     },
 ];
 
@@ -55,6 +67,11 @@ fn supervise(service: &'static Service) {
             failures += 1;
             eprintln!("init: {name}: spawn failed (attempt {failures})");
         } else {
+            if service.shell {
+                if let Err(e) = grant_shell(pid) {
+                    eprintln!("init: {name}: could not grant shell privilege: {e}");
+                }
+            }
             println!("init: {name} started, pid {pid}");
             let code = process::waitpid(pid);
             let ran_for = started.elapsed();

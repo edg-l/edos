@@ -81,6 +81,7 @@ sections, and wrapping them would recurse into the preemption counter.
 | 250 | `PORT_TABLE` | `PreemptSpinlock<BTreeMap>` | `net/socket.rs` |
 | 260 | `Socket` (per-socket) | `Arc<PreemptSpinlock<Socket>>` | `net/socket.rs` |
 | 270 | `TcpConnection` (per-conn) | `Arc<PreemptSpinlock<TcpConnection>>` | `net/tcp.rs` |
+| 275 | `SHELL_PIDS` | `PreemptRwLock<Vec<u64>>` | `window/shell.rs` |
 | 280 | `WINDOW_REGISTRY` | `PreemptRwLock<WindowRegistry>` | `window/registry.rs` |
 | 290 | `WINDOW_EVENTS` | `PreemptRwLock<BTreeMap>` | `window/input.rs` |
 | 300 | `LAST_MOUSE_BUTTONS` | `PreemptSpinlock<u8>` | `window/input.rs` |
@@ -278,6 +279,13 @@ shape — taking the port table while holding something that belongs inside it:
 Both are the reason the rank system pays for itself here: neither is visible by
 reading either function alone, and both sit between a syscall and a driver
 kthread that genuinely run at the same time.
+
+**275, `SHELL_PIDS`.** Which processes may manage windows they do not own.
+Strictly outside `WINDOW_REGISTRY`: a window syscall settles the caller's
+authority *before* it touches the registry, because the answer does not depend
+on the window, and because co-holding them would be two locks of one rank,
+which the tracker rejects. It caught exactly that the first time this was
+written.
 
 **280 to 300, window system.** The input thread holds the registry across event
 delivery (`handle_keyboard_event` sends key events while its read guard is
