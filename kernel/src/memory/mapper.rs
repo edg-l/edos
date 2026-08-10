@@ -299,6 +299,10 @@ impl MemoryManager {
                 .flush()
         };
 
+        // The caller supplied the physical frame (MMIO, firmware, shared
+        // memory), so the allocator must never hand it out, and must never
+        // free it either: reserve it with a refcount of 0 rather than taking
+        // a reference. Tearing such a mapping down is `unmap_foreign_memory`.
         if let Some(idx) = frame_allocator.frame_to_index(frame) {
             frame_allocator.set_frame_allocated(idx);
         }

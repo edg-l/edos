@@ -1,11 +1,4 @@
 
-- `BitmapFrameAllocator::inc_or_set_refcount` documents itself as being used by
-  `map_address` / `map_address_range`, and nothing calls it. `map_address`
-  instead calls `set_frame_allocated`, which leaves the refcount at 0 — the
-  allocator's "reserved, never hand this out" state. Either wire it up or
-  correct the doc; a doc naming a caller that does not exist is the trap that
-  hid the ACPI teardown bug.
-
 - An absolute symlink target is resolved in the wrong namespace. Root cause of
   `iotest /tmp` failing test 10 with "read through link: entity not found"
   while the identical `iotest /var` passes: VFS hands each filesystem a

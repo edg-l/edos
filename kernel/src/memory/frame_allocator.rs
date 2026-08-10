@@ -268,7 +268,10 @@ impl BitmapFrameAllocator {
         (self.bitmap[byte_index] & (1 << bit_index)) != 0
     }
 
-    /// Mark a frame as allocated
+    /// Mark a frame as allocated without giving it an owner: the bitmap bit
+    /// stops the frame being handed out, and the refcount stays at 0 so
+    /// `deallocate_frame` refuses to free it. This is the state for memory the
+    /// allocator does not own — firmware tables, MMIO, boot-time reservations.
     pub(super) fn set_frame_allocated(&mut self, index: usize) {
         if index >= self.frame_count {
             return;
@@ -478,26 +481,6 @@ impl BitmapFrameAllocator {
             self.refcounts[idx] = self.refcounts[idx]
                 .checked_add(1)
                 .expect("inc_refcount: refcount overflow");
-        }
-    }
-
-    /// Ensure `frame` is marked allocated and bump its refcount by one. Used
-    /// by `map_address` / `map_address_range` where the caller supplies an
-    /// existing physical frame (MMIO, shared memory) rather than allocating a
-    /// fresh one: the frame may already be tracked (refcount > 0) in which
-    /// case we just bump, or may be unmarked (refcount == 0) in which case we
-    /// set the bitmap bit and initialize the refcount to 1.
-    ///
-    /// Symmetric with `deallocate_frame`: each `inc_or_set_refcount` must be
-    /// matched by exactly one `deallocate_frame`.
-    pub fn inc_or_set_refcount(&mut self, frame: PhysFrame) {
-        if let Some(idx) = self.frame_to_index(frame) {
-            if self.refcounts[idx] == 0 {
-                self.set_frame_allocated(idx);
-            }
-            self.refcounts[idx] = self.refcounts[idx]
-                .checked_add(1)
-                .expect("inc_or_set_refcount: refcount overflow");
         }
     }
 
