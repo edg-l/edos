@@ -583,6 +583,30 @@ fn test10(dir: &str) {
     let _ = fs::remove_file(&up_link);
     let _ = fs::remove_file(&up_file);
 
+    // Two links naming each other must run out of hops rather than out of
+    // patience. Absolute targets, so each hop goes back through the VFS: this
+    // is the case where resolution restarts from the root and could otherwise
+    // never stop.
+    let loop_a = format!("{}/iotest_t10_loop_a.dat", dir);
+    let loop_b = format!("{}/iotest_t10_loop_b.dat", dir);
+    let _ = fs::remove_file(&loop_a);
+    let _ = fs::remove_file(&loop_b);
+    if symlink(&loop_b, &loop_a) != 0 || symlink(&loop_a, &loop_b) != 0 {
+        fail(10, "could not build a symlink loop");
+    }
+    if fs::read(&loop_a).is_ok() {
+        fail(10, "reading through a symlink loop succeeded");
+    }
+    if fs::metadata(&loop_a).is_ok() {
+        fail(10, "stat through a symlink loop succeeded");
+    }
+    // The link itself is still readable: only following it is refused.
+    if readlink(&loop_a, &mut buf) != loop_b.len() as i64 {
+        fail(10, "readlink of a looping link");
+    }
+    fs::remove_file(&loop_a).unwrap_or_else(|e| fail(10, &format!("unlink a looping link: {}", e)));
+    let _ = fs::remove_file(&loop_b);
+
     // A dangling link is legal to create and readable, but not to open.
     if symlink("/iotest_t10_nowhere", &dangling) != 0 {
         fail(10, "symlink to a nonexistent target was refused");
@@ -608,7 +632,7 @@ fn test10(dir: &str) {
     let _ = fs::remove_file(&target);
     pass(
         10,
-        "symlink/readlink: absolute, relative and dangling links resolve and unlink correctly",
+        "symlink/readlink: absolute, relative, cross-mount, looping and dangling links resolve and unlink correctly",
     );
 }
 
