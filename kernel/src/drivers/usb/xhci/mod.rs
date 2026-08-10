@@ -705,7 +705,7 @@ impl XhciController {
             w_length: 18,
         };
 
-        let transferred = self.control_transfer(device, setup, Some(buf_phys), 18, true)?;
+        let mut transferred = self.control_transfer(device, setup, Some(buf_phys), 18, true)?;
 
         if transferred < 18 {
             // Try with smaller initial request (some low-speed devices need this)
@@ -713,14 +713,23 @@ impl XhciController {
                 w_length: 8,
                 ..setup
             };
-            self.control_transfer(device, setup8, Some(buf_phys), 8, true)?;
+            transferred = self.control_transfer(device, setup8, Some(buf_phys), 8, true)?;
         }
 
-        let desc = unsafe { core::ptr::read(buf.as_ptr() as *const DeviceDescriptor) };
+        // A pooled DMA buffer carries whatever its previous owner left in it, so only the
+        // bytes the device actually sent may be read; the rest of the descriptor stays zero.
+        let valid = transferred.min(18);
+        let mut raw = [0u8; 18];
+        unsafe {
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), raw.as_mut_ptr(), valid);
+        }
         if let Err(e) = dma().dealloc(buf) {
             println!("xhci: dma dealloc failed: {e}");
         }
-        Ok(desc)
+        if valid < 8 {
+            return Err(XhciError::InvalidDevice);
+        }
+        Ok(unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const DeviceDescriptor) })
     }
 
     /// Read the full configuration descriptor (with all interfaces and endpoints).
@@ -746,12 +755,19 @@ impl XhciController {
             w_length: 9,
         };
 
-        self.control_transfer(device, setup, Some(hdr_phys), 9, true)?;
+        let hdr_len = self.control_transfer(device, setup, Some(hdr_phys), 9, true)?;
 
-        let config_hdr = unsafe { core::ptr::read(hdr_buf.as_ptr() as *const ConfigDescriptor) };
+        // A pooled DMA buffer is not zeroed on reuse, so a short transfer would otherwise
+        // hand back the previous owner's bytes as a descriptor.
+        let mut hdr_raw = [0u8; 9];
+        unsafe {
+            core::ptr::copy_nonoverlapping(hdr_buf.as_ptr(), hdr_raw.as_mut_ptr(), hdr_len.min(9));
+        }
+        let config_hdr =
+            unsafe { core::ptr::read_unaligned(hdr_raw.as_ptr() as *const ConfigDescriptor) };
         let total_len = config_hdr.w_total_length;
 
-        if total_len < 9 {
+        if hdr_len < 9 || total_len < 9 {
             if let Err(e) = dma().dealloc(hdr_buf) {
                 println!("xhci: dma dealloc failed: {e}");
             }
@@ -768,15 +784,15 @@ impl XhciController {
             w_length: total_len,
             ..setup
         };
-        self.control_transfer(device, setup_full, Some(full_phys), total_len, true)?;
+        let full_len =
+            self.control_transfer(device, setup_full, Some(full_phys), total_len, true)?;
 
-        let mut data = alloc::vec![0u8; total_len as usize];
+        // Keep only what the device sent: the descriptor walk stops at the first descriptor
+        // that does not fit, so a short transfer truncates the blob rather than parsing
+        // whatever the pooled buffer held before.
+        let mut data = alloc::vec![0u8; full_len.min(total_len as usize)];
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                full_buf.as_ptr(),
-                data.as_mut_ptr(),
-                total_len as usize,
-            );
+            core::ptr::copy_nonoverlapping(full_buf.as_ptr(), data.as_mut_ptr(), data.len());
         }
         if let Err(e) = dma().dealloc(hdr_buf) {
             println!("xhci: dma dealloc failed: {e}");
@@ -1741,12 +1757,15 @@ fn find_hid_interface(
             } else {
                 current_iface = None;
             }
-        } else if desc_type == DESC_ENDPOINT && bytes.len() >= 7 && current_iface.is_some() {
+        } else if desc_type == DESC_ENDPOINT
+            && bytes.len() >= 7
+            && let Some(iface) = current_iface
+        {
             let ep =
                 unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const EndpointDescriptor) };
             // Accept only IN interrupt endpoints
             if ep.b_endpoint_address & 0x80 != 0 && ep.bm_attributes & 0x03 == 3 {
-                return Some((current_iface.unwrap(), ep));
+                return Some((iface, ep));
             }
         }
     }

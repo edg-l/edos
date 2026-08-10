@@ -165,6 +165,11 @@ impl DmaAllocator {
         Ok(unsafe { DmaRegion::from_buffer(buffer) })
     }
 
+    /// Allocate a DMA buffer of at least `size` bytes.
+    ///
+    /// The contents are **not** zeroed: a buffer served from a bucket still holds whatever
+    /// its previous owner left there. Only a device transfer's own byte count may be read
+    /// back; callers that need a zeroed region must zero it themselves.
     pub fn allocate_sized(&self, size: usize) -> Result<DmaBuffer, DmaError> {
         if let Some(bucket) = size_to_bucket(size) {
             let alloc_size = bucket_size(bucket);

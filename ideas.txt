@@ -1205,8 +1205,14 @@ Hygiene and quality:
    `kernel/src`, so recount rather than trusting the figure. Convert the
    ones on I/O and parsing results; leave a comment on the structurally
    impossible ones. The ELF loader (`loader/mod.rs`) is done. Next by
-   count: `drivers/usb/xhci/mod.rs` (20), `fs/efs/mod.rs` (8),
+   count: `drivers/usb/xhci/mod.rs` (19), `fs/efs/mod.rs` (8),
    `drivers/ahci/port.rs` (8), `acpi/mod.rs` (7).
+   The xhci ones are worth little on their own: 12 are `Option` fields
+   that `init()` fills and the driver thread then uses, and removing
+   them means making those fields non-optional, which means folding
+   `init()` into `find_and_init()`. The rest are DMA-allocation
+   `expect()`s on a `-> !` thread. Reading them did turn up a real
+   defect (short control transfers parsed as descriptors), now fixed.
 2. **Module READMEs for `fs/` (15.7k lines) and `drivers/` (13k).**
    [audit]
 
