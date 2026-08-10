@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-80 programs and 2 libraries, all in the `programs/` cargo workspace.
+81 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -15,7 +15,7 @@
 | Archives | `tar` (ustar create, list and extract) |
 | Checksums | `sha256sum` |
 | Inspection | `file` |
-| System | `ps`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace`, `date` |
+| System | `ps`, `top`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace`, `date` |
 | Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
 | Network | `ping`, `dns`, `http`, `wget`, `dnsprobe` |
 | Audio | `play` |
@@ -58,6 +58,15 @@ directory is refused. Verified both directions against GNU tar rather than only
 against itself. See `doc/WORKING-NOTES.md` for the three header details that
 are easy to get subtly wrong.
 
+**`top`** (Phase 3). The thread table on a timer, in raw mode. `/proc/processes`
+publishes a monotonic `CPUms` per thread, so a *share* of the CPU exists only
+between two samples: every percentage is that counter's growth over the interval
+just measured, and the first frame reports zero because it has nothing to
+subtract from. Sorts by CPU, memory, total time or pid; `-b`/`-n`/`-d` give the
+batch form, and a run whose stdout is not a terminal becomes batch on its own so
+`top | head` does not write cursor escapes into a pipe. The parser it shares with
+`edos-procview` lives in `edos_lib::procinfo`.
+
 Candidates beyond these phases, ranked by the kernel path each would exercise,
 are in [`PROGRAMS.md`](PROGRAMS.md).
 
@@ -65,7 +74,6 @@ are in [`PROGRAMS.md`](PROGRAMS.md).
 
 | Program | Why it matters | Notes |
 |---|---|---|
-| `top` | live system monitor in a terminal | needs terminal raw mode and a refresh loop. The graphical half shipped as `edos-procview`, and the procfs gap it found is closed: `/proc/processes` has an RSS column and `/proc/<tid>/status` carries `VM Size` and `Resident` |
 | `snake` | terminal game on a timer | good demo of poll and time APIs, raw stdin |
 
 ## Phase 4: kernel-aware

@@ -12,9 +12,14 @@ use std::io;
 pub struct Process {
     pub pid: u64,
     pub ppid: u64,
+    /// Process group, which is what the shell puts a job in and what a
+    /// terminal signal is delivered to.
+    pub pgid: u64,
     /// `user` or `kernel`.
     pub kind: String,
     pub state: String,
+    /// Scheduling priority.
+    pub priority: String,
     /// The CPU the thread last ran on.
     pub cpu: u32,
     pub cpu_ms: u64,
@@ -87,15 +92,18 @@ pub fn read_table() -> io::Result<Table> {
 
 /// Parse one table row. The header and the blank line before the trailer fail
 /// the pid parse and are dropped by the same check.
+///
+/// Every column the kernel prints is read, in its order, even the ones no
+/// caller wants: skipping one by position is how a reader silently ends up a
+/// column behind the day a new one is added in the middle.
 fn parse_row(line: &str) -> Option<Process> {
     let mut fields = line.split_ascii_whitespace();
     let pid = fields.next()?.parse().ok()?;
     let ppid = fields.next()?.parse().ok()?;
+    let pgid = fields.next()?.parse().ok()?;
     let kind = fields.next()?.to_string();
     let state = fields.next()?.to_string();
-    // The priority column belongs to the selected process's detail line rather
-    // than to the table, which has one column per thing a reader scans for.
-    let _priority = fields.next()?;
+    let priority = fields.next()?.to_string();
     let cpu = fields.next()?.parse().ok()?;
     let cpu_ms = fields.next()?.parse().ok()?;
     // `-` where the kernel has no address space to measure.
@@ -105,8 +113,10 @@ fn parse_row(line: &str) -> Option<Process> {
     Some(Process {
         pid,
         ppid,
+        pgid,
         kind,
         state,
+        priority,
         cpu,
         cpu_ms,
         rss_kib,

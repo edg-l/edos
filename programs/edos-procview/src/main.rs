@@ -4,12 +4,11 @@
 //! `/proc/<tid>/{status,cmdline}`, and the selection is kept by pid so a
 //! refresh that reorders or drops rows does not move it under the reader.
 
-mod procinfo;
-
 use std::time::{Duration, Instant};
 
 use edos_lib::keymap::keycode;
 use edos_lib::process::sys_kill;
+use edos_lib::procinfo::{Details, Memory, Process, Table};
 use edos_render::metrics::{TEXT_CELL_HEIGHT, space};
 use edos_render::text::{self, Style};
 use edos_render::theme::Theme;
@@ -17,8 +16,6 @@ use edos_render::widgets::{
     draw_rect, draw_rect_outline, draw_text, draw_text_styled, text_height, text_width,
 };
 use edos_render::window::{Window, WindowEvent, WindowEventType, property, window_set};
-
-use procinfo::{Details, Memory, Process, Table};
 
 const WIN_W: u32 = 680;
 const WIN_H: u32 = 440;
@@ -347,7 +344,7 @@ impl App {
         self.last_refresh = Instant::now();
         self.dirty = true;
         let previous = self.selected_index();
-        match procinfo::read_table() {
+        match edos_lib::procinfo::read_table() {
             Ok(Table {
                 processes,
                 pending_exits,
@@ -363,7 +360,7 @@ impl App {
                 self.notice = Some(format!("cannot read /proc/processes: {e}"));
             }
         }
-        self.memory = procinfo::read_memory().ok();
+        self.memory = edos_lib::procinfo::read_memory().ok();
 
         if self.selected_index().is_none() {
             // The selected thread has exited. Take whatever moved into its
@@ -378,7 +375,7 @@ impl App {
     fn read_details(&mut self) {
         self.details = self
             .selected
-            .and_then(|pid| procinfo::read_details(pid).ok());
+            .and_then(|pid| edos_lib::procinfo::read_details(pid).ok());
     }
 
     fn selected_index(&self) -> Option<usize> {

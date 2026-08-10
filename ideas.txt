@@ -2,6 +2,13 @@
 
 ## Done
 
+- **`top`** - the thread table on a timer, in raw mode: live CPU share per
+  thread from the growth of the kernel's monotonic `CPUms`, sortable by cpu,
+  memory, total time or pid, kernel threads hideable with `u`. `-b`, `-n` and
+  `-d` give the batch form, and a run whose stdout is not a terminal turns
+  itself batch. Its parse of `/proc/processes` moved to `edos_lib::procinfo`,
+  shared with `edos-procview` - which had silently been reading one column
+  behind since `PGID` was added to that table.
 - **`tar`** - ustar (POSIX.1-1988) create, list and extract, with `-v`, `-C`,
   and `-f` where `-` or no flag means the standard stream, so
   `tar -cf - dir | tar -xf - -C dest` copies a tree. Regular files,

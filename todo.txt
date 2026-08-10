@@ -60,3 +60,10 @@
 - A stop or kill signal does not cut short sys_sleep_ms, so Ctrl+Z on
   `sleep 30` only takes effect 30s later. thread_sleep should return early
   when stop_requested or killed is set.
+
+- There is no `/dev/null`. `yes > /dev/null` fails with "cannot open for
+  writing", so the standard way to discard output does not exist and every
+  script that wants it has to write to a file under /tmp. One more node in the
+  devfs registry (`kernel/src/fs/devfs`), reads returning EOF and writes
+  succeeding with the byte count. `/dev/zero` and `/dev/full` are the same
+  shape and worth adding in the same change.

@@ -2052,3 +2052,43 @@ Three things the format demands that are easy to get subtly wrong:
   characters missing, so `mkdir -p /tmp/t/sub; …` ran as `/sub; …` and the
   failure looked like a shell parsing bug. Send one command per `type` and
   read the screenshot before trusting what ran.
+
+## `top` exists, and it found `edos-procview` reading one column behind
+
+`programs/top` is the thread table re-read on a timer in raw mode. The kernel
+publishes only a *monotonic* `CPUms` per thread in `/proc/processes`, so a share
+of the CPU is not something that can be read out of one sample: every percentage
+in `top` is the growth of that counter across the interval just measured, and
+the interval is timed with `Instant` rather than assumed to be the requested
+delay, because a keystroke forces an early redraw and would otherwise divide by
+the wrong number. The first frame, and the first frame in which a pid appears,
+report zero.
+
+The parse of `/proc/processes` moved out of `edos-procview` into
+`edos_lib::procinfo` so both readers share one. Moving it is what exposed the
+bug: **`PGID` was added to that table by the job-control work and the parser was
+never taught about it**, so every field from `TYPE` rightward was one column
+off. `edos-procview` had been rendering the pgid as the type, the type as the
+state and the priority as the CPU, and looked entirely plausible doing it,
+because each value it showed was a small integer or a short word in the right
+shape for the column it landed in. The parser now reads every column the kernel
+prints, in order, including the ones no caller wants: skipping a field by
+position is exactly how a reader ends up behind the day a column is added in
+the middle.
+
+### Things that will bite you
+
+- **A terminal line that fills the width exactly wraps on its own.** Clipping
+  a row to `cols` and then writing `\r\n` costs two lines, not one, so a
+  full-screen program that thinks it drew `rows` lines has actually drawn more
+  and has scrolled its own header off the top. Clip to `cols - 1`. The symptom
+  is a blank line between every long row and a missing header, which reads like
+  a size-detection bug rather than an off-by-one.
+- **There is no `/dev/null`.** `yes > /dev/null &` fails with `/dev/null:
+  cannot open for writing`, which makes the usual way to spin a CPU for a
+  measurement not work; use a program that writes nowhere, or redirect to a
+  file under `/tmp`. Recorded in `todo.txt`.
+- **The desktop can take longer than ten seconds to reach a prompt.** Typing
+  into a terminal that has not spawned its shell yet silently discards the
+  line, and the screenshot then looks like the program did nothing. Take a shot
+  and confirm the prompt is there before typing.
