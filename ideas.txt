@@ -110,6 +110,11 @@
   `&>file`, per pipeline stage as well as per command. Redirections are an
   ordered op list resolved left to right, so `>f 2>&1` and `2>&1 >f` differ as
   they should. `>` now truncates, and O_TRUNC is ignored on non-regular files.
+- **Shell pathname expansion** - `*`, `?` and `[...]` matched per path
+  component over readdir, for command arguments and `for` word lists. No match
+  passes through unchanged, quoted and escaped words are literal, `*` skips
+  dotfiles. `ls` now takes many operands and non-directory ones, which globbing
+  immediately required.
 - **Heap expansion race fixes** - Lazy vmalloc fault handler, expansion
   serialization (AtomicBool), per-CPU heap freelists (6 size classes,
   16 slots/CPU, batch refill/drain). Removed heap warmup workaround.

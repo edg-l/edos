@@ -307,12 +307,10 @@ fn parse_for_header(rest: &str) -> Result<(String, Vec<String>), String> {
     // Variable name must not contain spaces
     let var = var_part.to_string();
 
-    // Parse values respecting quotes (reuse parse_command logic)
+    // The word list is a command line's worth of words: quotes, tilde and
+    // pathname expansion all apply, so `for f in *.txt` iterates the matches.
     let expanded = command::expand_variables(values_part);
-    let values: Vec<String> = command::parse_command_simple(&expanded)
-        .into_iter()
-        .map(|v| command::expand_tilde(&v))
-        .collect();
+    let values = crate::glob::expand_words(&command::parse_command(&expanded));
 
     Ok((var, values))
 }

@@ -4,6 +4,7 @@ mod arith;
 mod builtins;
 mod command;
 mod complete;
+mod glob;
 mod jobs;
 mod script;
 mod spawn;
@@ -51,7 +52,7 @@ pub fn run_segment(segment: &str) -> SegmentResult {
             };
             parsed.push(edos_lib::process::PipelineStage {
                 command: first.0.clone(),
-                args: rest,
+                args: glob::expand_words(&rest),
                 slots: open.slots,
             });
             opened.push(open);
@@ -75,6 +76,7 @@ pub fn run_segment(segment: &str) -> SegmentResult {
     let (first, rest) = args.split_first().unwrap();
     let cmd = &first.0;
     let (rest, redirects) = command::extract_redirects(rest);
+    let rest = glob::expand_words(&rest);
 
     let Some(open) = command::open_redirects(&redirects) else {
         return SegmentResult::Done(1);
@@ -169,6 +171,7 @@ pub fn run_segment_with_stdin(segment: &str, stdin_fd: u64) -> i32 {
     let (first, rest) = args.split_first().unwrap();
     let cmd = &first.0;
     let (rest, redirects) = command::extract_redirects(rest);
+    let rest = glob::expand_words(&rest);
 
     let Some(open) = command::open_redirects(&redirects) else {
         return 1;

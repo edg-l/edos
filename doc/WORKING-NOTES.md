@@ -1851,3 +1851,48 @@ it.
 - **Pipeline exit status is still not tracked.** `run_segment` returns 0 for any
   pipeline regardless of what the last stage did, so `false | true` and
   `ls /nope | wc -l` both look successful to `&&`, `||` and `set -e`.
+
+## The shell expands patterns now, and that broke `ls`
+
+`programs/edos-sh/src/glob.rs` matches `*`, `?` and `[...]` (with `!`/`^`
+negation and `a-z` ranges) one path component at a time, so `ls /bin/e*`,
+`echo /bin/ec?o` and `for f in *.txt` all work. The rules that matter:
+
+- **Expansion is per component, over `readdir`.** A word is split on `/`; a
+  component with no metacharacter is appended literally, one with a
+  metacharacter reads the directory built so far and keeps the names that
+  match. That is what makes `/bin/*/x` cost one `readdir` per surviving prefix
+  rather than a walk of the tree.
+- **A pattern that matches nothing is passed through unchanged**, so
+  `echo *.nomatch` prints `*.nomatch` — the shell convention, not an error.
+- **Components after the last pattern are checked for existence** before the
+  path is returned. `*/missing` was built by appending, not by reading a
+  directory, so without the check it would be handed to the command as a path
+  that does not exist. The check is skipped when the last component is itself a
+  pattern, since those names came from `readdir` and are known to exist.
+- **A leading `.` is only matched by a pattern that starts with a literal `.`**,
+  so `*` does not pick up dotfiles and does not expand to `.` and `..`.
+- **Quoted or backslash-escaped words are never patterns.** `parse_command`
+  already flagged a word that was quoted anywhere; a backslash escape now sets
+  the same flag, which also fixes `echo \>x` printing `>x` instead of
+  redirecting. The flag is per word, so `a"b"*` is literal in its entirety —
+  a deviation from POSIX, which tracks quoting per character.
+- The command word itself is not expanded, only its arguments.
+
+`extract_redirects` returns `Vec<(String, bool)>` rather than `Vec<String>` for
+this: the quoted flag has to survive redirect extraction to reach expansion.
+
+**`ls` could not take what globbing hands it.** It read `args[1]` and called
+`read_dir` on it, so `ls /bin/e*` — now nine real paths — printed
+`cannot access '/bin/echo': not a directory` and stopped. It takes any number of
+operands now: non-directories are listed by name first, then each directory,
+with a `path:` header when there is more than one operand. Any program that
+takes "a path" is a candidate for the same defect now that a single word can
+expand to many.
+
+### Things that will bite you
+
+- **`for f in *; do ...; done` on one line does not run.** Loops are a
+  multi-line script construct; the interactive shell reads `for`, `do` and
+  `done` as commands and reports them not found. This predates globbing and is
+  unrelated to it, but it is the first thing you will try when testing a glob.

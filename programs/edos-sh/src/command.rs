@@ -351,9 +351,12 @@ pub fn parse_command(input: &str) -> Vec<(String, bool)> {
                 in_quotes = false;
             }
             '\\' => {
-                // Backslash escapes the next character (inside or outside quotes)
+                // Backslash escapes the next character (inside or outside
+                // quotes), which makes the word literal for the same reasons a
+                // quote does: no redirection operator, no pattern.
                 if let Some(escaped) = chars.next() {
                     current.push(escaped);
+                    was_quoted = true;
                 }
             }
             ' ' | '\t' | '\n' | '\r' if !in_quotes => {
@@ -635,7 +638,8 @@ pub fn parse_heredoc_marker(line: &str) -> Option<(String, String, bool)> {
     None
 }
 
-/// Extract redirections from args, returning the remaining args and the
+/// Extract redirections from args, returning the remaining words -- still
+/// carrying their quoted flag, since pathname expansion needs it -- and the
 /// redirection list.
 ///
 /// Understood: `<`, `>`, `>>`, an explicit descriptor number in front of any
@@ -643,7 +647,7 @@ pub fn parse_heredoc_marker(line: &str) -> Option<(String, String, bool)> {
 /// both output streams. Tokens that were quoted during parsing are never
 /// treated as redirect operators. Only descriptors 0, 1 and 2 can be
 /// redirected, since those are the three a spawned program is given.
-pub fn extract_redirects(args: &[(String, bool)]) -> (Vec<String>, Redirects) {
+pub fn extract_redirects(args: &[(String, bool)]) -> (Vec<(String, bool)>, Redirects) {
     let mut remaining = Vec::new();
     let mut redirects = Redirects::default();
     let mut i = 0;
@@ -656,7 +660,7 @@ pub fn extract_redirects(args: &[(String, bool)]) -> (Vec<String>, Redirects) {
             parse_redirect_token(tok)
         };
         let Some(op) = op else {
-            remaining.push(tok.clone());
+            remaining.push((tok.clone(), quoted));
             i += 1;
             continue;
         };

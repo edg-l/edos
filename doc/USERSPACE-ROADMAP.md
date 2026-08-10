@@ -178,14 +178,18 @@ the shell half has not been written yet.
    `fg`, no `bg` and nothing that puts a pipeline in one process group. Every
    kernel piece it needs now exists: `setpgid` at spawn, `tcsetpgrp` on
    foreground, `waitpid_untraced` to notice a stop, `SIGCONT` to resume.
-7. **Globbing.** Nothing expands `*` or `?`; `ls *.txt` passes the literal
-   string. No kernel work needed.
 
-**Done:** fd-numbered redirection. `Redirects` in
-`programs/edos-sh/src/command.rs` is an ordered list of operations, so `2>file`,
-`2>&1`, `1>&2` and `&>file` work, in a pipeline stage as well as on a plain
-command. Only descriptors 0, 1 and 2 can be named, since those are the three
-`SYS_SPAWN2` gives a child.
+**Done:**
+
+- fd-numbered redirection. `Redirects` in `programs/edos-sh/src/command.rs` is
+  an ordered list of operations, so `2>file`, `2>&1`, `1>&2` and `&>file` work,
+  in a pipeline stage as well as on a plain command. Only descriptors 0, 1 and
+  2 can be named, since those are the three `SYS_SPAWN2` gives a child.
+- Pathname expansion. `programs/edos-sh/src/glob.rs` matches `*`, `?` and
+  `[...]` one path component at a time over `readdir`, for command arguments
+  and for a `for` loop's word list. A pattern matching nothing is passed
+  through unchanged, a quoted or backslash-escaped word is never a pattern, and
+  `*` does not pick up dotfiles. The command word itself is not expanded.
 
 ## Next: time is UTC everywhere
 
