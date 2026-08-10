@@ -120,7 +120,6 @@ fn main() {
 
     let mut events = [WindowEvent::default(); 16];
     let mut entries = [WindowListEntry::default(); MAX_WINDOWS];
-    let mut hits: Vec<Hit> = Vec::new();
     let mut hovered: Option<Action> = None;
     let mut menu = menu::Menu::new();
 
@@ -171,7 +170,7 @@ fn main() {
             .collect();
 
         let layout = panel::compute(window.width, &labelled, &clock);
-        hits = layout.hits;
+        let hits: Vec<Hit> = layout.hits;
 
         if let Ok(count) = window.poll_events(&mut events) {
             for event in &events[..count] {

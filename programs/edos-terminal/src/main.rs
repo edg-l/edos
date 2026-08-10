@@ -52,6 +52,13 @@ fn main() {
     let child = match ChildProcess::spawn_shell(SHELL_PATH) {
         Some(c) => {
             println!("[Terminal] Spawned shell (PID: {})", c.pid);
+            // Publish the grid before anything runs in it, so the first
+            // full-screen program to start already knows the real size.
+            let _ = edos_lib::io::set_winsize(
+                c.master_fd,
+                terminal.cols() as u16,
+                terminal.rows() as u16,
+            );
             Some(c)
         }
         None => {
@@ -84,6 +91,16 @@ fn main() {
                         let new_h = event.y as u32;
                         if window.resize(new_w, new_h).is_ok() {
                             terminal.resize_to_pixels(new_w, new_h);
+                            // The grid moved, so tell the pty: a full-screen
+                            // program reads its size from there and would
+                            // otherwise keep drawing to the old one.
+                            if let Some(c) = child.as_ref() {
+                                let _ = edos_lib::io::set_winsize(
+                                    c.master_fd,
+                                    terminal.cols() as u16,
+                                    terminal.rows() as u16,
+                                );
+                            }
                         } else {
                             eprintln!("[Terminal] Failed to resize window");
                         }

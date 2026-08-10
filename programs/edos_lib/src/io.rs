@@ -458,6 +458,29 @@ pub fn ioctl(fd: u64, request: u64, arg: u64) -> i64 {
 pub const PTY_IOCTL_SET_RAW: u64 = 0x5001;
 pub const PTY_IOCTL_SET_CANONICAL: u64 = 0x5002;
 pub const PTY_IOCTL_GET_MODE: u64 = 0x5003;
+pub const PTY_IOCTL_SET_WINSIZE: u64 = 0x5004;
+pub const PTY_IOCTL_GET_WINSIZE: u64 = 0x5005;
+
+/// Tell the terminal's pty what character grid it is drawing.
+///
+/// Called by the terminal on resize. A full-screen program reads it back with
+/// [`get_winsize`] rather than assuming a size the terminal never promised.
+pub fn set_winsize(fd: u64, cols: u16, rows: u16) -> i64 {
+    ioctl(fd, PTY_IOCTL_SET_WINSIZE, (rows as u64) << 16 | cols as u64)
+}
+
+/// The character grid of the terminal behind `fd`, as (cols, rows).
+///
+/// `None` when the descriptor is not a pty, which is the case for a pipe or a
+/// file: a caller redirected somewhere without a size should pick its own.
+pub fn get_winsize(fd: u64) -> Option<(u16, u16)> {
+    let packed = ioctl(fd, PTY_IOCTL_GET_WINSIZE, 0);
+    if packed < 0 {
+        return None;
+    }
+    let packed = packed as u64;
+    Some(((packed & 0xFFFF) as u16, ((packed >> 16) & 0xFFFF) as u16))
+}
 
 /// Switch the PTY slave fd to raw mode (no echo, no line buffering).
 pub fn pty_set_raw(fd: u64) {

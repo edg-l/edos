@@ -28,7 +28,7 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
 
     match descriptor {
         FileDescriptor::PtyMaster(pty_arc) | FileDescriptor::PtySlave(pty_arc) => {
-            match ranked_lock!(RANK_PTY, "sys_ioctl::pty", pty_arc).ioctl(request) {
+            match ranked_lock!(RANK_PTY, "sys_ioctl::pty", pty_arc).ioctl_with(request, arg) {
                 Ok(val) => val as i64,
                 Err(()) => {
                     info.lock().errno = Errno::EINVAL;

@@ -7,9 +7,10 @@ use edos_lib::io::{poll_stdin, pty_set_canonical, pty_set_raw, sys_read};
 
 // --- Constants and types ---
 
-const COLS: usize = 80;
-const ROWS: usize = 30;
-const TEXT_ROWS: usize = ROWS - 1; // bottom row is status line
+/// Fallback grid for a terminal that cannot report one: a pipe, a file, or a
+/// console with no pty behind it.
+const DEFAULT_COLS: usize = 80;
+const DEFAULT_ROWS: usize = 30;
 
 #[derive(PartialEq, Clone, Copy)]
 enum Mode {
@@ -111,6 +112,11 @@ fn read_key() -> Key {
 // --- Editor struct ---
 
 struct Editor {
+    /// Character grid this editor is drawing into, read from the terminal
+    /// rather than assumed: a program that assumes draws off the bottom of the
+    /// window the moment the grid changes and nothing tells it.
+    cols: usize,
+    rows: usize,
     lines: Vec<String>,
     cx: usize,
     cy: usize,
@@ -126,6 +132,11 @@ struct Editor {
 }
 
 impl Editor {
+    /// Rows available for file content: everything but the status line.
+    fn text_rows(&self) -> usize {
+        self.rows - 1
+    }
+
     fn new(filename: Option<String>) -> Self {
         let lines = match &filename {
             Some(path) => match std::fs::read_to_string(path) {
@@ -141,7 +152,15 @@ impl Editor {
             None => vec![String::new()],
         };
 
+        // Ask the terminal what it is drawing. A pipe or a file has no answer,
+        // and the fallback is the size this editor used to assume.
+        let (cols, rows) = edos_lib::io::get_winsize(1)
+            .map(|(c, r)| (c as usize, r as usize))
+            .unwrap_or((DEFAULT_COLS, DEFAULT_ROWS));
+
         Editor {
+            cols: cols.max(20),
+            rows: rows.max(3),
             lines,
             cx: 0,
             cy: 0,
@@ -161,8 +180,8 @@ impl Editor {
     fn ensure_cursor_in_view(&mut self) {
         if self.cy < self.scroll {
             self.scroll = self.cy;
-        } else if self.cy >= self.scroll + TEXT_ROWS {
-            self.scroll = self.cy - TEXT_ROWS + 1;
+        } else if self.cy >= self.scroll + self.text_rows() {
+            self.scroll = self.cy - self.text_rows() + 1;
         }
     }
 
@@ -187,13 +206,13 @@ impl Editor {
         // Hide cursor, move to top-left.
         write!(w, "\x1b[?25l\x1b[H").unwrap();
 
-        for row in 0..TEXT_ROWS {
+        for row in 0..self.text_rows() {
             let buf_row = self.scroll + row;
             if buf_row < self.lines.len() {
                 let line = &self.lines[buf_row];
                 // Truncate to COLS columns.
-                let display: &str = if line.len() > COLS {
-                    &line[..COLS]
+                let display: &str = if line.len() > self.cols {
+                    &line[..self.cols]
                 } else {
                     line.as_str()
                 };
@@ -206,7 +225,7 @@ impl Editor {
 
         // Status line (last row). Pad to COLS-1 to avoid triggering a
         // line wrap + scroll when writing the last column.
-        let status_width = COLS - 1;
+        let status_width = self.cols - 1;
         write!(w, "\x1b[7m").unwrap(); // reverse video
         let status = self.build_status_line();
         let padded = format!("{:<width$}", status, width = status_width);

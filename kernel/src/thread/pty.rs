@@ -20,6 +20,10 @@ pub enum PtySlaveRead {
 }
 
 pub const PTY_IOCTL_SET_RAW: u64 = 0x5001;
+/// Record the character grid the terminal draws, packed `(rows << 16) | cols`.
+/// Set by the terminal on resize, read by full-screen programs.
+pub const PTY_IOCTL_SET_WINSIZE: u64 = 0x5004;
+pub const PTY_IOCTL_GET_WINSIZE: u64 = 0x5005;
 pub const PTY_IOCTL_SET_CANONICAL: u64 = 0x5002;
 pub const PTY_IOCTL_GET_MODE: u64 = 0x5003;
 
@@ -162,6 +166,11 @@ pub struct Pty {
     eof_pending: bool,
     /// PID of the foreground process that should receive Ctrl+C signals.
     pub foreground_pid: Option<u64>,
+    /// The character grid the terminal is drawing, so a full-screen program can
+    /// ask instead of assuming. A program that assumes draws off the bottom of
+    /// the window the moment the grid changes size, and nothing tells it.
+    cols: u16,
+    rows: u16,
 }
 
 #[allow(unused)]
@@ -181,11 +190,28 @@ impl Pty {
             line_disc: LineDiscipline::new(),
             eof_pending: false,
             foreground_pid: None,
+            cols: 80,
+            rows: 30,
         }
     }
 
     pub fn ioctl(&mut self, request: u64) -> Result<u64, ()> {
+        self.ioctl_with(request, 0)
+    }
+
+    pub fn ioctl_with(&mut self, request: u64, arg: u64) -> Result<u64, ()> {
         match request {
+            PTY_IOCTL_SET_WINSIZE => {
+                let cols = (arg & 0xFFFF) as u16;
+                let rows = ((arg >> 16) & 0xFFFF) as u16;
+                if cols == 0 || rows == 0 {
+                    return Err(());
+                }
+                self.cols = cols;
+                self.rows = rows;
+                Ok(0)
+            }
+            PTY_IOCTL_GET_WINSIZE => Ok((self.rows as u64) << 16 | self.cols as u64),
             PTY_IOCTL_SET_RAW => {
                 self.line_disc.canonical = false;
                 self.line_disc.echo = false;
