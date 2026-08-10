@@ -43,18 +43,28 @@
       `usb::init()` (`drivers/mod.rs:95`), which `call_once`s
       `XHCI_DRIVER_THREAD_ID` before any filesystem is mounted, so
       `send_and_wait`'s `if let Some(handle)` is taken.
-    What is left is the wake itself against a thread parked in
-    `thread_park_while`. The next experiment needs `log!` (never `println!`)
-    on both sides: one line where the park returns in `xhci_driver_main`
-    (`xhci/mod.rs:1475`) reporting `current_thread_id()`, and one in
-    `send_and_wait` after `wake_thread` reporting the target's id and the
-    value `wake_thread` returned. That shows whether the wake reached a
-    thread that then failed to re-enter the drain, or never landed at all.
+  MECHANISM, measured with `log!` on both sides of the mailbox
+  (`logs/iter32-usbdisk-run_log.txt`): THE WAKE IS NOT LOST. It is delivered
+  (`usb-msc: wake_thread -> true` at t=1.687) to a thread that has not reached
+  its event loop yet — the xHCI thread's FIRST EVER `loop wake` prints at
+  t=21.71, 20.8s after `xhci: initial enumeration complete` (t=0.89), and only
+  once the fs kthread's second 10s timeout has expired. So the driver thread is
+  blocked *between* enumeration and the loop, not parked inside it, and the two
+  threads deadlock until the timeout breaks it.
+  The only blocking call in that span is `crate::fs::api::register_partition`
+  (`xhci/mod.rs:1397`), which the xHCI driver thread runs inline — a filesystem
+  operation on the one thread that must stay free to answer block requests.
+  The fs kthread's partition scan of `/dev/usb0` then waits on a mailbox reply
+  that only that thread can post.
+  FIX: post the registration to a kthread (the `fs::evict::post_evict` shape)
+  so `xhci_driver_main` falls straight into its loop; the comment above that
+  block already claims the work is "deferred", and it is not. Confirm first
+  with one `log!` immediately after `register_partition` returns — if it prints
+  at ~21.7 the diagnosis is exact.
   The fs side no longer waits forever: `send_and_wait` uses
   `Response::wait_timeout(10s)` and fails the read with `BlockError::Timeout`,
-  so the symptom is now a logged `usb-msc: block request timed out` and a
-  failed GPT scan rather than a wedged boot. The lost wake itself is still
-  unexplained, and the next boot with `--usb-disk` should show which.
+  so the symptom is now a logged `usb-msc: block request timed out` and a GPT
+  scan that falls back to MBR, rather than a wedged boot.
 
 - The AHCI ATAPI commands read a fixed number of bytes out of a pooled DMA
   buffer without asking how many arrived, the same defect fixed in 7591982
