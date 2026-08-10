@@ -781,6 +781,59 @@ fn test13(dir: &str) {
     );
 }
 
+fn test14(dir: &str) {
+    use edos_lib::io::{mkdirat, symlink};
+    use std::io::ErrorKind;
+
+    let base = format!("{}/iotest_t14", dir);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir(&base).unwrap_or_else(|e| fail(14, &format!("create dir: {}", e)));
+
+    fs::create_dir(format!("{}/sub", base))
+        .unwrap_or_else(|e| fail(14, &format!("create subdir: {}", e)));
+    fs::write(format!("{}/file", base), b"x")
+        .unwrap_or_else(|e| fail(14, &format!("create file: {}", e)));
+    // A dangling link still takes the name.
+    if symlink("nowhere", &format!("{}/link", base)) != 0 {
+        fail(14, "symlink failed");
+    }
+
+    let taken = ["sub", "file", "link"];
+    for name in taken {
+        match fs::create_dir(format!("{}/{}", base, name)) {
+            Ok(()) => fail(14, &format!("mkdir over an existing {} succeeded", name)),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(e) => fail(14, &format!("mkdir over {} gave {:?}, want AlreadyExists", name, e.kind())),
+        }
+        if symlink("nowhere", &format!("{}/{}", base, name)) == 0 {
+            fail(14, &format!("symlink over an existing {} succeeded", name));
+        }
+        if mkdirat(AT_FDCWD, &format!("{}/{}", base, name)) == 0 {
+            fail(14, &format!("mkdirat over an existing {} succeeded", name));
+        }
+    }
+
+    // The refused creates must not have left duplicate directory entries.
+    let mut names: Vec<String> = fs::read_dir(&base)
+        .unwrap_or_else(|e| fail(14, &format!("read_dir: {}", e)))
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    if names != ["file", "link", "sub"] {
+        fail(14, &format!("directory holds {:?}, want one entry each", names));
+    }
+
+    // O_CREAT without O_EXCL still opens a file that already exists.
+    fs::write(format!("{}/file", base), b"yy")
+        .unwrap_or_else(|e| fail(14, &format!("rewrite an existing file: {}", e)));
+    if fs::read(format!("{}/file", base)).unwrap_or_default() != b"yy" {
+        fail(14, "O_CREAT on an existing file lost the write");
+    }
+
+    let _ = fs::remove_dir_all(&base);
+    pass(14, "creating over a taken name reports AlreadyExists");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -799,6 +852,7 @@ fn main() {
     test11();
     test12(dir);
     test13(dir);
+    test14(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

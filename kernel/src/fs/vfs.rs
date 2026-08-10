@@ -937,11 +937,22 @@ fn resolve_parent_inode(op: &VfsOp) -> Option<Arc<VfsInode>> {
     resolve_inode_for(op.mount_id, &op.fs, &parent)
 }
 
+/// Whether the name is already taken, for the benefit of the operations that
+/// POSIX requires to fail with `EEXIST` rather than replace what is there.
+/// A dangling symbolic link takes the name too, so `file_info` alone (which
+/// follows links) is not enough.
+fn name_taken(op: &VfsOp) -> bool {
+    op.fs.file_info(&op.relative).is_ok() || op.fs.read_link(&op.relative).is_ok()
+}
+
 pub fn create_file(op: &VfsOp) -> Result<(), Error> {
     let parent_inode = resolve_parent_inode(op);
     let _guard = parent_inode
         .as_ref()
         .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
+    if name_taken(op) {
+        return Err(Error::AlreadyExists);
+    }
     let result = op.fs.create_file(&op.relative);
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
@@ -954,6 +965,9 @@ pub fn symlink(op: &VfsOp, target: &str) -> Result<(), Error> {
     let _guard = parent_inode
         .as_ref()
         .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
+    if name_taken(op) {
+        return Err(Error::AlreadyExists);
+    }
     let result = op.fs.symlink(target, &op.relative);
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
@@ -970,6 +984,9 @@ pub fn create_dir(op: &VfsOp) -> Result<(), Error> {
     let _guard = parent_inode
         .as_ref()
         .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
+    if name_taken(op) {
+        return Err(Error::AlreadyExists);
+    }
     let result = op.fs.create_dir(&op.relative);
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);

@@ -1104,6 +1104,7 @@ impl From<FsError> for Errno {
             FsError::Busy => Errno::EBUSY,
             FsError::InvalidArgument => Errno::EINVAL,
             FsError::TooManyLinks => Errno::ELOOP,
+            FsError::AlreadyExists => Errno::EEXIST,
             FsError::ProtocolMismatch => Errno::EIO,
         }
     }

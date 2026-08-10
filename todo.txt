@@ -57,11 +57,6 @@
   syscall numbers is where a silent wrong-number bug would come from, so it
   wants doing deliberately rather than as a drive-by.
 
-- mkdir on an existing directory reports EIO, so std shows "other error" where
-  it should be AlreadyExists. The kernel's From<FsError> for Errno has no
-  EEXIST source: fs::Error has no AlreadyExists variant, so create_file and
-  mkdir cannot distinguish it. Now visible because userspace keeps the errno.
-
 - SYS_OPEN takes a NUL-terminated path while SYS_STAT takes pointer+length,
   so edos_rt allocates a CString for every open. Settling on pointer+length
   everywhere removes that allocation but changes the kernel ABI and every

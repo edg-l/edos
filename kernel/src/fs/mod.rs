@@ -88,6 +88,8 @@ pub enum Error {
     InvalidArgument,
     #[error("too many levels of symbolic links")]
     TooManyLinks,
+    #[error("file exists")]
+    AlreadyExists,
     #[error("filesystem thread answered a request with the wrong reply")]
     ProtocolMismatch,
 }

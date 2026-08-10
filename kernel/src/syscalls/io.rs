@@ -10,7 +10,7 @@ use crate::debug::lock_order::{RANK_PIPE, RANK_PTY};
 use crate::fs::block_page_cache::BlockPageCache;
 use crate::fs::handle::{PollEntry, PollKey, Pollable};
 use crate::fs::vfs;
-use crate::fs::{FileKind, PollState, api as fs_api, path::Path};
+use crate::fs::{Error as FsError, FileKind, PollState, api as fs_api, path::Path};
 use crate::net::socket::PollableSocket;
 use crate::thread::pipe::PollablePipe;
 use crate::thread::poll::PollWaiter;
@@ -910,9 +910,14 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
         }
         Err(e) => {
             if create {
-                if let Err(e) = fs_api::create_file(&path) {
-                    info.lock().errno = Errno::from(e);
-                    return -1;
+                // O_CREAT without O_EXCL: another creator winning the race
+                // between the lookup above and this call is not an error.
+                match fs_api::create_file(&path) {
+                    Ok(()) | Err(FsError::AlreadyExists) => {}
+                    Err(e) => {
+                        info.lock().errno = Errno::from(e);
+                        return -1;
+                    }
                 }
             } else {
                 info.lock().errno = Errno::from(e);
