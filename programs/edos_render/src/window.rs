@@ -446,8 +446,10 @@ impl Window {
             free_buffer(buf0.0, buf0.1);
             e
         })?;
-        // Point the compositor at buffer 0 initially.
-        window_set(id, property::BUFFER_SHM, buf0.0)?;
+        // No buffer is published here. A buffer nobody has drawn into is a
+        // black rectangle, and the compositor draws the window's ground when a
+        // window has no buffer at all; the first `swap_buffers` is what the
+        // client means by "this is what I look like".
 
         Ok(Self {
             id,

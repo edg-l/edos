@@ -1399,6 +1399,26 @@ the caller holds *open*, and `SYS_UTIMENSAT` took a path; a `File` has only a
 descriptor. The kernel grew the POSIX form — a null path means the file `dirfd`
 names — which is `futimens`, covered by `iotest` test 9.
 
+## Fixed: a new window was black until its client painted
+
+Reported from a VNC session, and invisible to a screenshot taken a moment
+later. A window was created **mapped** (`WindowInfo::new` set `visible: true`)
+and `Window::new` immediately pointed the compositor at buffer 0 — a buffer
+nobody had drawn into. Everything between `window_create` and the client's
+first frame — allocating the second buffer, the title, the flags, the client's
+own pre-render — was therefore composited as a black rectangle inside real
+decorations.
+
+Both halves had to go: a window is created unmapped and its client maps it with
+`show()`, and no buffer is published until the first `swap_buffers`, which is
+the only call that means "this is what I look like". A window with no buffer
+composites as its own themed ground, so a client that maps before painting
+costs a frame of empty window rather than a black hole.
+
+`Window::resize` still publishes an unpainted buffer, deliberately: the old
+pair is freed immediately after, so the alternative is leaving the compositor
+holding a freed shm id.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any

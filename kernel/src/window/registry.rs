@@ -114,7 +114,12 @@ impl WindowInfo {
             width,
             height,
             z_order,
-            visible: true,
+            // Created unmapped. A client sets up a window in several calls --
+            // buffers, title, flags -- and painting is the last of them, so a
+            // window that is visible from `create` is composited with whatever
+            // its buffer happened to contain: a black rectangle until the
+            // client's first frame lands.
+            visible: false,
             title: String::new(),
             buffer_shm_id: None,
             flags: 0,
