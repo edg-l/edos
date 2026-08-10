@@ -7,7 +7,7 @@
 
 | Channel | For | Transport |
 |---|---|---|
-| VNC | a human watching | `127.0.0.1:5901` (display `:1`) |
+| VNC or SPICE | a human watching | `127.0.0.1:5901` (display `:1`), or `--display spice` on 5930 |
 | QMP | scripts and agents | unix socket, line-delimited JSON |
 
 QEMU is itself the VNC server. There is no X server, no compositor, and no
@@ -66,7 +66,25 @@ ssh -L 5901:127.0.0.1:5901 <server>
 
 The VNC server is unauthenticated, which is safe only because it binds to
 loopback and the SSH tunnel is the authentication. Binding it to a LAN address
-without `password=on` publishes an unauthenticated console.
+(`--vnc-addr`) without `password=on` publishes an unauthenticated console; the
+same is true of `--display spice`, which is started with `disable-ticketing`.
+
+### SPICE, when VNC is not fast enough
+
+```bash
+scripts/edos-vm start --display spice     # then: remote-viewer spice://<host>:5930
+```
+
+QEMU's VNC server polls the display on a ~30ms timer, so a viewer sees roughly
+33 updates a second however fast the guest paints -- and the guest paints a
+window drag at 77fps with 1.5ms to spare, so that timer is the ceiling, not the
+compositor. SPICE streams damage as the guest produces it and lets the client
+draw the cursor, which is the difference that shows when a whole window moves.
+
+VNC stays the default because it needs nothing on the client beyond a VNC
+viewer; SPICE wants `remote-viewer` (the `virt-viewer` package). Screenshots,
+keystrokes and pointer events all go through QMP either way, so nothing that
+drives the guest changes.
 
 ---
 

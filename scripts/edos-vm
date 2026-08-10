@@ -208,11 +208,20 @@ def cmd_start(args):
         "-serial", f"file:{SERIAL_LOG}",
         "-no-reboot",
         "-display", "none",
-        "-vnc", f"{args.vnc_addr}:{args.vnc}",
         "-qmp", f"unix:{SOCK},server,nowait",
         "-pidfile", PIDFILE,
         "-daemonize",
     ]
+
+    # SPICE streams damage as the guest produces it and lets the client draw
+    # the cursor; QEMU's VNC server instead polls the display on a ~30ms timer,
+    # which caps a viewer near 33fps however fast the guest paints. VNC stays
+    # the default because it needs no client beyond a VNC viewer.
+    if args.display == "spice":
+        qemu += ["-spice",
+                 f"port={args.spice_port},addr={args.vnc_addr},disable-ticketing=on"]
+    else:
+        qemu += ["-vnc", f"{args.vnc_addr}:{args.vnc}"]
 
     if not args.no_cdrom:
         qemu += ["-cdrom", iso]
@@ -239,7 +248,10 @@ def cmd_start(args):
         if os.path.exists(SOCK):
             break
         time.sleep(0.1)
-    print(f"vnc      {args.vnc_addr}:{5900 + args.vnc} (display :{args.vnc})")
+    if args.display == "spice":
+        print(f"spice    spice://{args.vnc_addr}:{args.spice_port}")
+    else:
+        print(f"vnc      {args.vnc_addr}:{5900 + args.vnc} (display :{args.vnc})")
     print(f"qmp      {SOCK}")
     print(f"serial   {SERIAL_LOG}")
 
@@ -274,8 +286,13 @@ def cmd_status(args):
         return
     q = Qmp()
     status = q.cmd("query-status")
-    vnc = q.cmd("query-vnc")
-    print(f"pid {pid}, {status['status']}, vnc {vnc.get('host')}:{vnc.get('service')}")
+    spice = q.cmd("query-spice") or {}
+    if spice.get("enabled"):
+        display = f"spice {spice.get('host')}:{spice.get('port')}"
+    else:
+        vnc = q.cmd("query-vnc")
+        display = f"vnc {vnc.get('host')}:{vnc.get('service')}"
+    print(f"pid {pid}, {status['status']}, {display}")
 
 
 def cmd_shot(args):
@@ -567,6 +584,9 @@ def main():
     s = sub.add_parser("start", help="boot the VM headless")
     s.add_argument("--vnc", type=int, default=1, help="VNC display number (port 5900+N)")
     s.add_argument("--vnc-addr", default="127.0.0.1", help="VNC bind address")
+    s.add_argument("--display", default="vnc", choices=["vnc", "spice"],
+                   help="remote display protocol; spice streams damage, vnc polls")
+    s.add_argument("--spice-port", type=int, default=5930)
     s.add_argument("--pointer", default="tablet", choices=["tablet", "mouse"],
                    help="absolute (tablet) or relative (mouse) pointing device")
     s.add_argument("--smp", type=int, default=4)
