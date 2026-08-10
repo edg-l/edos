@@ -66,6 +66,7 @@ pub const SYS_PING: u64 = 249;
 pub const SYS_NETINFO: u64 = 250;
 pub const SYS_FORK: u64 = 255;
 pub const SYS_SYNC: u64 = 162;
+pub const SYS_REBOOT: u64 = 169;
 pub const SYS_MOUNT: u64 = 202;
 pub const SYS_LIST_PARTITIONS: u64 = 203;
 pub const SYS_LIST_MOUNTS: u64 = 208;

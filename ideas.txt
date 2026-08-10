@@ -1179,6 +1179,14 @@ Shipped this session, all verified on hardware unless noted:
   exec with user-spinning siblings; both fail on the previous kernel and
   the other four exectest cases do not.
 
+- **`shutdown` stops the machine properly.** `reboot(cmd)` (syscall
+  169, cmd 0 power off / 1 reset / 2 halt) syncs every filesystem, then
+  drives ACPI soft-off: PM1a_CNT comes from the FADT and SLP_TYPa is
+  decoded out of the DSDT's `\_S5_` package, with the emulator ports as
+  a fallback and `RST_CNT`/8042 for the reset. `programs/shutdown` is
+  the command. A guest stopped this way leaves a clean journal, so
+  `efs-fsck` runs its dir-tree pass without a `--repair` replay first.
+
 - **The audit's syscall table is closed.** `access`, `nanosleep`, path
   `truncate`, `utimensat`, `symlink`/`readlink`, `sigprocmask`,
   streaming `getdents`, both tiers of the `*at` family
@@ -1191,45 +1199,40 @@ Shipped this session, all verified on hardware unless noted:
 Open, roughly in priority order. Items marked [audit] come from
 doc/AUDIT.md, which has the file:line detail and the reasoning.
 
-The interface gaps that actually block programs:
+Hygiene and quality:
 
-1. **No shutdown or reboot syscall**, so every stop is a power cut and
-   the journal replays on the next boot. init is the natural owner now.
-
-Then hygiene and quality:
-
-2. **`unwrap()`/`expect()` density in kernel code.** [audit] 228 when the
+1. **`unwrap()`/`expect()` density in kernel code.** [audit] 228 when the
    audit was written and rising with every feature, so recount rather
    than trusting the figure. Convert the ones on I/O and parsing
    results; leave a comment on the structurally impossible ones.
-3. **Module READMEs for `fs/` (15.7k lines) and `drivers/` (13k).**
+2. **Module READMEs for `fs/` (15.7k lines) and `drivers/` (13k).**
    [audit]
 
 Still open from the audit, but deliberately unhurried. These are not
 oversights; each has a reason it has not been done.
 
-4. **TCP retransmit clones whole segments.** [audit 2.5]
+3. **TCP retransmit clones whole segments.** [audit 2.5]
    `resends.push(seg.data.clone())` copies the full segment per retry.
    This was theoretical while no connection could be established; now
    that TCP moves real data it is a live cost under loss. `Arc<[u8]>`
    and clone the handle.
-5. **Scheduler quality, four items.** [audit 4] Load is measured as
+4. **Scheduler quality, four items.** [audit 4] Load is measured as
    `thread_count`, so a sleeping thread weighs the same as a CPU-bound
    one and `pick_sched`/`try_rebalance` balance the wrong quantity.
    There is no priority inheritance, so a high-priority waiter still
    queues behind a low-priority lock holder. The timeslice is a flat 5ms
    regardless of priority. The idle loop polls for steals on a backoff
    instead of being told by an IPI.
-6. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
+5. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
    flag and one request slot, so unrelated `munmap`s on different
    address spaces serialize. Deliberate and correct; it is the scaling
    wall once core counts rise. The real fix is a per-mm CPU mask so the
    IPI is skipped for address spaces no other CPU has loaded.
-7. **`find_free_address` scans from the base every call.** [audit 2.7]
+6. **`find_free_address` scans from the base every call.** [audit 2.7]
    O(VMAs) per mmap. The tradeoff is deliberate — a cursor would never
    wrap and freed ranges would never be reused — and only worth
    revisiting if it shows up in a profile.
-8. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
+7. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
    NUL-terminated path while `SYS_STAT` takes pointer+length, so
    `edos_rt` allocates a `CString` for every open.
 

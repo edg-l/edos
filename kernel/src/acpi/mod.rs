@@ -12,7 +12,7 @@ use crate::{acpi::handler::AcpiHandler, boot::boot_info, println};
 use alloc::{collections::BTreeMap, vec::Vec};
 use raw_cpuid::CpuId;
 
-mod handler;
+pub mod handler;
 
 static ACPI_TABLES: Once<AcpiTables<AcpiHandler>> = Once::new();
 

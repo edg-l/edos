@@ -28,6 +28,12 @@ scripts/edos-vm log -n 40          # tail the guest serial log
 scripts/edos-vm stop
 ```
 
+`stop` is a power cut: the guest's filesystems are whatever the last writeback
+left, and the next boot replays the journal. Typing `shutdown` in the guest
+(`-r` to reboot, `-H` to halt) syncs every filesystem first and then powers the
+machine off through ACPI, which is what to use before running `efs-fsck` on the
+disk image.
+
 Three make targets drive the guest for you and need no display either:
 
 ```bash

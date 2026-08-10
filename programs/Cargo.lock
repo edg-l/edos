@@ -328,6 +328,13 @@ name = "sha256sum"
 version = "0.1.0"
 
 [[package]]
+name = "shutdown"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "sleep"
 version = "0.1.0"
 

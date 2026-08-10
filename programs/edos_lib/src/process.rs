@@ -475,3 +475,18 @@ pub fn sys_sigaction(signal: u32, handler: u64) -> i64 {
 pub fn sigprocmask(how: u32, mask: u32) -> i64 {
     unsafe { sys::syscall2(sys::SYS_SIGPROCMASK, how as u64, mask as u64) as i64 }
 }
+
+/// `reboot` commands: what the machine should do once the filesystems are
+/// flushed.
+pub const REBOOT_POWER_OFF: u64 = 0;
+pub const REBOOT_RESTART: u64 = 1;
+pub const REBOOT_HALT: u64 = 2;
+
+/// Stop the machine. The kernel syncs every filesystem first, so the next boot
+/// does not replay the journal.
+///
+/// Only returns on an unknown command, and then -1; a call that is going to
+/// work never comes back.
+pub fn reboot(cmd: u64) -> i64 {
+    unsafe { sys::syscall1(sys::SYS_REBOOT, cmd) as i64 }
+}

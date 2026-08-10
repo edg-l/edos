@@ -46,6 +46,7 @@ mod loader;
 mod logs;
 mod memory;
 mod net;
+mod power;
 mod serial;
 mod smp;
 mod syscalls;

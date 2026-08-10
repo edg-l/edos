@@ -33,7 +33,7 @@ use crate::{
         vma::{Vma, VmaBacking, VmaFlags, VmaProt, VmaSet},
     },
     net::device::NetDevice,
-    println, ranked_lock,
+    power, println, ranked_lock,
     syscalls::{
         fs::{
             FstatEntry, UserTimespec, sys_access, sys_faccessat, sys_fstat, sys_fstatat,
@@ -68,7 +68,7 @@ use crate::{
 };
 
 mod fs;
-mod io;
+pub(crate) mod io;
 mod ioctl;
 pub mod memory;
 mod net;
@@ -401,6 +401,13 @@ const SYS_STATFS: u64 = 254;
 const SYS_FORK: u64 = 255;
 const SYS_GETDNS: u64 = 256;
 const SYS_SYNC: u64 = 162;
+const SYS_REBOOT: u64 = 169;
+
+/// `reboot` commands. Flush the filesystems, then: power the machine off,
+/// reset it, or stop it where it is.
+const REBOOT_POWER_OFF: u64 = 0;
+const REBOOT_RESTART: u64 = 1;
+const REBOOT_HALT: u64 = 2;
 
 /// Arguments struct for SYS_SPAWN2. Passed as a single pointer from userspace.
 #[repr(C)]
@@ -1036,6 +1043,9 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             io::sys_sync();
             ctx.rax = 0;
         }
+        SYS_REBOOT => {
+            ctx.rax = sys_reboot(ctx.rdi);
+        }
         _ => {
             ctx.rax = !0u64;
         }
@@ -1220,6 +1230,28 @@ fn sys_sleep_ms(milliseconds: u64) -> u64 {
     thread_sleep(duration);
 
     0
+}
+
+/// `reboot(cmd)`: stop the machine. Only returns on an unknown command, and
+/// then with EINVAL — a successful call never comes back, so there is no
+/// success value to report.
+///
+/// EDOS has no user ids, so there is no privilege to check: the guard against
+/// a stray program stopping the machine is that `reboot` is not something a
+/// program calls by accident.
+fn sys_reboot(cmd: u64) -> u64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    match cmd {
+        REBOOT_POWER_OFF => power::power_off(),
+        REBOOT_RESTART => power::reboot(),
+        REBOOT_HALT => power::halt(),
+        _ => {
+            info.lock().errno = Errno::EINVAL;
+            !0u64
+        }
+    }
 }
 
 /// POSIX `timespec`, as userspace lays it out for [`sys_nanosleep`].
