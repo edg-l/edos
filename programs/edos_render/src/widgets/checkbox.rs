@@ -124,6 +124,8 @@ impl Widget for Checkbox {
         // Draw border
         let border_color = if self.focused {
             colors::FOCUS_RING
+        } else if self.hovered {
+            colors::BORDER_HOVER
         } else {
             colors::INPUT_BORDER
         };

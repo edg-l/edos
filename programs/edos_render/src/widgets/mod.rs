@@ -116,6 +116,8 @@ pub mod colors {
     pub const INPUT_BG: u32 = Theme::DEFAULT.input_bg.raw();
     /// Text input border.
     pub const INPUT_BORDER: u32 = Theme::DEFAULT.input_border.raw();
+    /// Border of a hovered or pressed control.
+    pub const BORDER_HOVER: u32 = Theme::DEFAULT.border_hover.raw();
     /// Slider track color.
     pub const SLIDER_TRACK: u32 = Theme::DEFAULT.slider_track.raw();
     /// Slider thumb color.

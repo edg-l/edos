@@ -115,10 +115,8 @@ impl Widget for Button {
         }
 
         // Draw border (subtle, matches dark theme)
-        let border_color = if self.pressed {
-            colors::FOCUS_RING
-        } else if self.hovered {
-            colors::FOCUS_RING
+        let border_color = if self.pressed || self.hovered {
+            colors::BORDER_HOVER
         } else {
             colors::INPUT_BORDER
         };

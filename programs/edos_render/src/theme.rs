@@ -46,6 +46,9 @@ pub struct Theme {
     pub button_pressed: Color,
     pub input_bg: Color,
     pub input_border: Color,
+    /// Border of a hovered or pressed control. Distinct from `focus_ring`, so
+    /// the pointer being over a control never looks like keyboard focus.
+    pub border_hover: Color,
     pub text_primary: Color,
     pub text_placeholder: Color,
     pub focus_ring: Color,
@@ -104,9 +107,10 @@ impl Theme {
         button_pressed: Color::from_rgb(0x14, 0x18, 0x20),
         input_bg: Color::from_rgb(0x0D, 0x10, 0x17),
         input_border: Color::from_rgb(0x27, 0x2D, 0x38),
+        border_hover: Color::from_rgb(0x3E, 0x46, 0x54),
         text_primary: Color::from_rgb(0xCB, 0xCC, 0xC6), // Ayu fg
         text_placeholder: Color::from_rgb(0x5C, 0x63, 0x70),
-        focus_ring: Color::from_rgb(0x39, 0xBA, 0xE6), // Ayu blue
+        focus_ring: Color::from_rgb(0xE6, 0xB4, 0x50), // Ayu orange, the one accent
         checkbox_check: Color::from_rgb(0x39, 0xBA, 0xE6),
         slider_track: Color::from_rgb(0x1A, 0x1F, 0x29),
         slider_thumb: Color::from_rgb(0x39, 0xBA, 0xE6),
