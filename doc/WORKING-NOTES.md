@@ -2040,11 +2040,13 @@ Three things the format demands that are easy to get subtly wrong:
 - **Creating a symlink needs `edos_lib::io::symlink`.** `std::fs` has no
   portable symlink constructor and `std::os::edos` exposes only `ffi` and `io`,
   so there is no `std::os::unix::fs::symlink` to reach for.
-- **`mkdir -p` is silently a no-op.** `programs/mkdir` does not implement `-p`;
-  it consumes the flag as an operand-ish argument, creates nothing, and exits
-  successfully, so a script that depends on it fails several commands later at
-  the first write into the directory that was never made. Recorded in
-  `todo.txt`. `tar -x` is unaffected: it uses `fs::create_dir_all`.
+- **`mkdir` used to read exactly one argument, and `mkdir -p` created a
+  directory called `-p`.** It took `args[1]` and passed it straight to
+  `create_dir`, so the flag became the operand, the call *succeeded*, and the
+  script failed several commands later at the first write into the directory
+  that was never made. It takes `-p` and any number of operands now. The shape
+  of the bug is worth remembering: a program that indexes `args[1]` without
+  parsing turns every flag into a plausible-looking success.
 - **`scripts/edos-vm type` can lose the front of a long line.** A single `type`
   carrying four `;`-separated commands arrived with its first fifteen
   characters missing, so `mkdir -p /tmp/t/sub; …` ran as `/sub; …` and the
