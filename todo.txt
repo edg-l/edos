@@ -99,12 +99,3 @@
   arriving after the counter is read. Seen once on 2026-08-10; catch the failing
   run's full log before chasing it, since the counter is the only evidence
   printed today.
-
-- Taskbar and window manager disagree about which window is focused. The taskbar
-  infers focus from the highest z_order in `window_list` (edos-taskbar/src/main.rs,
-  `focused_window_id`), while the wm paints its title-bar accent from its own
-  focus state. Launching `wintest` from a terminal puts the Widgets window on top
-  and underlined in the taskbar, while the orange title-bar hairline stays on the
-  terminal behind it (logs/iter12-widgets.png). One of the two has to be the
-  source of truth; the window list should carry a focused flag from the wm rather
-  than have every dock re-derive it from stacking order.

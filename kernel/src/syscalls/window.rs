@@ -303,6 +303,10 @@ pub fn sys_window_poll(window_id: WindowId, events_ptr: *mut WindowEvent, max: u
 ///     z_order: u32,
 ///     visible: u32,
 ///     buffer_shm_id: u64,
+///     flags: u64,
+///     damaged: u32,
+///     focused: u32,
+///     title: [u8; TITLE_MAX],
 /// }
 /// ```
 pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
@@ -316,6 +320,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
     let (entries, total_count) = {
         let registry = read_tracked(ReadSite::SysWindowList);
         let windows = registry.visible_windows_sorted();
+        let focused = registry.focused_window();
         let total_count = windows.len();
 
         if buffer_ptr.is_null() || max == 0 {
@@ -345,7 +350,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
                     buffer_shm_id: window.buffer_shm_id.unwrap_or(0),
                     flags: window.flags,
                     damaged: window.damaged as u32,
-                    _padding2: 0,
+                    focused: (focused == Some(window.id)) as u32,
                     title,
                 }
             })
@@ -404,7 +409,9 @@ pub struct WindowListEntry {
     pub flags: u64,
     /// Set when the client has called SYS_WINDOW_DAMAGE since last list query.
     pub damaged: u32,
-    pub _padding2: u32,
+    /// Set for the window that currently holds input focus. The registry is the
+    /// single source of truth: clients must not re-derive focus from `z_order`.
+    pub focused: u32,
     pub title: [u8; TITLE_MAX],
 }
 

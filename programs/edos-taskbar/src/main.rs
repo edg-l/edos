@@ -147,10 +147,12 @@ fn main() {
         // Sort by window ID for stable taskbar order (not z_order which changes on focus)
         visible_windows.sort_by_key(|w| w.id);
 
-        // Determine focused window (highest z_order among visible windows)
+        // Focus comes from the kernel registry, which the window manager owns.
+        // Deriving it from z_order disagrees with the title-bar accent, since a
+        // raise also moves z_order.
         let focused_window_id = visible_windows
             .iter()
-            .max_by_key(|w| w.z_order)
+            .find(|w| w.is_focused())
             .map(|w| w.id);
 
         // Handle taskbar events

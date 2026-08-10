@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use edos_render::graphics::Screen;
 use edos_render::window::{
-    WindowEvent, WindowEventType, WindowListEntry, property, window_list, window_send_event,
-    window_set,
+    WindowEvent, WindowEventType, WindowListEntry, focused_id, property, window_list,
+    window_send_event, window_set,
 };
 
 mod compositor;
@@ -54,7 +54,7 @@ struct ResizeState {
 /// Cursor size for dirty rect marking.
 const CURSOR_SIZE: u32 = 16;
 
-/// Snapshot of a window's position/size/visibility from the previous frame.
+/// Snapshot of a window's position/size/visibility/focus from the previous frame.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct PrevWindowState {
     id: u64,
@@ -64,6 +64,7 @@ struct PrevWindowState {
     height: u32,
     visible: u32,
     flags: u64,
+    focused: u32,
 }
 
 impl PrevWindowState {
@@ -76,6 +77,7 @@ impl PrevWindowState {
             height: w.height,
             visible: w.visible,
             flags: w.flags,
+            focused: w.focused,
         }
     }
 
@@ -100,20 +102,23 @@ fn find_window_at(windows: &[WindowListEntry], x: i32, y: i32) -> Option<&Window
 }
 
 /// Handle a left mouse button press: hit-test the topmost window and start
-/// drag, resize, close, or focus accordingly.
+/// drag, resize, or close accordingly.
+///
+/// Focus itself is the kernel registry's: it already moves focus to the window
+/// under a press. Only the desktop-background case has to be reported, since
+/// the kernel leaves focus alone when no window is hit.
 fn handle_mouse_press(
     windows: &[WindowListEntry],
     mx: i32,
     my: i32,
     drag_state: &mut Option<DragState>,
     resize_state: &mut Option<ResizeState>,
-    focused_window_id: &mut Option<u64>,
+    focused_window_id: Option<u64>,
 ) {
     let window = match find_window_at(windows, mx, my) {
         Some(w) => w,
         None => {
-            // Clicked on desktop background: unfocus current window
-            if let Some(old_id) = *focused_window_id {
+            if let Some(old_id) = focused_window_id {
                 let lost_event = WindowEvent {
                     event_type: WindowEventType::FocusLost as u32,
                     x: 0,
@@ -123,7 +128,6 @@ fn handle_mouse_press(
                 };
                 let _ = window_send_event(old_id, &lost_event);
             }
-            *focused_window_id = None;
             return;
         }
     };
@@ -162,8 +166,6 @@ fn handle_mouse_press(
         }
         _ => {}
     }
-
-    *focused_window_id = Some(window_id);
 }
 
 /// Update window position while dragging, or stop if mouse released.
@@ -273,12 +275,14 @@ fn handle_resize(resize_state: &mut Option<ResizeState>, mx: i32, my: i32, left_
     }
 }
 
-/// Invalidate drag/resize/focus state if their target windows no longer exist.
+/// Invalidate drag/resize state if their target windows no longer exist.
+///
+/// Focus needs no equivalent: the registry re-focuses the topmost survivor when
+/// a window is destroyed.
 fn validate_window_state(
     windows: &[WindowListEntry],
     drag_state: &mut Option<DragState>,
     resize_state: &mut Option<ResizeState>,
-    focused_window_id: &mut Option<u64>,
 ) {
     if let Some(ref drag) = *drag_state {
         if !windows.iter().any(|w| w.id == drag.window_id) {
@@ -288,27 +292,6 @@ fn validate_window_state(
     if let Some(ref resize) = *resize_state {
         if !windows.iter().any(|w| w.id == resize.window_id) {
             *resize_state = None;
-        }
-    }
-    if let Some(fid) = *focused_window_id {
-        if !windows.iter().any(|w| w.id == fid) {
-            // Focused window was destroyed, pick new top window and notify it
-            let new_focus = windows
-                .iter()
-                .filter(|w| w.visible != 0)
-                .max_by_key(|w| w.z_order)
-                .map(|w| w.id);
-            if let Some(new_id) = new_focus {
-                let focus_event = WindowEvent {
-                    event_type: WindowEventType::FocusGained as u32,
-                    x: 0,
-                    y: 0,
-                    code: 0,
-                    data: 0,
-                };
-                let _ = window_send_event(new_id, &focus_event);
-            }
-            *focused_window_id = new_focus;
         }
     }
 }
@@ -390,9 +373,6 @@ fn main() {
     // Window list buffer
     let mut entries = [WindowListEntry::default(); MAX_WINDOWS];
 
-    // Track focused window
-    let mut focused_window_id: Option<u64> = None;
-
     // Interaction state
     let mut drag_state: Option<DragState> = None;
     let mut resize_state: Option<ResizeState> = None;
@@ -440,6 +420,7 @@ fn main() {
         };
 
         let windows = &mut entries[..window_count];
+        let focused_window_id = focused_id(windows);
 
         // Process keyboard shortcuts (after window list so Alt+Tab has current data)
         match input.read_keyboard(focused_window_id, windows) {
@@ -455,7 +436,6 @@ fn main() {
                     data: 0,
                 };
                 let _ = window_send_event(next_id, &focus_event);
-                focused_window_id = Some(next_id);
             }
             InputAction::None => {}
         }
@@ -472,7 +452,7 @@ fn main() {
                 my,
                 &mut drag_state,
                 &mut resize_state,
-                &mut focused_window_id,
+                focused_window_id,
             );
         }
         handle_drag(&mut drag_state, mx, my, left_held);
@@ -485,14 +465,10 @@ fn main() {
         };
 
         let windows = &entries[..window_count];
+        let focused_window_id = focused_id(windows);
 
         // Validate interaction state against current window list
-        validate_window_state(
-            windows,
-            &mut drag_state,
-            &mut resize_state,
-            &mut focused_window_id,
-        );
+        validate_window_state(windows, &mut drag_state, &mut resize_state);
 
         // Detect dirty regions from window changes relative to previous frame.
         let screen_w = screen.width() as u32;
@@ -505,11 +481,15 @@ fn main() {
                 if w.visible == 0 {
                     continue;
                 }
-                let is_new = !prev_windows[..prev_window_count]
+                let prev = prev_windows[..prev_window_count]
                     .iter()
-                    .any(|slot| slot.as_ref().is_some_and(|s| s.id == w.id));
+                    .flatten()
+                    .find(|s| s.id == w.id);
+                // A focus change repaints the title-bar accent, so it is dirty
+                // even when nothing else about the window moved.
+                let focus_changed = prev.is_some_and(|s| s.focused != w.focused);
                 let has_buffer = w.buffer_shm_id != 0;
-                if w.damaged != 0 || is_new || has_buffer {
+                if w.damaged != 0 || prev.is_none() || focus_changed || has_buffer {
                     let s = PrevWindowState::from_entry(w);
                     if let Some(r) = s.dirty_rect().clipped(screen_w, screen_h) {
                         dirty.mark_dirty(r);

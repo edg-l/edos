@@ -133,7 +133,10 @@ pub struct WindowListEntry {
     pub buffer_shm_id: u64,
     pub flags: u64,
     pub damaged: u32,
-    pub _padding2: u32,
+    /// Set for the window that currently holds input focus. The kernel window
+    /// registry is the single source of truth; do not re-derive focus from
+    /// `z_order`, which also moves when a window is merely raised.
+    pub focused: u32,
     pub title: [u8; TITLE_MAX],
 }
 
@@ -143,6 +146,16 @@ impl WindowListEntry {
         let len = self.title.iter().position(|&b| b == 0).unwrap_or(TITLE_MAX);
         core::str::from_utf8(&self.title[..len]).unwrap_or("")
     }
+
+    /// Whether this window holds input focus.
+    pub fn is_focused(&self) -> bool {
+        self.focused != 0
+    }
+}
+
+/// The id of the focused window in a list, if any.
+pub fn focused_id(windows: &[WindowListEntry]) -> Option<u64> {
+    windows.iter().find(|w| w.is_focused()).map(|w| w.id)
 }
 
 impl core::fmt::Debug for WindowListEntry {
@@ -168,7 +181,7 @@ impl Default for WindowListEntry {
             buffer_shm_id: 0,
             flags: 0,
             damaged: 0,
-            _padding2: 0,
+            focused: 0,
             title: [0; TITLE_MAX],
         }
     }
