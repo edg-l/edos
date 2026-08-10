@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use edos_render::graphics::Screen;
 use edos_render::window::{
-    WindowEvent, WindowEventType, WindowListEntry, focused_id, property, window_list,
-    window_send_event, window_set,
+    WindowEvent, WindowEventType, WindowListEntry, focused_id, property, publish_decoration,
+    window_list, window_send_event, window_set,
 };
 
 mod compositor;
@@ -92,7 +92,7 @@ impl PrevWindowState {
 fn find_window_at(windows: &[WindowListEntry], x: i32, y: i32) -> Option<&WindowListEntry> {
     windows
         .iter()
-        .filter(|w| w.visible != 0)
+        .filter(|w| w.on_screen())
         .filter(|w| {
             let total_w = decorations::effective_width(w) as i32;
             let total_h = decorations::effective_height(w) as i32;
@@ -339,6 +339,18 @@ fn determine_cursor_shape(
 
 fn main() {
     eprintln!("[wm] starting");
+
+    // The kernel routes pointer events into a window's client area, so it has
+    // to know how much of the window this compositor covers with a frame. Tell
+    // it once, from the constants that draw that frame, rather than letting it
+    // keep a second copy that drifts.
+    if let Err(e) = publish_decoration(
+        0,
+        decorations::TITLE_HEIGHT as u32,
+        decorations::BORDER_WIDTH as u32,
+    ) {
+        eprintln!("[wm] could not publish decoration metrics: {e}");
+    }
     // Initialize screen
     let mut screen = match Screen::get() {
         Ok(s) => s,

@@ -9,7 +9,7 @@ use crate::{
     window::{
         WindowEvent,
         input::{get_or_create_event_queue, poll_events, remove_event_queue, send_event},
-        registry::{ReadSite, WINDOW_REGISTRY, WindowId, property, read_tracked},
+        registry::{ReadSite, WINDOW_REGISTRY, WindowId, decoration, property, read_tracked},
     },
 };
 
@@ -38,13 +38,22 @@ pub fn sys_window_create(x: i64, y: i64, width: u64, height: u64) -> u64 {
     let pid = info.lock().pid;
 
     // Create the window
-    let window_id =
+    let (window_id, unfocused) = ranked_write!(
+        RANK_WINDOW_REGISTRY,
+        "sys_window_create",
         WINDOW_REGISTRY
-            .write()
-            .create_window(pid, x as i32, y as i32, width as u32, height as u32);
+    )
+    .create_window(pid, x as i32, y as i32, width as u32, height as u32);
 
     // Create event queue for the window
     get_or_create_event_queue(window_id);
+
+    // Outside the registry lock: a new window takes focus, and the window that
+    // had it has to be told, or it keeps painting a focused caret.
+    if let Some(previous) = unfocused {
+        send_event(previous, WindowEvent::focus_lost());
+    }
+    send_event(window_id, WindowEvent::focus_gained());
 
     window_id
 }
@@ -125,6 +134,24 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
         }
     }
 
+    // DECORATION is not a property of any window: it tells the kernel where a
+    // decorated window's client area starts, so pointer routing lands where the
+    // window manager actually draws the frame. The window id is ignored.
+    //
+    // Unowned, like X/Y/WIDTH/HEIGHT below, because the window manager does not
+    // own the windows it manages -- and, like them, it stays unowned only until
+    // there is a way to say which process *is* the window manager. Until then
+    // any process can reshape input routing.
+    if prop == property::DECORATION {
+        let title_height = (value & 0xFFFF_FFFF) as i32;
+        let border_width = (value >> 32) as i32;
+        if !decoration::set(title_height, border_width) {
+            info.lock().errno = Errno::EINVAL;
+            return !0u64;
+        }
+        return 0;
+    }
+
     let mut registry = ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_set", WINDOW_REGISTRY);
 
     // Check window exists
@@ -181,22 +208,30 @@ pub fn sys_window_set(window_id: WindowId, prop: u64, value: u64) -> u64 {
         property::FLAGS => {
             window.flags = value;
         }
+        property::MINIMIZED => {
+            // Handled below: it moves focus, which needs the whole registry
+            // rather than the one window borrowed here.
+        }
         _ => {
             info.lock().errno = Errno::EINVAL;
             return !0u64;
         }
     }
 
-    let refocused = if prop == property::FLAGS {
-        registry.release_dock_focus(window_id)
-    } else {
-        None
+    let refocused = match prop {
+        property::FLAGS => registry.release_dock_focus(window_id),
+        property::MINIMIZED => registry.set_minimized(window_id, value != 0),
+        _ => None,
     };
     drop(registry);
 
-    if let Some(new_focus) = refocused {
+    if let Some(new_focus) = refocused
+        && new_focus != window_id
+    {
         send_event(window_id, WindowEvent::focus_lost());
         send_event(new_focus, WindowEvent::focus_gained());
+    } else if refocused == Some(window_id) {
+        send_event(window_id, WindowEvent::focus_gained());
     }
 
     0
@@ -224,6 +259,7 @@ pub fn sys_window_get(window_id: WindowId, prop: u64) -> u64 {
             property::HEIGHT => window.height as u64,
             property::BUFFER_SHM => window.buffer_shm_id.unwrap_or(0),
             property::FLAGS => window.flags,
+            property::MINIMIZED => window.minimized as u64,
             property::TITLE_PTR => {
                 // Can't return a string through u64; titles are available
                 // via the WindowListEntry.title field in sys_window_list.
@@ -318,6 +354,7 @@ pub fn sys_window_poll(window_id: WindowId, events_ptr: *mut WindowEvent, max: u
 ///     flags: u64,
 ///     damaged: u32,
 ///     focused: u32,
+///     minimized: u32,
 ///     title: [u8; TITLE_MAX],
 /// }
 /// ```
@@ -331,7 +368,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
     // the duration of the I/O.
     let (entries, total_count) = {
         let registry = read_tracked(ReadSite::SysWindowList);
-        let windows = registry.visible_windows_sorted();
+        let windows = registry.listed_windows_sorted();
         let focused = registry.focused_window();
         let total_count = windows.len();
 
@@ -363,6 +400,7 @@ pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
                     flags: window.flags,
                     damaged: window.damaged as u32,
                     focused: (focused == Some(window.id)) as u32,
+                    minimized: window.minimized as u32,
                     title,
                 }
             })
@@ -424,6 +462,9 @@ pub struct WindowListEntry {
     /// Set for the window that currently holds input focus. The registry is the
     /// single source of truth: clients must not re-derive focus from `z_order`.
     pub focused: u32,
+    /// Set while the window is put away. It stays in this list so the panel can
+    /// offer a way back; the compositor skips it.
+    pub minimized: u32,
     pub title: [u8; TITLE_MAX],
 }
 
@@ -498,11 +539,21 @@ pub fn sys_window_send_event(window_id: WindowId, event_ptr: *const WindowEvent)
 ///
 /// Returns: 0 on success, !0 on error.
 pub fn sys_window_damage(window_id: WindowId) -> u64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+    let pid = info.lock().pid;
+
     let mut registry = ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_damage", WINDOW_REGISTRY);
-    if let Some(w) = registry.get_window_mut(window_id) {
-        w.damaged = true;
-        0
-    } else {
-        !0u64
+    let Some(w) = registry.get_window_mut(window_id) else {
+        info.lock().errno = Errno::ENOENT;
+        return !0u64;
+    };
+    // Only the window's own process may declare it repainted. Otherwise any
+    // process can make the compositor redraw the screen every frame.
+    if w.pid != pid {
+        info.lock().errno = Errno::EPERM;
+        return !0u64;
     }
+    w.damaged = true;
+    0
 }

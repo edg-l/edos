@@ -193,7 +193,7 @@ pub fn composite(
     // Collect active shm_ids for cache cleanup
     let active_shm_ids: Vec<u64> = windows
         .iter()
-        .filter(|w| w.visible != 0 && w.buffer_shm_id != 0)
+        .filter(|w| w.on_screen() && w.buffer_shm_id != 0)
         .map(|w| w.buffer_shm_id)
         .collect();
 
@@ -202,7 +202,9 @@ pub fn composite(
 
     // Draw windows back-to-front (already sorted by z_order from kernel)
     for (_i, window) in windows.iter().enumerate() {
-        if window.visible != 0 {
+        // A minimized window stays in the list so the taskbar can offer a way
+        // back, but it occupies no screen space.
+        if window.on_screen() {
             draw_window_direct(
                 screen,
                 window,

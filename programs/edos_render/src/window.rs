@@ -137,6 +137,9 @@ pub struct WindowListEntry {
     /// registry is the single source of truth; do not re-derive focus from
     /// `z_order`, which also moves when a window is merely raised.
     pub focused: u32,
+    /// Set while the window is put away. It stays in this list so a panel can
+    /// offer a way back; the compositor must skip it when drawing.
+    pub minimized: u32,
     pub title: [u8; TITLE_MAX],
 }
 
@@ -150,6 +153,17 @@ impl WindowListEntry {
     /// Whether this window holds input focus.
     pub fn is_focused(&self) -> bool {
         self.focused != 0
+    }
+
+    /// Whether the window is put away. A minimized window is still listed, so
+    /// a compositor must check this before drawing it.
+    pub fn is_minimized(&self) -> bool {
+        self.minimized != 0
+    }
+
+    /// Whether the window occupies screen space right now.
+    pub fn on_screen(&self) -> bool {
+        self.visible != 0 && self.minimized == 0
     }
 }
 
@@ -182,6 +196,7 @@ impl Default for WindowListEntry {
             flags: 0,
             damaged: 0,
             focused: 0,
+            minimized: 0,
             title: [0; TITLE_MAX],
         }
     }
@@ -205,12 +220,26 @@ pub mod property {
     pub const BUFFER_SHM: u64 = 7;
     /// Window flags.
     pub const FLAGS: u64 = 8;
+    /// Put the window away, or bring it back. Non-zero minimizes.
+    pub const MINIMIZED: u64 = 9;
+    /// The frame the window manager draws, packed as
+    /// `(border_width << 32) | title_height`. Configures the whole session, not
+    /// the window it is set on, so that pointer routing in the kernel and the
+    /// frame the compositor paints cannot drift apart.
+    pub const DECORATION: u64 = 10;
 }
 
 /// Window flags.
 pub mod flags {
-    /// Dock window: no decorations, not draggable/resizable.
-    pub const FLAG_DOCK: u64 = 1;
+    /// No title bar or border: the window owns every pixel it was given, and
+    /// the compositor neither decorates it nor lets the pointer drag it.
+    pub const FLAG_UNDECORATED: u64 = 1;
+    /// Never holds keyboard focus. For chrome that paints no focus state, so
+    /// input landing there would be invisible.
+    pub const FLAG_NO_FOCUS: u64 = 2;
+    /// A panel: undecorated and never focusable. A menu wants only
+    /// `FLAG_UNDECORATED`, since it is dismissed by losing focus.
+    pub const FLAG_DOCK: u64 = FLAG_UNDECORATED | FLAG_NO_FOCUS;
 }
 
 // Syscall numbers (window-specific; SHM syscalls live in edos_lib::shm)
@@ -309,6 +338,28 @@ pub fn window_poll(id: WindowId, events: &mut [WindowEvent]) -> Result<usize, i6
 
 /// Mark a window as damaged (client has repainted its buffer).
 /// The WM reads this flag via window_list and only redraws damaged windows.
+/// Put a window away, or bring it back.
+///
+/// Minimizing the focused window moves focus to whatever is left, and the
+/// kernel delivers the focus events; a restored window takes focus itself.
+pub fn window_minimize(id: WindowId, minimized: bool) -> Result<(), i64> {
+    window_set(id, property::MINIMIZED, minimized as u64)
+}
+
+/// Tell the kernel the frame this window manager draws, so pointer routing
+/// lands where the decorations actually are.
+///
+/// Called once at startup on any window the caller owns. Without it the kernel
+/// keeps its built-in guess and input drifts from the drawing by the
+/// difference.
+pub fn publish_decoration(id: WindowId, title_height: u32, border_width: u32) -> Result<(), i64> {
+    window_set(
+        id,
+        property::DECORATION,
+        ((border_width as u64) << 32) | title_height as u64,
+    )
+}
+
 pub fn window_damage(id: WindowId) -> Result<(), i64> {
     let result = unsafe { syscall1(SYS_WINDOW_DAMAGE, id) };
     if is_error(result) { Err(-1) } else { Ok(()) }

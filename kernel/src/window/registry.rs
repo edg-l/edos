@@ -37,8 +37,13 @@ pub struct WindowInfo {
     pub title: String,
     /// Shared memory ID for the window buffer, if any.
     pub buffer_shm_id: Option<u64>,
-    /// Window flags (e.g., FLAG_DOCK for no decorations).
+    /// Window flags: see the `flags` module.
     pub flags: u64,
+    /// Set while the window is put away. Distinct from `visible`, which is the
+    /// client saying "do not map me at all": a minimized window is still one
+    /// the user owns and expects to find in the panel, so it stays in the
+    /// window list and only drops out of compositing and out of focus.
+    pub minimized: bool,
     /// Damage flag: set by client via SYS_WINDOW_DAMAGE, cleared by WM via window_list.
     pub damaged: bool,
 }
@@ -62,8 +67,15 @@ impl WindowInfo {
             title: String::new(),
             buffer_shm_id: None,
             flags: 0,
+            minimized: false,
             damaged: true, // newly created windows are damaged
         }
+    }
+
+    /// Whether the window currently occupies screen space: mapped by its
+    /// client and not put away by the user.
+    pub fn on_screen(&self) -> bool {
+        self.visible && !self.minimized
     }
 
     /// Check if a point is inside this window (client area only, excluding decorations).
@@ -73,19 +85,19 @@ impl WindowInfo {
 
     /// Check if a point is within the window's CLIENT area (excluding decorations).
     pub fn contains_client(&self, px: i32, py: i32) -> bool {
-        if !self.visible {
+        if !self.on_screen() {
             return false;
         }
-        let is_dock = (self.flags & flags::FLAG_DOCK) != 0;
-        let client_x = if is_dock {
+        let bare = (self.flags & flags::FLAG_UNDECORATED) != 0;
+        let client_x = if bare {
             self.x
         } else {
-            self.x + decoration::BORDER_WIDTH
+            self.x + decoration::border_width()
         };
-        let client_y = if is_dock {
+        let client_y = if bare {
             self.y
         } else {
-            self.y + decoration::TITLE_HEIGHT
+            self.y + decoration::title_height()
         };
         let client_w = self.width as i32;
         let client_h = self.height as i32;
@@ -95,16 +107,16 @@ impl WindowInfo {
 
     /// Check if point is within decorated bounds (for finding windows).
     pub fn contains_decorated(&self, px: i32, py: i32) -> bool {
-        if !self.visible {
+        if !self.on_screen() {
             return false;
         }
-        let is_dock = (self.flags & flags::FLAG_DOCK) != 0;
-        let (total_w, total_h) = if is_dock {
+        let bare = (self.flags & flags::FLAG_UNDECORATED) != 0;
+        let (total_w, total_h) = if bare {
             (self.width as i32, self.height as i32)
         } else {
             (
-                self.width as i32 + decoration::BORDER_WIDTH * 2,
-                self.height as i32 + decoration::TITLE_HEIGHT + decoration::BORDER_WIDTH,
+                self.width as i32 + decoration::border_width() * 2,
+                self.height as i32 + decoration::title_height() + decoration::border_width(),
             )
         };
 
@@ -122,18 +134,62 @@ pub mod property {
     pub const TITLE_PTR: u64 = 6;
     pub const BUFFER_SHM: u64 = 7;
     pub const FLAGS: u64 = 8;
+    /// Put the window away, or bring it back. Non-zero minimizes.
+    pub const MINIMIZED: u64 = 9;
+    /// The frame the window manager draws, packed as
+    /// `(border_width << 32) | title_height`. Set on any window the caller
+    /// owns; it configures the session, not that window.
+    pub const DECORATION: u64 = 10;
 }
 
 /// Window flags.
 pub mod flags {
-    /// Dock window: no decorations, not draggable.
-    pub const FLAG_DOCK: u64 = 1;
+    /// No title bar or border: the window owns every pixel it was given, and
+    /// the compositor neither decorates it nor lets the pointer drag it.
+    pub const FLAG_UNDECORATED: u64 = 1;
+    /// Never holds keyboard focus. Chrome that paints no focus state, such as
+    /// the panel, since input landing there is invisible to the user.
+    pub const FLAG_NO_FOCUS: u64 = 2;
+
+    /// A panel: undecorated and never focusable. The kernel never tests this
+    /// combined value, it tests the two bits separately, which is the whole
+    /// point -- a menu is undecorated but must take focus, or it cannot be
+    /// dismissed by focus loss. Kept as the name userspace sets.
+    #[allow(dead_code)]
+    pub const FLAG_DOCK: u64 = FLAG_UNDECORATED | FLAG_NO_FOCUS;
 }
 
-/// Window decoration constants (must match WM).
+/// Geometry of the frame the window manager draws around a window.
+///
+/// The kernel routes pointer input, so it has to know where a window's client
+/// area starts. The window manager owns the actual numbers, and publishes them
+/// here at startup through `property::DECORATION`; these are the values a
+/// session gets before it does. Two copies of one constant is how input routing
+/// silently drifts from what is drawn.
 pub mod decoration {
-    pub const TITLE_HEIGHT: i32 = 24;
-    pub const BORDER_WIDTH: i32 = 1;
+    use core::sync::atomic::{AtomicI32, Ordering};
+
+    static TITLE_HEIGHT: AtomicI32 = AtomicI32::new(24);
+    static BORDER_WIDTH: AtomicI32 = AtomicI32::new(1);
+
+    pub fn title_height() -> i32 {
+        TITLE_HEIGHT.load(Ordering::Relaxed)
+    }
+
+    pub fn border_width() -> i32 {
+        BORDER_WIDTH.load(Ordering::Relaxed)
+    }
+
+    /// Record the frame the window manager draws. Values outside a sane range
+    /// are refused, so a garbled value cannot make every window unclickable.
+    pub fn set(title_height: i32, border_width: i32) -> bool {
+        if !(0..=256).contains(&title_height) || !(0..=64).contains(&border_width) {
+            return false;
+        }
+        TITLE_HEIGHT.store(title_height, Ordering::Relaxed);
+        BORDER_WIDTH.store(border_width, Ordering::Relaxed);
+        true
+    }
 }
 
 /// Global window registry.
@@ -154,16 +210,55 @@ impl WindowRegistry {
         }
     }
 
-    /// Create a new window for the given process.
-    pub fn create_window(&mut self, pid: u64, x: i32, y: i32, width: u32, height: u32) -> WindowId {
+    /// Create a new window for the given process, focusing it.
+    ///
+    /// Returns the new id and whoever held focus before, so the caller can
+    /// deliver `FocusLost` to it outside the registry lock. Without that the
+    /// old holder keeps painting a focused caret while its keystrokes go to
+    /// the new window.
+    pub fn create_window(
+        &mut self,
+        pid: u64,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> (WindowId, Option<WindowId>) {
         let window = WindowInfo::new(pid, x, y, width, height);
         let id = window.id;
 
-        // Auto-focus new window
+        // Auto-focus the new window. Its flags arrive later, so a window that
+        // turns out to be chrome is moved off focus by `release_dock_focus`.
+        let previous = self.focused_window.filter(|prev| *prev != id);
         self.focused_window = Some(id);
 
         self.windows.insert(id, window);
-        id
+        (id, previous)
+    }
+
+    /// Put a window away, or bring it back. Returns the window that should
+    /// take focus as a result, if focus has to move.
+    ///
+    /// Minimizing the focused window hands focus to whatever is left, since a
+    /// window the user cannot see must not keep the keyboard.
+    pub fn set_minimized(&mut self, id: WindowId, minimized: bool) -> Option<WindowId> {
+        let Some(window) = self.windows.get_mut(&id) else {
+            return None;
+        };
+        if window.minimized == minimized {
+            return None;
+        }
+        window.minimized = minimized;
+
+        if minimized {
+            if self.focused_window != Some(id) {
+                return None;
+            }
+            self.focused_window = self.topmost_focusable();
+            self.focused_window
+        } else {
+            self.set_focused(id).then_some(id)
+        }
     }
 
     /// Destroy a window.
@@ -196,7 +291,7 @@ impl WindowRegistry {
     fn topmost_focusable(&self) -> Option<WindowId> {
         self.windows
             .values()
-            .filter(|w| w.visible && w.flags & flags::FLAG_DOCK == 0)
+            .filter(|w| w.on_screen() && w.flags & flags::FLAG_NO_FOCUS == 0)
             .max_by_key(|w| w.z_order)
             .map(|w| w.id)
     }
@@ -206,7 +301,7 @@ impl WindowRegistry {
         let Some(window) = self.windows.get_mut(&id) else {
             return false;
         };
-        if window.flags & flags::FLAG_DOCK != 0 {
+        if window.flags & flags::FLAG_NO_FOCUS != 0 {
             return false;
         }
         // Bring to top with new z-order
@@ -228,7 +323,7 @@ impl WindowRegistry {
         let is_dock = self
             .windows
             .get(&id)
-            .is_some_and(|w| w.flags & flags::FLAG_DOCK != 0);
+            .is_some_and(|w| w.flags & flags::FLAG_NO_FOCUS != 0);
         if !is_dock {
             return None;
         }
@@ -264,8 +359,12 @@ impl WindowRegistry {
             .map(|w| w.id)
     }
 
-    /// Get all visible windows sorted by z-order (back to front).
-    pub fn visible_windows_sorted(&self) -> Vec<&WindowInfo> {
+    /// Every window a client has mapped, sorted by z-order, back to front.
+    ///
+    /// Minimized windows are included: the panel needs them to offer a way
+    /// back, and the compositor skips them on the `minimized` field rather
+    /// than by their absence.
+    pub fn listed_windows_sorted(&self) -> Vec<&WindowInfo> {
         let mut windows: Vec<&WindowInfo> = self.windows.values().filter(|w| w.visible).collect();
         windows.sort_by_key(|w| w.z_order);
         windows

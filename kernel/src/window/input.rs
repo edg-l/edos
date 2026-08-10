@@ -359,11 +359,11 @@ fn handle_mouse_event(event: MouseEvent) {
                 // Send click event only if the click was in the client area
                 if window_under_cursor == Some(target_window) {
                     if let Some((wx, wy, wflags)) = window_info {
-                        let is_dock = (wflags & flags::FLAG_DOCK) != 0;
+                        let bare = (wflags & flags::FLAG_UNDECORATED) != 0;
                         let local_x =
-                            event.x - wx - if is_dock { 0 } else { decoration::BORDER_WIDTH };
+                            event.x - wx - if bare { 0 } else { decoration::border_width() };
                         let local_y =
-                            event.y - wy - if is_dock { 0 } else { decoration::TITLE_HEIGHT };
+                            event.y - wy - if bare { 0 } else { decoration::title_height() };
 
                         for bit in 0..3 {
                             if button_pressed & (1 << bit) != 0 {
@@ -384,9 +384,9 @@ fn handle_mouse_event(event: MouseEvent) {
     if let Some(target) = window_under_cursor {
         if let Some(window) = registry.get_window(target) {
             // Calculate coordinates relative to client area (excluding decorations)
-            let is_dock = (window.flags & flags::FLAG_DOCK) != 0;
-            let local_x = event.x - window.x - if is_dock { 0 } else { decoration::BORDER_WIDTH };
-            let local_y = event.y - window.y - if is_dock { 0 } else { decoration::TITLE_HEIGHT };
+            let bare = (window.flags & flags::FLAG_UNDECORATED) != 0;
+            let local_x = event.x - window.x - if bare { 0 } else { decoration::border_width() };
+            let local_y = event.y - window.y - if bare { 0 } else { decoration::title_height() };
 
             // Always send move events if there's movement
             if event.dx != 0 || event.dy != 0 {
