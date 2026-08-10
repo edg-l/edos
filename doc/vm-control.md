@@ -82,7 +82,8 @@ compositor. SPICE streams damage as the guest produces it and lets the client
 draw the cursor, which is the difference that shows when a whole window moves.
 
 VNC stays the default because it needs nothing on the client beyond a VNC
-viewer; SPICE wants `remote-viewer` (the `virt-viewer` package). Screenshots,
+viewer; SPICE wants `remote-viewer` from the `virt-viewer` package, which ships
+an MSI for Windows clients on virt-manager.org. Screenshots,
 keystrokes and pointer events all go through QMP either way, so nothing that
 drives the guest changes.
 
