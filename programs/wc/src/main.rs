@@ -2,11 +2,19 @@ use std::env;
 use std::fs;
 use std::io::{self, Read};
 
-fn count(content: &str) -> (usize, usize, usize) {
-    let lines = content.lines().count();
-    let words = content.split_whitespace().count();
-    let bytes = content.len();
-    (lines, words, bytes)
+fn count(content: &[u8]) -> (usize, usize, usize) {
+    let lines = content.iter().filter(|b| **b == b'\n').count();
+    let mut words = 0;
+    let mut in_word = false;
+    for byte in content {
+        if byte.is_ascii_whitespace() {
+            in_word = false;
+        } else if !in_word {
+            in_word = true;
+            words += 1;
+        }
+    }
+    (lines, words, content.len())
 }
 
 fn print_counts(lines: usize, words: usize, bytes: usize, name: &str, show: (bool, bool, bool)) {
@@ -61,14 +69,14 @@ fn main() {
     let mut total = (0usize, 0usize, 0usize);
 
     if files.is_empty() {
-        let mut content = String::new();
-        if io::stdin().read_to_string(&mut content).is_ok() {
+        let mut content = Vec::new();
+        if io::stdin().read_to_end(&mut content).is_ok() {
             let (l, w, b) = count(&content);
             print_counts(l, w, b, "", show);
         }
     } else {
         for file in &files {
-            match fs::read_to_string(file) {
+            match fs::read(file) {
                 Ok(content) => {
                     let (l, w, b) = count(&content);
                     total.0 += l;

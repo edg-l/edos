@@ -79,13 +79,6 @@
   Suspect the write path inflating node.content to a page boundary instead, and
   confirm the symptom still reproduces before touching the read path.
 
-- `wc -c` refuses a binary file with "stream did not contain valid UTF-8". A
-  byte count has no reason to decode anything; only the line/word modes do.
-  (wc reads via fs::read_to_string unconditionally.)
-
-- `hexdump -n <len>` is ignored, so it dumps the whole file. hexdump parses no
-  flags at all: everything after argv[0] is treated as a filename.
-
 - `std::thread::sleep` still rounds every request down to whole milliseconds:
   the fork's `sys/thread/edos.rs` calls `edos_rt::process::sleep_ms`, so a
   sub-millisecond sleep returns immediately. SYS_NANOSLEEP (35) now exists and

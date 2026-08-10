@@ -39,16 +39,63 @@ fn hexdump(data: &[u8]) {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    let mut limit: Option<usize> = None;
+    let mut files: Vec<&str> = Vec::new();
 
-    if args.len() < 2 {
-        // Read from stdin
+    let mut i = 1;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            files.extend(args[i + 1..].iter().map(String::as_str));
+            break;
+        } else if let Some(rest) = arg.strip_prefix("-n") {
+            let value = if rest.is_empty() {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!("hexdump: -n requires a length");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                rest
+            };
+            match value.parse::<usize>() {
+                Ok(n) => limit = Some(n),
+                Err(_) => {
+                    eprintln!("hexdump: invalid length: {}", value);
+                    std::process::exit(1);
+                }
+            }
+        } else if arg.starts_with('-') && arg.len() > 1 {
+            eprintln!("hexdump: unknown option {}", arg);
+            std::process::exit(1);
+        } else {
+            files.push(arg);
+        }
+        i += 1;
+    }
+
+    // Read at most `limit` bytes rather than the whole file, so -n stays cheap
+    // on a large image.
+    let read_limited = |source: &mut dyn Read| -> io::Result<Vec<u8>> {
         let mut data = Vec::new();
-        if io::stdin().read_to_end(&mut data).is_ok() {
+        match limit {
+            Some(n) => source.take(n as u64).read_to_end(&mut data)?,
+            None => source.read_to_end(&mut data)?,
+        };
+        Ok(data)
+    };
+
+    if files.is_empty() {
+        if let Ok(data) = read_limited(&mut io::stdin()) {
             hexdump(&data);
         }
     } else {
-        for file in &args[1..] {
-            match fs::read(file) {
+        for file in &files {
+            let result = fs::File::open(file).and_then(|mut f| read_limited(&mut f));
+            match result {
                 Ok(data) => hexdump(&data),
                 Err(e) => eprintln!("hexdump: {}: {}", file, e),
             }
