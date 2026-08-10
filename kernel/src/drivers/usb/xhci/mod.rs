@@ -712,12 +712,20 @@ impl XhciController {
         let mut transferred = self.control_transfer(device, setup, Some(buf_phys), 18, true)?;
 
         if transferred < 18 {
-            // Try with smaller initial request (some low-speed devices need this)
+            // USB 2.0 §9.4.3: a device whose bMaxPacketSize0 is smaller than the
+            // request answers only the first packet. Read that 8-byte prefix,
+            // which is what carries bMaxPacketSize0, then ask for the whole
+            // descriptor again -- the retry is the only way the remaining ten
+            // bytes, idVendor/idProduct/bNumConfigurations among them, arrive.
             let setup8 = SetupPacket {
                 w_length: 8,
                 ..setup
             };
-            transferred = self.control_transfer(device, setup8, Some(buf_phys), 8, true)?;
+            if self.control_transfer(device, setup8, Some(buf_phys), 8, true)? >= 8 {
+                transferred = self.control_transfer(device, setup, Some(buf_phys), 18, true)?;
+            } else {
+                transferred = 0;
+            }
         }
 
         // A pooled DMA buffer carries whatever its previous owner left in it, so only the
