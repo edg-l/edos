@@ -134,6 +134,14 @@ or a displacement rather than assuming a layout.
 (`query-mice`) rather than assuming: `--pointer mouse` starts a relative
 `usb-mouse` instead, which still works and still needs the homing dance below.
 
+**The cursor is not in a screenshot.** Having an absolute pointer let the
+compositor put the cursor on the virtio-GPU cursor plane, so a pointer move no
+longer damages the framebuffer and a remote viewer draws the cursor itself --
+which is what makes it feel immediate over VNC. `screendump` captures the
+scanout and not that plane, so a screenshot shows the desktop with no pointer
+in it. Do not read that as "the pointer did not move"; ask the guest or click
+and observe the result instead.
+
 **With a relative mouse, reaching an exact pixel means homing first**: the
 guest clamps the cursor to the screen rectangle and applies no acceleration,
 so driving it hard into the top-left corner is a reliable origin to count from,
@@ -262,5 +270,6 @@ until grep -qE '\[Terminal\] Spawned shell|KERNEL PANIC' run_log.txt; do sleep 1
 | Pointer stops short of the target | a relative `--pointer mouse` guest, steps sent faster than it polls |
 | Clicks do nothing at all | the guest bound no pointer; check `xhci: pointer on interface` in the log |
 | Blank or frozen screenshot | guest panicked; check `run_log.txt` |
+| No cursor in a screenshot | expected: the cursor is on its own plane, see above |
 | `Could not access KVM kernel module` | not in the `kvm` group in this session |
 | Viewer disconnects | QEMU exited, since QEMU *is* the VNC server |

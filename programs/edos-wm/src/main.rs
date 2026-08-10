@@ -33,6 +33,22 @@ use input::{InputAction, InputState};
 /// Maximum number of windows to track.
 const MAX_WINDOWS: usize = 64;
 
+/// Hand the display the current cursor image, returning whether it took it.
+///
+/// The texture is ARGB with zero alpha where the cursor is transparent, which
+/// is what both the software blit and the cursor plane expect, so there is one
+/// cursor image rather than two.
+fn upload_cursor(screen: &Screen, cursor: &Cursor) -> bool {
+    let texture = cursor.current_texture();
+    screen.set_cursor(
+        texture.width as u32,
+        texture.height as u32,
+        0,
+        0,
+        &texture.pixels,
+    )
+}
+
 /// Prefix on every line of a window dump, so a host-side reader can pick the
 /// block out of an interleaved serial log.
 const WINDOW_DUMP_TAG: &str = "windows|";
@@ -498,11 +514,17 @@ fn main() {
     // Initialize cursor
     let mut cursor = Cursor::new();
 
-    // Hardware cursor (virtio-gpu cursorq) is supported but requires absolute
-    // input mode (usb-tablet) to work with QEMU's GTK backend. With PS/2
-    // relative mouse, GTK hides the GDK cursor during input grab. Disabled
-    // until we have a USB HID driver or virtio-input support.
-    let hw_cursor = false;
+    // The hardware cursor is what stops a pointer move damaging the framebuffer
+    // at all: the cursor lives on its own plane, so moving it costs one small
+    // message and no compositing. Over a remote display that is the difference
+    // between a pointer that lags the frame rate and one the viewer draws
+    // itself. It needed an absolute pointing device, which the guest has now
+    // that the HID driver reads report descriptors.
+    //
+    // False when the display has no cursor plane, and the software cursor is
+    // composited as before.
+    let mut hw_cursor = upload_cursor(&screen, &cursor);
+    let mut uploaded_shape = cursor.shape();
 
     // Window list buffer
     let mut entries = [WindowListEntry::default(); MAX_WINDOWS];
@@ -728,6 +750,12 @@ fn main() {
             cursor.x,
             cursor.y,
         ));
+        // A hardware cursor is an image the display holds, so a shape change is
+        // an upload rather than a different texture at composite time.
+        if hw_cursor && cursor.shape() != uploaded_shape {
+            hw_cursor = upload_cursor(&screen, &cursor);
+            uploaded_shape = cursor.shape();
+        }
 
         // Composite all windows into back buffer (always full composite).
         compositor::composite(

@@ -1460,6 +1460,27 @@ script silently fell back to relative motion — which QEMU *does* apply to a
 tablet, so the pointer still moved and only the clicks went missing. It takes
 the caller's connection now.
 
+## The cursor moved to its own plane
+
+Reading report descriptors gave the guest an absolute pointer, which is what
+the hardware cursor had been waiting for: `hw_cursor` in the window manager was
+hard-coded `false` with a comment saying so. With it on, the compositor stops
+painting the pointer into the framebuffer, so moving the mouse damages nothing
+and costs one small message; a remote viewer is handed the image and draws it
+at its own pointer speed. That is most of what "the mouse is not smooth" over
+VNC was.
+
+The cursor texture already had zero alpha where it is transparent, which is
+what both the software blit and the cursor plane want, so there is one cursor
+image rather than two. A shape change is an upload rather than a different
+texture at composite time, and the flag falls back to the software cursor if
+the display has no cursor plane to take it.
+
+**`screendump` does not capture the cursor plane**, so screenshots no longer
+contain a pointer. That is worth knowing before it is read as a pointer that
+failed to move; it also means a screenshot is no longer a way to check where
+the pointer is.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any

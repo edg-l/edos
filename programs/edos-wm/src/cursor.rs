@@ -188,6 +188,12 @@ impl Cursor {
         self.current_shape = shape;
     }
 
+    /// The active shape, so a caller holding a copy of the cursor image can
+    /// tell when it has gone stale.
+    pub fn shape(&self) -> CursorShape {
+        self.current_shape
+    }
+
     /// Get the texture for the current cursor shape.
     pub fn current_texture(&self) -> &Texture {
         &self.textures[self.current_shape.index()]
