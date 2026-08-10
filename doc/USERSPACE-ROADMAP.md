@@ -119,7 +119,9 @@ correctness, locking, perf hot spots and missing syscalls — see
 [`AUDIT.md`](AUDIT.md), with the prioritised list in `ideas.txt`.
 
 1. **procfs depth.** `top` wants per-process CPU time and RSS.
-2. **TCP introspection.** `netstat` needs a read path for the connection table.
+2. **TCP introspection.** `/proc/net` carries interface state (link, address,
+   gateway, resolver); `netstat` still needs a read path for the connection
+   table in `net/tcp.rs`.
 3. **Accept backlog.** A concurrent server will test SYN backlog behaviour.
 4. **Large-file I/O.** `sha256sum` and `tar` push files larger than RAM through the
    block and page caches.

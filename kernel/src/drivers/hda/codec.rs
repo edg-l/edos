@@ -35,6 +35,25 @@ pub struct CodecInfo {
     pub afg_nid: u8, // Audio Function Group node ID
     pub dac_nid: u8, // DAC (Audio Output) node ID
     pub pin_nid: u8, // Output pin node ID
+    /// Loudest gain the DAC's output amp accepts, from its amp capabilities.
+    /// The gain field is seven bits wide but a codec rarely uses all of them,
+    /// and writing a step it does not have is not the same as writing its
+    /// maximum.
+    pub out_amp_max_gain: u8,
+    /// Whether the output pin has an amp of its own to follow the DAC's.
+    pub pin_has_out_amp: bool,
+}
+
+/// Amp payload for `SET_AMP_GAIN_MUTE`: output amp, both channels, at `gain`.
+/// A gain of zero mutes rather than attenuating to the codec's quietest step,
+/// because "off" is what a volume control at zero means.
+pub fn amp_payload(gain: u8) -> u32 {
+    const OUTPUT: u32 = 1 << 15;
+    const LEFT: u32 = 1 << 13;
+    const RIGHT: u32 = 1 << 12;
+    const UNMUTE: u32 = 1 << 7;
+    let gain = (gain & 0x7F) as u32;
+    OUTPUT | LEFT | RIGHT | if gain == 0 { 0 } else { UNMUTE | gain }
 }
 
 /// Discover codecs, find the DAC and output pin, configure for playback.
@@ -113,11 +132,17 @@ pub fn discover_and_configure(ctrl: &mut HdaController) -> Result<CodecInfo, Str
     let format_word: u32 = 0x0011; // 48kHz, 16-bit, stereo
     ctrl.codec_command(cad, dac_nid, SET_STREAM_FORMAT | format_word)?;
 
-    // Unmute DAC output amp: output, left+right, max gain
-    // SetAmplifierGainMute is a 4-bit verb (0x3) with 16-bit payload
-    // Payload: [15]=output, [13]=left, [12]=right, [7]=!mute, [6:0]=gain
-    let amp_payload: u32 = 0xB07F; // output | left | right | gain=0x7F | unmute
-    ctrl.codec_command(cad, dac_nid, SET_AMP_GAIN_MUTE | amp_payload)?;
+    // Loudest step this DAC has: Output Amplifier Capabilities bits [14:8] are
+    // the number of steps above the quietest, so the top step is that value.
+    let out_amp_cap = ctrl.codec_command(cad, dac_nid, GET_PARAM | PARAM_OUT_AMP_CAP)?;
+    let out_amp_max_gain = (((out_amp_cap >> 8) & 0x7F) as u8).max(1);
+
+    // Unmute the DAC output amp at full gain.
+    ctrl.codec_command(
+        cad,
+        dac_nid,
+        SET_AMP_GAIN_MUTE | amp_payload(out_amp_max_gain),
+    )?;
 
     // Enable output pin
     ctrl.codec_command(cad, pin_nid, SET_PIN_WIDGET_CONTROL | PIN_OUT_EN as u32)?;
@@ -132,9 +157,13 @@ pub fn discover_and_configure(ctrl: &mut HdaController) -> Result<CodecInfo, Str
 
     // Unmute pin output amp too (if it has one)
     let pin_wcaps = ctrl.codec_command(cad, pin_nid, GET_PARAM | PARAM_AUDIO_WIDGET_CAP)?;
-    if (pin_wcaps & (1 << 2)) != 0 {
-        // Has output amp
-        ctrl.codec_command(cad, pin_nid, SET_AMP_GAIN_MUTE | amp_payload)?;
+    let pin_has_out_amp = (pin_wcaps & (1 << 2)) != 0;
+    if pin_has_out_amp {
+        ctrl.codec_command(
+            cad,
+            pin_nid,
+            SET_AMP_GAIN_MUTE | amp_payload(out_amp_max_gain),
+        )?;
     }
 
     Ok(CodecInfo {
@@ -142,5 +171,26 @@ pub fn discover_and_configure(ctrl: &mut HdaController) -> Result<CodecInfo, Str
         afg_nid,
         dac_nid,
         pin_nid,
+        out_amp_max_gain,
+        pin_has_out_amp,
     })
+}
+
+/// Set the output amps to `percent` of their loudest step.
+pub fn set_volume(ctrl: &mut HdaController, info: &CodecInfo, percent: u8) -> Result<(), String> {
+    let percent = percent.min(100) as u32;
+    let gain = (percent * info.out_amp_max_gain as u32).div_ceil(100) as u8;
+    ctrl.codec_command(
+        info.cad,
+        info.dac_nid,
+        SET_AMP_GAIN_MUTE | amp_payload(gain),
+    )?;
+    if info.pin_has_out_amp {
+        ctrl.codec_command(
+            info.cad,
+            info.pin_nid,
+            SET_AMP_GAIN_MUTE | amp_payload(gain),
+        )?;
+    }
+    Ok(())
 }

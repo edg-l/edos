@@ -14,6 +14,7 @@ use edos_render::window::{
 
 mod menu;
 mod panel;
+mod status;
 
 use panel::{Action, Hit};
 
@@ -122,6 +123,7 @@ fn main() {
     let mut entries = [WindowListEntry::default(); MAX_WINDOWS];
     let mut hovered: Option<Action> = None;
     let mut menu = menu::Menu::new();
+    let mut popups = status::StatusPopups::new();
 
     loop {
         let window_count = match window_list(&mut entries) {
@@ -134,9 +136,12 @@ fn main() {
         // and a minimized window stays listed so there is a way back to it.
         let my_id = window.id;
         let menu_id = menu.window_id();
+        let popup_id = popups.window_id();
         let mut tasks: Vec<&WindowListEntry> = windows
             .iter()
-            .filter(|w| w.id != my_id && Some(w.id) != menu_id && w.visible != 0)
+            .filter(|w| {
+                w.id != my_id && Some(w.id) != menu_id && Some(w.id) != popup_id && w.visible != 0
+            })
             .filter(|w| w.flags & FLAG_DOCK == 0)
             .collect();
         // By id, not z_order: sorting by z_order makes every button jump the
@@ -212,7 +217,13 @@ fn main() {
                                     let _ = window_send_event(id, &event);
                                 }
                             }
-                            Action::Volume | Action::Network | Action::Clock => {}
+                            Action::Volume => {
+                                popups.toggle(status::Kind::Volume, hit.x, hit.width, panel_y);
+                            }
+                            Action::Network => {
+                                popups.toggle(status::Kind::Network, hit.x, hit.width, panel_y);
+                            }
+                            Action::Clock => {}
                         }
                     }
                     _ => {}
@@ -221,6 +232,7 @@ fn main() {
         }
 
         menu.tick(windows);
+        popups.tick(windows);
 
         let w = window.width;
         let h = window.height;
@@ -290,31 +302,20 @@ fn main() {
                             );
                         }
                     }
-                    Action::Volume => {
-                        let fill = is_hovered.then_some(hover_fill);
-                        draw_button(
-                            buf,
-                            w,
-                            h,
-                            hit,
-                            &icons::VOLUME,
-                            "",
-                            fill,
-                            Theme::DEFAULT.taskbar_text.raw(),
-                        );
-                    }
-                    Action::Network => {
-                        let fill = is_hovered.then_some(hover_fill);
-                        draw_button(
-                            buf,
-                            w,
-                            h,
-                            hit,
-                            &icons::NETWORK,
-                            "",
-                            fill,
-                            Theme::DEFAULT.taskbar_text.raw(),
-                        );
+                    Action::Volume | Action::Network => {
+                        let (icon, kind) = if hit.action == Action::Volume {
+                            (&icons::VOLUME, status::Kind::Volume)
+                        } else {
+                            (&icons::NETWORK, status::Kind::Network)
+                        };
+                        let is_open = popups.open_kind() == Some(kind);
+                        let fill = (is_hovered || is_open).then_some(hover_fill);
+                        let ink = if is_open {
+                            Theme::DEFAULT.taskbar_button_accent
+                        } else {
+                            Theme::DEFAULT.taskbar_text
+                        };
+                        draw_button(buf, w, h, hit, icon, "", fill, ink.raw());
                     }
                     Action::Clock => {
                         let fill = is_hovered.then_some(hover_fill);

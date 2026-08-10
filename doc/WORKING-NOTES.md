@@ -1380,6 +1380,14 @@ repo holds no binaries, and the make rule depends on the script so an unchanged
 wallpaper keeps its timestamp — the disk-image manifest is timestamp-based, so
 regenerating it every build would rebuild both images every build.
 
+**The status area does something.** Volume drives the HDA output amps through
+two new `/dev/dsp` ioctls; the gain scale comes from the codec's own Output
+Amplifier Capabilities rather than a hardcoded `0x7F` (QEMU's reports 74 steps),
+and zero mutes rather than attenuating to the quietest step. Network reports
+link, address, gateway, resolver and MAC from a new `/proc/net`. That file
+exists because `SYS_NETINFO` renders the same state *for a terminal*, ANSI
+colour codes and all, and a UI parsing that would be reading a display format.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any

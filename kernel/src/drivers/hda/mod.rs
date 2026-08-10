@@ -29,6 +29,10 @@ use crate::thread::scheduler::{current_thread, thread_park, thread_yield};
 // === Audio ioctl constants ===
 pub const AUDIO_IOCTL_SET_FORMAT: u64 = 1;
 pub const AUDIO_IOCTL_DRAIN: u64 = 3;
+/// Set output volume, `arg` running 0 (muted) to 100.
+pub const AUDIO_IOCTL_SET_VOLUME: u64 = 4;
+/// Read the volume back, on the same scale.
+pub const AUDIO_IOCTL_GET_VOLUME: u64 = 5;
 
 /// Intel HDA controller state.
 pub struct HdaController {
@@ -485,6 +489,13 @@ struct HdaPlaybackState {
     controller: HdaController,
     pci_device: crate::drivers::pci::structures::PciDevice,
     stream_running: bool,
+    /// The codec topology, kept past init because changing the volume means
+    /// sending another verb to the same nodes.
+    codec: codec::CodecInfo,
+    /// Output volume, 0 to 100. The codec stores a step, not a percentage, and
+    /// the mapping loses information, so the number the user set is kept here
+    /// rather than read back and rescaled.
+    volume: u8,
 }
 
 // === DevFs /dev/dsp device ===
@@ -587,6 +598,23 @@ impl DevFsDevice for HdaDspDevice {
                 }
                 Ok(0)
             }
+            AUDIO_IOCTL_SET_VOLUME => {
+                let percent = arg.min(100) as u8;
+                let mut state = ranked_lock!(RANK_HDA_STATE, "hda::set_volume", self.state);
+                let HdaPlaybackState {
+                    controller, codec, ..
+                } = &mut **state;
+                codec::set_volume(controller, codec, percent).map_err(|e| {
+                    log!("hda: volume: {}", e);
+                    DevFsError::IoError
+                })?;
+                state.volume = percent;
+                Ok(percent as u64)
+            }
+            AUDIO_IOCTL_GET_VOLUME => {
+                let state = ranked_lock!(RANK_HDA_STATE, "hda::get_volume", self.state);
+                Ok(state.volume as u64)
+            }
             _ => Err(DevFsError::Unsupported),
         }
     }
@@ -635,19 +663,23 @@ pub extern "C" fn hda_driver_main() -> ! {
     };
 
     // Discover and configure codec
-    match codec::discover_and_configure(&mut controller) {
-        Ok(codec_info) => log!(
-            "hda: codec ready, dac=nid{}, pin=nid{}",
-            codec_info.dac_nid,
-            codec_info.pin_nid
-        ),
+    let codec_info = match codec::discover_and_configure(&mut controller) {
+        Ok(codec_info) => {
+            log!(
+                "hda: codec ready, dac=nid{}, pin=nid{}, gain steps={}",
+                codec_info.dac_nid,
+                codec_info.pin_nid,
+                codec_info.out_amp_max_gain
+            );
+            codec_info
+        }
         Err(e) => {
             log!("hda: codec setup failed: {}", e);
             loop {
                 thread_park();
             }
         }
-    }
+    };
 
     // Set up the output stream DMA engine.
     if let Err(e) = controller.setup_output_stream() {
@@ -671,6 +703,8 @@ pub extern "C" fn hda_driver_main() -> ! {
         controller,
         pci_device: pci_dev,
         stream_running: false,
+        codec: codec_info,
+        volume: 100,
     }));
 
     // Register /dev/dsp.

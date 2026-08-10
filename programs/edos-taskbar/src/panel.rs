@@ -93,8 +93,6 @@ pub fn status_width(label: &str) -> u32 {
 /// the status area, so a window opening never pushes the clock off the edge.
 pub struct Layout {
     pub hits: Vec<Hit>,
-    /// Where the task list actually starts, after centring and clamping.
-    pub tasks_x: i32,
 }
 
 pub fn compute(panel_width: u32, tasks: &[(&WindowListEntry, String)], clock: &str) -> Layout {
@@ -130,9 +128,8 @@ pub fn compute(panel_width: u32, tasks: &[(&WindowListEntry, String)], clock: &s
         .sum::<u32>()
         + tasks.len().saturating_sub(1) as u32 * BUTTON_GAP as u32;
     let centred = (panel_width as i32 - total as i32) / 2;
-    let tasks_x = centred.max(left_edge);
 
-    let mut tx = tasks_x;
+    let mut tx = centred.max(left_edge);
     for (entry, label) in tasks {
         let w = task_width(label);
         if tx + w as i32 > right_edge {
@@ -162,5 +159,5 @@ pub fn compute(panel_width: u32, tasks: &[(&WindowListEntry, String)], clock: &s
         action: Action::Clock,
     });
 
-    Layout { hits, tasks_x }
+    Layout { hits }
 }
