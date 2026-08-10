@@ -54,9 +54,13 @@
   release and a fork pin bump.
 
 
-- `make test AUDIODEV=none` intermittently reports "[sched-test] ping-pong count
-  mismatch: 499 != 500" and then TIMEOUT at 47/49; the immediate re-run of the
-  same ISO passed 49/49. One wakeup in the ping-pong pair is being lost or
-  arriving after the counter is read. Seen once on 2026-08-10; catch the failing
-  run's full log before chasing it, since the counter is the only evidence
-  printed today.
+- `make test AUDIODEV=none` intermittently fails on the ping-pong pair, and the
+  immediate re-run of the same ISO passes 49/49. Two signatures so far, both on
+  2026-08-10:
+    * "[sched-test] ping-pong count mismatch: 499 != 500", TIMEOUT at 47/49.
+    * TIMEOUT at 48/49 with no FAIL line at all: `ping-pong-ping` passed and
+      `ping-pong-pong` never reported, so the pong thread was still parked when
+      the 10s deadline fired.
+  Both point at a lost or late wakeup on the pong side rather than at the
+  counter. Catch the failing run's full log before chasing it; the counter and
+  the missing PASS line are the only evidence printed today.
