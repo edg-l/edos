@@ -1220,6 +1220,16 @@ pub fn thread_exit(code: i32) -> ! {
         // ends the session so nothing keeps writing into an undrained ring.
         crate::syscalls::trace::on_thread_exit(&t, code);
 
+        // Tell the creator a child is gone. Sent here rather than from
+        // `record_thread_exit`, which runs with interrupts possibly disabled
+        // and may not touch the thread registry. The default action is Ignore,
+        // so this costs a lookup and changes nothing until somebody installs a
+        // handler for it.
+        let parent = t.parent.load(Ordering::Acquire);
+        if parent != 0 && t.user.is_some() {
+            crate::thread::thread::kill_process_with_signal(parent, crate::thread::signal::SIGCHLD);
+        }
+
         let created = t.created_at_tick.load(Ordering::Acquire);
         if let Some(timer) = crate::drivers::hpet::driver::get_hpet_timer()
             && created != 0
@@ -1310,6 +1320,33 @@ pub fn exit_if_killed() {
     }
 }
 
+/// Suspend the current thread if a stop signal is outstanding, returning when
+/// `SIGCONT` clears it.
+///
+/// Called from the same boundaries as [`exit_if_killed`], and for the same
+/// reason: a thread can only be suspended where it provably holds nothing, and
+/// a syscall return or a tick out of ring 3 is where that is true. A stop
+/// delivered mid-syscall therefore takes effect when the call finishes rather
+/// than in the middle of it, which is also what keeps a suspended process from
+/// holding a filesystem lock for as long as the user leaves it suspended.
+pub fn stop_if_signalled() {
+    let Some(thread) = current_thread() else {
+        return;
+    };
+    if !thread.stop_requested.load(Ordering::Acquire) {
+        return;
+    }
+
+    thread.stopped.store(true, Ordering::Release);
+    let watched = thread.clone();
+    // A kill outranks a stop: SIGKILL must reach a suspended process, so the
+    // park ends for that too and the caller's `exit_if_killed` finishes it.
+    thread_park_while(|| {
+        watched.stop_requested.load(Ordering::Acquire) && !watched.killed.load(Ordering::Acquire)
+    });
+    thread.stopped.store(false, Ordering::Release);
+}
+
 /// First half of a timer tick. See `Scheduler::tick_prepare`.
 pub fn tick_prepare(context: *mut CpuContext) -> u64 {
     check_context(context, "tick_prepare");
@@ -1319,6 +1356,7 @@ pub fn tick_prepare(context: *mut CpuContext) -> u64 {
     // safe; a tick that caught it inside the kernel leaves it to the syscall
     // boundary.
     if unsafe { (*context).is_from_userspace() } {
+        stop_if_signalled();
         exit_if_killed();
     }
     sched().tick_prepare(context)

@@ -166,12 +166,31 @@ pub struct Thread {
     /// dropped rather than kept forever, and orphans are handed to init.
     pub parent: AtomicU64,
 
+    /// Process group, or 0 meaning "this thread leads its own".
+    ///
+    /// The indirection is what makes a *job* addressable: a terminal delivers
+    /// Ctrl+C to a group rather than a pid, so every process in a pipeline
+    /// gets it. Read through [`Thread::pgid`], never directly, because 0 is a
+    /// sentinel and not a group.
+    pub pgid: AtomicU64,
+
     pub exit_code: AtomicI32,
     /// Set when the process has been killed (e.g. by Ctrl+C). Sleeping syscalls
     /// check this flag on wakeup and return EINTR to unblock the process; the
     /// thread then dies at whichever boundary it reaches first, the syscall
     /// return or a timer tick out of user code.
     pub killed: AtomicBool,
+
+    /// Set by a stop signal and cleared by `SIGCONT`.
+    ///
+    /// A thread is not suspended where the signal lands — it is suspended at
+    /// the next boundary where it provably holds nothing, which is the same
+    /// boundary `killed` uses. Between the two it keeps running, exactly as a
+    /// thread marked for death does.
+    pub stop_requested: AtomicBool,
+    /// Set while the thread is parked in `stop_if_signalled`, so `ps` and the
+    /// shell can tell a suspended job from one blocked in a syscall.
+    pub stopped: AtomicBool,
 
     /// Wake-pending token. Wakers publish their intent here BEFORE probing
     /// `state`; parkers consume it (swap to false) AFTER CAS to Parked/Sleeping
@@ -799,6 +818,18 @@ impl Thread {
         }
     }
 
+    /// The process group this thread belongs to.
+    ///
+    /// A stored 0 means the thread leads its own group, which is the right
+    /// default for anything nobody has placed: a process started outside a job
+    /// is its own job.
+    pub fn pgid(&self) -> u64 {
+        match self.pgid.load(Ordering::Acquire) {
+            0 => self.id.0,
+            pgid => pgid,
+        }
+    }
+
     pub fn cpu_time_ns(&self) -> u64 {
         let accumulated = self.cpu_time_ns.load(Ordering::Acquire);
         let start_tick = self.run_start_tick.load(Ordering::Acquire);
@@ -853,9 +884,12 @@ impl Thread {
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
             killed: AtomicBool::new(false),
+            stop_requested: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
             last_syscall: AtomicU32::new(NO_SYSCALL),
             traced: AtomicU64::new(0),
+            pgid: AtomicU64::new(0),
             signal: SignalState::new(),
             rq_link: Link::new(),
             context_saved: AtomicBool::new(true),
@@ -977,9 +1011,12 @@ impl Thread {
             cpu: AtomicU32::new(0),
             exit_code: AtomicI32::new(0),
             killed: AtomicBool::new(false),
+            stop_requested: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
             last_syscall: AtomicU32::new(NO_SYSCALL),
             traced: AtomicU64::new(0),
+            pgid: AtomicU64::new(0),
             signal: SignalState::new(),
             user: Some(user_state),
             rq_link: Link::new(),
@@ -1442,6 +1479,51 @@ pub fn kill_process(pid: u64) -> bool {
     kill_process_with_signal(pid, crate::thread::signal::SIGINT)
 }
 
+/// Send a signal to every process in group `pgid`.
+///
+/// Returns whether the group had any members. This is what a terminal uses:
+/// Ctrl+C is aimed at the foreground *job*, so every stage of a pipeline gets
+/// it rather than only whichever process the shell happened to name.
+pub fn signal_process_group(pgid: u64, signum: u32) -> bool {
+    let members: Vec<ThreadId> = THREADS
+        .list()
+        .into_iter()
+        .filter(|thread| thread.user.is_some() && thread.pgid() == pgid)
+        .map(|thread| thread.id)
+        .collect();
+
+    for tid in &members {
+        kill_process_with_signal(tid.0, signum);
+    }
+    !members.is_empty()
+}
+
+/// Place `pid` in process group `pgid`.
+///
+/// `pid` of 0 means the caller and `pgid` of 0 means "lead a new group", which
+/// is how a shell puts the first process of a job into a group of its own.
+pub fn set_process_group(pid: u64, pgid: u64, caller: u64) -> Result<(), Errno> {
+    let pid = if pid == 0 { caller } else { pid };
+    let Some(thread) = THREADS.get(ThreadId(pid)) else {
+        return Err(Errno::ENOENT);
+    };
+    if thread.user.is_none() {
+        return Err(Errno::EPERM);
+    }
+    let pgid = if pgid == 0 { pid } else { pgid };
+    thread.pgid.store(pgid, Ordering::Release);
+    Ok(())
+}
+
+/// The process group of `pid`, or of the caller when `pid` is 0.
+pub fn process_group_of(pid: u64, caller: u64) -> Result<u64, Errno> {
+    let pid = if pid == 0 { caller } else { pid };
+    THREADS
+        .get(ThreadId(pid))
+        .map(|thread| thread.pgid())
+        .ok_or(Errno::ENOENT)
+}
+
 /// Send a signal to a process by PID.
 ///
 /// For signals whose default action is Terminate, also sets the `killed` flag
@@ -1451,8 +1533,9 @@ pub fn kill_process_with_signal(pid: u64, signum: u32) -> bool {
     use crate::thread::signal;
 
     if let Some(thread) = THREADS.get(ThreadId(pid)) {
-        // Check if signal is ignored (SIG_IGN)
-        if signum != signal::SIGKILL && thread.signal.get_handler(signum) == signal::SIG_IGN {
+        let catchable = !signal::is_uncatchable(signum);
+
+        if catchable && thread.signal.get_handler(signum) == signal::SIG_IGN {
             return true; // Signal was "sent" but ignored
         }
 
@@ -1460,32 +1543,55 @@ pub fn kill_process_with_signal(pid: u64, signum: u32) -> bool {
         thread.signal.send(signum);
 
         // A blocked signal stays pending and acts on nothing until
-        // `sigprocmask` unblocks it. SIGKILL cannot be blocked.
-        if signum != signal::SIGKILL && thread.signal.is_blocked(signum) {
+        // `sigprocmask` unblocks it. SIGKILL and SIGSTOP cannot be blocked.
+        if catchable && thread.signal.is_blocked(signum) {
             return true;
         }
 
-        // For default-terminate signals, set the killed flag and exit code
-        match signal::default_action(signum) {
-            signal::DefaultAction::Terminate => {
-                // Also set the old killed flag for backward compatibility
-                // (PTY slave read checks it)
-                thread.killed.store(true, Ordering::Release);
-                thread
-                    .exit_code
-                    .store(128 + signum as i32, Ordering::Release);
-            }
-            signal::DefaultAction::Ignore => {
-                // SIG_DFL for this signal is ignore (e.g. SIGCHLD)
-                return true;
-            }
+        // A signal with a handler stays pending too: it is delivered on the
+        // target's own stack at its next syscall return, not here. Applying
+        // the default action as well would kill a process that asked to
+        // handle the signal instead.
+        if catchable && thread.signal.has_user_handler(signum) {
+            sched().wake_thread(&Arc::downgrade(&thread), WakePriority::Normal);
+            return true;
         }
 
-        // Wake the thread so it can observe the signal
+        apply_default_action(&thread, signum);
+
+        // Wake the thread so it can observe the signal. A stop takes effect at
+        // the next boundary, so the target has to be running to reach it; a
+        // continue has to undo the park the stop put it in. Both need a wake.
         sched().wake_thread(&Arc::downgrade(&thread), WakePriority::Normal);
         true
     } else {
         false
+    }
+}
+
+/// Apply a signal's default action to `thread`, short of actually suspending
+/// or terminating it — both of those happen on the target's own stack, at a
+/// boundary where it holds nothing.
+fn apply_default_action(thread: &Arc<Thread>, signum: u32) {
+    use crate::thread::signal;
+
+    match signal::default_action(signum) {
+        signal::DefaultAction::Terminate => {
+            thread.killed.store(true, Ordering::Release);
+            thread
+                .exit_code
+                .store(128 + signum as i32, Ordering::Release);
+        }
+        signal::DefaultAction::Stop => {
+            thread.stop_requested.store(true, Ordering::Release);
+        }
+        signal::DefaultAction::Continue => {
+            // Clearing the request is the whole of the resume: the parked
+            // thread's park condition reads it, so the wake that follows sends
+            // it back to userspace.
+            thread.stop_requested.store(false, Ordering::Release);
+        }
+        signal::DefaultAction::Ignore => {}
     }
 }
 
@@ -1504,11 +1610,24 @@ pub fn deliver_unblocked_signals(thread: &Thread) {
         {
             continue;
         }
-        if let signal::DefaultAction::Terminate = signal::default_action(signum) {
-            thread.killed.store(true, Ordering::Release);
-            thread
-                .exit_code
-                .store(128 + signum as i32, Ordering::Release);
+        // A handled signal is put back: it belongs to the handler path, which
+        // runs on the thread's own stack at its next syscall return.
+        if thread.signal.has_user_handler(signum) {
+            thread.signal.send(signum);
+            continue;
+        }
+        match signal::default_action(signum) {
+            signal::DefaultAction::Terminate => {
+                thread.killed.store(true, Ordering::Release);
+                thread
+                    .exit_code
+                    .store(128 + signum as i32, Ordering::Release);
+            }
+            signal::DefaultAction::Stop => thread.stop_requested.store(true, Ordering::Release),
+            signal::DefaultAction::Continue => {
+                thread.stop_requested.store(false, Ordering::Release)
+            }
+            signal::DefaultAction::Ignore => {}
         }
     }
 }

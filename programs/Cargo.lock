@@ -405,6 +405,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigtest"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "sleep"
 version = "0.1.0"
 

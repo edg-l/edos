@@ -1717,6 +1717,52 @@ worse than one that admits it.
   sleep 1` showing `<... nanosleep resumed> = 0 <1.000049>` is the answer to
   "the program is hung", not a guess about it.
 
+## Signals became a real subsystem
+
+`signal.rs` was 163 lines of pending bitmask and an ignore-or-die disposition.
+Five things landed on top of it; `programs/sigtest` covers each and is the
+thing to run before believing any change here.
+
+**Suspension happens at a boundary, not where the signal lands.** A stop sets
+`stop_requested` and wakes the target; the target parks itself in
+`stop_if_signalled` at its next syscall return or its next tick out of ring 3.
+That is the same boundary `killed` uses and for the same reason — it is where
+the thread provably holds no guard. The consequence worth keeping: a process
+suspended mid-`write` finishes the write first, so Ctrl+Z can never leave a
+filesystem lock held for as long as a user leaves a job suspended.
+
+**A handler runs by rewriting the syscall context.** Delivery builds a
+`SigFrame` on the user stack — the whole interrupted `SyscallContext`, the old
+blocked mask, and a magic word — then points `ctx.rip` at the handler with the
+restorer as its return address. `sigreturn` reloads it. Three things that are
+load-bearing rather than incidental:
+
+- The frame is written **below the red zone** and 16-aligned so that `rsp+8` is
+  16-aligned at handler entry, which is what the ABI actually requires.
+- `sigreturn` **checks the magic and masks rflags** before loading. It restores
+  `rip`, `rsp` and `rflags` wholesale from a user-writable address, so without
+  those two checks it is a privilege escalation rather than a syscall.
+- The saved `rax` is the interrupted syscall's **return value**, so a handler
+  that runs between a call finishing and userspace seeing its result is
+  invisible to the interrupted code. `sigtest`'s first case checks exactly that.
+
+**Delivery is syscall-return only.** A thread spinning without entering the
+kernel does not run a handler. Default actions still reach it from the tick, so
+Ctrl+C kills such a process — it just cannot *catch* it. Extending this to the
+tick path means building the same frame from a `CpuContext` instead of a
+`SyscallContext`, which is the work that was deliberately not done.
+
+**A handled signal must not also take its default action.** `kill_process_with_signal`
+returns early when a user handler is installed, leaving the signal pending for
+the handler path. Without that, a process asking to handle `SIGINT` gets killed
+by it anyway. `deliver_unblocked_signals` puts handled signals back for the same
+reason.
+
+**`Pipe::write` used to ignore its readers entirely** — a write with nobody
+reading buffered into the kernel heap forever, so `yes | head -1` was an
+unbounded allocation rather than a broken pipe. It now returns `None`, which
+the caller turns into `EPIPE` *and* a `SIGPIPE`.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any

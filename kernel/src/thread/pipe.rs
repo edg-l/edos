@@ -99,10 +99,19 @@ impl Pipe {
         self.notify_pollers()
     }
 
-    pub fn write(&mut self, data: &[u8]) -> (usize, PipeNotifications) {
+    /// Append to the pipe, or report that nobody is left to read it.
+    ///
+    /// A pipe with no reader is not a slow pipe, it is a dead one: buffering
+    /// into it grows the kernel heap for output no one will ever take. The
+    /// caller turns `None` into EPIPE and a `SIGPIPE`, which is what makes
+    /// `yes | head -1` terminate instead of running until memory runs out.
+    pub fn write(&mut self, data: &[u8]) -> (Option<usize>, PipeNotifications) {
+        if self.readers == 0 {
+            return (None, self.notify_pollers());
+        }
         self.buffer.extend_from_slice(data);
         let written = data.len();
-        (written, self.notify_pollers())
+        (Some(written), self.notify_pollers())
     }
 
     pub fn read(&mut self, count: usize) -> (Vec<u8>, PipeNotifications) {
@@ -311,9 +320,13 @@ pub fn close_descriptor(descriptor: FileDescriptor, owner_pid: u64) {
             notif.flush();
         }
         FileDescriptor::PtySlave(pty) => {
+            // The terminal keeps no foreground group once the group that held
+            // it lets go of its end.
+            let owner_pgid =
+                crate::thread::thread::process_group_of(owner_pid, owner_pid).unwrap_or(owner_pid);
             let mut guard = ranked_lock!(RANK_PTY, "pipe::close_slave", pty);
-            if guard.foreground_pid == Some(owner_pid) {
-                guard.foreground_pid = None;
+            if guard.foreground_pgid == Some(owner_pgid) {
+                guard.foreground_pgid = None;
             }
             let notif = guard.close_slave();
             drop(guard);

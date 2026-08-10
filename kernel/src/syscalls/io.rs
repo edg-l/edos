@@ -198,7 +198,22 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 pipe.write(&data)
             };
             notif.flush();
-            written as u64
+            match written {
+                Some(written) => written as u64,
+                None => {
+                    // POSIX: both, and in this order. The signal is what
+                    // terminates a producer that never checks its return
+                    // value, and errno is what a producer that does checks.
+                    if let Some(tid) = crate::thread::scheduler::current_thread_id() {
+                        crate::thread::thread::kill_process_with_signal(
+                            tid.0,
+                            crate::thread::signal::SIGPIPE,
+                        );
+                    }
+                    info.lock().errno = Errno::EPIPE;
+                    !0u64
+                }
+            }
         }
         Some(FileDescriptor::PipeRead(_)) => {
             info.lock().errno = Errno::EINVAL;
@@ -1791,6 +1806,50 @@ pub fn sys_isatty(fd: u64) -> u64 {
         Some(FileDescriptor::PtySlave(_)) => 1,
         _ => 0,
     }
+}
+
+/// The PTY behind `fd`, whichever end it names.
+fn pty_of_fd(fd: u64) -> Option<alloc::sync::Arc<BlockingMutex<crate::thread::pty::Pty>>> {
+    let info = current_thread_info();
+    let guard = info.lock();
+    let fd_table = guard.fd_table.lock();
+    match fd_table.get_fd(fd) {
+        Some(FileDescriptor::PtySlave(pty)) | Some(FileDescriptor::PtyMaster(pty)) => {
+            Some(pty.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Hand the terminal to a process group.
+///
+/// This is what makes a job "foreground": the line discipline aims Ctrl+C and
+/// Ctrl+Z at whichever group holds the terminal, so a shell resuming a job in
+/// the foreground gives it the terminal first and takes it back afterwards.
+pub fn sys_tcsetpgrp(fd: u64, pgid: u64) -> u64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let Some(pty) = pty_of_fd(fd) else {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    };
+    ranked_lock!(RANK_PTY, "tcsetpgrp", pty).foreground_pgid = Some(pgid);
+    0
+}
+
+/// The process group holding the terminal, or 0 if none does.
+pub fn sys_tcgetpgrp(fd: u64) -> u64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let Some(pty) = pty_of_fd(fd) else {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    };
+    ranked_lock!(RANK_PTY, "tcgetpgrp", pty)
+        .foreground_pgid
+        .unwrap_or(0)
 }
 
 pub fn sys_ftruncate(fd: u64, size: u64) -> i32 {

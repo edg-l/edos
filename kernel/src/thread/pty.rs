@@ -3,7 +3,7 @@ use crate::{
         PollState,
         handle::{PollEntry, PollKey, PollRegistration, Pollable},
     },
-    thread::{mutex::BlockingMutex, waitqueue::WaitQueue},
+    thread::{mutex::BlockingMutex, signal, waitqueue::WaitQueue},
 };
 use alloc::{sync::Arc, vec::Vec};
 
@@ -39,6 +39,7 @@ pub enum LineAction {
     None,
     Eof,
     Interrupt,
+    Suspend,
 }
 
 #[derive(Debug)]
@@ -63,13 +64,22 @@ impl LineDiscipline {
         input_buf: &mut Vec<u8>,
         output_buf: &mut Vec<u8>,
     ) -> LineAction {
-        // Ctrl+C generates interrupt in both raw and canonical mode
+        // Ctrl+C and Ctrl+Z reach the foreground job in both raw and
+        // canonical mode, and neither reaches the reader as data.
         if byte == 0x03 {
             self.line_buf.clear();
             if self.echo {
                 output_buf.extend_from_slice(b"^C\n");
             }
             return LineAction::Interrupt;
+        }
+
+        if byte == 0x1a {
+            self.line_buf.clear();
+            if self.echo {
+                output_buf.extend_from_slice(b"^Z\n");
+            }
+            return LineAction::Suspend;
         }
 
         if !self.canonical {
@@ -165,7 +175,11 @@ pub struct Pty {
     line_disc: LineDiscipline,
     eof_pending: bool,
     /// PID of the foreground process that should receive Ctrl+C signals.
-    pub foreground_pid: Option<u64>,
+    /// Process group signals from the line discipline are aimed at.
+    ///
+    /// A group rather than a pid because Ctrl+C belongs to the foreground
+    /// *job*: `ls | grep x` is two processes and both must get it.
+    pub foreground_pgid: Option<u64>,
     /// The character grid the terminal is drawing, so a full-screen program can
     /// ask instead of assuming. A program that assumes draws off the bottom of
     /// the window the moment the grid changes size, and nothing tells it.
@@ -189,7 +203,7 @@ impl Pty {
             next_poll_key: 1,
             line_disc: LineDiscipline::new(),
             eof_pending: false,
-            foreground_pid: None,
+            foreground_pgid: None,
             cols: 80,
             rows: 30,
         }
@@ -244,7 +258,7 @@ impl Pty {
         }
 
         // Process each byte through the line discipline.
-        let mut kill_pid: Option<u64> = None;
+        let mut signal_pgid: Option<(u64, u32)> = None;
         for &byte in data {
             // Borrow fields separately to satisfy the borrow checker.
             let action =
@@ -255,14 +269,17 @@ impl Pty {
                     self.eof_pending = true;
                 }
                 LineAction::Interrupt => {
-                    kill_pid = self.foreground_pid;
+                    signal_pgid = self.foreground_pgid.map(|pgid| (pgid, signal::SIGINT));
+                }
+                LineAction::Suspend => {
+                    signal_pgid = self.foreground_pgid.map(|pgid| (pgid, signal::SIGTSTP));
                 }
                 LineAction::None => {}
             }
         }
 
         let mut notif = self.notify_pollers();
-        notif.kill_pid = kill_pid;
+        notif.signal_pgid = signal_pgid;
         (len, notif)
     }
 
@@ -406,7 +423,7 @@ impl Pty {
                 slave_state,
                 input_wq,
                 output_wq,
-                kill_pid: None,
+                signal_pgid: None,
             };
         }
 
@@ -421,7 +438,7 @@ impl Pty {
             slave_state,
             input_wq,
             output_wq,
-            kill_pid: None,
+            signal_pgid: None,
         }
     }
 }
@@ -433,8 +450,8 @@ pub struct PtyNotifications {
     slave_state: PollState,
     input_wq: Option<Arc<WaitQueue>>,
     output_wq: Option<Arc<WaitQueue>>,
-    /// If set, kill this process after releasing the PTY lock.
-    pub kill_pid: Option<u64>,
+    /// If set, signal this process group after releasing the PTY lock.
+    pub signal_pgid: Option<(u64, u32)>,
 }
 
 impl PtyNotifications {
@@ -444,7 +461,7 @@ impl PtyNotifications {
         slave_state: PollState::none(),
         input_wq: None,
         output_wq: None,
-        kill_pid: None,
+        signal_pgid: None,
     };
 
     /// Send all notifications. Call this after dropping the PTY lock.
@@ -462,8 +479,8 @@ impl PtyNotifications {
         if let Some(wq) = &self.output_wq {
             wq.wake_one();
         }
-        if let Some(pid) = self.kill_pid {
-            crate::thread::thread::kill_process(pid);
+        if let Some((pgid, signum)) = self.signal_pgid {
+            crate::thread::thread::signal_process_group(pgid, signum);
         }
     }
 }

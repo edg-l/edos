@@ -57,7 +57,8 @@ use crate::{
         signal::{self, SignalState},
         thread::{
             State, Thread, ThreadId, allocate_thread_id, deliver_unblocked_signals,
-            get_thread_info_by_id, insert_thread, insert_thread_info, kill_process_with_signal,
+            get_thread_by_id, get_thread_info_by_id, insert_thread, insert_thread_info,
+            kill_process_with_signal, process_group_of, set_process_group, signal_process_group,
             take_thread_exit_code,
         },
         util::{kthread_stack_alloc, kthread_stack_free},
@@ -73,6 +74,7 @@ mod ioctl;
 pub mod memory;
 mod net;
 mod shm;
+mod sigframe;
 mod sync;
 mod table;
 pub mod trace;
@@ -81,9 +83,15 @@ mod window;
 use self::ioctl::sys_ioctl;
 use self::sync::{sys_futex_wait, sys_futex_wake};
 use crate::thread::scheduler::{
-    current_thread, current_thread_info, current_thread_weak, exit_if_killed, thread_exit,
-    thread_park_while, thread_sleep,
+    current_thread, current_thread_id, current_thread_info, current_thread_weak, exit_if_killed,
+    stop_if_signalled, thread_exit, thread_park_while, thread_sleep,
 };
+
+/// Set the caller's errno and return the `-1` every failing syscall reports.
+fn fail_with(errno: Errno) -> u64 {
+    current_thread_info().lock().errno = errno;
+    !0u64
+}
 
 /// Properly decrement refcounts when a FileDescriptor is removed from a table
 /// without going through sys_close (e.g. dup2 replacing an existing fd).
@@ -381,6 +389,15 @@ const SYS_WINDOW_DAMAGE: u64 = 232;
 /// Appoint another process as part of the shell. Init only; see
 /// `kernel/src/window/shell.rs`.
 const SYS_WINDOW_GRANT_SHELL: u64 = 234;
+/// Return from a signal handler; see `syscalls/sigframe.rs`.
+const SYS_SIGRETURN: u64 = 239;
+/// Place a process in a process group.
+const SYS_SETPGID: u64 = 109;
+/// Read a process's process group.
+const SYS_GETPGID: u64 = 121;
+/// Hand a terminal to a process group, or read which group holds it.
+const SYS_TCSETPGRP: u64 = 237;
+const SYS_TCGETPGRP: u64 = 238;
 /// Claim, release and target the syscall tracer; see `syscalls/trace.rs`.
 const SYS_TRACE_CTL: u64 = 235;
 /// Drain trace records into the tracer's buffer.
@@ -716,9 +733,9 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         }
         SYS_WAIT_PID => {
             let pid = ctx.rdi;
-            let block = ctx.rsi;
+            let flags = ctx.rsi;
             let status_ptr = ctx.rdx as *mut i32;
-            ctx.rax = sys_waitpid(pid, block == 1, status_ptr);
+            ctx.rax = sys_waitpid(pid, flags, status_ptr);
         }
         SYS_ERRNO => {
             ctx.rax = sys_errno();
@@ -907,13 +924,24 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             ctx.rax = sys_spawn2(args_ptr);
         }
         SYS_KILL => {
-            let pid = ctx.rdi;
+            // POSIX addressing: a positive pid is one process, 0 is the
+            // caller's group, and a negative pid is the group named by its
+            // magnitude. The group forms are how a shell stops a whole job.
+            let pid = ctx.rdi as i64;
             let signum = ctx.rsi as u32;
             let info = current_thread_info();
-            if signum == 0 || signum >= 32 {
-                info.lock().errno = Errno::EINVAL;
-                ctx.rax = !0u64;
-            } else if kill_process_with_signal(pid, signum) {
+            let delivered = if signum == 0 || signum >= 32 {
+                false
+            } else if pid > 0 {
+                kill_process_with_signal(pid as u64, signum)
+            } else {
+                let pgid = match pid {
+                    0 => current_thread().map(|t| t.pgid()),
+                    _ => Some(pid.unsigned_abs()),
+                };
+                pgid.is_some_and(|pgid| signal_process_group(pgid, signum))
+            };
+            if delivered {
                 ctx.rax = 0;
             } else {
                 info.lock().errno = Errno::EINVAL;
@@ -921,19 +949,37 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             }
         }
         SYS_SIGACTION => {
+            // `handler` is SIG_DFL, SIG_IGN, or a user function address.
+            // `restorer` is the address a handler returns through and is
+            // required whenever a real handler is installed: the kernel cannot
+            // supply those instructions itself without making a stack
+            // executable.
             let signum = ctx.rdi as u32;
-            let handler = ctx.rsi as u32; // 0=SIG_DFL, 1=SIG_IGN
+            let handler = ctx.rsi;
+            let restorer = ctx.rdx;
             let info = current_thread_info();
-            if signum == 0 || signum >= 32 || signum == signal::SIGKILL {
+            if signum == 0 || signum >= 32 || signal::is_uncatchable(signum) {
+                info.lock().errno = Errno::EINVAL;
+                ctx.rax = !0u64;
+            } else if handler > signal::SIG_IGN && restorer == 0 {
                 info.lock().errno = Errno::EINVAL;
                 ctx.rax = !0u64;
             } else if let Some(cur_thread) = current_thread() {
+                if restorer != 0 {
+                    cur_thread
+                        .signal
+                        .restorer
+                        .store(restorer, Ordering::Release);
+                }
                 let prev = cur_thread.signal.set_handler(signum, handler);
-                ctx.rax = prev as u64;
+                ctx.rax = prev;
             } else {
                 info.lock().errno = Errno::EINVAL;
                 ctx.rax = !0u64;
             }
+        }
+        SYS_SIGRETURN => {
+            sigframe::sys_sigreturn(ctx);
         }
         SYS_SIGPROCMASK => {
             // Signal sets are 32 bits wide here, so the mask is passed and the
@@ -1071,6 +1117,36 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_REBOOT => {
             ctx.rax = sys_reboot(ctx.rdi);
         }
+        SYS_SETPGID => {
+            let pid = ctx.rdi;
+            let pgid = ctx.rsi;
+            ctx.rax = match current_thread_id() {
+                Some(caller) => match set_process_group(pid, pgid, caller.0) {
+                    Ok(()) => 0,
+                    Err(errno) => fail_with(errno),
+                },
+                None => fail_with(Errno::EINVAL),
+            };
+        }
+        SYS_GETPGID => {
+            let pid = ctx.rdi;
+            ctx.rax = match current_thread_id() {
+                Some(caller) => match process_group_of(pid, caller.0) {
+                    Ok(pgid) => pgid,
+                    Err(errno) => fail_with(errno),
+                },
+                None => fail_with(Errno::EINVAL),
+            };
+        }
+        SYS_TCSETPGRP => {
+            let fd = ctx.rdi;
+            let pgid = ctx.rsi;
+            ctx.rax = io::sys_tcsetpgrp(fd, pgid);
+        }
+        SYS_TCGETPGRP => {
+            let fd = ctx.rdi;
+            ctx.rax = io::sys_tcgetpgrp(fd);
+        }
         SYS_TRACE_CTL => {
             let op = ctx.rdi;
             let arg = ctx.rsi;
@@ -1092,10 +1168,19 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
     }
 
     // A thread marked for termination dies here rather than returning to user
-    // code. This is one of the two boundaries where that is safe; the other is
-    // a timer tick that interrupted ring 3, which covers a thread that spins
-    // without ever making a syscall.
+    // code, and one carrying a stop signal suspends here. This is one of the
+    // two boundaries where either is safe; the other is a timer tick that
+    // interrupted ring 3, which covers a thread that spins without ever making
+    // a syscall. Stop first, so a process resumed by SIGCONT and killed while
+    // suspended still dies on the way out.
+    stop_if_signalled();
     exit_if_killed();
+
+    // Last, because it rewrites the very context the stub is about to restore
+    // from, and because a thread that is dying or suspended has no business
+    // running user code. A handled signal outlives both checks: neither marks
+    // the thread killed.
+    sigframe::deliver_pending_handler(ctx);
 }
 
 pub fn sys_errno() -> u64 {
@@ -1279,17 +1364,41 @@ fn sys_getpid() -> u64 {
     current_thread_info().lock().pid
 }
 
-fn sys_waitpid(pid: u64, block: bool, status_ptr: *mut i32) -> u64 {
+/// `waitpid` flags. Blocking is the low bit; `UNTRACED` asks to hear about a
+/// child that stopped as well as one that exited, which is what lets a shell
+/// notice Ctrl+Z without polling procfs.
+const WAIT_BLOCK: u64 = 1;
+const WAIT_UNTRACED: u64 = 2;
+
+/// Status value reported for a stopped child, distinguishable from any exit
+/// code: an exit status is a byte, this is not.
+const STATUS_STOPPED: i32 = 0x1_0000;
+
+fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> u64 {
     use crate::thread::thread::EXITED_THREADS;
 
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
     let target = ThreadId(pid);
+    let block = flags & WAIT_BLOCK != 0;
 
     // Fast path: already exited
     if let Some(code) = take_thread_exit_code(target) {
         if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, code) } {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
+        }
+        return pid;
+    }
+
+    // A stopped child is reported before the blocking wait, because it is not
+    // going to exit while it is suspended and a caller that blocked here would
+    // never come back.
+    if flags & WAIT_UNTRACED != 0
+        && get_thread_by_id(target).is_some_and(|t| t.stopped.load(Ordering::Acquire))
+    {
+        if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, STATUS_STOPPED) } {
             info.lock().errno = Errno::EFAULT;
             return !0u64;
         }
@@ -1816,13 +1925,16 @@ fn do_spawn(
 
     let child_pid = user_thread.id.0;
 
-    // If the child's stdin (fd 0) is a PTY slave, register this child as the
-    // foreground process so Ctrl+C signals are delivered to it.
+    // A child reading the terminal leads a new process group and that group
+    // becomes the terminal's foreground job, so Ctrl+C reaches it and not its
+    // spawner. A shell building a pipeline puts the remaining stages into this
+    // same group with `setpgid`, which is what makes one Ctrl+C stop all of it.
     {
         let child_info = get_thread_info_by_id(user_thread.id).unwrap();
         let child_fd_table = child_info.lock().fd_table.clone();
         if let Some(FileDescriptor::PtySlave(pty)) = child_fd_table.lock().get_fd(0).cloned() {
-            ranked_lock!(RANK_PTY, "sys_spawn::foreground", pty).foreground_pid = Some(child_pid);
+            user_thread.pgid.store(child_pid, Ordering::Release);
+            ranked_lock!(RANK_PTY, "sys_spawn::foreground", pty).foreground_pgid = Some(child_pid);
         }
     }
 
@@ -2532,9 +2644,12 @@ fn sys_clone(
         cpu: AtomicU32::new(0),
         exit_code: AtomicI32::new(0),
         killed: AtomicBool::new(false),
+        stop_requested: AtomicBool::new(false),
+        stopped: AtomicBool::new(false),
         wake_pending: AtomicBool::new(false),
         last_syscall: AtomicU32::new(crate::thread::thread::NO_SYSCALL),
         traced: AtomicU64::new(trace::inherit_from(&parent_thread)),
+        pgid: AtomicU64::new(parent_thread.pgid()),
         signal: SignalState::new(),
         user: Some(child_user),
         rq_link: Link::new(),
@@ -2783,9 +2898,12 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         cpu: AtomicU32::new(0),
         exit_code: AtomicI32::new(0),
         killed: AtomicBool::new(false),
+        stop_requested: AtomicBool::new(false),
+        stopped: AtomicBool::new(false),
         wake_pending: AtomicBool::new(false),
         last_syscall: AtomicU32::new(crate::thread::thread::NO_SYSCALL),
         traced: AtomicU64::new(trace::inherit_from(&parent_thread)),
+        pgid: AtomicU64::new(parent_thread.pgid()),
         signal: SignalState::new(),
         user: Some(child_user_arc.clone()),
         rq_link: Link::new(),

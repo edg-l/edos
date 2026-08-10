@@ -78,10 +78,15 @@ impl Procfs {
     }
 
     fn render_process_table(entries: &[ThreadSnapshot]) -> String {
-        let mut table = String::from("PID   PPID  TYPE   STATE     PRIO CPU CPUms RSSKiB NAME\n");
+        let mut table =
+            String::from("PID   PPID  PGID  TYPE   STATE     PRIO CPU CPUms RSSKiB NAME\n");
         for entry in entries {
             let ty = if entry.is_kernel { "kernel" } else { "user" };
-            let state = format!("{:?}", entry.state);
+            let state = if entry.stopped {
+                "Stopped".to_string()
+            } else {
+                format!("{:?}", entry.state)
+            };
             let name = entry.display_name();
             let cpu_ms = entry.cpu_time_ns / 1_000_000;
             // A kernel thread has no address space of its own, so it reports
@@ -92,9 +97,10 @@ impl Procfs {
                 .unwrap_or_else(|| "-".to_string());
             let _ = writeln!(
                 table,
-                "{:<5} {:<5} {:<6} {:<9} {:<4} {:<3} {:>6} {:>6} {}",
+                "{:<5} {:<5} {:<5} {:<6} {:<9} {:<4} {:<3} {:>6} {:>6} {}",
                 entry.tid,
                 entry.parent,
+                entry.pgid,
                 ty,
                 state,
                 entry.priority,
@@ -508,8 +514,12 @@ impl FileSystem for Procfs {
 struct ThreadSnapshot {
     tid: u64,
     parent: u64,
+    pgid: u64,
     name: String,
     state: State,
+    /// Suspended by a stop signal. Reported instead of `state`, which for a
+    /// stopped thread only says it is parked and not why.
+    stopped: bool,
     priority: u8,
     cpu: u32,
     cpu_affinity: u32,
@@ -554,6 +564,8 @@ impl ThreadSnapshot {
         let exit_code = thread.exit_code.load(Ordering::Acquire);
         let kstack_top = thread.kstack_top;
         let is_kernel = thread.user.is_none();
+        let pgid = thread.pgid();
+        let stopped = thread.stopped.load(Ordering::Acquire);
 
         let (user_pid, heap_break, vma_count, vm_size, resident) = thread
             .user
@@ -593,7 +605,9 @@ impl ThreadSnapshot {
             tid,
             parent,
             name,
+            pgid,
             state,
+            stopped,
             priority,
             cpu,
             cpu_affinity,
@@ -638,7 +652,16 @@ impl ThreadSnapshot {
             "Type: {}",
             if self.is_kernel { "kernel" } else { "user" }
         );
-        let _ = writeln!(out, "State: {:?}", self.state);
+        let _ = writeln!(
+            out,
+            "State: {}",
+            if self.stopped {
+                "Stopped".to_string()
+            } else {
+                format!("{:?}", self.state)
+            }
+        );
+        let _ = writeln!(out, "ProcessGroup: {}", self.pgid);
         let _ = writeln!(out, "Priority: {}", self.priority);
         let _ = writeln!(out, "CPU: {}", self.cpu);
         let _ = writeln!(out, "CPU Affinity: 0x{:08x}", self.cpu_affinity);

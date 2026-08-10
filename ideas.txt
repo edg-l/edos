@@ -2,6 +2,18 @@
 
 ## Done
 
+- **Signals grew up** - five kernel items, all covered by `programs/sigtest`.
+  Process groups (`setpgid`/`getpgid`, `tcsetpgrp`/`tcgetpgrp`, `kill` with a
+  negative pid) so Ctrl+C reaches a pipeline rather than one stage of it;
+  `SIGSTOP`/`SIGTSTP`/`SIGCONT` with Ctrl+Z, a thread suspending at the same
+  boundary `killed` uses so a suspended process never holds a filesystem lock,
+  and `waitpid` reporting a stopped child; real userspace handlers, delivered
+  by building a frame on the user stack at the syscall-return boundary and
+  unwound by a new `sigreturn`, restoring the whole context including the
+  interrupted call's return value; `SIGPIPE` on a write to a pipe with no
+  reader, which used to buffer into the kernel heap forever; and `SIGCHLD` to
+  the parent on exit. A thread that never syscalls never runs a *handler* --
+  default actions still reach it from the timer tick.
 - **strace** - the kernel records syscall entries and returns for marked
   threads into a ring a tracer drains, and `programs/strace` formats them.
   No ptrace: dispatch in `syscalls/mod.rs` is one choke point, so the mark is
