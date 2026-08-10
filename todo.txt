@@ -1,4 +1,21 @@
 
+- The AHCI ATAPI commands read a fixed number of bytes out of a pooled DMA
+  buffer without asking how many arrived, the same defect fixed in 7591982
+  (xHCI descriptors) and in the USB mass-storage INQUIRY / READ CAPACITY
+  paths. `execute_atapi_command` (`kernel/src/drivers/ahci/port.rs:1941`)
+  returns `Result<(), _>` and drops the count, so
+  `execute_atapi_inquiry_as_identify` parses all 96 bytes,
+  `execute_atapi_read_capacity` all 8, and `execute_atapi_read_as_sectors`
+  copies the whole `expected_size` back to the caller. `DmaPool` does not zero
+  a recycled buffer, so a short response yields the previous owner's bytes as
+  device identity or as sector data.
+  The count is already available: `issue_command` zeroes the command header's
+  `prdbc` before issuing (`port.rs:1026`) and the HBA writes the transferred
+  byte count there on completion, so `execute_atapi_command` can read it back
+  after `wait_for_completion` and return it. Not done tonight because nothing
+  in the current QEMU setup exercises an ATAPI device, so gating those reads on
+  `prdbc` would ship an unverified behaviour change on the storage path.
+
 - An absolute symlink target is resolved in the wrong namespace. Root cause of
   `iotest /tmp` failing test 10 with "read through link: entity not found"
   while the identical `iotest /var` passes: VFS hands each filesystem a

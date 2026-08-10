@@ -111,9 +111,14 @@ impl UsbMassStorage {
     // SCSI commands
     // -----------------------------------------------------------------------
 
+    /// Smallest INQUIRY response that carries a meaningful header: peripheral
+    /// device type through ADDITIONAL LENGTH (SPC-4 §6.4.2).
+    const MIN_INQUIRY_BYTES: usize = 5;
+
     /// SCSI INQUIRY (opcode 0x12) - identifies the device type and vendor strings.
     ///
-    /// Returns the 36-byte standard INQUIRY data.
+    /// Returns the standard INQUIRY data, zero-padded to 36 bytes when the
+    /// device answers with fewer than the allocation length.
     pub fn inquiry(
         &mut self,
         controller: &mut XhciController,
@@ -129,7 +134,7 @@ impl UsbMassStorage {
             .map_err(|_| XhciError::InvalidDevice)?;
         let data_phys = data_buf.phys_addr().as_u64();
 
-        self.bot_transfer(
+        let transferred = self.bot_transfer(
             controller,
             in_ring,
             out_ring,
@@ -140,12 +145,19 @@ impl UsbMassStorage {
             true,
         )?;
 
+        // Only the bytes the device actually sent are ours; the rest of a
+        // pooled buffer still holds whatever its previous owner left there.
         let mut result = [0u8; 36];
+        let valid = transferred.min(36);
         unsafe {
-            core::ptr::copy_nonoverlapping(data_buf.as_ptr(), result.as_mut_ptr(), 36);
+            core::ptr::copy_nonoverlapping(data_buf.as_ptr(), result.as_mut_ptr(), valid);
         }
         if let Err(e) = dma().dealloc(data_buf) {
             println!("usb-msc: dma dealloc failed: {e}");
+        }
+        if valid < Self::MIN_INQUIRY_BYTES {
+            println!("usb-msc: short INQUIRY response: {valid} bytes");
+            return Err(XhciError::InvalidDevice);
         }
         Ok(result)
     }
@@ -167,7 +179,7 @@ impl UsbMassStorage {
             .map_err(|_| XhciError::InvalidDevice)?;
         let data_phys = data_buf.phys_addr().as_u64();
 
-        self.bot_transfer(
+        let transferred = self.bot_transfer(
             controller,
             in_ring,
             out_ring,
@@ -185,6 +197,20 @@ impl UsbMassStorage {
 
         if let Err(e) = dma().dealloc(data_buf) {
             println!("usb-msc: dma dealloc failed: {e}");
+        }
+
+        // A short answer leaves part of the parameter data as whatever the
+        // previous owner of the pooled buffer wrote, so neither field is ours.
+        if transferred < 8 {
+            println!("usb-msc: short READ CAPACITY response: {transferred} bytes");
+            return Err(XhciError::InvalidDevice);
+        }
+        // `block_size` divides MAX_TRANSFER_BYTES in read_sectors/write_sectors:
+        // zero faults the CPU and anything past the cap makes the chunk size
+        // round to zero, so neither can be allowed to reach that arithmetic.
+        if block_size == 0 || block_size > Self::MAX_TRANSFER_BYTES {
+            println!("usb-msc: implausible block size {block_size}");
+            return Err(XhciError::InvalidDevice);
         }
         Ok((last_lba, block_size))
     }
@@ -241,7 +267,7 @@ impl UsbMassStorage {
             cmd[8] = chunk as u8;
 
             let transfer_len = chunk as u32 * self.block_size;
-            self.bot_transfer(
+            let got = self.bot_transfer(
                 controller,
                 in_ring,
                 out_ring,
@@ -251,6 +277,13 @@ impl UsbMassStorage {
                 transfer_len,
                 true,
             )?;
+            // A short read leaves the tail of the caller's buffer holding
+            // whatever was there before; reporting success would pass it off
+            // as sector data.
+            if got < transfer_len as usize {
+                println!("usb-msc: short READ(10): {got} of {transfer_len} bytes");
+                return Err(XhciError::InvalidDevice);
+            }
 
             remaining -= chunk;
             cur_lba += chunk as u32;
@@ -291,7 +324,7 @@ impl UsbMassStorage {
             cmd[8] = chunk as u8;
 
             let transfer_len = chunk as u32 * self.block_size;
-            self.bot_transfer(
+            let sent = self.bot_transfer(
                 controller,
                 in_ring,
                 out_ring,
@@ -301,6 +334,10 @@ impl UsbMassStorage {
                 transfer_len,
                 false,
             )?;
+            if sent < transfer_len as usize {
+                println!("usb-msc: short WRITE(10): {sent} of {transfer_len} bytes");
+                return Err(XhciError::InvalidDevice);
+            }
 
             remaining -= chunk;
             cur_lba += chunk as u32;
@@ -321,7 +358,10 @@ impl UsbMassStorage {
     /// - `data_len`: byte count for the data phase.
     /// - `direction_in`: `true` = device-to-host (read), `false` = host-to-device (write).
     ///
-    /// Returns the CSW data residue on success.
+    /// Returns the number of bytes the data phase actually moved. A caller that
+    /// parses the buffer must bound itself by that count: the buffer comes from
+    /// a pool that does not zero on reuse, so bytes past it belong to whoever
+    /// held it last.
     fn bot_transfer(
         &mut self,
         controller: &mut XhciController,
@@ -332,7 +372,7 @@ impl UsbMassStorage {
         data_phys: Option<u64>,
         data_len: u32,
         direction_in: bool,
-    ) -> Result<u32, XhciError> {
+    ) -> Result<usize, XhciError> {
         let tag = self.next_tag();
 
         // 1. Build and send CBW on bulk OUT using the pre-allocated buffer.
@@ -352,9 +392,10 @@ impl UsbMassStorage {
         controller.bulk_transfer(self.slot_id, out_ring, self.ep_out_dci, cbw_phys, 31, false)?;
 
         // 2. Data phase (optional).
+        let mut transferred = 0usize;
         if data_len > 0 {
             if let Some(phys) = data_phys {
-                if direction_in {
+                transferred = if direction_in {
                     controller.bulk_transfer(
                         self.slot_id,
                         in_ring,
@@ -362,7 +403,7 @@ impl UsbMassStorage {
                         phys,
                         data_len,
                         true,
-                    )?;
+                    )?
                 } else {
                     controller.bulk_transfer(
                         self.slot_id,
@@ -371,8 +412,8 @@ impl UsbMassStorage {
                         phys,
                         data_len,
                         false,
-                    )?;
-                }
+                    )?
+                };
             }
         }
 
@@ -407,7 +448,10 @@ impl UsbMassStorage {
             return Err(XhciError::TransferError(status));
         }
 
-        Ok(residue)
+        // Two independent counts cover the data phase: the transfer event's
+        // residual, reported by the host controller, and the CSW residue,
+        // reported by the device. Trust whichever claims less arrived.
+        Ok(transferred.min(data_len.saturating_sub(residue) as usize))
     }
 }
 
