@@ -82,7 +82,7 @@ impl Widget for Checkbox {
     }
 
     fn bounds(&self) -> Rect {
-        let label_width = (self.label.len() as u32) * char_width();
+        let label_width = (self.label.chars().count() as u32) * char_width();
         let total_width = CHECKBOX_BOX + LABEL_GAP + label_width;
         Rect::new(self.x, self.y, total_width, CONTROL_HEIGHT)
     }

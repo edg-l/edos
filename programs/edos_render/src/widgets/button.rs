@@ -22,7 +22,7 @@ pub struct Button {
 impl Button {
     /// Create a new button that auto-sizes based on text.
     pub fn new(id: WidgetId, x: i32, y: i32, label: &str) -> Self {
-        let width = (label.len() as u32) * char_width() + CONTROL_PAD_X * 2;
+        let width = (label.chars().count() as u32) * char_width() + CONTROL_PAD_X * 2;
 
         Self {
             id,
@@ -130,7 +130,7 @@ impl Widget for Button {
         );
 
         // Center the text
-        let text_width = (self.label.len() as u32) * char_width();
+        let text_width = (self.label.chars().count() as u32) * char_width();
         let text_x = self.x + (self.width as i32 - text_width as i32) / 2;
         let text_y = self.y + (self.height as i32 - text_height() as i32) / 2;
 
