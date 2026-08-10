@@ -26,8 +26,9 @@ use crate::{
             fis::FisRegH2D,
             structures::{
                 CMD_HEADER_ATAPI, CMD_HEADER_WRITE, CommandHeader, CommandTable,
-                DeviceIdentifyInfo, HbaFis, HbaPort, MAX_PRDT_ENTRIES, PORT_CMD_CR, PORT_CMD_FR,
-                PORT_CMD_FRE, PORT_CMD_ST, PORT_IS_TFES, PrdtEntry, ScsiInquiry, ScsiRead10,
+                DeviceIdentifyInfo, HbaFis, HbaPort, INQUIRY_ALLOCATION_LEN, MAX_PRDT_ENTRIES,
+                MIN_INQUIRY_BYTES, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE, PORT_CMD_ST,
+                PORT_IS_TFES, PrdtEntry, READ_CAPACITY_10_LEN, ScsiInquiry, ScsiRead10,
                 ScsiReadCapacity10,
             },
         },
@@ -1940,34 +1941,60 @@ impl AhciPort {
 
 impl AhciPort {
     /// Execute an ATAPI (SCSI packet) command. Caller must hold legacy_lock.
+    ///
+    /// Returns the number of bytes the device actually transferred, which a
+    /// packet device is free to make smaller than the allocation length. The
+    /// count comes from the command header's PRD byte count, which the HBA
+    /// writes on completion (AHCI 1.3.1 §4.2.3); `issue_command` zeroes it
+    /// before issuing, so a device that transfers nothing reports zero rather
+    /// than a stale value.
     fn execute_atapi_command(
         &self,
         scsi_cmd: &[u8],
         buffer_addr: PhysAddr,
         buffer_size: usize,
         timeout: Duration,
-    ) -> Result<(), AhciError> {
+    ) -> Result<usize, AhciError> {
         self.with_slot_try(|slot, _op| {
             self.setup_atapi_command_table(slot, scsi_cmd, buffer_addr, buffer_size)?;
             let prdtl = if buffer_size > 0 { 1 } else { 0 };
             self.issue_command(slot, CMD_HEADER_ATAPI, prdtl)?;
-            self.wait_for_completion(slot, timeout)
+            self.wait_for_completion(slot, timeout)?;
+
+            let prdbc = unsafe {
+                let header = &raw const (*self.command_list.get())[slot];
+                ptr::read_volatile(&raw const (*header).prdbc)
+            };
+            Ok((prdbc as usize).min(buffer_size))
         })
     }
 
     /// SCSI INQUIRY, converted to DeviceIdentifyInfo.
     fn execute_atapi_inquiry_as_identify(&self) -> Result<DeviceIdentifyInfo, AhciError> {
         let inquiry_cmd = ScsiInquiry::new();
-        let data_buffer = dma().allocate_sized(96)?;
+        let data_buffer = dma().allocate_sized(INQUIRY_ALLOCATION_LEN)?;
 
-        self.execute_atapi_command(
+        let transferred = self.execute_atapi_command(
             bytemuck::bytes_of(&inquiry_cmd),
             data_buffer.phys_addr(),
-            96,
+            INQUIRY_ALLOCATION_LEN,
             Duration::from_secs(5),
         )?;
 
-        let inquiry_data = unsafe { core::slice::from_raw_parts(data_buffer.as_ptr(), 96) };
+        // Only the bytes the device sent are ours; the rest of a pooled buffer
+        // still holds whatever its previous owner left there.
+        if transferred < MIN_INQUIRY_BYTES {
+            log!(
+                "AHCI port {}: short INQUIRY response: {} bytes",
+                self.port_idx,
+                transferred
+            );
+            let _ = dma().dealloc(data_buffer);
+            return Err(AhciError::IoError);
+        }
+
+        let inquiry_data =
+            unsafe { core::slice::from_raw_parts(data_buffer.as_ptr(), transferred) };
         let mut device_info = DeviceIdentifyInfo::from_scsi_inquiry(inquiry_data);
 
         if let Ok(capacity) = self.execute_atapi_read_capacity() {
@@ -1982,16 +2009,29 @@ impl AhciPort {
 
     fn execute_atapi_read_capacity(&self) -> Result<(u64, u32), AhciError> {
         let capacity_cmd = ScsiReadCapacity10::new();
-        let data_buffer = dma().allocate_sized(8)?;
+        let data_buffer = dma().allocate_sized(READ_CAPACITY_10_LEN)?;
 
-        self.execute_atapi_command(
+        let transferred = self.execute_atapi_command(
             bytemuck::bytes_of(&capacity_cmd),
             data_buffer.phys_addr(),
-            8,
+            READ_CAPACITY_10_LEN,
             Duration::from_secs(5),
         )?;
 
-        let data = unsafe { core::slice::from_raw_parts(data_buffer.as_ptr(), 8) };
+        // A short answer leaves part of the parameter data as whatever the
+        // previous owner of the pooled buffer wrote, so neither field is ours.
+        if transferred < READ_CAPACITY_10_LEN {
+            log!(
+                "AHCI port {}: short READ CAPACITY response: {} bytes",
+                self.port_idx,
+                transferred
+            );
+            let _ = dma().dealloc(data_buffer);
+            return Err(AhciError::IoError);
+        }
+
+        let data =
+            unsafe { core::slice::from_raw_parts(data_buffer.as_ptr(), READ_CAPACITY_10_LEN) };
         let last_lba = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         let block_size = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
 
@@ -2042,12 +2082,26 @@ impl AhciPort {
         let read_cmd = ScsiRead10::new(lba as u32, sectors);
         let data_buffer = dma().allocate_sized(expected_size)?;
 
-        self.execute_atapi_command(
+        let transferred = self.execute_atapi_command(
             bytemuck::bytes_of(&read_cmd),
             data_buffer.phys_addr(),
             expected_size,
             Duration::from_secs(10),
         )?;
+
+        // A short read would leave the tail of the caller's buffer holding the
+        // pooled buffer's previous contents; returning success would pass that
+        // off as sector data.
+        if transferred < expected_size {
+            log!(
+                "AHCI port {}: short ATAPI READ(10): {} of {} bytes",
+                self.port_idx,
+                transferred,
+                expected_size
+            );
+            let _ = dma().dealloc(data_buffer);
+            return Err(AhciError::IoError);
+        }
 
         unsafe {
             ptr::copy_nonoverlapping(data_buffer.as_ptr(), buffer.as_mut_ptr(), expected_size);

@@ -76,7 +76,7 @@ fn block_write_fua(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result
 }
 use super::path::Path;
 use super::{
-    DateTime, Error, File, FileAttrs, FileKind, FileSystem, FileTime, MAX_SYMLINK_HOPS,
+    DateTime, Error, File, FileAttrs, FileKind, FileSystem, FileTime, LinkEscape, LinkMode,
     splice_symlink,
 };
 use crate::{
@@ -86,6 +86,13 @@ use crate::{
 };
 
 // ---- Constants ----------------------------------------------------------------
+
+/// Where a path walk stopped.
+enum Walk {
+    Node((u64, EfsInode)),
+    /// A symbolic link named a path outside this filesystem.
+    Escaped(LinkEscape),
+}
 
 /// Number of 512-byte sectors in 4 KiB (one default block).
 const SECTORS_PER_DEFAULT_BLOCK: u16 = 8;
@@ -605,51 +612,51 @@ impl EfsDriver {
     /// Resolve a path to (inode_number, inode), avoiding a redundant read_inode after resolution.
     /// Symbolic links are followed, including one named by the last component.
     fn resolve_path_inode(&self, path: &Path) -> Result<(u64, EfsInode), Error> {
-        self.resolve_path_walk(path, true)
+        self.resolve_path_mode(path, LinkMode::Follow)
     }
 
     /// Resolve a path whose last component is left unfollowed, so a symbolic
     /// link resolves to the link itself. Links in the leading components are
     /// still followed.
     fn resolve_path_inode_nofollow(&self, path: &Path) -> Result<(u64, EfsInode), Error> {
-        self.resolve_path_walk(path, false)
+        self.resolve_path_mode(path, LinkMode::NoFollow)
     }
 
-    fn resolve_path_walk(&self, path: &Path, follow_final: bool) -> Result<(u64, EfsInode), Error> {
-        let mut components: Vec<String> = path.components().to_vec();
-        let mut hops = 0u32;
+    fn resolve_path_mode(&self, path: &Path, mode: LinkMode) -> Result<(u64, EfsInode), Error> {
+        match self.resolve_path_walk(path, mode)? {
+            Walk::Node(found) => Ok(found),
+            Walk::Escaped(_) => Err(Error::LinkEscape),
+        }
+    }
 
-        'walk: loop {
-            let mut current_ino = EFS_ROOT_INO;
-            let mut resolved: Vec<String> = Vec::new();
+    fn resolve_path_walk(&self, path: &Path, mode: LinkMode) -> Result<Walk, Error> {
+        let components = path.components();
+        let mut current_ino = EFS_ROOT_INO;
+        let mut resolved: Vec<String> = Vec::new();
 
-            let mut index = 0;
-            while index < components.len() {
-                let ino = match self.lookup_in_dir(current_ino, components[index].as_str())? {
-                    Some((ino, _)) => ino,
-                    None => return Err(Error::FileNotFound),
-                };
-                let inode = self.read_inode(ino)?;
-                let is_last = index + 1 == components.len();
+        for (index, name) in components.iter().enumerate() {
+            let ino = match self.lookup_in_dir(current_ino, name.as_str())? {
+                Some((ino, _)) => ino,
+                None => return Err(Error::FileNotFound),
+            };
+            let inode = self.read_inode(ino)?;
+            let is_last = index + 1 == components.len();
 
-                if inode.mode & S_IFMT == S_IFLNK && (!is_last || follow_final) {
-                    hops += 1;
-                    if hops > MAX_SYMLINK_HOPS {
-                        return Err(Error::TooManyLinks);
-                    }
-                    let target = symlink_target(&inode)?;
-                    components = splice_symlink(&resolved, &target, &components[index + 1..]);
-                    continue 'walk;
-                }
-
-                current_ino = ino;
-                resolved.push(components[index].clone());
-                index += 1;
+            if inode.mode & S_IFMT == S_IFLNK && (!is_last || mode.follows_final()) {
+                let target = symlink_target(&inode)?;
+                return Ok(Walk::Escaped(splice_symlink(
+                    &resolved,
+                    &target,
+                    &components[index + 1..],
+                )));
             }
 
-            let inode = self.read_inode(current_ino)?;
-            return Ok((current_ino, inode));
+            current_ino = ino;
+            resolved.push(name.clone());
         }
+
+        let inode = self.read_inode(current_ino)?;
+        Ok(Walk::Node((current_ino, inode)))
     }
 }
 
@@ -1889,6 +1896,14 @@ impl FileSystem for EfsDriver {
             return Err(Error::InvalidArgument);
         }
         symlink_target(&inode)
+    }
+
+    fn link_escape(&self, path: &Path, mode: LinkMode) -> Result<LinkEscape, Error> {
+        let path = path.normalize();
+        match self.resolve_path_walk(&path, mode)? {
+            Walk::Escaped(escape) => Ok(escape),
+            Walk::Node(_) => Err(Error::Unsupported),
+        }
     }
 
     fn file_info(&self, path: &Path) -> Result<File, Error> {

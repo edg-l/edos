@@ -8,6 +8,7 @@
 //! reason those two used to be one flag and are now two. A menu has no title
 //! bar, and it has to take focus, because losing focus is how it closes.
 
+use edos_lib::io::klog_dump;
 use edos_lib::process::{reboot, spawn, REBOOT_HALT, REBOOT_POWER_OFF, REBOOT_RESTART};
 use edos_render::icons;
 use edos_render::theme::Theme;
@@ -80,6 +81,37 @@ const ROWS: &[Row] = &[
 /// Index of the first power row, which is where the rule goes.
 const FIRST_POWER_ROW: usize = 2;
 
+/// Prefix on every line of a menu dump, so a host-side reader can pick the
+/// block out of an interleaved serial log.
+const MENU_DUMP_TAG: &str = "menu|";
+
+/// Header starting each block, which is also how a reader tells where one
+/// block ends and the next begins: it is the only line whose first field is
+/// not a number.
+const MENU_DUMP_HEADER: &str = "X Y W H LABEL";
+
+/// Publish where each row sits on screen, once per opening.
+///
+/// The menu exists only while it is open and its rows are not windows, so this
+/// is the only way something driving the machine from outside can choose one
+/// by its label instead of by a pixel copied out of this file.
+fn dump_rows(window_x: i32, window_y: i32) {
+    let lines = ROWS.iter().enumerate().map(|(index, row)| {
+        format!(
+            "{} {} {} {} {}",
+            window_x + PAD,
+            window_y + row_y(index),
+            WIDTH - PAD as u32 * 2,
+            ROW_HEIGHT,
+            row.label
+        )
+    });
+    klog_dump(
+        MENU_DUMP_TAG,
+        core::iter::once(MENU_DUMP_HEADER.to_string()).chain(lines),
+    );
+}
+
 fn height() -> u32 {
     ROWS.len() as u32 * ROW_HEIGHT + (PAD * 2) as u32 + RULE + (RULE_GAP * 2) as u32
 }
@@ -141,6 +173,7 @@ impl Menu {
         if window.show().is_err() {
             return;
         }
+        dump_rows(anchor_x, y);
         self.window = Some(window);
         self.hovered = None;
         self.just_opened = true;

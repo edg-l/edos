@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use std::collections::HashMap;
 
+use edos_lib::io::klog_dump;
 use edos_render::graphics::Screen;
 use edos_render::window::{
     WindowEvent, WindowEventType, WindowListEntry, flags, focused_id, property, set_frame,
@@ -139,8 +140,6 @@ const WINDOW_DUMP_TAG: &str = "windows|";
 /// through rather than reformatted: procfs owns the format, and a second
 /// formatter here is a second thing to keep in step.
 fn dump_windows() {
-    use std::io::Write;
-
     let text = match std::fs::read_to_string("/proc/windows") {
         Ok(text) => text,
         Err(e) => {
@@ -148,20 +147,11 @@ fn dump_windows() {
             return;
         }
     };
-    let Ok(mut klog) = std::fs::OpenOptions::new().write(true).open("/dev/klog") else {
-        eprintln!("[wm] /dev/klog is not writable");
-        return;
-    };
-    // One write per line, formatted first: each write to /dev/klog is one log
-    // message, and `write!` would split a line across several of them.
-    for line in text.lines() {
-        let _ = klog.write_all(format!("{WINDOW_DUMP_TAG} {line}").as_bytes());
-    }
+    klog_dump(WINDOW_DUMP_TAG, text.lines());
 }
 
 /// Target frame time (approximately 60 FPS).
 const FRAME_TIME_MS_DEFAULT: u64 = 16;
-
 
 /// Minimum window width in pixels.
 const MIN_WINDOW_WIDTH: u32 = 100;
@@ -878,7 +868,13 @@ fn main() {
             }
         }
         let flip_us = flip_start.elapsed().as_micros() as u64;
-        frame_stats.record(composite_us, flip_us, dirty.full_screen, frame_time_ms, sent_pixels);
+        frame_stats.record(
+            composite_us,
+            flip_us,
+            dirty.full_screen,
+            frame_time_ms,
+            sent_pixels,
+        );
         dirty.clear();
         // Sleep remainder of frame budget to maintain frame rate.
         // Use a minimum sleep of 1ms to avoid sub-microsecond sleeps that

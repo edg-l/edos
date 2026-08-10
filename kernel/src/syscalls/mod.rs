@@ -1170,7 +1170,7 @@ impl From<FsError> for Errno {
             FsError::Unsupported => Errno::EIO,
             FsError::Busy => Errno::EBUSY,
             FsError::InvalidArgument => Errno::EINVAL,
-            FsError::TooManyLinks => Errno::ELOOP,
+            FsError::TooManyLinks | FsError::LinkEscape => Errno::ELOOP,
             FsError::AlreadyExists => Errno::EEXIST,
             FsError::ProtocolMismatch => Errno::EIO,
         }

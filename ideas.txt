@@ -2,6 +2,31 @@
 
 ## Done
 
+- **Symbolic links resolve in the mount namespace** - a filesystem walks
+  paths from its own root and cannot see the mount table, so it no longer
+  resolves a link target at all: it reports where the link pointed and the
+  VFS says what that names, restarting from the VFS root and crossing onto
+  whatever mount the target lives on. Fixes an absolute target being looked
+  up under the link's own filesystem (`iotest /tmp` stopped at test 10),
+  a relative target whose `..` walked out of the mount, and a target that
+  landed on something mounted deeper. `LinkMode` carries the follow /
+  nofollow distinction the VFS previously left to each filesystem, so
+  `unlink`, `readlink` and `rename` act on the link and everything else
+  acts on what it names. Escalation is error-driven (`Error::LinkEscape`),
+  so a path with no links costs exactly one walk as before.
+- **AHCI ATAPI bounds its reads by the transferred count** - the command
+  header's `prdbc`, which the HBA writes on completion, instead of assuming
+  the full allocation length arrived out of a pooled DMA buffer that is not
+  zeroed between owners. Same defect previously fixed in xHCI descriptors
+  and USB mass storage. A short INQUIRY, READ CAPACITY or READ(10) is now
+  rejected rather than padded with the previous owner's bytes; the boot ISO
+  is an ATAPI port on q35, so this runs on every boot.
+- **The panel is addressable by name** - its buttons are not windows, so it
+  publishes them itself: the panel writes its controls to `/dev/klog`
+  whenever its layout moves and the applications menu writes its rows as it
+  opens, tagged like the window dump. `scripts/edos-vm` grows `panel` and
+  `press <name>` and resolves `launch` rows by label, with no layout
+  constant left in the script.
 - **fsbench** - `programs/fsbench` measures filesystem throughput and latency
   across idioms (write/read at 512B..1MiB, BufWriter, fs::write, pwrite,
   random, mmap, fsync, metadata) and three depths (memfs, raw block device,
@@ -581,11 +606,11 @@ All fixes implemented:
 3. **Per-CPU heap freelists** -- 6 size classes (32-1024 bytes), 16 slots
    per CPU. Most small allocations avoid the global heap lock. Batch
    refill/drain of 8 objects. FSGSBASE enabled for fast per-CPU access.
-4. **TLB flush fix** -- switch_to_kernel_page() no longer calls
+1. **TLB flush fix** -- switch_to_kernel_page() no longer calls
    tlb_flush_all_including_global() unconditionally. Cr3::write
    already flushes non-global entries. The unconditional global flush
    was the root trigger for the intermittent boot hang.
-5. **Page fault off IST** -- Page fault handler uses the kernel stack
+2. **Page fault off IST** -- Page fault handler uses the kernel stack
    instead of IST 1. Nested page faults (vmalloc fault during demand
    fault handling) work naturally. Double fault retains its own IST
    for stack overflow protection.
@@ -805,7 +830,7 @@ reaper correctness in general). Roadmap in dependency order:
    `doc/bugs/2026-04-17-foundation-5.md` and
    `.claude/handoff/2026-04-17-3-foundation-5-phase-4-plus-ahci-ncq-hang.md`.
 
-6. **Generic async block I/O trait. DONE 2026-05-19.** `AsyncBlockDevice`
+3. **Generic async block I/O trait. DONE 2026-05-19.** `AsyncBlockDevice`
    with AHCI callers migrated (Phase A, `04232c0`), USB MSC migrated and
    BPC dispatch collapsed (Phase B, `35ad890`). AHCI NCQ submit/complete
    split with an IRQ-driven dispatcher (Phase C1, `cf7938e`, fixed in
@@ -1238,52 +1263,30 @@ page cache, with ioctls for flush, sector count, rescan and is-mounted.
 `edos-install` already uses them, so an in-EDOS fsck has everything it
 needs.
 
-### Addressing windows by name instead of by pixel (DONE, and what is left)
+### Addressing the screen by name instead of by pixel (DONE)
 
-Option 1 shipped: `/proc/windows` publishes the registry, the compositor
+Windows first: `/proc/windows` publishes the registry, the compositor
 copies it into the kernel log on `Ctrl+Alt+W`, and `scripts/edos-vm`
-grows `windows` and `focus <title>`. Windows no longer need pixels.
+grows `windows` and `focus <title>`.
 
-The *panel* still does. `launch`, and the menu row coordinates behind
-it, remain a hand-copied mirror of
-`programs/edos-taskbar/src/{main,panel,menu}.rs`, because the panel's
-buttons are not windows and nothing publishes their layout. Option 2 --
-a control daemon speaking names for panel actions too, so a test can
-assert on text rather than a screenshot -- is what would close that,
-and would also let a script restore a minimized window, which has no
-on-screen geometry to click.
+The panel followed, by the same route rather than by the control daemon
+first sketched here. Its buttons are not windows, so it publishes them
+itself: the panel writes its controls to `/dev/klog` whenever its
+layout moves and the applications menu writes its rows as it opens,
+both tagged like the window dump. `scripts/edos-vm` grows `panel` and
+`press <name>`, `launch` resolves rows by label, and no layout constant
+is left in the script. `press <title>` also clicks a task button, which
+is how a minimized window gets restored -- it has no on-screen geometry
+of its own.
 
 ## What to do next (reviewed 2026-08-10)
 
 Open, roughly in priority order. Items marked [audit] come from
 doc/AUDIT.md, which has the file:line detail and the reasoning.
 
-Known defects, mechanism written out in `todo.txt`:
-
-1. **An absolute symlink target resolves in the wrong namespace.** VFS
-   hands each filesystem a mount-relative path, so a link naming
-   `/tmp/target` makes memfs look under its own root. `iotest /tmp`
-   stops at test 10; `iotest /var` passes only because EFS is mounted
-   at `/`. The fix belongs in the VFS, which is the only layer that
-   owns the namespace, and needs follow/nofollow resolve entry points
-   because the target may live on another mount.
-2. **AHCI ATAPI reads a fixed size out of a pooled DMA buffer.** The
-   same defect already fixed in xHCI descriptors and USB mass storage.
-   `execute_atapi_command` drops the transferred count that the command
-   header's `prdbc` already carries. The boot ISO is an AHCI ATAPI port
-   on q35, so the defective path runs on every boot and the fix is
-   verifiable against the `QEMU DVD-ROM` model string in `dmesg`.
-
-3. **Panel actions still have no name addressing.** Windows do now
-   (`/proc/windows`, `scripts/edos-vm focus`), but the launcher and the
-   applications-menu rows are drawn by the panel and published by
-   nothing, so `scripts/edos-vm launch` still mirrors their coordinates
-   by hand. See "Addressing windows by name instead of by pixel" below
-   for what closes it.
-
 Hygiene and quality:
 
-4. **`unwrap()`/`expect()` density in kernel code.** [audit] 204 across
+1. **`unwrap()`/`expect()` density in kernel code.** [audit] 204 across
    `kernel/src`, so recount rather than trusting the figure. Convert the
    ones on I/O and parsing results; leave a comment on the structurally
    impossible ones. The ELF loader (`loader/mod.rs`) is done. Next by
@@ -1295,34 +1298,34 @@ Hygiene and quality:
    `init()` into `find_and_init()`. The rest are DMA-allocation
    `expect()`s on a `-> !` thread. Reading them did turn up a real
    defect (short control transfers parsed as descriptors), now fixed.
-5. **Module READMEs for `fs/` (17.5k lines) and `drivers/` (13.6k).**
+2. **Module READMEs for `fs/` (17.5k lines) and `drivers/` (13.6k).**
    [audit]
 
 Still open from the audit, but deliberately unhurried. These are not
 oversights; each has a reason it has not been done.
 
-6. **TCP retransmit clones whole segments.** [audit 2.5]
+3. **TCP retransmit clones whole segments.** [audit 2.5]
    `resends.push(seg.data.clone())` copies the full segment per retry.
    This was theoretical while no connection could be established; now
    that TCP moves real data it is a live cost under loss. `Arc<[u8]>`
    and clone the handle.
-7. **Scheduler quality, four items.** [audit 4] Load is measured as
+4. **Scheduler quality, four items.** [audit 4] Load is measured as
    `thread_count`, so a sleeping thread weighs the same as a CPU-bound
    one and `pick_sched`/`try_rebalance` balance the wrong quantity.
    There is no priority inheritance, so a high-priority waiter still
    queues behind a low-priority lock holder. The timeslice is a flat 5ms
    regardless of priority. The idle loop polls for steals on a backoff
    instead of being told by an IPI.
-8. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
+5. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
    flag and one request slot, so unrelated `munmap`s on different
    address spaces serialize. Deliberate and correct; it is the scaling
    wall once core counts rise. The real fix is a per-mm CPU mask so the
    IPI is skipped for address spaces no other CPU has loaded.
-9. **`find_free_address` scans from the base every call.** [audit 2.7]
+6. **`find_free_address` scans from the base every call.** [audit 2.7]
    O(VMAs) per mmap. The tradeoff is deliberate — a cursor would never
    wrap and freed ranges would never be reused — and only worth
    revisiting if it shows up in a profile.
-10. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
+7. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
    NUL-terminated path while `SYS_STAT` takes pointer+length. `edos_rt`
    no longer pays for it — `FileDesc::new` goes through `SYS_OPENAT`
    with `AT_FDCWD`, which behaves exactly like `SYS_OPEN` and needs no

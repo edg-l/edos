@@ -30,6 +30,11 @@ impl Path {
         Ok(Path { components })
     }
 
+    /// Build an absolute path from already-split components.
+    pub fn from_components(components: Vec<String>) -> Path {
+        Path { components }
+    }
+
     /// Return a normalized path with `.` and `..` resolved.
     /// - Absolute only (always starts at `/`).
     /// - `..` at root keeps root.

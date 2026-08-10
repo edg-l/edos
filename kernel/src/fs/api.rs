@@ -10,8 +10,8 @@ use alloc::{
 
 use crate::{
     fs::{
-        Error, FS_REQUESTS, File, FileAttrs, FileKind, FsRequest, FsResponse, MmapRegion,
-        MountInfo,
+        Error, FS_REQUESTS, File, FileAttrs, FileKind, FsRequest, FsResponse, LinkMode,
+        MAX_SYMLINK_HOPS, MmapRegion, MountInfo,
         gpt::{FilesystemType, Partition},
         handle::Pollable,
         inode::VfsInode,
@@ -102,67 +102,169 @@ pub fn register_partition(partition: Partition) -> Result<(), Error> {
 // Write operations acquire per-inode write locks.
 // Two threads reading different files never block each other.
 
+/// How a path API turns its path into a `VfsOp`.
+#[derive(Clone, Copy)]
+enum Resolver {
+    /// Full resolution, with the inode from the dentry cache.
+    Inode,
+    /// The mount only, for operations whose target need not exist yet.
+    Mount,
+    /// Full resolution that also handles the path naming a mount point.
+    Info,
+}
+
+impl Resolver {
+    fn resolve(self, path: &Path) -> Option<vfs::VfsOp> {
+        match self {
+            Resolver::Inode => vfs::resolve(path),
+            Resolver::Mount => vfs::resolve_mount(path),
+            Resolver::Info => vfs::resolve_for_info(path),
+        }
+    }
+}
+
+/// Run a path operation, restarting it when a symbolic link on the path names
+/// something outside the mount the link lives on.
+///
+/// A filesystem resolves paths from its own root and cannot see the mount
+/// table, so it stops at such a link and reports `Error::LinkEscape`; the VFS
+/// says where the target lands and the operation runs again there, possibly on
+/// another filesystem. A path with no links, or only links that stay inside
+/// their mount, costs exactly one walk.
+///
+/// The path the operation finally ran on is returned with its result, since
+/// `open` caches it for the life of the file descriptor.
+fn with_links<T>(
+    path: &Path,
+    resolver: Resolver,
+    mode: LinkMode,
+    mut f: impl FnMut(&vfs::VfsOp, &Path) -> Result<T, Error>,
+) -> Result<(T, Path), Error> {
+    let mut path = path.clone();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        let op = resolver.resolve(&path).ok_or(Error::FileNotFound)?;
+        match f(&op, &path) {
+            Err(Error::LinkEscape) => path = vfs::link_escape(&op, mode)?,
+            result => return result.map(|value| (value, path)),
+        }
+    }
+    Err(Error::TooManyLinks)
+}
+
+/// `with_links` for the callers that do not need the resolved path back.
+fn on_path<T>(
+    path: &Path,
+    resolver: Resolver,
+    mode: LinkMode,
+    f: impl FnMut(&vfs::VfsOp, &Path) -> Result<T, Error>,
+) -> Result<T, Error> {
+    with_links(path, resolver, mode, f).map(|(value, _)| value)
+}
+
+/// Follow the escaping symbolic links on `path` without acting on what it
+/// names, for the caller that cannot use `with_links` because it holds two
+/// paths at once.
+///
+/// The probe has to walk the path the same way the operation will, or it would
+/// report an escape the operation does not hit, or miss one it does:
+/// `file_info` follows the final component and `read_link` leaves it alone,
+/// which is exactly the distinction `mode` draws. Neither's own result is of
+/// any interest here; only whether the walk escaped the mount.
+fn resolve_links(path: &Path, mode: LinkMode) -> Result<Path, Error> {
+    let mut path = path.clone();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        let op = vfs::resolve_mount(&path).ok_or(Error::FileNotFound)?;
+        let probe = match mode {
+            LinkMode::Follow => vfs::file_info(&op).map(|_| ()),
+            LinkMode::NoFollow => vfs::read_link(&op).map(|_| ()),
+        };
+        match probe {
+            Err(Error::LinkEscape) => path = vfs::link_escape(&op, mode)?,
+            _ => return Ok(path),
+        }
+    }
+    Err(Error::TooManyLinks)
+}
+
 pub fn list_files(path: &Path) -> Result<Vec<File>, Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
-    vfs::list_files(&op, path)
+    on_path(path, Resolver::Inode, LinkMode::Follow, |op, resolved| {
+        vfs::list_files(op, resolved)
+    })
 }
 
 pub fn read_bytes(path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
-    // Path-API reads have no fd, so readahead state is not preserved across calls.
-    let mut ra = ReadaheadState::default();
-    vfs::read(&op, &mut ra, offset, count)
+    on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
+        // Path-API reads have no fd, so readahead state is not preserved across calls.
+        let mut ra = ReadaheadState::default();
+        vfs::read(op, &mut ra, offset, count)
+    })
 }
 
 #[expect(unused)]
 pub fn write_bytes(path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
-    vfs::write(&op, offset, data, false)
+    on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
+        vfs::write(op, offset, data, false)
+    })
 }
 
 #[expect(unused)]
 pub fn write_bytes_owned(path: &Path, offset: usize, data: Vec<u8>) -> Result<u64, Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
-    vfs::write(&op, offset, &data, false)
+    on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
+        vfs::write(op, offset, &data, false)
+    })
 }
 
 pub fn create_file(path: &Path) -> Result<(), Error> {
-    let op = vfs::resolve_mount(path).ok_or(Error::FileNotFound)?;
-    vfs::create_file(&op)
+    on_path(path, Resolver::Mount, LinkMode::NoFollow, |op, _| {
+        vfs::create_file(op)
+    })
 }
 
 /// Create a symbolic link at `path` holding `target` verbatim. The target is
 /// not resolved or validated: a dangling link is legal, as in POSIX.
 pub fn symlink(target: &str, path: &Path) -> Result<(), Error> {
-    let op = vfs::resolve_mount(path).ok_or(Error::FileNotFound)?;
-    vfs::symlink(&op, target)
+    on_path(path, Resolver::Mount, LinkMode::NoFollow, |op, _| {
+        vfs::symlink(op, target)
+    })
 }
 
 /// Read the target of the symbolic link at `path` without following it.
 pub fn read_link(path: &Path) -> Result<String, Error> {
-    let op = vfs::resolve_mount(path).ok_or(Error::FileNotFound)?;
-    vfs::read_link(&op)
+    on_path(path, Resolver::Mount, LinkMode::NoFollow, |op, _| {
+        vfs::read_link(op)
+    })
 }
 
 pub fn create_dir(path: &Path) -> Result<(), Error> {
-    let op = vfs::resolve_mount(path).ok_or(Error::FileNotFound)?;
-    vfs::create_dir(&op)
+    on_path(path, Resolver::Mount, LinkMode::NoFollow, |op, _| {
+        vfs::create_dir(op)
+    })
 }
 
 pub fn remove_file(path: &Path) -> Result<(), Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
-    vfs::remove_file(&op)
+    on_path(path, Resolver::Inode, LinkMode::NoFollow, |op, _| {
+        vfs::remove_file(op)
+    })
 }
 
 pub fn remove_dir(path: &Path) -> Result<(), Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
-    vfs::remove_dir(&op)
+    on_path(path, Resolver::Inode, LinkMode::NoFollow, |op, _| {
+        vfs::remove_dir(op)
+    })
 }
 
 pub fn file_info(path: &Path) -> Result<File, Error> {
+    file_info_resolved(path).map(|(info, _)| info)
+}
+
+/// `file_info` that also hands back the path it resolved to, which differs
+/// from `path` exactly when a symbolic link redirected it across a mount.
+/// `open` needs it: everything it caches on the file descriptor has to name
+/// the file the fd actually refers to.
+pub fn file_info_resolved(path: &Path) -> Result<(File, Path), Error> {
     if vfs::is_mount_point(path) {
         let name = path.last_component().unwrap_or("/").to_string();
-        return Ok(File {
+        let info = File {
             name,
             kind: FileKind::Directory,
             size: 0,
@@ -175,16 +277,19 @@ pub fn file_info(path: &Path) -> Result<File, Error> {
             created: None,
             accessed: None,
             modified: None,
-        });
+        };
+        return Ok((info, path.clone()));
     }
-    let op = vfs::resolve_for_info(path).ok_or(Error::FileNotFound)?;
-    vfs::file_info(&op)
+    with_links(path, Resolver::Info, LinkMode::Follow, |op, _| {
+        vfs::file_info(op)
+    })
 }
 
 #[expect(unused)]
 pub fn flush(path: &Path) -> Result<(), Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
-    vfs::flush(&op)
+    on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
+        vfs::flush(op)
+    })
 }
 
 pub fn flush_file(path: &Path, inode: Option<Arc<VfsInode>>) -> Result<(), Error> {
@@ -193,13 +298,15 @@ pub fn flush_file(path: &Path, inode: Option<Arc<VfsInode>>) -> Result<(), Error
 }
 
 pub fn ioctl(path: &Path, request: u64, arg: u64) -> Result<u64, Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
-    vfs::ioctl(&op, request, arg)
+    on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
+        vfs::ioctl(op, request, arg)
+    })
 }
 
 pub fn poll(path: &Path) -> Result<Box<dyn Pollable>, Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
-    vfs::poll(&op)
+    on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
+        vfs::poll(op)
+    })
 }
 
 #[expect(unused)]
@@ -209,23 +316,34 @@ pub fn mmap(
     length: usize,
     memory: Arc<PreemptSpinlock<MemoryManager>>,
 ) -> Result<MmapRegion, Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
-    vfs::mmap(&op, offset, length, memory)
+    on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
+        vfs::mmap(op, offset, length, memory.clone())
+    })
 }
 
 pub fn truncate(path: &Path, size: u64) -> Result<(), Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
-    vfs::truncate(&op, size)
+    on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
+        vfs::truncate(op, size)
+    })
 }
 
 pub fn set_times(path: &Path, atime: Option<u64>, mtime: Option<u64>) -> Result<(), Error> {
-    let op = vfs::resolve(path).ok_or(Error::FileNotFound)?;
-    vfs::set_times(&op, atime, mtime)
+    on_path(path, Resolver::Inode, LinkMode::Follow, |op, _| {
+        vfs::set_times(op, atime, mtime)
+    })
 }
 
+/// Rename is the one path operation that takes two paths, so the escapes on
+/// each have to be settled before the call rather than by retrying it: a
+/// failure would not say which side raised it. Both keep their final component
+/// unfollowed, as POSIX requires; a link in the leading components can still
+/// redirect either side onto another mount, which `vfs::rename` then refuses,
+/// since no filesystem can move a file into a different one.
 pub fn rename(old_path: &Path, new_path: &Path) -> Result<(), Error> {
-    let old_op = vfs::resolve(old_path).ok_or(Error::FileNotFound)?;
-    let new_op = vfs::resolve(new_path).ok_or(Error::FileNotFound)?;
+    let old_path = resolve_links(old_path, LinkMode::NoFollow)?;
+    let new_path = resolve_links(new_path, LinkMode::NoFollow)?;
+    let old_op = vfs::resolve(&old_path).ok_or(Error::FileNotFound)?;
+    let new_op = vfs::resolve(&new_path).ok_or(Error::FileNotFound)?;
     vfs::rename(&old_op, &new_op)
 }
 

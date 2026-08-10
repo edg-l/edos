@@ -531,3 +531,28 @@ pub fn poll_stdin(timeout_ms: u64) -> bool {
     let result = poll(&mut fds, timeout_ms);
     result > 0 && fds[0].result.readable
 }
+
+/// Publish `lines` to the kernel log, each prefixed with `tag`.
+///
+/// The serial console is the only channel out of a headless guest, so this is
+/// how a graphical program tells something outside the machine where its own
+/// controls are, letting a test address them by name instead of by a pixel
+/// copied out of its layout. The tag lets a reader pick one program's block out
+/// of an interleaved log.
+///
+/// One write per line: each write to `/dev/klog` is one log message, so a
+/// single write holding newlines would arrive as one unsplittable blob.
+pub fn klog_dump<I>(tag: &str, lines: I)
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    use std::io::Write;
+
+    let Ok(mut klog) = std::fs::OpenOptions::new().write(true).open("/dev/klog") else {
+        return;
+    };
+    for line in lines {
+        let _ = klog.write_all(std::format!("{tag} {}", line.as_ref()).as_bytes());
+    }
+}

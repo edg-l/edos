@@ -88,6 +88,8 @@ pub enum Error {
     InvalidArgument,
     #[error("too many levels of symbolic links")]
     TooManyLinks,
+    #[error("symbolic link names a path outside this mount")]
+    LinkEscape,
     #[error("file exists")]
     AlreadyExists,
     #[error("filesystem thread answered a request with the wrong reply")]
@@ -209,25 +211,68 @@ impl MmapRegion {
 /// Maximum symbolic links a single path resolution may traverse.
 pub const MAX_SYMLINK_HOPS: u32 = 8;
 
+/// How a path's final component is treated when it names a symbolic link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkMode {
+    /// Resolve to what the link points at, as `open` and `stat` do.
+    Follow,
+    /// Resolve to the link itself, as `readlink`, `unlink` and `rename` do.
+    NoFollow,
+}
+
+impl LinkMode {
+    pub fn follows_final(self) -> bool {
+        matches!(self, LinkMode::Follow)
+    }
+}
+
+/// Where a symbolic link points, said in the only terms a filesystem can use.
+///
+/// A filesystem walks paths from its own root and cannot see the mount table,
+/// so it never resolves a link target itself: an absolute one names a path in
+/// the mount namespace, `..` can walk out of the mount entirely, and even a
+/// target that stays put may cross into something mounted deeper. It reports
+/// where the link pointed and the VFS says what that names.
+#[derive(Debug, Clone)]
+pub enum LinkEscape {
+    /// The target began with `/`, so it is resolved from the VFS root.
+    Absolute(Vec<String>),
+    /// A relative target, resolved from `up` levels above the mount point.
+    AboveMount { up: usize, components: Vec<String> },
+}
+
 /// Splice a symbolic link's target into the path being resolved. `prefix` is
-/// the components resolved before the link, `rest` the ones that followed it.
-/// An absolute target discards the prefix; `.` and `..` are folded lexically.
-pub fn splice_symlink(prefix: &[String], target: &str, rest: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = if target.starts_with('/') {
+/// the components resolved before the link, `rest` the ones that followed it;
+/// `.` and `..` are folded lexically.
+pub fn splice_symlink(prefix: &[String], target: &str, rest: &[String]) -> LinkEscape {
+    let absolute = target.starts_with('/');
+    let mut out: Vec<String> = if absolute {
         Vec::new()
     } else {
         prefix.to_vec()
     };
+    let mut up = 0usize;
     for component in target.split('/').chain(rest.iter().map(String::as_str)) {
         match component {
             "" | "." => {}
             ".." => {
-                out.pop();
+                if out.pop().is_none() {
+                    up += 1;
+                }
             }
             other => out.push(other.to_string()),
         }
     }
-    out
+
+    if absolute {
+        // `..` past the root stays at the root, as POSIX has it.
+        LinkEscape::Absolute(out)
+    } else {
+        LinkEscape::AboveMount {
+            up,
+            components: out,
+        }
+    }
 }
 
 pub trait FileSystem {
@@ -290,6 +335,14 @@ pub trait FileSystem {
 
     /// Read the target of the symbolic link at `path` without following it.
     fn read_link(&self, _path: &Path) -> Result<String, Error> {
+        Err(Error::Unsupported)
+    }
+
+    /// Where the symbolic link that made an operation on `path` fail with
+    /// `Error::LinkEscape` pointed. Filesystems that never report that error
+    /// keep the default; the ones that do walk `path` again and answer with
+    /// the escape instead of raising it.
+    fn link_escape(&self, _path: &Path, _mode: LinkMode) -> Result<LinkEscape, Error> {
         Err(Error::Unsupported)
     }
 

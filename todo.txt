@@ -14,55 +14,6 @@
   The fs side is also no longer unbounded: `send_and_wait` uses
   `Response::wait_timeout(10s)` and fails the read with `BlockError::Timeout`.
 
-- The AHCI ATAPI commands read a fixed number of bytes out of a pooled DMA
-  buffer without asking how many arrived, the same defect fixed in 7591982
-  (xHCI descriptors) and in the USB mass-storage INQUIRY / READ CAPACITY
-  paths. `execute_atapi_command` (`kernel/src/drivers/ahci/port.rs:1941`)
-  returns `Result<(), _>` and drops the count, so
-  `execute_atapi_inquiry_as_identify` parses all 96 bytes,
-  `execute_atapi_read_capacity` all 8, and `execute_atapi_read_as_sectors`
-  copies the whole `expected_size` back to the caller. `DmaPool` does not zero
-  a recycled buffer, so a short response yields the previous owner's bytes as
-  device identity or as sector data.
-  The count is already available: `issue_command` zeroes the command header's
-  `prdbc` before issuing (`port.rs:1026`) and the HBA writes the transferred
-  byte count there on completion, so `execute_atapi_command` can read it back
-  after `wait_for_completion` and return it.
-  It IS verifiable today, and no new QEMU option is needed: the boot ISO is
-  attached with `-cdrom`, which on q35 lands on the ICH9 AHCI controller, not
-  on a legacy IDE bus — UEFI names it `PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x2,..)`
-  in `run_log.txt:2`, the same controller the guest driver claims. Port
-  discovery therefore takes the `SATA_SIG_ATAPI` arm (`controller.rs:269`) on
-  port 2 and `identify_device` dispatches to
-  `execute_atapi_inquiry_as_identify` (`port.rs:1914`) on every single boot, so
-  the defective read already runs in the default configuration. Verify a fix by
-  booting and reading the model string the ATAPI port reports in `dmesg`
-  ("QEMU DVD-ROM"); it should not change when the fix bounds the copy by
-  `prdbc`, and a truncated INQUIRY should now be rejected rather than padded
-  with the previous buffer owner's bytes.
-
-- An absolute symlink target is resolved in the wrong namespace. Root cause of
-  `iotest /tmp` failing test 10 with "read through link: entity not found"
-  while the identical `iotest /var` passes: VFS hands each filesystem a
-  MOUNT-RELATIVE path, and each filesystem resolves link targets from its own
-  root. `splice_symlink` discards the prefix for a target starting with `/`, so
-  a link at /tmp/link naming "/tmp/target" makes memfs look for `tmp/target`
-  under the memfs root, which has no `tmp`. EFS only works because it is
-  mounted at `/`, where mount-relative and absolute coincide. Relative targets
-  are unaffected on both.
-  The fix belongs in the VFS, which is the only layer that owns the namespace:
-  a filesystem must not follow an absolute target at all, and VFS must restart
-  resolution from the VFS root, crossing mounts, capped at MAX_SYMLINK_HOPS.
-  What makes it more than a one-liner: the follow/nofollow distinction
-  currently lives inside each filesystem's walk, so `read_link`, `remove_file`
-  and `symlink` (vfs.rs:952-1005) need a resolve entry point that leaves the
-  final component alone while every other op gets one that follows it, and the
-  followed path can land on a different mount than the one the link lives on,
-  so `VfsOp.fs` has to come from the target. Doing it by probing each path
-  prefix with `read_link` is the obvious shape and is O(N) fs walks per
-  lookup — too slow for `resolve()`; escalating only when the filesystem
-  reports it hit an absolute target keeps the fast path free.
-
 - Intermittent segfault in fsbench's `mmap store 4MiB + msync`, recorded at
   ~1 run in 6 on 2026-08-09, NOT reproduced since: 37 suite runs across 4 and
   8 vCPUs on a freshly formatted disk, all clean. The KILL line now names why

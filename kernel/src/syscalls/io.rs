@@ -239,13 +239,13 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                     return !0u64;
                 }
             };
-            let op = vfs::VfsOp {
-                fs: fs.clone(),
+            let op = vfs::VfsOp::from_open_file(
+                fs.clone(),
                 // Invariant: relative is Some iff fs is Some (set together at open time).
-                relative: file.relative.clone().expect("fs set without relative path"),
-                inode: file.inode.clone(),
-                mount_id: file.mount_id,
-            };
+                file.relative.clone().expect("fs set without relative path"),
+                file.inode.clone(),
+                file.mount_id,
+            );
 
             match vfs::write_from_user(
                 &op,
@@ -618,13 +618,13 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                         return -1;
                     }
                 };
-                let op = vfs::VfsOp {
-                    fs: fs.clone(),
+                let op = vfs::VfsOp::from_open_file(
+                    fs.clone(),
                     // Invariant: relative is Some iff fs is Some (set together at open time).
-                    relative: file.relative.clone().expect("fs set without relative path"),
-                    inode: file.inode.clone(),
-                    mount_id: file.mount_id,
-                };
+                    file.relative.clone().expect("fs set without relative path"),
+                    file.inode.clone(),
+                    file.mount_id,
+                );
                 match vfs::read_to_user(&op, &mut ra, offset, count, buffer_ptr) {
                     Ok(n) => (n, ra),
                     Err(_) => {
@@ -899,8 +899,12 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
         _ => OpenMode::ReadWrite, // 3 is not a valid Linux value; treat as ReadWrite
     };
     interrupts::enable();
-    match fs_api::file_info(&path) {
-        Ok(_) => {
+    // Everything cached on the descriptor has to name the file the fd refers
+    // to, which is not `path` when a symbolic link on it crossed a mount.
+    let mut path = path;
+    match fs_api::file_info_resolved(&path) {
+        Ok((_, resolved)) => {
+            path = resolved;
             if truncate {
                 if let Err(e) = fs_api::truncate(&path, 0) {
                     info.lock().errno = Errno::from(e);
@@ -1513,13 +1517,13 @@ pub fn sys_pread(fd: u64, buffer_ptr: *mut u8, count: usize, offset: u64) -> i64
         info.lock().errno = Errno::EINVAL;
         return -1;
     };
-    let op = vfs::VfsOp {
-        fs: fs.clone(),
+    let op = vfs::VfsOp::from_open_file(
+        fs.clone(),
         // Invariant: relative is Some iff fs is Some (set together at open time).
-        relative: file.relative.clone().expect("fs set without relative path"),
-        inode: file.inode.clone(),
-        mount_id: file.mount_id,
-    };
+        file.relative.clone().expect("fs set without relative path"),
+        file.inode.clone(),
+        file.mount_id,
+    );
 
     let mut ra = file.ra;
     match vfs::read_to_user(&op, &mut ra, offset, count, buffer_ptr) {
@@ -1574,12 +1578,12 @@ pub fn sys_pwrite(fd: u64, buffer_ptr: *const u8, count: usize, offset: u64) -> 
         info.lock().errno = Errno::EINVAL;
         return -1;
     };
-    let op = vfs::VfsOp {
-        fs: fs.clone(),
-        relative: file.relative.clone().expect("fs set without relative path"),
-        inode: file.inode.clone(),
-        mount_id: file.mount_id,
-    };
+    let op = vfs::VfsOp::from_open_file(
+        fs.clone(),
+        file.relative.clone().expect("fs set without relative path"),
+        file.inode.clone(),
+        file.mount_id,
+    );
 
     match vfs::write_from_user(&op, offset as usize, buffer_ptr, capped_count, false) {
         Ok(written) => written as i64,

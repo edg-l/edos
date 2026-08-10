@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use edos_lib::io::klog_dump;
 use edos_lib::process::spawn;
 use edos_render::graphics::{Framebuffer, ScreenInfo};
 use edos_render::icons;
@@ -20,6 +21,58 @@ use panel::{Action, Hit};
 
 /// Maximum number of windows to track.
 const MAX_WINDOWS: usize = 32;
+
+/// Prefix on every line of a panel dump, so a host-side reader can pick the
+/// block out of an interleaved serial log.
+const PANEL_DUMP_TAG: &str = "panel|";
+
+/// Header starting each block, which is also how a reader tells where one
+/// block ends and the next begins: it is the only line whose first field is
+/// not a number.
+const PANEL_DUMP_HEADER: &str = "X Y W H KIND LABEL";
+
+/// Where every control of the panel sits on screen, and the name a person
+/// would use for it.
+///
+/// The panel's buttons are not windows, so nothing in `/proc/windows` accounts
+/// for them and something driving the machine from outside would otherwise
+/// have to mirror this file's arithmetic by hand. A task is named by its
+/// window's full title rather than the elided label actually drawn, since the
+/// caller is naming the window, not reading the screen.
+fn action_lines(
+    hits: &[Hit],
+    labelled: &[(&WindowListEntry, String)],
+    panel_y: i32,
+) -> Vec<String> {
+    let y = panel_y + panel::button_y();
+    hits.iter()
+        .map(|hit| {
+            let (kind, label) = match hit.action {
+                Action::Launcher => ("launcher", ""),
+                Action::Task(id) => (
+                    "task",
+                    labelled
+                        .iter()
+                        .find(|(entry, _)| entry.id == id)
+                        .map(|(entry, _)| entry.title_str())
+                        .unwrap_or(""),
+                ),
+                Action::Volume => ("volume", ""),
+                Action::Network => ("network", ""),
+                Action::Clock => ("clock", ""),
+            };
+            format!(
+                "{} {} {} {} {} {}",
+                hit.x,
+                y,
+                hit.width,
+                panel::BUTTON_HEIGHT,
+                kind,
+                label
+            )
+        })
+        .collect()
+}
 
 fn get_screen_info() -> Option<ScreenInfo> {
     let fb = Framebuffer::new();
@@ -124,6 +177,7 @@ fn main() {
     let mut hovered: Option<Action> = None;
     let mut menu = menu::Menu::new();
     let mut popups = status::StatusPopups::new();
+    let mut published: Vec<String> = Vec::new();
 
     loop {
         let window_count = match window_list(&mut entries) {
@@ -176,6 +230,17 @@ fn main() {
 
         let layout = panel::compute(window.width, &labelled, &clock);
         let hits: Vec<Hit> = layout.hits;
+
+        // Republished only when it moves, which is when a window opens or
+        // closes or the clock's width changes. Every frame would drown the log.
+        let lines = action_lines(&hits, &labelled, panel_y);
+        if lines != published {
+            klog_dump(
+                PANEL_DUMP_TAG,
+                std::iter::once(PANEL_DUMP_HEADER.to_string()).chain(lines.iter().cloned()),
+            );
+            published = lines;
+        }
 
         if let Ok(count) = window.poll_events(&mut events) {
             for event in &events[..count] {

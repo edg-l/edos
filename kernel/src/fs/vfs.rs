@@ -16,8 +16,9 @@ use crate::{
 };
 
 use super::{
-    Error, File, FileAttrs, FileKind, FileSystem, MmapRegion, MountInfo, StatFs, dentry,
-    handle::Pollable, icache, inode::VfsInode, page_fill, path::Path, readahead::ReadaheadState,
+    Error, File, FileAttrs, FileKind, FileSystem, LinkEscape, LinkMode, MmapRegion, MountInfo,
+    StatFs, dentry, handle::Pollable, icache, inode::VfsInode, page_fill, path::Path,
+    readahead::ReadaheadState,
 };
 use x86_64::{
     VirtAddr,
@@ -60,6 +61,7 @@ struct VfsLookup {
     fs: Arc<dyn FileSystem + Send + Sync>,
     relative: Path,
     mount_id: usize,
+    mount_path: Path,
 }
 
 /// Stable filesystem mount info (fs, relative path, mount_id) cached from
@@ -78,9 +80,33 @@ pub struct VfsOp {
     pub relative: Path,
     pub inode: Option<Arc<VfsInode>>,
     pub mount_id: usize,
+    /// Where `fs` is mounted, so a symbolic link that escaped the mount can be
+    /// put back into the namespace it was written in. See [`link_escape`].
+    mount_path: Path,
 }
 
 impl VfsOp {
+    /// Rebuild an op from what an open file descriptor cached at open time.
+    ///
+    /// Open resolved its path in full, symbolic links included, so the
+    /// descriptor names a file directly. `mount_path` exists only to put a
+    /// link that escaped its mount back into the namespace, which cannot
+    /// happen from here, so it stays at the root.
+    pub fn from_open_file(
+        fs: Arc<dyn FileSystem + Send + Sync>,
+        relative: Path,
+        inode: Option<Arc<VfsInode>>,
+        mount_id: usize,
+    ) -> Self {
+        Self {
+            fs,
+            relative,
+            inode,
+            mount_id,
+            mount_path: Path::from_components(Vec::new()),
+        }
+    }
+
     /// Return just the stable filesystem info (fs, relative path, mount_id),
     /// excluding the inode.  Useful for caching in FsFile.
     pub fn fs_info(&self) -> VfsFsInfo {
@@ -114,6 +140,7 @@ fn lookup(path: &Path) -> Option<VfsLookup> {
         fs: entry.fs.clone(),
         relative,
         mount_id: entry.mount_id,
+        mount_path: mount_path.clone(),
     })
 }
 
@@ -129,6 +156,7 @@ fn lookup_for_info(path: &Path) -> Option<VfsLookup> {
                     fs: lk.fs,
                     relative,
                     mount_id: lk.mount_id,
+                    mount_path: lk.mount_path,
                 }
             });
         }
@@ -169,6 +197,7 @@ pub fn resolve(path: &Path) -> Option<VfsOp> {
         relative: lk.relative,
         inode,
         mount_id: lk.mount_id,
+        mount_path: lk.mount_path,
     })
 }
 
@@ -181,6 +210,7 @@ pub fn resolve_for_info(path: &Path) -> Option<VfsOp> {
         relative: lk.relative,
         inode,
         mount_id: lk.mount_id,
+        mount_path: lk.mount_path,
     })
 }
 
@@ -193,6 +223,7 @@ pub fn resolve_mount(path: &Path) -> Option<VfsOp> {
         relative: lk.relative,
         inode: None,
         mount_id: lk.mount_id,
+        mount_path: lk.mount_path,
     })
 }
 
@@ -204,7 +235,30 @@ pub fn resolve_with_inode(path: &Path, inode: Option<Arc<VfsInode>>) -> Option<V
         relative: lk.relative,
         inode,
         mount_id: lk.mount_id,
+        mount_path: lk.mount_path,
     })
+}
+
+/// Put a symbolic link's target back into the namespace it was written in.
+///
+/// A filesystem walks paths from its own root and cannot see the mount table,
+/// so it stops at every link it is asked to follow and reports
+/// `Error::LinkEscape`. This turns that report into the absolute path the link
+/// named, which the caller resolves again from the VFS root, possibly landing
+/// on another mount.
+pub fn link_escape(op: &VfsOp, mode: LinkMode) -> Result<Path, Error> {
+    let components = match op.fs.link_escape(&op.relative, mode)? {
+        LinkEscape::Absolute(components) => components,
+        LinkEscape::AboveMount { up, components } => {
+            // `..` past the VFS root stays at the root, as POSIX has it.
+            let mount = op.mount_path.components();
+            let keep = mount.len().saturating_sub(up);
+            let mut out = mount[..keep].to_vec();
+            out.extend(components);
+            out
+        }
+    };
+    Ok(Path::from_components(components))
 }
 
 // --- Readahead debug logging ---

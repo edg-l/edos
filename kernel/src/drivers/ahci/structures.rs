@@ -293,6 +293,19 @@ pub struct DeviceIdentifyInfo {
 }
 
 // SCSI Command Descriptor Block structures for ATAPI
+
+/// Allocation length asked of INQUIRY. Covers the standard data plus the
+/// vendor-specific tail devices commonly append.
+pub const INQUIRY_ALLOCATION_LEN: usize = 96;
+
+/// Mandatory portion of the INQUIRY standard data (SPC-4 §6.4.2): everything
+/// up to and including the product revision level.
+pub const MIN_INQUIRY_BYTES: usize = 36;
+
+/// Length of the READ CAPACITY(10) parameter data: last LBA and block length,
+/// both big-endian 32-bit.
+pub const READ_CAPACITY_10_LEN: usize = 8;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct ScsiInquiry {
@@ -349,7 +362,7 @@ impl ScsiInquiry {
     pub fn new() -> Self {
         let mut cmd = Self::zeroed();
         cmd.operation_code = SCSI_CMD_INQUIRY;
-        cmd.allocation_length = 96; // Standard INQUIRY data length
+        cmd.allocation_length = INQUIRY_ALLOCATION_LEN as u8;
         cmd
     }
 }
@@ -383,7 +396,7 @@ impl ScsiTestUnitReady {
 impl DeviceIdentifyInfo {
     /// Parse SCSI INQUIRY data into DeviceIdentifyInfo format (for ATAPI devices)
     pub fn from_scsi_inquiry(inquiry_data: &[u8]) -> Self {
-        if inquiry_data.len() < 96 {
+        if inquiry_data.len() < MIN_INQUIRY_BYTES {
             return Self::default_atapi();
         }
 

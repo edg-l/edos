@@ -1535,6 +1535,69 @@ Two things the numbers say that are worth keeping:
   the dirty rectangle. 1.5 ms says that is affordable today; it is where to
   look first if it stops being.
 
+## A filesystem cannot resolve a symbolic link, and now does not try
+
+`iotest /tmp` stopped at test 10 with "read through link: entity not found"
+while the identical `iotest /var` passed. The VFS hands each filesystem a
+*mount-relative* path and each filesystem resolved link targets from its own
+root, so a link at `/tmp/link` naming `/tmp/target` made memfs look for
+`tmp/target` under the memfs root, which has no `tmp`. EFS only worked because
+it is mounted at `/`, where mount-relative and absolute coincide.
+
+Chasing the fix turned up two more of the same shape, which is why the answer
+is broader than the symptom. A relative target can walk *out* of its mount
+(`/tmp/l -> ../var/x`), and the filesystem clamps the `..` at its own root
+instead. And a target that stays put can still cross into something mounted
+*deeper*, which the filesystem also cannot see. There is no rule by which a
+filesystem gets any of these right, because the mount table is not its to
+read.
+
+So a filesystem no longer resolves a link target at all. Its walk stops at the
+first link it is asked to follow and reports `Error::LinkEscape`; the VFS asks
+where the link pointed (`FileSystem::link_escape`, answering in the only terms
+a filesystem has: an absolute target, or a relative one plus how many levels
+above the mount point it started), turns that into an absolute path, and
+restarts resolution from the VFS root. The hop cap lives in the VFS now, so it
+counts hops across mounts rather than per filesystem.
+
+Two consequences worth knowing:
+
+- **Escalation is error-driven, not a pre-pass.** `fs::api::with_links` runs
+  the operation and only redirects when it comes back `LinkEscape`, so a path
+  with no symbolic links costs exactly one walk, as before. Probing each prefix
+  with `read_link` would have been the obvious shape and is O(N) walks per
+  lookup.
+- **The follow/nofollow distinction had to move up.** It used to live inside
+  each filesystem's walk. `LinkMode` now carries it from the API layer, because
+  the redirect has to be computed the same way the operation walks: `unlink`,
+  `readlink`, `symlink` and `rename` leave the final component alone, and
+  everything else follows it. `rename` is the one operation holding two paths,
+  so a retry could not say which side raised the error; it settles both with
+  `resolve_links` before calling.
+
+`open` caches the path on the descriptor, so it takes the resolved one:
+`file_info_resolved` hands back the path it landed on, which differs from the
+one asked for exactly when a link crossed a mount.
+
+## The panel publishes where its own buttons are
+
+`scripts/edos-vm launch` used to mirror `programs/edos-taskbar/src/{main,panel,
+menu}.rs` by hand, because the panel's buttons are not windows and nothing in
+`/proc/windows` accounts for them. Moving the layout silently misaimed every
+scripted click: no compile error, no failing test.
+
+The panel writes them out itself now, the same way the window manager copies
+`/proc/windows` into the kernel log: `panel|` lines whenever the layout moves
+(a window opening or closing, or the clock growing a digit), and `menu|` lines
+as the applications menu opens. `klog_dump` in `edos_lib::io` is the shared
+writer. `scripts/edos-vm` grows `panel` and `press <name>`, `launch` resolves
+rows by label, and every layout constant is gone from the script.
+
+The panel needs no request channel because it republishes on change, so the
+last block in the log is current. The menu does: it exists only while open, so
+`launch` notes where the log ends before clicking the launcher and only reads
+what lands after that.
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any
@@ -1570,12 +1633,13 @@ Two things the numbers say that are worth keeping:
   findings" line from a power-cut image proves nothing. Type `shutdown` in the
   guest rather than `edos-vm stop`: it syncs every filesystem and the resulting
   image checks clean with no `--repair` replay.
-- **`scripts/edos-vm` mirrors the panel's geometry and nothing enforces it.**
-  That is now only true of the panel: `launch <row>` drives the applications
-  menu by row name from copied coordinates. *Windows* are addressed by title
-  (`edos-vm windows`, `edos-vm focus <title>`), which reads `/proc/windows` and
-  needs no layout constants. A minimized window has no geometry to click, so
-  bringing one back is still `Alt+Tab` or its task button.
+- **Nothing on screen is addressed by pixel any more.** Windows go by title
+  (`edos-vm windows`, `edos-vm focus <title>`) from `/proc/windows`; the panel's
+  controls go by name (`edos-vm panel`, `edos-vm press <name>`, `edos-vm launch
+  <row>`) from what the panel itself publishes. No layout constant is left in
+  `scripts/edos-vm`, so moving the panel no longer silently misaims every
+  scripted click. A minimized window still has no geometry to click: `press
+  <title>` hits its task button, which restores it.
 - **The sched-test suite has a known flake with two signatures**, both on a
   first run: `ping-pong count mismatch: 499 != 500`, and 48/49 TIMEOUT with
   ping-pong-pong never reporting. An immediate re-run passes. Recorded in

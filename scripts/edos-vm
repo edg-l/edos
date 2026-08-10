@@ -11,6 +11,8 @@ go in as synthetic input, so the guest cannot tell them from a real keyboard.
     scripts/edos-vm key ret
     scripts/edos-vm windows
     scripts/edos-vm focus Terminal
+    scripts/edos-vm panel
+    scripts/edos-vm press clock
     scripts/edos-vm log -n 40
     scripts/edos-vm stop
 """
@@ -51,42 +53,6 @@ ALTGR = {
     "[": "bracket_left", "]": "bracket_right", "{": "apostrophe",
     "}": "backslash",
 }
-
-# Mirrors the layout constants in programs/edos-taskbar/src/{main,panel,menu}.rs.
-# Nothing checks that these still agree, and a stale value just clicks the wrong
-# button, so move them in the same commit that moves the panel.
-PANEL_HEIGHT = 40
-PANEL_EDGE_PAD = 8
-PANEL_BUTTON_HEIGHT = 28
-# An icon-only button: the icon plus its padding on both sides.
-ICON_BUTTON_WIDTH = 16 + 10 * 2
-
-MENU_ROW_HEIGHT = 32
-MENU_PAD = 6
-MENU_RULE_GAP = 6
-MENU_ROWS = 5
-MENU_FIRST_POWER_ROW = 2
-MENU_HEIGHT = MENU_ROWS * MENU_ROW_HEIGHT + MENU_PAD * 2 + 1 + MENU_RULE_GAP * 2
-# Row order in programs/edos-taskbar/src/menu.rs.
-MENU_ITEMS = {"terminal": 0, "widgets": 1, "shutdown": 2, "restart": 3, "halt": 4}
-
-
-def panel_launcher(height):
-    """Centre of the launcher, which opens the applications menu."""
-    x = PANEL_EDGE_PAD + ICON_BUTTON_WIDTH // 2
-    y = height - PANEL_HEIGHT + (PANEL_HEIGHT - PANEL_BUTTON_HEIGHT) // 2
-    return x, y + PANEL_BUTTON_HEIGHT // 2
-
-
-def menu_row(name, height):
-    """Centre of a menu row, with the menu anchored at the launcher."""
-    index = MENU_ITEMS[name]
-    top = height - PANEL_HEIGHT - MENU_HEIGHT
-    y = top + MENU_PAD + index * MENU_ROW_HEIGHT
-    if index >= MENU_FIRST_POWER_ROW:
-        y += MENU_RULE_GAP * 2 + 1
-    return PANEL_EDGE_PAD + 60, y + MENU_ROW_HEIGHT // 2
-
 
 def keystroke(ch):
     """Return the QMP key list that produces `ch`, or None if unmapped."""
@@ -445,15 +411,6 @@ def _drag(q, dx, dy):
         time.sleep(0.012)
 
 
-def cmd_launch(args):
-    """Open the applications menu and choose a row."""
-    x, y = panel_launcher(args.height)
-    _click_at(x, y, args)
-    time.sleep(0.4)
-    x, y = menu_row(args.item, args.height)
-    _click_at(x, y, args)
-
-
 def _click_at(x, y, args):
     q = Qmp()
     goto(q, x, y, args.width, args.height)
@@ -464,11 +421,136 @@ def _click_at(x, y, args):
         time.sleep(0.05)
 
 
-# The window manager copies /proc/windows into the kernel log on Ctrl+Alt+W,
-# tagging every line so it can be picked out of an interleaved serial log. The
-# columns are procfs's, in kernel/src/fs/procfs/mod.rs.
+# A headless guest can only talk through the serial console, so anything on
+# screen that a script needs to address by name writes where it is into the
+# kernel log, tagged so its block can be picked out of an interleaved log. The
+# window manager copies /proc/windows on Ctrl+Alt+W (columns from procfs, in
+# kernel/src/fs/procfs/mod.rs); the panel and its applications menu publish
+# their own controls, which are not windows and appear nowhere else.
 WINDOW_DUMP_KEY = "ctrl+alt+w"
 WINDOW_DUMP_TAG = "windows|"
+PANEL_DUMP_TAG = "panel|"
+MENU_DUMP_TAG = "menu|"
+
+
+def tagged_lines(tag, since=0):
+    """Every line the guest published under `tag`, from `since` bytes in."""
+    if not os.path.exists(SERIAL_LOG):
+        raise SystemExit("no serial log yet")
+    with open(SERIAL_LOG, errors="replace") as f:
+        f.seek(since)
+        return [line.split(tag, 1)[1].strip() for line in f if tag in line]
+
+
+def last_block(lines, columns, min_fields):
+    """The last block of `lines`, each split into at most `columns` fields.
+
+    Every block opens with a header, the one line whose first field is not a
+    number, so a dump left over from an earlier state cannot answer for the
+    current one.
+    """
+    block = []
+    for line in lines:
+        fields = line.split(None, columns - 1)
+        if len(fields) < min_fields or not fields[0].isdigit():
+            block = []
+            continue
+        block.append(fields)
+    return block
+
+
+class Region:
+    """A rectangle on screen that a click can reach, and what to call it."""
+
+    __slots__ = ("x", "y", "w", "h", "kind", "label")
+
+    def __init__(self, x, y, w, h, kind, label):
+        self.x, self.y, self.w, self.h = x, y, w, h
+        self.kind, self.label = kind, label
+
+    def centre(self):
+        return self.x + self.w // 2, self.y + self.h // 2
+
+    def name(self):
+        return self.label or self.kind
+
+    def __str__(self):
+        return (f"{self.x:<6} {self.y:<6} {self.w:<5} {self.h:<5} "
+                f"{self.kind:<9} {self.label}")
+
+
+def find_region(name, regions, what):
+    """Resolve a region by name: exact, then prefix, then substring.
+
+    Spaces are ignored on both sides, so the row drawn as "Shut down" answers
+    to `shutdown` as well.
+    """
+    def squash(text):
+        return text.lower().replace(" ", "")
+
+    key = squash(name)
+    for match in (lambda t: t == key,
+                  lambda t: t.startswith(key),
+                  lambda t: key in t):
+        hits = [r for r in regions if match(squash(r.name()))]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            raise SystemExit(f"{name!r} matches several {what}: "
+                             + ", ".join(repr(r.name()) for r in hits))
+    raise SystemExit(f"no {what} matching {name!r}; there are: "
+                     + ", ".join(repr(r.name()) for r in regions))
+
+
+def panel_actions():
+    """Where the panel's controls sit, as the panel itself published them.
+
+    Nothing has to be asked for: the panel republishes whenever its layout
+    moves, so the last block in the log is the current one.
+    """
+    rows = last_block(tagged_lines(PANEL_DUMP_TAG), 6, 5)
+    regions = [Region(*(int(v) for v in fields[:4]), fields[4],
+                      fields[5] if len(fields) > 5 else "")
+               for fields in rows]
+    if not regions:
+        raise SystemExit("the panel published no layout; is edos-taskbar running?")
+    return regions
+
+
+def menu_rows(since):
+    """The applications menu's rows, which it publishes as it opens.
+
+    `since` is a byte offset into the serial log taken before the menu was
+    asked to open, so a block from an earlier opening cannot answer.
+    """
+    for _ in range(30):
+        time.sleep(0.1)
+        rows = last_block(tagged_lines(MENU_DUMP_TAG, since), 5, 5)
+        if rows:
+            return [Region(*(int(v) for v in fields[:4]), "row", fields[4])
+                    for fields in rows]
+    raise SystemExit("the applications menu published no rows; did it open?")
+
+
+def cmd_panel(args):
+    print(f"{'X':<6} {'Y':<6} {'W':<5} {'H':<5} {'KIND':<9} LABEL")
+    for region in panel_actions():
+        print(region)
+
+
+def cmd_press(args):
+    """Click a panel control found by name."""
+    region = find_region(args.name, panel_actions(), "panel controls")
+    _click_at(*region.centre(), args)
+
+
+def cmd_launch(args):
+    """Open the applications menu and choose a row, both addressed by name."""
+    launcher = find_region("launcher", panel_actions(), "panel controls")
+    marker = os.path.getsize(SERIAL_LOG)
+    _click_at(*launcher.centre(), args)
+    row = find_region(args.item, menu_rows(marker), "menu rows")
+    _click_at(*row.centre(), args)
 
 
 class Window:
@@ -510,9 +592,8 @@ class Window:
 def window_list():
     """Ask the guest for its window registry and parse the reply.
 
-    The serial log is the only channel out of a headless guest, so the request
-    is a keystroke and the answer arrives in `run_log.txt`. Only the block
-    after the last header line is read, so an older dump cannot answer.
+    Unlike the panel, the registry changes constantly and is dumped only on
+    request, so this sends the keystroke and waits for the answer to land.
     """
     if not os.path.exists(SERIAL_LOG):
         raise SystemExit("no serial log yet")
@@ -526,19 +607,9 @@ def window_list():
     # The dump is several writes, so give the rest of it time to land.
     time.sleep(0.2)
 
-    with open(SERIAL_LOG, errors="replace") as f:
-        tagged = [line.split(WINDOW_DUMP_TAG, 1)[1].strip()
-                  for line in f if WINDOW_DUMP_TAG in line]
-
-    windows = []
-    for line in tagged:
-        fields = line.split(None, 10)
-        if len(fields) < 10 or not fields[0].isdigit():
-            # The header line starts each block; anything before it is stale.
-            windows = []
-            continue
-        windows.append(Window(fields, fields[10] if len(fields) > 10 else ""))
-    return windows
+    rows = last_block(tagged_lines(WINDOW_DUMP_TAG), 11, 10)
+    return [Window(fields, fields[10] if len(fields) > 10 else "")
+            for fields in rows]
 
 
 def find_window(name, windows):
@@ -686,10 +757,20 @@ def main():
         s.set_defaults(func=fn)
 
     s = sub.add_parser("launch", help="open the applications menu and choose a row")
-    s.add_argument("item", nargs="?", default="terminal", choices=sorted(MENU_ITEMS))
+    s.add_argument("item", nargs="?", default="terminal",
+                   help="a menu row's label; spaces and case are ignored")
     s.add_argument("--width", type=int)
     s.add_argument("--height", type=int)
     s.set_defaults(func=cmd_launch)
+
+    sub.add_parser("panel", help="list the panel's controls by name").set_defaults(
+        func=cmd_panel)
+
+    s = sub.add_parser("press", help="click a panel control found by name")
+    s.add_argument("name")
+    s.add_argument("--width", type=int)
+    s.add_argument("--height", type=int)
+    s.set_defaults(func=cmd_press)
 
     sub.add_parser("windows", help="list the guest's windows by name").set_defaults(
         func=cmd_windows)

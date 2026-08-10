@@ -22,13 +22,21 @@ use crate::{
     thread::rwlock::RwLock as BlockingRwLock,
 };
 
-use super::{FileKind, FileTime, MAX_SYMLINK_HOPS, splice_symlink};
+use super::{FileKind, FileTime, LinkEscape, LinkMode, splice_symlink};
 
 mod node;
 
 struct MemfsInner {
     nodes: BTreeMap<u32, Node>,
     next_id: u32,
+}
+
+/// Where a path walk stopped.
+enum Walk {
+    Node(u32),
+    Missing,
+    /// A symbolic link named a path outside this filesystem.
+    Escaped(LinkEscape),
 }
 
 /// Read from a node's storage, clamped to the file size.
@@ -77,56 +85,56 @@ impl MemfsInner {
     /// Resolve a path, following symbolic links including one named by the
     /// last component.
     fn find_node(&self, path: &Path) -> Result<Option<u32>, Error> {
-        self.walk(path, true)
+        self.find_node_mode(path, LinkMode::Follow)
     }
 
     /// Resolve a path whose last component is left unfollowed, so a symbolic
     /// link resolves to the link itself.
     fn find_node_nofollow(&self, path: &Path) -> Result<Option<u32>, Error> {
-        self.walk(path, false)
+        self.find_node_mode(path, LinkMode::NoFollow)
     }
 
-    fn walk(&self, path: &Path, follow_final: bool) -> Result<Option<u32>, Error> {
-        let mut components: Vec<String> = path.components().to_vec();
-        let mut hops = 0u32;
+    fn find_node_mode(&self, path: &Path, mode: LinkMode) -> Result<Option<u32>, Error> {
+        match self.walk(path, mode)? {
+            Walk::Node(id) => Ok(Some(id)),
+            Walk::Missing => Ok(None),
+            Walk::Escaped(_) => Err(Error::LinkEscape),
+        }
+    }
 
-        'walk: loop {
-            let mut current = self.nodes.get(&0).unwrap();
-            let mut resolved: Vec<String> = Vec::new();
+    fn walk(&self, path: &Path, mode: LinkMode) -> Result<Walk, Error> {
+        let components = path.components();
+        let mut current = self.nodes.get(&0).unwrap();
+        let mut resolved: Vec<String> = Vec::new();
 
-            let mut index = 0;
-            while index < components.len() {
-                let mut found = None;
-                for child in &current.childs {
-                    let child_node = self.get_node(*child)?;
-                    if child_node.file.name == components[index] {
-                        found = Some(child_node);
-                        break;
-                    }
+        for (index, name) in components.iter().enumerate() {
+            let mut found = None;
+            for child in &current.childs {
+                let child_node = self.get_node(*child)?;
+                if &child_node.file.name == name {
+                    found = Some(child_node);
+                    break;
                 }
-                let Some(node) = found else {
-                    return Ok(None);
-                };
+            }
+            let Some(node) = found else {
+                return Ok(Walk::Missing);
+            };
 
-                let is_last = index + 1 == components.len();
-                if node.file.kind == FileKind::Symlink && (!is_last || follow_final) {
-                    hops += 1;
-                    if hops > MAX_SYMLINK_HOPS {
-                        return Err(Error::TooManyLinks);
-                    }
-                    let target =
-                        core::str::from_utf8(&node.content).map_err(|_| Error::Corrupted)?;
-                    components = splice_symlink(&resolved, target, &components[index + 1..]);
-                    continue 'walk;
-                }
-
-                current = node;
-                resolved.push(components[index].clone());
-                index += 1;
+            let is_last = index + 1 == components.len();
+            if node.file.kind == FileKind::Symlink && (!is_last || mode.follows_final()) {
+                let target = core::str::from_utf8(&node.content).map_err(|_| Error::Corrupted)?;
+                return Ok(Walk::Escaped(splice_symlink(
+                    &resolved,
+                    target,
+                    &components[index + 1..],
+                )));
             }
 
-            return Ok(Some(current.id));
+            current = node;
+            resolved.push(name.clone());
         }
+
+        Ok(Walk::Node(current.id))
     }
 
     fn get_all_child_ids(&self, id: u32) -> Result<Vec<u32>, Error> {
@@ -232,6 +240,14 @@ impl FileSystem for Memfs {
         inner.next_id = next_id;
         inner.nodes.insert(node.id, node);
         Ok(())
+    }
+
+    fn link_escape(&self, path: &Path, mode: LinkMode) -> Result<LinkEscape, Error> {
+        let path = path.normalize();
+        match self.inner.read().walk(&path, mode)? {
+            Walk::Escaped(escape) => Ok(escape),
+            _ => Err(Error::Unsupported),
+        }
     }
 
     fn read_link(&self, path: &Path) -> Result<String, Error> {

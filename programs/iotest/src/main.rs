@@ -537,6 +537,52 @@ fn test10(dir: &str) {
         );
     }
 
+    // An absolute target names a path in the mount namespace, not one under
+    // the root of whichever filesystem the link happens to live on, so it
+    // resolves the same whether or not it crosses a mount. `/var` is EFS and
+    // `/tmp` is memfs, so one of these two crosses whichever `dir` is.
+    for cross in ["/var/iotest_t10_xmount.dat", "/tmp/iotest_t10_xmount.dat"] {
+        let cross_link = format!("{}/iotest_t10_xmount_link.dat", dir);
+        let _ = fs::remove_file(&cross_link);
+        let _ = fs::remove_file(cross);
+        fs::write(cross, b"across")
+            .unwrap_or_else(|e| fail(10, &format!("write {}: {}", cross, e)));
+        if symlink(cross, &cross_link) != 0 {
+            fail(10, "symlink to another mount failed");
+        }
+        if fs::read(&cross_link).ok().as_deref() != Some(b"across".as_slice()) {
+            fail(10, "an absolute target resolved in the wrong namespace");
+        }
+        // Unlinking the link leaves the file it named alone, on either mount.
+        fs::remove_file(&cross_link)
+            .unwrap_or_else(|e| fail(10, &format!("unlink the cross-mount link: {}", e)));
+        if fs::read(cross).ok().as_deref() != Some(b"across".as_slice()) {
+            fail(10, "unlinking a cross-mount link removed its target");
+        }
+        let _ = fs::remove_file(cross);
+    }
+
+    // `..` in a relative target walks out of the mount the link lives on, and
+    // has to keep walking in the namespace above it.
+    let up_target = if dir == "/tmp" { "/var" } else { "/tmp" };
+    let up_file = format!("{}/iotest_t10_up.dat", up_target);
+    let up_link = format!("{}/iotest_t10_up_link.dat", dir);
+    let _ = fs::remove_file(&up_file);
+    let _ = fs::remove_file(&up_link);
+    fs::write(&up_file, b"upwards")
+        .unwrap_or_else(|e| fail(10, &format!("write up target: {}", e)));
+    if symlink(&format!("..{}/iotest_t10_up.dat", up_target), &up_link) != 0 {
+        fail(10, "symlink with a target above the mount failed");
+    }
+    if fs::read(&up_link).ok().as_deref() != Some(b"upwards".as_slice()) {
+        fail(
+            10,
+            "a target reached with .. resolved in the wrong namespace",
+        );
+    }
+    let _ = fs::remove_file(&up_link);
+    let _ = fs::remove_file(&up_file);
+
     // A dangling link is legal to create and readable, but not to open.
     if symlink("/iotest_t10_nowhere", &dangling) != 0 {
         fail(10, "symlink to a nonexistent target was refused");

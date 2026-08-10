@@ -100,10 +100,9 @@ host CPU is not the problem, and the compositor is not the problem.
 
 Capping the compositor to 30ms to match was tried and **not kept**: it trades
 smoothness on a local display, where 74Hz is real, for smoothness on a remote
-one, on a hypothesis nobody has confirmed by watching. The measurement that
-would settle it is an RFB client counting `FramebufferUpdate` messages per
-second during a drag; the fix, if it is confirmed, is a one-line patch to that
-constant in a locally built QEMU.
+one, on a hypothesis nobody has confirmed by watching. Nothing here is a guest
+defect, so nothing in this repo is the fix; the ceiling is that constant in a
+locally built QEMU. Recorded so the measurement does not get made twice.
 
 ### SPICE, when VNC is not fast enough
 
@@ -136,6 +135,8 @@ drives the guest changes.
 | `key <qcode>...` | e.g. `ret`, `ctrl+c`, `alt+f4` |
 | `click x y` / `move x y` | `--button left\|middle\|right` |
 | `launch [row]` | applications menu by row name, instead of raw pixels |
+| `panel` | the panel's controls, by name |
+| `press <name>` | click a panel control found by name |
 | `windows` | the guest's window registry, by name |
 | `focus <name>` | click into a window found by title, `--dx/--dy` for a point in it |
 | `log [-n N]` | tails `run_log.txt` |
@@ -212,34 +213,36 @@ window is frontmost; `scripts/edos-vm focus <title>` picks the one you mean.
 
 ---
 
-## Panel geometry
+## Addressing the panel by name
 
-Prefer the named subcommand over raw pixels, so a layout change is one edit
-rather than a hunt through every script:
+The panel's buttons are not windows, so nothing in `/proc/windows` accounts for
+them. They publish themselves instead: the panel writes where each of its
+controls sits to `/dev/klog` whenever its layout moves, and the applications
+menu writes its rows as it opens, both tagged so the block can be picked out of
+an interleaved serial log. Nothing in `scripts/edos-vm` knows the panel's
+geometry.
 
 ```bash
+scripts/edos-vm panel             # X, Y, W, H, kind and label, per control
+scripts/edos-vm press clock       # click a control found by name
+scripts/edos-vm press Terminal    # ...including a task button, by window title
 scripts/edos-vm launch            # applications menu, then "Terminal"
 scripts/edos-vm launch widgets    # ...or any other row
 scripts/edos-vm launch shutdown   # power the machine off through the menu
 ```
 
-> **These coordinates mirror the GUI source and nothing enforces it.**
-> `scripts/edos-vm` copies the panel and menu geometry from
-> `programs/edos-taskbar/src/{main,panel,menu}.rs`. Move the layout and every
-> scripted click silently lands on the wrong row: no compile error, no failing
-> test, just wrong behaviour. Update both in the same commit.
+Names match case-insensitively and ignore spaces, preferring an exact match,
+then a prefix, then a substring, so the row drawn as "Shut down" answers to
+`shutdown`. A name matching several controls is reported rather than guessed
+at. The controls are `launcher`, `volume`, `network`, `clock`, and one `task`
+per window, named by that window's full title rather than the elided label
+actually drawn.
 
-The mapping, for a screen `W x H`:
-
-| Target | x | y |
-|---|---|---|
-| Launcher | 8 to 44 (centre 26) | `H - 20` |
-| Menu row *n* (0-based) | 68 | `H - 40 - 185 + 6 + 32n`, plus 13 from row 2 |
-
-**Task buttons are not addressable by index.** They size to their title and the
-list is centred, so their position depends on how many windows are open and what
-they are called. Address the window instead, which needs no panel geometry at
-all — see below.
+The panel republishes only when its layout changes — a window opening or
+closing, or the clock growing a digit — so `panel` and `press` cost nothing but
+a read of `run_log.txt`. `launch` does have to wait: it notes where the log ends,
+clicks the launcher, and reads the block the menu writes as it opens, so a
+previous opening's rows cannot answer for this one.
 
 ---
 
@@ -263,9 +266,9 @@ rather than focusing whatever is on top of it. A fully covered window is
 reported and left alone.
 
 Two things this does not do. It cannot restore a minimized window, which has no
-geometry on screen: use the panel's task button or `Alt+Tab`. And it reads the
-log rather than talking to the guest, so a dump costs a keystroke and about a
-second.
+geometry on screen: `scripts/edos-vm press <title>` clicks its task button,
+which can. And it reads the log rather than talking to the guest, so a dump
+costs a keystroke and about a second.
 
 `/proc/windows` reports the *outer* origin and the *client* size, with the
 manager's frame as a fourth column, because that is what the kernel routes
