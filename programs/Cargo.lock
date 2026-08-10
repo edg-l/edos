@@ -127,6 +127,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "edos-trace-abi"
+version = "0.1.0"
+
+[[package]]
 name = "edos-vi"
 version = "0.1.0"
 dependencies = [
@@ -144,6 +148,9 @@ dependencies = [
 [[package]]
 name = "edos_lib"
 version = "0.1.0"
+dependencies = [
+ "edos-trace-abi",
+]
 
 [[package]]
 name = "edos_render"
@@ -408,6 +415,14 @@ version = "0.1.0"
 [[package]]
 name = "stat"
 version = "0.1.0"
+
+[[package]]
+name = "strace"
+version = "0.1.0"
+dependencies = [
+ "edos-trace-abi",
+ "edos_lib",
+]
 
 [[package]]
 name = "sync"

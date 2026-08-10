@@ -1216,6 +1216,10 @@ pub fn thread_exit(code: i32) -> ! {
 
     // Log lifetime stats before the without_interrupts fast path (log! allocates).
     if let Some(t) = get_thread_by_id(tid) {
+        // Publishes the death to a tracer and, if this thread was the tracer,
+        // ends the session so nothing keeps writing into an undrained ring.
+        crate::syscalls::trace::on_thread_exit(&t, code);
+
         let created = t.created_at_tick.load(Ordering::Acquire);
         if let Some(timer) = crate::drivers::hpet::driver::get_hpet_timer()
             && created != 0

@@ -90,6 +90,7 @@ sections, and wrapping them would recurse into the preemption counter.
 | 330 | `HdaPlaybackState` | `Arc<PreemptSpinlock<..>>` | `drivers/hda/mod.rs` |
 | 340 | `DevFs.shared` | `Arc<PreemptRwLock<DevFs>>` | `fs/devfs/mod.rs` |
 | 350 | `EVICT_OVERFLOW` | `PreemptSpinlock<Vec<EvictRequest>>` | `fs/evict.rs` |
+| 355 | trace ring | `PreemptSpinlock<Option<Ring>>` | `syscalls/trace.rs` |
 | 900 | kernel-global mapper | `IrqSpinlock<MemoryManager>` | `memory/mapper.rs` |
 | 910 | `FRAME_ALLOCATOR` | `IrqSpinlock<BitmapFrameAllocator>` | `memory/frame_allocator.rs` |
 
@@ -358,6 +359,17 @@ reads `DevFsDevice::size`, and for `/dev/tty0` that takes the rank-210
 `BlockingMutex`. A spin lock held across a *blocking* mutex acquisition is the
 serious half — the holder can park with the registry still locked. Both now
 snapshot the nodes under the guard and build their `File` entries after it.
+
+**355, trace ring.** The syscall tracer's record ring. A true leaf: it is taken
+at the syscall entry and return boundaries, where no other guard is live, and in
+`thread_exit`, which has just asserted the same thing. Nothing is acquired while
+it is held and it is never held across a call into anything else, so its rank
+would be legal anywhere. It is ranked so that a thread dying with it held is
+caught by `assert_no_guards_held` rather than leaving the ring wedged for every
+other CPU; an unranked lock is invisible to that check.
+
+The ~250 KiB `Vec` behind it is dropped *outside* the guard, since freeing it
+reaches the allocator.
 
 **900, kernel-global mapper.** Reached via `memory_mapper()`. Kernel-address-space
 edits plus per-page virtual-to-physical translation during DMA setup. A deep leaf,

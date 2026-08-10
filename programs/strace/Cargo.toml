@@ -1,7 +1,8 @@
 [package]
-name = "edos_lib"
+name = "strace"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+edos_lib = { path = "../edos_lib" }
 edos-trace-abi = { path = "../../libs/edos-trace-abi" }

@@ -185,6 +185,10 @@ pub struct Thread {
     /// Written by the syscall dispatcher; read by debug tooling. Single
     /// relaxed store on a hot cache line — sub-cycle cost.
     pub last_syscall: AtomicU32,
+    /// Trace-session generation this thread was marked under, or 0 for
+    /// unmarked. Meaningful only against `syscalls::trace::TRACE_GEN`, which
+    /// is what lets a session end without walking the thread table.
+    pub traced: AtomicU64,
     /// Signal state: pending bitmask and per-signal disposition.
     pub signal: SignalState,
 
@@ -851,6 +855,7 @@ impl Thread {
             killed: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
             last_syscall: AtomicU32::new(NO_SYSCALL),
+            traced: AtomicU64::new(0),
             signal: SignalState::new(),
             rq_link: Link::new(),
             context_saved: AtomicBool::new(true),
@@ -974,6 +979,7 @@ impl Thread {
             killed: AtomicBool::new(false),
             wake_pending: AtomicBool::new(false),
             last_syscall: AtomicU32::new(NO_SYSCALL),
+            traced: AtomicU64::new(0),
             signal: SignalState::new(),
             user: Some(user_state),
             rq_link: Link::new(),

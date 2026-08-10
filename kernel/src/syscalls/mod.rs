@@ -74,6 +74,8 @@ pub mod memory;
 mod net;
 mod shm;
 mod sync;
+mod table;
+pub mod trace;
 mod window;
 
 use self::ioctl::sys_ioctl;
@@ -379,6 +381,10 @@ const SYS_WINDOW_DAMAGE: u64 = 232;
 /// Appoint another process as part of the shell. Init only; see
 /// `kernel/src/window/shell.rs`.
 const SYS_WINDOW_GRANT_SHELL: u64 = 234;
+/// Claim, release and target the syscall tracer; see `syscalls/trace.rs`.
+const SYS_TRACE_CTL: u64 = 235;
+/// Drain trace records into the tracer's buffer.
+const SYS_TRACE_READ: u64 = 236;
 const SYS_CLOCK_GETTIME: u64 = 226;
 const SYS_OPENPTY: u64 = 227;
 const SYS_SPAWN2: u64 = 228;
@@ -438,9 +444,22 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
 
     // Record the syscall number on the current thread for debug visibility.
     // Single relaxed store on a hot cache line; see Thread::last_syscall.
-    crate::util::per_cpu::get_percpu_data().with_current_thread(|t| {
-        t.last_syscall.store(ctx.rax as u32, Ordering::Relaxed);
-    });
+    //
+    // The traced tid is resolved here and carried to the return path in a
+    // local: it decides both records, so a thread that marks itself mid-call
+    // cannot produce a return with no matching entry, and no reference into
+    // per-CPU state outlives this closure.
+    let traced_call = crate::util::per_cpu::get_percpu_data()
+        .with_current_thread(|t| {
+            t.last_syscall.store(ctx.rax as u32, Ordering::Relaxed);
+            trace::traced_session(t)
+                .map(|generation| trace::TracedCall::new(t.id.0, generation, ctx))
+        })
+        .flatten();
+
+    if let Some(call) = &traced_call {
+        trace::record_enter(call);
+    }
 
     match ctx.rax {
         SYS_WRITE => {
@@ -1052,9 +1071,24 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         SYS_REBOOT => {
             ctx.rax = sys_reboot(ctx.rdi);
         }
+        SYS_TRACE_CTL => {
+            let op = ctx.rdi;
+            let arg = ctx.rsi;
+            ctx.rax = trace::sys_trace_ctl(op, arg);
+        }
+        SYS_TRACE_READ => {
+            let buf = ctx.rdi as *mut edos_trace_abi::TraceRecord;
+            let max = ctx.rsi;
+            let timeout_ms = ctx.rdx;
+            ctx.rax = trace::sys_trace_read(buf, max, timeout_ms);
+        }
         _ => {
             ctx.rax = !0u64;
         }
+    }
+
+    if let Some(call) = &traced_call {
+        trace::record_exit(call, ctx.rax);
     }
 
     // A thread marked for termination dies here rather than returning to user
@@ -1154,6 +1188,70 @@ pub enum Errno {
     ELOOP,
     /// Placeholder for unknown or unmapped kernel error codes.
     UNKNOWN,
+}
+
+/// Every `Errno`, so the values and names can be published to userspace
+/// without a second copy of the list. Order is the discriminant order.
+pub const ALL_ERRNOS: &[Errno] = &[
+    Errno::Clear,
+    Errno::EINVAL,
+    Errno::ENOMEM,
+    Errno::EFAULT,
+    Errno::EBADF,
+    Errno::EACCES,
+    Errno::EPERM,
+    Errno::ENOENT,
+    Errno::EEXIST,
+    Errno::ENOTDIR,
+    Errno::EISDIR,
+    Errno::ENOSPC,
+    Errno::EROFS,
+    Errno::EIO,
+    Errno::EINTR,
+    Errno::ENOEXEC,
+    Errno::EAGAIN,
+    Errno::ENOTCONN,
+    Errno::ECONNREFUSED,
+    Errno::EADDRINUSE,
+    Errno::EPIPE,
+    Errno::EAFNOSUPPORT,
+    Errno::ESPIPE,
+    Errno::EBUSY,
+    Errno::ELOOP,
+    Errno::UNKNOWN,
+];
+
+impl Errno {
+    pub fn name(self) -> &'static str {
+        match self {
+            Errno::Clear => "OK",
+            Errno::EINVAL => "EINVAL",
+            Errno::ENOMEM => "ENOMEM",
+            Errno::EFAULT => "EFAULT",
+            Errno::EBADF => "EBADF",
+            Errno::EACCES => "EACCES",
+            Errno::EPERM => "EPERM",
+            Errno::ENOENT => "ENOENT",
+            Errno::EEXIST => "EEXIST",
+            Errno::ENOTDIR => "ENOTDIR",
+            Errno::EISDIR => "EISDIR",
+            Errno::ENOSPC => "ENOSPC",
+            Errno::EROFS => "EROFS",
+            Errno::EIO => "EIO",
+            Errno::EINTR => "EINTR",
+            Errno::ENOEXEC => "ENOEXEC",
+            Errno::EAGAIN => "EAGAIN",
+            Errno::ENOTCONN => "ENOTCONN",
+            Errno::ECONNREFUSED => "ECONNREFUSED",
+            Errno::EADDRINUSE => "EADDRINUSE",
+            Errno::EPIPE => "EPIPE",
+            Errno::EAFNOSUPPORT => "EAFNOSUPPORT",
+            Errno::ESPIPE => "ESPIPE",
+            Errno::EBUSY => "EBUSY",
+            Errno::ELOOP => "ELOOP",
+            Errno::UNKNOWN => "UNKNOWN",
+        }
+    }
 }
 
 impl From<FsError> for Errno {
@@ -1741,6 +1839,9 @@ fn do_spawn(
     // collector left and init inherits any child still running.
     if let Some(parent) = current_thread() {
         user_thread.parent.store(parent.id.0, Ordering::Release);
+        user_thread
+            .traced
+            .store(trace::inherit_from(&parent), Ordering::Relaxed);
     }
 
     queue_spawn_thread(user_thread);
@@ -2433,6 +2534,7 @@ fn sys_clone(
         killed: AtomicBool::new(false),
         wake_pending: AtomicBool::new(false),
         last_syscall: AtomicU32::new(crate::thread::thread::NO_SYSCALL),
+        traced: AtomicU64::new(trace::inherit_from(&parent_thread)),
         signal: SignalState::new(),
         user: Some(child_user),
         rq_link: Link::new(),
@@ -2683,6 +2785,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         killed: AtomicBool::new(false),
         wake_pending: AtomicBool::new(false),
         last_syscall: AtomicU32::new(crate::thread::thread::NO_SYSCALL),
+        traced: AtomicU64::new(trace::inherit_from(&parent_thread)),
         signal: SignalState::new(),
         user: Some(child_user_arc.clone()),
         rq_link: Link::new(),

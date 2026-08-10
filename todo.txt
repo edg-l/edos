@@ -52,3 +52,12 @@
   Both point at a lost or late wakeup on the pong side rather than at the
   counter. Catch the failing run's full log before chasing it; the counter and
   the missing PASS line are the only evidence printed today.
+
+- edos-sh has no fd-numbered redirection. `Redirects` in
+  programs/edos-sh/src/command.rs carries stdin_file, stdout_file and
+  stdout_append and nothing else, so `2>file` and `2>&1` are parsed as ordinary
+  arguments and land in argv. Found while testing `strace`, whose trace goes to
+  stderr: `strace echo hi 2>/tmp/t.txt` printed "hi 2>/tmp/t.txt" and wrote no
+  file. `strace -o FILE` covers that case; the shell gap is the real one, and it
+  is why every program that separates diagnostics from output is hard to use
+  from a script here.

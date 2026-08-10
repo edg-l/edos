@@ -46,6 +46,7 @@ buddy_system_allocator = "0.13.0"
 bitflags = { version = "2.11.0", default-features = false, features = ["bytemuck"] }
 intrusive-list = { path = "../libs/intrusive_list" }
 efs-common = { path = "../libs/efs-common" }
+edos-trace-abi = { path = "../libs/edos-trace-abi" }
 
 [profile.dev]
 opt-level = 2

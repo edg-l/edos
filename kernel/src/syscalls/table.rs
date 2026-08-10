@@ -1,0 +1,156 @@
+//! One description of the syscall surface: number, name, and what each
+//! argument is.
+//!
+//! Two consumers share it so neither can hold a private copy that rots. The
+//! tracer reads it to decide which arguments are strings worth copying out of
+//! user memory, and `/proc/syscalls` publishes it so `strace` formats calls
+//! from the kernel's own table instead of a duplicate of it.
+
+use edos_trace_abi::ArgKind;
+
+use super::{
+    SYS_ACCEPT, SYS_ACCESS, SYS_BIND, SYS_CHDIR, SYS_CLOCK_GETTIME, SYS_CLONE, SYS_CLOSE,
+    SYS_CONNECT, SYS_DUP, SYS_DUP2, SYS_ERRNO, SYS_EXECVE, SYS_EXIT, SYS_FACCESSAT, SYS_FCNTL,
+    SYS_FORK, SYS_FSTAT, SYS_FSTATAT, SYS_FSYNC, SYS_FTRUNCATE, SYS_FUTEX_WAIT, SYS_FUTEX_WAKE,
+    SYS_GETCWD, SYS_GETDENTS, SYS_GETDNS, SYS_GETGID, SYS_GETPEERNAME, SYS_GETPID, SYS_GETRANDOM,
+    SYS_GETSOCKNAME, SYS_GETSOCKOPT, SYS_GETUID, SYS_IOCTL, SYS_ISATTY, SYS_KILL, SYS_LIST_DIR,
+    SYS_LIST_MOUNTS, SYS_LIST_PARTITIONS, SYS_LISTEN, SYS_LSEEK, SYS_MKDIR, SYS_MKDIRAT, SYS_MMAP,
+    SYS_MONOTONIC_TIME, SYS_MOUNT, SYS_MSYNC, SYS_MUNMAP, SYS_NANOSLEEP, SYS_NETINFO, SYS_OPEN,
+    SYS_OPENAT, SYS_OPENPTY, SYS_PING, SYS_PIPE, SYS_POLL, SYS_PREAD, SYS_PWRITE, SYS_READ,
+    SYS_READLINK, SYS_READLINKAT, SYS_READV, SYS_REBOOT, SYS_RECVFROM, SYS_RENAME, SYS_RENAMEAT,
+    SYS_RMDIR, SYS_RMDIR_ALL, SYS_SENDTO, SYS_SETSOCKOPT, SYS_SHM_CREATE, SYS_SHM_DESTROY,
+    SYS_SHM_MAP, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SHUTDOWN, SYS_SIGACTION, SYS_SIGPROCMASK,
+    SYS_SLEEP_MS, SYS_SOCKET, SYS_SPAWN, SYS_SPAWN2, SYS_STAT, SYS_STATFS, SYS_SYMLINK,
+    SYS_SYMLINKAT, SYS_SYNC, SYS_TRACE_CTL, SYS_TRACE_READ, SYS_TRUNCATE, SYS_UNLINK, SYS_UNLINKAT,
+    SYS_UTIMENSAT, SYS_WAIT_PID, SYS_WINDOW_CREATE, SYS_WINDOW_DAMAGE, SYS_WINDOW_DESTROY,
+    SYS_WINDOW_GET, SYS_WINDOW_GRANT_SHELL, SYS_WINDOW_LIST, SYS_WINDOW_POLL,
+    SYS_WINDOW_SEND_EVENT, SYS_WINDOW_SET, SYS_WRITE, SYS_WRITEV,
+};
+
+pub struct SyscallInfo {
+    pub nr: u64,
+    pub name: &'static str,
+    pub args: &'static [ArgKind],
+}
+
+macro_rules! sc {
+    ($nr:expr, $name:literal $(, $kind:ident)* $(,)?) => {
+        SyscallInfo {
+            nr: $nr,
+            name: $name,
+            args: &[$(ArgKind::$kind),*],
+        }
+    };
+}
+
+/// Every number [`super::syscall_handler`] dispatches, in numeric order.
+pub static SYSCALLS: &[SyscallInfo] = &[
+    sc!(SYS_READ, "read", Fd, Out, Len),
+    sc!(SYS_WRITE, "write", Fd, StrLen, Len),
+    sc!(SYS_OPEN, "open", Str, Hex),
+    sc!(SYS_CLOSE, "close", Fd),
+    sc!(SYS_LIST_DIR, "list_dir", Str, Buf, Len),
+    sc!(SYS_GETCWD, "getcwd", Buf, Len),
+    sc!(SYS_CHDIR, "chdir", Str),
+    sc!(SYS_POLL, "poll", Ptr, Len, Int),
+    sc!(SYS_FSTAT, "fstat", Fd, Ptr),
+    sc!(SYS_MMAP, "mmap", Ptr, Len, Hex, Hex, Hex, Len),
+    sc!(SYS_STAT, "stat", StrLen, Len, Ptr),
+    sc!(SYS_MUNMAP, "munmap", Ptr, Len),
+    sc!(SYS_LSEEK, "lseek", Fd, Int, Int),
+    sc!(SYS_FTRUNCATE, "ftruncate", Fd, Len),
+    sc!(SYS_FSYNC, "fsync", Fd),
+    sc!(SYS_ISATTY, "isatty", Fd),
+    sc!(SYS_IOCTL, "ioctl", Fd, Hex, Ptr, Len, Hex),
+    sc!(SYS_PREAD, "pread", Fd, Out, Len, Len),
+    sc!(SYS_PWRITE, "pwrite", Fd, StrLen, Len, Len),
+    sc!(SYS_READV, "readv", Fd, Ptr, Len),
+    sc!(SYS_WRITEV, "writev", Fd, Ptr, Len),
+    sc!(SYS_ACCESS, "access", StrLen, Len, Hex),
+    sc!(SYS_PIPE, "pipe", Ptr),
+    sc!(SYS_DUP, "dup", Fd),
+    sc!(SYS_DUP2, "dup2", Fd, Fd),
+    sc!(SYS_MSYNC, "msync", Ptr, Len, Hex),
+    sc!(SYS_NANOSLEEP, "nanosleep", Ptr, Ptr),
+    sc!(SYS_GETPID, "getpid"),
+    sc!(SYS_WAIT_PID, "waitpid", Int, Int, Ptr),
+    sc!(SYS_SPAWN, "spawn", Str, Ptr, Fd, Fd, Fd),
+    sc!(SYS_EXECVE, "execve", Str, Ptr, Ptr),
+    sc!(SYS_EXIT, "exit", Int),
+    sc!(SYS_FCNTL, "fcntl", Fd, Int, Hex),
+    sc!(SYS_TRUNCATE, "truncate", StrLen, Len, Len),
+    sc!(SYS_GETDENTS, "getdents", StrLen, Len, Buf, Len, Len),
+    sc!(SYS_RENAME, "rename", Str, Str),
+    sc!(SYS_SYMLINK, "symlink", StrLen, Len, StrLen, Len),
+    sc!(SYS_READLINK, "readlink", StrLen, Len, Out, Len),
+    sc!(SYS_GETUID, "getuid"),
+    sc!(SYS_GETGID, "getgid"),
+    sc!(SYS_SYNC, "sync"),
+    sc!(SYS_REBOOT, "reboot", Int),
+    sc!(SYS_MOUNT, "mount", Int, Int, Str, Str),
+    sc!(SYS_LIST_PARTITIONS, "list_partitions", Buf, Len),
+    sc!(SYS_MKDIR, "mkdir", Str),
+    sc!(SYS_RMDIR, "rmdir", Str),
+    sc!(SYS_RMDIR_ALL, "rmdir_all", Str),
+    sc!(SYS_UNLINK, "unlink", Str),
+    sc!(SYS_LIST_MOUNTS, "list_mounts", Buf, Len),
+    sc!(SYS_SLEEP_MS, "sleep_ms", Len),
+    sc!(SYS_MONOTONIC_TIME, "monotonic_time"),
+    sc!(SYS_CLONE, "clone", Ptr, Hex, Hex, Ptr),
+    sc!(SYS_FUTEX_WAIT, "futex_wait", Ptr, Hex, Len),
+    sc!(SYS_FUTEX_WAKE, "futex_wake", Ptr, Len),
+    sc!(SYS_GETRANDOM, "getrandom", Buf, Len, Hex),
+    sc!(SYS_SHM_CREATE, "shm_create", Len),
+    sc!(SYS_SHM_MAP, "shm_map", Int, Ptr, Hex),
+    sc!(SYS_SHM_UNMAP, "shm_unmap", Ptr),
+    sc!(SYS_SHM_DESTROY, "shm_destroy", Int),
+    sc!(SYS_WINDOW_CREATE, "window_create", Int, Int, Len, Len),
+    sc!(SYS_WINDOW_DESTROY, "window_destroy", Int),
+    sc!(SYS_WINDOW_SET, "window_set", Int, Int, Hex),
+    sc!(SYS_WINDOW_GET, "window_get", Int, Int),
+    sc!(SYS_WINDOW_POLL, "window_poll", Int, Ptr, Len),
+    sc!(SYS_WINDOW_LIST, "window_list", Buf, Len),
+    sc!(SYS_WINDOW_SEND_EVENT, "window_send_event", Int, Ptr),
+    sc!(SYS_CLOCK_GETTIME, "clock_gettime", Buf),
+    sc!(SYS_OPENPTY, "openpty", Ptr),
+    sc!(SYS_SPAWN2, "spawn2", Ptr),
+    sc!(SYS_KILL, "kill", Int, Int),
+    sc!(SYS_SIGACTION, "sigaction", Int, Hex),
+    sc!(SYS_SHM_SIZE, "shm_size", Int),
+    sc!(SYS_WINDOW_DAMAGE, "window_damage", Int),
+    sc!(SYS_SIGPROCMASK, "sigprocmask", Int, Hex),
+    sc!(SYS_WINDOW_GRANT_SHELL, "window_grant_shell", Int),
+    sc!(SYS_TRACE_CTL, "trace_ctl", Int, Len),
+    sc!(SYS_TRACE_READ, "trace_read", Buf, Len, Len),
+    sc!(SYS_SOCKET, "socket", Int, Int, Int),
+    sc!(SYS_BIND, "bind", Fd, Ptr, Len),
+    sc!(SYS_CONNECT, "connect", Fd, Ptr, Len),
+    sc!(SYS_LISTEN, "listen", Fd, Len),
+    sc!(SYS_ACCEPT, "accept", Fd, Ptr, Ptr),
+    sc!(SYS_SENDTO, "sendto", Fd, StrLen, Len, Hex, Ptr, Len),
+    sc!(SYS_RECVFROM, "recvfrom", Fd, Out, Len, Hex, Ptr, Ptr),
+    sc!(SYS_SHUTDOWN, "shutdown", Fd, Int),
+    sc!(SYS_SETSOCKOPT, "setsockopt", Fd, Int, Int, Ptr, Len),
+    sc!(SYS_PING, "ping", Ptr, Int, Int, Len),
+    sc!(SYS_NETINFO, "netinfo", Buf, Len),
+    sc!(SYS_GETSOCKOPT, "getsockopt", Fd, Int, Int, Ptr, Ptr),
+    sc!(SYS_GETPEERNAME, "getpeername", Fd, Ptr, Ptr),
+    sc!(SYS_GETSOCKNAME, "getsockname", Fd, Ptr, Ptr),
+    sc!(SYS_STATFS, "statfs", Str, Buf, Len),
+    sc!(SYS_FORK, "fork"),
+    sc!(SYS_GETDNS, "getdns", Buf),
+    sc!(SYS_OPENAT, "openat", Fd, StrLen, Len, Hex),
+    sc!(SYS_MKDIRAT, "mkdirat", Fd, StrLen, Len),
+    sc!(SYS_FSTATAT, "fstatat", Fd, StrLen, Len, Ptr, Hex),
+    sc!(SYS_UNLINKAT, "unlinkat", Fd, StrLen, Len, Hex),
+    sc!(SYS_RENAMEAT, "renameat", Fd, StrLen, Len, Fd, StrLen, Len),
+    sc!(SYS_SYMLINKAT, "symlinkat", StrLen, Len, Fd, StrLen, Len),
+    sc!(SYS_READLINKAT, "readlinkat", Fd, StrLen, Len, Out, Len),
+    sc!(SYS_FACCESSAT, "faccessat", Fd, StrLen, Len, Hex, Hex),
+    sc!(SYS_UTIMENSAT, "utimensat", Fd, StrLen, Len, Ptr, Hex),
+    sc!(SYS_ERRNO, "errno"),
+];
+
+pub fn lookup(nr: u64) -> Option<&'static SyscallInfo> {
+    SYSCALLS.iter().find(|info| info.nr == nr)
+}

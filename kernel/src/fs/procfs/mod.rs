@@ -771,4 +771,5 @@ const GLOBAL_FILES: &[(&str, fn() -> String)] = &[
     ("ahci_stats", Procfs::render_ahci_stats),
     ("windows", Procfs::render_windows),
     ("net", Procfs::render_net),
+    ("syscalls", crate::syscalls::trace::render_syscall_table),
 ];

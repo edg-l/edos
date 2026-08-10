@@ -2,6 +2,19 @@
 
 ## Done
 
+- **strace** - the kernel records syscall entries and returns for marked
+  threads into a ring a tracer drains, and `programs/strace` formats them.
+  No ptrace: dispatch in `syscalls/mod.rs` is one choke point, so the mark is
+  one relaxed load next to the `last_syscall` store already there. Marks are
+  generation-stamped, so ending a session invalidates every outstanding one
+  with a single increment instead of walking the thread table, and a tracer
+  that dies releases the session from `thread_exit`. Children are followed,
+  string and buffer arguments are copied out of user memory (in on entry,
+  out on return, sized by the return value), and a call that has not
+  returned prints `<unfinished ...>`, which is the answer to "the program is
+  doing nothing". `/proc/syscalls` publishes the kernel's own syscall and
+  errno tables so the formatter holds no second copy that could rot.
+  Written up in `doc/strace.md`.
 - **Symbolic links resolve in the mount namespace** - a filesystem walks
   paths from its own root and cannot see the mount table, so it no longer
   resolves a link target at all: it reports where the link pointed and the

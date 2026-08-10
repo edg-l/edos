@@ -1,4 +1,4 @@
-# Working notes, sessions of 2026-08-08 to 2026-08-10
+# Working notes, sessions of 2026-08-08 to 2026-08-11
 
 State of the tree, what changed, and what is still open. Written for whoever
 picks this up next, which will usually be an agent with no memory of the
@@ -1670,6 +1670,52 @@ resident. `/bin/sh` 208 KiB and `/bin/ps` 60 KiB resident against ~300 KiB
 binaries, which is demand paging visible in a number for the first time. Kernel
 threads report `-` rather than a figure: they have no address space of their
 own, and reporting the kernel's would be a lie that adds up.
+
+## strace exists, and it is now the first thing to reach for
+
+A program that failed silently used to leave nothing behind — this OS is driven
+through screenshots and a serial log, so "it printed nothing" was the end of the
+evidence. `strace` makes it the beginning. Full write-up in
+[`strace.md`](strace.md); the parts worth knowing before reading code:
+
+**It is not ptrace, and deliberately so.** `syscall_handler` is a single choke
+point for the entire syscall surface, so tracing is an entry record before the
+match, a return record after it, and a per-thread mark to decide whether to
+write either. Nothing stops the target and nothing changes its scheduling.
+
+**The mark is a generation, not a bool.** `Thread::traced` holds the trace
+session it was marked under, and only counts while that equals the live
+generation. Ending a session is therefore one increment rather than a walk of
+the thread table, and a mark a dead tracer left behind cannot reactivate under
+the next one. This matters more than it looks: a stale mark means a program
+writing records into a ring nobody drains, forever.
+
+**A tracer that dies releases the session**, because `thread_exit` calls into
+the tracer for the `+++ exited +++` record anyway. Ctrl+C on `strace -p` leaves
+nothing marked, which is verified behaviour and not an assumption.
+
+**Records can be lost and the count is printed.** The target never blocks on the
+tracer; a ring that fills drops and counts. A tool that silently omits calls is
+worse than one that admits it.
+
+**Three things the design bought that are worth keeping in mind:**
+
+- `/proc/syscalls` publishes the kernel's own syscall table (number, name,
+  argument kinds) and its errno names, so `strace` holds no duplicate that could
+  drift the way `WindowListEntry` can. **Adding a syscall now means adding a row
+  to `kernel/src/syscalls/table.rs`** or `strace` will print it as
+  `syscall_NNN(0x…, 0x…)`.
+- Buffer contents are captured on both sides: an input buffer on entry, an
+  output buffer on return, sized by the return value. The output side finds its
+  buffer through the arguments *copied at entry* and carried in a `TracedCall`,
+  not through the registers as they stand on return — `sys_execve` rewrites the
+  whole `SyscallContext`, so those can name a dead address space. An earlier
+  draft relied on "the dispatcher only ever assigns to `ctx.rax`", which is
+  false. That is what makes `write(1, "hi\n", 3)` and `read(3, "…", 4096) = 12`
+  readable.
+- A call still in flight prints `<unfinished ...>` and resumes later. `strace -T
+  sleep 1` showing `<... nanosleep resumed> = 0 <1.000049>` is the answer to
+  "the program is hung", not a guess about it.
 
 ## Things that will bite you
 

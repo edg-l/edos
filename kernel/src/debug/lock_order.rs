@@ -147,6 +147,11 @@ pub const RANK_DEVFS_REGISTRY: u16 = 340;
 // `VfsInode::drop` could still be holding. Never held across a call into a
 // filesystem: both sides take it, move the Vec, and release.
 pub const RANK_EVICT_OVERFLOW: u16 = 350;
+// Syscall trace ring. A true leaf: taken at the syscall entry and exit
+// boundaries, where no other guard is live, and never held across a call into
+// anything else. Ranked anyway so a thread that dies holding it is caught by
+// `assert_no_guards_held` rather than silently corrupting the ring.
+pub const RANK_TRACE_RING: u16 = 355;
 // Deep utility leaves — acquired from arbitrary contexts (AHCI DMA setup,
 // page-table edits, etc.). Must be higher than any caller's rank. Ordered
 // relative to each other because `MemoryManager::map_memory` acquires

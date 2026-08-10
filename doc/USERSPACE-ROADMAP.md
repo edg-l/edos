@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-75 programs and 2 libraries, all in the `programs/` cargo workspace.
+76 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -14,7 +14,7 @@
 | Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs` |
 | Checksums | `sha256sum` |
 | Inspection | `file` |
-| System | `ps`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown` |
+| System | `ps`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace` |
 | Network | `ping`, `dns`, `http`, `wget`, `dnsprobe` |
 | Audio | `play` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
@@ -39,6 +39,13 @@ block-boundary cases (55/56/57, 63/64/65, 8191/8192/8193).
 signatures with longest-match wins, ELF class/endianness/type decoding, and a
 UTF-8 text heuristic. Classifications agree with GNU `file` on ELF binaries,
 scripts, text, empty files and directories.
+
+**`strace`** (Phase 4, the kernel-aware one that shipped first). A per-thread
+trace mark checked at the syscall dispatch choke point, records into a ring the
+tracer drains, and `/proc/syscalls` publishing the kernel's own syscall table so
+the formatter carries no second copy of it. Follows children, shows what a
+blocked process is blocked in, and captures both what a call was handed and what
+it filled in. Written up in [`strace.md`](strace.md).
 
 Candidates beyond these phases, ranked by the kernel path each would exercise,
 are in [`PROGRAMS.md`](PROGRAMS.md).
@@ -136,3 +143,50 @@ correctness, locking, perf hot spots and missing syscalls — see
 5. **Rapid spawn and exit.** `xargs` in loop mode hammers the reaper and zombie
    collection.
 6. **CPU count.** Not exposed to userspace at all today.
+
+## Next: the signal subsystem, and the shell on top of it
+
+Found 2026-08-11 by reading `kernel/src/thread/signal.rs` (163 lines) against
+what `edos-sh` wants to do. These are ordered: everything the shell is missing
+that anyone would notice is blocked on the kernel item above it.
+
+1. **No process groups.** `Pty.foreground_pid` is a single `Option<u64>`, set by
+   `do_spawn` from the child's own pid. Ctrl+C in `ls | grep x` therefore reaches
+   one process and leaves the rest of the pipeline running. A foreground process
+   *group*, and `kill` accepting a negative pid to address one, is the fix.
+2. **Nothing can be stopped.** There is no `SIGSTOP`/`SIGTSTP`/`SIGCONT` and no
+   `Stopped` thread state — `signal.rs` says so in a comment: *"POSIX also names
+   SIGSTOP, which does not exist here because nothing stops a process short of
+   killing it."* This is what blocks Ctrl+Z, `fg` and `bg`; `JobStatus` in
+   `programs/edos-sh/src/jobs.rs` is `Running | Done` for the same reason.
+3. **No userspace signal handlers.** `SignalState::handlers` holds only `SIG_DFL`
+   (0) or `SIG_IGN` (1), so every signal a process does not ignore terminates it
+   and no program can clean up on `SIGINT`. Real handlers need a trampoline that
+   builds a frame on the user stack, plus a `sigreturn` syscall to unwind it —
+   the deepest item here, and the only one job control does *not* depend on.
+4. **`SIGPIPE` is declared and never raised.** It carries `#[expect(unused)]`;
+   a write to a pipe with no reader returns `EPIPE` (`syscalls/io.rs`). So
+   `yes | head -1` leaves `yes` running until something else kills it.
+5. **`SIGCHLD` is never sent.** It exists in `default_action` as `Ignore` and
+   nothing ever raises it, which is why `JobList::reap` polls every job with
+   `waitpid_nonblocking` instead of waking on a child's exit.
+
+Shell work that needs no kernel change and is worth doing regardless:
+
+6. **No globbing.** `ls *.txt` passes the literal string through; nothing in
+   `edos-sh` expands `*`, `?` or character classes. Probably the single most
+   noticeable gap in daily use.
+7. **No fd-numbered redirection.** `Redirects` in
+   `programs/edos-sh/src/command.rs` carries stdin, stdout and an append flag
+   only, so `2>file`, `2>&1` and `&>` land in argv as ordinary arguments. Also
+   recorded in `todo.txt`, where it was found.
+
+## Next: time is UTC everywhere
+
+Nothing in the system has a timezone concept. The kernel reads the RTC as UTC
+(`timer.rs`), `edos_lib::time::ClockTime::from_unix_nanos` documents itself as
+UTC, and the panel clock formats that directly — so the desktop clock is wrong
+by the local offset for everyone not on UTC. There is also no `date` program, so
+the panel is the only way to read the time at all. Wants: an offset the session
+can carry (an environment variable is enough; `/etc` does not exist yet), one
+place in `edos_lib` that applies it, and `date`.
