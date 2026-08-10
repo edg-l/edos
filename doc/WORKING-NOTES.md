@@ -2263,3 +2263,47 @@ both cases.
   never exercised: `sh -c "sleep 8; kill <pid>" &`, then click the target
   window. Its pid is reachable without reading the covered terminal by sending
   `ps > /dev/klog` and reading `scripts/edos-vm log` on the host.
+
+## `ln` exists, and `lstat` in the std fork is a lie
+
+`ln -s` was the last thing standing between the shell and symbolic links, which
+the VFS has resolved correctly for a long time. Three POSIX shapes: one target
+into the working directory under its own basename, one target to a named link,
+and several targets into a directory. `-f` replaces an existing destination but
+refuses a directory, since replacing one with a link would discard its
+contents. Hard links are refused outright, and that is a statement about the
+kernel rather than about `ln`: there is no `link(2)`, and EFS inodes carry no
+link count, so there is nothing to increment.
+
+The interesting part is what verifying it turned up.
+
+**`std::fs::symlink_metadata` follows symbolic links on this target.**
+`library/std/src/sys/fs/edos.rs` defines `lstat` as `stat(p)` — literally the
+same call — so `Metadata::is_symlink()` can never be true and every
+`symlink_metadata` caller silently gets the target's type and size. `stat` had
+had a dead `is_symlink()` branch since it was written for exactly this reason:
+it reported a link to an 11-byte file as `regular file, 11 bytes`.
+
+The fix that does not require the Rust fork is `readlink`, which resolves the
+final component without following it: a non-negative return *is* the proof that
+a path is a link, and it hands back the target in the same call. `stat` and
+`ls` both classify that way now. The real fix is in the fork — an
+`AT_SYMLINK_NOFOLLOW` stat path plumbed into `lstat` — and it is written down
+in `todo.txt`.
+
+`getdents` is not affected: it reports `file_type == 2` for a link, so
+`DirEntry::file_type()` is correct and `ls` uses it for directory contents.
+Only path-based lookups go through the broken `lstat`.
+
+### Things that will bite you
+
+- **Do not trust `Metadata::is_symlink()` on edos.** It is always false. Use
+  `edos_lib::io::readlink`, or `DirEntry::file_type()` if the name came from a
+  `read_dir`. Any code testing for a link through `symlink_metadata` is dead
+  code that looks live.
+- **`scripts/edos-vm type ... --enter` does not always deliver the Enter.**
+  Several times in this session the line was typed and left sitting at the
+  prompt until the next input arrived; a following `scripts/edos-vm key ret`
+  fixes it. Screenshot after the `key ret`, not after the `type`, or the shot
+  shows a command that has not run and reads exactly like a program that
+  printed nothing.

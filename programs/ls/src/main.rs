@@ -5,8 +5,53 @@ use std::fs;
 use std::io::Write;
 use std::process;
 
-/// One listed name and whether it is a directory.
-type Item = (String, bool);
+/// What a listed name is, which decides its suffix and its colour.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    File,
+    Dir,
+    Link,
+}
+
+impl Kind {
+    /// The `ls -F` suffix: a directory ends in `/`, a symbolic link in `@`.
+    fn suffix(self) -> &'static str {
+        match self {
+            Kind::File => "",
+            Kind::Dir => "/",
+            Kind::Link => "@",
+        }
+    }
+
+    fn color(self) -> Option<&'static str> {
+        match self {
+            Kind::File => None,
+            Kind::Dir => Some("\x1B[1;34m"),
+            Kind::Link => Some("\x1B[1;36m"),
+        }
+    }
+}
+
+/// One listed name and what it is.
+type Item = (String, Kind);
+
+/// Classify a directory entry without following it, so a link to a directory
+/// still reads as a link.
+fn kind_of(ft: Option<std::fs::FileType>) -> Kind {
+    match ft {
+        Some(t) if t.is_symlink() => Kind::Link,
+        Some(t) if t.is_dir() => Kind::Dir,
+        _ => Kind::File,
+    }
+}
+
+/// Whether `path` names a symbolic link. `readlink` is the only way to ask:
+/// on this target `std`'s `lstat` follows links, so `symlink_metadata` reports
+/// the target and `Metadata::is_symlink` is never true.
+fn is_symlink(path: &str) -> bool {
+    let mut buf = [0u8; 1];
+    edos_lib::io::readlink(path, &mut buf) >= 0
+}
 
 /// Read a directory into sorted items.
 fn read_dir_items(path: &str) -> Option<Vec<Item>> {
@@ -23,8 +68,8 @@ fn read_dir_items(path: &str) -> Option<Vec<Item>> {
         match entry {
             Ok(e) => {
                 let name = e.file_name().to_string_lossy().into_owned();
-                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                items.push((name, is_dir));
+                let kind = kind_of(e.file_type().ok());
+                items.push((name, kind));
             }
             Err(e) => {
                 eprintln!("ls: error reading entry: {}", e);
@@ -45,42 +90,32 @@ fn print_items(items: &[Item], is_tty: bool) {
 
     if !is_tty {
         // Piped output: one entry per line, no color, no padding
-        for (name, is_dir) in items {
-            if *is_dir {
-                println!("{}/", name);
-            } else {
-                println!("{}", name);
-            }
+        for (name, kind) in items {
+            println!("{}{}", name, kind.suffix());
         }
         return;
     }
 
-    let display_width = |item: &Item| -> usize { item.0.len() + if item.1 { 1 } else { 0 } };
+    let display_width = |item: &Item| -> usize { item.0.len() + item.1.suffix().len() };
     let max_name = items.iter().map(display_width).max().unwrap_or(0);
     let col_width = max_name + 2;
     let term_width = 80usize;
     let cols = (term_width / col_width).max(1);
 
-    for (i, (name, is_dir)) in items.iter().enumerate() {
+    for (i, (name, kind)) in items.iter().enumerate() {
         if i > 0 && i % cols == 0 {
             println!();
         }
-        let display = if *is_dir {
-            format!("{}/", name)
-        } else {
-            name.clone()
-        };
+        let display = format!("{}{}", name, kind.suffix());
         let is_last_col = (i + 1) % cols == 0 || i + 1 == items.len();
-        if *is_dir {
-            if is_last_col {
-                print!("\x1B[1;34m{}\x1B[0m", display);
-            } else {
-                print!("\x1B[1;34m{:<width$}\x1B[0m", display, width = col_width);
-            }
-        } else if is_last_col {
-            print!("{}", display);
+        let padded = if is_last_col {
+            display
         } else {
-            print!("{:<width$}", display, width = col_width);
+            format!("{:<width$}", display, width = col_width)
+        };
+        match kind.color() {
+            Some(color) => print!("{}{}\x1B[0m", color, padded),
+            None => print!("{}", padded),
         }
     }
     println!();
@@ -99,9 +134,12 @@ fn main() {
     let mut files: Vec<Item> = Vec::new();
     let mut dirs: Vec<String> = Vec::new();
     for operand in &operands {
+        // Named operands follow links, as POSIX requires: `ls a-link-to-a-dir`
+        // lists the directory rather than printing the link's name.
         match fs::metadata(operand) {
             Ok(meta) if meta.is_dir() => dirs.push(operand.clone()),
-            Ok(_) => files.push((operand.clone(), false)),
+            Ok(_) if is_symlink(operand) => files.push((operand.clone(), Kind::Link)),
+            Ok(_) => files.push((operand.clone(), Kind::File)),
             Err(e) => {
                 eprintln!("ls: cannot access '{}': {}", operand, e);
                 status = 1;

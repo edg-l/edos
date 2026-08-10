@@ -39,7 +39,6 @@ surface at all.
 
 | Program | Why |
 |---|---|
-| `ln` | Symbolic links resolve properly now and there is still no way to make one from a shell. The smallest gap-closer on the list |
 | `less` | `dmesg \| less` is missing, and `edos-vi` already proves raw mode works |
 | `sed`, even just `s///` | Multiplies the value of every text tool already there |
 | `watch` | Trivial against procfs, and immediately useful for the poll-and-look debugging this OS gets |

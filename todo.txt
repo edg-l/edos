@@ -1,3 +1,12 @@
+- Rust fork: `std::fs::symlink_metadata` follows symbolic links, because
+  `lstat` in `library/std/src/sys/fs/edos.rs` is defined as `stat(p)`. So
+  `Metadata::is_symlink()` is always false and any path-based link test through
+  std is dead code. Needs a nofollow stat: `SYS_STAT`/`statat` already resolve
+  to the link itself for `readlink`/`unlink`/`rename`, so the kernel side is an
+  `AT_SYMLINK_NOFOLLOW` flag, and then `edos_rt::fd::lstat_path` plus the
+  `lstat` arm in the fork. Until then, use `edos_lib::io::readlink` (what
+  `stat` and `ls` do) or `DirEntry::file_type()`.
+
 
 - FIXED: attaching a USB mass-storage device hung the boot.
   `xhci_driver_main` called `crate::fs::api::register_partition` inline, between

@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-82 programs and 2 libraries, all in the `programs/` cargo workspace.
+85 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -10,7 +10,7 @@
 | GUI | `edos-wm` (compositor, decorations, desktop menu), `edos-terminal`, `edos-taskbar` (panel + applications menu), `edos-procview`, `wintest` |
 | Shell | `edos-sh` |
 | Editor | `edos-vi` |
-| Files | `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `touch`, `stat`, `find`, `du`, `diff` |
+| Files | `ls`, `cat`, `cp`, `mv`, `rm`, `ln`, `mkdir`, `rmdir`, `touch`, `stat`, `find`, `du`, `diff` |
 | Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs` |
 | Archives | `tar` (ustar create, list and extract) |
 | Checksums | `sha256sum` |
@@ -87,6 +87,16 @@ took the port table under the socket lock, inverting the order `handle_tcp`
 uses, and closing an accepted socket removed its *listener's* port-table entry,
 so a second connection was answered with RST. Both are written up in
 `doc/WORKING-NOTES.md`.
+
+**`ln`**. Symbolic links have resolved correctly for a long time and there was
+no way to make one outside a program. `ln -s` covers the three POSIX shapes:
+one target into the working directory, one target to a named link, and several
+targets into a directory. There is no `link(2)` and EFS inodes carry no link
+count, so `ln` without `-s` reports that rather than pretending.
+
+Two companions, because a link nobody can see is not much of a feature: `ls`
+now suffixes a symbolic link with `@` and a directory with `/`, and `stat`
+reports the link itself and where it points.
 
 **`imgview`** (Phase 4). A BMP viewer: one window, one image, either scaled to
 the window or shown at one image pixel per screen pixel and cropped. It decodes

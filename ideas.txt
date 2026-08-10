@@ -2,6 +2,14 @@
 
 ## Done
 
+- **`ln`, and links you can see** - `ln -s` creates symbolic links from the
+  shell for the first time: one target into the working directory, one target
+  to a named link, or several targets into a directory, with `-f` to replace
+  an existing non-directory and `-v` to report each one. Hard links are
+  refused with a reason: the kernel has no `link(2)` and EFS inodes carry no
+  link count. `ls` now marks a symbolic link `@` and a directory `/`, and
+  `stat` describes the link itself rather than its target.
+
 - **Focus follows a closed window again** - destroying a window moved keyboard
   focus in the registry but never sent `FocusGained` to whoever inherited it,
   so the terminal painted focused and dropped every keystroke once any GUI
