@@ -5,7 +5,7 @@ use std::time::Duration;
 use edos_lib::process::spawn;
 use edos_render::graphics::{Framebuffer, ScreenInfo};
 use edos_render::theme::{draw_gradient_v, Theme};
-use edos_render::widgets::{char_width, draw_rect, draw_rect_outline, draw_text};
+use edos_render::widgets::{draw_rect, draw_rect_outline, draw_text, text_height, text_width};
 use edos_render::window::{
     flags::FLAG_DOCK, property, window_list, window_send_event, window_set, Window, WindowEvent,
     WindowEventType, WindowListEntry,
@@ -19,6 +19,9 @@ const MAX_WINDOWS: usize = 32;
 
 /// Button width for each window entry.
 const BUTTON_WIDTH: u32 = 120;
+
+/// Padding between a window button's edge and its label.
+const LABEL_INSET: u32 = 8;
 
 /// Gap between adjacent window buttons.
 const BUTTON_GAP: i32 = 4;
@@ -51,12 +54,36 @@ const CLOCK_PADDING: i32 = 12;
 const CLOCK_GAP: i32 = 16;
 
 /// Height of a line of text drawn by `draw_text`.
-const TEXT_HEIGHT: i32 = 16;
+fn text_line_height() -> i32 {
+    text_height() as i32
+}
 
 /// Get screen dimensions.
 fn get_screen_info() -> Option<ScreenInfo> {
     let fb = Framebuffer::new();
     fb.screen_info().ok()
+}
+
+/// Shorten `text` with an ellipsis until it fits `max_width` pixels.
+///
+/// Measured, not counted: the face is proportional, so a fixed character
+/// budget truncates `Illuminate` and leaves `WWWWWWWWWW` overflowing.
+fn fit_label(text: &str, max_width: u32) -> String {
+    if text_width(text) <= max_width {
+        return text.to_string();
+    }
+    let ellipsis = "...";
+    let budget = max_width.saturating_sub(text_width(ellipsis));
+    let mut out = String::new();
+    for ch in text.chars() {
+        out.push(ch);
+        if text_width(&out) > budget {
+            out.pop();
+            break;
+        }
+    }
+    out.push_str(ellipsis);
+    out
 }
 
 /// Draw `text` centered inside the rectangle at (`x`, `y`) sized `w` by `h`.
@@ -71,11 +98,9 @@ fn draw_centered_text(
     h: u32,
     text: &str,
     color: u32,
-    char_w: u32,
 ) {
-    let text_w = text.chars().count() as i32 * char_w as i32;
-    let text_x = x + (w as i32 - text_w) / 2;
-    let text_y = y + (h as i32 - TEXT_HEIGHT) / 2;
+    let text_x = x + (w as i32 - text_width(text) as i32) / 2;
+    let text_y = y + (h as i32 - text_line_height()) / 2;
     draw_text(buf, buf_w, buf_h, text_x, text_y, text, color);
 }
 
@@ -235,8 +260,7 @@ fn main() {
             }
 
             // Wordmark, then a hairline closing off the identity region
-            let cw = char_width();
-            let text_y = (h as i32 - TEXT_HEIGHT) / 2;
+            let text_y = (h as i32 - text_line_height()) / 2;
             draw_text(
                 buf,
                 w,
@@ -292,7 +316,6 @@ fn main() {
                 btn_h,
                 LAUNCHER_LABEL,
                 Theme::DEFAULT.taskbar_text_active.raw(),
-                cw,
             );
 
             // Clock (right-aligned); window buttons stop short of it
@@ -302,7 +325,7 @@ fn main() {
                 (0, 0)
             };
             let clock_text = format!("{:02}:{:02}", hours, minutes);
-            let clock_w = clock_text.chars().count() as i32 * cw as i32;
+            let clock_w = text_width(&clock_text) as i32;
             let clock_x = w as i32 - clock_w - CLOCK_PADDING;
             draw_text(
                 buf,
@@ -327,11 +350,8 @@ fn main() {
                 let title = win_entry.title_str();
                 let label = if title.is_empty() {
                     format!("Win {}", win_entry.id)
-                } else if title.chars().count() > 12 {
-                    let truncated: String = title.chars().take(9).collect();
-                    format!("{}...", truncated)
                 } else {
-                    title.to_string()
+                    fit_label(title, BUTTON_WIDTH - LABEL_INSET * 2)
                 };
 
                 // The focused window reads as a raised chip underlined in the
@@ -383,7 +403,6 @@ fn main() {
                     btn_h,
                     &label,
                     label_color.raw(),
-                    cw,
                 );
 
                 displayed_windows.push((win_entry.id, btn_x));

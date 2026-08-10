@@ -1,8 +1,8 @@
 //! Checkbox widget with label.
 
 use super::{
-    Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_focus_ring, draw_rect,
-    draw_rect_outline, draw_text, text_height,
+    Rect, Widget, WidgetEvent, WidgetId, colors, draw_focus_ring, draw_rect, draw_rect_outline,
+    draw_text, text_height, text_width,
 };
 use crate::metrics::{CHECKBOX_BOX, CHECKBOX_INSET, CONTROL_HEIGHT, LABEL_GAP};
 
@@ -82,7 +82,7 @@ impl Widget for Checkbox {
     }
 
     fn bounds(&self) -> Rect {
-        let label_width = (self.label.chars().count() as u32) * char_width();
+        let label_width = text_width(&self.label);
         let total_width = CHECKBOX_BOX + LABEL_GAP + label_width;
         Rect::new(self.x, self.y, total_width, CONTROL_HEIGHT)
     }

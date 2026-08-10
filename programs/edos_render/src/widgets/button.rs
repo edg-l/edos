@@ -1,8 +1,8 @@
 //! Clickable button widget.
 
 use super::{
-    Rect, Widget, WidgetEvent, WidgetId, char_width, colors, draw_focus_ring, draw_rect,
-    draw_rect_outline, draw_text, text_height,
+    Rect, Widget, WidgetEvent, WidgetId, colors, draw_focus_ring, draw_rect, draw_rect_outline,
+    draw_text, text_height, text_width,
 };
 use crate::metrics::{CONTROL_HEIGHT, CONTROL_PAD_X};
 
@@ -22,7 +22,7 @@ pub struct Button {
 impl Button {
     /// Create a new button that auto-sizes based on text.
     pub fn new(id: WidgetId, x: i32, y: i32, label: &str) -> Self {
-        let width = (label.chars().count() as u32) * char_width() + CONTROL_PAD_X * 2;
+        let width = text_width(label) + CONTROL_PAD_X * 2;
 
         Self {
             id,
@@ -130,8 +130,8 @@ impl Widget for Button {
         );
 
         // Center the text
-        let text_width = (self.label.chars().count() as u32) * char_width();
-        let text_x = self.x + (self.width as i32 - text_width as i32) / 2;
+        let label_w = text_width(&self.label);
+        let text_x = self.x + (self.width as i32 - label_w as i32) / 2;
         let text_y = self.y + (self.height as i32 - text_height() as i32) / 2;
 
         draw_text(

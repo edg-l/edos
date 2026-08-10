@@ -215,7 +215,7 @@ pub fn draw_focus_ring(
     );
 }
 
-/// Helper function to draw text into a buffer.
+/// Draw a line of interface text with its top edge at `y`.
 pub fn draw_text(
     buffer: &mut [u32],
     buffer_width: u32,
@@ -225,75 +225,49 @@ pub fn draw_text(
     text: &str,
     color: u32,
 ) {
-    use crate::graphics::Color;
-    use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
-
-    let font_size = RasterHeight::Size16;
-    let char_width = get_raster_width(FontWeight::Regular, font_size);
-
-    let mut current_x = x;
-    for ch in text.chars() {
-        if current_x < 0 || current_x >= buffer_width as i32 {
-            current_x += char_width as i32;
-            continue;
-        }
-
-        if let Some(raster) = get_raster(ch, FontWeight::Regular, font_size) {
-            let raster_data = raster.raster();
-            let char_h = raster.height();
-            let char_w = raster.width();
-
-            for cy in 0..char_h {
-                let py = y + cy as i32;
-                if py < 0 || py >= buffer_height as i32 {
-                    continue;
-                }
-
-                for cx in 0..char_w {
-                    let px = current_x + cx as i32;
-                    if px < 0 || px >= buffer_width as i32 {
-                        continue;
-                    }
-
-                    let intensity = raster_data[cy][cx];
-                    if intensity > 0 {
-                        let idx = (py as u32 * buffer_width + px as u32) as usize;
-                        if idx < buffer.len() {
-                            if intensity == 255 {
-                                buffer[idx] = color;
-                            } else {
-                                // Blend with background
-                                let bg = Color::from(buffer[idx]);
-                                let fg = Color::from(color);
-                                let alpha = intensity as u32;
-                                let inv_alpha = 255 - alpha;
-
-                                let r =
-                                    (fg.red() as u32 * alpha + bg.red() as u32 * inv_alpha) / 255;
-                                let g = (fg.green() as u32 * alpha + bg.green() as u32 * inv_alpha)
-                                    / 255;
-                                let b =
-                                    (fg.blue() as u32 * alpha + bg.blue() as u32 * inv_alpha) / 255;
-
-                                buffer[idx] = Color::from_rgb(r as u8, g as u8, b as u8).raw();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        current_x += char_width as i32;
-    }
+    draw_text_styled(
+        buffer,
+        buffer_width,
+        buffer_height,
+        x,
+        y,
+        text,
+        crate::text::Style::new(color),
+    );
 }
 
-/// Get the width of a character in the default font.
+/// Draw a line of text in an explicit style.
+pub fn draw_text_styled(
+    buffer: &mut [u32],
+    buffer_width: u32,
+    buffer_height: u32,
+    x: i32,
+    y: i32,
+    text: &str,
+    style: crate::text::Style,
+) {
+    let mut surface = crate::text::Surface {
+        pixels: buffer,
+        width: buffer_width,
+        height: buffer_height,
+    };
+    crate::text::draw(&mut surface, x, y, text, style);
+}
+
+/// Width of a string set as interface text, in pixels.
+///
+/// Proportional: a label's width is not its character count times a cell, and
+/// laying out from a cell count is how columns end up ragged.
+pub fn text_width(text: &str) -> u32 {
+    crate::text::width(text, crate::text::Style::new(0))
+}
+
+/// Advance of one cell in the monospaced face, for a character grid.
 pub fn char_width() -> u32 {
-    use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster_width};
-    get_raster_width(FontWeight::Regular, RasterHeight::Size16) as u32
+    crate::text::width("M", crate::text::Style::mono(0)).max(1)
 }
 
-/// Get the height of text in the default font.
+/// Height of one line of interface text.
 pub fn text_height() -> u32 {
-    crate::metrics::TEXT_CELL_HEIGHT
+    crate::text::line_height(crate::text::Style::new(0))
 }

@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use edos_lib::shm::{PROT_READ, shm_map, shm_size, shm_unmap};
-use edos_render::graphics::{Color, RasterHeight, Screen, TextStyle};
+use edos_render::font::{self, Weight};
+use edos_render::graphics::{Color, Screen};
+use edos_render::text::Style;
 use edos_render::theme::{Theme, lerp_color};
 use edos_render::window::{WindowListEntry, flags::FLAG_DOCK};
 
@@ -353,8 +355,17 @@ fn draw_window_direct(
             } else {
                 Theme::DEFAULT.title_text_inactive
             };
-            let style = TextStyle::new(color).with_size(RasterHeight::Size16);
-            let _ = screen.draw_text(text_x as u64, text_y as u64, title, &style);
+            // The focused window's title carries weight as well as colour, so
+            // focus reads without relying on a hairline the eye has to hunt for.
+            let weight = if is_focused {
+                Weight::Semibold
+            } else {
+                Weight::Regular
+            };
+            let style = Style::new(color.raw())
+                .with_weight(weight)
+                .with_px(font::size::TITLE);
+            let _ = screen.draw_styled_text(text_x as i32, text_y as i32, title, style);
         }
     }
 

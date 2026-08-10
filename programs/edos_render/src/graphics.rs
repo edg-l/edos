@@ -971,6 +971,26 @@ impl Texture {
         render_string_at(&mut self.pixels, self.width, self.height, x, y, text, style)
     }
 
+    /// Render a line of interface text, in the shell's outline face.
+    ///
+    /// Separate from `draw_text`, which is the bitmap path this is gradually
+    /// replacing: chrome goes through here, and anything that is genuinely a
+    /// character grid stays where it is.
+    pub fn draw_styled_text(&mut self, x: i32, y: i32, text: &str, style: crate::text::Style) {
+        let (width, height) = (self.width as u32, self.height as u32);
+        let mut surface = crate::text::Surface {
+            pixels: &mut self.pixels,
+            width,
+            height,
+        };
+        crate::text::draw(&mut surface, x, y, text, style);
+    }
+
+    /// Width of a string in the shell's outline face.
+    pub fn styled_text_width(text: &str, style: crate::text::Style) -> u32 {
+        crate::text::width(text, style)
+    }
+
     /// Render text with word wrapping within the specified width
     pub fn draw_text_wrapped(
         &mut self,
@@ -1543,6 +1563,31 @@ impl Screen {
         } else {
             None
         }
+    }
+
+    /// Render a line of interface text in the shell's outline face.
+    ///
+    /// Separate from `draw_text`, which is the bitmap path this replaces for
+    /// chrome. Anything that is genuinely a character grid keeps the old one.
+    pub fn draw_styled_text(
+        &mut self,
+        x: i32,
+        y: i32,
+        text: &str,
+        style: crate::text::Style,
+    ) -> Result<()> {
+        self.ensure_back_buffer()?;
+        let height = self.info.height as u32;
+        let Some((pixels, stride)) = self.pixels_mut() else {
+            return Ok(());
+        };
+        let mut surface = crate::text::Surface {
+            pixels,
+            width: stride as u32,
+            height,
+        };
+        crate::text::draw(&mut surface, x, y, text, style);
+        Ok(())
     }
 
     /// Draw a rectangle on the screen

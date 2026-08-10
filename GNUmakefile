@@ -367,8 +367,29 @@ clean-sata:
 # Listed one per directory rather than brace-expanded: make runs recipes under
 # /bin/sh, which is dash on Debian, and dash does not do brace expansion. It
 # silently creates a single directory with the braces in its name instead.
-FILESYSTEM_DIRS := bin boot dev home lib var mnt opt root sys tmp
+FILESYSTEM_DIRS := bin boot dev home lib var mnt opt root sys tmp share share/fonts
 
 .PHONY: filesystem
+# Outline faces for the shell. Lato sets the chrome and JetBrains Mono the
+# terminal; both are OFL and both ship in Debian, so they are copied from the
+# host rather than committed here. A missing face is not fatal: edos_render
+# falls back to its built-in bitmap font, and the shell comes up looking like
+# it did before outlines.
+SANS_DIR := /usr/share/fonts/truetype/lato
+MONO_DIR := /usr/share/fonts/truetype/jetbrains-mono
+FONT_COPIES := \
+	$(SANS_DIR)/Lato-Regular.ttf:Sans-Regular.ttf \
+	$(SANS_DIR)/Lato-Medium.ttf:Sans-Medium.ttf \
+	$(SANS_DIR)/Lato-Semibold.ttf:Sans-Semibold.ttf \
+	$(MONO_DIR)/JetBrainsMono-Regular.ttf:Mono-Regular.ttf
+
 filesystem:
 	mkdir -p filesystem $(addprefix filesystem/,$(FILESYSTEM_DIRS))
+	@for pair in $(FONT_COPIES); do \
+		src=$${pair%%:*}; dst=$${pair##*:}; \
+		if [ -f "$$src" ]; then \
+			cp -u "$$src" filesystem/share/fonts/$$dst; \
+		else \
+			echo "warning: $$src not found, shell falls back to the bitmap font" >&2; \
+		fi; \
+	done

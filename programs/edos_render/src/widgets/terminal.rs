@@ -2,7 +2,10 @@
 
 use std::collections::VecDeque;
 
-use super::{Rect, Widget, WidgetEvent, WidgetId, char_width, draw_rect, draw_text, text_height};
+use super::{
+    Rect, Widget, WidgetEvent, WidgetId, char_width, draw_rect, draw_text_styled, text_height,
+};
+use crate::text::Style;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum EscState {
@@ -859,14 +862,17 @@ impl Widget for Terminal {
                     // Draw character if not a space
                     if cell.ch != ' ' {
                         let ch_str = cell.ch.to_string();
-                        draw_text(
+                        // Mono, always: this is a character grid, and a
+                        // proportional face would put every cell's glyph at a
+                        // different offset inside its cell.
+                        draw_text_styled(
                             buffer,
                             buffer_width,
                             buffer_height,
                             cell_x,
                             row_y,
                             &ch_str,
-                            cell.fg,
+                            Style::mono(cell.fg),
                         );
                     }
                 }
@@ -894,14 +900,14 @@ impl Widget for Terminal {
                 let ch = self.buffer[self.cursor_row][self.cursor_col].ch;
                 if ch != ' ' {
                     let ch_str = ch.to_string();
-                    draw_text(
+                    draw_text_styled(
                         buffer,
                         buffer_width,
                         buffer_height,
                         cursor_x,
                         cursor_y,
                         &ch_str,
-                        self.bg_color,
+                        Style::mono(self.bg_color),
                     );
                 }
             }

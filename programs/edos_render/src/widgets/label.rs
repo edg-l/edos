@@ -56,7 +56,7 @@ impl Widget for Label {
     }
 
     fn bounds(&self) -> Rect {
-        let width = (self.text.chars().count() as u32) * super::char_width();
+        let width = super::text_width(&self.text);
         Rect::new(self.x, self.y, width.max(1), super::text_height())
     }
 
