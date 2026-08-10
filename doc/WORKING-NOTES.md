@@ -1307,6 +1307,36 @@ If you add a driver that reads out of `DmaPool`, this is the first thing to
 check. `allocate_sized` does not zero, and documents why: it serves AHCI
 per-command buffers up to 2 MiB, so a memset per pop is a storage regression.
 
+## The shell was rebuilt, and the kernel gave two things back to userspace
+
+The GUI now has proportional type (Lato for chrome, JetBrains Mono for the
+grid, from `/share/fonts` via `fontdue`), a panel with launcher/tasks/status
+regions and icons, an applications menu with working power controls, minimize
+and maximize, and a desktop right-click menu. `programs/wintest` is the
+reference for the widget toolkit and now models a disabled state and aligned
+columns.
+
+Two moves that matter beyond the pixels:
+
+- **The kernel no longer knows what a title bar is.** It routes pointer events
+  into client space, so it needs the offset -- but each window now carries the
+  frame *its manager gave it*, through `property::FRAME`. There is no global
+  decoration constant in the kernel, and different windows can be framed
+  differently, which is what a menu needs.
+- **`FLAG_DOCK` split into `FLAG_UNDECORATED` and `FLAG_NO_FOCUS`.** They were
+  one flag, and a menu needs the first without the second: it has no title bar,
+  and it must take focus because losing focus is how it closes.
+
+Traps this round produced, both of which cost a build cycle:
+
+- **`WidgetContainer` wraps every widget to assign it an id and forwards each
+  trait method by hand.** A method added to `Widget` with a default body is
+  inherited by the wrapper and never reaches the real widget. It compiles, it
+  looks right, and it silently does nothing.
+- **A window created this frame is not in the window list the caller already
+  fetched.** The panel's menu closed itself instantly because its absence from
+  a stale list read as "destroyed".
+
 ## Things that will bite you
 
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any
@@ -1342,6 +1372,10 @@ per-command buffers up to 2 MiB, so a memset per pop is a storage regression.
   findings" line from a power-cut image proves nothing. Type `shutdown` in the
   guest rather than `edos-vm stop`: it syncs every filesystem and the resulting
   image checks clean with no `--repair` replay.
+- **`scripts/edos-vm` mirrors the panel's geometry and nothing enforces it.**
+  Task buttons are no longer addressable by index at all: they size to their
+  title and the list is centred, so scripted focus changes go through
+  `key alt+tab`. `launch <row>` drives the applications menu by row name.
 - **The sched-test suite has a known flake with two signatures**, both on a
   first run: `ping-pong count mismatch: 499 != 500`, and 48/49 TIMEOUT with
   ping-pong-pong never reporting. An immediate re-run passes. Recorded in

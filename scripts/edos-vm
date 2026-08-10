@@ -49,24 +49,40 @@ ALTGR = {
     "}": "backslash",
 }
 
-# Mirrors the layout constants in programs/edos-taskbar/src/main.rs. Nothing
-# checks that these still agree, and a stale value just clicks the wrong button,
-# so move them in the same commit that moves the taskbar.
-TASKBAR_HEIGHT = 32
-LAUNCHER_X, LAUNCHER_WIDTH = 60, 64
-WINDOW_BUTTONS_X = LAUNCHER_X + LAUNCHER_WIDTH + 8
-BUTTON_WIDTH, BUTTON_GAP = 120, 4
+# Mirrors the layout constants in programs/edos-taskbar/src/{main,panel,menu}.rs.
+# Nothing checks that these still agree, and a stale value just clicks the wrong
+# button, so move them in the same commit that moves the panel.
+PANEL_HEIGHT = 40
+PANEL_EDGE_PAD = 8
+PANEL_BUTTON_HEIGHT = 28
+# An icon-only button: the icon plus its padding on both sides.
+ICON_BUTTON_WIDTH = 16 + 10 * 2
+
+MENU_ROW_HEIGHT = 32
+MENU_PAD = 6
+MENU_RULE_GAP = 6
+MENU_ROWS = 5
+MENU_FIRST_POWER_ROW = 2
+MENU_HEIGHT = MENU_ROWS * MENU_ROW_HEIGHT + MENU_PAD * 2 + 1 + MENU_RULE_GAP * 2
+# Row order in programs/edos-taskbar/src/menu.rs.
+MENU_ITEMS = {"terminal": 0, "widgets": 1, "shutdown": 2, "restart": 3, "halt": 4}
 
 
-def taskbar_launcher(height):
-    """Centre of the `+ Term` button."""
-    return LAUNCHER_X + LAUNCHER_WIDTH // 2, height - TASKBAR_HEIGHT // 2
+def panel_launcher(height):
+    """Centre of the launcher, which opens the applications menu."""
+    x = PANEL_EDGE_PAD + ICON_BUTTON_WIDTH // 2
+    y = height - PANEL_HEIGHT + (PANEL_HEIGHT - PANEL_BUTTON_HEIGHT) // 2
+    return x, y + PANEL_BUTTON_HEIGHT // 2
 
 
-def taskbar_window(index, height):
-    """Centre of the nth window button, 0-based, left to right."""
-    x = WINDOW_BUTTONS_X + index * (BUTTON_WIDTH + BUTTON_GAP) + BUTTON_WIDTH // 2
-    return x, height - TASKBAR_HEIGHT // 2
+def menu_row(name, height):
+    """Centre of a menu row, with the menu anchored at the launcher."""
+    index = MENU_ITEMS[name]
+    top = height - PANEL_HEIGHT - MENU_HEIGHT
+    y = top + MENU_PAD + index * MENU_ROW_HEIGHT
+    if index >= MENU_FIRST_POWER_ROW:
+        y += MENU_RULE_GAP * 2 + 1
+    return PANEL_EDGE_PAD + 60, y + MENU_ROW_HEIGHT // 2
 
 
 def keystroke(ch):
@@ -331,14 +347,11 @@ def _drag(q, dx, dy):
 
 
 def cmd_launch(args):
-    """Click the taskbar launcher, spawning a terminal."""
-    x, y = taskbar_launcher(args.height)
+    """Open the applications menu and choose a row."""
+    x, y = panel_launcher(args.height)
     _click_at(x, y, args)
-
-
-def cmd_raise(args):
-    """Raise a window by its taskbar position, so typing reaches it."""
-    x, y = taskbar_window(args.index, args.height)
+    time.sleep(0.4)
+    x, y = menu_row(args.item, args.height)
     _click_at(x, y, args)
 
 
@@ -418,16 +431,11 @@ def main():
                            choices=["left", "middle", "right"])
         s.set_defaults(func=fn)
 
-    s = sub.add_parser("launch", help="click the taskbar launcher (new terminal)")
+    s = sub.add_parser("launch", help="open the applications menu and choose a row")
+    s.add_argument("item", nargs="?", default="terminal", choices=sorted(MENU_ITEMS))
     s.add_argument("--width", type=int, default=1920)
     s.add_argument("--height", type=int, default=1080)
     s.set_defaults(func=cmd_launch)
-
-    s = sub.add_parser("raise", help="raise the nth window via its taskbar button")
-    s.add_argument("index", type=int, help="0-based, left to right")
-    s.add_argument("--width", type=int, default=1920)
-    s.add_argument("--height", type=int, default=1080)
-    s.set_defaults(func=cmd_raise)
 
     s = sub.add_parser("log", help="tail the guest serial log")
     s.add_argument("-n", type=int, default=20)

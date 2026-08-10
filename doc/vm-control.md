@@ -80,7 +80,7 @@ without `password=on` publishes an unauthenticated console.
 | `type <text>` | `--enter` appends Return, `--delay` paces keystrokes |
 | `key <qcode>...` | e.g. `ret`, `ctrl+c`, `alt+f4` |
 | `click x y` / `move x y` | `--button left\|middle\|right` |
-| `launch` / `raise N` | taskbar buttons by role, instead of raw pixels |
+| `launch [row]` | applications menu by row name, instead of raw pixels |
 | `log [-n N]` | tails `run_log.txt` |
 | `qmp <cmd> [json]` | escape hatch for any QMP command |
 
@@ -142,33 +142,42 @@ almost always this.
 The window manager focuses on click. Click into a window before typing, or the
 keystrokes go nowhere. A new terminal also spawns at the *same* geometry as the
 existing one, landing exactly on top, so when driving blind never assume which
-window is frontmost; raise the one you want by its taskbar button.
+window is frontmost; `Alt+Tab` to the one you want, or click its title bar.
 
 ---
 
-## Taskbar geometry
+## Panel geometry
 
-Prefer the named subcommands over raw pixels, so a layout change is one edit
+Prefer the named subcommand over raw pixels, so a layout change is one edit
 rather than a hunt through every script:
 
 ```bash
-scripts/edos-vm launch     # click the "+ Term" launcher
-scripts/edos-vm raise 0    # raise the first window, 0-based left to right
+scripts/edos-vm launch            # applications menu, then "Terminal"
+scripts/edos-vm launch widgets    # ...or any other row
+scripts/edos-vm launch shutdown   # power the machine off through the menu
 ```
 
 > **These coordinates mirror the GUI source and nothing enforces it.**
-> `scripts/edos-vm` copies `TASKBAR_HEIGHT`, `LAUNCHER_X`, `LAUNCHER_WIDTH` and
-> `BUTTON_WIDTH` from `programs/edos-taskbar/src/main.rs`. Move the taskbar
-> layout and every scripted click silently lands on the wrong button: no
-> compile error, no failing test, just wrong behaviour. Update both in the same
-> commit.
+> `scripts/edos-vm` copies the panel and menu geometry from
+> `programs/edos-taskbar/src/{main,panel,menu}.rs`. Move the layout and every
+> scripted click silently lands on the wrong row: no compile error, no failing
+> test, just wrong behaviour. Update both in the same commit.
 
 The mapping, for a screen `W x H`:
 
 | Target | x | y |
 |---|---|---|
-| `+ Term` launcher | 60 to 124 (centre 92) | `H - 16` |
-| Window button *n* (0-based) | `192 + 124n` | `H - 16` |
+| Launcher | 8 to 44 (centre 26) | `H - 20` |
+| Menu row *n* (0-based) | 68 | `H - 40 - 185 + 6 + 32n`, plus 13 from row 2 |
+
+**Task buttons are no longer addressable by index.** They size to their title
+and the list is centred, so their position depends on how many windows are open
+and what they are called. To change focus from a script, use `Alt+Tab`, which
+the window manager handles and which needs no geometry:
+
+```bash
+scripts/edos-vm key alt+tab
+```
 
 The real fix is to stop addressing windows by pixel at all: the kernel window
 registry already tracks id, pid, rect, z-order and title, so exposing it (via

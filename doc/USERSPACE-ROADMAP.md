@@ -7,7 +7,7 @@
 | Area | Programs |
 |---|---|
 | Init | `edos-init` (the only process the kernel starts; supervises the GUI session) |
-| GUI | `edos-wm`, `edos-terminal`, `edos-taskbar`, `wintest` |
+| GUI | `edos-wm` (compositor, decorations, desktop menu), `edos-terminal`, `edos-taskbar` (panel + applications menu), `wintest` |
 | Shell | `edos-sh` |
 | Editor | `edos-vi` |
 | Files | `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `touch`, `stat`, `find`, `du`, `diff` |

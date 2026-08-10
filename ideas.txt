@@ -274,6 +274,30 @@
   (widened to u64), and a pre-existing ring-0 demand fault with IRQs
   disabled in idt.rs exposed by the new concurrency.
 
+### The shell, 2026-08-10
+
+- **Real type.** `edos_render` rasterizes outlines through `fontdue` with a
+  glyph cache: Lato for chrome, JetBrains Mono for the terminal and editor,
+  loaded from `/share/fonts` with the bitmap face as the fallback. One scale,
+  12/14/15. Text is measured, not counted, so buttons size to their labels and
+  the panel truncates titles by pixels.
+- **A panel with regions.** Launcher, centred task list, status area, all with
+  icons from a new `edos_render::icons`. Task buttons size to content between
+  96 and 200px.
+- **An applications menu**, owned by the panel process as a second window, with
+  shut down, restart and halt on the existing `reboot` syscall. It needed
+  `FLAG_DOCK` split into `FLAG_UNDECORATED` and `FLAG_NO_FOCUS`, since a menu
+  is undecorated but must take focus to know when to close.
+- **Minimize and maximize.** A window can be put away and brought back from the
+  panel; before this the only way to clear one was to drag it off screen.
+  Maximize fills the working area, not the screen, so the panel stays reachable.
+- **A desktop menu** on right click: new terminal, widget demo, change
+  background.
+- **A disabled state** across Button, Checkbox, TextInput and Slider, and
+  `HBoxLayout::set_uniform_columns` so rows of controls line up.
+- **The kernel stopped knowing what a title bar is.** Each window carries the
+  frame its manager gave it, through `property::FRAME`.
+
 ### Sessions of 2026-08-08 to 2026-08-10
 
 Mechanism kept because it is not recoverable from the diff. Verified in a
@@ -1218,9 +1242,16 @@ Known defects, mechanism written out in `todo.txt`:
    on q35, so the defective path runs on every boot and the fix is
    verifiable against the `QEMU DVD-ROM` model string in `dmesg`.
 
+3. **The shell has no window-name addressing.** Task buttons size to
+   their title and the panel centres them, so `scripts/edos-vm` can no
+   longer click one by index and automation has to go through Alt+Tab.
+   Exposing the kernel window registry through procfs, or a guest-side
+   control daemon that resolves window *names*, fixes both this and the
+   older "addressing windows by pixel" entry below.
+
 Reach, not correctness:
 
-3. **19 syscalls exist that `std` cannot reach.** The syscall table is
+4. **19 syscalls exist that `std` cannot reach.** The syscall table is
    closed but the Rust fork was never moved with it, so
    `std::fs::{symlink,read_link,set_times}`, `File::set_times`,
    `FileAttr::{modified,accessed}`, vectored `read`/`write` and
@@ -1232,7 +1263,7 @@ Reach, not correctness:
 
 Hygiene and quality:
 
-4. **`unwrap()`/`expect()` density in kernel code.** [audit] 204 across
+5. **`unwrap()`/`expect()` density in kernel code.** [audit] 204 across
    `kernel/src`, so recount rather than trusting the figure. Convert the
    ones on I/O and parsing results; leave a comment on the structurally
    impossible ones. The ELF loader (`loader/mod.rs`) is done. Next by
@@ -1244,34 +1275,34 @@ Hygiene and quality:
    `init()` into `find_and_init()`. The rest are DMA-allocation
    `expect()`s on a `-> !` thread. Reading them did turn up a real
    defect (short control transfers parsed as descriptors), now fixed.
-5. **Module READMEs for `fs/` (17.5k lines) and `drivers/` (13.6k).**
+6. **Module READMEs for `fs/` (17.5k lines) and `drivers/` (13.6k).**
    [audit]
 
 Still open from the audit, but deliberately unhurried. These are not
 oversights; each has a reason it has not been done.
 
-6. **TCP retransmit clones whole segments.** [audit 2.5]
+7. **TCP retransmit clones whole segments.** [audit 2.5]
    `resends.push(seg.data.clone())` copies the full segment per retry.
    This was theoretical while no connection could be established; now
    that TCP moves real data it is a live cost under loss. `Arc<[u8]>`
    and clone the handle.
-7. **Scheduler quality, four items.** [audit 4] Load is measured as
+8. **Scheduler quality, four items.** [audit 4] Load is measured as
    `thread_count`, so a sleeping thread weighs the same as a CPU-bound
    one and `pick_sched`/`try_rebalance` balance the wrong quantity.
    There is no priority inheritance, so a high-priority waiter still
    queues behind a low-priority lock holder. The timeslice is a flat 5ms
    regardless of priority. The idle loop polls for steals on a backoff
    instead of being told by an IPI.
-8. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
+9. **TLB shootdown is globally serialized.** [audit 2.6] One `active`
    flag and one request slot, so unrelated `munmap`s on different
    address spaces serialize. Deliberate and correct; it is the scaling
    wall once core counts rise. The real fix is a per-mm CPU mask so the
    IPI is skipped for address spaces no other CPU has loaded.
-9. **`find_free_address` scans from the base every call.** [audit 2.7]
+10. **`find_free_address` scans from the base every call.** [audit 2.7]
    O(VMAs) per mmap. The tradeoff is deliberate — a cursor would never
    wrap and freed ranges would never be reused — and only worth
    revisiting if it shows up in a profile.
-10. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
+11. **Path ABI is inconsistent.** [audit 3] `SYS_OPEN` takes a
    NUL-terminated path while `SYS_STAT` takes pointer+length, so
    `edos_rt` allocates a `CString` for every open. `SYS_OPENAT` takes
    pointer+length and `AT_FDCWD` behaves exactly like `SYS_OPEN`, so
