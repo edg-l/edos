@@ -374,6 +374,17 @@ impl WindowRegistry {
         windows
     }
 
+    /// Every window the registry holds, sorted by z-order, back to front.
+    ///
+    /// Unfiltered, unlike `listed_windows_sorted`: introspection wants the
+    /// window a client has created and not yet mapped as much as the ones on
+    /// screen, since "created but never shown" is a state worth seeing.
+    pub fn all_windows_sorted(&self) -> Vec<&WindowInfo> {
+        let mut windows: Vec<&WindowInfo> = self.windows.values().collect();
+        windows.sort_by_key(|w| w.z_order);
+        windows
+    }
+
     /// Get all windows owned by a process.
     pub fn windows_for_pid(&self, pid: u64) -> Vec<WindowId> {
         self.windows
@@ -415,6 +426,23 @@ pub enum ReadSite {
     SysWindowPoll = 5,
     SysWindowList = 6,
     SysWindowSendEvent = 7,
+    ProcWindows = 8,
+}
+
+/// A copy of the registry, taken under the guard and formatted outside it.
+///
+/// The guard covers a clone rather than the whole render: `/proc/windows` is
+/// read by anything that wants to find a window, and holding the registry
+/// across a `String` build would put the compositor's frame behind a formatter.
+pub fn snapshot() -> (Vec<WindowInfo>, Option<WindowId>) {
+    let registry = read_tracked(ReadSite::ProcWindows);
+    let windows = registry
+        .all_windows_sorted()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let focused = registry.focused_window();
+    (windows, focused)
 }
 
 /// Forensic table of live readers of `WINDOW_REGISTRY`.

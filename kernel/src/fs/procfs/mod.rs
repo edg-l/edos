@@ -212,6 +212,75 @@ impl Procfs {
         )
     }
 
+    /// The window registry, one line per window.
+    ///
+    /// Columns are fixed and the title comes last, because it is the only field
+    /// that can contain a space. `X`/`Y` are the outer origin, `W`/`H` the
+    /// client size and `FRAME` the manager's border, so the centre of a
+    /// window's client area is `(X + frame.left + W/2, Y + frame.top + H/2)` --
+    /// which is what lets something outside the shell address a window by name
+    /// instead of by a pixel copied out of the panel's layout.
+    fn render_windows() -> String {
+        let (windows, focused) = crate::window::registry::snapshot();
+        let mut out = String::from(
+            "ID    PID   X      Y      W     H     Z     FLAGS FRAME       STATE     TITLE\n",
+        );
+        for w in windows {
+            let state = if focused == Some(w.id) {
+                "focused"
+            } else if w.minimized {
+                "minimized"
+            } else if !w.visible {
+                "unmapped"
+            } else {
+                "normal"
+            };
+            let frame = format!(
+                "{},{},{},{}",
+                w.frame.left, w.frame.top, w.frame.right, w.frame.bottom
+            );
+            let _ = writeln!(
+                out,
+                "{:<5} {:<5} {:<6} {:<6} {:<5} {:<5} {:<5} {:<5} {:<11} {:<9} {}",
+                w.id, w.pid, w.x, w.y, w.width, w.height, w.z_order, w.flags, frame, state, w.title
+            );
+        }
+        out
+    }
+
+    /// Interface state as `key: value`, for a program that wants to *use* the
+    /// numbers. `SYS_NETINFO` renders the same state for a terminal, colour
+    /// codes and all, which is the wrong thing to hand a parser.
+    fn render_net() -> String {
+        use crate::{debug::lock_order::RANK_NET_STACK, net::device::NetDevice};
+        let mut out = String::from("interface: lo\nlink: up\ninet: 127.0.0.1\nprefix: 8\n\n");
+        let Some(stack_mutex) = crate::net::stack::NET_STACK.get() else {
+            let _ = writeln!(out, "interface: none");
+            return out;
+        };
+        let stack = ranked_lock!(RANK_NET_STACK, "procfs::net", stack_mutex);
+        let mac = stack.mac();
+        let ip = stack.local_ip;
+        let gw = stack.gateway_ip;
+        let dns = stack.dns_server;
+        let prefix: u32 = stack.subnet_mask.iter().map(|b| b.count_ones()).sum();
+        let link = stack.nic.link_up();
+        drop(stack);
+
+        let _ = writeln!(out, "interface: eth0");
+        let _ = writeln!(out, "link: {}", if link { "up" } else { "down" });
+        let _ = writeln!(
+            out,
+            "mac: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
+        let _ = writeln!(out, "inet: {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+        let _ = writeln!(out, "prefix: {prefix}");
+        let _ = writeln!(out, "gateway: {}.{}.{}.{}", gw[0], gw[1], gw[2], gw[3]);
+        let _ = writeln!(out, "dns: {}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
+        out
+    }
+
     fn render_lock_order_stats() -> String {
         use crate::debug::lock_order::{LOCK_ORDER_INVERSIONS, MAX_RANK_DEPTH};
         use core::sync::atomic::Ordering;
@@ -232,16 +301,12 @@ impl Procfs {
         let components = path.components();
 
         match components.len() {
-            1 => match components[0].as_str() {
-                "processes" => Ok(ProcNode::ProcessesFile),
-                "meminfo" => Ok(ProcNode::MemInfo),
-                "block_cache" => Ok(ProcNode::BlockCacheStats),
-                "evict_stats" => Ok(ProcNode::EvictStats),
-                "efs_stats" => Ok(ProcNode::EfsStats),
-                "lock_order_stats" => Ok(ProcNode::LockOrderStats),
-                "inflight_stats" => Ok(ProcNode::InflightStats),
-                "ahci_stats" => Ok(ProcNode::AhciStats),
-                tid_component => parse_tid(tid_component)
+            1 => match GLOBAL_FILES
+                .iter()
+                .position(|(name, _)| *name == components[0].as_str())
+            {
+                Some(index) => Ok(ProcNode::GlobalFile(index)),
+                None => parse_tid(&components[0])
                     .map(ProcNode::ProcessDir)
                     .ok_or(Error::FileNotFound),
             },
@@ -277,43 +342,11 @@ impl FileSystem for Procfs {
         match Self::resolve_path(&path)? {
             ProcNode::Root => {
                 let snapshots = Self::collect_snapshots();
-                let mut files = Vec::with_capacity(snapshots.len() + 3);
+                let mut files = Vec::with_capacity(snapshots.len() + GLOBAL_FILES.len());
 
-                let summary = Self::render_process_table(&snapshots);
-                files.push(Self::file_entry("processes".to_string(), summary.len()));
-
-                let meminfo = Self::render_meminfo();
-                files.push(Self::file_entry("meminfo".to_string(), meminfo.len()));
-
-                let block_cache = Self::render_block_cache();
-                files.push(Self::file_entry(
-                    "block_cache".to_string(),
-                    block_cache.len(),
-                ));
-
-                let evict_stats = Self::render_evict_stats();
-                files.push(Self::file_entry(
-                    "evict_stats".to_string(),
-                    evict_stats.len(),
-                ));
-
-                let efs_stats = Self::render_efs_stats();
-                files.push(Self::file_entry("efs_stats".to_string(), efs_stats.len()));
-
-                let lock_order_stats = Self::render_lock_order_stats();
-                files.push(Self::file_entry(
-                    "lock_order_stats".to_string(),
-                    lock_order_stats.len(),
-                ));
-
-                let inflight_stats = Self::render_inflight_stats();
-                files.push(Self::file_entry(
-                    "inflight_stats".to_string(),
-                    inflight_stats.len(),
-                ));
-
-                let ahci_stats = Self::render_ahci_stats();
-                files.push(Self::file_entry("ahci_stats".to_string(), ahci_stats.len()));
+                for (name, render) in GLOBAL_FILES {
+                    files.push(Self::file_entry(name.to_string(), render().len()));
+                }
 
                 for snapshot in snapshots {
                     files.push(Self::dir_entry(snapshot.tid.to_string()));
@@ -339,25 +372,17 @@ impl FileSystem for Procfs {
 
                 Ok(files)
             }
-            ProcNode::ProcessesFile
-            | ProcNode::MemInfo
-            | ProcNode::BlockCacheStats
-            | ProcNode::EvictStats
-            | ProcNode::EfsStats
-            | ProcNode::LockOrderStats
-            | ProcNode::InflightStats
-            | ProcNode::AhciStats
-            | ProcNode::ProcessStatus(_)
-            | ProcNode::ProcessCmdline(_) => Err(Error::NotADir),
+            ProcNode::GlobalFile(_) | ProcNode::ProcessStatus(_) | ProcNode::ProcessCmdline(_) => {
+                Err(Error::NotADir)
+            }
         }
     }
 
     fn read_bytes(&self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error> {
         let path = path.normalize();
         match Self::resolve_path(&path)? {
-            ProcNode::ProcessesFile => {
-                let snapshots = Self::collect_snapshots();
-                let content = Self::render_process_table(&snapshots);
+            ProcNode::GlobalFile(index) => {
+                let content = GLOBAL_FILES[index].1();
                 Ok(Self::read_text(content, offset, count))
             }
             ProcNode::ProcessStatus(tid) => {
@@ -374,34 +399,6 @@ impl FileSystem for Procfs {
                     return Err(Error::FileNotFound);
                 };
                 let content = snapshot.cmdline_text();
-                Ok(Self::read_text(content, offset, count))
-            }
-            ProcNode::MemInfo => {
-                let content = Self::render_meminfo();
-                Ok(Self::read_text(content, offset, count))
-            }
-            ProcNode::BlockCacheStats => {
-                let content = Self::render_block_cache();
-                Ok(Self::read_text(content, offset, count))
-            }
-            ProcNode::EfsStats => {
-                let content = Self::render_efs_stats();
-                Ok(Self::read_text(content, offset, count))
-            }
-            ProcNode::EvictStats => {
-                let content = Self::render_evict_stats();
-                Ok(Self::read_text(content, offset, count))
-            }
-            ProcNode::LockOrderStats => {
-                let content = Self::render_lock_order_stats();
-                Ok(Self::read_text(content, offset, count))
-            }
-            ProcNode::InflightStats => {
-                let content = Self::render_inflight_stats();
-                Ok(Self::read_text(content, offset, count))
-            }
-            ProcNode::AhciStats => {
-                let content = Self::render_ahci_stats();
                 Ok(Self::read_text(content, offset, count))
             }
             ProcNode::Root | ProcNode::ProcessDir(_) => Err(Error::NotAFile),
@@ -432,44 +429,9 @@ impl FileSystem for Procfs {
         let path = path.normalize();
         match Self::resolve_path(&path)? {
             ProcNode::Root => Ok(Self::dir_entry(String::new())),
-            ProcNode::ProcessesFile => {
-                let snapshots = Self::collect_snapshots();
-                let summary = Self::render_process_table(&snapshots);
-                Ok(Self::file_entry("processes".to_string(), summary.len()))
-            }
-            ProcNode::MemInfo => {
-                let meminfo = Self::render_meminfo();
-                Ok(Self::file_entry("meminfo".to_string(), meminfo.len()))
-            }
-            ProcNode::BlockCacheStats => {
-                let content = Self::render_block_cache();
-                Ok(Self::file_entry("block_cache".to_string(), content.len()))
-            }
-            ProcNode::EfsStats => {
-                let content = Self::render_efs_stats();
-                Ok(Self::file_entry("efs_stats".to_string(), content.len()))
-            }
-            ProcNode::EvictStats => {
-                let content = Self::render_evict_stats();
-                Ok(Self::file_entry("evict_stats".to_string(), content.len()))
-            }
-            ProcNode::LockOrderStats => {
-                let content = Self::render_lock_order_stats();
-                Ok(Self::file_entry(
-                    "lock_order_stats".to_string(),
-                    content.len(),
-                ))
-            }
-            ProcNode::InflightStats => {
-                let content = Self::render_inflight_stats();
-                Ok(Self::file_entry(
-                    "inflight_stats".to_string(),
-                    content.len(),
-                ))
-            }
-            ProcNode::AhciStats => {
-                let content = Self::render_ahci_stats();
-                Ok(Self::file_entry("ahci_stats".to_string(), content.len()))
+            ProcNode::GlobalFile(index) => {
+                let (name, render) = GLOBAL_FILES[index];
+                Ok(Self::file_entry(name.to_string(), render().len()))
             }
             ProcNode::ProcessDir(tid) => {
                 let snapshots = Self::collect_snapshots();
@@ -726,15 +688,29 @@ fn display_option_errno(value: Option<Errno>) -> String {
 #[derive(Debug, Clone, Copy)]
 enum ProcNode {
     Root,
-    ProcessesFile,
-    MemInfo,
-    BlockCacheStats,
-    EvictStats,
-    EfsStats,
-    LockOrderStats,
-    InflightStats,
-    AhciStats,
+    /// Index into `GLOBAL_FILES`.
+    GlobalFile(usize),
     ProcessDir(u64),
     ProcessStatus(u64),
     ProcessCmdline(u64),
 }
+
+/// The files directly under `/proc`, each rendered on demand.
+///
+/// One table rather than a variant and four match arms per file: lookup,
+/// listing, read and stat all walk it, so adding a counter is one line and
+/// cannot land in three of the four places.
+const GLOBAL_FILES: &[(&str, fn() -> String)] = &[
+    ("processes", || {
+        Procfs::render_process_table(&Procfs::collect_snapshots())
+    }),
+    ("meminfo", Procfs::render_meminfo),
+    ("block_cache", Procfs::render_block_cache),
+    ("evict_stats", Procfs::render_evict_stats),
+    ("efs_stats", Procfs::render_efs_stats),
+    ("lock_order_stats", Procfs::render_lock_order_stats),
+    ("inflight_stats", Procfs::render_inflight_stats),
+    ("ahci_stats", Procfs::render_ahci_stats),
+    ("windows", Procfs::render_windows),
+    ("net", Procfs::render_net),
+];
