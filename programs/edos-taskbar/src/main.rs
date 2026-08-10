@@ -20,6 +20,15 @@ const MAX_WINDOWS: usize = 32;
 /// Button width for each window entry.
 const BUTTON_WIDTH: u32 = 120;
 
+/// Gap between adjacent window buttons.
+const BUTTON_GAP: i32 = 4;
+
+/// Height of every button in the bar.
+const BUTTON_HEIGHT: u32 = 24;
+
+/// Height of the accent underline marking the focused window's button.
+const ACCENT_HEIGHT: u32 = 2;
+
 /// Launcher button label.
 const LAUNCHER_LABEL: &str = "+ Term";
 
@@ -32,10 +41,42 @@ const LAUNCHER_X: i32 = 60;
 /// X position where window buttons start (after launcher + gap).
 const WINDOW_BUTTONS_X: i32 = LAUNCHER_X + LAUNCHER_WIDTH as i32 + 8;
 
+/// X position of the wordmark, and of the hairline that closes its region.
+const BRANDING_X: i32 = 8;
+const BRANDING_RULE_X: i32 = 48;
+
+/// Padding between the clock and the right edge, and between the clock and the
+/// last window button.
+const CLOCK_PADDING: i32 = 12;
+const CLOCK_GAP: i32 = 16;
+
+/// Height of a line of text drawn by `draw_text`.
+const TEXT_HEIGHT: i32 = 16;
+
 /// Get screen dimensions.
 fn get_screen_info() -> Option<ScreenInfo> {
     let fb = Framebuffer::new();
     fb.screen_info().ok()
+}
+
+/// Draw `text` centered inside the rectangle at (`x`, `y`) sized `w` by `h`.
+#[allow(clippy::too_many_arguments)]
+fn draw_centered_text(
+    buf: &mut [u32],
+    buf_w: u32,
+    buf_h: u32,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    text: &str,
+    color: u32,
+    char_w: u32,
+) {
+    let text_w = text.chars().count() as i32 * char_w as i32;
+    let text_x = x + (w as i32 - text_w) / 2;
+    let text_y = y + (h as i32 - TEXT_HEIGHT) / 2;
+    draw_text(buf, buf_w, buf_h, text_x, text_y, text, color);
 }
 
 fn main() {
@@ -132,7 +173,7 @@ fn main() {
                             let click_x = event.x;
                             let click_y = event.y;
                             let h = window.height;
-                            let btn_h = 24i32;
+                            let btn_h = BUTTON_HEIGHT as i32;
                             let btn_y = (h as i32 - btn_h) / 2;
 
                             // Check launcher button click
@@ -191,32 +232,32 @@ fn main() {
                 buf[x as usize] = Theme::DEFAULT.taskbar_separator.raw();
             }
 
-            // EDOS branding: colored accent bar then text
-            let branding_x = 8i32;
-            let accent_y = (h as i32 - 20) / 2;
-            draw_rect(
-                buf,
-                w,
-                h,
-                branding_x,
-                accent_y,
-                4,
-                20,
-                Theme::DEFAULT.taskbar_branding_accent.raw(),
-            );
+            // Wordmark, then a hairline closing off the identity region
+            let cw = char_width();
+            let text_y = (h as i32 - TEXT_HEIGHT) / 2;
             draw_text(
                 buf,
                 w,
                 h,
-                branding_x + 8,
-                (h as i32 - 16) / 2,
+                BRANDING_X,
+                text_y,
                 "EDOS",
                 Theme::DEFAULT.taskbar_branding_text.raw(),
             );
+            draw_rect(
+                buf,
+                w,
+                h,
+                BRANDING_RULE_X,
+                8,
+                1,
+                h - 16,
+                Theme::DEFAULT.taskbar_separator.raw(),
+            );
 
-            // Launcher button
-            let cw = char_width();
-            let btn_h = 24u32;
+            // Launcher: the one action in the bar, so it is outlined rather than
+            // filled like the window buttons, which report state.
+            let btn_h = BUTTON_HEIGHT;
             let btn_y = (h as i32 - btn_h as i32) / 2;
 
             draw_rect(
@@ -239,36 +280,48 @@ fn main() {
                 btn_h,
                 Theme::DEFAULT.taskbar_button_border.raw(),
             );
-            // 1px top highlight
-            draw_rect(
+            draw_centered_text(
                 buf,
                 w,
                 h,
                 LAUNCHER_X,
                 btn_y,
                 LAUNCHER_WIDTH,
-                1,
-                Theme::DEFAULT.taskbar_separator.raw(),
+                btn_h,
+                LAUNCHER_LABEL,
+                Theme::DEFAULT.taskbar_text_active.raw(),
+                cw,
             );
-            let launcher_text_w = LAUNCHER_LABEL.len() as i32 * cw as i32;
-            let launcher_text_x = LAUNCHER_X + (LAUNCHER_WIDTH as i32 - launcher_text_w) / 2;
-            let launcher_text_y = btn_y + (btn_h as i32 - 16) / 2;
+
+            // Clock (right-aligned); window buttons stop short of it
+            let (hours, minutes) = if let Some(t) = edos_lib::time::clock_gettime() {
+                (t.hour as u64, t.minute as u64)
+            } else {
+                (0, 0)
+            };
+            let clock_text = format!("{:02}:{:02}", hours, minutes);
+            let clock_w = clock_text.chars().count() as i32 * cw as i32;
+            let clock_x = w as i32 - clock_w - CLOCK_PADDING;
             draw_text(
                 buf,
                 w,
                 h,
-                launcher_text_x,
-                launcher_text_y,
-                LAUNCHER_LABEL,
-                Theme::DEFAULT.taskbar_text.raw(),
+                clock_x,
+                text_y,
+                &clock_text,
+                Theme::DEFAULT.taskbar_clock_text.raw(),
             );
 
             // Window buttons
+            let buttons_limit = clock_x - CLOCK_GAP;
             let mut btn_x = WINDOW_BUTTONS_X;
 
             displayed_windows.clear();
 
             for win_entry in &visible_windows {
+                if btn_x + BUTTON_WIDTH as i32 > buttons_limit {
+                    break;
+                }
                 let title = win_entry.title_str();
                 let label = if title.is_empty() {
                     format!("Win {}", win_entry.id)
@@ -279,14 +332,21 @@ fn main() {
                     title.to_string()
                 };
 
+                // The focused window reads as a raised chip underlined in the
+                // same accent the window's own title bar wears.
                 let is_focused = focused_window_id == Some(win_entry.id);
-                let btn_color = if is_focused {
-                    Theme::DEFAULT.taskbar_button_active
+                let (btn_color, label_color) = if is_focused {
+                    (
+                        Theme::DEFAULT.taskbar_button_active,
+                        Theme::DEFAULT.taskbar_text_active,
+                    )
                 } else {
-                    Theme::DEFAULT.taskbar_button_normal
+                    (
+                        Theme::DEFAULT.taskbar_button_normal,
+                        Theme::DEFAULT.taskbar_text,
+                    )
                 };
 
-                // Button background
                 draw_rect(
                     buf,
                     w,
@@ -298,69 +358,35 @@ fn main() {
                     btn_color.raw(),
                 );
 
-                // 1px border outline for unfocused buttons
-                if !is_focused {
-                    draw_rect_outline(
+                if is_focused {
+                    draw_rect(
                         buf,
                         w,
                         h,
                         btn_x,
-                        btn_y,
+                        btn_y + (btn_h - ACCENT_HEIGHT) as i32,
                         BUTTON_WIDTH,
-                        btn_h,
-                        Theme::DEFAULT.taskbar_button_border.raw(),
+                        ACCENT_HEIGHT,
+                        Theme::DEFAULT.taskbar_button_accent.raw(),
                     );
                 }
 
-                // 1px top highlight on button
-                draw_rect(
+                draw_centered_text(
                     buf,
                     w,
                     h,
                     btn_x,
                     btn_y,
                     BUTTON_WIDTH,
-                    1,
-                    Theme::DEFAULT.taskbar_separator.raw(),
-                );
-
-                // Button text centered
-                let text_w = label.len() as i32 * cw as i32;
-                let text_x = btn_x + (BUTTON_WIDTH as i32 - text_w) / 2;
-                let text_y = btn_y + (btn_h as i32 - 16) / 2;
-                draw_text(
-                    buf,
-                    w,
-                    h,
-                    text_x,
-                    text_y,
+                    btn_h,
                     &label,
-                    Theme::DEFAULT.taskbar_text.raw(),
+                    label_color.raw(),
+                    cw,
                 );
 
                 displayed_windows.push((win_entry.id, btn_x));
-                btn_x += BUTTON_WIDTH as i32 + 4;
+                btn_x += BUTTON_WIDTH as i32 + BUTTON_GAP;
             }
-
-            // Clock display (right-aligned)
-            let (hours, minutes) = if let Some(t) = edos_lib::time::clock_gettime() {
-                (t.hour as u64, t.minute as u64)
-            } else {
-                (0, 0)
-            };
-            let clock_text = format!("{:02}:{:02}", hours, minutes);
-            let clock_w = clock_text.len() as u32 * cw;
-            let clock_x = w as i32 - clock_w as i32 - 12;
-            let clock_y = (h as i32 - 16) / 2;
-            draw_text(
-                buf,
-                w,
-                h,
-                clock_x,
-                clock_y,
-                &clock_text,
-                Theme::DEFAULT.taskbar_clock_text.raw(),
-            );
         }
 
         window.swap_buffers();

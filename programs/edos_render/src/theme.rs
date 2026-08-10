@@ -28,13 +28,15 @@ pub struct Theme {
     pub taskbar_bg_top: Color,
     pub taskbar_bg_bottom: Color,
     pub taskbar_text: Color,
+    /// Label of the focused window's button, and of the launcher.
+    pub taskbar_text_active: Color,
     pub taskbar_button_normal: Color,
-    pub taskbar_button_hover: Color,
     pub taskbar_button_active: Color,
+    /// Underline marking the focused window's button.
+    pub taskbar_button_accent: Color,
     pub taskbar_button_border: Color,
     pub taskbar_separator: Color,
     pub taskbar_clock_text: Color,
-    pub taskbar_branding_accent: Color,
     pub taskbar_branding_text: Color,
 
     // Widgets
@@ -85,15 +87,15 @@ impl Theme {
         // Taskbar
         taskbar_bg_top: Color::from_rgb(0x13, 0x17, 0x1F),
         taskbar_bg_bottom: Color::from_rgb(0x0D, 0x10, 0x17),
-        taskbar_text: Color::from_rgb(0xB8, 0xC4, 0xD0),
+        taskbar_text: Color::from_rgb(0x8A, 0x91, 0x99),
+        taskbar_text_active: Color::from_rgb(0xCB, 0xCC, 0xC6),
         taskbar_button_normal: Color::from_rgb(0x1A, 0x1F, 0x29),
-        taskbar_button_hover: Color::from_rgb(0x22, 0x28, 0x34),
-        taskbar_button_active: Color::from_rgb(0x1E, 0x3A, 0x50), // Muted blue highlight
+        taskbar_button_active: Color::from_rgb(0x23, 0x29, 0x35),
+        taskbar_button_accent: Color::from_rgb(0xE6, 0xB4, 0x50), // Ayu orange, the one accent
         taskbar_button_border: Color::from_rgb(0x27, 0x2D, 0x38),
         taskbar_separator: Color::from_rgb(0x27, 0x2D, 0x38),
         taskbar_clock_text: Color::from_rgb(0x6C, 0x73, 0x80),
-        taskbar_branding_accent: Color::from_rgb(0xE6, 0xB4, 0x50), // Ayu orange/yellow
-        taskbar_branding_text: Color::from_rgb(0xE6, 0xB4, 0x50),
+        taskbar_branding_text: Color::from_rgb(0x8A, 0x91, 0x99),
 
         // Widgets (Ayu Dark)
         background: Color::from_rgb(0x0B, 0x0E, 0x14),
