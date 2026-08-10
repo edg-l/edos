@@ -16,9 +16,13 @@ pub struct Theme {
     pub window_border_highlight: Color,
     pub window_border_shadow: Color,
     pub window_shadow: Color,
-    pub close_button_normal: Color,
+    /// Hairline along the top of the focused window's title bar.
+    pub title_accent: Color,
+    pub title_text: Color,
+    pub title_text_inactive: Color,
     pub close_button_hover: Color,
-    pub close_button_x: Color,
+    pub close_glyph: Color,
+    pub close_glyph_hover: Color,
 
     // Taskbar
     pub taskbar_bg_top: Color,
@@ -64,16 +68,19 @@ impl Theme {
         desktop_bg_bottom: Color::from_rgb(0x0A, 0x0E, 0x12),
 
         // Window decorations
-        title_active_top: Color::from_rgb(0x1A, 0x1F, 0x29),
-        title_active_bottom: Color::from_rgb(0x13, 0x17, 0x1F),
-        title_inactive_top: Color::from_rgb(0x16, 0x1A, 0x22),
-        title_inactive_bottom: Color::from_rgb(0x10, 0x14, 0x1A),
+        title_active_top: Color::from_rgb(0x1F, 0x24, 0x30),
+        title_active_bottom: Color::from_rgb(0x16, 0x1B, 0x24),
+        title_inactive_top: Color::from_rgb(0x11, 0x15, 0x1C),
+        title_inactive_bottom: Color::from_rgb(0x0E, 0x12, 0x18),
         window_border_highlight: Color::from_rgb(0x2A, 0x30, 0x3C),
         window_border_shadow: Color::from_rgb(0x0B, 0x0E, 0x14),
         window_shadow: Color::from_rgb(0x05, 0x07, 0x0A),
-        close_button_normal: Color::from_rgb(0x90, 0x3A, 0x3E), // Subdued red
+        title_accent: Color::from_rgb(0xE6, 0xB4, 0x50), // Ayu orange, the one accent
+        title_text: Color::from_rgb(0xCB, 0xCC, 0xC6),
+        title_text_inactive: Color::from_rgb(0x6C, 0x73, 0x80),
         close_button_hover: Color::from_rgb(0xC0, 0x50, 0x55),
-        close_button_x: Color::from_rgb(0xC0, 0xC0, 0xC0),
+        close_glyph: Color::from_rgb(0x8A, 0x91, 0x99),
+        close_glyph_hover: Color::from_rgb(0xF2, 0xF2, 0xF0),
 
         // Taskbar
         taskbar_bg_top: Color::from_rgb(0x13, 0x17, 0x1F),

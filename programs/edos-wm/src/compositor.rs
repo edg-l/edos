@@ -8,7 +8,9 @@ use edos_render::theme::Theme;
 use edos_render::window::{WindowListEntry, flags::FLAG_DOCK};
 
 use crate::cursor::Cursor;
-use crate::decorations::{self, BORDER_WIDTH, SHADOW_SIZE, TITLE_HEIGHT};
+use crate::decorations::{
+    self, ACCENT_HEIGHT, BORDER_WIDTH, SHADOW_SIZE, TITLE_HEIGHT, TITLE_PADDING, TITLE_TEXT_HEIGHT,
+};
 
 /// Cache for shared memory mappings to avoid map/unmap on every frame.
 pub struct ShmCache {
@@ -280,14 +282,32 @@ fn draw_window_direct(
         draw_clipped_rect(screen, bw, bw + row, w, 1, color);
     }
 
+    // --- Focus accent ---
+    // The focused window is the only thing on screen wearing the accent colour,
+    // so which window has the keyboard is readable without comparing shades.
+    if is_focused {
+        draw_clipped_rect(
+            screen,
+            bw,
+            bw,
+            w,
+            ACCENT_HEIGHT,
+            Theme::DEFAULT.title_accent,
+        );
+    }
+
     // --- Title text ---
     let title = window.title_str();
     if !title.is_empty() {
-        let text_x = window.x as i64 + bw + 6;
-        let text_y = window.y as i64 + bw + 3;
+        let text_x = window.x as i64 + bw + TITLE_PADDING;
+        let text_y = window.y as i64 + bw + (title_bar_h - TITLE_TEXT_HEIGHT).max(0) / 2;
         if text_x >= 0 && text_y >= 0 && text_x < screen_w && text_y < screen_h {
-            let style =
-                TextStyle::new(Color::from_rgb(0xFF, 0xFF, 0xFF)).with_size(RasterHeight::Size16);
+            let color = if is_focused {
+                Theme::DEFAULT.title_text
+            } else {
+                Theme::DEFAULT.title_text_inactive
+            };
+            let style = TextStyle::new(color).with_size(RasterHeight::Size16);
             let _ = screen.draw_text(text_x as u64, text_y as u64, title, &style);
         }
     }
@@ -298,30 +318,35 @@ fn draw_window_direct(
     let close_rx = bw + w - decorations::CLOSE_BUTTON_MARGIN as i64 - btn_size;
     let close_ry = bw + (title_bar_h - btn_size) / 2;
 
-    let btn_color = if hovered_close_window == Some(window.id) {
-        Theme::DEFAULT.close_button_hover
-    } else {
-        Theme::DEFAULT.close_button_normal
-    };
-
-    // Draw button background
-    draw_clipped_rect(screen, close_rx, close_ry, btn_size, btn_size, btn_color);
-
-    // Cut the 4 corner pixels to simulate rounding (replace with title bar color at that row).
-    // Corner rows are 0 and btn_size-1 relative to the button.
-    for &corner_row in &[0i64, btn_size - 1] {
-        let title_row = (close_ry - bw) + corner_row; // row index within the title gradient
-        let t_corner = ((title_row * 255) / (title_bar_h - 1).max(1)).min(255) as u8;
-        let corner_color = edos_render::theme::lerp_color(title_top, title_bottom, t_corner);
-        draw_clipped_rect(screen, close_rx, close_ry + corner_row, 1, 1, corner_color);
+    // Closing is destructive and rarely wanted, so it stays quiet until the
+    // pointer is on it: a muted glyph at rest, a red field under the cursor.
+    let hovered = hovered_close_window == Some(window.id);
+    if hovered {
         draw_clipped_rect(
             screen,
-            close_rx + btn_size - 1,
-            close_ry + corner_row,
-            1,
-            1,
-            corner_color,
+            close_rx,
+            close_ry,
+            btn_size,
+            btn_size,
+            Theme::DEFAULT.close_button_hover,
         );
+
+        // Cut the 4 corner pixels to simulate rounding (replace with title bar color at that row).
+        // Corner rows are 0 and btn_size-1 relative to the button.
+        for &corner_row in &[0i64, btn_size - 1] {
+            let title_row = (close_ry - bw) + corner_row; // row index within the title gradient
+            let t_corner = ((title_row * 255) / (title_bar_h - 1).max(1)).min(255) as u8;
+            let corner_color = edos_render::theme::lerp_color(title_top, title_bottom, t_corner);
+            draw_clipped_rect(screen, close_rx, close_ry + corner_row, 1, 1, corner_color);
+            draw_clipped_rect(
+                screen,
+                close_rx + btn_size - 1,
+                close_ry + corner_row,
+                1,
+                1,
+                corner_color,
+            );
+        }
     }
 
     // Draw 10x10 X glyph centered inside the 20x20 button.
@@ -334,12 +359,12 @@ fn draw_window_direct(
         && close_abs_x + 10 <= screen_w
         && close_abs_y + 10 <= screen_h
     {
-        draw_close_x(
-            screen,
-            close_abs_x as u64,
-            close_abs_y as u64,
-            Theme::DEFAULT.close_button_x,
-        );
+        let glyph = if hovered {
+            Theme::DEFAULT.close_glyph_hover
+        } else {
+            Theme::DEFAULT.close_glyph
+        };
+        draw_close_x(screen, close_abs_x as u64, close_abs_y as u64, glyph);
     }
 
     // --- Content area background ---

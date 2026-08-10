@@ -8,6 +8,15 @@ pub const TITLE_HEIGHT: u64 = 24;
 /// Width of the window border.
 pub const BORDER_WIDTH: u64 = 1;
 
+/// Height of the accent hairline marking the focused window's title bar.
+pub const ACCENT_HEIGHT: i64 = 2;
+
+/// Horizontal padding between the border and the title text.
+pub const TITLE_PADDING: i64 = 8;
+
+/// Raster height of the title text, used to centre it in the title bar.
+pub const TITLE_TEXT_HEIGHT: i64 = 16;
+
 /// Size of the drop shadow in pixels (drawn outside the decorated area).
 pub const SHADOW_SIZE: u64 = 5;
 
