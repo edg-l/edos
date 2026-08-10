@@ -47,6 +47,14 @@ Both exit 0 only when the run passed. The sched-test suite reports through
 `make test` translates that, and a guest that dies before reporting a verdict is
 a failure too.
 
+**The desktop is 1280x800, and `limine.conf` is what says so.** The bootloader
+asks the firmware for that mode and the guest keeps it, so QEMU's `xres`/`yres`
+do not decide it and neither does anything on the command line. It is the one
+number that sets what a remote display carries per frame, since a window drag
+ships its old and new rectangle every time. `scripts/edos-vm` *measures* the
+screen (one `screendump`, whose PNG header carries the size) rather than
+repeating it, so its pointer commands follow whatever the ISO boots at.
+
 **A rebuilt program does not reach the guest until the disk is rebuilt.** Every
 `run` target attaches `sata-disk.img`, and root selection prefers it over the
 live-root ramdisk, so the guest runs whatever `/bin` that image holds. `make
@@ -93,7 +101,7 @@ drives the guest changes.
 
 | Command | Notes |
 |---|---|
-| `start` | `--vnc N`, `--vnc-addr`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--width/--height`, `--usb-disk [image]`, `--pointer tablet\|mouse` |
+| `start` | `--vnc N`, `--vnc-addr`, `--display vnc\|spice`, `--smp N`, `--mem 2G`, `--accel kvm\|tcg`, `--usb-disk [image]`, `--pointer tablet\|mouse` |
 | `stop` / `status` | `status` reports pid, run state, VNC address |
 | `shot [file]` | writes PNG via QMP `screendump` |
 | `type <text>` | `--enter` appends Return, `--delay` paces keystrokes |

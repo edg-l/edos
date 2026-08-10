@@ -28,6 +28,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNDIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "edos-vm")
 SOCK = os.path.join(RUNDIR, "qmp.sock")
 PIDFILE = os.path.join(RUNDIR, "qemu.pid")
+GEOMETRY = os.path.join(RUNDIR, "geometry")
 SERIAL_LOG = os.path.join(REPO, "run_log.txt")
 
 # The guest decodes scancodes with a hard-coded Spanish 105-key ISO layout
@@ -131,6 +132,49 @@ class Qmp:
         self.cmd("send-key", **args)
 
 
+def screen_size():
+    """The running guest's screen, measured rather than assumed.
+
+    A pointer command that disagrees with the guest's real size computes the
+    wrong absolute coordinate and nothing catches it, so this asks: one
+    screendump, whose PNG header carries the framebuffer's dimensions. The
+    answer is cached, because the mode is set at boot (`limine.conf`) and does
+    not change under a running guest.
+    """
+    try:
+        with open(GEOMETRY) as f:
+            width, height = f.read().strip().split("x")
+        return int(width), int(height)
+    except (OSError, ValueError):
+        pass
+
+    probe = os.path.join(RUNDIR, "geometry.png")
+    if os.path.exists(probe):
+        os.unlink(probe)
+    Qmp().cmd("screendump", filename=probe, format="png")
+    # screendump returns before the file is written: QEMU completes it on the
+    # next display update, so a read straight after gets nothing or a partial
+    # header.
+    header = b""
+    for _ in range(40):
+        try:
+            with open(probe, "rb") as f:
+                header = f.read(24)
+        except OSError:
+            header = b""
+        if len(header) == 24:
+            break
+        time.sleep(0.05)
+    os.unlink(probe)
+    if header[:8] != b"\x89PNG\r\n\x1a\n":
+        raise SystemExit("screendump did not produce a PNG")
+    width = int.from_bytes(header[16:20], "big")
+    height = int.from_bytes(header[20:24], "big")
+    with open(GEOMETRY, "w") as f:
+        f.write(f"{width}x{height}")
+    return width, height
+
+
 def running():
     if not os.path.exists(PIDFILE):
         return None
@@ -192,7 +236,9 @@ def cmd_start(args):
         # blob=on needs udmabuf and a local display; plain virtio-vga renders
         # into a buffer QEMU itself owns, which is what VNC and screendump read.
         "-vga", "none",
-        "-device", f"virtio-vga,xres={args.width},yres={args.height}",
+        # The mode comes from limine.conf, which the guest boots with; these
+        # only bound what the device will offer.
+        "-device", "virtio-vga,xres=1920,yres=1080",
         # usb-tablet reports absolute positions, which the guest reads out of
         # the device's own HID report descriptor. usb-mouse is kept for testing
         # the relative path, and is what a guest older than that parser needs.
@@ -592,8 +638,6 @@ def main():
     s.add_argument("--smp", type=int, default=4)
     s.add_argument("--mem", default="2G")
     s.add_argument("--accel", default="kvm", choices=["kvm", "tcg"])
-    s.add_argument("--width", type=int, default=1920)
-    s.add_argument("--height", type=int, default=1080)
     s.add_argument("--disk", default="sata-disk.img",
                    help="disk image attached as the SATA drive")
     s.add_argument("--usb-disk", nargs="?", const="usb-test.img", default=None,
@@ -627,8 +671,8 @@ def main():
         s = sub.add_parser(name, help=f"{name} the pointer at a pixel")
         s.add_argument("x", type=int)
         s.add_argument("y", type=int)
-        s.add_argument("--width", type=int, default=1920)
-        s.add_argument("--height", type=int, default=1080)
+        s.add_argument("--width", type=int)
+        s.add_argument("--height", type=int)
         if extra:
             s.add_argument("--button", default="left",
                            choices=["left", "middle", "right"])
@@ -636,8 +680,8 @@ def main():
 
     s = sub.add_parser("launch", help="open the applications menu and choose a row")
     s.add_argument("item", nargs="?", default="terminal", choices=sorted(MENU_ITEMS))
-    s.add_argument("--width", type=int, default=1920)
-    s.add_argument("--height", type=int, default=1080)
+    s.add_argument("--width", type=int)
+    s.add_argument("--height", type=int)
     s.set_defaults(func=cmd_launch)
 
     sub.add_parser("windows", help="list the guest's windows by name").set_defaults(
@@ -648,8 +692,8 @@ def main():
     s.add_argument("--dx", type=int, help="click this far into the client area instead"
                                           " of its centre")
     s.add_argument("--dy", type=int, default=0)
-    s.add_argument("--width", type=int, default=1920)
-    s.add_argument("--height", type=int, default=1080)
+    s.add_argument("--width", type=int)
+    s.add_argument("--height", type=int)
     s.set_defaults(func=cmd_focus)
 
     s = sub.add_parser("log", help="tail the guest serial log")
@@ -662,6 +706,10 @@ def main():
     s.set_defaults(func=cmd_qmp)
 
     args = p.parse_args()
+    # Anything that names a pixel needs the guest's real screen, which `start`
+    # recorded. An explicit --width/--height still wins.
+    if getattr(args, "width", None) is None and hasattr(args, "width"):
+        args.width, args.height = screen_size()
     args.func(args)
 
 
