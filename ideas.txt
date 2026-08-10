@@ -2,6 +2,15 @@
 
 ## Done
 
+- **Focus follows a closed window again** - destroying a window moved keyboard
+  focus in the registry but never sent `FocusGained` to whoever inherited it,
+  so the terminal painted focused and dropped every keystroke once any GUI
+  program had been opened and closed; click-to-focus could not repair it,
+  because a click on the window the registry already names sends nothing.
+  `destroy_window`/`destroy_windows_for_pid` now return the heir and both
+  callers deliver the event, covering the orderly close and the killed process
+  alike.
+
 - **`imgview`** - a BMP viewer, and the first ordinary GUI application the
   system has: one window, one image, `f` to fit it to the window and `1` to
   show it at one image pixel per screen pixel. It decodes with the same

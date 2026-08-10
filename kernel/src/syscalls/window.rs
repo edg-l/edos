@@ -72,7 +72,7 @@ pub fn sys_window_destroy(window_id: WindowId) -> u64 {
     let pid = info.lock().pid;
 
     // Check ownership and destroy in a single write lock to avoid TOCTOU.
-    {
+    let refocused = {
         let mut registry =
             ranked_write!(RANK_WINDOW_REGISTRY, "sys_window_destroy", WINDOW_REGISTRY);
         if let Some(window) = registry.get_window(window_id) {
@@ -84,14 +84,17 @@ pub fn sys_window_destroy(window_id: WindowId) -> u64 {
             info.lock().errno = Errno::ENOENT;
             return !0u64;
         }
-        if !registry.destroy_window(window_id) {
-            info.lock().errno = Errno::ENOENT;
-            return !0u64;
-        }
-    }
+        registry.destroy_window(window_id)
+    };
 
     // Remove event queue after the window is destroyed.
     remove_event_queue(window_id);
+
+    // Outside the registry lock: whoever inherits focus has to be told, or it
+    // goes on treating the keyboard as somebody else's.
+    if let Some(new_focus) = refocused {
+        send_event(new_focus, WindowEvent::focus_gained());
+    }
 
     0
 }

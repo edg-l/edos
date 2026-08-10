@@ -32,7 +32,7 @@ pub fn cleanup_process_windows(pid: u64) {
         registry.windows_for_pid(pid)
     };
 
-    ranked_write!(
+    let refocused = ranked_write!(
         RANK_WINDOW_REGISTRY,
         "window::cleanup_pid",
         registry::WINDOW_REGISTRY
@@ -41,5 +41,13 @@ pub fn cleanup_process_windows(pid: u64) {
 
     for &id in &window_ids {
         input::remove_event_queue(id);
+    }
+
+    // Outside the registry lock, and after the dead queues are gone: the
+    // window that inherits focus has to be told, or a process exiting leaves
+    // the keyboard pointed at a window that believes it is unfocused and
+    // drops every key.
+    if let Some(new_focus) = refocused {
+        input::send_event(new_focus, WindowEvent::focus_gained());
     }
 }

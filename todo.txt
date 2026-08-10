@@ -87,11 +87,3 @@
   Err("arp pending"), kernel/src/net/stack.rs) and nothing retries it, so the
   first inbound connection after boot is lost: the SYN-ACK never goes out. A
   one-slot pending-transmit queue per ARP request would fix it.
-- Keyboard focus is lost for good when a client window exits. Repro: run
-  `imgview /share/wallpapers/dusk.bmp &` from the terminal, quit the viewer
-  with `q`, then click the terminal — the title bar and the task button both
-  render focused, but no `[Term] FocusGained` reaches the serial log and no
-  keystroke is echoed. `WindowRegistry::destroy` does refocus
-  `topmost_focusable` (kernel/src/window/registry.rs:277), so the miss is
-  further along: either the refocus posts no FocusGained, or the compositor's
-  click-to-focus does nothing when the registry already names that window.

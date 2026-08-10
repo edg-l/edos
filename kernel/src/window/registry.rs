@@ -271,16 +271,22 @@ impl WindowRegistry {
     }
 
     /// Destroy a window.
-    pub fn destroy_window(&mut self, id: WindowId) -> bool {
-        if self.windows.remove(&id).is_some() {
-            // Clear focus if this was the focused window
-            if self.focused_window == Some(id) {
-                self.focused_window = self.topmost_focusable();
-            }
-            true
-        } else {
-            false
+    ///
+    /// Returns the window that inherits keyboard focus, if the destroyed one
+    /// held it, so the caller can deliver the focus event outside the registry
+    /// lock. Delivering it is not optional: the heir was told it lost focus
+    /// when the dying window was created, and click-to-focus sends nothing
+    /// when the registry already names the window clicked, so an undelivered
+    /// gain leaves it dropping keystrokes for the rest of the session.
+    pub fn destroy_window(&mut self, id: WindowId) -> Option<WindowId> {
+        if self.windows.remove(&id).is_none() {
+            return None;
         }
+        if self.focused_window != Some(id) {
+            return None;
+        }
+        self.focused_window = self.topmost_focusable();
+        self.focused_window
     }
 
     /// Get a reference to a window.
@@ -405,11 +411,21 @@ impl WindowRegistry {
     }
 
     /// Destroy all windows owned by a process.
-    pub fn destroy_windows_for_pid(&mut self, pid: u64) {
+    /// Destroy every window owned by `pid`.
+    ///
+    /// Returns the window left holding keyboard focus, if focus moved. A
+    /// destroy that moves focus onto another window of the same process is
+    /// superseded by that window's own destroy, so the last answer is the
+    /// surviving one.
+    pub fn destroy_windows_for_pid(&mut self, pid: u64) -> Option<WindowId> {
         let window_ids: Vec<WindowId> = self.windows_for_pid(pid);
+        let mut refocused = None;
         for id in window_ids {
-            self.destroy_window(id);
+            if let Some(heir) = self.destroy_window(id) {
+                refocused = Some(heir);
+            }
         }
+        refocused
     }
 }
 

@@ -2207,3 +2207,59 @@ ground as the rest of the shell.
   silently ignores every key; the first screenshot after pressing one looks
   identical to the one before it, which reads like a redraw bug rather than an
   event that was never delivered.
+
+## Fixed: closing a window left the keyboard pointed at a deaf one
+
+Quitting a GUI program cost a reboot: every keystroke after it was dropped, and
+clicking the terminal did not help even though its title bar and task button
+both painted focused. Three separate pieces each behaved correctly and the
+composition lost the keyboard.
+
+`WindowRegistry::destroy_window` did move focus — it picked `topmost_focusable`
+and stored it — so `/proc/windows`, the compositor's decorations and the panel
+all named the terminal focused, which is why the screen looked right. What it
+did not do is tell the winner. The client's own belief about focus comes from
+`FocusGained`/`FocusLost` events alone, and `edos_render`'s terminal widget
+drops `on_key` outright when it thinks it is unfocused. The terminal had been
+told `FocusLost` when the viewer's window was created (`create_window` returns
+the displaced holder for exactly that purpose), and nothing ever told it
+otherwise.
+
+Click-to-focus could not repair it either, and for a defensible reason:
+`handle_mouse_event` compares the click target against `registry.focused_window()`
+and sends nothing when they already agree. That is right — a click inside the
+focused window must not restage focus — but it means the registry and the client
+can never re-synchronise once they disagree. The registry has to be the one that
+never lets them.
+
+So a focus transition is only real when its event is delivered, and every
+registry call that moves focus now returns the window that has to be told:
+`create_window` already did, `set_minimized` and `release_dock_focus` already
+did, and `destroy_window` and `destroy_windows_for_pid` now do too. The two
+callers — `sys_window_destroy` and `window::cleanup_process_windows` — send
+`focus_gained` after dropping the registry lock, the latter after the dead event
+queues are removed. `destroy_window` no longer returns `bool`: both callers
+establish existence under the same lock, so the flag was never read.
+
+Both paths matter and they are different code: a program that closes its own
+window goes through the syscall (`edos_render`'s `Drop for Window` calls
+`window_destroy`), and one that is killed or panics goes through the process-exit
+cleanup. Verified separately in the guest — `imgview` quit with `q`, and
+`imgview` killed by a delayed `sh -c "sleep 8; kill 28" &` while it held focus —
+with the terminal accepting a typed command afterwards **without a click** in
+both cases.
+
+### Things that will bite you
+
+- **A window that renders focused is not a window that receives keys.** The two
+  answers come from different places: decorations and the task button read the
+  `focused` flag out of `sys_window_list`, while a client decides whether to
+  act on a key from the last focus event it was handed. When they disagree the
+  screen shows the registry's answer, so the symptom is a window that looks
+  live and behaves dead. `[Term] FocusGained` in the serial log is the ground
+  truth for what the client believes.
+- **Killing a windowed program while it holds focus needs a delayed kill,** or
+  the terminal you type it in takes focus first and the exit path under test is
+  never exercised: `sh -c "sleep 8; kill <pid>" &`, then click the target
+  window. Its pid is reachable without reading the covered terminal by sending
+  `ps > /dev/klog` and reading `scripts/edos-vm log` on the host.
