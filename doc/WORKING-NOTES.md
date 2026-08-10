@@ -1809,3 +1809,45 @@ the caller turns into `EPIPE` *and* a `SIGPIPE`.
   first run: `ping-pong count mismatch: 499 != 500`, and 48/49 TIMEOUT with
   ping-pong-pong never reporting. An immediate re-run passes. Recorded in
   `todo.txt`; it points at a lost or late wakeup, and it has never been chased.
+
+## The shell can redirect any of the three standard descriptors now
+
+`2>file`, `2>>file`, `2>&1`, `1>&2` and `&>file` work, on a plain command and on
+each stage of a pipeline. Three things had to change, and the second was the one
+that would have been diagnosed as "redirection is broken" forever:
+
+1. `Redirects` is an ordered `Vec<RedirOp>` rather than three fields. Order is
+   the whole semantics: `>f 2>&1` sends both streams to the file, `2>&1 >f`
+   leaves the error stream on the terminal. `open_redirects` walks the list left
+   to right into a three-slot table where each slot is either an opened
+   descriptor or `Default(n)` — "whatever descriptor *n* would have been". A
+   pipeline stage resolves that table against the pipe ends, which is what makes
+   `ls / 2>&1 | wc -l` put the error stream into the pipe. `&>f` is `>f 2>&1`,
+   never two opens of the same file, or the two descriptions would each start at
+   offset 0 and overwrite each other.
+
+2. **`split_chain` ate the `&` in `2>&1`.** It ran before any redirect parsing
+   and treated an unquoted `&` at paren depth 0 as the background operator, so
+   `ls / 2>&1 | wc -l` was split into `ls / 2>` and `1 | wc -l` — with the
+   redirect code perfect, the command still made no sense. An `&` preceded by
+   `>`/`<` or followed by `>` is part of a redirection, not a job-control
+   operator.
+
+3. **`>` never truncated.** The shell opened with `O_CREAT` only, so writing a
+   short file over a long one left the tail behind. Adding `O_TRUNC` alone would
+   have broken `> /dev/klog`, because devfs has no `truncate` and the trait
+   default returns `IoError`: POSIX says `O_TRUNC` has no effect on anything but
+   a regular file, so `open_resolved` in `kernel/src/syscalls/io.rs` now checks
+   `FileKind` before truncating. Redirect opens also pass `O_WRONLY`; only
+   `mmap` enforces the access mode today, but the descriptor should still say
+   what it is for.
+
+Only descriptors 0, 1 and 2 can be redirected. `SYS_SPAWN2` takes exactly three,
+so `3>file` has nowhere to go; the shell says so rather than silently dropping
+it.
+
+### Things that will bite you
+
+- **Pipeline exit status is still not tracked.** `run_segment` returns 0 for any
+  pipeline regardless of what the last stage did, so `false | true` and
+  `ls /nope | wc -l` both look successful to `&&`, `||` and `set -e`.

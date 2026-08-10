@@ -32,22 +32,35 @@ pub fn run_segment(segment: &str) -> SegmentResult {
     }
 
     if stages.len() > 1 {
-        // Pipeline: parse each stage and spawn connected by pipes
-        let parsed: Vec<(String, Vec<String>)> = stages
-            .iter()
-            .filter_map(|s| {
-                let expanded = command::expand_variables(s);
-                let args = command::parse_command_simple(&expanded);
-                if args.is_empty() {
-                    None
-                } else {
-                    let (cmd, rest) = args.split_at(1);
-                    Some((cmd[0].clone(), rest.to_vec()))
+        // Pipeline: parse each stage, apply its own redirections on top of the
+        // pipe wiring, and spawn them connected by pipes.
+        let mut parsed: Vec<edos_lib::process::PipelineStage> = Vec::new();
+        let mut opened: Vec<command::OpenRedirects> = Vec::new();
+        for stage in &stages {
+            let expanded = command::expand_variables(stage);
+            let args = command::parse_command(&expanded);
+            let Some((first, rest)) = args.split_first() else {
+                continue;
+            };
+            let (rest, redirects) = command::extract_redirects(rest);
+            let Some(open) = command::open_redirects(&redirects) else {
+                for open in opened {
+                    open.close();
                 }
-            })
-            .collect();
+                return SegmentResult::Done(1);
+            };
+            parsed.push(edos_lib::process::PipelineStage {
+                command: first.0.clone(),
+                args: rest,
+                slots: open.slots,
+            });
+            opened.push(open);
+        }
         if !parsed.is_empty() {
             spawn::spawn_pipeline(&parsed);
+        }
+        for open in opened {
+            open.close();
         }
         // Pipeline exit code is not tracked; treat as success
         return SegmentResult::Done(0);
@@ -63,69 +76,20 @@ pub fn run_segment(segment: &str) -> SegmentResult {
     let cmd = &first.0;
     let (rest, redirects) = command::extract_redirects(rest);
 
-    // Open redirect files
-    let stdout_fd = if let Some(ref path) = redirects.stdout_file {
-        let flags: u64 = if redirects.stdout_append {
-            0x40 | 0x400
-        } else {
-            0x40
-        };
-        let fd = edos_lib::io::open(path, flags);
-        if fd < 0 {
-            eprintln!("{}: cannot open for writing", path);
-            return SegmentResult::Done(1);
-        }
-        Some(fd as u64)
-    } else {
-        None
+    let Some(open) = command::open_redirects(&redirects) else {
+        return SegmentResult::Done(1);
     };
 
-    let stdin_fd = if let Some(ref path) = redirects.stdin_file {
-        let fd = edos_lib::io::open(path, 0);
-        if fd < 0 {
-            eprintln!("{}: cannot open for reading", path);
-            if let Some(fd) = stdout_fd {
-                edos_lib::process::close(fd);
-            }
-            return SegmentResult::Done(1);
-        }
-        Some(fd as u64)
+    let exec_result = if open.is_default() {
+        command::execute_command(cmd, &rest)
     } else {
-        None
-    };
-
-    let exec_result = if stdout_fd.is_some() || stdin_fd.is_some() {
+        let fds = resolve_slots(&open.slots, [0, 1, 2]);
         if command::is_builtin(cmd) {
-            let saved_stdout = stdout_fd.map(|fd| {
-                let saved = edos_lib::process::dup(1) as u64;
-                edos_lib::process::dup2(fd, 1);
-                saved
-            });
-            let saved_stdin = stdin_fd.map(|fd| {
-                let saved = edos_lib::process::dup(0) as u64;
-                edos_lib::process::dup2(fd, 0);
-                saved
-            });
-
-            let r = command::execute_command(cmd, &rest);
-
-            let _ = std::io::Write::flush(&mut std::io::stdout());
-
-            if let Some(saved) = saved_stdout {
-                edos_lib::process::dup2(saved, 1);
-                edos_lib::process::close(saved);
-            }
-            if let Some(saved) = saved_stdin {
-                edos_lib::process::dup2(saved, 0);
-                edos_lib::process::close(saved);
-            }
-            r
+            run_builtin_redirected(cmd, &rest, fds)
         } else {
-            let in_fd = stdin_fd.unwrap_or(0);
-            let out_fd = stdout_fd.unwrap_or(1);
             edos_lib::io::pty_set_canonical(0);
             let result = if let Some(pid) =
-                edos_lib::process::spawn_program_with_fds(cmd, &rest, in_fd, out_fd, 2)
+                edos_lib::process::spawn_program_with_fds(cmd, &rest, fds[0], fds[1], fds[2])
             {
                 let code = edos_lib::process::waitpid(pid);
                 if code == 0 {
@@ -140,23 +104,55 @@ pub fn run_segment(segment: &str) -> SegmentResult {
             edos_lib::io::pty_set_raw(0);
             result
         }
-    } else {
-        command::execute_command(cmd, &rest)
     };
 
-    // Close redirect file fds
-    if let Some(fd) = stdout_fd {
-        edos_lib::process::close(fd);
-    }
-    if let Some(fd) = stdin_fd {
-        edos_lib::process::close(fd);
-    }
+    open.close();
 
     match exec_result {
         command::ExecResult::Success(code) => SegmentResult::Done(code),
         command::ExecResult::Failed(code) => SegmentResult::Done(code),
         command::ExecResult::Exit => SegmentResult::Exit,
     }
+}
+
+/// Resolve a redirection's slots against the descriptors the command would
+/// otherwise have used.
+fn resolve_slots(slots: &[edos_lib::process::StdioSlot; 3], defaults: [u64; 3]) -> [u64; 3] {
+    [
+        slots[0].resolve(defaults),
+        slots[1].resolve(defaults),
+        slots[2].resolve(defaults),
+    ]
+}
+
+/// Run a builtin with descriptors 0, 1 and 2 pointing at `fds`, restoring the
+/// shell's own descriptors afterwards.
+///
+/// Every save is taken before any `dup2`, so a redirection that reads a
+/// descriptor it also replaces (`>file 2>&1`) still saves the original.
+fn run_builtin_redirected(cmd: &str, args: &[String], fds: [u64; 3]) -> command::ExecResult {
+    let mut saved: [Option<u64>; 3] = [None; 3];
+    for (i, &fd) in fds.iter().enumerate() {
+        if fd != i as u64 {
+            saved[i] = Some(edos_lib::process::dup(i as u64) as u64);
+        }
+    }
+    for (i, &fd) in fds.iter().enumerate() {
+        if fd != i as u64 {
+            edos_lib::process::dup2(fd, i as u64);
+        }
+    }
+
+    let result = command::execute_command(cmd, args);
+    let _ = std::io::stdout().flush();
+
+    for (i, restore) in saved.iter().enumerate() {
+        if let Some(restore) = *restore {
+            edos_lib::process::dup2(restore, i as u64);
+            edos_lib::process::close(restore);
+        }
+    }
+    result
 }
 
 /// Run a single command segment with a caller-supplied stdin fd.
@@ -174,56 +170,22 @@ pub fn run_segment_with_stdin(segment: &str, stdin_fd: u64) -> i32 {
     let cmd = &first.0;
     let (rest, redirects) = command::extract_redirects(rest);
 
-    let stdout_fd = if let Some(ref path) = redirects.stdout_file {
-        let flags: u64 = if redirects.stdout_append {
-            0x40 | 0x400
-        } else {
-            0x40
-        };
-        let fd = edos_lib::io::open(path, flags);
-        if fd < 0 {
-            eprintln!("{}: cannot open for writing", path);
-            return 1;
-        }
-        fd as u64
-    } else {
-        1
+    let Some(open) = command::open_redirects(&redirects) else {
+        return 1;
     };
+    // The heredoc pipe is this command's standard input unless it redirects
+    // its own.
+    let fds = resolve_slots(&open.slots, [stdin_fd, 1, 2]);
 
-    if command::is_builtin(cmd) || crate::script::is_function(cmd) {
-        // Dup stdin_fd onto fd 0, run the builtin, then restore.
-        let saved_stdin = edos_lib::process::dup(0) as u64;
-        edos_lib::process::dup2(stdin_fd, 0);
-        let saved_stdout = if stdout_fd != 1 {
-            let s = edos_lib::process::dup(1) as u64;
-            edos_lib::process::dup2(stdout_fd, 1);
-            Some(s)
-        } else {
-            None
-        };
-
-        let result = command::execute_command(cmd, &rest);
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-
-        edos_lib::process::dup2(saved_stdin, 0);
-        edos_lib::process::close(saved_stdin);
-        if let Some(saved) = saved_stdout {
-            edos_lib::process::dup2(saved, 1);
-            edos_lib::process::close(saved);
-        }
-        if stdout_fd != 1 {
-            edos_lib::process::close(stdout_fd);
-        }
-
-        match result {
+    let code = if command::is_builtin(cmd) || crate::script::is_function(cmd) {
+        match run_builtin_redirected(cmd, &rest, fds) {
             command::ExecResult::Success(c) | command::ExecResult::Failed(c) => c,
             command::ExecResult::Exit => -1,
         }
     } else {
-        // External command: pass stdin_fd directly.
         edos_lib::io::pty_set_canonical(0);
         let code = if let Some(pid) =
-            edos_lib::process::spawn_program_with_fds(cmd, &rest, stdin_fd, stdout_fd, 2)
+            edos_lib::process::spawn_program_with_fds(cmd, &rest, fds[0], fds[1], fds[2])
         {
             edos_lib::process::waitpid(pid)
         } else {
@@ -231,11 +193,11 @@ pub fn run_segment_with_stdin(segment: &str, stdin_fd: u64) -> i32 {
             127
         };
         edos_lib::io::pty_set_raw(0);
-        if stdout_fd != 1 {
-            edos_lib::process::close(stdout_fd);
-        }
         code
-    }
+    };
+
+    open.close();
+    code
 }
 
 /// Check if a segment is a subshell expression `(...)` and return the inner content.

@@ -431,18 +431,50 @@ pub fn spawn_program(command: &str, args: &[String]) {
     }
 }
 
-/// Spawn a pipeline of commands connected by pipes.
-/// Each stage is (command_name, args_vec).
-pub fn spawn_pipeline(stages: &[(String, Vec<String>)]) {
-    if stages.len() == 1 {
-        spawn_program(&stages[0].0, &stages[0].1);
-        return;
-    }
+/// How one of a command's three standard descriptors is wired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdioSlot {
+    /// Follow descriptor `n`'s default: for a pipeline stage that is the pipe
+    /// end, otherwise the caller's own descriptor. The index is recorded
+    /// rather than resolved so that `2>&1` written before `>file` still
+    /// tracks the original standard output, as the shell requires.
+    Default(usize),
+    /// An already-open descriptor.
+    Fd(u64),
+}
 
+impl StdioSlot {
+    /// Resolve against the descriptors the command would have used with no
+    /// redirection at all.
+    pub fn resolve(self, defaults: [u64; 3]) -> u64 {
+        match self {
+            StdioSlot::Default(n) => defaults[n],
+            StdioSlot::Fd(fd) => fd,
+        }
+    }
+}
+
+/// Every descriptor following its own default: no redirection.
+pub const STDIO_DEFAULT: [StdioSlot; 3] = [
+    StdioSlot::Default(0),
+    StdioSlot::Default(1),
+    StdioSlot::Default(2),
+];
+
+/// One stage of a pipeline.
+pub struct PipelineStage {
+    pub command: String,
+    pub args: Vec<String>,
+    /// Redirections layered on top of the pipe wiring.
+    pub slots: [StdioSlot; 3],
+}
+
+/// Spawn a pipeline of commands connected by pipes.
+pub fn spawn_pipeline(stages: &[PipelineStage]) {
     let mut prev_read_fd: Option<u64> = None;
     let mut last_pid: Option<u64> = None;
 
-    for (i, (cmd, args)) in stages.iter().enumerate() {
+    for (i, stage) in stages.iter().enumerate() {
         let is_last = i == stages.len() - 1;
 
         // Create pipe for this stage's output (except the last stage)
@@ -462,10 +494,14 @@ pub fn spawn_pipeline(stages: &[(String, Vec<String>)]) {
             (None, None)
         };
 
-        let stdin_fd = prev_read_fd.unwrap_or(0);
-        let stdout_fd = write_fd.unwrap_or(1);
-
-        let pid = spawn_program_with_fds(cmd, args, stdin_fd, stdout_fd, 2);
+        let defaults = [prev_read_fd.unwrap_or(0), write_fd.unwrap_or(1), 2];
+        let pid = spawn_program_with_fds(
+            &stage.command,
+            &stage.args,
+            stage.slots[0].resolve(defaults),
+            stage.slots[1].resolve(defaults),
+            stage.slots[2].resolve(defaults),
+        );
 
         // Close pipe ends the parent no longer needs after spawning
         if let Some(fd) = prev_read_fd {
@@ -476,7 +512,7 @@ pub fn spawn_pipeline(stages: &[(String, Vec<String>)]) {
         }
 
         if pid.is_none() {
-            eprintln!("Command not found: {}", cmd);
+            eprintln!("Command not found: {}", stage.command);
             // Close the read end of the pipe we just created (if any)
             if let Some(fd) = read_fd {
                 close(fd);

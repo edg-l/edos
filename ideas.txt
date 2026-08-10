@@ -106,6 +106,10 @@
   European ISO keyboards (< > º ç ´).
 - **Shell quoted redirect fix** - parse_command tracks quoted tokens,
   extract_redirects skips them. echo "<" > file works correctly.
+- **Fd-numbered redirection** - `2>file`, `2>>file`, `2>&1`, `1>&2` and
+  `&>file`, per pipeline stage as well as per command. Redirections are an
+  ordered op list resolved left to right, so `>f 2>&1` and `2>&1 >f` differ as
+  they should. `>` now truncates, and O_TRUNC is ignored on non-regular files.
 - **Heap expansion race fixes** - Lazy vmalloc fault handler, expansion
   serialization (AtomicBool), per-CPU heap freelists (6 size classes,
   16 slots/CPU, batch refill/drain). Removed heap warmup workaround.

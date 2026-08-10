@@ -2,6 +2,7 @@
 
 use crate::builtins;
 use crate::spawn;
+use edos_lib::process::{STDIO_DEFAULT, StdioSlot};
 
 // ---------------------------------------------------------------------------
 // Positional parameters ($0, $1, ..., $#, $@) and last exit code ($?)
@@ -413,15 +414,158 @@ pub fn split_pipeline(input: &str) -> Vec<String> {
     stages
 }
 
-/// Parsed redirections from a command line.
+/// How a redirection opens its file.
+#[derive(Clone, Copy, PartialEq)]
+pub enum RedirMode {
+    /// `<`
+    Read,
+    /// `>`
+    Write,
+    /// `>>`
+    Append,
+}
+
+impl RedirMode {
+    /// Open flags: `0x1` O_WRONLY, `0x40` O_CREAT, `0x200` O_TRUNC, `0x400` O_APPEND.
+    fn open_flags(self) -> u64 {
+        match self {
+            RedirMode::Read => 0,
+            RedirMode::Write => 0x1 | 0x40 | 0x200,
+            RedirMode::Append => 0x1 | 0x40 | 0x400,
+        }
+    }
+}
+
+/// A single redirection, kept in the order it was written.
+pub enum RedirOp {
+    /// `N<file`, `N>file`, `N>>file`
+    File {
+        fd: usize,
+        path: String,
+        mode: RedirMode,
+    },
+    /// `N>&M`: descriptor N takes wherever M is wired at this point in the line.
+    Dup { fd: usize, from: usize },
+}
+
+/// Parsed redirections from a command line, in written order.
 #[derive(Default)]
 pub struct Redirects {
-    /// File to redirect stdin from (`< file`)
-    pub stdin_file: Option<String>,
-    /// File to redirect stdout to (`> file` or `>> file`)
-    pub stdout_file: Option<String>,
-    /// Whether stdout redirect is append mode (`>>`)
-    pub stdout_append: bool,
+    pub ops: Vec<RedirOp>,
+}
+
+/// A redirection list with its files opened.
+pub struct OpenRedirects {
+    /// Where descriptors 0, 1 and 2 end up.
+    pub slots: [StdioSlot; 3],
+    /// Descriptors opened here, which the caller closes once the command is done.
+    opened: Vec<u64>,
+}
+
+impl OpenRedirects {
+    /// True when the command runs on the caller's own descriptors.
+    pub fn is_default(&self) -> bool {
+        self.slots == STDIO_DEFAULT
+    }
+
+    /// Close every file this opened.
+    pub fn close(self) {
+        for fd in self.opened {
+            edos_lib::process::close(fd);
+        }
+    }
+}
+
+/// Open every file a redirection list names, in the order it was written.
+///
+/// `2>&1` copies whatever descriptor 1 is wired to *at that point*, so
+/// `>f 2>&1` sends both streams to the file while `2>&1 >f` leaves the error
+/// stream on the terminal.
+pub fn open_redirects(redirects: &Redirects) -> Option<OpenRedirects> {
+    let mut open = OpenRedirects {
+        slots: STDIO_DEFAULT,
+        opened: Vec::new(),
+    };
+    for op in &redirects.ops {
+        match op {
+            RedirOp::File { fd, path, mode } => {
+                let opened = edos_lib::io::open(path, mode.open_flags());
+                if opened < 0 {
+                    if *mode == RedirMode::Read {
+                        eprintln!("{}: cannot open for reading", path);
+                    } else {
+                        eprintln!("{}: cannot open for writing", path);
+                    }
+                    open.close();
+                    return None;
+                }
+                open.opened.push(opened as u64);
+                open.slots[*fd] = StdioSlot::Fd(opened as u64);
+            }
+            RedirOp::Dup { fd, from } => open.slots[*fd] = open.slots[*from],
+        }
+    }
+    Some(open)
+}
+
+/// A redirection operator found at the head of a token.
+struct RedirOperator {
+    /// Descriptor being redirected.
+    fd: usize,
+    mode: RedirMode,
+    /// `&>`: standard output and error together.
+    both: bool,
+    /// `>&` / `<&`: the target names a descriptor, not a file.
+    dup: bool,
+    /// The target when it is part of the same token; empty when it is the next one.
+    target: String,
+}
+
+/// Parse the redirection operator at the start of `tok`.
+///
+/// Returns `None` when the token does not begin with one, which leaves a word
+/// like `x>y` an ordinary argument.
+fn parse_redirect_token(tok: &str) -> Option<RedirOperator> {
+    let bytes = tok.as_bytes();
+    let (fd, both, mut i) = if tok.starts_with("&>") {
+        (1, true, 1)
+    } else {
+        let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+        let op = *bytes.get(digits)?;
+        if op != b'<' && op != b'>' {
+            return None;
+        }
+        let fd = if digits == 0 {
+            if op == b'<' { 0 } else { 1 }
+        } else {
+            tok[..digits].parse().ok()?
+        };
+        (fd, false, digits)
+    };
+
+    let op = bytes[i];
+    i += 1;
+    let mut mode = if op == b'<' {
+        RedirMode::Read
+    } else {
+        RedirMode::Write
+    };
+    if op == b'>' && bytes.get(i) == Some(&b'>') {
+        mode = RedirMode::Append;
+        i += 1;
+    }
+    let dup = bytes.get(i) == Some(&b'&');
+    if dup {
+        i += 1;
+    }
+
+    Some(RedirOperator {
+        fd,
+        mode,
+        both,
+        dup,
+        target: tok[i..].to_string(),
+    })
 }
 
 /// Detect `<<MARKER` or `<< MARKER` in a command line.
@@ -491,8 +635,14 @@ pub fn parse_heredoc_marker(line: &str) -> Option<(String, String, bool)> {
     None
 }
 
-/// Extract `>`, `>>`, `<` redirections from args, returning remaining args and redirects.
-/// Tokens that were quoted during parsing are never treated as redirect operators.
+/// Extract redirections from args, returning the remaining args and the
+/// redirection list.
+///
+/// Understood: `<`, `>`, `>>`, an explicit descriptor number in front of any
+/// of them (`2>file`), descriptor duplication (`2>&1`), and `&>` / `&>>` for
+/// both output streams. Tokens that were quoted during parsing are never
+/// treated as redirect operators. Only descriptors 0, 1 and 2 can be
+/// redirected, since those are the three a spawned program is given.
 pub fn extract_redirects(args: &[(String, bool)]) -> (Vec<String>, Redirects) {
     let mut remaining = Vec::new();
     let mut redirects = Redirects::default();
@@ -500,40 +650,55 @@ pub fn extract_redirects(args: &[(String, bool)]) -> (Vec<String>, Redirects) {
 
     while i < args.len() {
         let (ref tok, quoted) = args[i];
-        if quoted {
-            remaining.push(tok.clone());
-            i += 1;
-        } else if tok == ">" || tok == ">>" {
-            redirects.stdout_append = tok == ">>";
-            if i + 1 < args.len() {
-                redirects.stdout_file = Some(args[i + 1].0.clone());
-                i += 2;
-            } else {
-                eprintln!("syntax error: expected filename after {}", tok);
-                i += 1;
-            }
-        } else if tok == "<" {
-            if i + 1 < args.len() {
-                redirects.stdin_file = Some(args[i + 1].0.clone());
-                i += 2;
-            } else {
-                eprintln!("syntax error: expected filename after <");
-                i += 1;
-            }
-        } else if tok.starts_with(">>") {
-            redirects.stdout_append = true;
-            redirects.stdout_file = Some(tok[2..].to_string());
-            i += 1;
-        } else if tok.starts_with('>') {
-            redirects.stdout_append = false;
-            redirects.stdout_file = Some(tok[1..].to_string());
-            i += 1;
-        } else if tok.starts_with('<') {
-            redirects.stdin_file = Some(tok[1..].to_string());
-            i += 1;
+        let op = if quoted {
+            None
         } else {
+            parse_redirect_token(tok)
+        };
+        let Some(op) = op else {
             remaining.push(tok.clone());
             i += 1;
+            continue;
+        };
+        i += 1;
+
+        let target = if op.target.is_empty() {
+            match args.get(i) {
+                Some((next, _)) => {
+                    i += 1;
+                    next.clone()
+                }
+                None => {
+                    eprintln!("sh: syntax error: {} needs a target", tok);
+                    continue;
+                }
+            }
+        } else {
+            op.target.clone()
+        };
+
+        if op.fd > 2 {
+            eprintln!("sh: {}: only descriptors 0, 1 and 2 can be redirected", tok);
+            continue;
+        }
+
+        if op.dup {
+            match target.parse::<usize>() {
+                Ok(from) if from <= 2 => redirects.ops.push(RedirOp::Dup { fd: op.fd, from }),
+                _ => eprintln!("sh: {}: bad file descriptor", target),
+            }
+        } else {
+            redirects.ops.push(RedirOp::File {
+                fd: op.fd,
+                path: target,
+                mode: op.mode,
+            });
+        }
+
+        // `&>file` is `>file 2>&1`: one open description shared by both
+        // streams, so the two do not overwrite each other's output.
+        if op.both {
+            redirects.ops.push(RedirOp::Dup { fd: 2, from: 1 });
         }
     }
 
@@ -583,7 +748,13 @@ pub fn split_chain(input: &str) -> Vec<(String, Option<ChainOp>)> {
                 paren_depth = paren_depth.saturating_sub(1);
                 current.push(ch);
             }
-            '&' if !in_quotes && paren_depth == 0 => {
+            // An `&` belonging to a redirection (`2>&1`, `&>file`) is not the
+            // background operator.
+            '&' if !in_quotes
+                && paren_depth == 0
+                && !current.ends_with(['>', '<'])
+                && chars.peek() != Some(&'>') =>
+            {
                 if chars.peek() == Some(&'&') {
                     chars.next(); // consume second '&'
                     let trimmed = current.trim().to_string();

@@ -918,9 +918,11 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
     // to, which is not `path` when a symbolic link on it crossed a mount.
     let mut path = path;
     match fs_api::file_info_resolved(&path) {
-        Ok((_, resolved)) => {
+        Ok((existing, resolved)) => {
             path = resolved;
-            if truncate {
+            // POSIX: O_TRUNC has no effect on anything but a regular file, so
+            // `> /dev/klog` must not fail on a filesystem with no truncate.
+            if truncate && existing.kind == FileKind::File {
                 if let Err(e) = fs_api::truncate(&path, 0) {
                     info.lock().errno = Errno::from(e);
                     return -1;

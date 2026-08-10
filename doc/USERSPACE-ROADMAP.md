@@ -180,9 +180,12 @@ the shell half has not been written yet.
    foreground, `waitpid_untraced` to notice a stop, `SIGCONT` to resume.
 7. **Globbing.** Nothing expands `*` or `?`; `ls *.txt` passes the literal
    string. No kernel work needed.
-8. **Fd-numbered redirection.** `Redirects` in
-   `programs/edos-sh/src/command.rs` carries stdin, stdout and an append flag,
-   so `2>file`, `2>&1` and `&>` land in argv. No kernel work needed.
+
+**Done:** fd-numbered redirection. `Redirects` in
+`programs/edos-sh/src/command.rs` is an ordered list of operations, so `2>file`,
+`2>&1`, `1>&2` and `&>file` work, in a pipeline stage as well as on a plain
+command. Only descriptors 0, 1 and 2 can be named, since those are the three
+`SYS_SPAWN2` gives a child.
 
 ## Next: time is UTC everywhere
 
