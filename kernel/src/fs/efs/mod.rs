@@ -2147,19 +2147,27 @@ impl EfsDriver {
         self.add_dir_entry(parent_ino, name, new_ino, FT_DIR, tx)
     }
 
-    /// Detach the dentry only. Block and inode freeing is deferred to
-    /// `evict_inode`, which the VFS calls on the final `Arc<VfsInode>` drop.
-    /// This is the Linux model: unlink removes the name but leaves data
-    /// reachable by already-open fds and live mmap mappings.
+    /// Detach the dentry. For a regular file, block and inode freeing is
+    /// deferred to `evict_inode`, which the VFS calls on the final
+    /// `Arc<VfsInode>` drop. This is the Linux model: unlink removes the name
+    /// but leaves data reachable by already-open fds and live mmap mappings.
+    ///
+    /// A symbolic link has no such deferral: `open` follows links, so no
+    /// `VfsInode` ever names the link itself and nothing would ever evict it.
+    /// Its storage is freed here, in the same transaction as the detach.
     fn remove_file_inner(
         &self,
         parent_ino: u64,
-        _file_ino: u64,
-        _file_inode: &EfsInode,
+        file_ino: u64,
+        file_inode: &EfsInode,
         name: &str,
         tx: &mut TxHandle<'_>,
     ) -> Result<(), Error> {
-        self.remove_dir_entry(parent_ino, name, tx)
+        self.remove_dir_entry(parent_ino, name, tx)?;
+        if file_inode.mode & S_IFMT == S_IFLNK {
+            self.free_file_storage(file_ino, file_inode, tx)?;
+        }
+        Ok(())
     }
 
     /// Free on-disk blocks + inode. Called from `FileSystem::evict_inode`

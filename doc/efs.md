@@ -521,6 +521,13 @@ Target paths are not null-terminated on disk in either case; length is always de
 
 **Maximum symlink length:** Limited by the filesystem's maximum file size. There is no separate smaller limit imposed by EFS.
 
+**Unlinking a symlink frees it immediately.** A regular file's inode and blocks
+survive the removal of its last name until the last open reference goes away, but
+nothing can hold a reference to a link: `open` follows it, so only the link's own
+name reaches it. Removing the directory entry and freeing the inode therefore
+happen in one transaction. An allocated `S_IFLNK` inode with no directory entry is
+a leak, and `efs-fsck` reports it as an orphan.
+
 ---
 
 ## 9. Checksums
