@@ -163,8 +163,9 @@ pub const AT_FDCWD: i64 = -100;
 /// time and `times[1]` the modification time, and `None` stamps both with the
 /// current time. Returns 0 on success and -1 on error.
 ///
-/// `dirfd` must be [`AT_FDCWD`]; relative paths resolve against the working
-/// directory. Timestamps are stored to whole seconds.
+/// A relative path resolves against the directory descriptor `dirfd`, or the
+/// working directory for [`AT_FDCWD`]. Timestamps are stored to whole seconds,
+/// and `flags` must be 0.
 pub fn utimensat(dirfd: i64, path: &str, times: Option<&[Timespec; 2]>, flags: u64) -> i64 {
     let times_ptr = times.map(|t| t.as_ptr() as u64).unwrap_or(0);
     unsafe {
@@ -250,6 +251,70 @@ pub fn stat(path: &str) -> Option<Stat> {
         ) as i64
     };
     if rc == 0 { Some(out) } else { None }
+}
+
+/// Stat a path relative to the directory descriptor `dirfd`. An absolute path
+/// ignores `dirfd`, and [`AT_FDCWD`] names the working directory. `flags` must
+/// be 0: the walk always follows symbolic links, so `AT_SYMLINK_NOFOLLOW` is
+/// refused rather than quietly ignored.
+pub fn fstatat(dirfd: i64, path: &str, flags: u64) -> Option<Stat> {
+    let mut out = Stat::default();
+    let rc = unsafe {
+        sys::syscall5(
+            sys::SYS_FSTATAT,
+            dirfd as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            &mut out as *mut Stat as u64,
+            flags,
+        ) as i64
+    };
+    if rc == 0 { Some(out) } else { None }
+}
+
+/// Open a file relative to the directory descriptor `dirfd`. An absolute path
+/// ignores `dirfd`, and [`AT_FDCWD`] names the working directory. `flags` are
+/// [`open`]'s. Returns a file descriptor, or negative on error.
+pub fn openat(dirfd: i64, path: &str, flags: u64) -> i64 {
+    unsafe {
+        sys::syscall4(
+            sys::SYS_OPENAT,
+            dirfd as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            flags,
+        ) as i64
+    }
+}
+
+/// Create a directory relative to the directory descriptor `dirfd`. Returns 0
+/// on success and -1 on error.
+pub fn mkdirat(dirfd: i64, path: &str) -> i64 {
+    unsafe {
+        sys::syscall3(
+            sys::SYS_MKDIRAT,
+            dirfd as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+        ) as i64
+    }
+}
+
+/// `flags` bit making [`unlinkat`] remove an empty directory instead of a file.
+pub const AT_REMOVEDIR: u64 = 0x200;
+
+/// Remove a file, or with [`AT_REMOVEDIR`] an empty directory, relative to the
+/// directory descriptor `dirfd`. Returns 0 on success and -1 on error.
+pub fn unlinkat(dirfd: i64, path: &str, flags: u64) -> i64 {
+    unsafe {
+        sys::syscall4(
+            sys::SYS_UNLINKAT,
+            dirfd as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            flags,
+        ) as i64
+    }
 }
 
 /// Read from a file descriptor using a raw syscall.

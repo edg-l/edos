@@ -36,9 +36,10 @@ use crate::{
     println, ranked_lock,
     syscalls::{
         fs::{
-            FstatEntry, UserTimespec, sys_access, sys_fstat, sys_list_mounts, sys_list_partitions,
-            sys_mkdir, sys_mount, sys_readlink, sys_rmdir, sys_rmdir_all, sys_stat, sys_symlink,
-            sys_truncate, sys_unlink, sys_utimensat,
+            FstatEntry, UserTimespec, sys_access, sys_fstat, sys_fstatat, sys_list_mounts,
+            sys_list_partitions, sys_mkdir, sys_mkdirat, sys_mount, sys_readlink, sys_rmdir,
+            sys_rmdir_all, sys_stat, sys_symlink, sys_truncate, sys_unlink, sys_unlinkat,
+            sys_utimensat,
         },
         io::{
             SelectFd, sys_chdir, sys_close, sys_getcwd, sys_getrandom, sys_list_dir, sys_open,
@@ -317,6 +318,10 @@ const SYS_LSEEK: u64 = 12;
 const SYS_FTRUNCATE: u64 = 13;
 const SYS_TRUNCATE: u64 = 76; // resize a file named by path
 const SYS_UTIMENSAT: u64 = 280; // stamp a file's access and modification times
+const SYS_OPENAT: u64 = 257; // open relative to a directory descriptor
+const SYS_MKDIRAT: u64 = 258; // create a directory relative to a directory descriptor
+const SYS_FSTATAT: u64 = 262; // stat relative to a directory descriptor
+const SYS_UNLINKAT: u64 = 263; // remove a file or directory relative to one
 const SYS_SYMLINK: u64 = 88; // create a symbolic link
 const SYS_READLINK: u64 = 89; // read a symbolic link's target
 const SYS_FSYNC: u64 = 14;
@@ -554,6 +559,34 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let buf = ctx.rdx as *mut u8;
             let buf_len = ctx.r10 as usize;
             ctx.rax = sys_readlink(path_ptr, path_len, buf, buf_len) as u64;
+        }
+        SYS_OPENAT => {
+            let dirfd = ctx.rdi as i64;
+            let path_ptr = ctx.rsi as *const u8;
+            let path_len = ctx.rdx as usize;
+            let flags = ctx.r10;
+            ctx.rax = io::sys_openat(dirfd, path_ptr, path_len, flags) as u64;
+        }
+        SYS_MKDIRAT => {
+            let dirfd = ctx.rdi as i64;
+            let path_ptr = ctx.rsi as *const u8;
+            let path_len = ctx.rdx as usize;
+            ctx.rax = sys_mkdirat(dirfd, path_ptr, path_len) as u64;
+        }
+        SYS_UNLINKAT => {
+            let dirfd = ctx.rdi as i64;
+            let path_ptr = ctx.rsi as *const u8;
+            let path_len = ctx.rdx as usize;
+            let flags = ctx.r10;
+            ctx.rax = sys_unlinkat(dirfd, path_ptr, path_len, flags) as u64;
+        }
+        SYS_FSTATAT => {
+            let dirfd = ctx.rdi as i64;
+            let path_ptr = ctx.rsi as *const u8;
+            let path_len = ctx.rdx as usize;
+            let fstat_buf = ctx.r10 as *mut FstatEntry;
+            let flags = ctx.r8;
+            ctx.rax = sys_fstatat(dirfd, path_ptr, path_len, fstat_buf, flags) as u64;
         }
         SYS_UTIMENSAT => {
             let dirfd = ctx.rdi as i64;

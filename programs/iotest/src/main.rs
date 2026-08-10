@@ -426,9 +426,11 @@ fn test9(dir: &str) {
         fail(9, "UTIME_NOW did not move the access time forward");
     }
 
-    // A bad dirfd, an undefined flag and a missing path are all refused.
-    if utimensat(3, &path, None, 0) == 0 {
-        fail(9, "utimensat accepted a dirfd other than AT_FDCWD");
+    // A bad dirfd, an undefined flag and a missing path are all refused. An
+    // absolute path ignores dirfd, so the bad one has to be paired with a
+    // relative name to be reached at all.
+    if utimensat(4242, "iotest_t9.dat", None, 0) == 0 {
+        fail(9, "utimensat accepted a closed dirfd");
     }
     if utimensat(AT_FDCWD, &path, None, 0x4000) == 0 {
         fail(9, "utimensat accepted an undefined flag");
@@ -678,6 +680,107 @@ fn test12(dir: &str) {
     );
 }
 
+// -----------------------------------------------------------------------
+// Test 13: the *at family resolves against a directory descriptor
+// -----------------------------------------------------------------------
+fn test13(dir: &str) {
+    use edos_lib::io::{AT_REMOVEDIR, fstatat, mkdirat, open, openat, unlinkat};
+    use edos_lib::process::close;
+
+    let base = format!("{}/iotest_t13", dir);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir(&base).unwrap_or_else(|e| fail(13, &format!("create dir: {}", e)));
+
+    let dirfd = open(&base, 0);
+    if dirfd < 0 {
+        fail(13, "cannot open a directory as a descriptor");
+    }
+    let dirfd = dirfd as u64;
+
+    // A relative name resolves against the descriptor, not the working
+    // directory, so the file lands inside `base`.
+    let fd = openat(dirfd as i64, "made", 0x40 | 1);
+    if fd < 0 {
+        fail(13, "openat with O_CREAT failed");
+    }
+    if pwrite(fd as u64, b"at", 0) != 2 {
+        fail(13, "write through an openat descriptor failed");
+    }
+    close(fd as u64);
+
+    match fstatat(dirfd as i64, "made", 0) {
+        Some(st) if st.size == 2 => {}
+        Some(st) => fail(13, &format!("fstatat reported {} bytes, want 2", st.size)),
+        None => fail(13, "fstatat cannot see the file openat created"),
+    }
+    if fs::read(format!("{}/made", base)).unwrap_or_default() != b"at" {
+        fail(13, "openat resolved against the wrong directory");
+    }
+
+    // An absolute path ignores dirfd entirely.
+    let abs = format!("{}/made", base);
+    let fd = openat(dirfd as i64, &abs, 0);
+    if fd < 0 {
+        fail(13, "openat refused an absolute path");
+    }
+    let mut buf = [0u8; 2];
+    if pread(fd as u64, &mut buf, 0) != 2 || &buf != b"at" {
+        fail(13, "read back the wrong contents through openat");
+    }
+    close(fd as u64);
+
+    if mkdirat(dirfd as i64, "sub") != 0 {
+        fail(13, "mkdirat failed");
+    }
+    match fstatat(dirfd as i64, "sub", 0) {
+        Some(st) if st.kind == 1 => {}
+        _ => fail(13, "mkdirat did not create a directory"),
+    }
+
+    // AT_REMOVEDIR is the rmdir/unlink switch, and each refuses the other's
+    // kind rather than removing it.
+    if unlinkat(dirfd as i64, "sub", 0) == 0 {
+        fail(13, "unlinkat without AT_REMOVEDIR removed a directory");
+    }
+    if unlinkat(dirfd as i64, "sub", AT_REMOVEDIR) != 0 {
+        fail(13, "unlinkat with AT_REMOVEDIR failed");
+    }
+    if unlinkat(dirfd as i64, "made", 0) != 0 {
+        fail(13, "unlinkat failed to remove a file");
+    }
+    if fstatat(dirfd as i64, "made", 0).is_some() {
+        fail(13, "the file survived unlinkat");
+    }
+
+    // A descriptor that is not a directory, and one that is not open at all,
+    // are both refused; AT_FDCWD keeps the working-directory meaning.
+    let filefd = open(&format!("{}/plain", base), 0x40 | 1);
+    if filefd < 0 {
+        fail(13, "cannot create a plain file");
+    }
+    if openat(filefd, "x", 0) != -1 {
+        fail(13, "openat accepted a descriptor that is not a directory");
+    }
+    close(filefd as u64);
+    if openat(4242, "x", 0) != -1 {
+        fail(13, "openat accepted a closed descriptor");
+    }
+    if fstatat(AT_FDCWD, &base, 0).is_none() {
+        fail(13, "fstatat with AT_FDCWD cannot see an absolute path");
+    }
+    // AT_SYMLINK_NOFOLLOW cannot be honoured, so it is refused, not ignored.
+    if fstatat(AT_FDCWD, &base, 0x100).is_some() {
+        fail(13, "fstatat accepted a flag it cannot honour");
+    }
+
+    close(dirfd);
+    let _ = fs::remove_dir_all(&base);
+    pass(
+        13,
+        "openat/mkdirat/unlinkat/fstatat resolve against a directory descriptor",
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -695,6 +798,7 @@ fn main() {
     test10(dir);
     test11();
     test12(dir);
+    test13(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

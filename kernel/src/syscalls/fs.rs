@@ -56,6 +56,67 @@ pub(super) fn read_user_path_with_len(
     resolve_path(path_str, cwd).map_err(|_| Errno::EINVAL)
 }
 
+/// `dirfd` naming the calling process's working directory.
+pub(super) const AT_FDCWD: i64 = -100;
+
+/// Resolve a user path the way the `*at` family does: an absolute path ignores
+/// `dirfd`, `AT_FDCWD` resolves against the working directory, and any other
+/// value must be a descriptor open on a directory.
+///
+/// Enables interrupts before checking that a descriptor names a directory,
+/// since that check walks the filesystem. Every caller enables them for the
+/// operation itself anyway.
+pub(super) fn read_user_path_at(
+    dirfd: i64,
+    path_ptr: *const u8,
+    path_len: usize,
+) -> Result<Path, Errno> {
+    if path_ptr.is_null() {
+        return Err(Errno::EFAULT);
+    }
+    if path_len == 0 || path_len > MAX_PATH_LEN {
+        return Err(Errno::EINVAL);
+    }
+
+    let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
+    if !unsafe { try_copy_from_user(buf.as_mut_ptr(), path_ptr, path_len) } {
+        return Err(Errno::EFAULT);
+    }
+    let path_str = core::str::from_utf8(&buf[..path_len]).map_err(|_| Errno::EINVAL)?;
+
+    if path_str.starts_with('/') || dirfd == AT_FDCWD {
+        let info = current_thread_info();
+        let cwd = current_cwd(&info);
+        return resolve_path(path_str, &cwd).map_err(|_| Errno::EINVAL);
+    }
+
+    let base = at_dir_path(dirfd)?;
+    Ok(base.join(path_str).normalize())
+}
+
+/// The directory a `*at` descriptor names.
+fn at_dir_path(dirfd: i64) -> Result<Path, Errno> {
+    if dirfd < 0 {
+        return Err(Errno::EBADF);
+    }
+
+    let info = current_thread_info();
+    let fd_table = info.lock().fd_table.clone();
+    let base = match fd_table.lock().get_fd(dirfd as u64) {
+        Some(FileDescriptor::FsFile(file)) => file.path.clone(),
+        Some(_) => return Err(Errno::ENOTDIR),
+        None => return Err(Errno::EBADF),
+    };
+
+    interrupts::enable();
+
+    match file_info(&base) {
+        Ok(finfo) if finfo.kind == FileKind::Directory => Ok(base),
+        Ok(_) => Err(Errno::ENOTDIR),
+        Err(err) => Err(Errno::from(err)),
+    }
+}
+
 fn read_user_str(value_ptr: *const u8) -> Result<CString, Errno> {
     if value_ptr.is_null() {
         return Err(Errno::EFAULT);
@@ -274,6 +335,74 @@ pub fn sys_unlink(path_ptr: *const u8) -> i64 {
     interrupts::enable();
 
     match remove_file(&path) {
+        Ok(_) => 0,
+        Err(err) => {
+            info.lock().errno = Errno::from(err);
+            -1
+        }
+    }
+}
+
+/// `flags` bit selecting `rmdir` semantics, as in Linux `<fcntl.h>`.
+const AT_REMOVEDIR: u64 = 0x200;
+
+/// mkdirat(dirfd, path, path_len) -> 0 on success, -1 on error
+///
+/// No `mode` argument: EDOS carries no permission bits, so one would be a
+/// value nothing could observe.
+pub fn sys_mkdirat(dirfd: i64, path_ptr: *const u8, path_len: usize) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
+        Ok(path) => path,
+        Err(errno) => {
+            info.lock().errno = errno;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    match create_dir(&path) {
+        Ok(_) => 0,
+        Err(err) => {
+            info.lock().errno = Errno::from(err);
+            -1
+        }
+    }
+}
+
+/// unlinkat(dirfd, path, path_len, flags) -> 0 on success, -1 on error
+///
+/// `AT_REMOVEDIR` removes an empty directory instead of a file; no other flag
+/// is defined.
+pub fn sys_unlinkat(dirfd: i64, path_ptr: *const u8, path_len: usize, flags: u64) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if flags & !AT_REMOVEDIR != 0 {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
+    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
+        Ok(path) => path,
+        Err(errno) => {
+            info.lock().errno = errno;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    let result = if flags & AT_REMOVEDIR != 0 {
+        remove_dir(&path)
+    } else {
+        remove_file(&path)
+    };
+
+    match result {
         Ok(_) => 0,
         Err(err) => {
             info.lock().errno = Errno::from(err);
@@ -536,6 +665,21 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
 }
 
 pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut FstatEntry) -> i64 {
+    sys_fstatat(AT_FDCWD, path_ptr, path_len, fstat_buf, 0)
+}
+
+/// fstatat(dirfd, path, path_len, statbuf, flags) -> 0 on success, -1 on error
+///
+/// `flags` must be 0: `file_info` resolves through symbolic links, so
+/// `AT_SYMLINK_NOFOLLOW` cannot be honoured and is refused rather than quietly
+/// ignored. `readlink` is what reports on the link itself.
+pub fn sys_fstatat(
+    dirfd: i64,
+    path_ptr: *const u8,
+    path_len: usize,
+    fstat_buf: *mut FstatEntry,
+    flags: u64,
+) -> i64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
@@ -543,10 +687,12 @@ pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut FstatEntry
         info.lock().errno = Errno::EFAULT;
         return -1;
     }
+    if flags != 0 {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
 
-    let cwd = current_cwd(&info);
-
-    let path = match read_user_path_with_len(path_ptr, path_len, &cwd) {
+    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
         Ok(p) => p,
         Err(err) => {
             info.lock().errno = err;
@@ -768,18 +914,12 @@ pub struct UserTimespec {
 const UTIME_NOW: i64 = (1 << 30) - 1;
 const UTIME_OMIT: i64 = (1 << 30) - 2;
 
-/// `dirfd` naming the calling process's working directory.
-const AT_FDCWD: i64 = -100;
-
 /// utimensat(dirfd, path, path_len, times, flags) -> 0 on success, -1 on error
 ///
 /// `times` points at two `timespec`s, access then modification; a null pointer
 /// stamps both with the current time. `UTIME_NOW` and `UTIME_OMIT` in `tv_nsec`
 /// have their POSIX meanings. Timestamps are stored to whole seconds, so
 /// `tv_nsec` is otherwise dropped.
-///
-/// `dirfd` must be `AT_FDCWD`: relative resolution against an open directory
-/// arrives with the rest of the `*at` family.
 pub fn sys_utimensat(
     dirfd: i64,
     path_ptr: *const u8,
@@ -790,10 +930,6 @@ pub fn sys_utimensat(
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    if dirfd != AT_FDCWD {
-        info.lock().errno = Errno::EBADF;
-        return -1;
-    }
     // `set_times` resolves through symbolic links, so a request not to follow
     // one cannot be honoured and is refused rather than quietly ignored.
     if flags != 0 {
@@ -801,8 +937,7 @@ pub fn sys_utimensat(
         return -1;
     }
 
-    let cwd = current_cwd(&info);
-    let path = match read_user_path_with_len(path_ptr, path_len, &cwd) {
+    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
         Ok(p) => p,
         Err(err) => {
             info.lock().errno = err;

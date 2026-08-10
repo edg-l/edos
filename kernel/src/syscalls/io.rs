@@ -861,6 +861,30 @@ pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
         }
     };
 
+    open_resolved(&info, path, flags)
+}
+
+/// openat(dirfd, path, path_len, flags) -> fd, or -1 on error
+///
+/// The `*at` form of `open`, taking the path as pointer plus length rather
+/// than NUL-terminated. `flags` are `open`'s.
+pub fn sys_openat(dirfd: i64, path_ptr: *const u8, path_len: usize, flags: u64) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let path = match super::fs::read_user_path_at(dirfd, path_ptr, path_len) {
+        Ok(path) => path,
+        Err(err) => {
+            info.lock().errno = err;
+            return -1;
+        }
+    };
+
+    open_resolved(&info, path, flags)
+}
+
+/// Open an already-resolved absolute path, shared by `open` and `openat`.
+fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64) -> i64 {
     // Verify file exists; support create flag.
     // O_APPEND offset is determined per-write by vfs::write, not at open time.
     let append = (flags & 0x400) != 0; // O_APPEND
