@@ -10,9 +10,10 @@
 use std::time::Duration;
 
 use edos_render::metrics::{space, CONTROL_HEIGHT, TEXT_CELL_HEIGHT};
-use edos_render::widgets::layout::{Alignment, HBoxLayout, Insets, VBoxLayout};
+use edos_render::widgets::layout::{Alignment, HBoxLayout, Insets, SizePolicy, VBoxLayout};
 use edos_render::widgets::{
-    Button, Checkbox, Label, Rect, Slider, TextInput, Widget, WidgetContainer, WidgetEvent,
+    char_width, Button, Checkbox, Label, Rect, Slider, TextInput, Widget, WidgetContainer,
+    WidgetEvent, WidgetId,
 };
 use edos_render::window::{Window, WindowEvent, WindowEventType};
 
@@ -28,8 +29,12 @@ const WIN_W: u32 = 450;
 const WIN_H: u32 = 450;
 const CONTENT_X: i32 = MARGIN as i32;
 const CONTENT_W: u32 = WIN_W - MARGIN * 2;
+/// Width of the section-label column. Every row's label is sized to this, so
+/// the controls beside them start at one column instead of wherever each
+/// label's own text happens to end. Clears the longest label, "Brightness:".
+const LABEL_W: u32 = space(24);
 /// Left edge of anything that hangs under a section label.
-const INDENT_X: i32 = CONTENT_X + space(20) as i32;
+const INDENT_X: i32 = CONTENT_X + (LABEL_W + GROUP_GAP) as i32;
 
 /// Top of the row that follows one starting at `y`.
 const fn row_after(y: i32, gap: u32) -> i32 {
@@ -58,6 +63,14 @@ const ROW_FOOTER: i32 = row_after(ROW_STATUS, ROW_GAP);
 
 /// Width of a slider row's control column, leaving room for its value readout.
 const SLIDER_ROW_W: u32 = 300;
+
+/// Put a section label in the shared label column, so the controls beside it
+/// start at `INDENT_X` whatever the label says.
+fn add_section_label(row: &mut HBoxLayout, label: WidgetId) {
+    row.add(label)
+        .set_width(SizePolicy::Fixed(LABEL_W))
+        .set_alignment(Alignment::center_left());
+}
 
 fn main() {
     // Create a window for the widget demo
@@ -126,9 +139,7 @@ fn main() {
     let mut button_row = HBoxLayout::new();
     button_row.set_spacing(GROUP_GAP);
     button_row.set_bounds(Rect::new(CONTENT_X, ROW_BUTTONS, CONTENT_W, ROW_H));
-    button_row
-        .add(btn_label)
-        .set_alignment(Alignment::center_left());
+    add_section_label(&mut button_row, btn_label);
     button_row.add(btn_hello);
     button_row.add(btn_count);
     button_row.add(btn_reset);
@@ -136,11 +147,9 @@ fn main() {
 
     // Input row
     let mut input_row = HBoxLayout::new();
-    input_row.set_spacing(ROW_GAP);
+    input_row.set_spacing(GROUP_GAP);
     input_row.set_bounds(Rect::new(CONTENT_X, ROW_INPUT, CONTENT_W, ROW_H));
-    input_row
-        .add(input_label)
-        .set_alignment(Alignment::center_left());
+    add_section_label(&mut input_row, input_label);
     input_row.add(input_name);
     input_row.add(btn_greet);
 
@@ -148,52 +157,47 @@ fn main() {
     let mut chk_row1 = HBoxLayout::new();
     chk_row1.set_spacing(GROUP_GAP);
     chk_row1.set_bounds(Rect::new(CONTENT_X, ROW_CHK1, CONTENT_W, ROW_H));
-    chk_row1
-        .add(chk_label)
-        .set_alignment(Alignment::center_left());
+    add_section_label(&mut chk_row1, chk_label);
     chk_row1.add(chk_sound);
     chk_row1.add(chk_auto);
     chk_row1.add_stretch(1.0);
 
     let mut chk_row2 = HBoxLayout::new();
     chk_row2.set_spacing(GROUP_GAP);
-    chk_row2.set_bounds(Rect::new(INDENT_X, ROW_CHK2, CONTENT_W - space(20), ROW_H));
+    chk_row2.set_bounds(Rect::new(
+        INDENT_X,
+        ROW_CHK2,
+        CONTENT_W - (LABEL_W + GROUP_GAP),
+        ROW_H,
+    ));
     chk_row2.add(chk_dark);
     chk_row2.add(chk_notify);
     chk_row2.add_stretch(1.0);
 
     // Slider rows
     let mut vol_row = HBoxLayout::new();
-    vol_row.set_spacing(ROW_GAP);
+    vol_row.set_spacing(GROUP_GAP);
     vol_row.set_bounds(Rect::new(CONTENT_X, ROW_VOLUME, SLIDER_ROW_W, ROW_H));
-    vol_row
-        .add(vol_label)
-        .set_alignment(Alignment::center_left());
+    add_section_label(&mut vol_row, vol_label);
     vol_row.add(slider_vol);
 
     let mut bright_row = HBoxLayout::new();
-    bright_row.set_spacing(ROW_GAP);
+    bright_row.set_spacing(GROUP_GAP);
     bright_row.set_bounds(Rect::new(CONTENT_X, ROW_BRIGHTNESS, SLIDER_ROW_W, ROW_H));
-    bright_row
-        .add(bright_label)
-        .set_alignment(Alignment::center_left());
+    add_section_label(&mut bright_row, bright_label);
     bright_row.add(slider_bright);
 
     let mut speed_row = HBoxLayout::new();
-    speed_row.set_spacing(ROW_GAP);
+    speed_row.set_spacing(GROUP_GAP);
     speed_row.set_bounds(Rect::new(CONTENT_X, ROW_SPEED, SLIDER_ROW_W, ROW_H));
-    speed_row
-        .add(speed_label)
-        .set_alignment(Alignment::center_left());
+    add_section_label(&mut speed_row, speed_label);
     speed_row.add(slider_speed);
 
     // Status row
     let mut status_row = HBoxLayout::new();
-    status_row.set_spacing(ROW_GAP);
+    status_row.set_spacing(GROUP_GAP);
     status_row.set_bounds(Rect::new(CONTENT_X, ROW_STATUS, CONTENT_W, ROW_H));
-    status_row
-        .add(status_label)
-        .set_alignment(Alignment::center_left());
+    add_section_label(&mut status_row, status_label);
 
     // Apply all layouts
     main_layout.layout(&mut widgets);
@@ -359,8 +363,8 @@ fn main() {
 
             // Draw click count, right-aligned on the status row
             let count_text = format!("Clicks: {}", click_count);
-            let count_x =
-                CONTENT_X + CONTENT_W as i32 - (count_text.chars().count() as u32 * 8) as i32;
+            let count_x = CONTENT_X + CONTENT_W as i32
+                - (count_text.chars().count() as u32 * char_width()) as i32;
             Label::new(0, count_x, row_text_y(ROW_STATUS), &count_text).draw(buf, w, h);
 
             // Draw separator lines
