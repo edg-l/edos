@@ -16,7 +16,7 @@ use efs_common::{
 };
 
 mod extents;
-use extents::ExtentMap;
+use extents::{BlockRun, ExtentMap};
 
 use super::block_device::BlockDevice;
 use super::block_page_cache::BlockPageCache;
@@ -441,10 +441,6 @@ impl EfsDriver {
         count: usize,
     ) -> Result<Vec<u8>, Error> {
         let extents = self.load_extent_map(inode)?;
-        let ext_slice = extents.as_slice();
-        if ext_slice.is_empty() {
-            return Err(Error::Corrupted);
-        }
         let block_size = self.block_size() as usize;
         let spb = self.sectors_per_block();
 
@@ -452,32 +448,10 @@ impl EfsDriver {
         let mut result_pos = 0usize;
         let mut remaining = count;
         let mut cur_byte = byte_offset;
-        let mut ext_idx = 0usize;
 
         while remaining > 0 {
             let logical_block = (cur_byte / block_size) as u32;
             let offset_in_block = cur_byte % block_size;
-
-            // Find the extent covering logical_block.
-            let extent = ext_slice[ext_idx..]
-                .iter()
-                .chain(ext_slice[..ext_idx].iter())
-                .enumerate()
-                .find(|(_, e)| {
-                    e.logical_block <= logical_block
-                        && logical_block < e.logical_block + e.length as u32
-                });
-
-            let extent = match extent {
-                Some((i, e)) => {
-                    ext_idx = (ext_idx + i) % ext_slice.len();
-                    e
-                }
-                None => return Err(Error::Corrupted),
-            };
-
-            let block_within_extent = logical_block - extent.logical_block;
-            let blocks_left_in_extent = extent.length as u32 - block_within_extent;
 
             // How many contiguous blocks can we read in one shot?
             // Cap at per-slot pool size (248 pages = 992KB) per AHCI command.
@@ -485,30 +459,35 @@ impl EfsDriver {
             const MAX_BULK_BLOCKS: u32 = 248;
             let blocks_needed =
                 ((remaining + offset_in_block + block_size - 1) / block_size) as u32;
-            let bulk_blocks = blocks_needed
-                .min(blocks_left_in_extent)
-                .min(MAX_BULK_BLOCKS);
 
-            let phys_block = extent.physical_start() + block_within_extent as u64;
-            let lba = self.block_to_lba(phys_block);
-            let total_sectors = (bulk_blocks as u32 * spb as u32) as u16;
+            let run_blocks = match extents.run_at(logical_block) {
+                BlockRun::Mapped { phys, blocks } => {
+                    let bulk_blocks = blocks_needed.min(blocks).min(MAX_BULK_BLOCKS);
+                    let lba = self.block_to_lba(phys);
+                    let total_sectors = (bulk_blocks * spb as u32) as u16;
 
-            // INVARIANT: file-data reads bypass BlockDevice to avoid shredding
-            // bulk AHCI commands into per-page cache ops. The per-inode page
-            // cache owns file data — do not route through BlockPageCache.
-            let mut bulk_data = vec![0u8; total_sectors as usize * 512];
-            block_read(self.device.device_id, lba, total_sectors, &mut bulk_data)?;
+                    // INVARIANT: file-data reads bypass BlockDevice to avoid
+                    // shredding bulk AHCI commands into per-page cache ops. The
+                    // per-inode page cache owns file data — do not route
+                    // through BlockPageCache.
+                    let mut bulk_data = vec![0u8; total_sectors as usize * 512];
+                    block_read(self.device.device_id, lba, total_sectors, &mut bulk_data)?;
 
-            // Copy the useful portion into result.
-            let bulk_bytes = bulk_blocks as usize * block_size;
-            let available = bulk_bytes - offset_in_block;
-            let copy_len = remaining.min(available);
-            result[result_pos..result_pos + copy_len]
-                .copy_from_slice(&bulk_data[offset_in_block..offset_in_block + copy_len]);
+                    let bulk_bytes = bulk_blocks as usize * block_size;
+                    let copy_len = remaining.min(bulk_bytes - offset_in_block);
+                    result[result_pos..result_pos + copy_len]
+                        .copy_from_slice(&bulk_data[offset_in_block..offset_in_block + copy_len]);
+                    bulk_blocks
+                }
+                // A hole reads as zeros, which `result` already holds.
+                BlockRun::Hole { blocks } => blocks.unwrap_or(blocks_needed).min(blocks_needed),
+            };
 
-            result_pos += copy_len;
-            remaining -= copy_len;
-            cur_byte += copy_len;
+            let run_bytes = run_blocks as usize * block_size - offset_in_block;
+            let advance = remaining.min(run_bytes);
+            result_pos += advance;
+            remaining -= advance;
+            cur_byte += advance;
         }
 
         Ok(result)
@@ -2432,7 +2411,11 @@ impl PageCacheOps for EfsDriver {
 
         // Extent-based read: one page == one block (block_size == 4096).
         let extents = self.load_extent_map(&inode)?;
-        let phys_block = extents.lookup(page_index as u32).ok_or(Error::Corrupted)?;
+        // An unmapped block inside the file is a hole and reads as zeros.
+        let Some(phys_block) = extents.lookup(page_index as u32) else {
+            buf.fill(0);
+            return Ok(valid_bytes);
+        };
         let lba = self.block_to_lba(phys_block);
         let spb = self.sectors_per_block();
 

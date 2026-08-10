@@ -37,6 +37,16 @@ pub(super) struct ExtentMap {
     extents: Vec<EfsExtent>,
 }
 
+/// The contiguous run a logical block starts, as reported by
+/// [`ExtentMap::run_at`].
+pub(super) enum BlockRun {
+    /// `blocks` contiguous blocks starting at physical block `phys`.
+    Mapped { phys: u64, blocks: u32 },
+    /// Unallocated blocks, `blocks` of them before the next extent begins;
+    /// `None` when no extent follows, so the hole runs to end of file.
+    Hole { blocks: Option<u32> },
+}
+
 impl ExtentMap {
     pub fn as_slice(&self) -> &[EfsExtent] {
         &self.extents
@@ -69,6 +79,34 @@ impl ExtentMap {
             Some(e.physical_start() + (logical_block - e.logical_block) as u64)
         } else {
             None
+        }
+    }
+
+    /// What backs the run of blocks starting at `logical_block`.
+    ///
+    /// A file may have holes: `truncate` can grow a file past its last extent,
+    /// and the blocks in between are never allocated. They read as zeros.
+    pub fn run_at(&self, logical_block: u32) -> BlockRun {
+        let pos = self
+            .extents
+            .partition_point(|e| e.logical_block <= logical_block);
+
+        if pos > 0 {
+            let e = self.extents[pos - 1];
+            let end = e.logical_block + e.length as u32;
+            if logical_block < end {
+                return BlockRun::Mapped {
+                    phys: e.physical_start() + (logical_block - e.logical_block) as u64,
+                    blocks: end - logical_block,
+                };
+            }
+        }
+
+        BlockRun::Hole {
+            blocks: self
+                .extents
+                .get(pos)
+                .map(|next| next.logical_block - logical_block),
         }
     }
 

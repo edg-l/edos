@@ -55,16 +55,6 @@
   everywhere removes that allocation but changes the kernel ABI and every
   caller.
 
-- EFS cannot read back a file grown past the inline area by `truncate`. The
-  grow is sparse: no extent covers the tail, so `read_via_extents` reports
-  EINVAL for a logical block with no extent instead of returning zeros.
-  Repro: truncate a 20-byte file on /var to 5000, then read it. Holes are a
-  legitimate EFS state (truncate is the only thing that makes one today), so
-  the fix is in `read_via_extents` (kernel/src/fs/efs/mod.rs:437) — a logical
-  block with no covering extent reads as zeros, and only a block whose extent
-  names an unreadable device range is an error. iotest test 15 had a grow arm
-  for this; it was removed and belongs back once the read works.
-
 - `std::thread::sleep` still rounds every request down to whole milliseconds:
   the fork's `sys/thread/edos.rs` calls `edos_rt::process::sleep_ms`, so a
   sub-millisecond sleep returns immediately. SYS_NANOSLEEP (35) now exists and

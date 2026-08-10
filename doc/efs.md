@@ -310,6 +310,8 @@ EFS uses a tree structure to map a file's logical block offsets to physical bloc
 
 All multi-byte fields are stored **little-endian**.
 
+A logical block below the file's size need not be mapped. Such a block is a hole: it reads as zeroes and occupies no space, and it is not counted in `inode.blocks`. Growing a file with `truncate` is what creates one, since the new size is stamped without allocating the blocks it names. Writing to a hole allocates its block.
+
 ### 6.1 Extent Header (12 bytes)
 
 The extent header appears at the beginning of `data_area` in the inode and at the beginning of every extent tree node block.

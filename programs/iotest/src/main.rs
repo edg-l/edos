@@ -873,6 +873,86 @@ fn test15(dir: &str) {
     pass(15, "file length is the file, not its last page");
 }
 
+// Test 16: a file grown by truncate is sparse, and its holes read as zeros
+//
+// Growing past the last allocated block leaves blocks nobody wrote. Reading
+// one is not an error: it yields zeros, and writing into it later leaves the
+// blocks around it untouched.
+fn test16(dir: &str) {
+    const GROWN: usize = 12_000;
+    let path = format!("{}/iotest_t16.bin", dir);
+    let _ = fs::remove_file(&path);
+
+    let body: Vec<u8> = (0..20).map(pattern).collect();
+    fs::write(&path, &body).unwrap_or_else(|e| fail(16, &format!("write: {}", e)));
+
+    if truncate(&path, GROWN as u64) != 0 {
+        fail(16, "truncate to grow failed");
+    }
+
+    let len = fs::metadata(&path)
+        .unwrap_or_else(|e| fail(16, &format!("metadata: {}", e)))
+        .len();
+    if len != GROWN as u64 {
+        fail(16, &format!("metadata says {} bytes, want {}", len, GROWN));
+    }
+
+    let grown = fs::read(&path).unwrap_or_else(|e| fail(16, &format!("read grown: {}", e)));
+    if grown.len() != GROWN {
+        fail(16, &format!("read {} bytes, want {}", grown.len(), GROWN));
+    }
+    if grown[..body.len()] != body[..] {
+        fail(16, "grow lost the original contents");
+    }
+    if grown[body.len()..].iter().any(|&b| b != 0) {
+        fail(16, "a hole did not read as zeros");
+    }
+
+    // A block entirely inside the hole reads as zeros too, and reads past the
+    // new end still stop at it.
+    let f = File::open(&path).unwrap_or_else(|e| fail(16, &format!("open: {}", e)));
+    let mut mid = [0xAAu8; 512];
+    let n = pread(f.as_raw_fd() as u64, &mut mid, 8192);
+    if n != 512 || mid.iter().any(|&b| b != 0) {
+        fail(16, &format!("pread inside the hole returned {}", n));
+    }
+    let n = pread(f.as_raw_fd() as u64, &mut mid, GROWN as u64);
+    if n != 0 {
+        fail(16, &format!("pread past EOF returned {}, want 0", n));
+    }
+    drop(f);
+
+    // Filling one hole block leaves its neighbours zero.
+    let f = OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|e| fail(16, &format!("open for write: {}", e)));
+    let filled = [0x5Au8; 256];
+    if pwrite(f.as_raw_fd() as u64, &filled, 8192) != filled.len() as isize {
+        fail(16, "pwrite into a hole failed");
+    }
+    drop(f);
+
+    let after = fs::read(&path).unwrap_or_else(|e| fail(16, &format!("read after fill: {}", e)));
+    if after.len() != GROWN {
+        fail(16, &format!("fill changed the length to {}", after.len()));
+    }
+    if after[8192..8192 + filled.len()] != filled[..] {
+        fail(16, "the byte written into the hole did not come back");
+    }
+    if after[..body.len()] != body[..] {
+        fail(16, "filling a hole disturbed the first block");
+    }
+    if after[body.len()..8192].iter().any(|&b| b != 0)
+        || after[8192 + filled.len()..].iter().any(|&b| b != 0)
+    {
+        fail(16, "filling a hole disturbed the blocks around it");
+    }
+
+    let _ = fs::remove_file(&path);
+    pass(16, "a hole in a grown file reads as zeros");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -893,6 +973,7 @@ fn main() {
     test13(dir);
     test14(dir);
     test15(dir);
+    test16(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }
