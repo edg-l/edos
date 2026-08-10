@@ -31,6 +31,14 @@
   `/proc/<tid>/status` and `/proc/meminfo`: a live table with keyboard and
   pointer selection, a detail line per process, and kill behind a
   confirmation.
+- **Per-process memory in procfs** - the gap `edos-procview` ran into.
+  `/proc/processes` grows an RSS column and `/proc/<tid>/status` a `VM Size`
+  and a `Resident` line. Resident is counted from the page tables on read
+  rather than tracked in a field: a page enters a user address space from
+  demand paging, COW, mmap, shared memory and the loader and leaves from as
+  many places again, and a counter maintained at each of them drifts the first
+  time one is missed. The walk descends only into present entries, so a lazily
+  faulted mapping costs one skipped entry rather than a probe per page.
 - **fsbench** - `programs/fsbench` measures filesystem throughput and latency
   across idioms (write/read at 512B..1MiB, BufWriter, fs::write, pwrite,
   random, mmap, fsync, metadata) and three depths (memfs, raw block device,

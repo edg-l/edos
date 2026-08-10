@@ -9,7 +9,7 @@ use alloc::{
 };
 
 use crate::{
-    debug::lock_order::RANK_VMAS,
+    debug::lock_order::{RANK_USER_MM, RANK_VMAS},
     fs::{
         Error, File, FileAttrs, FileKind, FileSystem, block_page_cache::BlockPageCache, path::Path,
     },
@@ -70,16 +70,30 @@ impl Procfs {
     }
 
     fn render_process_table(entries: &[ThreadSnapshot]) -> String {
-        let mut table = String::from("PID   PPID  TYPE   STATE     PRIO CPU CPUms NAME\n");
+        let mut table = String::from("PID   PPID  TYPE   STATE     PRIO CPU CPUms RSSKiB NAME\n");
         for entry in entries {
             let ty = if entry.is_kernel { "kernel" } else { "user" };
             let state = format!("{:?}", entry.state);
             let name = entry.display_name();
             let cpu_ms = entry.cpu_time_ns / 1_000_000;
+            // A kernel thread has no address space of its own, so it reports
+            // no resident size rather than the kernel's.
+            let rss_kib = entry
+                .resident
+                .map(|bytes| format!("{}", bytes / 1024))
+                .unwrap_or_else(|| "-".to_string());
             let _ = writeln!(
                 table,
-                "{:<5} {:<5} {:<6} {:<9} {:<4} {:<3} {:>6} {}",
-                entry.tid, entry.parent, ty, state, entry.priority, entry.cpu, cpu_ms, name
+                "{:<5} {:<5} {:<6} {:<9} {:<4} {:<3} {:>6} {:>6} {}",
+                entry.tid,
+                entry.parent,
+                ty,
+                state,
+                entry.priority,
+                entry.cpu,
+                cpu_ms,
+                rss_kib,
+                name
             );
         }
         // Statuses of exited threads that nobody has collected yet. A number
@@ -504,6 +518,8 @@ struct ThreadSnapshot {
     cwd: Option<String>,
     heap_break: Option<u64>,
     vma_count: Option<usize>,
+    vm_size: Option<u64>,
+    resident: Option<u64>,
     next_mmap_addr: Option<u64>,
     errno: Option<Errno>,
 }
@@ -531,18 +547,28 @@ impl ThreadSnapshot {
         let kstack_top = thread.kstack_top;
         let is_kernel = thread.user.is_none();
 
-        let (user_pid, heap_break, vma_count) = thread
+        let (user_pid, heap_break, vma_count, vm_size, resident) = thread
             .user
             .as_ref()
             .map(|user_arc| {
                 let user = user_arc.read();
+                let (vma_count, vm_size) = {
+                    let vmas = ranked_lock!(RANK_VMAS, "user.vmas", user.vmas);
+                    (vmas.len(), vmas.iter().map(|vma| vma.size()).sum::<u64>())
+                };
+                // After the VMA set, never before: vmas is rank 70 and the
+                // memory manager 80.
+                let resident = ranked_lock!(RANK_USER_MM, "procfs::resident", user.memory_manager)
+                    .resident_bytes();
                 (
                     Some(user.pid),
                     Some(user.heap_break),
-                    Some(ranked_lock!(RANK_VMAS, "user.vmas", user.vmas).len()),
+                    Some(vma_count),
+                    Some(vm_size),
+                    Some(resident),
                 )
             })
-            .unwrap_or((None, None, None));
+            .unwrap_or((None, None, None, None, None));
 
         let (user_id, group_id, cwd, errno, next_mmap_addr) = read_thread_info(thread.id);
 
@@ -567,6 +593,8 @@ impl ThreadSnapshot {
             cwd,
             heap_break,
             vma_count,
+            vm_size,
+            resident,
             next_mmap_addr,
             errno,
         }
@@ -626,6 +654,19 @@ impl ThreadSnapshot {
             out,
             "VMAs: {}",
             display_option_decimal(self.vma_count.map(|v| v as u64))
+        );
+        // Address space asked for, then the part of it that has actually been
+        // faulted in. Almost everything here is demand-paged, so the two are
+        // far apart and only the second is memory the machine has spent.
+        let _ = writeln!(
+            out,
+            "VM Size: {} KiB",
+            display_option_decimal(self.vm_size.map(|v| v / 1024))
+        );
+        let _ = writeln!(
+            out,
+            "Resident: {} KiB",
+            display_option_decimal(self.resident.map(|v| v / 1024))
         );
         let _ = writeln!(
             out,

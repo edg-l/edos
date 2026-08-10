@@ -18,6 +18,9 @@ pub struct Process {
     /// The CPU the thread last ran on.
     pub cpu: u32,
     pub cpu_ms: u64,
+    /// Memory faulted into this thread's address space, or `None` for a kernel
+    /// thread, which has no address space of its own.
+    pub rss_kib: Option<u64>,
     pub name: String,
 }
 
@@ -53,6 +56,8 @@ pub struct Details {
     pub priority: String,
     pub affinity: String,
     pub vmas: String,
+    /// Address space reserved, against the `RSS` column's faulted-in part.
+    pub vm_size: String,
     pub cwd: String,
 }
 
@@ -93,6 +98,8 @@ fn parse_row(line: &str) -> Option<Process> {
     let _priority = fields.next()?;
     let cpu = fields.next()?.parse().ok()?;
     let cpu_ms = fields.next()?.parse().ok()?;
+    // `-` where the kernel has no address space to measure.
+    let rss_kib = fields.next()?.parse().ok();
     let name = fields.collect::<Vec<&str>>().join(" ");
 
     Some(Process {
@@ -102,6 +109,7 @@ fn parse_row(line: &str) -> Option<Process> {
         state,
         cpu,
         cpu_ms,
+        rss_kib,
         name,
     })
 }
@@ -141,6 +149,7 @@ pub fn read_details(pid: u64) -> io::Result<Details> {
         priority: field(&status, "Priority").unwrap_or("-").to_string(),
         affinity: field(&status, "CPU Affinity").unwrap_or("-").to_string(),
         vmas: field(&status, "VMAs").unwrap_or("-").to_string(),
+        vm_size: field(&status, "VM Size").unwrap_or("-").to_string(),
         cwd: field(&status, "CWD").unwrap_or("-").to_string(),
     })
 }

@@ -92,12 +92,16 @@ const COLUMNS: [Column; NCOLS] = [
         align: Align::Right,
     },
     Column {
+        title: "RSS KiB",
+        align: Align::Right,
+    },
+    Column {
         title: "NAME",
         align: Align::Left,
     },
 ];
 
-const NCOLS: usize = 7;
+const NCOLS: usize = 8;
 /// The state column, which is the one coloured by what it says.
 const STATE_COL: usize = 3;
 /// The column that absorbs the width the others leave.
@@ -126,6 +130,12 @@ impl Row {
                 process.state.clone(),
                 process.cpu.to_string(),
                 process.cpu_ms.to_string(),
+                // A kernel thread runs in whatever address space it was
+                // scheduled over, so it has no resident size to report.
+                process
+                    .rss_kib
+                    .map(|kib| kib.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
                 process.name.clone(),
             ],
         }
@@ -665,8 +675,13 @@ impl App {
     fn detail(&self) -> String {
         match (&self.details, self.selected) {
             (Some(details), _) => format!(
-                "{}   priority {}   affinity {}   vmas {}   cwd {}",
-                details.cmdline, details.priority, details.affinity, details.vmas, details.cwd
+                "{}   priority {}   affinity {}   vmas {}   vm size {}   cwd {}",
+                details.cmdline,
+                details.priority,
+                details.affinity,
+                details.vmas,
+                details.vm_size,
+                details.cwd
             ),
             (None, Some(pid)) => format!("pid {pid} has no detail to read"),
             (None, None) => "no thread selected".to_string(),

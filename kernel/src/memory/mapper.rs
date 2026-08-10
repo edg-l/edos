@@ -16,12 +16,19 @@ use crate::{
     boot::boot_info,
     debug::lock_order::{RANK_KERNEL_MAPPER, RankedGuard},
     loader::reloc::RelocTable,
-    memory::{STACK_ALIGNMENT, frame_allocator::frame_allocator, vma::VmaSet},
+    memory::{
+        STACK_ALIGNMENT,
+        frame_allocator::frame_allocator,
+        vma::{USER_VA_END, VmaSet},
+    },
     thread::irqlock::IrqLockGuard,
 };
 
 /// OS-available PTE bit used to mark copy-on-write pages.
 pub const COW_BIT: PageTableFlags = PageTableFlags::BIT_9;
+
+/// Entries in one page table at any level.
+const ENTRIES_PER_TABLE: u64 = 512;
 
 pub unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut PageTable {
     use x86_64::registers::control::Cr3;
@@ -349,6 +356,35 @@ impl MemoryManager {
         self.mapper.translate(addr)
     }
 
+    /// Bytes actually mapped into the user half of this address space.
+    ///
+    /// Counted from the page tables rather than tracked in a field, because a
+    /// page reaches a user address space from demand paging, copy-on-write,
+    /// `mmap`, shared memory and the loader, and leaves it from as many places
+    /// again; a counter maintained at each of those drifts the first time one
+    /// is missed, and a drifting number is worse than none. The walk descends
+    /// only into present entries, so the lazily faulted mappings this kernel
+    /// leans on -- a whole ELF image, a grown stack -- cost one skipped entry
+    /// each rather than a probe per page.
+    ///
+    /// A page shared with another address space is counted in both, as
+    /// `/proc/<pid>/status` on Linux counts it.
+    pub fn resident_bytes(&self) -> u64 {
+        let phys_off = boot_info().physical_memory_offset;
+        // The user half is the low PML4 entries, one per 512 GiB.
+        const PML4_ENTRY_SPAN: u64 = 512 * 1024 * 1024 * 1024;
+        self.mapper
+            .level_4_table()
+            .iter()
+            .take((USER_VA_END / PML4_ENTRY_SPAN) as usize)
+            .filter(|entry| entry.flags().contains(PageTableFlags::PRESENT))
+            .map(|entry| {
+                let pdpt = unsafe { &*(phys_off + entry.addr().as_u64()).as_ptr::<PageTable>() };
+                count_present_bytes(pdpt, PML4_ENTRY_SPAN / ENTRIES_PER_TABLE, phys_off)
+            })
+            .sum()
+    }
+
     /// Translate a virtual address mapped in this page table to a kernel HHDM pointer.
     /// If the page is not yet present and this MemoryManager has an attached VmaSet,
     /// demand-faults the page before returning the pointer.
@@ -478,6 +514,23 @@ pub fn get_page_range(addr: VirtAddr, size: u64) -> PageRangeInclusive<Size4KiB>
 /// Align a stack pointer down to the required stack alignment (16 bytes for FPU/SSE)
 pub fn align_stack_pointer(stack_ptr: VirtAddr) -> VirtAddr {
     VirtAddr::new(stack_ptr.as_u64() & !(STACK_ALIGNMENT - 1))
+}
+
+/// Bytes mapped by `table`, each of whose entries covers `entry_span` bytes:
+/// a PDPT spans 1 GiB per entry, a PD 2 MiB, a page table 4 KiB. Used by
+/// [`MemoryManager::resident_bytes`].
+fn count_present_bytes(table: &PageTable, entry_span: u64, phys_off: VirtAddr) -> u64 {
+    table
+        .iter()
+        .filter(|entry| entry.flags().contains(PageTableFlags::PRESENT))
+        .map(|entry| {
+            if entry_span == Size4KiB::SIZE || entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+                return entry_span;
+            }
+            let child = unsafe { &*(phys_off + entry.addr().as_u64()).as_ptr::<PageTable>() };
+            count_present_bytes(child, entry_span / ENTRIES_PER_TABLE, phys_off)
+        })
+        .sum()
 }
 
 /// Walk the page-table chain from `pml4` down to (but not including) the PML1
