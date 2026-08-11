@@ -1,19 +1,24 @@
 //! Measures what a `poll` call costs, split into the part that is fixed per
 //! call and the part that scales with the descriptor count.
 //!
-//! Three shapes, all with a zero timeout so no case ever sleeps:
+//! Every shape polls with a zero timeout, so no case ever sleeps:
 //!
 //! - `count == 0` returns before the kernel touches the heap or the fd table,
 //!   so it prices the syscall boundary alone and is the floor every other
 //!   number is measured against.
+//! - An invalid descriptor is answered from the fd table, which prices what a
+//!   call does once however many descriptors it carries.
 //! - Ready descriptors take the path where the device reports readiness at
 //!   registration time, so nothing is ever added to a poller list.
 //! - Idle descriptors take the path where every descriptor is pushed onto its
 //!   device's poller list and removed again before the call returns.
 //!
-//! The marginal cost per descriptor is what a per-descriptor allocation could
-//! ever hope to remove a slice of; the idle-minus-ready gap is what the poller
-//! list churn costs on its own.
+//! A bound UDP socket is polled too. It is the one descriptor kind that
+//! registers and unregisters without needing a peer, so it is what covers the
+//! socket path here rather than a networked test.
+//!
+//! It also times a clock read and a context switch, because both turned out to
+//! cost more than everything above.
 //!
 //! `-l` mirrors the report to `/dev/klog`, which is how a headless run is read.
 
@@ -21,6 +26,7 @@ use std::io::Write;
 use std::time::Instant;
 
 use edos_lib::io::{PollState, SelectFd, close, poll};
+use edos_lib::net::{self, SockAddrIn};
 use edos_lib::process::{pipe, write};
 
 const COUNTS: [usize; 5] = [1, 2, 4, 16, 64];
@@ -164,6 +170,37 @@ fn main() {
         "pollbench 1 invalid fd {invalid_ns:.0} ns, so fixed cost {:.0} ns",
         invalid_ns - floor
     ));
+
+    // A bound UDP socket with nothing to receive is never readable, so it
+    // takes the registration path: the socket keeps a poller for the length of
+    // the call and drops it again on the way out. That is the only descriptor
+    // kind needing no peer to exercise, which is what makes it worth a line
+    // here rather than a networked test.
+    match net::create_udp_socket() {
+        Ok(sock) => {
+            let addr = SockAddrIn::new([0, 0, 0, 0], 0);
+            if net::bind(sock, &addr).is_err() {
+                out.line("pollbench: could not bind a UDP socket");
+                std::process::exit(1);
+            }
+            let mut sock_fds = [SelectFd {
+                fd: sock,
+                interests: readable(),
+                result: PollState::default(),
+            }];
+            let sock_ns = time_poll(&mut sock_fds, iters);
+            if sock_fds[0].result.readable || sock_fds[0].result.invalid {
+                out.line("pollbench: an idle UDP socket reported ready or invalid");
+                std::process::exit(1);
+            }
+            out.line(&format!(
+                "pollbench 1 idle UDP socket {sock_ns:.0} ns, register and unregister {:.0} ns",
+                sock_ns - invalid_ns
+            ));
+            net::close(sock);
+        }
+        Err(()) => out.line("pollbench: could not create a UDP socket"),
+    }
 
     let max = *COUNTS.iter().max().unwrap();
 
