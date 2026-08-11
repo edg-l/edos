@@ -141,6 +141,34 @@
   window to look at is a waker publishing `wake_pending` against a parker that
   is between its last condition check and its CAS to `Parked`.
 
+- The switch path is structurally heavier than it needs to be, and this is
+  where the next round should go. Two techniques, both standard elsewhere:
+  - **A voluntary switch does not need a full register frame or an `iretq`.**
+    `save_transition_switch` builds a synthetic 160-byte `CpuContext`, copies
+    it twice under a spin `Mutex`, and `iretq`s kernel-to-kernel back to a
+    resume label. Linux's `__switch_to_asm` saves six callee-saved registers
+    (`rbp rbx r12-r15`), swaps `RSP`, and `ret`s -- the C ABI already lets a
+    call clobber the other nine, so saving them is pure cost. This is the
+    ~210 ns that `sched_yield` (433) has over the switch itself (220), plus the
+    36 ns of `CpuContext` copies. The preemption path still needs the full
+    frame; the two paths would stop sharing one representation.
+  - **A blocking IPC should hand off directly to the receiver.** A pipe round
+    trip is 4552 ns and each park/wake is 2276, against 490 for a yield
+    handover -- so the wake machinery costs about four times the switch it
+    performs. L4/seL4 answer this with a direct process switch: the sender
+    yields straight to the receiver on its own timeslice, no runqueue, no
+    scheduler invocation, with a fastpath for the case where nothing of higher
+    priority is runnable. seL4 gets 0.2-0.5 us round trips that way. Our path
+    enqueues on a runqueue, possibly sends an IPI, parks, then re-picks the
+    thread it just enqueued.
+  - Cheaper and independent: **spin briefly before parking** in `BlockingMutex`
+    and the wait queues, bounded by the measured switch cost. Standard
+    spin-then-block; LWN reports a futex microbenchmark going 35M -> 54M ops
+    with adaptive spinning.
+  Sources: kernel-internals.org/sched/context-switch (`__switch_to_asm`),
+  docs.sel4.systems/Tutorials/ipc + microkerneldude.org (direct process
+  switch, fastpath conditions), lwn.net/Articles/386536 (adaptive spinning).
+
 - Context switch: done for this round. `sched_yield` 1917 -> 433 ns, the switch
   itself 1270 -> 220, a cross-process handover 2215 -> 751, a pipe round trip
   9429 -> 4552. See `doc/WORKING-NOTES.md`. What is left, in order:

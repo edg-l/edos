@@ -72,6 +72,23 @@ before deciding it has nothing to do. Mirroring the thread's `CR3` in an
 atomic would remove the lock; there are only three sites that set it
 (`thread.rs` thread creation, `execve`, `fork`).
 
+But the bigger number is elsewhere. **A pipe round trip is 4552 ns and each
+park/wake is 2276, against 490 ns for a yield handover** — so the wake
+machinery costs about four times the switch it performs, and it is what every
+real workload here pays: a shell pipeline, the compositor, the terminal.
+Nothing has profiled it. `todo.txt` carries the two structural changes worth
+making (a minimal voluntary switch in the shape of Linux's `__switch_to_asm`,
+and an L4-style direct handoff to the receiver on a blocking IPC) with the
+sources.
+
+**PCID is not coming to this machine.** It is not an old feature — Intel has
+had it since Westmere in 2010 — but AMD did not ship it for a decade, and this
+host, a Ryzen 5 5600 (Zen 3, Vermeer), does not expose it: no `pcid` in
+`/proc/cpuinfo` (it does have `invpcid`), and `qemu -cpu qemu64,enforce,+pcid`
+refuses with "host doesn't support requested feature: CPUID.01H:ECX.pcid".
+Reporting at the time had Zen 3 adding it on the **EPYC** parts. Do not plan
+around PCID here without checking the CPU first.
+
 ## A context switch is one MSR write and a rounding error
 
 Measured on a single-CPU boot with `switchbench` (userspace, end to end) and
