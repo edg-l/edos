@@ -47,6 +47,16 @@ Both exit 0 only when the run passed. The sched-test suite reports through
 `make test` translates that, and a guest that dies before reporting a verdict is
 a failure too.
 
+**`make test` leaves a sched-test ISO behind, and it never reaches a desktop.**
+The target rebuilds `edos-x86_64.iso` with `CARGO_FLAGS="--features sched-test"`,
+and that kernel runs the suite and stops: the serial log ends at `ALL 51 TESTS
+PASSED` and the framebuffer stays black. A `make run-headless` or a
+`storage-check` right afterwards boots *that* ISO, since both take the file as
+already built, and the symptom is a guest that looks hung rather than one that
+is misconfigured. `make all` puts the normal ISO back in about three seconds
+(cargo still holds the non-feature artifact, so nothing recompiles). Run it
+before driving the guest whenever the last thing you ran was a test target.
+
 **The desktop is 1280x800, and `limine.conf` is what says so.** The bootloader
 asks the firmware for that mode and the guest keeps it, so QEMU's `xres`/`yres`
 do not decide it and neither does anything on the command line. It is the one

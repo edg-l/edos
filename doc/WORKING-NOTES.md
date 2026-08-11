@@ -26,6 +26,28 @@ Worth generalising: **a gate that cannot fail is not a gate.** Any check whose
 success is inferred from an exit code shared with the harness's own failures
 needs a positive signal from inside the guest.
 
+## The ISO `make test` leaves behind boots to a black screen
+
+Directly after a test target, `edos-x86_64.iso` is a `--features sched-test`
+build, and that kernel runs the suite and stops rather than continuing to the
+desktop. `make run-headless` and `make storage-check` both take the ISO as
+already built, so they boot it and the guest looks hung: the serial log ends at
+`ALL 51 TESTS PASSED` and every screenshot is black. `make all` restores the
+normal ISO in about three seconds, because cargo still has the non-feature
+artifact and only the image is rebuilt. This is now in `doc/vm-control.md`
+next to the test targets, which is where it will actually be read.
+
+## Pipelined readahead's 500 ms figure is stale
+
+`mmaptest` test 10 on `/var`, the number that justified pipelined readahead, is
+**12 ms on a cold boot** as of 2026-08-12, not the ~500 ms on record: `fs::copy`
+of `/bin/echo` 11 ms and `spawn+wait` 356 us, with `mmaptest /var` 11/11 in
+37 ms. Whole-file prefetch covers anything under 2 MiB and `/bin/echo` is
+329240 bytes, so the test never exercises the ramping window it was cited for.
+The idea keeps its entry for the large-file case; what it lost is its
+instrument. `doc/STORAGE-ROADMAP.md` section 1b says what to build instead and
+which counter decides it.
+
 ## Counts, remeasured 2026-08-12
 
 Every number a doc states about the size of the tree, taken rather than carried

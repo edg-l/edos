@@ -86,6 +86,31 @@ completion-side cuts in the refuted list below, both of which were neutral.
 Coalescing cannot help here — one page is one command — so this is
 per-operation work, not another run-length fix.
 
+## 1b. Pipelined readahead has no instrument that still shows a cost
+
+The pipelined-readahead idea is to fire the *next* window's I/O when the reader
+touches the last page of the current one, so the prefetch pulls ahead of the
+reader instead of trailing it. The number quoted for it was `mmaptest` test 10
+on `/var`, at about 500 ms on a first run.
+
+**Measured 2026-08-12 on a cold boot, that test is 12 ms** — `fs::copy` of
+`/bin/echo` 11 ms, `spawn+wait` 356 us, whole suite `mmaptest /var` 11/11 in
+37 ms. The gain came from two things that landed since: whole-file prefetch
+(`RA_WHOLE_FILE_MAX_PAGES`, 512 pages) turns a first sequential read of any file
+under 2 MiB into one bulk fill, and `/bin/echo` is 329240 bytes, so test 10
+never rides the ramping window at all. The old figure predates both and should
+not be quoted again.
+
+So the idea is not refuted, but nothing measures it. What survives is the
+large-file case, above the whole-file threshold, where `page_cache_read_core`
+(`fs/vfs.rs`) still extends only `window_size` pages past each request and
+submits from within the read call. Before writing any of it, build the
+instrument: a **cold** sequential read of a file several times
+`RA_MAX_PAGES` (512 KiB) — 8-16 MiB — on `/var`, reboot between arms, and
+watch `ahci_stats.ncq_max_inflight`, which is the direct read on whether the
+prefetch is ahead of the reader or behind it. A change that does not move that
+counter off 1 has not pipelined anything.
+
 ## 2. mmap fault-around
 
 A map, fault in 4 MiB, unmap cycle is 124 ms: 1024 pages at 121 us each,
