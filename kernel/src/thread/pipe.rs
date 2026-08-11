@@ -198,12 +198,6 @@ pub struct PipeNotifications {
 }
 
 impl PipeNotifications {
-    const EMPTY: Self = Self {
-        entries: heapless::Vec::new(),
-        state: PollState::none(),
-        reader_wq: None,
-    };
-
     /// Send notifications. Call this after dropping the pipe lock.
     pub fn flush(self) {
         for entry in &self.entries {

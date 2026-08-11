@@ -45,7 +45,9 @@ pub struct VfsInode {
     pub mount_id: usize,
     /// Filesystem-local inode number (EFS ino, FAT32 start cluster, memfs node id).
     pub ino: u64,
-    /// Cached file kind (file, directory, special).
+    /// Cached file kind (file, directory, special). Part of the identity the
+    /// inode is created with; readers go through the filesystem's own lookup.
+    #[allow(dead_code)]
     pub kind: FileKind,
     /// Per-inode read-write lock.
     pub lock: BlockingRwLock<()>,

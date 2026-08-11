@@ -242,43 +242,6 @@ impl InodePages {
         }
     }
 
-    /// Flush all dirty pages via `flush_fn`. The per-inode lock is NOT held
-    /// during I/O, but the final `clear_dirty` + `dirty_keys` removal is
-    /// performed atomically (both under `dirty_keys` lock) so that a
-    /// concurrent `mark_dirty` either (a) runs entirely before this section
-    /// — key removal eats its push but the flag re-set ensures the next
-    /// flush round picks it up via the still-true flag replayed through
-    /// mark_dirty on the next writer call — or (b) runs entirely after,
-    /// with both flag-set and key-push preserved. Either way no dirty
-    /// page ends up without both a set `dirty` flag AND a `dirty_keys`
-    /// entry pointing at it.
-    pub fn flush_dirty(
-        &self,
-        mut flush_fn: impl FnMut(u64, &[u8]) -> Result<(), Error>,
-    ) -> Result<(), Error> {
-        let dirty: Vec<(u64, Arc<CachedPage>)> = {
-            let map = ranked_lock!(RANK_PAGES, "InodePages.pages", self.pages);
-            let dk = ranked_lock!(RANK_DIRTY_KEYS, "InodePages.dirty_keys", self.dirty_keys);
-            dk.iter()
-                .filter_map(|&idx| map.get(&idx).map(|p| (idx, Arc::clone(p))))
-                .collect()
-        };
-
-        for (idx, page) in &dirty {
-            page.pin();
-            let result = flush_fn(*idx, unsafe { page.as_slice() });
-            page.unpin();
-            result?;
-            // Clear the flag and remove the key atomically under the
-            // dirty_keys lock, so a concurrent mark_dirty cannot race
-            // in between and lose the dirty state.
-            let mut dk = ranked_lock!(RANK_DIRTY_KEYS, "InodePages.dirty_keys", self.dirty_keys);
-            page.clear_dirty();
-            dk.retain(|k| k != idx);
-        }
-        Ok(())
-    }
-
     /// Flush all dirty pages via `flush_fn` with all-or-nothing semantics.
     ///
     /// **Semantics differ from `flush_dirty`**: `flush_dirty` clears dirty flags

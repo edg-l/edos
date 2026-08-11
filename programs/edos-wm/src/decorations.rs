@@ -133,11 +133,6 @@ pub fn button_at(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> Opti
         })
 }
 
-/// Check if a point is within the close button area of a window.
-fn is_in_close_button(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> bool {
-    button_at(window, screen_x, screen_y) == Some(BUTTON_CLOSE)
-}
-
 /// Check if a point is within the title bar (for dragging).
 fn is_in_title_bar(window: &WindowListEntry, screen_x: i32, screen_y: i32) -> bool {
     let win_x = window.x as i64;

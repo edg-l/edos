@@ -32,6 +32,8 @@ const PROT_EXEC: u32 = 0x4;
 // Mapping flags
 pub const MAP_SHARED: u32 = 0x01;
 pub const MAP_PRIVATE: u32 = 0x02;
+/// Unimplemented: the kernel always picks the range for a hinted address.
+#[allow(dead_code)]
 pub const MAP_FIXED: u32 = 0x10;
 pub const MAP_ANONYMOUS: u32 = 0x20;
 pub const MAP_PHYSICAL: u32 = 0x40;
@@ -40,6 +42,8 @@ pub const MAP_WRITE_COMBINING: u32 = 0x80;
 // msync flags
 pub const MS_ASYNC: u32 = 0x1;
 pub const MS_SYNC: u32 = 0x2;
+/// Unimplemented: there is no second cache of a mapping to invalidate.
+#[allow(dead_code)]
 pub const MS_INVALIDATE: u32 = 0x4;
 
 /// Places a VMA and returns the address it covers, or `None` after setting

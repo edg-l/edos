@@ -57,7 +57,12 @@ pub struct FaultInfo {
 /// alone does not say whether the mapping was missing, the permissions were
 /// wrong, or the filesystem could not produce the page. The kill path prints
 /// this so the log names the cause.
+///
+/// The payload fields are read only through the derived `Debug` in that line,
+/// which the dead-code lint does not count as a read; they are the first thing
+/// to look at when a fault kills a process.
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 pub enum FaultReject {
     /// A protection violation, which belongs to the COW handler.
     Protection,

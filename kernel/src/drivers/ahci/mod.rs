@@ -64,8 +64,6 @@ pub enum AhciError {
     CommandTimeout,
     #[error("i/o error")]
     IoError,
-    #[error("invalid command slot")]
-    InvalidSlot,
     #[error("device is read-only")]
     ReadOnly,
 }

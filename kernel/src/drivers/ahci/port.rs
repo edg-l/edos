@@ -2128,7 +2128,7 @@ fn ahci_err_to_block(e: AhciError) -> BlockError {
         AhciError::CommandTimeout => BlockError::Timeout,
         AhciError::InvalidDevice | AhciError::PortNotReady => BlockError::DeviceGone,
         AhciError::DmaError(_) => BlockError::NoMemory,
-        AhciError::InvalidSlot | AhciError::ReadOnly => BlockError::InvalidArg,
+        AhciError::ReadOnly => BlockError::InvalidArg,
         AhciError::IoError => BlockError::Io,
     }
 }

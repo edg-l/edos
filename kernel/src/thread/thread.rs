@@ -779,6 +779,7 @@ impl Thread {
     /// is already running takes effect at its next placement rather than
     /// immediately. Set it before publishing the thread when the first
     /// placement has to honour it.
+    #[cfg_attr(not(feature = "sched-test"), allow(dead_code))]
     pub fn set_affinity_mask(&self, mask: u32) {
         self.cpu_affinity.store(mask, Ordering::Release);
         self.mark_need_resched();
@@ -1467,16 +1468,6 @@ pub fn insert_thread_info(tid: ThreadId, info: Arc<IrqSpinlock<UserThreadInfo>>)
 
 pub fn allocate_thread_id() -> ThreadId {
     ThreadId(THREAD_ID_NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed))
-}
-
-/// Mark a process as killed and wake it so it can exit.
-///
-/// Sends SIGINT to the target process. The target thread will observe
-/// `killed == true` after waking from any blocking syscall (e.g. `sys_read`
-/// on a PTY slave) and return an error, causing the process to exit. One that
-/// makes no syscalls at all dies at its next timer tick out of user code.
-pub fn kill_process(pid: u64) -> bool {
-    kill_process_with_signal(pid, crate::thread::signal::SIGINT)
 }
 
 /// Send a signal to every process in group `pgid`.

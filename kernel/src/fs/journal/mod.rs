@@ -96,8 +96,6 @@ pub struct Transaction {
     pub enrolled_blocks: BTreeMap<(u64, u64), Arc<CachedBlockPage>>,
     /// Blocks to be revoked: (device_id, fs_block).
     pub revokes: BTreeSet<(u64, u64)>,
-    /// Number of ring blocks consumed when committed (set by seal_and_commit).
-    pub ring_blocks: u64,
 }
 
 impl Transaction {
@@ -107,7 +105,6 @@ impl Transaction {
             tx_id,
             enrolled_blocks: BTreeMap::new(),
             revokes: BTreeSet::new(),
-            ring_blocks: 0,
         }
     }
 

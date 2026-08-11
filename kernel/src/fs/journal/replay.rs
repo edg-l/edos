@@ -63,11 +63,11 @@ fn block_flush(device_id: u64) -> Result<(), AhciError> {
 const BLOCK_SIZE: usize = 4096;
 const SECTORS_PER_BLOCK: u16 = 8;
 
-/// Result of replay: how many transactions were applied, and the total ring
-/// blocks consumed (so the caller can initialize head_block/tail_block).
+/// Result of replay: how many transactions were applied. The ring cursors are
+/// not reported back — the journal superblock carries `head_block`, and that is
+/// what the caller resets `tail_block` to once replay has applied everything.
 pub struct ReplayResult {
     pub txs_applied: u64,
-    pub ring_blocks_consumed: u64,
 }
 
 /// Replay committed journal transactions to their home FS locations.
@@ -91,10 +91,7 @@ pub fn replay(
 ) -> Result<ReplayResult, AhciError> {
     if head_seq == tail_seq {
         log!("efs journal: clean, no replay needed");
-        return Ok(ReplayResult {
-            txs_applied: 0,
-            ring_blocks_consumed: 0,
-        });
+        return Ok(ReplayResult { txs_applied: 0 });
     }
 
     log!(
@@ -245,10 +242,7 @@ pub fn replay(
     if committed_txs.is_empty() {
         log!("efs journal: no committed transactions to replay");
         // Still reset JSB tail = head so next mount is clean.
-        return Ok(ReplayResult {
-            txs_applied: 0,
-            ring_blocks_consumed: total_ring_blocks,
-        });
+        return Ok(ReplayResult { txs_applied: 0 });
     }
 
     // ---- Pass 2: apply committed txs ----------------------------------------
@@ -291,7 +285,6 @@ pub fn replay(
 
     Ok(ReplayResult {
         txs_applied: applied,
-        ring_blocks_consumed: total_ring_blocks,
     })
 }
 
