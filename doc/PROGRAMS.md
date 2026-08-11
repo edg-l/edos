@@ -46,9 +46,9 @@ surface at all.
 ### Blocked, and on what
 
 - `chmod`, `chown` — wait on file permissions (open in engram: `engram-cli todo
-  list`). `whoami` and `id` ship: `SYS_GETUID`/`SYS_GETGID` already report the
-  ids, and naming them needs no permission model, only the fixed table in
-  `edos_lib::process::id_name` standing in for a `/etc/passwd` that does not
-  exist.
+  list`). `whoami` and `id` shipped, because they need no permission model:
+  `SYS_GETUID`/`SYS_GETGID` already report the ids, and naming them takes only
+  the fixed table in `edos_lib::process::id_name`, standing in for a
+  `/etc/passwd` that does not exist.
 - Hard links — the kernel has no concept of them, which is why `fs::hard_link`
   is one of the three deliberate `unsupported()` stubs in the std fork.

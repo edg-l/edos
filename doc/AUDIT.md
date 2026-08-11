@@ -292,7 +292,7 @@ profile.
 
 ## 3. Missing syscalls and interfaces
 
-110 syscalls exist. The conspicuous absences, roughly by how much they block real
+111 syscalls exist. The conspicuous absences, roughly by how much they block real
 programs:
 
 | Missing | Why it matters |

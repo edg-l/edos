@@ -87,8 +87,10 @@ every call in the system pays it. That is item 2.
 
 ## 1. There was no gap: it was the benchmark, and ~620 ns is what is left
 
-A blocking pipe round trip reads **2203 ns**, not the ~4900 this file reported
-for months. The difference was never the kernel.
+A blocking pipe round trip read **2203 ns**, not the ~4900 this file reported
+for months. The difference was never the kernel. Every figure in this section
+is that 2203 ns baseline; the round trip reads 2016 ns today, and the change
+that moved it is at the end of the section.
 
 `pipe_round_trip` timed one batch of 2000 trips with no warmup, while every other
 figure in `switchbench` is the best of six batches after 64 warmup iterations. A

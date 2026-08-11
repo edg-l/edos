@@ -6,6 +6,27 @@ session.
 
 ---
 
+## Counts, remeasured 2026-08-12
+
+Every number a doc states about the size of the tree, taken rather than carried
+forward. Remeasure before quoting one; the commands are here so the next reader
+does not have to invent them.
+
+| | value | how |
+|---|---|---|
+| syscalls | 111 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 111 — a mismatch is the bug |
+| userspace programs | 102 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
+| in-kernel test suite | 51 | `make test AUDIODEV=none` |
+| `iotest /var` | 19/19 | the syscall regression suite, run in the guest |
+| `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+
+The `unwrap` figure includes 11 in `thread/sched_test.rs`, which is test code and
+not worth converting. By file, the ones that would move the number are
+`drivers/usb/xhci/mod.rs` (19), `fs/efs/mod.rs` (8), `drivers/usb/hid/report.rs`
+(8), `drivers/ahci/port.rs` (8) and `acpi/mod.rs` (7). Twelve of the xhci ones
+are `Option` fields that `init()` fills, so removing them means folding `init()`
+into `find_and_init()` rather than rewriting call sites.
+
 ## Naming a uid without a passwd database
 
 `id` and `whoami` were listed as blocked on "users and file permissions", and
@@ -256,9 +277,10 @@ did not have before, and it matters: see the memset trap below.
 
 ## There was no 3-microsecond gap: it was the benchmark
 
-A blocking pipe round trip reads **2203 ns**, not the ~4900 this file and
+A blocking pipe round trip read **2203 ns**, not the ~4900 this file and
 `SCHED-ROADMAP.md` reported for months, and the 3.7 us that "nothing could
-account for" was never the kernel.
+account for" was never the kernel. Every figure below is that 2203 ns baseline;
+the round trip reads 2016 ns today, for the reason the end of this section gives.
 
 `switchbench`'s `pipe_round_trip` timed one batch of 2000 trips with no warmup,
 while every other figure it prints is the best of six batches after 64 warmup
@@ -2011,9 +2033,9 @@ feature. `key ctrl+d` is correct, as the script's own help says.
 ## The syscall table is closed, and closing it found five data-loss bugs
 
 `doc/AUDIT.md` §3 listed eight missing interfaces; all eight now exist and the
-table is down to `setuid`, which is rejected there. 101 syscalls, each with an
+table is down to `setuid`, which is rejected there. 111 syscalls, each with an
 `edos_lib` wrapper and a case in `programs/iotest` — **`iotest /var` is the
-regression suite for the whole set, and it runs 18/18.**
+regression suite for the whole set, and it runs 19/19.**
 
 The syscalls are not the interesting part. Writing them found five bugs that
 predate them, every one a silent data corruption:
