@@ -45,6 +45,7 @@ surface at all.
 
 ### Blocked, and on what
 
-- `chmod`, `chown`, `whoami` — wait on users and file permissions (`todo.txt`).
+- `chmod`, `chown`, `whoami` — wait on users and file permissions (open in
+  engram: `engram-cli todo list`).
 - Hard links — the kernel has no concept of them, which is why `fs::hard_link`
   is one of the three deliberate `unsupported()` stubs in the std fork.

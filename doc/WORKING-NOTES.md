@@ -1448,7 +1448,7 @@ this area needs poking again.
 past EOF and returns zeros to the end of the last page, so `sha256sum` of a
 file on `/tmp` hashes the padding too and never matches the host, while
 `stat` and `cat` both look right. The same file on `/var` hashes correctly.
-Recorded in `todo.txt`; verify downloads on EFS until it is fixed.
+Tracked in engram (`engram-cli todo list`); verify downloads on EFS until it is fixed.
 
 ## Fixed: a port restart stranded the op it meant to fail
 
@@ -1826,7 +1826,7 @@ also faulted the CPU and an oversized one made `read_sectors` loop forever).
 drops the count the command header's `prdbc` already carries. It is verifiable
 today with no new QEMU option: `-cdrom` on q35 lands on the ICH9 AHCI
 controller, so the guest logs `Found ATAPI device on port 2` /
-`Model: QEMU QEMU DVD-ROM` on every boot. `todo.txt` has the fix and the recipe.
+`Model: QEMU QEMU DVD-ROM` on every boot.
 
 If you add a driver that reads out of `DmaPool`, this is the first thing to
 check. `allocate_sized` does not zero, and documents why: it serves AHCI
@@ -2309,7 +2309,7 @@ fixed; the mechanisms are worth keeping.
    table maps a port to the socket that owns it, so the entry is now removed
    only when it names the socket being closed (`Arc::ptr_eq`).
 
-Two things this exposed that are **still open** (both in `todo.txt`): a segment
+Two things this exposed that are **still open** (both in engram): a segment
 is dropped outright on an ARP cache miss and never retried, so the first inbound
 connection after boot is lost; and the accept queue never drops an entry that
 never reached Connected, so every half-open SYN permanently occupies a backlog
@@ -2387,7 +2387,7 @@ slot.
   count mismatch: 499 != 500`, and a TIMEOUT with ping-pong-pong never
   reporting. It has been seen to fail **twice in a row** before passing, so a
   single clean re-run is weak evidence either way; weigh whether the changed
-  code is reachable from the scheduler at all. Recorded in `todo.txt`; it
+  code is reachable from the scheduler at all. Tracked in engram; it
   points at a lost or late wakeup, and it has never been chased.
 
 ## The shell can redirect any of the three standard descriptors now
@@ -2714,7 +2714,7 @@ the middle.
 - **There is no `/dev/null`.** `yes > /dev/null &` fails with `/dev/null:
   cannot open for writing`, which makes the usual way to spin a CPU for a
   measurement not work; use a program that writes nowhere, or redirect to a
-  file under `/tmp`. Recorded in `todo.txt`.
+  file under `/tmp`. Tracked in engram.
 - **The desktop can take longer than ten seconds to reach a prompt.** Typing
   into a terminal that has not spawned its shell yet silently discards the
   line, and the screenshot then looks like the program did nothing. Take a shot
@@ -2759,7 +2759,7 @@ is the same one the collision test reads.
   implemented finals, so the cursor stays visible in `top` and `snake`. It is
   cosmetic, but a screenshot taken mid-frame shows the cursor parked wherever
   the redraw had got to, which reads like a rendering bug in the program.
-  Recorded in `todo.txt`.
+  Tracked in engram.
 
 ---
 
@@ -2880,7 +2880,7 @@ final component without following it: a non-negative return *is* the proof that
 a path is a link, and it hands back the target in the same call. `stat` and
 `ls` both classify that way now. The real fix is in the fork — an
 `AT_SYMLINK_NOFOLLOW` stat path plumbed into `lstat` — and it is written down
-in `todo.txt`.
+in engram.
 
 `getdents` is not affected: it reports `file_type == 2` for a link, so
 `DirEntry::file_type()` is correct and `ls` uses it for directory contents.
@@ -3009,7 +3009,7 @@ rather than guessed at.
   thread name, and the name is the path `exec` was given. argv is never
   retained by the kernel, so `sleep 60` and `sleep 1` are indistinguishable to
   every tool. `pstree` had a `-a` flag for about ten minutes before this turned
-  up; it ships `-l` (whole spawn path) instead, and the gap is in `todo.txt`.
+  up; it ships `-l` (whole spawn path) instead, and the gap is in engram.
   Anything reaching for that file for arguments is reaching for nothing.
 
 ## `sntp`, and the clock the kernel could not be told (2026-08-11)
@@ -3210,7 +3210,7 @@ all 200, the 657212-byte font byte-identical each time.
   `tcp_connections` and so never reaches the listener path that would resend a
   SYN-ACK. Every guest test of a server therefore starts with one failed
   request; make it a warm-up rather than reading it as a bug in the program.
-  The fix is a one-slot pending-transmit queue per ARP request (`todo.txt`).
+  The fix is a one-slot pending-transmit queue per ARP request (tracked in engram).
 - **`httpd` answers one request per connection** (`Connection: close`), so it
   needs no idle timeout and keep-alive is not implemented. A client that opens
   a connection and sends nothing holds a thread until it goes away.

@@ -207,8 +207,9 @@ Every call does several 0x70/0x71 port round-trips. Under KVM each is a VM exit;
 on real hardware the RTC is a genuinely slow device. It is also racy — nothing
 handles the update-in-progress flag — and the returned struct is
 `[hour, minute, second, 0, ...]`: no date, no epoch, no sub-second resolution.
-`std::time::SystemTime` cannot be built on it, which is what `todo.txt` is
-describing as "add system time (real time)".
+`std::time::SystemTime` cannot be built on it. (`clock_gettime` off the RTC,
+sampled once at boot and pinned to the HPET, shipped later; see
+`doc/WORKING-NOTES.md`.)
 
 **Fixed** exactly that way: `timer::init_wall_clock` samples the RTC once after
 HPET init and pins it to the counter, and the syscall returns nanoseconds since
@@ -310,7 +311,7 @@ so `F_SETFL` remains unimplemented on purpose.
 added: with no permission model to enforce, a freely callable `setuid` is a
 privilege change that lies about being one.
 
-Also worth noting from `todo.txt`, still true: `edos_lib` duplicates `edos_rt`'s
+Also worth noting, still true and tracked in engram: `edos_lib` duplicates `edos_rt`'s
 syscall wrappers, and `SYS_OPEN` takes a NUL-terminated path while `SYS_STAT`
 takes pointer+length, so `edos_rt` allocates a `CString` for every open.
 

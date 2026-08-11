@@ -71,11 +71,11 @@ scheduler round trips per 4 KiB. Anything that only shortens submission is
 attacking the cheaper half.
 
 **Those two scheduler round trips are now the shared boundary with the context
-switch work** (`todo.txt`). They cost 20818 ns each when the 100 us figure was
-measured and 433 ns now, which is where the 4 KiB gain since came from. That
-lever is close to spent: what is left in a switch is 91 ns of `fxsave` and
-`fxrstor`, 66-77 ns of `switch_to_page`, and a per-process TLB flush that
-needs PCID this machine's CPU does not have. So depth is not merely the half
+switch work** (`doc/SCHED-ROADMAP.md`). They cost 20818 ns each when the 100 us
+figure was measured and 285 ns now, which is where the 4 KiB gain since came
+from. That lever is close to spent: what is left in a switch is 91 ns of
+`fxsave` and `fxrstor` and a per-process TLB flush of about 108 ns, which needs
+PCID this machine's CPU does not have. So depth is not merely the half
 only this section can fix — it is the half with anything left in it.
 
 The fix that matters is giving readahead and writeback a path that keeps
