@@ -157,7 +157,43 @@ fn main() {
     // other's `write`, so this prices the wake path the yield cases never take.
     pipe_round_trip(&mut out, iters.min(2_000));
 
+    pipe_no_block(&mut out, iters.min(5_000));
+
     sleep_overshoot(&mut out);
+}
+
+/// A pipe write and read where the data is already there, so nothing blocks
+/// and nothing is scheduled.
+///
+/// This is what separates the pipe from the scheduler. The blocking round trip
+/// above is two switches, two wakes, four syscalls and two trips through the
+/// pipe's own machinery, and subtracting a yield handover from it charges the
+/// whole remainder to the wake path -- which is wrong, the wake itself is
+/// about 50 ns. Whatever this case costs is the part that has nothing to do
+/// with handing over a CPU.
+fn pipe_no_block(out: &mut Out, iters: u64) {
+    let Some((r, w)) = pipe() else {
+        out.line("switchbench: pipe failed, skipping the non-blocking case");
+        return;
+    };
+    let mut byte = [0u8; 1];
+    for _ in 0..64 {
+        write(w, b"x");
+        read(r, &mut byte);
+    }
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        if write(w, b"x") != 1 || read(r, &mut byte) != 1 {
+            out.line("switchbench: non-blocking pipe echo failed");
+            break;
+        }
+    }
+    let each = t0.elapsed().as_nanos() as f64 / iters as f64;
+    close(r);
+    close(w);
+    out.line(&format!(
+        "switchbench pipe echo, nothing blocks {each:.0} ns for a write plus a read"
+    ));
 }
 
 /// How late a sleep returns.

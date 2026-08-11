@@ -24,20 +24,26 @@ scripts/edos-vm type 'cat /proc/sched_prof > /tmp/b.txt; switchbench 20000 -l; \
 
 | | ns |
 |---|---|
-| `sched_yield`, nothing else Ready | 433 |
-| `sched_yield`, handover to a sibling thread | 490 |
-| `sched_yield`, handover to another process | 751 |
-| **park/wake, one direction** | **2276** |
-| pipe round trip between two processes | 4552 |
+| `sched_yield`, nothing else Ready | 433-566 |
+| `sched_yield`, handover to a sibling thread | 490-571 |
+| `sched_yield`, handover to another process | 751-822 |
 | the switch itself, `/proc/sched_prof` | 220 |
+| a wake (`do_wake`) | 51 |
+| **a pipe write + read, nothing blocking** | **1153** |
+| a blocking pipe round trip between two processes | 4552-6720 |
 
 Inside the 220 ns switch: `page` 66-77, `fxrstor` + `fxsave` 91, `CpuContext`
 copies 36, publish 19, transition 27, `wake_sleepers` 18, pick 12, timer 10.
 
-**The switch is no longer the expensive part.** A wake costs about four times
-the switch it performs, and it is what every real workload here pays — a shell
-pipeline, the compositor talking to a client, the terminal. Items 1 and 2 are
-both about that gap; item 1 is the smaller and safer of the two.
+Ranges are run-to-run spread across boots with the desktop running; treat
+anything under about 15% as noise and re-measure rather than believe it.
+
+**The switch is no longer the expensive part, and neither is the wake.** A
+wake is 51 ns. What a real IPC pays is the pipe's own data path — 1153 ns to
+move one byte through `write` and `read` with no scheduling involved at all.
+Item 2 is that, and it replaces an earlier draft of this doc that blamed the
+wake path on the strength of a subtraction; the correction is written out
+there because the reasoning error is easy to repeat.
 
 ## 1. A voluntary switch does not need a register frame or an `iretq`
 
@@ -66,40 +72,74 @@ so a large fraction of the 210 ns boundary.
 
 Reference: <https://kernel-internals.org/sched/context-switch/>
 
-## 2. A blocking IPC should hand off directly to the receiver
+## 2. The pipe data path, not the wake path
 
-A pipe round trip is 4552 ns for two switches that cost 490 ns each as plain
-handovers. The rest is the wake path: the writer enqueues the reader on a
-runqueue, possibly sends a reschedule IPI, then parks; the scheduler then picks
-the thread that was just enqueued.
+**Read this before reaching for an IPC fastpath.** An earlier draft of this
+item proposed an L4-style direct process switch on the strength of
+`(round_trip / 2) - (yield handover)` — a subtraction that charges the entire
+remainder of a round trip to the wake. Measuring the wake directly refuted it:
 
-L4 and seL4 answer this with a **direct process switch** — the sender yields
-straight to the receiver, on the sender's own timeslice, with no runqueue
-operation and no scheduler invocation, guarded by a fastpath that requires the
-receiver to be runnable here and nothing of higher priority to be waiting.
-seL4 reaches 0.2-0.5 us round trips that way, against our 4.5.
+| | ns |
+|---|---|
+| `wake` (all of `do_wake`) | 51 |
+| of which `wake_enqueue` | 32 |
+| `pick` | 16 |
+| a pipe write + read with **nothing blocking** | **1153** |
+| a blocking pipe round trip between two processes | 6720 |
 
-The shape for us: when a thread wakes exactly one target, that target is
-allowed on this CPU, and the waker is about to block anyway, switch to it
-directly rather than enqueue-then-park-then-pick. Everything else falls back
-to the path that exists. The fastpath conditions are the design work; seL4's
-list is a good starting point and the reasons for each are documented.
+The scheduler's part of an IPC is about 100 ns. A direct handoff would remove
+some of that and some scheduling latency, and it is not where the time is.
 
-References: <https://docs.sel4.systems/Tutorials/ipc.html>,
+Where it is: **1153 ns for a one-byte pipe write and read with no scheduling at
+all.** Against a bare syscall floor of ~90 ns (`pollbench`), two syscalls
+account for maybe 300 of that, leaving ~850 ns of pipe machinery to move one
+byte. `sys_read` on a pipe (`syscalls/io.rs`) does, per call:
+
+- takes the pipe `BlockingMutex` to clone `reader_wq`, again to drain, and
+  again inside every `wait_until` predicate evaluation;
+- `Pipe::read` **allocates a `Vec`** for the result (`buffer[..n].to_vec()`)
+  and then `drain(..n)`, which memmoves the remainder;
+- calls `notify_pollers()` on every read and every write.
+
+Roughly 2300 ns of the 6720 round trip is these two traversals, against ~1600
+for the two cross-process switches and ~100 for the scheduling.
+
+The work, in order of how well it is evidenced: give `Pipe` a ring buffer so a
+read is a copy rather than an allocation plus a memmove; return the bytes into
+a caller-provided buffer instead of a `Vec`; take the lock once per call rather
+than per phase. Only then is it worth asking whether the scheduler hand-off
+shape matters.
+
+If it does become worth it later, the reference design is seL4's: the sender
+switches straight to the receiver on its own timeslice, no runqueue and no
+scheduler invocation, behind a fastpath that requires the receiver to be
+runnable here with nothing higher-priority waiting.
+<https://docs.sel4.systems/Tutorials/ipc.html>,
 <https://microkerneldude.org/2019/03/07/how-to-and-how-not-to-use-sel4-ipc/>
 
-## 3. Spin briefly before parking
+## 3. Spin briefly before parking — not yet justified, measure first
 
-Independent of 1 and 2, and much smaller: `BlockingMutex` and the wait queues
-park immediately on contention. Spinning first for about the cost of a switch
-turns a short wait into no switch at all. LWN reports a futex microbenchmark
-going from 35M to 54M operations with adaptive spinning.
+`BlockingMutex` and the wait queues park immediately on contention. Spinning
+first for about the cost of a switch turns a short wait into no switch at all,
+and LWN reports a futex microbenchmark going from 35M to 54M operations with
+adaptive spinning. <https://lwn.net/Articles/386536/>
 
-The bound should be derived from the measured switch cost rather than picked,
-and the spin should give up if the holder is not currently running — which is
-the check a pure spinlock cannot make and the reason this is called *adaptive*.
+**But nothing here has measured a wait short enough for it to help.** On the
+single-CPU boot every measurement in this doc was taken on, spinning cannot
+help by construction: the thread that would satisfy the wait cannot run while
+the waiter spins, so every spun cycle is pure waste before the park happens
+anyway. It pays only when the holder is running *concurrently* on another CPU,
+and there is no multi-CPU contention measurement here to size it against.
 
-Reference: <https://lwn.net/Articles/386536/>
+So the prerequisite is a benchmark that holds a `BlockingMutex` across a short
+critical section from several CPUs and reports the wait distribution. If the
+common wait is shorter than a switch, this becomes item 3 for real; if it is
+longer, adaptive spinning is a pessimisation and should be recorded as refuted.
+
+When it is built: derive the bound from the measured switch cost rather than
+picking one, and give up the spin if the holder is not currently running —
+that check is what a pure spinlock cannot make and is why it is called
+*adaptive*.
 
 ## 4. `switch_to_page` takes a lock to decide it has nothing to do
 

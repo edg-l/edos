@@ -52,10 +52,16 @@ pub enum Stage {
     RestoreTls,
     /// `fxrstor` of the incoming thread's FPU area.
     RestoreFpu,
+    /// Everything `do_wake` does, from publishing the token to handing the
+    /// target to a runqueue or nudging the CPU it is already on.
+    Wake,
+    /// The enqueue half of a wake: pick the target CPU, publish Ready, take
+    /// that CPU's runqueue.
+    WakeEnqueue,
 }
 
 #[cfg(feature = "sched-prof")]
-const STAGE_NAMES: [&str; 13] = [
+const STAGE_NAMES: [&str; 15] = [
     "save_ctx",
     "save_fpu",
     "save_tls",
@@ -69,6 +75,8 @@ const STAGE_NAMES: [&str; 13] = [
     "page",
     "restore_tls",
     "restore_fpu",
+    "wake",
+    "wake_enqueue",
 ];
 
 #[cfg(feature = "sched-prof")]

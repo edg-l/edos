@@ -178,6 +178,7 @@ impl Scheduler {
     }
 
     fn complete_wake(&self, thread: &Arc<Thread>, priority: WakePriority) {
+        let probe = sched_prof::now_ns();
         without_interrupts(|| {
             // Enqueue on the waker's CPU for cache locality. Safe because
             // save_transition_switch pivots to the per-CPU scheduler stack
@@ -198,6 +199,7 @@ impl Scheduler {
             thread.state.store(State::Ready as u8, Ordering::Release);
             Self::enqueue_ready(target, thread, priority);
         });
+        sched_prof::record(Stage::WakeEnqueue, probe);
     }
 
     pub fn new(cpu: u32) -> Self {
@@ -1122,6 +1124,7 @@ impl Scheduler {
     /// Safe from any context — `without_interrupts` is a cheap no-op when
     /// IRQs are already disabled.
     fn do_wake(&self, thread: Arc<Thread>, priority: WakePriority) {
+        let probe = sched_prof::now_ns();
         // Publish wake intent. Pairs with `consume_wake_pending` in
         // transition_park / transition_park_while / transition_sleep.
         thread.signal_wake();
@@ -1158,6 +1161,7 @@ impl Scheduler {
                 self.send_reschedule_ipi(cpu);
             }
         });
+        sched_prof::record(Stage::Wake, probe);
     }
 }
 
@@ -1599,6 +1603,7 @@ extern "C" fn transition_yield(_arg: *mut u8) -> bool {
 }
 
 extern "C" fn transition_park(_arg: *mut u8) -> bool {
+    let probe = sched_prof::now_ns();
     let Some(cur) = current_thread() else {
         return true;
     };
@@ -1615,14 +1620,17 @@ extern "C" fn transition_park(_arg: *mut u8) -> bool {
         if cur.cas_state(State::Parked, State::Running) {
             // Reverted cleanly: no waker reached us via try_wake. Skip the
             // context switch entirely.
+            sched_prof::record(Stage::Transition, probe);
             return false;
         }
         // CAS lost: a waker beat us to try_wake (Parked -> Waking) and
         // complete_wake will set us Ready in some runqueue. We must switch
         // so the scheduler can pick us back up properly.
+        sched_prof::record(Stage::Transition, probe);
         return true;
     }
 
+    sched_prof::record(Stage::Transition, probe);
     true
 }
 
@@ -1635,6 +1643,7 @@ struct ParkWhileCtx {
 }
 
 extern "C" fn transition_park_while(arg: *mut u8) -> bool {
+    let probe = sched_prof::now_ns();
     let ctx = unsafe { &*(arg as *const ParkWhileCtx) };
     let Some(cur) = current_thread() else {
         return true;
@@ -1655,6 +1664,7 @@ extern "C" fn transition_park_while(arg: *mut u8) -> bool {
     let should_park = (ctx.check_fn)(ctx.check_ctx);
 
     if token || !should_park {
+        sched_prof::record(Stage::Transition, probe);
         if cur.cas_state(State::Parked, State::Running) {
             return false; // Reverted cleanly; no switch.
         }
@@ -1664,6 +1674,7 @@ extern "C" fn transition_park_while(arg: *mut u8) -> bool {
         return true;
     }
 
+    sched_prof::record(Stage::Transition, probe);
     true
 }
 
