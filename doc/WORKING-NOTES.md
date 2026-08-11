@@ -6,6 +6,26 @@ session.
 
 ---
 
+## `make test` used to pass without running
+
+If a guest was already up — `make run-headless`, or anything else holding
+`sata-disk.img` — `make test` exited **0 having run no tests at all**. The
+suite reports through `isa-debug-exit`, which the host reads as
+`(code << 1) | 1`, so a pass is exit 1; qemu's own startup failures are also
+exit 1, and the `Failed to get "write" lock` on the disk is one of those. The
+exit code alone cannot tell the two apart, so the only visible sign was that a
+7-second gate came back in a fraction of a second.
+
+The verdict now comes from the serial log: exit 1 must also carry
+`TESTS PASSED` in `run_log.txt`, and the test targets `rm -f run_log.txt`
+first so a previous run's verdict cannot stand in for this one. Both branches
+were exercised — a normal run still passes, and a run with a guest holding the
+disk now fails with `qemu exited before the suite reported a verdict`.
+
+Worth generalising: **a gate that cannot fail is not a gate.** Any check whose
+success is inferred from an exit code shared with the harness's own failures
+needs a positive signal from inside the guest.
+
 ## Counts, remeasured 2026-08-12
 
 Every number a doc states about the size of the tree, taken rather than carried

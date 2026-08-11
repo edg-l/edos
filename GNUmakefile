@@ -151,19 +151,28 @@ run-trace: programs limine/limine ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KA
 # `(code << 1) | 1`: 1 for a passing run, 3 for a failing one, and anything
 # else for a guest that died before reporting. Translate that to a shell
 # exit status, or every run looks like a failed one.
+#
+# A passing run is not 1 alone: qemu's own startup failures also exit 1, so a
+# refused `sata-disk.img` write lock (another guest already has it) reads as a
+# green suite that never ran. The verdict has to come from the serial log, and
+# the log is truncated first so a previous run's cannot stand in for it.
 sched_test_status = ; rc=$$?; \
-	if [ $$rc -eq 1 ]; then exit 0; \
+	if [ $$rc -eq 1 ] && grep -aq 'TESTS PASSED' run_log.txt; then exit 0; \
 	elif [ $$rc -eq 3 ]; then echo "sched-test: suite reported failures"; exit 1; \
+	elif [ $$rc -eq 1 ]; then \
+		echo "sched-test: qemu exited before the suite reported a verdict"; exit 1; \
 	else echo "sched-test: qemu exited $$rc without a verdict"; exit 1; fi
 
 .PHONY: test
 test: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features sched-test"
+	rm -f run_log.txt
 	$(call run_qemu_uefi,iso,4,-accel kvm -display none) $(sched_test_status)
 
 .PHONY: test-single
 test-single: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features sched-test"
+	rm -f run_log.txt
 	$(call run_qemu_uefi,iso,1,-display none) $(sched_test_status)
 
 # The same suite as `test`, against a null audio backend. `test` binds the
