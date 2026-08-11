@@ -2420,3 +2420,43 @@ rather than guessed at.
   every tool. `pstree` had a `-a` flag for about ten minutes before this turned
   up; it ships `-l` (whole spawn path) instead, and the gap is in `todo.txt`.
   Anything reaching for that file for arguments is reaching for nothing.
+
+## `sntp`, and the clock the kernel could not be told (2026-08-11)
+
+`kernel/src/timer.rs` reads the RTC exactly once, at one-second resolution, and
+answers every later `clock_gettime` from that pin plus HPET ticks. On a fresh
+boot that is around 1.4 s behind real time in the QEMU guest, measured against
+`time.cloudflare.com`, and nothing existed to correct it: there was no way to
+set the wall clock at all.
+
+`programs/sntp` is the client (RFC 4330: one 48-byte packet, mode 3 out and
+mode 4 back, offset `((T2-T1)+(T3-T4))/2` and delay `(T4-T1)-(T3-T2)`), and
+`SYS_CLOCK_SETTIME` (281) is what lets it act on the answer.
+
+**The step is an atomic offset, not a re-pin.** `WALL_CLOCK_OFFSET_NS` is added
+in `wall_clock_nanos`, so the RTC reference point and the monotonic counter are
+never touched — a step moves the wall clock and nothing that measures a
+duration. Re-pinning would have meant making `WALL_CLOCK` mutable and taking a
+lock on a path that every redraw calls.
+
+**The reply is checked before it is believed.** Mode must be 4, stratum 0 is a
+kiss-o'-death and stratum above 15 is unsynchronised, and the originate
+timestamp must equal the transmit timestamp that was sent — that last one is
+the anti-spoof check, and it is why the client's own T1 goes into the packet
+rather than a zero.
+
+**NTP seconds wrap in 2036,** so a timestamp below the Unix epoch delta is in
+era 1 and gets `2^32` added rather than being read as a date in 1900.
+
+### Things that will bite you
+
+- **Do not pick a syscall number by grepping `^const SYS_`.** Several are
+  declared `pub const`, and the `*at` family sits at 257–269 above what looks
+  like the top of the range. 257 was taken by `SYS_OPENAT`; the dispatch arm
+  compiled and the only sign was an `unreachable pattern` warning in the noise
+  of the twelve pre-existing ones. Grep `^(pub )?const SYS_` and take the
+  number above 280.
+- **A UDP send to an unreachable address on the guest's own subnet fails
+  immediately** ("send failed") rather than timing out — there is no ARP reply,
+  so nothing is ever transmitted. `-t` only bounds a reply that never comes
+  from a host that did answer ARP.

@@ -1,3 +1,5 @@
+use core::sync::atomic::{AtomicI64, Ordering};
+
 use x86_64::instructions::port::Port;
 
 use crate::{apic::get_lapic, println};
@@ -147,6 +149,14 @@ struct WallClockRef {
 
 static WALL_CLOCK: spin::Once<WallClockRef> = spin::Once::new();
 
+/// Correction added to the pinned RTC reading, in nanoseconds.
+///
+/// The RTC is sampled once and has one-second resolution, so the boot reading
+/// is wrong by up to a second before the HPET's own error is counted. A time
+/// client corrects it by storing the difference here rather than re-pinning,
+/// which leaves the reference point and the monotonic counter alone.
+static WALL_CLOCK_OFFSET_NS: AtomicI64 = AtomicI64::new(0);
+
 /// Days from 1970-01-01 to a proleptic Gregorian date, for `m` in `[1, 12]`.
 ///
 /// Howard Hinnant's `days_from_civil`:
@@ -182,5 +192,22 @@ pub fn init_wall_clock() {
 pub fn wall_clock_nanos() -> Option<u64> {
     let reference = WALL_CLOCK.get()?;
     let elapsed = Instant::now().duration_since(reference.at).as_nanos() as u64;
-    Some(reference.epoch_nanos.saturating_add(elapsed))
+    let pinned = reference.epoch_nanos.saturating_add(elapsed);
+    Some(pinned.saturating_add_signed(WALL_CLOCK_OFFSET_NS.load(Ordering::Relaxed)))
+}
+
+/// Step the wall clock so that it reads `epoch_nanos` now.
+///
+/// Returns `false` before the RTC has been sampled, since there is no reference
+/// to correct. The step is not slewed: a reader either side of it sees the jump,
+/// which is why the monotonic counter and not this is what durations are measured
+/// against.
+pub fn set_wall_clock_nanos(epoch_nanos: u64) -> bool {
+    let Some(reference) = WALL_CLOCK.get() else {
+        return false;
+    };
+    let elapsed = Instant::now().duration_since(reference.at).as_nanos() as u64;
+    let pinned = reference.epoch_nanos.saturating_add(elapsed);
+    WALL_CLOCK_OFFSET_NS.store(epoch_nanos as i64 - pinned as i64, Ordering::Relaxed);
+    true
 }

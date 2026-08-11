@@ -437,6 +437,8 @@ const SYS_GETSOCKNAME: u64 = 253;
 const SYS_STATFS: u64 = 254;
 const SYS_FORK: u64 = 255;
 const SYS_GETDNS: u64 = 256;
+/// Step the wall clock, for a time client that has just learnt the real time.
+const SYS_CLOCK_SETTIME: u64 = 281;
 const SYS_SYNC: u64 = 162;
 const SYS_REBOOT: u64 = 169;
 
@@ -926,6 +928,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let buf_ptr = ctx.rdi as *mut u8;
             ctx.rax = sys_clock_gettime(buf_ptr);
         }
+        SYS_CLOCK_SETTIME => {
+            let buf_ptr = ctx.rdi as *const u8;
+            ctx.rax = sys_clock_settime(buf_ptr);
+        }
         SYS_OPENPTY => {
             let pipefd_ptr = ctx.rdi as *mut [u64; 2];
             ctx.rax = io::sys_openpty(pipefd_ptr);
@@ -1225,6 +1231,36 @@ fn sys_clock_gettime(buf_ptr: *mut u8) -> u64 {
         return !0u64;
     }
 
+    0
+}
+
+/// Steps the wall clock to the nanoseconds since the Unix epoch held in the
+/// caller's 8-byte little-endian buffer.
+///
+/// The RTC is sampled once at boot and every later answer is that reading plus
+/// HPET ticks, so the clock is only ever as good as one one-second-resolution
+/// sample; this is how a time client corrects it. Only the wall clock moves —
+/// the monotonic counter durations are measured against is untouched.
+fn sys_clock_settime(buf_ptr: *const u8) -> u64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if buf_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    let Some(nanos) = (unsafe { try_read_user(buf_ptr as *const u64) }) else {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    };
+
+    if !crate::timer::set_wall_clock_nanos(nanos) {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    }
+
+    log!("clock: wall clock stepped to {} ns since the epoch", nanos);
     0
 }
 

@@ -45,6 +45,7 @@ pub const SYS_SPAWN: u64 = 57;
 pub const SYS_RENAME: u64 = 82;
 pub const SYS_NANOSLEEP: u64 = 35;
 pub const SYS_CLOCK_GETTIME: u64 = 226;
+pub const SYS_CLOCK_SETTIME: u64 = 281;
 pub const SYS_OPENPTY: u64 = 227;
 pub const SYS_SPAWN2: u64 = 228;
 pub const SYS_SHM_CREATE: u64 = 215;
@@ -69,6 +70,7 @@ pub const SYS_LISTEN: u64 = 243;
 pub const SYS_ACCEPT: u64 = 244;
 pub const SYS_SENDTO: u64 = 245;
 pub const SYS_RECVFROM: u64 = 246;
+pub const SYS_SETSOCKOPT: u64 = 248;
 pub const SYS_PING: u64 = 249;
 pub const SYS_NETINFO: u64 = 250;
 pub const SYS_FORK: u64 = 255;
@@ -82,6 +84,9 @@ pub const SYS_STATFS: u64 = 254;
 pub const AF_INET: u32 = 2;
 pub const SOCK_STREAM: u32 = 1;
 pub const SOCK_DGRAM: u32 = 2;
+
+pub const SOL_SOCKET: u32 = 1;
+pub const SO_RCVTIMEO: u32 = 20;
 
 /// Raw syscall with 0 arguments.
 #[inline(always)]

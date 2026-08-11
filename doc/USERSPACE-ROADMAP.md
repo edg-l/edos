@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-88 programs and 2 libraries, all in the `programs/` cargo workspace.
+89 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -17,7 +17,7 @@
 | Inspection | `file` |
 | System | `ps`, `pstree`, `top`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace`, `date`, `watch` |
 | Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
-| Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho` |
+| Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `sntp` |
 | Audio | `play` |
 | Images | `imgview` (BMP viewer) |
 | Games | `snake` |

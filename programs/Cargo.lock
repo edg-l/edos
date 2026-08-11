@@ -462,6 +462,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sntp"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "sort"
 version = "0.1.0"
 

@@ -51,6 +51,18 @@ pub fn clock_gettime_nanos() -> Option<u64> {
     Some(u64::from_le_bytes(buf))
 }
 
+/// Step the wall clock to `nanos` nanoseconds since the Unix epoch.
+///
+/// The kernel reads the RTC once at boot, at one-second resolution, and counts
+/// HPET ticks from there, so the clock starts up to a second wrong and drifts;
+/// a time client calls this with what it learnt from the network. Only the wall
+/// clock moves — monotonic time is unaffected. Returns `false` if the kernel
+/// never sampled the RTC.
+pub fn clock_settime_nanos(nanos: u64) -> bool {
+    let ret = unsafe { sys::syscall1(sys::SYS_CLOCK_SETTIME, &nanos as *const u64 as u64) };
+    ret != !0u64
+}
+
 /// Current UTC time broken down into date and time fields.
 pub fn clock_gettime() -> Option<ClockTime> {
     clock_gettime_nanos().map(ClockTime::from_unix_nanos)

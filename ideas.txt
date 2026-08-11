@@ -2,6 +2,15 @@
 
 ## Done
 
+- **`sntp`, and the clock the kernel could not be told** - the RTC is sampled
+  once at boot at one-second resolution and everything after it is HPET ticks,
+  which left the guest around 1.4 s slow with no way to correct it. One UDP
+  round trip (RFC 4330) gives the offset and delay; `-s` acts on it through the
+  new `SYS_CLOCK_SETTIME`, which stores an atomic correction rather than
+  re-pinning, so monotonic time is untouched. Takes several servers, `-u` for
+  UTC, `-t` for the timeout and `-p` for the port, defaults to `pool.ntp.org`,
+  and refuses a reply whose originate timestamp is not the one it sent.
+
 - **`pstree`, the thread table as a forest** - `/proc/processes` has carried a
   PPID column that every reader printed as a number, so the structure
   `edos-init` supervises with, and the fact that a shell's background jobs are

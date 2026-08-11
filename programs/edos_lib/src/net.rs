@@ -97,6 +97,35 @@ pub fn accept(fd: u64) -> Result<(u64, SockAddrIn), ()> {
     }
 }
 
+/// Bound how long a `recvfrom` or `recv` on `fd` waits before giving up.
+///
+/// Zero clears the timeout and restores the blocking-forever default. Without
+/// one, a datagram sent to a host that never answers costs the caller its
+/// thread.
+pub fn set_recv_timeout(fd: u64, millis: u64) -> Result<(), ()> {
+    #[repr(C)]
+    struct Timeval {
+        tv_sec: i64,
+        tv_usec: i64,
+    }
+
+    let tv = Timeval {
+        tv_sec: (millis / 1000) as i64,
+        tv_usec: ((millis % 1000) * 1000) as i64,
+    };
+    let ret = unsafe {
+        sys::syscall5(
+            sys::SYS_SETSOCKOPT,
+            fd,
+            sys::SOL_SOCKET as u64,
+            sys::SO_RCVTIMEO as u64,
+            &tv as *const Timeval as u64,
+            core::mem::size_of::<Timeval>() as u64,
+        )
+    };
+    if ret == u64::MAX { Err(()) } else { Ok(()) }
+}
+
 pub fn sendto(fd: u64, data: &[u8], addr: Option<&SockAddrIn>) -> Result<usize, ()> {
     let (addr_ptr, addr_len) = match addr {
         Some(a) => (
