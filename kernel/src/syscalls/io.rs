@@ -8,12 +8,13 @@ use x86_64::instructions::interrupts;
 
 use crate::debug::lock_order::{RANK_PIPE, RANK_PTY};
 use crate::fs::block_page_cache::BlockPageCache;
-use crate::fs::handle::{PollEntry, PollKey, Pollable, StaticPoll};
+use crate::fs::handle::{PollKey, PollRef, PollSet, Pollable, StaticPoll};
 use crate::fs::vfs;
 use crate::fs::{Error as FsError, FileKind, PollState, api as fs_api, path::Path};
-use crate::net::socket::PollableSocket;
-use crate::thread::pipe::PollablePipe;
+use crate::net::socket::{PollableSocket, Socket};
+use crate::thread::pipe::{Pipe, PollablePipe};
 use crate::thread::poll::PollWaiter;
+use crate::thread::preempt::PreemptSpinlock;
 use crate::thread::pty::{PollablePtyMaster, PollablePtySlave, PtySlaveRead};
 use crate::thread::scheduler::{
     current_thread, current_thread_info, current_thread_weak, thread_exit, thread_park_while,
@@ -80,12 +81,59 @@ pub struct SelectFd {
     pub result: PollState,
 }
 
+impl SelectFd {
+    const EMPTY: Self = Self {
+        fd: 0,
+        interests: PollState::none(),
+        result: PollState::none(),
+    };
+}
+
+/// Descriptor counts at or below this are served from the stack.
+const POLL_INLINE_FDS: usize = 8;
+
+/// What a registered descriptor has to be unregistered *through*.
+///
+/// A registration is only ever undone by the object that took it, and every
+/// one of those is already an `Arc` the descriptor table handed us, so naming
+/// them costs a refcount rather than the boxed trait object it replaced. Only
+/// the filesystem path, which builds its `Pollable` from a path lookup, still
+/// has anything to box.
+#[derive(Debug)]
+enum PollTarget {
+    Pipe(Arc<BlockingMutex<Pipe>>),
+    PtyMaster(Arc<BlockingMutex<Pty>>),
+    PtySlave(Arc<BlockingMutex<Pty>>),
+    Socket(Arc<PreemptSpinlock<Socket>>),
+    Tty,
+    Fs(Box<dyn Pollable>),
+}
+
+impl PollTarget {
+    fn unregister(&self, key: PollKey) {
+        match self {
+            Self::Pipe(pipe) => PollablePipe::new(pipe.clone()).unregister(key),
+            Self::PtyMaster(pty) => PollablePtyMaster::new(pty.clone()).unregister(key),
+            Self::PtySlave(pty) => PollablePtySlave::new(pty.clone()).unregister(key),
+            Self::Socket(sock) => PollableSocket::new(sock.clone()).unregister(key),
+            Self::Tty => tty::pollable().unregister(key),
+            Self::Fs(pollable) => pollable.unregister(key),
+        }
+    }
+}
+
+/// A descriptor whose readiness can still change, so it has to be watched and
+/// unregistered.
+///
+/// Descriptors that register nothing never reach this: their reported state is
+/// frozen at registration, so it is written into the caller's array once and
+/// counted there.
 struct PollContext {
     index: usize,
+    slot: usize,
     interests: PollState,
-    pollable: Box<dyn Pollable>,
-    entry: Arc<PollEntry>,
-    key: Option<PollKey>,
+    target: PollTarget,
+    key: PollKey,
 }
 
 const MAX_RANDOM_LEN: usize = 1 << 20;
@@ -1156,14 +1204,18 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
         return -1;
     }
 
-    let mut fds = vec![
-        SelectFd {
-            fd: 0,
-            interests: PollState::none(),
-            result: PollState::none(),
-        };
-        count
-    ];
+    // Both per-descriptor arrays stay on the stack at the counts poll is
+    // almost always called with — a shell watching stdin, a server watching a
+    // listener and a few clients — because a heap round trip costs about 41 ns
+    // against a whole call of a few hundred.
+    let mut inline_fds = [SelectFd::EMPTY; POLL_INLINE_FDS];
+    let mut heap_fds;
+    let fds: &mut [SelectFd] = if count <= POLL_INLINE_FDS {
+        &mut inline_fds[..count]
+    } else {
+        heap_fds = vec![SelectFd::EMPTY; count];
+        &mut heap_fds
+    };
 
     let fds_bytes = count * core::mem::size_of::<SelectFd>();
 
@@ -1177,6 +1229,9 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
         try_copy_to_user(fds_ptr as *mut u8, entries.as_ptr() as *const u8, fds_bytes)
     };
 
+    // The descriptor snapshot stays on the heap. `FileDescriptor` is about a
+    // hundred bytes, so an inline array of them costs more to initialise and
+    // drop than the single allocation it would save.
     let descriptors = {
         let fd_table = {
             let mut guard = info.lock();
@@ -1196,12 +1251,25 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
             return -1;
         }
     };
-    let waiter = Arc::new(PollWaiter::new(thread_weak));
+    // One allocation of slots for the whole call, holding the waiter too.
+    let set = Arc::new(PollSet::new(
+        PollWaiter::new(thread_weak),
+        fds.iter().map(|entry| entry.interests),
+    ));
 
     interrupts::enable();
 
-    let mut contexts: Vec<PollContext> = Vec::with_capacity(count);
+    let mut contexts: Vec<PollContext> = Vec::new();
     let mut base_ready = 0usize;
+
+    // Records a descriptor whose readiness is settled for the whole call: an
+    // invalid one, or one the device registered nothing for.
+    let settle = |fds: &mut [SelectFd], idx: usize, state: PollState, ready: &mut usize| {
+        fds[idx].result = state;
+        if state.matches(fds[idx].interests) {
+            *ready += 1;
+        }
+    };
 
     for idx in 0..count {
         let interests = fds[idx].interests;
@@ -1209,114 +1277,115 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
 
         let descriptor = descriptors.get(idx).and_then(|d| d.clone());
 
+        // Registers against this descriptor's slot and records the outcome,
+        // keeping a context only when the device took a registration that has
+        // to be undone. The pollable is built on the stack: only the ones that
+        // stay watched are named again, in `PollTarget`.
+        macro_rules! register {
+            ($pollable:expr, $target:expr) => {{
+                let registration = $pollable.register(PollRef::new(&set, idx));
+                match registration.key {
+                    Some(key) => {
+                        fds[idx].result = registration.initial;
+                        contexts.push(PollContext {
+                            index: idx,
+                            slot: idx,
+                            interests,
+                            target: $target,
+                            key,
+                        });
+                    }
+                    None => settle(fds, idx, registration.initial, &mut base_ready),
+                }
+            }};
+        }
+
         match descriptor {
-            None => {
-                let entry = &mut fds[idx];
-                entry.result.invalid = true;
-                entry.result.error = true;
-                base_ready += 1;
-            }
+            None => settle(
+                fds,
+                idx,
+                PollState {
+                    invalid: true,
+                    error: true,
+                    ..PollState::none()
+                },
+                &mut base_ready,
+            ),
             Some(FileDescriptor::StandardStream(stream)) => {
                 // These are valid descriptors that read and write, so reporting
                 // POLLNVAL turned a select loop over an un-redirected stdin
                 // into a spin. Stdin is the console, which can block; the two
                 // output streams never do.
-                let pollable: Box<dyn Pollable> = match stream {
-                    StandardStream::Stdin => tty::pollable(),
+                match stream {
+                    StandardStream::Stdin => register!(tty::pollable(), PollTarget::Tty),
+                    // Never blocks, so it registers nothing and its
+                    // readiness is settled here for the whole call.
                     StandardStream::Stdout | StandardStream::Stderr => {
-                        Box::new(StaticPoll::new(PollState {
+                        let state = PollState {
                             writable: true,
                             ..PollState::none()
-                        }))
+                        };
+                        StaticPoll::new(state).register(PollRef::new(&set, idx));
+                        settle(fds, idx, state, &mut base_ready);
                     }
-                };
-                let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
-                let registration = pollable.register(poll_entry.clone());
-                fds[idx].result = registration.initial;
-                contexts.push(PollContext {
-                    index: idx,
-                    interests,
-                    pollable,
-                    entry: poll_entry,
-                    key: registration.key,
-                });
+                }
             }
             Some(FileDescriptor::PipeRead(pipe) | FileDescriptor::PipeWrite(pipe)) => {
-                let pollable: Box<dyn Pollable> = Box::new(PollablePipe::new(pipe.clone()));
-                let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
-                let registration = pollable.register(poll_entry.clone());
-                fds[idx].result = registration.initial;
-                contexts.push(PollContext {
-                    index: idx,
-                    interests,
-                    pollable,
-                    entry: poll_entry,
-                    key: registration.key,
-                });
+                register!(
+                    PollablePipe::new(pipe.clone()),
+                    PollTarget::Pipe(pipe.clone())
+                )
             }
             Some(FileDescriptor::PtyMaster(pty)) => {
-                let pollable: Box<dyn Pollable> = Box::new(PollablePtyMaster::new(pty.clone()));
-                let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
-                let registration = pollable.register(poll_entry.clone());
-                fds[idx].result = registration.initial;
-                contexts.push(PollContext {
-                    index: idx,
-                    interests,
-                    pollable,
-                    entry: poll_entry,
-                    key: registration.key,
-                });
+                register!(
+                    PollablePtyMaster::new(pty.clone()),
+                    PollTarget::PtyMaster(pty.clone())
+                )
             }
             Some(FileDescriptor::PtySlave(pty)) => {
-                let pollable: Box<dyn Pollable> = Box::new(PollablePtySlave::new(pty.clone()));
-                let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
-                let registration = pollable.register(poll_entry.clone());
-                fds[idx].result = registration.initial;
-                contexts.push(PollContext {
-                    index: idx,
-                    interests,
-                    pollable,
-                    entry: poll_entry,
-                    key: registration.key,
-                });
+                register!(
+                    PollablePtySlave::new(pty.clone()),
+                    PollTarget::PtySlave(pty.clone())
+                )
             }
             Some(FileDescriptor::Socket(sock)) => {
-                let pollable: Box<dyn Pollable> = Box::new(PollableSocket::new(sock.clone()));
-                let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
-                let registration = pollable.register(poll_entry.clone());
-                fds[idx].result = registration.initial;
-                contexts.push(PollContext {
-                    index: idx,
-                    interests,
-                    pollable,
-                    entry: poll_entry,
-                    key: registration.key,
-                });
+                register!(
+                    PollableSocket::new(sock.clone()),
+                    PollTarget::Socket(sock.clone())
+                )
             }
             Some(FileDescriptor::FsFile(file)) => match fs_api::poll(&file.path) {
                 Ok(pollable) => {
-                    let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
-                    let registration = pollable.register(poll_entry.clone());
-                    fds[idx].result = registration.initial;
-                    contexts.push(PollContext {
-                        index: idx,
-                        interests,
-                        pollable,
-                        entry: poll_entry,
-                        key: registration.key,
-                    });
+                    let registration = pollable.register(PollRef::new(&set, idx));
+                    match registration.key {
+                        Some(key) => {
+                            fds[idx].result = registration.initial;
+                            contexts.push(PollContext {
+                                index: idx,
+                                slot: idx,
+                                interests,
+                                target: PollTarget::Fs(pollable),
+                                key,
+                            });
+                        }
+                        None => settle(fds, idx, registration.initial, &mut base_ready),
+                    }
                 }
-                Err(_err) => {
-                    let entry = &mut fds[idx];
-                    entry.result.error = true;
-                    entry.result.invalid = true;
-                    base_ready += 1;
-                }
+                Err(_err) => settle(
+                    fds,
+                    idx,
+                    PollState {
+                        invalid: true,
+                        error: true,
+                        ..PollState::none()
+                    },
+                    &mut base_ready,
+                ),
             },
         }
     }
 
-    let mut ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
+    let mut ready = base_ready + refresh_poll_contexts(&set, &contexts, fds);
 
     // A zero timeout asks what is ready now, and that answer is already
     // computed, so the clock is never consulted: reading it is the most
@@ -1328,7 +1397,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
         let deadline = timeout.map(|t| now + t);
 
         loop {
-            ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
+            ready = base_ready + refresh_poll_contexts(&set, &contexts, fds);
             if ready > 0 {
                 break;
             }
@@ -1339,7 +1408,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                         break;
                     };
 
-                    if waiter.arm() {
+                    if set.arm() {
                         now = Instant::now();
                         continue;
                     }
@@ -1347,7 +1416,7 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                     // Re-check poll state after arming to close race window.
                     // If notification arrived after refresh but before arm,
                     // the state was updated before notify() was called.
-                    ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
+                    ready = base_ready + refresh_poll_contexts(&set, &contexts, fds);
                     if ready > 0 {
                         break;
                     }
@@ -1361,23 +1430,23 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                     now = Instant::now();
                 }
                 None => {
-                    if waiter.arm() {
+                    if set.arm() {
                         continue;
                     }
 
                     thread_park_while(|| {
-                        base_ready + refresh_poll_contexts(&mut contexts, &mut fds) == 0
+                        base_ready + refresh_poll_contexts(&set, &contexts, fds) == 0
                     });
                 }
             }
         }
 
-        ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
+        ready = base_ready + refresh_poll_contexts(&set, &contexts, fds);
     }
 
-    cleanup_poll_contexts(&mut contexts);
+    cleanup_poll_contexts(&contexts);
 
-    if !copy_back(&fds) {
+    if !copy_back(fds) {
         info.lock().errno = Errno::EFAULT;
         return -1;
     }
@@ -1385,11 +1454,11 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     ready as i64
 }
 
-fn refresh_poll_contexts(contexts: &mut [PollContext], fds: &mut [SelectFd]) -> usize {
+fn refresh_poll_contexts(set: &PollSet, contexts: &[PollContext], fds: &mut [SelectFd]) -> usize {
     let mut ready = 0usize;
 
-    for ctx in contexts.iter() {
-        let state = ctx.entry.state();
+    for ctx in contexts {
+        let state = set.state(ctx.slot);
         fds[ctx.index].result = state;
         if state.matches(ctx.interests) {
             ready += 1;
@@ -1399,11 +1468,9 @@ fn refresh_poll_contexts(contexts: &mut [PollContext], fds: &mut [SelectFd]) -> 
     ready
 }
 
-fn cleanup_poll_contexts(contexts: &mut [PollContext]) {
-    for ctx in contexts.iter_mut() {
-        if let Some(key) = ctx.key.take() {
-            ctx.pollable.unregister(key);
-        }
+fn cleanup_poll_contexts(contexts: &[PollContext]) {
+    for ctx in contexts {
+        ctx.target.unregister(ctx.key);
     }
 }
 

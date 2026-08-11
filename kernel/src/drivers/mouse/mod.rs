@@ -17,7 +17,7 @@ use crate::{
     debug::lock_order::RANK_DEVICE_POLLERS,
     fs::{
         DevFsDevice, DevFsError, MmapRegion, PollState,
-        handle::{PollEntry, PollKey, PollRegistration, Pollable},
+        handle::{PollKey, PollRef, PollRegistration, Pollable},
         register_device_str,
     },
     graphics::DISPLAY,
@@ -107,7 +107,7 @@ pub fn push_mouse_byte(byte: u8) {
 }
 
 // Polling support
-static MOUSE_POLLERS: BlockingMutex<Vec<(PollKey, Arc<PollEntry>, Arc<Subscriber<MouseEvent>>)>> =
+static MOUSE_POLLERS: BlockingMutex<Vec<(PollKey, PollRef, Arc<Subscriber<MouseEvent>>)>> =
     BlockingMutex::new(Vec::new());
 static MOUSE_NEXT_POLL_KEY: AtomicU64 = AtomicU64::new(1);
 
@@ -342,7 +342,7 @@ pub(crate) fn dispatch_mouse_event(event: MouseEvent) {
 fn notify_mouse_pollers() {
     // Snapshot poller entries under lock, then notify outside to avoid
     // holding BlockingMutex while wake_thread spins (priority inversion).
-    let snapshot: heapless::Vec<(Arc<PollEntry>, Arc<Subscriber<MouseEvent>>), 16> = {
+    let snapshot: heapless::Vec<(PollRef, Arc<Subscriber<MouseEvent>>), 16> = {
         let pollers = ranked_lock!(RANK_DEVICE_POLLERS, "mouse::notify_pollers", MOUSE_POLLERS);
         let mut v = heapless::Vec::new();
         for (_, entry, subscriber) in pollers.iter() {
@@ -367,7 +367,7 @@ struct MouseDevice;
 struct MousePoll;
 
 impl Pollable for MousePoll {
-    fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
+    fn register(&self, entry: PollRef) -> PollRegistration {
         let subscriber = MOUSE_BROADCAST.subscribe();
         let state = mouse_poll_state(&subscriber);
         entry.update(state);

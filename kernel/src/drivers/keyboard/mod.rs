@@ -18,7 +18,7 @@ use crate::{
     debug::lock_order::RANK_DEVICE_POLLERS,
     fs::{
         DevFsDevice, DevFsError, MmapRegion, PollState,
-        handle::{PollEntry, PollKey, PollRegistration, Pollable},
+        handle::{PollKey, PollRef, PollRegistration, Pollable},
         register_device_str,
     },
     memory::mapper::MemoryManager,
@@ -32,7 +32,7 @@ use crate::{
 pub static KEY_EVENT_BROADCAST: Broadcaster<KeyEvent> = Broadcaster::new();
 /// Set to true when a USB HID keyboard is active; suppresses PS/2 keyboard broadcasting.
 pub static USB_KEYBOARD_ACTIVE: AtomicBool = AtomicBool::new(false);
-static KEYBOARD_POLLERS: BlockingMutex<Vec<(PollKey, Arc<PollEntry>, Arc<Subscriber<KeyEvent>>)>> =
+static KEYBOARD_POLLERS: BlockingMutex<Vec<(PollKey, PollRef, Arc<Subscriber<KeyEvent>>)>> =
     BlockingMutex::new(Vec::new());
 static KEYBOARD_NEXT_POLL_KEY: AtomicU64 = AtomicU64::new(1);
 
@@ -122,7 +122,7 @@ pub(crate) fn dispatch_key_events(events: &[KeyEvent]) {
 fn notify_keyboard_pollers() {
     // Snapshot poller entries under lock, then notify outside to avoid
     // holding BlockingMutex while wake_thread spins (priority inversion).
-    let snapshot: heapless::Vec<(Arc<PollEntry>, Arc<Subscriber<KeyEvent>>), 16> = {
+    let snapshot: heapless::Vec<(PollRef, Arc<Subscriber<KeyEvent>>), 16> = {
         let pollers = ranked_lock!(
             RANK_DEVICE_POLLERS,
             "keyboard::notify_pollers",
@@ -144,7 +144,7 @@ fn notify_keyboard_pollers() {
 }
 
 impl Pollable for KeyboardPoll {
-    fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
+    fn register(&self, entry: PollRef) -> PollRegistration {
         let subscriber = KEY_EVENT_BROADCAST.subscribe();
         let state = keyboard_poll_state(&subscriber);
         entry.update(state);

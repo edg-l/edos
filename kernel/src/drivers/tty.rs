@@ -5,7 +5,7 @@ use crate::{
     debug::lock_order::{RANK_DEVICE_POLLERS, RANK_TTY_BUFFER},
     fs::{
         DevFsDevice, DevFsError, PollState,
-        handle::{PollEntry, PollKey, PollRegistration, Pollable},
+        handle::{PollKey, PollRef, PollRegistration, Pollable},
         register_device_str,
     },
     ranked_lock,
@@ -17,7 +17,7 @@ const TTY_BUFFER_CAPACITY: usize = 16 * 1024;
 
 static TTY_BUFFER: BlockingMutex<VecDeque<u8>> = BlockingMutex::new(VecDeque::new());
 static TTY_NOTIFY: Broadcaster<()> = Broadcaster::new();
-static TTY_POLLERS: BlockingMutex<Vec<(PollKey, Arc<PollEntry>)>> = BlockingMutex::new(Vec::new());
+static TTY_POLLERS: BlockingMutex<Vec<(PollKey, PollRef)>> = BlockingMutex::new(Vec::new());
 static TTY_NEXT_POLL_KEY: AtomicU64 = AtomicU64::new(1);
 
 pub struct TtyDevice;
@@ -96,7 +96,7 @@ fn snapshot_pollers(state: PollState) -> TtyNotifications {
 /// Deferred poll notifications, flushed after releasing the TTY locks so a
 /// wake never runs with them held.
 struct TtyNotifications {
-    entries: Vec<Arc<PollEntry>>,
+    entries: Vec<PollRef>,
     state: PollState,
 }
 
@@ -190,7 +190,7 @@ pub fn init() {
 struct TtyPoll;
 
 impl Pollable for TtyPoll {
-    fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
+    fn register(&self, entry: PollRef) -> PollRegistration {
         // The buffer lock is held across reading the state and joining the
         // poller list, so a write cannot land in the gap and notify a list this
         // entry has not reached yet.

@@ -1,7 +1,7 @@
 use crate::{
     fs::{
         PollState,
-        handle::{PollEntry, PollKey, PollRegistration, Pollable},
+        handle::{PollKey, PollRef, PollRegistration, Pollable},
     },
     thread::{mutex::BlockingMutex, signal, waitqueue::WaitQueue},
 };
@@ -170,7 +170,7 @@ pub struct Pty {
     input_wq: Arc<WaitQueue>,
     /// Wakes master readers when output_buf gets data or slave closes.
     output_wq: Arc<WaitQueue>,
-    pollers: Vec<(PollKey, PtySide, Arc<PollEntry>)>,
+    pollers: Vec<(PollKey, PtySide, PollRef)>,
     next_poll_key: PollKey,
     line_disc: LineDiscipline,
     eof_pending: bool,
@@ -386,7 +386,7 @@ impl Pty {
         state
     }
 
-    pub fn add_poller(&mut self, side: PtySide, entry: Arc<PollEntry>) -> PollKey {
+    pub fn add_poller(&mut self, side: PtySide, entry: PollRef) -> PollKey {
         let key = self.next_poll_key;
         self.next_poll_key = self.next_poll_key.wrapping_add(1).max(1);
         self.pollers.push((key, side, entry));
@@ -427,7 +427,7 @@ impl Pty {
             };
         }
 
-        let entries: Vec<(PtySide, Arc<PollEntry>)> = self
+        let entries: Vec<(PtySide, PollRef)> = self
             .pollers
             .iter()
             .map(|(_, side, entry)| (*side, entry.clone()))
@@ -446,7 +446,7 @@ impl Pty {
 
 /// Deferred PTY notifications flushed after releasing the PTY lock.
 pub struct PtyNotifications {
-    entries: Vec<(PtySide, Arc<PollEntry>)>,
+    entries: Vec<(PtySide, PollRef)>,
     master_state: PollState,
     slave_state: PollState,
     input_wq: Option<Arc<WaitQueue>>,
@@ -502,7 +502,7 @@ impl PollablePtyMaster {
 }
 
 impl Pollable for PollablePtyMaster {
-    fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
+    fn register(&self, entry: PollRef) -> PollRegistration {
         let mut pty = self.inner.lock();
         let state = pty.poll_state_master();
         entry.update(state);
@@ -538,7 +538,7 @@ impl PollablePtySlave {
 }
 
 impl Pollable for PollablePtySlave {
-    fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
+    fn register(&self, entry: PollRef) -> PollRegistration {
         let mut pty = self.inner.lock();
         let state = pty.poll_state_slave();
         entry.update(state);

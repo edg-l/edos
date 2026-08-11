@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::debug::lock_order::{RANK_PORT_TABLE, RANK_SOCKET, RANK_TCP_CONN};
 use crate::fs::PollState;
-use crate::fs::handle::{PollEntry, PollKey, PollRegistration, Pollable};
+use crate::fs::handle::{PollKey, PollRef, PollRegistration, Pollable};
 use crate::net::tcp::{TcpConnection, TcpState};
 use crate::thread::waitqueue::WaitQueue;
 use crate::{ranked_lock, ranked_lock_same};
@@ -60,7 +60,7 @@ pub struct Socket {
     /// Number of fd references. Close only tears down when this reaches 0.
     pub refcount: u32,
     /// Registered poll entries for wakeup on state changes.
-    pollers: Vec<(PollKey, Arc<PollEntry>)>,
+    pollers: Vec<(PollKey, PollRef)>,
     next_poll_key: PollKey,
     /// Receive timeout for blocking operations.
     pub recv_timeout: Option<core::time::Duration>,
@@ -163,7 +163,7 @@ impl Socket {
         state
     }
 
-    pub fn add_poller(&mut self, entry: Arc<PollEntry>) -> PollKey {
+    pub fn add_poller(&mut self, entry: PollRef) -> PollKey {
         let key = self.next_poll_key;
         self.next_poll_key = self.next_poll_key.wrapping_add(1).max(1);
         self.pollers.push((key, entry));
@@ -181,7 +181,7 @@ impl Socket {
         if self.pollers.is_empty() {
             return SocketNotifications::EMPTY;
         }
-        let entries: Vec<Arc<PollEntry>> = self
+        let entries: Vec<PollRef> = self
             .pollers
             .iter()
             .map(|(_, entry)| entry.clone())
@@ -192,7 +192,7 @@ impl Socket {
 
 /// Deferred poll notifications to be flushed after releasing all locks.
 pub struct SocketNotifications {
-    entries: Vec<Arc<PollEntry>>,
+    entries: Vec<PollRef>,
     state: PollState,
 }
 
@@ -222,7 +222,7 @@ impl PollableSocket {
 }
 
 impl Pollable for PollableSocket {
-    fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
+    fn register(&self, entry: PollRef) -> PollRegistration {
         let mut s = ranked_lock!(RANK_SOCKET, "socket::poll_register", self.inner);
         let state = s.poll_state();
         entry.update(state);

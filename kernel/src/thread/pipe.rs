@@ -3,7 +3,7 @@ use crate::{
     debug::lock_order::{RANK_PIPE, RANK_PTY},
     fs::{
         FileSystem, PollState,
-        handle::{PollEntry, PollKey, PollRegistration, Pollable},
+        handle::{PollKey, PollRef, PollRegistration, Pollable},
         inode::VfsInode,
         path::Path,
     },
@@ -66,7 +66,7 @@ pub struct Pipe {
     pub readers: usize,
     pub writers: usize,
     pub closed: bool,
-    pollers: Vec<(PollKey, Arc<PollEntry>)>,
+    pollers: Vec<(PollKey, PollRef)>,
     next_poll_key: PollKey,
     /// Wakes threads blocked in sys_read waiting for data or EOF.
     pub reader_wq: Arc<WaitQueue>,
@@ -149,7 +149,7 @@ impl Pipe {
         state
     }
 
-    fn add_poller(&mut self, entry: Arc<PollEntry>) -> PollKey {
+    fn add_poller(&mut self, entry: PollRef) -> PollKey {
         let key = self.next_poll_key;
         self.next_poll_key = self.next_poll_key.wrapping_add(1).max(1);
         self.pollers.push((key, entry));
@@ -178,7 +178,7 @@ impl Pipe {
                 reader_wq,
             };
         }
-        let entries: Vec<Arc<PollEntry>> = self
+        let entries: Vec<PollRef> = self
             .pollers
             .iter()
             .map(|(_, entry)| entry.clone())
@@ -193,7 +193,7 @@ impl Pipe {
 
 /// Deferred poll notifications to be flushed after releasing the pipe lock.
 pub struct PipeNotifications {
-    entries: Vec<Arc<PollEntry>>,
+    entries: Vec<PollRef>,
     state: PollState,
     reader_wq: Option<Arc<WaitQueue>>,
 }
@@ -274,7 +274,7 @@ impl PollablePipe {
 }
 
 impl Pollable for PollablePipe {
-    fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
+    fn register(&self, entry: PollRef) -> PollRegistration {
         let mut inner = self.inner.lock();
         let state = inner.poll_state();
         entry.update(state);

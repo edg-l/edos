@@ -46,31 +46,50 @@ rather than twice for a timed wait. That, not the allocations, was the cost the
 whole time: the two clock reads a timed call made were **12.7 us** against
 **158 ns** for the entire per-descriptor path.
 
-### …which makes the allocations worth removing, where they were not before
+### …which promoted the per-descriptor allocations, and they are gone now
 
-Removing the clock reads promoted what was left. `pollbench` prices the split
-by polling descriptors that stop at different depths — an invalid one is
-answered from the fd table alone, and `stdout` boxes a `Pollable` and allocates
-a `PollEntry` but registers nothing and takes no device lock:
+With the clock reads gone, the 158 ns marginal cost of a descriptor was worth
+attacking. A poll call used to allocate **2 + 2N** times; it now allocates 2 or
+3 regardless of how many descriptors it watches:
 
-| | ns |
-|---|---|
-| syscall floor, `count=0` | 81 |
-| one invalid descriptor | 248 |
-| one `stdout` descriptor | 330 |
-| marginal per descriptor at `n=64` | 158 |
+- **One `PollSet` for the whole call** replaces `Arc<PollWaiter>` plus an
+  `Arc<PollEntry>` per descriptor. A device holds a `PollRef`, which is a
+  refcount on the set plus an index, so registering costs no allocation. Its
+  slots live inside the set for eight descriptors or fewer.
+- **No `Box<dyn Pollable>`.** The pollable is built on the stack to register
+  through; only descriptors the device actually kept a registration for are
+  named again, as a `PollTarget` enum holding the `Arc` the descriptor table
+  already gave us. Only the filesystem path still boxes.
+- **A descriptor that registers nothing gets no context at all.** Its readiness
+  is frozen at registration, so it is written into the caller's array once and
+  counted there.
+- `Vec<SelectFd>` is a stack array for eight descriptors or fewer.
 
-So **one alloc/free pair costs about 41 ns**, and a poll call above the syscall
-floor is very nearly all allocator traffic: four allocations happen per call
-regardless of the descriptors (`Vec<SelectFd>`, the descriptor snapshot,
-`Arc<PollWaiter>`, `Vec<PollContext>`) at ~167 ns, and two more per descriptor
-(`Box<dyn Pollable>`, `Arc<PollEntry>`) at 82 ns — **52% of the 158 ns
-per-descriptor cost, and ~75% of a 329 ns single-descriptor call.**
+Medians of three runs, before and after:
 
-The old "2+2N allocations per poll" item is therefore live again, and scoped
-wrong: the four fixed allocations are worth as much as the per-descriptor pair.
-It was genuinely not worth doing before, when 82 ns sat inside a 13877 ns call.
-Measure with `pollbench` before and after; do not re-derive this by reasoning.
+| n | ready before | after | idle before | after |
+|---|---|---|---|---|
+| 1 | 636 | 347 | 329 | 318 |
+| 4 | 796 | 696 | 663 | 568 |
+| 16 | 2569 | 1841 | 2374 | 2005 |
+| 64 | 10175 | 6408 | 10213 | 7696 |
+
+**Marginal cost per descriptor: 158 → 99 ns.** Fixed cost is unchanged at
+~162 ns, and the descriptor snapshot stays on the heap: `FileDescriptor` is
+about a hundred bytes, so an inline array of them costs more to initialise and
+drop than the allocation it saves.
+
+**Two measurement traps this produced, both of which I acted on before catching:**
+
+- `pollbench` used to price the allocations as the gap between an invalid
+  descriptor and `stdout`. That is wrong: in a terminal, fd 1 is a **PTY
+  slave**, not `StandardStream::Stdout`, so it takes the PTY lock and registers
+  like any other device, and the terminal is redrawing during the measurement.
+  The "82 ns for two allocations" that figure produced was never real.
+- Single readings of the fixed-cost line swing between 150 and 256 ns. A
+  three-run median says the fixed cost did not move; one run said it had
+  regressed by 75 ns. The `n >= 2` rows are stable to a few percent and are the
+  ones to trust.
 
 ---
 
