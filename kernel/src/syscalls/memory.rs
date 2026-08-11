@@ -577,7 +577,20 @@ pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
     }
 
     // Flush collected pages outside the VmaSet lock (AHCI I/O may block).
-    for (inode, page_idx, page) in &work {
+    //
+    // One bulk call per inode, in ascending page order, because the filesystem
+    // turns a contiguous run of pages into a single device command. Written one
+    // page at a time, a 4 MiB mapping is a thousand synchronous round trips at
+    // queue depth one, which is where the several hundred milliseconds a first
+    // msync used to cost came from.
+    //
+    // `dirty_keys` is left alone, as the per-page path also left it: the entry
+    // survives a page being cleaned here and costs a later writeback pass one
+    // redundant write of a clean page.
+    work.sort_by_key(|(inode, page_idx, _)| (inode.mount_id, inode.ino, *page_idx));
+
+    for group in work.chunk_by(|(a, _, _), (b, _, _)| a.mount_id == b.mount_id && a.ino == b.ino) {
+        let inode = &group[0].0;
         let fs = match fs_by_mount_id(inode.mount_id) {
             Some(f) => f,
             None => {
@@ -589,23 +602,30 @@ pub fn sys_msync(addr: u64, len: u64, flags: u32) -> i64 {
             Some(ops) => ops,
             None => continue,
         };
-        // Safety: no mutable aliasing; user PTEs may be writable but the cache
-        // frame is the sole physical backing and we're only reading it here.
-        //
-        // Note: msync stays on the per-page path intentionally.  Switching to
-        // `flush_pages_bulk` would require tracking which page indices to remove
-        // from `dirty_keys` on success — a non-trivial change for a rare syscall.
-        // The bulk path is a possible follow-up improvement.
-        let buf = unsafe { page.as_slice() };
-        match pc_ops.flush_page(inode.ino, *page_idx, buf, 4096) {
-            Ok(()) => page.clear_dirty(),
+
+        let pages: Vec<(u64, Arc<CachedPage>)> = group
+            .iter()
+            .map(|(_, page_idx, page)| (*page_idx, Arc::clone(page)))
+            .collect();
+
+        // Pinned across the flush so the frames cannot be reclaimed while the
+        // device is reading them.
+        for (_, page) in &pages {
+            page.pin();
+        }
+        let result = pc_ops.flush_pages_bulk(inode.ino, &pages, None);
+        for (_, page) in &pages {
+            page.unpin();
+        }
+
+        match result {
+            Ok(()) => {
+                for (_, page) in &pages {
+                    page.clear_dirty();
+                }
+            }
             Err(e) => {
-                log!(
-                    "msync: flush_page ino={} idx={} err={:?}",
-                    inode.ino,
-                    page_idx,
-                    e
-                );
+                log!("msync: flush_pages_bulk ino={} err={:?}", inode.ino, e);
                 info.lock().errno = Errno::EIO;
                 return -1;
             }
