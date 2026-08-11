@@ -117,3 +117,17 @@
   Wants argv retained on the Thread (a joined String is enough) at
   load_process_image time, and cmdline_text rendering it. `pstree` has `-l` for
   the full path instead, which is all the kernel can answer today.
+
+- `fsbench all /var` can hang in `write_durable` (the fsync tests). Seen once
+  after 25.1s of a run, no further serial output for 275s; `fs-regression`
+  passes on both EFS and FAT32 in the same build, and `fsbench write -n 32`
+  completes. The suspect is the pre-existing
+  `sys_sync: journal still pending after 8 rounds` /
+  `force_commit_and_wait` 30 s timeout path, which appears in logs going back
+  to before the clocksource work. It is more likely to be reached now that the
+  system does more work per second. Reproduce with `make storage-check`, and
+  read `/proc/processes` while it is stuck to find which thread is blocked.
+- `ahci_stats.ncq_max_inflight` reaches 1. `doc/STORAGE-ROADMAP.md` records it
+  peaking at 9 of a negotiated 32, so either the roadmap is stale or the async
+  NCQ path stopped queueing. Worth settling before any further storage work,
+  because a queue depth of one makes every latency number a round-trip count.

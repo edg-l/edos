@@ -6,6 +6,51 @@ session.
 
 ---
 
+## The clock was the most expensive thing in the kernel
+
+`Instant::now()` was an MMIO read of the HPET main counter. QEMU emulates the
+HPET in its own userspace, so every read was a full exit to the hypervisor:
+**6361 ns measured**, against **16 ns** for `rdtsc`. There were 72 call sites,
+including one on each side of every context switch and one per AHCI command.
+
+`Instant` now holds **nanoseconds, not counter ticks**, so a value stays
+comparable across a change of source; `tick()`/`from_tick` are `as_nanos()`/
+`from_nanos()` and every `*_tick` field was renamed. The TSC is only used when
+`CPUID.80000007H:EDX[8]` reports an invariant TSC, each AP re-checks itself
+against the HPET at bring-up and demotes everyone on disagreement, and
+`clocksource=hpet` on the kernel command line forces the old behaviour. QEMU
+does not advertise invariant TSC unless asked, so the run targets pass
+`+invtsc`; under TCG the bit is absent and the HPET is kept automatically,
+which is the right answer since TCG's TSC is counted instructions.
+
+| | before | after |
+|---|---|---|
+| clock read | 6361 ns | 16 ns |
+| `sched_yield` | 20818 ns | 1357 ns |
+| `poll`, 1 idle fd, timeout 0 | 13877 ns | 330 ns |
+| 512B raw device reads | 13.6 MiB/s | 35.3 MiB/s |
+
+Two defects only a fine-grained clock exposes, both fixed here:
+
+- **`set_apic_timer` clamped the initial count to 1 tick, not the duration.**
+  Writing 0 stops the one-shot timer permanently, so a floor existed — but one
+  tick at Div1 fires before the handler that armed it returns. A deadline that
+  has just arrived now asks for a nearly-zero timer routinely. Floored at 10 us
+  and saturated instead of truncated at the top.
+- **A slow clock was an accidental rate limiter.** Anything that read it in a
+  loop got a free backoff. Nothing depended on that in the end, but it is the
+  first thing to suspect if a spin loop starts misbehaving.
+
+**`poll` never consults the clock for a zero timeout now**, and reads it once
+rather than twice for a timed wait. That, not the allocations, was the cost: at
+`n=64` the entire per-descriptor cost — two allocations, the fd-table lookup,
+the device lock, and the poller-list push and remove — is **158 ns**, while the
+two clock reads a timed call used to make were **12.7 us**. The long-standing
+"2+2N allocations per poll" item is therefore **not worth doing**; see
+`programs/pollbench`, which prices all of it.
+
+---
+
 ## lstat is real now, so `is_symlink()` finally answers
 
 `std::fs::symlink_metadata` used to follow links: `lstat` in the fork's
@@ -112,8 +157,8 @@ host — the guest terminal is far too short to hold a full run.
   measurement refuted.** Read that list before optimising: two of them sounded
   obviously right and made the system slower.
 
-Two traps that round produced, both of which made a number mean the opposite of
-what it said:
+Three traps that round produced, all of which made a number mean the opposite
+of what it said:
 
 - A throughput figure is meaningless unless you know whether the work was
   deferred. A buffered `write` returns at page-cache speed; only the `fsync`
@@ -121,6 +166,13 @@ what it said:
 - Reading back in the same boot reads the page cache. Cold numbers need
   `fsbench write`, a reboot, then `fsbench read`, which is also what
   `scripts/fs-regression` does for durability.
+- **Comparing two builds under the default time budget measures the wrong
+  thing.** The faster build does more work per test, so it meets every later
+  test with a fuller, more fragmented filesystem. Two sides of the clocksource
+  comparison allocated 176927 and 221918 blocks and reported 483 against 1.8
+  MiB/s for `mmap store 4MiB + msync` — while at a fixed `-n 32` operations
+  both had a **1.0 ms median** and differed only in their worst single
+  operation. Use `-n` for any A/B, and rebuild `sata-disk.img` between runs.
 
 ---
 
