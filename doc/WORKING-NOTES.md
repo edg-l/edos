@@ -1,8 +1,39 @@
-# Working notes, sessions of 2026-08-08 to 2026-08-11
+# Working notes, sessions of 2026-08-08 to 2026-08-12
 
 State of the tree, what changed, and what is still open. Written for whoever
 picks this up next, which will usually be an agent with no memory of the
 session.
+
+---
+
+## Fixed: the shell read one byte and called it a character
+
+Typing the Spanish ISO `ç` and redirecting it wrote `c3 83 c2 a7` instead of
+`c3 a7`. Nothing was encoding twice; the shell's readline decoded once, wrongly.
+
+`read_line` in `programs/edos-sh/src/main.rs` reads stdin one byte at a time and
+did `let ch = ch as char`. That cast is a Latin-1 decode, not a UTF-8 one: it
+takes the byte as a code point. `0xC3` becomes `U+00C3` and re-encodes as
+`c3 83`, `0xA7` becomes `U+00A7` and re-encodes as `c2 a7`, and the two together
+are exactly the sequence observed. Every layer below was already correct — the
+terminal widget collects `Vec<char>` and writes real UTF-8, and the PTY line
+discipline passes bytes through untouched — so the bug was entirely in the
+one-byte-at-a-time reader treating each byte as a whole character.
+
+The fix reads the rest of the sequence when a byte at or above `0x80` arrives,
+using `utf8_seq_len` for the expected length, and decodes with
+`str::from_utf8`. A stray continuation byte or a lead byte RFC 3629 no longer
+permits is dropped rather than inserted, so a malformed sequence cannot corrupt
+the line buffer.
+
+Verified in the guest: `echo ç > /var/k.txt` then `hexdump /var/k.txt` gives
+`c3 a7 0a`, with `ç` echoed correctly on screen. Use `/var`, not `/tmp`: memfs
+reads past EOF and pads the last page with zeros, so a hexdump there shows
+trailing garbage that has nothing to do with the write. `hexdump` here takes no
+`-C`.
+
+Sending the key: `scripts/edos-vm key backslash`. `ç` is `OEM7` in
+`programs/edos_lib/src/keymap.rs`, which is the ISO key beside Enter.
 
 ---
 

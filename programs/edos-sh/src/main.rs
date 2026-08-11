@@ -546,6 +546,19 @@ pub fn run_chain(input: &str) -> i32 {
     last_exit
 }
 
+/// Total length in bytes of the UTF-8 sequence `lead` starts, or `None` when
+/// `lead` cannot begin one (a stray continuation byte, or an encoding no longer
+/// permitted by RFC 3629).
+fn utf8_seq_len(lead: u8) -> Option<usize> {
+    match lead {
+        0x00..=0x7F => Some(1),
+        0xC2..=0xDF => Some(2),
+        0xE0..=0xEF => Some(3),
+        0xF0..=0xF4 => Some(4),
+        _ => None,
+    }
+}
+
 /// Find the byte offset of the previous character boundary before `pos`.
 fn prev_char_boundary(s: &str, pos: usize) -> usize {
     let mut i = pos - 1;
@@ -785,8 +798,36 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
             continue;
         }
 
-        // Insert character at cursor position
-        let ch = ch as char;
+        // Insert character at cursor position. A byte at or above 0x80 opens a
+        // multi-byte UTF-8 sequence whose continuation bytes arrive on later
+        // reads, so the whole sequence is decoded before anything is inserted.
+        let ch = if ch < 0x80 {
+            ch as char
+        } else {
+            let Some(seq_len) = utf8_seq_len(ch) else {
+                continue;
+            };
+            let mut seq = [0u8; 4];
+            seq[0] = ch;
+            let mut got = 1;
+            while got < seq_len {
+                if !poll_stdin(20) {
+                    break;
+                }
+                let n = sys_read(0, &mut seq[got..got + 1]);
+                if n != 1 {
+                    break;
+                }
+                got += 1;
+            }
+            match std::str::from_utf8(&seq[..got])
+                .ok()
+                .and_then(|s| s.chars().next())
+            {
+                Some(c) => c,
+                None => continue,
+            }
+        };
         let char_len = ch.len_utf8();
         if cursor == line.len() {
             // Append (common case)
