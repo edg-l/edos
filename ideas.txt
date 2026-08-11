@@ -269,6 +269,13 @@
   position-dependent pattern after writing; prints the delta of every relevant
   /proc counter. `raw`/`rawwrite` modes hit the block device directly. Docs:
   `doc/fsbench.md`; what to optimise next: `doc/STORAGE-ROADMAP.md`.
+- **Context switch round (2026-08-11)** - `sched_yield` 1917 -> 433 ns, the
+  switch itself 1270 -> 220, a cross-process handover 2215 -> 751, a pipe round
+  trip between two processes 9429 -> 4552. Three changes: the APIC one-shot is
+  re-armed only when what is armed would fire too late (that write alone was
+  81% of a switch), `FS.base` goes through `rdfsbase`/`wrfsbase`, and kernel
+  mappings are `GLOBAL` with `CR4.PGE` on so a `CR3` reload keeps them.
+  `XSAVEOPT` and PCID were both ruled out; `doc/WORKING-NOTES.md` says why.
 - **switchbench and /proc/sched_prof** - `programs/switchbench` prices a
   context switch four ways (yield with nothing else Ready, handover to a
   sibling thread, handover to another process, blocking pipe round trip) and

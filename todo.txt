@@ -141,23 +141,18 @@
   window to look at is a waker publishing `wake_pending` against a parker that
   is between its last condition check and its CAS to `Parked`.
 
-- Context switch cost, the top item for the next round, now measured rather
-  than guessed. `switchbench` on a single-CPU boot and `/proc/sched_prof`
-  (`--features sched-prof`) put one switch at 1270 ns, of which:
-  - **`set_apic_timer` is 1024 ns**, 81% of the whole switch. One x2APIC write
-    to `IA32_TSC_TMICT`, trapped by KVM, done on every switch to push the
-    incoming thread's timeslice deadline out. Nothing else is close.
-  - `FS.base` costs 104 ns as `RDMSR` + `WRMSR`, while `CR4.FSGSBASE` has been
-    on since boot and `rdfsbase`/`wrfsbase` cost a cycle or two.
-  - `fxsave` + `fxrstor` is 93 ns. Unconditional and 512 bytes wide whether or
-    not the thread touched the FPU; `XSAVEOPT` with a dirty check is the fix,
-    and it decides what the save area has to hold, so pair it with the
-    `-cpu host` question.
-  - `switch_to_page` is 67 ns, and a cross-process handover costs ~380 ns more
-    than a same-address-space one, so PCID is worth roughly that much plus the
-    refill misses that land after the switch.
-  - The `CpuContext` copies under a spin `Mutex` are 40 ns for both sides
-    together. Not worth restructuring on their own.
-  The two-thread ping-pong the last round asked for has been run, and it
-  cleared the doubt rather than confirming it: a real handover costs the same
-  as a self-yield within noise, so the idle figure was never hiding anything.
+- Context switch: done for this round. `sched_yield` 1917 -> 433 ns, the switch
+  itself 1270 -> 220, a cross-process handover 2215 -> 751, a pipe round trip
+  9429 -> 4552. See `doc/WORKING-NOTES.md`. What is left, in order:
+  - `switch_to_page` is 66-77 ns and takes `user.read()` plus a `CR3` read
+    before deciding it has nothing to do. Mirror the thread's `CR3` in an
+    atomic to drop the lock; only three sites set it (thread creation,
+    `execve`, `fork`).
+  - `fxsave` + `fxrstor` is 91 ns and is now the largest single item. Do NOT
+    reach for `XSAVEOPT`: measured, it is slower, and the reason is written
+    above `save_fpu_state`.
+  - PCID needs hardware this machine does not have (Zen 3). Global kernel
+    pages took the reachable part of it.
+  - The 10 us `MIN_TIMER_INTERVAL` floor in `apic/mod.rs` is still a picked
+    number. It matters less now that the timer is armed rarely, and
+    TSC-deadline mode would remove the need for it.

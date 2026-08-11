@@ -21,7 +21,7 @@ descriptors, so `orphans_dropped` reads 0 mid-run and 513 afterwards.
 **Every number below predates the monotonic clock moving off the HPET
 (2026-08-11), and the per-command ones are wrong because of it.** An
 `Instant::now()` cost 6361 ns then and 16 ns now, and a context switch went
-20818 -> 1357 ns. Section 1 attributes ~100 us per 4 KiB command to two
+20818 -> 1357 ns, and 433 ns after the round that followed it. Section 1 attributes ~100 us per 4 KiB command to two
 scheduler round trips, so on the order of 40 us of that was clock reads. What
 this actually moved, measured on the raw device: 4 KiB reads 30.4 -> 36.4 MiB/s
 (p50 107 -> 92 us) and 512 B reads 13.6 -> 35.3 MiB/s (p50 9 -> 1 us, most of
@@ -72,11 +72,11 @@ attacking the cheaper half.
 
 **Those two scheduler round trips are now the shared boundary with the context
 switch work** (`todo.txt`). They cost 20818 ns each when the 100 us figure was
-measured and 1357 ns now, which is where the 4 KiB gain since came from. What
-is left in a switch is a TLB flush on every CR3 reload (the kernel uses no
-PCID), an unconditional 512-byte `fxsave`, and two locked `CpuContext` copies —
-so this section and that one are the same lever seen from two ends, and depth
-is the half that only this one can fix.
+measured and 433 ns now, which is where the 4 KiB gain since came from. That
+lever is close to spent: what is left in a switch is 91 ns of `fxsave` and
+`fxrstor`, 66-77 ns of `switch_to_page`, and a per-process TLB flush that
+needs PCID this machine's CPU does not have. So depth is not merely the half
+only this section can fix — it is the half with anything left in it.
 
 The fix that matters is giving readahead and writeback a path that keeps
 commands outstanding, so depth 32 is reachable at all. Until something asks for

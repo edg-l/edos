@@ -6,6 +6,72 @@ session.
 
 ---
 
+## The context switch round: 1917 ns to 433
+
+| | before | after |
+|---|---|---|
+| `sched_yield`, nothing else Ready | 1917 ns | 433 ns |
+| `sched_yield`, handover to a sibling thread | 1832 ns | 490 ns |
+| `sched_yield`, handover to another process | 2215 ns | 751 ns |
+| pipe round trip between two processes | 9429 ns | 4552 ns |
+| the switch itself, `/proc/sched_prof` | 1270 ns | 220 ns |
+
+Three changes, in the order they matter.
+
+**The APIC timer is armed only when what is already armed will not do.**
+`context_switch_to` re-armed the one-shot on every switch to push the incoming
+thread's slice out, and that write — one x2APIC store to `IA32_TSC_TMICT`,
+trapped by the hypervisor — was 1024 ns of a 1270 ns switch. A timer already
+set to fire *earlier* than the new deadline satisfies it; only one that would
+fire late forces the write. `expire_timeslice` already compared each thread
+against its own deadline and let an early tick pass, and `tick_finish` re-arms
+for what is left of the slice, so a thread still gets all of it and just takes
+one extra tick to notice. Yielding in a loop now costs one interrupt per
+timeslice instead of one trap per switch.
+
+This is what a tickless kernel's clock-event layer does, and why Linux ships
+`HRTICK` — an hrtimer armed at the exact slice end — turned off by default.
+
+**`FS.base` moved to `rdfsbase`/`wrfsbase`**, following the `HAS_FSGSBASE`
+gate `per_cpu.rs` already had for GS. 104 ns to 34.
+
+**Kernel mappings are `GLOBAL` now, and `CR4.PGE` is on.** Neither had ever
+been set, so a `CR3` write discarded the kernel's own translations along with
+the outgoing process's and the next syscall re-walked them. The kernel half is
+the same page tables in every address space, so the bit is exactly true of
+them. 2805 leaves marked at boot; it is worth nothing to a same-address-space
+switch and a fifth of a cross-process one.
+
+### Two things that were tried and are not worth doing
+
+- **`XSAVEOPT` instead of `FXSAVE`.** Measured: save 32 → 36 ns, restore
+  59 → 83 ns. It can only win by *skipping* components, and with `XCR0`
+  holding x87 and SSE there are none to skip — it saves the same registers
+  `FXSAVE` does and adds a 64-byte header plus per-component work. Its
+  modified optimisation needs consecutive `XSAVEOPT`/`XRSTOR` on the same
+  area, which two threads handing off to each other never do. It becomes the
+  right answer only if `XCR0` grows something large and optional (AVX and
+  wider) that most threads leave alone. The note lives above `save_fpu_state`.
+- **PCID.** Not possible on this machine: the host is a Ryzen 5 5600, and Zen
+  3 has no PCID, so `qemu` refuses `+pcid` with "host doesn't support requested
+  feature: CPUID.01H:ECX.pcid". It cannot be exposed to the guest or tested
+  here. Global kernel pages above are the part of the same win that is
+  reachable; what remains — a process's own translations dying on every switch
+  — needs the hardware.
+
+### What is left, with numbers
+
+The switch is 220 ns and the whole `sched_yield` is 433, so roughly 210 ns is
+now the syscall boundary, the trampoline and `iretq`. Inside the switch:
+`page` 66-77 (an `RwLock` read and a `CR3` read even when the address space
+does not change), `fxrstor` + `fxsave` 91, `CpuContext` copies 36, publish 19,
+transition 27, `wake_sleepers` 18, pick 12, timer 10.
+
+`switch_to_page` is the next cheap one: it takes `user.read()` and reads `CR3`
+before deciding it has nothing to do. Mirroring the thread's `CR3` in an
+atomic would remove the lock; there are only three sites that set it
+(`thread.rs` thread creation, `execve`, `fork`).
+
 ## A context switch is one MSR write and a rounding error
 
 Measured on a single-CPU boot with `switchbench` (userspace, end to end) and
