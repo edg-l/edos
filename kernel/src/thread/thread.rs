@@ -312,6 +312,26 @@ pub(crate) struct LoadedImage {
     pub tls: Option<UserThreadTls>,
     pub tls_fs_base: u64,
     pub stack_top: u64,
+    /// The arguments the image was started with, space-joined, for procfs.
+    /// The stack copy lives in user memory, which the kernel cannot read once
+    /// the process has had a chance to overwrite it.
+    pub cmdline: Arc<String>,
+}
+
+/// Render `argv` as one line for `/proc/<tid>/cmdline`, falling back to the
+/// path for an image started with no arguments at all.
+fn cmdline_of(path: &Path, argv: &[&[u8]]) -> Arc<String> {
+    let mut out = String::new();
+    for arg in argv {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&String::from_utf8_lossy(arg));
+    }
+    if out.is_empty() {
+        out = alloc::format!("{path}");
+    }
+    Arc::new(out)
 }
 
 /// Build a fresh address space and load `inode` into it, with `argv`/`envp`
@@ -400,6 +420,7 @@ pub(crate) fn load_process_image(
         tls: tls_runtime,
         tls_fs_base,
         stack_top,
+        cmdline: cmdline_of(path, argv),
     })
 }
 
@@ -967,6 +988,7 @@ impl Thread {
             tls: tls_runtime,
             tls_fs_base,
             stack_top,
+            cmdline,
         } = image;
 
         let kernel_pml4 = boot_info().cr3;
@@ -996,6 +1018,7 @@ impl Thread {
             address_space_refs,
             process_stack_top,
             next_tls_slot: Arc::new(AtomicU64::new(1)), // slot 0 used by initial thread
+            cmdline,
         }));
 
         // Task 2.9: Register the new process as a mapper of every FileBacked VMA

@@ -3107,13 +3107,16 @@ rather than guessed at.
 
 ### Things that will bite you
 
-- **`/proc/<pid>/cmdline` does not hold a command line.**
-  `ThreadSnapshot::cmdline_text` in `kernel/src/fs/procfs/mod.rs` prints the
-  thread name, and the name is the path `exec` was given. argv is never
-  retained by the kernel, so `sleep 60` and `sleep 1` are indistinguishable to
-  every tool. `pstree` had a `-a` flag for about ten minutes before this turned
-  up; it ships `-l` (whole spawn path) instead, and the gap is in engram.
-  Anything reaching for that file for arguments is reaching for nothing.
+- **`/proc/<pid>/cmdline` now holds the arguments too**, so `sleep 60` and
+  `sleep 1` are distinguishable in `ps`, `top` and `pstree`. `UserThread`
+  carries an `Arc<String>` built by `load_process_image` from the argv it is
+  already pushing onto the new stack; the kernel cannot read it back from the
+  user stack later, because the process is free to overwrite it. It is per
+  address space, so `execve` replaces it in `install_image` and `clone`/`fork`
+  inherit the parent's. `/proc/processes` renders it as the trailing NAME
+  column, which is why arguments containing spaces do not break the fixed
+  columns anything parses. `pstree` had a `-a` flag for about ten minutes
+  before the gap turned up and ships `-l` (whole spawn path) instead.
 
 ## `sntp`, and the clock the kernel could not be told (2026-08-11)
 

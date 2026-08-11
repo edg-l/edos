@@ -791,6 +791,9 @@ struct ThreadSnapshot {
     kstack_top: u64,
     is_kernel: bool,
     user_pid: Option<u64>,
+    /// The command line of a user thread's image, arguments included. A kernel
+    /// thread has none, and reports its name instead.
+    cmdline: Option<String>,
     user_id: Option<u32>,
     group_id: Option<u32>,
     cwd: Option<String>,
@@ -827,7 +830,7 @@ impl ThreadSnapshot {
         let pgid = thread.pgid();
         let stopped = thread.stopped.load(Ordering::Acquire);
 
-        let (user_pid, heap_break, vma_count, vm_size, resident) = thread
+        let (user_pid, cmdline, heap_break, vma_count, vm_size, resident) = thread
             .user
             .as_ref()
             .map(|user_arc| {
@@ -851,13 +854,14 @@ impl ThreadSnapshot {
                 };
                 (
                     Some(user.pid),
+                    Some(user.cmdline.to_string()),
                     Some(user.heap_break),
                     Some(vma_count),
                     Some(vm_size),
                     Some(resident),
                 )
             })
-            .unwrap_or((None, None, None, None, None));
+            .unwrap_or((None, None, None, None, None, None));
 
         let (user_id, group_id, cwd, errno, next_mmap_addr) = read_thread_info(thread.id);
 
@@ -879,6 +883,7 @@ impl ThreadSnapshot {
             kstack_top,
             is_kernel,
             user_pid,
+            cmdline,
             user_id,
             group_id,
             cwd,
@@ -891,15 +896,17 @@ impl ThreadSnapshot {
         }
     }
 
+    /// The last column of `/proc/processes`, so arguments can run to the end of
+    /// the line without disturbing anything that parses the fixed columns.
     fn display_name(&self) -> &str {
-        self.name.as_str()
+        self.cmdline.as_deref().unwrap_or(self.name.as_str())
     }
 
     fn cmdline_text(&self) -> String {
         if self.is_kernel {
             format!("[kernel] {}\n", self.name)
         } else {
-            format!("{}\n", self.name)
+            format!("{}\n", self.display_name())
         }
     }
 

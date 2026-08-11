@@ -2465,6 +2465,7 @@ fn install_image(
     thread.set_user_cr3(&mut user, (image.pml4_frame, kernel_pml4_flags));
     user.tls = image.tls;
     user.heap_break = image.heap_break;
+    user.cmdline = image.cmdline;
     user.process_stack_top
         .store(image.stack_top, Ordering::Release);
     // A fresh image has one thread again, so TLS slots restart above slot 0.
@@ -2598,6 +2599,7 @@ fn sys_clone(
     let cr3 = parent_user_read.cr3;
     let memory_manager = parent_user_read.memory_manager.clone();
     let parent_heap_break = parent_user_read.heap_break;
+    let parent_cmdline = parent_user_read.cmdline.clone();
     let parent_vmas = parent_user_read.vmas.clone();
     let process_stack_top = parent_user_read.process_stack_top.clone();
     let address_space_refs = parent_user_read.address_space_refs.clone();
@@ -2675,6 +2677,7 @@ fn sys_clone(
         vmas: parent_vmas, // Arc clone - shared address space
         tls: tls_runtime,
         heap_break: parent_heap_break,
+        cmdline: parent_cmdline,
         address_space_refs,
         process_stack_top,
         next_tls_slot, // Arc clone - shared counter
@@ -2789,6 +2792,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
     let parent_user_read = parent_user.read();
     let parent_cr3 = parent_user_read.cr3;
     let parent_heap_break = parent_user_read.heap_break;
+    let parent_cmdline = parent_user_read.cmdline.clone();
     let parent_process_stack_top = parent_user_read.process_stack_top.load(Ordering::Acquire);
     let parent_tls = parent_user_read.tls.clone();
     let parent_fs_base = parent_thread.tls_base.load(Ordering::Acquire);
@@ -2932,6 +2936,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         vmas: child_vma_set_arc,
         tls: parent_tls,
         heap_break: parent_heap_break,
+        cmdline: parent_cmdline,
         address_space_refs: Arc::new(AtomicUsize::new(1)),
         process_stack_top: Arc::new(AtomicU64::new(parent_process_stack_top)),
         next_tls_slot: Arc::new(AtomicU64::new(1)), // fresh counter, slot 0 inherited via COW

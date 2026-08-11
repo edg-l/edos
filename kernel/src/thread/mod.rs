@@ -1,5 +1,5 @@
 use crate::thread::preempt::PreemptSpinlock;
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize};
 use x86_64::{VirtAddr, registers::control::Cr3Flags, structures::paging::PhysFrame};
 
@@ -51,6 +51,9 @@ pub struct UserThread {
     /// Per-address-space TLS slot counter. Thread 0 uses slot 0, each
     /// subsequent clone'd thread gets the next slot via fetch_add.
     pub next_tls_slot: Arc<AtomicU64>,
+    /// The command line the image was started with, space-joined. Per address
+    /// space, so `execve` replaces it along with everything else it installs.
+    pub cmdline: Arc<String>,
 }
 
 #[derive(Debug, Clone)]
