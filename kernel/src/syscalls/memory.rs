@@ -706,7 +706,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                         }
                     }
                 }
-                if !frames.is_empty() && crate::memory::tlb::shootdown_needed() {
+                if !frames.is_empty() {
                     crate::memory::tlb::tlb_shootdown(vma_start, vma_page_count);
                 }
                 let mut fa = frame_allocator();
@@ -725,9 +725,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                         }
                     }
                 }
-                if crate::memory::tlb::shootdown_needed() {
-                    crate::memory::tlb::tlb_shootdown(vma_start, vma_page_count);
-                }
+                crate::memory::tlb::tlb_shootdown(vma_start, vma_page_count);
             }
             VmaBacking::FileBacked {
                 inode,
@@ -759,7 +757,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i32 {
                         }
                     }
                 }
-                if !frames.is_empty() && crate::memory::tlb::shootdown_needed() {
+                if !frames.is_empty() {
                     crate::memory::tlb::tlb_shootdown(vma_start, vma_page_count);
                 }
                 {

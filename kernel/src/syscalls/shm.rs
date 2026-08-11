@@ -253,9 +253,7 @@ pub fn sys_shm_unmap(addr: u64) -> i64 {
                             }
                         }
                     }
-                    if crate::memory::tlb::shootdown_needed() {
-                        crate::memory::tlb::tlb_shootdown(VirtAddr::new(addr), page_count);
-                    }
+                    crate::memory::tlb::tlb_shootdown(VirtAddr::new(addr), page_count);
 
                     0
                 }

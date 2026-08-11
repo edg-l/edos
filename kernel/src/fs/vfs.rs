@@ -1427,9 +1427,7 @@ pub fn invalidate_mappings_above(inode: &Arc<VfsInode>, new_size: u64) {
 
     // Issue TLB shootdowns after all MM locks are released.
     for (start, count) in shootdown_ranges {
-        if crate::memory::tlb::shootdown_needed() {
-            crate::memory::tlb::tlb_shootdown(start, count);
-        }
+        crate::memory::tlb::tlb_shootdown(start, count);
     }
 }
 

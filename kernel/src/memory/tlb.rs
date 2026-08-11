@@ -54,6 +54,13 @@ const ACK_ATTEMPTS: u32 = 3;
 /// This function must be called with interrupts **enabled** so that the caller
 /// CPU can receive reschedule or other IPIs while spinning, and so that target
 /// CPUs can receive the shootdown IPI.
+///
+/// Call it whenever a mapping is torn down, including on a machine with one
+/// CPU online. The local flush below is not an optimisation of the IPI round —
+/// it is the *only* invalidation an unmapper gets when it dropped the per-page
+/// `MapperFlush` with `ignore()`, which every caller that batches a range
+/// does. Guarding the call on "is anyone else running" leaves that CPU reading
+/// through a translation to a frame the allocator has already handed out again.
 pub fn tlb_shootdown(start: VirtAddr, page_count: u64) {
     debug_assert!(
         x86_64::instructions::interrupts::are_enabled(),
@@ -148,11 +155,6 @@ fn send_shootdown_ipis(mask: u64) {
         let lapic_id = lapic_id_for_cpu(idx);
         unsafe { get_lapic().send_ipi(InterruptIndex::TlbShootdown as u8, lapic_id) };
     }
-}
-
-/// Returns true if TLB shootdown is necessary (more than one CPU online).
-pub fn shootdown_needed() -> bool {
-    crate::smp::cpu_count() > 1
 }
 
 /// Flush the entire TLB (including global pages) on all CPUs.
