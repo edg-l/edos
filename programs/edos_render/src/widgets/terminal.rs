@@ -86,6 +86,9 @@ pub struct Terminal {
     cursor_col: usize,
     cursor_visible: bool,
     cursor_blink_counter: u32,
+    /// DECTCEM (CSI ? 25 h / l): the program can hide the cursor entirely,
+    /// independently of the blink phase in `cursor_visible`.
+    cursor_enabled: bool,
 
     // Scroll position
     scroll_offset: usize,
@@ -149,6 +152,7 @@ impl Terminal {
             cursor_col: 0,
             cursor_visible: true,
             cursor_blink_counter: 0,
+            cursor_enabled: true,
             scroll_offset: 0,
             history: VecDeque::new(),
             max_history: 1000,
@@ -455,15 +459,33 @@ impl Terminal {
                     }
                 }
             }
+            'h' | 'l' => {
+                // DEC private mode set/reset. DECTCEM (?25) is the only mode
+                // the widget implements; anything else is ignored.
+                if self.csi_is_private() && params.first() == Some(&25) {
+                    self.cursor_enabled = final_byte == 'h';
+                    if self.cursor_enabled {
+                        self.cursor_visible = true;
+                        self.cursor_blink_counter = 0;
+                    }
+                }
+            }
             _ => {
                 // Unknown CSI command, ignore
             }
         }
     }
 
+    /// Whether the accumulated CSI carries the DEC private-parameter prefix `?`.
+    fn csi_is_private(&self) -> bool {
+        self.esc_len > 0 && self.esc_buf[0] == b'?'
+    }
+
     /// Parse the accumulated CSI parameter bytes into a list of numeric values.
+    /// A leading private-parameter prefix is not a parameter and is skipped.
     fn parse_csi_params(&self) -> Vec<usize> {
-        let param_str = core::str::from_utf8(&self.esc_buf[..self.esc_len]).unwrap_or("");
+        let start = usize::from(self.csi_is_private());
+        let param_str = core::str::from_utf8(&self.esc_buf[start..self.esc_len]).unwrap_or("");
         if param_str.is_empty() {
             return Vec::new();
         }
@@ -891,8 +913,9 @@ impl Widget for Terminal {
             }
         }
 
-        // Draw cursor if focused, visible, and not scrolled back
-        if self.scroll_offset == 0 && self.focused && self.cursor_visible {
+        // Draw cursor if focused, not hidden by DECTCEM, visible in this blink
+        // phase, and not scrolled back
+        if self.scroll_offset == 0 && self.focused && self.cursor_enabled && self.cursor_visible {
             let cursor_x = origin_x + (self.cursor_col as i32) * char_w;
             let cursor_y = origin_y + (self.cursor_row as i32) * char_h;
 

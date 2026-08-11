@@ -2853,13 +2853,16 @@ is the same one the collision test reads.
 
 ### Things that will bite you
 
-- **`\x1b[?25l` and `\x1b[?25h` do nothing.** The terminal widget's CSI
-  parameter parser (`edos_render/src/widgets/terminal.rs`, `parse_csi_params`)
-  runs `parse::<usize>()` over `?25` and gets 0, and `l`/`h` are not
-  implemented finals, so the cursor stays visible in `top` and `snake`. It is
-  cosmetic, but a screenshot taken mid-frame shows the cursor parked wherever
-  the redraw had got to, which reads like a rendering bug in the program.
-  Tracked in engram.
+- **`\x1b[?25l` and `\x1b[?25h` are honoured** (DECTCEM). They used to do
+  nothing: `parse_csi_params` in `edos_render/src/widgets/terminal.rs` ran
+  `parse::<usize>()` over `?25`, got 0, and `l`/`h` had no arm, so the cursor
+  stayed parked wherever a redraw had got to and read like a rendering bug in
+  the program. The parser now recognises the DEC private-parameter prefix and
+  skips it, and the mode drives a `cursor_enabled` flag that gates drawing
+  separately from `cursor_visible`, which is the blink phase and must stay
+  independent of it. `edos-sh` prints `\x1b[?25h` ahead of every prompt, because
+  a full-screen program killed before it restores the mode would otherwise
+  leave the cursor hidden for the rest of the session and there is no `reset`.
 
 ---
 

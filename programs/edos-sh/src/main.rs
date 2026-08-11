@@ -605,7 +605,9 @@ fn redraw_from_cursor(line: &str, cursor: usize, _prompt_len: usize) {
 }
 
 fn read_line(history: &[String], prompt: &str) -> Option<String> {
-    print!("{}", prompt);
+    // DECTCEM on: a full-screen program killed before it could restore the
+    // cursor would otherwise leave it hidden for the rest of the session.
+    print!("\x1B[?25h{}", prompt);
     let _ = std::io::stdout().flush();
 
     let mut line = String::new();
