@@ -1918,6 +1918,17 @@ impl FileSystem for EfsDriver {
         Ok(inode_to_file(name, &inode))
     }
 
+    fn file_info_nofollow(&self, path: &Path) -> Result<File, Error> {
+        let path = path.normalize();
+        let name = if path.is_root() {
+            String::from("/")
+        } else {
+            path.last_component().unwrap_or("/").to_string()
+        };
+        let (_ino, inode) = self.resolve_path_inode_nofollow(&path)?;
+        Ok(inode_to_file(name, &inode))
+    }
+
     fn flush(&self) -> Result<(), Error> {
         let mut tx = self.journal.begin_tx();
         let result = self.flush_inner(&mut tx);

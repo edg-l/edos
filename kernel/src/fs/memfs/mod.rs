@@ -448,6 +448,16 @@ impl FileSystem for Memfs {
         }
     }
 
+    fn file_info_nofollow(&self, path: &Path) -> Result<super::File, Error> {
+        let path = path.normalize();
+        let inner = self.inner.read();
+        if let Some(node_id) = inner.find_node_nofollow(&path)? {
+            Ok(inner.get_node(node_id)?.file.clone())
+        } else {
+            Err(Error::FileNotFound)
+        }
+    }
+
     fn flush(&self) -> Result<(), Error> {
         Ok(())
     }

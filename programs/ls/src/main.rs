@@ -45,12 +45,9 @@ fn kind_of(ft: Option<std::fs::FileType>) -> Kind {
     }
 }
 
-/// Whether `path` names a symbolic link. `readlink` is the only way to ask:
-/// on this target `std`'s `lstat` follows links, so `symlink_metadata` reports
-/// the target and `Metadata::is_symlink` is never true.
+/// Whether `path` names a symbolic link, asked of the link and not its target.
 fn is_symlink(path: &str) -> bool {
-    let mut buf = [0u8; 1];
-    edos_lib::io::readlink(path, &mut buf) >= 0
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_symlink())
 }
 
 /// Read a directory into sorted items.

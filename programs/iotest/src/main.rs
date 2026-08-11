@@ -876,7 +876,9 @@ fn test12(dir: &str) {
 // Test 13: the *at family resolves against a directory descriptor
 // -----------------------------------------------------------------------
 fn test13(dir: &str) {
-    use edos_lib::io::{AT_REMOVEDIR, fstatat, mkdirat, open, openat, unlinkat};
+    use edos_lib::io::{
+        AT_REMOVEDIR, AT_SYMLINK_NOFOLLOW, fstatat, mkdirat, open, openat, symlink, unlinkat,
+    };
     use edos_lib::process::close;
 
     let base = format!("{}/iotest_t13", dir);
@@ -960,8 +962,42 @@ fn test13(dir: &str) {
     if fstatat(AT_FDCWD, &base, 0).is_none() {
         fail(13, "fstatat with AT_FDCWD cannot see an absolute path");
     }
-    // AT_SYMLINK_NOFOLLOW cannot be honoured, so it is refused, not ignored.
-    if fstatat(AT_FDCWD, &base, 0x100).is_some() {
+    // AT_SYMLINK_NOFOLLOW describes the link itself: on a path that is not a
+    // link it agrees with a plain stat, and on one that is it reports kind 2
+    // and the length of the target rather than the target's own size.
+    if fstatat(AT_FDCWD, &base, AT_SYMLINK_NOFOLLOW).is_none() {
+        fail(13, "fstatat refused AT_SYMLINK_NOFOLLOW");
+    }
+    let target = format!("{}/plain", base);
+    let link = format!("{}/alias", base);
+    if symlink(&target, &link) != 0 {
+        fail(13, "cannot create a symbolic link");
+    }
+    match (
+        fstatat(AT_FDCWD, &link, 0),
+        fstatat(AT_FDCWD, &link, AT_SYMLINK_NOFOLLOW),
+    ) {
+        (Some(followed), Some(itself)) => {
+            if followed.kind == 2 {
+                fail(
+                    13,
+                    "fstatat without the flag described the link, not its target",
+                );
+            }
+            if itself.kind != 2 {
+                fail(
+                    13,
+                    "fstatat with AT_SYMLINK_NOFOLLOW followed the link anyway",
+                );
+            }
+            if itself.size != target.len() as u64 {
+                fail(13, "a link's own size is not the length of its target");
+            }
+        }
+        _ => fail(13, "fstatat could not stat a symbolic link"),
+    }
+    // A flag that genuinely cannot be honoured is still refused, not ignored.
+    if fstatat(AT_FDCWD, &base, 0x1000).is_some() {
         fail(13, "fstatat accepted a flag it cannot honour");
     }
 

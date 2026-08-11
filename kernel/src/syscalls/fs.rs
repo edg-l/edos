@@ -6,8 +6,8 @@ use crate::{
     fs::{
         Error, FileKind,
         api::{
-            create_dir, file_info, list_files, list_mounts, list_partitions, mount_partition,
-            remove_dir, remove_file,
+            create_dir, file_info, file_info_nofollow, list_files, list_mounts, list_partitions,
+            mount_partition, remove_dir, remove_file,
         },
         gpt::FilesystemType,
         path::Path,
@@ -683,11 +683,16 @@ pub fn sys_stat(path_ptr: *const u8, path_len: usize, fstat_buf: *mut FstatEntry
     sys_fstatat(AT_FDCWD, path_ptr, path_len, fstat_buf, 0)
 }
 
+/// Report on a symbolic link itself rather than on what it names, as in POSIX
+/// `<fcntl.h>`. This is what makes `lstat` distinguishable from `stat`.
+const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+
 /// fstatat(dirfd, path, path_len, statbuf, flags) -> 0 on success, -1 on error
 ///
-/// `flags` must be 0: `file_info` resolves through symbolic links, so
-/// `AT_SYMLINK_NOFOLLOW` cannot be honoured and is refused rather than quietly
-/// ignored. `readlink` is what reports on the link itself.
+/// `AT_SYMLINK_NOFOLLOW` is the only accepted flag; anything else is refused
+/// rather than quietly ignored. With it, a symbolic link reports its own
+/// `Symlink` kind and the length of its target, which is the only way a caller
+/// can tell a link from the file it names without `readlink`.
 pub fn sys_fstatat(
     dirfd: i64,
     path_ptr: *const u8,
@@ -702,10 +707,11 @@ pub fn sys_fstatat(
         info.lock().errno = Errno::EFAULT;
         return -1;
     }
-    if flags != 0 {
+    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
         info.lock().errno = Errno::EINVAL;
         return -1;
     }
+    let nofollow = flags & AT_SYMLINK_NOFOLLOW != 0;
 
     let path = match read_user_path_at(dirfd, path_ptr, path_len) {
         Ok(p) => p,
@@ -717,7 +723,12 @@ pub fn sys_fstatat(
 
     interrupts::enable();
 
-    let fstat_entry = match file_info(&path) {
+    let looked_up = if nofollow {
+        file_info_nofollow(&path)
+    } else {
+        file_info(&path)
+    };
+    let fstat_entry = match looked_up {
         Ok(file) => file_to_fstat_entry(&file),
         Err(err) => {
             info.lock().errno = Errno::from(err);

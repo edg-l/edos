@@ -334,10 +334,14 @@ pub fn stat(path: &str) -> Option<Stat> {
     if rc == 0 { Some(out) } else { None }
 }
 
+/// Report on a symbolic link itself rather than on what it names, as in POSIX
+/// `<fcntl.h>`. The only flag [`fstatat`] accepts.
+pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+
 /// Stat a path relative to the directory descriptor `dirfd`. An absolute path
-/// ignores `dirfd`, and [`AT_FDCWD`] names the working directory. `flags` must
-/// be 0: the walk always follows symbolic links, so `AT_SYMLINK_NOFOLLOW` is
-/// refused rather than quietly ignored.
+/// ignores `dirfd`, and [`AT_FDCWD`] names the working directory.
+/// [`AT_SYMLINK_NOFOLLOW`] is the only accepted flag; anything else is refused
+/// rather than quietly ignored.
 pub fn fstatat(dirfd: i64, path: &str, flags: u64) -> Option<Stat> {
     let mut out = Stat::default();
     let rc = unsafe {

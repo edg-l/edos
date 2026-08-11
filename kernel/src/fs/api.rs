@@ -257,6 +257,22 @@ pub fn file_info(path: &Path) -> Result<File, Error> {
     file_info_resolved(path).map(|(info, _)| info)
 }
 
+/// `file_info` that stops at a symbolic link instead of following it, which is
+/// what `lstat` and `AT_SYMLINK_NOFOLLOW` ask for.
+///
+/// Only the final component is left unresolved; leading components are still
+/// followed, exactly as POSIX.1-2024 specifies for `fstatat`. A path naming a
+/// mount point is still the directory it mounts, since a mount point is not a
+/// link and there is nothing to decline to follow.
+pub fn file_info_nofollow(path: &Path) -> Result<File, Error> {
+    if vfs::is_mount_point(path) {
+        return file_info(path);
+    }
+    on_path(path, Resolver::Info, LinkMode::NoFollow, |op, _| {
+        vfs::file_info_nofollow(op)
+    })
+}
+
 /// `file_info` that also hands back the path it resolved to, which differs
 /// from `path` exactly when a symbolic link redirected it across a mount.
 /// `open` needs it: everything it caches on the file descriptor has to name

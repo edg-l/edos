@@ -6,15 +6,13 @@ use std::process;
 
 /// The target of `path` if it is a symbolic link, and `None` otherwise.
 ///
-/// `readlink` is the only way to ask: on this target `std`'s `lstat` follows
-/// links, so `symlink_metadata` reports whatever the link points at and
-/// `Metadata::is_symlink` is never true.
+/// The link test and the target read are separate calls, so a path that stops
+/// being a link between them reports no target rather than a wrong one.
 fn link_target(path: &str) -> Option<String> {
-    let mut buf = [0u8; 1024];
-    match edos_lib::io::readlink(path, &mut buf) {
-        n if n >= 0 => Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned()),
-        _ => None,
+    if !fs::symlink_metadata(path).is_ok_and(|meta| meta.is_symlink()) {
+        return None;
     }
+    fs::read_link(path).ok()?.to_str().map(str::to_owned)
 }
 
 fn main() {

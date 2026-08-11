@@ -278,6 +278,17 @@ pub trait FileSystem {
     fn read_bytes(&self, path: &Path, offset: usize, count: usize) -> Result<Vec<u8>, Error>;
     fn file_info(&self, path: &Path) -> Result<File, Error>;
 
+    /// `file_info` that stops at a symbolic link in the final component and
+    /// describes the link itself, which is what `lstat` asks for.
+    ///
+    /// The `LinkMode` the VFS carries governs only where a link that escapes
+    /// its mount lands; whether the final component is followed at all is the
+    /// driver's own walk, so this has to be its own entry point. Defaults to
+    /// following, which is right for every filesystem with no links to stop at.
+    fn file_info_nofollow(&self, path: &Path) -> Result<File, Error> {
+        self.file_info(path)
+    }
+
     fn poll(&self, _path: &Path) -> Result<Box<dyn Pollable>, Error> {
         Err(Error::IoError)
     }

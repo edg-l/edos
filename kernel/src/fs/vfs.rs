@@ -597,6 +597,15 @@ pub fn file_info(op: &VfsOp) -> Result<File, Error> {
     op.fs.file_info(&op.relative)
 }
 
+/// `file_info` describing a final symbolic link rather than its target.
+pub fn file_info_nofollow(op: &VfsOp) -> Result<File, Error> {
+    let _guard = op
+        .inode
+        .as_ref()
+        .map(|i| i.lock.read_ranked(RANK_INODE, "inode.lock"));
+    op.fs.file_info_nofollow(&op.relative)
+}
+
 pub fn list_files(op: &VfsOp, full_path: &Path) -> Result<Vec<File>, Error> {
     // Release inode.lock (rank 30) before calling child_mount_points, which
     // acquires VFS (rank 10). The inode guard only needs to protect the
