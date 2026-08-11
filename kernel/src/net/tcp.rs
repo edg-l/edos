@@ -218,7 +218,8 @@ const MAX_RTO: Duration = Duration::from_secs(60);
 pub struct RetransmitSegment {
     pub seq: u32,
     pub payload_len: u32, // Sequence space consumed (payload bytes, or 1 for SYN/FIN)
-    pub data: Vec<u8>,    // Full TCP segment (for retransmit)
+    /// Full TCP segment, shared so a resend clones a handle and not the bytes.
+    pub data: Arc<[u8]>,
     pub sent_at: Instant,
     pub retries: u32,
 }
@@ -563,7 +564,38 @@ impl TcpConnection {
         self.retransmit_queue.push(RetransmitSegment {
             seq: self.iss,
             payload_len: 1, // SYN consumes 1 byte of sequence space
-            data: seg.clone(),
+            data: seg.as_slice().into(),
+            sent_at: Instant::now(),
+            retries: 0,
+        });
+        seg
+    }
+
+    /// Build a SYN-ACK segment for passive open. Caller sends it.
+    ///
+    /// The segment goes on the retransmit queue like any other, so a lost
+    /// SYN-ACK is resent and a peer that vanishes mid-handshake eventually
+    /// takes the connection through the `check_retransmit` death path instead
+    /// of holding its listener's backlog slot forever.
+    pub fn build_syn_ack(&mut self) -> Vec<u8> {
+        self.set_state(TcpState::SynReceived);
+        let seg = build(
+            self.local_port,
+            self.remote_port,
+            self.iss,
+            self.rcv_nxt,
+            SYN | ACK,
+            self.rcv_wnd,
+            self.local_ip,
+            self.remote_ip,
+            &mss_option(DEFAULT_MSS),
+            &[],
+        );
+        self.snd_nxt = self.iss.wrapping_add(1); // SYN consumes one seq
+        self.retransmit_queue.push(RetransmitSegment {
+            seq: self.iss,
+            payload_len: 1,
+            data: seg.as_slice().into(),
             sent_at: Instant::now(),
             retries: 0,
         });
@@ -599,7 +631,7 @@ impl TcpConnection {
         self.retransmit_queue.push(RetransmitSegment {
             seq: fin_seq,
             payload_len: 1, // FIN consumes 1 byte of sequence space
-            data: seg.clone(),
+            data: seg.as_slice().into(),
             sent_at: Instant::now(),
             retries: 0,
         });
@@ -641,7 +673,7 @@ impl TcpConnection {
             self.retransmit_queue.push(RetransmitSegment {
                 seq: self.snd_nxt,
                 payload_len: chunk_size as u32,
-                data: seg.clone(),
+                data: seg.as_slice().into(),
                 sent_at: Instant::now(),
                 retries: 0,
             });
@@ -655,7 +687,7 @@ impl TcpConnection {
     }
 
     /// Check retransmit queue for timed-out segments. Returns segments to resend.
-    pub fn check_retransmit(&mut self) -> Vec<Vec<u8>> {
+    pub fn check_retransmit(&mut self) -> Vec<Arc<[u8]>> {
         let now = Instant::now();
         let mut resends = Vec::new();
         let mut dead = false;
@@ -690,7 +722,7 @@ impl TcpConnection {
                 &[],
                 &[],
             );
-            resends.push(rst);
+            resends.push(rst.into());
             self.set_state(TcpState::Closed);
             self.retransmit_queue.clear();
             self.state_wq.wake_all();

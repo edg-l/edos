@@ -6,6 +6,49 @@ session.
 
 ---
 
+## The connection reaper unbound the listener, and a half-open lived forever
+
+Two defects in the same 40 lines of `tcp_retransmit_main`
+(`kernel/src/net/stack.rs`) and the passive-open path above it.
+
+**The listener was unbound by its own connections closing.** The reaper collected
+`c.local_port` from every connection it reaped and did `pt.remove(&(6, port))`.
+A connection born of `accept` carries its *listener's* port, so the first
+`TIME_WAIT` to expire took `(6, 23)` out of the port table with it and every
+later SYN was answered with RST. `socket::unbind_port` had already been written
+for exactly this — it removes only when the table's entry is the socket being
+closed — but the reaper predated it and released by port number alone. It now
+collects the owning socket alongside the port and applies the same `Arc::ptr_eq`
+test. A dead `Weak` owner means the socket was closed and unbound on the syscall
+path, so there is nothing to release.
+
+Worth knowing how this hid: a single request per boot passes, and so do several
+in a row, because the reaper only strikes once the connection leaves `TIME_WAIT`
+five seconds later. It takes **two connections more than five seconds apart** to
+see it. Iteration 7's httpd test was one `curl`, which is why item 7 looked
+closed with this underneath it.
+
+**A half-open connection was immortal.** The SYN-ACK was built inline with
+`tcp::build` and sent once, so it was on no retransmit queue: a lost SYN-ACK was
+never resent, and a peer that vanished after its SYN held a backlog slot until
+the listener closed. `TcpConnection::build_syn_ack` now mirrors `build_syn` and
+queues the segment, which buys both halves from machinery that already existed —
+resend with RFC 6298 backoff, and death by `check_retransmit`'s `retries >= 5`
+arm at about 63 s, which RSTs and marks the connection `Closed`. The reaper then
+drops it and prunes the listener's `accept_queue` of any queued socket whose
+connection went `Closed` without ever reaching `Connected`.
+
+**A `SynReceived` half-open cannot be produced through slirp**, so do not spend
+an iteration trying. QEMU's `hostfwd` terminates the host TCP connection itself
+and then opens its own to the guest, which it always completes; the guest never
+sees a handshake that stalls after its SYN-ACK. Exercising the deadline for real
+needs a tap backend with a packet filter that drops the final ACK, or an in-guest
+raw-socket test. What was verified in the guest is the listener surviving five
+connections spread across 20 s with `netstat -a` showing one `TIME_WAIT`, the
+`LISTEN` row intact, and no stranded `SYN_RECV`.
+
+---
+
 ## The first inbound connection after boot was lost in the ARP cache
 
 `send_ip` used to build the frame only when `arp_cache.lookup` hit, and return

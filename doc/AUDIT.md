@@ -258,12 +258,14 @@ touched anyway.
 **Fixed** with `.iter().cycle().skip(start).take(n)`, taken while the map was
 open for the affinity filter (1.2).
 
-### 2.5 TCP retransmit clones whole segments — LOW
+### 2.5 TCP retransmit clones whole segments — FIXED
 
-`net/tcp.rs:596` — `resends.push(seg.data.clone())` copies the full segment on
-every resend. Under loss this allocates and memcpys per retry.
+`resends.push(seg.data.clone())` copied the full segment on every resend, so
+loss allocated and memcpy'd per retry.
 
-**Fix:** keep segments in `Arc<[u8]>` and clone the handle.
+**Fixed:** `RetransmitSegment::data` is an `Arc<[u8]>` and `check_retransmit`
+returns handles. The one copy is at build time, where the segment was cloned
+into the queue anyway.
 
 ### 2.6 TLB shootdown is globally serialized — MEDIUM, by design
 

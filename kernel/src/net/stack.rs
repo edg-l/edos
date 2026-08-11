@@ -299,21 +299,8 @@ impl NetStack {
                         conn.mss = mss;
                     }
                     conn.snd_wnd = tcp_hdr.window;
-                    conn.state = tcp::TcpState::SynReceived;
 
-                    let syn_ack = tcp::build(
-                        tcp_hdr.dst_port,
-                        tcp_hdr.src_port,
-                        conn.iss,
-                        conn.rcv_nxt,
-                        tcp::SYN | tcp::ACK,
-                        conn.rcv_wnd,
-                        local_ip,
-                        ip_hdr.src_addr,
-                        &tcp::mss_option(tcp::DEFAULT_MSS),
-                        &[],
-                    );
-                    conn.snd_nxt = conn.iss.wrapping_add(1);
+                    let syn_ack = conn.build_syn_ack();
 
                     let conn_arc = Arc::new(Mutex::new(conn));
                     let local_sa = socket::SocketAddr {
@@ -605,7 +592,12 @@ pub extern "C" fn tcp_retransmit_main() -> ! {
         {
             let mut stack = ranked_lock!(RANK_NET_STACK, "stack::cleanup", stack_mutex);
             let now = Instant::now();
-            let mut freed_ports: Vec<u16> = Vec::new();
+            // Each entry is the reaped connection's port and the socket that
+            // owns it. A connection born of `accept` carries its listener's
+            // port, so releasing by port alone unbinds the listener as soon as
+            // one of its connections closes and the next SYN is answered with
+            // RST. Only the socket the table actually maps may release it.
+            let mut freed: Vec<(u16, Arc<Mutex<socket::Socket>>)> = Vec::new();
             stack.tcp_connections.retain(|_, conn| {
                 let c = ranked_lock!(RANK_TCP_CONN, "stack::cleanup_conn", conn);
                 let remove = if c.state == super::tcp::TcpState::TimeWait {
@@ -613,20 +605,43 @@ pub extern "C" fn tcp_retransmit_main() -> ! {
                 } else {
                     c.state == super::tcp::TcpState::Closed
                 };
-                if remove {
-                    freed_ports.push(c.local_port);
+                if remove && let Some(owner) = c.owner.as_ref().and_then(|w| w.upgrade()) {
+                    freed.push((c.local_port, owner));
                 }
                 !remove
             });
-            if !freed_ports.is_empty() {
-                let mut pt = ranked_lock!(
-                    RANK_PORT_TABLE,
-                    "stack::cleanup_ports",
-                    socket::port_table()
-                );
-                for port in freed_ports {
+
+            let mut pt = ranked_lock!(
+                RANK_PORT_TABLE,
+                "stack::cleanup_ports",
+                socket::port_table()
+            );
+            for (port, owner) in freed {
+                if pt
+                    .get(&(6u8, port))
+                    .is_some_and(|bound| Arc::ptr_eq(bound, &owner))
+                {
                     pt.remove(&(6u8, port));
                 }
+            }
+
+            // A peer that opens a connection and vanishes leaves a half-open
+            // entry in its listener's backlog. Its connection dies on the
+            // retransmit path above; drop the entry with it, or the slot is
+            // held until the listener itself closes.
+            for sock in pt.values() {
+                let mut ls = ranked_lock!(RANK_SOCKET, "stack::cleanup_listen", sock);
+                if !ls.listening {
+                    continue;
+                }
+                ls.accept_queue.retain(|queued| {
+                    let qs = ranked_lock_same!(RANK_SOCKET, "stack::cleanup_queued", queued);
+                    qs.state == socket::SocketState::Connected
+                        || qs.tcp_conn.as_ref().is_none_or(|c| {
+                            ranked_lock!(RANK_TCP_CONN, "stack::cleanup_queued_conn", c).state
+                                != super::tcp::TcpState::Closed
+                        })
+                });
             }
         }
     }
