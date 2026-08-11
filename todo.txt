@@ -127,7 +127,23 @@
   to before the clocksource work. It is more likely to be reached now that the
   system does more work per second. Reproduce with `make storage-check`, and
   read `/proc/processes` while it is stuck to find which thread is blocked.
-- `ahci_stats.ncq_max_inflight` reaches 1. `doc/STORAGE-ROADMAP.md` records it
-  peaking at 9 of a negotiated 32, so either the roadmap is stale or the async
-  NCQ path stopped queueing. Worth settling before any further storage work,
-  because a queue depth of one makes every latency number a round-trip count.
+- Queue depth is still 1: `doc/STORAGE-ROADMAP.md` section 1 is the entry, and
+  it is unchanged by this round. Every I/O path but `read_pages` is
+  submit-then-wait, so nothing ever asks for depth. The fix it names is giving
+  readahead and writeback a path that keeps commands outstanding.
+
+- Context switch cost, the top item for the next round. `sched_yield` is
+  1357 ns, four times what a whole one-descriptor `poll` call costs, and a
+  4 KiB device command pays two scheduler round trips (see
+  `doc/STORAGE-ROADMAP.md` section 1). Three levers, all verified present:
+  - No PCID anywhere in the kernel, so every CR3 reload flushes the whole TLB.
+    That cost lands *after* the switch as refill misses.
+  - `kernel/src/drivers/fpu.rs` uses plain 512-byte `fxsave`/`fxrstor` on every
+    user switch whether or not the thread touched the FPU. No `XSAVE`,
+    no `XSAVEOPT`, no dirty-state check. Do this together with the `-cpu host`
+    question, since both decide what the save area has to hold.
+  - The `CpuContext` is copied under a spin `Mutex` twice per switch:
+    `thread/scheduler.rs:631` and `:1388` on the save side, `:722` on restore.
+  Measure a real two-thread ping-pong first. `sched_yield` on an idle CPU
+  returns to the *same* thread, so it never reloads CR3 and never hands over --
+  1357 ns is the bookkeeping floor, and the PCID cost is invisible to it.

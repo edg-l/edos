@@ -18,6 +18,17 @@ files and leaked inodes. And read `/proc/efs_stats` **after** the benchmark
 process exits — fsbench prints its counter deltas before closing its
 descriptors, so `orphans_dropped` reads 0 mid-run and 513 afterwards.
 
+**Every number below predates the monotonic clock moving off the HPET
+(2026-08-11), and the per-command ones are wrong because of it.** An
+`Instant::now()` cost 6361 ns then and 16 ns now, and a context switch went
+20818 -> 1357 ns. Section 1 attributes ~100 us per 4 KiB command to two
+scheduler round trips, so on the order of 40 us of that was clock reads. What
+this actually moved, measured on the raw device: 4 KiB reads 30.4 -> 36.4 MiB/s
+(p50 107 -> 92 us) and 512 B reads 13.6 -> 35.3 MiB/s (p50 9 -> 1 us, most of
+the old figure being the benchmark's own two clock reads per operation).
+Re-measure before trusting any absolute number here, and use `fsbench -n` so
+both arms do the same work.
+
 Where things stand as of 2026-08-09:
 
 | | Measured | Against |
@@ -58,6 +69,14 @@ what a round trip costs: syscall, cache lookup, frame allocation, submit, park,
 device, MSI, wake the dispatcher kthread, complete, wake the submitter — two
 scheduler round trips per 4 KiB. Anything that only shortens submission is
 attacking the cheaper half.
+
+**Those two scheduler round trips are now the shared boundary with the context
+switch work** (`todo.txt`). They cost 20818 ns each when the 100 us figure was
+measured and 1357 ns now, which is where the 4 KiB gain since came from. What
+is left in a switch is a TLB flush on every CR3 reload (the kernel uses no
+PCID), an unconditional 512-byte `fxsave`, and two locked `CpuContext` copies —
+so this section and that one are the same lever seen from two ends, and depth
+is the half that only this one can fix.
 
 The fix that matters is giving readahead and writeback a path that keeps
 commands outstanding, so depth 32 is reachable at all. Until something asks for
