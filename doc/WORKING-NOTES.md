@@ -2167,9 +2167,18 @@ slot.
   attaches it and prefers it over the live-root ramdisk. A rebuilt program is
   invisible to the guest until `make sata-disk.img`, so a screenshot looks
   exactly as if the change did nothing.
-- **`make sata-disk.img` fails while a VM is running** — `qemu-img` reports
-  "Failed to get write lock" — and the guest then boots the old binary. Stop the
-  VM first.
+- **`make sata-disk.img` used to fail while a VM was running** — `qemu-img`
+  reported "Failed to get write lock" — and worse, when it ran underneath
+  `make test` or `storage-check` the whole build died and read as a *test*
+  failure. The rule stops the guest itself now, so this only bites a VM started
+  outside `scripts/edos-vm`.
+- **A kernel edit no longer rebuilds `sata-disk.img`.** It used to, every time:
+  `live-root.img` depends on the phony `kernel` target, its recipe writes
+  `filesystem/boot/kernel`, and that path was in the manifest whose timestamp
+  decides the disk. `filesystem/boot` is excluded from the manifest now, so a
+  kernel-only cycle skips the 5 GB create, the `efs-mkfs` populate and the
+  qcow2 convert. The cost of the exclusion: the disk's own `/boot` can hold a
+  stale kernel, which nothing reads because the run targets boot the ISO.
 - **`make test` leaves the sched-test ISO in place.** A later `edos-vm start`
   boots the test kernel rather than the desktop; re-run `make all` before manual
   guest checks.
