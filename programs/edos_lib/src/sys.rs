@@ -70,6 +70,7 @@ pub const SYS_LISTEN: u64 = 243;
 pub const SYS_ACCEPT: u64 = 244;
 pub const SYS_SENDTO: u64 = 245;
 pub const SYS_RECVFROM: u64 = 246;
+pub const SYS_SHUTDOWN: u64 = 247;
 pub const SYS_SETSOCKOPT: u64 = 248;
 pub const SYS_PING: u64 = 249;
 pub const SYS_NETINFO: u64 = 250;

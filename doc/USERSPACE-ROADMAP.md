@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-92 programs and 2 libraries, all in the `programs/` cargo workspace.
+93 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -17,7 +17,7 @@
 | Inspection | `file` |
 | System | `ps`, `pstree`, `pmap`, `top`, `lsof`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace`, `date`, `watch` |
 | Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
-| Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `sntp` |
+| Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `nc`, `sntp` |
 | Audio | `play` |
 | Images | `imgview` (BMP viewer) |
 | Games | `snake` |
@@ -87,6 +87,15 @@ the stack at all, and it found two kernel bugs on its first run: `sys_listen`
 took the port table under the socket lock, inverting the order `handle_tcp`
 uses, and closing an accepted socket removed its *listener's* port-table entry,
 so a second connection was answered with RST. Both are written up in
+`doc/WORKING-NOTES.md`.
+
+**`nc`**. Both ends of a TCP connection over one relay loop: `nc host port`
+connects, `nc -l port` listens and accepts, and either way standard input and
+the socket are polled together. End of input half-closes the connection rather
+than closing it, which is the first use of `SYS_SHUTDOWN` by anything, so
+`echo hi | nc host 7` gets its answer back. It found the poll layer refusing to
+report a hang-up nobody had asked for, which is why a pipe feeding it hung
+forever; both that and the pipe's own poll state are fixed and written up in
 `doc/WORKING-NOTES.md`.
 
 **`ln`**. Symbolic links have resolved correctly for a long time and there was

@@ -1,6 +1,6 @@
 //! High-level network socket wrappers.
 
-use crate::sys;
+use crate::{sys, time};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -189,6 +189,43 @@ pub fn recv(fd: u64, buf: &mut [u8]) -> Result<usize, ()> {
     } else {
         Ok(ret as usize)
     }
+}
+
+/// Send every byte of `data`, retrying the short writes a stream socket makes.
+///
+/// A TCP write returns 0 when the send window is full rather than waiting, so a
+/// caller that reads 0 as failure loses data the moment a peer stops reading as
+/// fast as it is written. A millisecond is long enough for the ACK that reopens
+/// the window; a peer that has gone away takes the connection out of
+/// ESTABLISHED instead, and the write then fails outright.
+pub fn send_all(fd: u64, data: &[u8]) -> Result<(), ()> {
+    let mut sent = 0;
+    while sent < data.len() {
+        match send(fd, &data[sent..]) {
+            Ok(0) => {
+                time::nanosleep(0, 1_000_000);
+            }
+            Ok(n) => sent += n,
+            Err(()) => return Err(()),
+        }
+    }
+    Ok(())
+}
+
+/// `shutdown` directions, as in POSIX.
+pub const SHUT_RD: u64 = 0;
+pub const SHUT_WR: u64 = 1;
+pub const SHUT_RDWR: u64 = 2;
+
+/// Close one direction of a connected socket while leaving the descriptor open.
+///
+/// `SHUT_WR` sends a FIN, so the peer sees end of input and can answer before
+/// the connection goes away; the read side keeps working until the peer closes
+/// in turn. Without it a program that has no more to send has only `close`,
+/// which discards the reply along with the connection.
+pub fn shutdown(fd: u64, how: u64) -> Result<(), ()> {
+    let ret = unsafe { sys::syscall2(sys::SYS_SHUTDOWN, fd, how) };
+    if ret == u64::MAX { Err(()) } else { Ok(()) }
 }
 
 pub fn close(fd: u64) {

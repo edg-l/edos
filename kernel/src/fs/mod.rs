@@ -128,7 +128,18 @@ impl PollState {
         }
     }
 
+    /// Whether this state makes a poll on `interests` ready.
+    ///
+    /// Error, hang-up and invalid are reported whether or not the caller asked
+    /// for them (POSIX.1-2024 `poll`, which lists POLLERR, POLLHUP and POLLNVAL
+    /// as output-only). A caller waiting for data on a descriptor whose peer has
+    /// gone away would otherwise wait forever for a read that would return end
+    /// of file immediately.
     pub fn matches(&self, interests: Self) -> bool {
+        if self.error || self.hangup || self.invalid {
+            return true;
+        }
+
         let mut matched = false;
 
         if interests.readable && self.readable {
@@ -137,23 +148,9 @@ impl PollState {
         if interests.writable && self.writable {
             matched = true;
         }
-        if interests.error && self.error {
-            matched = true;
-        }
-        if interests.hangup && self.hangup {
-            matched = true;
-        }
-        if interests.invalid && self.invalid {
-            matched = true;
-        }
 
-        if !interests.readable
-            && !interests.writable
-            && !interests.error
-            && !interests.hangup
-            && !interests.invalid
-        {
-            matched = self.readable || self.writable || self.error || self.hangup || self.invalid;
+        if !interests.readable && !interests.writable {
+            matched = self.readable || self.writable;
         }
 
         matched

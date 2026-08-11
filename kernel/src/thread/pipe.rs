@@ -128,7 +128,9 @@ impl Pipe {
     fn poll_state(&self) -> PollState {
         let mut state = PollState::none();
 
-        if !self.buffer.is_empty() {
+        // A pipe whose last writer is gone is readable: the read returns end of
+        // file at once rather than waiting. The PTY sides report the same way.
+        if !self.buffer.is_empty() || self.closed {
             state.readable = true;
         }
 

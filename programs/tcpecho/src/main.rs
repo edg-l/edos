@@ -120,12 +120,8 @@ fn echo(conn: u64) -> Result<usize, usize> {
             Ok(n) => n,
             Err(_) => return Err(total),
         };
-        let mut sent = 0;
-        while sent < n {
-            match net::send(conn, &buf[sent..n]) {
-                Ok(0) | Err(_) => return Err(total + sent),
-                Ok(w) => sent += w,
-            }
+        if net::send_all(conn, &buf[..n]).is_err() {
+            return Err(total);
         }
         total += n;
     }

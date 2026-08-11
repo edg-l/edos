@@ -2560,3 +2560,70 @@ procfs file.
 - **The kernel's unit is the thread, so `lsof` reports a multi-threaded
   process once per thread**, with the same descriptors each time. That is what
   procfs holds; it is left visible rather than collapsed.
+
+## `nc`, and the pipe hang-up that `poll` refused to report
+
+`programs/nc` is both halves of a TCP connection: `nc host port` connects,
+`nc -l port` binds, listens and accepts. One relay loop serves both. It polls
+standard input and the socket together and copies whichever is ready, so a pipe
+feeding one side and a peer answering on the other never block each other.
+Flags are the ones that carry their weight: `-l`/`-p`/`-s`/`-k` for the listen
+side, `-n` to refuse resolving a name, `-z` to connect and report without
+transferring, `-w` for an idle timeout, `-q` for how long to wait after end of
+input, `-v` for progress on stderr.
+
+**Standard input is read with the raw `read` syscall, not `std::io::Stdin`.**
+`poll` reports what the descriptor holds; a buffered reader that had already
+drained it would make the loop wait on data it is holding.
+
+**End of input half-closes rather than closing.** `edos_lib::net::shutdown`
+wraps `SYS_SHUTDOWN` (247), which was implemented and reachable from no program
+until now — `build_fin` in `kernel/src/net/tcp.rs` moves ESTABLISHED to
+FIN_WAIT_1 and queues the FIN for retransmission, so the read side keeps working
+afterwards. That is what makes `echo hi | nc host 7` send its line, let the peer
+see end of input, and still print the answer. Closing instead would discard the
+reply along with the connection.
+
+### `poll` never reported a pipe whose writer had gone
+
+The first run of `echo hi | nc 10.0.2.2 9099` sent its line and then hung
+forever. `strace` was unambiguous:
+
+```
+read(0, "hi\n", 4096) = 3
+write(5, "hi\n", 3) = 3
+poll(0x428368, 2, -1) <unfinished ...>
+```
+
+`echo` had already exited, so the pipe had no writer left and a `read` would
+have returned 0 at once — but `poll` slept. Two defects, both fixed:
+
+1. **`PollState::matches` (`kernel/src/fs/mod.rs`) required the caller to ask
+   for hang-up before it would report one.** POSIX makes POLLERR, POLLHUP and
+   POLLNVAL output-only: they are reported whether or not `events` lists them,
+   precisely so a reader waiting for data cannot wait forever on a descriptor
+   whose peer has gone. `matches` now returns ready for error, hang-up and
+   invalid unconditionally, and consults the interests only for readable and
+   writable.
+2. **`Pipe::poll_state` (`kernel/src/thread/pipe.rs`) set only `hangup` on a
+   drained, writerless pipe, never `readable`.** A read there returns end of
+   file immediately, which is readable in every other sense; both PTY sides
+   already reported it that way. Now the pipe does too.
+
+Either fix alone unhangs `nc`, and both are right independently: (1) is the
+general rule and (2) is what makes the state honest. Anything that polls a
+descriptor for readability and expects to notice end of input was affected —
+which, before `nc`, was nothing, because every existing poll loop sits on a PTY.
+
+`net::send_all` in `edos_lib` came out of the same run. A TCP write returns 0
+when the send window is full rather than waiting, and both `nc` and `tcpecho`
+had open-coded a retry loop that treated 0 as failure — silent data loss the
+moment a peer reads slower than it is written. One helper now retries with a
+millisecond pause; a peer that has gone away leaves ESTABLISHED, so the write
+fails outright instead of spinning.
+
+### Things that will bite you
+
+- **`nc` has no UDP mode.** `-u` is not accepted. `edos_lib::net` has the
+  datagram calls, but a datagram relay is a different loop (no connection, no
+  end of input to propagate), and nothing needed it yet.

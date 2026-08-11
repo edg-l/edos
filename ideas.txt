@@ -2,6 +2,19 @@
 
 ## Done
 
+- **`nc`, and the hang-up `poll` refused to report** - both ends of a TCP
+  connection over one relay loop that polls standard input and the socket
+  together: `nc host port` connects, `nc -l port` listens and accepts, with
+  `-knvz`, `-w`, `-q`, `-p` and `-s`. End of input half-closes via
+  `SYS_SHUTDOWN`, so `echo hi | nc host 7` still receives the answer; that
+  syscall had been implemented and unreachable. Two kernel fixes came out of
+  the first run: `PollState::matches` demanded that a caller ask for hang-up
+  before it would report one, against POSIX, which makes POLLERR/POLLHUP/
+  POLLNVAL output-only; and a drained pipe with no writer left reported only
+  hang-up and never readable, though a read there returns end of file at once.
+  Also `edos_lib::net::send_all`, replacing two open-coded retry loops that
+  treated the "window full" zero-length write as a failure.
+
 - **`lsof`, and the `/proc/<tid>/fd` it needed** - the descriptor table lived on
   `UserThreadInfo` and nothing published it, so "which process still has this
   open" was unanswerable. procfs now renders one row per descriptor
