@@ -56,6 +56,10 @@ struct TestHarness {
     ping_tid: AtomicU64,
     pong_tid: AtomicU64,
     ping_pong_count: AtomicU32,
+    /// Whose turn it is, [`PING_TURN`] or [`PONG_TURN`]. The handshake is
+    /// driven by this rather than by park/wake pairing up one for one, which
+    /// `thread_park` does not promise.
+    ping_pong_turn: AtomicU32,
     // spawn-exit stress
     spawn_exit_done: AtomicU32,
     // multi-wake
@@ -107,6 +111,7 @@ pub fn run_sched_tests() {
         ping_tid: AtomicU64::new(0),
         pong_tid: AtomicU64::new(0),
         ping_pong_count: AtomicU32::new(0),
+        ping_pong_turn: AtomicU32::new(PONG_TURN),
         spawn_exit_done: AtomicU32::new(0),
         multi_wake_tids: [
             AtomicU64::new(0),
@@ -359,6 +364,22 @@ extern "C" fn test_context_saved(arg: *mut u8) -> ! {
 // ---------------------------------------------------------------------------
 
 const PING_PONG_ROUNDS: u32 = 500;
+const PING_TURN: u32 = 0;
+const PONG_TURN: u32 = 1;
+
+/// Block until it is `turn`'s go.
+///
+/// The loop is the point. `thread_park` may return without a matching wake --
+/// a wake-pending token published while the thread was still running is
+/// consumed by the transition and short-circuits the park -- so a park is not
+/// a receipt for one wake. Pairing them one for one desynchronises the
+/// handshake by a round the first time it happens, and the two sides then
+/// disagree about how many rounds have run.
+fn await_turn(h: &TestHarness, turn: u32) {
+    while h.ping_pong_turn.load(Ordering::Acquire) != turn {
+        thread_park();
+    }
+}
 
 extern "C" fn test_ping(arg: *mut u8) -> ! {
     let h = get_harness(arg);
@@ -372,13 +393,13 @@ extern "C" fn test_ping(arg: *mut u8) -> ! {
     let pong = ThreadId(h.pong_tid.load(Ordering::Acquire));
 
     for _ in 0..PING_PONG_ROUNDS {
-        thread_park();
-        // Woken by pong. Wake pong back.
+        await_turn(&h, PING_TURN);
+        h.ping_pong_turn.store(PONG_TURN, Ordering::Release);
         wake_tid(pong, WakePriority::Normal);
     }
-    // Final park - pong will wake us one last time
-    thread_park();
 
+    // Pong hands the turn over only after incrementing, and ping's last round
+    // ended on such a handover, so the count is already final here.
     let count = h.ping_pong_count.load(Ordering::Acquire);
     assert!(
         count == PING_PONG_ROUNDS,
@@ -399,18 +420,17 @@ extern "C" fn test_pong(arg: *mut u8) -> ! {
     }
     let ping = ThreadId(h.ping_tid.load(Ordering::Acquire));
 
-    // Give ping time to enter its first park
-    thread_sleep(Duration::from_millis(5));
-
+    // No sleep to let ping park first: the turn is what synchronises them, so
+    // starting before ping has parked exercises the wake-before-park path
+    // rather than breaking the handshake.
     for _ in 0..PING_PONG_ROUNDS {
-        // Wake ping
-        wake_tid(ping, WakePriority::Normal);
+        await_turn(&h, PONG_TURN);
+        // Count before handing the turn over, so ping cannot be released into
+        // a window where the round is done but not yet counted.
         h.ping_pong_count.fetch_add(1, Ordering::AcqRel);
-        // Park, wait for ping to wake us back
-        thread_park();
+        h.ping_pong_turn.store(PING_TURN, Ordering::Release);
+        wake_tid(ping, WakePriority::Normal);
     }
-    // Wake ping one final time so it can finish
-    wake_tid(ping, WakePriority::Normal);
 
     test_done(&h, "ping-pong-pong");
     thread_exit(0);

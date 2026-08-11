@@ -344,7 +344,12 @@ live-root.img: kernel limine/limine filesystem/.manifest tools/efs-mkfs/src/*.rs
 	cargo build --release --manifest-path tools/efs-mkfs/Cargo.toml
 	tools/efs-mkfs/target/release/efs-mkfs --partition-offset 1048576 --populate filesystem/ --label EDOS live-root.img
 
+# A running guest holds a write lock on the qcow2, so the convert at the end
+# fails with "Failed to get write lock" and takes the whole build down with it.
+# That reads as a test failure when this runs underneath `test` or
+# `storage-check`, so retire the guest first rather than explain it afterwards.
 sata-disk.img: filesystem/.manifest tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
+	-scripts/edos-vm stop >/dev/null 2>&1
 	qemu-img create -f raw sata-disk.raw 5G
 	sgdisk sata-disk.raw -n 1:2048 -t 1:0700 -c 1:"EDOS_DATA" --partition-guid=1:$(PARTITION_UUID)
 	cargo build --release --manifest-path tools/efs-mkfs/Cargo.toml
