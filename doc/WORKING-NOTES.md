@@ -827,7 +827,7 @@ diff -ru /tmp/rt/src ~/dev/edos_rt/src
 **The std fork's pin is the version that actually runs.** `library/std/Cargo.toml`
 sat at `edos_rt = "0.0.26"` for ten releases while the crate moved on, and a
 `0.0.z` requirement is exact, so none of that work reached any program. It is now
-0.0.36. The full loop for an allocator or syscall-wrapper change is: patch
+0.0.46. The full loop for an allocator or syscall-wrapper change is: patch
 `edos_rt`, bump, `cargo publish`, bump the pin, `cargo +nightly update
 --manifest-path library/Cargo.toml -p edos_rt`, `./x install` in `~/dev/rust`
 (prefix `~/dev/edos-toolchain`, linked as the `edos` toolchain), then
@@ -3412,3 +3412,51 @@ name form.
 
 Verified in the guest: `kill -TSTP 29` then `grep State /proc/29/status` reports
 `Stopped`, and `kill -CONT 29` reports `Sleeping`.
+
+---
+
+## The `-w-p` heap region is real, and the kernel was recording it faithfully (2026-08-12)
+
+`pmap` on any process shows one anonymous region with no read bit:
+
+```
+/ $ pmap -x 27
+27:   /bin/sleep 200
+Address          End                 Kbytes    RSS Mode Mapping
+0000000000400000 0000000000407000        28      8 r--p file:1:73+0
+0000000000407000 0000000000413000        48     44 r-xp file:1:73+24576
+0000000000413000 0000000000415000         8      8 rw-p file:1:73+69632
+0000000000425000 0000000000435000        64      4 -w-p anon
+00006ffff7df000  00006ffff7e0000         4      4 rw-p tls
+00006ffff800000  0000700000000000     8192      4 rw-p stack
+```
+
+Confirmed, so the entry was not refutable — but every pointer on record for it
+was wrong. There is no `brk`/`sbrk` syscall in this kernel; `heap_break` is only
+a starting address for `next_mmap_addr`, and `syscalls/memory.rs` builds
+`vma_prot` straight from what the caller passed. Both VMAs `thread.rs` creates
+are `READ | WRITE`, and the loader maps the ELF `p_flags` one for one.
+
+The `-w-` region is the userspace heap, and the request comes from the runtime:
+`edos_rt`'s allocator called `mmap` with `PROT_WRITE` alone at both of its call
+sites, for the 64 KiB pool chunk and for a large allocation past the 512 KiB
+threshold. The kernel recorded exactly what it was asked for. That is what
+Linux does too — x86 has no write-without-read page encoding, so a `PROT_WRITE`
+mapping is readable in the PTE while `/proc/<pid>/maps` still prints `-w-p`.
+
+Nothing in this kernel reads `VmaProt::READ` except the `pmap`/`maps`
+rendering: `memory/fault.rs` checks only `WRITE` and `EXEC`, which is why a
+heap that never asked to be readable has always worked. So the fix belongs at
+the caller, and there is no kernel change. `edos_rt` 0.0.46 asks for
+`PROT_READ | PROT_WRITE`.
+
+Reaching userspace takes the whole publish loop, because a `0.0.z` requirement
+is exact: publish the crate, bump the pin in `library/std/Cargo.toml` in the
+fork, `cargo +nightly update -p edos_rt`, `./x install`, then `cargo +edos
+clean` in `programs/` and rebuild. A skipped pin bump silently ships the old
+crate and the region stays `-w-p`. The `cargo +edos clean` is not optional
+either: the std rlib changes without its version string moving, so nothing in
+`programs/` sees a reason to rebuild.
+
+Verified in the guest after that loop: the same `pmap -x` on `/bin/sleep`
+reports `rw-p anon`, and every region in the list renders a correct triple.
