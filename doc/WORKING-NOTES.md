@@ -1801,6 +1801,14 @@ slot.
 
 ## Things that will bite you
 
+- **`USER_VA_END` cannot be put in a `VirtAddr`.** It is `0x0000_8000_0000_0000`,
+  the exclusive end of the user half, which is the *lowest non-canonical*
+  address; `VirtAddr::new` panics on it with "virtual address must be sign
+  extended in bits 48 to 64". Anything expressing a half-open range over the
+  whole user half — `MemoryManager::resident_bytes_in` is the one that hit it —
+  must carry raw `u64`s. The panic is not at boot: it fires the first time
+  something reads `/proc/processes`, which on the desktop is the panel, so the
+  session comes up and then dies a few seconds later.
 - `make edos-x86_64.iso` re-invokes the kernel target **without** any
   `CARGO_FLAGS` you passed earlier, silently replacing an instrumented build
   with a plain one. Pass the flags to the ISO target itself.

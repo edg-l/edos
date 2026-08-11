@@ -388,9 +388,23 @@ impl MemoryManager {
     /// A page shared with another address space is counted in both, as
     /// `/proc/<pid>/status` on Linux counts it.
     pub fn resident_bytes(&self) -> u64 {
+        self.resident_bytes_in(0, USER_VA_END)
+    }
+
+    /// Bytes of `[start, end)` mapped into this address space.
+    ///
+    /// The same walk as [`resident_bytes`] clipped to one range, which is what
+    /// `/proc/<tid>/maps` reports per mapping: a VMA is only a request, and the
+    /// gap between its size and this number is the demand paging that has not
+    /// happened yet.
+    ///
+    /// Raw addresses rather than `VirtAddr`, because the exclusive end of the
+    /// user half is [`USER_VA_END`], which is the lowest *non*-canonical
+    /// address and cannot be held in one.
+    pub fn resident_bytes_in(&self, start: u64, end: u64) -> u64 {
         // The tables are gone; following `mapper` now would read a recycled
         // frame and take its bytes for page-table entries.
-        if self.released {
+        if self.released || end <= start {
             return 0;
         }
         let phys_off = boot_info().physical_memory_offset;
@@ -399,11 +413,25 @@ impl MemoryManager {
         self.mapper
             .level_4_table()
             .iter()
+            .enumerate()
             .take((USER_VA_END / PML4_ENTRY_SPAN) as usize)
-            .filter(|entry| entry.flags().contains(PageTableFlags::PRESENT))
-            .map(|entry| {
+            .map(|(index, entry)| {
+                let base = index as u64 * PML4_ENTRY_SPAN;
+                if base >= end
+                    || base + PML4_ENTRY_SPAN <= start
+                    || !entry.flags().contains(PageTableFlags::PRESENT)
+                {
+                    return 0;
+                }
                 let pdpt = unsafe { &*(phys_off + entry.addr().as_u64()).as_ptr::<PageTable>() };
-                count_present_bytes(pdpt, PML4_ENTRY_SPAN / ENTRIES_PER_TABLE, phys_off)
+                count_present_bytes(
+                    pdpt,
+                    PML4_ENTRY_SPAN / ENTRIES_PER_TABLE,
+                    base,
+                    phys_off,
+                    start,
+                    end,
+                )
             })
             .sum()
     }
@@ -539,19 +567,43 @@ pub fn align_stack_pointer(stack_ptr: VirtAddr) -> VirtAddr {
     VirtAddr::new(stack_ptr.as_u64() & !(STACK_ALIGNMENT - 1))
 }
 
-/// Bytes mapped by `table`, each of whose entries covers `entry_span` bytes:
-/// a PDPT spans 1 GiB per entry, a PD 2 MiB, a page table 4 KiB. Used by
-/// [`MemoryManager::resident_bytes`].
-fn count_present_bytes(table: &PageTable, entry_span: u64, phys_off: VirtAddr) -> u64 {
+/// Bytes of `[start, end)` mapped by `table`, which covers `[base, base +
+/// 512 * entry_span)`: a PDPT spans 1 GiB per entry, a PD 2 MiB, a page table
+/// 4 KiB. Used by [`MemoryManager::resident_bytes_in`].
+fn count_present_bytes(
+    table: &PageTable,
+    entry_span: u64,
+    base: u64,
+    phys_off: VirtAddr,
+    start: u64,
+    end: u64,
+) -> u64 {
     table
         .iter()
-        .filter(|entry| entry.flags().contains(PageTableFlags::PRESENT))
-        .map(|entry| {
+        .enumerate()
+        .map(|(index, entry)| {
+            let entry_base = base + index as u64 * entry_span;
+            let entry_end = entry_base + entry_span;
+            if entry_base >= end
+                || entry_end <= start
+                || !entry.flags().contains(PageTableFlags::PRESENT)
+            {
+                return 0;
+            }
             if entry_span == Size4KiB::SIZE || entry.flags().contains(PageTableFlags::HUGE_PAGE) {
-                return entry_span;
+                // A 2 MiB leaf can straddle either end of the range, so count
+                // only the part asked for.
+                return entry_end.min(end) - entry_base.max(start);
             }
             let child = unsafe { &*(phys_off + entry.addr().as_u64()).as_ptr::<PageTable>() };
-            count_present_bytes(child, entry_span / ENTRIES_PER_TABLE, phys_off)
+            count_present_bytes(
+                child,
+                entry_span / ENTRIES_PER_TABLE,
+                entry_base,
+                phys_off,
+                start,
+                end,
+            )
         })
         .sum()
 }

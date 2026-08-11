@@ -1,3 +1,14 @@
+- The heap VMA is created with PROT_WRITE and no PROT_READ: `pmap` on any
+  process shows the `brk` region as `-w-p` while every other mapping is `r--`
+  or `rw-`. x86 has no write-without-read encoding so nothing breaks, but the
+  VMA record is wrong and a future `mprotect` or a permission check that
+  believes it would reject a legitimate read. Look at where `heap_break` grows
+  a VMA in `kernel/src/syscalls/memory.rs`.
+- `/proc/<tid>/maps` names a file-backed mapping `file:<mount>:<ino>` because a
+  `VfsInode` carries no path and the dentry that named it may be gone. A path
+  would need a reverse lookup through the dentry cache, or the mapping to
+  remember the path it was opened with.
+
 - Rust fork: `std::fs::symlink_metadata` follows symbolic links, because
   `lstat` in `library/std/src/sys/fs/edos.rs` is defined as `stat(p)`. So
   `Metadata::is_symlink()` is always false and any path-based link test through

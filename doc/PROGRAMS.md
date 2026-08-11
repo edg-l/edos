@@ -45,7 +45,6 @@ surface at all.
 
 | Program | The gap |
 |---|---|
-| `pmap` | `/proc/<tid>/` has `status` and `cmdline` and nothing that shows an *address space*. This kernel's worst bugs have all been in mm — two mappings sharing a page, COW, lazy relocation, file-backed VMAs — and every one of them would have been visible in a `maps` file. The VMA set is already walked for the RSS column, so this is a renderer over data procfs collects |
 | syscall fuzzer | Newly possible: `/proc/syscalls` names every call and says which arguments are pointers, lengths and strings, so a fuzzer can generate structurally plausible calls without a hand-written table. Nothing tests the `uaccess` surface as a surface; this drives every dispatch arm with unmapped pointers, absurd lengths and misaligned structs, and `strace` names the call that killed it |
 | `lsof` | Needs `/proc/<tid>/fd`. "Which process still has this open" is unanswerable today, and it is the question a file manager or an unmount failure asks first |
 | `httpd` | Serves the guest filesystem over TCP. Same untested listen/accept path `nc` reaches, plus concurrent connections, and it doubles as a host-to-guest inspection channel that needs no disk rebuild |

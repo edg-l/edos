@@ -2,6 +2,17 @@
 
 ## Done
 
+- **`pmap`, and the address space `/proc` never showed** - `status` counted
+  VMAs and totalled their size; nothing said what any one of them was. The new
+  `/proc/<tid>/maps` prints one line per VMA — range, `rwxp`, size asked for,
+  size actually mapped, and what backs it (`anon`, `stack`, `tls`, `shm:<id>`,
+  `phys:0x..`, `file:<mount>:<ino>+<off>`) — and `pmap` renders it, with `-x`
+  for the end address and `-q` for the bare list. The residency column is a
+  page-table walk clipped to one range (`MemoryManager::resident_bytes_in`),
+  so a mapping's demand paging is visible: a shell asks for 8532 KiB and has
+  220 KiB. The per-thread files now live in a `PROCESS_FILES` table like the
+  global ones, so a new one is a row rather than four match arms.
+
 - **`sntp`, and the clock the kernel could not be told** - the RTC is sampled
   once at boot at one-second resolution and everything after it is HPET ticks,
   which left the guest around 1.4 s slow with no way to correct it. One UDP

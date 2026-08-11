@@ -15,7 +15,10 @@ use crate::{
     fs::{
         Error, File, FileAttrs, FileKind, FileSystem, block_page_cache::BlockPageCache, path::Path,
     },
-    memory::frame_allocator::frame_allocator,
+    memory::{
+        frame_allocator::frame_allocator,
+        vma::{Vma, VmaBacking, VmaFlags, VmaProt},
+    },
     ranked_lock,
     syscalls::Errno,
     thread::thread::{State, Thread, ThreadId, get_thread_info_by_id, list_threads},
@@ -321,6 +324,58 @@ impl Procfs {
         format!("inversions: {inversions}\nmax_depth: {max_depth}\n")
     }
 
+    /// Render one per-thread file, or `None` if no such thread is alive.
+    fn with_snapshot(tid: u64, render: fn(&ThreadSnapshot) -> String) -> Option<String> {
+        let snapshots = Self::collect_snapshots();
+        Self::find_snapshot(&snapshots, tid).map(render)
+    }
+
+    /// One line per VMA: the address range, its protection, the size asked for
+    /// and the part of it that is actually mapped, then what backs it.
+    ///
+    /// Rendered straight from the thread rather than from a `ThreadSnapshot`,
+    /// because every other `/proc` reader would then pay for a page-table walk
+    /// per mapping to build a field nothing else uses.
+    fn render_maps(tid: u64) -> Option<String> {
+        let thread = list_threads()
+            .into_iter()
+            .find(|thread| thread.id.0 == tid)?;
+        let mut out = String::from("START-END PERM SIZEKIB RSSKIB BACKING\n");
+        // A kernel thread has no address space of its own; the file exists so
+        // readers need not special-case it, and lists nothing.
+        let Some(user_arc) = thread.user.as_ref() else {
+            return Some(out);
+        };
+        let user = user_arc.read();
+
+        // Copied out under the VMA lock so residency, which takes the memory
+        // manager (rank 80), is computed after it is released.
+        let entries: Vec<(u64, u64, String, String)> = {
+            let vmas = ranked_lock!(RANK_VMAS, "procfs::maps", user.vmas);
+            vmas.iter()
+                .map(|vma| {
+                    (
+                        vma.start.as_u64(),
+                        vma.end.as_u64(),
+                        vma_prot_text(vma),
+                        vma_backing_text(vma),
+                    )
+                })
+                .collect()
+        };
+
+        let manager = ranked_lock!(RANK_USER_MM, "procfs::maps_resident", user.memory_manager);
+        for (start, end, prot, backing) in entries {
+            let resident = manager.resident_bytes_in(start, end) / 1024;
+            let _ = writeln!(
+                out,
+                "{start:016x}-{end:016x} {prot} {} {resident} {backing}",
+                (end - start) / 1024
+            );
+        }
+        Some(out)
+    }
+
     fn resolve_path(path: &Path) -> Result<ProcNode, Error> {
         if path.is_root() {
             return Ok(ProcNode::Root);
@@ -340,11 +395,11 @@ impl Procfs {
             },
             2 => {
                 let tid = parse_tid(&components[0]).ok_or(Error::FileNotFound)?;
-                match components[1].as_str() {
-                    "status" => Ok(ProcNode::ProcessStatus(tid)),
-                    "cmdline" => Ok(ProcNode::ProcessCmdline(tid)),
-                    _ => Err(Error::FileNotFound),
-                }
+                PROCESS_FILES
+                    .iter()
+                    .position(|(name, _)| *name == components[1].as_str())
+                    .map(|index| ProcNode::ProcessFile(tid, index))
+                    .ok_or(Error::FileNotFound)
             }
             _ => Err(Error::FileNotFound),
         }
@@ -384,25 +439,21 @@ impl FileSystem for Procfs {
             }
             ProcNode::ProcessDir(tid) => {
                 let snapshots = Self::collect_snapshots();
-                let Some(snapshot) = Self::find_snapshot(&snapshots, tid) else {
+                if Self::find_snapshot(&snapshots, tid).is_none() {
                     return Err(Error::FileNotFound);
-                };
+                }
 
-                let mut files = Vec::with_capacity(2);
-                files.push(Self::file_entry(
-                    "status".to_string(),
-                    snapshot.status_text().len(),
-                ));
-                files.push(Self::file_entry(
-                    "cmdline".to_string(),
-                    snapshot.cmdline_text().len(),
-                ));
-
-                Ok(files)
+                Ok(PROCESS_FILES
+                    .iter()
+                    .map(|(name, render)| {
+                        Self::file_entry(
+                            name.to_string(),
+                            render(tid).map(|text| text.len()).unwrap_or(0),
+                        )
+                    })
+                    .collect())
             }
-            ProcNode::GlobalFile(_) | ProcNode::ProcessStatus(_) | ProcNode::ProcessCmdline(_) => {
-                Err(Error::NotADir)
-            }
+            ProcNode::GlobalFile(_) | ProcNode::ProcessFile(..) => Err(Error::NotADir),
         }
     }
 
@@ -413,20 +464,8 @@ impl FileSystem for Procfs {
                 let content = GLOBAL_FILES[index].1();
                 Ok(Self::read_text(content, offset, count))
             }
-            ProcNode::ProcessStatus(tid) => {
-                let snapshots = Self::collect_snapshots();
-                let Some(snapshot) = Self::find_snapshot(&snapshots, tid) else {
-                    return Err(Error::FileNotFound);
-                };
-                let content = snapshot.status_text();
-                Ok(Self::read_text(content, offset, count))
-            }
-            ProcNode::ProcessCmdline(tid) => {
-                let snapshots = Self::collect_snapshots();
-                let Some(snapshot) = Self::find_snapshot(&snapshots, tid) else {
-                    return Err(Error::FileNotFound);
-                };
-                let content = snapshot.cmdline_text();
+            ProcNode::ProcessFile(tid, index) => {
+                let content = PROCESS_FILES[index].1(tid).ok_or(Error::FileNotFound)?;
                 Ok(Self::read_text(content, offset, count))
             }
             ProcNode::Root | ProcNode::ProcessDir(_) => Err(Error::NotAFile),
@@ -469,21 +508,10 @@ impl FileSystem for Procfs {
                     Ok(Self::dir_entry(path.filename()))
                 }
             }
-            ProcNode::ProcessStatus(tid) => {
-                let snapshots = Self::collect_snapshots();
-                let Some(snapshot) = Self::find_snapshot(&snapshots, tid) else {
-                    return Err(Error::FileNotFound);
-                };
-                let status = snapshot.status_text();
-                Ok(Self::file_entry("status".to_string(), status.len()))
-            }
-            ProcNode::ProcessCmdline(tid) => {
-                let snapshots = Self::collect_snapshots();
-                let Some(snapshot) = Self::find_snapshot(&snapshots, tid) else {
-                    return Err(Error::FileNotFound);
-                };
-                let cmdline = snapshot.cmdline_text();
-                Ok(Self::file_entry("cmdline".to_string(), cmdline.len()))
+            ProcNode::ProcessFile(tid, index) => {
+                let (name, render) = PROCESS_FILES[index];
+                let content = render(tid).ok_or(Error::FileNotFound)?;
+                Ok(Self::file_entry(name.to_string(), content.len()))
             }
         }
     }
@@ -718,6 +746,45 @@ impl ThreadSnapshot {
     }
 }
 
+/// `rwx` plus the sharing of the mapping, as `/proc/<pid>/maps` writes it.
+fn vma_prot_text(vma: &Vma) -> String {
+    let bit = |set: bool, ch: char| if set { ch } else { '-' };
+    let mut text = String::with_capacity(4);
+    text.push(bit(vma.prot.contains(VmaProt::READ), 'r'));
+    text.push(bit(vma.prot.contains(VmaProt::WRITE), 'w'));
+    text.push(bit(vma.prot.contains(VmaProt::EXEC), 'x'));
+    text.push(bit(vma.flags.contains(VmaFlags::SHARED), 's'));
+    if !vma.flags.contains(VmaFlags::SHARED) {
+        text.pop();
+        text.push('p');
+    }
+    text
+}
+
+/// One whitespace-free token naming what a mapping is made of. A file-backed
+/// mapping is named by mount and inode number: an inode carries no path, and
+/// the dentry that named it may already be gone.
+fn vma_backing_text(vma: &Vma) -> String {
+    match &vma.backing {
+        VmaBacking::Anonymous => "anon".to_string(),
+        VmaBacking::Physical { phys_base } => format!("phys:0x{phys_base:x}"),
+        VmaBacking::SharedMemory { shm_id } => format!("shm:{shm_id}"),
+        VmaBacking::Tls => "tls".to_string(),
+        VmaBacking::Stack => "stack".to_string(),
+        VmaBacking::FileBacked {
+            inode,
+            file_offset,
+            shared,
+            ..
+        } => format!(
+            "file:{}:{}+{file_offset}{}",
+            inode.mount_id,
+            inode.ino,
+            if *shared { ":shared" } else { "" }
+        ),
+    }
+}
+
 fn parse_tid(component: &str) -> Option<u64> {
     component.parse().ok()
 }
@@ -772,9 +839,23 @@ enum ProcNode {
     /// Index into `GLOBAL_FILES`.
     GlobalFile(usize),
     ProcessDir(u64),
-    ProcessStatus(u64),
-    ProcessCmdline(u64),
+    /// Thread id, and an index into `PROCESS_FILES`.
+    ProcessFile(u64, usize),
 }
+
+/// The files under `/proc/<tid>/`, each rendered on demand for that thread.
+/// `None` means the thread is gone between lookup and read.
+///
+/// A table for the same reason `GLOBAL_FILES` is one.
+const PROCESS_FILES: &[(&str, fn(u64) -> Option<String>)] = &[
+    ("status", |tid| {
+        Procfs::with_snapshot(tid, ThreadSnapshot::status_text)
+    }),
+    ("cmdline", |tid| {
+        Procfs::with_snapshot(tid, ThreadSnapshot::cmdline_text)
+    }),
+    ("maps", Procfs::render_maps),
+];
 
 /// The files directly under `/proc`, each rendered on demand.
 ///
