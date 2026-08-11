@@ -1598,7 +1598,7 @@ pub fn kill_process_with_signal(pid: u64, signum: u32) -> bool {
 /// Apply a signal's default action to `thread`, short of actually suspending
 /// or terminating it — both of those happen on the target's own stack, at a
 /// boundary where it holds nothing.
-fn apply_default_action(thread: &Arc<Thread>, signum: u32) {
+fn apply_default_action(thread: &Thread, signum: u32) {
     use crate::thread::signal;
 
     match signal::default_action(signum) {
@@ -1632,6 +1632,11 @@ fn apply_default_action(thread: &Arc<Thread>, signum: u32) {
 /// behalf. A signal whose disposition is SIG_IGN is discarded; one whose
 /// default action is Terminate marks the thread killed, and it dies at the
 /// syscall return boundary in `exit_if_killed`.
+///
+/// The action itself goes through `apply_default_action`, the same function the
+/// send path uses: two copies of the Continue arm drifted apart once, leaving a
+/// thread resumed this way still reporting Stopped to `ps` and to an untraced
+/// `waitpid`.
 pub fn deliver_unblocked_signals(thread: &Thread) {
     use crate::thread::signal;
 
@@ -1647,18 +1652,6 @@ pub fn deliver_unblocked_signals(thread: &Thread) {
             thread.signal.send(signum);
             continue;
         }
-        match signal::default_action(signum) {
-            signal::DefaultAction::Terminate => {
-                thread.killed.store(true, Ordering::Release);
-                thread
-                    .exit_code
-                    .store(128 + signum as i32, Ordering::Release);
-            }
-            signal::DefaultAction::Stop => thread.stop_requested.store(true, Ordering::Release),
-            signal::DefaultAction::Continue => {
-                thread.stop_requested.store(false, Ordering::Release)
-            }
-            signal::DefaultAction::Ignore => {}
-        }
+        apply_default_action(thread, signum);
     }
 }

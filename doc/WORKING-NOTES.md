@@ -3364,3 +3364,45 @@ connections later, because the accept queue has no half-open timeout.
   standard input to the socket, so anything typed at the prompt afterwards goes
   to the peer rather than to the shell. Use a server that does not read standard
   input (`tcpecho -p 23 -q &`) when the point of the test is to keep typing.
+
+## `fg` and the job that reported Stopped (2026-08-12)
+
+The symptom on record — resume a stopped job and `ps` still says `Stopped` —
+**does not reproduce**. Driven in the guest on two terminals: `sleep 300`,
+Ctrl+Z (`[1]+ Stopped`), `fg`, then `ps` from the other terminal reports the
+`/bin/sleep` thread `Sleeping`. `bg` and a bare `kill -TSTP` / `kill -CONT`
+pair both show `/proc/<tid>/status` going `Stopped` → `Sleeping` as well.
+
+The entry stays as a record rather than being deleted, because the symptom was
+real and one path could still produce it. `SIGCONT` clears both
+`stop_requested` and `stopped`, and the target clears `stopped` again on its
+way out of the park in `stop_if_signalled` — but only the send path did that.
+`deliver_unblocked_signals`, which acts on signals a widening `sigprocmask`
+just unblocked, carried its own copy of the same match and its Continue arm
+cleared `stop_requested` alone. A thread resumed through *that* door was
+runnable while still reporting `Stopped` to `ps` and to an untraced `waitpid`,
+which is exactly the report: a shell that resumes a job and polls it would put
+it straight back in the job list. Both callers now go through
+`apply_default_action`, so the two arms cannot drift again.
+
+Ruled out along the way: `stop_if_signalled` itself (it stores `stopped=false`
+unconditionally on the way out, and the loop added in `fc39bed` means it
+actually reaches that store), the level-triggered `waitpid(WUNTRACED)`, and
+`fg`'s `tcsetpgrp`/`pty_set_canonical` bracket.
+
+### `kill` had two argument orders, and the wrong one killed the process
+
+Reproducing any of this first cost a process: `kill 27 20` **terminated** pid 27
+with `Done(143)`. The shell builtin took `kill [-SIGNAL] PID`, ignored every
+operand past the first, and defaulted to SIGTERM; `/bin/kill` took the opposite
+order, `kill PID [SIGNAL]`. Since the builtin shadows the binary, the form that
+reads as "suspend 27" was parsed as "terminate 27". Both now take
+`kill [-SIGNAL] PID...` over `edos_lib::process::signal_by_name` (names with or
+without the `SIG` prefix, or a number), and the signal is only ever read from
+the `-SIG` position, so `kill -TSTP 27` means what it says. Note the corollary:
+every remaining operand is a PID, so `kill 27 20` now signals *both* 27 and 20
+rather than dropping the 20 — POSIX, but still not "suspend 27". Reach for the
+name form.
+
+Verified in the guest: `kill -TSTP 29` then `grep State /proc/29/status` reports
+`Stopped`, and `kill -CONT 29` reports `Sleeping`.

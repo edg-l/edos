@@ -632,6 +632,28 @@ pub fn sigmask(signum: u32) -> u32 {
     1 << signum
 }
 
+/// Resolve a `kill` signal operand: a name with or without the `SIG` prefix,
+/// or a decimal number.
+///
+/// Signal 0 is accepted because POSIX gives it to `kill` as the
+/// "probe whether the process exists" no-op.
+pub fn signal_by_name(spec: &str) -> Option<u32> {
+    let name = spec.trim();
+    let bare = name.strip_prefix("SIG").unwrap_or(name);
+    match bare {
+        "HUP" => Some(SIGHUP),
+        "INT" => Some(SIGINT),
+        "KILL" => Some(SIGKILL),
+        "PIPE" => Some(SIGPIPE),
+        "TERM" => Some(SIGTERM),
+        "CHLD" => Some(SIGCHLD),
+        "CONT" => Some(SIGCONT),
+        "STOP" => Some(SIGSTOP),
+        "TSTP" => Some(SIGTSTP),
+        _ => name.parse::<u32>().ok().filter(|&n| n < 32),
+    }
+}
+
 /// Send a signal to a process.
 ///
 /// Returns 0 on success, or a negative value on error.

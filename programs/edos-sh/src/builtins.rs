@@ -268,53 +268,50 @@ pub fn cmd_test(args: &[String]) -> i32 {
     }
 }
 
-/// Kill a process: kill [-SIGNAL] PID
+/// Send a signal to one or more processes: kill [-SIGNAL] PID...
+///
+/// Every operand after the signal is a PID, so a trailing word is a usage
+/// error rather than something silently dropped: `kill 12 20` used to send
+/// SIGTERM to 12 and ignore the 20, terminating the process the caller was
+/// asking to suspend.
 pub fn cmd_kill(args: &[String]) -> i32 {
-    if args.is_empty() {
-        eprintln!("usage: kill [-SIGNAL] PID");
-        return 1;
-    }
+    const USAGE: &str = "usage: kill [-SIGNAL] PID...";
 
-    let (signal, pid_arg) = if args[0].starts_with('-') {
-        let sig_str = &args[0][1..];
-        let sig = match sig_str {
-            "INT" | "2" => 2u32,
-            "KILL" | "9" => 9,
-            "TERM" | "15" => 15,
-            "HUP" | "1" => 1,
-            other => {
-                if let Ok(n) = other.parse::<u32>() {
-                    n
-                } else {
-                    eprintln!("kill: unknown signal: {}", other);
+    let (signal, pids) = match args.split_first() {
+        Some((first, rest)) if first.starts_with('-') => {
+            match edos_lib::process::signal_by_name(&first[1..]) {
+                Some(sig) => (sig, rest),
+                None => {
+                    eprintln!("kill: unknown signal: {}", &first[1..]);
                     return 1;
                 }
             }
-        };
-        if args.len() < 2 {
-            eprintln!("usage: kill [-SIGNAL] PID");
-            return 1;
         }
-        (sig, &args[1])
-    } else {
-        (15u32, &args[0]) // Default: SIGTERM
-    };
-
-    let pid: u64 = match pid_arg.parse() {
-        Ok(p) => p,
-        Err(_) => {
-            eprintln!("kill: invalid PID: {}", pid_arg);
+        Some(_) => (edos_lib::process::SIGTERM, args),
+        None => {
+            eprintln!("{}", USAGE);
             return 1;
         }
     };
 
-    let result = edos_lib::process::sys_kill(pid, signal);
-    if result < 0 {
-        eprintln!("kill: no such process: {}", pid);
-        1
-    } else {
-        0
+    if pids.is_empty() {
+        eprintln!("{}", USAGE);
+        return 1;
     }
+
+    let mut status = 0;
+    for pid_arg in pids {
+        let Ok(pid) = pid_arg.parse::<u64>() else {
+            eprintln!("kill: invalid PID: {}", pid_arg);
+            status = 1;
+            continue;
+        };
+        if edos_lib::process::sys_kill(pid, signal) < 0 {
+            eprintln!("kill: no such process: {}", pid);
+            status = 1;
+        }
+    }
+    status
 }
 
 /// Print network interface configuration.
