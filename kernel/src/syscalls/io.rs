@@ -277,8 +277,11 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                     fd_table.lock().replace_fd(fd, new_fd);
                     written
                 }
-                Err(_) => {
-                    info.lock().errno = Errno::EINVAL;
+                Err(e) => {
+                    // The filesystem's own code, not EINVAL for everything: a
+                    // full device and a bad argument are not the same failure,
+                    // and a caller that has to tell them apart has only this.
+                    info.lock().errno = Errno::from(e);
                     !0u64
                 }
             }
