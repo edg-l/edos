@@ -16,6 +16,7 @@ use crate::thread::pipe::{Pipe, PollablePipe};
 use crate::thread::poll::PollWaiter;
 use crate::thread::preempt::PreemptSpinlock;
 use crate::thread::pty::{PollablePtyMaster, PollablePtySlave, PtySlaveRead};
+use crate::thread::sched_prof::{self, Stage};
 use crate::thread::scheduler::{
     current_thread, current_thread_info, current_thread_weak, thread_exit, thread_park_while,
     thread_sleep,
@@ -237,15 +238,19 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             // Copy out of user space before taking the pipe lock: a user copy can
             // demand fault and park, and a thread killed while parked never runs
             // the guard's Drop, which would leave the pipe locked for good.
+            let probe = sched_prof::now_ns();
             let Some(data) = copy_in(buffer_ptr, count) else {
                 info.lock().errno = Errno::EFAULT;
                 return !0u64;
             };
+            let probe = sched_prof::record(Stage::PipeCopyIn, probe);
             let (written, notif) = {
                 let mut pipe = ranked_lock!(RANK_PIPE, "sys_write::pipe", pipe);
                 pipe.write(&data)
             };
+            let probe = sched_prof::record(Stage::PipeWrite, probe);
             notif.flush();
+            sched_prof::record(Stage::PipeFlush, probe);
             match written {
                 Some(written) => written as u64,
                 None => {
@@ -553,18 +558,22 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 // lost if the copy then faults, which only happens when the
                 // caller passed a bad buffer; holding the guard across the copy
                 // instead would leak it permanently on a kill.
+                let probe = sched_prof::now_ns();
                 let (data, closed, notif) = {
                     let mut guard = ranked_lock!(RANK_PIPE, "sys_read::pipe", pipe);
                     let (d, n) = guard.read(count);
                     (d, guard.closed && guard.buffer.is_empty(), n)
                 };
+                let probe = sched_prof::record(Stage::PipeRead, probe);
                 notif.flush();
+                let probe = sched_prof::record(Stage::PipeFlush, probe);
 
                 if !data.is_empty() {
                     if !copy_out(buffer_ptr, &data) {
                         info.lock().errno = Errno::EFAULT;
                         break -1;
                     }
+                    sched_prof::record(Stage::PipeCopyOut, probe);
                     break data.len() as i64;
                 }
                 if closed {

@@ -58,10 +58,20 @@ pub enum Stage {
     /// The enqueue half of a wake: pick the target CPU, publish Ready, take
     /// that CPU's runqueue.
     WakeEnqueue,
+    /// `sys_write` on a pipe: copy the user's bytes into the kernel.
+    PipeCopyIn,
+    /// `sys_write` on a pipe: take the pipe, append, build the notification.
+    PipeWrite,
+    /// `sys_read` on a pipe: take the pipe, drain, build the notification.
+    PipeRead,
+    /// Deliver a pipe's notification: poller updates and a reader wake.
+    PipeFlush,
+    /// `sys_read` on a pipe: copy the drained bytes out to the user.
+    PipeCopyOut,
 }
 
 #[cfg(feature = "sched-prof")]
-const STAGE_NAMES: [&str; 15] = [
+const STAGE_NAMES: [&str; 20] = [
     "save_ctx",
     "save_fpu",
     "save_tls",
@@ -77,6 +87,11 @@ const STAGE_NAMES: [&str; 15] = [
     "restore_fpu",
     "wake",
     "wake_enqueue",
+    "pipe_copy_in",
+    "pipe_write",
+    "pipe_read",
+    "pipe_flush",
+    "pipe_copy_out",
 ];
 
 #[cfg(feature = "sched-prof")]

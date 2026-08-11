@@ -35,8 +35,31 @@ scripts/edos-vm type 'cat /proc/sched_prof > /tmp/b.txt; switchbench 20000 -l; \
 Inside the 220 ns switch: `page` 66-77, `fxrstor` + `fxsave` 91, `CpuContext`
 copies 36, publish 19, transition 27, `wake_sleepers` 18, pick 12, timer 10.
 
-Ranges are run-to-run spread across boots with the desktop running; treat
-anything under about 15% as noise and re-measure rather than believe it.
+### The numbers above are not as solid as they look
+
+Two sources of interference, and the second one is invisible from inside the
+guest:
+
+- The desktop. The compositor wakes ~74 times a second and the panel clock
+  once a second, and either landing inside a measurement inflates it.
+- **The host.** This is a VM: when the host has something else to run — a build
+  in another terminal, most obviously — it deschedules the whole vCPU. The
+  guest cannot see that happen. It just looks like slow code.
+
+The same `switchbench` binary in one boot gave **243, 302 and 96 ns** for
+`getpid`, and **530, 1103 and 2090 ns** for the pipe echo. That is a 4× spread
+on unchanged code, so a single mean settles nothing. `switchbench` therefore
+reports the **best of six batches** rather than the mean of one: interference
+only ever adds time, so the fastest batch is the least contaminated.
+
+What that leaves trustworthy:
+
+- **`/proc/sched_prof` stages**, which are means over 10⁴–10⁵ samples of work
+  that happens entirely inside the kernel. Use these for attribution.
+- **Large deltas**, like 1917 → ~500 ns. Those survive any of this.
+- **Not** fine attribution between two things a few hundred nanoseconds apart.
+  Anything under about 30% needs the host idle and several runs before it means
+  anything, and the figures in the table above were not all taken that way.
 
 **The switch is no longer the expensive part, and neither is the wake.** A
 wake is 51 ns. What a real IPC pays is the pipe's own data path — 1153 ns to
@@ -90,10 +113,24 @@ remainder of a round trip to the wake. Measuring the wake directly refuted it:
 The scheduler's part of an IPC is about 100 ns. A direct handoff would remove
 some of that and some scheduling latency, and it is not where the time is.
 
-Where it is: **1153 ns for a one-byte pipe write and read with no scheduling at
-all.** Against a bare syscall floor of ~90 ns (`pollbench`), two syscalls
-account for maybe 300 of that, leaving ~850 ns of pipe machinery to move one
-byte. `sys_read` on a pipe (`syscalls/io.rs`) does, per call:
+Where it is **not**, on the evidence: the pipe's own data structures. Per call,
+from `/proc/sched_prof` — the trustworthy instrument here — `pipe_copy_in` is
+37 ns, `pipe_write` 61, `pipe_read` 61, `pipe_flush` 21 and `pipe_copy_out` 9.
+A whole round trip's pipe work is therefore something like 190 ns, against a
+`getpid` that costs 96-302 ns depending on what the host was doing. **The
+syscall boundary is the larger term, and it is paid by every syscall in the
+system, not just IPC.** Attacking the pipe's buffer first would be optimising
+the smaller half.
+
+That is as far as the evidence goes, and no further: the wall-clock figures
+that would settle the ratio are inside the noise described above. The next
+step is a floor measurement of `getpid` on an idle host, repeated, and then a
+look at what the generic dispatch path in `syscall_handler` does before it
+reaches the syscall — the traced-call bookkeeping and `current_thread_info()`
+are both on it.
+
+For the record, the pipe path per read does the following, and it is worth
+tidying whenever it is touched for other reasons, but it is not the lever:
 
 - takes the pipe `BlockingMutex` to clone `reader_wq`, again to drain, and
   again inside every `wait_until` predicate evaluation;
@@ -101,14 +138,10 @@ byte. `sys_read` on a pipe (`syscalls/io.rs`) does, per call:
   and then `drain(..n)`, which memmoves the remainder;
 - calls `notify_pollers()` on every read and every write.
 
-Roughly 2300 ns of the 6720 round trip is these two traversals, against ~1600
-for the two cross-process switches and ~100 for the scheduling.
-
-The work, in order of how well it is evidenced: give `Pipe` a ring buffer so a
-read is a copy rather than an allocation plus a memmove; return the bytes into
-a caller-provided buffer instead of a `Vec`; take the lock once per call rather
-than per phase. Only then is it worth asking whether the scheduler hand-off
-shape matters.
+If it is tidied: give `Pipe` a ring buffer so a read is a copy rather than an
+allocation plus a memmove, return the bytes into a caller-provided buffer
+instead of a `Vec`, and take the lock once per call rather than per phase.
+Expect tens of nanoseconds, not hundreds.
 
 If it does become worth it later, the reference design is seL4's: the sender
 switches straight to the receiver on its own timeslice, no runqueue and no

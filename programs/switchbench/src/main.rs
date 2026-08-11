@@ -71,16 +71,53 @@ fn cpus_online() -> u64 {
         .unwrap_or(0)
 }
 
-/// Nanoseconds per `sched_yield` over `iters` calls.
-fn time_yield(iters: u64) -> f64 {
+/// Batches a short measurement runs, of the `iters` it was given each.
+///
+/// Six, not more: the whole run costs about 0.45 s at the default iteration
+/// count and every batch past the first few buys less, since one clean batch
+/// is all the minimum needs. Raise it only for a number that has to settle a
+/// question, and remember the build-and-boot cycle around this is minutes.
+const BATCHES: u64 = 6;
+
+/// Nanoseconds per operation, taken as the **best** batch rather than the mean
+/// of one.
+///
+/// Everything measured here is a few hundred nanoseconds, and two things
+/// interrupt it. Inside the guest, the desktop: the compositor wakes about 74
+/// times a second and the panel clock once a second. Outside it, the **host**,
+/// which deschedules the whole vCPU whenever it has something else to run --
+/// a build running on the host machine is invisible from in here and looks
+/// exactly like slow code.
+///
+/// A mean therefore reports the machine's mood rather than the code, and it
+/// did: the same binary in one boot gave 243, 302 and 96 ns for `getpid`, and
+/// 530, 1103 and 2090 for the pipe echo. Interference only ever *adds* time,
+/// so the fastest batch is the one least contaminated by it, and it is stable
+/// where the mean is not.
+///
+/// This is why the numbers here are lower than earlier records of the same
+/// quantities: those were means of a single batch.
+fn best_ns(iters: u64, mut op: impl FnMut()) -> f64 {
     for _ in 0..64 {
-        sched_yield();
+        op();
     }
-    let t0 = Instant::now();
-    for _ in 0..iters {
-        sched_yield();
+    let mut best = f64::MAX;
+    for _ in 0..BATCHES {
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            op();
+        }
+        let per = t0.elapsed().as_nanos() as f64 / iters as f64;
+        if per < best {
+            best = per;
+        }
     }
-    t0.elapsed().as_nanos() as f64 / iters as f64
+    best
+}
+
+/// Nanoseconds per `sched_yield`.
+fn time_yield(iters: u64) -> f64 {
+    best_ns(iters, sched_yield)
 }
 
 /// A partner yielding in a loop keeps exactly one other thread Ready, so every
@@ -157,9 +194,33 @@ fn main() {
     // other's `write`, so this prices the wake path the yield cases never take.
     pipe_round_trip(&mut out, iters.min(2_000));
 
+    syscall_floor(&mut out, iters);
     pipe_no_block(&mut out, iters.min(5_000));
 
     sleep_overshoot(&mut out);
+}
+
+/// What a syscall costs before it does anything.
+///
+/// `getpid` is the shortest call the kernel has: dispatch, and a read of the
+/// current thread. A read of a descriptor that does not exist adds the fd
+/// table lookup and the error return, so the difference between the two is
+/// what every call that touches a descriptor pays before reaching its own
+/// work. Both are the floor under `pipe echo` below.
+fn syscall_floor(out: &mut Out, iters: u64) {
+    let getpid = best_ns(iters, || {
+        edos_lib::process::getpid();
+    });
+    out.line(&format!("switchbench getpid {getpid:.0} ns"));
+
+    let mut byte = [0u8; 1];
+    let badfd = best_ns(iters, || {
+        read(9999, &mut byte);
+    });
+    out.line(&format!(
+        "switchbench read of a bad fd {badfd:.0} ns, so the fd table costs {:.0} ns",
+        badfd - getpid
+    ));
 }
 
 /// A pipe write and read where the data is already there, so nothing blocks
@@ -177,20 +238,18 @@ fn pipe_no_block(out: &mut Out, iters: u64) {
         return;
     };
     let mut byte = [0u8; 1];
-    for _ in 0..64 {
-        write(w, b"x");
-        read(r, &mut byte);
-    }
-    let t0 = Instant::now();
-    for _ in 0..iters {
+    let mut failed = false;
+    let each = best_ns(iters, || {
         if write(w, b"x") != 1 || read(r, &mut byte) != 1 {
-            out.line("switchbench: non-blocking pipe echo failed");
-            break;
+            failed = true;
         }
-    }
-    let each = t0.elapsed().as_nanos() as f64 / iters as f64;
+    });
     close(r);
     close(w);
+    if failed {
+        out.line("switchbench: non-blocking pipe echo failed");
+        return;
+    }
     out.line(&format!(
         "switchbench pipe echo, nothing blocks {each:.0} ns for a write plus a read"
     ));
