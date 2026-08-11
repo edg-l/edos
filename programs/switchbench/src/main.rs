@@ -192,8 +192,14 @@ fn main() {
 
     // A blocking round trip: each side parks in `read` and is woken by the
     // other's `write`, so this prices the wake path the yield cases never take.
-    pipe_round_trip(&mut out, iters.min(2_000));
-    pipe_round_trip_threads(&mut out, iters.min(2_000));
+    // Both round trips at two working-set sizes. The cross-process case pays
+    // for refills the thread case does not, so the difference of the two
+    // differences is what one user page costs after a `CR3` reload -- which is
+    // the number that says whether larger pages are worth having.
+    for touch in [0, TOUCH_PAGES] {
+        pipe_round_trip(&mut out, iters.min(2_000), touch);
+        pipe_round_trip_threads(&mut out, iters.min(2_000), touch);
+    }
 
     syscall_floor(&mut out, iters);
     pipe_no_block(&mut out, iters.min(5_000));
@@ -289,6 +295,45 @@ fn sleep_overshoot(out: &mut Out) {
     out.line(&format!("switchbench sleep worst overshoot {worst} us"));
 }
 
+/// Pages of user memory a round trip touches per trip, on each side, when
+/// asked to. Sized to be a working set rather than a rounding error: 32 pages
+/// is 128 KiB, about what a small program's hot data is.
+const TOUCH_PAGES: usize = 32;
+
+/// A working set to walk, one byte per page.
+///
+/// It exists to price the refills a `CR3` reload causes. `black_box` keeps the
+/// walk from being optimised away, and pre-touching in `new` keeps demand
+/// faults out of the measurement -- what is being measured is the second and
+/// later visits to a page, which is when only the TLB entry is missing.
+struct WorkingSet {
+    buf: Vec<u8>,
+    pages: usize,
+}
+
+impl WorkingSet {
+    fn new(pages: usize) -> Self {
+        let mut set = Self {
+            buf: alloc_pages(pages),
+            pages,
+        };
+        set.walk();
+        set
+    }
+
+    fn walk(&mut self) {
+        for i in 0..self.pages {
+            let at = i * 4096;
+            self.buf[at] = self.buf[at].wrapping_add(1);
+            std::hint::black_box(self.buf[at]);
+        }
+    }
+}
+
+fn alloc_pages(pages: usize) -> Vec<u8> {
+    vec![0u8; pages.max(1) * 4096]
+}
+
 /// The same blocking round trip with a **thread** at the far end instead of a
 /// process, so both sides share an address space.
 ///
@@ -301,7 +346,7 @@ fn sleep_overshoot(out: &mut Out) {
 ///
 /// It is best-of-batches, unlike the cross-process case, which is a single
 /// batch of `iters` and reads 16% apart between runs for that reason.
-fn pipe_round_trip_threads(out: &mut Out, iters: u64) {
+fn pipe_round_trip_threads(out: &mut Out, iters: u64, touch: usize) {
     let (Some((up_r, up_w)), Some((down_r, down_w))) = (pipe(), pipe()) else {
         out.line("switchbench: pipe failed, skipping the thread round trip");
         return;
@@ -311,7 +356,11 @@ fn pipe_round_trip_threads(out: &mut Out, iters: u64) {
     // below does to it.
     let peer = thread::spawn(move || {
         let mut byte = [0u8; 1];
+        let mut set = WorkingSet::new(touch);
         while read(up_r, &mut byte) == 1 {
+            if touch > 0 {
+                set.walk();
+            }
             if write(down_w, &byte) != 1 {
                 return;
             }
@@ -320,9 +369,13 @@ fn pipe_round_trip_threads(out: &mut Out, iters: u64) {
 
     let mut byte = [0u8; 1];
     let mut failed = false;
+    let mut set = WorkingSet::new(touch);
     let each = best_ns(iters, || {
         if write(up_w, b"x") != 1 || read(down_r, &mut byte) != 1 {
             failed = true;
+        }
+        if touch > 0 {
+            set.walk();
         }
     });
 
@@ -335,15 +388,15 @@ fn pipe_round_trip_threads(out: &mut Out, iters: u64) {
         return;
     }
     out.line(&format!(
-        "switchbench pipe round trip, one address space {each:.0} ns, \
-         {:.0} ns per park/wake",
+        "switchbench pipe round trip, one address space, touching {touch} pages \
+         {each:.0} ns, {:.0} ns per park/wake",
         each / 2.0
     ));
 }
 
 /// Time a one-byte round trip through a pair of pipes, forked child at the
 /// far end. Both sides block, so each trip is two parks and two wakes.
-fn pipe_round_trip(out: &mut Out, iters: u64) {
+fn pipe_round_trip(out: &mut Out, iters: u64, touch: usize) {
     let (Some((up_r, up_w)), Some((down_r, down_w))) = (pipe(), pipe()) else {
         out.line("switchbench: pipe failed, skipping the pipe case");
         return;
@@ -354,9 +407,13 @@ fn pipe_round_trip(out: &mut Out, iters: u64) {
         close(up_w);
         close(down_r);
         let mut byte = [0u8; 1];
+        let mut set = WorkingSet::new(touch);
         loop {
             if read(up_r, &mut byte) != 1 {
                 std::process::exit(0);
+            }
+            if touch > 0 {
+                set.walk();
             }
             if write(down_w, &byte) != 1 {
                 std::process::exit(0);
@@ -370,29 +427,37 @@ fn pipe_round_trip(out: &mut Out, iters: u64) {
     close(up_r);
     close(down_w);
 
+    // Best of batches, with warmup, exactly as the thread case above -- and
+    // that matters more here than anywhere else in this file. A `fork`ed child
+    // starts with every page copy-on-write, so a single unwarmed batch charges
+    // the round trip for the COW faults of starting up: measured the old way,
+    // one batch of 2000 trips, this case read ~4900 ns against 1980 for the
+    // thread case, and most of the difference was the faults rather than the
+    // address space.
     let mut byte = [0u8; 1];
-    let mut trips = 0u64;
-    let t0 = Instant::now();
-    for _ in 0..iters {
+    let mut failed = false;
+    let mut set = WorkingSet::new(touch);
+    let each = best_ns(iters, || {
         if write(up_w, b"x") != 1 || read(down_r, &mut byte) != 1 {
-            break;
+            failed = true;
         }
-        trips += 1;
-    }
-    let elapsed = t0.elapsed().as_nanos() as f64;
+        if touch > 0 {
+            set.walk();
+        }
+    });
 
     close(up_w);
     close(down_r);
     edos_lib::process::kill(child as u64, edos_lib::process::SIGKILL);
     edos_lib::process::waitpid(child as u64);
 
-    if trips == 0 {
+    if failed {
         out.line("switchbench: pipe round trip failed");
         return;
     }
     out.line(&format!(
-        "switchbench pipe round trip {:.0} ns over {trips} trips, {:.0} ns per park/wake",
-        elapsed / trips as f64,
-        elapsed / trips as f64 / 2.0
+        "switchbench pipe round trip, touching {touch} pages {each:.0} ns, \
+         {:.0} ns per park/wake",
+        each / 2.0
     ));
 }

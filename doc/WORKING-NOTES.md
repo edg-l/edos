@@ -27,7 +27,8 @@ across the five runs:
 | `getpid` | 94 | 92-95 |
 | `read` of a descriptor that does not exist | 128 | 128 |
 | a pipe write + read, nothing blocking | 402 | 399-407 |
-| a blocking pipe round trip | 4946 | 4785-5168 |
+| a blocking pipe round trip | 2203 | 2196-2206 |
+| the same round trip, one address space | 1988 | 1983-1992 |
 
 **The same binary now repeats to within 2%**, which is what makes a 25 ns
 change measurable. The rule that follows is simple: do not measure while
@@ -44,69 +45,88 @@ These decompose cleanly, which the old noisy numbers never did:
 rank the parts of a call and do not add up to one. That is a caveat this file
 did not have before, and it matters: see the memset trap below.
 
-## The 3 microseconds nothing could account for are the address space
+## There was no 3-microsecond gap: it was the benchmark
 
-A blocking pipe round trip is ~4900 ns, and everything measurable accounted for
-only ~1300 of it. The missing 3.6 us was charged to "the park/wake path" and
-looked like a defect. It is not one.
+A blocking pipe round trip reads **2203 ns**, not the ~4900 this file and
+`SCHED-ROADMAP.md` reported for months, and the 3.7 us that "nothing could
+account for" was never the kernel.
 
-`switchbench` now runs the same round trip with a **thread** at the far end
-instead of a forked process: same two pipes, same two parks, same two wakes, one
-address space. That case is **1968 ns**, and it is stable to 20 ns across runs
-where the cross-process case swings 8%.
+`switchbench`'s `pipe_round_trip` timed one batch of 2000 trips with no warmup,
+while every other figure it prints is the best of six batches after 64 warmup
+iterations. A `fork`ed child starts with every page copy-on-write, so that single
+unwarmed batch charged the round trip for the faults of its own child starting
+up. Measured the same way as everything else:
 
-| | ns/round trip |
+| | ns/round trip | spread |
+|---|---|---|
+| cross-process | 2203 | 2196-2206 |
+| one address space (a thread at the far end) | 1988 | 1983-1992 |
+| **the address space, per switch** | **~108** | |
+
+**That ~108 ns agrees with the yield path**, where a cross-process handover costs
+129 ns more than a same-process one. Two independent measurements of the same
+quantity that now agree, where they used to differ elevenfold. That is the reason
+to believe these and not the old ones.
+
+**How it fooled a whole round of analysis.** The thread-vs-process comparison was
+added to find where the missing microseconds went, and it *did* isolate them --
+onto the address space, which is where the difference in method happened to sit.
+The conclusion (a `CR3` reload costs ~1470 ns in TLB refills, amplified by nested
+paging) was wrong, and the next piece of work chosen on the strength of it, huge
+pages for user mappings, would have bought nothing measurable.
+
+What killed it is now a permanent part of `switchbench`: both round trips can
+touch a 32-page working set per side per trip, and doing so costs the same
+whether or not an address space was switched in between.
+
+| | 0 pages | 32 pages | delta |
+|---|---|---|---|
+| one address space | 1988 | 2280 | +292 |
+| cross-process | 2203 | 2590 | +387 |
+
+**~1.3 ns per page refilled after a `CR3` reload**, not the ~100 a nested walk
+was assumed to cost. Refills are not where the time is, so nothing that reduces
+them -- huge pages, and PCID if this host had it -- is worth building.
+
+**Two rules out of this, both about measurement:**
+
+- **Never compare a best-of-N-with-warmup figure against a single unwarmed
+  batch.** Every case in one benchmark has to be timed the same way, or the
+  difference between two cases is a difference in method.
+- **A stable artifact is still an artifact.** The bad number reproduced to within
+  8% across runs and across four builds, and that is exactly why it was trusted.
+  What caught it was two ways of measuring one quantity disagreeing by 11x.
+
+### What is left: ~620 ns per round trip
+
+| | ns |
 |---|---|
-| cross-process, two `CR3` reloads | ~4900 |
-| one address space | 1968 |
-| **per address-space switch** | **~1470** |
+| 4 pipe syscalls, at 94 boundary + 34 fd table + ~73 pipe work | 804 |
+| 2 switches, at ~230 plus ~108 when the address space changes | 676 |
+| 2 wakes (`do_wake`) | 102 |
+| **accounted** | **~1580** |
+| **measured** | **2203** |
 
-The second measurement beside it is what makes this worth keeping: a
-cross-process `sched_yield` handover costs only **176 ns** more than a
-same-process one. Same `CR3` write, eight times cheaper. **The write is not the
-cost; the refills after it are**, and they only show up when the code that runs
-next touches enough memory to need them -- which a `sched_yield` loop does not
-and a syscall through the fd table, a pipe and a user buffer does.
+~310 ns per park/wake pair, with one clear suspect: the blocking read performs a
+**whole** read attempt before it blocks, and `wait_internal` then evaluates its
+predicate up to three more times, with a queue push and a `retain` around them.
+Unlike everything this section retracts, that is a cost bare metal pays too.
 
-Two properties of this machine multiply those refills, and neither is a kernel
-bug: under KVM every guest page walk is a nested walk (four guest levels each
-resolved through four host levels, so a TLB miss costs five to ten times bare
-metal), and this host has no PCID, so every `CR3` write flushes the whole
-non-global TLB. ~1470 ns is about 5000 cycles, the right order for a few dozen
-nested walks.
+### What survived: the kernel half was only global for what existed at boot
 
-**So a cross-process number measured here carries a VM penalty that bare metal
-would not.** Do not read ~4900 ns as a kernel figure, and do not chase the ratio
-between it and the thread case as a defect. What is left to attack is the 1968
-ns, where ~600 ns is still unaccounted -- see `doc/SCHED-ROADMAP.md` item 1.
+The one measured win against the address-space switch, and it stands:
+a cross-process `sched_yield` handover **506 -> 456 ns**, of which the
+address-space part went **177 -> 128**.
 
-Three changes came out of the hunt.
-
-- **The kernel half was only global for what existed at boot**, and that is 28%
-  of an address-space switch. `mark_kernel_mappings_global` sweeps once at boot;
-  everything mapped into the kernel half afterwards was non-global, including a
-  thread's kernel stack and the per-CPU scheduler stack the voluntary switch
-  pivots onto -- the two regions every syscall and every switch touch. They died
-  on every `CR3` write and were re-walked, nested. `map_memory` now sets
-  `GLOBAL` on any kernel-half mapping itself, so the next site cannot forget.
-  A cross-process `sched_yield` handover: **506 -> 456 ns**, of which the
-  address-space part went **177 -> 128**. The two controls did not move (thread
-  handover 328, same-address-space round trip 1968 -> 1979), which is exactly
-  what a fix to post-`CR3` refills should look like.
-- **A read that moves no bytes notifies nobody.** The blocking read's first
-  attempt finds the pipe empty and used to build a poll state, clone the reader
-  wait queue and wake it, reporting the state the pipe already had. 1994 -> 1968
-  ns, two blocking reads per trip.
-- **`switch_to_page` no longer takes a lock**, and this bought *no measurable
-  time*, which is the part worth remembering. `Thread::user_cr3` mirrors
-  `UserThread::cr3` so the switch path reads one atomic instead of taking the
-  `RwLock`. Kept because the lock is a real hazard -- `execve` holds
-  `user.write()` while it installs an image, and a switch to a sibling thread of
-  that process would spin behind that guard *inside the switch* -- but the
-  roadmap item claiming 66-77 ns was wrong. Idle yield 285 -> 283 ns, sibling
-  handover 328 -> 327, cross-process 500 -> 506: all noise. That 66-77 came from
-  a `/proc/sched_prof` stage that is two `rdtsc` reads wide before it measures
-  anything.
+`mark_kernel_mappings_global` sweeps the kernel half once, at boot. Everything
+mapped there afterwards was non-global, including a thread's kernel stack and the
+per-CPU scheduler stack the voluntary switch pivots onto -- the two regions every
+syscall and every switch touch. `map_memory` now sets `GLOBAL` on any kernel-half
+mapping itself, so the next site cannot forget. The controls did not move (thread
+handover 328 ns, same-address-space round trip unchanged), which is what a fix to
+post-`CR3` work should look like. Freed kernel stacks keep their mapping, so no
+global entry outlives what it maps; where a kernel mapping is torn down, `invlpg`
+and the `CR4.PGE` toggle both ignore the `G` bit.
 
 ## The pipe and the PTY share one ring now, 480 ns to 402
 
