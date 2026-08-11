@@ -40,7 +40,6 @@ surface at all.
 | Program | The gap |
 |---|---|
 | syscall fuzzer | Newly possible: `/proc/syscalls` names every call and says which arguments are pointers, lengths and strings, so a fuzzer can generate structurally plausible calls without a hand-written table. Nothing tests the `uaccess` surface as a surface; this drives every dispatch arm with unmapped pointers, absurd lengths and misaligned structs, and `strace` names the call that killed it |
-| `httpd` | Serves the guest filesystem over TCP. The listen/accept path `nc` reaches, plus concurrent connections, and it doubles as a host-to-guest inspection channel that needs no disk rebuild |
 | `netstat` | Needs a read path into `net/tcp.rs`'s `CONNECTIONS`; `/proc/net` covers interface state and not connections |
 | `nproc` | The CPU count is not exposed to userspace at all, which is odd for an SMP kernel |
 | `dd` | The raw block path has device nodes and `edos-install` uses them; `dd` makes that reachable by hand |

@@ -2,6 +2,18 @@
 
 ## Done
 
+- **`httpd`, and the port table that unbound its own listener** - a web server
+  over the guest filesystem, one thread per connection, `GET`/`HEAD`,
+  directory listings, an index file, content types, path-traversal rejection
+  after percent decoding, and a 301 for a directory without its trailing
+  slash. Being the first program to accept more than a couple of connections,
+  it found that two of the three socket close paths removed a port-table entry
+  by port alone, unbinding the listener as soon as any accepted connection
+  ended, and that a retransmitted SYN pushed a second half-open entry into the
+  accept queue and never gave the slot back. Both fixed; `unbind_port` and
+  `port_key` in `kernel/src/net/socket.rs` now hold the ownership rule in one
+  place.
+
 - **`nc`, and the hang-up `poll` refused to report** - both ends of a TCP
   connection over one relay loop that polls standard input and the socket
   together: `nc host port` connects, `nc -l port` listens and accepts, with

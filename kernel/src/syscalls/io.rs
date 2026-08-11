@@ -414,18 +414,15 @@ pub fn sys_close(fd: u64) -> i32 {
             s.closed = true;
             let notif = s.notify_pollers();
             s.rx_wq.wake_all();
-            if let Some(addr) = s.local_addr {
-                let proto = if s.sock_type == crate::net::socket::SOCK_DGRAM {
-                    17u8
-                } else {
-                    6u8
-                };
-                crate::net::socket::port_table()
-                    .lock()
-                    .remove(&(proto, addr.port));
-            }
+            // Read the key under the socket guard and release the entry after
+            // it is dropped: the receive path takes the port table before a
+            // socket, so the other order is an AB/BA against it.
+            let bound = crate::net::socket::port_key(&s);
             let tcp_conn = s.tcp_conn.clone();
             drop(s);
+            if let Some(key) = bound {
+                crate::net::socket::unbind_port(&sock, key);
+            }
             notif.flush();
             // For TCP sockets, send FIN to initiate graceful close
             if let Some(conn) = tcp_conn {

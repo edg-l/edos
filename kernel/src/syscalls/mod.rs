@@ -22,9 +22,7 @@ use x86_64::{
 
 use crate::{
     debug::lock_order::{RANK_MAPPERS, RANK_USER_MM, RANK_VMAS},
-    debug::lock_order::{
-        RANK_NET_STACK, RANK_PIPE, RANK_PORT_TABLE, RANK_PTY, RANK_SOCKET, RANK_TCP_CONN,
-    },
+    debug::lock_order::{RANK_NET_STACK, RANK_PIPE, RANK_PTY, RANK_SOCKET, RANK_TCP_CONN},
     fs::Error as FsError,
     gdt::selectors,
     log,
@@ -131,34 +129,11 @@ fn close_fd_refcount(desc: FileDescriptor) {
             // here is an AB/BA against the receive path: closing a listening
             // socket while a segment arrives for it would wedge both CPUs on
             // preempt spinlocks.
-            let bound = s.local_addr.map(|addr| {
-                let proto = if s.sock_type == crate::net::socket::SOCK_DGRAM {
-                    17u8
-                } else {
-                    6u8
-                };
-                (proto, addr.port)
-            });
+            let bound = crate::net::socket::port_key(&s);
             let tcp_conn = s.tcp_conn.clone();
             drop(s);
             if let Some(key) = bound {
-                let mut table = ranked_lock!(
-                    RANK_PORT_TABLE,
-                    "fd::drop_socket_port",
-                    crate::net::socket::port_table()
-                );
-                // A socket returned by accept() carries its listener's local
-                // port, and the table maps a port to the socket that owns it,
-                // so only that socket may take the entry out. Removing it for
-                // every close would unbind the listener the first time one of
-                // its connections ended, and the next SYN would be answered
-                // with RST.
-                if table
-                    .get(&key)
-                    .is_some_and(|owner| alloc::sync::Arc::ptr_eq(owner, &sock))
-                {
-                    table.remove(&key);
-                }
+                crate::net::socket::unbind_port(&sock, key);
             }
             // For TCP sockets, send FIN to initiate graceful close
             if let Some(conn) = tcp_conn {

@@ -346,18 +346,14 @@ pub fn close_descriptor(descriptor: FileDescriptor, owner_pid: u64) {
             }
             s.closed = true;
             s.rx_wq.wake_all();
-            if let Some(addr) = s.local_addr {
-                let proto = if s.sock_type == crate::net::socket::SOCK_DGRAM {
-                    17u8
-                } else {
-                    6u8
-                };
-                crate::net::socket::port_table()
-                    .lock()
-                    .remove(&(proto, addr.port));
-            }
+            // Key read under the socket guard, entry released after it goes:
+            // the receive path takes the port table before a socket.
+            let bound = crate::net::socket::port_key(&s);
             let tcp_conn = s.tcp_conn.clone();
             drop(s);
+            if let Some(key) = bound {
+                crate::net::socket::unbind_port(&sock, key);
+            }
             // For TCP sockets, send FIN to initiate graceful close
             if let Some(conn) = tcp_conn {
                 let fin = conn.lock().build_fin();

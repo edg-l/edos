@@ -256,7 +256,19 @@ impl NetStack {
 
             if let Some(listen_sock) = listen_sock_opt {
                 let (is_listening, backlog_ok) = {
-                    let ls = ranked_lock!(RANK_SOCKET, "stack::syn_listen", listen_sock);
+                    let mut ls = ranked_lock!(RANK_SOCKET, "stack::syn_listen", listen_sock);
+                    // A peer whose SYN-ACK was lost retransmits the same SYN,
+                    // from the same port. That is one connection attempt, not
+                    // several: drop the half-open entry it left behind and let
+                    // the handshake below start again, or a client that retries
+                    // three times eats three backlog slots and never gives any
+                    // of them back.
+                    ls.accept_queue.retain(|queued| {
+                        let qs = ranked_lock_same!(RANK_SOCKET, "stack::syn_dedup", queued);
+                        qs.state == socket::SocketState::Connected
+                            || qs.remote_addr.map(|r| (r.ip, r.port))
+                                != Some((ip_hdr.src_addr, tcp_hdr.src_port))
+                    });
                     (ls.listening, (ls.accept_queue.len() as u32) < ls.backlog)
                 };
 

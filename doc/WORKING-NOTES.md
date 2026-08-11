@@ -2627,3 +2627,54 @@ fails outright instead of spinning.
 - **`nc` has no UDP mode.** `-u` is not accepted. `edos_lib::net` has the
   datagram calls, but a datagram relay is a different loop (no connection, no
   end of input to propagate), and nothing needed it yet.
+
+## `httpd`, and the two ways a listener stopped listening (2026-08-11)
+
+`programs/httpd` serves a directory tree with one thread per accepted
+connection. It is the first program in the tree to take more than two
+connections in a row, and it stopped serving after the first one, then after
+the eighth. Two separate defects, both in the kernel.
+
+**The port table was keyed by port and released by anybody.** Closing a socket
+removed `(proto, port)` from `PORT_TABLE` unconditionally. A socket returned by
+`accept` carries its *listener's* local port, so the first accepted connection
+to close unbound the listener, and every later SYN found no entry and was
+answered with RST. This was found and fixed once before, for `tcpecho`, in
+`syscalls/mod.rs::close_fd_refcount` — but the same sequence is written out
+three times, and `syscalls/io.rs::sys_close` and
+`thread/pipe.rs::close_descriptor` still had the unguarded remove. `tcpecho`
+survived because it closes its listener between runs; `httpd` keeps one.
+
+The rule now lives in one place: `port_key` and `unbind_port` in
+`kernel/src/net/socket.rs`, the latter removing an entry only when the table
+holds that exact `Arc` (`Arc::ptr_eq`). All three close paths call it, and all
+three now read the key under the socket guard and release the entry after
+dropping it — the receive path takes the port table before a socket, so the
+other order is an AB/BA against it. Two of the three were taking the socket
+with a bare `.lock()`, invisible to the rank tracker, which is why the
+inversion had never been reported.
+
+**A retransmitted SYN ate a second backlog slot.** `stack.rs` pushed a new
+`Socket` onto `accept_queue` for every SYN, and `sys_accept` only removes
+entries that reached `Connected`. A peer whose SYN-ACK was dropped retransmits
+the same SYN from the same port; each copy took another slot, none of which
+came back, so a backlog of 8 filled after a handful of connections and the
+listener RST everything. The SYN path now drops the half-open entry left by the
+same remote address and port before starting the handshake again, which is what
+RFC 793 §3.4 asks for: a retransmitted SYN is one connection attempt, not
+several. Measured after the fix: 12 sequential requests and 4 concurrent ones,
+all 200, the 657212-byte font byte-identical each time.
+
+### Things that will bite you
+
+- **The first inbound connection after boot is still lost.** The guest has no
+  ARP entry for the peer when the SYN arrives, `send_ip` returns "arp pending"
+  and drops the SYN-ACK, and nothing retries it. The ARP reply lands ~40µs
+  later, but the client's retransmitted SYN matches an existing connection in
+  `tcp_connections` and so never reaches the listener path that would resend a
+  SYN-ACK. Every guest test of a server therefore starts with one failed
+  request; make it a warm-up rather than reading it as a bug in the program.
+  The fix is a one-slot pending-transmit queue per ARP request (`todo.txt`).
+- **`httpd` answers one request per connection** (`Connection: close`), so it
+  needs no idle timeout and keep-alive is not implemented. A client that opens
+  a connection and sends nothing holds a thread until it goes away.

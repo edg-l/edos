@@ -94,15 +94,13 @@
   and `l`/`h` have no arm in execute_csi. Needs a private-parameter flag on the
   CSI state plus the two arms.
 
-- The TCP accept queue never drops an entry that never reached Connected.
-  kernel/src/net/stack.rs pushes a new Socket onto listen_sock.accept_queue on
-  every SYN, and sys_accept only removes entries whose state is Connected, so a
-  half-open connection (a SYN whose SYN-ACK was dropped, e.g. on an ARP miss,
-  and every retransmit of it) occupies a backlog slot forever. Symptom seen with
-  `tcpecho -p 23`: after a timed-out first connection plus two good ones, the
-  next SYN gets no SynReceived line at all and the peer sees RST — the backlog
-  of 4 is full of dead entries. Wants a SynReceived timeout, or a cap on
-  half-open entries separate from the completed-connection backlog.
+- The TCP accept queue still has no timeout on an entry that never reaches
+  Connected. A retransmitted SYN no longer multiplies them — the SYN path in
+  kernel/src/net/stack.rs now drops the half-open entry left by the same peer
+  address and port before starting the handshake again — but a peer that opens
+  one connection and vanishes still holds its backlog slot until the listener
+  closes. Wants a SynReceived deadline, or a half-open cap separate from the
+  completed-connection backlog.
 - An outbound segment is dropped when the ARP cache misses (send_ip returns
   Err("arp pending"), kernel/src/net/stack.rs) and nothing retries it, so the
   first inbound connection after boot is lost: the SYN-ACK never goes out. A

@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-93 programs and 2 libraries, all in the `programs/` cargo workspace.
+94 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -17,7 +17,7 @@
 | Inspection | `file` |
 | System | `ps`, `pstree`, `pmap`, `top`, `lsof`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace`, `date`, `watch` |
 | Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
-| Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `nc`, `sntp` |
+| Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `nc`, `sntp`, `httpd` |
 | Audio | `play` |
 | Images | `imgview` (BMP viewer) |
 | Games | `snake` |
@@ -97,6 +97,14 @@ than closing it, which is the first use of `SYS_SHUTDOWN` by anything, so
 report a hang-up nobody had asked for, which is why a pipe feeding it hung
 forever; both that and the pipe's own poll state are fixed and written up in
 `doc/WORKING-NOTES.md`.
+
+**`httpd`**. Serves a directory tree over HTTP with one thread per accepted
+connection: `GET` and `HEAD`, an index file or a generated listing for a
+directory, content types by extension, `Content-Length` on everything, and 301
+for a directory reached without its trailing slash. A request path is percent
+decoded before it is checked, so `..` and `%2e%2e` are both 403. It is the
+first program to hold several connections open at once, which is how it found
+two more listen-path defects, both written up in `doc/WORKING-NOTES.md`.
 
 **`ln`**. Symbolic links have resolved correctly for a long time and there was
 no way to make one outside a program. `ln -s` covers the three POSIX shapes:

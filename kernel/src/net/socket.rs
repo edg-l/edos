@@ -253,6 +253,35 @@ pub fn port_table() -> &'static Mutex<BTreeMap<(u8, u16), Arc<Mutex<Socket>>>> {
     PORT_TABLE.call_once(|| Mutex::new(BTreeMap::new()))
 }
 
+/// The port-table key for a socket's bound address, if it has one.
+pub fn port_key(sock: &Socket) -> Option<(u8, u16)> {
+    let proto = if sock.sock_type == SOCK_DGRAM {
+        17u8
+    } else {
+        6u8
+    };
+    sock.local_addr.map(|addr| (proto, addr.port))
+}
+
+/// Release a port-table entry on close, but only for the socket that owns it.
+///
+/// A socket returned by `accept` carries its listener's local port, and the
+/// table maps a port to the one socket bound to it. Removing by port alone
+/// unbinds the listener as soon as any of its connections closes, and the next
+/// SYN is answered with RST.
+///
+/// The socket's own lock must not be held: the receive path takes the port
+/// table before a socket, so the other order is an AB/BA against it.
+pub fn unbind_port(sock: &Arc<Mutex<Socket>>, key: (u8, u16)) {
+    let mut table = ranked_lock!(RANK_PORT_TABLE, "socket::unbind_port", port_table());
+    if table
+        .get(&key)
+        .is_some_and(|owner| Arc::ptr_eq(owner, sock))
+    {
+        table.remove(&key);
+    }
+}
+
 /// Ephemeral port counter.
 static EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(49152);
 
