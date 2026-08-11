@@ -82,7 +82,7 @@ use self::ioctl::sys_ioctl;
 use self::sync::{sys_futex_wait, sys_futex_wake};
 use crate::thread::scheduler::{
     current_thread, current_thread_id, current_thread_info, current_thread_weak, exit_if_killed,
-    stop_if_signalled, thread_exit, thread_park_while, thread_sleep,
+    stop_if_signalled, thread_exit, thread_park_while, thread_sleep, thread_yield,
 };
 
 /// Set the caller's errno and return the `-1` every failing syscall reports.
@@ -414,6 +414,9 @@ const SYS_FORK: u64 = 255;
 const SYS_GETDNS: u64 = 256;
 /// Step the wall clock, for a time client that has just learnt the real time.
 const SYS_CLOCK_SETTIME: u64 = 281;
+/// Give up the rest of the timeslice, for a caller spinning on state another
+/// thread has to produce.
+const SYS_SCHED_YIELD: u64 = 282;
 const SYS_SYNC: u64 = 162;
 const SYS_REBOOT: u64 = 169;
 
@@ -712,6 +715,10 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         }
         SYS_GETPID => {
             ctx.rax = sys_getpid();
+        }
+        SYS_SCHED_YIELD => {
+            thread_yield();
+            ctx.rax = 0;
         }
         SYS_GETUID => {
             ctx.rax = current_thread_info().lock().user_id as u64;
@@ -1377,6 +1384,7 @@ impl From<FsError> for Errno {
             FsError::InvalidArgument => Errno::EINVAL,
             FsError::TooManyLinks | FsError::LinkEscape => Errno::ELOOP,
             FsError::AlreadyExists => Errno::EEXIST,
+            FsError::NoSpace => Errno::ENOSPC,
             FsError::ProtocolMismatch => Errno::EIO,
         }
     }

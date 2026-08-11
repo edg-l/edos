@@ -35,6 +35,8 @@ pub enum DevFsError {
     IoError,
     #[error("device or resource busy")]
     Busy,
+    #[error("no space left on device")]
+    NoSpace,
 }
 
 impl From<DevFsError> for fs::Error {
@@ -43,6 +45,7 @@ impl From<DevFsError> for fs::Error {
             DevFsError::NotFound => fs::Error::FileNotFound,
             DevFsError::Busy => fs::Error::Busy,
             DevFsError::InvalidPath => fs::Error::InvalidArgument,
+            DevFsError::NoSpace => fs::Error::NoSpace,
             DevFsError::AlreadyExists | DevFsError::Unsupported | DevFsError::IoError => {
                 fs::Error::IoError
             }

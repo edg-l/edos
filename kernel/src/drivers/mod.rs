@@ -77,6 +77,7 @@ pub mod hpet;
 pub mod keyboard;
 pub mod mouse;
 pub mod msi;
+pub mod null;
 pub mod pci;
 pub mod ramdisk;
 pub mod random;
@@ -99,6 +100,7 @@ pub fn init_drivers() {
     graphics::init();
     tty::init();
     random::init();
+    null::init();
     // Initialize PS/2 controller and both devices BEFORE spawning driver threads.
     // Both keyboard and mouse share the 8042 controller -- their init sequences
     // must not run concurrently or they clobber each other's config byte writes.

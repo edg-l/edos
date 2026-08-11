@@ -36,7 +36,12 @@
 
 - research what try_clone on pipe means, can pipes be cloned?
 
-- users, file perms
+- users, file perms. `stat` reports the read-only bit in `FstatEntry::attrs`
+  and `Metadata::permissions().readonly()` now answers from it, but nothing
+  writes attributes back: there is no chmod-shaped syscall, so
+  `fs::set_permissions` reports Unsupported. Wants a `FileSystem::set_attrs`
+  alongside `set_times`, implemented by EFS, FAT32 and memfs, and a syscall
+  over it.
 
 - direct copy file (rename exists as SYS_RENAME; a copy that stays in the kernel
   does not, so `cp` reads and writes through userspace)
@@ -82,13 +87,6 @@
 - A stop or kill signal does not cut short sys_sleep_ms, so Ctrl+Z on
   `sleep 30` only takes effect 30s later. thread_sleep should return early
   when stop_requested or killed is set.
-
-- There is no `/dev/null`. `yes > /dev/null` fails with "cannot open for
-  writing", so the standard way to discard output does not exist and every
-  script that wants it has to write to a file under /tmp. One more node in the
-  devfs registry (`kernel/src/fs/devfs`), reads returning EOF and writes
-  succeeding with the byte count. `/dev/zero` and `/dev/full` are the same
-  shape and worth adding in the same change.
 
 - The terminal does not implement DECTCEM: `\x1b[?25l` / `\x1b[?25h` are
   ignored, so `top` and `snake` cannot hide the cursor. `parse_csi_params` in

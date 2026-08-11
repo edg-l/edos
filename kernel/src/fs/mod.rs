@@ -92,6 +92,8 @@ pub enum Error {
     LinkEscape,
     #[error("file exists")]
     AlreadyExists,
+    #[error("no space left on device")]
+    NoSpace,
     #[error("filesystem thread answered a request with the wrong reply")]
     ProtocolMismatch,
 }

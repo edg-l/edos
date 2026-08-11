@@ -2,6 +2,27 @@
 
 ## Done
 
+- **The std fork moved from Rust 1.96 to 1.99, and std stopped declining what
+  the kernel already offered** - three months of upstream (13,491 commits) cost
+  nine one-hunk conflicts and seven pieces of semantic drift that no conflict
+  marks: the futex module moved under `sys/sync/`, `BorrowedCursor` gained an
+  element type, `sys/alloc` backends became free functions, `crate::sealed`
+  gave way to `pub impl(self) trait`, and pointers handed to the kernel now
+  need `expose_provenance`. `doc/rust-fork-rebase.md` carries the measurements
+  and the traps. Auditing what the backend answered afterwards found eight
+  places where the mechanism existed and std refused to use it: `yield_now` did
+  nothing at all, which had `play` busy-spinning on a full audio ring buffer
+  and the compositor spinning the tail of every frame; `available_parallelism`
+  gave up beside a `/proc/cpuinfo` that `nproc` already reads;
+  `Child::kill` and `set_cloexec` reported unsupported next to `SYS_KILL` and
+  `F_SETFD`; `permissions().readonly()` threw away the bit `stat` delivers;
+  `Command::output()` and `Stdio::null()` failed outright; and `Debug for File`
+  was a `todo!()` that panicked. `SYS_SCHED_YIELD` and `/dev/{null,zero,full}`
+  are the two new pieces of kernel behind them. `set_perm` went the other
+  way and now reports Unsupported: nothing writes attributes back, and
+  answering `Ok` left a caller believing a file it had just made read-only was
+  protected.
+
 - **`netstat`, and the `/proc/sockets` it needed** - the connection table was
   reachable only from inside the kernel, so nothing could answer "who is
   listening" or "why can this port not be bound". `/proc/sockets` publishes
