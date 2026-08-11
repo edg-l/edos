@@ -173,15 +173,16 @@ impl Pipe {
         };
         if self.pollers.is_empty() {
             return PipeNotifications {
-                entries: heapless::Vec::new(),
+                entries: Vec::new(),
                 state,
                 reader_wq,
             };
         }
-        let mut entries: heapless::Vec<Arc<PollEntry>, 8> = heapless::Vec::new();
-        for (_, entry) in self.pollers.iter() {
-            let _ = entries.push(entry.clone());
-        }
+        let entries: Vec<Arc<PollEntry>> = self
+            .pollers
+            .iter()
+            .map(|(_, entry)| entry.clone())
+            .collect();
         PipeNotifications {
             entries,
             state,
@@ -192,7 +193,7 @@ impl Pipe {
 
 /// Deferred poll notifications to be flushed after releasing the pipe lock.
 pub struct PipeNotifications {
-    entries: heapless::Vec<Arc<PollEntry>, 8>,
+    entries: Vec<Arc<PollEntry>>,
     state: PollState,
     reader_wq: Option<Arc<WaitQueue>>,
 }

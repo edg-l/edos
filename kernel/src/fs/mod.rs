@@ -289,8 +289,11 @@ pub trait FileSystem {
         self.file_info(path)
     }
 
+    /// A regular file is always ready in both directions (POSIX.1-2024 `poll`),
+    /// so a filesystem only overrides this when it holds objects that can
+    /// actually block, as devfs does.
     fn poll(&self, _path: &Path) -> Result<Box<dyn Pollable>, Error> {
-        Err(Error::IoError)
+        Ok(Box::new(handle::StaticPoll::ready()))
     }
 
     fn mmap(

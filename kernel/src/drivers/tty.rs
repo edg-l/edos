@@ -35,7 +35,7 @@ fn push_bytes(data: &[u8]) {
     }
 
     let mut should_notify = false;
-    let mut resulting_state = None;
+    let mut notifications = None;
     {
         let mut buffer = ranked_lock!(RANK_TTY_BUFFER, "tty::push_bytes", TTY_BUFFER);
         for &byte in data {
@@ -58,12 +58,12 @@ fn push_bytes(data: &[u8]) {
             }
         }
         if should_notify {
-            resulting_state = Some(poll_state_for_len(buffer.len()));
+            notifications = Some(snapshot_pollers(poll_state_for_len(buffer.len())));
         }
     }
 
-    if should_notify {
-        notify_pollers(resulting_state.expect("state must exist when notifying"));
+    if let Some(notifications) = notifications {
+        notifications.flush();
         TTY_NOTIFY.broadcast(());
     }
 }
@@ -78,10 +78,33 @@ fn poll_state_for_len(len: usize) -> PollState {
     }
 }
 
-fn notify_pollers(state: PollState) {
-    let pollers = ranked_lock!(RANK_DEVICE_POLLERS, "tty::notify_pollers", TTY_POLLERS);
-    for (_, entry) in pollers.iter() {
-        entry.update(state);
+/// Snapshot the pollers to notify, for the caller to flush once it has dropped
+/// every lock.
+///
+/// Taken while the buffer lock is still held, which is what serializes it
+/// against `TtyPoll::register`: a registration that read an empty buffer has
+/// not yet joined the list, and would otherwise miss the wake for the bytes
+/// that arrived in between.
+fn snapshot_pollers(state: PollState) -> TtyNotifications {
+    let pollers = ranked_lock!(RANK_DEVICE_POLLERS, "tty::snapshot_pollers", TTY_POLLERS);
+    TtyNotifications {
+        entries: pollers.iter().map(|(_, entry)| entry.clone()).collect(),
+        state,
+    }
+}
+
+/// Deferred poll notifications, flushed after releasing the TTY locks so a
+/// wake never runs with them held.
+struct TtyNotifications {
+    entries: Vec<Arc<PollEntry>>,
+    state: PollState,
+}
+
+impl TtyNotifications {
+    fn flush(self) {
+        for entry in &self.entries {
+            entry.update(self.state);
+        }
     }
 }
 
@@ -95,7 +118,7 @@ pub fn write_from_user(user_ptr: *const u8, len: usize) -> Option<usize> {
     }
 
     let mut should_notify = false;
-    let mut resulting_state = None;
+    let mut notifications = None;
     let mut total_processed = 0usize;
     let mut faulted = false;
     let mut chunk = [0u8; CHUNK_SIZE];
@@ -142,14 +165,14 @@ pub fn write_from_user(user_ptr: *const u8, len: usize) -> Option<usize> {
                 }
             }
             if should_notify {
-                resulting_state = Some(poll_state_for_len(buffer.len()));
+                notifications = Some(snapshot_pollers(poll_state_for_len(buffer.len())));
             }
         }
         total_processed += to_copy;
     }
 
-    if should_notify {
-        notify_pollers(resulting_state.unwrap());
+    if let Some(notifications) = notifications {
+        notifications.flush();
         TTY_NOTIFY.broadcast(());
     }
 
@@ -168,10 +191,11 @@ struct TtyPoll;
 
 impl Pollable for TtyPoll {
     fn register(&self, entry: Arc<PollEntry>) -> PollRegistration {
-        let state = {
-            let buffer = ranked_lock!(RANK_TTY_BUFFER, "tty::poll_register", TTY_BUFFER);
-            poll_state_for_len(buffer.len())
-        };
+        // The buffer lock is held across reading the state and joining the
+        // poller list, so a write cannot land in the gap and notify a list this
+        // entry has not reached yet.
+        let buffer = ranked_lock!(RANK_TTY_BUFFER, "tty::poll_register", TTY_BUFFER);
+        let state = poll_state_for_len(buffer.len());
 
         entry.update(state);
 
@@ -212,9 +236,9 @@ impl DevFsDevice for TtyDevice {
                 None => break,
             }
         }
-        let new_state = poll_state_for_len(buffer.len());
+        let notifications = snapshot_pollers(poll_state_for_len(buffer.len()));
         drop(buffer);
-        notify_pollers(new_state);
+        notifications.flush();
 
         Ok(result)
     }
@@ -231,4 +255,10 @@ impl DevFsDevice for TtyDevice {
     fn size(&self) -> u64 {
         ranked_lock!(RANK_TTY_BUFFER, "tty::device_size", TTY_BUFFER).len() as u64
     }
+}
+
+/// A `Pollable` for the console, for `stdin` reached as the standard stream
+/// rather than through a descriptor of its own.
+pub fn pollable() -> Box<dyn Pollable> {
+    Box::new(TtyPoll)
 }

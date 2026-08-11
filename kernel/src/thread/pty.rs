@@ -418,7 +418,7 @@ impl Pty {
 
         if self.pollers.is_empty() {
             return PtyNotifications {
-                entries: heapless::Vec::new(),
+                entries: Vec::new(),
                 master_state,
                 slave_state,
                 input_wq,
@@ -427,10 +427,11 @@ impl Pty {
             };
         }
 
-        let mut entries: heapless::Vec<(PtySide, Arc<PollEntry>), 8> = heapless::Vec::new();
-        for (_, side, entry) in self.pollers.iter() {
-            let _ = entries.push((*side, entry.clone()));
-        }
+        let entries: Vec<(PtySide, Arc<PollEntry>)> = self
+            .pollers
+            .iter()
+            .map(|(_, side, entry)| (*side, entry.clone()))
+            .collect();
 
         PtyNotifications {
             entries,
@@ -445,7 +446,7 @@ impl Pty {
 
 /// Deferred PTY notifications flushed after releasing the PTY lock.
 pub struct PtyNotifications {
-    entries: heapless::Vec<(PtySide, Arc<PollEntry>), 8>,
+    entries: Vec<(PtySide, Arc<PollEntry>)>,
     master_state: PollState,
     slave_state: PollState,
     input_wq: Option<Arc<WaitQueue>>,
@@ -456,7 +457,7 @@ pub struct PtyNotifications {
 
 impl PtyNotifications {
     const EMPTY: Self = Self {
-        entries: heapless::Vec::new(),
+        entries: Vec::new(),
         master_state: PollState::none(),
         slave_state: PollState::none(),
         input_wq: None,

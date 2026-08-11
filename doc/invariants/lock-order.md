@@ -316,8 +316,16 @@ with each other. They are ranked above the window band because the window input
 thread is the one context that could hold a registry guard while touching them;
 the driver kthreads hold nothing at all when they broadcast. `Broadcaster.subs`
 is never co-held with a poller list: `MousePoll::register` calls `subscribe` and
-lets that guard go before taking the list, and `tty::push_bytes` drops
-`TTY_BUFFER` before notifying.
+lets that guard go before taking the list.
+
+`TTY_BUFFER` (210) *is* co-held with `TTY_POLLERS` (320), in increasing order,
+and deliberately. Both `tty::snapshot_pollers` and `TtyPoll::register` take the
+list while still holding the buffer, because that is what serializes them: a
+registration that read an empty buffer and then joined the list without the
+buffer lock would miss the wake for the bytes that arrived in between. What
+must not happen under either lock is the wake itself, so the snapshot only
+clones the entries and the caller calls `TtyNotifications::flush` once both are
+dropped. Pipes, PTYs and sockets defer their notifications the same way.
 
 `Broadcaster.subs` was a bare `spin::RwLock` and is now a `PreemptRwLock`. It is
 shared between threads, so a descheduled holder used to stall every other CPU

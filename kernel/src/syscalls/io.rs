@@ -8,7 +8,7 @@ use x86_64::instructions::interrupts;
 
 use crate::debug::lock_order::{RANK_PIPE, RANK_PTY};
 use crate::fs::block_page_cache::BlockPageCache;
-use crate::fs::handle::{PollEntry, PollKey, Pollable};
+use crate::fs::handle::{PollEntry, PollKey, Pollable, StaticPoll};
 use crate::fs::vfs;
 use crate::fs::{Error as FsError, FileKind, PollState, api as fs_api, path::Path};
 use crate::net::socket::PollableSocket;
@@ -1173,10 +1173,14 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     };
 
     let descriptors = {
-        let mut guard = info.lock();
-        guard.errno = Errno::Clear;
+        let fd_table = {
+            let mut guard = info.lock();
+            guard.errno = Errno::Clear;
+            guard.fd_table.clone()
+        };
+        let table = fd_table.lock();
         fds.iter()
-            .map(|entry| guard.fd_table.lock().get_fd(entry.fd).cloned())
+            .map(|entry| table.get_fd(entry.fd).cloned())
             .collect::<Vec<_>>()
     };
 
@@ -1207,11 +1211,30 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                 entry.result.error = true;
                 base_ready += 1;
             }
-            Some(FileDescriptor::StandardStream(_)) => {
-                let entry = &mut fds[idx];
-                entry.result.invalid = true;
-                entry.result.error = true;
-                base_ready += 1;
+            Some(FileDescriptor::StandardStream(stream)) => {
+                // These are valid descriptors that read and write, so reporting
+                // POLLNVAL turned a select loop over an un-redirected stdin
+                // into a spin. Stdin is the console, which can block; the two
+                // output streams never do.
+                let pollable: Box<dyn Pollable> = match stream {
+                    StandardStream::Stdin => tty::pollable(),
+                    StandardStream::Stdout | StandardStream::Stderr => {
+                        Box::new(StaticPoll::new(PollState {
+                            writable: true,
+                            ..PollState::none()
+                        }))
+                    }
+                };
+                let poll_entry = Arc::new(PollEntry::new(waiter.clone(), interests));
+                let registration = pollable.register(poll_entry.clone());
+                fds[idx].result = registration.initial;
+                contexts.push(PollContext {
+                    index: idx,
+                    interests,
+                    pollable,
+                    entry: poll_entry,
+                    key: registration.key,
+                });
             }
             Some(FileDescriptor::PipeRead(pipe) | FileDescriptor::PipeWrite(pipe)) => {
                 let pollable: Box<dyn Pollable> = Box::new(PollablePipe::new(pipe.clone()));

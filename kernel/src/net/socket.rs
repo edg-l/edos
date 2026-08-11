@@ -181,23 +181,24 @@ impl Socket {
         if self.pollers.is_empty() {
             return SocketNotifications::EMPTY;
         }
-        let mut entries: heapless::Vec<Arc<PollEntry>, 8> = heapless::Vec::new();
-        for (_, entry) in self.pollers.iter() {
-            let _ = entries.push(entry.clone());
-        }
+        let entries: Vec<Arc<PollEntry>> = self
+            .pollers
+            .iter()
+            .map(|(_, entry)| entry.clone())
+            .collect();
         SocketNotifications { entries, state }
     }
 }
 
 /// Deferred poll notifications to be flushed after releasing all locks.
 pub struct SocketNotifications {
-    entries: heapless::Vec<Arc<PollEntry>, 8>,
+    entries: Vec<Arc<PollEntry>>,
     state: PollState,
 }
 
 impl SocketNotifications {
     pub const EMPTY: Self = Self {
-        entries: heapless::Vec::new(),
+        entries: Vec::new(),
         state: PollState::none(),
     };
 
