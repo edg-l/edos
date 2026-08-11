@@ -141,6 +141,50 @@ boot's 4, and the 11 stalls going towards 0. Throughput is the last thing to
 look at, not the first — 222 MiB/s is already far off the raw-device ceiling for
 reasons section 1 owns.
 
+### Build the branch counter before writing any pipelining code
+
+Reading `page_cache_read_core` (`fs/vfs.rs`) against that baseline, a readahead
+window past `end_page` can take three different paths, and **the instrument
+cannot tell which one it took**:
+
+1. `submit_prefetch_pages` returns `Ok(Some(..))` and `issue_prefetch_bulk`
+   installs the pages — genuinely asynchronous, the reader does not wait.
+2. It returns `Ok(None)` and the window falls back to
+   `get_or_fill_bulk_async_sync` — a **synchronous** bulk fill, billed to the
+   reader inside its own read call. EFS returns `None` whenever the range is not
+   covered by a single extent, and also for inline-data inodes and for
+   `total_sectors > u16::MAX` (`fs/efs/mod.rs:2489`).
+3. It returns `Err(..)` and takes the same synchronous fallback.
+
+Path 2 produces exactly the signature the baseline recorded — the device idle
+between calls and never more than one command outstanding — without any of it
+being evidence about trailing versus pipelining, because on that path the
+prefetch is not asynchronous at all. The two hypotheses are not distinguishable
+from throughput, stalls or `ncq_inflight`.
+
+A second number is unexplained and points the same way: p50 is 174 us per 64 KiB
+call while only 11 of 256 calls are counted as stalled. In steady state the
+window has ramped to `RA_MAX_PAGES` and the requested pages are 128 pages behind
+the prefetch frontier, so the call should be a `memcpy` and finish in single-digit
+microseconds. 174 us is a call waiting on a device, and the stall counter does not
+see it — consistent with the wait happening inside the fallback bulk fill rather
+than at the point the stall counter watches.
+
+So the next step on this item is **not** to write pipelining. It is two counters
+on the three branches above, exposed the way everything else here is (a
+`/proc` line, per `CLAUDE.md`) and reported by `fsbench ra`. If the pass turns out
+to be mostly path 2, pipelining is the wrong fix and the right ones are already on
+the list: let the prefetch span extents by issuing one submit per extent, and EFS
+sequential-extent pre-allocation so a 16 MiB file is few extents rather than many.
+
+Note also that the instrument's own fixture is exposed to this. `fsbench raprep`
+creates its 16 MiB file by appending, which is the pattern the EFS
+pre-allocation item describes as splitting what could be one contiguous extent
+into many tiny ones. `ensure_block_for_logical` does coalesce a new block into
+the previous extent when it is contiguous both logically and physically, so this
+is a risk rather than a certainty — but it has not been checked, and per the
+measurement rules the scaffolding gets ruled out before the design does.
+
 ## 2. mmap fault-around
 
 A map, fault in 4 MiB, unmap cycle is 124 ms: 1024 pages at 121 us each,
