@@ -2,6 +2,15 @@
 
 ## Done
 
+- **`less`, a pager** - holds the whole text and moves a window over it: j/k and
+  arrows, space/b by the screen, d/u by half, g/G, left/right for output wider
+  than the terminal, `/pat` and `?pat` search with every match on a line
+  reverse-videoed, `n`/`N`, `:n`/`:p` across several files, `-N` line numbers,
+  `-i` case-insensitive search and `h` for the key list. `dmesg | less` works
+  because the keys are read from stderr when stdin is the pipe carrying the
+  text; with no terminal at either end it behaves as `cat`. The escape-aware
+  column splitting it shares with `watch` moved into `edos_lib::term`.
+
 - **`watch`, a command on a timer** - re-runs a command every N seconds and
   paints its output over the previous frame, with `-d` reverse-videoing the
   columns that changed since the last run, `-x` to skip the `sh -c` the command

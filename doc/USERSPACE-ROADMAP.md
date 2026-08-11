@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-86 programs and 2 libraries, all in the `programs/` cargo workspace.
+87 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -11,7 +11,7 @@
 | Shell | `edos-sh` |
 | Editor | `edos-vi` |
 | Files | `ls`, `cat`, `cp`, `mv`, `rm`, `ln`, `mkdir`, `rmdir`, `touch`, `stat`, `find`, `du`, `diff` |
-| Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs` |
+| Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs`, `less` |
 | Archives | `tar` (ustar create, list and extract) |
 | Checksums | `sha256sum` |
 | Inspection | `file` |
@@ -115,6 +115,19 @@ last run. It runs the command through `sh -c` unless `-x` is given, so
 `watch 'ls /bin | wc -l'` is a pipeline, and it reads the child's pipe dry
 before waiting on it, since a command whose output exceeds the pipe buffer
 would otherwise deadlock the pair.
+
+**`less`**. A pager: the whole text held in memory with a window moved over it,
+line and page motion, sideways motion for output wider than the screen, search
+with every match on a line reverse-videoed, and `:n`/`:p` across several file
+operands. `dmesg | less` is the case that shapes it — the text arrives on stdin,
+so the keyboard has to come from somewhere else, and stderr is the descriptor a
+pipeline leaves pointing at the PTY. Not a terminal at either end and it is
+`cat`, so a pipeline someone else wrote still works.
+
+The escape-aware column splitting `watch` needed is the same thing a pager needs
+to scroll sideways and to highlight a match, so it now lives in
+`edos_lib::term` (`Cell`, `cells`, `clip`, `window`, `render`) with both
+programs over it.
 
 Anything that clips or diffs another program's output has to parse the escape
 sequences in it: `ps` colours its state column, so counting escape bytes as

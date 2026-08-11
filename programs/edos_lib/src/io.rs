@@ -520,8 +520,13 @@ pub fn munmap(addr: u64, length: u64) -> i64 {
 /// Poll stdin for readability with the given timeout.
 /// Returns true if stdin has data available.
 pub fn poll_stdin(timeout_ms: u64) -> bool {
+    poll_readable(0, timeout_ms)
+}
+
+/// Poll one descriptor for readability with the given timeout.
+pub fn poll_readable(fd: u64, timeout_ms: u64) -> bool {
     let mut fds = [SelectFd {
-        fd: 0,
+        fd,
         interests: PollState {
             readable: true,
             ..Default::default()

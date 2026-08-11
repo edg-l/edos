@@ -2342,9 +2342,46 @@ ends a highlight with SGR 27 rather than SGR 0 for the same reason.
 - **Anything that clips, wraps or diffs another program's output must parse
   ANSI escapes.** Half this tree's CLI programs colour their output, so a
   character count is not a column count, and cutting a line at a character
-  boundary can cut an escape sequence in half. `cells()` in
-  `programs/watch/src/main.rs` is the shape to copy.
+  boundary can cut an escape sequence in half. `edos_lib::term` does it once:
+  `cells()` splits a line into columns that each carry the escapes preceding
+  them, `window()` takes a horizontal slice carrying the escapes scrolled past
+  into the first visible column, and `render()` writes columns back out.
 - **A frame ending in `\r\n` scrolls the screen.** Full-screen programs here
   write the last row without a line feed, or the terminal scrolls and takes the
   header with it. `top` and `watch` both do this; it is not obvious from either
   until the header starts creeping off the top.
+
+## `less` (2026-08-11)
+
+**The pager's keyboard is not always its stdin.** `dmesg | less` hands the pager
+a pipe on fd 0, and this system has no `/dev/tty`: devfs registers `klog`, `fb`,
+`kbd`, `tty0`, `random`, `mouse`, `dsp` and the block nodes, and `tty0` is the
+kernel's own console, not the PTY the window's shell is on. What a pipeline does
+leave pointing at that PTY is **stderr**, so `less` reads keys from fd 0 when
+that is a terminal and from fd 2 otherwise, and puts *that* descriptor into raw
+mode. Both `ioctl` and blocking `read` work on it; the PTY slave carries no
+access mode that would stop either. With neither a terminal, it prints
+everything and exits, which is what makes it safe in someone else's pipeline.
+
+**Reading the text has to finish before the keyboard is touched.** The whole
+input is read to EOF up front. That is not only simplicity: on a pipe the writer
+is still running, and a pager that interleaved reading the pipe with reading
+keys would be waiting on two descriptors that are the same terminal session.
+
+**A search hit is a column range, not a byte range.** Matching runs over the
+line with the escapes stripped out and the tabs already expanded — the `plain`
+field alongside the cells — so a match index is directly the column to
+reverse-video. The highlight is applied by pushing `\x1b[7m` into the escapes of
+the first matched column and `\x1b[27m` into the one after the last, which means
+it survives horizontal scrolling and clipping exactly the way the line's own
+colours do, with no separate pass.
+
+### Things that will bite you
+
+- **`isatty(0)` is the wrong question for an interactive terminal program that
+  can be at the end of a pipeline.** Ask it about the descriptor you intend to
+  read keys from, and fall back to fd 2. A program that gives up when stdin is a
+  pipe is unusable in exactly the case a pager exists for.
+- **Forward search starts below the top line.** `/pat` reporting "pattern not
+  found" for something visible three screens *up* is correct behaviour, not a
+  bug; `?pat` is the other direction. This looks like a defect the first time.

@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use edos_lib::io::{get_winsize, isatty, poll_stdin, pty_set_canonical, pty_set_raw, sys_read};
 use edos_lib::process::{close, pipe, read, spawn_program_with_fds, waitpid};
+use edos_lib::term::{Cell, clip, render};
 use edos_lib::time::local_time;
 
 const DEFAULT_INTERVAL_MS: u64 = 2000;
@@ -24,8 +25,6 @@ const DEFAULT_INTERVAL_MS: u64 = 2000;
 const MIN_INTERVAL_MS: u64 = 100;
 const DEFAULT_COLS: usize = 80;
 const DEFAULT_ROWS: usize = 24;
-/// A tab stops every eight columns, which is what the terminal assumes.
-const TAB_WIDTH: usize = 8;
 
 struct Options {
     interval_ms: u64,
@@ -166,99 +165,6 @@ fn run_command(command: &[String], exec: bool) -> Result<Run, String> {
     Ok(Run { lines, status })
 }
 
-/// One column of a line: the character in it, and any escape sequences that
-/// come immediately before it.
-///
-/// Commands here colour their own output — `ps` colours the state column, `ls`
-/// the file types — so a line is not a sequence of columns until the escapes in
-/// it are separated out. Counting them as columns clips a line short of the
-/// screen width, and splitting one to insert a highlight prints its tail as
-/// text.
-struct Cell {
-    escapes: String,
-    ch: char,
-}
-
-/// Split a line into columns, expanding tabs to the next eight-column stop
-/// while doing it, since the column a tab lands on is only known here.
-fn cells(line: &str) -> Vec<Cell> {
-    let mut cells: Vec<Cell> = Vec::new();
-    let mut pending = String::new();
-    let mut chars = line.trim_end_matches('\r').chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            pending.push(c);
-            // A CSI sequence runs to its final byte; anything else is the two
-            // characters of an escape and its selector.
-            if chars.peek() == Some(&'[') {
-                pending.push(chars.next().unwrap_or('['));
-                for c in chars.by_ref() {
-                    pending.push(c);
-                    if ('\x40'..='\x7e').contains(&c) {
-                        break;
-                    }
-                }
-            } else if let Some(c) = chars.next() {
-                pending.push(c);
-            }
-            continue;
-        }
-        let width = if c == '\t' {
-            TAB_WIDTH - cells.len() % TAB_WIDTH
-        } else {
-            1
-        };
-        for i in 0..width {
-            cells.push(Cell {
-                escapes: if i == 0 {
-                    std::mem::take(&mut pending)
-                } else {
-                    String::new()
-                },
-                ch: if c == '\t' { ' ' } else { c },
-            });
-        }
-    }
-    cells
-}
-
-/// Clip to the screen width, leaving the last column empty so that a full-width
-/// line does not make the terminal wrap and cost a second row.
-fn clip(line: &str, cols: usize) -> Vec<Cell> {
-    let mut cells = cells(line);
-    cells.truncate(cols.saturating_sub(1));
-    cells
-}
-
-/// Write a row out, optionally reverse-videoing every run of columns that
-/// differs from `previous`. A row the previous frame did not have is left
-/// alone: the whole line being new is obvious without marking every column.
-///
-/// Reverse video ends with SGR 27 rather than SGR 0 so that a highlight laid
-/// over coloured output does not also switch the colour off.
-fn render(cells: &[Cell], previous: Option<&Vec<Cell>>) -> String {
-    let mut out = String::new();
-    let mut inverted = false;
-    let mut coloured = false;
-    for (column, cell) in cells.iter().enumerate() {
-        if !cell.escapes.is_empty() {
-            out.push_str(&cell.escapes);
-            coloured = true;
-        }
-        let changed = previous.is_some_and(|p| p.get(column).map(|c| c.ch) != Some(cell.ch));
-        if changed != inverted {
-            out.push_str(if changed { "\x1b[7m" } else { "\x1b[27m" });
-            inverted = changed;
-        }
-        out.push(cell.ch);
-    }
-    if inverted || coloured {
-        out.push_str("\x1b[0m");
-    }
-    out
-}
-
 fn banner(command: &[String], interval_ms: u64) -> String {
     let seconds = interval_ms as f64 / 1000.0;
     format!("Every {seconds:.1}s: {}", command.join(" "))
@@ -320,7 +226,9 @@ fn draw(lines: &[Vec<Cell>], previous: &[Vec<Cell>], options: &Options, rows: us
     let _ = write!(w, "\x1b[H");
     for row in 0..rows {
         let text = match lines.get(row) {
-            Some(line) if options.differences => render(line, previous.get(row)),
+            Some(line) if options.differences => {
+                render(line, previous.get(row).map(|p| p.as_slice()))
+            }
             Some(line) => render(line, None),
             None => String::new(),
         };

@@ -6,6 +6,7 @@ pub mod process;
 pub mod procinfo;
 pub mod shm;
 pub mod sys;
+pub mod term;
 pub mod time;
 pub mod trace;
 
