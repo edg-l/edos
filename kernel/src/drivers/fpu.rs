@@ -1,3 +1,13 @@
+//! FPU/SSE state, and how a context switch carries it.
+//!
+//! The kernel itself is built `-sse,+soft-float` and never touches an FPU or
+//! vector register, so the only state that has to survive a switch belongs to
+//! user threads, and nothing disturbs it between a thread being switched out
+//! and switched back in.
+//!
+//! `FXSAVE`/`FXRSTOR` is the whole mechanism, and `XSAVEOPT` was tried and is
+//! not worth it here — see the note above [`save_fpu_state`].
+
 use bytemuck::{Pod, Zeroable};
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 
@@ -43,7 +53,18 @@ pub unsafe fn enable_fsgsbase() {
     unsafe { Cr4::write(cr4) };
 }
 
-/// Save FPU state using FXSAVE
+/// Save FPU state using FXSAVE.
+///
+/// `XSAVEOPT` is the obvious thing to reach for here and it was measured:
+/// save 32 -> 36 ns, restore 59 -> 83 ns, so it is a loss. The reason is that
+/// it can only win by *skipping* components, and there are none to skip. The
+/// state this kernel enables is x87 and SSE, exactly what `FXSAVE` writes, so
+/// `XSAVE` covers the same registers and adds a 64-byte header plus
+/// per-component work on top. Its init and modified optimisations do not
+/// recover that: two threads handing off to each other `XRSTOR` from different
+/// areas, which is what invalidates the modified tracking. `XSAVE` becomes the
+/// right answer if `XCR0` ever grows a large optional component (AVX and
+/// wider) that most threads leave alone; until then it is overhead.
 pub unsafe fn save_fpu_state(state: &mut FpuState) {
     unsafe {
         core::arch::asm!(
@@ -65,14 +86,33 @@ pub unsafe fn restore_fpu_state(state: &FpuState) {
     }
 }
 
-/// Initialize FPU state for a new thread
+/// Give a thread the state it should start life with, and put the CPU in it.
+///
+/// Both halves matter. The area is what the thread will be restored from
+/// later, and the *registers* have to be cleaned now because this runs on the
+/// way in to a thread that has never had state of its own: `fninit` resets x87
+/// and leaves SSE completely alone, so without the second half everything the
+/// previously running thread left in `XMM0-15` is readable by this one, across
+/// a process boundary.
 pub unsafe fn init_fpu_state(state: &mut FpuState) {
-    // Initialize with a clean FPU state
     unsafe {
         core::arch::asm!("fninit", options(nostack, preserves_flags));
         save_fpu_state(state);
+        state.data[FXSAVE_XMM_OFFSET..FXSAVE_XMM_END].fill(0);
+        state.set_default_mxcsr();
+        restore_fpu_state(state);
     }
 }
+
+/// `XMM0-15` inside an `FXSAVE` image, and the end of that region.
+const FXSAVE_XMM_OFFSET: usize = 160;
+const FXSAVE_XMM_END: usize = 416;
+/// `MXCSR` inside an `FXSAVE` image, and its reset value: all exceptions
+/// masked, round to nearest. Zero is a legal encoding meaning every SIMD
+/// floating-point exception is *unmasked*, so a state area that is merely
+/// zeroed raises `#XM` on the first inexact result the thread computes.
+const FXSAVE_MXCSR_OFFSET: usize = 24;
+const MXCSR_DEFAULT: u32 = 0x1F80;
 
 // FPU/SSE state structure (512 bytes for FXSAVE)
 #[repr(C, align(16))]
@@ -81,8 +121,18 @@ pub struct FpuState {
     data: [u8; 512],
 }
 
+impl FpuState {
+    /// Put the reset `MXCSR` into the image.
+    fn set_default_mxcsr(&mut self) {
+        self.data[FXSAVE_MXCSR_OFFSET..FXSAVE_MXCSR_OFFSET + 4]
+            .copy_from_slice(&MXCSR_DEFAULT.to_le_bytes());
+    }
+}
+
 impl Default for FpuState {
     fn default() -> Self {
-        Self { data: [0; 512] }
+        let mut state = Self { data: [0; 512] };
+        state.set_default_mxcsr();
+        state
     }
 }
