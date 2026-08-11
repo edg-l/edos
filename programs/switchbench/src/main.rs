@@ -193,6 +193,7 @@ fn main() {
     // A blocking round trip: each side parks in `read` and is woken by the
     // other's `write`, so this prices the wake path the yield cases never take.
     pipe_round_trip(&mut out, iters.min(2_000));
+    pipe_round_trip_threads(&mut out, iters.min(2_000));
 
     syscall_floor(&mut out, iters);
     pipe_no_block(&mut out, iters.min(5_000));
@@ -286,6 +287,58 @@ fn sleep_overshoot(out: &mut Out) {
         ));
     }
     out.line(&format!("switchbench sleep worst overshoot {worst} us"));
+}
+
+/// The same blocking round trip with a **thread** at the far end instead of a
+/// process, so both sides share an address space.
+///
+/// This is the control for the cross-process case below. The two differ by
+/// exactly two `CR3` reloads per trip and everything those cost -- the TLB
+/// entries a reload discards and the refills the next syscall then takes -- and
+/// nothing else: the same two pipes, the same two parks, the same two wakes.
+/// Subtracting one from the other says how much of a blocking IPC is the
+/// address space rather than the scheduler.
+///
+/// It is best-of-batches, unlike the cross-process case, which is a single
+/// batch of `iters` and reads 16% apart between runs for that reason.
+fn pipe_round_trip_threads(out: &mut Out, iters: u64) {
+    let (Some((up_r, up_w)), Some((down_r, down_w))) = (pipe(), pipe()) else {
+        out.line("switchbench: pipe failed, skipping the thread round trip");
+        return;
+    };
+
+    // The far end runs until its read fails, which is what closing `up_w`
+    // below does to it.
+    let peer = thread::spawn(move || {
+        let mut byte = [0u8; 1];
+        while read(up_r, &mut byte) == 1 {
+            if write(down_w, &byte) != 1 {
+                return;
+            }
+        }
+    });
+
+    let mut byte = [0u8; 1];
+    let mut failed = false;
+    let each = best_ns(iters, || {
+        if write(up_w, b"x") != 1 || read(down_r, &mut byte) != 1 {
+            failed = true;
+        }
+    });
+
+    close(up_w);
+    let _ = peer.join();
+    close(down_r);
+
+    if failed {
+        out.line("switchbench: thread round trip failed");
+        return;
+    }
+    out.line(&format!(
+        "switchbench pipe round trip, one address space {each:.0} ns, \
+         {:.0} ns per park/wake",
+        each / 2.0
+    ));
 }
 
 /// Time a one-byte round trip through a pair of pipes, forked child at the

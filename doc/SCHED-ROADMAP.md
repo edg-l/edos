@@ -35,6 +35,7 @@ last column, and it is a few percent everywhere.
 | `read` of a descriptor that does not exist | 128 | 128 |
 | a pipe write + read, nothing blocking | 402 | 399-407 |
 | a blocking pipe round trip between two processes | 4946 | 4785-5168 |
+| the same round trip, one address space | 1968 | 1946-1996 |
 | the switch itself, `/proc/sched_prof` | 220 | |
 | a wake (`do_wake`) | 51 | |
 
@@ -81,34 +82,71 @@ switch alone, which is the probe overhead showing.
 **The syscall boundary is the biggest single term in any short call**, and
 every call in the system pays it. That is item 2.
 
-## 1. A park and a wake cost four times a yield handover, and nothing explains it
+## 1. Found: the gap is two address-space switches, and nested paging pays for them
 
-This is the largest unexplained number in the table. A blocking pipe round trip
-is 4946 ns, which is two parks and two wakes, four syscalls and four trips
-through the pipe. Subtract the four syscalls and each park/wake pair is 2071 ns,
-against 505 for the cross-process handover a `sched_yield` performs. Priced from
-the parts that *are* measured:
+A blocking pipe round trip is ~4900 ns cross-process. The same round trip with a
+**thread** at the far end -- same two pipes, same two parks, same two wakes, one
+address space -- is **1968 ns**. `switchbench` reports both now, and the
+thread case is stable to 20 ns across runs.
 
-| | ns |
+| | ns/round trip |
 |---|---|
-| 4 pipe syscalls, at 94 boundary + 34 fd table + ~73 pipe work each | 804 |
-| 2 context switches, at `sched_yield` minus its own boundary | 382 |
-| 2 wakes (`do_wake`) | 102 |
-| **accounted** | **~1290** |
-| **measured** | **4946** |
+| cross-process, two `CR3` reloads | ~4900 |
+| one address space | 1968 |
+| difference, per address-space switch | **~1470** |
 
-So about 3.7 microseconds per round trip -- 1.8 per park/wake pair -- is in
-nobody's column. Candidates, none of them measured yet: `wait_until` evaluating
-its predicate under `without_interrupts` and taking the pipe lock to do it;
-`thread_park_while`'s enqueue and the transition through `Parked`; the woken
-thread starting on a cold cache after the other process ran; and the timer being
-re-armed for a thread that then blocks immediately.
+So the 3 microseconds that nothing accounted for is the address space, not the
+scheduler. What makes that worth writing down is the second measurement beside
+it: a cross-process `sched_yield` handover costs only **176 ns** more than a
+same-process one. The same `CR3` write, eight times cheaper. The write is not
+the cost -- **the refills after it are**, and they only appear when the code
+that runs next touches enough memory to need them, which a `sched_yield` loop
+never does and a syscall through the fd table, the pipe and a user buffer does.
 
-**Measure before optimising anything here.** The instrument is a `sched_prof`
-stage around `thread_park_while` and one around `WaitQueue::wait_internal`'s
-enqueue, which do not exist yet. The previous version of this file guessed at
-this number by subtraction and drew a wrong conclusion (see the retraction
-below); do not repeat that.
+Two things amplify those refills here, and both are properties of the machine
+rather than the kernel:
+
+- **Nested paging.** Under KVM every guest page walk is a nested walk: four
+  guest levels, each resolved through the host's four, so a TLB miss can cost
+  five to ten times what it costs on bare metal. ~1470 ns is about 5000 cycles,
+  which is the right order for a few dozen nested walks.
+- **No PCID on this host**, so every `CR3` write flushes the whole
+  non-global TLB. This is the PCID case in miniature, and PCID is exactly what
+  a VM wants: it is why Linux made it unconditional for its own KPTI work.
+  `doc/WORKING-NOTES.md` records why it cannot be tested on this Ryzen 5 5600.
+
+**What follows for anything measured on this machine:** a cross-process number
+here carries a VM-specific penalty that bare metal would not. Do not treat
+~4900 ns as a kernel figure, and do not chase the ratio between it and the
+thread case as if it were a defect.
+
+What is actually left to attack, in order:
+
+1. **The 1968 ns same-address-space round trip.** Priced from parts that are
+   measured -- four syscalls at 94 boundary + 34 fd table + ~73 pipe work,
+   two same-address-space switches at ~233, two wakes at 51 -- accounts for
+   ~1370, leaving ~600 ns, or ~300 per park/wake pair. It is most likely the
+   blocking read's shape: it performs a **whole** read attempt (lock, drain,
+   poll state) that returns nothing before it blocks, and `wait_internal` then
+   evaluates the predicate up to three more times (entry, post-enqueue, and
+   inside `transition_park_while`) with a queue push and a `retain` around
+   them. A blocking read that could tell the wait queue "I already looked, the
+   pipe was empty under the lock" would remove one of those.
+2. **Fewer address-space switches per byte**, which is a workload property, not
+   a kernel one: a shell pipeline moving 4 KiB per switch pays that ~1470 ns
+   once per 4 KiB, and one moving a byte pays it per byte. This is the argument
+   for the pipe *not* being byte-at-a-time in the programs that use it.
+3. **Huge pages for user text and data**, which would cut the number of entries
+   a flush discards. Large change, and worth pricing only after 1.
+
+### Done: `notify_pollers` on a read that moved nothing (2026-08-11)
+
+The blocking read's first attempt finds the pipe empty, and then built a poll
+state, cloned the reader wait queue and woke it -- to report the state the pipe
+already had. A read that moves no bytes changes nothing, so it now returns no
+notification at all. **1994 -> 1968 ns** on the same-address-space round trip,
+which is two blocking reads per trip, and the thread case is the instrument
+stable enough to see it.
 
 ### Retracted: the L4-style direct handoff
 
@@ -259,17 +297,7 @@ picking one, and give up the spin if the holder is not currently running —
 that check is what a pure spinlock cannot make and is why it is called
 *adaptive*.
 
-## 5. `switch_to_page` takes a lock to decide it has nothing to do
-
-66-77 ns, on every switch including the common one where the address space
-does not change. It takes `user.read()` — an `RwLock` — and reads `CR3` before
-comparing. Mirroring the thread's `CR3` in an `AtomicU64` removes the lock;
-only three sites set it (thread creation in `thread.rs`, `execve`, `fork`).
-
-Getting this wrong means a thread runs on the wrong address space, so the
-mirror has to be provably updated at all three.
-
-## 6. `MIN_TIMER_INTERVAL` is still a picked number
+## 5. `MIN_TIMER_INTERVAL` is still a picked number
 
 The 10 us floor in `apic/mod.rs` was chosen to sit above interrupt cost and
 below a 1 ms sleep, not measured. It matters much less now that the one-shot
@@ -279,6 +307,17 @@ reason to consider it; it is **not** a way to make arming cheaper, since it is
 still a trapping MSR write.
 
 ## What has been tried and did not work
+
+- **Mirroring the thread's `CR3` to keep `switch_to_page` off a lock.** Shipped,
+  because the lock is a hazard worth removing -- `execve` holds `user.write()`
+  while it installs an image, and a switch to a sibling thread of that process
+  would spin behind that guard *inside the switch* -- but it is **not** worth
+  measurable time, and the item claiming 66-77 ns was wrong. `sched_yield` with
+  nothing else Ready: 285 -> 283 ns. A handover to a sibling thread: 328 -> 327.
+  To another process: 500 -> 506. All inside the noise. The 66-77 ns came from
+  the `page` stage of `/proc/sched_prof`, which is two `rdtsc` reads wide before
+  it measures anything; a `PreemptRwLock` read acquire and release is 10-20 ns,
+  and 10-20 ns is not visible against a 285 ns call at a 2% noise floor.
 
 - **`XSAVEOPT` instead of `FXSAVE`.** Measured: save 32 → 36 ns, restore
   59 → 83 ns. It can only win by *skipping* components, and with `XCR0`

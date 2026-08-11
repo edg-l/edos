@@ -2,6 +2,19 @@
 
 ## Done
 
+- **The IPC gap was the address space, not the scheduler (2026-08-11)** - a
+  blocking pipe round trip is ~4900 ns and only ~1300 of it could be accounted
+  for; the missing 3.6 us looked like a park/wake defect. `switchbench` now runs
+  the same round trip with a thread at the far end instead of a forked process,
+  and that case is 1968 ns: ~1470 ns per address-space switch. Beside it, a
+  cross-process `sched_yield` handover costs only 176 ns more than a
+  same-process one -- the same `CR3` write, so the write is not the cost, the
+  refills after it are, amplified by nested paging (every guest page walk is a
+  nested walk under KVM) and by this host having no PCID. Fallout: a read that
+  moves no bytes now notifies nobody (1994 -> 1968 ns), and `switch_to_page`
+  reads an atomic `Thread::user_cr3` mirror instead of taking the `UserThread`
+  `RwLock` -- which bought no measurable time and is kept only because `execve`
+  holds that lock for writing while it installs an image.
 - **The pipe and the PTY share one byte ring (2026-08-11)** - `Pipe::read`
   allocated a `Vec` for the bytes it drained and memmoved the remainder,
   `sys_write` allocated another to stage the user's bytes, and `sys_read` took

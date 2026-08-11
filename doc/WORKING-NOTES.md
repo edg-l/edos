@@ -44,6 +44,59 @@ These decompose cleanly, which the old noisy numbers never did:
 rank the parts of a call and do not add up to one. That is a caveat this file
 did not have before, and it matters: see the memset trap below.
 
+## The 3 microseconds nothing could account for are the address space
+
+A blocking pipe round trip is ~4900 ns, and everything measurable accounted for
+only ~1300 of it. The missing 3.6 us was charged to "the park/wake path" and
+looked like a defect. It is not one.
+
+`switchbench` now runs the same round trip with a **thread** at the far end
+instead of a forked process: same two pipes, same two parks, same two wakes, one
+address space. That case is **1968 ns**, and it is stable to 20 ns across runs
+where the cross-process case swings 8%.
+
+| | ns/round trip |
+|---|---|
+| cross-process, two `CR3` reloads | ~4900 |
+| one address space | 1968 |
+| **per address-space switch** | **~1470** |
+
+The second measurement beside it is what makes this worth keeping: a
+cross-process `sched_yield` handover costs only **176 ns** more than a
+same-process one. Same `CR3` write, eight times cheaper. **The write is not the
+cost; the refills after it are**, and they only show up when the code that runs
+next touches enough memory to need them -- which a `sched_yield` loop does not
+and a syscall through the fd table, a pipe and a user buffer does.
+
+Two properties of this machine multiply those refills, and neither is a kernel
+bug: under KVM every guest page walk is a nested walk (four guest levels each
+resolved through four host levels, so a TLB miss costs five to ten times bare
+metal), and this host has no PCID, so every `CR3` write flushes the whole
+non-global TLB. ~1470 ns is about 5000 cycles, the right order for a few dozen
+nested walks.
+
+**So a cross-process number measured here carries a VM penalty that bare metal
+would not.** Do not read ~4900 ns as a kernel figure, and do not chase the ratio
+between it and the thread case as a defect. What is left to attack is the 1968
+ns, where ~600 ns is still unaccounted -- see `doc/SCHED-ROADMAP.md` item 1.
+
+Two changes came out of the hunt:
+
+- **A read that moves no bytes notifies nobody.** The blocking read's first
+  attempt finds the pipe empty and used to build a poll state, clone the reader
+  wait queue and wake it, reporting the state the pipe already had. 1994 -> 1968
+  ns, two blocking reads per trip.
+- **`switch_to_page` no longer takes a lock**, and this bought *no measurable
+  time*, which is the part worth remembering. `Thread::user_cr3` mirrors
+  `UserThread::cr3` so the switch path reads one atomic instead of taking the
+  `RwLock`. Kept because the lock is a real hazard -- `execve` holds
+  `user.write()` while it installs an image, and a switch to a sibling thread of
+  that process would spin behind that guard *inside the switch* -- but the
+  roadmap item claiming 66-77 ns was wrong. Idle yield 285 -> 283 ns, sibling
+  handover 328 -> 327, cross-process 500 -> 506: all noise. That 66-77 came from
+  a `/proc/sched_prof` stage that is two `rdtsc` reads wide before it measures
+  anything.
+
 ## The pipe and the PTY share one ring now, 480 ns to 402
 
 `Pipe::read` allocated a `Vec` for the bytes it drained and then memmoved the

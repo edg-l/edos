@@ -2349,7 +2349,7 @@ fn sys_execve(
     // apart: `context_switch_to` reloads CR3 from `user.cr3` on every switch,
     // so freeing a page table that is still published there would hand a
     // preemption a dangling CR3.
-    let (parts, old) = install_image(&user_arc, &info, image);
+    let (parts, old) = install_image(&thread, &user_arc, &info, image);
 
     unsafe { Cr3::write(parts.new_cr3.0, parts.new_cr3.1) };
 
@@ -2429,6 +2429,7 @@ struct DetachedAddressSpace {
 }
 
 fn install_image(
+    thread: &Thread,
     user_arc: &Arc<RwLock<crate::thread::UserThread>>,
     info: &Arc<IrqSpinlock<UserThreadInfo>>,
     image: crate::thread::thread::LoadedImage,
@@ -2453,7 +2454,9 @@ fn install_image(
     let old_pml4 = user.cr3.0;
     let old_stack_top = user.process_stack_top.load(Ordering::Acquire);
 
-    user.cr3 = (image.pml4_frame, kernel_pml4_flags);
+    // Both halves under the one write guard: a preemption between them would
+    // resume this thread on whichever half was still stale.
+    thread.set_user_cr3(&mut user, (image.pml4_frame, kernel_pml4_flags));
     user.tls = image.tls;
     user.heap_break = image.heap_break;
     user.process_stack_top
@@ -2658,6 +2661,7 @@ fn sys_clone(
 
     address_space_refs.fetch_add(1, Ordering::AcqRel);
 
+    let child_user_cr3 = Thread::encode_cr3(cr3);
     let child_user = Arc::new(RwLock::new(crate::thread::UserThread {
         pid: child_id.0,
         cr3,
@@ -2699,6 +2703,7 @@ fn sys_clone(
         pgid: AtomicU64::new(parent_thread.pgid()),
         signal: SignalState::new(),
         user: Some(child_user),
+        user_cr3: AtomicU64::new(child_user_cr3),
         rq_link: Link::new(),
         context_saved: AtomicBool::new(true),
         fpu: core::cell::UnsafeCell::new(crate::drivers::fpu::FpuState::default()),
@@ -2913,6 +2918,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
 
     let child_id = allocate_thread_id();
 
+    let child_user_cr3 = Thread::encode_cr3((child_pml4_frame, parent_cr3.1));
     let child_user_arc = Arc::new(RwLock::new(crate::thread::UserThread {
         pid: child_id.0,
         cr3: (child_pml4_frame, parent_cr3.1),
@@ -2953,6 +2959,7 @@ fn sys_fork(parent_ctx: &mut SyscallContext) -> i64 {
         pgid: AtomicU64::new(parent_thread.pgid()),
         signal: SignalState::new(),
         user: Some(child_user_arc.clone()),
+        user_cr3: AtomicU64::new(child_user_cr3),
         rq_link: Link::new(),
         context_saved: AtomicBool::new(true),
         fpu: {

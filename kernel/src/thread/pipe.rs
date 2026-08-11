@@ -122,6 +122,14 @@ impl Pipe {
     /// from there to user space after the pipe lock is released.
     pub fn read_into(&mut self, out: &mut [u8]) -> (usize, PipeNotifications) {
         let taken = self.buffer.pop(out);
+        // A read that moved nothing changed nothing, so there is nothing to
+        // tell anyone. This is the common case on the blocking path: the read
+        // that finds the pipe empty and parks would otherwise build a poll
+        // state, clone the reader queue and wake it, all to report the state it
+        // already had.
+        if taken == 0 {
+            return (0, PipeNotifications::EMPTY);
+        }
         (taken, self.notify_pollers())
     }
 
@@ -209,6 +217,14 @@ pub struct PipeNotifications {
 }
 
 impl PipeNotifications {
+    /// Nothing to tell anyone. `Vec::new` does not allocate, so this costs
+    /// nothing to build or drop.
+    pub const EMPTY: Self = Self {
+        entries: Vec::new(),
+        state: PollState::none(),
+        reader_wq: None,
+    };
+
     /// Send notifications. Call this after dropping the pipe lock.
     pub fn flush(self) {
         for entry in &self.entries {

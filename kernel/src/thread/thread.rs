@@ -13,9 +13,9 @@ use alloc::{
 };
 use spin::{Mutex, RwLock};
 use x86_64::{
-    VirtAddr,
+    PhysAddr, VirtAddr,
     instructions::interrupts::without_interrupts,
-    registers::control::Cr3,
+    registers::control::{Cr3, Cr3Flags},
     structures::paging::{OffsetPageTable, PageTableFlags, PhysFrame},
 };
 
@@ -212,6 +212,24 @@ pub struct Thread {
     pub signal: SignalState,
 
     pub user: Option<Arc<RwLock<UserThread>>>,
+
+    /// The architectural `CR3` this thread runs on -- the PML4 frame address
+    /// with the flag bits -- or 0 for a kernel thread, which runs on the
+    /// kernel page tables.
+    ///
+    /// A mirror of `UserThread::cr3`, so the switch path can ask "has the
+    /// address space changed" without taking the `RwLock` that `user` sits
+    /// behind. That lock is the reason, not its cost: `execve` holds it for
+    /// writing while it installs an image, and a switch to a sibling thread of
+    /// that process would spin behind the guard inside the switch. (It is not
+    /// worth measurable time -- see `doc/SCHED-ROADMAP.md`.)
+    ///
+    /// Write it only through [`Thread::set_user_cr3`], which sets both halves
+    /// under the write guard, or in a `Thread` literal beside the `UserThread`
+    /// it mirrors. A stale value here runs a thread on another process's page
+    /// tables, so the four sites that install an address space are enforced by
+    /// the field being mandatory rather than defaulted.
+    pub user_cr3: AtomicU64,
 
     // Context and kernel stack pointer:
     pub ctx: Mutex<CpuContext>, // only scheduler touches ctx under lock
@@ -725,15 +743,40 @@ pub(crate) fn allocate_tls_region(
 }
 
 impl Thread {
+    /// Pack a `CR3` pair into the value the register itself holds: the PML4 is
+    /// 4 KiB-aligned, so the flag bits live below it and neither loses
+    /// information.
+    pub fn encode_cr3((frame, flags): (PhysFrame, Cr3Flags)) -> u64 {
+        frame.start_address().as_u64() | flags.bits()
+    }
+
+    fn decode_cr3(raw: u64) -> (PhysFrame, Cr3Flags) {
+        (
+            PhysFrame::containing_address(PhysAddr::new(raw & 0x000f_ffff_ffff_f000)),
+            Cr3Flags::from_bits_truncate(raw & 0xfff),
+        )
+    }
+
+    /// Install an address space on this thread, keeping the mirror the switch
+    /// path reads in step with the `UserThread` field it mirrors.
+    ///
+    /// The caller holds the `UserThread` write guard, which is what makes the
+    /// pair atomic with respect to anything that reads both.
+    pub fn set_user_cr3(&self, user: &mut UserThread, cr3: (PhysFrame, Cr3Flags)) {
+        user.cr3 = cr3;
+        self.user_cr3
+            .store(Self::encode_cr3(cr3), Ordering::Release);
+    }
+
     pub fn switch_to_page(&self) {
-        if let Some(user) = &self.user {
-            let user = user.read();
-            if Cr3::read().0.start_address() != user.cr3.0.start_address() {
-                unsafe { Cr3::write(user.cr3.0, user.cr3.1) };
-            }
-            //tlb_flush_all_including_global();
-        } else {
+        let target = self.user_cr3.load(Ordering::Acquire);
+        if target == 0 {
             switch_to_kernel_page();
+            return;
+        }
+        let (frame, flags) = Self::decode_cr3(target);
+        if Cr3::read().0.start_address() != frame.start_address() {
+            unsafe { Cr3::write(frame, flags) };
         }
     }
 
@@ -860,6 +903,7 @@ impl Thread {
             state: AtomicU8::new(State::Ready as u8),
             name,
             user: None,
+            user_cr3: AtomicU64::new(0), // kernel threads run on the kernel page tables
             cpu_affinity: AtomicU32::new(0),
             flags: AtomicU32::new(0),
             slice_deadline: AtomicU64::new(0),
@@ -941,6 +985,7 @@ impl Thread {
         let address_space_refs = Arc::new(AtomicUsize::new(1));
         let process_stack_top = Arc::new(AtomicU64::new(stack_top));
 
+        let user_cr3 = Self::encode_cr3((page, kernel_pml4.1));
         let user_state = Arc::new(RwLock::new(UserThread {
             pid: id.0,
             cr3: (page, kernel_pml4.1),
@@ -1009,6 +1054,7 @@ impl Thread {
             pgid: AtomicU64::new(0),
             signal: SignalState::new(),
             user: Some(user_state),
+            user_cr3: AtomicU64::new(user_cr3),
             rq_link: Link::new(),
             context_saved: AtomicBool::new(true),
             fpu: UnsafeCell::new(FpuState::default()),
