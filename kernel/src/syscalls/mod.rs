@@ -1405,6 +1405,12 @@ fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> u64 {
     let target = ThreadId(pid);
     let block = flags & WAIT_BLOCK != 0;
     let untraced = flags & WAIT_UNTRACED != 0;
+    // Level-triggered on purpose: an untraced wait answers for as long as the
+    // child is down, so a caller can use it to ask "is it still stopped?" and
+    // get the same answer twice. `programs/sigtest` checks exactly that, and
+    // `edos-sh` polls it the same way. POSIX's "status not yet reported" would
+    // make the second query block instead, which is not what anything here
+    // wants from it.
     let has_stopped =
         || untraced && get_thread_by_id(target).is_some_and(|t| t.stopped.load(Ordering::Acquire));
 

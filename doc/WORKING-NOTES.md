@@ -6,6 +6,87 @@ session.
 
 ---
 
+## lstat is real now, so `is_symlink()` finally answers
+
+`std::fs::symlink_metadata` used to follow links: `lstat` in the fork's
+`library/std/src/sys/fs/edos.rs` was literally `stat(p)`, so
+`Metadata::is_symlink()` was always false and every path-based link test through
+std was dead code. Programs worked around it by calling `readlink` and treating
+success as proof of a link.
+
+The whole chain now exists:
+
+- `fs::api::file_info_nofollow` resolves with `LinkMode::NoFollow`, so only the
+  final component is left unresolved — leading components are still followed,
+  which is what POSIX.1-2024 specifies for `fstatat`.
+- `sys_fstatat` accepts `AT_SYMLINK_NOFOLLOW` (0x100) instead of refusing every
+  non-zero flag. The `FstatEntry` wire format already had `kind == 2` for a
+  symlink and EFS already reported it; nothing but the resolution was missing.
+- `edos_rt::fd::lstat_path` (0.0.43) goes through `SYS_FSTATAT` with `AT_FDCWD`,
+  because `SYS_STAT` has no argument for the flag.
+- The fork's `lstat` calls it.
+
+The `readlink` workarounds in `ls` and `stat` still work and were left alone;
+new code should use `symlink_metadata` instead.
+
+## Warnings are a gate now, and one of them was load-bearing
+
+Both builds are warning-free. Getting there turned up something worth knowing
+before the next cleanup: **`cargo check` on the default features reports items
+as dead that the `sched-test` feature uses.** `Thread::set_affinity_mask` is
+the example — its only caller is `queue_spawn_kthread_affine`, which is behind
+`#[cfg(feature = "sched-test")]`. Deleting it on the strength of the default
+build's warning would have broken `make test`. It carries
+`#[cfg_attr(not(feature = "sched-test"), allow(dead_code))]` now. Run
+`cargo check --features sched-test` before deleting anything the lint calls
+dead.
+
+Two warnings were vestigial code whose doc comments claimed consumers that
+never existed: `Transaction::ring_blocks` said it was "set by seal_and_commit"
+and nothing ever set it, and `ReplayResult::ring_blocks_consumed` said the
+caller used it to initialise `head_block` when the caller takes that from the
+on-disk journal superblock. Both are gone. The rest are `#[allow(dead_code)]`
+with a reason: `FaultReject`'s payload fields are read only through the derived
+`Debug` in the `KILL: PF ... reject={reject:?}` line, which the lint does not
+count, and `MAP_FIXED`/`MS_INVALIDATE` are unimplemented flags that still
+document the ABI's flag space.
+
+## Three defects the overnight run's own code review missed
+
+Found reviewing the 2026-08-11 run, all fixed in the same commit:
+
+- **`sys_listen` could leak a port for the rest of the boot.** The socket lock
+  is dropped before the port-table insert (correct — the receive path takes them
+  the other way round), then re-taken to set `listening`. A close landing in
+  that window ran its own `unbind_port` before the entry existed, so nothing
+  ever removed it: `sys_bind` refuses the port from then on, and an arriving SYN
+  finds a listener that is not listening. The `EBADF` path unbinds now.
+- **`/proc/<tid>/fd` reported a live thread as missing.** It reads the
+  descriptor table through `try_lock` — which it must, because a thread reading
+  its own `fd` file can already hold that lock further up the syscall path — but
+  folded the contention case into the same `None` that means "the thread
+  exited", which the read path turns into `FileNotFound`. `PROCESS_FILES` now
+  returns `Result<String, Error>`, contention is a bounded spin and then `Busy`.
+- **`destroy_windows_for_pid` could name a destroyed window as the focus heir.**
+  It accumulated the last non-`None` heir, so a process whose window W1 handed
+  focus to its own W2 before W2 was destroyed with nothing left to inherit
+  returned W2. It reads `focused_window` once at the end instead.
+
+## `waitpid(WUNTRACED)` is level-triggered here, and that is deliberate
+
+Worth knowing before someone else "fixes" it. POSIX.1-2024 reports a stopped
+child "whose status has not yet been reported", once; this kernel answers for as
+long as the child is down, so the same suspension is reported on every call.
+
+That reads like a bug and is not. Two callers depend on it as a state query:
+`programs/sigtest` stops a child, sees the stop, waits, and asks a *second* time
+to prove the child did not resume on its own; and `edos-sh` polls the same way.
+A latch that consumed the first report was written and reverted after sigtest
+hung on it — the second query blocked forever instead of answering. The comment
+in `sys_waitpid` says so now.
+
+---
+
 ## Start here for anything about storage performance
 
 `programs/fsbench` measures the filesystem across idioms and depths: a memory

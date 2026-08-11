@@ -415,17 +415,17 @@ impl WindowRegistry {
     ///
     /// Returns the window left holding keyboard focus, if focus moved. A
     /// destroy that moves focus onto another window of the same process is
-    /// superseded by that window's own destroy, so the last answer is the
-    /// surviving one.
+    /// itself superseded when that window is destroyed in turn, so the answer
+    /// is read from the registry once at the end rather than accumulated: the
+    /// last destroy to move focus may have moved it to nothing, and returning
+    /// the heir it displaced would name a window that no longer exists.
     pub fn destroy_windows_for_pid(&mut self, pid: u64) -> Option<WindowId> {
         let window_ids: Vec<WindowId> = self.windows_for_pid(pid);
-        let mut refocused = None;
+        let mut moved = false;
         for id in window_ids {
-            if let Some(heir) = self.destroy_window(id) {
-                refocused = Some(heir);
-            }
+            moved |= self.destroy_window(id).is_some();
         }
-        refocused
+        if moved { self.focused_window } else { None }
     }
 }
 

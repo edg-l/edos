@@ -9,14 +9,6 @@
   would need a reverse lookup through the dentry cache, or the mapping to
   remember the path it was opened with.
 
-- Rust fork: `std::fs::symlink_metadata` follows symbolic links, because
-  `lstat` in `library/std/src/sys/fs/edos.rs` is defined as `stat(p)`. So
-  `Metadata::is_symlink()` is always false and any path-based link test through
-  std is dead code. Needs a nofollow stat: `SYS_STAT`/`statat` already resolve
-  to the link itself for `readlink`/`unlink`/`rename`, so the kernel side is an
-  `AT_SYMLINK_NOFOLLOW` flag, and then `edos_rt::fd::lstat_path` plus the
-  `lstat` arm in the fork. Until then, use `edos_lib::io::readlink` (what
-  `stat` and `ls` do) or `DirEntry::file_type()`.
 
 
 - FIXED: attaching a USB mass-storage device hung the boot.
@@ -81,6 +73,12 @@
 - fg resumes a job but /proc still shows the process Stopped afterwards.
   Repro: cat, Ctrl+Z, fg, then ps. SIGCONT clears the flag at delivery now,
   so something re-sets it or the target re-enters the park.
+  Ruled out: `stop_if_signalled` is not the leak. It stores `stopped = false`
+  unconditionally on the way out of its park, so a thread that resumes at all
+  clears the flag. Either the SIGCONT wake is lost and the thread never leaves
+  the park (which contradicts the job visibly resuming), or something drives it
+  back through `stop_if_signalled` after the resume. Instrument which of the two
+  boundaries -- the syscall return or the ring-3 tick -- re-enters it.
 - A stop or kill signal does not cut short sys_sleep_ms, so Ctrl+Z on
   `sleep 30` only takes effect 30s later. thread_sleep should return early
   when stop_requested or killed is set.

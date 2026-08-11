@@ -126,8 +126,14 @@
   show it at one image pixel per screen pixel. It decodes with the same
   `edos_render::image` the compositor uses for a wallpaper; what it adds is
   `fit_size`/`scaled_to_fit` beside the existing scale-to-cover, over one
-  shared bilinear resampler. Completes Phase 4 of the userspace roadmap bar
-  `nproc`, which needs new kernel surface.
+  shared bilinear resampler.
+
+- **`nproc`** and the `/proc/cpuinfo` behind it - the CPU count was not
+  exposed to userspace at all, which is odd for an SMP kernel. The file reports
+  vendor, brand string, family/model/stepping and the feature flags the kernel
+  depends on, one block per online CPU, then `cpus detected` and `cpus online`.
+  The two differ when an AP fails to start, so `nproc` prints the online count
+  and `--all` the detected one. Completes Phase 4 of the userspace roadmap.
 
 - **`tcpecho`** - a TCP echo server over `bind`/`listen`/`accept`, the first
   user of the listen side of the stack. Serves one connection at a time so the

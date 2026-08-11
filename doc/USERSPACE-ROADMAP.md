@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-95 programs and 2 libraries, all in the `programs/` cargo workspace.
+96 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -116,6 +116,13 @@ Two companions, because a link nobody can see is not much of a feature: `ls`
 now suffixes a symbolic link with `@` and a directory with `/`, and `stat`
 reports the link itself and where it points.
 
+**`nproc`** (Phase 4). The CPU count, from the `/proc/cpuinfo` the kernel
+gained for it: vendor, brand string, family/model/stepping and the feature flags
+the kernel itself depends on, one block per online CPU, then the detected and
+online totals. Two totals rather than one because they differ when an
+application processor fails to start, and the answer anything sizing a thread
+pool wants is the online count. That is the default; `--all` asks for detected.
+
 **`imgview`** (Phase 4). A BMP viewer: one window, one image, either scaled to
 the window or shown at one image pixel per screen pixel and cropped. It decodes
 with the same `edos_render::image` the compositor uses for a wallpaper, which is
@@ -164,9 +171,7 @@ Complete. Everything listed here shipped; see the Done section above.
 
 ## Phase 4: kernel-aware
 
-| Program | Why it matters | Kernel gap |
-|---|---|---|
-| `nproc` | CPU count | needs `SYS_NPROC` or `/proc/cpuinfo` |
+Complete. Everything listed here shipped; see the Done section above.
 
 ## `edos_render` is the shared surface
 

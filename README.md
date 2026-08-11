@@ -38,10 +38,12 @@ stack, the USB stack, and the window system.
 | **Graphics** | virtio-gpu driver, userspace compositor, window decorations, shared-memory buffers, hardware cursor |
 | **USB** | xHCI with HID keyboard and mouse, and mass storage |
 | **Audio** | Intel HDA with a `/dev/dsp` node |
-| **Userspace** | 60+ programs against a forked Rust `std`, including a shell with job control and scripting, a vi-like editor, and the usual coreutils |
+| **Userspace** | 95 programs against a forked Rust `std`, including a shell with job control, globbing and scripting, a vi-like editor, a pager, `sed`, and the usual coreutils and network tools |
 
-There is no init process. The kernel mounts the root filesystem and spawns the
-window manager, taskbar, and terminal directly.
+The kernel mounts the root filesystem and starts exactly one process,
+`bin/edos-init`. That supervises the window manager, taskbar and terminal —
+spawning them, reaping them and restarting them with backoff — so session
+policy lives in userspace rather than in the kernel.
 
 ## Quick start
 

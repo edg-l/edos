@@ -20,7 +20,7 @@ use crate::{
         vma::{Vma, VmaBacking, VmaFlags, VmaProt},
     },
     net::socket::{SOCK_STREAM, SocketAddr, SocketState},
-    ranked_lock,
+    ranked_lock, smp,
     syscalls::Errno,
     thread::{
         pipe::{FileDescriptor, OpenMode, StandardStream},
@@ -157,6 +157,94 @@ impl Procfs {
             stats.free_frames,
             used_frames,
         )
+    }
+
+    fn render_cpuinfo() -> String {
+        use raw_cpuid::CpuId;
+
+        let cpuid = CpuId::new();
+        let vendor = cpuid
+            .get_vendor_info()
+            .map(|v| v.as_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let brand = cpuid
+            .get_processor_brand_string()
+            .map(|b| b.as_str().trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let feature = cpuid.get_feature_info();
+        let extended = cpuid.get_extended_feature_info();
+
+        // Only the flags the kernel itself depends on or reports elsewhere.
+        let mut flags = String::new();
+        if let Some(f) = feature.as_ref() {
+            for (name, present) in [
+                ("fpu", f.has_fpu()),
+                ("tsc", f.has_tsc()),
+                ("msr", f.has_msr()),
+                ("pae", f.has_pae()),
+                ("apic", f.has_apic()),
+                ("sse", f.has_sse()),
+                ("sse2", f.has_sse2()),
+                ("sse3", f.has_sse3()),
+                ("ssse3", f.has_ssse3()),
+                ("sse4_1", f.has_sse41()),
+                ("sse4_2", f.has_sse42()),
+                ("x2apic", f.has_x2apic()),
+                ("aes", f.has_aesni()),
+                ("xsave", f.has_xsave()),
+                ("avx", f.has_avx()),
+                ("rdrand", f.has_rdrand()),
+                ("hypervisor", f.has_hypervisor()),
+            ] {
+                if present {
+                    if !flags.is_empty() {
+                        flags.push(' ');
+                    }
+                    flags.push_str(name);
+                }
+            }
+        }
+        if let Some(e) = extended.as_ref() {
+            for (name, present) in [
+                ("fsgsbase", e.has_fsgsbase()),
+                ("smep", e.has_smep()),
+                ("smap", e.has_smap()),
+                ("avx2", e.has_avx2()),
+                ("rdseed", e.has_rdseed()),
+            ] {
+                if present {
+                    if !flags.is_empty() {
+                        flags.push(' ');
+                    }
+                    flags.push_str(name);
+                }
+            }
+        }
+        if flags.is_empty() {
+            flags.push_str("unknown");
+        }
+
+        let online = smp::cpu_count();
+        let detected = smp::NUM_CPUS.load(Ordering::Relaxed).max(online);
+
+        let mut out = String::new();
+        for index in 0..online {
+            let _ = writeln!(out, "processor: {index}");
+            let _ = writeln!(out, "apicid: {}", smp::lapic_id_for_cpu(index));
+            let _ = writeln!(out, "vendor_id: {vendor}");
+            let _ = writeln!(out, "model name: {brand}");
+            if let Some(f) = feature.as_ref() {
+                let _ = writeln!(out, "cpu family: {}", f.family_id());
+                let _ = writeln!(out, "model: {}", f.model_id());
+                let _ = writeln!(out, "stepping: {}", f.stepping_id());
+            }
+            let _ = writeln!(out, "flags: {flags}");
+            out.push('\n');
+        }
+
+        let _ = writeln!(out, "cpus detected: {detected}");
+        let _ = writeln!(out, "cpus online: {online}");
+        out
     }
 
     fn render_evict_stats() -> String {
@@ -407,10 +495,12 @@ impl Procfs {
         format!("inversions: {inversions}\nmax_depth: {max_depth}\n")
     }
 
-    /// Render one per-thread file, or `None` if no such thread is alive.
-    fn with_snapshot(tid: u64, render: fn(&ThreadSnapshot) -> String) -> Option<String> {
+    /// Render one per-thread file, or `FileNotFound` if no such thread is alive.
+    fn with_snapshot(tid: u64, render: fn(&ThreadSnapshot) -> String) -> Result<String, Error> {
         let snapshots = Self::collect_snapshots();
-        Self::find_snapshot(&snapshots, tid).map(render)
+        Self::find_snapshot(&snapshots, tid)
+            .map(render)
+            .ok_or(Error::FileNotFound)
     }
 
     /// One line per VMA: the address range, its protection, the size asked for
@@ -419,15 +509,16 @@ impl Procfs {
     /// Rendered straight from the thread rather than from a `ThreadSnapshot`,
     /// because every other `/proc` reader would then pay for a page-table walk
     /// per mapping to build a field nothing else uses.
-    fn render_maps(tid: u64) -> Option<String> {
+    fn render_maps(tid: u64) -> Result<String, Error> {
         let thread = list_threads()
             .into_iter()
-            .find(|thread| thread.id.0 == tid)?;
+            .find(|thread| thread.id.0 == tid)
+            .ok_or(Error::FileNotFound)?;
         let mut out = String::from("START-END PERM SIZEKIB RSSKIB BACKING\n");
         // A kernel thread has no address space of its own; the file exists so
         // readers need not special-case it, and lists nothing.
         let Some(user_arc) = thread.user.as_ref() else {
-            return Some(out);
+            return Ok(out);
         };
         let user = user_arc.read();
 
@@ -456,7 +547,7 @@ impl Procfs {
                 (end - start) / 1024
             );
         }
-        Some(out)
+        Ok(out)
     }
 
     /// `/proc/<tid>/fd`: the thread's open descriptors, one per line.
@@ -466,24 +557,39 @@ impl Procfs {
     /// PTY side and a socket have no name in the filesystem, and the fields
     /// that identify them (the shared object's address, the connection's
     /// endpoints) do not fit in a link target.
-    fn render_fds(tid: u64) -> Option<String> {
+    fn render_fds(tid: u64) -> Result<String, Error> {
         let thread = list_threads()
             .into_iter()
-            .find(|thread| thread.id.0 == tid)?;
+            .find(|thread| thread.id.0 == tid)
+            .ok_or(Error::FileNotFound)?;
         let mut out = String::from("FD TYPE MODE POS NAME\n");
         // A kernel thread owns no descriptor table; the file exists so readers
         // need not special-case it, and lists nothing.
         if thread.user.is_none() {
-            return Some(out);
+            return Ok(out);
         }
 
         // The table handle leaves the thread-info spinlock before it is
         // locked: that lock runs with interrupts off, and the table is a
         // BlockingMutex whose contended acquisition parks.
+        //
+        // The acquisition is a bounded spin on `try_lock` rather than `lock`,
+        // because a thread reading its own `/proc/<tid>/fd` can already hold
+        // this lock further up the syscall path and would deadlock on itself.
+        // Losing the race is `Busy`, not `FileNotFound`: a contended descriptor
+        // table is not a thread that has exited, and telling a reader the file
+        // does not exist is a lie it cannot distinguish from the real thing.
         let table = {
-            let info = get_thread_info_by_id(thread.id)?;
-            let guard = info.try_lock()?;
-            guard.fd_table.clone()
+            let info = get_thread_info_by_id(thread.id).ok_or(Error::FileNotFound)?;
+            let mut acquired = None;
+            for _ in 0..FD_TABLE_LOCK_SPINS {
+                if let Some(guard) = info.try_lock() {
+                    acquired = Some(guard.fd_table.clone());
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            acquired.ok_or(Error::Busy)?
         };
 
         // Cloned out under the table lock and rendered after it is released:
@@ -499,7 +605,7 @@ impl Procfs {
             let (kind, mode, pos, name) = describe_descriptor(&descriptor);
             let _ = writeln!(out, "{fd} {kind} {mode} {pos} {name}");
         }
-        Some(out)
+        Ok(out)
     }
 
     fn resolve_path(path: &Path) -> Result<ProcNode, Error> {
@@ -591,7 +697,7 @@ impl FileSystem for Procfs {
                 Ok(Self::read_text(content, offset, count))
             }
             ProcNode::ProcessFile(tid, index) => {
-                let content = PROCESS_FILES[index].1(tid).ok_or(Error::FileNotFound)?;
+                let content = PROCESS_FILES[index].1(tid)?;
                 Ok(Self::read_text(content, offset, count))
             }
             ProcNode::Root | ProcNode::ProcessDir(_) => Err(Error::NotAFile),
@@ -636,7 +742,7 @@ impl FileSystem for Procfs {
             }
             ProcNode::ProcessFile(tid, index) => {
                 let (name, render) = PROCESS_FILES[index];
-                let content = render(tid).ok_or(Error::FileNotFound)?;
+                let content = render(tid)?;
                 Ok(Self::file_entry(name.to_string(), content.len()))
             }
         }
@@ -1038,11 +1144,17 @@ enum ProcNode {
     ProcessFile(u64, usize),
 }
 
+/// How long a `/proc/<tid>/fd` read spins for the thread-info lock before it
+/// gives up with `Busy`. The lock is held for a handful of instructions
+/// everywhere it is taken, so this is orders of magnitude more than enough and
+/// still bounded for the self-inspection case, which can never win it.
+const FD_TABLE_LOCK_SPINS: u32 = 1024;
+
 /// The files under `/proc/<tid>/`, each rendered on demand for that thread.
-/// `None` means the thread is gone between lookup and read.
+/// `FileNotFound` means the thread went away between lookup and read.
 ///
 /// A table for the same reason `GLOBAL_FILES` is one.
-const PROCESS_FILES: &[(&str, fn(u64) -> Option<String>)] = &[
+const PROCESS_FILES: &[(&str, fn(u64) -> Result<String, Error>)] = &[
     ("status", |tid| {
         Procfs::with_snapshot(tid, ThreadSnapshot::status_text)
     }),
@@ -1063,6 +1175,7 @@ const GLOBAL_FILES: &[(&str, fn() -> String)] = &[
         Procfs::render_process_table(&Procfs::collect_snapshots())
     }),
     ("meminfo", Procfs::render_meminfo),
+    ("cpuinfo", Procfs::render_cpuinfo),
     ("block_cache", Procfs::render_block_cache),
     ("evict_stats", Procfs::render_evict_stats),
     ("efs_stats", Procfs::render_efs_stats),

@@ -15,7 +15,7 @@ use crate::{
         ipv4,
         socket::{
             AF_INET, SOCK_DGRAM, SOCK_STREAM, Socket, SocketAddr, SocketState,
-            allocate_ephemeral_port, port_table,
+            allocate_ephemeral_port, port_table, unbind_port,
         },
         stack::net_stack,
         tcp::{TcpConnection, TcpState},
@@ -597,6 +597,14 @@ pub fn sys_listen(fd: u64, backlog: u32) -> u64 {
 
     let mut s = ranked_lock!(RANK_SOCKET, "sys_listen", sock_arc);
     if s.closed {
+        drop(s);
+        // A close that landed in the window above ran its own unbind before
+        // the entry existed, so nothing else will ever remove it: the port
+        // would stay bound to a dead socket, `sys_bind` would refuse it, and
+        // an arriving SYN would find a listener that is not listening.
+        if let Some(local_addr) = local_addr {
+            unbind_port(&sock_arc, (6u8, local_addr.port));
+        }
         info.lock().errno = Errno::EBADF;
         return !0u64;
     }
