@@ -132,6 +132,15 @@
   submit-then-wait, so nothing ever asks for depth. The fix it names is giving
   readahead and writeback a path that keeps commands outstanding.
 
+- `sched-test` fails intermittently: `ping-pong count mismatch: 499 != 500` at
+  `thread/sched_test.rs:383`, once in three runs of `make test-headless` on
+  2026-08-11. One park/wake round out of 500 goes missing between `test_ping`
+  and `test_pong`, and the suite then times out at 48/50 because both threads
+  are parked. A single clean run proves nothing here; loop the suite. The
+  wakes are `wake_tid` from a thread that has just been woken itself, so the
+  window to look at is a waker publishing `wake_pending` against a parker that
+  is between its last condition check and its CAS to `Parked`.
+
 - Context switch cost, the top item for the next round, now measured rather
   than guessed. `switchbench` on a single-CPU boot and `/proc/sched_prof`
   (`--features sched-prof`) put one switch at 1270 ns, of which:
