@@ -29,47 +29,49 @@ suspended for a minute returns as soon as it is continued.
 `sys_sleep_ms` needs no equivalent change; it does not loop, so its single early
 return already reaches the syscall boundary where the stop is taken.
 
-### The fix is necessary but not sufficient: the guest still sleeps the full 30 s
+### The second half: `stop_if_signalled` parked once and the wake token ate it
 
-Driven in the guest against the kernel that carries the change (the ISO was
-rebuilt from `85f2a5c`; `make run-headless` reported both crates already up to
-date, so the running binary is that commit):
+With only that change the guest still waited the full 30 s. Instrumenting the
+signal path settled it in one boot. Serial log, `sleep 30` interrupted at t = 2 s:
 
 ```
-/ $ sleep 30
-^Z                       <- t = 1 s, echoed by the line discipline
-echo BACK                <- typed at t = 2 s, only the PTY echo appears
-                            no shell prompt, nothing runs
-
-[1]+ Stopped    sleep 30 <- t = 30 s, when the deadline passed
-/ $ echo BACK
-BACK
+[25.599102] signal_process_group pgid=27 signum=20 members=[27]
+[25.599104] kill pid=27 signum=20 state=Ready woke=true
+[25.607726] nanosleep tid=27 woke, stop_requested=true
+[25.607730] nanosleep tid=27 sleeping 27940 ms
 ```
 
-So Ctrl+Z is **still** a 30-second wait, and the item is not closed. What the
-run does establish:
+Every layer worked: the line discipline signalled the right process group, the
+default action set `stop_requested`, the wake claimed the sleeper, and the
+nanosleep loop ran `stop_if_signalled` 8 ms later with the flag set. Four
+microseconds later it was sleeping again — so the park inside
+`stop_if_signalled` returned without ever parking.
 
-- The stop is genuinely recorded, and by the nanosleep loop: `stop_requested`
-  was set at the keypress and `stop_if_signalled` ran, since the shell's
-  `waitpid(WUNTRACED)` only reports `Stopped` off the `EXITED_THREADS`
-  wake that `stop_if_signalled` posts. It just ran at the deadline instead of
-  at the keypress.
-- `/bin/sleep` really is on this path. `std::thread::sleep` reaches
-  `edos_rt::process::nanosleep` (`library/std/src/sys/thread/edos.rs`), which
-  is `SYS_NANOSLEEP`, not `SYS_SLEEP_MS`.
+`thread_park_while` documents exactly this: it **may return spuriously**, because
+`transition_park_while` consumes the wake-pending token and bails when it finds
+one, and it deliberately does not loop internally (looping would re-park without
+re-enrolling on a wait queue, which breaks the wait-queue protocols). The token
+here is the one `do_wake` published to deliver the signal: `try_wake` claims a
+`Sleeping` thread through the state machine and never clears it, so it survives
+into the *next* park the thread attempts. `stop_if_signalled` called
+`thread_park_while` exactly once, so that stale token turned the suspension into
+a no-op and the syscall resumed.
 
-Ruled out, so do not re-derive them: a stale ISO, the wrong syscall, and the
-loop lacking a `stop_if_signalled` call.
+The fix loops on the condition around the park, which is what every other
+`thread_park_while` caller in the tree already does (they are all bodies of
+kthread `loop`s). `stop_if_signalled` enrolls on no wait queue, so re-parking is
+safe there.
 
-What is left is the wake itself: the sleeping thread does not leave
-`thread_sleep` when the signal arrives, so the loop only reaches
-`stop_if_signalled` when the deadline expires. `kill_process_with_signal` does
-call `wake_thread` after `apply_default_action`, and `wake_thread` claims a
-`Sleeping` thread through `try_wake`, so the next step is to instrument which of
-those two is not happening — whether `signal_process_group` matched the sleeper
-at all, and whether `transition_sleep` honours the wake token or re-arms to the
-deadline. Instrument before changing anything: the previous mechanism on record
-for this symptom was wrong twice.
+Verified in the guest: Ctrl+Z on `sleep 30` returns the prompt at once and the
+next command runs, while an unsignalled `sleep 5` still takes its five seconds.
+
+Ruled out along the way, so do not re-derive them: a stale ISO, the wrong
+syscall, the loop lacking a `stop_if_signalled` call, `signal_process_group`
+failing to match, and the wake failing to reach the sleeper.
+
+**Generalisation worth carrying:** a stale wake token is left behind by every
+wake that ends a sleep or a park, so any *single* `thread_park_while` call is a
+latent no-op. Treat the one-shot call as the bug, not the token.
 
 ---
 

@@ -1407,9 +1407,19 @@ pub fn stop_if_signalled() {
     let watched = thread.clone();
     // A kill outranks a stop: SIGKILL must reach a suspended process, so the
     // park ends for that too and the caller's `exit_if_killed` finishes it.
-    thread_park_while(|| {
-        watched.stop_requested.load(Ordering::Acquire) && !watched.killed.load(Ordering::Acquire)
-    });
+    //
+    // `thread_park_while` may return without having parked at all — the wake
+    // that carried the signal here leaves its wake-pending token set, and the
+    // transition consumes that token and declines to park. Only the loop makes
+    // the suspension actually happen; a single call turns Ctrl+Z on a sleeping
+    // process into a no-op that resumes the syscall.
+    while watched.stop_requested.load(Ordering::Acquire) && !watched.killed.load(Ordering::Acquire)
+    {
+        thread_park_while(|| {
+            watched.stop_requested.load(Ordering::Acquire)
+                && !watched.killed.load(Ordering::Acquire)
+        });
+    }
     thread.stopped.store(false, Ordering::Release);
 }
 
