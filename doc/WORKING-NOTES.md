@@ -80,8 +80,19 @@ would not.** Do not read ~4900 ns as a kernel figure, and do not chase the ratio
 between it and the thread case as a defect. What is left to attack is the 1968
 ns, where ~600 ns is still unaccounted -- see `doc/SCHED-ROADMAP.md` item 1.
 
-Two changes came out of the hunt:
+Three changes came out of the hunt.
 
+- **The kernel half was only global for what existed at boot**, and that is 28%
+  of an address-space switch. `mark_kernel_mappings_global` sweeps once at boot;
+  everything mapped into the kernel half afterwards was non-global, including a
+  thread's kernel stack and the per-CPU scheduler stack the voluntary switch
+  pivots onto -- the two regions every syscall and every switch touch. They died
+  on every `CR3` write and were re-walked, nested. `map_memory` now sets
+  `GLOBAL` on any kernel-half mapping itself, so the next site cannot forget.
+  A cross-process `sched_yield` handover: **506 -> 456 ns**, of which the
+  address-space part went **177 -> 128**. The two controls did not move (thread
+  handover 328, same-address-space round trip 1968 -> 1979), which is exactly
+  what a fix to post-`CR3` refills should look like.
 - **A read that moves no bytes notifies nobody.** The blocking read's first
   attempt finds the pipe empty and used to build a poll state, clone the reader
   wait queue and wake it, reporting the state the pipe already had. 1994 -> 1968

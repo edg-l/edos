@@ -139,6 +139,36 @@ What is actually left to attack, in order:
 3. **Huge pages for user text and data**, which would cut the number of entries
    a flush discards. Large change, and worth pricing only after 1.
 
+### Done: the kernel half was only global for what existed at boot (2026-08-11)
+
+**An address-space switch costs 28% less than it did**, and this is the first
+thing on this list to move the number the gap is made of.
+
+`mark_kernel_mappings_global` is a one-time sweep of the kernel half at boot.
+Anything mapped into the kernel half *after* that sweep was not global -- and
+that covered the two regions every syscall and every switch touch: a thread's
+kernel stack (`kthread_stack_alloc`, 32 KiB per thread) and the per-CPU
+scheduler stack that every voluntary switch pivots onto. Both died on every
+`CR3` write and were re-walked, nested, on the way back.
+
+`MemoryManager::map_memory` now adds `GLOBAL` to any kernel-half mapping
+itself, so the next site cannot forget it. Measured, four clean runs:
+
+| | before | after |
+|---|---|---|
+| `sched_yield` handover to another process | 506 ns | **456** |
+| of which the address-space switch | 177 | **128** |
+| the same handover between threads (control) | 328 | 328 |
+| a blocking round trip, one address space (control) | 1968 | 1979 |
+
+The two controls are the point: only the cases that reload `CR3` moved, which
+is what a fix to post-`CR3` refills must look like. Freed kernel stacks keep
+their mapping (`kthread_stack_free` returns the region to a freelist and reuse
+hands back the same virtual address over the same frames), so no global entry
+outlives what it maps; where a kernel mapping *is* torn down, `Mapper::unmap`'s
+flush is an `invlpg` and `tlb_shootdown` either issues `invlpg` per page or
+toggles `CR4.PGE`, and both ignore the `G` bit.
+
 ### Done: `notify_pollers` on a read that moved nothing (2026-08-11)
 
 The blocking read's first attempt finds the pipe empty, and then built a poll

@@ -85,6 +85,31 @@ pub struct MemoryManager {
     released: bool,
 }
 
+/// The kernel half starts here: every address at or above it is kernel-owned
+/// and mapped identically in every address space, which is exactly what the
+/// `GLOBAL` bit asserts.
+const KERNEL_HALF_START: u64 = 0xFFFF_8000_0000_0000;
+
+/// Add `GLOBAL` to a kernel-half mapping, so a `CR3` reload keeps it.
+///
+/// `mark_kernel_mappings_global` sweeps the kernel half once at boot, and
+/// anything mapped after that sweep would otherwise be non-global -- which
+/// covered the two regions every syscall and every switch touch: a thread's
+/// kernel stack (`kthread_stack_alloc`) and the per-CPU scheduler stack the
+/// voluntary switch pivots onto. Doing it here rather than at the call sites is
+/// what stops the next kernel-half mapping from forgetting.
+///
+/// Unmapping a global entry needs explicit invalidation, and it gets it:
+/// `Mapper::unmap`'s flush is an `invlpg`, which ignores the `G` bit, and
+/// `tlb_shootdown` either issues `invlpg` per page or toggles `CR4.PGE`.
+fn with_global_if_kernel(addr: VirtAddr, flags: PageTableFlags) -> PageTableFlags {
+    if addr.as_u64() >= KERNEL_HALF_START && !flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+        flags | PageTableFlags::GLOBAL
+    } else {
+        flags
+    }
+}
+
 #[expect(unused)]
 impl MemoryManager {
     pub fn new(page_table: OffsetPageTable<'static>) -> Self {
@@ -112,6 +137,8 @@ impl MemoryManager {
     }
 
     /// Maps memory, the default flag is PRESENT, use extra flags for more.
+    ///
+    /// A kernel-half mapping is made `GLOBAL`; see [`with_global_if_kernel`].
     pub fn map_memory(
         &mut self,
         addr: VirtAddr,
@@ -120,7 +147,7 @@ impl MemoryManager {
     ) -> Result<PageRangeInclusive<Size4KiB>, MapToError<Size4KiB>> {
         let page_range = get_page_range(addr, size);
 
-        let flags = PageTableFlags::PRESENT | extra_flags;
+        let flags = with_global_if_kernel(addr, PageTableFlags::PRESENT | extra_flags);
         {
             let mut frame_allocator = frame_allocator();
 
@@ -148,7 +175,7 @@ impl MemoryManager {
     ) -> Result<PageRangeInclusive<Size4KiB>, MapToError<Size4KiB>> {
         let page_range = get_page_range(addr, size);
 
-        let flags = PageTableFlags::PRESENT | extra_flags;
+        let flags = with_global_if_kernel(addr, PageTableFlags::PRESENT | extra_flags);
         {
             let mut frame_allocator = frame_allocator();
             let frame = frame_allocator
