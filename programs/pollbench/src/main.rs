@@ -230,7 +230,10 @@ fn main() {
             out.line("pollbench: a ready descriptor did not report readable");
             std::process::exit(1);
         }
-        if idle_fds.iter().any(|f| f.result.readable || f.result.invalid) {
+        if idle_fds
+            .iter()
+            .any(|f| f.result.readable || f.result.invalid)
+        {
             out.line("pollbench: an idle descriptor reported ready or invalid");
             std::process::exit(1);
         }

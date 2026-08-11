@@ -69,7 +69,8 @@ fn check_parallelism() -> Result<(), String> {
 
 fn check_dev_null() -> Result<(), String> {
     let mut sink = File::create("/dev/null").map_err(|e| format!("open: {e}"))?;
-    sink.write_all(b"discarded").map_err(|e| format!("write: {e}"))?;
+    sink.write_all(b"discarded")
+        .map_err(|e| format!("write: {e}"))?;
 
     let mut source = File::open("/dev/null").map_err(|e| format!("open for read: {e}"))?;
     let mut buf = [0u8; 16];
