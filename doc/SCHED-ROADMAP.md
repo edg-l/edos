@@ -29,7 +29,8 @@ scripts/edos-vm type 'cat /proc/sched_prof > /tmp/b.txt; switchbench 20000 -l; \
 | `sched_yield`, handover to another process | 751-822 |
 | the switch itself, `/proc/sched_prof` | 220 |
 | a wake (`do_wake`) | 51 |
-| **a pipe write + read, nothing blocking** | **1153** |
+| `getpid`, i.e. a syscall that does nothing | 96-302 |
+| a pipe write + read, nothing blocking | 530-2090 |
 | a blocking pipe round trip between two processes | 4552-6720 |
 
 Inside the 220 ns switch: `page` 66-77, `fxrstor` + `fxsave` 91, `CpuContext`
@@ -62,11 +63,10 @@ What that leaves trustworthy:
   anything, and the figures in the table above were not all taken that way.
 
 **The switch is no longer the expensive part, and neither is the wake.** A
-wake is 51 ns. What a real IPC pays is the pipe's own data path — 1153 ns to
-move one byte through `write` and `read` with no scheduling involved at all.
-Item 2 is that, and it replaces an earlier draft of this doc that blamed the
-wake path on the strength of a subtraction; the correction is written out
-there because the reasoning error is easy to repeat.
+wake is 51 ns and a whole round trip's pipe work is about 190. What is left is
+the syscall boundary, which every call in the system pays — but see item 2:
+the wall-clock spread on `getpid` is wide enough that the size of that term is
+not yet established, only its rank.
 
 ## 1. A voluntary switch does not need a register frame or an `iretq`
 
@@ -107,11 +107,11 @@ remainder of a round trip to the wake. Measuring the wake directly refuted it:
 | `wake` (all of `do_wake`) | 51 |
 | of which `wake_enqueue` | 32 |
 | `pick` | 16 |
-| a pipe write + read with **nothing blocking** | **1153** |
-| a blocking pipe round trip between two processes | 6720 |
+| the pipe's own work, per round trip, summed from its stages | ~190 |
 
-The scheduler's part of an IPC is about 100 ns. A direct handoff would remove
-some of that and some scheduling latency, and it is not where the time is.
+The scheduler's part of an IPC is about 100 ns and the pipe's is about 190. A
+direct handoff would remove some of the first, and neither is where a round
+trip's microseconds go.
 
 Where it is **not**, on the evidence: the pipe's own data structures. Per call,
 from `/proc/sched_prof` — the trustworthy instrument here — `pipe_copy_in` is

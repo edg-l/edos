@@ -309,8 +309,20 @@ FILESYSTEM_SERIAL := 305419896
 # the tree really changed. Its recipe therefore runs on every invocation while
 # its timestamp moves only on a real change, which is what lets the images stay
 # up to date without rebuilding the persistent sata-disk.img every time.
+#
+# `filesystem/boot` is excluded, and that exclusion is what makes the guard
+# work at all. The live-root recipe writes the stripped kernel to
+# filesystem/boot/kernel on every build -- `kernel` is phony, so it always
+# runs -- and the manifest records mtimes, so including it changed the manifest
+# every single time and rebuilt the 5 GB sata-disk.img on every kernel edit,
+# `make test` included. Nothing boots from the disk's copy of /boot: the run
+# targets boot the ISO, which carries its own. An installed system built by
+# `edos-install` gets its boot files from the ISO too, so the only cost of the
+# exclusion is that a stale kernel can sit in sata-disk.img's /boot, where
+# nothing reads it.
 define update-manifest
 find filesystem -type f ! -name '*.rlib' ! -name '*.a' ! -name '.manifest*' \
+	! -path 'filesystem/boot/*' \
 	-printf '%T@ %s %p\n' | sort > filesystem/.manifest.new; \
 cmp -s filesystem/.manifest.new filesystem/.manifest \
 	|| mv -f filesystem/.manifest.new filesystem/.manifest; \
@@ -324,7 +336,11 @@ filesystem/.manifest: filesystem programs
 # image, so the kernel discovers it exactly like a real disk. Sized from the
 # populated tree rather than hard-coded, because it is resident in RAM for the
 # whole boot.
-live-root.img: kernel limine/limine filesystem/.manifest tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
+# `kernel` is order-only so cargo always gets a chance to run, while the real
+# prerequisite is the binary it produces. Depending on the phony target
+# directly rebuilt this image -- objcopy, a du of the whole tree and an
+# efs-mkfs -- on every invocation, including ones where cargo had nothing to do.
+live-root.img: kernel/kernel limine/limine filesystem/.manifest tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs | kernel
 	mkdir -p filesystem/boot
 	# Stripped: this copy is only ever loaded, never symbolized. Debug info
 	# stays in kernel/kernel, which is what addr2line reads. 40 MB -> 2.5 MB,
