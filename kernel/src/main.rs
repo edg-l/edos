@@ -99,6 +99,10 @@ fn init() {
     // Pins the RTC reading to the monotonic counter; every later wall-clock
     // answer derives from this one sample.
     timer::init_wall_clock();
+    // Before the APs, so each comes up with the bits already set and only has
+    // to enable PGE for itself.
+    memory::mark_kernel_mappings_global();
+    memory::enable_pge();
     smp::init();
     // Enable per-CPU cache globally only after all APs have their GS base set.
     // APs allocate (Box::new for PerCpuData) during init_gs_for_this_cpu before

@@ -151,6 +151,83 @@ fn walk_page_table(
     }
 }
 
+/// Mark every kernel-half leaf mapping `GLOBAL`, so a `CR3` reload keeps it.
+///
+/// A `CR3` write drops every non-global translation, and the kernel half is
+/// the same in every address space — the same page tables, reached through
+/// PML4 entries copied from the kernel's. Switching between two processes
+/// therefore threw away the kernel's own translations along with the outgoing
+/// process's, and every one of them was re-walked on the next syscall. The
+/// `G` bit says "this one is not part of any address space", which is exactly
+/// true here and is what the bit is for.
+///
+/// This is what PCID would otherwise buy on the kernel side. It is not a
+/// substitute for PCID on the *user* side: a process's own translations are
+/// genuinely per-address-space and still go.
+///
+/// Must run before [`enable_pge`] takes effect anywhere, though not urgently:
+/// `G` is ignored while `CR4.PGE` is clear, and an entry cached before its bit
+/// was set is simply re-walked after the next reload.
+pub fn mark_kernel_mappings_global() {
+    use x86_64::registers::control::Cr3;
+
+    let phys_off = boot_info().physical_memory_offset;
+    let cr3_phys = Cr3::read().0.start_address();
+    let pml4 = unsafe { &mut *(phys_off + cr3_phys.as_u64()).as_mut_ptr::<PageTable>() };
+
+    let mut marked = 0u64;
+    // The whole higher half. Every entry in it is kernel-owned: user mappings
+    // live below 0x0000_8000_0000_0000 and never reach index 256.
+    for i in 256..512 {
+        let entry = &mut pml4[i];
+        if !entry.flags().contains(PageTableFlags::PRESENT) {
+            continue;
+        }
+        mark_global(entry, 3, phys_off, &mut marked);
+    }
+
+    // Nothing is cached as global yet; make the CPU re-walk so it starts
+    // seeing the bits set above.
+    crate::smp::tlb_flush_all_including_global();
+    crate::println!("mark_kernel_mappings_global: {marked} kernel-half leaves");
+}
+
+/// Set `GLOBAL` on every leaf under `parent_entry`. `level` = 3 / 2 / 1.
+fn mark_global(
+    parent_entry: &mut x86_64::structures::paging::page_table::PageTableEntry,
+    level: u8,
+    phys_off: VirtAddr,
+    marked: &mut u64,
+) {
+    let table_virt = phys_off + parent_entry.addr().as_u64();
+    let table = unsafe { &mut *table_virt.as_mut_ptr::<PageTable>() };
+
+    for entry in table.iter_mut() {
+        let flags = entry.flags();
+        if !flags.contains(PageTableFlags::PRESENT) {
+            continue;
+        }
+        // `GLOBAL` means nothing on a table entry, so only leaves are touched.
+        if level == 1 || flags.contains(PageTableFlags::HUGE_PAGE) {
+            if !flags.contains(PageTableFlags::GLOBAL) {
+                entry.set_flags(flags | PageTableFlags::GLOBAL);
+                *marked += 1;
+            }
+        } else {
+            mark_global(entry, level - 1, phys_off, marked);
+        }
+    }
+}
+
+/// Enable `CR4.PGE`, which is what makes the `G` bit mean anything. Per-CPU.
+pub fn enable_pge() {
+    use x86_64::registers::control::{Cr4, Cr4Flags};
+
+    let mut cr4 = Cr4::read();
+    cr4.insert(Cr4Flags::PAGE_GLOBAL);
+    unsafe { Cr4::write(cr4) };
+}
+
 /// Get the virtual address from the given physical address
 ///
 /// This may not be mapped! check with translate

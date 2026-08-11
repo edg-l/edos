@@ -134,6 +134,10 @@ pub unsafe extern "C" fn ap_start(cpu: &MpInfo) -> ! {
 
     unsafe { fpu::init_fpu() };
 
+    // The G bits on the kernel half were set by the BSP before this CPU
+    // started; PGE is per-CPU, so honouring them is this CPU's own business.
+    crate::memory::enable_pge();
+
     thread::scheduler::init();
 
     crate::allocator::enable_percpu_cache();

@@ -1983,8 +1983,10 @@ impl Eq for SleepEntry {}
 pub fn switch_to_kernel_page() {
     let kernel_cr3 = boot_info().cr3;
     if Cr3::read().0.start_address() != kernel_cr3.0.start_address() {
-        // Cr3::write flushes all non-global TLB entries. Kernel mappings
-        // don't use GLOBAL, so they are all refreshed by this write.
+        // Drops every non-global translation. Kernel-half mappings are marked
+        // GLOBAL (`memory::mark_kernel_mappings_global`) and survive, which is
+        // the point: they are identical in the space being left and the one
+        // being entered.
         unsafe { Cr3::write(kernel_cr3.0, kernel_cr3.1) };
     }
 }
