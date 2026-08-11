@@ -72,6 +72,10 @@
   Both point at a lost or late wakeup on the pong side rather than at the
   counter. Catch the failing run's full log before chasing it; the counter and
   the missing PASS line are the only evidence printed today.
+  2026-08-11: it failed TWICE in a row (count mismatch, then TIMEOUT 48/50)
+  before the third run passed, so "an immediate re-run passes" is not reliable
+  as a discriminator. Judge a suspected regression by whether the changed code
+  is reachable from the scheduler at all, not by one re-run.
 
 
 - fg resumes a job but /proc still shows the process Stopped afterwards.
@@ -95,7 +99,9 @@
   CSI state plus the two arms.
 
 - The TCP accept queue still has no timeout on an entry that never reaches
-  Connected. A retransmitted SYN no longer multiplies them — the SYN path in
+  Connected. Visible now: `netstat -a` in the guest lists the stranded entry as
+  `SYN_RECV` with one unacknowledged byte, and it never leaves the list.
+  A retransmitted SYN no longer multiplies them — the SYN path in
   kernel/src/net/stack.rs now drops the half-open entry left by the same peer
   address and port before starting the handshake again — but a peer that opens
   one connection and vanishes still holds its backlog slot until the listener
@@ -103,7 +109,8 @@
   completed-connection backlog.
 - An outbound segment is dropped when the ARP cache misses (send_ip returns
   Err("arp pending"), kernel/src/net/stack.rs) and nothing retries it, so the
-  first inbound connection after boot is lost: the SYN-ACK never goes out. A
+  first inbound connection after boot is lost: the SYN-ACK never goes out.
+  `netstat -a` shows the casualty as a `SYN_RECV` row with Send-Q 1. A
   one-slot pending-transmit queue per ARP request would fix it.
 
 - A process's arguments are not recorded anywhere, so nothing in userspace can

@@ -186,6 +186,25 @@ pub enum TcpState {
     TimeWait,
 }
 
+impl TcpState {
+    /// The RFC 793 name of the state, as `netstat` reports it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Closed => "CLOSED",
+            Self::Listen => "LISTEN",
+            Self::SynSent => "SYN_SENT",
+            Self::SynReceived => "SYN_RECV",
+            Self::Established => "ESTABLISHED",
+            Self::FinWait1 => "FIN_WAIT1",
+            Self::FinWait2 => "FIN_WAIT2",
+            Self::CloseWait => "CLOSE_WAIT",
+            Self::Closing => "CLOSING",
+            Self::LastAck => "LAST_ACK",
+            Self::TimeWait => "TIME_WAIT",
+        }
+    }
+}
+
 /// Retransmit timeout bounds and smoothing constants, RFC 6298 section 2.
 ///
 /// The 200 ms floor is below the 1 s the RFC suggests: this stack is used on a

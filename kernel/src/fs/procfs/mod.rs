@@ -316,6 +316,85 @@ impl Procfs {
         out
     }
 
+    /// Every TCP connection the stack is tracking, then every port-table
+    /// binding that has no connection of its own: listening TCP sockets and
+    /// bound UDP ports.
+    ///
+    /// `RECVQ` is what has arrived and not been read yet; `SENDQ` is what has
+    /// been sent and not acknowledged. A connection appears here for as long
+    /// as the stack tracks it, so a `TIME_WAIT` with no descriptor left still
+    /// shows, which is the whole reason a connection list is not derivable
+    /// from `/proc/<tid>/fd`.
+    ///
+    /// This is `/proc/sockets` and not `/proc/net/tcp`: `/proc/net` is already
+    /// a file, and procfs has no directories other than one per thread.
+    fn render_sockets() -> String {
+        use crate::{
+            debug::lock_order::{RANK_NET_STACK, RANK_PORT_TABLE, RANK_TCP_CONN},
+            net::{socket::port_table, stack::NET_STACK},
+        };
+
+        let mut out = String::from("PROTO RECVQ SENDQ LOCAL FOREIGN STATE\n");
+
+        // Both tables are snapshotted and released before any socket or
+        // connection is locked. The receive path takes NET_STACK (240) and
+        // PORT_TABLE (250) above Socket (260) and TcpConnection (270), so
+        // holding either across the object it dispatches to is legal by rank
+        // but pins the whole stack behind one `cat`.
+        let connections = match NET_STACK.get() {
+            Some(stack) => {
+                let stack = ranked_lock!(RANK_NET_STACK, "procfs::sockets", stack);
+                stack.tcp_connections.values().cloned().collect::<Vec<_>>()
+            }
+            None => Vec::new(),
+        };
+        let bound = {
+            let table = ranked_lock!(RANK_PORT_TABLE, "procfs::sockets", port_table());
+            table.values().cloned().collect::<Vec<_>>()
+        };
+
+        for connection in connections {
+            let connection = ranked_lock!(RANK_TCP_CONN, "procfs::sockets", connection);
+            let _ = writeln!(
+                out,
+                "tcp {} {} {} {} {}",
+                connection.rx_buffer.len(),
+                connection.snd_nxt.wrapping_sub(connection.snd_una),
+                display_endpoint(connection.local_ip, connection.local_port),
+                display_endpoint(connection.remote_ip, connection.remote_port),
+                connection.state.name()
+            );
+        }
+
+        for socket in bound {
+            let socket = ranked_lock!(RANK_SOCKET, "procfs::sockets", socket);
+            // A connected TCP socket is already listed from the connection
+            // table, which knows its sequence space; only bindings without one
+            // are left to report.
+            if socket.sock_type == SOCK_STREAM && socket.tcp_conn.is_some() {
+                continue;
+            }
+            let (proto, state) = if socket.sock_type == SOCK_STREAM {
+                ("tcp", if socket.listening { "LISTEN" } else { "BOUND" })
+            } else {
+                ("udp", "-")
+            };
+            let _ = writeln!(
+                out,
+                "{proto} {} 0 {} {} {state}",
+                socket
+                    .rx_queue
+                    .iter()
+                    .map(|(data, _)| data.len())
+                    .sum::<usize>(),
+                display_socket_addr(socket.local_addr),
+                display_socket_addr(socket.remote_addr)
+            );
+        }
+
+        out
+    }
+
     fn render_lock_order_stats() -> String {
         use crate::debug::lock_order::{LOCK_ORDER_INVERSIONS, MAX_RANK_DEPTH};
         use core::sync::atomic::Ordering;
@@ -929,6 +1008,10 @@ fn describe_descriptor(descriptor: &FileDescriptor) -> (&'static str, &'static s
     }
 }
 
+fn display_endpoint(ip: [u8; 4], port: u16) -> String {
+    format!("{}.{}.{}.{}:{}", ip[0], ip[1], ip[2], ip[3], port)
+}
+
 fn display_socket_addr(addr: Option<SocketAddr>) -> String {
     match addr {
         Some(addr) => format!(
@@ -988,5 +1071,6 @@ const GLOBAL_FILES: &[(&str, fn() -> String)] = &[
     ("ahci_stats", Procfs::render_ahci_stats),
     ("windows", Procfs::render_windows),
     ("net", Procfs::render_net),
+    ("sockets", Procfs::render_sockets),
     ("syscalls", crate::syscalls::trace::render_syscall_table),
 ];

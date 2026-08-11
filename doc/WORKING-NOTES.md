@@ -1849,10 +1849,12 @@ slot.
   `scripts/edos-vm`, so moving the panel no longer silently misaims every
   scripted click. A minimized window still has no geometry to click: `press
   <title>` hits its task button, which restores it.
-- **The sched-test suite has a known flake with two signatures**, both on a
-  first run: `ping-pong count mismatch: 499 != 500`, and 48/49 TIMEOUT with
-  ping-pong-pong never reporting. An immediate re-run passes. Recorded in
-  `todo.txt`; it points at a lost or late wakeup, and it has never been chased.
+- **The sched-test suite has a known flake with two signatures**: `ping-pong
+  count mismatch: 499 != 500`, and a TIMEOUT with ping-pong-pong never
+  reporting. It has been seen to fail **twice in a row** before passing, so a
+  single clean re-run is weak evidence either way; weigh whether the changed
+  code is reachable from the scheduler at all. Recorded in `todo.txt`; it
+  points at a lost or late wakeup, and it has never been chased.
 
 ## The shell can redirect any of the three standard descriptors now
 
@@ -2678,3 +2680,53 @@ all 200, the 657212-byte font byte-identical each time.
 - **`httpd` answers one request per connection** (`Connection: close`), so it
   needs no idle timeout and keep-alive is not implemented. A client that opens
   a connection and sends nothing holds a thread until it goes away.
+
+## `netstat`, and the socket list `/proc/<tid>/fd` cannot give (2026-08-11)
+
+`/proc/sockets` is the connection table: every entry in `NetStack.tcp_connections`,
+then every `PORT_TABLE` binding that has no connection of its own, as
+`PROTO RECVQ SENDQ LOCAL FOREIGN STATE`. `RECVQ` is what has arrived and not
+been read, `SENDQ` is `snd_nxt - snd_una`, what has been sent and not
+acknowledged.
+
+It is deliberately not derivable from `/proc/<tid>/fd`, which `lsof` reads. A
+connection outlives the descriptor that made it: a `TIME_WAIT`, a `FIN_WAIT2`
+or a stranded `SYN_RECV` belongs to no process at all, and those are exactly
+the states worth looking at when a port cannot be bound again. The two files
+answer different questions and both are needed.
+
+The file is `/proc/sockets` rather than the `/proc/net/tcp` the roadmap
+suggested, because `/proc/net` is already a file — the panel's network
+indicator parses it — and procfs has no directories other than one per thread.
+Turning `net` into a directory would have broken that reader for a cosmetic
+gain.
+
+A bound TCP socket that already has a `tcp_conn` is skipped, because the
+connection table lists it with its sequence space; without that rule every
+established connection appears twice.
+
+Locking: both tables are snapshotted and released before any socket (rank 260)
+or connection (270) is locked. Holding `NET_STACK` (240) or `PORT_TABLE` (250)
+across them is legal by rank, but it parks the whole stack behind one `cat`.
+
+`netstat` reads that file for `-a`/`-l`/`-t`/`-u`, and `/proc/net` for `-i` and
+`-r`. There is no routing table in the kernel — an address, a prefix and a
+gateway are the whole forwarding decision — so `-r` reconstructs the two routes
+those imply rather than the kernel inventing a table to be asked for.
+
+Both open TCP defects were visible on its first run, which is the argument for
+having written it: the connection lost to the ARP-pending drop after boot sits
+in `SYN_RECV` with one unacknowledged byte, and it is *still there* several
+connections later, because the accept queue has no half-open timeout.
+
+### Things that will bite you
+
+- **The terminal is about 70 columns at its default window size**, not 80. A
+  column-formatted table wider than that wraps every row and the output becomes
+  unreadable in exactly the screenshot you take to verify it. `netstat`'s row
+  is 67 characters wide for that reason. Count the format string before
+  boarding a new program's table, or widen the window first.
+- **A background job still owns the terminal's input.** `nc -l 23 &` relays
+  standard input to the socket, so anything typed at the prompt afterwards goes
+  to the peer rather than to the shell. Use a server that does not read standard
+  input (`tcpecho -p 23 -q &`) when the point of the test is to keep typing.

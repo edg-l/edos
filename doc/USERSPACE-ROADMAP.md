@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-94 programs and 2 libraries, all in the `programs/` cargo workspace.
+95 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -17,7 +17,7 @@
 | Inspection | `file` |
 | System | `ps`, `pstree`, `pmap`, `top`, `lsof`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace`, `date`, `watch` |
 | Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
-| Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `nc`, `sntp`, `httpd` |
+| Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `nc`, `sntp`, `httpd`, `netstat` |
 | Audio | `play` |
 | Images | `imgview` (BMP viewer) |
 | Games | `snake` |
@@ -166,7 +166,6 @@ Complete. Everything listed here shipped; see the Done section above.
 
 | Program | Why it matters | Kernel gap |
 |---|---|---|
-| `netstat` | listening and established sockets | needs a read path into `net/tcp.rs` `CONNECTIONS`, as `SYS_NETSTAT` or `/proc/net/tcp` |
 | `nproc` | CPU count | needs `SYS_NPROC` or `/proc/cpuinfo` |
 
 ## `edos_render` is the shared surface
@@ -236,9 +235,8 @@ correctness, locking, perf hot spots and missing syscalls — see
 1. **procfs depth.** CPU time, RSS and virtual size are all there now. What a
    `top` still lacks is a *rate*: every counter is cumulative, so the reader has
    to difference two samples itself to get CPU percent.
-2. **TCP introspection.** `/proc/net` carries interface state (link, address,
-   gateway, resolver); `netstat` still needs a read path for the connection
-   table in `net/tcp.rs`.
+2. **TCP introspection.** Closed: `/proc/sockets` publishes the connection
+   table and the port-table bindings, and `netstat` reads it.
 3. **Accept backlog.** A concurrent server will test SYN backlog behaviour.
 4. **Large-file I/O.** `sha256sum` and `tar` push files larger than RAM through the
    block and page caches.

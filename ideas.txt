@@ -2,6 +2,19 @@
 
 ## Done
 
+- **`netstat`, and the `/proc/sockets` it needed** - the connection table was
+  reachable only from inside the kernel, so nothing could answer "who is
+  listening" or "why can this port not be bound". `/proc/sockets` publishes
+  every TCP connection the stack tracks, then every port-table binding without
+  a connection of its own, as `PROTO RECVQ SENDQ LOCAL FOREIGN STATE`. That is
+  a different set from `/proc/<tid>/fd`: a connection outlives the descriptor
+  that made it, so `TIME_WAIT`, `FIN_WAIT2` and a stranded `SYN_RECV` appear
+  here and nowhere else. `netstat` renders it with `-a`, `-l`, `-t`, `-u`, and
+  reads `/proc/net` for `-i` and `-r`. It made the two open TCP bugs visible on
+  the first run: the connection lost to the ARP-pending drop after boot sits in
+  `SYN_RECV` with one unacknowledged byte, and stays in the list forever
+  because the accept queue has no half-open timeout.
+
 - **`httpd`, and the port table that unbound its own listener** - a web server
   over the guest filesystem, one thread per connection, `GET`/`HEAD`,
   directory listings, an index file, content types, path-traversal rejection
@@ -114,7 +127,7 @@
   `edos_render::image` the compositor uses for a wallpaper; what it adds is
   `fit_size`/`scaled_to_fit` beside the existing scale-to-cover, over one
   shared bilinear resampler. Completes Phase 4 of the userspace roadmap bar
-  `netstat` and `nproc`, which both need new kernel surface.
+  `nproc`, which needs new kernel surface.
 
 - **`tcpecho`** - a TCP echo server over `bind`/`listen`/`accept`, the first
   user of the listen side of the stack. Serves one connection at a time so the
