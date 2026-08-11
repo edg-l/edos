@@ -103,7 +103,7 @@ pub struct CachedBlockPage {
     pub dirty: AtomicBool,
     /// HPET tick when this page was first dirtied (0 = not dirty).
     /// Used for dirty_expire: writeback skips recently-dirtied pages.
-    pub dirty_since_tick: AtomicU64,
+    pub dirty_since_ns: AtomicU64,
     pub pin_count: AtomicU32,
     /// Serializes partial and full-page writers on the same page.
     pub write_lock: BlockingMutex<()>,
@@ -115,7 +115,7 @@ impl CachedBlockPage {
             key,
             frame,
             dirty: AtomicBool::new(false),
-            dirty_since_tick: AtomicU64::new(0),
+            dirty_since_ns: AtomicU64::new(0),
             pin_count: AtomicU32::new(0),
             write_lock: BlockingMutex::new(()),
         }
@@ -145,14 +145,14 @@ impl CachedBlockPage {
     pub fn mark_dirty(&self) {
         // Only set the timestamp on the first dirty (not re-dirty).
         if !self.dirty.swap(true, Ordering::AcqRel) {
-            let tick = crate::timer::Instant::now().tick();
-            self.dirty_since_tick.store(tick, Ordering::Release);
+            let tick = crate::timer::Instant::now().as_nanos();
+            self.dirty_since_ns.store(tick, Ordering::Release);
         }
     }
 
     pub fn clear_dirty(&self) {
         self.dirty.store(false, Ordering::Release);
-        self.dirty_since_tick.store(0, Ordering::Release);
+        self.dirty_since_ns.store(0, Ordering::Release);
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -161,12 +161,12 @@ impl CachedBlockPage {
 
     /// Returns true if this page has been dirty for at least `DIRTY_EXPIRE_MS`.
     pub fn is_expired(&self) -> bool {
-        let tick = self.dirty_since_tick.load(Ordering::Acquire);
+        let tick = self.dirty_since_ns.load(Ordering::Acquire);
         if tick == 0 {
             return false;
         }
         let now = crate::timer::Instant::now();
-        let since = crate::timer::Instant::from_tick(tick);
+        let since = crate::timer::Instant::from_nanos(tick);
         now.duration_since(since).as_millis() as u64 >= DIRTY_EXPIRE_MS
     }
 

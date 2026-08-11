@@ -93,6 +93,8 @@ fn init() {
     drivers::hpet::driver::init();
     println!("Calibrating timer");
     get_timer_calibration();
+    // Anchors the TSC to the HPET, so it must run before the first Instant.
+    timer::init_monotonic_clock();
     init_boot_time();
     // Pins the RTC reading to the monotonic counter; every later wall-clock
     // answer derives from this one sample.

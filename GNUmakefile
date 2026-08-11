@@ -56,7 +56,7 @@ AUDIODEV ?= pipewire
 define run_qemu_uefi
 	qemu-system-$(KARCH) \
 		-M q35 \
-		-cpu qemu64,+sse4.1,+sse4.2,+x2apic,+fsgsbase \
+		-cpu qemu64,+sse4.1,+sse4.2,+x2apic,+fsgsbase,+invtsc \
 		-object memory-backend-memfd,id=mem1,size=$(QEMU_MEM) \
 		-machine memory-backend=mem1 \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \

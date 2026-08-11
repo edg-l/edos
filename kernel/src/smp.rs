@@ -126,6 +126,10 @@ pub unsafe extern "C" fn ap_start(cpu: &MpInfo) -> ! {
     // PAT must come after GDT/IDT/GS init since it uses println
     crate::memory::pat::init_pat();
 
+    // Before this CPU runs a thread, and so before it stamps a time anything
+    // else will compare against.
+    crate::timer::verify_tsc_sync(cpu.lapic_id);
+
     unsafe { setup_syscall() };
 
     unsafe { fpu::init_fpu() };

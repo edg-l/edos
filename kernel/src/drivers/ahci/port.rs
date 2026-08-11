@@ -33,7 +33,6 @@ use crate::{
             },
         },
         dma::{DmaBuffer, DmaRegion, dma},
-        hpet::instant::HpetInstant,
     },
     log,
     memory::mapper::memory_mapper,
@@ -44,6 +43,7 @@ use crate::{
         scheduler::{WakePriority, sched},
         waitqueue::WaitQueue,
     },
+    timer::Instant,
 };
 
 const AHCI_CMD_SLOTS: usize = 32;
@@ -384,7 +384,7 @@ impl AhciPort {
                 cmd &= !PORT_CMD_ST;
                 ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
 
-                let start = crate::timer::Instant::now();
+                let start = Instant::now();
                 while ptr::read_volatile(&raw const (*port_regs).cmd) & PORT_CMD_CR != 0 {
                     if start.elapsed().as_millis() > 500 {
                         return Err(AhciError::CommandTimeout);
@@ -398,7 +398,7 @@ impl AhciPort {
                 cmd &= !PORT_CMD_FRE;
                 ptr::write_volatile(&raw mut (*port_regs).cmd, cmd);
 
-                let start = crate::timer::Instant::now();
+                let start = Instant::now();
                 while ptr::read_volatile(&raw const (*port_regs).cmd) & PORT_CMD_FR != 0 {
                     if start.elapsed().as_millis() > 500 {
                         return Err(AhciError::CommandTimeout);
@@ -484,7 +484,7 @@ impl AhciPort {
             sctl &= !0xF;
             ptr::write_volatile(&raw mut (*self.port_regs).sctl, sctl);
 
-            let start = crate::timer::Instant::now();
+            let start = Instant::now();
             loop {
                 let ssts = ptr::read_volatile(&raw const (*self.port_regs).ssts);
                 if ssts & 0xF == 0x3 {
@@ -1083,7 +1083,7 @@ impl AhciPort {
 
     /// Wait for a non-NCQ command to complete (CI bit clears).
     fn wait_for_completion(&self, slot: usize, timeout: Duration) -> Result<(), AhciError> {
-        let start = crate::timer::Instant::now();
+        let start = Instant::now();
         let port_regs = self.port_regs;
 
         loop {
@@ -1265,7 +1265,7 @@ impl AhciPort {
         // Open the slot for IRQ-side completion. Release pairs with the
         // dispatcher's Acquire load in `complete_ncq_slot`.
         op.issue_time
-            .store(HpetInstant::now().tick(), Ordering::Relaxed);
+            .store(Instant::now().as_nanos(), Ordering::Relaxed);
         op.issued.store(true, Ordering::Release);
         crate::drivers::ahci::watchdog::ncq_inflight_inc();
 
@@ -1369,7 +1369,7 @@ impl AhciPort {
 
         // See `submit_ncq_read` for the issued+self-check rationale.
         op.issue_time
-            .store(HpetInstant::now().tick(), Ordering::Relaxed);
+            .store(Instant::now().as_nanos(), Ordering::Relaxed);
         op.issued.store(true, Ordering::Release);
         crate::drivers::ahci::watchdog::ncq_inflight_inc();
         let sact = unsafe { ptr::read_volatile(&raw const (*self.port_regs).sact) };
@@ -1580,8 +1580,8 @@ impl AhciPort {
             // issue_time is safe to load Relaxed; the Acquire on `issued`
             // above synchronizes-with the submit Release and carries the
             // prior Relaxed store of `issue_time`.
-            let issued_tick = op.issue_time.load(Ordering::Relaxed);
-            let elapsed = HpetInstant::from_tick(issued_tick).elapsed();
+            let issued_ns = op.issue_time.load(Ordering::Relaxed);
+            let elapsed = Instant::from_nanos(issued_ns).elapsed();
             if elapsed < timeout {
                 continue;
             }

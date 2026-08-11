@@ -25,7 +25,7 @@ use crate::thread::preempt::{PreemptRwLock, PreemptSpinlock};
 use crate::{
     boot::boot_info,
     debug::lock_order::{RANK_MAPPERS, RANK_USER_MM, RANK_VMAS},
-    drivers::{fpu::FpuState, hpet::driver::get_hpet_timer},
+    drivers::fpu::FpuState,
     fs::{self, inode::VfsInode, path::Path},
     loader::{ElfLoadError, TlsTemplate, load_elf},
     memory::{
@@ -142,18 +142,18 @@ pub struct Thread {
     pub cpu_affinity: AtomicU32, // bitmask of allowed CPUs
     pub flags: AtomicU32,        // Flags
 
-    // deadline as Instant counter value
+    // Every field below is an `Instant` in nanoseconds, with 0 meaning unset.
     pub slice_deadline: AtomicU64,
 
     // Sleep data split to avoid locking:
-    pub sleep_deadline: AtomicU64, // instant counter value
+    pub sleep_deadline: AtomicU64,
 
-    // CPU time accounting (nanoseconds + current run start tick)
+    // CPU time accounting: total, and the start of the current run.
     pub cpu_time_ns: AtomicU64,
-    pub run_start_tick: AtomicU64,
+    pub run_start_ns: AtomicU64,
 
-    // HPET tick at thread creation. Used to compute wall lifetime on exit.
-    pub created_at_tick: AtomicU64,
+    // Thread creation, for the wall lifetime reported on exit.
+    pub created_at_ns: AtomicU64,
     // Demand page faults served on behalf of this thread (userspace-triggered).
     pub demand_faults: AtomicU32,
 
@@ -796,27 +796,22 @@ impl Thread {
         mask == 0 || (cpu < 32 && mask & (1u32 << cpu) != 0)
     }
 
-    pub fn begin_run(&self, start_tick: u64) {
-        self.run_start_tick.store(start_tick, Ordering::Release);
+    pub fn begin_run(&self, start_ns: u64) {
+        self.run_start_ns.store(start_ns, Ordering::Release);
     }
 
-    pub fn end_run(&self, end_tick: u64) {
-        let start_tick = self.run_start_tick.swap(0, Ordering::AcqRel);
-        if start_tick == 0 {
+    pub fn end_run(&self, end_ns: u64) {
+        let start_ns = self.run_start_ns.swap(0, Ordering::AcqRel);
+        if start_ns == 0 {
             return;
         }
 
-        let elapsed_ticks = end_tick.saturating_sub(start_tick);
-        if elapsed_ticks == 0 {
+        let elapsed_ns = end_ns.saturating_sub(start_ns);
+        if elapsed_ns == 0 {
             return;
         }
 
-        if let Some(timer) = get_hpet_timer() {
-            let elapsed_ns = timer.ticks_to_nanos(elapsed_ticks);
-            if elapsed_ns != 0 {
-                self.cpu_time_ns.fetch_add(elapsed_ns, Ordering::AcqRel);
-            }
-        }
+        self.cpu_time_ns.fetch_add(elapsed_ns, Ordering::AcqRel);
     }
 
     /// The process group this thread belongs to.
@@ -833,9 +828,9 @@ impl Thread {
 
     pub fn cpu_time_ns(&self) -> u64 {
         let accumulated = self.cpu_time_ns.load(Ordering::Acquire);
-        let start_tick = self.run_start_tick.load(Ordering::Acquire);
+        let start_ns = self.run_start_ns.load(Ordering::Acquire);
 
-        if start_tick == 0 {
+        if start_ns == 0 {
             return accumulated;
         }
 
@@ -844,14 +839,8 @@ impl Thread {
             return accumulated;
         }
 
-        if let Some(timer) = get_hpet_timer() {
-            let now_tick = Instant::now().tick();
-            let extra_ticks = now_tick.saturating_sub(start_tick);
-            let extra_ns = timer.ticks_to_nanos(extra_ticks);
-            return accumulated.saturating_add(extra_ns);
-        }
-
-        accumulated
+        let extra_ns = Instant::now().as_nanos().saturating_sub(start_ns);
+        accumulated.saturating_add(extra_ns)
     }
 
     pub fn new_kernel(name: Option<String>, entry_point: u64, arg: u64) -> Arc<Self> {
@@ -877,8 +866,8 @@ impl Thread {
             priority: AtomicU8::new(DEFAULT_PRIORITY),
             sleep_deadline: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),
-            run_start_tick: AtomicU64::new(0),
-            created_at_tick: AtomicU64::new(Instant::now().tick()),
+            run_start_ns: AtomicU64::new(0),
+            created_at_ns: AtomicU64::new(Instant::now().as_nanos()),
             demand_faults: AtomicU32::new(0),
             tls_base: AtomicU64::new(0),
             parent: AtomicU64::new(0),
@@ -1004,8 +993,8 @@ impl Thread {
             priority: AtomicU8::new(DEFAULT_PRIORITY),
             sleep_deadline: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),
-            run_start_tick: AtomicU64::new(0),
-            created_at_tick: AtomicU64::new(Instant::now().tick()),
+            run_start_ns: AtomicU64::new(0),
+            created_at_ns: AtomicU64::new(Instant::now().as_nanos()),
             demand_faults: AtomicU32::new(0),
             tls_base: AtomicU64::new(tls_fs_base),
             parent: AtomicU64::new(0),

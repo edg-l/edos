@@ -13,28 +13,39 @@ pub fn get_lapic() -> &'static mut LocalApic {
     unsafe { get_percpu_data().lapic.get().as_mut().unwrap() }
 }
 
+/// The shortest interval the one-shot timer is ever armed for.
+///
+/// A deadline that has effectively arrived asks for a timer of nearly zero
+/// length, and the two ways to answer that are both wrong: writing 0 to the
+/// initial count stops the timer permanently, and a count of a handful of
+/// ticks fires again before the handler that armed it has returned, so the CPU
+/// services interrupts instead of the work it was about to do. Neither showed
+/// while durations came from a counter that cost microseconds to read.
+const MIN_TIMER_INTERVAL: Duration = Duration::from_micros(10);
+
+/// Initial count for a one-shot of `duration`, floored at
+/// [`MIN_TIMER_INTERVAL`] and saturated rather than truncated at the top.
+fn timer_count(duration: Duration) -> u32 {
+    let micros = duration.max(MIN_TIMER_INTERVAL).as_micros() as u64;
+    get_timer_calibration()
+        .ticks_per_microsecond
+        .saturating_mul(micros)
+        .clamp(1, u32::MAX as u64) as u32
+}
+
 pub fn set_apic_timer_and_enable(duration: Duration) {
     unsafe {
         let lapic = get_lapic();
-        let timer = get_timer_calibration();
         lapic.set_timer_mode(x2apic::lapic::TimerMode::OneShot);
         lapic.set_timer_divide(x2apic::lapic::TimerDivide::Div1);
-        let micros = duration.as_micros() as u64;
-        let count = (timer.ticks_per_microsecond.saturating_mul(micros)) as u32;
-        lapic.set_timer_initial(if count == 0 { 1 } else { count });
+        lapic.set_timer_initial(timer_count(duration));
         lapic.enable_timer();
     }
 }
 
 pub fn set_apic_timer(duration: Duration) {
     let lapic = get_lapic();
-    let timer = get_timer_calibration();
-    // Compute initial count, clamping to at least 1. Writing 0 to the
-    // initial count register stops the one-shot APIC timer permanently,
-    // so sub-microsecond durations (which truncate to 0) must be avoided.
-    let micros = duration.as_micros() as u64;
-    let count = (timer.ticks_per_microsecond.saturating_mul(micros)) as u32;
     unsafe {
-        lapic.set_timer_initial(if count == 0 { 1 } else { count });
+        lapic.set_timer_initial(timer_count(duration));
     }
 }

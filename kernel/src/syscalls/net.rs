@@ -7,9 +7,9 @@ use alloc::sync::Arc;
 
 use core::time::Duration;
 
-use crate::drivers::hpet::instant::HpetInstant;
 use crate::thread::scheduler::current_thread_info;
 use crate::thread::waitqueue::WaitOutcome;
+use crate::timer::Instant;
 use crate::{
     net::{
         ipv4,
@@ -467,7 +467,7 @@ pub fn sys_recvfrom(
         let s = ranked_lock!(RANK_SOCKET, "sys_recvfrom", sock_arc);
         (s.rx_wq.clone(), s.recv_timeout)
     };
-    let deadline = timeout.map(|timeout| HpetInstant::now() + timeout);
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
     loop {
         let ready = || {
             let s = ranked_lock!(RANK_SOCKET, "sys_recvfrom", sock_arc);
@@ -480,7 +480,7 @@ pub fn sys_recvfrom(
         // timeout rather than the thread. The remaining time comes off the
         // deadline each round, since a spurious wake must not restart it.
         let remaining = match deadline {
-            Some(deadline) => match deadline.checked_duration_since(HpetInstant::now()) {
+            Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
                 Some(remaining) => Some(remaining),
                 None => {
                     info.lock().errno = Errno::EAGAIN;

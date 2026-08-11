@@ -189,7 +189,7 @@ def cmd_start(args):
     qemu = [
         "qemu-system-x86_64",
         "-M", "q35",
-        "-cpu", "qemu64,+sse4.1,+sse4.2,+x2apic,+fsgsbase",
+        "-cpu", "qemu64,+sse4.1,+sse4.2,+x2apic,+fsgsbase,+invtsc",
         "-accel", args.accel,
         "-object", f"memory-backend-memfd,id=mem1,size={mem}",
         "-machine", "memory-backend=mem1",

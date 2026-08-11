@@ -1138,11 +1138,13 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
         return -1;
     }
 
+    // `None` is an unbounded wait; a zero timeout returns without ever waiting.
     let timeout = if timeout_ms == u64::MAX {
         None
     } else {
         Some(Duration::from_millis(timeout_ms))
     };
+    let immediate = timeout_ms == 0;
 
     if count == 0 {
         return 0;
@@ -1315,62 +1317,63 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
     }
 
     let mut ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
-    if ready > 0 {
-        cleanup_poll_contexts(&mut contexts);
-        if !copy_back(&fds) {
-            info.lock().errno = Errno::EFAULT;
-            return -1;
-        }
-        return ready as i64;
-    }
 
-    let deadline = timeout.map(|t| Instant::now() + t);
-    loop {
+    // A zero timeout asks what is ready now, and that answer is already
+    // computed, so the clock is never consulted: reading it is the most
+    // expensive thing in the call.
+    if ready == 0 && !immediate {
+        // One reading serves both the deadline and the first comparison
+        // against it.
+        let mut now = Instant::now();
+        let deadline = timeout.map(|t| now + t);
+
+        loop {
+            ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
+            if ready > 0 {
+                break;
+            }
+
+            match deadline {
+                Some(dl) => {
+                    let Some(remaining) = dl.checked_duration_since(now) else {
+                        break;
+                    };
+
+                    if waiter.arm() {
+                        now = Instant::now();
+                        continue;
+                    }
+
+                    // Re-check poll state after arming to close race window.
+                    // If notification arrived after refresh but before arm,
+                    // the state was updated before notify() was called.
+                    ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
+                    if ready > 0 {
+                        break;
+                    }
+
+                    let sleep_dur = if remaining.is_zero() {
+                        Duration::from_millis(1)
+                    } else {
+                        remaining
+                    };
+                    thread_sleep(sleep_dur);
+                    now = Instant::now();
+                }
+                None => {
+                    if waiter.arm() {
+                        continue;
+                    }
+
+                    thread_park_while(|| {
+                        base_ready + refresh_poll_contexts(&mut contexts, &mut fds) == 0
+                    });
+                }
+            }
+        }
+
         ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
-        if ready > 0 {
-            break;
-        }
-
-        match deadline {
-            Some(dl) => {
-                let now = Instant::now();
-                if now >= dl {
-                    break;
-                }
-
-                if waiter.arm() {
-                    continue;
-                }
-
-                // Re-check poll state after arming to close race window.
-                // If notification arrived after refresh but before arm,
-                // the state was updated before notify() was called.
-                ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
-                if ready > 0 {
-                    break;
-                }
-
-                let remaining = dl.duration_since(now);
-                let sleep_dur = if remaining.is_zero() {
-                    Duration::from_millis(1)
-                } else {
-                    remaining
-                };
-                thread_sleep(sleep_dur);
-            }
-            None => {
-                if waiter.arm() {
-                    continue;
-                }
-
-                thread_park_while(|| {
-                    base_ready + refresh_poll_contexts(&mut contexts, &mut fds) == 0
-                });
-            }
-        }
     }
-
-    ready = base_ready + refresh_poll_contexts(&mut contexts, &mut fds);
 
     cleanup_poll_contexts(&mut contexts);
 

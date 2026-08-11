@@ -322,7 +322,7 @@ impl Scheduler {
             // earliest sleeper deadline.
             let mut next = now + self.default_timeslice;
             if ed != u64::MAX && ed != 0 {
-                let dl = Instant::from_tick(ed);
+                let dl = Instant::from_nanos(ed);
                 if dl < next {
                     next = dl;
                 }
@@ -338,7 +338,7 @@ impl Scheduler {
     }
 
     fn wake_sleepers(&self) {
-        let now = Instant::now().tick();
+        let now = Instant::now().as_nanos();
         let mut sl = self.sleepers.lock();
         // Drain stale and expired entries from the heap.
         // Stale = not Sleeping (already woken, died, etc.).
@@ -390,8 +390,8 @@ impl Scheduler {
             let is_user = if t.user.is_some() { "user" } else { "kern" };
             let sleep_dl = t.sleep_deadline.load(Ordering::Relaxed);
             if state == State::Sleeping && sleep_dl != 0 {
-                let dl = Instant::from_tick(sleep_dl);
-                let overdue = if now.tick() > sleep_dl {
+                let dl = Instant::from_nanos(sleep_dl);
+                let overdue = if now.as_nanos() > sleep_dl {
                     let elapsed = now.duration_since(dl);
                     alloc::format!(
                         " OVERDUE {}.{:03}s",
@@ -480,10 +480,10 @@ impl Scheduler {
                 let ed = self.earliest_deadline.load(Ordering::Acquire);
                 let dur = if ed != u64::MAX && ed != 0 {
                     let now = Instant::now();
-                    if ed <= now.tick() {
+                    if ed <= now.as_nanos() {
                         Duration::from_micros(1)
                     } else {
-                        let dl = Instant::from_tick(ed);
+                        let dl = Instant::from_nanos(ed);
                         dl.duration_since(now)
                     }
                 } else {
@@ -514,7 +514,7 @@ impl Scheduler {
             return;
         };
         let deadline = cur.slice_deadline.load(Ordering::Acquire);
-        if deadline != 0 && Instant::now().tick() >= deadline {
+        if deadline != 0 && Instant::now().as_nanos() >= deadline {
             cur.mark_need_resched();
         }
     }
@@ -623,8 +623,8 @@ impl Scheduler {
             if current.cpu.load(Ordering::Acquire) != self.cpu {
                 return;
             }
-            let end_tick = Instant::now().tick();
-            current.end_run(end_tick);
+            let end_ns = Instant::now().as_nanos();
+            current.end_run(end_ns);
             unsafe {
                 #[cfg(debug_assertions)]
                 Self::validate_ctx(&current, &*context, "save_current_thread");
@@ -692,20 +692,20 @@ impl Scheduler {
         next.context_saved.store(false, Ordering::Release);
 
         let now = Instant::now();
-        next.begin_run(now.tick());
+        next.begin_run(now.as_nanos());
         let mut deadline = now + self.default_timeslice;
 
         let earliest_deadline = self.earliest_deadline.load(Ordering::Acquire);
 
-        if earliest_deadline < deadline.tick() {
-            deadline = Instant::from_tick(earliest_deadline);
+        if earliest_deadline < deadline.as_nanos() {
+            deadline = Instant::from_nanos(earliest_deadline);
         } else {
             self.earliest_deadline
-                .store(deadline.tick(), Ordering::Release);
+                .store(deadline.as_nanos(), Ordering::Release);
         }
 
         next.slice_deadline
-            .store(deadline.tick(), Ordering::Release);
+            .store(deadline.as_nanos(), Ordering::Release);
         set_apic_timer(deadline.duration_since(now));
 
         if context.is_null() {
@@ -1200,8 +1200,8 @@ pub fn thread_sleep(dt: Duration) {
         return;
     };
     let now = Instant::now();
-    let deadline_tick = (now + dt).tick();
-    let mut ctx = SleepCtx { deadline_tick };
+    let deadline_ns = (now + dt).as_nanos();
+    let mut ctx = SleepCtx { deadline_ns };
     without_interrupts(|| unsafe {
         save_transition_switch(transition_sleep, &mut ctx as *mut SleepCtx as *mut u8);
     });
@@ -1230,12 +1230,9 @@ pub fn thread_exit(code: i32) -> ! {
             crate::thread::thread::kill_process_with_signal(parent, crate::thread::signal::SIGCHLD);
         }
 
-        let created = t.created_at_tick.load(Ordering::Acquire);
-        if let Some(timer) = crate::drivers::hpet::driver::get_hpet_timer()
-            && created != 0
-        {
-            let now = crate::timer::Instant::now().tick();
-            let wall_ns = timer.ticks_to_nanos(now.saturating_sub(created));
+        let created = t.created_at_ns.load(Ordering::Acquire);
+        if created != 0 {
+            let wall_ns = Instant::now().as_nanos().saturating_sub(created);
             let cpu_ns = t.cpu_time_ns();
             let faults = t.demand_faults.load(Ordering::Relaxed);
             crate::log_debug!(
@@ -1385,8 +1382,8 @@ extern "C" fn do_save_current_thread(context: *mut CpuContext) -> u64 {
         debug_assert!(sched_stack != 0, "scheduler stack not initialized");
         return sched_stack;
     };
-    let end_tick = Instant::now().tick();
-    current.end_run(end_tick);
+    let end_ns = Instant::now().as_nanos();
+    current.end_run(end_ns);
     unsafe {
         *current.ctx.lock() = (*context).clone();
         if current.user.is_some() {
@@ -1601,7 +1598,7 @@ extern "C" fn transition_park_while(arg: *mut u8) -> bool {
 /// Context struct passed through the `arg` pointer to `transition_sleep`.
 #[repr(C)]
 struct SleepCtx {
-    deadline_tick: u64,
+    deadline_ns: u64,
 }
 
 extern "C" fn transition_sleep(arg: *mut u8) -> bool {
@@ -1625,12 +1622,12 @@ extern "C" fn transition_sleep(arg: *mut u8) -> bool {
         return true;
     }
 
-    let deadline_tick = ctx.deadline_tick;
-    cur.sleep_deadline.store(deadline_tick, Ordering::Release);
+    let deadline_ns = ctx.deadline_ns;
+    cur.sleep_deadline.store(deadline_ns, Ordering::Release);
 
     let mut sleepers = sched.sleepers.lock();
     let sleep_entry = SleepEntry {
-        deadline: deadline_tick,
+        deadline: deadline_ns,
         thread: cur.clone(),
     };
     if sleepers.push(sleep_entry).is_err() {
@@ -1639,10 +1636,10 @@ extern "C" fn transition_sleep(arg: *mut u8) -> bool {
         return false;
     }
     let current_earliest = sched.earliest_deadline.load(Ordering::Acquire);
-    if deadline_tick < current_earliest {
+    if deadline_ns < current_earliest {
         sched
             .earliest_deadline
-            .store(deadline_tick, Ordering::Release);
+            .store(deadline_ns, Ordering::Release);
     }
     true
 }
