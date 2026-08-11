@@ -645,7 +645,9 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                         .reader_wq
                         .clone()
                 });
-                wq.wait_until(|| pipe.try_lock().is_none_or(|guard| guard.readable()));
+                // The drain above already established the pipe is not readable,
+                // so the wait skips its entry evaluation of the same predicate.
+                wq.wait_until_unready(|| pipe.try_lock().is_none_or(|guard| guard.readable()));
             }
         }
         Some(FileDescriptor::PipeWrite(_)) => {

@@ -1,4 +1,5 @@
 use alloc::sync::Weak;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use heapless::Deque;
 use spin::Mutex;
@@ -30,12 +31,24 @@ pub enum WaitOutcome {
 #[derive(Debug)]
 pub struct WaitQueue {
     inner: Mutex<Deque<Weak<Thread>, WAITQUEUE_CAP>>,
+    /// Number of handles currently enrolled in `inner`, published so a
+    /// producer can skip the wake path entirely when nobody is waiting.
+    ///
+    /// Written to `inner.len()` while `inner` is held, so it is exact rather
+    /// than a hint. The ordering that matters is the enrol-versus-wake race:
+    /// a waiter publishes its enrolment *before* re-checking its predicate,
+    /// and a producer publishes its data before reading the count, so with
+    /// `SeqCst` on both sides the two cannot both miss each other. A relaxed
+    /// read here would allow the store-load reorder that is exactly the shape
+    /// of a missed wakeup.
+    waiters: AtomicUsize,
 }
 
 impl WaitQueue {
     pub const fn new() -> Self {
         Self {
             inner: Mutex::new(Deque::new()),
+            waiters: AtomicUsize::new(0),
         }
     }
 
@@ -48,7 +61,21 @@ impl WaitQueue {
     /// atomics, or probe a lock with `try_lock` and bias the unavailable case
     /// towards "ready" so the caller re-checks under the real lock.
     pub fn wait_until<F: Fn() -> bool>(&self, ready: F) -> WaitOutcome {
-        self.wait_internal(ready, None)
+        self.wait_internal(ready, None, true)
+    }
+
+    /// Wait without the entry evaluation of `ready`, for a caller that has
+    /// just established the condition is false under the real lock.
+    ///
+    /// Only the pre-enrolment check is skipped. The enrol-then-re-check that
+    /// closes the lost-wakeup window still runs, so a wake landing between
+    /// the caller's lock release and the enrolment is still seen.
+    ///
+    /// `ready` carries the same non-blocking requirement as [`wait_until`].
+    ///
+    /// [`wait_until`]: WaitQueue::wait_until
+    pub fn wait_until_unready<F: Fn() -> bool>(&self, ready: F) -> WaitOutcome {
+        self.wait_internal(ready, None, false)
     }
 
     /// Put the current thread to sleep until woken or the timeout elapses.
@@ -61,7 +88,7 @@ impl WaitQueue {
         ready: F,
         timeout: Option<Duration>,
     ) -> WaitOutcome {
-        self.wait_internal(ready, timeout)
+        self.wait_internal(ready, timeout, true)
     }
 
     /// Wake one live thread from the queue.
@@ -71,10 +98,15 @@ impl WaitQueue {
     /// wake) are silently discarded so a single dead waiter at head cannot
     /// stall the wake.
     pub fn wake_one(&self) -> bool {
+        if !self.has_waiters() {
+            return false;
+        }
         loop {
             let handle_opt = without_interrupts(|| {
                 let mut q = self.inner.lock();
-                q.pop_front()
+                let h = q.pop_front();
+                self.publish(&q);
+                h
             });
             match handle_opt {
                 None => return false,
@@ -91,6 +123,9 @@ impl WaitQueue {
 
     /// Wake all threads
     pub fn wake_all(&self) -> usize {
+        if !self.has_waiters() {
+            return 0;
+        }
         // Drain into stack buffer under lock (heapless::Vec, no allocation),
         // then wake outside to avoid holding the lock while do_wake spins.
         let handles: heapless::Vec<Weak<Thread>, WAITQUEUE_CAP> = without_interrupts(|| {
@@ -99,6 +134,7 @@ impl WaitQueue {
             while let Some(h) = q.pop_front() {
                 let _ = v.push(h);
             }
+            self.publish(&q);
             v
         });
         let mut n = 0usize;
@@ -110,9 +146,22 @@ impl WaitQueue {
         n
     }
 
+    /// Check whether the queue currently has any waiters, without taking the
+    /// lock. A producer calls this before doing anything that only a waiter
+    /// would care about.
+    pub fn has_waiters(&self) -> bool {
+        self.waiters.load(Ordering::SeqCst) != 0
+    }
+
     /// Check whether the queue currently has any waiters.
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().is_empty()
+        !self.has_waiters()
+    }
+
+    /// Publish the queue length. Must be called with `inner` held, and before
+    /// an enrolling waiter re-checks its predicate.
+    fn publish(&self, q: &Deque<Weak<Thread>, WAITQUEUE_CAP>) {
+        self.waiters.store(q.len(), Ordering::SeqCst);
     }
 
     /// Single-iteration wait: push handle → park (or sleep) → remove handle.
@@ -131,8 +180,13 @@ impl WaitQueue {
     /// inside `thread_park_while`) would re-park without re-pushing and
     /// silently lose wakes when the producer churns the lock faster than
     /// the waiter can drain the queue.
-    fn wait_internal<F: Fn() -> bool>(&self, ready: F, timeout: Option<Duration>) -> WaitOutcome {
-        if ready() {
+    fn wait_internal<F: Fn() -> bool>(
+        &self,
+        ready: F,
+        timeout: Option<Duration>,
+        precheck: bool,
+    ) -> WaitOutcome {
+        if precheck && ready() {
             return WaitOutcome::Ready;
         }
 
@@ -155,11 +209,13 @@ impl WaitQueue {
                 let mut q = self.inner.lock();
                 q.push_back(my_handle.clone())
                     .expect("WaitQueue overflow: too many waiters");
+                self.publish(&q);
             }
 
             if ready() {
                 let mut q = self.inner.lock();
                 q.retain(|w| !Weak::ptr_eq(w, &my_handle));
+                self.publish(&q);
                 return;
             }
 
@@ -206,6 +262,7 @@ impl WaitQueue {
                             if q.iter().all(|w| !Weak::ptr_eq(w, &my_handle)) {
                                 q.push_back(my_handle.clone())
                                     .expect("WaitQueue overflow: too many waiters");
+                                self.publish(&q);
                             }
                             drop(q);
                             ready()
@@ -223,18 +280,18 @@ impl WaitQueue {
         interrupts::without_interrupts(|| {
             let mut q = self.inner.lock();
             q.retain(|w| !Weak::ptr_eq(w, &my_handle));
+            self.publish(&q);
         });
 
         let Some(action) = action else {
             return WaitOutcome::Ready;
         };
 
-        if ready() {
-            return WaitOutcome::Parked;
-        }
-
         match action {
+            // A park reports `Parked` whether or not the condition now holds,
+            // so do not pay for a predicate evaluation nobody reads.
             SleepAction::Park => WaitOutcome::Parked,
+            SleepAction::Sleep(_) if ready() => WaitOutcome::Parked,
             SleepAction::Sleep(_) => WaitOutcome::TimedOut,
         }
     }

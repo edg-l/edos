@@ -213,9 +213,13 @@ across the five runs:
 | `sched_yield`, handover to another process | 505 | 499-533 |
 | `getpid` | 94 | 92-95 |
 | `read` of a descriptor that does not exist | 128 | 128 |
-| a pipe write + read, nothing blocking | 402 | 399-407 |
-| a blocking pipe round trip | 2203 | 2196-2206 |
-| the same round trip, one address space | 1988 | 1983-1992 |
+| a pipe write + read, nothing blocking | 387 | 384-537 |
+| a blocking pipe round trip | 2016 | 2009-2036 |
+| the same round trip, one address space | 1808 | 1800-1812 |
+
+The last three rows were re-taken on 2026-08-12 after the wait-queue work below
+(402 / 2203 / 1988 before it); the rest have not moved since they were first
+measured.
 
 **The same binary now repeats to within 2%**, which is what makes a 25 ns
 change measurable. The rule that follows is simple: do not measure while
@@ -294,10 +298,23 @@ them -- huge pages, and PCID if this host had it -- is worth building.
 | **accounted** | **~1580** |
 | **measured** | **2203** |
 
-~310 ns per park/wake pair, with one clear suspect: the blocking read performs a
-**whole** read attempt before it blocks, and `wait_internal` then evaluates its
-predicate up to three more times, with a queue push and a `retain` around them.
-Unlike everything this section retracts, that is a cost bare metal pays too.
+~310 ns per park/wake pair, and the suspect was the predicate: the blocking read
+performs a **whole** read attempt before it blocks, and `wait_internal` then
+evaluated its predicate up to three more times, with a queue push and a `retain`
+around them. Unlike everything this section retracts, that is a cost bare metal
+pays too.
+
+**Two of those three evaluations are gone (2026-08-12): 2203 -> 2016 ns.**
+`WaitQueue::wait_until_unready` drops the entry check for a caller that has just
+established the condition is false under the real lock, and the tail check was
+dead for every untimed waiter because both of its branches returned `Parked`.
+The same commit gave `WaitQueue` an exact `waiters` count so `wake_one` and
+`wake_all` cost nothing when nobody is enrolled. The ordering argument that
+makes the count safe is in `doc/SCHED-ROADMAP.md` section 1 — it is the one part
+of this worth reading before touching the queue, since a relaxed read there is
+precisely the missed wakeup in `doc/bugs/2026-04-13-sched-park-wake-missed-wakeup.md`.
+What is left of the ~620 is the third evaluation, inside `transition_park_while`,
+which is what makes the park safe and cannot be removed.
 
 ### What survived: the kernel half was only global for what existed at boot
 

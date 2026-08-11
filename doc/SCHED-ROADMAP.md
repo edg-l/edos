@@ -33,9 +33,12 @@ last column, and it is a few percent everywhere.
 | `sched_yield`, handover to another process | 505 | 499-533 |
 | `getpid`, i.e. a syscall that does nothing | 94 | 92-95 |
 | `read` of a descriptor that does not exist | 128 | 128 |
-| a pipe write + read, nothing blocking | 402 | 399-407 |
-| a blocking pipe round trip between two processes | 2203 | 2196-2206 |
-| the same round trip, one address space | 1988 | 1983-1992 |
+| a pipe write + read, nothing blocking | 387 | 384-537 |
+| a blocking pipe round trip between two processes | 2016 | 2009-2036 |
+| the same round trip, one address space | 1808 | 1800-1812 |
+
+The last three rows were re-taken on 2026-08-12 after the wait-queue work in
+section 1 (402 / 2203 / 1988 before it); the rest have not moved.
 | the switch itself, `/proc/sched_prof` | 220 | |
 | a wake (`do_wake`) | 51 | |
 
@@ -143,16 +146,31 @@ Priced from parts that are all measured the same way:
 | **accounted** | **~1580** |
 | **measured** | **2203** |
 
-~620 ns, or ~310 per park/wake pair, and there is one clear suspect: the
-blocking read performs a **whole** read attempt -- take the lock, drain nothing,
-build the state -- before it blocks, and `wait_internal` then evaluates its
+~620 ns, or ~310 per park/wake pair, and the suspect was the predicate: the
+blocking read performs a whole read attempt -- take the lock, drain nothing,
+build the state -- before it blocks, and `wait_internal` then evaluated its
 predicate up to three more times (at entry, after enqueueing, and inside
-`transition_park_while`) with a queue push and a `retain` around them. A read
-that could hand the wait queue what it already learned under the lock would
-remove one of those evaluations and the whole first attempt.
+`transition_park_while`) with a queue push and a `retain` around them.
 
-That is the next thing to do, and it is a kernel-side cost that exists on bare
-metal too, unlike everything this section retracted.
+**Two of the three are now gone (2026-08-12), for a measured 2203 -> 2016 ns.**
+`wait_until_unready` skips the entry evaluation for a caller that has just
+established the condition is false under the real lock (`sys_read`'s pipe arm),
+and the tail evaluation was dead for every untimed waiter: both of its branches
+returned `Parked`. The enrol-then-re-check that closes the lost-wakeup window is
+untouched, which is why this is safe; only checks whose answer was already known
+were removed.
+
+| | ns, median of five, 1 vCPU |
+|---|---|
+| cross-process blocking round trip, before | 2203 |
+| after | 2016 |
+| pipe echo, nothing blocks (control) | 402 -> 387 |
+| `sched_yield` idle (control) | 285 -> 280 |
+
+What is left of the ~620 is the third evaluation inside `transition_park_while`,
+which is structural — it is the check that makes the park safe — plus the read
+attempt itself, which a caller cannot skip without knowing the pipe is empty
+before it takes the lock.
 
 ### Done: the kernel half was only global for what existed at boot (2026-08-11)
 
@@ -231,12 +249,33 @@ declared size**, and the cost does not appear in a profile taken with
 `sched_prof` — the compiler moved the memset across the probe boundaries, which
 is how `pipe_copy_out` came to read 135 ns for copying one byte.
 
-What is left in the pipe path, unmeasured and small: `notify_pollers()` runs on
-every read and every write, clones the reader's `WaitQueue` `Arc`, and calls
-`wake_one()`, which disables interrupts and takes a spin lock to find an empty
-queue. A cheap "is anyone waiting" would skip all of it — but it has to be a
-check that cannot miss a wake, and a relaxed counter read before the queue lock
-is exactly the shape of a missed wakeup.
+### Done: a wake that costs nothing when nobody is waiting (2026-08-12)
+
+`notify_pollers()` ran on every read and every write, cloned the reader's
+`WaitQueue` `Arc`, and called `wake_one()`, which disabled interrupts and took a
+spin lock only to find the queue empty. `WaitQueue` now carries a `waiters`
+count, written to `inner.len()` under the queue lock, and `has_waiters()` reads
+it with no lock at all; `wake_one`/`wake_all` return early on it, so every one
+of the ~60 wake sites in the kernel gets the same skip.
+
+The ordering is the whole of it, and `SeqCst` on both sides is what makes it
+safe rather than the shape of a missed wakeup:
+
+- a waiter publishes its enrolment **before** re-checking its predicate (the
+  store is inside the enqueue's critical section, and the re-check follows the
+  lock release);
+- a producer publishes its data **before** reading the count (the pipe read is
+  the case: `has_waiters` is read with the pipe lock held and the bytes already
+  in the ring).
+
+So the two cannot both miss each other. If the producer reads 0, the waiter's
+enrolment is later in the total order than that read, which puts the waiter's
+predicate evaluation after the producer's data was published — and the pipe
+predicate probes with `try_lock` and treats a contended pipe as ready, so a
+waiter that races the producer's critical section re-checks under the real lock
+instead of parking. The count is exact rather than a hint (every mutation of the
+deque republishes its length), so over-counting can only cost a wake on an empty
+queue, which is what happened unconditionally before.
 
 ### Known gap: a pipe has no backpressure
 

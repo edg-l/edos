@@ -183,7 +183,10 @@ impl Pipe {
     /// holding BlockingMutex while wake_thread spins (priority inversion).
     fn notify_pollers(&mut self) -> PipeNotifications {
         let state = self.poll_state();
-        let wake_reader = state.readable || state.hangup;
+        // `has_waiters` is read with the pipe lock held and the bytes already
+        // in the ring, so a reader that enrols after this point re-checks its
+        // predicate against data that is already there.
+        let wake_reader = (state.readable || state.hangup) && self.reader_wq.has_waiters();
         let reader_wq = if wake_reader {
             Some(self.reader_wq.clone())
         } else {
