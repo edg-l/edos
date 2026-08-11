@@ -6,7 +6,109 @@ session.
 
 ---
 
+## The floor, measured with the host quiet
+
+Every number in this file older than this section was taken while the host was
+doing something else, and the previous session concluded from a 4x spread that
+nothing under 30% could be attributed. That spread was the host. This is a VM:
+when the host has a build or a test suite to run it deschedules the whole vCPU,
+which the guest cannot see and which looks exactly like slow code.
+
+Five consecutive `switchbench` runs, single-CPU boot, nothing building on the
+host (a resident Ethereum devnet was still running, about 2.5 of 12 hardware
+threads -- this machine has no truly idle state). Median, with the spread
+across the five runs:
+
+| | ns | spread |
+|---|---|---|
+| `sched_yield`, nothing else Ready | 285 | 283-288 |
+| `sched_yield`, handover to a sibling thread | 340 | 328-350 |
+| `sched_yield`, handover to another process | 505 | 499-533 |
+| `getpid` | 94 | 92-95 |
+| `read` of a descriptor that does not exist | 128 | 128 |
+| a pipe write + read, nothing blocking | 402 | 399-407 |
+| a blocking pipe round trip | 4946 | 4785-5168 |
+
+**The same binary now repeats to within 2%**, which is what makes a 25 ns
+change measurable. The rule that follows is simple: do not measure while
+anything is building, and read the median of five runs.
+
+These decompose cleanly, which the old noisy numbers never did:
+
+- the syscall boundary is **94 ns**, and the fd table another **34** on top;
+- a switch and its trampoline are **~190** (`sched_yield` 285 minus a `getpid`);
+- the pipe's own work is **~73 ns per call**.
+
+`/proc/sched_prof` says 220 for the switch alone, which is *more* than the whole
+285 minus 94. Its probes are two `rdtsc` reads per stage boundary, so its stages
+rank the parts of a call and do not add up to one. That is a caveat this file
+did not have before, and it matters: see the memset trap below.
+
+## The pipe and the PTY share one ring now, 480 ns to 402
+
+`Pipe::read` allocated a `Vec` for the bytes it drained and then memmoved the
+remainder with `drain(..n)`; `sys_write` allocated another to stage the user's
+bytes before taking the pipe lock; `sys_read` took that lock three times, once
+to clone `reader_wq`, once to drain, and once inside every `wait_until`
+predicate. Both directions of the PTY did the same thing to every keystroke and
+every character a program printed.
+
+All of it is one `ByteRing` now (`kernel/src/util/ring.rs`), behind the pipe and
+both PTY directions. It grows to fit, keeps its allocation, and restarts at zero
+whenever it drains, so two processes passing single bytes settle on one buffer
+and never allocate again. Reads fill a caller-provided buffer, so no device
+allocates on a read; the non-blocking path takes the lock once, and `reader_wq`
+is only fetched when a read really has to park.
+
+A pipe write plus read went **480 -> 402 ns**. Verified by hashing 1.1 MB
+through a pipe (`cat /bin/switchbench | sha256sum` matches `sha256sum
+/bin/switchbench` byte for byte), `wc -c` reporting the exact size, `$(ls /bin)`
+capturing a multi-kilobyte substitution, heredocs, and 51/51 in-kernel tests --
+`byte-ring` in `sched_test.rs` is the new one, and it exercises wrapping and a
+growth that has to linearise a wrapped ring.
+
+### The trap: a stack buffer costs its declared size, every call
+
+The staging buffer that replaced the per-call `Vec` is a stack array, and **Rust
+zeroes a stack array**. So the first version swapped an allocation for a memset
+of the array's full size on every call, whatever the transfer, and at 2048 bytes
+the two cancelled exactly:
+
+| staging buffer | one-byte pipe echo |
+|---|---|
+| a `Vec` per call, as before | 480 ns |
+| 2048 B | 480 ns |
+| 512 B | 455 ns |
+| 128 B | 404 ns |
+
+128 B shipped: enough for a byte of IPC or a keystroke, with anything larger
+taking the heap where one allocation is amortised over a copy worth making.
+
+Two things worth keeping from how this was found. The end-to-end number said
+"no change" while `/proc/sched_prof` said `pipe_copy_out` had gone from 9 ns to
+135 -- **the compiler had moved the memset across a probe boundary**, because
+the boundary is an `rdtsc` and nothing stops code crossing it. And the honest
+reading of "no change at all, to the nanosecond" was that something new had been
+added of exactly the size of what was removed, which is what it was.
+
+### Fixed on the way: a wait predicate that could panic the kernel
+
+`WaitQueue::wait_until` evaluates its predicate inside `without_interrupts`, and
+its doc says so: a predicate that takes a contended `BlockingMutex` there trips
+that primitive's interrupts-enabled assertion. The pipe's read predicate took
+the pipe lock, and the PTY slave's took the PTY lock. Both now probe with
+`try_lock` and treat a contended device as ready, which is safe because the loop
+around the wait re-checks under the real lock either way. It only fired under
+contention, which is why it survived this long.
+
+---
+
 ## The context switch round: 1917 ns to 433
+
+Both columns here were taken while the host was busy. The floor section above
+re-measures the "after" column on a quiet host and gets 285 ns for the idle
+yield rather than 433; the *ratio* is what this section is about, and it
+survives.
 
 | | before | after |
 |---|---|---|

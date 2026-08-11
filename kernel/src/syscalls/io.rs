@@ -55,6 +55,57 @@ fn copy_in(user_ptr: *const u8, count: usize) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// How much of a pipe or PTY transfer rides on the kernel stack rather than
+/// the heap.
+///
+/// Both directions need a kernel-side buffer, for the reason [`copy_in`] gives:
+/// the user copy cannot happen under the device lock. Below this size that
+/// buffer is a stack array, which is what keeps a one-byte round trip between
+/// two processes, or a keystroke through a PTY, from allocating at all. Kernel
+/// stacks are [`KTHREAD_STACK_SIZE`](crate::memory::KTHREAD_STACK_SIZE), 32 KiB.
+///
+/// **Sized small on purpose, and the size is the whole point.** Rust zeroes a
+/// stack array, so this is a memset on every call however few bytes the call
+/// moves, and that memset is what the buffer costs. Measured with
+/// `switchbench`'s one-byte pipe echo, a write plus a read:
+///
+/// | staging buffer | ns |
+/// |---|---|
+/// | none: a `Vec` per call, as before | 480 |
+/// | 2048 B | 480 |
+/// | 512 B | 455 |
+/// | 128 B | 404 |
+///
+/// At 2 KiB the memset costs exactly what the allocation it replaced did. Keep
+/// it big enough for the transfers that care about latency -- a byte of IPC, a
+/// keystroke -- and let anything larger take the heap, where one allocation is
+/// amortised over a copy worth making.
+const STREAM_STACK_BUF: usize = 128;
+
+/// Most a single pipe or PTY read or write will stage at once. Above it the
+/// call is short, which POSIX.1-2024 permits of both `read()` and `write()`,
+/// and which is what stops a `write(fd, p, 1 << 30)` from asking the kernel
+/// heap for a gigabyte.
+const STREAM_MAX_TRANSFER: usize = 1024 * 1024;
+
+/// A kernel staging buffer of `count` bytes, on the stack when it fits.
+///
+/// `inline` and `heap` are the caller's storage; the returned slice borrows one
+/// of them. Only the heap arm allocates, and only above [`STREAM_STACK_BUF`].
+fn stage_buffer<'a>(
+    inline: &'a mut [u8; STREAM_STACK_BUF],
+    heap: &'a mut Vec<u8>,
+    count: usize,
+) -> &'a mut [u8] {
+    let want = count.min(STREAM_MAX_TRANSFER);
+    if want <= STREAM_STACK_BUF {
+        &mut inline[..want]
+    } else {
+        *heap = vec![0u8; want];
+        heap.as_mut_slice()
+    }
+}
+
 /// Copy a kernel buffer into user space. Counterpart to [`copy_in`]: the caller
 /// releases its guards first, then copies out.
 fn copy_out(user_ptr: *mut u8, data: &[u8]) -> bool {
@@ -239,14 +290,17 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
             // demand fault and park, and a thread killed while parked never runs
             // the guard's Drop, which would leave the pipe locked for good.
             let probe = sched_prof::now_ns();
-            let Some(data) = copy_in(buffer_ptr, count) else {
+            let mut inline = [0u8; STREAM_STACK_BUF];
+            let mut heap = Vec::new();
+            let data = stage_buffer(&mut inline, &mut heap, count);
+            if !unsafe { try_copy_from_user(data.as_mut_ptr(), buffer_ptr, data.len()) } {
                 info.lock().errno = Errno::EFAULT;
                 return !0u64;
-            };
+            }
             let probe = sched_prof::record(Stage::PipeCopyIn, probe);
             let (written, notif) = {
                 let mut pipe = ranked_lock!(RANK_PIPE, "sys_write::pipe", pipe);
-                pipe.write(&data)
+                pipe.write(data)
             };
             let probe = sched_prof::record(Stage::PipeWrite, probe);
             notif.flush();
@@ -549,9 +603,12 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             }
         },
         Some(FileDescriptor::PipeRead(pipe)) => {
-            let reader_wq = ranked_lock!(RANK_PIPE, "sys_read::pipe_wq", pipe)
-                .reader_wq
-                .clone();
+            let mut inline = [0u8; STREAM_STACK_BUF];
+            let mut heap = Vec::new();
+            let data = stage_buffer(&mut inline, &mut heap, count);
+            // Only fetched if this read actually has to park, which is the slow
+            // path by definition.
+            let mut reader_wq = None;
             // Block until data is available or all writers are closed (EOF).
             loop {
                 // Drain under the guard, copy out after releasing it. Bytes are
@@ -559,31 +616,36 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 // caller passed a bad buffer; holding the guard across the copy
                 // instead would leak it permanently on a kill.
                 let probe = sched_prof::now_ns();
-                let (data, closed, notif) = {
+                let (taken, at_eof, notif) = {
                     let mut guard = ranked_lock!(RANK_PIPE, "sys_read::pipe", pipe);
-                    let (d, n) = guard.read(count);
-                    (d, guard.closed && guard.buffer.is_empty(), n)
+                    let (taken, notif) = guard.read_into(data);
+                    (taken, guard.at_eof(), notif)
                 };
                 let probe = sched_prof::record(Stage::PipeRead, probe);
                 notif.flush();
                 let probe = sched_prof::record(Stage::PipeFlush, probe);
 
-                if !data.is_empty() {
-                    if !copy_out(buffer_ptr, &data) {
+                if taken > 0 {
+                    if !copy_out(buffer_ptr, &data[..taken]) {
                         info.lock().errno = Errno::EFAULT;
                         break -1;
                     }
                     sched_prof::record(Stage::PipeCopyOut, probe);
-                    break data.len() as i64;
+                    break taken as i64;
                 }
-                if closed {
+                if at_eof {
                     break 0; // EOF: no data and all writers closed
                 }
-                // No data but writer still open: park until woken by write/close
-                reader_wq.wait_until(|| {
-                    let guard = ranked_lock!(RANK_PIPE, "sys_read::pipe_wait", pipe);
-                    !guard.buffer.is_empty() || guard.closed
+                // No data but writer still open: park until woken by write/close.
+                // The predicate runs with interrupts off, so it probes the lock
+                // rather than taking it and treats a contended pipe as ready --
+                // the loop above re-checks under the real lock either way.
+                let wq = reader_wq.get_or_insert_with(|| {
+                    ranked_lock!(RANK_PIPE, "sys_read::pipe_wq", pipe)
+                        .reader_wq
+                        .clone()
                 });
+                wq.wait_until(|| pipe.try_lock().is_none_or(|guard| guard.readable()));
             }
         }
         Some(FileDescriptor::PipeWrite(_)) => {
@@ -595,22 +657,28 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             // is available. The master side is typically used in a poll loop
             // (e.g. the terminal emulator) and must not block, or it cannot
             // forward keyboard input to the slave -- causing a deadlock.
-            let (data, notif) = {
+            let mut inline = [0u8; STREAM_STACK_BUF];
+            let mut heap = Vec::new();
+            let data = stage_buffer(&mut inline, &mut heap, count);
+            let (taken, notif) = {
                 let mut guard = ranked_lock!(RANK_PTY, "sys_read::pty_master", pty);
-                guard.master_read(count)
+                guard.master_read(data)
             };
             notif.flush();
 
-            if data.is_empty() {
+            if taken == 0 {
                 return 0; // EOF, or no data yet
             }
-            if !copy_out(buffer_ptr, &data) {
+            if !copy_out(buffer_ptr, &data[..taken]) {
                 info.lock().errno = Errno::EFAULT;
                 return -1;
             }
-            data.len() as i64
+            taken as i64
         }
         Some(FileDescriptor::PtySlave(pty)) => {
+            let mut inline = [0u8; STREAM_STACK_BUF];
+            let mut heap = Vec::new();
+            let data = stage_buffer(&mut inline, &mut heap, count);
             // Clone the input_wq Arc before entering the loop (avoids holding lock while blocking).
             let input_wq = ranked_lock!(RANK_PTY, "sys_read::pty_wq", pty).input_wq();
             loop {
@@ -626,19 +694,19 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
 
                 let (result, hangup, notif) = {
                     let mut guard = ranked_lock!(RANK_PTY, "sys_read::pty_slave", pty);
-                    let (r, n) = guard.slave_read(count);
+                    let (r, n) = guard.slave_read(data);
                     let hangup = guard.closed_master && guard.input_buf.is_empty();
                     (r, hangup, n)
                 };
                 notif.flush();
 
                 match result {
-                    PtySlaveRead::Data(data) => {
-                        if !copy_out(buffer_ptr, &data) {
+                    PtySlaveRead::Data(taken) => {
+                        if !copy_out(buffer_ptr, &data[..taken]) {
                             info.lock().errno = Errno::EFAULT;
                             break -1;
                         }
-                        break data.len() as i64;
+                        break taken as i64;
                     }
                     // Ctrl-D: a zero-length read, which is how POSIX spells EOF.
                     PtySlaveRead::Eof => break 0,
@@ -648,11 +716,12 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     break 0;
                 }
                 input_wq.wait_until(|| {
-                    let guard = ranked_lock!(RANK_PTY, "sys_read::pty_wait", pty);
-                    let killed = current_thread().map_or(false, |t| {
-                        t.killed.load(core::sync::atomic::Ordering::Acquire)
-                    });
-                    !guard.input_buf.is_empty() || guard.closed_master || killed
+                    let killed = current_thread()
+                        .is_some_and(|t| t.killed.load(core::sync::atomic::Ordering::Acquire));
+                    killed
+                        || pty
+                            .try_lock()
+                            .is_none_or(|guard| !guard.input_buf.is_empty() || guard.closed_master)
                 });
             }
         }

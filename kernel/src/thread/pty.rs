@@ -4,6 +4,7 @@ use crate::{
         handle::{PollKey, PollRef, PollRegistration, Pollable},
     },
     thread::{mutex::BlockingMutex, signal, waitqueue::WaitQueue},
+    util::ring::ByteRing,
 };
 use alloc::{sync::Arc, vec::Vec};
 
@@ -14,7 +15,8 @@ use alloc::{sync::Arc, vec::Vec};
 /// means park until the master writes. Collapsing them is why Ctrl-D used to
 /// hang until the master closed.
 pub enum PtySlaveRead {
-    Data(Vec<u8>),
+    /// This many bytes were written into the caller's buffer.
+    Data(usize),
     Eof,
     WouldBlock,
 }
@@ -61,15 +63,15 @@ impl LineDiscipline {
     fn process_input(
         &mut self,
         byte: u8,
-        input_buf: &mut Vec<u8>,
-        output_buf: &mut Vec<u8>,
+        input_buf: &mut ByteRing,
+        output_buf: &mut ByteRing,
     ) -> LineAction {
         // Ctrl+C and Ctrl+Z reach the foreground job in both raw and
         // canonical mode, and neither reaches the reader as data.
         if byte == 0x03 {
             self.line_buf.clear();
             if self.echo {
-                output_buf.extend_from_slice(b"^C\n");
+                output_buf.push(b"^C\n");
             }
             return LineAction::Interrupt;
         }
@@ -77,15 +79,15 @@ impl LineDiscipline {
         if byte == 0x1a {
             self.line_buf.clear();
             if self.echo {
-                output_buf.extend_from_slice(b"^Z\n");
+                output_buf.push(b"^Z\n");
             }
             return LineAction::Suspend;
         }
 
         if !self.canonical {
-            input_buf.push(byte);
+            input_buf.push_byte(byte);
             if self.echo {
-                output_buf.push(byte);
+                output_buf.push_byte(byte);
             }
             return LineAction::None;
         }
@@ -95,10 +97,10 @@ impl LineDiscipline {
             // Enter / carriage return
             b'\r' | b'\n' => {
                 self.line_buf.push(b'\n');
-                input_buf.extend_from_slice(&self.line_buf);
+                input_buf.push(&self.line_buf);
                 self.line_buf.clear();
                 if self.echo {
-                    output_buf.push(b'\n');
+                    output_buf.push_byte(b'\n');
                 }
                 LineAction::None
             }
@@ -107,7 +109,7 @@ impl LineDiscipline {
                 if !self.line_buf.is_empty() {
                     self.line_buf.pop();
                     if self.echo {
-                        output_buf.extend_from_slice(b"\x08 \x08");
+                        output_buf.push(b"\x08 \x08");
                     }
                 }
                 LineAction::None
@@ -117,7 +119,7 @@ impl LineDiscipline {
                 if self.line_buf.is_empty() {
                     LineAction::Eof
                 } else {
-                    input_buf.extend_from_slice(&self.line_buf);
+                    input_buf.push(&self.line_buf);
                     self.line_buf.clear();
                     LineAction::None
                 }
@@ -127,7 +129,7 @@ impl LineDiscipline {
             b'\t' => {
                 self.line_buf.push(byte);
                 if self.echo {
-                    output_buf.push(byte);
+                    output_buf.push_byte(byte);
                 }
                 LineAction::None
             }
@@ -135,7 +137,7 @@ impl LineDiscipline {
             0x1B => {
                 self.line_buf.push(byte);
                 if self.echo {
-                    output_buf.push(byte);
+                    output_buf.push_byte(byte);
                 }
                 LineAction::None
             }
@@ -143,7 +145,7 @@ impl LineDiscipline {
             byte if byte >= 0x20 => {
                 self.line_buf.push(byte);
                 if self.echo {
-                    output_buf.push(byte);
+                    output_buf.push_byte(byte);
                 }
                 LineAction::None
             }
@@ -157,9 +159,9 @@ impl LineDiscipline {
 #[allow(unused)]
 pub struct Pty {
     /// Data written by master (keyboard input), consumed by slave readers.
-    pub input_buf: Vec<u8>,
+    pub input_buf: ByteRing,
     /// Data written by slave (program output), consumed by master readers.
-    pub output_buf: Vec<u8>,
+    pub output_buf: ByteRing,
     /// Number of master file descriptor handles open.
     pub masters: usize,
     /// Number of slave file descriptor handles open.
@@ -191,8 +193,8 @@ pub struct Pty {
 impl Pty {
     pub fn new() -> Self {
         Self {
-            input_buf: Vec::new(),
-            output_buf: Vec::new(),
+            input_buf: ByteRing::new(),
+            output_buf: ByteRing::new(),
             masters: 1,
             slaves: 1,
             closed_master: false,
@@ -285,20 +287,15 @@ impl Pty {
 
     /// Master reads program output from output_buf (slave wrote this).
     ///
-    /// Returns the drained bytes; the caller copies them to user space after
-    /// releasing the pty lock.
-    pub fn master_read(&mut self, count: usize) -> (Vec<u8>, PtyNotifications) {
-        if count == 0 {
-            return (Vec::new(), PtyNotifications::EMPTY);
+    /// Fills the caller's buffer and reports how many bytes it took, so the
+    /// PTY never allocates on a read; the caller copies them to user space
+    /// after releasing the pty lock.
+    pub fn master_read(&mut self, out: &mut [u8]) -> (usize, PtyNotifications) {
+        let taken = self.output_buf.pop(out);
+        if taken == 0 {
+            return (0, PtyNotifications::EMPTY);
         }
-
-        let available = count.min(self.output_buf.len());
-        if available == 0 {
-            return (Vec::new(), PtyNotifications::EMPTY);
-        }
-
-        let out: Vec<u8> = self.output_buf.drain(..available).collect();
-        (out, self.notify_pollers())
+        (taken, self.notify_pollers())
     }
 
     /// Slave writes program output into output_buf (master reads this).
@@ -307,29 +304,25 @@ impl Pty {
             return (0, PtyNotifications::EMPTY);
         }
 
-        self.output_buf.extend_from_slice(data);
+        self.output_buf.push(data);
         (data.len(), self.notify_pollers())
     }
 
     /// Slave reads keyboard input from input_buf (master wrote this).
-    pub fn slave_read(&mut self, count: usize) -> (PtySlaveRead, PtyNotifications) {
-        if count == 0 {
-            return (PtySlaveRead::WouldBlock, PtyNotifications::EMPTY);
-        }
-
+    ///
+    /// Fills the caller's buffer, as [`master_read`](Self::master_read) does.
+    pub fn slave_read(&mut self, out: &mut [u8]) -> (PtySlaveRead, PtyNotifications) {
         // Deliver EOF once when input is empty and eof_pending is set.
         if self.input_buf.is_empty() && self.eof_pending {
             self.eof_pending = false;
             return (PtySlaveRead::Eof, self.notify_pollers());
         }
 
-        let available = count.min(self.input_buf.len());
-        if available == 0 {
+        let taken = self.input_buf.pop(out);
+        if taken == 0 {
             return (PtySlaveRead::WouldBlock, PtyNotifications::EMPTY);
         }
-
-        let out: Vec<u8> = self.input_buf.drain(..available).collect();
-        (PtySlaveRead::Data(out), self.notify_pollers())
+        (PtySlaveRead::Data(taken), self.notify_pollers())
     }
 
     /// Decrement master refcount; set closed_master when it reaches zero.

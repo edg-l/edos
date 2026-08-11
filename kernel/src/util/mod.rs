@@ -1,4 +1,5 @@
 pub mod per_cpu;
+pub mod ring;
 pub mod trace;
 pub mod uaccess;
 

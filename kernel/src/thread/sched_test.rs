@@ -98,7 +98,7 @@ struct TestHarness {
     affinity_tid: AtomicU64,
 }
 
-const TOTAL_TESTS: u32 = 50;
+const TOTAL_TESTS: u32 = 51;
 
 pub fn run_sched_tests() {
     println!("[sched-test] Starting scheduler tests ({TOTAL_TESTS} expected)...");
@@ -210,6 +210,9 @@ pub fn run_sched_tests() {
     // reports mean, checked against the two QEMU speaks (1)
     spawn_test(&harness, "test-hid-report", test_hid_report);
 
+    // The byte ring behind every pipe and PTY, where wrapping meets growth (1)
+    spawn_test(&harness, "test-byte-ring", test_byte_ring);
+
     // Priority starvation: one busy spinner per CPU plus one victim below them (1)
     for _ in 0..harness.starvation_spinners {
         spawn_test(&harness, "test-starve-spin", test_starvation_spinner);
@@ -242,6 +245,13 @@ extern "C" fn test_hid_report(arg: *mut u8) -> ! {
     let h = get_harness(arg);
     crate::drivers::usb::hid::report::tests::check();
     test_done(&h, "hid-report-descriptor");
+    thread_exit(0);
+}
+
+extern "C" fn test_byte_ring(arg: *mut u8) -> ! {
+    let h = get_harness(arg);
+    crate::util::ring::tests::check();
+    test_done(&h, "byte-ring");
     thread_exit(0);
 }
 

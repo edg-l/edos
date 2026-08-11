@@ -2,6 +2,26 @@
 
 ## Done
 
+- **The pipe and the PTY share one byte ring (2026-08-11)** - `Pipe::read`
+  allocated a `Vec` for the bytes it drained and memmoved the remainder,
+  `sys_write` allocated another to stage the user's bytes, and `sys_read` took
+  the pipe lock three times per call; both PTY directions did the same to every
+  keystroke. All of it is `util::ring::ByteRing` now, which grows to fit, keeps
+  its allocation, and fills a caller-provided buffer so no read allocates. A
+  pipe write plus read: 480 -> 402 ns. The trap that hid the win for two builds
+  is worth reading in `doc/SCHED-ROADMAP.md`: the stack buffer that replaced
+  the `Vec` is zeroed by Rust on every call, and at 2 KiB that memset cost
+  exactly what the allocation did. Also fixed a wait predicate that took a
+  `BlockingMutex` inside `without_interrupts`, which `WaitQueue` documents as a
+  panic under contention.
+- **The floor, measured with the host quiet (2026-08-11)** - the 4x spread the
+  previous round reported for `getpid` and the pipe echo was the *host*
+  descheduling the vCPU, not the code. With nothing building, five
+  `switchbench` runs repeat to within 2%: syscall boundary 94 ns, fd table +34,
+  a switch and its trampoline ~190, the pipe's own work ~73 per call, a pipe
+  round trip 4946. That last one is now the biggest unexplained number in the
+  system -- 1.8 us per park/wake pair that nothing accounts for -- and it is
+  item 1 of `doc/SCHED-ROADMAP.md`.
 - **The std fork moved from Rust 1.96 to 1.99, and std stopped declining what
   the kernel already offered** - three months of upstream (13,491 commits) cost
   nine one-hunk conflicts and seven pieces of semantic drift that no conflict

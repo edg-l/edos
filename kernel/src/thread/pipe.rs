@@ -10,6 +10,7 @@ use crate::{
     net::socket::Socket,
     ranked_lock,
     thread::{mutex::BlockingMutex, pty::Pty, waitqueue::WaitQueue},
+    util::ring::ByteRing,
 };
 use alloc::{sync::Arc, vec::Vec};
 
@@ -62,7 +63,7 @@ pub enum StandardStream {
 #[allow(unused)]
 #[derive(Debug)]
 pub struct Pipe {
-    pub buffer: Vec<u8>,
+    pub buffer: ByteRing,
     pub readers: usize,
     pub writers: usize,
     pub closed: bool,
@@ -76,7 +77,7 @@ pub struct Pipe {
 impl Pipe {
     pub fn new() -> Self {
         Self {
-            buffer: Vec::new(),
+            buffer: ByteRing::new(),
             readers: 1,
             writers: 1,
             closed: false,
@@ -109,20 +110,29 @@ impl Pipe {
         if self.readers == 0 {
             return (None, self.notify_pollers());
         }
-        self.buffer.extend_from_slice(data);
+        self.buffer.push(data);
         let written = data.len();
         (Some(written), self.notify_pollers())
     }
 
-    pub fn read(&mut self, count: usize) -> (Vec<u8>, PipeNotifications) {
-        let available = count.min(self.buffer.len());
-        let mut out = self.buffer[..available].to_vec();
-        self.buffer.drain(..available);
-        let notif = self.notify_pollers();
-        if available == 0 {
-            out.clear();
-        }
-        (out, notif)
+    /// Take up to `out.len()` bytes, reporting how many and what to notify.
+    ///
+    /// The caller owns the destination so the pipe never allocates on a read:
+    /// the bytes go from the ring into a buffer the syscall already has, and
+    /// from there to user space after the pipe lock is released.
+    pub fn read_into(&mut self, out: &mut [u8]) -> (usize, PipeNotifications) {
+        let taken = self.buffer.pop(out);
+        (taken, self.notify_pollers())
+    }
+
+    /// A read would return end of file: nothing buffered and no writer left.
+    pub fn at_eof(&self) -> bool {
+        self.closed && self.buffer.is_empty()
+    }
+
+    /// A read would return without blocking, either with bytes or with EOF.
+    pub fn readable(&self) -> bool {
+        !self.buffer.is_empty() || self.closed
     }
 
     fn poll_state(&self) -> PollState {

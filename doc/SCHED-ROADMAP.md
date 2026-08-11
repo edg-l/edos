@@ -20,59 +20,199 @@ scripts/edos-vm type 'cat /proc/sched_prof > /tmp/b.txt; switchbench 20000 -l; \
     cat /proc/sched_prof > /dev/klog; cat /tmp/b.txt > /dev/klog' --enter
 ```
 
-## Where things stand (2026-08-11)
+## Where things stand (2026-08-11, quiet host)
 
-| | ns |
-|---|---|
-| `sched_yield`, nothing else Ready | 433-566 |
-| `sched_yield`, handover to a sibling thread | 490-571 |
-| `sched_yield`, handover to another process | 751-822 |
-| the switch itself, `/proc/sched_prof` | 220 |
-| a wake (`do_wake`) | 51 |
-| `getpid`, i.e. a syscall that does nothing | 96-302 |
-| a pipe write + read, nothing blocking | 530-2090 |
-| a blocking pipe round trip between two processes | 4552-6720 |
+Five consecutive `switchbench` runs on a single-CPU boot, each already the best
+of six batches. The median is below; the spread across the five runs is in the
+last column, and it is a few percent everywhere.
+
+| | ns | spread |
+|---|---|---|
+| `sched_yield`, nothing else Ready | 285 | 283-288 |
+| `sched_yield`, handover to a sibling thread | 340 | 328-350 |
+| `sched_yield`, handover to another process | 505 | 499-533 |
+| `getpid`, i.e. a syscall that does nothing | 94 | 92-95 |
+| `read` of a descriptor that does not exist | 128 | 128 |
+| a pipe write + read, nothing blocking | 402 | 399-407 |
+| a blocking pipe round trip between two processes | 4946 | 4785-5168 |
+| the switch itself, `/proc/sched_prof` | 220 | |
+| a wake (`do_wake`) | 51 | |
 
 Inside the 220 ns switch: `page` 66-77, `fxrstor` + `fxsave` 91, `CpuContext`
 copies 36, publish 19, transition 27, `wake_sleepers` 18, pick 12, timer 10.
 
-### The numbers above are not as solid as they look
+### These are the floor, and the earlier ranges were the host
 
-Two sources of interference, and the second one is invisible from inside the
-guest:
+The previous version of this table gave `getpid` as 96-302 ns and the pipe echo
+as 530-2090, and concluded that nothing under about 30% could be attributed.
+That spread was **the host**, not the code. This is a VM, and when the host has
+something else to run it deschedules the whole vCPU; the guest cannot see it
+happen, and it looks exactly like slow code.
 
-- The desktop. The compositor wakes ~74 times a second and the panel clock
-  once a second, and either landing inside a measurement inflates it.
-- **The host.** This is a VM: when the host has something else to run — a build
-  in another terminal, most obviously — it deschedules the whole vCPU. The
-  guest cannot see that happen. It just looks like slow code.
+With no build and no test suite running on the host, the same binary repeats to
+within 2%. What the machine was doing during the run above: a permanently
+resident Ethereum devnet (two `ethrex`, a `geth`, a `lighthouse`), about 2.5 of
+12 hardware threads. That is this machine's floor rather than a truly idle one,
+and it is quiet enough to attribute 25 ns.
 
-The same `switchbench` binary in one boot gave **243, 302 and 96 ns** for
-`getpid`, and **530, 1103 and 2090 ns** for the pipe echo. That is a 4× spread
-on unchanged code, so a single mean settles nothing. `switchbench` therefore
-reports the **best of six batches** rather than the mean of one: interference
-only ever adds time, so the fastest batch is the least contaminated.
+So the rule is simpler than it was: **do not measure while anything is
+building.** Take five runs and read the median. The desktop still interferes
+from inside the guest -- the compositor wakes ~74 times a second, the panel
+clock once a second -- which is what the best-of-six inside `switchbench` is
+for.
 
-What that leaves trustworthy:
+`/proc/sched_prof` remains the tool for attribution *inside* a call, with one
+caveat learned the hard way below: its probes cost two `rdtsc` reads per stage
+boundary, and the compiler is free to move work across a boundary that is only
+delimited by a non-serialising instruction. Stage numbers rank the parts of a
+call; they do not add up to the call.
 
-- **`/proc/sched_prof` stages**, which are means over 10⁴–10⁵ samples of work
-  that happens entirely inside the kernel. Use these for attribution.
-- **Large deltas**, like 1917 → ~500 ns. Those survive any of this.
-- **Not** fine attribution between two things a few hundred nanoseconds apart.
-  Anything under about 30% needs the host idle and several runs before it means
-  anything, and the figures in the table above were not all taken that way.
+### What the floor says about where the time is
 
-**The switch is no longer the expensive part, and neither is the wake.** A
-wake is 51 ns and a whole round trip's pipe work is about 190. What is left is
-the syscall boundary, which every call in the system pays — but see item 2:
-the wall-clock spread on `getpid` is wide enough that the size of that term is
-not yet established, only its rank.
+`getpid` is 94 ns and a bad-fd `read` is 128, so the syscall boundary is 94 and
+the fd table costs 34 on top of it. A pipe write plus read is 402: two
+boundaries are 188 of that, two fd lookups another 68, and roughly 145 ns is
+the pipe's own work for both calls together.
 
-## 1. A voluntary switch does not need a register frame or an `iretq`
+`sched_yield` with nothing else Ready is 285, so the switch and its trampoline
+are the other ~190 -- less than the 220 `/proc/sched_prof` reports for the
+switch alone, which is the probe overhead showing.
 
-`sched_yield` is 433 ns and the switch inside it is 220, so ~210 ns is the
-boundary: `save_transition_switch` builds a synthetic 160-byte `CpuContext` on
-the stack, `do_save_current_thread` copies it into the thread under a spin
+**The syscall boundary is the biggest single term in any short call**, and
+every call in the system pays it. That is item 2.
+
+## 1. A park and a wake cost four times a yield handover, and nothing explains it
+
+This is the largest unexplained number in the table. A blocking pipe round trip
+is 4946 ns, which is two parks and two wakes, four syscalls and four trips
+through the pipe. Subtract the four syscalls and each park/wake pair is 2071 ns,
+against 505 for the cross-process handover a `sched_yield` performs. Priced from
+the parts that *are* measured:
+
+| | ns |
+|---|---|
+| 4 pipe syscalls, at 94 boundary + 34 fd table + ~73 pipe work each | 804 |
+| 2 context switches, at `sched_yield` minus its own boundary | 382 |
+| 2 wakes (`do_wake`) | 102 |
+| **accounted** | **~1290** |
+| **measured** | **4946** |
+
+So about 3.7 microseconds per round trip -- 1.8 per park/wake pair -- is in
+nobody's column. Candidates, none of them measured yet: `wait_until` evaluating
+its predicate under `without_interrupts` and taking the pipe lock to do it;
+`thread_park_while`'s enqueue and the transition through `Parked`; the woken
+thread starting on a cold cache after the other process ran; and the timer being
+re-armed for a thread that then blocks immediately.
+
+**Measure before optimising anything here.** The instrument is a `sched_prof`
+stage around `thread_park_while` and one around `WaitQueue::wait_internal`'s
+enqueue, which do not exist yet. The previous version of this file guessed at
+this number by subtraction and drew a wrong conclusion (see the retraction
+below); do not repeat that.
+
+### Retracted: the L4-style direct handoff
+
+An earlier draft proposed an L4/seL4 direct process switch on the strength of
+`(round_trip / 2) - (yield handover)`, a subtraction that charges the entire
+remainder of a round trip to the wake. Measuring the wake directly refuted it:
+`do_wake` is 51 ns end to end, `wake_enqueue` 32 of that, and `pick` 16. The
+scheduler's share of an IPC is about 100 ns. A fastpath would remove some of
+that and none of the 3 microseconds above.
+
+If it ever does become worth it, the reference design is seL4's: the sender
+switches straight to the receiver on its own timeslice, no runqueue and no
+scheduler invocation, behind a fastpath requiring the receiver to be runnable
+here with nothing higher-priority waiting.
+<https://docs.sel4.systems/Tutorials/ipc.html>,
+<https://microkerneldude.org/2019/03/07/how-to-and-how-not-to-use-sel4-ipc/>
+
+### Done: the pipe and PTY data path (2026-08-11)
+
+A pipe write plus read, nothing blocking, went **480 -> 402 ns**, and the same
+change removed an allocation per keystroke from the PTY. What it was:
+
+- `Pipe::read` allocated a `Vec` for the bytes it drained and then `drain(..n)`
+  memmoved everything left behind. Both sides of a PTY did the same.
+- `sys_write` allocated a `Vec` to stage the user's bytes before taking the
+  pipe lock, on every call.
+- `sys_read` took the pipe lock once to clone `reader_wq`, again to drain, and
+  again inside every `wait_until` predicate evaluation.
+
+Now: one `ByteRing` (`kernel/src/util/ring.rs`) behind the pipe and both
+directions of the PTY, which grows to fit and keeps its allocation, so two
+processes passing single bytes settle on one buffer and never allocate again.
+Reads fill a caller-provided buffer, so the device never allocates on a read.
+The non-blocking path takes the lock once; `reader_wq` is only fetched when the
+read actually has to park.
+
+**The trap, and it is worth remembering because it hid the whole win.** The
+staging buffer that replaced the per-call `Vec` was a stack array, and Rust
+zeroes a stack array — so the change swapped an allocation for a memset of the
+array's full size, whatever the transfer. At 2048 bytes the two cancelled
+*exactly*: 480 ns before, 480 after. The measured curve, one-byte echo:
+
+| staging buffer | ns |
+|---|---|
+| a `Vec` per call, as before | 480 |
+| 2048 B | 480 |
+| 512 B | 455 |
+| 128 B | 404 |
+
+128 B is what shipped: enough for a byte of IPC or a keystroke, with anything
+larger taking the heap, where one allocation is amortised over a copy worth
+making. The general lesson is that **a stack buffer is not free, it costs its
+declared size**, and the cost does not appear in a profile taken with
+`sched_prof` — the compiler moved the memset across the probe boundaries, which
+is how `pipe_copy_out` came to read 135 ns for copying one byte.
+
+What is left in the pipe path, unmeasured and small: `notify_pollers()` runs on
+every read and every write, clones the reader's `WaitQueue` `Arc`, and calls
+`wake_one()`, which disables interrupts and takes a spin lock to find an empty
+queue. A cheap "is anyone waiting" would skip all of it — but it has to be a
+check that cannot miss a wake, and a relaxed counter read before the queue lock
+is exactly the shape of a missed wakeup.
+
+### Known gap: a pipe has no backpressure
+
+`Pipe::write` never blocks and the ring grows without limit, so a writer that
+outruns its reader grows the kernel heap until it dies. The only thing that
+stops it today is `readers == 0`, which is what makes `yes | head -1` terminate.
+POSIX wants a bounded pipe whose write blocks when full.
+
+Deliberately not done with the ring, because it is a semantic change with a
+deadlock attached: `edos-sh` writes a whole heredoc into a pipe *before*
+anything reads it (`main.rs`, `script.rs`), so a heredoc larger than the
+capacity would deadlock the shell against itself. The real fix is both halves
+together — a capacity plus a writer wait queue in the kernel, and a shell that
+does not write into a pipe it has not yet given anyone to read.
+
+## 2. What every syscall does before it reaches the syscall
+
+`getpid` is 94 ns and it is the shortest call the kernel has: the SYSCALL entry
+stub, the dispatch, a read of the current thread, and SYSRET. Every call in the
+system pays it, so it outranks anything that belongs to one subsystem.
+
+What sits on that path and has never been read with this in mind: the
+traced-call bookkeeping in `syscall_handler` (`with_current_thread` and
+`trace::traced_session` run on *every* call, whether or not anything is being
+traced), and `current_thread_info()` plus `info.lock()`, which the arms
+themselves then call again.
+
+The fd table costs a further 34 ns on top, measured as the gap between `getpid`
+and a `read` of a descriptor that does not exist — that one is a
+`BlockingMutex` acquisition and a lookup, before any descriptor is cloned.
+
+Reference for how small this can get: Linux's `SYSCALL`/`SYSRET` path with no
+mitigations is on the order of 40-60 ns on comparable hardware.
+
+## 3. A voluntary switch does not need a register frame or an `iretq`
+
+`sched_yield` with nothing else Ready is 285 ns and a `getpid` is 94, so the
+switch and its trampoline are the other **~190**. (`/proc/sched_prof` says 220
+for the switch alone, which is more than the whole difference: its probes cost
+two `rdtsc` per stage boundary. Read the stages as a ranking of the parts, not
+as a total.) That 190 buys: `save_transition_switch` builds a synthetic
+160-byte `CpuContext` on the stack, `do_save_current_thread` copies it into the thread under a spin
 `Mutex`, `context_switch_to` copies the next thread's back out under another,
 and the trampoline `iretq`s **kernel-to-kernel** into a resume label that then
 `ret`s to the caller.
@@ -91,66 +231,11 @@ to design carefully — `Thread::ctx` is read by work-stealing and by
 `validate_ctx`, and both need to know which kind they are looking at.
 
 Worth: the 36 ns of `CpuContext` copies plus the `iretq` and the frame build,
-so a large fraction of the 210 ns boundary.
+so a large fraction of the ~190 ns the switch costs.
 
 Reference: <https://kernel-internals.org/sched/context-switch/>
 
-## 2. The pipe data path, not the wake path
-
-**Read this before reaching for an IPC fastpath.** An earlier draft of this
-item proposed an L4-style direct process switch on the strength of
-`(round_trip / 2) - (yield handover)` — a subtraction that charges the entire
-remainder of a round trip to the wake. Measuring the wake directly refuted it:
-
-| | ns |
-|---|---|
-| `wake` (all of `do_wake`) | 51 |
-| of which `wake_enqueue` | 32 |
-| `pick` | 16 |
-| the pipe's own work, per round trip, summed from its stages | ~190 |
-
-The scheduler's part of an IPC is about 100 ns and the pipe's is about 190. A
-direct handoff would remove some of the first, and neither is where a round
-trip's microseconds go.
-
-Where it is **not**, on the evidence: the pipe's own data structures. Per call,
-from `/proc/sched_prof` — the trustworthy instrument here — `pipe_copy_in` is
-37 ns, `pipe_write` 61, `pipe_read` 61, `pipe_flush` 21 and `pipe_copy_out` 9.
-A whole round trip's pipe work is therefore something like 190 ns, against a
-`getpid` that costs 96-302 ns depending on what the host was doing. **The
-syscall boundary is the larger term, and it is paid by every syscall in the
-system, not just IPC.** Attacking the pipe's buffer first would be optimising
-the smaller half.
-
-That is as far as the evidence goes, and no further: the wall-clock figures
-that would settle the ratio are inside the noise described above. The next
-step is a floor measurement of `getpid` on an idle host, repeated, and then a
-look at what the generic dispatch path in `syscall_handler` does before it
-reaches the syscall — the traced-call bookkeeping and `current_thread_info()`
-are both on it.
-
-For the record, the pipe path per read does the following, and it is worth
-tidying whenever it is touched for other reasons, but it is not the lever:
-
-- takes the pipe `BlockingMutex` to clone `reader_wq`, again to drain, and
-  again inside every `wait_until` predicate evaluation;
-- `Pipe::read` **allocates a `Vec`** for the result (`buffer[..n].to_vec()`)
-  and then `drain(..n)`, which memmoves the remainder;
-- calls `notify_pollers()` on every read and every write.
-
-If it is tidied: give `Pipe` a ring buffer so a read is a copy rather than an
-allocation plus a memmove, return the bytes into a caller-provided buffer
-instead of a `Vec`, and take the lock once per call rather than per phase.
-Expect tens of nanoseconds, not hundreds.
-
-If it does become worth it later, the reference design is seL4's: the sender
-switches straight to the receiver on its own timeslice, no runqueue and no
-scheduler invocation, behind a fastpath that requires the receiver to be
-runnable here with nothing higher-priority waiting.
-<https://docs.sel4.systems/Tutorials/ipc.html>,
-<https://microkerneldude.org/2019/03/07/how-to-and-how-not-to-use-sel4-ipc/>
-
-## 3. Spin briefly before parking — not yet justified, measure first
+## 4. Spin briefly before parking — not yet justified, measure first
 
 `BlockingMutex` and the wait queues park immediately on contention. Spinning
 first for about the cost of a switch turns a short wait into no switch at all,
@@ -166,7 +251,7 @@ and there is no multi-CPU contention measurement here to size it against.
 
 So the prerequisite is a benchmark that holds a `BlockingMutex` across a short
 critical section from several CPUs and reports the wait distribution. If the
-common wait is shorter than a switch, this becomes item 3 for real; if it is
+common wait is shorter than a switch, this becomes a real item; if it is
 longer, adaptive spinning is a pessimisation and should be recorded as refuted.
 
 When it is built: derive the bound from the measured switch cost rather than
@@ -174,7 +259,7 @@ picking one, and give up the spin if the holder is not currently running —
 that check is what a pure spinlock cannot make and is why it is called
 *adaptive*.
 
-## 4. `switch_to_page` takes a lock to decide it has nothing to do
+## 5. `switch_to_page` takes a lock to decide it has nothing to do
 
 66-77 ns, on every switch including the common one where the address space
 does not change. It takes `user.read()` — an `RwLock` — and reads `CR3` before
@@ -184,7 +269,7 @@ only three sites set it (thread creation in `thread.rs`, `execve`, `fork`).
 Getting this wrong means a thread runs on the wrong address space, so the
 mirror has to be provably updated at all three.
 
-## 5. `MIN_TIMER_INTERVAL` is still a picked number
+## 6. `MIN_TIMER_INTERVAL` is still a picked number
 
 The 10 us floor in `apic/mod.rs` was chosen to sit above interrupt cost and
 below a 1 ms sleep, not measured. It matters much less now that the one-shot
@@ -219,7 +304,8 @@ still a trapping MSR write.
 The 2026-08-11 round, in `doc/WORKING-NOTES.md`: the APIC one-shot is re-armed
 only when what is armed would fire too late (that write alone was 1024 ns of a
 1270 ns switch), `FS.base` goes through `rdfsbase`/`wrfsbase`, and kernel
-mappings are `GLOBAL` with `CR4.PGE` on. `sched_yield` 1917 → 433 ns.
+mappings are `GLOBAL` with `CR4.PGE` on. `sched_yield` 1917 → 433 ns as
+measured then, and 285 when re-measured on a quiet host.
 
 **The intermittent `sched-test` ping-pong failure was a test bug, not a lost
 wakeup.** It had been open since 2026-08-10 under two signatures — `ping-pong
