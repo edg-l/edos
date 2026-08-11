@@ -29,9 +29,47 @@ suspended for a minute returns as soon as it is continued.
 `sys_sleep_ms` needs no equivalent change; it does not loop, so its single early
 return already reaches the syscall boundary where the stop is taken.
 
-Verified by the gates only (51/51, warning-free). The in-guest check — Ctrl+Z on
-`sleep 30` returning a prompt within a second, and `sleep 30` still taking 30 s
-unsignalled — is still owed.
+### The fix is necessary but not sufficient: the guest still sleeps the full 30 s
+
+Driven in the guest against the kernel that carries the change (the ISO was
+rebuilt from `85f2a5c`; `make run-headless` reported both crates already up to
+date, so the running binary is that commit):
+
+```
+/ $ sleep 30
+^Z                       <- t = 1 s, echoed by the line discipline
+echo BACK                <- typed at t = 2 s, only the PTY echo appears
+                            no shell prompt, nothing runs
+
+[1]+ Stopped    sleep 30 <- t = 30 s, when the deadline passed
+/ $ echo BACK
+BACK
+```
+
+So Ctrl+Z is **still** a 30-second wait, and the item is not closed. What the
+run does establish:
+
+- The stop is genuinely recorded, and by the nanosleep loop: `stop_requested`
+  was set at the keypress and `stop_if_signalled` ran, since the shell's
+  `waitpid(WUNTRACED)` only reports `Stopped` off the `EXITED_THREADS`
+  wake that `stop_if_signalled` posts. It just ran at the deadline instead of
+  at the keypress.
+- `/bin/sleep` really is on this path. `std::thread::sleep` reaches
+  `edos_rt::process::nanosleep` (`library/std/src/sys/thread/edos.rs`), which
+  is `SYS_NANOSLEEP`, not `SYS_SLEEP_MS`.
+
+Ruled out, so do not re-derive them: a stale ISO, the wrong syscall, and the
+loop lacking a `stop_if_signalled` call.
+
+What is left is the wake itself: the sleeping thread does not leave
+`thread_sleep` when the signal arrives, so the loop only reaches
+`stop_if_signalled` when the deadline expires. `kill_process_with_signal` does
+call `wake_thread` after `apply_default_action`, and `wake_thread` claims a
+`Sleeping` thread through `try_wake`, so the next step is to instrument which of
+those two is not happening — whether `signal_process_group` matched the sleeper
+at all, and whether `transition_sleep` honours the wake token or re-arms to the
+deadline. Instrument before changing anything: the previous mechanism on record
+for this symptom was wrong twice.
 
 ---
 
