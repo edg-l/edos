@@ -75,7 +75,14 @@ pub fn parse(data: &[u8]) -> Option<(Ipv4Header, &[u8])> {
 }
 
 /// Build an IPv4 packet with a valid header checksum.
-pub fn build(src: [u8; 4], dst: [u8; 4], protocol: IpProtocol, ttl: u8, payload: &[u8]) -> Vec<u8> {
+pub fn build(
+    src: [u8; 4],
+    dst: [u8; 4],
+    protocol: IpProtocol,
+    ttl: u8,
+    id: u16,
+    payload: &[u8],
+) -> Vec<u8> {
     let total_length = (HEADER_LEN + payload.len()) as u16;
     let mut pkt = Vec::with_capacity(total_length as usize);
 
@@ -83,7 +90,7 @@ pub fn build(src: [u8; 4], dst: [u8; 4], protocol: IpProtocol, ttl: u8, payload:
     pkt.push(0x45); // version=4, ihl=5
     pkt.push(0x00); // dscp_ecn
     pkt.extend_from_slice(&total_length.to_be_bytes());
-    pkt.extend_from_slice(&0u16.to_be_bytes()); // identification
+    pkt.extend_from_slice(&id.to_be_bytes());
     pkt.extend_from_slice(&0x4000u16.to_be_bytes()); // flags: DF=1, MF=0, offset=0
     pkt.push(ttl);
     pkt.push(protocol as u8);

@@ -243,6 +243,12 @@ def cmd_start(args):
     if not args.no_cdrom:
         qemu += ["-cdrom", iso]
 
+    # `make run-capture` needs a local display; this is the same filter-dump
+    # for a headless boot, and writes the same pcap.
+    if args.pcap:
+        pcap = args.pcap if os.path.isabs(args.pcap) else os.path.join(REPO, args.pcap)
+        qemu += ["-object", f"filter-dump,id=dump0,netdev=net0,file={pcap}"]
+
     # Hangs off the same qemu-xhci as the keyboard and mouse, so the guest
     # reaches it through its own xHCI driver rather than a second controller.
     if usb_disk:
@@ -725,6 +731,8 @@ def main():
                    help="boot without the ISO, e.g. to test an installed disk")
     s.add_argument("--ssh-fwd", type=int, default=2323,
                    help="host port forwarded to guest TCP 23")
+    s.add_argument("--pcap", metavar="FILE",
+                   help="dump every frame on the NIC to FILE (pcap)")
     s.set_defaults(func=cmd_start)
 
     sub.add_parser("stop", help="shut the VM down").set_defaults(func=cmd_stop)

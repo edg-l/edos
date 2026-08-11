@@ -6,6 +6,50 @@ session.
 
 ---
 
+## The first inbound connection after boot was lost in the ARP cache
+
+`send_ip` used to build the frame only when `arp_cache.lookup` hit, and return
+`Err("arp pending")` otherwise. The packet was gone: the ARP request went out,
+the reply arrived, and nothing remembered what the request had been for. Every
+caller that could not block (the SYN-ACK path in `handle_ipv4`, the FIN paths in
+`pipe.rs`, `io.rs` and `syscalls/mod.rs`, retransmits) simply dropped its
+segment, which is why the first `curl` after boot failed and `netstat -a` showed
+a stranded `SYN_RECV` with Send-Q 1.
+
+`ArpCache` now holds one packet per unresolved target (`queue_pending_tx` /
+`take_pending_tx`, RFC 1122 §2.3.2.2), flushed from `handle_arp` when the reply
+lands. Newest wins per target and the map is capped at 16 targets, so a peer
+that never replies costs one packet, not a growing queue.
+
+Consequences worth knowing:
+
+- `send_ip` returns `Ok(())` for a packet that has not reached the wire. That is
+  the honest contract for a best-effort layer, and it made three ARP-retry
+  loops dead: `syscall_ping`, `sys_connect` and `sys_sendto` each used to wait on
+  an ARP waiter and re-send. All three are gone, and with them
+  `ArpCache::get_or_create_waiter` and the `pending` waiter map.
+- A cold-cache ping now measures ARP resolution inside its RTT, since the echo
+  request leaves when the reply lands. Linux reports a first ping the same way.
+
+Verified in the guest with `httpd -p 23 &` and one `curl` from the host through
+`hostfwd tcp:127.0.0.1:2323`: 200 in 10 ms on the *first* connection after boot,
+and the pcap shows the order — inbound SYN, `who-has 10.0.2.2`, the reply, then
+the SYN-ACK 39 µs later.
+
+`scripts/edos-vm start --pcap FILE` was added for that, since `make run-capture`
+wants a local display and cannot run over SSH.
+
+### The IPv4 id was always zero
+
+`ipv4::build` hardcoded `identification = 0` while `next_ip_id()` was called and
+discarded in `send_ping`. Fragment reassembly keys on that field, so two
+concurrent fragmented flows to the same peer would have aliased. `build` now
+takes the id and `send_ip_inner` supplies it. Still zero in one place: DHCP hand
+-rolls its own IPv4 header (`net/dhcp.rs:176`) rather than calling `ipv4::build`,
+which is harmless for a never-fragmented broadcast but is the last id=0 sender.
+
+---
+
 ## A stop signal did not cut short a sleep, and `thread_sleep` was not why
 
 Ctrl+Z on `sleep 30` took effect only when the 30 s were up. The mechanism on

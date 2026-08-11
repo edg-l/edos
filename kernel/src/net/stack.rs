@@ -107,6 +107,15 @@ impl NetStack {
         );
         self.arp_cache.insert(pkt.spa, pkt.sha);
 
+        // Flush the packet that was waiting on this address.
+        if let Some(ip_pkt) = self.arp_cache.take_pending_tx(&pkt.spa) {
+            let frame =
+                ethernet::build_frame(pkt.sha, self.mac(), ethernet::EtherType::Ipv4, &ip_pkt);
+            if let Err(e) = self.nic.transmit(&frame) {
+                log!("net: arp: pending transmit failed: {}", e);
+            }
+        }
+
         if pkt.oper == arp::ARP_REQUEST && pkt.tpa == self.local_ip {
             self.send_arp_reply(pkt.sha, pkt.spa);
         }
@@ -398,8 +407,9 @@ impl NetStack {
 
     /// Send an IP packet, resolving the destination MAC via ARP.
     ///
-    /// Returns `Err("arp pending")` on a cache miss after sending an ARP request.
-    /// Callers that can block should retry after waiting on the ARP cache waiter.
+    /// On a cache miss the packet is held against the ARP request and goes out
+    /// when the reply lands, so the caller sees `Ok(())` for a packet that has
+    /// not reached the wire yet.
     pub fn send_ip(
         &mut self,
         dst_ip: [u8; 4],
@@ -429,7 +439,8 @@ impl NetStack {
             } else {
                 self.local_ip
             };
-            let ip_pkt = ipv4::build(src_ip, dst_ip, protocol, 64, payload);
+            let id = self.next_ip_id();
+            let ip_pkt = ipv4::build(src_ip, dst_ip, protocol, 64, id, payload);
             let frame = ethernet::build_frame([0; 6], [0; 6], ethernet::EtherType::Ipv4, &ip_pkt);
             self.loopback_queue.push(frame);
             return Ok(());
@@ -441,14 +452,16 @@ impl NetStack {
             self.gateway_ip
         };
 
+        let id = self.next_ip_id();
+        let ip_pkt = ipv4::build(self.local_ip, dst_ip, protocol, 64, id, payload);
         if let Some(dst_mac) = self.arp_cache.lookup(&resolve_ip) {
-            let ip_pkt = ipv4::build(self.local_ip, dst_ip, protocol, 64, payload);
             let frame =
                 ethernet::build_frame(dst_mac, self.mac(), ethernet::EtherType::Ipv4, &ip_pkt);
             self.nic.transmit(&frame)
         } else {
+            self.arp_cache.queue_pending_tx(resolve_ip, ip_pkt);
             self.send_arp_request(resolve_ip);
-            Err("arp pending")
+            Ok(())
         }
     }
 
@@ -542,7 +555,6 @@ impl NetStack {
     /// `PingWaiter` in `ping_waiters` before calling this if it wants to
     /// receive the reply notification.
     pub fn send_ping(&mut self, dst: [u8; 4], id: u16, seq: u16) -> Result<(), &'static str> {
-        let _ = self.next_ip_id();
         let icmp_data = icmp::build_echo_request(id, seq, &[0u8; 32]);
         self.send_ip(dst, ipv4::IpProtocol::Icmp, &icmp_data)
     }
@@ -646,54 +658,13 @@ pub fn syscall_ping(dst_ip: [u8; 4], id: u16, seq: u16, timeout: Duration) -> Op
         );
     }
 
-    // Send the ping, retrying up to 3 times if ARP resolution is pending.
-    let mut sent = false;
-    for attempt in 0..3u32 {
-        let result =
-            ranked_lock!(RANK_NET_STACK, "syscall_ping", net_stack()).send_ping(dst_ip, id, seq);
-        match result {
-            Ok(()) => {
-                sent = true;
-                break;
-            }
-            Err("arp pending") => {
-                // Get the ARP waiter while still holding the lock, then drop
-                // it before sleeping.
-                let arp_wq = {
-                    let mut stack = ranked_lock!(RANK_NET_STACK, "syscall_ping", net_stack());
-                    let resolve_ip = if stack.is_local_subnet(&dst_ip) {
-                        dst_ip
-                    } else {
-                        stack.gateway_ip
-                    };
-                    stack.arp_cache.get_or_create_waiter(resolve_ip)
-                };
-
-                // Wait up to 100 ms for the ARP reply.
-                let sleep_dur = Duration::from_millis(100);
-                arp_wq.wait_until_timeout(
-                    || {
-                        let stack = ranked_lock!(RANK_NET_STACK, "syscall_ping", net_stack());
-                        let resolve_ip = if stack.is_local_subnet(&dst_ip) {
-                            dst_ip
-                        } else {
-                            stack.gateway_ip
-                        };
-                        stack.arp_cache.lookup(&resolve_ip).is_some()
-                    },
-                    Some(sleep_dur),
-                );
-
-                log!("net: ping ARP attempt {}", attempt + 1);
-            }
-            Err(e) => {
-                log!("net: ping send_ip failed: {}", e);
-                break;
-            }
-        }
-    }
-
-    if !sent {
+    // An unresolved destination is not a failure: the stack holds the request
+    // against its ARP request and transmits it when the reply lands, which the
+    // round-trip time then includes.
+    let result =
+        ranked_lock!(RANK_NET_STACK, "syscall_ping", net_stack()).send_ping(dst_ip, id, seq);
+    if let Err(e) = result {
+        log!("net: ping send_ip failed: {}", e);
         // Clean up waiter and return failure.
         ranked_lock!(RANK_NET_STACK, "syscall_ping", net_stack())
             .ping_waiters

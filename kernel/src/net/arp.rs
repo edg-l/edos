@@ -1,6 +1,4 @@
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
-
-use crate::thread::waitqueue::WaitQueue;
+use alloc::{collections::BTreeMap, vec::Vec};
 
 pub const ARP_REQUEST: u16 = 1;
 pub const ARP_REPLY: u16 = 2;
@@ -55,15 +53,17 @@ impl ArpPacket {
 
 pub struct ArpCache {
     entries: BTreeMap<[u8; 4], [u8; 6]>,
-    /// Waiters blocked on pending ARP resolution, keyed by target IP.
-    pending: BTreeMap<[u8; 4], Arc<WaitQueue>>,
+    /// One outbound IPv4 packet held per unresolved target, transmitted once
+    /// the reply lands. RFC 1122 §2.3.2.2 requires an implementation to queue
+    /// at least one packet rather than dropping it.
+    pending_tx: BTreeMap<[u8; 4], Vec<u8>>,
 }
 
 impl ArpCache {
     pub fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
-            pending: BTreeMap::new(),
+            pending_tx: BTreeMap::new(),
         }
     }
 
@@ -80,16 +80,24 @@ impl ArpCache {
             }
         }
         self.entries.insert(ip, mac);
-        // Wake anyone waiting for this IP.
-        if let Some(wq) = self.pending.remove(&ip) {
-            wq.wake_all();
-        }
     }
 
-    pub fn get_or_create_waiter(&mut self, ip: [u8; 4]) -> Arc<WaitQueue> {
-        self.pending
-            .entry(ip)
-            .or_insert_with(|| Arc::new(WaitQueue::new()))
-            .clone()
+    /// Hold `packet` until `ip` resolves. Newest wins: a second packet for the
+    /// same target replaces the first, so a sender that keeps retrying cannot
+    /// grow the queue.
+    pub fn queue_pending_tx(&mut self, ip: [u8; 4], packet: Vec<u8>) {
+        const MAX_PENDING_TX: usize = 16;
+        if self.pending_tx.len() >= MAX_PENDING_TX && !self.pending_tx.contains_key(&ip) {
+            if let Some(&oldest_ip) = self.pending_tx.keys().next() {
+                self.pending_tx.remove(&oldest_ip);
+            }
+        }
+        self.pending_tx.insert(ip, packet);
+    }
+
+    /// Take the packet held for `ip`, if any. A packet whose target never
+    /// replies is dropped when the slot is reused or evicted.
+    pub fn take_pending_tx(&mut self, ip: &[u8; 4]) -> Option<Vec<u8>> {
+        self.pending_tx.remove(ip)
     }
 }
