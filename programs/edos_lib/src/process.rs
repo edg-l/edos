@@ -600,6 +600,14 @@ pub fn fork() -> i64 {
     unsafe { sys::syscall0(sys::SYS_FORK) as i64 }
 }
 
+/// Give up the rest of this thread's timeslice.
+///
+/// The thread stays runnable, so on a CPU with nothing else Ready the
+/// scheduler picks it straight back up.
+pub fn sched_yield() {
+    unsafe { sys::syscall0(sys::SYS_SCHED_YIELD) };
+}
+
 pub const SIGHUP: u32 = 1;
 pub const SIGINT: u32 = 2;
 pub const SIGKILL: u32 = 9;

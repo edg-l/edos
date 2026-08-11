@@ -35,6 +35,7 @@ use crate::{
         irqlock::IrqSpinlock,
         preempt::{debug_assert_preemptible, preempt_enabled},
         runqueue::RunQueue,
+        sched_prof::{self, Stage},
         thread::{Flags, State, THREADS, Thread, ThreadId, get_thread_by_id, record_thread_exit},
         util::pick_sched_for,
     },
@@ -529,12 +530,14 @@ impl Scheduler {
         // save would then overwrite the stolen thread's ctx with THIS CPU's
         // interrupt frame, corrupting it.
         loop {
+            let probe = sched_prof::now_ns();
             let next = {
                 let mut rq = self.rq.lock();
                 let item = rq.pop_next();
                 self.has_work.store(!rq.is_empty(), Ordering::Release);
                 item
             };
+            sched_prof::record(Stage::Pick, probe);
 
             match next {
                 Some(t) => {
@@ -686,6 +689,7 @@ impl Scheduler {
                     .as_u64(),
             });
         }
+        let entry = sched_prof::now_ns();
         self.current.store(next.id.0, Ordering::Release);
         unsafe { get_percpu_data().set_current_thread(Some(next.clone())) };
         next.cpu.store(self.cpu, Ordering::Release);
@@ -706,7 +710,9 @@ impl Scheduler {
 
         next.slice_deadline
             .store(deadline.as_nanos(), Ordering::Release);
+        let probe = sched_prof::record(Stage::Publish, entry);
         set_apic_timer(deadline.duration_since(now));
+        let probe = sched_prof::record(Stage::Timer, probe);
 
         if context.is_null() {
             panic!("cw: null context ptr");
@@ -737,13 +743,16 @@ impl Scheduler {
         Self::validate_ctx(&next, &ctx_snapshot, "context_switch_to");
         let user_rsp = ctx_snapshot.interrupt_stack_frame.stack_pointer.as_u64();
         unsafe { *context = ctx_snapshot };
+        let probe = sched_prof::record(Stage::RestoreCtx, probe);
 
         // Switch address space
         next.switch_to_page();
+        let probe = sched_prof::record(Stage::Page, probe);
 
         let next_fs_base = next.tls_base.load(Ordering::Acquire);
 
         FsBase::write(VirtAddr::new(next_fs_base));
+        let probe = sched_prof::record(Stage::RestoreTls, probe);
 
         if next.user.is_some() {
             unsafe {
@@ -756,6 +765,7 @@ impl Scheduler {
                 }
             }
         }
+        sched_prof::record(Stage::RestoreFpu, probe);
 
         let cpu = get_percpu_data();
         // Set RSP0 - validate it's in kernel space
@@ -771,6 +781,7 @@ impl Scheduler {
         // set kernel gs stack
         cpu.kernel_rsp.set(next.kstack_top);
         cpu.user_rsp.set(user_rsp);
+        sched_prof::record(Stage::Switch, entry);
         // return handles context switch
     }
 
@@ -1384,8 +1395,12 @@ extern "C" fn do_save_current_thread(context: *mut CpuContext) -> u64 {
     };
     let end_ns = Instant::now().as_nanos();
     current.end_run(end_ns);
+    let probe = sched_prof::now_ns();
     unsafe {
         *current.ctx.lock() = (*context).clone();
+    }
+    let probe = sched_prof::record(Stage::SaveCtx, probe);
+    unsafe {
         if current.user.is_some() {
             let fpu = &mut *current.fpu.get();
             if !current.fpu_init.load(Ordering::Relaxed) {
@@ -1396,8 +1411,10 @@ extern "C" fn do_save_current_thread(context: *mut CpuContext) -> u64 {
             }
         }
     }
+    let probe = sched_prof::record(Stage::SaveFpu, probe);
     let fs_base = FsBase::read();
     current.tls_base.store(fs_base.as_u64(), Ordering::Release);
+    sched_prof::record(Stage::SaveTls, probe);
     current.context_saved.store(true, Ordering::Release);
     let sched_stack = get_percpu_data().scheduler_stack_top.get();
     debug_assert!(sched_stack != 0, "scheduler stack not initialized");
@@ -1429,7 +1446,9 @@ extern "C" fn schedule_voluntary(context: *mut CpuContext) -> *mut CpuContext {
     }
     let sched = sched();
     without_interrupts(|| {
+        let probe = sched_prof::now_ns();
         sched.wake_sleepers();
+        sched_prof::record(Stage::WakeSleepers, probe);
         sched.pick_and_run(context);
     });
     context
@@ -1512,6 +1531,7 @@ extern "C" fn reap_and_schedule(context: *mut CpuContext) -> *mut CpuContext {
 // ---------------------------------------------------------------------------
 
 extern "C" fn transition_yield(_arg: *mut u8) -> bool {
+    let probe = sched_prof::now_ns();
     let sched = sched();
     let Some(cur) = current_thread() else {
         return true;
@@ -1523,6 +1543,7 @@ extern "C" fn transition_yield(_arg: *mut u8) -> bool {
     }
     cur.flags
         .fetch_and(!Flags::NEED_RESCHED.bits(), Ordering::AcqRel);
+    sched_prof::record(Stage::Transition, probe);
     true
 }
 

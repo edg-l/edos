@@ -1186,4 +1186,5 @@ const GLOBAL_FILES: &[(&str, fn() -> String)] = &[
     ("net", Procfs::render_net),
     ("sockets", Procfs::render_sockets),
     ("syscalls", crate::syscalls::trace::render_syscall_table),
+    ("sched_prof", crate::thread::sched_prof::render),
 ];

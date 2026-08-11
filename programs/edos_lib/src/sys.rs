@@ -75,6 +75,7 @@ pub const SYS_SETSOCKOPT: u64 = 248;
 pub const SYS_PING: u64 = 249;
 pub const SYS_NETINFO: u64 = 250;
 pub const SYS_FORK: u64 = 255;
+pub const SYS_SCHED_YIELD: u64 = 282;
 pub const SYS_SYNC: u64 = 162;
 pub const SYS_REBOOT: u64 = 169;
 pub const SYS_MOUNT: u64 = 202;

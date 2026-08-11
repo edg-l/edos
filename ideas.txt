@@ -269,6 +269,14 @@
   position-dependent pattern after writing; prints the delta of every relevant
   /proc counter. `raw`/`rawwrite` modes hit the block device directly. Docs:
   `doc/fsbench.md`; what to optimise next: `doc/STORAGE-ROADMAP.md`.
+- **switchbench and /proc/sched_prof** - `programs/switchbench` prices a
+  context switch four ways (yield with nothing else Ready, handover to a
+  sibling thread, handover to another process, blocking pipe round trip) and
+  must run on a single-CPU boot, which it checks and says. `/proc/sched_prof`
+  breaks one switch into its stages under `--features sched-prof`, reporting
+  cumulative work so a measurement is read-run-read-subtract. Together they
+  found that `set_apic_timer` is 81% of a context switch; see
+  `doc/WORKING-NOTES.md`.
 - **Storage throughput round (2026-08-09)** - coalescing contiguous blocks into
   one command wherever a path owns a long exclusive run: block-cache reads
   (37 -> 886 MiB/s at 1 MiB), block-cache whole-page writes (44 -> 543 MiB/s

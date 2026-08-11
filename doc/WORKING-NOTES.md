@@ -6,6 +6,85 @@ session.
 
 ---
 
+## A context switch is one MSR write and a rounding error
+
+Measured on a single-CPU boot with `switchbench` (userspace, end to end) and
+`/proc/sched_prof` (kernel, stage by stage; `--features sched-prof`):
+
+| | ns |
+|---|---|
+| `sched_yield`, nothing else Ready | 1917 |
+| `sched_yield`, handover to a sibling thread | 1832 |
+| `sched_yield`, handover to another process | 2215 |
+| pipe round trip between two processes | 9429 |
+
+**The first two numbers settle a question the last round left open.** A
+`sched_yield` on an idle CPU returns to the *same* thread, so it was recorded
+as a floor that might be hiding the real cost of a handover. It was not: a
+genuine two-thread handover costs the same, within noise. An address-space
+switch on top adds ~380 ns.
+
+Inside the kernel, one switch is 1270 ns and this is where it goes:
+
+| stage | ns |
+|---|---|
+| `set_apic_timer` | **1024** |
+| `switch_to_page` (`CR3`) | 67 |
+| `fxrstor` + `fxsave` | 93 |
+| `FS.base` read + write | 104 |
+| `CpuContext` copies, both sides | 40 |
+| publish, transition, pick, wake_sleepers | 76 |
+
+`set_apic_timer` is **81% of a context switch.** It is one x2APIC write to
+`IA32_TSC_TMICT`, which KVM traps and answers by re-arming a host timer, and
+`context_switch_to` does it unconditionally on every switch to push the new
+thread's timeslice deadline out.
+
+Everything the previous round nominated as a lever is real but small: no PCID
+is 67 ns of directly visible cost (the refill misses it also causes are not in
+this figure), the unconditional 512-byte `fxsave`/`fxrstor` pair is 93 ns, and
+the `CpuContext` copies under a spin `Mutex` are 40 ns. `FS.base` goes through
+`RDMSR`/`WRMSR` for 104 ns while `CR4.FSGSBASE` has been on since boot and
+`rdfsbase`/`wrfsbase` cost a cycle or two.
+
+### How to take these numbers again
+
+`programs/switchbench` is the end-to-end side and **must be run on a
+single-CPU boot** — give the scheduler a second CPU and it puts the two
+threads on both, where neither ever waits for the other and every yield case
+collapses back into the idle one. It prints the CPU count it saw for exactly
+that reason.
+
+`/proc/sched_prof` is the breakdown, and reports cumulative work rather than a
+rate, so a measurement is: read the file, run the workload, read it again,
+subtract. The probes only exist under `--features sched-prof`, which must be
+passed to the **ISO** target rather than the kernel target.
+
+```bash
+make edos-x86_64.iso CARGO_FLAGS="--features sched-prof"
+scripts/edos-vm start --smp 1
+scripts/edos-vm type 'cat /proc/sched_prof > /tmp/b.txt; switchbench 20000 -l; \
+    cat /proc/sched_prof > /dev/klog; cat /tmp/b.txt > /dev/klog' --enter
+```
+
+## Fixed: a single-CPU boot never flushed its own TLB
+
+`make run-single` could not reach a desktop: `edos-taskbar` and
+`edos-terminal` both took a #GP inside `edos_rt`'s allocator within 50 ms of
+starting, and `edos-init` gave up on them. Four CPUs were fine, which is the
+wrong way round for a race.
+
+`munmap` unmaps each page with `flush.ignore()` and flushes the range once at
+the end — and that final flush was guarded on `shootdown_needed()`, which was
+`cpu_count() > 1`. With one CPU online the range was never invalidated at all,
+so freed frames went back to the allocator while the faulting CPU still held
+live translations to them. `tlb_shootdown` already skips the IPI round when it
+is alone, so the guard never saved anything and cost the local flush.
+
+`shootdown_needed` is deleted; every unmap path calls `tlb_shootdown`
+unconditionally. Full writeup in
+`doc/bugs/2026-08-11-single-cpu-skipped-its-own-tlb-flush.md`.
+
 ## The clock was the most expensive thing in the kernel
 
 `Instant::now()` was an MMIO read of the HPET main counter. QEMU emulates the

@@ -26,6 +26,7 @@ pub mod poll;
 pub mod preempt;
 pub mod runqueue;
 pub mod rwlock;
+pub mod sched_prof;
 pub mod scheduler;
 pub mod signal;
 pub mod thread;

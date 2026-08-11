@@ -27,7 +27,7 @@ use std::time::Instant;
 
 use edos_lib::io::{PollState, SelectFd, close, poll};
 use edos_lib::net::{self, SockAddrIn};
-use edos_lib::process::{pipe, write};
+use edos_lib::process::{pipe, sched_yield, write};
 
 const COUNTS: [usize; 5] = [1, 2, 4, 16, 64];
 
@@ -131,14 +131,14 @@ fn main() {
 
     // sched_yield on an otherwise idle CPU returns to the same thread, so it
     // prices the switch bookkeeping rather than a real handover. The scheduler
-    // stamps run time from the same clock on the way out.
-    const SYS_SCHED_YIELD: u64 = 282;
+    // stamps run time from the same clock on the way out. `switchbench` is
+    // where the handover cases live.
     for _ in 0..64 {
-        unsafe { edos_lib::sys::syscall0(SYS_SCHED_YIELD) };
+        sched_yield();
     }
     let t0 = Instant::now();
     for _ in 0..iters {
-        unsafe { edos_lib::sys::syscall0(SYS_SCHED_YIELD) };
+        sched_yield();
     }
     let yielded = t0.elapsed().as_nanos() as f64 / iters as f64;
     out.line(&format!("pollbench sched_yield {yielded:.0} ns"));

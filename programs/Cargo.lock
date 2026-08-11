@@ -533,6 +533,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "switchbench"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "sync"
 version = "0.1.0"
 dependencies = [

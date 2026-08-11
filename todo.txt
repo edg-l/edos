@@ -132,18 +132,23 @@
   submit-then-wait, so nothing ever asks for depth. The fix it names is giving
   readahead and writeback a path that keeps commands outstanding.
 
-- Context switch cost, the top item for the next round. `sched_yield` is
-  1357 ns, four times what a whole one-descriptor `poll` call costs, and a
-  4 KiB device command pays two scheduler round trips (see
-  `doc/STORAGE-ROADMAP.md` section 1). Three levers, all verified present:
-  - No PCID anywhere in the kernel, so every CR3 reload flushes the whole TLB.
-    That cost lands *after* the switch as refill misses.
-  - `kernel/src/drivers/fpu.rs` uses plain 512-byte `fxsave`/`fxrstor` on every
-    user switch whether or not the thread touched the FPU. No `XSAVE`,
-    no `XSAVEOPT`, no dirty-state check. Do this together with the `-cpu host`
-    question, since both decide what the save area has to hold.
-  - The `CpuContext` is copied under a spin `Mutex` twice per switch:
-    `thread/scheduler.rs:631` and `:1388` on the save side, `:722` on restore.
-  Measure a real two-thread ping-pong first. `sched_yield` on an idle CPU
-  returns to the *same* thread, so it never reloads CR3 and never hands over --
-  1357 ns is the bookkeeping floor, and the PCID cost is invisible to it.
+- Context switch cost, the top item for the next round, now measured rather
+  than guessed. `switchbench` on a single-CPU boot and `/proc/sched_prof`
+  (`--features sched-prof`) put one switch at 1270 ns, of which:
+  - **`set_apic_timer` is 1024 ns**, 81% of the whole switch. One x2APIC write
+    to `IA32_TSC_TMICT`, trapped by KVM, done on every switch to push the
+    incoming thread's timeslice deadline out. Nothing else is close.
+  - `FS.base` costs 104 ns as `RDMSR` + `WRMSR`, while `CR4.FSGSBASE` has been
+    on since boot and `rdfsbase`/`wrfsbase` cost a cycle or two.
+  - `fxsave` + `fxrstor` is 93 ns. Unconditional and 512 bytes wide whether or
+    not the thread touched the FPU; `XSAVEOPT` with a dirty check is the fix,
+    and it decides what the save area has to hold, so pair it with the
+    `-cpu host` question.
+  - `switch_to_page` is 67 ns, and a cross-process handover costs ~380 ns more
+    than a same-address-space one, so PCID is worth roughly that much plus the
+    refill misses that land after the switch.
+  - The `CpuContext` copies under a spin `Mutex` are 40 ns for both sides
+    together. Not worth restructuring on their own.
+  The two-thread ping-pong the last round asked for has been run, and it
+  cleared the doubt rather than confirming it: a real handover costs the same
+  as a self-yield within noise, so the idle figure was never hiding anything.
