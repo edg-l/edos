@@ -161,7 +161,7 @@ fast for that long.
 - **`OpenOptions` opens files for writing.** `read`, `write`, `truncate` and
   `create_new` were no-op stubs in the std fork, so every file was read-only as
   far as the kernel was concerned. This is why `mmap(MAP_SHARED, PROT_WRITE)`
-  failed. Fixed in the fork as commit `b7af81795f6`, on `origin/edos_std_v2`.
+  failed. Fixed in the fork as commit `88d827604b3`, on `origin/edos_std_v3`.
 - `sha256sum` and `file`, two Phase 3 userspace programs.
 
 `mmaptest` went from failing at test 1 to all 10 passing on both `/var` and

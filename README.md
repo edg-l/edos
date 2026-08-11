@@ -72,13 +72,13 @@ Userspace is the awkward part: it links a **real `std`**, which means a custom
 toolchain named `edos`.
 
 ```bash
-git clone -b edos_std_v2 https://github.com/edg-l/rust.git
+git clone -b edos_std_v3 https://github.com/edg-l/rust.git
 cd rust && ./x install
 rustup toolchain link edos <install-prefix>
 ```
 
-The fork is at [edg-l/rust](https://github.com/edg-l/rust/tree/edos_std_v2)
-(branch `edos_std_v2`), and its runtime crate is
+The fork is at [edg-l/rust](https://github.com/edg-l/rust/tree/edos_std_v3)
+(branch `edos_std_v3`), and its runtime crate is
 [edos_rt](https://github.com/edg-l/edos_rt). The target triple is
 `x86_64-unknown-edos`. Without the `edos` toolchain, `make programs` and
 `make all` fail, but `make -C kernel check` still works for kernel-only work.

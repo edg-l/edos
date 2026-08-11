@@ -585,7 +585,7 @@
   MAC, read from a new `/proc/net` rather than parsed out of `SYS_NETINFO`,
   which renders the same state with ANSI colour for a terminal.
 - **`std` reaches the whole syscall table.** `edos_rt` 0.0.42 and the shims on
-  `edos_std_v2` close the nineteen syscalls the fork had never been moved for:
+  `edos_std_v3` close the nineteen syscalls the fork had never been moved for:
   symlinks, file times, vectored I/O, `nanosleep`, streaming `ReadDir`, `access`
   behind `try_exists`, and `openat` so an open no longer allocates a `CString`.
   `File::set_times` needed the kernel to grow POSIX `futimens`: a null path now

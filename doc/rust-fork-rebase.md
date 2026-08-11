@@ -4,6 +4,10 @@ The fork at `~/dev/rust` (remote `origin` = github.com/edg-l/rust) carries EDOS
 target support on top of rust-lang/rust. It was rebased from 1.96.0 to **1.99.0**
 on 2026-08-11, onto upstream `0e72e3266cd`, skipping 13,491 upstream commits.
 
+The current branch is **`edos_std_v3`**. Each rebase takes a new name rather
+than rewriting the old one, so `edos_std_v2` (1.96) and `edos_std` before it
+remain on the remote as the history they are; nothing tracks them.
+
 ## The shape of the fork
 
 63 files, +2853 −44: **27 EDOS-only files that cannot conflict**, and 36 real

@@ -204,7 +204,7 @@ Two things that break silently rather than loudly:
 Every program here is ordinary `std` Rust, so a syscall the fork does not know
 about is a syscall no program can use without dropping to `edos_lib`. Nineteen
 syscalls had landed without the fork moving; `edos_rt` 0.0.42 and the shims in
-`library/std/src/sys/*/edos.rs` on `edos_std_v2` close that gap:
+`library/std/src/sys/*/edos.rs` on `edos_std_v3` close that gap:
 
 | std API | Was | Now |
 |---|---|---|
