@@ -96,3 +96,12 @@
   Err("arp pending"), kernel/src/net/stack.rs) and nothing retries it, so the
   first inbound connection after boot is lost: the SYN-ACK never goes out. A
   one-slot pending-transmit queue per ARP request would fix it.
+
+- A process's arguments are not recorded anywhere, so nothing in userspace can
+  show them. `/proc/<pid>/cmdline` looks like the file that would carry them,
+  but `ThreadSnapshot::cmdline_text` in kernel/src/fs/procfs/mod.rs just prints
+  the thread name, and the name is the path `exec` was given, without argv.
+  `sleep 60` and `sleep 1` are indistinguishable in `ps`, `top` and `pstree`.
+  Wants argv retained on the Thread (a joined String is enough) at
+  load_process_image time, and cmdline_text rendering it. `pstree` has `-l` for
+  the full path instead, which is all the kernel can answer today.

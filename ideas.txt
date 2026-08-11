@@ -2,6 +2,15 @@
 
 ## Done
 
+- **`pstree`, the thread table as a forest** - `/proc/processes` has carried a
+  PPID column that every reader printed as a number, so the structure
+  `edos-init` supervises with, and the fact that a shell's background jobs are
+  its children, were invisible. Draws the classic aligned tree, collapses runs
+  of identical siblings into `N*[name]`, and takes `-p`/`-g` for pids and
+  process groups, `-u` for user threads only, `-n` to sort by pid, `-c` to keep
+  identical siblings apart, `-l` for the whole spawn path, `-U` for box-drawing
+  lines, and a PID operand to root the tree anywhere.
+
 - **`less`, a pager** - holds the whole text and moves a window over it: j/k and
   arrows, space/b by the screen, d/u by half, g/G, left/right for output wider
   than the terminal, `/pat` and `?pat` search with every match on a line

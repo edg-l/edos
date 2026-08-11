@@ -41,7 +41,6 @@ surface at all.
 |---|---|
 | `sed`, even just `s///` | Multiplies the value of every text tool already there |
 | `sntp` | The wall clock is sampled once at boot and drifts from there. One UDP round trip fixes it, and it is the only thing that would exercise the UDP client path outside `dns` |
-| `pstree` | `/proc/processes` already carries a PPID column that nothing renders as a tree. Small, and the supervision structure `edos-init` builds is currently invisible |
 
 ### Would surface a kernel gap, which is the point
 

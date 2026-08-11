@@ -2385,3 +2385,38 @@ colours do, with no separate pass.
 - **Forward search starts below the top line.** `/pat` reporting "pattern not
   found" for something visible three screens *up* is correct behaviour, not a
   bug; `?pat` is the other direction. This looks like a defect the first time.
+
+## `pstree`, and the arguments the kernel never kept (2026-08-11)
+
+`/proc/processes` has carried a PPID column since it existed, and every reader
+printed it as a number. `programs/pstree` renders it as the forest it is, over
+`edos_lib::procinfo::read_table` like `ps`, `top` and `edos-procview`.
+
+**The tree the guest actually has is three deep and one of the levels is a
+surprise.** `edos-init` supervises each child from its own thread, so what
+appears under it is `edos-init-thread-20---edos-wm`, not `edos-wm`: the
+supervisor threads are real rows in the table and the tree makes that visible
+for the first time. Kernel threads have no parent in the table and come out as
+roots, one per line, which is why `-u` exists.
+
+**The layout rule is one line long.** A node's connector sits one column past
+the end of its label, and its children start two columns past the connector;
+that single rule produces both `a---b` and the aligned `a-+-b` / `` `-c ``.
+Continuation lines carry a prefix string rather than a width, because an
+ancestor's `|` has to keep being drawn down the left of everything under it —
+a width alone cannot say which ancestors still have siblings to come.
+
+**Compaction is restricted to subtrees that render on one line**, i.e. chains
+where every node has at most one child, which is what `N*[sleep]` collapses.
+A branching subtree has no unambiguous collapsed form, so it is left expanded
+rather than guessed at.
+
+### Things that will bite you
+
+- **`/proc/<pid>/cmdline` does not hold a command line.**
+  `ThreadSnapshot::cmdline_text` in `kernel/src/fs/procfs/mod.rs` prints the
+  thread name, and the name is the path `exec` was given. argv is never
+  retained by the kernel, so `sleep 60` and `sleep 1` are indistinguishable to
+  every tool. `pstree` had a `-a` flag for about ten minutes before this turned
+  up; it ships `-l` (whole spawn path) instead, and the gap is in `todo.txt`.
+  Anything reaching for that file for arguments is reaching for nothing.
