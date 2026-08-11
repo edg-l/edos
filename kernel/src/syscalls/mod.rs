@@ -2229,8 +2229,6 @@ fn sys_execve(
     argv: *const *const u8,
     envp: *const *const u8,
 ) -> u64 {
-    use x86_64::registers::model_specific::FsBase;
-
     use crate::{
         fs::api as fs_api,
         memory::frame_allocator::frame_allocator,
@@ -2238,6 +2236,7 @@ fn sys_execve(
             pipe::close_descriptor,
             thread::{load_process_image, quiesce_address_space},
         },
+        util::per_cpu::write_fs_base,
     };
 
     const MAX_ARGC: usize = 64;
@@ -2376,7 +2375,7 @@ fn sys_execve(
     } = parts;
 
     thread.tls_base.store(tls_fs_base, Ordering::Release);
-    FsBase::write(VirtAddr::new(tls_fs_base));
+    write_fs_base(VirtAddr::new(tls_fs_base));
     thread.signal.reset_for_exec();
 
     // Return into the new image: the syscall stub restores every register from

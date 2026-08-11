@@ -14,7 +14,7 @@ use spin::{Mutex, Once, RwLock};
 use x86_64::{
     PrivilegeLevel, VirtAddr,
     instructions::interrupts::{disable, enable, enable_and_hlt, without_interrupts},
-    registers::{control::Cr3, model_specific::FsBase},
+    registers::control::Cr3,
 };
 
 use x86_64::structures::paging::PageTableFlags;
@@ -40,7 +40,7 @@ use crate::{
         util::pick_sched_for,
     },
     timer::Instant,
-    util::per_cpu::get_percpu_data,
+    util::per_cpu::{get_percpu_data, read_fs_base, write_fs_base},
 };
 
 /// Rebalance every N timer ticks (~50ms at 5ms timeslice).
@@ -135,6 +135,13 @@ pub struct Scheduler {
 
     pub earliest_deadline: AtomicU64,
 
+    /// When this CPU's one-shot APIC timer is currently set to fire, or 0 when
+    /// nothing is armed because it already has.
+    ///
+    /// Only this CPU reads or writes it, always with interrupts off; the
+    /// atomic is for the shared-reference API, not for sharing.
+    armed_expiry: AtomicU64,
+
     pub thread_count: AtomicU64,
 
     has_work: AtomicBool,
@@ -202,6 +209,7 @@ impl Scheduler {
             sleepers: Mutex::new(BinaryHeap::new()),
             thread_count: AtomicU64::new(0),
             earliest_deadline: AtomicU64::new(u64::MAX),
+            armed_expiry: AtomicU64::new(0),
             has_work: AtomicBool::new(false),
             steal_count: AtomicU64::new(0),
             steal_scan_start: AtomicU32::new(0),
@@ -239,6 +247,10 @@ impl Scheduler {
     /// on the scheduler stack, and no thread owns that.
     pub fn tick_prepare(&self, context: *mut CpuContext) -> u64 {
         without_interrupts(|| {
+            // The one-shot counted down to zero and stopped, so whatever this
+            // CPU last armed is gone and the next request must reach the
+            // hardware rather than trusting the record of it.
+            self.timer_fired();
             self.wake_sleepers();
             self.try_rebalance();
 
@@ -317,24 +329,27 @@ impl Scheduler {
             // to steal), so nothing else re-armed the one-shot APIC timer and
             // it would stay dead. context_switch_to arms it when switching
             // threads and run_idle arms it while halted.
+            //
+            // This is also where a tick that fired early lands, since
+            // `context_switch_to` skips the write whenever an earlier timer is
+            // already pending: the running thread keeps the rest of the slice
+            // it was given, and the next stretch of it is armed here.
             let now = Instant::now();
             let ed = self.earliest_deadline.load(Ordering::Acquire);
-            // Re-arm to the sooner of: a default timeslice, or the
-            // earliest sleeper deadline.
-            let mut next = now + self.default_timeslice;
+            // Re-arm to the sooner of: what is left of the running thread's
+            // slice, or the earliest sleeper deadline.
+            let running_until = current_thread()
+                .map(|cur| cur.slice_deadline.load(Ordering::Acquire))
+                .filter(|deadline| *deadline > now.as_nanos())
+                .map(Instant::from_nanos);
+            let mut next = running_until.unwrap_or(now + self.default_timeslice);
             if ed != u64::MAX && ed != 0 {
                 let dl = Instant::from_nanos(ed);
                 if dl < next {
                     next = dl;
                 }
             }
-            let dur = next.duration_since(now);
-            // Clamp to at least 1us to avoid zero-length timers.
-            set_apic_timer(if dur.is_zero() {
-                Duration::from_micros(1)
-            } else {
-                dur
-            });
+            self.arm_timer_until(now, next);
         })
     }
 
@@ -478,19 +493,14 @@ impl Scheduler {
             }
 
             without_interrupts(|| {
+                let now = Instant::now();
                 let ed = self.earliest_deadline.load(Ordering::Acquire);
-                let dur = if ed != u64::MAX && ed != 0 {
-                    let now = Instant::now();
-                    if ed <= now.as_nanos() {
-                        Duration::from_micros(1)
-                    } else {
-                        let dl = Instant::from_nanos(ed);
-                        dl.duration_since(now)
-                    }
+                let next = if ed != u64::MAX && ed != 0 {
+                    Instant::from_nanos(ed)
                 } else {
-                    Duration::from_millis(100)
+                    now + Duration::from_millis(100)
                 };
-                set_apic_timer(dur);
+                self.arm_timer_until(now, next);
             });
 
             // Halt until next interrupt (timer, IPI, device)
@@ -501,6 +511,47 @@ impl Scheduler {
 
         disable();
         false
+    }
+
+    /// Program the one-shot APIC timer to fire no later than `deadline`, and
+    /// skip the hardware write when what is already armed will do.
+    ///
+    /// The write is the single most expensive thing on the switch path — one
+    /// x2APIC store to `IA32_TSC_TMICT` that a hypervisor traps and answers by
+    /// re-arming a host timer, measured at 1024 ns of a 1270 ns switch — and
+    /// `context_switch_to` used to make it every time to push the incoming
+    /// thread's slice out. It rarely bought anything: a timer already set to
+    /// fire *earlier* than the new deadline satisfies it, because firing early
+    /// is not a failure. `expire_timeslice` compares each thread against its
+    /// own recorded deadline and lets an early tick pass, and `tick_finish`
+    /// re-arms when a tick decided not to switch, so the thread still gets the
+    /// whole slice; it just takes one extra tick to notice. What must never
+    /// happen is the timer firing *late*, and that is exactly what the upper
+    /// bound below refuses to skip.
+    ///
+    /// Yielding in a loop therefore costs one interrupt per timeslice instead
+    /// of one trap per switch. This is what a tickless kernel's clock-event
+    /// layer does, and why Linux ships `HRTICK` — an hrtimer armed at the exact
+    /// slice end — turned off.
+    fn arm_timer_until(&self, now: Instant, deadline: Instant) {
+        let armed = self.armed_expiry.load(Ordering::Relaxed);
+        if armed > now.as_nanos() && armed <= deadline.as_nanos() {
+            return;
+        }
+        // Record what the hardware was actually given, not what was asked for:
+        // a deadline inside the floor fires later than `deadline`, and
+        // believing otherwise would let the next request skip a write it needs.
+        let armed = set_apic_timer(deadline.duration_since(now));
+        self.armed_expiry.store(
+            now.as_nanos().saturating_add(armed.as_nanos() as u64),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Record that the one-shot has fired and left itself disarmed, so the
+    /// next request programs the hardware rather than trusting a dead timer.
+    fn timer_fired(&self) {
+        self.armed_expiry.store(0, Ordering::Relaxed);
     }
 
     /// Request a reschedule once the running thread has used its timeslice.
@@ -643,7 +694,7 @@ impl Scheduler {
                 }
             }
 
-            let fs_base = FsBase::read();
+            let fs_base = read_fs_base();
             current.tls_base.store(fs_base.as_u64(), Ordering::Release);
             current.context_saved.store(true, Ordering::Release);
             trace_event!(Save {
@@ -711,7 +762,7 @@ impl Scheduler {
         next.slice_deadline
             .store(deadline.as_nanos(), Ordering::Release);
         let probe = sched_prof::record(Stage::Publish, entry);
-        set_apic_timer(deadline.duration_since(now));
+        self.arm_timer_until(now, deadline);
         let probe = sched_prof::record(Stage::Timer, probe);
 
         if context.is_null() {
@@ -751,7 +802,7 @@ impl Scheduler {
 
         let next_fs_base = next.tls_base.load(Ordering::Acquire);
 
-        FsBase::write(VirtAddr::new(next_fs_base));
+        write_fs_base(VirtAddr::new(next_fs_base));
         let probe = sched_prof::record(Stage::RestoreTls, probe);
 
         if next.user.is_some() {
@@ -1412,7 +1463,7 @@ extern "C" fn do_save_current_thread(context: *mut CpuContext) -> u64 {
         }
     }
     let probe = sched_prof::record(Stage::SaveFpu, probe);
-    let fs_base = FsBase::read();
+    let fs_base = read_fs_base();
     current.tls_base.store(fs_base.as_u64(), Ordering::Release);
     sched_prof::record(Stage::SaveTls, probe);
     current.context_saved.store(true, Ordering::Release);

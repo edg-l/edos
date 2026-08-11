@@ -43,9 +43,17 @@ pub fn set_apic_timer_and_enable(duration: Duration) {
     }
 }
 
-pub fn set_apic_timer(duration: Duration) {
+/// Arm the one-shot for `duration`, and report the interval actually
+/// programmed, which is `duration` raised to [`MIN_TIMER_INTERVAL`].
+///
+/// Callers that remember when the timer will fire must remember what comes
+/// back rather than what they asked for, or they will believe a floored timer
+/// fires earlier than it does.
+pub fn set_apic_timer(duration: Duration) -> Duration {
+    let armed = duration.max(MIN_TIMER_INTERVAL);
     let lapic = get_lapic();
     unsafe {
-        lapic.set_timer_initial(timer_count(duration));
+        lapic.set_timer_initial(timer_count(armed));
     }
+    armed
 }

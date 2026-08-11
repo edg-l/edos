@@ -156,6 +156,41 @@ fn main() {
     // A blocking round trip: each side parks in `read` and is woken by the
     // other's `write`, so this prices the wake path the yield cases never take.
     pipe_round_trip(&mut out, iters.min(2_000));
+
+    sleep_overshoot(&mut out);
+}
+
+/// How late a sleep returns.
+///
+/// This is the check on the APIC timer: the scheduler arms the one-shot for
+/// the earliest deadline it owes anyone, and a sleeper is the only thing that
+/// asks for a deadline sooner than the running thread's timeslice. Arm it
+/// wrong and a sleep returns on some unrelated later event instead.
+///
+/// It has to be measured with nothing else to run. Overshoot on a busy
+/// machine is dominated by the woken thread waiting its turn behind everything
+/// already queued -- under the 50-thread `sched-test` suite a 50 ms sleep
+/// takes 130-280 ms, and none of that is the timer.
+fn sleep_overshoot(out: &mut Out) {
+    // The first sleep of a process pays for whatever its return path touches
+    // for the first time, which lands as a millisecond of overshoot on a
+    // measurement that is otherwise accurate to tens of microseconds.
+    thread::sleep(std::time::Duration::from_millis(1));
+
+    let mut worst = 0i64;
+    for ms in [1u64, 5, 20, 50] {
+        let want = std::time::Duration::from_millis(ms);
+        let t0 = Instant::now();
+        thread::sleep(want);
+        let took = t0.elapsed();
+        let over = took.as_micros() as i64 - want.as_micros() as i64;
+        worst = worst.max(over);
+        out.line(&format!(
+            "switchbench sleep {ms} ms took {} us, over by {over} us",
+            took.as_micros()
+        ));
+    }
+    out.line(&format!("switchbench sleep worst overshoot {worst} us"));
 }
 
 /// Time a one-byte round trip through a pair of pipes, forked child at the
