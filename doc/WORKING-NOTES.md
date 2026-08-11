@@ -44,9 +44,31 @@ next to the test targets, which is where it will actually be read.
 of `/bin/echo` 11 ms and `spawn+wait` 356 us, with `mmaptest /var` 11/11 in
 37 ms. Whole-file prefetch covers anything under 2 MiB and `/bin/echo` is
 329240 bytes, so the test never exercises the ramping window it was cited for.
-The idea keeps its entry for the large-file case; what it lost is its
-instrument. `doc/STORAGE-ROADMAP.md` section 1b says what to build instead and
-which counter decides it.
+The idea keeps its entry for the large-file case, and it now has an instrument:
+`fsbench raprep /var`, reboot, `fsbench ra /var`. `doc/STORAGE-ROADMAP.md`
+section 1b carries its baseline and states which readings decide whether a
+change pipelined anything; `doc/fsbench.md` documents the mode.
+
+## The guest boots `sata-disk.img`, and `make all` does not rebuild it
+
+An hour of this went into believing a new `fsbench` mode did not exist: the
+guest printed the *old* usage text for a binary that had just been built and
+`make all` had reported success.
+
+`make all` builds `programs`, the kernel and the ISO. It does **not** build
+`sata-disk.img`, and that image — not the ISO's live root — is what the run
+targets mount as `/`, because root selection prefers a real disk. Only the
+`make run*` targets list it as a prerequisite, and `scripts/edos-vm start` does
+not go through them, so a `make all` plus `scripts/edos-vm start` boots fresh
+kernel against stale userspace. Nothing in the guest distinguishes that from the
+change not working.
+
+Leaving the image alone is deliberate: it is the persistent development root, a
+rebuild is 5 GB and discards whatever the guest has written, and the manifest
+guard exists precisely so a kernel edit does not trigger one (see the comment
+above `update-manifest` in `GNUmakefile`). So the fix is not to rebuild it
+automatically. `scripts/edos-vm start` now compares its mtime against
+`filesystem/.manifest` and warns, naming `make sata-disk.img`.
 
 ## Counts, remeasured 2026-08-12
 

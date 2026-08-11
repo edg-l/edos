@@ -22,11 +22,14 @@ Modes:
   write   write and metadata only; leaves its files for a later read run
   read    read only, against files a previous `write` run left behind
   raw     sequential reads straight from a block device, no filesystem
+  raprep  write the large file the readahead instrument reads, then sync
+  ra      one cold sequential pass over that file: the readahead instrument
   clean   remove every file the suite creates
 
 Options:
   -t MS   per-test time budget in ms (default 700)
-  -m MIB  per-test byte cap in MiB (default 256)
+  -m MIB  per-test byte cap in MiB (default 256), or the `raprep` file size
+          (default 16)
   -n OPS  fixed operations per test, overriding -t and -m
   -q      quick: 200 ms budget
   -k      keep the files a run creates
@@ -61,6 +64,40 @@ than a full report prints, and `/dev/klog` is teed to `run_log.txt`.
 page-cache hits. For disk reads use `fsbench write /var`, reboot, then
 `fsbench read /var`. Raw device reads need no such care: the swept span is far
 larger than the 8 MiB block page cache, so it evicts itself as it goes.
+
+### `raprep` / `ra`: the readahead instrument
+
+The rest of the suite cannot see readahead work at all. Its sequential files sit
+under the 2 MiB below which the kernel prefetches a whole file in one bulk fill
+(`RA_WHOLE_FILE_MAX_PAGES`), so a first read never rides the ramping window, and
+every read after it is a cache hit. Above that threshold the window grows
+`RA_MAX_PAGES` (512 KiB) at a time and the question is whether the prefetch runs
+*ahead* of the reader or *behind* it.
+
+```
+fsbench raprep /var     # writes a 16 MiB pattern file and syncs
+... reboot ...
+fsbench ra /var         # one cold pass, 64 KiB calls, front to back
+```
+
+Throughput does not answer the question, so three other numbers are printed:
+
+- **stalls** — calls slower than 4x the median, which is a call that waited on
+  I/O nobody had started. A prefetch pulling ahead of the reader drives this
+  towards zero; one that trails stalls about once per window.
+- **`ncq_inflight` between calls** — sampled once after every call, outside the
+  timed region. All-zero means nothing was ever outstanding except the read the
+  reader was blocked on.
+- **`ncq_max_inflight` before and after** — a high-water mark nothing resets, so
+  only the *rise* across the pass belongs to the pass. A change that leaves it
+  where the boot left it has asked for no queue depth and pipelined nothing.
+
+The between-call sampling is a procfs read, so it delays the next call. It is
+reported apart from the read path's own summed time, and it is identical in both
+arms of an A/B, which is the property the comparison needs. Only the file's
+first and last 512 bytes per call are pattern-checked: generating the pattern
+for 16 MiB costs more CPU than the reads it sits between, and delaying the
+reader is exactly what the instrument is trying to observe.
 
 ### What it checks besides speed
 

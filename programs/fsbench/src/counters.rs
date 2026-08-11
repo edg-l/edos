@@ -68,6 +68,21 @@ impl Counters {
     }
 }
 
+/// One counter's current value, read straight from its procfs file.
+///
+/// For sampling a single gauge inside a loop, where [`Counters::sample`] would
+/// read five files to use one number. A missing file or key reads as 0.
+pub fn gauge(path: &str, key: &str) -> u64 {
+    let Ok(text) = read_to_string(path) else {
+        return 0;
+    };
+    text.lines()
+        .flat_map(parse_pairs)
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v)
+        .unwrap_or(0)
+}
+
 /// Extract every `key: value` / `key=value` pair on one line.
 ///
 /// Both spellings and both spacings occur in procfs: `/proc/block_cache`

@@ -178,6 +178,21 @@ def cmd_start(args):
         if not os.path.exists(path):
             raise SystemExit(f"missing {os.path.basename(path)}; run `{target}` first")
 
+    # The root the guest actually runs from is this disk, not the ISO. It is a
+    # persistent development image and `make all` deliberately leaves it alone
+    # (a 5 GB rebuild per kernel edit, and it would discard whatever the guest
+    # has written), so a freshly built program can sit in filesystem/bin/ while
+    # the guest still runs the previous one. Nothing about that looks like a
+    # stale binary from inside the guest: it looks like the change not working.
+    manifest = os.path.join(REPO, "filesystem", ".manifest")
+    if os.path.exists(manifest) and os.path.getmtime(disk) < os.path.getmtime(manifest):
+        print(
+            f"warning: {os.path.basename(disk)} is older than filesystem/ — the guest "
+            f"will boot stale userspace.\n"
+            f"         run `make {os.path.basename(disk)}` to rebuild it first.",
+            file=sys.stderr,
+        )
+
     disk_format = _disk_format(disk)
 
     os.makedirs(RUNDIR, exist_ok=True)

@@ -46,15 +46,32 @@ const RAW_SPAN: u64 = 256 << 20;
 /// metadata that a mounted root keeps hot.
 const RAW_SKIP: u64 = 64 << 20;
 
+/// Size of the file the readahead instrument reads, when `-m` does not say.
+/// 32 windows of `RA_MAX_PAGES`, and well past the 2 MiB below which the kernel
+/// prefetches a whole file in one go and no window ever ramps.
+const RA_DEFAULT_MIB: u64 = 16;
+
 struct Options {
     mode: Mode,
     path: String,
     budget_ms: u64,
-    cap_mib: u64,
+    /// `-m`, unset when the caller did not pass one: the byte cap and the
+    /// readahead file's size have different defaults.
+    cap_mib: Option<u64>,
     max_ops: Option<u64>,
     verify: bool,
     keep: bool,
     klog: bool,
+}
+
+impl Options {
+    fn cap_bytes(&self) -> u64 {
+        self.cap_mib.unwrap_or(DEFAULT_CAP_MIB) << 20
+    }
+
+    fn ra_bytes(&self) -> u64 {
+        self.cap_mib.unwrap_or(RA_DEFAULT_MIB) << 20
+    }
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -64,6 +81,8 @@ enum Mode {
     Read,
     Raw,
     RawWrite,
+    RaPrep,
+    Ra,
     Clean,
 }
 
@@ -75,6 +94,8 @@ impl Mode {
             Mode::Read => "read",
             Mode::Raw => "raw",
             Mode::RawWrite => "rawwrite",
+            Mode::RaPrep => "raprep",
+            Mode::Ra => "ra",
             Mode::Clean => "clean",
         }
     }
@@ -158,6 +179,9 @@ Modes:
   raw     sequential reads straight from a block device, no filesystem
   rawwrite  sequential writes straight to a block device. DESTROYS whatever is
           on it; refused while a filesystem on that device is mounted
+  raprep  write the large file the readahead instrument reads, then sync
+  ra      one cold sequential pass over that file: the readahead instrument.
+          Needs a reboot after `raprep`, or it reads the page cache
   clean   remove every file the suite creates
 
 Paths:
@@ -165,7 +189,8 @@ Paths:
 
 Options:
   -t MS     per-test time budget in ms (default {DEFAULT_BUDGET_MS})
-  -m MIB    per-test byte cap in MiB (default {DEFAULT_CAP_MIB})
+  -m MIB    per-test byte cap in MiB (default {DEFAULT_CAP_MIB}), or the size of
+            the `raprep` file (default {RA_DEFAULT_MIB})
   -n OPS    fixed operations per test, overriding -t and -m. Use this to
             compare two builds: a time budget makes the faster one do more
             work and meet every later test with a different filesystem.
@@ -178,7 +203,8 @@ Examples:
   fsbench                    on-disk filesystem, one boot
   fsbench /tmp               memfs: the syscall and copy ceiling
   fsbench raw /dev/sda       the block layer and AHCI ceiling
-  fsbench write /var         ... reboot ...   fsbench read /var"
+  fsbench write /var         ... reboot ...   fsbench read /var
+  fsbench raprep /var        ... reboot ...   fsbench ra /var"
     );
     std::process::exit(2)
 }
@@ -188,7 +214,7 @@ fn parse_args() -> Options {
         mode: Mode::All,
         path: String::new(),
         budget_ms: DEFAULT_BUDGET_MS,
-        cap_mib: DEFAULT_CAP_MIB,
+        cap_mib: None,
         max_ops: None,
         verify: true,
         keep: false,
@@ -209,7 +235,7 @@ fn parse_args() -> Options {
                 None => usage(),
             },
             "-m" => match args.next().and_then(|v| v.parse().ok()) {
-                Some(v) => opts.cap_mib = v,
+                Some(v) => opts.cap_mib = Some(v),
                 None => usage(),
             },
             "-n" => match args.next().and_then(|v| v.parse().ok()) {
@@ -229,6 +255,8 @@ fn parse_args() -> Options {
             "read" => opts.mode = Mode::Read,
             "raw" => opts.mode = Mode::Raw,
             "rawwrite" => opts.mode = Mode::RawWrite,
+            "raprep" => opts.mode = Mode::RaPrep,
+            "ra" => opts.mode = Mode::Ra,
             "clean" => opts.mode = Mode::Clean,
             _ => opts.path = first,
         }
@@ -247,7 +275,9 @@ fn parse_args() -> Options {
             _ => "/var".to_string(),
         };
     }
-    if opts.mode == Mode::Write {
+    // The readahead pass is only cold in a boot that has not touched its file,
+    // so both of its modes leave it behind for the next boot to read.
+    if matches!(opts.mode, Mode::Write | Mode::RaPrep | Mode::Ra) {
         opts.keep = true;
     }
     opts
@@ -266,17 +296,18 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let budget = Budget::new(opts.budget_ms, opts.cap_mib << 20, opts.max_ops);
+    let budget = Budget::new(opts.budget_ms, opts.cap_bytes(), opts.max_ops);
     out.line(&format!(
         "fsbench {} on {}  ({})",
         opts.mode.name(),
         opts.path,
-        match opts.max_ops {
-            Some(n) => format!("{n} ops per test"),
-            None => format!(
+        match (opts.mode, opts.max_ops) {
+            (Mode::RaPrep | Mode::Ra, _) => format!("{} file", human_bytes(opts.ra_bytes())),
+            (_, Some(n)) => format!("{n} ops per test"),
+            (_, None) => format!(
                 "{} ms or {} per test",
                 opts.budget_ms,
-                human_bytes(opts.cap_mib << 20)
+                human_bytes(opts.cap_bytes())
             ),
         }
     ));
@@ -300,6 +331,24 @@ fn main() -> ExitCode {
                 failures += out.report(&report);
             }
         }
+        Mode::RaPrep => match workloads::ra_prepare(&opts.path, opts.ra_bytes()) {
+            Ok((path, bytes)) => out.line(&format!(
+                "wrote {} to {path} and synced — reboot, then `fsbench ra {}`",
+                human_bytes(bytes),
+                opts.path
+            )),
+            Err(e) => {
+                out.line(&format!("raprep: {e}"));
+                failures += 1;
+            }
+        },
+        Mode::Ra => match workloads::ra_read(&opts.path) {
+            Ok(report) => failures += ra_report(&mut out, &report),
+            Err(e) => {
+                out.line(&format!("ra: {e}"));
+                failures += 1;
+            }
+        },
         Mode::Read => failures += read_phase(&mut out, &opts.path, budget),
         Mode::Write | Mode::All => {
             failures += write_phase(&mut out, &opts.path, budget);
@@ -343,6 +392,67 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Print the readahead pass. Returns 1 if the data did not match.
+///
+/// Three numbers decide whether a prefetch change did anything, and they are
+/// not the throughput:
+///
+/// * `stalls` — calls that waited on I/O nobody had started. A prefetch that
+///   pulls ahead of the reader drives this towards zero; one that trails it
+///   stalls once per window.
+/// * `inflight` between calls — what the device still had outstanding when the
+///   reader's call returned. All zero means nothing was ever in flight but the
+///   read the reader was waiting for.
+/// * `ncq_max_inflight` — the high-water mark. It is never reset, so only the
+///   rise across the pass belongs to it; a pass that leaves it unmoved has
+///   asked for no queue depth at all.
+fn ra_report(out: &mut Out, r: &workloads::RaReport) -> u32 {
+    out.blank();
+    out.line(&format!(
+        "READAHEAD  cold sequential pass, {} in {} calls of {}",
+        human_bytes(r.bytes),
+        r.calls,
+        human_bytes(workloads::RA_CHUNK as u64)
+    ));
+    out.line(&format!("  file                    {}", r.path));
+    out.line(&format!(
+        "  read path               {} MiB/s in {}  (wall {}, sampling included)",
+        rate(r.mib_per_sec()),
+        duration(r.read_time.as_nanos() as u64),
+        duration(r.wall.as_nanos() as u64),
+    ));
+    out.line(&format!(
+        "  per call                p50 {}  p99 {}  max {}",
+        duration(r.p50),
+        duration(r.p99),
+        duration(r.max),
+    ));
+    out.line(&format!(
+        "  stalls                  {} of {} calls over {}",
+        r.stalls,
+        r.calls,
+        duration(r.stall_bound),
+    ));
+    out.line(&format!(
+        "  ncq_inflight between    nonzero on {} of {} samples, max {}",
+        r.inflight_nonzero, r.inflight_samples, r.inflight_max,
+    ));
+    out.line(&format!(
+        "  ncq_max_inflight        {} before, {} after",
+        r.hwm_before, r.hwm_after,
+    ));
+    match &r.mismatch {
+        Some(problem) => {
+            out.line(&format!("  VERIFY FAIL             {problem}"));
+            1
+        }
+        None => {
+            out.line("  verify                  edges match the pattern");
+            0
+        }
+    }
 }
 
 fn write_phase(out: &mut Out, dir: &str, budget: Budget) -> u32 {

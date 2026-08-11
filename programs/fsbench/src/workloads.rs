@@ -20,11 +20,13 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
+use std::time::{Duration, Instant};
 
 use edos_lib::io::{pread, pwrite};
 use edos_lib::mem::{MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE, mmap, msync, munmap};
 use edos_lib::sys::{SYS_SYNC, syscall0};
 
+use crate::counters::gauge;
 use crate::harness::{Budget, Report, Rng, Runner, human_bytes};
 
 /// Buffer sizes swept by the sequential tests, in bytes. Spans the range where
@@ -777,6 +779,7 @@ pub fn cleanup(dir: &str) {
         "fsbench.mmap",
         "fsbench.whole",
         "fsbench.bufwriter",
+        RA_NAME,
     ] {
         let _ = fs::remove_file(format!("{dir}/{name}"));
     }
@@ -801,4 +804,219 @@ fn ensure_file(path: &str, bytes: u64) -> Result<(), String> {
     }
     let buf = pattern_buf(3, 0, bytes as usize);
     fs::write(path, &buf).map_err(|e| format!("prepare {path}: {e}"))
+}
+
+// -----------------------------------------------------------------------
+// Readahead instrument
+// -----------------------------------------------------------------------
+//
+// The rest of the suite cannot see readahead work. Its sequential files are
+// small enough that the kernel's whole-file prefetch turns a first read into
+// one bulk fill (`RA_WHOLE_FILE_MAX_PAGES`, 2 MiB), and every read after that
+// is a page-cache hit. Above that threshold the window ramps instead, and the
+// question is whether the prefetch runs ahead of the reader or trails it.
+//
+// That question is not answered by throughput alone, so this pass reports two
+// things beside it: how many calls waited on I/O nobody had started, and how
+// much was in flight at the device between calls. A build that claims to
+// pipeline readahead and leaves `ncq_inflight` at 0 between every call has
+// pipelined nothing.
+
+const RA_NAME: &str = "fsbench.ra";
+
+/// Pattern tag for the readahead file. Distinct from every `SWEEP` size and
+/// from the tag [`ensure_file`] uses, so a block from another test that lands
+/// here fails the edge check.
+const RA_TAG: u64 = 7;
+
+/// Call size for the pass. One AHCI command carries 992 KiB and the readahead
+/// window is 512 KiB, so 64 KiB is small enough that several calls fall inside
+/// one window and the ones served from it can be told from the ones that wait.
+pub const RA_CHUNK: usize = 64 << 10;
+
+/// A call this much slower than the median waited on the device rather than on
+/// the page cache. The gap between the two is three orders of magnitude, so the
+/// exact factor does not matter; the count does.
+const RA_STALL_FACTOR: u64 = 4;
+
+fn ra_path(dir: &str) -> String {
+    format!("{dir}/{RA_NAME}")
+}
+
+/// Write the file [`ra_read`] reads, and get it onto the disk.
+///
+/// Separate mode on purpose: the pass is only cold in a boot that has not
+/// touched the file, so this runs, the machine reboots, and `fsbench ra` reads
+/// what is left behind.
+pub fn ra_prepare(dir: &str, bytes: u64) -> Result<(String, u64), String> {
+    let path = ra_path(dir);
+    let _ = fs::remove_file(&path);
+    let mut file = File::create(&path).map_err(|e| format!("create {path}: {e}"))?;
+
+    const STEP: u64 = 1 << 20;
+    let mut offset = 0u64;
+    while offset < bytes {
+        let len = STEP.min(bytes - offset) as usize;
+        let buf = pattern_buf(RA_TAG, offset, len);
+        file.write_all(&buf)
+            .map_err(|e| format!("write {path} at {offset}: {e}"))?;
+        offset += len as u64;
+    }
+    file.sync_all().map_err(|e| format!("fsync {path}: {e}"))?;
+    drop(file);
+    // The file's own data is durable after the fsync; this drains the metadata
+    // and the journal, so the reboot cannot lose the extents that name it.
+    unsafe { syscall0(SYS_SYNC) };
+    Ok((path, offset))
+}
+
+/// What one cold sequential pass over the large file showed.
+pub struct RaReport {
+    pub path: String,
+    pub bytes: u64,
+    pub calls: u64,
+    /// Summed time inside `read`, which is the read path's own cost. The wall
+    /// clock also carries the between-call sampling, so it is reported apart.
+    pub read_time: Duration,
+    pub wall: Duration,
+    pub p50: u64,
+    pub p99: u64,
+    pub max: u64,
+    /// Calls slower than `RA_STALL_FACTOR` x p50, and the bound that decided.
+    pub stalls: u64,
+    pub stall_bound: u64,
+    /// `ncq_inflight` sampled once after every call.
+    pub inflight_samples: u64,
+    pub inflight_nonzero: u64,
+    pub inflight_max: u64,
+    /// `ncq_max_inflight` either side of the pass. It is a high-water mark that
+    /// nothing resets, so the boot's own I/O is already in `before` and only
+    /// the rise is this pass's.
+    pub hwm_before: u64,
+    pub hwm_after: u64,
+    /// First edge check that did not match, if any.
+    pub mismatch: Option<String>,
+}
+
+impl RaReport {
+    pub fn mib_per_sec(&self) -> f64 {
+        let secs = self.read_time.as_secs_f64();
+        if secs <= 0.0 {
+            return 0.0;
+        }
+        (self.bytes as f64 / (1024.0 * 1024.0)) / secs
+    }
+}
+
+/// Read the whole readahead file front to back in [`RA_CHUNK`] calls.
+///
+/// Every call is timed, and `ncq_inflight` is sampled between calls rather than
+/// inside them, so a sample cannot inflate a latency. Sampling does delay the
+/// next call by a procfs read; that cost is identical in both arms of an A/B,
+/// which is the property the comparison needs.
+pub fn ra_read(dir: &str) -> Result<RaReport, String> {
+    let path = ra_path(dir);
+    let mut file =
+        File::open(&path).map_err(|e| format!("open {path}: {e} (run `fsbench raprep` first)"))?;
+    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if size < 4 << 20 {
+        return Err(format!(
+            "{path} is {} — too small to ride the ramping window, re-run `fsbench raprep`",
+            human_bytes(size)
+        ));
+    }
+
+    let hwm_before = gauge("/proc/ahci_stats", "ncq_max_inflight");
+    let mut buf = vec![0u8; RA_CHUNK];
+    let mut samples: Vec<u64> = Vec::new();
+    let mut inflight_nonzero = 0u64;
+    let mut inflight_max = 0u64;
+    let mut read_time = Duration::ZERO;
+    let mut mismatch = None;
+    let mut offset = 0u64;
+
+    let wall_start = Instant::now();
+    loop {
+        let t0 = Instant::now();
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("read {path} at {offset}: {e}"))?;
+        let dt = t0.elapsed();
+        if n == 0 {
+            break;
+        }
+        read_time += dt;
+        samples.push(dt.as_nanos() as u64);
+
+        let inflight = gauge("/proc/ahci_stats", "ncq_inflight");
+        inflight_max = inflight_max.max(inflight);
+        if inflight > 0 {
+            inflight_nonzero += 1;
+        }
+        if mismatch.is_none() {
+            mismatch = ra_check_edges(&buf[..n], offset);
+        }
+        offset += n as u64;
+    }
+    let wall = wall_start.elapsed();
+    let hwm_after = gauge("/proc/ahci_stats", "ncq_max_inflight");
+
+    let calls = samples.len() as u64;
+    let max = samples.iter().copied().max().unwrap_or(0);
+    let mut sorted = samples.clone();
+    sorted.sort_unstable();
+    let pick = |q: f64| -> u64 {
+        if sorted.is_empty() {
+            return 0;
+        }
+        sorted[((sorted.len() as f64 - 1.0) * q).round() as usize]
+    };
+    let p50 = pick(0.50);
+    let stall_bound = p50.saturating_mul(RA_STALL_FACTOR);
+    let stalls = samples.iter().filter(|&&s| s > stall_bound).count() as u64;
+
+    Ok(RaReport {
+        path,
+        bytes: offset,
+        calls,
+        read_time,
+        wall,
+        p50,
+        p99: pick(0.99),
+        max,
+        stalls,
+        stall_bound,
+        inflight_samples: calls,
+        inflight_nonzero,
+        inflight_max,
+        hwm_before,
+        hwm_after,
+        mismatch,
+    })
+}
+
+/// Check the first and last 512 bytes of a chunk against the pattern.
+///
+/// Cheap on purpose: generating the pattern for every byte of a 16 MiB pass
+/// costs more CPU than the reads it sits between, and delaying the reader is
+/// exactly the thing the instrument is trying to observe. The edges still catch
+/// a block landing at the wrong offset, a stale block from another test, and a
+/// page of zeros that was never filled.
+fn ra_check_edges(data: &[u8], offset: u64) -> Option<String> {
+    const EDGE: usize = 512;
+    let tail = data.len().saturating_sub(EDGE);
+    for at in [0usize, tail] {
+        let end = (at + EDGE).min(data.len());
+        for i in at..end {
+            let want = byte_at(RA_TAG, offset + i as u64);
+            if data[i] != want {
+                return Some(format!(
+                    "byte {} of the file is {:#04x}, want {want:#04x}",
+                    offset + i as u64,
+                    data[i]
+                ));
+            }
+        }
+    }
+    None
 }

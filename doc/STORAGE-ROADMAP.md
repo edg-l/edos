@@ -86,7 +86,7 @@ completion-side cuts in the refuted list below, both of which were neutral.
 Coalescing cannot help here — one page is one command — so this is
 per-operation work, not another run-length fix.
 
-## 1b. Pipelined readahead has no instrument that still shows a cost
+## 1b. Pipelined readahead: the instrument, and the baseline it reads
 
 The pipelined-readahead idea is to fire the *next* window's I/O when the reader
 touches the last page of the current one, so the prefetch pulls ahead of the
@@ -101,15 +101,45 @@ under 2 MiB into one bulk fill, and `/bin/echo` is 329240 bytes, so test 10
 never rides the ramping window at all. The old figure predates both and should
 not be quoted again.
 
-So the idea is not refuted, but nothing measures it. What survives is the
+So the idea is not refuted, but nothing measured it. What survives is the
 large-file case, above the whole-file threshold, where `page_cache_read_core`
 (`fs/vfs.rs`) still extends only `window_size` pages past each request and
-submits from within the read call. Before writing any of it, build the
-instrument: a **cold** sequential read of a file several times
-`RA_MAX_PAGES` (512 KiB) — 8-16 MiB — on `/var`, reboot between arms, and
-watch `ahci_stats.ncq_max_inflight`, which is the direct read on whether the
-prefetch is ahead of the reader or behind it. A change that does not move that
-counter off 1 has not pipelined anything.
+submits from within the read call.
+
+**The instrument now exists**: `fsbench raprep /var`, reboot, `fsbench ra /var`
+is a cold sequential pass over a 16 MiB file in 64 KiB calls — 32 windows of
+`RA_MAX_PAGES`, well past the whole-file threshold. Beside throughput it reports
+the three numbers that actually answer the question, documented in
+`doc/fsbench.md`: how many calls stalled waiting on I/O nobody had started,
+whether `ncq_inflight` was ever non-zero *between* calls, and how far
+`ncq_max_inflight` rose across the pass. A change that leaves the inflight
+samples at zero and the high-water mark where the boot left it has pipelined
+nothing, whatever it did to the MiB/s.
+
+**Baseline, 2026-08-12, cold boot, 4 vCPUs, 16 MiB in 256 calls of 64 KiB:**
+
+| | |
+|---|---|
+| read path | 222 MiB/s, 72.1 ms summed (wall 75.8 ms) |
+| per call | p50 174 us, p99 868 us, max 1.9 ms |
+| stalls | 11 of 256 calls over 696 us |
+| `ncq_inflight` between calls | non-zero on 2 of 256 samples, max 1 |
+| `ncq_max_inflight` | 4 before, 4 after |
+
+That is the trailing prefetch, measured rather than argued. Two readings matter.
+The device was idle between calls in 254 of 256 samples and never held more than
+one command, so the only I/O in flight at any moment was the one the reader was
+blocked on — the window is refilled from inside the read call, so it cannot be
+otherwise. And the stall count is 11, not the 32 that one stall per 512 KiB
+window would give, because the window does ramp to `RA_MAX_PAGES` and a 64 KiB
+call inside a filled window is a cache hit: `block_cache` took 618 hits and 1
+miss across the pass.
+
+So the target for a pipelined version is specific: the same 16 MiB with
+`ncq_inflight` non-zero across most samples, `ncq_max_inflight` rising above the
+boot's 4, and the 11 stalls going towards 0. Throughput is the last thing to
+look at, not the first — 222 MiB/s is already far off the raw-device ceiling for
+reasons section 1 owns.
 
 ## 2. mmap fault-around
 
