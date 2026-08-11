@@ -1557,6 +1557,12 @@ fn sys_nanosleep(req_ptr: *const Timespec, _rem_ptr: *mut Timespec) -> u64 {
             break;
         }
         thread_sleep(remaining);
+        // A signal wakes the sleeper early, and this loop is what would put it
+        // straight back to sleep: without suspending here, Ctrl+Z on a long
+        // sleep would not take effect until the deadline passed. The thread
+        // holds nothing at this point, which is what makes suspending it safe.
+        // The deadline is absolute, so time spent suspended counts against it.
+        stop_if_signalled();
         exit_if_killed();
     }
 

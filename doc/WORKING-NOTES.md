@@ -6,6 +6,35 @@ session.
 
 ---
 
+## A stop signal did not cut short a sleep, and `thread_sleep` was not why
+
+Ctrl+Z on `sleep 30` took effect only when the 30 s were up. The mechanism on
+record blamed `thread_sleep` for not returning early on a signal, and that is
+wrong: `thread_sleep` already aborts on a wake, `transition_sleep` consumes the
+wake token exactly as park does, and `kill_process_with_signal` wakes its target
+before setting anything.
+
+The loop is one layer up. `sys_nanosleep` (`kernel/src/syscalls/mod.rs`) sleeps
+against an absolute deadline and re-enters `thread_sleep` with the time
+remaining, so the early return did happen and the loop immediately undid it. It
+checked `exit_if_killed`, which is why a kill got through and a stop did not.
+
+The fix calls `stop_if_signalled` alongside `exit_if_killed` inside that loop.
+The thread holds nothing there, which is the condition that doc comment names
+for suspending a thread, so the suspension is safe in the middle of the call.
+On `SIGCONT` the loop recomputes the remaining time and sleeps the balance. The
+deadline is absolute, so time spent suspended counts against it: a `sleep 30`
+suspended for a minute returns as soon as it is continued.
+
+`sys_sleep_ms` needs no equivalent change; it does not loop, so its single early
+return already reaches the syscall boundary where the stop is taken.
+
+Verified by the gates only (51/51, warning-free). The in-guest check — Ctrl+Z on
+`sleep 30` returning a prompt within a second, and `sleep 30` still taking 30 s
+unsignalled — is still owed.
+
+---
+
 ## Fixed: the shell read one byte and called it a character
 
 Typing the Spanish ISO `ç` and redirecting it wrote `c3 83 c2 a7` instead of
