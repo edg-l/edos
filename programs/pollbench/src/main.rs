@@ -137,6 +137,44 @@ fn main() {
     let yielded = t0.elapsed().as_nanos() as f64 / iters as f64;
     out.line(&format!("pollbench sched_yield {yielded:.0} ns"));
 
+    // What one descriptor costs, split at the allocation.
+    //
+    // An invalid descriptor is answered from the fd table alone: no `Pollable`
+    // is boxed, no `PollEntry` is allocated and no device lock is taken, so it
+    // prices everything a poll call does once regardless of its descriptors.
+    // `stdout` reports a fixed readiness, so it boxes the `Pollable` and
+    // allocates the `PollEntry` but registers nothing and takes no device
+    // lock. The gap between them is very nearly the two allocations alone.
+    let mut invalid = [SelectFd {
+        fd: 9999,
+        interests: readable(),
+        result: PollState::default(),
+    }];
+    let mut stdout = [SelectFd {
+        fd: 1,
+        interests: PollState {
+            writable: true,
+            ..PollState::default()
+        },
+        result: PollState::default(),
+    }];
+    let invalid_ns = time_poll(&mut invalid, iters);
+    let stdout_ns = time_poll(&mut stdout, iters);
+    if !invalid[0].result.invalid {
+        out.line("pollbench: fd 9999 did not report invalid");
+        std::process::exit(1);
+    }
+    if !stdout[0].result.writable {
+        out.line("pollbench: stdout did not report writable");
+        std::process::exit(1);
+    }
+    out.line(&format!(
+        "pollbench 1 invalid fd {invalid_ns:.0} ns (fixed cost {:.0}), \
+         1 stdout {stdout_ns:.0} ns, so the two allocations {:.0} ns",
+        invalid_ns - floor,
+        stdout_ns - invalid_ns
+    ));
+
     let max = *COUNTS.iter().max().unwrap();
 
     // One pipe per descriptor. The ready set gets a byte written into it and

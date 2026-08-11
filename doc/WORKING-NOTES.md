@@ -42,12 +42,35 @@ Two defects only a fine-grained clock exposes, both fixed here:
   first thing to suspect if a spin loop starts misbehaving.
 
 **`poll` never consults the clock for a zero timeout now**, and reads it once
-rather than twice for a timed wait. That, not the allocations, was the cost: at
-`n=64` the entire per-descriptor cost — two allocations, the fd-table lookup,
-the device lock, and the poller-list push and remove — is **158 ns**, while the
-two clock reads a timed call used to make were **12.7 us**. The long-standing
-"2+2N allocations per poll" item is therefore **not worth doing**; see
-`programs/pollbench`, which prices all of it.
+rather than twice for a timed wait. That, not the allocations, was the cost the
+whole time: the two clock reads a timed call made were **12.7 us** against
+**158 ns** for the entire per-descriptor path.
+
+### …which makes the allocations worth removing, where they were not before
+
+Removing the clock reads promoted what was left. `pollbench` prices the split
+by polling descriptors that stop at different depths — an invalid one is
+answered from the fd table alone, and `stdout` boxes a `Pollable` and allocates
+a `PollEntry` but registers nothing and takes no device lock:
+
+| | ns |
+|---|---|
+| syscall floor, `count=0` | 81 |
+| one invalid descriptor | 248 |
+| one `stdout` descriptor | 330 |
+| marginal per descriptor at `n=64` | 158 |
+
+So **one alloc/free pair costs about 41 ns**, and a poll call above the syscall
+floor is very nearly all allocator traffic: four allocations happen per call
+regardless of the descriptors (`Vec<SelectFd>`, the descriptor snapshot,
+`Arc<PollWaiter>`, `Vec<PollContext>`) at ~167 ns, and two more per descriptor
+(`Box<dyn Pollable>`, `Arc<PollEntry>`) at 82 ns — **52% of the 158 ns
+per-descriptor cost, and ~75% of a 329 ns single-descriptor call.**
+
+The old "2+2N allocations per poll" item is therefore live again, and scoped
+wrong: the four fixed allocations are worth as much as the per-descriptor pair.
+It was genuinely not worth doing before, when 82 ns sat inside a 13877 ns call.
+Measure with `pollbench` before and after; do not re-derive this by reasoning.
 
 ---
 
