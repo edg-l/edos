@@ -11,7 +11,7 @@ use alloc::{
 };
 
 use crate::{
-    debug::lock_order::{RANK_USER_MM, RANK_VMAS},
+    debug::lock_order::{RANK_SOCKET, RANK_USER_MM, RANK_VMAS},
     fs::{
         Error, File, FileAttrs, FileKind, FileSystem, block_page_cache::BlockPageCache, path::Path,
     },
@@ -19,9 +19,13 @@ use crate::{
         frame_allocator::frame_allocator,
         vma::{Vma, VmaBacking, VmaFlags, VmaProt},
     },
+    net::socket::{SOCK_STREAM, SocketAddr, SocketState},
     ranked_lock,
     syscalls::Errno,
-    thread::thread::{State, Thread, ThreadId, get_thread_info_by_id, list_threads},
+    thread::{
+        pipe::{FileDescriptor, OpenMode, StandardStream},
+        thread::{State, Thread, ThreadId, get_thread_info_by_id, list_threads},
+    },
 };
 
 pub struct Procfs;
@@ -372,6 +376,49 @@ impl Procfs {
                 "{start:016x}-{end:016x} {prot} {} {resident} {backing}",
                 (end - start) / 1024
             );
+        }
+        Some(out)
+    }
+
+    /// `/proc/<tid>/fd`: the thread's open descriptors, one per line.
+    ///
+    /// A directory of symbolic links is what Linux offers; this is a table
+    /// instead, because a descriptor here is not always a path — a pipe end, a
+    /// PTY side and a socket have no name in the filesystem, and the fields
+    /// that identify them (the shared object's address, the connection's
+    /// endpoints) do not fit in a link target.
+    fn render_fds(tid: u64) -> Option<String> {
+        let thread = list_threads()
+            .into_iter()
+            .find(|thread| thread.id.0 == tid)?;
+        let mut out = String::from("FD TYPE MODE POS NAME\n");
+        // A kernel thread owns no descriptor table; the file exists so readers
+        // need not special-case it, and lists nothing.
+        if thread.user.is_none() {
+            return Some(out);
+        }
+
+        // The table handle leaves the thread-info spinlock before it is
+        // locked: that lock runs with interrupts off, and the table is a
+        // BlockingMutex whose contended acquisition parks.
+        let table = {
+            let info = get_thread_info_by_id(thread.id)?;
+            let guard = info.try_lock()?;
+            guard.fd_table.clone()
+        };
+
+        // Cloned out under the table lock and rendered after it is released:
+        // describing a socket takes the socket lock (rank 260), and a
+        // descriptor clone shares the underlying object without touching the
+        // open counts, which only close adjusts.
+        let entries: Vec<(u64, FileDescriptor)> = {
+            let guard = table.lock();
+            guard.iter_all().map(|(fd, d)| (fd, d.clone())).collect()
+        };
+
+        for (fd, descriptor) in entries {
+            let (kind, mode, pos, name) = describe_descriptor(&descriptor);
+            let _ = writeln!(out, "{fd} {kind} {mode} {pos} {name}");
         }
         Some(out)
     }
@@ -827,6 +874,71 @@ fn display_option_str(value: Option<&str>) -> String {
     value.map_or_else(|| "-".to_string(), |v| v.to_string())
 }
 
+/// One `/proc/<tid>/fd` row's `TYPE MODE POS NAME` fields.
+///
+/// Objects with no name in the filesystem are identified by the address of the
+/// object the descriptor shares, so the two ends of a pipe or the two sides of
+/// a PTY can be matched up across processes.
+fn describe_descriptor(descriptor: &FileDescriptor) -> (&'static str, &'static str, u64, String) {
+    fn identity<T>(shared: &Arc<T>) -> usize {
+        Arc::as_ptr(shared) as *const u8 as usize
+    }
+
+    match descriptor {
+        FileDescriptor::StandardStream(stream) => match stream {
+            StandardStream::Stdin => ("stream", "r", 0, "stdin".to_string()),
+            StandardStream::Stdout => ("stream", "w", 0, "stdout".to_string()),
+            StandardStream::Stderr => ("stream", "w", 0, "stderr".to_string()),
+        },
+        FileDescriptor::PipeRead(pipe) => ("pipe", "r", 0, format!("pipe:[{:x}]", identity(pipe))),
+        FileDescriptor::PipeWrite(pipe) => ("pipe", "w", 0, format!("pipe:[{:x}]", identity(pipe))),
+        FileDescriptor::PtyMaster(pty) => ("pty", "rw", 0, format!("ptmx:[{:x}]", identity(pty))),
+        FileDescriptor::PtySlave(pty) => ("pty", "rw", 0, format!("pts:[{:x}]", identity(pty))),
+        FileDescriptor::FsFile(file) => {
+            let mode = match file.mode {
+                OpenMode::ReadOnly => "r",
+                OpenMode::WriteOnly => "w",
+                OpenMode::ReadWrite => "rw",
+            };
+            ("file", mode, file.offset, format!("{}", file.path))
+        }
+        FileDescriptor::Socket(socket) => {
+            let socket = ranked_lock!(RANK_SOCKET, "procfs::fd", socket);
+            let proto = if socket.sock_type == SOCK_STREAM {
+                "tcp"
+            } else {
+                "udp"
+            };
+            let state = if socket.listening {
+                "LISTEN"
+            } else {
+                match socket.state {
+                    SocketState::Unbound => "UNBOUND",
+                    SocketState::Bound => "BOUND",
+                    SocketState::Connected => "CONNECTED",
+                    SocketState::Closed => "CLOSED",
+                }
+            };
+            let name = format!(
+                "{proto}:{}->{} {state}",
+                display_socket_addr(socket.local_addr),
+                display_socket_addr(socket.remote_addr)
+            );
+            ("socket", "rw", 0, name)
+        }
+    }
+}
+
+fn display_socket_addr(addr: Option<SocketAddr>) -> String {
+    match addr {
+        Some(addr) => format!(
+            "{}.{}.{}.{}:{}",
+            addr.ip[0], addr.ip[1], addr.ip[2], addr.ip[3], addr.port
+        ),
+        None => "*:*".to_string(),
+    }
+}
+
 fn display_option_errno(value: Option<Errno>) -> String {
     value
         .map(|errno| format!("{:?}", errno))
@@ -855,6 +967,7 @@ const PROCESS_FILES: &[(&str, fn(u64) -> Option<String>)] = &[
         Procfs::with_snapshot(tid, ThreadSnapshot::cmdline_text)
     }),
     ("maps", Procfs::render_maps),
+    ("fd", Procfs::render_fds),
 ];
 
 /// The files directly under `/proc`, each rendered on demand.

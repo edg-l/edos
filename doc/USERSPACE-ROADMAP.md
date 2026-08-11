@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-91 programs and 2 libraries, all in the `programs/` cargo workspace.
+92 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -15,7 +15,7 @@
 | Archives | `tar` (ustar create, list and extract) |
 | Checksums | `sha256sum` |
 | Inspection | `file` |
-| System | `ps`, `pstree`, `pmap`, `top`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace`, `date`, `watch` |
+| System | `ps`, `pstree`, `pmap`, `top`, `lsof`, `free`, `uname`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `shutdown`, `strace`, `date`, `watch` |
 | Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
 | Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `sntp` |
 | Audio | `play` |

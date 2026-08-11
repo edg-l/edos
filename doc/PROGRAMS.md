@@ -40,7 +40,6 @@ surface at all.
 | Program | The gap |
 |---|---|
 | syscall fuzzer | Newly possible: `/proc/syscalls` names every call and says which arguments are pointers, lengths and strings, so a fuzzer can generate structurally plausible calls without a hand-written table. Nothing tests the `uaccess` surface as a surface; this drives every dispatch arm with unmapped pointers, absurd lengths and misaligned structs, and `strace` names the call that killed it |
-| `lsof` | Needs `/proc/<tid>/fd`. "Which process still has this open" is unanswerable today, and it is the question a file manager or an unmount failure asks first |
 | `httpd` | Serves the guest filesystem over TCP. Same untested listen/accept path `nc` reaches, plus concurrent connections, and it doubles as a host-to-guest inspection channel that needs no disk rebuild |
 | `nc` | Pairs with the TCP echo server. The listen/accept path has never been run — `tcptest` only proves the client side |
 | `netstat` | Needs a read path into `net/tcp.rs`'s `CONNECTIONS`; `/proc/net` covers interface state and not connections |

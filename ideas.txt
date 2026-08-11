@@ -2,6 +2,14 @@
 
 ## Done
 
+- **`lsof`, and the `/proc/<tid>/fd` it needed** - the descriptor table lived on
+  `UserThreadInfo` and nothing published it, so "which process still has this
+  open" was unanswerable. procfs now renders one row per descriptor
+  (`FD TYPE MODE POS NAME`), a table rather than Linux's directory of symbolic
+  links because a pipe end, a PTY side and a socket have no path. Pipes and
+  PTYs carry the shared object's address, so both ends pair up across
+  processes; sockets carry protocol, endpoints and TCP state.
+
 - **`sed`, and the backslashes the shell was eating** - a stream editor over
   its own backtracking regex engine: POSIX BRE, ERE under `-E`, and the GNU
   extensions scripts actually use. `s`, `y`, `p`, `d`, `q`, `=`, `a`, `i`, `c`

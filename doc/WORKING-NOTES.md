@@ -2515,3 +2515,48 @@ era 1 and gets `2^32` added rather than being read as a date in 1900.
   immediately** ("send failed") rather than timing out — there is no ARP reply,
   so nothing is ever transmitted. `-t` only bounds a reply that never comes
   from a host that did answer ARP.
+
+## `lsof`, and why `/proc/<tid>/fd` is a table and not a directory (2026-08-11)
+
+"Which process still has this open" had no answer: the descriptor table lived
+on `UserThreadInfo` and nothing published it. `/proc/<tid>/fd` does now, and
+`programs/lsof` reads it.
+
+**It is a text table, not Linux's directory of symbolic links.** Half the
+descriptors in this system have no path — a pipe end, a PTY side and a socket
+are all nameless — and the fields that identify them do not fit in a link
+target. So a row is `FD TYPE MODE POS NAME`, and NAME is the rest of the line
+because a socket's is several tokens:
+
+```
+0 pty rw 0 pts:[ffffc00024848810]
+3 file r 657212 /share/fonts/Sans-Regular.ttf
+4 pipe w 0 pipe:[ffffc0024848410]
+5 socket rw 0 tcp:0.0.0.0:2400->*:* LISTEN
+```
+
+The bracketed number is the address of the shared object (`Arc::as_ptr`), which
+is what makes the two ends of a pipe and the two sides of a PTY pairable across
+processes — verified in the guest: `lsof | grep pipe` shows the writer and the
+reader on the same `pipe:[…]`, and the terminal's `ptmx:[…]` matches the
+`pts:[…]` of everything running under it.
+
+**Two locks had to be released before two others in `render_fds`.** The table
+handle is cloned out from under the thread-info `IrqSpinlock` before the table
+itself is locked, because that spinlock runs with interrupts off and the table
+is a `BlockingMutex` whose contended acquisition parks. Then the descriptors
+are cloned out from under the table lock before they are rendered, because
+describing a socket takes the socket lock (rank 260). A `FileDescriptor` clone
+shares the underlying object without touching the pipe/PTY/socket open counts —
+only `close` adjusts those — so cloning is safe here where `inc_refcount` would
+not be.
+
+Path-based procfs reads are safe to park in: `vfs::read` drops the inode guard
+before calling `fs.read_bytes` when the inode is `None`, which is every
+procfs file.
+
+### Things that will bite you
+
+- **The kernel's unit is the thread, so `lsof` reports a multi-threaded
+  process once per thread**, with the same descriptors each time. That is what
+  procfs holds; it is left visible rather than collapsed.
