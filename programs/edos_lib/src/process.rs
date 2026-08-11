@@ -131,6 +131,18 @@ pub fn getgid() -> u32 {
     unsafe { sys::syscall0(sys::SYS_GETGID) as u32 }
 }
 
+/// Name for a user or group id, or `None` when there is no name for it.
+///
+/// There is no password or group database on this system and no way to become
+/// anything but id 0, so the table is the single identity the kernel hands out.
+/// This is the one place to replace when a `/etc/passwd` exists.
+pub fn id_name(id: u32) -> Option<&'static str> {
+    match id {
+        0 => Some("root"),
+        _ => None,
+    }
+}
+
 /// Spawn a new process with redirected I/O.
 ///
 /// # Arguments

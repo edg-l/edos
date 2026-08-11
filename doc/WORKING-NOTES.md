@@ -6,6 +6,24 @@ session.
 
 ---
 
+## Naming a uid without a passwd database
+
+`id` and `whoami` were listed as blocked on "users and file permissions", and
+only half of that was true. `SYS_GETUID`/`SYS_GETGID` (102/104) already answer
+from `UserThreadInfo.user_id`/`group_id`, which every process inherits from
+`edos-init` and which nothing can change — there is no `setuid` and, per the
+charter, deliberately will not be one until something can enforce it. So the ids
+are real; what is missing is only a way to spell them.
+
+That spelling is `edos_lib::process::id_name`, a table of the one identity the
+kernel hands out (`0` → `root`), and it is the single place to replace when an
+`/etc/passwd` exists. There is no `/etc` in `FILESYSTEM_DIRS` (`GNUmakefile`),
+so nothing reads a database today. An id with no entry prints bare — `whoami`
+prints the number, `id` omits the `(name)` suffix — rather than inventing one.
+
+`chmod`/`chown` stay blocked, and on the other half: attributes are readable
+(`FstatEntry::attrs`) but no `FileSystem::set_attrs` exists to write them back.
+
 ## The connection reaper unbound the listener, and a half-open lived forever
 
 Two defects in the same 40 lines of `tcp_retransmit_main`

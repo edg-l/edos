@@ -305,6 +305,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "id"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "imgview"
 version = "0.1.0"
 dependencies = [
@@ -448,6 +455,10 @@ version = "0.1.0"
 dependencies = [
  "edos_lib",
 ]
+
+[[package]]
+name = "printenv"
+version = "0.1.0"
 
 [[package]]
 name = "ps"
@@ -633,6 +644,13 @@ version = "0.1.0"
 [[package]]
 name = "wget"
 version = "0.1.0"
+
+[[package]]
+name = "whoami"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
 
 [[package]]
 name = "wintest"
