@@ -51,6 +51,7 @@ struct Options {
     path: String,
     budget_ms: u64,
     cap_mib: u64,
+    max_ops: Option<u64>,
     verify: bool,
     keep: bool,
     klog: bool,
@@ -165,6 +166,9 @@ Paths:
 Options:
   -t MS     per-test time budget in ms (default {DEFAULT_BUDGET_MS})
   -m MIB    per-test byte cap in MiB (default {DEFAULT_CAP_MIB})
+  -n OPS    fixed operations per test, overriding -t and -m. Use this to
+            compare two builds: a time budget makes the faster one do more
+            work and meet every later test with a different filesystem.
   -q        quick: 200 ms budget
   -k        keep the files a run creates (implied by `write`)
   -l        mirror the report to /dev/klog as well as stdout
@@ -185,6 +189,7 @@ fn parse_args() -> Options {
         path: String::new(),
         budget_ms: DEFAULT_BUDGET_MS,
         cap_mib: DEFAULT_CAP_MIB,
+        max_ops: None,
         verify: true,
         keep: false,
         klog: false,
@@ -205,6 +210,10 @@ fn parse_args() -> Options {
             },
             "-m" => match args.next().and_then(|v| v.parse().ok()) {
                 Some(v) => opts.cap_mib = v,
+                None => usage(),
+            },
+            "-n" => match args.next().and_then(|v| v.parse().ok()) {
+                Some(v) => opts.max_ops = Some(v),
                 None => usage(),
             },
             other if other.starts_with('-') => usage(),
@@ -257,13 +266,19 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let budget = Budget::new(opts.budget_ms, opts.cap_mib << 20);
+    let budget = Budget::new(opts.budget_ms, opts.cap_mib << 20, opts.max_ops);
     out.line(&format!(
-        "fsbench {} on {}  ({} ms or {} per test)",
+        "fsbench {} on {}  ({})",
         opts.mode.name(),
         opts.path,
-        opts.budget_ms,
-        human_bytes(opts.cap_mib << 20)
+        match opts.max_ops {
+            Some(n) => format!("{n} ops per test"),
+            None => format!(
+                "{} ms or {} per test",
+                opts.budget_ms,
+                human_bytes(opts.cap_mib << 20)
+            ),
+        }
     ));
 
     let before = Counters::sample();

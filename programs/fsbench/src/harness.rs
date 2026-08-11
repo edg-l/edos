@@ -22,13 +22,21 @@ pub struct Budget {
     pub target: Duration,
     /// Stop starting new operations once this many bytes have moved.
     pub max_bytes: u64,
+    /// Stop after exactly this many operations, ignoring the other two limits.
+    ///
+    /// A time budget makes two builds do *different amounts of work*, so the
+    /// faster one arrives at every later test with a fuller, more fragmented
+    /// filesystem and the comparison measures that instead of the change. Any
+    /// A/B between builds wants this.
+    pub max_ops: Option<u64>,
 }
 
 impl Budget {
-    pub fn new(target_ms: u64, max_bytes: u64) -> Self {
+    pub fn new(target_ms: u64, max_bytes: u64, max_ops: Option<u64>) -> Self {
         Self {
             target: Duration::from_millis(target_ms),
             max_bytes,
+            max_ops,
         }
     }
 }
@@ -103,6 +111,9 @@ impl Runner {
     pub fn keep_going(&self) -> bool {
         if self.error.is_some() {
             return false;
+        }
+        if let Some(max_ops) = self.budget.max_ops {
+            return self.ops < max_ops;
         }
         if self.ops == 0 {
             return true;

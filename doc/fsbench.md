@@ -27,6 +27,7 @@ Modes:
 Options:
   -t MS   per-test time budget in ms (default 700)
   -m MIB  per-test byte cap in MiB (default 256)
+  -n OPS  fixed operations per test, overriding -t and -m
   -q      quick: 200 ms budget
   -k      keep the files a run creates
   -l      mirror the report to /dev/klog, which the host reads off run_log.txt
@@ -36,6 +37,20 @@ Options:
 Each test runs until a time budget or a byte cap, whichever comes first, so a
 path running at 1 MiB/s and one running at 1 GiB/s both take about the same
 wall-clock second and the suite finishes either way.
+
+### Comparing two builds needs `-n`, not the default budget
+
+A time budget makes the faster build do *more work*, so it meets every later
+test with a fuller and more fragmented filesystem, and the write-side averages
+then measure that rather than the change. This is not a small effect: the two
+sides of one such comparison allocated 176927 and 221918 blocks, and
+`mmap store 4MiB + msync` read 483 MiB/s against 1.8 — while at a fixed 32
+operations the same two builds both had a **1.0 ms median** and differed only
+in their worst single operation.
+
+So `-n` for any A/B, and rebuild the disk image between runs so both start from
+the same filesystem. Reserve the time budget for characterising one build,
+which is what it is good at.
 
 `-l` is how a headless run gets read: the guest terminal holds far fewer lines
 than a full report prints, and `/dev/klog` is teed to `run_log.txt`.
