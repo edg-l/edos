@@ -350,10 +350,15 @@ pub fn parse_command(input: &str) -> Vec<(String, bool)> {
             q if in_quotes && q == quote_char => {
                 in_quotes = false;
             }
-            '\\' => {
-                // Backslash escapes the next character (inside or outside
-                // quotes), which makes the word literal for the same reasons a
-                // quote does: no redirection operator, no pattern.
+            // Inside single quotes every character is literal, backslash
+            // included (POSIX 2.2.2); inside double quotes a backslash only
+            // escapes the four characters that remain special there, and is
+            // otherwise itself literal (POSIX 2.2.3).
+            '\\' if !(in_quotes && quote_char == '\'')
+                && !(in_quotes && !matches!(chars.peek(), Some('$' | '`' | '"' | '\\'))) =>
+            {
+                // Escaping makes the word literal for the same reasons a quote
+                // does: no redirection operator, no pattern.
                 if let Some(escaped) = chars.next() {
                     current.push(escaped);
                     was_quoted = true;

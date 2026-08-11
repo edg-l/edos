@@ -1943,6 +1943,53 @@ expand to many.
 
 ---
 
+## `sed`, and the backslashes the shell was eating
+
+`programs/sed` is a stream editor over its own backtracking regex engine
+(`programs/sed/src/regex.rs`): POSIX BRE by default, ERE under `-E`, plus the
+GNU extensions scripts actually use (`\+`, `\?`, `\|`, `\{m,n\}`, `\w`,
+`\s`, `[[:class:]]`). Commands are `s`, `y`, `p`, `d`, `q`, `=`, `a`, `i`, `c`
+and `{}` blocks; addresses are a line number, `$`, `/re/` (with `I`), a range of
+either, and `!`. Options: `-n`, `-e`, `-f`, `-i[SUFFIX]`, `-E`/`-r`.
+
+**The engine matches `&[char]`, not `&str`.** Capture offsets are character
+indices, so a replacement splices out of the same `Vec<char>` without
+re-scanning UTF-8 and a multi-byte character can never split a capture.
+
+Two things in the matcher are not obvious and are load-bearing:
+
+- **A repetition whose body matched empty must not recurse.** `m_rep` refuses a
+  repetition that did not advance the position; without that, `\(a*\)*`
+  never terminates.
+- **An empty match abutting the previous match is not a new occurrence.**
+  `substitute` tracks `prev_end` and skips an empty match starting exactly
+  where the last one ended. Without it, `s/a*/-/g` on `baac` gives `-b--c-`
+  instead of GNU's `-b-c-`.
+
+**ROOT CAUSE FOUND WHILE TESTING IT: the shell was deleting backslashes inside
+single quotes.** `parse_command` in `programs/edos-sh/src/command.rs` had one
+backslash arm that escaped the next character unconditionally, "inside or
+outside quotes". So `echo 'a\1b'` printed `a1b`, and every sed script written
+the normal way — `sed 's/\(.*\) \(.*\)/\2 \1/'` — reached the program as
+`s/(.*) (.*)/2 1/`, which is a BRE with literal parentheses: it matches
+nothing, sed changes nothing, and the output is the input. This looked exactly
+like a broken regex engine. Fixed to POSIX 2.2.2/2.2.3: inside single quotes a
+backslash is literal, inside double quotes it escapes only `$`, `` ` ``, `"`
+and `\`, and is otherwise literal.
+
+### Things that will bite you
+
+- **A sed script whose output equals its input is more likely a quoting bug
+  than a regex bug.** Check what the program actually received before touching
+  the matcher: `strace -o /tmp/t.txt sed '...'` prints the argv.
+- **`"\$x"` inside double quotes still expands `$x`.** Variable expansion runs
+  over the raw line before tokenizing, so it never sees the backslash. This is
+  separate from the fix above and still open; `echo "d\$x"` prints `d"`.
+- **There is no `printf` in the guest.** Build a fixture file with `echo` and
+  `>>`, not with `printf '...\n'`.
+
+---
+
 ## The shell has job control
 
 `programs/edos-sh/src/jobs.rs` holds a `Job` with every stage's pid and the

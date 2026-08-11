@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-90 programs and 2 libraries, all in the `programs/` cargo workspace.
+91 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -11,7 +11,7 @@
 | Shell | `edos-sh` |
 | Editor | `edos-vi` |
 | Files | `ls`, `cat`, `cp`, `mv`, `rm`, `ln`, `mkdir`, `rmdir`, `touch`, `stat`, `find`, `du`, `diff` |
-| Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs`, `less` |
+| Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs`, `less`, `sed` |
 | Archives | `tar` (ustar create, list and extract) |
 | Checksums | `sha256sum` |
 | Inspection | `file` |

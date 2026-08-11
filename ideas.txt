@@ -2,6 +2,16 @@
 
 ## Done
 
+- **`sed`, and the backslashes the shell was eating** - a stream editor over
+  its own backtracking regex engine: POSIX BRE, ERE under `-E`, and the GNU
+  extensions scripts actually use. `s`, `y`, `p`, `d`, `q`, `=`, `a`, `i`, `c`
+  and `{}` blocks, addressed by line, `$`, `/re/`, ranges of either and `!`,
+  with `-n`, `-e`, `-f` and in-place `-i`. Fifty-two cases were diffed against
+  GNU sed on the host before it ever booted. Testing it turned up the reason
+  every sed one-liner would have looked broken: `parse_command` in `edos-sh`
+  stripped backslashes inside single quotes, so `'s/\(.*\)/\1/'` arrived as
+  `s/(.*)/1/`. Quote removal now follows POSIX 2.2.2/2.2.3.
+
 - **`pmap`, and the address space `/proc` never showed** - `status` counted
   VMAs and totalled their size; nothing said what any one of them was. The new
   `/proc/<tid>/maps` prints one line per VMA — range, `rwxp`, size asked for,

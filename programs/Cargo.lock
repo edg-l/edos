@@ -433,6 +433,10 @@ name = "rmdir"
 version = "0.1.0"
 
 [[package]]
+name = "sed"
+version = "0.1.0"
+
+[[package]]
 name = "seq"
 version = "0.1.0"
 

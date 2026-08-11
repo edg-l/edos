@@ -35,12 +35,6 @@ surface at all.
 
 ## CLI
 
-### Immediate, no kernel work
-
-| Program | Why |
-|---|---|
-| `sed`, even just `s///` | Multiplies the value of every text tool already there |
-
 ### Would surface a kernel gap, which is the point
 
 | Program | The gap |
