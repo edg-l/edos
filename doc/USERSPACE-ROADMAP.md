@@ -1,12 +1,12 @@
 # Userspace Roadmap
 
-106 programs and 2 libraries, all in the `programs/` cargo workspace.
+107 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
 | Area | Programs |
 |---|---|
-| Init | `edos-init` (the only process the kernel starts; supervises the GUI session) |
+| Init | `edos-init` (the only process the kernel starts; supervises the GUI session and `sshd`) |
 | GUI | `edos-wm` (compositor, decorations, desktop menu), `edos-terminal`, `edos-taskbar` (panel + applications menu), `edos-procview`, `wintest` |
 | Shell | `edos-sh` |
 | Editor | `edos-vi` |
@@ -17,7 +17,7 @@
 | Inspection | `file` |
 | System | `ps`, `pstree`, `pmap`, `top`, `lsof`, `free`, `uname`, `nproc`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `printenv`, `id`, `whoami`, `shutdown`, `strace`, `date`, `watch` |
 | Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
-| Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `nc`, `sntp`, `httpd`, `netstat` |
+| Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `nc`, `sntp`, `httpd`, `netstat`, `sshd` |
 | Audio | `play` |
 | Images | `imgview` (BMP viewer) |
 | Games | `snake` |
@@ -162,6 +162,30 @@ that each carry the escapes preceding them. Making the highlight visible also
 needed SGR 7 and 27 in `edos_render::widgets::terminal`, which had no reverse
 video at all — `top`'s inverse header and status bar had been rendering as
 plain text.
+
+**`sshd`**. An SSH-2 server: `curve25519-sha256`, an `ssh-ed25519` host key,
+`aes128-ctr` and `hmac-sha2-256`, password authentication, one session channel
+with a pty and a shell. A stock OpenSSH client connects with no options.
+Written up in [`sshd.md`](sshd.md).
+
+It is the first program to lean on the crypto crates, and they build for
+`x86_64-unknown-edos` unmodified — `sha2`, `hmac`, `aes`, `ctr`,
+`x25519-dalek`, `ed25519-dalek`, `subtle`, all with `default-features = false`
+so nothing reaches for a `getrandom` backend this target has not got.
+Randomness is `SYS_GETRANDOM`. The kernel sets `CR4.OSFXSR` but never
+`OSXSAVE`, so feature detection reports no AVX and the crates pick their SSE2
+backends: that is what makes this safe today, and why enabling `OSXSAVE`
+without moving the context switch to `XSAVE` would silently corrupt crypto
+state rather than merely slow it down.
+
+Two defects surfaced while testing it, both older than the program and both
+fixed here rather than worked around. `exit N` in `edos-sh` dropped its
+argument, because `ExecResult::Exit` carried no code and a `-1` sentinel stood
+in for the exit request. And a thread parked in `accept` could not be killed at
+all, not even by `SIGKILL`: the kill marks the thread and wakes it, but the
+death happens at the syscall return boundary, and a wait that re-parks on a
+predicate no peer will ever satisfy never reaches that boundary. See
+`WaitQueue::wait_until_killable`.
 
 Candidates beyond these phases, ranked by the kernel path each would exercise,
 are in [`PROGRAMS.md`](PROGRAMS.md).

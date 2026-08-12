@@ -450,7 +450,7 @@ clean-sata:
 # Listed one per directory rather than brace-expanded: make runs recipes under
 # /bin/sh, which is dash on Debian, and dash does not do brace expansion. It
 # silently creates a single directory with the braces in its name instead.
-FILESYSTEM_DIRS := bin boot dev home lib var mnt opt root sys tmp share share/fonts share/wallpapers
+FILESYSTEM_DIRS := bin boot dev etc home lib var mnt opt root sys tmp share share/fonts share/wallpapers
 
 .PHONY: filesystem
 # Outline faces for the shell. Lato sets the chrome and JetBrains Mono the

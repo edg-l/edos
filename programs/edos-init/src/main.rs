@@ -34,6 +34,15 @@ struct Service {
     /// service that treats the open as optional comes up permanently without
     /// that device. Waiting here keeps both out of every service.
     requires: &'static [&'static str],
+    /// A file whose absence means the service is not configured, and so is not
+    /// started at all.
+    ///
+    /// Distinct from `requires`, which waits and then starts the service
+    /// anyway: this is a decision, not a race. A network service with no
+    /// credentials configured would only exit and be restarted until its
+    /// failure budget ran out, logging on every boot of a system whose owner
+    /// never asked for it.
+    enabled_by: Option<&'static str>,
 }
 
 const SERVICES: &[Service] = &[
@@ -42,20 +51,34 @@ const SERVICES: &[Service] = &[
         essential: true,
         shell: true,
         requires: &["/dev/mouse", "/dev/kbd"],
+        enabled_by: None,
     },
     Service {
         path: "/bin/edos-taskbar",
         essential: false,
         shell: true,
         requires: &[],
+        enabled_by: None,
     },
     Service {
         path: "/bin/edos-terminal",
         essential: false,
         shell: false,
         requires: &[],
+        enabled_by: None,
+    },
+    Service {
+        path: "/bin/sshd",
+        essential: false,
+        shell: false,
+        requires: &[],
+        enabled_by: Some(SSHD_CONFIG),
     },
 ];
+
+/// Configuration that turns the SSH server on. It holds the only credential
+/// the server has, so a system without one has no business listening.
+const SSHD_CONFIG: &str = "/etc/sshd.conf";
 
 /// A service that dies faster than this is treated as failing to start rather
 /// than as having run and exited.
@@ -110,6 +133,13 @@ fn wait_for_devices(paths: &'static [&'static str]) -> Vec<&'static str> {
 fn supervise(service: &'static Service) {
     let name = service.path.rsplit('/').next().unwrap_or(service.path);
     let mut failures: u32 = 0;
+
+    if let Some(config) = service.enabled_by
+        && File::open(config).is_err()
+    {
+        println!("init: {name} not started: no {config}");
+        return;
+    }
 
     // Once, before the first spawn: a restart later on cannot lose this race,
     // since the drivers registered long before.

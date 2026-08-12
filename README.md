@@ -37,12 +37,13 @@ filesystem, network stack, USB stack and window system.
 | **Graphics** | virtio-gpu driver, userspace compositor, window decorations, shared-memory buffers, hardware cursor |
 | **USB** | xHCI with HID keyboard and mouse, and mass storage |
 | **Audio** | Intel HDA with a `/dev/dsp` node |
-| **Userspace** | 106 programs against a forked Rust `std`, including a shell with job control, globbing and scripting, a vi-like editor, a pager, `sed`, and the usual coreutils and network tools |
+| **Userspace** | 107 programs against a forked Rust `std`, including a shell with job control, globbing and scripting, a vi-like editor, a pager, `sed`, and the usual coreutils and network tools |
 
 The kernel mounts the root filesystem and starts exactly one process,
 `bin/edos-init`. That supervises the window manager, taskbar and terminal —
 spawning them, reaping them and restarting them with backoff — so session
-policy lives in userspace rather than in the kernel.
+policy lives in userspace rather than in the kernel. It also starts `sshd`,
+but only on a system that has an `/etc/sshd.conf` to configure it.
 
 ## Quick start
 

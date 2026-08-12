@@ -205,6 +205,56 @@ pub fn spawn_with_env(
     stdout_fd: u64,
     stderr_fd: u64,
 ) -> u64 {
+    spawn_envp(
+        path,
+        args,
+        &current_env_strings(),
+        stdin_fd,
+        stdout_fd,
+        stderr_fd,
+    )
+}
+
+/// Same as [`spawn_with_env`] except the child's environment is given rather
+/// than inherited.
+///
+/// A server that gives each client its own `TERM` and `HOME` needs this:
+/// the environment belongs to the connection, and one process may be serving
+/// several at once, so it cannot be carried in the caller's own environment.
+///
+/// Each entry is a `KEY=VALUE` pair; entries containing a NUL are dropped.
+/// Returns the pid, or `u64::MAX` on error.
+pub fn spawn_with_envp(
+    path: &str,
+    args: &[&str],
+    env: &[&str],
+    stdin_fd: u64,
+    stdout_fd: u64,
+    stderr_fd: u64,
+) -> u64 {
+    let strings: Vec<Vec<u8>> = env
+        .iter()
+        .filter(|e| !e.as_bytes().contains(&0))
+        .map(|e| {
+            let mut buf = Vec::with_capacity(e.len() + 1);
+            buf.extend_from_slice(e.as_bytes());
+            buf.push(0);
+            buf
+        })
+        .collect();
+    spawn_envp(path, args, &strings, stdin_fd, stdout_fd, stderr_fd)
+}
+
+/// The one `SYS_SPAWN2` call site: `envp` arrives as NUL-terminated
+/// `KEY=VALUE` byte strings, whoever assembled them.
+fn spawn_envp(
+    path: &str,
+    args: &[&str],
+    env_strings: &[Vec<u8>],
+    stdin_fd: u64,
+    stdout_fd: u64,
+    stderr_fd: u64,
+) -> u64 {
     let Ok(c_path) = CString::new(path) else {
         return u64::MAX;
     };
@@ -212,7 +262,6 @@ pub fn spawn_with_env(
     let mut argv_ptrs: Vec<*const u8> = c_args.iter().map(|c| c.as_ptr() as *const u8).collect();
     argv_ptrs.push(core::ptr::null());
 
-    let env_strings = current_env_strings();
     let mut envp_ptrs: Vec<*const u8> = env_strings.iter().map(|s| s.as_ptr()).collect();
     envp_ptrs.push(core::ptr::null());
 

@@ -902,8 +902,8 @@ does not have to invent them.
 | | value | how |
 |---|---|---|
 | syscalls | 110 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 110 — a mismatch is the bug |
-| userspace programs | 106 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
-| programs listed in `doc/USERSPACE-ROADMAP.md` | 108 rows = 106 + the 2 libraries | diff the table against the workspace, below |
+| userspace programs | 107 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
+| programs listed in `doc/USERSPACE-ROADMAP.md` | 109 rows = 107 + the 2 libraries | diff the table against the workspace, below |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 20/20 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
@@ -2425,10 +2425,16 @@ Three things underneath had to change, and are worth knowing independently:
 ## There is an init process now
 
 `bin/edos-init` is the only thing the kernel starts. It supervises `edos-wm`,
-`edos-taskbar` and `edos-terminal` with a thread each — spawn, `waitpid`,
-restart with backoff, give up after five rapid failures — so which programs
-make up a session is userspace policy rather than something compiled into
-`main.rs`.
+`edos-taskbar`, `edos-terminal` and `sshd` with a thread each — spawn,
+`waitpid`, restart with backoff, give up after five rapid failures — so which
+programs make up a session is userspace policy rather than something compiled
+into `main.rs`.
+
+`sshd` carries an `enabled_by` path and is skipped outright when
+`/etc/sshd.conf` is absent. That is distinct from `requires`, which waits for a
+device and then starts the service anyway: a server with no credentials
+configured would only exit and be restarted until its failure budget ran out,
+on every boot of a system whose owner never asked for it.
 
 Two consequences worth knowing:
 
