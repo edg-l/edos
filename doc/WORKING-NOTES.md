@@ -4282,6 +4282,49 @@ What that leaves, and it is a different bug from the one written down before:
   these two immediately: a mapped-but-empty block reads as an aligned run of
   zeros, a mis-planned run reads as another file's pattern.
 
-Redo the repro on the fixed instrument before touching either. The failing
-offset will now come with the range it covers, and the host scan says whether
-anything reached the disk.
+**The fixed instrument ran, and the answer is aligned zeros, not another file's
+pattern.** Fresh `sata-disk.img`, `fsbench fragprep /var`, `sync`, reboot,
+`fsbench ra /var`:
+
+```
+VERIFY FAIL  byte 1310720 of the file is 0x00, want 0x87; the chunk differs in
+             16321 of 65536 bytes, 16321 of them zero, from byte 1310720 to
+             byte 1363967 of the file
+```
+
+Every differing byte is zero, and 16321 is what a **16 KiB solid run of zeros**
+looks like through this pattern: 1/256 of the pattern's own bytes are zero and
+match, and 16384 - 16384/256 = 16320. The first bad byte is 1310720 = block 320,
+4096-aligned and 64 KiB-aligned; the span to the last bad byte is 53248 bytes =
+13 blocks, so four blocks' worth of zeros sit inside a 13-block window rather
+than in one run. `extent_holes` is 0 for the pass, so nothing was planned as a
+hole below EOF. That is the mapped-block-holding-no-file-data shape, and it is
+per whole 4 KiB block.
+
+**And the host scan now contradicts the guest, which is the next thing to
+settle.** The scan grew a missing-blocks report — a block the guest reads as
+zeros but whose pattern is on the disk was written and read back from the wrong
+place; one that is nowhere in the image was never written:
+
+```
+7508 pattern blocks in the image, 7508 byte-perfect, 0 damaged
+3584 of 4096 logical blocks have no copy anywhere in the image
+```
+
+The 512 blocks that *are* present are exactly logical 3584..4095, the file's
+last 2 MiB, in one contiguous range. Blocks 0..3583 are absent at **every**
+512-byte alignment, not just at 4096 (re-scanned with a 512-byte step: same 512
+blocks, so this is not the scan's block alignment). Yet the same boot read
+blocks 0..319 back with a correct pattern before failing at 320, on a cold boot,
+and `ra_read` only opens and reads — it never writes the file. Both statements
+cannot hold for one disk.
+
+So the scan's unstated premise is what to check first: **that the guest's `/var`
+is the image being scanned.** The boot log records `root=UUID=8765...` and
+registers `/dev/sda`, `/dev/sdb` and `/dev/ram0`, but does not name which
+partition won root, so nothing yet proves the reads and the scan looked at the
+same device. Next: print the winning device in the mount line (or read it from
+the guest), and only then re-run the scan. Until that is settled, do not treat
+"3584 blocks were never written" as a write-path finding — it is exactly the
+shape of the traps this file already records, where a confident number was taken
+from the wrong device.

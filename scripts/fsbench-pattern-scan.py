@@ -16,8 +16,13 @@ the raw file is sparse):
 
 Blocks a previous run left behind are still recognised, so the count is
 normally a multiple of the file's block count plus whatever survives from
-earlier runs. What matters is the mismatch list: a partially written block
-appears there with the exact range of bytes that differ.
+earlier runs. What matters is the two lists it prints: a partially written
+block appears in the mismatch list with the exact range of bytes that differ,
+and a logical block with no copy anywhere in the image appears in the missing
+list. The second one is what separates a lost write from a misdirected read:
+a block the guest reads as zeros but whose pattern is on the disk was written
+and read back from the wrong place, and one that is nowhere in the image was
+never written at all.
 """
 
 import argparse
@@ -61,11 +66,13 @@ def main() -> None:
         m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
         found = perfect = 0
         shown = 0
+        copies = [0] * blocks
         for pos in range(0, len(m) - BLOCK + 1, BLOCK):
             lb = index.get(m[pos : pos + 16])
             if lb is None:
                 continue
             found += 1
+            copies[lb] += 1
             want = block_bytes(args.tag, lb * BLOCK)
             got = m[pos : pos + BLOCK]
             if got == want:
@@ -81,6 +88,10 @@ def main() -> None:
                     f"first {bad[0]}, last {bad[-1]}"
                 )
         print(f"{found} pattern blocks in the image, {perfect} byte-perfect, {found - perfect} damaged")
+        missing = [lb for lb in range(blocks) if copies[lb] == 0]
+        print(f"{len(missing)} of {blocks} logical blocks have no copy anywhere in the image")
+        for lb in missing[: args.limit]:
+            print(f"  logical block {lb} (file offset {lb * BLOCK}) is nowhere in the image")
 
 
 if __name__ == "__main__":
