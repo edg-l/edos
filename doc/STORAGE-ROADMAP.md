@@ -261,10 +261,12 @@ read is below: path 1 dominates, 245 windows to 8. Path 2 is not what the
 baseline was measuring, and the extent work is not what fixes this.
 
 The fixture worry that came with the hypothesis is settled by the same reading.
-`fsbench raprep` builds its 16 MiB file by appending, which is the pattern the
-EFS pre-allocation item describes as splitting one contiguous extent into many
-tiny ones — but EFS declined only 8 of 253 windows, so `ensure_block_for_logical`
-is coalescing and the file is not badly fragmented. The scaffolding is ruled out.
+`fsbench raprep` builds its 16 MiB file by appending, the pattern that can split
+one contiguous extent into many tiny ones — but EFS declined only 8 of 253
+windows, so `ensure_block_for_logical` is coalescing and the file is not badly
+fragmented. The scaffolding is ruled out. Appending allocation has since been
+batched and given a goal (see "Recently closed"), so the coalescing no longer
+depends on the allocator happening to hand back neighbouring blocks.
 
 ### What the branch counter found: the prefetch reads and throws away 92 MiB
 
@@ -535,6 +537,27 @@ Not performance, but found by this work and unfixed.
 Kept as an index; the mechanism is in the post-mortem or the spec named on each
 line.
 
+- **A fragmented file lost whole 4 KiB blocks.** A newly allocated block was
+  zeroed through the journal, and that zeroed copy could reach the home block
+  after the direct data write had already landed on it — 289 of one file's 4096
+  blocks were nowhere in the image. The write path no longer stages a zeroed
+  copy of a block it is about to overwrite whole (`554b515`,
+  `doc/WORKING-NOTES.md` "Interleaved appends drop whole blocks on the write
+  path").
+- **Readahead declined any window that spanned more than one extent.** A
+  prefetch window is now a set of contiguous runs, so a fragmented file goes
+  from 5 asynchronous windows and 243 synchronous fallbacks to 248 and 0
+  (`4f69216`, `kernel/src/fs/readahead.rs`).
+- **An appending file asked for one block at a time.** `alloc_blocks` serves a
+  whole batch, so a run of appends becomes one extent rather than one per block
+  (`22b5783`, in-guest evidence at `67fa350`).
+- **A file's next block is sought where its last extent ended.** `alloc_blocks`
+  takes a goal from `ExtentMap::goal_for`, tries it exactly before any scan, and
+  falls back to first fit inside the goal's own group, so batch N+1 continues
+  batch N instead of restarting at group 0 (`ae0424a`). Correctness is verified
+  in the guest; the extent-count win itself is **not yet measured** — take it
+  with `fsbench raprep /var`, a reboot, then `fsbench ra /var` and
+  `/proc/efs_stats` runs/reads against `67fa350`.
 - **Both storage regressions now run from one command.** `make storage-check`
   drives `scripts/fs-regression` (EFS then FAT32) and `scripts/fsbench-run`,
   which share their VM-driving helpers in `scripts/vmdrive.py`
