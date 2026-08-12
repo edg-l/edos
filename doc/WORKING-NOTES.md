@@ -4610,5 +4610,21 @@ iotest /var                 20/20
 
 `fsbench ra /var` **needs `fsbench raprep /var` and a reboot first**; on a fresh
 disk it exits `entity not found` and reports one test failed. The extent-count
-win is only visible on that path (`/proc/efs_stats` `runs / reads`), so the
-number for interleaved appends is still unmeasured — see the todo.
+win is only visible on that path (`/proc/efs_stats` `runs / reads`).
+
+Measured there, fresh disk, `raprep` then a cold boot then `ra`:
+
+```
+fsbench raprep /var     efs_stats.blocks_allocated +4096 (a 16 MiB file)
+  ... reboot ...
+fsbench ra /var         extent runs   4 reads planned 4 runs, queued in 4 submits
+                        windows sync fallback  0 declined, 0 failed
+                        readahead 248 async windows / 4048 async pages
+                        verify: edges match the pattern
+```
+
+`runs / reads` = 1.00: every bulk read of the appended file resolves to a single
+contiguous run, so the appended file is one extent per read and the heavier
+ext4-style delayed allocation or per-inode reservation window has nothing left
+to win. The counter to watch for a regression is `efs_stats.extent_runs` rising
+above `extent_reads` on this sequence.

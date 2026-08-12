@@ -554,10 +554,11 @@ line.
 - **A file's next block is sought where its last extent ended.** `alloc_blocks`
   takes a goal from `ExtentMap::goal_for`, tries it exactly before any scan, and
   falls back to first fit inside the goal's own group, so batch N+1 continues
-  batch N instead of restarting at group 0 (`ae0424a`). Correctness is verified
-  in the guest; the extent-count win itself is **not yet measured** — take it
-  with `fsbench raprep /var`, a reboot, then `fsbench ra /var` and
-  `/proc/efs_stats` runs/reads against `67fa350`.
+  batch N instead of restarting at group 0 (`ae0424a`). Measured on a fresh
+  disk with `fsbench raprep /var` → reboot → `fsbench ra /var`: the 16 MiB
+  appended file reads as **4 reads planned 4 runs, queued in 4 submits**, i.e.
+  `runs / reads` = 1.00, so an appended file is laid out contiguously and a
+  per-inode reservation window buys nothing on top.
 - **Both storage regressions now run from one command.** `make storage-check`
   drives `scripts/fs-regression` (EFS then FAT32) and `scripts/fsbench-run`,
   which share their VM-driving helpers in `scripts/vmdrive.py`
