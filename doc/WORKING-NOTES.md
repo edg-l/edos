@@ -364,6 +364,42 @@ that survives `kill -9`.
 
 ---
 
+## The PTY never translated a newline, and only its own terminal hid it
+
+FIXED. A terminal moves the cursor *down* on a line feed and leaves the column
+alone; the carriage return is what sends it back to the left. POSIX has the
+driver add it, `OPOST` with `ONLCR`, and this one did not. Every program here
+writes `\n` alone, so output drew a staircase:
+
+```
+/ $ ls
+      .manifest  bin/       boot/      dev/
+                                           home/      lib/
+```
+
+It was invisible for as long as the only consumer was `edos_render`'s terminal
+widget, whose `'\n'` handler sets the column to zero as well as advancing the
+row -- so a bare newline behaved like CRLF there and nowhere else. The first
+time output left the machine, over SSH, it was obvious.
+
+`LineDiscipline` now carries `opost`, on in canonical mode and off in raw,
+because a program drawing with escape sequences writes its own line endings.
+`slave_write` expands through it, and so does the echo of a newline.
+
+**The shell was half the fix, again.** `edos-sh` called `pty_set_raw` once at
+startup and stayed raw, switching to canonical only around an external command,
+so its banner and every builtin's `println!` bypassed the new translation.
+Raw mode now belongs to `read_line` and is released when it returns, via a
+`RawMode` guard, so only the line editor -- which echoes and positions the
+cursor itself -- runs raw. The one place the editor ended a line with a bare
+newline emits CRLF, since nothing is translating for it.
+
+Verified by counting bytes rather than by eye: an interactive session over SSH
+that runs `ls /`, two `echo`s and a `free` contains **0 bare line feeds**, and
+the local terminal renders identically to before.
+
+---
+
 ## A pipe holds 64 KiB now, and the shell had to change in the same commit
 
 FIXED. `Pipe::write` never blocked and the `ByteRing` just grew, so a writer

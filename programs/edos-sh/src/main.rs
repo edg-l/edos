@@ -642,7 +642,32 @@ fn redraw_from_cursor(line: &str, cursor: usize, _prompt_len: usize) {
     let _ = std::io::stdout().flush();
 }
 
+/// Raw mode for as long as a line is being edited, and normal terminal
+/// behaviour the rest of the time.
+///
+/// The shell echoes and positions the cursor itself while editing, which needs
+/// the driver to stay out of the way. Everywhere else -- a prompt, a builtin's
+/// output, an external command -- wants the ordinary cooked mode, because that
+/// is what turns a newline into a carriage return and a newline. Without the
+/// restore, every builtin that used `println!` drew a staircase on a real
+/// terminal, and only `edos_render`'s own widget made it look right.
+struct RawMode;
+
+impl RawMode {
+    fn enter() -> Self {
+        edos_lib::io::pty_set_raw(0);
+        Self
+    }
+}
+
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        edos_lib::io::pty_set_canonical(0);
+    }
+}
+
 fn read_line(history: &[String], prompt: &str) -> Option<String> {
+    let _raw = RawMode::enter();
     // DECTCEM on: a full-screen program killed before it could restore the
     // cursor would otherwise leave it hidden for the rest of the session.
     print!("\x1B[?25h{}", prompt);
@@ -670,7 +695,9 @@ fn read_line(history: &[String], prompt: &str) -> Option<String> {
         let ch = buf[0];
 
         if ch == b'\n' || ch == b'\r' {
-            print!("\n");
+            // Written in raw mode, so the carriage return is the shell's to
+            // send: the driver is not translating while a line is being edited.
+            print!("\r\n");
             let _ = std::io::stdout().flush();
             line.push('\n');
             return Some(line);
@@ -962,8 +989,11 @@ fn main() {
     // Interactive mode
     command::set_script_args(&argv);
 
-    edos_lib::io::pty_set_raw(0);
     claim_terminal();
+
+    // Raw mode is entered by `read_line` and left when it returns, so the
+    // shell starts out cooked: the banner below, and every builtin's output,
+    // get their newlines translated like any other program's.
 
     // Ignore SIGINT so the shell doesn't die on Ctrl+C
     // (the foreground child process gets killed instead)

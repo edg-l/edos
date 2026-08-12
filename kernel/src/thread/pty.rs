@@ -48,6 +48,20 @@ pub enum LineAction {
 struct LineDiscipline {
     canonical: bool,
     echo: bool,
+    /// Output post-processing, POSIX `OPOST` with `ONLCR`: a newline on the way
+    /// out becomes a carriage return and a newline.
+    ///
+    /// A terminal moves the cursor *down* on a line feed and leaves the column
+    /// where it was; only the carriage return sends it back to the left. A
+    /// program that writes lines separated by `\n` alone therefore draws a
+    /// staircase, and every real terminal relies on the driver adding the
+    /// carriage return. `edos_render`'s widget happens to treat a bare newline
+    /// as both, which is why this was invisible until output first left the
+    /// machine over SSH.
+    ///
+    /// Off in raw mode, where a program is drawing with escape sequences and
+    /// emits its own line endings.
+    opost: bool,
     line_buf: Vec<u8>,
 }
 
@@ -56,8 +70,29 @@ impl LineDiscipline {
         Self {
             canonical: true,
             echo: true,
+            opost: true,
             line_buf: Vec::new(),
         }
+    }
+
+    /// Append `data` to `out`, expanding newlines when `opost` is on.
+    ///
+    /// The scan costs a pass over the bytes only when there is a newline to
+    /// find; output with none is pushed as it stands.
+    fn write_output(&self, data: &[u8], out: &mut ByteRing) {
+        if !self.opost || !data.contains(&b'\n') {
+            out.push(data);
+            return;
+        }
+        let mut start = 0;
+        for (i, &byte) in data.iter().enumerate() {
+            if byte == b'\n' {
+                out.push(&data[start..i]);
+                out.push(b"\r\n");
+                start = i + 1;
+            }
+        }
+        out.push(&data[start..]);
     }
 
     fn process_input(
@@ -100,7 +135,11 @@ impl LineDiscipline {
                 input_buf.push(&self.line_buf);
                 self.line_buf.clear();
                 if self.echo {
-                    output_buf.push_byte(b'\n');
+                    if self.opost {
+                        output_buf.push(b"\r\n");
+                    } else {
+                        output_buf.push_byte(b'\n');
+                    }
                 }
                 LineAction::None
             }
@@ -231,11 +270,16 @@ impl Pty {
             PTY_IOCTL_SET_RAW => {
                 self.line_disc.canonical = false;
                 self.line_disc.echo = false;
+                // A program in raw mode positions the cursor itself and writes
+                // its own line endings, so translating them would insert
+                // carriage returns it did not ask for.
+                self.line_disc.opost = false;
                 Ok(0)
             }
             PTY_IOCTL_SET_CANONICAL => {
                 self.line_disc.canonical = true;
                 self.line_disc.echo = true;
+                self.line_disc.opost = true;
                 Ok(0)
             }
             PTY_IOCTL_GET_MODE => Ok(if self.line_disc.canonical { 1 } else { 0 }),
@@ -304,7 +348,10 @@ impl Pty {
             return (0, PtyNotifications::EMPTY);
         }
 
-        self.output_buf.push(data);
+        // Reports what the caller gave, not what went into the ring: the
+        // carriage returns are the driver's, and a writer told it had written
+        // more than it asked would loop trying to make up the difference.
+        self.line_disc.write_output(data, &mut self.output_buf);
         (data.len(), self.notify_pollers())
     }
 
