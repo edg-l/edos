@@ -168,7 +168,36 @@ master is also the output, and a terminal's input does not end while it is open.
 
 ## Testing it
 
-The VM script already forwards host `127.0.0.1:2323` to guest port 23, so:
+```
+make ssh-check
+```
+
+`scripts/ssh-check` boots the guest, writes an `/etc/sshd.conf`, starts the
+server, and drives the host's own OpenSSH client against it: authentication and
+a refused password, exit status for 0/1/42, ~10 MB out and 629 KB in with the
+SHA-256 compared either way, and three concurrent sessions. Testing a protocol
+against anything other than the implementation everyone else uses proves very
+little, which is why the client here is the real one.
+
+The check does **not** cover the flow-control bug that motivated the download
+case, and that is established rather than assumed: the defect (closing the
+channel while the client's window is shut) was reintroduced twice and
+`ssh-check` stayed green both times. `ssh` writes straight to a file and drains
+as fast as the server sends, so the window never closes and the buggy path is
+never entered; the payload being larger than the client's 2 MiB starting window
+is not sufficient. Covering it needs a client that stops reading mid-transfer
+while the guest's command finishes and exits. An attempt at that -- stalling
+the read from a pipe -- failed its own control by going red against a correct
+server, and was removed rather than left in looking like coverage.
+
+The transport lives in `scripts/sshdrive.py` and is reusable: `run(command)`
+gives back a real exit status and real stdout, which every other check in this
+repo currently has to reconstruct by typing at the terminal and grepping
+`run_log.txt` for a marker it asked the command to print. Readiness is the SSH
+banner rather than a log line, because QEMU's user-mode forward accepts a host
+connection before it knows whether anything in the guest is listening.
+
+By hand, the same thing:
 
 ```
 make run-headless
@@ -176,11 +205,6 @@ scripts/edos-vm click 600 400
 scripts/edos-vm type 'sshd -p 23 -u edgar:hunter2 -v' --enter
 ssh -p 2323 -o StrictHostKeyChecking=no edgar@127.0.0.1
 ```
-
-Verified against OpenSSH 10.0p2: interactive shell, `exec` with the exit status
-propagated, 629 KB down and 629 KB up with the SHA-256 matching either way,
-three concurrent sessions, a resize taking effect mid-session, and a wrong
-password refused.
 
 ## Note on in-kernel crypto
 

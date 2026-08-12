@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""SSH regression: does a real OpenSSH client get a working session?
+
+`programs/sshd` speaks a protocol, and the only honest test of a protocol is
+the implementation everyone else uses. This drives the host's `ssh` against the
+guest over the port forward `scripts/edos-vm` already sets up, and asserts the
+things that broke while it was being written:
+
+  1. password authentication succeeds, and a wrong one does not,
+  2. `exec` reports the command's real exit status,
+  3. a file comes back byte for byte, larger than the client's initial window,
+  4. a file sent up arrives byte for byte, and
+  5. several sessions run at once.
+
+The transfers are ~10 MB rather than a token amount so that a session moving
+real volume is exercised end to end, but see the gap below before trusting this
+to catch a flow-control regression.
+
+**What this does NOT cover.** The bug that motivated the download case --
+closing a channel while the client's window is shut, which lost 6 MB of a 10 MB
+transfer -- is *not* caught here, and that was established rather than assumed:
+the defect was reintroduced twice and this check stayed green both times. The
+reason is that `ssh` writes straight to a file and drains as fast as the server
+sends, so the window never closes and the buggy path is never entered. Catching
+it needs a client that stops reading mid-transfer while the guest's command
+finishes and exits. An attempt at that (stalling the read from a pipe) failed
+its own control -- it went red against a correct server too -- and was removed
+rather than left in looking like coverage.
+
+    make ssh-check
+
+Exits 0 when every case passes, 1 otherwise. The SSH transport itself lives in
+`scripts/sshdrive.py`, which any other check can use to run a command in the
+guest and get real stdout and a real exit status back.
+"""
+
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sshdrive  # noqa: E402
+from sshdrive import exit_code, run, ssh  # noqa: E402
+from vmdrive import BOOT_SECONDS, REPO, VM, serial_mark, serial_tail, vm  # noqa: E402
+
+# Big enough to outlast the client's initial channel window (OpenSSH opens with
+# 2 MiB), so a server that stops at the window is caught. /bin/edos-wm is the
+# largest thing in the image; sixteen of it is about 10 MB.
+PAYLOAD = "/bin/edos-wm"
+PAYLOAD_COPIES = 16
+
+
+def fail(message, mark=None):
+    if mark is not None:
+        print(serial_tail(mark)[-2000:])
+    vm("stop")
+    sys.exit(f"ssh-check: {message}")
+
+
+def check_login(mark):
+    status, transcript = run("echo SSH_CHECK_OK")
+    if exit_code(status) != 0 or "SSH_CHECK_OK" not in transcript:
+        print(transcript[-2000:])
+        fail("could not log in and run a command", mark)
+    print("  login and exec ok")
+
+
+def check_wrong_password(mark):
+    status, transcript = run("echo SHOULD_NOT_RUN", password="wrong-password", prompts=2)
+    if "SHOULD_NOT_RUN" in transcript:
+        print(transcript[-2000:])
+        fail("a wrong password was accepted", mark)
+    if exit_code(status) == 0:
+        fail("a wrong password did not fail the client", mark)
+    print("  wrong password refused")
+
+
+def check_exit_status(mark):
+    for want in (0, 1, 42):
+        status, _ = run(f"exit {want}")
+        got = exit_code(status)
+        if got != want:
+            fail(f"exit status {want} came back as {got}", mark)
+    print("  exit status propagated")
+
+
+def check_download(mark, tmp):
+    """Read a large file out of the guest and compare it byte for byte."""
+    local = os.path.join(REPO, "filesystem/bin/edos-wm")
+    if not os.path.exists(local):
+        fail("filesystem/bin/edos-wm is missing; run `make programs` first")
+
+    with open(local, "rb") as f:
+        one = f.read()
+    want = hashlib.sha256(one * PAYLOAD_COPIES).hexdigest()
+    want_size = len(one) * PAYLOAD_COPIES
+
+    got_path = os.path.join(tmp, "download.bin")
+    command = "cat " + " ".join([PAYLOAD] * PAYLOAD_COPIES)
+    status, transcript = ssh([command], stdout_path=got_path)
+    if exit_code(status) != 0:
+        print(transcript[-2000:])
+        fail("the download command failed", mark)
+
+    got_size = os.path.getsize(got_path)
+    if got_size != want_size:
+        fail(f"downloaded {got_size} bytes, expected {want_size}", mark)
+    with open(got_path, "rb") as f:
+        if hashlib.sha256(f.read()).hexdigest() != want:
+            fail("the downloaded bytes differ from the original", mark)
+    print(f"  downloaded {got_size} bytes, sha256 matches")
+
+
+def check_upload(mark, tmp):
+    """Send a file up the channel and have the guest hash what it received."""
+    local = os.path.join(REPO, "filesystem/bin/edos-wm")
+    with open(local, "rb") as f:
+        want = hashlib.sha256(f.read()).hexdigest()
+
+    status, transcript = ssh(["cat > /tmp/ssh-check.bin; sha256sum /tmp/ssh-check.bin"],
+                             stdin_path=local)
+    if exit_code(status) != 0:
+        print(transcript[-2000:])
+        fail("the upload command failed", mark)
+    if want not in transcript:
+        print(transcript[-2000:])
+        fail("the guest hashed the upload differently; bytes were lost on the way in", mark)
+    print("  uploaded and hashed in the guest, sha256 matches")
+
+
+def check_concurrent(mark):
+    """Three sessions at once, each holding its channel open for a while."""
+    script = os.path.abspath(__file__)
+    procs = [
+        subprocess.Popen([sys.executable, script, "--one-session", str(i)],
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for i in range(3)
+    ]
+    failures = []
+    for i, p in enumerate(procs):
+        out, _ = p.communicate(timeout=180)
+        if p.returncode != 0:
+            failures.append(f"session {i}: {out.strip()}")
+    if failures:
+        print("\n".join(failures))
+        fail("concurrent sessions did not all succeed", mark)
+    print("  three concurrent sessions ok")
+
+
+def one_session(index):
+    """A single session, run as a child process by check_concurrent."""
+    status, transcript = run(f"echo START_{index}; sleep 2; echo DONE_{index}")
+    if exit_code(status) != 0 or f"DONE_{index}" not in transcript:
+        print(transcript[-500:])
+        sys.exit(1)
+    sys.exit(0)
+
+
+def main():
+    if len(sys.argv) > 2 and sys.argv[1] == "--one-session":
+        one_session(sys.argv[2])
+
+    try:
+        sshdrive.require_ssh()
+    except sshdrive.SshUnavailable as e:
+        sys.exit(f"ssh-check: {e}")
+    if not os.path.exists(os.path.join(REPO, "edos-x86_64.iso")):
+        sys.exit("missing edos-x86_64.iso; run `make ssh-check` rather than this "
+                 "script directly, so the image is built first")
+
+    subprocess.run([VM, "stop"], capture_output=True)
+
+    print("[1/3] booting and starting sshd from /etc/sshd.conf...")
+    vm("start")
+    time.sleep(BOOT_SECONDS)
+    vm("click", "400", "300")
+    time.sleep(1)
+    mark = serial_mark()
+    try:
+        print(f"  guest says {sshdrive.start_sshd()}")
+    except RuntimeError as e:
+        fail(str(e), mark)
+
+    print("[2/3] authentication and exit status...")
+    check_login(mark)
+    check_wrong_password(mark)
+    check_exit_status(mark)
+
+    print("[3/3] transfers and concurrency...")
+    tmp = os.path.join(REPO, "ssh-check-tmp")
+    os.makedirs(tmp, exist_ok=True)
+    try:
+        check_download(mark, tmp)
+        check_upload(mark, tmp)
+        check_concurrent(mark)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    vm("stop")
+    print("ssh-check: OK, a real OpenSSH client got everything it asked for")
+
+
+if __name__ == "__main__":
+    main()

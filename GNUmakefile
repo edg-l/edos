@@ -186,6 +186,14 @@ recovery-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features fault-inject"
 	scripts/recovery-check
 
+# Drive the host's own OpenSSH client against the guest's sshd: authentication,
+# a refused password, exit status, ~10 MB each way compared byte for byte, and
+# concurrent sessions. It does not cover the shut-window flow-control case; see
+# doc/sshd.md for why, and for what covering it would take.
+.PHONY: ssh-check
+ssh-check: $(IMAGE_NAME).iso
+	scripts/ssh-check
+
 # Hold unlinked-but-open files, cut power, and fail if the remount does not
 # finish the deletions the crash interrupted. The orphan chain's regression;
 # see doc/efs.md section 14.
