@@ -59,14 +59,16 @@ in `fs/efs/mod.rs`, `read_frame` / `write_frame` / `write_frames` in
 `fs/gpt.rs` and `fs/mbr.rs` all call `submit_*` and immediately park on the
 handle.
 
-Two paths do not. `BlockPageCache::read_pages` → `submit_read_batch` coalesces
-contiguous misses first, so a 1 MiB miss is two commands rather than 256. And
-since 2026-08-12 EFS `flush_pages_bulk` issues every run of a chunk before
-reaping any of them, capped at 16 outstanding (below `OWNED_OPS_CAP`), with each
-staging buffer held until its own handle completes. `fsbench write -n 32 /var`
-used to report `ahci_stats.ncq_max_inflight +1` for a whole suite; it now
-reports +3 to +9. Writeback is the half that queues; reads outside the
-readahead path, the journal and everything metadata still do not.
+Three paths do not. `BlockPageCache::read_pages` → `submit_read_batch` coalesces
+contiguous misses first, so a 1 MiB miss is two commands rather than 256. Since
+2026-08-12 EFS `flush_pages_bulk` issues every run of a chunk before reaping any
+of them, capped at 16 outstanding (below `OWNED_OPS_CAP`), with each staging
+buffer held until its own handle completes. `fsbench write -n 32 /var` used to
+report `ahci_stats.ncq_max_inflight +1` for a whole suite; it now reports +3 to
++9. And the journal committer queues a transaction's descriptor, data and revoke
+blocks together through `RingWrites`, draining them at the barrier that already
+had to precede the commit block. Reads outside the readahead path, and
+everything metadata outside the journal, still do not.
 
 So a 4 KiB read is a dependent round trip, not a queued one, and the 100 us is
 what a round trip costs: syscall, cache lookup, frame allocation, submit, park,

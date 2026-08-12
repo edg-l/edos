@@ -42,8 +42,45 @@ Three things the shape of this had to respect:
 
 Still submit-then-wait, and the next place to take this: `block_read` /
 `block_write` / `block_write_fua` themselves, `read_frame` / `write_frame` /
-`write_frames` in `fs/block_page_cache.rs`, and the journal, FAT32, GPT and MBR
-paths.
+`write_frames` in `fs/block_page_cache.rs`, and the FAT32, GPT and MBR paths,
+plus `replay.rs`, which writes home blocks one command at a time on the mount
+path.
+
+---
+
+## The journal committer queues a transaction instead of writing it in three trips
+
+`seal_and_commit` (`fs/journal/mod.rs`) wrote the descriptor block, then the
+payload, then the revoke block, parking on each. The format does not ask for
+that ordering: what it requires is that all three are on the platter *before*
+the commit block, which the `block_flush` barrier and the FUA commit already
+give. So the three are now queued through a `RingWrites` helper and drained at
+that same barrier — one wait for the batch instead of three dependent round
+trips per commit. Depth is capped at 16 for the same `OWNED_OPS_CAP` reason as
+writeback.
+
+Two shapes this had to respect, both the same class of bug as the writeback
+work:
+
+- **The revoke block's buffer is the DMA source**, so it is bound outside the
+  `if` that builds it. Left inside the branch it would drop while its command
+  was still outstanding.
+- **`RingWrites::drain` waits for every command even after one has failed**, and
+  only then reports. Returning early on the first error would free the payload
+  buffer under the drive.
+
+What was verified: `scripts/fs-regression` passes across a reboot (the durability
+gate that matters for a journal change), and `fsbench write -n 32 /var` on a
+freshly formatted disk reports `verify: all patterns match`, `ncq_max_inflight
++6`, `write 4KiB + fsync each` 52.0 ops/s at 2.6 ms p50.
+
+What was **not** measured: whether commit latency actually fell. `ncq_max_inflight`
+is a global maximum and writeback alone already drives it to +3..+9, so it cannot
+attribute depth to the journal, and there is no per-commit counter to read. The
+honest claim from this change is structural — two fewer dependent round trips per
+commit — not a throughput number. A `/proc` line counting commits, blocks written
+and time in `seal_and_commit` is what would settle it, and is worth adding before
+anything else in the journal is tuned.
 
 ---
 

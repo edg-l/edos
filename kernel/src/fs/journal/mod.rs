@@ -25,15 +25,23 @@ use crate::{
     debug::lock_order::{RANK_JOURNAL_STATE, RANK_JOURNAL_TRACKER},
     drivers::{
         ahci::AhciError,
-        block_io::{self, BlockBuffer, WriteFlags},
+        block_io::{self, BlockBuffer, BlockIoHandle, WriteFlags},
     },
     ranked_lock,
     thread::{mutex::BlockingMutex, waitqueue::WaitQueue},
 };
 
-fn block_write(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
+/// Issue a sector-level write and return its handle without waiting, so the
+/// caller can keep further commands outstanding behind it. `buf` is the DMA
+/// source and must outlive the handle.
+fn submit_block_write(
+    device_id: u64,
+    lba: u64,
+    sectors: u16,
+    buf: &[u8],
+) -> Result<Arc<BlockIoHandle>, AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    let h = dev.submit_write(
+    dev.submit_write(
         lba,
         sectors as u32,
         BlockBuffer::Slice {
@@ -41,9 +49,75 @@ fn block_write(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(),
             len: buf.len(),
         },
         WriteFlags::NONE,
-    )?;
-    h.wait()?;
-    Ok(())
+    )
+    .map_err(Into::into)
+}
+
+/// Ring commands a transaction has issued but not waited on yet.
+///
+/// A transaction's descriptor, data and revoke blocks carry no ordering
+/// requirement among themselves: what the format requires is that all of them
+/// are on the platter before the commit block, which the flush barrier and the
+/// FUA commit provide. So they are issued back to back and waited on
+/// afterwards, and the drive sees a queue rather than one command per round
+/// trip.
+struct RingWrites {
+    device_id: u64,
+    inflight: VecDeque<Arc<BlockIoHandle>>,
+    failure: Option<AhciError>,
+}
+
+impl RingWrites {
+    /// Outstanding commands allowed at once, kept under `OWNED_OPS_CAP` so
+    /// every one of them still gets its cancellation hookup.
+    const MAX_INFLIGHT: usize = 16;
+
+    fn new(device_id: u64) -> Self {
+        Self {
+            device_id,
+            inflight: VecDeque::new(),
+            failure: None,
+        }
+    }
+
+    /// Queue one command, first waiting for the oldest if the queue is full.
+    /// Returns false once anything has failed, so a caller mid-run stops
+    /// issuing rather than piling commands behind a broken one.
+    fn submit(&mut self, lba: u64, sectors: u16, buf: &[u8]) -> bool {
+        while self.inflight.len() >= Self::MAX_INFLIGHT {
+            let Some(done) = self.inflight.pop_front() else {
+                break;
+            };
+            if let Err(e) = done.wait() {
+                self.failure.get_or_insert(e.into());
+            }
+        }
+        match submit_block_write(self.device_id, lba, sectors, buf) {
+            Ok(handle) => {
+                self.inflight.push_back(handle);
+                self.failure.is_none()
+            }
+            Err(e) => {
+                self.failure.get_or_insert(e);
+                false
+            }
+        }
+    }
+
+    /// Wait for every outstanding command. This must run before the buffers
+    /// they read from are dropped, on the failure path too: a command that
+    /// reported an error may still have DMA in flight against its source.
+    fn drain(&mut self) -> Result<(), AhciError> {
+        while let Some(done) = self.inflight.pop_front() {
+            if let Err(e) = done.wait() {
+                self.failure.get_or_insert(e.into());
+            }
+        }
+        match self.failure.take() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
 }
 
 fn block_write_fua(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
@@ -295,17 +369,13 @@ impl Journal {
 
     // ---- Block I/O ----------------------------------------------------------
 
-    /// Write one 4096-byte journal block at `journal_block_idx` (ring index).
-    pub fn write_journal_block(
-        &self,
-        journal_block_idx: u64,
-        data: &[u8],
-    ) -> Result<(), AhciError> {
+    /// Queue one 4096-byte journal block at `journal_block_idx` (ring index).
+    fn submit_journal_block(&self, journal_block_idx: u64, data: &[u8], q: &mut RingWrites) {
         let lba = self.journal_block_lba(journal_block_idx);
-        block_write(self.device_id, lba, SECTORS_PER_BLOCK, data)
+        q.submit(lba, SECTORS_PER_BLOCK, data);
     }
 
-    /// Write consecutive ring blocks, coalescing them into as few commands as
+    /// Queue consecutive ring blocks, coalescing them into as few commands as
     /// the ring layout allows.
     ///
     /// The ring is contiguous on disk and only the committer ever writes it, so
@@ -313,7 +383,7 @@ impl Journal {
     /// command beats many small ones: a long run of adjacent blocks owned
     /// exclusively by this caller. Runs are cut where the ring wraps back to
     /// its first block, and at the most one command can carry.
-    pub fn write_journal_blocks(&self, start_idx: u64, data: &[u8]) -> Result<(), AhciError> {
+    fn submit_journal_blocks(&self, start_idx: u64, data: &[u8], q: &mut RingWrites) {
         debug_assert!(data.len() % BLOCK_SIZE == 0);
         let ring_size = self.block_count as u64 - 1;
         let total = (data.len() / BLOCK_SIZE) as u64;
@@ -324,15 +394,15 @@ impl Journal {
             let run = (total - done).min(until_wrap).min(MAX_RUN_BLOCKS);
             let off = done as usize * BLOCK_SIZE;
             let len = run as usize * BLOCK_SIZE;
-            block_write(
-                self.device_id,
+            if !q.submit(
                 self.journal_block_lba(idx),
                 SECTORS_PER_BLOCK * run as u16,
                 &data[off..off + len],
-            )?;
+            ) {
+                return;
+            }
             done += run;
         }
-        Ok(())
     }
 
     /// Write one 4096-byte journal block with Force Unit Access for durability.
@@ -833,27 +903,36 @@ impl Journal {
 
             let mut ring_pos = ring_pos_start;
 
-            // Write descriptor block.
+            // Descriptor, data and revoke blocks all go out before the barrier
+            // below, so they are queued together and drained as a batch.
+            let mut q = RingWrites::new(self.device_id);
+
             let desc_block = self.build_descriptor_block(tx.seq, tx.tx_id, &entries);
-            self.write_journal_block(ring_pos % ring_size, &desc_block)?;
+            self.submit_journal_block(ring_pos % ring_size, &desc_block, &mut q);
             ring_pos += 1;
 
-            // Write data blocks (one per enrolled page, possibly escaped).
-            // The CRC below needs them contiguous anyway, so the same buffer
-            // is what goes to the device.
+            // Data blocks (one per enrolled page, possibly escaped). The CRC
+            // below needs them contiguous anyway, so the same buffer is what
+            // goes to the device.
             let mut payload_bytes: Vec<u8> = Vec::with_capacity(n_data as usize * BLOCK_SIZE);
             for block_data in &data_blocks {
                 payload_bytes.extend_from_slice(block_data);
             }
-            self.write_journal_blocks(ring_pos, &payload_bytes)?;
+            self.submit_journal_blocks(ring_pos, &payload_bytes, &mut q);
             ring_pos += n_data;
 
-            // Write revoke block if needed.
-            if !revoke_entries.is_empty() {
-                let revoke_block = self.build_revoke_block(tx.seq, tx.tx_id, &revoke_entries);
-                self.write_journal_block(ring_pos % ring_size, &revoke_block)?;
+            // Held out here rather than inside the branch: the buffer is the
+            // DMA source and must outlive the drain below.
+            let revoke_block = (!revoke_entries.is_empty())
+                .then(|| self.build_revoke_block(tx.seq, tx.tx_id, &revoke_entries));
+            if let Some(block) = &revoke_block {
+                self.submit_journal_block(ring_pos % ring_size, block, &mut q);
                 ring_pos += 1;
             }
+
+            // Every command is waited on here, before the barrier that orders
+            // the whole batch ahead of the commit block.
+            q.drain()?;
 
             // Ordering barrier: flush drive write cache before commit block.
             block_flush(self.device_id)?;
