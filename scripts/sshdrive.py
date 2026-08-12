@@ -8,8 +8,16 @@ status is only visible if the command is written to print it, and each step
 needs a `settle` guess because there is no way to know when a command finished.
 
 Over SSH none of that applies. A command's output is its own stream, its status
-is a number, and the call returns when the command does. Anything that does not
-need a graphical guest should prefer this.
+is a number, and the call returns when the command does.
+
+This is not a replacement for driving the terminal, and existing checks are not
+worth converting for its own sake. Use whichever suits the thing being tested:
+
+- SSH suits running a command and caring what it printed or what it returned,
+  and moving a file either way.
+- The terminal suits everything SSH cannot reach: anything before `sshd` is up,
+  a power cut (the connection dies with the machine), a graphical guest, and
+  anything whose evidence is kernel log output rather than a command's own.
 
 Requires `sshd` running in the guest with a known password; [`start_sshd`] does
 that through `/etc/sshd.conf`. The guest is reachable because `scripts/edos-vm`
