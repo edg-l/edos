@@ -558,6 +558,10 @@ impl EfsDriver {
         // AHCI commands into per-page cache ops. The per-inode page cache owns
         // file data — do not route through BlockPageCache.
         let dev = block_io::lookup(self.device.device_id).ok_or(AhciError::InvalidDevice)?;
+        if !runs.is_empty() {
+            EFS_EXTENT_READS.fetch_add(1, Ordering::Relaxed);
+            EFS_EXTENT_RUNS.fetch_add(runs.len() as u64, Ordering::Relaxed);
+        }
         let mut idx = 0usize;
         while idx < runs.len() {
             let mut end = idx;
@@ -596,6 +600,7 @@ impl EfsDriver {
             // buffer alive until its DMA is finished. The error return is the
             // legacy/ATAPI path, which completes inside `submit_read` and so
             // leaves nothing outstanding.
+            EFS_EXTENT_BATCHES.fetch_add(1, Ordering::Relaxed);
             let handles = dev.submit_read_batch(reqs).map_err(AhciError::from)?;
             let mut failure = None;
             for handle in &handles {
@@ -1105,6 +1110,18 @@ pub static EFS_BLOCKS_ALLOCATED: AtomicU64 = AtomicU64::new(0);
 pub static EFS_BLOCKS_FREED: AtomicU64 = AtomicU64::new(0);
 /// Allocation attempts that found no free block in any group.
 pub static EFS_ALLOC_FAILED: AtomicU64 = AtomicU64::new(0);
+
+/// What `read_via_extents` planned and what it cost the device.
+///
+/// `reads` counts the calls that reached the device at all, `runs` the
+/// physically contiguous stretches they were split into, and `batches` the
+/// submit-then-reap rounds those runs were queued in. The two ratios are what
+/// the numbers are for: `runs / reads` above 1 means the file is fragmented, or
+/// longer than the 992 KiB one command carries, and `runs / batches` above 1 is
+/// the device round trips the queueing saved.
+pub static EFS_EXTENT_READS: AtomicU64 = AtomicU64::new(0);
+pub static EFS_EXTENT_RUNS: AtomicU64 = AtomicU64::new(0);
+pub static EFS_EXTENT_BATCHES: AtomicU64 = AtomicU64::new(0);
 
 impl EfsDriver {
     /// Allocate a free block and return its absolute block number.

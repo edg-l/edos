@@ -4206,3 +4206,43 @@ DHCP also stopped hand-rolling its IPv4 header, which had been shipping `id=0`
 since the identification field was fixed everywhere else. It cannot draw from
 the stack's counter because it runs before the stack has an address, so it keeps
 its own `AtomicU16`; the header is otherwise `ipv4::build`'s, which sets DF.
+
+## Fragmented files: the instrument, and the hole it found (2026-08-12)
+
+`fsbench fragprep /var` writes the same 16 MiB file `raprep` does, but in 256 KiB
+steps alternating with a second file and `fsync`ing between each, so the two
+files' blocks interleave on disk. EFS allocates at writeback, so buffered
+appends to two files can still be flushed one file at a time and come out
+contiguous; the `fsync` between steps is what forces the allocator to alternate.
+Reboot and `fsbench ra /var` reads it cold, exactly as after `raprep`.
+
+Both arms, one 16 MiB file read in 256 calls of 64 KiB on a cold boot:
+
+| | contiguous | fragmented |
+|---|---|---|
+| read path | 287 MiB/s | 132 MiB/s |
+| p50 per call | 203 us | 474 us |
+| async prefetch windows | 245 | 5 |
+| sync fallback windows | 3 | 243 |
+| `extent_reads` / `runs` / `batches` | 7 / 10 / 7 | 247 / 672 / 247 |
+
+So the queued-runs branch of `EfsDriver::read_via_extents` is real: a fragmented
+read plans 2.7 physically contiguous runs on average and issues all of them as
+one submit-then-reap round, where before it paid a device round trip each. The
+contiguous file also plans more runs than reads, because a run longer than
+`MAX_RUN_BLOCKS` (248 blocks, 992 KiB) is split whatever the layout.
+
+The larger cost is not the runs, it is that the prefetch stops: 245 async
+windows become 5, and 243 windows are declined and billed to the reader inside
+its own `read`. That is where the 287 -> 132 MiB/s went, not into the extra
+commands.
+
+**Open, found by the first run of this instrument:** the fragmented file reads
+back a hole. `fsbench ra /var` reports `byte 786432 of the file is 0x00, want
+0x47` — 786432 is exactly 3 x 256 KiB, a step boundary — and a warm re-read in
+the same boot reports the same byte, so the zeros are in the page cache and not
+a one-off in the cold path. Not yet split between the write path (the block was
+never allocated or never flushed) and the read path (a run planned past the
+extent it belongs to). Repro: `fsbench fragprep /var`, reboot, `fsbench ra /var`.
+The contiguous arm verifies clean in the same build, so it is specific to a file
+whose extents alternate with another file's.

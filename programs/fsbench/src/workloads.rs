@@ -780,6 +780,7 @@ pub fn cleanup(dir: &str) {
         "fsbench.whole",
         "fsbench.bufwriter",
         RA_NAME,
+        FRAG_NAME,
     ] {
         let _ = fs::remove_file(format!("{dir}/{name}"));
     }
@@ -891,6 +892,66 @@ pub fn ra_prepare(dir: &str, bytes: u64) -> Result<(String, u64), String> {
     Ok((path, offset))
 }
 
+/// How `read_via_extents` split its work, in the order [`RaReport`] records it.
+fn extent_branches() -> [u64; 3] {
+    gauges(
+        "/proc/efs_stats",
+        ["extent_reads", "extent_runs", "extent_batches"],
+    )
+}
+
+/// The file whose appends are interleaved with the readahead file's, to break
+/// the latter into many extents.
+const FRAG_NAME: &str = "fsbench.frag";
+
+/// Bytes appended to one file before switching to the other.
+///
+/// EFS allocates at writeback, so buffered appends to two files can still be
+/// flushed one file at a time and come out contiguous; the `fsync` between
+/// steps is what forces the allocator to interleave them. 256 KiB is small
+/// enough that a 512 KiB readahead window always spans more than one extent,
+/// and large enough that a 16 MiB file costs 64 round trips to lay down rather
+/// than thousands.
+const FRAG_STEP: u64 = 256 << 10;
+
+/// Write the readahead file the same size as [`ra_prepare`] does, but
+/// interleaved with a second file so its blocks are scattered.
+///
+/// This is the input the queued-runs path of `EfsDriver::read_via_extents`
+/// needs: a contiguous file gives one run per read, so the batching branch is
+/// never exercised and `extent_runs / extent_reads` sits at 1.
+pub fn frag_prepare(dir: &str, bytes: u64) -> Result<(String, u64, u64), String> {
+    let path = ra_path(dir);
+    let decoy = format!("{dir}/{FRAG_NAME}");
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&decoy);
+    let mut file = File::create(&path).map_err(|e| format!("create {path}: {e}"))?;
+    let mut other = File::create(&decoy).map_err(|e| format!("create {decoy}: {e}"))?;
+
+    let mut offset = 0u64;
+    let mut steps = 0u64;
+    while offset < bytes {
+        let len = FRAG_STEP.min(bytes - offset) as usize;
+        file.write_all(&pattern_buf(RA_TAG, offset, len))
+            .map_err(|e| format!("write {path} at {offset}: {e}"))?;
+        file.sync_all().map_err(|e| format!("fsync {path}: {e}"))?;
+        other
+            .write_all(&pattern_buf(RA_TAG, offset, len))
+            .map_err(|e| format!("write {decoy} at {offset}: {e}"))?;
+        other
+            .sync_all()
+            .map_err(|e| format!("fsync {decoy}: {e}"))?;
+        offset += len as u64;
+        steps += 1;
+    }
+    drop(file);
+    drop(other);
+    // The data is durable after the fsyncs; this drains the metadata and the
+    // journal, so the reboot cannot lose the extents that name it.
+    unsafe { syscall0(SYS_SYNC) };
+    Ok((path, offset, steps))
+}
+
 /// What one cold sequential pass over the large file showed.
 pub struct RaReport {
     pub path: String,
@@ -939,6 +1000,12 @@ pub struct RaReport {
     pub ra_skipped_pages: u64,
     pub ra_trimmed_windows: u64,
     pub ra_trimmed_pages: u64,
+    /// How `EfsDriver::read_via_extents` split the pass's reads. `runs` above
+    /// `reads` is the file's fragmentation; `runs` above `batches` is the
+    /// device round trips queueing them together saved.
+    pub extent_reads: u64,
+    pub extent_runs: u64,
+    pub extent_batches: u64,
     /// First edge check that did not match, if any.
     pub mismatch: Option<String>,
 }
@@ -973,6 +1040,7 @@ pub fn ra_read(dir: &str) -> Result<RaReport, String> {
 
     let hwm_before = gauge("/proc/ahci_stats", "ncq_max_inflight");
     let ra_before = ra_branches();
+    let ext_before = extent_branches();
     let mut buf = vec![0u8; RA_CHUNK];
     let mut samples: Vec<u64> = Vec::new();
     let mut inflight_nonzero = 0u64;
@@ -1007,6 +1075,7 @@ pub fn ra_read(dir: &str) -> Result<RaReport, String> {
     let wall = wall_start.elapsed();
     let hwm_after = gauge("/proc/ahci_stats", "ncq_max_inflight");
     let ra_after = ra_branches();
+    let ext_after = extent_branches();
 
     let calls = samples.len() as u64;
     let max = samples.iter().copied().max().unwrap_or(0);
@@ -1050,6 +1119,9 @@ pub fn ra_read(dir: &str) -> Result<RaReport, String> {
         ra_skipped_pages: ra_after[9].saturating_sub(ra_before[9]),
         ra_trimmed_windows: ra_after[10].saturating_sub(ra_before[10]),
         ra_trimmed_pages: ra_after[11].saturating_sub(ra_before[11]),
+        extent_reads: ext_after[0].saturating_sub(ext_before[0]),
+        extent_runs: ext_after[1].saturating_sub(ext_before[1]),
+        extent_batches: ext_after[2].saturating_sub(ext_before[2]),
         mismatch,
     })
 }

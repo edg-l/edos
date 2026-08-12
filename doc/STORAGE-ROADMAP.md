@@ -509,6 +509,11 @@ lookup result down through the trait.
 
 Not performance, but found by this work and unfixed.
 
+- **A fragmented file reads back a hole.** `fsbench fragprep /var`, reboot,
+  `fsbench ra /var` reports `byte 786432 of the file is 0x00` — a 256 KiB step
+  boundary — and a warm re-read agrees, so the zeros are in the page cache. The
+  contiguous arm of the same build verifies clean. Mechanism and both arms'
+  numbers are in `doc/WORKING-NOTES.md`.
 - **An intermittent segfault in `mmap store 4MiB + msync`**, roughly one
   `fsbench /var` run in six: `KILL: PF addr=... User write to unmapped page`.
   Unexplained. Item 4 above records a past `MAP_SHARED` segfault near the

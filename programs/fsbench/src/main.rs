@@ -82,6 +82,7 @@ enum Mode {
     Raw,
     RawWrite,
     RaPrep,
+    FragPrep,
     Ra,
     Clean,
 }
@@ -95,6 +96,7 @@ impl Mode {
             Mode::Raw => "raw",
             Mode::RawWrite => "rawwrite",
             Mode::RaPrep => "raprep",
+            Mode::FragPrep => "fragprep",
             Mode::Ra => "ra",
             Mode::Clean => "clean",
         }
@@ -180,6 +182,8 @@ Modes:
   rawwrite  sequential writes straight to a block device. DESTROYS whatever is
           on it; refused while a filesystem on that device is mounted
   raprep  write the large file the readahead instrument reads, then sync
+  fragprep  the same file, written interleaved with a second one so its blocks
+          are scattered: the fragmented input for the `ra` pass
   ra      one cold sequential pass over that file: the readahead instrument.
           Needs a reboot after `raprep`, or it reads the page cache
   clean   remove every file the suite creates
@@ -204,7 +208,8 @@ Examples:
   fsbench /tmp               memfs: the syscall and copy ceiling
   fsbench raw /dev/sda       the block layer and AHCI ceiling
   fsbench write /var         ... reboot ...   fsbench read /var
-  fsbench raprep /var        ... reboot ...   fsbench ra /var"
+  fsbench raprep /var        ... reboot ...   fsbench ra /var
+  fsbench fragprep /var      ... reboot ...   fsbench ra /var"
     );
     std::process::exit(2)
 }
@@ -256,6 +261,7 @@ fn parse_args() -> Options {
             "raw" => opts.mode = Mode::Raw,
             "rawwrite" => opts.mode = Mode::RawWrite,
             "raprep" => opts.mode = Mode::RaPrep,
+            "fragprep" => opts.mode = Mode::FragPrep,
             "ra" => opts.mode = Mode::Ra,
             "clean" => opts.mode = Mode::Clean,
             _ => opts.path = first,
@@ -277,7 +283,10 @@ fn parse_args() -> Options {
     }
     // The readahead pass is only cold in a boot that has not touched its file,
     // so both of its modes leave it behind for the next boot to read.
-    if matches!(opts.mode, Mode::Write | Mode::RaPrep | Mode::Ra) {
+    if matches!(
+        opts.mode,
+        Mode::Write | Mode::RaPrep | Mode::FragPrep | Mode::Ra
+    ) {
         opts.keep = true;
     }
     opts
@@ -302,7 +311,8 @@ fn main() -> ExitCode {
         opts.mode.name(),
         opts.path,
         match (opts.mode, opts.max_ops) {
-            (Mode::RaPrep | Mode::Ra, _) => format!("{} file", human_bytes(opts.ra_bytes())),
+            (Mode::RaPrep | Mode::FragPrep | Mode::Ra, _) =>
+                format!("{} file", human_bytes(opts.ra_bytes())),
             (_, Some(n)) => format!("{n} ops per test"),
             (_, None) => format!(
                 "{} ms or {} per test",
@@ -339,6 +349,18 @@ fn main() -> ExitCode {
             )),
             Err(e) => {
                 out.line(&format!("raprep: {e}"));
+                failures += 1;
+            }
+        },
+        Mode::FragPrep => match workloads::frag_prepare(&opts.path, opts.ra_bytes()) {
+            Ok((path, bytes, steps)) => out.line(&format!(
+                "wrote {} to {path} in {steps} interleaved steps and synced \
+                 — reboot, then `fsbench ra {}`",
+                human_bytes(bytes),
+                opts.path
+            )),
+            Err(e) => {
+                out.line(&format!("fragprep: {e}"));
                 failures += 1;
             }
         },
@@ -456,6 +478,10 @@ fn ra_report(out: &mut Out, r: &workloads::RaReport) -> u32 {
     out.line(&format!(
         "  windows sync fallback   {} declined ({} pages), {} failed ({} pages)",
         r.ra_sync_windows, r.ra_sync_pages, r.ra_err_windows, r.ra_err_pages,
+    ));
+    out.line(&format!(
+        "  extent runs             {} reads planned {} runs, queued in {} submits",
+        r.extent_reads, r.extent_runs, r.extent_batches,
     ));
     out.line(&format!(
         "  windows overlapping     {} skipped ({} pages), {} trimmed ({} pages not re-read)",
