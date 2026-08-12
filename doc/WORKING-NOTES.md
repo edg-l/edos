@@ -6,6 +6,31 @@ session.
 
 ---
 
+## Where the tree stands at the end of 2026-08-12
+
+Every gate is green and re-run at this commit: `make -C kernel check` and
+`cargo check --features sched-test` are warning-free, both `cargo fmt --check`
+and `cargo +edos fmt --check` exit 0, `make test AUDIODEV=none` is **ALL 51
+TESTS PASSED**, the desktop boots to a shell prompt under
+`make run-headless`, and `iotest /var` is 20/20 in the guest.
+
+The write-path data loss that dominated the last third of the session is
+**fixed**: EFS zeroed a newly allocated block through the journal, and that
+copy could land on the home block after the direct data write. A host scan of a
+`fsbench fragprep` disk is now 8192/8192 blocks byte-perfect (it was 467
+missing). The mechanism, and the four diagnoses that were refuted on the way to
+it, are further down this file — read those before re-opening anything about
+fragmented-file reads.
+
+The largest thing still open on the storage side is not correctness but
+throughput: `issue_prefetch_bulk` declines a readahead window whose pages span
+more than one extent, so a fragmented file gets 5 async windows against 243
+synchronous fallbacks where a contiguous one gets 245 against 3. That, not the
+extra AHCI commands, is where 287 → 132 MiB/s goes. The EFS read path already
+queues the multi-run case, so the decline is the thing to remove.
+
+---
+
 ## A batch of same-class guards is bounded by the rank stack, not by the device
 
 Block-page-cache writeback (`flush_dirty_once`) wrote one dirty page per device
@@ -446,10 +471,16 @@ does not have to invent them.
 | | value | how |
 |---|---|---|
 | syscalls | 111 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 111 — a mismatch is the bug |
-| userspace programs | 104 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
+| userspace programs | 105 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 20/20 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+
+One number outside this repo is stale against the table above: the project site
+says "There are 110 syscalls" in
+`/usr/src/edos-web/src/content/docs/architecture.md`, and the kernel has 111.
+Fixing it means a commit and an `npm run build` in that checkout, which is a
+separate repo and not something to do unattended.
 
 The `unwrap` figure includes 11 in `thread/sched_test.rs`, which is test code and
 not worth converting. By file, the ones that would move the number are
