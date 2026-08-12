@@ -1,5 +1,5 @@
 use alloc::sync::Weak;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering, fence};
 use core::time::Duration;
 use heapless::Deque;
 use spin::Mutex;
@@ -35,12 +35,8 @@ pub struct WaitQueue {
     /// producer can skip the wake path entirely when nobody is waiting.
     ///
     /// Written to `inner.len()` while `inner` is held, so it is exact rather
-    /// than a hint. The ordering that matters is the enrol-versus-wake race:
-    /// a waiter publishes its enrolment *before* re-checking its predicate,
-    /// and a producer publishes its data before reading the count, so with
-    /// `SeqCst` on both sides the two cannot both miss each other. A relaxed
-    /// read here would allow the store-load reorder that is exactly the shape
-    /// of a missed wakeup.
+    /// than a hint. See [`WaitQueue::has_waiters`] for the ordering the read
+    /// side has to establish before it can be trusted.
     waiters: AtomicUsize,
 }
 
@@ -149,7 +145,24 @@ impl WaitQueue {
     /// Check whether the queue currently has any waiters, without taking the
     /// lock. A producer calls this before doing anything that only a waiter
     /// would care about.
+    ///
+    /// The fence is what makes the answer safe to act on, and it cannot be
+    /// dropped for a plain `SeqCst` load: on x86 a `SeqCst` load is a bare
+    /// `mov` — the barrier rides on `SeqCst` *stores* — so the store buffer may
+    /// still hold the producer's publication when the count is read. A waiter
+    /// enrols under `inner`, whose `lock cmpxchg` and the `xchg` of
+    /// [`WaitQueue::publish`] both fence it, then re-checks its predicate; a
+    /// producer that publishes with a plain or `Release` store and no fence of
+    /// its own completes the store-buffer litmus with only one side ordered,
+    /// and both may read stale. That is a lost wakeup, and a park here is
+    /// indefinite.
+    ///
+    /// Fencing here rather than at each producer is deliberate: taking
+    /// `inner.lock()` used to supply the barrier for free, so every existing
+    /// caller was written without one. Linux draws the same line — see
+    /// `wq_has_sleeper()`, which is `smp_mb()` plus `waitqueue_active()`.
     pub fn has_waiters(&self) -> bool {
+        fence(Ordering::SeqCst);
         self.waiters.load(Ordering::SeqCst) != 0
     }
 

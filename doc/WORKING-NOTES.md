@@ -26,6 +26,54 @@ fragmented-file reads.
 
 ---
 
+## A `SeqCst` load is not a barrier, and that is where a has-waiters check goes wrong
+
+`WaitQueue::wake_one`/`wake_all` skip the whole wake path when the enrolled-waiter
+count reads zero. The count is exact — it is written to `inner.len()` under
+`inner` — but reading it correctly is not about the count at all, it is about
+what the producer published just before.
+
+The check replaced an `inner.lock()`, and that lock was doing invisible work: on
+x86 its `lock cmpxchg` is a full barrier, so a producer's publication could never
+sit in the store buffer while the queue was inspected. A bare atomic read has no
+such barrier, and **`Ordering::SeqCst` does not supply one on a load**. The
+barrier rides on `SeqCst` stores. Checked against real codegen:
+
+```asm
+producer:                       waiter_publish:
+  movb  $1, (%rdi)   ; store      xchgq %rsi, (%rdi)   ; publish, full barrier
+  movq  (%rsi), %rax ; load       movzbl (%rdx), %eax  ; predicate
+```
+
+That is the store-buffer litmus with a fence on one side only, which permits both
+sides to read stale: the producer sees no waiters and skips the wake, the waiter
+sees no data and parks. The park is indefinite.
+
+Most producers were saved by accident rather than by design — a pipe holds the
+same mutex the waiter's predicate re-takes, and `BlockIoHandle::complete`
+publishes with a `compare_exchange`, which is `lock`-prefixed. Two were not:
+
+- `PageFillHandle::finish_success`/`finish_failed` (`fs/page_fill.rs`) store the
+  terminal state `Release` and then wake. A lost wake parks a reader forever on a
+  fill that already completed.
+- The writeback kthread stores `flush_completed` `Release` and then wakes
+  `sync_done_wq` (`fs/writeback.rs`). Its waiter, `wait_for_flush`, is a single
+  un-looped `wait_until`, so a lost wake hangs `sync()`/`fsync()`.
+
+The fence belongs in `has_waiters`, not at the two producers. Taking the lock used
+to supply it for free, so every caller in the tree was written without one, and a
+rule that each new producer must remember a barrier is a rule that will be missed.
+Linux draws the same line: `wq_has_sleeper()` is `smp_mb()` plus
+`waitqueue_active()`, and its documentation exists because this is a recurring
+bug. LLVM lowers the `SeqCst` fence to `lock orl $0, (%rsp)`, not `mfence`, so it
+costs less than the `cli`/`sti` plus `lock cmpxchg` plus `Arc` churn it replaces —
+the pipe-echo and blocking-round-trip wins the check was added for survive it.
+
+The tell, if this ever recurs elsewhere: a producer whose publication is a plain
+or `Release` store with no read-modify-write and no lock between it and a wake.
+
+---
+
 ## A prefetch window is a set of runs, not one extent
 
 A readahead window whose pages spanned more than one extent used to be declined
@@ -533,11 +581,17 @@ sed -n '/^| Area/,/^$/p' doc/USERSPACE-ROADMAP.md | grep -oE '`[a-z0-9_-]+`' | t
 comm -3 /tmp/members.txt /tmp/tabled.txt   # empty is correct
 ```
 
-One number outside this repo is stale against the table above: the project site
-says "There are 110 syscalls" in
-`/usr/src/edos-web/src/content/docs/architecture.md`, and the kernel has 111.
-Fixing it means a commit and an `npm run build` in that checkout, which is a
-separate repo and not something to do unattended.
+Three numbers outside this repo are stale against the table above, all on the
+project site at `/usr/src/edos-web`:
+
+- `src/content/docs/architecture.md` says "There are 110 syscalls"; the kernel
+  has 111.
+- `src/content/docs/introduction.md` and `src/content/docs/userspace.md` both say
+  96 programs, in a table row and in a page description; the workspace builds
+  105.
+
+Fixing any of them means a commit and an `npm run build` in that checkout, which
+is a separate repo and not something to do unattended.
 
 The `unwrap` figure includes 11 in `thread/sched_test.rs`, which is test code and
 not worth converting. By file, the ones that would move the number are

@@ -260,24 +260,29 @@ count, written to `inner.len()` under the queue lock, and `has_waiters()` reads
 it with no lock at all; `wake_one`/`wake_all` return early on it, so every one
 of the ~60 wake sites in the kernel gets the same skip.
 
-The ordering is the whole of it, and `SeqCst` on both sides is what makes it
-safe rather than the shape of a missed wakeup:
+The ordering is the whole of it, and it is a barrier rather than an ordering
+annotation that supplies it. `has_waiters` opens with a `SeqCst` **fence**,
+because a `SeqCst` load alone is a bare `mov` on x86 and would leave the
+producer's publication sitting in the store buffer while the count is read —
+the store-buffer litmus with one side fenced, which is a lost wakeup. The lock
+this check replaced was the barrier before; the fence is what stands in for it.
+`doc/WORKING-NOTES.md` has the codegen and the two producers it would otherwise
+have hung.
+
+With the fence in place:
 
 - a waiter publishes its enrolment **before** re-checking its predicate (the
   store is inside the enqueue's critical section, and the re-check follows the
   lock release);
-- a producer publishes its data **before** reading the count (the pipe read is
-  the case: `has_waiters` is read with the pipe lock held and the bytes already
-  in the ring).
+- a producer's publication is ordered **before** its read of the count, whatever
+  that publication was — a lock release, a `compare_exchange`, or a plain
+  `Release` store.
 
-So the two cannot both miss each other. If the producer reads 0, the waiter's
-enrolment is later in the total order than that read, which puts the waiter's
-predicate evaluation after the producer's data was published — and the pipe
-predicate probes with `try_lock` and treats a contended pipe as ready, so a
-waiter that races the producer's critical section re-checks under the real lock
-instead of parking. The count is exact rather than a hint (every mutation of the
-deque republishes its length), so over-counting can only cost a wake on an empty
-queue, which is what happened unconditionally before.
+So the two cannot both miss each other, and the guarantee holds for all ~60 wake
+sites rather than only the ones whose producer happened to publish under a lock.
+The count is exact rather than a hint (every mutation of the deque republishes
+its length), so over-counting can only cost a wake on an empty queue, which is
+what happened unconditionally before.
 
 ### Known gap: a pipe has no backpressure
 
