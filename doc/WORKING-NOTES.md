@@ -687,7 +687,7 @@ does not have to invent them.
 
 | | value | how |
 |---|---|---|
-| syscalls | 111 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 111 — a mismatch is the bug |
+| syscalls | 110 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 110 — a mismatch is the bug |
 | userspace programs | 105 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | 107 rows = 105 + the 2 libraries | diff the table against the workspace, below |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
@@ -707,14 +707,18 @@ sed -n '/^| Area/,/^$/p' doc/USERSPACE-ROADMAP.md | grep -oE '`[a-z0-9_-]+`' | t
 comm -3 /tmp/members.txt /tmp/tabled.txt   # empty is correct
 ```
 
-Three numbers outside this repo are stale against the table above, all on the
+Two numbers outside this repo are stale against the table above, all on the
 project site at `/usr/src/edos-web`:
 
-- `src/content/docs/architecture.md` says "There are 110 syscalls"; the kernel
-  has 111.
 - `src/content/docs/introduction.md` and `src/content/docs/userspace.md` both say
   96 programs, in a table row and in a page description; the workspace builds
   105.
+
+`src/content/docs/architecture.md` said "There are 110 syscalls" when the kernel
+had 111; removing the plain `open` entry point (`SYS_OPEN`, superseded by
+`SYS_OPENAT` with `AT_FDCWD`) brought the kernel back down to 110, so that page
+is accurate again by coincidence rather than by an edit. Re-check it before
+relying on that.
 
 Fixing any of them means a commit and an `npm run build` in that checkout, which
 is a separate repo and not something to do unattended.
@@ -2732,9 +2736,10 @@ feature. `key ctrl+d` is correct, as the script's own help says.
 ## The syscall table is closed, and closing it found five data-loss bugs
 
 `doc/AUDIT.md` §3 listed eight missing interfaces; all eight now exist and the
-table is down to `setuid`, which is rejected there. 111 syscalls, each with an
-`edos_lib` wrapper and a case in `programs/iotest` — **`iotest /var` is the
-regression suite for the whole set, and it runs 20/20.**
+table is down to `setuid`, which is rejected there. 111 syscalls at the time
+(110 now that the redundant NUL-terminated `open` was retired in favor of
+`openat`), each with an `edos_lib` wrapper and a case in `programs/iotest` —
+**`iotest /var` is the regression suite for the whole set, and it runs 20/20.**
 
 The syscalls are not the interesting part. Writing them found five bugs that
 predate them, every one a silent data corruption:

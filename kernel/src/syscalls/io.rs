@@ -1003,35 +1003,6 @@ fn read_from_stdin(max_count: usize) -> Result<alloc::vec::Vec<u8>, i64> {
     Ok(kernel_buffer)
 }
 
-pub fn sys_open(path_ptr: *const u8, flags: u64) -> i64 {
-    let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
-
-    if path_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
-    }
-
-    let mut buf: PathBuf = [0u8; MAX_PATH_LEN];
-    let path_str = match copy_user_path(&mut buf, path_ptr) {
-        Ok(s) => s,
-        Err(e) => {
-            info.lock().errno = e;
-            return -1;
-        }
-    };
-
-    let path = match resolve_path(path_str, &current_cwd(&info)) {
-        Ok(path) => path,
-        Err(_) => {
-            info.lock().errno = Errno::EINVAL;
-            return -1;
-        }
-    };
-
-    open_resolved(&info, path, flags)
-}
-
 /// openat(dirfd, path, path_len, flags) -> fd, or -1 on error
 ///
 /// The `*at` form of `open`, taking the path as pointer plus length rather
