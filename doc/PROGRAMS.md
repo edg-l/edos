@@ -40,6 +40,15 @@ surface at all.
 | Program | The gap |
 |---|---|
 | in-EDOS `fsck` | `efs-fsck` is host-side only, so the guest cannot check its own filesystem. This is the difference between an OS that can be repaired and one that has to be re-imaged |
+| `ssh` (client) | `sshd` serves, but nothing here can reach out. Needs terminal raw mode on the local side and a `known_hosts` the user actually reads, neither of which the server side needed |
+
+**An SFTP subsystem in `sshd`** rather than a program of its own, and the
+reason it belongs on this list: it is what turns "I can log in" into "I can work
+on the machine", since the host's `sftp` and `scp` both ride it. It would also
+be the first thing to exercise the channel layer beyond one interactive
+session. The gap it runs into is attributes: with no `chmod`-shaped syscall,
+`SSH_FXP_SETSTAT` can only honour size and times, and should say so rather than
+pretend. Sketched in engram.
 
 `syscallfuzz` shipped and found two kernel panics, both since fixed: an `ioctl`
 that wedged its own CPU and a `#GP` on a non-canonical user pointer. The
