@@ -65,8 +65,16 @@ pub struct EfsSuperblock {
     /// Set to 1 while fsck --repair is in progress; cleared on clean exit.
     /// If set on fsck startup, refuse to run without --force.
     pub fsck_in_progress: u8,
+    /// Head of the orphan chain: the inode number of the most recently orphaned
+    /// inode, or 0 when nothing is pending deletion.
+    ///
+    /// An inode is on this chain from the moment it loses its last name until its
+    /// storage is freed, which is a window an unclean shutdown can land in. Mount
+    /// walks the chain and finishes those deletions; see `doc/efs.md` §14. Zero on
+    /// an image written before the chain existed, which reads as an empty chain.
+    pub last_orphan: u32,
     /// Reserved; must be zero.
-    pub reserved: [u8; 47],
+    pub reserved: [u8; 43],
 }
 
 const _: () = assert!(core::mem::size_of::<EfsSuperblock>() == 256);

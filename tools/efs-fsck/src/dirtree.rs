@@ -9,6 +9,7 @@ use efs_common::{
 
 use crate::bitmaps::InodeInfo;
 use crate::disk::Disk;
+use crate::orphan::OrphanChain;
 use crate::report::{Category, Finding, Report, Severity};
 
 // ---------------------------------------------------------------------------
@@ -442,12 +443,16 @@ pub fn walk(
 
 /// Compare on-disk link counts against observed directory-entry counts.
 ///
-/// Mismatches are reported as fixable errors. Allocated inodes with zero
-/// observed links (orphans) are reported with context `"destructive"` so the
-/// repair phase can prompt before deleting.
+/// Mismatches are reported as fixable errors. An allocated inode with no
+/// observed links is either a deletion the filesystem committed to and did not
+/// finish, or a leak, and `chain` is what tells them apart: an inode on the
+/// orphan chain is named by nothing *by design*, so finishing its deletion is
+/// completing the filesystem's own intent rather than destroying data. Only a
+/// leak gets the `"destructive"` context that makes the repair phase prompt.
 pub fn check_link_counts(
     infos: &HashMap<u64, &InodeInfo>,
     observed: &HashMap<u64, u32>,
+    chain: &OrphanChain,
     report: &mut Report,
 ) {
     let mut inos: Vec<u64> = infos.keys().copied().collect();
@@ -459,12 +464,27 @@ pub fn check_link_counts(
         let obs = observed.get(&ino).copied().unwrap_or(0);
 
         if obs == 0 {
+            let pending = chain.set.contains(&ino);
             report.push(Finding {
                 severity: Severity::Error,
                 category: Category::DirTree,
-                message: format!("orphan inode {ino} (reachable link count 0)"),
+                message: if pending {
+                    format!(
+                        "inode {ino} pending deletion (on the orphan chain; a mount or \
+                         --repair finishes it)"
+                    )
+                } else {
+                    format!("orphan inode {ino} (reachable link count 0)")
+                },
                 fixable: true,
-                context: Some("destructive".to_string()),
+                context: Some(
+                    if pending {
+                        "pending-deletion"
+                    } else {
+                        "destructive"
+                    }
+                    .to_string(),
+                ),
             });
         } else if obs != expected as u32 {
             report.push(Finding {

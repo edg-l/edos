@@ -68,6 +68,12 @@ pub const RANK_INODE: u16 = 30;
 // (32) that block allocation takes underneath it.
 pub const RANK_EFS_INODE_RMW: u16 = 31;
 pub const RANK_EFS_BITMAP: u16 = 32;
+// In-memory mirror of EFS's on-disk orphan chain, which gives an eviction its
+// inode's predecessor without walking the chain. Held across the inode and
+// superblock writes that unlink an inode from the chain, so it sits below
+// `BPC.shard` (110) and `EfsDriver.mutable` (160); never co-held with the bitmap
+// mutex, because the chain is updated before storage is freed.
+pub const RANK_EFS_ORPHAN: u16 = 33;
 pub const RANK_DENTRY: u16 = 35;
 // `(mount_id, ino) -> Weak<VfsInode>` map that gives an on-disk inode a single
 // `VfsInode`, and with it a single page cache, across dentry invalidations.

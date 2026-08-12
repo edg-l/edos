@@ -53,6 +53,15 @@ pub const EFS_ROOT_INO: u64 = 1;
 /// Compatible feature: filesystem was created with TRIM/discard support.
 pub const COMPAT_DISCARD: u64 = 1 << 0;
 
+/// Compatible feature: the superblock's `last_orphan` heads a chain of inodes
+/// pending deletion, threaded through `EfsInode::orphan_next`.
+///
+/// Compatible rather than incompatible because an implementation that ignores the
+/// chain still reads and writes the filesystem correctly; it just strands the
+/// inodes on it after an unclean shutdown, which is what every implementation did
+/// before the chain existed.
+pub const COMPAT_ORPHAN_LIST: u64 = 1 << 1;
+
 /// Incompatible feature: filesystem has a journal. Kernel must honour the
 /// journal before mounting read-write. A kernel that does not understand this
 /// flag must refuse to mount.

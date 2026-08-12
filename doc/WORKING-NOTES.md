@@ -97,7 +97,7 @@ instead of the 4095 blocks a default journal takes. `make run-recovery` boots
 both together. The procedure, and the host-side superblock rewind that predates
 it with its two off-by-one traps, are in `doc/journal-recovery-test.md`.
 
-### Orphan inodes after a power cut are the missing orphan list, not an ordering bug
+### Orphan inodes after a power cut were the missing orphan list, not an ordering bug
 
 The suspicion was that `EfsDriver::write_block` breaks write-ahead ordering: it
 calls `write_page` to put the block at its home location and *then* enrols it in
@@ -117,22 +117,62 @@ The actual answer was in the same counter dump, one line down:
 `efs_stats.orphans_marked +503`. `vfs::remove_file` implements Linux unlink
 semantics — detach the dentry, free the inode only when the last `Arc<VfsInode>`
 drops — so between those two points the disk *deliberately* holds an allocated
-inode that nothing names, and the only record of that intent is the in-memory
-orphan mark. **EFS has no on-disk orphan list.** ext3/4 close the window with
-`s_last_orphan` and a mount-time walk; EFS has the semantics without the list, so
-every unclean shutdown inside the window strands inodes that only
-`efs-fsck --repair` reclaims. Written up in `doc/efs.md` §8.
+inode that nothing names, and the only record of that intent was the in-memory
+orphan mark. **EFS had no on-disk orphan list**, so every unclean shutdown inside
+the window stranded inodes that only `efs-fsck --repair` could reclaim.
 
 The width of that window was already measured and written down, in
 `doc/STORAGE-ROADMAP.md`'s note on reading `/proc/efs_stats`: fsbench prints its
 counter deltas *before* closing its descriptors, so `orphans_dropped` reads **0
 mid-run and 513 afterwards**. Those 513 inodes are unlinked-and-still-open for the
-length of the run, which is to say a power cut anywhere in it strands all of them.
-`orphans_marked - orphans_dropped` is therefore the exact count a crash would
-leave behind, and ~52 after an iotest crash is the same thing on a smaller
-workload. That subtraction is also the regression test for an orphan list when one
-is built: unlink while open, cut power, mount, assert the mount reclaimed them and
-`efs-fsck` reports none.
+length of the run, which is to say a power cut anywhere in it stranded all of them.
+~52 after an iotest crash is the same thing on a smaller workload.
+
+### The orphan chain closes it
+
+ext3/4's `s_last_orphan`, adapted: `superblock.last_orphan` heads a chain threaded
+through a new `EfsInode::orphan_next`, both `u32`, both taken from reserved space
+so an older image reads as a chain of length zero. `COMPAT_ORPHAN_LIST` announces
+it; compatible rather than incompatible because a driver that ignores the chain
+still reads and writes correctly, it just strands what the chain names — which is
+precisely what every driver did before. Format spec in `doc/efs.md` §14.
+
+Three rules make it airtight, and each one is a transaction boundary:
+
+- `remove_file` links the inode in **in the transaction that removes its directory
+  entry**. Anything looser is a window of its own.
+- `evict_inode` unlinks it **in the transaction that frees its storage**. Those two
+  together are what "this deletion finished" means on disk.
+- Mount walks the chain and completes every deletion on it, **after replay** —
+  replay is what restores the chain the committed transactions describe.
+
+`orphan_add` also zeroes `link_count`, since the inode has no names left and a
+checker reads a non-zero count as a name it cannot find, and it takes `inode_rmw`
+before rewriting the inode: an unlinked file can still be written through an open
+descriptor, and a concurrent `update_size` that read the inode first would
+otherwise put its copy back and take the chain link with it, truncating the chain
+and stranding everything below that inode.
+
+The cost is one extra journalled block per unlink — the superblock, carrying the
+new head — because the head has to be durable in the transaction that removes the
+directory entry. There is no cheaper place to put it. Two things fell out of
+writing it: `write_superblock` now stamps the checksum on every write, which it
+never did before (`free_blocks` moves on every allocation, and that is why a live
+image so reliably had `efs-fsck` reporting a repairable superblock CRC mismatch),
+and `efs-fsck` re-reads the superblock and BGDs after a replay, which it also never
+did — replay writes block 1, so every phase below it was reading pre-crash values.
+
+`make orphan-check` is the regression, and it is the shape the old note asked for:
+`programs/orphantest` holds N unlinked-but-open files, the harness cuts power,
+and the run fails unless the remount reclaims exactly those N and `efs-fsck` then
+finds nothing unnamed. First green run: `efs: freed 8 orphaned inode(s) left by an
+unclean shutdown`.
+
+`efs-fsck` tells the two cases apart now. An inode on the chain is a deletion the
+filesystem committed to, so `--repair` finishes it with no prompt; an unnamed inode
+*not* on the chain is a leak of unknown provenance and still gets the destructive
+prompt. Both directions are pinned by tests that were watched to fail when the
+chain is ignored and when everything is treated as chained.
 
 Two real defects turned up on the way and are fixed:
 
@@ -773,8 +813,8 @@ does not have to invent them.
 | | value | how |
 |---|---|---|
 | syscalls | 110 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 110 — a mismatch is the bug |
-| userspace programs | 105 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
-| programs listed in `doc/USERSPACE-ROADMAP.md` | 107 rows = 105 + the 2 libraries | diff the table against the workspace, below |
+| userspace programs | 106 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
+| programs listed in `doc/USERSPACE-ROADMAP.md` | 108 rows = 106 + the 2 libraries | diff the table against the workspace, below |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 20/20 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |

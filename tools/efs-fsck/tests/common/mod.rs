@@ -653,3 +653,136 @@ pub fn crc32_of(data: &[u8]) -> u32 {
     }
     !crc
 }
+
+// ---------------------------------------------------------------------------
+// Fixture builder: inodes with no name, on and off the orphan chain
+// ---------------------------------------------------------------------------
+
+/// Inode field offsets within the 256-byte on-disk struct.
+const INODE_SIZE: u64 = 256;
+const INODE_MODE_OFF: usize = 0;
+const INODE_LINK_COUNT_OFF: usize = 6;
+const INODE_FLAGS_OFF: usize = 24;
+const INODE_ORPHAN_NEXT_OFF: usize = 28;
+const INODE_CHECKSUM_OFF: usize = 76;
+/// Superblock offsets. `EfsSuperblock` is `repr(C, packed)`, so these are the
+/// running sums of the field sizes before them with no padding anywhere.
+const SB_CHECKSUM_OFF: usize = 188;
+const SB_LAST_ORPHAN_OFF: u64 = 209;
+
+/// Byte offset of inode `ino` within the image.
+fn inode_file_offset(
+    f: &mut File,
+    partition_offset: u64,
+    sb: &SbInfo,
+    ino: u64,
+) -> io::Result<u64> {
+    let inodes_per_group = sb.inodes_per_group as u64;
+    let group = (ino - 1) / inodes_per_group;
+    let local_idx = (ino - 1) % inodes_per_group;
+    let inode_table_block = read_bgd_field_u64(
+        f,
+        partition_offset,
+        sb.block_size,
+        group,
+        BGD_INODE_TABLE_OFF,
+    )?;
+    let byte_off_in_table = local_idx * INODE_SIZE;
+    Ok(partition_offset
+        + (inode_table_block + byte_off_in_table / sb.block_size as u64) * sb.block_size as u64
+        + byte_off_in_table % sb.block_size as u64)
+}
+
+/// Set the inode-bitmap bit for `ino`.
+fn set_inode_bitmap_bit(
+    f: &mut File,
+    partition_offset: u64,
+    sb: &SbInfo,
+    ino: u64,
+) -> io::Result<()> {
+    let inodes_per_group = sb.inodes_per_group as u64;
+    let group = (ino - 1) / inodes_per_group;
+    let local_bit = (ino - 1) % inodes_per_group;
+    let bitmap_block = read_bgd_field_u64(
+        f,
+        partition_offset,
+        sb.block_size,
+        group,
+        BGD_INODE_BITMAP_OFF,
+    )?;
+    let byte_offset = partition_offset + bitmap_block * sb.block_size as u64 + local_bit / 8;
+    f.seek(SeekFrom::Start(byte_offset))?;
+    let mut byte = [0u8; 1];
+    f.read_exact(&mut byte)?;
+    byte[0] |= 1 << (local_bit % 8);
+    f.seek(SeekFrom::Start(byte_offset))?;
+    f.write_all(&byte)
+}
+
+/// Write a regular-file inode with no name and no data blocks at `ino`, and mark
+/// it allocated.
+///
+/// This is the on-disk state of a file whose last directory entry is gone but
+/// whose inode has not been freed: what the checker sees as an orphan. Inline
+/// data with size 0 keeps it out of the extent checks, which have nothing to say
+/// here.
+pub fn plant_unnamed_inode(
+    image: &Path,
+    partition_offset: u64,
+    ino: u64,
+    orphan_next: u32,
+) -> io::Result<()> {
+    let sb = read_sb_info_at(image, partition_offset)?;
+    let mut f = OpenOptions::new().read(true).write(true).open(image)?;
+    let offset = inode_file_offset(&mut f, partition_offset, &sb, ino)?;
+
+    let mut inode = [0u8; INODE_SIZE as usize];
+    // S_IFREG | 0644, link_count 0, INODE_FLAG_INLINE_DATA, size 0.
+    inode[INODE_MODE_OFF..INODE_MODE_OFF + 2]
+        .copy_from_slice(&(efs_common::S_IFREG | 0o644).to_le_bytes());
+    inode[INODE_LINK_COUNT_OFF..INODE_LINK_COUNT_OFF + 2].copy_from_slice(&0u16.to_le_bytes());
+    inode[INODE_FLAGS_OFF..INODE_FLAGS_OFF + 4]
+        .copy_from_slice(&efs_common::INODE_FLAG_INLINE_DATA.to_le_bytes());
+    inode[INODE_ORPHAN_NEXT_OFF..INODE_ORPHAN_NEXT_OFF + 4]
+        .copy_from_slice(&orphan_next.to_le_bytes());
+    let crc = crc32_of(&inode);
+    inode[INODE_CHECKSUM_OFF..INODE_CHECKSUM_OFF + 4].copy_from_slice(&crc.to_le_bytes());
+
+    f.seek(SeekFrom::Start(offset))?;
+    f.write_all(&inode)?;
+    set_inode_bitmap_bit(&mut f, partition_offset, &sb, ino)?;
+    f.sync_all()
+}
+
+/// Point the superblock's orphan chain head at `ino` (0 empties the chain).
+pub fn set_orphan_head(image: &Path, partition_offset: u64, ino: u32) -> io::Result<()> {
+    let sb = read_sb_info_at(image, partition_offset)?;
+    let sb_offset = partition_offset + sb.block_size as u64;
+
+    let mut f = OpenOptions::new().read(true).write(true).open(image)?;
+    f.seek(SeekFrom::Start(sb_offset))?;
+    let mut bytes = [0u8; 256];
+    f.read_exact(&mut bytes)?;
+
+    let off = SB_LAST_ORPHAN_OFF as usize;
+    bytes[off..off + 4].copy_from_slice(&ino.to_le_bytes());
+    bytes[SB_CHECKSUM_OFF..SB_CHECKSUM_OFF + 4].copy_from_slice(&0u32.to_le_bytes());
+    let crc = crc32_of(&bytes);
+    bytes[SB_CHECKSUM_OFF..SB_CHECKSUM_OFF + 4].copy_from_slice(&crc.to_le_bytes());
+
+    f.seek(SeekFrom::Start(sb_offset))?;
+    f.write_all(&bytes)?;
+    f.sync_all()
+}
+
+/// Read the superblock's orphan chain head.
+pub fn read_orphan_head(image: &Path, partition_offset: u64) -> io::Result<u32> {
+    let sb = read_sb_info_at(image, partition_offset)?;
+    let mut f = File::open(image)?;
+    f.seek(SeekFrom::Start(
+        partition_offset + sb.block_size as u64 + SB_LAST_ORPHAN_OFF,
+    ))?;
+    let mut buf = [0u8; 4];
+    f.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}

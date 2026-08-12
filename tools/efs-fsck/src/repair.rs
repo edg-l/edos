@@ -8,7 +8,7 @@ use efs_common::{
 
 use crate::bitmaps::InodeInfo;
 use crate::disk::Disk;
-use crate::layout::RuntimeLayout;
+use crate::layout::{RuntimeLayout, inode_location};
 use crate::report::{Category, Finding, Severity};
 
 /// Summary of what the repair pass did.
@@ -163,18 +163,13 @@ fn write_inode(
     ino: u64,
     inode: &EfsInode,
 ) -> io::Result<()> {
-    let inodes_per_group = sb.inodes_per_group as u64;
-    let inode_size = sb.inode_size as usize;
     let block_size = disk.block_size as usize;
-
-    let group = ((ino - 1) / inodes_per_group) as usize;
-    let local_idx = (ino - 1) % inodes_per_group;
-    let bgd = &bgds[group];
-
-    let byte_offset = local_idx as usize * inode_size;
-    let block = bgd.inode_table_block + (byte_offset / block_size) as u64;
-    let offset_in_block = byte_offset % block_size;
-
+    let Some((block, offset_in_block)) = inode_location(sb, bgds, ino, block_size) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("inode {ino} is outside the filesystem"),
+        ));
+    };
     disk.write_struct_at(block, offset_in_block, inode)
 }
 
@@ -511,17 +506,10 @@ fn repair_link_counts(
 
         // Read current inode, patch link_count, recompute checksum, write back.
         let mut inode: EfsInode = {
-            let inodes_per_group = sb.inodes_per_group as u64;
-            let inode_size = sb.inode_size as usize;
             let block_size = disk.block_size as usize;
-
-            let group = ((ino - 1) / inodes_per_group) as usize;
-            let local_idx = (ino - 1) % inodes_per_group;
-            let bgd = &bgds[group];
-            let byte_offset = local_idx as usize * inode_size;
-            let block = bgd.inode_table_block + (byte_offset / block_size) as u64;
-            let offset_in_block = byte_offset % block_size;
-
+            let Some((block, offset_in_block)) = inode_location(sb, bgds, ino, block_size) else {
+                continue;
+            };
             disk.read_struct_at(block, offset_in_block)?
         };
 
@@ -537,9 +525,17 @@ fn repair_link_counts(
 }
 
 // ---------------------------------------------------------------------------
-// Class 5: orphan inodes (destructive)
+// Class 5: inodes with no name — pending deletions, and leaks
 // ---------------------------------------------------------------------------
 
+/// Free the storage of every inode that no directory entry names.
+///
+/// Two kinds arrive here and they are not the same act. An inode on the orphan
+/// chain is a deletion the filesystem committed to and an unclean shutdown
+/// interrupted: finishing it is exactly what the next mount would do, so it needs
+/// no permission. An inode that is *not* on the chain is a leak of unknown
+/// provenance whose blocks may still be someone's data, and freeing that is
+/// destructive enough to ask about.
 fn repair_orphans(
     disk: &mut Disk,
     sb: &mut EfsSuperblock,
@@ -549,44 +545,60 @@ fn repair_orphans(
     stats: &mut RepairStats,
     inode_infos: &[InodeInfo],
 ) -> io::Result<()> {
-    let orphan_indices: Vec<usize> = findings
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| {
-            f.category == Category::DirTree
-                && f.fixable
-                && f.context.as_deref() == Some("destructive")
-        })
-        .map(|(i, _)| i)
-        .collect();
+    let tagged = |findings: &[Finding], tag: &str| -> Vec<usize> {
+        findings
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                f.category == Category::DirTree && f.fixable && f.context.as_deref() == Some(tag)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    };
 
-    if orphan_indices.is_empty() {
+    let pending_indices = tagged(findings, "pending-deletion");
+    let leak_indices = tagged(findings, "destructive");
+
+    if pending_indices.is_empty() && leak_indices.is_empty() {
         return Ok(());
     }
 
-    stats.attempted += orphan_indices.len() as u32;
+    let mut orphan_indices = pending_indices.clone();
+    stats.attempted += pending_indices.len() as u32;
+    if !pending_indices.is_empty() {
+        println!(
+            "finishing {} deletion(s) the orphan chain was holding",
+            pending_indices.len()
+        );
+    }
 
-    // Separate prompt with a loud warning.
-    if yes {
-        println!(
-            "WARNING: auto-accepting deletion of {} orphan inode(s). This frees their blocks.",
-            orphan_indices.len()
-        );
-    } else {
-        println!(
-            "WARNING: {} orphan inode(s) found. Deleting them will free their blocks permanently.",
-            orphan_indices.len()
-        );
-        print!(
-            "Delete {} orphan inode(s)? This frees their blocks. [y/N]: ",
-            orphan_indices.len()
-        );
-        std::io::stdout().flush().ok();
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line).ok();
-        if !matches!(line.trim(), "y" | "Y") {
-            stats.skipped += orphan_indices.len() as u32;
-            return Ok(());
+    if !leak_indices.is_empty() {
+        stats.attempted += leak_indices.len() as u32;
+        let accepted = if yes {
+            println!(
+                "WARNING: auto-accepting deletion of {} orphan inode(s). This frees their blocks.",
+                leak_indices.len()
+            );
+            true
+        } else {
+            println!(
+                "WARNING: {} orphan inode(s) found. Deleting them will free their blocks \
+                 permanently.",
+                leak_indices.len()
+            );
+            print!(
+                "Delete {} orphan inode(s)? This frees their blocks. [y/N]: ",
+                leak_indices.len()
+            );
+            std::io::stdout().flush().ok();
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).ok();
+            matches!(line.trim(), "y" | "Y")
+        };
+        if accepted {
+            orphan_indices.extend(leak_indices);
+        } else {
+            stats.skipped += leak_indices.len() as u32;
         }
     }
 
@@ -677,13 +689,8 @@ fn repair_orphans(
         }
 
         // Zero the inode table entry.
-        let inode_size = sb.inode_size as usize;
         let block_size = disk.block_size as usize;
-        if inode_group < bgds.len() {
-            let local_idx = (ino - 1) % inodes_per_group;
-            let byte_offset = local_idx as usize * inode_size;
-            let block = bgds[inode_group].inode_table_block + (byte_offset / block_size) as u64;
-            let offset_in_block = byte_offset % block_size;
+        if let Some((block, offset_in_block)) = inode_location(sb, bgds, ino, block_size) {
             // Write a zeroed inode.
             let zero_inode = EfsInode {
                 mode: 0,
@@ -693,7 +700,7 @@ fn repair_orphans(
                 size: 0,
                 blocks: 0,
                 flags: 0,
-                reserved1: 0,
+                orphan_next: 0,
                 ctime_sec: 0,
                 ctime_nsec: 0,
                 reserved2: 0,
@@ -710,6 +717,15 @@ fn repair_orphans(
 
         findings[fi].fixable = false;
         stats.succeeded += 1;
+    }
+
+    // The chain no longer names anything, so empty it. Written even when the walk
+    // that produced these findings ended at a fault: the head is the only way in,
+    // and whatever it could not reach is reported as an ordinary leak next run.
+    if !pending_indices.is_empty() && sb.last_orphan != 0 {
+        sb.last_orphan = 0;
+        sb.checksum = checksum_superblock(sb);
+        write_superblock_all(disk, sb)?;
     }
 
     Ok(())

@@ -4,8 +4,8 @@ use std::time::SystemTime;
 
 use crate::random::uuid_v4;
 use efs_common::{
-    EFS_MAGIC, EFS_ROOT_INO, EFS_VERSION, EXTENT_MAGIC, EfsBlockGroupDesc, EfsExtent,
-    EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, INCOMPAT_JOURNAL, JOURNAL_MAGIC,
+    COMPAT_ORPHAN_LIST, EFS_MAGIC, EFS_ROOT_INO, EFS_VERSION, EXTENT_MAGIC, EfsBlockGroupDesc,
+    EfsExtent, EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, INCOMPAT_JOURNAL, JOURNAL_MAGIC,
     JournalSuperblock, MAX_INLINE_EXTENTS, S_IFDIR, checksum_block_group_desc, checksum_inode,
     checksum_superblock, journal_sb_checksum,
 };
@@ -90,7 +90,7 @@ pub fn make_dir_inode(
         size,
         blocks,
         flags: 0,
-        reserved1: 0,
+        orphan_next: 0,
         ctime_sec: ts.0,
         ctime_nsec: ts.1,
         reserved2: 0,
@@ -242,7 +242,7 @@ pub fn format(
         inodes_per_group: layout.inodes_per_group,
         inode_size: 256,
         block_group_count: layout.block_group_count,
-        compatible_features: 0,
+        compatible_features: COMPAT_ORPHAN_LIST,
         incompatible_features: INCOMPAT_JOURNAL,
         read_only_features: 0,
         uuid,
@@ -257,7 +257,8 @@ pub fn format(
         journal_block_count: journal_blocks as u32,
         journal_sb_checksum: 0, // filled in after writing journal SB
         fsck_in_progress: 0,
-        reserved: [0u8; 47],
+        last_orphan: 0,
+        reserved: [0u8; 43],
     };
 
     // ---- Mark all partition blocks as zero ----

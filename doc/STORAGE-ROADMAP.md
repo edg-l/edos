@@ -16,7 +16,9 @@ sata-disk.img`): `make all` only rebuilds the image when `filesystem/` changes,
 so successive suites otherwise run against a disk carrying the previous runs'
 files and leaked inodes. And read `/proc/efs_stats` **after** the benchmark
 process exits — fsbench prints its counter deltas before closing its
-descriptors, so `orphans_dropped` reads 0 mid-run and 513 afterwards.
+descriptors, so `orphans_dropped` reads 0 mid-run and 513 afterwards. That gap is
+also the length of the on-disk orphan chain, i.e. the deletions a power cut at
+that instant would leave for the next mount to finish (`doc/efs.md` §14).
 
 **Every number below predates the monotonic clock moving off the HPET
 (2026-08-11), and the per-command ones are wrong because of it.** An

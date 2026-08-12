@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
@@ -12,8 +12,8 @@ use efs_common::{
     DIR_ENTRY_HEADER_SIZE, EFS_ROOT_INO, EXTENT_MAGIC, EfsBlockGroupDesc, EfsDirEntryHeader,
     EfsExtent, EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, FT_REG_FILE, FT_SYMLINK,
     INCOMPAT_JOURNAL, INODE_DATA_AREA_SIZE, INODE_FLAG_INLINE_DATA, JOURNAL_MAGIC,
-    JournalSuperblock, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG, checksum_inode, dir_entry_min_size,
-    journal_sb_checksum,
+    JournalSuperblock, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG, checksum_inode, checksum_superblock,
+    dir_entry_min_size, journal_sb_checksum,
 };
 
 mod extents;
@@ -125,7 +125,7 @@ use super::{
     splice_symlink,
 };
 use crate::{
-    debug::lock_order::{RANK_EFS_BITMAP, RANK_EFS_INODE_RMW, RANK_EFS_MUTABLE},
+    debug::lock_order::{RANK_EFS_BITMAP, RANK_EFS_INODE_RMW, RANK_EFS_MUTABLE, RANK_EFS_ORPHAN},
     log, ranked_lock,
     thread::mutex::BlockingMutex,
 };
@@ -192,6 +192,16 @@ pub struct EfsDriver {
     bitmap_mutex: BlockingMutex<()>,
     /// Serializes read-modify-write of an inode. See `RANK_EFS_INODE_RMW`.
     inode_rmw: BlockingMutex<()>,
+    /// In-memory mirror of the on-disk orphan chain: inode number → the inode
+    /// that points at it, where 0 means the superblock's `last_orphan` does.
+    ///
+    /// The chain is singly linked on disk, so unlinking an inode from the middle
+    /// of it needs its predecessor, and walking from the head to find one is
+    /// O(chain) per eviction over a chain that reaches into the hundreds. This is
+    /// the same reason ext4 keeps `i_orphan` in memory beside the on-disk chain.
+    /// It starts empty at every mount, because mount finishes and clears whatever
+    /// the previous one left behind.
+    orphan_prev: BlockingMutex<BTreeMap<u64, u64>>,
     /// Mutable FS metadata (superblock + block group descriptors).
     mutable: BlockingMutex<EfsMutableState>,
 }
@@ -371,7 +381,7 @@ impl EfsDriver {
         // gate flushes on commit state.
         BlockPageCache::global().register_device(partition.device_id, journal.clone());
 
-        Ok(Self {
+        let driver = Self {
             device,
             partition,
             block_size_log2,
@@ -379,11 +389,26 @@ impl EfsDriver {
             journal,
             bitmap_mutex: BlockingMutex::new(()),
             inode_rmw: BlockingMutex::new(()),
+            orphan_prev: BlockingMutex::new(BTreeMap::new()),
             mutable: BlockingMutex::new(EfsMutableState {
                 superblock,
                 bgd_table,
             }),
-        })
+        };
+
+        // Finish the deletions the last mount was interrupted in the middle of.
+        // After replay, because replay is what restores the chain the committed
+        // transactions describe. A failure here is reported rather than fatal:
+        // the filesystem is consistent either way, it just still holds inodes
+        // that only `efs-fsck --repair` would reclaim.
+        if let Err(e) = driver.process_orphan_list() {
+            log!(
+                "efs: orphan list not fully processed ({:?}); run efs-fsck",
+                e
+            );
+        }
+
+        Ok(driver)
     }
 }
 
@@ -1190,6 +1215,19 @@ pub static EFS_BLOCKS_FREED: AtomicU64 = AtomicU64::new(0);
 /// Allocation attempts that found no free block in any group.
 pub static EFS_ALLOC_FAILED: AtomicU64 = AtomicU64::new(0);
 
+/// Inodes put on and taken off the on-disk orphan chain.
+///
+/// The difference is the chain's current length, which is the number of inodes
+/// a power cut right now would leave for the next mount to free. It tracks
+/// `orphans_marked - orphans_dropped` in the same `/proc/efs_stats`, which is that
+/// window seen from the VFS side; a lasting disagreement between the two pairs
+/// means an unlink took a path that did not reach the chain.
+pub static ORPHANS_LINKED: AtomicU64 = AtomicU64::new(0);
+pub static ORPHANS_UNLINKED: AtomicU64 = AtomicU64::new(0);
+/// Inodes freed by `process_orphan_list` at mount, i.e. deletions an unclean
+/// shutdown interrupted. Non-zero after a power cut and zero after a clean one.
+pub static ORPHANS_RECOVERED: AtomicU64 = AtomicU64::new(0);
+
 /// What `read_via_extents` planned and what it cost the device.
 ///
 /// `reads` counts the calls that reached the device at all, `runs` the
@@ -1947,7 +1985,7 @@ fn new_inode(mode: u16, flags: u32) -> EfsInode {
         size: 0,
         blocks: 0,
         flags,
-        reserved1: 0,
+        orphan_next: 0,
         ctime_sec: now,
         ctime_nsec: 0,
         reserved2: 0,
@@ -2115,7 +2153,12 @@ impl FileSystem for EfsDriver {
             return Ok(());
         }
         let mut tx = self.journal.begin_tx();
-        match self.free_file_storage(ino, &file_inode, &mut tx) {
+        // Off the chain in the same transaction that frees the storage: the two
+        // together are what "this deletion finished" means on disk.
+        match self
+            .orphan_del(ino, &mut tx)
+            .and_then(|()| self.free_file_storage(ino, &file_inode, &mut tx))
+        {
             Ok(()) => Ok(()),
             Err(e) => {
                 tx.abort();
@@ -2471,7 +2514,7 @@ impl EfsDriver {
             size: block_size as u64,
             blocks: 1,
             flags: 0,
-            reserved1: 0,
+            orphan_next: 0,
             ctime_sec: now,
             ctime_nsec: 0,
             reserved2: 0,
@@ -2534,7 +2577,15 @@ impl EfsDriver {
     ) -> Result<(), Error> {
         self.remove_dir_entry(parent_ino, name, tx)?;
         if file_inode.mode & S_IFMT == S_IFLNK {
+            // Nothing can hold a reference to a link, so its storage goes in the
+            // same transaction and it is never pending deletion.
             self.free_file_storage(file_ino, file_inode, tx)?;
+        } else {
+            // The inode outlives its last name until the final reference drops
+            // (`vfs::remove_file`). The chain is what records that on disk, in
+            // this same transaction, so a crash before the eviction is a
+            // deletion to finish rather than a leak.
+            self.orphan_add(file_ino, tx)?;
         }
         Ok(())
     }
@@ -2601,20 +2652,202 @@ impl EfsDriver {
         self.remove_dir_entry(parent_ino, name, tx)
     }
 
-    fn flush_inner(&self, tx: &mut TxHandle<'_>) -> Result<(), Error> {
-        let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
-        // Write updated superblock to block 1.
+    // ---- Orphan chain ------------------------------------------------------
+    //
+    // An inode that has lost its last name but whose storage is not freed yet is
+    // on this chain. Without it that state exists only in memory (`VfsInode`'s
+    // orphan mark), so an unclean shutdown inside the window strands the inode
+    // and its blocks with nothing on disk saying they were pending deletion.
+    // See `doc/efs.md` §14.
+
+    /// Put `ino` at the head of the orphan chain, in `tx`.
+    ///
+    /// Both writes are in the caller's transaction, which is also the one that
+    /// removes the directory entry: linking the inode in and unnaming it have to
+    /// be the same atom, or a crash between them recreates the gap this closes.
+    ///
+    /// Stamping `orphan_next` rewrites the whole 256-byte inode, so it takes
+    /// `inode_rmw` and reads the inode under it like every other whole-inode
+    /// writer. An unlinked file can still be written through an open descriptor,
+    /// and a concurrent `update_size` that read the inode first would otherwise
+    /// put its copy back and take the chain link with it — truncating the chain
+    /// and stranding everything below this inode.
+    fn orphan_add(&self, ino: u64, tx: &mut TxHandle<'_>) -> Result<(), Error> {
+        let _rmw = ranked_lock!(RANK_EFS_INODE_RMW, "EfsDriver.inode_rmw", self.inode_rmw);
+        let mut prevs = ranked_lock!(RANK_EFS_ORPHAN, "EfsDriver.orphan_prev", self.orphan_prev);
+
+        let old_head = {
+            let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
+            let old_head = m.superblock.last_orphan;
+            m.superblock.last_orphan = ino as u32;
+            old_head
+        };
+
+        let mut updated = self.read_inode(ino)?;
+        updated.orphan_next = old_head;
+        // No directory entry names it any more, and the on-disk count should say
+        // so: a chained inode with a non-zero count reads to a checker as a name
+        // it cannot find.
+        updated.link_count = 0;
+        updated.checksum = checksum_inode(&updated);
+        self.write_inode(ino, &updated, tx)?;
+        self.write_superblock(tx)?;
+
+        prevs.insert(ino, 0);
+        if old_head != 0 {
+            prevs.insert(old_head as u64, ino);
+        }
+        ORPHANS_LINKED.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Unlink `ino` from the orphan chain, in `tx`. A no-op for an inode that is
+    /// not on it, which is every directory and symbolic link: their storage is
+    /// freed in the same transaction that unnames them, so they are never
+    /// pending.
+    /// Takes `inode_rmw` for the same reason [`orphan_add`] does: the predecessor
+    /// it rewrites can be an unlinked-but-open file that another thread is
+    /// writing.
+    ///
+    /// [`orphan_add`]: Self::orphan_add
+    fn orphan_del(&self, ino: u64, tx: &mut TxHandle<'_>) -> Result<(), Error> {
+        let _rmw = ranked_lock!(RANK_EFS_INODE_RMW, "EfsDriver.inode_rmw", self.inode_rmw);
+        let mut prevs = ranked_lock!(RANK_EFS_ORPHAN, "EfsDriver.orphan_prev", self.orphan_prev);
+        let Some(prev) = prevs.remove(&ino) else {
+            return Ok(());
+        };
+
+        let next = self.read_inode(ino)?.orphan_next;
+
+        if prev == 0 {
+            let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
+            m.superblock.last_orphan = next;
+            drop(m);
+            self.write_superblock(tx)?;
+        } else {
+            let mut prev_inode = self.read_inode(prev)?;
+            prev_inode.orphan_next = next;
+            prev_inode.checksum = checksum_inode(&prev_inode);
+            self.write_inode(prev, &prev_inode, tx)?;
+        }
+
+        if next != 0 {
+            prevs.insert(next as u64, prev);
+        }
+        ORPHANS_UNLINKED.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Finish the deletions the previous mount did not, and empty the chain.
+    ///
+    /// Runs once at mount, after journal replay: replay restores the chain the
+    /// committed transactions describe, and only then does walking it mean
+    /// anything. Each inode is freed in its own transaction and the head moves
+    /// with it, so a crash part-way through leaves the rest of the chain intact
+    /// for the next mount.
+    ///
+    /// Anything that stops the walk early — a cycle, an unreadable inode, a failed
+    /// free — leaves the remainder chained and says so. The filesystem is
+    /// consistent either way; it just still holds inodes that `efs-fsck --repair`
+    /// would have to reclaim.
+    fn process_orphan_list(&self) -> Result<(), Error> {
+        let mut ino = {
+            let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
+            m.superblock.last_orphan as u64
+        };
+        if ino == 0 {
+            return Ok(());
+        }
+
+        // Every step frees an inode, so a cycle would free one twice and give its
+        // blocks away. The visited set stops at the first repeat, before the
+        // damage, rather than at a length bound after it.
+        let mut visited: BTreeSet<u64> = BTreeSet::new();
+        let mut freed = 0u64;
+        while ino != 0 {
+            if !visited.insert(ino) {
+                log!(
+                    "efs: orphan chain loops back to ino {}, stopping; run efs-fsck",
+                    ino
+                );
+                break;
+            }
+            let inode = match self.read_inode(ino) {
+                Ok(inode) => inode,
+                Err(e) => {
+                    log!(
+                        "efs: orphan chain broken at ino {} ({:?}); run efs-fsck",
+                        ino,
+                        e
+                    );
+                    break;
+                }
+            };
+            let next = inode.orphan_next as u64;
+
+            let mut tx = self.journal.begin_tx();
+            let result = self.free_file_storage(ino, &inode, &mut tx).and_then(|()| {
+                let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
+                m.superblock.last_orphan = next as u32;
+                drop(m);
+                self.write_superblock(&mut tx)
+            });
+            if let Err(e) = result {
+                tx.abort();
+                log!(
+                    "efs: could not free orphan ino {} ({:?}); run efs-fsck",
+                    ino,
+                    e
+                );
+                break;
+            }
+            drop(tx);
+
+            freed += 1;
+            ORPHANS_RECOVERED.fetch_add(1, Ordering::Relaxed);
+            ino = next;
+        }
+
+        if freed > 0 {
+            log!(
+                "efs: freed {} orphaned inode(s) left by an unclean shutdown",
+                freed
+            );
+            self.journal.force_commit_and_wait()?;
+        }
+        Ok(())
+    }
+
+    /// Write the in-memory superblock to block 1 inside `tx`.
+    ///
+    /// Enrolling the superblock page without writing it, which several callers do,
+    /// records whatever bytes the page already held; the orphan chain needs its
+    /// head to be *durable* in the transaction that changed it, so it writes.
+    fn write_superblock(&self, tx: &mut TxHandle<'_>) -> Result<(), Error> {
         let block_size = self.block_size() as usize;
         let mut sb_block = vec![0u8; block_size];
-        let sb_bytes: &[u8] = unsafe {
-            core::slice::from_raw_parts(
-                &m.superblock as *const EfsSuperblock as *const u8,
-                core::mem::size_of::<EfsSuperblock>(),
-            )
-        };
-        sb_block[..sb_bytes.len()].copy_from_slice(sb_bytes);
-        drop(m);
-        self.write_block(1, &sb_block, tx)?;
+        {
+            let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
+            // Stamped here rather than by every path that changes a counter, so
+            // the bytes that reach the disk always check out. `free_blocks` and
+            // `free_inodes` move on every allocation, and nothing recomputed the
+            // checksum for them before, which is why a live image so often had
+            // `efs-fsck` reporting a superblock CRC mismatch it could repair.
+            m.superblock.checksum = checksum_superblock(&m.superblock);
+            let sb_bytes: &[u8] = unsafe {
+                core::slice::from_raw_parts(
+                    &m.superblock as *const EfsSuperblock as *const u8,
+                    core::mem::size_of::<EfsSuperblock>(),
+                )
+            };
+            sb_block[..sb_bytes.len()].copy_from_slice(sb_bytes);
+        }
+        self.write_block(1, &sb_block, tx)
+    }
+
+    fn flush_inner(&self, tx: &mut TxHandle<'_>) -> Result<(), Error> {
+        self.write_superblock(tx)?;
+        let block_size = self.block_size() as usize;
 
         let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
         // Write BGD table starting at block 2.

@@ -25,8 +25,14 @@ pub struct EfsInode {
     pub blocks: u64,
     /// Inode flags (see `INODE_FLAG_*` constants).
     pub flags: u32,
-    /// Reserved; must be zero.
-    pub reserved1: u32,
+    /// Next inode in the orphan chain, or 0 for the end of it.
+    ///
+    /// Meaningful only while this inode is on the chain — that is, between
+    /// losing its last name and having its storage freed. See the orphan list in
+    /// `doc/efs.md` §14. Inode 0 is never allocated, which is what makes it the
+    /// end-of-chain sentinel, and an image written before the chain existed has
+    /// zero here and so reads as a chain of length zero.
+    pub orphan_next: u32,
     /// Creation time: seconds since Unix epoch.
     pub ctime_sec: u64,
     /// Creation time: nanoseconds component (0..=999_999_999).

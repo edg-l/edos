@@ -51,6 +51,7 @@ sections, and wrapping them would recurse into the preemption counter.
 |  10 | `VFS` mount registry | `PreemptRwLock<BTreeMap>` | `fs/vfs.rs` |
 |  30 | `inode.lock` (per-inode) | `BlockingRwLock<()>` | `fs/inode.rs` |
 |  32 | `EfsDriver.bitmap_mutex` | `BlockingMutex<()>` | `fs/efs/mod.rs` |
+|  33 | `EfsDriver.orphan_prev` | `BlockingMutex<BTreeMap<u64,u64>>` | `fs/efs/mod.rs` |
 |  35 | `dentry_cache.inner` | `BlockingMutex<DentryCacheInner>` | `fs/dentry.rs` |
 |  36 | `INODE_CACHE` | `BlockingMutex<BTreeMap<(usize,u64), Weak<VfsInode>>>` | `fs/icache.rs` |
 |  40 | `InodePages.pages` | `BlockingMutex<BTreeMap>` | `fs/page_cache.rs` |
@@ -112,6 +113,15 @@ in the block bitmap with nothing referencing them --- a steady leak proportional
 to write volume, with no error reported anywhere. Held across block-cache I/O,
 so it is a `BlockingMutex`; entry points take it once and call the `_locked`
 inner variants, since it is not reentrant.
+
+**33, `EfsDriver.orphan_prev`.** In-memory mirror of the on-disk orphan chain
+(`doc/efs.md` §14), mapping an inode to the one that points at it so an eviction
+can unlink it without walking the chain from the head. It is also the chain's
+lock: `orphan_add` and `orphan_del` hold it across the superblock and inode writes
+that change the links, which is what serializes two concurrent unlinks against one
+head. Those writes reach the block page cache (110) and take `mutable` (160), so it
+has to sit below both. It is never co-held with `bitmap_mutex` (32): the chain is
+updated before storage is freed, and freeing is what takes the bitmap.
 
 **32, `EfsDriver.bitmap_mutex`.** Guards *every* read-modify-write of an
 allocation bitmap, not just allocation. `alloc_block`, `free_block`,

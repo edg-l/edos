@@ -173,6 +173,14 @@ recovery-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features fault-inject"
 	scripts/recovery-check
 
+# Hold unlinked-but-open files, cut power, and fail if the remount does not
+# finish the deletions the crash interrupted. The orphan chain's regression;
+# see doc/efs.md section 14.
+.PHONY: orphan-check
+orphan-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img journal-test.img efs-fsck
+	$(MAKE) $(IMAGE_NAME).iso
+	scripts/orphan-check
+
 .PHONY: run-trace
 run-trace: programs limine/limine ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 	$(MAKE) -C kernel CARGO_FLAGS="--features trace"

@@ -6,6 +6,7 @@ mod disk;
 mod exit_code;
 mod journal;
 mod layout;
+mod orphan;
 mod qcow2;
 mod repair;
 mod replay;
@@ -60,7 +61,7 @@ fn main() {
         });
 
     // --- Phase 1: BGDs ---
-    let (mut bgds, bgd_report) = bgd::load_and_verify(&mut disk, &sb).unwrap_or_else(|e| {
+    let (bgds, bgd_report) = bgd::load_and_verify(&mut disk, &sb).unwrap_or_else(|e| {
         eprintln!("BGD read failed: {e}");
         process::exit(FsckExitCode::OperationalError.code());
     });
@@ -180,10 +181,38 @@ fn main() {
         }
     }
 
-    // --- Phase 3: Inode scan + bitmap rebuild ---
+    // Replay writes home blocks, and block 1 is one of them, so the superblock
+    // and BGD table read before it can be stale. Everything below reads the
+    // filesystem the journal describes, not the one the crash left. The reports
+    // from the second read are dropped on purpose: the findings already pushed
+    // describe the state the image arrived in, which is what is being reported.
+    let (sb, mut bgds) = if journal_replayed > 0 {
+        let (sb, _) = superblock::load_and_verify(&mut disk).unwrap_or_else(|e| {
+            eprintln!("superblock re-read after replay failed: {e}");
+            process::exit(FsckExitCode::OperationalError.code());
+        });
+        let (bgds, _) = bgd::load_and_verify(&mut disk, &sb).unwrap_or_else(|e| {
+            eprintln!("BGD re-read after replay failed: {e}");
+            process::exit(FsckExitCode::OperationalError.code());
+        });
+        (sb, bgds)
+    } else {
+        (sb, bgds)
+    };
+
+    // --- Phase 3: the orphan chain ---
+    //
+    // Walked before the inode scan so the phases below can tell a deletion the
+    // filesystem committed to from a leak. Reading it does not need the scan.
+    let (orphans, orphan_report) = orphan::walk(&mut disk, &sb, &bgds).unwrap_or_else(|e| {
+        eprintln!("orphan chain walk failed: {e}");
+        process::exit(FsckExitCode::OperationalError.code());
+    });
+
+    // --- Phase 4: Inode scan + bitmap rebuild ---
     let mut scan_report = Report::new();
 
-    let inode_infos = scan::scan_all_inodes(&mut disk, &sb, &bgds, &mut scan_report)
+    let inode_infos = scan::scan_all_inodes(&mut disk, &sb, &bgds, &orphans, &mut scan_report)
         .unwrap_or_else(|e| {
             eprintln!("inode scan failed: {e}");
             process::exit(FsckExitCode::OperationalError.code());
@@ -262,7 +291,7 @@ fn main() {
 
     let _ = block_group_count; // used via bgds.iter().enumerate()
 
-    // --- Phase 4: Directory tree + link counts ---
+    // --- Phase 5: Directory tree + link counts ---
     let mut dirtree_report = Report::new();
 
     // Build a map from inode number to &InodeInfo for O(1) lookup.
@@ -275,7 +304,7 @@ fn main() {
             process::exit(FsckExitCode::OperationalError.code());
         });
 
-    dirtree::check_link_counts(&infos_map, &observed_links, &mut dirtree_report);
+    dirtree::check_link_counts(&infos_map, &observed_links, &orphans, &mut dirtree_report);
 
     // Merge all reports.
     let mut full_report = Report::new();
@@ -286,6 +315,9 @@ fn main() {
         full_report.push(f);
     }
     for f in journal_report.findings {
+        full_report.push(f);
+    }
+    for f in orphan_report.findings {
         full_report.push(f);
     }
     for f in scan_report.findings {
@@ -303,7 +335,7 @@ fn main() {
     let initial_errors =
         repair::count_error_findings(&full_report.findings) + journal_replayed as usize;
 
-    // --- Phase 5: Repair ---
+    // --- Phase 6: Repair ---
     let mut repair_succeeded: u32 = journal_replayed;
     if args.repair {
         let fixable_count = full_report.findings.iter().filter(|f| f.fixable).count();

@@ -8,6 +8,7 @@ use efs_common::{
 
 use crate::bitmaps::InodeInfo;
 use crate::disk::Disk;
+use crate::orphan::OrphanChain;
 use crate::report::{Category, Finding, Report, Severity};
 
 /// Scan all allocated inodes across every block group.
@@ -18,6 +19,7 @@ pub fn scan_all_inodes(
     disk: &mut Disk,
     sb: &EfsSuperblock,
     bgds: &[EfsBlockGroupDesc],
+    chain: &OrphanChain,
     report: &mut Report,
 ) -> io::Result<Vec<InodeInfo>> {
     // Copy packed fields.
@@ -58,7 +60,7 @@ pub fn scan_all_inodes(
 
             let inode: EfsInode = disk.read_struct_at(inode_block, offset_in_block)?;
 
-            if let Some(info) = verify_inode(disk, &inode, ino, sb, report) {
+            if let Some(info) = verify_inode(disk, &inode, ino, sb, chain, report) {
                 group_block_count_found += info.extents.iter().map(|&(_, l)| l as u64).sum::<u64>();
                 group_inode_count_found += 1;
                 all_infos.push(info);
@@ -95,6 +97,7 @@ fn verify_inode(
     inode: &EfsInode,
     ino: u64,
     sb: &EfsSuperblock,
+    chain: &OrphanChain,
     report: &mut Report,
 ) -> Option<InodeInfo> {
     let total_blocks = sb.total_blocks;
@@ -118,10 +121,22 @@ fn verify_inode(
     // (b) link_count > 0. Report-only: still seed the inode's extents into the
     // rebuilt bitmap so we don't double-count the same blocks as "leaked".
     if inode.link_count == 0 {
+        // On the orphan chain this is the expected state, not damage: the inode
+        // lost its last name and its deletion has not finished. The DirTree phase
+        // reports it as pending and `--repair` completes it.
+        let pending = chain.set.contains(&ino);
         report.push(Finding {
-            severity: Severity::Error,
+            severity: if pending {
+                Severity::Info
+            } else {
+                Severity::Error
+            },
             category: Category::Inode,
-            message: format!("inode {ino}: allocated but link_count == 0 (orphan)"),
+            message: if pending {
+                format!("inode {ino}: link_count == 0, pending deletion")
+            } else {
+                format!("inode {ino}: allocated but link_count == 0 (orphan)")
+            },
             fixable: false,
             context: None,
         });

@@ -1,4 +1,29 @@
-use efs_common::EfsSuperblock;
+use efs_common::{EfsBlockGroupDesc, EfsSuperblock};
+
+/// Where inode `ino` lives: `(block, byte offset within it)`.
+///
+/// Returns `None` when `ino` is 0 or names a group the BGD table does not have,
+/// which is the shape a wild inode number arrives in.
+pub fn inode_location(
+    sb: &EfsSuperblock,
+    bgds: &[EfsBlockGroupDesc],
+    ino: u64,
+    block_size: usize,
+) -> Option<(u64, usize)> {
+    if ino == 0 {
+        return None;
+    }
+    let inodes_per_group = sb.inodes_per_group as u64;
+    let group = ((ino - 1) / inodes_per_group) as usize;
+    let local_idx = (ino - 1) % inodes_per_group;
+    let bgd = bgds.get(group)?;
+
+    let byte_offset = local_idx as usize * sb.inode_size as usize;
+    Some((
+        bgd.inode_table_block + (byte_offset / block_size) as u64,
+        byte_offset % block_size,
+    ))
+}
 
 #[allow(dead_code)]
 /// Runtime layout derived from the on-disk superblock.

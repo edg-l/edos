@@ -14,8 +14,8 @@ mod common;
 
 use common::{
     JsbCursors, TxSpec, build_fixture_clean, corrupt_block_bitmap_bit, corrupt_link_count,
-    force_dirty_journal, plant_journal_txs, read_bytes_at, read_jsb, run_fsck,
-    scribble_journal_commit,
+    force_dirty_journal, plant_journal_txs, plant_unnamed_inode, read_bytes_at, read_jsb,
+    read_orphan_head, run_fsck, scribble_journal_commit, set_orphan_head,
 };
 
 // ---- Task 6.2: clean image exits 0 -----------------------------------------
@@ -456,5 +456,105 @@ fn corrupt_jsb_checksum_is_reported() {
     assert_eq!(
         code, 0,
         "--force should skip journal replay and finish the check; got {code}\nstdout: {stdout}"
+    );
+}
+
+// ---- The orphan chain -------------------------------------------------------
+//
+// An inode on the chain has no name by design: it lost its last one and its
+// deletion did not finish before the filesystem went away. Finishing it is what
+// a mount does, so the checker completes it without asking. An unnamed inode
+// that is *not* on the chain is a leak of unknown provenance and still needs the
+// prompt. These two tests are that distinction.
+
+/// Inodes clear of the root and of any metadata in a 32M fixture.
+const ORPHAN_INO_A: u64 = 10;
+const ORPHAN_INO_B: u64 = 11;
+
+#[test]
+fn orphan_chain_deletions_are_finished_without_prompting() {
+    let img = build_fixture_clean("efs_fsck_test_orphan_chain.img");
+
+    // Two inodes, chained A -> B, with the superblock pointing at A.
+    plant_unnamed_inode(&img.path, 0, ORPHAN_INO_A, ORPHAN_INO_B as u32)
+        .expect("plant_unnamed_inode failed");
+    plant_unnamed_inode(&img.path, 0, ORPHAN_INO_B, 0).expect("plant_unnamed_inode failed");
+    set_orphan_head(&img.path, 0, ORPHAN_INO_A as u32).expect("set_orphan_head failed");
+
+    let (code, stdout, stderr) = run_fsck(&img.path, &["--verbose"]);
+    assert_eq!(
+        code, 4,
+        "expected exit 4 while the deletions are outstanding; got {code}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("2 inode(s) pending deletion on the orphan chain"),
+        "expected the chain to be reported as pending deletions; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("orphan inode"),
+        "a chained inode must not be reported as an orphan leak; got:\n{stdout}"
+    );
+
+    // No --yes, and stdin is closed: a prompt would be declined. The chain's
+    // deletions are finished anyway, because they need no permission.
+    let (code, stdout, stderr) = run_fsck(&img.path, &["--repair"]);
+    assert!(
+        code < 2,
+        "expected the pending deletions to be finished; got {code}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("finishing 2 deletion(s)"),
+        "expected the repair to say what it finished; got:\n{stdout}"
+    );
+
+    let head = read_orphan_head(&img.path, 0).expect("read_orphan_head failed");
+    assert_eq!(head, 0, "the chain must be empty once its inodes are freed");
+
+    let (code, stdout, stderr) = run_fsck(&img.path, &["--verbose"]);
+    assert_eq!(
+        code, 0,
+        "expected a clean image after the deletions finished; got {code}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn unnamed_inode_off_the_chain_still_needs_the_prompt() {
+    let img = build_fixture_clean("efs_fsck_test_orphan_leak.img");
+
+    // Allocated, unnamed, and on no chain: provenance unknown.
+    plant_unnamed_inode(&img.path, 0, ORPHAN_INO_A, 0).expect("plant_unnamed_inode failed");
+
+    let (code, stdout, stderr) = run_fsck(&img.path, &[]);
+    assert_eq!(
+        code, 4,
+        "expected exit 4 for an orphan leak; got {code}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains(&format!("orphan inode {ORPHAN_INO_A}")),
+        "expected it to be reported as an orphan leak; got:\n{stdout}"
+    );
+
+    // stdin is closed, so the prompt is declined and nothing is freed.
+    let (_, stdout, _) = run_fsck(&img.path, &["--repair"]);
+    assert!(
+        stdout.contains("Delete 1 orphan inode(s)?"),
+        "expected the destructive prompt; got:\n{stdout}"
+    );
+    let (code, stdout, stderr) = run_fsck(&img.path, &[]);
+    assert_eq!(
+        code, 4,
+        "a declined prompt must leave the orphan in place; got {code}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // --yes accepts it, and then the image is clean.
+    let (_, stdout, stderr) = run_fsck(&img.path, &["--repair", "--yes"]);
+    assert!(
+        stdout.contains("auto-accepting deletion of 1 orphan inode(s)"),
+        "expected --yes to accept the deletion; got:\n{stdout}\nstderr: {stderr}"
+    );
+    let (code, stdout, stderr) = run_fsck(&img.path, &["--verbose"]);
+    assert_eq!(
+        code, 0,
+        "expected a clean image after the orphan was freed; got {code}\nstdout: {stdout}\nstderr: {stderr}"
     );
 }

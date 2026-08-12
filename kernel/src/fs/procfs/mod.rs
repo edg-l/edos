@@ -302,11 +302,13 @@ impl Procfs {
         use crate::fs::efs::{
             EFS_EXTENT_BATCHES, EFS_EXTENT_HOLES, EFS_EXTENT_READS, EFS_EXTENT_RUNS,
         };
+        use crate::fs::efs::{ORPHANS_LINKED, ORPHANS_RECOVERED, ORPHANS_UNLINKED};
         use crate::fs::inode::{ORPHANS_DROPPED, ORPHANS_MARKED};
         use crate::fs::journal::tx::TX_ABORTS;
         format!(
             "blocks_allocated: {}\nblocks_freed: {}\nalloc_failed: {}\ntx_aborts: {}\n\
              orphans_marked: {}\norphans_dropped: {}\n\
+             orphans_linked: {}\norphans_unlinked: {}\norphans_recovered: {}\n\
              extent_reads: {}\nextent_runs: {}\nextent_batches: {}\nextent_holes: {}\n",
             EFS_BLOCKS_ALLOCATED.load(Ordering::Relaxed),
             EFS_BLOCKS_FREED.load(Ordering::Relaxed),
@@ -314,6 +316,9 @@ impl Procfs {
             TX_ABORTS.load(Ordering::Relaxed),
             ORPHANS_MARKED.load(Ordering::Relaxed),
             ORPHANS_DROPPED.load(Ordering::Relaxed),
+            ORPHANS_LINKED.load(Ordering::Relaxed),
+            ORPHANS_UNLINKED.load(Ordering::Relaxed),
+            ORPHANS_RECOVERED.load(Ordering::Relaxed),
             EFS_EXTENT_READS.load(Ordering::Relaxed),
             EFS_EXTENT_RUNS.load(Ordering::Relaxed),
             EFS_EXTENT_BATCHES.load(Ordering::Relaxed),

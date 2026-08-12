@@ -179,7 +179,10 @@ does not start on a block boundary cannot be addressed in that domain.
 | Finding | Severity | Fixable | What fsck does |
 |---------|----------|---------|----------------|
 | `inode N link_count on-disk=X observed=Y` | ERROR | yes | With `--repair`: updates `inode.link_count` to the observed value, recomputes inode CRC. |
-| `orphan inode N (reachable link count 0)` | ERROR | yes | With `--repair` (separate prompt, default NO): clears inode bitmap bit, zeros inode table entry, frees extent blocks. **Destructive.** |
+| `inode N pending deletion (on the orphan chain)` | ERROR | yes | With `--repair`: finishes the deletion — frees the extent blocks, clears the inode bitmap bit, zeros the inode, and empties the chain. **No prompt**: this is the same act the next mount performs, not a judgement about data. |
+| `orphan inode N (reachable link count 0)` | ERROR | yes | An unnamed inode that is *not* on the orphan chain, so its provenance is unknown. With `--repair` (separate prompt, default NO): clears inode bitmap bit, zeros inode table entry, frees extent blocks. **Destructive.** |
+| `orphan chain loops back to inode N` / `reaches inode N, beyond the …` | ERROR | no | Ends the walk. What the chain could still reach is completed; the rest is reported as ordinary orphans. |
+| `inode N is on the orphan chain with link_count M` | WARN | no | A chained inode has no name, so a non-zero count is stale. Reported, not acted on. |
 | `.` entry points to wrong inode | ERROR | no | Reports only. |
 | `..` entry points to wrong parent | ERROR | no | Reports only. |
 | Directory cycle detected | ERROR | no | Reports only; that subtree is not descended into. |
@@ -243,7 +246,9 @@ confirm the filesystem is clean.
   walks both — a depth-1 inode's leaf blocks are validated and seeded into the
   rebuilt block bitmap alongside its data blocks. A `depth > 1` header is
   reported as an error and that inode's blocks are skipped.
-- **No `lost+found`**: orphan inodes are offered for deletion, not recovery.
+- **No `lost+found`**: orphan inodes are offered for deletion, not recovery. An
+  inode on the orphan chain is a different case: the filesystem already decided
+  to delete it, so `--repair` finishes the job rather than offering a choice.
   A `lost+found` directory is a v2 feature.
 - **No FAT32 or memfs**: `efs-fsck` only handles the EFS (`EFS!` magic) format.
   The kernel's other filesystem drivers (FAT32, memfs, procfs, devfs) are not

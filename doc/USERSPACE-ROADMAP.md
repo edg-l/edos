@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-105 programs and 2 libraries, all in the `programs/` cargo workspace.
+106 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -22,7 +22,7 @@
 | Images | `imgview` (BMP viewer) |
 | Games | `snake` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
-| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest`, `sigtest`, `fstest`, `socktest`, `stdtest`, `syscallfuzz` |
+| Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest`, `sigtest`, `fstest`, `socktest`, `stdtest`, `syscallfuzz`, `orphantest` |
 | Benchmarks | `fsbench` (filesystem, see `doc/fsbench.md`), `switchbench` and `pollbench` (scheduler and poll paths, see `doc/SCHED-ROADMAP.md`) |
 | Libraries | `edos_lib` (syscall wrappers), `edos_render` (fonts, text, icons, theme, widgets, windows) |
 

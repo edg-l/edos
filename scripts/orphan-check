@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Orphan-list regression: does a mount finish the deletions a crash interrupted?
+
+An inode that has lost its last name but still has an open descriptor is on
+EFS's on-disk orphan chain: allocated, named by nothing, pending deletion. That
+window is microseconds wide in normal use, so `programs/orphantest` holds it
+open on purpose. This script cuts power while it is wide and then checks that
+
+  1. the remount says it freed the inodes, and `orphans_recovered` agrees, and
+  2. `efs-fsck` on the host finds no orphan inodes left behind.
+
+Before the chain existed, both of those failed: the inodes stayed allocated with
+nothing naming them, and only `efs-fsck --repair` could reclaim them.
+
+    make orphan-check
+
+Exits 0 when the mount reclaimed everything, 1 otherwise.
+"""
+
+import os
+import re
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from vmdrive import REPO, VM, BOOT_SECONDS, serial_mark, serial_tail, type_line, vm, wait_for  # noqa: E402
+
+EXTRA_DISK = os.path.join(REPO, "journal-test.img")
+FSCK = os.path.join(REPO, "tools/efs-fsck/target/release/efs-fsck")
+# journal-test.img is a GPT image whose one partition starts at LBA 2048.
+PARTITION_OFFSET = 1024 * 1024
+# See scripts/recovery-check for why the scratch disk is device 2.
+MOUNT_CMD = "mount 2 0 /mnt efs"
+ORPHANS = 8
+
+
+def boot_with_extra_disk():
+    vm("start", "--extra-disk", EXTRA_DISK)
+    time.sleep(BOOT_SECONDS)
+    vm("click", "400", "300")
+    time.sleep(1)
+
+
+def mount_scratch(mark):
+    type_line(
+        f"{MOUNT_CMD} && echo ORPHAN_MOUNT_OK > /dev/klog "
+        "|| echo ORPHAN_MOUNT_FAIL > /dev/klog",
+        settle=1,
+    )
+    out = wait_for(mark, "ORPHAN_MOUNT_", 20)
+    if out is None or "ORPHAN_MOUNT_OK" not in out:
+        print(serial_tail(mark)[-2000:])
+        vm("stop")
+        sys.exit("orphan-check: scratch partition did not mount")
+
+
+def efs_counter(mark, name):
+    """Read one /proc/efs_stats counter through the serial log."""
+    type_line("cat /proc/efs_stats > /dev/klog", settle=2)
+    out = wait_for(mark, "orphans_recovered", 15) or serial_tail(mark)
+    m = None
+    for line in out.splitlines():
+        found = re.search(rf"{name}: (\d+)", line)
+        if found:
+            m = found
+    return int(m.group(1)) if m else None
+
+
+def main():
+    if not os.path.exists(os.path.join(REPO, "edos-x86_64.iso")):
+        sys.exit("missing edos-x86_64.iso; run `make orphan-check` rather than this script")
+    if not os.path.exists(EXTRA_DISK):
+        sys.exit("missing journal-test.img; run `make journal-test.img` first")
+
+    subprocess.run([VM, "stop"], capture_output=True)
+
+    print(f"[1/4] holding {ORPHANS} unlinked-but-open files...")
+    boot_with_extra_disk()
+    mark = serial_mark()
+    mount_scratch(mark)
+
+    type_line(f"orphantest /mnt {ORPHANS} &", settle=2)
+    out = wait_for(mark, "ORPHANTEST_HOLDING", 30)
+    if out is None:
+        print(serial_tail(mark)[-2000:])
+        vm("stop")
+        sys.exit("orphan-check: orphantest never reported holding the files")
+
+    linked = efs_counter(mark, "orphans_linked")
+    unlinked = efs_counter(mark, "orphans_unlinked")
+    if linked is None or unlinked is None:
+        print(serial_tail(mark)[-2000:])
+        vm("stop")
+        sys.exit("orphan-check: /proc/efs_stats has no orphan counters; is this a stale ISO?")
+    live = linked - unlinked
+    if live < ORPHANS:
+        print(serial_tail(mark)[-2000:])
+        vm("stop")
+        sys.exit(
+            f"orphan-check: only {live} inode(s) on the chain, expected at least "
+            f"{ORPHANS}; the test's own setup failed, not a verdict on recovery"
+        )
+    print(f"    {live} inode(s) on the orphan chain, as intended")
+
+    print("[2/4] cutting power...")
+    vm("stop")
+
+    print("[3/4] remounting and checking that the mount finished them...")
+    boot_with_extra_disk()
+    mark2 = serial_mark()
+    mount_scratch(mark2)
+    mount_log = serial_tail(mark2)
+
+    recovered = efs_counter(mark2, "orphans_recovered")
+
+    # The mount's frees are journalled, so a second power cut here would leave
+    # them in the ring with the chain's old head still at its home block, and the
+    # host-side check below reads the image without replaying. A sync puts them
+    # where efs-fsck looks.
+    type_line("sync && echo ORPHAN_SYNC_OK > /dev/klog", settle=2)
+    if wait_for(mark2, "ORPHAN_SYNC_OK", 30) is None:
+        print(serial_tail(mark2)[-2000:])
+        vm("stop")
+        sys.exit("orphan-check: sync did not finish; the image is not checkpointed")
+    vm("stop")
+
+    freed_line = next(
+        (line.strip() for line in mount_log.splitlines() if "orphaned inode(s)" in line),
+        None,
+    )
+    if recovered is None or recovered < ORPHANS:
+        print(mount_log[-3000:])
+        print(
+            f"orphan-check: FAILED, the mount recovered {recovered} inode(s), expected "
+            f"{ORPHANS}"
+        )
+        return 1
+    print(f"    {freed_line or f'orphans_recovered={recovered}'}")
+
+    print("[4/4] checking the image with efs-fsck...")
+    if not os.path.exists(FSCK):
+        print("    SKIP: efs-fsck not built")
+        print("orphan-check: OK (guest side only)")
+        return 0
+    proc = subprocess.run(
+        [FSCK, "--partition-offset", str(PARTITION_OFFSET), EXTRA_DISK],
+        capture_output=True,
+        text=True,
+    )
+    if "orphan inode" in proc.stdout or "pending deletion" in proc.stdout:
+        print(proc.stdout)
+        print("orphan-check: FAILED, efs-fsck still sees inodes with no name")
+        return 1
+    print(f"    efs-fsck exit {proc.returncode}, no orphans reported")
+
+    print(f"orphan-check: OK, the mount reclaimed {recovered} interrupted deletion(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

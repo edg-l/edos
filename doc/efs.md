@@ -136,7 +136,8 @@ All multi-byte fields are stored **little-endian**.
 | 200 | 4 | `journal_block_count` | `u32` | Blocks reserved for the journal, including its superblock |
 | 204 | 4 | `journal_sb_checksum` | `u32` | CRC32 of the journal superblock, so it can be sanity-checked without reading the journal |
 | 208 | 1 | `fsck_in_progress` | `u8` | Set to 1 while `efs-fsck --repair` runs, cleared on clean exit. If set at startup, fsck refuses to run without `--force` |
-| 209 | 47 | `reserved` | `[u8; 47]` | Reserved; must be zero |
+| 209 | 4 | `last_orphan` | `u32` | Inode number heading the orphan chain, or 0 when nothing is pending deletion. See Section 14 |
+| 213 | 43 | `reserved` | `[u8; 43]` | Reserved; must be zero |
 
 **Total defined size:** 256 bytes. Bytes 256 through end-of-block must be zero.
 
@@ -212,7 +213,7 @@ All multi-byte fields are stored **little-endian**.
 | 8 | 8 | `size` | `u64` | File size in bytes |
 | 16 | 8 | `blocks` | `u64` | Number of filesystem blocks (not 512-byte sectors) allocated to this inode |
 | 24 | 4 | `flags` | `u32` | Inode flags (see Inode Flags table below) |
-| 28 | 4 | `reserved1` | `u32` | Reserved; must be zero |
+| 28 | 4 | `orphan_next` | `u32` | Next inode in the orphan chain, 0 at its end. Meaningful only while this inode is on the chain; see Section 14 |
 | 32 | 8 | `ctime_sec` | `u64` | Creation time: seconds since Unix epoch (1970-01-01 00:00:00 UTC) |
 | 40 | 4 | `ctime_nsec` | `u32` | Creation time: nanoseconds component (0..=999999999) |
 | 44 | 4 | `reserved2` | `u32` | Reserved; must be zero |
@@ -528,24 +529,18 @@ name reaches it. Removing the directory entry and freeing the inode therefore
 happen in one transaction. An allocated `S_IFLNK` inode with no directory entry is
 a leak, and `efs-fsck` reports it as an orphan.
 
-**There is no on-disk orphan list, and that is why a power cut leaves orphan
-inodes.** `vfs::remove_file` implements Linux's unlink semantics: the driver
+**A regular file survives its last name, and the orphan chain is what records
+that on disk.** `vfs::remove_file` implements Linux's unlink semantics: the driver
 detaches the directory entry and must not free the inode, and the inode is freed
 by `FileSystem::evict_inode` when the last `Arc<VfsInode>` drops. Between those
 two points the on-disk state is *deliberately* an allocated inode that no
-directory entry names, and the only record that it is pending deletion is the
-in-memory orphan mark (`/proc/evict_stats`, `orphans_marked`). Nothing on disk
-says so, so an unclean shutdown in that window strands the inode and its blocks
-permanently; `efs-fsck` reports `orphan inode N` and `--repair` reclaims it.
+directory entry names.
 
-ext3/4 close the same window with an on-disk orphan chain (`s_last_orphan` in the
-superblock, walked at mount to finish the deletions). EFS has the semantics
-without the list. Until it has one, orphan inodes after a power cut are expected
-output, not evidence of a journal or ordering defect.
-
-`orphans_marked - orphans_dropped` in `/proc/efs_stats` is the number a crash
-would strand at that instant. It is not small: a `fsbench all /var` run holds its
-descriptors to the end, so the gap is **513** for the length of the run.
+That window is entered constantly — a `fsbench all /var` run holds its descriptors
+to the end, so `orphans_marked - orphans_dropped` in `/proc/efs_stats` sits at
+**513** for the length of it — and every inode in it is one an unclean shutdown
+would stranded permanently if nothing on disk said it was pending deletion. The
+chain in Section 14 is what says so, and a mount finishes what it names.
 
 ---
 
@@ -623,6 +618,7 @@ let read_only = (sb.read_only_features & !KNOWN_RO_COMPAT) != 0;
 | Bit | Name | Value | Meaning |
 |-----|------|-------|---------|
 | 0 | `COMPAT_DISCARD` | `0x0000000000000001` | The filesystem was created with TRIM/discard support. The driver should issue discard commands to the block device when freeing blocks. Drivers that do not support discard can ignore this flag and mount read/write. |
+| 1 | `COMPAT_ORPHAN_LIST` | `0x0000000000000002` | `last_orphan` heads a chain of inodes pending deletion, threaded through `orphan_next` (Section 14). A driver that ignores the flag still reads and writes correctly; it just strands the inodes on the chain after an unclean shutdown, which is what every driver did before the chain existed. Set on every image `efs-mkfs` produces. |
 
 #### Incompatible Features (`incompatible_features`)
 
@@ -901,7 +897,47 @@ Idempotent: crash during replay re-replays on next boot.
 - Metadata committed to the journal survives power loss.
 - Partial transactions (no commit block) are discarded on replay.
 - Freed blocks are revoke-protected against stale replay.
+- A deletion interrupted between losing its name and freeing its storage is
+  finished by the next mount, through the orphan chain below.
 - File data is NOT crash-safe (data=writeback mode).
+
+### The orphan chain
+
+A regular file's inode outlives its last directory entry: the entry goes away when
+it is unlinked, and the inode and its blocks are freed only when the last open
+reference drops (Section 8). On disk, therefore, there is a window in which an
+inode is allocated and nothing names it. The chain is what records that the state
+is a deletion in progress rather than a leak.
+
+```
+superblock.last_orphan ──▶ inode A.orphan_next ──▶ inode B.orphan_next ──▶ 0
+```
+
+- `remove_file` links the inode in **in the same transaction that removes its
+  directory entry**. Anything less is a window of its own: a crash between the two
+  writes would leave the inode unnamed and unrecorded, which is the state the chain
+  exists to prevent.
+- `evict_inode` unlinks it **in the same transaction that frees its storage**. The
+  two together are what "this deletion finished" means on disk.
+- Mount walks the chain and completes every deletion on it, after journal replay —
+  replay is what restores the chain the committed transactions describe, so walking
+  before it would read a stale head. Each inode is freed in its own transaction, so
+  an interrupted recovery leaves the rest of the chain for the next mount.
+- Directories and symbolic links are never on it. Their storage is freed in the
+  transaction that unnames them, because nothing can hold a reference to either.
+
+The head is a `u32` inode number, as is `orphan_next`, so the chain cannot address
+inode numbers above `u32::MAX`; `efs-mkfs` never creates that many. Zero is the
+end-of-chain sentinel, which works because inode 0 is never allocated — and it also
+means an image written before the chain existed reads as a chain of length zero.
+
+`/proc/efs_stats` reports `orphans_linked`, `orphans_unlinked` and
+`orphans_recovered`. The first two differ by the chain's current length, which is
+the number of deletions a power cut at that instant would leave for the next mount;
+the third is how many the current mount actually finished, so it is non-zero after
+an unclean shutdown and zero after a clean one. `make orphan-check` is the
+regression: it holds unlinked-but-open files, cuts power, and fails unless the
+remount reclaims them.
 
 ### What enforces write-ahead ordering
 
@@ -1035,7 +1071,8 @@ FT_DIR      = 2
 FT_SYMLINK  = 7
 
 // Feature flags
-COMPAT_DISCARD   = 0x0000000000000001
+COMPAT_DISCARD     = 0x0000000000000001
+COMPAT_ORPHAN_LIST = 0x0000000000000002
 INCOMPAT_JOURNAL = 0x0000000000000001
 
 // Journal
