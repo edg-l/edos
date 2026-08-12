@@ -1026,7 +1026,7 @@ pub fn sys_openat(dirfd: i64, path_ptr: *const u8, path_len: usize, flags: u64) 
 /// O_TRUNC and O_APPEND.
 const OPEN_FLAGS_SUPPORTED: u64 = 0x3 | 0x40 | 0x200 | 0x400;
 
-/// Open an already-resolved absolute path, shared by `open` and `openat`.
+/// Open an already-resolved absolute path.
 fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64) -> i64 {
     // A flag this kernel does not implement is refused rather than ignored:
     // silently dropping O_EXCL or O_DIRECTORY hands back a descriptor whose
