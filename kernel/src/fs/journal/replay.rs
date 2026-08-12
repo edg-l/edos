@@ -38,18 +38,41 @@ fn block_read(device_id: u64, lba: u64, sectors: u16, buf: &mut [u8]) -> Result<
     Ok(())
 }
 
-fn block_write(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(), AhciError> {
+/// A replay write that has been submitted but not waited on. `data` is the DMA
+/// source and must outlive the handle, so it is carried here rather than being
+/// dropped at the end of the loop iteration that issued it.
+struct InflightReplay {
+    handle: alloc::sync::Arc<crate::drivers::block_io::BlockIoHandle>,
+    data: Vec<u8>,
+}
+
+/// Issue a home-block write without waiting, so replay can keep several
+/// outstanding instead of paying a round trip per block.
+fn submit_block_write(
+    device_id: u64,
+    lba: u64,
+    sectors: u16,
+    data: Vec<u8>,
+) -> Result<InflightReplay, AhciError> {
     let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
-    let h = dev.submit_write(
+    let handle = dev.submit_write(
         lba,
         sectors as u32,
         BlockBuffer::Slice {
-            ptr: buf.as_ptr() as *mut u8,
-            len: buf.len(),
+            ptr: data.as_ptr() as *mut u8,
+            len: data.len(),
         },
         WriteFlags::NONE,
     )?;
-    h.wait()?;
+    Ok(InflightReplay { handle, data })
+}
+
+/// Wait for one outstanding replay write. The buffer is only free once the
+/// device has finished reading it.
+fn reap_replay(write: InflightReplay) -> Result<(), AhciError> {
+    let result = write.handle.wait();
+    drop(write.data);
+    result?;
     Ok(())
 }
 
@@ -88,6 +111,7 @@ pub fn replay(
     head_seq: u64,
     tail_seq: u64,
     tail_block: u64,
+    head_block: u64,
 ) -> Result<ReplayResult, AhciError> {
     if head_seq == tail_seq {
         log!("efs journal: clean, no replay needed");
@@ -103,9 +127,16 @@ pub fn replay(
     let ring_size = block_count as u64 - 1; // block 0 = JSB
 
     // Read one journal ring block by its ring-internal index.
+    //
+    // `first_block` is an EFS block number, which is partition-relative, so the
+    // partition's starting LBA has to be added exactly as the home-block write
+    // below does. Without it the ring is read `partition_start_lba` sectors too
+    // low, off the front of the partition: every header fails to parse, replay
+    // reports no committed transactions, and an unclean mount silently discards
+    // the metadata the journal was holding for it.
     let read_ring_block = |ring_idx: u64| -> Result<Vec<u8>, AhciError> {
         let wrapped = (ring_idx % ring_size) + 1;
-        let lba = (first_block + wrapped) * SECTORS_PER_BLOCK as u64;
+        let lba = partition_start_lba + (first_block + wrapped) * SECTORS_PER_BLOCK as u64;
         let mut buf = vec![0u8; BLOCK_SIZE];
         block_read(device_id, lba, SECTORS_PER_BLOCK, &mut buf)?;
         Ok(buf)
@@ -121,9 +152,27 @@ pub fn replay(
     let mut ring_pos: u64 = tail_block;
     let mut total_ring_blocks: u64 = 0;
 
+    // Blocks the writer actually produced, tail to head, wrapping. Anything at
+    // or past the head is space the ring has not reached yet or has already
+    // reused, and on a wrapped ring that is a *older* transaction that still
+    // parses: descriptor, data and commit blocks all intact, with a lower seq.
+    // Replaying it rolls metadata backwards. Stopping when parsing fails is not
+    // enough, because it does not fail there.
+    let live_blocks = {
+        let head = head_block % ring_size;
+        let tail = tail_block % ring_size;
+        if head == tail {
+            // `head_seq != tail_seq` got us here, so equal cursors mean the ring
+            // is exactly full rather than empty.
+            ring_size
+        } else {
+            (head + ring_size - tail) % ring_size
+        }
+    };
+
     loop {
-        if ring_pos >= tail_block + ring_size {
-            // Don't scan more than one full ring from the starting position.
+        if ring_pos >= tail_block + live_blocks {
+            // Reached the head: everything the writer committed has been read.
             break;
         }
 
@@ -246,9 +295,24 @@ pub fn replay(
     }
 
     // ---- Pass 2: apply committed txs ----------------------------------------
+    //
+    // Home-block writes are queued rather than waited on one at a time: replay
+    // runs on the mount path, so its cost is boot latency after an unclean
+    // shutdown, and a full ring is hundreds of blocks. Depth is bounded so the
+    // port's queue is not oversubscribed and so the buffers held for DMA stay a
+    // fixed cost rather than the whole ring.
+    //
+    // Ordering within the ring is preserved by the revoke check below and by
+    // replay applying transactions in sequence order, not by the device: two
+    // outstanding writes never target the same home block, because a later
+    // transaction writing the same block revokes the earlier one.
+    const MAX_INFLIGHT_REPLAY: usize = 16;
     let mut applied = 0u64;
+    let mut inflight: alloc::collections::VecDeque<InflightReplay> =
+        alloc::collections::VecDeque::new();
+    let mut failure: Option<AhciError> = None;
 
-    for tx in &committed_txs {
+    'outer: for tx in &committed_txs {
         for (i, entry) in tx.entries.iter().enumerate() {
             let fs_block = entry.fs_block;
 
@@ -266,12 +330,40 @@ pub fn replay(
                 data[..4].copy_from_slice(&JOURNAL_BLOCK_MAGIC.to_le_bytes());
             }
 
+            while inflight.len() >= MAX_INFLIGHT_REPLAY {
+                let Some(done) = inflight.pop_front() else {
+                    break;
+                };
+                if let Err(e) = reap_replay(done) {
+                    failure.get_or_insert(e);
+                    break 'outer;
+                }
+            }
+
             // Write to home location via direct AHCI (not through the block page
             // cache — the cache isn't populated yet during early mount).
             let lba = partition_start_lba + fs_block * SECTORS_PER_BLOCK as u64;
-            block_write(device_id, lba, SECTORS_PER_BLOCK, &data)?;
+            match submit_block_write(device_id, lba, SECTORS_PER_BLOCK, data) {
+                Ok(w) => inflight.push_back(w),
+                Err(e) => {
+                    failure.get_or_insert(e);
+                    break 'outer;
+                }
+            }
         }
         applied += 1;
+    }
+
+    // Every outstanding command is drained before its buffer is dropped, on the
+    // failure path too: returning early would free memory the device is still
+    // reading from.
+    while let Some(done) = inflight.pop_front() {
+        if let Err(e) = reap_replay(done) {
+            failure.get_or_insert(e);
+        }
+    }
+    if let Some(e) = failure {
+        return Err(e);
     }
 
     // Flush all replayed writes to platter.

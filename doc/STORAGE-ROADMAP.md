@@ -55,9 +55,8 @@ is the one remaining number that would still matter on real hardware.
 The reason is structural, not a slow submit path. **Almost every I/O path in the
 kernel is submit-then-wait.** `block_read` / `block_write` / `block_write_fua`
 in `fs/efs/mod.rs`, `read_frame` / `write_frame` / `write_frames` in
-`fs/block_page_cache.rs`, and the equivalents in `fs/journal/replay.rs`,
-`fs/fat32/`, `fs/gpt.rs` and `fs/mbr.rs` all call `submit_*` and immediately park on the
-handle.
+`fs/block_page_cache.rs`, and the equivalents in `fs/fat32/`, `fs/gpt.rs` and
+`fs/mbr.rs` all call `submit_*` and immediately park on the handle.
 
 Three paths do not. `BlockPageCache::read_pages` → `submit_read_batch` coalesces
 contiguous misses first, so a 1 MiB miss is two commands rather than 256. Since
@@ -75,8 +74,21 @@ outstanding write. And since 2026-08-12 `read_via_extents` plans every run of a
 bulk file read before issuing any: a range that spans several extents, or that
 is longer than the 992 KiB one command carries, goes out as one queue of up to
 16 commands (or 2 MiB of staging, whichever comes first) instead of one round
-trip per run. The mount-time paths (`fs/journal/replay.rs` home blocks,
-`fs/fat32/`, `fs/gpt.rs`, `fs/mbr.rs`) still do not.
+trip per run. Journal replay queues its home-block writes too, since
+2026-08-12, capped at 16 outstanding with each block's buffer held until its own
+handle completes: a full ring is hundreds of blocks and replay runs on the mount
+path, so its cost is boot latency after an unclean shutdown. The remaining
+mount-time paths (`fs/fat32/`, `fs/gpt.rs`, `fs/mbr.rs`) still do not.
+
+Two of the paths named above turn out not to be worth converting, which is worth
+recording so the list is not walked twice. `write_via_extents` in `fs/efs/mod.rs`
+is reachable only through `FileSystem::write_bytes`/`write_bytes_ino`, and EFS
+returns `Some(self)` from `as_page_cache_ops`, so every ordinary EFS write goes
+through `page_cache_write` and `flush_pages_bulk` instead; the loop is dead on the
+hot path. `read_frame`, `write_frame` and the `write_frame` at the tail of
+`invalidate_device` each handle exactly one page, so there is nothing to queue
+inside a call: the win there would have to come from restructuring their callers,
+which is a different change.
 
 That read change does not move `fsbench ra` on a contiguous file: its window is
 128 pages, one run, and every async window takes the single-submit prefetch

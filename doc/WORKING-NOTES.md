@@ -58,6 +58,51 @@ fragmented-file reads.
 
 ---
 
+## Journal replay never worked, and the suite could not have told you
+
+`read_ring_block` in `fs/journal/replay.rs` built its LBA without
+`partition_start_lba`, while the home-block write in the same function added it.
+EFS block numbers are partition-relative, so the ring was read 2048 sectors
+before the partition on a GPT disk: nothing parsed, and every unclean mount
+logged `no committed transactions to replay` and discarded the metadata the
+journal was holding. Recovery has never applied a transaction.
+
+A second bug surfaced the moment the first was fixed: pass 1 stopped when a
+header failed to parse and never consulted `head_block`. Past the head on a
+wrapped ring sits an *older* transaction that parses perfectly, so replay applied
+it and rolled metadata backwards. Both are fixed, and the home-block writes are
+queued now rather than one round trip each. Full writeup in
+`doc/bugs/2026-08-12-journal-replay-read-the-wrong-lba.md`.
+
+**The part worth keeping is how to test recovery at all.** No userspace workload
+leaves committed, un-checkpointed transactions behind: writeback checkpoints
+promptly, so every power cut mid-workload gave `clean, no replay needed`. Rewind
+the journal superblock on the host instead:
+
+```bash
+qemu-img convert -f qcow2 -O raw sata-disk.img /tmp/sata.raw
+# find b'EJS!' at a 4096-aligned offset; u32 magic/version/block_count/block_size,
+# then u64 tail_seq@16 head_seq@24 tail_block@32 head_block@40, u32 crc32@48.
+# CRC is zlib.crc32 over the 64-byte struct with crc32 zeroed.
+# Set tail_seq/tail_block to a real descriptor's seq and ring index, then:
+qemu-img convert -f raw -O qcow2 /tmp/sata.raw sata-disk.img
+```
+
+Two traps in that, both of which cost a boot:
+
+- **Ring indices exclude the superblock.** Index 0 maps to the journal region's
+  *second* block. Setting `tail_block` to the descriptor's physical block number
+  lands one block late, mid-transaction, and reads exactly like a corrupt ring.
+- **Rewind to a transaction inside `head_block`.** Going further tests the
+  over-scan bug rather than recovery: rewinding to seq 1 replayed 91
+  transactions over a 644-block head and left a tree that could not load
+  `bin/edos-init`.
+
+`fs-regression` passing across a reboot proves nothing here, because a clean
+unmount has nothing to replay.
+
+---
+
 ## The newest committed transaction was never retired, so `sync` never converged
 
 `sys_sync` loops commit, flush, `advance_tail` to a fixed point, up to

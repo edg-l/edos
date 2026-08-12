@@ -315,6 +315,7 @@ impl EfsDriver {
             jsb_head_seq,
             jsb_tail_seq,
             jsb_tail_block,
+            jsb_head_block,
         )?;
 
         // After replay, reset the JSB: tail = head (all applied).
