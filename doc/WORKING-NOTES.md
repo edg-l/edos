@@ -11,8 +11,10 @@ session.
 Every gate is green and re-run at this commit: `make -C kernel check` and
 `cargo check --features sched-test` are warning-free, both `cargo fmt --check`
 and `cargo +edos fmt --check` exit 0, `make test AUDIODEV=none` is **ALL 51
-TESTS PASSED**, the desktop boots to a shell prompt under
-`make run-headless`, and `iotest /var` is 20/20 in the guest.
+TESTS PASSED** (run twice, because `ping-pong` is a known flake), the desktop
+boots to a shell prompt under `make run-headless`, `iotest /var` is 20/20 in
+the guest, and `scripts/fs-regression` passes across a reboot on both EFS and
+FAT32.
 
 The write-path data loss that dominated the last third of the session is
 **fixed**: EFS zeroed a newly allocated block through the journal, and that
