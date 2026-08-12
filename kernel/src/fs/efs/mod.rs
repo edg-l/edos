@@ -2808,9 +2808,9 @@ impl PageCacheOps for EfsDriver {
                 }
 
                 while inflight.len() >= MAX_INFLIGHT_WRITES {
-                    let done = inflight
-                        .pop_front()
-                        .expect("non-empty by the loop condition");
+                    let Some(done) = inflight.pop_front() else {
+                        break;
+                    };
                     if let Err(e) = reap_write(self.device.device_id, done) {
                         failure.get_or_insert(e.into());
                     }
