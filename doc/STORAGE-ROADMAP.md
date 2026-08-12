@@ -509,13 +509,6 @@ lookup result down through the trait.
 
 Not performance, but found by this work and unfixed.
 
-- **Interleaved appends drop whole blocks on the write path.** `fsbench fragprep
-  /var`, reboot, `fsbench ra /var` reads a 4 KiB-aligned run of zeros, and a host
-  scan of that image (`scripts/fsbench-pattern-scan.py`, one tag per file) finds
-  467 of the 8192 written blocks nowhere on the disk, none misdirected and none
-  torn. Allocation covered every block, so it is the data write that did not
-  happen. The contiguous arm of the same build verifies clean. Evidence and the
-  stride-4 shape of the loss are in `doc/WORKING-NOTES.md`.
 - **An intermittent segfault in `mmap store 4MiB + msync`**, roughly one
   `fsbench /var` run in six: `KILL: PF addr=... User write to unmapped page`.
   Unexplained. Item 4 above records a past `MAP_SHARED` segfault near the

@@ -131,6 +131,25 @@ use crate::{
 
 // ---- Constants ----------------------------------------------------------------
 
+/// Whether a freshly allocated block has to be zeroed on disk before it is
+/// mapped into a file.
+///
+/// Zeroing is a journalled write of the block, so the journal carries a copy of
+/// that block's home location full of zeros. File data bypasses the block page
+/// cache and goes straight to the device, which means the zeros are written to
+/// the home block *after* the data whenever the copy reaches it: a concurrent
+/// `flush_dirty_once` from another thread's fsync, or a replay of the ring after
+/// a reboot that found the transaction committed but not checkpointed. A caller
+/// that overwrites every byte of the block must therefore not stage them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NewBlock {
+    /// The caller may read the block back, or write only part of it, so it must
+    /// start as zeros rather than whatever its previous life left behind.
+    Zeroed,
+    /// The caller writes the whole block before it returns.
+    Overwritten,
+}
+
 /// Where a path walk stopped.
 enum Walk {
     Node((u64, EfsInode)),
@@ -952,7 +971,12 @@ impl EfsDriver {
             let offset_in_block = cur_byte % block_size;
             let copy_len = (data.len() - written).min(block_size - offset_in_block);
 
-            let phys_block = self.ensure_block_for_logical(ino, logical_block, tx)?;
+            let new = if copy_len == block_size {
+                NewBlock::Overwritten
+            } else {
+                NewBlock::Zeroed
+            };
+            let phys_block = self.ensure_block_for_logical(ino, logical_block, new, tx)?;
 
             // INVARIANT: file-data writes bypass BlockPageCache to stay consistent
             // with the read path (read_via_extents) which also bypasses it. Only
@@ -983,16 +1007,18 @@ impl EfsDriver {
         &self,
         ino: u64,
         logical_block: u32,
+        new: NewBlock,
         tx: &mut TxHandle<'_>,
     ) -> Result<u64, Error> {
         let _rmw = ranked_lock!(RANK_EFS_INODE_RMW, "EfsDriver.inode_rmw", self.inode_rmw);
-        self.ensure_block_for_logical_locked(ino, logical_block, tx)
+        self.ensure_block_for_logical_locked(ino, logical_block, new, tx)
     }
 
     fn ensure_block_for_logical_locked(
         &self,
         ino: u64,
         logical_block: u32,
+        new: NewBlock,
         tx: &mut TxHandle<'_>,
     ) -> Result<u64, Error> {
         let inode = self.read_inode(ino)?;
@@ -1004,9 +1030,10 @@ impl EfsDriver {
 
         // Allocate a new block.
         let phys_block = self.alloc_block(tx)?;
-        // Zero it.
-        let block_size = self.block_size() as usize;
-        self.write_block(phys_block, &vec![0u8; block_size], tx)?;
+        if new == NewBlock::Zeroed {
+            let block_size = self.block_size() as usize;
+            self.write_block(phys_block, &vec![0u8; block_size], tx)?;
+        }
 
         extents.insert(logical_block, phys_block);
 
@@ -1074,11 +1101,10 @@ impl EfsDriver {
                 continue;
             }
 
-            // Allocate a new physical block.
+            // Allocate a new physical block. The caller writes every byte of it
+            // straight to the device, so it is not zeroed first: see
+            // [`NewBlock`] for what staging those zeros costs.
             let phys_block = self.alloc_block(tx)?;
-            // Zero the new block.
-            let block_size = self.block_size() as usize;
-            self.write_block(phys_block, &vec![0u8; block_size], tx)?;
 
             // Extent coalescing: if the last extent is contiguous (both logically
             // and physically) with the new block, extend it.
@@ -1489,7 +1515,8 @@ impl EfsDriver {
             }
 
             let logical_block = (new_block_start / block_size) as u32;
-            let phys_block = self.ensure_block_for_logical(dir_ino, logical_block, tx)?;
+            let phys_block =
+                self.ensure_block_for_logical(dir_ino, logical_block, NewBlock::Overwritten, tx)?;
             self.write_block(
                 phys_block,
                 &dir_data[new_block_start..new_block_start + block_size],
@@ -1605,7 +1632,8 @@ impl EfsDriver {
         let mut buf = vec![0u8; block_size];
         while written < dir_data.len() {
             let logical_block = (written / block_size) as u32;
-            let phys_block = self.ensure_block_for_logical(dir_ino, logical_block, tx)?;
+            let phys_block =
+                self.ensure_block_for_logical(dir_ino, logical_block, NewBlock::Overwritten, tx)?;
             let end = (written + block_size).min(dir_data.len());
             buf.fill(0);
             buf[..end - written].copy_from_slice(&dir_data[written..end]);
@@ -2750,7 +2778,12 @@ impl PageCacheOps for EfsDriver {
 
         // Extent-based write.
         let logical_block = page_index as u32;
-        let phys_block = match self.ensure_block_for_logical_locked(ino, logical_block, &mut tx) {
+        let phys_block = match self.ensure_block_for_logical_locked(
+            ino,
+            logical_block,
+            NewBlock::Overwritten,
+            &mut tx,
+        ) {
             Ok(b) => b,
             Err(e) => {
                 tx.abort();

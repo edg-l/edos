@@ -4239,7 +4239,55 @@ commands.
 
 ## Interleaved appends drop whole blocks on the write path (and two instruments said otherwise first)
 
-**Open.** Repro: `fsbench fragprep /var`, reboot, `fsbench ra /var` — the pass
+**FIXED.** Root cause: a newly allocated block was zeroed through the journal
+before the data was written to it, so the journal carried a copy of that block's
+home location full of zeros. File data bypasses the block page cache and goes
+straight to the device, so the two copies race and the zeros can land last. Two
+doors reach the home block after the data write:
+
+- a concurrent `BlockPageCache::flush_dirty_once` — the checkpoint the *other*
+  file's `fsync` runs, which is why the interleaved arm loses blocks and the
+  contiguous control does not;
+- replay of the ring on the next mount, for a transaction committed but not
+  checkpointed. `fragprep` prints `sys_sync: journal still pending after 8
+  rounds`, which is exactly that state, and the repro reads the file after a
+  reboot.
+
+`reap_write` invalidates the block page cache *after* the data write completes,
+which closes the second half of the window but not the part before it, and it
+cannot reach the ring copy at all. The fix is to not stage the zeros: EFS block
+allocation now takes a `NewBlock` (`kernel/src/fs/efs/mod.rs`) saying whether the
+caller overwrites the whole block, and `flush_page`, `flush_pages_bulk`,
+`write_via_extents` for a full-block write and both directory writers pass
+`Overwritten`. `Zeroed` remains for the sub-block write, which reads the block
+back before merging into it.
+
+Verified on a fresh `sata-disk.img`: `fsbench fragprep /var`, reboot, `fsbench ra
+/var` reports `verify: edges match the pattern`, and the host scan of that image
+finds every block of both files:
+
+```
+tag 7 (fsbench.ra)    4096 pattern blocks, 4096 byte-perfect, 0 damaged
+                      0 of 4096 logical blocks have no copy anywhere
+tag 5 (fsbench.frag)  4096 pattern blocks, 4096 byte-perfect, 0 damaged
+                      0 of 4096 logical blocks have no copy anywhere
+```
+
+against 289 and 178 missing before. The file is still as fragmented — 248
+`extent_reads` planning 673 `extent_runs`, the same ratio as the failing run — so
+the loss went away without the layout changing. `fragprep` also went from
+thousands of journalled blocks to `ring_blocks +879 / data_blocks +621` for 8194
+allocations, since the zeroing write was most of the ring traffic, and the whole
+32 MiB interleaved prepare now takes 0.7 s.
+
+The general rule this is an instance of: **a block written on a path that
+bypasses a cache must not have a copy of itself staged in that cache, or in the
+journal, at any point.** Zero-filling on allocation is the natural way to write
+that bug, because the zeros look like they can only ever be harmless.
+
+The record of how it was found follows; two instruments said otherwise first.
+
+Repro: `fsbench fragprep /var`, reboot, `fsbench ra /var` — the pass
 reports `VERIFY FAIL byte <n> of the file is 0x00, want <p>`. The contiguous arm
 (`raprep`) verifies clean in the same build, so it takes the interleaved
 append + `fsync` pattern to produce it. The bug is in the write path; the two
