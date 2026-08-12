@@ -292,7 +292,7 @@ profile.
 
 ## 3. Missing syscalls and interfaces
 
-111 syscalls exist. The conspicuous absences, roughly by how much they block real
+110 syscalls exist. The conspicuous absences, roughly by how much they block real
 programs:
 
 | Missing | Why it matters |
@@ -313,9 +313,19 @@ so `F_SETFL` remains unimplemented on purpose.
 added: with no permission model to enforce, a freely callable `setuid` is a
 privilege change that lies about being one.
 
-Also worth noting, still true and tracked in engram: `edos_lib` duplicates `edos_rt`'s
-syscall wrappers, and `SYS_OPEN` takes a NUL-terminated path while `SYS_STAT`
-takes pointer+length, so `edos_rt` allocates a `CString` for every open.
+**Fixed.** `edos_lib` no longer duplicates `edos_rt`'s syscall wrappers and
+`SYS_*` numbers; it re-exports them, and only the numbers with no `edos_rt`
+equivalent stay local. The bare `open` entry point is gone too: the kernel
+now takes every path as pointer+length, and `edos_lib::io::open` goes through
+`openat` with `AT_FDCWD` the way `edos_rt::fd::FileDesc::new` already did.
+
+What is left of the split: `mkdir`, `rmdir`, `rmdir_all`, `unlink` and
+`rename` are still NUL-terminated kernel entry points, because `edos_rt`'s own
+`fs.rs` calls them directly and the std fork calls into `edos_rt` for all
+five (`sys_mkdir`/`sys_rmdir`/`sys_rmdir_all` take a raw pointer, `unlink` and
+`rename` build a `Vec<u8>` with a trailing NUL). Retiring them needs an
+`edos_rt` release that moves to `*at` forms plus the fork's pin bump, not a
+change on this side alone.
 
 ---
 
