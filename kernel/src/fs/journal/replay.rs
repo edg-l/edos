@@ -369,7 +369,18 @@ pub fn replay(
 
             // Write to home location via direct AHCI (not through the block page
             // cache — the cache isn't populated yet during early mount).
-            let lba = partition_start_lba + fs_block * SECTORS_PER_BLOCK as u64;
+            //
+            // `fs_block` is device-absolute, not partition-relative, and
+            // `DescriptorEntry` documents it as such: enrolment stamps the
+            // block page cache's page index, which EFS derives as
+            // `block_to_lba(block) / SECTORS_PER_BLOCK` and so already carries
+            // the partition offset. Adding `partition_start_lba` here a second
+            // time put every home write exactly `partition_start_lba /
+            // SECTORS_PER_BLOCK` blocks too high, dropping inode-table content
+            // onto the first data block. The ring read above is the other
+            // domain and does need the offset, because `first_block` is
+            // partition-relative.
+            let lba = fs_block * SECTORS_PER_BLOCK as u64;
             match submit_block_write(device_id, lba, SECTORS_PER_BLOCK, data) {
                 Ok(w) => inflight.push_back(w),
                 Err(e) => {
