@@ -929,7 +929,13 @@ fn main() {
     // (the foreground child process gets killed instead)
     edos_lib::process::sys_sigaction(2, 1); // SIGINT=2, SIG_IGN=1
 
-    println!("EDOS Shell v0.1");
+    // The system's release, not the shell's own: `/proc/version` is rendered
+    // from the kernel's `CARGO_PKG_VERSION`, which is the one place it is set.
+    let release = std::fs::read_to_string("/proc/version")
+        .ok()
+        .and_then(|v| v.split_whitespace().nth(1).map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("EDOS {release} shell");
     println!("Type 'help' for commands.\n");
 
     let mut stdout = std::io::stdout();

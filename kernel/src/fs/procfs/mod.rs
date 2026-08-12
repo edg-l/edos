@@ -159,6 +159,12 @@ impl Procfs {
         )
     }
 
+    /// The kernel's own version, so nothing in userspace has to carry a copy.
+    /// `uname -r` reads this; `kernel/Cargo.toml` is the only place it is set.
+    fn render_version() -> String {
+        alloc::format!("EDOS {} x86_64\n", env!("CARGO_PKG_VERSION"))
+    }
+
     fn render_cpuinfo() -> String {
         use raw_cpuid::CpuId;
 
@@ -1265,6 +1271,7 @@ const GLOBAL_FILES: &[(&str, fn() -> String)] = &[
     ("processes", || {
         Procfs::render_process_table(&Procfs::collect_snapshots())
     }),
+    ("version", Procfs::render_version),
     ("meminfo", Procfs::render_meminfo),
     ("cpuinfo", Procfs::render_cpuinfo),
     ("block_cache", Procfs::render_block_cache),

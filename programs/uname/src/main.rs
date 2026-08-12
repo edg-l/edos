@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, fs};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -28,15 +28,24 @@ fn main() {
         show_sys = true;
     }
 
+    // `/proc/version` is "EDOS <release> <machine>", rendered from the kernel's
+    // own `CARGO_PKG_VERSION`. Reading it keeps the release out of userspace: a
+    // copy here reported 0.1.0 for two releases without anything noticing.
+    let version = fs::read_to_string("/proc/version").unwrap_or_default();
+    let mut fields = version.split_whitespace();
+    let sysname = fields.next().unwrap_or("EDOS");
+    let release = fields.next().unwrap_or("unknown");
+    let machine = fields.next().unwrap_or("x86_64");
+
     let mut parts: Vec<&str> = Vec::new();
     if show_all || show_sys {
-        parts.push("EDOS");
+        parts.push(sysname);
     }
     if show_all || show_release {
-        parts.push("0.1.0");
+        parts.push(release);
     }
     if show_all || show_machine {
-        parts.push("x86_64");
+        parts.push(machine);
     }
 
     println!("{}", parts.join(" "));
