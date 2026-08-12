@@ -4,7 +4,7 @@
 //! with proper page fault handling and recovery.
 #![allow(unused)]
 
-use crate::util::per_cpu::get_percpu_data;
+use crate::{memory::vma::USER_VA_END, util::per_cpu::get_percpu_data};
 use core::{
     ptr,
     sync::atomic::{AtomicU64, Ordering},
@@ -82,6 +82,24 @@ impl Drop for UAccessGuard {
 #[inline]
 pub fn current_cpu_uaccess() -> &'static UAccessState {
     &get_percpu_data().uaccess
+}
+
+/// True when a caller-supplied range lies entirely in the user half of the
+/// address space.
+///
+/// The fault fixup below only rescues a copy that faults; it does not make an
+/// arbitrary address safe to dereference. Two ranges have to be rejected before
+/// the copy rather than during it:
+///
+/// - an address in the kernel half is canonical and mapped, so the copy would
+///   succeed and hand kernel memory to the caller;
+/// - an address inside the non-canonical hole raises #GP, not #PF.
+#[inline]
+pub fn access_ok(addr: u64, len: usize) -> bool {
+    match addr.checked_add(len as u64) {
+        Some(end) => end <= USER_VA_END,
+        None => false,
+    }
 }
 
 /// Low-level copy with fault handling
@@ -182,7 +200,7 @@ unsafe extern "C" fn clear_fault_resume() {
 /// - `size` must not exceed the size of either buffer
 #[inline]
 pub unsafe fn try_copy_from_user(dst: *mut u8, src: *const u8, size: usize) -> bool {
-    if src.is_null() || dst.is_null() {
+    if src.is_null() || dst.is_null() || !access_ok(src as u64, size) {
         return false;
     }
 
@@ -202,7 +220,7 @@ pub unsafe fn try_copy_from_user(dst: *mut u8, src: *const u8, size: usize) -> b
 /// - `size` must not exceed the size of either buffer
 #[inline]
 pub unsafe fn try_copy_to_user(dst: *mut u8, src: *const u8, size: usize) -> bool {
-    if src.is_null() || dst.is_null() {
+    if src.is_null() || dst.is_null() || !access_ok(dst as u64, size) {
         return false;
     }
 

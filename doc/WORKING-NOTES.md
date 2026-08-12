@@ -83,6 +83,77 @@ sharing an fd table is what would make it matter.
 
 ---
 
+## FIXED: a user pointer was never bounds-checked, only fault-fixed up
+
+`syscallfuzz -n 4 -u 0` panicked the kernel a second way: a General Protection
+Fault in ring 0 inside `do_user_copy` (`util/uaccess.rs`), reached from
+`sys_pipe`. The pointer was `0x0000_8000_0000_0000`, one of the fuzzer's poison
+values.
+
+The whole of `try_copy_from_user`/`try_copy_to_user`'s validation was a null
+check. Everything else was left to the fault fixup, and the fixup is only wired
+into the page fault handler, so two classes of address walked straight through:
+
+- **Non-canonical** (`0x0000_8000_0000_0000`). Dereferencing one raises #GP, not
+  #PF. `general_protection_fault_handler` had no `fault_resume` check, so the
+  ring-0 arm panicked the machine on a pointer any program can pass.
+- **The kernel half** (`0xffff_ffff_8000_0000`). That address is canonical and
+  mapped, so the copy *succeeded*: `read(fd, kernel_addr, n)` overwrote kernel
+  memory and `write(fd, kernel_addr, n)` handed kernel memory to userspace. No
+  fault, no error, no trace of it.
+
+Fixed at the source with an `access_ok(addr, len)` in `util/uaccess.rs` that
+requires `addr + len <= USER_VA_END` with a checked add, applied to the user
+side of both copy directions — `src` for `from_user`, `dst` for `to_user`. Every
+other entry point (`try_read_user`, `try_write_user`,
+`try_copy_string_from_user`) funnels through those two, and every call site in
+the tree passes a pointer that came from a syscall argument, so there is no
+in-kernel caller that legitimately needs the kernel half.
+
+The #GP handler got the page fault handler's fixup as well. With `access_ok` in
+place nothing should reach it, which is the point: a uaccess copy that faults
+for a reason the checks did not anticipate now reports failure instead of
+taking the machine down.
+
+Left standing, deliberately: every exception handler in `interrupts/idt.rs`
+sends `end_of_interrupt()` on entry, which is wrong for a fault (no interrupt is
+in service) and would clear an unrelated ISR bit if a fault ever landed inside
+an interrupt handler. Not reachable from the uaccess path, which never runs in
+interrupt context, so it was left alone rather than churned.
+
+---
+
+## FIXED: `shm_create` reserved for a size before checking it was possible
+
+The same fuzz run then panicked in the allocator:
+
+```
+failed to map heap expansion: FrameAllocationFailed   (allocator.rs:334)
+  <- RawVecInner::try_allocate_in
+  <- sys_shm_create (syscalls/shm.rs:44)
+```
+
+`SharedMemory::new` (`memory/shared.rs`) turned the caller's `size` into a frame
+count and then `Vec::with_capacity(frame_count)`. The batched allocation loop
+below it was careful — it releases the frame-allocator lock every 64 frames so
+interrupts are not starved — but the reservation happens first, so a size that
+no machine could satisfy grew the kernel heap until the frame allocator had
+nothing left to expand it with. That path panics; it does not return a null.
+
+Two fixes at the source: `size + 0xFFF` is a `checked_add` now (a size near
+`usize::MAX` wrapped to an aligned size of 0 and a frame count of 0, so the
+worst case was a zero-frame region reported as a success), and the frame count
+is compared against `frame_allocator().stats().free_frames` before anything is
+reserved. Over budget is `AllocationFailed`, which `sys_shm_create` already maps
+to `ENOMEM`.
+
+`stats()` walks the whole bitmap, which is ~128 KiB of `count_ones` on a 4 GiB
+guest. `shm_create` is not a hot path — the compositor calls it per surface —
+so the honest bound was preferred over a cheaper comparison against
+`total_frames`.
+
+---
+
 ## Readahead now submits before it fills, and "device idle" stopped meaning idle
 
 `page_cache_read_core` (`fs/vfs.rs`) filled the reader's own pages first and

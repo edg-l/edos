@@ -81,11 +81,26 @@ pub fn build_idt_for_current_cpu() -> InterruptDescriptorTable {
 
 #[unsafe(no_mangle)]
 extern "x86-interrupt" fn general_protection_fault_handler(
-    stack_frame: InterruptStackFrame,
+    mut stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
     unsafe { get_lapic().end_of_interrupt() };
     if stack_frame.code_segment.rpl() == PrivilegeLevel::Ring0 {
+        // A user copy takes the same fixup as in the page fault handler: a
+        // non-canonical address raises #GP rather than #PF, so without this the
+        // copy would panic the kernel instead of reporting failure.
+        let uaccess = current_cpu_uaccess();
+        if uaccess.is_active() {
+            let resume_addr = uaccess.fault_resume.load(Ordering::Relaxed);
+            uaccess.clear();
+            unsafe {
+                stack_frame.as_mut().update(|frame| {
+                    frame.instruction_pointer = VirtAddr::new(resume_addr);
+                });
+            }
+            return;
+        }
+
         println!("GPF Error code: 0x{:x}", error_code);
         println!("Selector index: {}", (error_code >> 3) & 0x1FFF);
         println!("Table: {}", if error_code & 4 != 0 { "LDT" } else { "GDT" });
@@ -94,7 +109,6 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 
         panic!("General Protection Fault");
     } else {
-        log!("GPF Error code: 0x{:x}", error_code);
         log!("GPF Error code: 0x{:x}", error_code);
         log!("Selector index: {}", (error_code >> 3) & 0x1FFF);
         log!("Table: {}", if error_code & 4 != 0 { "LDT" } else { "GDT" });

@@ -55,8 +55,21 @@ impl SharedMemory {
         }
 
         // Round up to page size
-        let aligned_size = (size + 0xFFF) & !0xFFF;
+        let aligned_size = match size.checked_add(0xFFF) {
+            Some(rounded) => rounded & !0xFFF,
+            None => return Err(SharedMemoryError::InvalidSize),
+        };
         let frame_count = aligned_size / 4096;
+
+        // Refuse a request larger than the memory that exists before reserving
+        // for it. `Vec::with_capacity` on a frame count taken from a caller's
+        // size grows the kernel heap until the frame allocator has nothing left
+        // to expand it with, and that path panics rather than returning an
+        // error the caller could see.
+        let free_frames = frame_allocator().stats().free_frames;
+        if frame_count > free_frames {
+            return Err(SharedMemoryError::AllocationFailed);
+        }
 
         // Allocate physical frames in batches, releasing the IRQ lock between
         // batches so timer/device interrupts aren't starved during large SHM
