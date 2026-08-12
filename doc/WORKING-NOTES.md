@@ -8,6 +8,23 @@ session.
 
 ## Where the tree stands at the end of 2026-08-12
 
+**Released as v0.3.0** at `2a4c334`, tagged and pushed, with `edos-x86_64.iso`
+and `SHA256SUMS` attached. The release exists mainly because v0.2.0 loses file
+data on fragmented writes, so anything on that ISO should be replaced. The site
+was rebuilt and deployed for it; the counts it carries are the ones in the
+"Counts, remeasured" section below.
+
+The version is set in exactly one place now, `kernel/Cargo.toml`. Four strings
+carried it before and none matched the released tag, so a running system
+misreported itself by two releases. `/proc/version` renders `EDOS <release>
+<machine>` from `CARGO_PKG_VERSION`, and `uname` and the shell banner read it.
+Do not reintroduce a literal.
+
+The ISO is 193 MB because all 105 programs ship unstripped. Stripping would take
+it to roughly 25 MB (measured: `edos-wm` 7.3M → 548K) and is deliberately left
+out of this release, since it changes how every program is built and wants its
+own boot-and-`iotest` pass.
+
 Every gate is green and re-run at this commit: `make -C kernel check` and
 `cargo check --features sched-test` are warning-free, both `cargo fmt --check`
 and `cargo +edos fmt --check` exit 0, `make test AUDIODEV=none` is **ALL 51
