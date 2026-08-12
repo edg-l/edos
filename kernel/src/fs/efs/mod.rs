@@ -458,6 +458,25 @@ impl EfsDriver {
 
 // ---- File data reading --------------------------------------------------------
 
+/// Commands kept in flight by one bulk file-data read. The port has 32 NCQ
+/// slots and other threads share them.
+const MAX_INFLIGHT_READS: usize = 16;
+/// Staging bytes held by those commands at once, so a very large read costs a
+/// bounded amount of memory beyond its own result buffer.
+const MAX_INFLIGHT_BYTES: usize = 2 * 1024 * 1024;
+
+/// One device read planned by `read_via_extents`: a physically contiguous run,
+/// and where in the caller's buffer its bytes land.
+struct ExtentRead {
+    lba: u64,
+    sectors: u16,
+    /// Offset of the run's first wanted byte in the result buffer.
+    dest: usize,
+    /// Offset of that byte inside the run's first block.
+    skew: usize,
+    len: usize,
+}
+
 impl EfsDriver {
     /// Read up to `count` bytes from a file inode starting at `offset`.
     fn read_file_data(
@@ -496,6 +515,12 @@ impl EfsDriver {
         let spb = self.sectors_per_block();
 
         let mut result = vec![0u8; count];
+
+        // Plan every device read before issuing any of them, so the runs can be
+        // queued together rather than costing one round trip each. A range is
+        // several runs whenever the file is fragmented, and whenever it is
+        // longer than the 992 KiB one command can carry.
+        let mut runs: Vec<ExtentRead> = Vec::new();
         let mut result_pos = 0usize;
         let mut remaining = count;
         let mut cur_byte = byte_offset;
@@ -503,31 +528,19 @@ impl EfsDriver {
         while remaining > 0 {
             let logical_block = (cur_byte / block_size) as u32;
             let offset_in_block = cur_byte % block_size;
-
-            // How many contiguous blocks can we read in one shot?
-            // Cap at per-slot pool size (248 pages = 992KB) per AHCI command.
-            // With NCQ, multiple commands can be in flight concurrently.
-            const MAX_BULK_BLOCKS: u32 = 248;
-            let blocks_needed =
-                ((remaining + offset_in_block + block_size - 1) / block_size) as u32;
+            let blocks_needed = (remaining + offset_in_block).div_ceil(block_size) as u32;
 
             let run_blocks = match extents.run_at(logical_block) {
                 BlockRun::Mapped { phys, blocks } => {
-                    let bulk_blocks = blocks_needed.min(blocks).min(MAX_BULK_BLOCKS);
-                    let lba = self.block_to_lba(phys);
-                    let total_sectors = (bulk_blocks * spb as u32) as u16;
-
-                    // INVARIANT: file-data reads bypass BlockDevice to avoid
-                    // shredding bulk AHCI commands into per-page cache ops. The
-                    // per-inode page cache owns file data — do not route
-                    // through BlockPageCache.
-                    let mut bulk_data = vec![0u8; total_sectors as usize * 512];
-                    block_read(self.device.device_id, lba, total_sectors, &mut bulk_data)?;
-
+                    let bulk_blocks = blocks_needed.min(blocks).min(MAX_RUN_BLOCKS as u32);
                     let bulk_bytes = bulk_blocks as usize * block_size;
-                    let copy_len = remaining.min(bulk_bytes - offset_in_block);
-                    result[result_pos..result_pos + copy_len]
-                        .copy_from_slice(&bulk_data[offset_in_block..offset_in_block + copy_len]);
+                    runs.push(ExtentRead {
+                        lba: self.block_to_lba(phys),
+                        sectors: (bulk_blocks * spb as u32) as u16,
+                        dest: result_pos,
+                        skew: offset_in_block,
+                        len: remaining.min(bulk_bytes - offset_in_block),
+                    });
                     bulk_blocks
                 }
                 // A hole reads as zeros, which `result` already holds.
@@ -539,6 +552,65 @@ impl EfsDriver {
             result_pos += advance;
             remaining -= advance;
             cur_byte += advance;
+        }
+
+        // INVARIANT: file-data reads bypass BlockDevice to avoid shredding bulk
+        // AHCI commands into per-page cache ops. The per-inode page cache owns
+        // file data — do not route through BlockPageCache.
+        let dev = block_io::lookup(self.device.device_id).ok_or(AhciError::InvalidDevice)?;
+        let mut idx = 0usize;
+        while idx < runs.len() {
+            let mut end = idx;
+            let mut batch_bytes = 0usize;
+            while end < runs.len() && end - idx < MAX_INFLIGHT_READS {
+                let bytes = runs[end].sectors as usize * 512;
+                if end > idx && batch_bytes + bytes > MAX_INFLIGHT_BYTES {
+                    break;
+                }
+                batch_bytes += bytes;
+                end += 1;
+            }
+            let batch = &runs[idx..end];
+
+            let mut staging: Vec<Vec<u8>> = batch
+                .iter()
+                .map(|r| vec![0u8; r.sectors as usize * 512])
+                .collect();
+            let reqs = batch
+                .iter()
+                .zip(staging.iter_mut())
+                .map(|(r, buf)| {
+                    (
+                        r.lba,
+                        r.sectors as u32,
+                        BlockBuffer::Slice {
+                            ptr: buf.as_mut_ptr(),
+                            len: buf.len(),
+                        },
+                    )
+                })
+                .collect();
+
+            // Every request comes back with a handle, a failed submission
+            // included, so waiting on all of them is what keeps each staging
+            // buffer alive until its DMA is finished. The error return is the
+            // legacy/ATAPI path, which completes inside `submit_read` and so
+            // leaves nothing outstanding.
+            let handles = dev.submit_read_batch(reqs).map_err(AhciError::from)?;
+            let mut failure = None;
+            for handle in &handles {
+                if let Err(e) = handle.wait() {
+                    failure.get_or_insert(e);
+                }
+            }
+            if let Some(e) = failure {
+                return Err(AhciError::from(e).into());
+            }
+
+            for (r, buf) in batch.iter().zip(staging.iter()) {
+                result[r.dest..r.dest + r.len].copy_from_slice(&buf[r.skew..r.skew + r.len]);
+            }
+            idx = end;
         }
 
         Ok(result)

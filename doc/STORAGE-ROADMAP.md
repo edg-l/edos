@@ -71,9 +71,18 @@ had to precede the commit block. Block-page-cache writeback batches too, since
 2026-08-12: `flush_dirty_once` collects dirty pages that pass its filters and
 `write_batch` submits up to 8 of them before reaping any. Its cap is not the
 device but `LOCK_RANK_DEPTH` — a batch holds one `page.write_lock` per
-outstanding write. Reads outside the readahead path, and the mount-time paths
-(`fs/journal/replay.rs` home blocks, `fs/fat32/`, `fs/gpt.rs`, `fs/mbr.rs`),
-still do not.
+outstanding write. And since 2026-08-12 `read_via_extents` plans every run of a
+bulk file read before issuing any: a range that spans several extents, or that
+is longer than the 992 KiB one command carries, goes out as one queue of up to
+16 commands (or 2 MiB of staging, whichever comes first) instead of one round
+trip per run. The mount-time paths (`fs/journal/replay.rs` home blocks,
+`fs/fat32/`, `fs/gpt.rs`, `fs/mbr.rs`) still do not.
+
+That read change does not move `fsbench ra`: its window is 128 pages, one run of
+a contiguous file, and its 248 async windows all take the single-submit prefetch
+path (`windows sync fallback: 0 declined`). What it changes is the fallback — a
+fragmented file, and any single read larger than one command — which no bench
+currently generates. Measuring it wants a workload that fragments a file first.
 
 So a 4 KiB read is a dependent round trip, not a queued one, and the 100 us is
 what a round trip costs: syscall, cache lookup, frame allocation, submit, park,
