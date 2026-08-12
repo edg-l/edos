@@ -41,6 +41,7 @@ surface at all.
 |---|---|
 | in-EDOS `fsck` | `efs-fsck` is host-side only, so the guest cannot check its own filesystem. This is the difference between an OS that can be repaired and one that has to be re-imaged |
 | `ssh` (client) | `sshd` serves, but nothing here can reach out. Needs terminal raw mode on the local side and a `known_hosts` the user actually reads, neither of which the server side needed |
+| `svc` | Nothing can start, stop or restart a service at runtime, because `edos-init` supervises a hardcoded array and has no control channel. It exposes the missing piece rather than the missing program: there are no named FIFOs, which is what every established supervisor is controlled through. Design and the rejected alternatives are in [`USERSPACE-ROADMAP.md`](USERSPACE-ROADMAP.md) |
 
 **An SFTP subsystem in `sshd`** rather than a program of its own, and the
 reason it belongs on this list: it is what turns "I can log in" into "I can work
