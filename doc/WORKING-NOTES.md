@@ -461,6 +461,17 @@ normal ISO in about three seconds, because cargo still has the non-feature
 artifact and only the image is rebuilt. This is now in `doc/vm-control.md`
 next to the test targets, which is where it will actually be read.
 
+## `make test` and `scripts/edos-vm` cannot run at the same time
+
+They share two files: both attach `sata-disk.img`, and both point a serial
+chardev at `run_log.txt`. Two QEMUs on one qcow2 is a corruption hazard, and the
+second serial open truncates the first one's log, so a guest measurement taken
+alongside a test run is worthless and the disk under it is suspect. Run them in
+sequence, and rebuild `sata-disk.img` if they ever overlapped. The follow-on trap
+is the one above: a `make test` run also leaves the sched-test ISO in place, so
+the next `edos-vm start` boots to a black screen with a log that ends at
+`ALL 51 TESTS PASSED` — `make all` before booting the guest again.
+
 ## Pipelined readahead's 500 ms figure is stale
 
 `mmaptest` test 10 on `/var`, the number that justified pipelined readahead, is

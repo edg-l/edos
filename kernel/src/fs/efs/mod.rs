@@ -1058,11 +1058,13 @@ impl EfsDriver {
     ///   (a) Read the inode once.
     ///   (b) If the inline-data flag is set, convert to extent mode BEFORE the
     ///       loop — `ensure_block_for_logical` errors on inline inodes.
-    ///   (c) For each logical block, find an existing extent mapping or allocate a
-    ///       new physical block.  When a new block is contiguous with the last
+    ///   (c) Allocate every block the batch does not already map, in one request
+    ///       so the allocator can answer it with one contiguous run.
+    ///   (d) For each logical block, find an existing extent mapping or take the
+    ///       next allocated block.  When a new block is contiguous with the last
     ///       extent (both logically and physically), extend that extent rather than
     ///       creating a new one (same coalescing logic as `ensure_block_for_logical`).
-    ///   (d) Write the updated inode ONCE with the final extent list, updated
+    ///   (e) Write the updated inode ONCE with the final extent list, updated
     ///       block count, optional new size, and refreshed checksum + mtime.
     ///
     /// Returns a Vec of physical block numbers in the same order as `logical_blocks`.
@@ -1100,34 +1102,45 @@ impl EfsDriver {
         let mut extents = self.load_extent_map(&inode)?;
         let mut phys_blocks = Vec::with_capacity(logical_blocks.len());
 
-        // (c) Walk logical blocks, reusing existing mappings or allocating new ones.
+        // (c) Allocate every unmapped block of the batch up front, so the run
+        //     search sees the whole request and an appending file lands in one
+        //     contiguous extent instead of the first free bit per block. The
+        //     blocks are not zeroed: the caller writes every byte of each one
+        //     straight to the device — see [`NewBlock`] for what staging those
+        //     zeros costs. One bitmap write per run also collapses what used to
+        //     be one `BlockPageCache::write_page` on the same page per block.
+        let need = logical_blocks
+            .iter()
+            .filter(|&&lb| extents.lookup(lb).is_none())
+            .count();
+        let mut pool: Vec<u64> = Vec::with_capacity(need);
+        while pool.len() < need {
+            let run = self.alloc_blocks(need - pool.len(), tx)?;
+            debug_assert!(!run.is_empty());
+            pool.extend(run);
+        }
+
+        // (d) Walk logical blocks, reusing existing mappings or taking from the
+        //     pool. Extent coalescing happens inside `insert`: a block contiguous
+        //     with the last extent, logically and physically, extends it.
+        let mut taken = 0;
         for &lb in logical_blocks {
             if let Some(phys) = extents.lookup(lb) {
                 phys_blocks.push(phys);
                 continue;
             }
-
-            // Allocate a new physical block. The caller writes every byte of it
-            // straight to the device, so it is not zeroed first: see
-            // [`NewBlock`] for what staging those zeros costs.
-            let phys_block = self.alloc_block(tx)?;
-
-            // Extent coalescing: if the last extent is contiguous (both logically
-            // and physically) with the new block, extend it.
-            //
-            // Note on alloc_block bitmap dedup: `alloc_block` calls `write_block`
-            // on the bitmap once per allocation; `write_block` enrolls the block
-            // in the journal, and the journal deduplicates by (dev, block) key, so
-            // 480 enrollments of the same bitmap page collapse to one journal ring
-            // entry.  However, each `alloc_block` call does invoke
-            // `device.write_page` on `BlockPageCache`, which is 480 in-memory
-            // writes to the same cached page — acceptable for v1 since they are
-            // all in-memory and the final journaled state is correct.
+            let phys_block = pool[taken];
+            taken += 1;
             extents.insert(lb, phys_block);
             phys_blocks.push(phys_block);
         }
+        // A repeated logical block in the batch leaves its share of the pool
+        // unused; return it rather than leaking it.
+        for &unused in &pool[taken..] {
+            self.free_block(unused, tx)?;
+        }
 
-        // (d) Write updated inode ONCE with final extent list.
+        // (e) Write updated inode ONCE with final extent list.
         self.store_extent_map(&mut inode, &extents, tx)?;
         if let Some(sz) = new_size {
             if sz > inode.size {
@@ -1180,6 +1193,23 @@ const EXTENT_HOLE_LOG_LIMIT: u64 = 8;
 impl EfsDriver {
     /// Allocate a free block and return its absolute block number.
     fn alloc_block(&self, tx: &mut TxHandle<'_>) -> Result<u64, Error> {
+        self.alloc_blocks(1, tx)?
+            .first()
+            .copied()
+            .ok_or(Error::IoError)
+    }
+
+    /// Allocate up to `want` blocks, preferring a single physically contiguous
+    /// run, and return them in ascending order.
+    ///
+    /// Never returns more than `want` blocks and never returns none: a caller
+    /// that needs more calls again, and a request that finds nothing free is an
+    /// error. Asking for the whole run at once is what keeps an appending file
+    /// in one extent once free space is fragmented, since taking the first free
+    /// bit per block fills every small hole before reaching a run that could
+    /// have held the file.
+    fn alloc_blocks(&self, want: usize, tx: &mut TxHandle<'_>) -> Result<Vec<u64>, Error> {
+        debug_assert!(want > 0);
         let block_size = self.block_size() as usize;
 
         let _bitmap = ranked_lock!(RANK_EFS_BITMAP, "EfsDriver.bitmap", self.bitmap_mutex);
@@ -1204,13 +1234,16 @@ impl EfsDriver {
             let mut bitmap = self.read_block(bitmap_block)?;
 
             let bits_to_check = blocks_per_group.min(block_size * 8);
-            if let Some(bit) = find_free_bit(&bitmap, bits_to_check) {
-                set_bit(&mut bitmap, bit);
+            let want_here = want.min(free_count as usize);
+            if let Some((bit, len)) = find_free_run(&bitmap, bits_to_check, want_here) {
+                for b in bit..bit + len {
+                    set_bit(&mut bitmap, b);
+                }
 
                 let abs_block = {
                     let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
-                    m.bgd_table[g].free_blocks_count -= 1;
-                    m.superblock.free_blocks -= 1;
+                    m.bgd_table[g].free_blocks_count -= len as u64;
+                    m.superblock.free_blocks -= len as u64;
                     g as u64 * blocks_per_group as u64 + bit as u64
                 };
 
@@ -1238,8 +1271,8 @@ impl EfsDriver {
                     tx.enroll_block(self.device.device_id, sb_page_idx, guard.page_arc());
                 }
 
-                EFS_BLOCKS_ALLOCATED.fetch_add(1, Ordering::Relaxed);
-                return Ok(abs_block);
+                EFS_BLOCKS_ALLOCATED.fetch_add(len as u64, Ordering::Relaxed);
+                return Ok((0..len as u64).map(|i| abs_block + i).collect());
             }
         }
         EFS_ALLOC_FAILED.fetch_add(1, Ordering::Relaxed);
@@ -1743,6 +1776,39 @@ fn find_free_bit(bitmap: &[u8], max_bits: usize) -> Option<usize> {
         };
     }
     None
+}
+
+/// Find a free run of at most `want` bits within the first `max_bits`.
+///
+/// Returns the first run long enough to satisfy the request, and otherwise the
+/// longest run in the bitmap, so a request lands in a small hole only when no
+/// hole is big enough for it. With `want == 1` this is the first free bit.
+fn find_free_run(bitmap: &[u8], max_bits: usize, want: usize) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize)> = None;
+    let mut bit = 0;
+    while bit < max_bits {
+        if bit % 8 == 0 && bitmap[bit / 8] == 0xFF {
+            bit += 8;
+            continue;
+        }
+        if bitmap[bit / 8] & (1 << (bit % 8)) != 0 {
+            bit += 1;
+            continue;
+        }
+        let start = bit;
+        while bit < max_bits && bit - start < want && bitmap[bit / 8] & (1 << (bit % 8)) == 0 {
+            bit += 1;
+        }
+        let len = bit - start;
+        if len >= want {
+            return Some((start, len));
+        }
+        if best.is_none_or(|(_, best_len)| len > best_len) {
+            best = Some((start, len));
+        }
+        bit += 1;
+    }
+    best
 }
 
 fn set_bit(bitmap: &mut [u8], bit: usize) {
