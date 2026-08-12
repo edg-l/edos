@@ -15,6 +15,7 @@ const SOURCES: &[&str] = &[
     "/proc/inflight_stats",
     "/proc/evict_stats",
     "/proc/efs_stats",
+    "/proc/readahead_stats",
 ];
 
 /// Counters whose value is a current level rather than a running total.
@@ -81,6 +82,25 @@ pub fn gauge(path: &str, key: &str) -> u64 {
         .find(|(k, _)| k == key)
         .map(|(_, v)| v)
         .unwrap_or(0)
+}
+
+/// Several counters from one procfs file, read in a single pass.
+///
+/// [`gauge`] re-reads the file per key, which is what a single sample inside a
+/// loop wants and is wasteful for a group taken at one instant — and reading
+/// the file once also keeps the group consistent with itself.
+pub fn gauges<const N: usize>(path: &str, keys: [&str; N]) -> [u64; N] {
+    let Ok(text) = read_to_string(path) else {
+        return [0; N];
+    };
+    let pairs: Vec<(String, u64)> = text.lines().flat_map(parse_pairs).collect();
+    keys.map(|key| {
+        pairs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| *v)
+            .unwrap_or(0)
+    })
 }
 
 /// Extract every `key: value` / `key=value` pair on one line.

@@ -396,9 +396,15 @@ fn main() -> ExitCode {
 
 /// Print the readahead pass. Returns 1 if the data did not match.
 ///
-/// Three numbers decide whether a prefetch change did anything, and they are
-/// not the throughput:
+/// Four numbers decide whether a prefetch change did anything, and none of
+/// them is the throughput:
 ///
+/// * `windows` — which of its three paths each readahead window past the
+///   caller's request took. Only the async one is a prefetch the reader did not
+///   wait for; a window the driver declines, or whose submit fails, becomes a
+///   bulk fill billed to the reader inside its own `read`. Read this first: the
+///   three below cannot tell a trailing prefetch from a synchronous one, so
+///   they only mean what they appear to mean once the async count dominates.
 /// * `stalls` — calls that waited on I/O nobody had started. A prefetch that
 ///   pulls ahead of the reader drives this towards zero; one that trails it
 ///   stalls once per window.
@@ -442,6 +448,14 @@ fn ra_report(out: &mut Out, r: &workloads::RaReport) -> u32 {
     out.line(&format!(
         "  ncq_max_inflight        {} before, {} after",
         r.hwm_before, r.hwm_after,
+    ));
+    out.line(&format!(
+        "  windows async           {} ({} pages), {} discarded ({} pages read and thrown away)",
+        r.ra_async_windows, r.ra_async_pages, r.ra_async_dropped_windows, r.ra_async_dropped_pages,
+    ));
+    out.line(&format!(
+        "  windows sync fallback   {} declined ({} pages), {} failed ({} pages)",
+        r.ra_sync_windows, r.ra_sync_pages, r.ra_err_windows, r.ra_err_pages,
     ));
     match &r.mismatch {
         Some(problem) => {

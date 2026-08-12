@@ -80,8 +80,20 @@ fsbench raprep /var     # writes a 16 MiB pattern file and syncs
 fsbench ra /var         # one cold pass, 64 KiB calls, front to back
 ```
 
-Throughput does not answer the question, so three other numbers are printed:
+Throughput does not answer the question, so four other numbers are printed.
+**Read the window rows first**: the three after them describe a prefetch that
+was actually asynchronous, and cannot tell one that was not from one that
+trailed.
 
+- **windows async / sync fallback** — which of its three paths each readahead
+  window past the caller's request took, from `/proc/readahead_stats`. A window
+  the driver declines, or whose submit fails, becomes a bulk fill billed to the
+  reader inside its own `read`. Of the async ones, **discarded** counts those
+  whose fill handle lost the `in_flight` check *after* their block I/O was
+  already submitted: those pages are read from the device and thrown away, and
+  the next call finds the range uncached and reads it again. A large discarded
+  count is the thing to fix before anything else, and it costs real device
+  bandwidth — see `doc/STORAGE-ROADMAP.md` section 1b.
 - **stalls** — calls slower than 4x the median, which is a call that waited on
   I/O nobody had started. A prefetch pulling ahead of the reader drives this
   towards zero; one that trails stalls about once per window.

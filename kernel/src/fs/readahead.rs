@@ -1,3 +1,5 @@
+use core::sync::atomic::{AtomicU64, Ordering};
+
 /// Initial readahead window size in pages (16 KiB).
 pub const RA_INIT_PAGES: u64 = 4;
 /// Maximum readahead window size in pages (512 KiB).
@@ -47,5 +49,62 @@ impl ReadaheadState {
     /// read as "first read on fd" if the overwrite ever became conditional.
     pub fn reset(&mut self) {
         self.window_size = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Branch counters
+// ---------------------------------------------------------------------------
+
+// A readahead window past the caller's requested range takes exactly one of
+// three paths in `vfs::page_cache_read_core`, and throughput, stall counts and
+// `ncq_inflight` cannot tell them apart: only the first is asynchronous, and
+// the other two are a bulk fill billed to the reader inside its own `read`.
+// Exposed as `/proc/readahead_stats` and reported by `fsbench ra`.
+
+/// Windows the driver accepted for asynchronous prefetch.
+pub static RA_ASYNC_WINDOWS: AtomicU64 = AtomicU64::new(0);
+/// Pages in those windows.
+pub static RA_ASYNC_PAGES: AtomicU64 = AtomicU64::new(0);
+/// Of those, windows whose `PageFillHandle` could not be installed because a
+/// page in the range was already in flight. The block I/O is submitted before
+/// the install is attempted, so such a window still reads from the device and
+/// then discards the result: the pages never reach the cache, and the next read
+/// finds the same range uncached and submits it again.
+pub static RA_ASYNC_DROPPED_WINDOWS: AtomicU64 = AtomicU64::new(0);
+/// Pages in those windows — device reads whose result nothing keeps.
+pub static RA_ASYNC_DROPPED_PAGES: AtomicU64 = AtomicU64::new(0);
+/// Windows the driver declined (no single extent covers the range, inline data,
+/// or a run too long for one command), which fall back to a synchronous fill.
+pub static RA_SYNC_WINDOWS: AtomicU64 = AtomicU64::new(0);
+/// Pages in those windows.
+pub static RA_SYNC_PAGES: AtomicU64 = AtomicU64::new(0);
+/// Windows whose prefetch submit failed outright, taking the same fallback.
+pub static RA_ERR_WINDOWS: AtomicU64 = AtomicU64::new(0);
+/// Pages in those windows.
+pub static RA_ERR_PAGES: AtomicU64 = AtomicU64::new(0);
+
+/// Record a window the driver accepted for asynchronous prefetch, and whether
+/// its fill handle was installed or the submitted read will be discarded.
+#[inline]
+pub fn count_async_window(pages: u64, installed: bool) {
+    RA_ASYNC_WINDOWS.fetch_add(1, Ordering::Relaxed);
+    RA_ASYNC_PAGES.fetch_add(pages, Ordering::Relaxed);
+    if !installed {
+        RA_ASYNC_DROPPED_WINDOWS.fetch_add(1, Ordering::Relaxed);
+        RA_ASYNC_DROPPED_PAGES.fetch_add(pages, Ordering::Relaxed);
+    }
+}
+
+/// Record a window that fell back to a synchronous fill, either because the
+/// driver declined it (`accepted` false path) or because the submit failed.
+#[inline]
+pub fn count_sync_window(pages: u64, submit_failed: bool) {
+    if submit_failed {
+        RA_ERR_WINDOWS.fetch_add(1, Ordering::Relaxed);
+        RA_ERR_PAGES.fetch_add(pages, Ordering::Relaxed);
+    } else {
+        RA_SYNC_WINDOWS.fetch_add(1, Ordering::Relaxed);
+        RA_SYNC_PAGES.fetch_add(pages, Ordering::Relaxed);
     }
 }

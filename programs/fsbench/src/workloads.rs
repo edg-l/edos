@@ -26,7 +26,7 @@ use edos_lib::io::{pread, pwrite};
 use edos_lib::mem::{MAP_SHARED, MS_SYNC, PROT_READ, PROT_WRITE, mmap, msync, munmap};
 use edos_lib::sys::{SYS_SYNC, syscall0};
 
-use crate::counters::gauge;
+use crate::counters::{gauge, gauges};
 use crate::harness::{Budget, Report, Rng, Runner, human_bytes};
 
 /// Buffer sizes swept by the sequential tests, in bytes. Spans the range where
@@ -843,6 +843,23 @@ fn ra_path(dir: &str) -> String {
     format!("{dir}/{RA_NAME}")
 }
 
+/// The readahead branch counters, in the order [`RaReport`] records them.
+fn ra_branches() -> [u64; 8] {
+    gauges(
+        "/proc/readahead_stats",
+        [
+            "async_windows",
+            "async_pages",
+            "async_dropped_windows",
+            "async_dropped_pages",
+            "sync_windows",
+            "sync_pages",
+            "err_windows",
+            "err_pages",
+        ],
+    )
+}
+
 /// Write the file [`ra_read`] reads, and get it onto the disk.
 ///
 /// Separate mode on purpose: the pass is only cold in a boot that has not
@@ -894,6 +911,23 @@ pub struct RaReport {
     /// the rise is this pass's.
     pub hwm_before: u64,
     pub hwm_after: u64,
+    /// Which path the pass's readahead windows took, from
+    /// `/proc/readahead_stats` either side of it. Only `async_*` is a prefetch
+    /// the reader did not wait for; the other two are a bulk fill inside the
+    /// reader's own `read`, so a pass dominated by them says nothing about
+    /// whether the prefetch trails the reader.
+    pub ra_async_windows: u64,
+    pub ra_async_pages: u64,
+    /// Of the async windows, the ones whose fill handle could not be installed
+    /// because a page in the range was already in flight. Their block I/O was
+    /// already submitted, so those pages are read from the device and thrown
+    /// away.
+    pub ra_async_dropped_windows: u64,
+    pub ra_async_dropped_pages: u64,
+    pub ra_sync_windows: u64,
+    pub ra_sync_pages: u64,
+    pub ra_err_windows: u64,
+    pub ra_err_pages: u64,
     /// First edge check that did not match, if any.
     pub mismatch: Option<String>,
 }
@@ -927,6 +961,7 @@ pub fn ra_read(dir: &str) -> Result<RaReport, String> {
     }
 
     let hwm_before = gauge("/proc/ahci_stats", "ncq_max_inflight");
+    let ra_before = ra_branches();
     let mut buf = vec![0u8; RA_CHUNK];
     let mut samples: Vec<u64> = Vec::new();
     let mut inflight_nonzero = 0u64;
@@ -960,6 +995,7 @@ pub fn ra_read(dir: &str) -> Result<RaReport, String> {
     }
     let wall = wall_start.elapsed();
     let hwm_after = gauge("/proc/ahci_stats", "ncq_max_inflight");
+    let ra_after = ra_branches();
 
     let calls = samples.len() as u64;
     let max = samples.iter().copied().max().unwrap_or(0);
@@ -991,6 +1027,14 @@ pub fn ra_read(dir: &str) -> Result<RaReport, String> {
         inflight_max,
         hwm_before,
         hwm_after,
+        ra_async_windows: ra_after[0].saturating_sub(ra_before[0]),
+        ra_async_pages: ra_after[1].saturating_sub(ra_before[1]),
+        ra_async_dropped_windows: ra_after[2].saturating_sub(ra_before[2]),
+        ra_async_dropped_pages: ra_after[3].saturating_sub(ra_before[3]),
+        ra_sync_windows: ra_after[4].saturating_sub(ra_before[4]),
+        ra_sync_pages: ra_after[5].saturating_sub(ra_before[5]),
+        ra_err_windows: ra_after[6].saturating_sub(ra_before[6]),
+        ra_err_pages: ra_after[7].saturating_sub(ra_before[7]),
         mismatch,
     })
 }

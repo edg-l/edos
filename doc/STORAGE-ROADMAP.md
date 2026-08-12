@@ -141,7 +141,57 @@ boot's 4, and the 11 stalls going towards 0. Throughput is the last thing to
 look at, not the first — 222 MiB/s is already far off the raw-device ceiling for
 reasons section 1 owns.
 
-### Build the branch counter before writing any pipelining code
+### What the branch counter found: the prefetch reads and throws away 92 MiB
+
+Built and read 2026-08-12, cold boot, same 16 MiB pass. The counters are
+`/proc/readahead_stats`, reported by `fsbench ra`:
+
+| | |
+|---|---|
+| windows async | 245 (30480 pages), **185 discarded (23680 pages)** |
+| windows sync fallback | 8 declined (1024 pages), 0 failed |
+
+So the path-2 hypothesis below is **refuted**: 245 of 253 windows do reach the
+asynchronous path, and EFS declines only 8. The real defect is one layer down,
+and the two numbers that give it away are in the async row itself.
+
+`issue_prefetch_bulk` (`fs/page_fill.rs`) installs a `PageFillHandle` over the
+whole window and **bails if any page in the range is already in flight** — it
+narrows nothing. But `page_cache_read_core` submits the block I/O *before* it
+tries the install, so a window that loses that check has already issued a real
+AHCI read whose result nobody keeps: the buffer completes into a `Shared` Arc
+that is dropped, the pages never reach the inode page cache, and the next call
+finds the same range uncached and submits it again.
+
+That is what 185 of 245 means. A 64 KiB call advances the reader 16 pages while
+the window reaches 128 pages past it, so consecutive windows overlap by ~112
+pages and almost every one collides with the previous window's still-installed
+handle. 30480 pages of prefetch were submitted for a 4096-page file — 7.4x the
+file — and 23680 of them, about 92 MiB, were read from the device and discarded.
+
+This also explains the number section 1b could not: p50 168 us per call in a
+window that should already be filled. The window is not filled, because the
+fill that would have populated it was dropped, so nearly every call pays for
+device I/O while the stall counter — which watches for a call far slower than
+the median — sees nothing unusual, because *every* call pays it.
+
+**So pipelining is not the fix, and neither is the extent work.** The fix is to
+stop the two from colliding, in this order:
+
+1. Do not submit I/O the install may discard: check `in_flight` for the window
+   range *before* `submit_prefetch_pages`, and narrow the window to the pages
+   that are not already covered (or skip it entirely when they all are). The
+   check and the install must be under the same `in_flight` lock acquisition or
+   the race just moves. That alone removes the 92 MiB and lets the first
+   window's prefetch survive to serve the calls behind it.
+2. Only then re-measure, and only then ask whether the prefetch still trails.
+
+Rank note for whoever writes it: `in_flight` is `RANK_IN_FLIGHT`, and the
+submit path takes driver locks, so the lock must be dropped before
+`submit_prefetch_pages` — which is why the narrowed range has to be computed
+first and the install re-checked after, not held across the submit.
+
+### The three paths, and why the counter had to come first
 
 Reading `page_cache_read_core` (`fs/vfs.rs`) against that baseline, a readahead
 window past `end_page` can take three different paths, and **the instrument
@@ -170,20 +220,15 @@ microseconds. 174 us is a call waiting on a device, and the stall counter does n
 see it — consistent with the wait happening inside the fallback bulk fill rather
 than at the point the stall counter watches.
 
-So the next step on this item is **not** to write pipelining. It is two counters
-on the three branches above, exposed the way everything else here is (a
-`/proc` line, per `CLAUDE.md`) and reported by `fsbench ra`. If the pass turns out
-to be mostly path 2, pipelining is the wrong fix and the right ones are already on
-the list: let the prefetch span extents by issuing one submit per extent, and EFS
-sequential-extent pre-allocation so a 16 MiB file is few extents rather than many.
+The counters that tell them apart were built for exactly this, and what they
+read is above: path 1 dominates, 245 windows to 8. Path 2 is not what the
+baseline was measuring, and the extent work is not what fixes this.
 
-Note also that the instrument's own fixture is exposed to this. `fsbench raprep`
-creates its 16 MiB file by appending, which is the pattern the EFS
-pre-allocation item describes as splitting what could be one contiguous extent
-into many tiny ones. `ensure_block_for_logical` does coalesce a new block into
-the previous extent when it is contiguous both logically and physically, so this
-is a risk rather than a certainty — but it has not been checked, and per the
-measurement rules the scaffolding gets ruled out before the design does.
+The fixture worry that came with the hypothesis is settled by the same reading.
+`fsbench raprep` builds its 16 MiB file by appending, which is the pattern the
+EFS pre-allocation item describes as splitting one contiguous extent into many
+tiny ones — but EFS declined only 8 of 253 windows, so `ensure_block_for_logical`
+is coalescing and the file is not badly fragmented. The scaffolding is ruled out.
 
 ## 2. mmap fault-around
 

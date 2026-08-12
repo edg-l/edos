@@ -408,7 +408,10 @@ fn page_cache_read_core(
         return Ok(());
     }
 
-    use super::readahead::{RA_INIT_PAGES, RA_MAX_PAGES, RA_NO_PREV, RA_WHOLE_FILE_MAX_PAGES};
+    use super::readahead::{
+        RA_INIT_PAGES, RA_MAX_PAGES, RA_NO_PREV, RA_WHOLE_FILE_MAX_PAGES, count_async_window,
+        count_sync_window,
+    };
 
     let start_page = offset / 4096;
     let end_page = (offset + count - 1) / 4096;
@@ -510,16 +513,19 @@ fn page_cache_read_core(
             let pf_end = range_end;
             let pf_offset = pf_start * 4096;
             let pf_count = (pf_end - pf_start + 1) * 4096;
-            match pc_ops.submit_prefetch_pages(ino, pf_offset, pf_count) {
+            let pf_pages = (pf_end - pf_start + 1) as u64;
+            let submitted = pc_ops.submit_prefetch_pages(ino, pf_offset, pf_count);
+            let submit_failed = submitted.is_err();
+            match submitted {
                 Ok(Some((block_handle, buffer))) => {
                     let installed = page_fill::issue_prefetch_bulk(
                         inode,
                         pf_start as u64,
-                        (pf_end - pf_start + 1) as u64,
+                        pf_pages,
                         block_handle,
                         buffer,
                     );
-                    let _ = installed;
+                    count_async_window(pf_pages, installed);
                 }
                 Ok(None) | Err(_) => {
                     // No prefetch path available (e.g. cross-extent or
@@ -527,13 +533,13 @@ fn page_cache_read_core(
                     // fill of the readahead window so this read still
                     // benefits from a populated cache, but the user pays
                     // for it. Same behaviour as pre-Phase-C2.
+                    count_sync_window(pf_pages, submit_failed);
                     let byte_offset = pf_offset;
                     let byte_count = pf_count;
-                    let page_count = (pf_end - pf_start + 1) as u64;
                     let _ = page_fill::get_or_fill_bulk_async_sync(
                         inode,
                         pf_start as u64,
-                        page_count,
+                        pf_pages,
                         || pc_ops.fill_pages_bulk(ino, byte_offset, byte_count),
                     );
                 }
