@@ -20,10 +20,22 @@ misreported itself by two releases. `/proc/version` renders `EDOS <release>
 <machine>` from `CARGO_PKG_VERSION`, and `uname` and the shell banner read it.
 Do not reintroduce a literal.
 
-The ISO is 193 MB because all 105 programs ship unstripped. Stripping would take
-it to roughly 25 MB (measured: `edos-wm` 7.3M → 548K) and is deliberately left
-out of this release, since it changes how every program is built and wants its
-own boot-and-`iotest` pass.
+The images ship stripped binaries, dev builds included, and the ISO is 74.5 MB
+where it was 193 MB. The trap is that `--artifact-dir` **hardlinks** into
+`filesystem/bin`, so the installed copy and the one under
+`programs/target/x86_64-unknown-edos/` are the same inode: stripping in place
+takes the debug info `addr2line` needs with it. `programs/Makefile` runs
+`objcopy --strip-debug` into a new file and moves it over, which breaks the link
+and leaves `target/`'s copy whole. Do not replace that with a plain `strip`.
+
+`--strip-debug` rather than `--strip-all`, since keeping `.symtab` costs about
+13% (edos-wm 644K against 557K). Debug builds are stripped because nothing reads
+a guest binary's debug info: `addr2line` is pointed at `target/`, `strace` names
+calls from the kernel's own table, and there is no debugger in the guest.
+
+What is left is mostly the live root, sized at 1.4x the filesystem tree it
+carries (43 MB for 26 MB of files), so the next lever on image size is that
+multiplier or compressing the module, not the binaries.
 
 Every gate is green and re-run at this commit: `make -C kernel check` and
 `cargo check --features sched-test` are warning-free, both `cargo fmt --check`
