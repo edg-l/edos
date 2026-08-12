@@ -481,6 +481,63 @@ fn page_cache_read_core(
     // `submit_prefetch_pages`, with finalization deferred to the first
     // joiner. On any prefetch-submit failure we fall back to the sync
     // bulk fill — never block the read path on a readahead error.
+    //
+    // The readahead window is submitted **before** the request portion is
+    // filled, so the device works on the next window while the reader is
+    // parked on its own pages. Filling first leaves the queue empty for the
+    // whole of that park and starts the window only once the reader no
+    // longer needs the overlap: the prefetch then trails the reader by a
+    // full round trip instead of pulling ahead of it.
+    let mut deferred_sync_windows: Vec<(usize, u64, bool)> = Vec::new();
+    for &(_, range_end) in &uncached_ranges {
+        if range_end <= end_page {
+            continue;
+        }
+        let window_start = end_page + 1;
+        let pf_end = range_end;
+        // `uncached_ranges` is built from the page map alone, and a page an
+        // earlier window is still filling is in neither the map nor the
+        // window's way — so most of this window is typically already in
+        // flight. Trim to the free tail before submitting anything: the
+        // block I/O goes to the device before the handle install can refuse
+        // a colliding range, so a window submitted whole is read and thrown
+        // away.
+        let Some(pf_start) =
+            page_fill::narrow_prefetch_window(inode, window_start as u64, pf_end as u64)
+        else {
+            count_skipped_window((pf_end - end_page) as u64);
+            continue;
+        };
+        let pf_start = pf_start as usize;
+        count_trimmed_pages((pf_start - window_start) as u64);
+        let pf_offset = pf_start * 4096;
+        let pf_count = (pf_end - pf_start + 1) * 4096;
+        let pf_pages = (pf_end - pf_start + 1) as u64;
+        let submitted = pc_ops.submit_prefetch_pages(ino, pf_offset, pf_count);
+        let submit_failed = submitted.is_err();
+        match submitted {
+            Ok(Some((block_handle, buffer))) => {
+                let installed = page_fill::issue_prefetch_bulk(
+                    inode,
+                    pf_start as u64,
+                    pf_pages,
+                    block_handle,
+                    buffer,
+                );
+                count_async_window(pf_pages, installed);
+            }
+            Ok(None) | Err(_) => {
+                // No prefetch path available (e.g. cross-extent or
+                // unsupported by driver) — fall back to a sync bulk fill of
+                // the readahead window so this read still benefits from a
+                // populated cache, but the user pays for it. Deferred past
+                // the request portion: it is the reader's own pages that
+                // must not queue behind a whole window of readahead.
+                deferred_sync_windows.push((pf_start, pf_pages, submit_failed));
+            }
+        }
+    }
+
     for &(range_start, range_end) in &uncached_ranges {
         // Sync portion overlapping the user's requested range.
         let sync_end = range_end.min(end_page);
@@ -506,60 +563,15 @@ fn page_cache_read_core(
                 }
             }
         }
+    }
 
-        // Async-prefetch portion past the user's request.
-        if range_end > end_page {
-            let window_start = end_page + 1;
-            let pf_end = range_end;
-            // `uncached_ranges` is built from the page map alone, and a page an
-            // earlier window is still filling is in neither the map nor the
-            // window's way — so most of this window is typically already in
-            // flight. Trim to the free tail before submitting anything: the
-            // block I/O goes to the device before the handle install can refuse
-            // a colliding range, so a window submitted whole is read and thrown
-            // away.
-            let Some(pf_start) =
-                page_fill::narrow_prefetch_window(inode, window_start as u64, pf_end as u64)
-            else {
-                count_skipped_window((pf_end - end_page) as u64);
-                continue;
-            };
-            let pf_start = pf_start as usize;
-            count_trimmed_pages((pf_start - window_start) as u64);
-            let pf_offset = pf_start * 4096;
-            let pf_count = (pf_end - pf_start + 1) * 4096;
-            let pf_pages = (pf_end - pf_start + 1) as u64;
-            let submitted = pc_ops.submit_prefetch_pages(ino, pf_offset, pf_count);
-            let submit_failed = submitted.is_err();
-            match submitted {
-                Ok(Some((block_handle, buffer))) => {
-                    let installed = page_fill::issue_prefetch_bulk(
-                        inode,
-                        pf_start as u64,
-                        pf_pages,
-                        block_handle,
-                        buffer,
-                    );
-                    count_async_window(pf_pages, installed);
-                }
-                Ok(None) | Err(_) => {
-                    // No prefetch path available (e.g. cross-extent or
-                    // unsupported by driver) — fall back to a sync bulk
-                    // fill of the readahead window so this read still
-                    // benefits from a populated cache, but the user pays
-                    // for it. Same behaviour as pre-Phase-C2.
-                    count_sync_window(pf_pages, submit_failed);
-                    let byte_offset = pf_offset;
-                    let byte_count = pf_count;
-                    let _ = page_fill::get_or_fill_bulk_async_sync(
-                        inode,
-                        pf_start as u64,
-                        pf_pages,
-                        || pc_ops.fill_pages_bulk(ino, byte_offset, byte_count),
-                    );
-                }
-            }
-        }
+    for &(pf_start, pf_pages, submit_failed) in &deferred_sync_windows {
+        count_sync_window(pf_pages, submit_failed);
+        let byte_offset = pf_start * 4096;
+        let byte_count = pf_pages as usize * 4096;
+        let _ = page_fill::get_or_fill_bulk_async_sync(inode, pf_start as u64, pf_pages, || {
+            pc_ops.fill_pages_bulk(ino, byte_offset, byte_count)
+        });
     }
 
     let did_io = !uncached_ranges.is_empty();

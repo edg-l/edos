@@ -267,11 +267,53 @@ Same cold pass, all three states:
 | `inflight_stats.retries` | — | 240 | 240, none doing I/O |
 
 The pass is now faster than it was with 92 MiB of waste in it, and it reads the
-file once. **Pipelining is still unbuilt and still justified**: `ncq_inflight` is
+file once. **Pipelining was still unbuilt at this point, and justified** (it
+landed next, in the section below): `ncq_inflight` is
 non-zero on 0 of 256 samples and `ncq_max_inflight` did not move off the boot's
 value, so nothing is ever outstanding except the one command the reader is
 waiting on. p50 210 us against a memcpy's single-digit microseconds is what that
 costs. The target for the pipelined version is unchanged.
+
+### Pipelining landed: submit the window before filling the request
+
+`page_cache_read_core` did the two halves of a read in the wrong order. For each
+uncached run it filled the request portion first — which parks the reader on the
+device — and only afterwards submitted the readahead window past `end_page`. So
+the queue was empty for the whole of that park, and the window started only once
+the reader no longer needed the overlap: the prefetch trailed the reader by a
+full round trip rather than pulling ahead of it.
+
+The loop is now three passes over `uncached_ranges`: submit every window, then
+fill the request portions, then run whatever windows fell back to a synchronous
+fill. The fallback is deferred past the request on purpose — that path is billed
+to the reader, and the reader's own 16 pages must not queue behind 128 pages of
+readahead.
+
+Same cold pass, 16 MiB in 256 calls of 64 KiB, 4 vCPUs:
+
+| | trailing | pipelined |
+|---|---|---|
+| read path | 260 MiB/s, 61.6 ms | **292 MiB/s, 54.9 ms** |
+| per call | p50 210 us, p99 509 us, max — | **p50 203 us, p99 471 us, max 564 us** |
+| stalls | 1 of 256 over 840 us | **0 of 256** |
+| device pages read | 4624 (18 MiB) | 4608 (18 MiB) |
+| windows async | 240 (4032 pages), 0 discarded | 240 (4032 pages), 0 discarded |
+
+**`ncq_inflight` is still non-zero on 0 of 256 samples, and here that is the
+success case rather than the failure it was.** The window is a single 64 KiB
+command against a qcow2 the host holds in its page cache, and the reader's park
+on its own pages is ~200 us — far longer than the window takes. So the prefetch
+completes *inside* the call that issued it, and `fsbench` samples between calls,
+after it is already done. `ncq_max_inflight` staying at 1 says the same thing
+from the other side: the reader never issues a command of its own, it joins the
+window's handle (240 joins), so there is nothing for a second command to overlap
+with. **The inflight criterion in the baseline above is therefore not a usable
+test on this host** — it can only be met by a device slow enough to still be
+working when the call returns. Read the stall count and p50 instead.
+
+What is left in the 203 us is not readahead placement: the file is read exactly
+once, no window is discarded, and no call stalls. It is the per-command cost
+section 1 owns, paid once per 64 KiB by the joiner that finalizes the window.
 
 ### The three paths, and why the counter had to come first
 

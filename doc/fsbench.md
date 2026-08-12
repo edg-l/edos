@@ -101,11 +101,16 @@ trailed.
   I/O nobody had started. A prefetch pulling ahead of the reader drives this
   towards zero; one that trails stalls about once per window.
 - **`ncq_inflight` between calls** — sampled once after every call, outside the
-  timed region. All-zero means nothing was ever outstanding except the read the
-  reader was blocked on.
+  timed region. All-zero means nothing was outstanding *by the time the sample
+  was taken*, which on this host it never is: a window is one 64 KiB command
+  against a qcow2 the host holds in RAM, and the reader's park is far longer, so
+  a prefetch that overlaps the park perfectly still finishes before the sample.
+  Treat a non-zero reading as informative and an all-zero one as saying nothing.
 - **`ncq_max_inflight` before and after** — a high-water mark nothing resets, so
-  only the *rise* across the pass belongs to the pass. A change that leaves it
-  where the boot left it has asked for no queue depth and pipelined nothing.
+  only the *rise* across the pass belongs to the pass. It stays at 1 through a
+  correctly pipelined pass, because the reader joins the window's fill handle
+  rather than issuing a command of its own, so there is no second command for it
+  to count. Depth comes from section 1's work, not from this path.
 
 The between-call sampling is a procfs read, so it delays the next call. It is
 reported apart from the read path's own summed time, and it is identical in both

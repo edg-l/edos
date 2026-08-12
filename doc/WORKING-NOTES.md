@@ -6,6 +6,31 @@ session.
 
 ---
 
+## Readahead now submits before it fills, and "device idle" stopped meaning idle
+
+`page_cache_read_core` (`fs/vfs.rs`) filled the reader's own pages first and
+submitted the readahead window afterwards, so the queue was empty for the whole
+of the reader's park and the window started only once the overlap was no longer
+wanted. Submitting every window first, then filling the request portions, then
+running the windows that fell back to a synchronous fill, took the cold 16 MiB
+`fsbench ra` pass from 260 to 292 MiB/s and its stall count from 1 to 0. The
+sync fallback is deliberately last: it is billed to the reader, and the reader's
+16 pages must not queue behind 128 pages of readahead.
+
+**The trap is in the instrument, not the code.** `fsbench ra` reports whether
+`ncq_inflight` was non-zero *between* calls, and `doc/STORAGE-ROADMAP.md`
+section 1b originally set "non-zero across most samples" as the target for a
+pipelined version. That target cannot be met on this host and its absence is not
+evidence of anything: the window is one 64 KiB command against a qcow2 the host
+holds in RAM, and the reader's park is ~200 us, so the prefetch completes inside
+the call that issued it and the between-calls sample always reads zero.
+`ncq_max_inflight` stuck at 1 says it from the other side — the reader joins the
+window's handle rather than issuing a command, so there is never a second one to
+overlap. Judge this path by the stall count, p50, and the discarded/trimmed page
+counters instead.
+
+---
+
 ## Readahead submitted I/O it was about to refuse, and the host hid the cost
 
 `page_cache_read_core` (`fs/vfs.rs`) built its readahead window from the inode
