@@ -6,6 +6,47 @@ session.
 
 ---
 
+## Writeback queues now, so the drive is no longer asked one command at a time
+
+`doc/STORAGE-ROADMAP.md` section 1 says every I/O path but `read_pages` is
+submit-then-wait, and that `fsbench` reported `ahci_stats.ncq_max_inflight +1`
+for a whole suite: the system never had two commands outstanding, so a 4 KiB
+access cost a full dependent round trip.
+
+`EfsDriver::flush_pages_bulk` (`fs/efs/mod.rs`) already coalesced a chunk's
+pages into runs of physically contiguous blocks, but it called `block_write`
+per run, which submits and parks. It now issues every run through
+`submit_block_write` and reaps the handles afterwards, so the runs of one chunk
+are queued together.
+
+Measured in the guest, `fsbench write -n 32 /var` on a freshly formatted disk:
+`ncq_max_inflight` +1 before, **+3 and +9 across two runs** after, with
+`verify: all patterns match` on both. The per-row throughput is inside the
+noise the roadmap warns about for the `/var` suite, which is expected — one
+chunk of a sequential file is a couple of long runs, so depth is what moved,
+not the bandwidth of a run.
+
+Three things the shape of this had to respect:
+
+- **A staging buffer is the DMA source on the direct path**, so it is held in
+  the in-flight record and only dropped once its own handle completes. Returning
+  early from a failed run without draining the rest would free buffers the
+  drive is still reading.
+- **Depth is capped at 16, below `OWNED_OPS_CAP` (32)**. Past that,
+  `install_ncq_op`'s `owned_ops_push` fails and the command silently loses its
+  cancellation hookup. `allocate_slot_blocking` parks when the hardware slots
+  are gone, so the cap is about the registry, not the drive.
+- **The block-cache invalidation stays after the wait**, and now happens on
+  failure too: a command that reported an error may still have landed in part,
+  so a cached page for that range cannot be trusted either way.
+
+Still submit-then-wait, and the next place to take this: `block_read` /
+`block_write` / `block_write_fua` themselves, `read_frame` / `write_frame` /
+`write_frames` in `fs/block_page_cache.rs`, and the journal, FAT32, GPT and MBR
+paths.
+
+---
+
 ## FIXED: one `ioctl` wedged a CPU, because a match scrutinee held its guard
 
 `syscallfuzz` found this on its first run. It was userspace-reachable, it was

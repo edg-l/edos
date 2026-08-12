@@ -52,17 +52,21 @@ nothing left to win there. Everything below is per-operation cost.
 system near 10k IOPS where a real SATA SSD does 50-100k at queue depth 32. This
 is the one remaining number that would still matter on real hardware.
 
-The reason is structural, not a slow submit path. **Every I/O path in the kernel
-but one is submit-then-wait.** `block_read` / `block_write` / `block_write_fua`
+The reason is structural, not a slow submit path. **Almost every I/O path in the
+kernel is submit-then-wait.** `block_read` / `block_write` / `block_write_fua`
 in `fs/efs/mod.rs`, `read_frame` / `write_frame` / `write_frames` in
 `fs/block_page_cache.rs`, and the equivalents in `fs/journal/`, `fs/fat32/`,
 `fs/gpt.rs` and `fs/mbr.rs` all call `submit_*` and immediately park on the
-handle. EFS `flush_pages_bulk` coalesces into runs but still blocks on each run.
+handle.
 
-The single exception is `BlockPageCache::read_pages` → `submit_read_batch`, and
-it coalesces contiguous misses first, so a 1 MiB miss is two commands rather
-than 256. `fsbench /var` reports `ahci_stats.ncq_max_inflight +1`: the whole
-suite never has two commands outstanding.
+Two paths do not. `BlockPageCache::read_pages` → `submit_read_batch` coalesces
+contiguous misses first, so a 1 MiB miss is two commands rather than 256. And
+since 2026-08-12 EFS `flush_pages_bulk` issues every run of a chunk before
+reaping any of them, capped at 16 outstanding (below `OWNED_OPS_CAP`), with each
+staging buffer held until its own handle completes. `fsbench write -n 32 /var`
+used to report `ahci_stats.ncq_max_inflight +1` for a whole suite; it now
+reports +3 to +9. Writeback is the half that queues; reads outside the
+readahead path, the journal and everything metadata still do not.
 
 So a 4 KiB read is a dependent round trip, not a queued one, and the 100 us is
 what a round trip costs: syscall, cache lookup, frame allocation, submit, park,
@@ -82,6 +86,8 @@ The fix that matters is giving readahead and writeback a path that keeps
 commands outstanding, so depth 32 is reachable at all. Until something asks for
 depth, per-command micro-optimisation has nothing to bite on: see the two
 completion-side cuts in the refuted list below, both of which were neutral.
+Writeback now asks; what is left is the read side outside readahead, and the
+journal, whose commits are the other bulk writer.
 
 Readahead has half of that path now (section 1b): a window is submitted before
 the reader parks, so a command is outstanding while the reader waits. Depth

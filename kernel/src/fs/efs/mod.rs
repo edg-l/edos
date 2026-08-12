@@ -2,6 +2,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
@@ -24,7 +25,7 @@ use super::gpt::Partition;
 use super::journal::{Journal, tx::TxHandle};
 use super::page_cache::{CachedPage, PageCacheOps};
 use crate::drivers::ahci::AhciError;
-use crate::drivers::block_io::{self, BlockBuffer, WriteFlags};
+use crate::drivers::block_io::{self, BlockBuffer, BlockIoHandle, WriteFlags};
 
 /// Submit a sector-level read and park on the handle. Returns an `AhciError`
 /// so existing call sites can `?`-propagate without further mapping.
@@ -57,6 +58,49 @@ fn block_write(device_id: u64, lba: u64, sectors: u16, buf: &[u8]) -> Result<(),
         WriteFlags::NONE,
     )?;
     handle.wait()?;
+    Ok(())
+}
+
+/// Issue a sector-level write and return its handle without waiting, so the
+/// caller can keep further commands outstanding behind it. `buf` is the DMA
+/// source on the direct path and must outlive the handle.
+fn submit_block_write(
+    device_id: u64,
+    lba: u64,
+    sectors: u16,
+    buf: &[u8],
+) -> Result<Arc<BlockIoHandle>, AhciError> {
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    let handle = dev.submit_write(
+        lba,
+        sectors as u32,
+        BlockBuffer::Slice {
+            ptr: buf.as_ptr() as *mut u8,
+            len: buf.len(),
+        },
+        WriteFlags::NONE,
+    )?;
+    Ok(handle)
+}
+
+/// One `submit_block_write` that has not been waited on yet.
+struct InflightWrite {
+    handle: Arc<BlockIoHandle>,
+    staging: Vec<u8>,
+    first_page: u64,
+    pages: u64,
+}
+
+/// Wait for one outstanding write, then drop the block cache's copy of the
+/// range it overwrote behind the cache's back. The invalidation happens on
+/// failure too: a command that reported an error may still have landed in
+/// part, so a cached page for that range cannot be trusted either way.
+fn reap_write(device_id: u64, write: InflightWrite) -> Result<(), AhciError> {
+    let result = write.handle.wait();
+    // The device is only done reading the staging buffer now.
+    drop(write.staging);
+    BlockPageCache::global().invalidate_pages(device_id, write.first_page, write.pages);
+    result?;
     Ok(())
 }
 
@@ -2735,6 +2779,17 @@ impl PageCacheOps for EfsDriver {
             // Cache pages are separate frames, so each run is assembled into a
             // staging buffer first; the copy is a fraction of the commands it
             // replaces.
+            //
+            // Runs are issued back to back and waited on afterwards, so the
+            // drive sees a queue rather than one command per round trip. Depth
+            // is capped below `OWNED_OPS_CAP` so every outstanding command
+            // still gets its cancellation hookup, and each staging buffer is
+            // held until its own command completes because the DMA reads from
+            // it.
+            const MAX_INFLIGHT_WRITES: usize = 16;
+            let mut inflight: VecDeque<InflightWrite> = VecDeque::new();
+            let mut failure: Option<Error> = None;
+
             let mut run_start = 0usize;
             while run_start < chunk.len() {
                 let mut run_len = 1usize;
@@ -2752,21 +2807,45 @@ impl PageCacheOps for EfsDriver {
                         .copy_from_slice(&buf[..needed_bytes]);
                 }
 
+                while inflight.len() >= MAX_INFLIGHT_WRITES {
+                    let done = inflight
+                        .pop_front()
+                        .expect("non-empty by the loop condition");
+                    if let Err(e) = reap_write(self.device.device_id, done) {
+                        failure.get_or_insert(e.into());
+                    }
+                }
+
                 let lba = self.block_to_lba(phys_blocks[run_start]);
                 let sectors = spb as usize * run_len;
-                if let Err(e) = block_write(self.device.device_id, lba, sectors as u16, &staging) {
-                    tx.abort();
-                    return Err(e.into());
+                match submit_block_write(self.device.device_id, lba, sectors as u16, &staging) {
+                    Ok(handle) => inflight.push_back(InflightWrite {
+                        handle,
+                        staging,
+                        first_page: lba / 8,
+                        pages: run_len as u64,
+                    }),
+                    Err(e) => {
+                        failure.get_or_insert(e.into());
+                        break;
+                    }
                 }
-                // These blocks just went to the device behind the block
-                // cache's back; drop any pages it still holds for them.
-                BlockPageCache::global().invalidate_pages(
-                    self.device.device_id,
-                    lba / 8,
-                    run_len as u64,
-                );
 
                 run_start += run_len;
+            }
+
+            // Every command must be drained before its staging buffer is
+            // dropped, so a failed run waits for the ones already issued
+            // rather than returning out from under their DMA.
+            while let Some(done) = inflight.pop_front() {
+                if let Err(e) = reap_write(self.device.device_id, done) {
+                    failure.get_or_insert(e.into());
+                }
+            }
+
+            if let Some(e) = failure {
+                tx.abort();
+                return Err(e);
             }
 
             // tx drops here, merging enrolled metadata into the active journal tx.
