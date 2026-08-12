@@ -516,15 +516,13 @@ fn page_cache_read_core(
         let submitted = pc_ops.submit_prefetch_pages(ino, pf_offset, pf_count);
         let submit_failed = submitted.is_err();
         match submitted {
-            Ok(Some((block_handle, buffer))) => {
-                let installed = page_fill::issue_prefetch_bulk(
-                    inode,
-                    pf_start as u64,
-                    pf_pages,
-                    block_handle,
-                    buffer,
-                );
-                count_async_window(pf_pages, installed);
+            Ok(Some(plan)) => {
+                // The plan may stop short of the window at the driver's command
+                // budget; the pages past it stay uncached rather than costing
+                // the reader a synchronous fill of a range nobody asked for.
+                let installed =
+                    page_fill::issue_prefetch_bulk(inode, pf_start as u64, plan.pages, plan.runs);
+                count_async_window(plan.pages, installed);
             }
             Ok(None) | Err(_) => {
                 // No prefetch path available (e.g. cross-extent or

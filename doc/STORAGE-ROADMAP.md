@@ -237,9 +237,9 @@ cannot tell which one it took**:
    installs the pages — genuinely asynchronous, the reader does not wait.
 2. It returns `Ok(None)` and the window falls back to
    `get_or_fill_bulk_async_sync` — a **synchronous** bulk fill, billed to the
-   reader inside its own read call. EFS returns `None` whenever the range is not
-   covered by a single extent, and also for inline-data inodes and for
-   `total_sectors > u16::MAX` (`fs/efs/mod.rs:2489`).
+   reader inside its own read call. EFS returns `None` for inline-data inodes
+   and for a range that maps nothing at all; a fragmented range is queued as
+   several runs rather than declined.
 3. It returns `Err(..)` and takes the same synchronous fallback.
 
 Path 2 produces exactly the signature the baseline recorded — the device idle

@@ -77,8 +77,8 @@ pub static RA_ASYNC_PAGES: AtomicU64 = AtomicU64::new(0);
 pub static RA_ASYNC_DROPPED_WINDOWS: AtomicU64 = AtomicU64::new(0);
 /// Pages in those windows — device reads whose result nothing keeps.
 pub static RA_ASYNC_DROPPED_PAGES: AtomicU64 = AtomicU64::new(0);
-/// Windows the driver declined (no single extent covers the range, inline data,
-/// or a run too long for one command), which fall back to a synchronous fill.
+/// Windows the driver declined (inline data, or a range that maps nothing),
+/// which fall back to a synchronous fill.
 pub static RA_SYNC_WINDOWS: AtomicU64 = AtomicU64::new(0);
 /// Pages in those windows.
 pub static RA_SYNC_PAGES: AtomicU64 = AtomicU64::new(0);

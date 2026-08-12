@@ -24,12 +24,42 @@ missing). The mechanism, and the four diagnoses that were refuted on the way to
 it, are further down this file — read those before re-opening anything about
 fragmented-file reads.
 
-The largest thing still open on the storage side is not correctness but
-throughput: `issue_prefetch_bulk` declines a readahead window whose pages span
-more than one extent, so a fragmented file gets 5 async windows against 243
-synchronous fallbacks where a contiguous one gets 245 against 3. That, not the
-extra AHCI commands, is where 287 → 132 MiB/s goes. The EFS read path already
-queues the multi-run case, so the decline is the thing to remove.
+---
+
+## A prefetch window is a set of runs, not one extent
+
+A readahead window whose pages spanned more than one extent used to be declined
+by `EfsDriver::submit_prefetch_pages` and filled synchronously instead, so a
+fragmented file got 5 async windows against 243 sync fallbacks where a
+contiguous one got 245 against 3. The single-extent restriction was the whole
+reason: it existed because a `PageFillHandle` carried exactly one
+`BlockIoHandle` and one buffer.
+
+`PrefetchData` now holds a `Vec<PrefetchRun>`, one per physically contiguous
+span, each with its own handle, buffer and the window-relative page it starts
+at. The driver plans the window the way `read_via_extents` plans a read
+(`ExtentMap::run_at`, runs capped at `MAX_RUN_BLOCKS`) and queues them all
+through `submit_read_batch`. `finalize_prefetch` waits on every run's handle
+before finalizing — on failure too, so no run is still DMA-ing into its buffer
+when the handle goes terminal — and copies each page from whichever run covers
+it.
+
+Two consequences worth knowing:
+
+- **A hole inside the window costs no command.** No run covers those pages and
+  finalization leaves the frame zeroed, which is what a hole reads as anyway.
+  A window that maps *nothing* still declines to `Ok(None)`, so an async window
+  always means real I/O is pending for a joiner to wait on.
+- **A window may be prefetched only in part.** `MAX_PREFETCH_RUNS` (16, half the
+  port's NCQ slots) bounds what one speculative window may queue ahead of reads
+  a thread is actually waiting on, so `PrefetchPlan::pages` can be short of what
+  the caller asked for. The uncovered tail is left uncached rather than pulled
+  in synchronously — it is readahead, and nobody is waiting for it.
+
+Verified in the guest on a fresh disk, `fsbench fragprep /var` then a reboot then
+`fsbench ra /var`: 248 async windows, **0 declined and 0 failed** (was 5 async /
+243 sync), 4 extent reads planning 4 runs in 4 submits, and `verify: edges match
+the pattern`.
 
 ---
 

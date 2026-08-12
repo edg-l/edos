@@ -24,6 +24,7 @@ use super::block_page_cache::BlockPageCache;
 use super::gpt::Partition;
 use super::journal::{Journal, tx::TxHandle};
 use super::page_cache::{CachedPage, PageCacheOps};
+use super::page_fill::{PrefetchPlan, PrefetchRun};
 use crate::drivers::ahci::AhciError;
 use crate::drivers::block_io::{self, BlockBuffer, BlockIoHandle, WriteFlags};
 
@@ -483,6 +484,11 @@ const MAX_INFLIGHT_READS: usize = 16;
 /// Staging bytes held by those commands at once, so a very large read costs a
 /// bounded amount of memory beyond its own result buffer.
 const MAX_INFLIGHT_BYTES: usize = 2 * 1024 * 1024;
+/// Commands one readahead window may queue. Half the port's NCQ slots, because
+/// a prefetch is speculative and must leave room for the reads a thread is
+/// actually waiting on. A window needing more runs than this is prefetched as
+/// far as the budget reaches and no further.
+const MAX_PREFETCH_RUNS: usize = 16;
 
 /// One device read planned by `read_via_extents`: a physically contiguous run,
 /// and where in the caller's buffer its bytes land.
@@ -2665,22 +2671,17 @@ impl PageCacheOps for EfsDriver {
         self.read_file_data(&inode, offset, count)
     }
 
-    /// Async prefetch: submit ONE AHCI read for the range and return its
-    /// handle + the shared buffer. Returns `None` if the range isn't fully
-    /// covered by a single extent (the caller falls back to sync
-    /// `fill_pages_bulk`).
+    /// Async prefetch: queue one AHCI read per physically contiguous run of the
+    /// range and return their handles + shared buffers. A fragmented file is
+    /// several runs, which is the common case for anything written alongside
+    /// other files; only inline data and a range that maps nothing at all fall
+    /// back to the sync `fill_pages_bulk`.
     fn submit_prefetch_pages(
         &self,
         ino: u64,
         offset: usize,
         count: usize,
-    ) -> Result<
-        Option<(
-            alloc::sync::Arc<crate::drivers::block_io::BlockIoHandle>,
-            alloc::sync::Arc<alloc::vec::Vec<u8>>,
-        )>,
-        Error,
-    > {
+    ) -> Result<Option<PrefetchPlan>, Error> {
         let inode = self.read_inode(ino)?;
         if inode.mode & S_IFMT != S_IFREG {
             return Err(Error::NotAFile);
@@ -2708,48 +2709,81 @@ impl PageCacheOps for EfsDriver {
         let block_size = self.block_size() as usize;
         let logical_start = (offset / block_size) as u32;
         let logical_end = ((offset + to_read).div_ceil(block_size)) as u32;
-
-        // The range must be covered by ONE extent for single-submit prefetch.
-        let extent = match extents.as_slice().iter().find(|e| {
-            e.logical_block <= logical_start && logical_start < e.logical_block + e.length as u32
-        }) {
-            Some(e) => e,
-            None => return Ok(None),
-        };
-        if logical_end > extent.logical_block + extent.length as u32 {
-            return Ok(None);
-        }
-
-        // Convert to LBA + sector count.
-        let blocks_into_extent = logical_start - extent.logical_block;
-        let phys_block = extent.physical_start() + blocks_into_extent as u64;
-        let lba = self.block_to_lba(phys_block);
-        let total_blocks = logical_end - logical_start;
         let spb = self.sectors_per_block();
-        let total_sectors = total_blocks * spb as u32;
-        if total_sectors > u16::MAX as u32 {
-            return Ok(None);
+
+        // Plan one read per contiguous run, stopping at the command budget:
+        // the whole window is queued at once and nothing waits on it here, so
+        // an unbounded plan would hand the device a queue's worth of
+        // speculative reads ahead of the reader's own.
+        struct PlannedRun {
+            lba: u64,
+            sectors: u32,
+            page_offset: u64,
+            blocks: u32,
+        }
+        let mut planned: Vec<PlannedRun> = Vec::new();
+        let mut logical = logical_start;
+        while logical < logical_end {
+            let want = logical_end - logical;
+            match extents.run_at(logical) {
+                BlockRun::Mapped { phys, blocks } => {
+                    if planned.len() == MAX_PREFETCH_RUNS {
+                        break;
+                    }
+                    let run_blocks = want.min(blocks).min(MAX_RUN_BLOCKS as u32);
+                    planned.push(PlannedRun {
+                        lba: self.block_to_lba(phys),
+                        sectors: run_blocks * spb as u32,
+                        page_offset: (logical - logical_start) as u64,
+                        blocks: run_blocks,
+                    });
+                    logical += run_blocks;
+                }
+                // A hole prefetches as zeros: no command, and finalization
+                // leaves the page zeroed because no run covers it.
+                BlockRun::Hole { blocks } => {
+                    logical += blocks.unwrap_or(want).min(want);
+                }
+            }
         }
 
-        // Allocate the shared buffer (block-aligned, size = whole-blocks of
-        // data; finalization copies the relevant chunk into each page).
-        let byte_count = total_blocks as usize * block_size;
-        let buffer = alloc::sync::Arc::new(alloc::vec![0u8; byte_count]);
+        if planned.is_empty() {
+            return Ok(None);
+        }
+        let pages = (logical - logical_start) as u64;
 
-        // Submit the read with a Shared BlockBuffer so the DMA target stays
-        // alive even if no caller observes the prefetch.
+        // Shared BlockBuffers so the DMA target stays alive even if no caller
+        // ever observes the prefetch.
+        let buffers: Vec<alloc::sync::Arc<alloc::vec::Vec<u8>>> = planned
+            .iter()
+            .map(|r| alloc::sync::Arc::new(alloc::vec![0u8; r.blocks as usize * block_size]))
+            .collect();
+        let reqs = planned
+            .iter()
+            .zip(buffers.iter())
+            .map(|(r, buf)| {
+                (
+                    r.lba,
+                    r.sectors,
+                    crate::drivers::block_io::BlockBuffer::Shared { vec: buf.clone() },
+                )
+            })
+            .collect();
+
         let dev = crate::drivers::block_io::lookup(self.device.device_id).ok_or(Error::IoError)?;
-        let block_handle = dev
-            .submit_read(
-                lba,
-                total_sectors,
-                crate::drivers::block_io::BlockBuffer::Shared {
-                    vec: buffer.clone(),
-                },
-            )
-            .map_err(|_| Error::IoError)?;
+        let handles = dev.submit_read_batch(reqs).map_err(|_| Error::IoError)?;
 
-        Ok(Some((block_handle, buffer)))
+        let runs = handles
+            .into_iter()
+            .zip(buffers)
+            .zip(planned.iter())
+            .map(|((block_handle, buffer), r)| PrefetchRun {
+                block_handle,
+                buffer,
+                page_offset: r.page_offset,
+            })
+            .collect();
+        Ok(Some(PrefetchPlan { pages, runs }))
     }
 
     fn flush_page(

@@ -131,8 +131,8 @@ pub struct PageFillHandle {
     /// Fill state machine: `FILL_PENDING` → `FILL_SUCCESS | FILL_FAILED`.
     pub state: AtomicU8,
     /// `Some` for async-readahead prefetch entries; `None` for inline fills.
-    /// When present, the first joiner parks on `block_handle.wait()`, then
-    /// CASes `finalized` and (on success) copies `buffer` into freshly
+    /// When present, the first joiner parks on every run's block handle, then
+    /// CASes `finalized` and (on success) copies the run buffers into freshly
     /// allocated `CachedPage` frames, inserts them under `inode.pages`,
     /// and transitions `state` to `FILL_SUCCESS`. Later joiners observe
     /// the terminal state and look the pages up directly.
@@ -142,9 +142,37 @@ pub struct PageFillHandle {
 /// Per-prefetch state attached to a `PageFillHandle`. The first joiner
 /// finalizes; subsequent joiners wait on the parent handle's `waiters`.
 pub struct PrefetchData {
+    pub runs: Vec<PrefetchRun>,
+    pub finalized: AtomicBool,
+}
+
+/// One device read backing part of a prefetch window: a physically contiguous
+/// run, and the page of the window its first byte belongs to. A window over a
+/// fragmented file is several runs; a window over one extent is exactly one.
+pub struct PrefetchRun {
     pub block_handle: Arc<BlockIoHandle>,
     pub buffer: Arc<Vec<u8>>,
-    pub finalized: AtomicBool,
+    /// First page this run fills, relative to the window's first page.
+    pub page_offset: u64,
+}
+
+impl PrefetchRun {
+    /// Pages this run's buffer covers. Buffers are whole blocks and a block is
+    /// a page, so this is exact.
+    fn pages(&self) -> u64 {
+        (self.buffer.len() / 4096) as u64
+    }
+}
+
+/// What a driver submitted for one prefetch window.
+pub struct PrefetchPlan {
+    /// Pages covered from the window's first page. Fewer than requested when
+    /// the driver stopped at its per-window command budget; the rest is simply
+    /// not prefetched, and the next read finds it uncached.
+    pub pages: u64,
+    /// The submitted runs, ascending by `page_offset`. A page inside `pages`
+    /// that no run covers is a hole in the file and finalizes as zeros.
+    pub runs: Vec<PrefetchRun>,
 }
 
 impl PageFillHandle {
@@ -162,13 +190,12 @@ impl PageFillHandle {
     }
 
     /// Construct a new prefetch handle. The block I/O has already been
-    /// submitted; `block_handle` becomes terminal when the drive completes.
+    /// submitted; each run's handle becomes terminal when the drive completes.
     pub fn new_prefetch(
         inode: Weak<VfsInode>,
         page_idx: u64,
         len: u64,
-        block_handle: Arc<BlockIoHandle>,
-        buffer: Arc<Vec<u8>>,
+        runs: Vec<PrefetchRun>,
     ) -> Arc<Self> {
         Arc::new(Self {
             inode,
@@ -177,8 +204,7 @@ impl PageFillHandle {
             waiters: WaitQueue::new(),
             state: AtomicU8::new(FILL_PENDING),
             prefetch: Some(PrefetchData {
-                block_handle,
-                buffer,
+                runs,
                 finalized: AtomicBool::new(false),
             }),
         })
@@ -330,8 +356,14 @@ fn finalize_prefetch(inode: &Arc<VfsInode>, handle: &Arc<PageFillHandle>) {
         None => return,
     };
 
-    // Park on the I/O. wait_until per the spurious-wake park contract.
-    let block_result = prefetch.block_handle.wait();
+    // Park on every run's I/O. All of them are waited on even after one fails,
+    // so no run is still writing into its buffer when this returns.
+    let mut block_result = Ok(());
+    for run in &prefetch.runs {
+        if run.block_handle.wait().is_err() {
+            block_result = Err(());
+        }
+    }
 
     // Only the CAS winner does the finalization work.
     if prefetch
@@ -342,7 +374,7 @@ fn finalize_prefetch(inode: &Arc<VfsInode>, handle: &Arc<PageFillHandle>) {
         return;
     }
 
-    if let Err(_e) = block_result {
+    if block_result.is_err() {
         // I/O failed: publish FAILED so joiners retry.
         handle.finish_failed();
         in_flight_remove_all(inode, handle);
@@ -368,14 +400,23 @@ fn finalize_prefetch(inode: &Arc<VfsInode>, handle: &Arc<PageFillHandle>) {
     // Copy buffer chunks into frames; build the (idx, page) list.
     let mut pages_to_insert: Vec<(u64, Arc<CachedPage>)> = Vec::with_capacity(handle.len as usize);
     for (i, fd) in frames.into_iter().enumerate() {
-        let data_offset = i * 4096;
+        let page_offset = i as u64;
         {
             let slice = unsafe { fd.frame_slice_mut() };
-            let available = prefetch.buffer.len().saturating_sub(data_offset);
-            let copy = available.min(4096);
-            if copy > 0 {
-                slice[..copy].copy_from_slice(&prefetch.buffer[data_offset..data_offset + copy]);
-            }
+            // A page no run covers is a hole in the file and reads as zeros.
+            let run = prefetch
+                .runs
+                .iter()
+                .find(|r| page_offset >= r.page_offset && page_offset - r.page_offset < r.pages());
+            let copy = match run {
+                Some(r) => {
+                    let data_offset = (page_offset - r.page_offset) as usize * 4096;
+                    let copy = r.buffer.len().saturating_sub(data_offset).min(4096);
+                    slice[..copy].copy_from_slice(&r.buffer[data_offset..data_offset + copy]);
+                    copy
+                }
+                None => 0,
+            };
             if copy < 4096 {
                 slice[copy..].fill(0);
             }
@@ -444,7 +485,7 @@ pub fn narrow_prefetch_window(
 
 /// Install a prefetch `PageFillHandle` covering `[start_page, start_page +
 /// page_count)` in `inode.pages.in_flight`. The caller has already submitted
-/// the block I/O and passes the resulting `block_handle` + `buffer`.
+/// the block I/O and passes the resulting `runs`.
 ///
 /// Returns `true` if the handle was installed. Returns `false` if any page in
 /// the range was already in flight, which loses the submitted read: the pages
@@ -457,20 +498,13 @@ pub fn issue_prefetch_bulk(
     inode: &Arc<VfsInode>,
     start_page: u64,
     page_count: u64,
-    block_handle: Arc<BlockIoHandle>,
-    buffer: Arc<Vec<u8>>,
+    runs: Vec<PrefetchRun>,
 ) -> bool {
     assert!(
         page_count > 0,
         "issue_prefetch_bulk: page_count must be > 0"
     );
-    let handle = PageFillHandle::new_prefetch(
-        Arc::downgrade(inode),
-        start_page,
-        page_count,
-        block_handle,
-        buffer,
-    );
+    let handle = PageFillHandle::new_prefetch(Arc::downgrade(inode), start_page, page_count, runs);
 
     let installed = {
         let mut inflight = inode
