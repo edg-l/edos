@@ -176,7 +176,7 @@ does not have to invent them.
 | | value | how |
 |---|---|---|
 | syscalls | 111 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 111 — a mismatch is the bug |
-| userspace programs | 102 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
+| userspace programs | 103 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 19/19 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |

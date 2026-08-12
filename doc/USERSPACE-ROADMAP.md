@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-102 programs and 2 libraries, all in the `programs/` cargo workspace.
+103 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -10,7 +10,7 @@
 | GUI | `edos-wm` (compositor, decorations, desktop menu), `edos-terminal`, `edos-taskbar` (panel + applications menu), `edos-procview`, `wintest` |
 | Shell | `edos-sh` |
 | Editor | `edos-vi` |
-| Files | `ls`, `cat`, `cp`, `mv`, `rm`, `ln`, `mkdir`, `rmdir`, `touch`, `stat`, `find`, `du`, `diff` |
+| Files | `ls`, `cat`, `cp`, `mv`, `rm`, `ln`, `mkdir`, `rmdir`, `touch`, `stat`, `find`, `du`, `diff`, `dd` |
 | Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs`, `less`, `sed` |
 | Archives | `tar` (ustar create, list and extract) |
 | Checksums | `sha256sum` |
