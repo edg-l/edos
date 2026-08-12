@@ -83,6 +83,13 @@ commands outstanding, so depth 32 is reachable at all. Until something asks for
 depth, per-command micro-optimisation has nothing to bite on: see the two
 completion-side cuts in the refuted list below, both of which were neutral.
 
+Readahead has half of that path now (section 1b): a window is submitted before
+the reader parks, so a command is outstanding while the reader waits. Depth
+still never exceeds 1, because the reader joins that same window's handle rather
+than issuing one of its own, and a 512 KiB window is a single command. Reaching
+depth means several windows in flight at once, or splitting one — writeback has
+none of it yet.
+
 Coalescing cannot help here — one page is one command — so this is
 per-operation work, not another run-length fix.
 
@@ -140,6 +147,50 @@ So the target for a pipelined version is specific: the same 16 MiB with
 boot's 4, and the 11 stalls going towards 0. Throughput is the last thing to
 look at, not the first — 222 MiB/s is already far off the raw-device ceiling for
 reasons section 1 owns.
+
+**Two of those three criteria turned out to be untestable on this host**, for a
+reason only visible once pipelining landed: the window completes inside the call
+that issued it, so a sample taken between calls can never see it. Read the stall
+count and p50; the reasoning is under "Pipelining landed" below.
+
+### The three paths, and why the counter had to come first
+
+Reading `page_cache_read_core` (`fs/vfs.rs`) against that baseline, a readahead
+window past `end_page` can take three different paths, and **the instrument
+cannot tell which one it took**:
+
+1. `submit_prefetch_pages` returns `Ok(Some(..))` and `issue_prefetch_bulk`
+   installs the pages — genuinely asynchronous, the reader does not wait.
+2. It returns `Ok(None)` and the window falls back to
+   `get_or_fill_bulk_async_sync` — a **synchronous** bulk fill, billed to the
+   reader inside its own read call. EFS returns `None` whenever the range is not
+   covered by a single extent, and also for inline-data inodes and for
+   `total_sectors > u16::MAX` (`fs/efs/mod.rs:2489`).
+3. It returns `Err(..)` and takes the same synchronous fallback.
+
+Path 2 produces exactly the signature the baseline recorded — the device idle
+between calls and never more than one command outstanding — without any of it
+being evidence about trailing versus pipelining, because on that path the
+prefetch is not asynchronous at all. The two hypotheses are not distinguishable
+from throughput, stalls or `ncq_inflight`.
+
+A second number is unexplained and points the same way: p50 is 174 us per 64 KiB
+call while only 11 of 256 calls are counted as stalled. In steady state the
+window has ramped to `RA_MAX_PAGES` and the requested pages are 128 pages behind
+the prefetch frontier, so the call should be a `memcpy` and finish in single-digit
+microseconds. 174 us is a call waiting on a device, and the stall counter does not
+see it — consistent with the wait happening inside the fallback bulk fill rather
+than at the point the stall counter watches.
+
+The counters that tell them apart were built for exactly this, and what they
+read is below: path 1 dominates, 245 windows to 8. Path 2 is not what the
+baseline was measuring, and the extent work is not what fixes this.
+
+The fixture worry that came with the hypothesis is settled by the same reading.
+`fsbench raprep` builds its 16 MiB file by appending, which is the pattern the
+EFS pre-allocation item describes as splitting one contiguous extent into many
+tiny ones — but EFS declined only 8 of 253 windows, so `ensure_block_for_logical`
+is coalescing and the file is not badly fragmented. The scaffolding is ruled out.
 
 ### What the branch counter found: the prefetch reads and throws away 92 MiB
 
@@ -314,45 +365,6 @@ working when the call returns. Read the stall count and p50 instead.
 What is left in the 203 us is not readahead placement: the file is read exactly
 once, no window is discarded, and no call stalls. It is the per-command cost
 section 1 owns, paid once per 64 KiB by the joiner that finalizes the window.
-
-### The three paths, and why the counter had to come first
-
-Reading `page_cache_read_core` (`fs/vfs.rs`) against that baseline, a readahead
-window past `end_page` can take three different paths, and **the instrument
-cannot tell which one it took**:
-
-1. `submit_prefetch_pages` returns `Ok(Some(..))` and `issue_prefetch_bulk`
-   installs the pages — genuinely asynchronous, the reader does not wait.
-2. It returns `Ok(None)` and the window falls back to
-   `get_or_fill_bulk_async_sync` — a **synchronous** bulk fill, billed to the
-   reader inside its own read call. EFS returns `None` whenever the range is not
-   covered by a single extent, and also for inline-data inodes and for
-   `total_sectors > u16::MAX` (`fs/efs/mod.rs:2489`).
-3. It returns `Err(..)` and takes the same synchronous fallback.
-
-Path 2 produces exactly the signature the baseline recorded — the device idle
-between calls and never more than one command outstanding — without any of it
-being evidence about trailing versus pipelining, because on that path the
-prefetch is not asynchronous at all. The two hypotheses are not distinguishable
-from throughput, stalls or `ncq_inflight`.
-
-A second number is unexplained and points the same way: p50 is 174 us per 64 KiB
-call while only 11 of 256 calls are counted as stalled. In steady state the
-window has ramped to `RA_MAX_PAGES` and the requested pages are 128 pages behind
-the prefetch frontier, so the call should be a `memcpy` and finish in single-digit
-microseconds. 174 us is a call waiting on a device, and the stall counter does not
-see it — consistent with the wait happening inside the fallback bulk fill rather
-than at the point the stall counter watches.
-
-The counters that tell them apart were built for exactly this, and what they
-read is above: path 1 dominates, 245 windows to 8. Path 2 is not what the
-baseline was measuring, and the extent work is not what fixes this.
-
-The fixture worry that came with the hypothesis is settled by the same reading.
-`fsbench raprep` builds its 16 MiB file by appending, which is the pattern the
-EFS pre-allocation item describes as splitting one contiguous extent into many
-tiny ones — but EFS declined only 8 of 253 windows, so `ensure_block_for_logical`
-is coalescing and the file is not badly fragmented. The scaffolding is ruled out.
 
 ## 2. mmap fault-around
 

@@ -312,6 +312,22 @@ until grep -qE '\[Terminal\] Spawned shell|KERNEL PANIC' run_log.txt; do sleep 1
 
 ---
 
+## A program's own output is on the screen, not in `run_log.txt`
+
+`run_log.txt` carries the serial console: the kernel log, panics, and the
+`KILL:` lines the page-fault path writes. A program started from the GUI
+terminal writes its stdout to that terminal's PTY, and none of it reaches
+serial. So `wait_for(mark, "all tests passed", ...)` against the serial log
+times out while the line sits on screen, and grepping the tail finds only the
+kernel-side traces — for `mmaptest` those are the `PastEof` `KILL:` lines its
+own out-of-bounds test provokes, which look like a failure and are the pass.
+
+Read a verdict of that kind with `scripts/edos-vm shot` and look at the image.
+Only a program that writes to `/dev/klog`, or the kernel itself, can be waited
+on through the log.
+
+---
+
 ## Host requirements
 
 - **`/dev/kvm` access.** It is group-owned by `kvm`; membership applies at login,
