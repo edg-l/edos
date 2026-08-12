@@ -33,7 +33,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from vmdrive import type_line  # noqa: E402
+from vmdrive import serial_mark, type_line, wait_for  # noqa: E402
 
 # What `scripts/edos-vm` forwards to guest port 23 by default.
 PORT = 2323
@@ -160,6 +160,29 @@ def wait_until_serving(timeout=30, poll=1.0):
     return None
 
 
+def write_config(user=USER, password=PASSWORD, attempts=3):
+    """Type `/etc/sshd.conf` into the guest and read it back to be sure.
+
+    Read back because this is typed at a terminal, and a keystroke dropped
+    while the guest is still settling produces a file that looks plausible and
+    is wrong. A mangled password line leaves the server listening and refusing
+    every login, which reads as "sshd is broken" rather than "the test typed it
+    wrong" -- so the check confirms what it wrote instead of assuming it.
+    """
+    want = f"user {user} {password}"
+    for attempt in range(attempts):
+        mark = serial_mark()
+        type_line("echo port 23 > /etc/sshd.conf", settle=1)
+        type_line(f"echo {want} >> /etc/sshd.conf", settle=1)
+        type_line("cat /etc/sshd.conf > /dev/klog", settle=1)
+        out = wait_for(mark, want, 10)
+        if out is not None and "port 23" in out:
+            return
+        if attempt + 1 < attempts:
+            time.sleep(2)
+    raise RuntimeError("/etc/sshd.conf did not come out as typed in the guest")
+
+
 def start_sshd(user=USER, password=PASSWORD, timeout=30):
     """Write `/etc/sshd.conf` in the guest and start the server from it.
 
@@ -176,8 +199,7 @@ def start_sshd(user=USER, password=PASSWORD, timeout=30):
     Readiness is the banner rather than a log line, so this waits on the thing
     the caller actually needs.
     """
-    type_line("echo port 23 > /etc/sshd.conf", settle=1)
-    type_line(f"echo user {user} {password} >> /etc/sshd.conf", settle=1)
+    write_config(user, password)
     type_line("sshd -v > /dev/klog 2>&1 &", settle=2)
     found = wait_until_serving(timeout)
     if found is None:
