@@ -21,7 +21,7 @@ use crate::thread::scheduler::{
     current_thread, current_thread_info, current_thread_weak, thread_exit, thread_park_while,
     thread_sleep,
 };
-use crate::util::uaccess::{try_copy_from_user, try_copy_to_user, try_write_user};
+use crate::util::uaccess::{access_ok, try_copy_from_user, try_copy_to_user, try_write_user};
 use crate::{
     drivers::{keyboard::KEY_EVENT_BROADCAST, random, tty},
     log, ranked_lock,
@@ -903,13 +903,16 @@ pub fn sys_getrandom(buffer_ptr: *mut u8, count: usize, flags: u64) -> i64 {
         return -1;
     }
 
-    if count == 0 {
-        return 0;
-    }
-
+    // Validate before short-circuiting: a zero-length request still carries a
+    // flag word, and answering 0 for one this kernel does not implement tells
+    // the caller a flag was honoured that never was.
     if count > MAX_RANDOM_LEN || flags != 0 {
         info.lock().errno = Errno::EINVAL;
         return -1;
+    }
+
+    if count == 0 {
+        return 0;
     }
 
     let mut kernel_buffer = vec![0u8; count];
@@ -1048,8 +1051,21 @@ pub fn sys_openat(dirfd: i64, path_ptr: *const u8, path_len: usize, flags: u64) 
     open_resolved(&info, path, flags)
 }
 
+/// Every `open` flag this kernel implements: the access mode plus O_CREAT,
+/// O_TRUNC and O_APPEND.
+const OPEN_FLAGS_SUPPORTED: u64 = 0x3 | 0x40 | 0x200 | 0x400;
+
 /// Open an already-resolved absolute path, shared by `open` and `openat`.
 fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64) -> i64 {
+    // A flag this kernel does not implement is refused rather than ignored:
+    // silently dropping O_EXCL or O_DIRECTORY hands back a descriptor whose
+    // semantics are not the ones the caller asked for. Access mode 3 has no
+    // meaning either.
+    if flags & !OPEN_FLAGS_SUPPORTED != 0 || flags & 0x3 == 0x3 {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
     // Verify file exists; support create flag.
     // O_APPEND offset is determined per-write by vfs::write, not at open time.
     let append = (flags & 0x400) != 0; // O_APPEND
@@ -1061,7 +1077,7 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
         0 => OpenMode::ReadOnly,
         1 => OpenMode::WriteOnly,
         2 => OpenMode::ReadWrite,
-        _ => OpenMode::ReadWrite, // 3 is not a valid Linux value; treat as ReadWrite
+        _ => unreachable!(),
     };
     interrupts::enable();
     // Everything cached on the descriptor has to name the file the fd refers
@@ -1587,6 +1603,14 @@ pub fn sys_getcwd(buffer_ptr: *mut u8, size: usize) -> i64 {
 
     if size == 0 {
         info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
+    // `size` is the caller's claim about its own buffer. A claim that cannot
+    // describe any user buffer is a bad pointer, not a large one, and must be
+    // refused before it is compared against the path length below.
+    if !access_ok(buffer_ptr as u64, size) {
+        info.lock().errno = Errno::EFAULT;
         return -1;
     }
 

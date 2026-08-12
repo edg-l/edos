@@ -8,7 +8,7 @@ use crate::{
         mutex::BlockingMutex,
         waitqueue::{WaitOutcome, WaitQueue},
     },
-    util::uaccess::try_read_user,
+    util::uaccess::{access_ok, try_read_user},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -122,7 +122,11 @@ pub fn sys_futex_wake(addr: *const u32, count: u32) -> u64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    if addr.is_null() {
+    // A wake never dereferences the word, it only keys the registry by its
+    // address, so the range has to be checked here rather than being caught by
+    // a copy the way `sys_futex_wait` is. Validated before the zero-count
+    // short-circuit: waking nobody is still a claim about a real address.
+    if addr.is_null() || !access_ok(addr as u64, size_of::<u32>()) {
         info.lock().errno = Errno::EFAULT;
         return !0u64;
     }

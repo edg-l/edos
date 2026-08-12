@@ -62,7 +62,8 @@ use crate::{
         util::{kthread_stack_alloc, kthread_stack_free},
     },
     util::uaccess::{
-        UAccessError, try_copy_string_from_user, try_copy_to_user, try_read_user, try_write_user,
+        UAccessError, access_ok, try_copy_string_from_user, try_copy_to_user, try_read_user,
+        try_write_user,
     },
 };
 
@@ -3128,7 +3129,7 @@ fn sys_netinfo(buf_ptr: *mut u8, buf_len: usize) -> u64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    if buf_ptr.is_null() || buf_len == 0 {
+    if buf_ptr.is_null() || buf_len == 0 || !access_ok(buf_ptr as u64, buf_len) {
         info.lock().errno = Errno::EFAULT;
         return !0u64;
     }

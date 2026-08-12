@@ -5,7 +5,7 @@ use crate::ranked_write;
 use alloc::string::String;
 
 use crate::{
-    util::uaccess::{try_copy_to_user, try_read_user},
+    util::uaccess::{access_ok, try_copy_to_user, try_read_user},
     window::{
         WindowEvent,
         input::{get_or_create_event_queue, poll_events, remove_event_queue, send_event},
@@ -369,6 +369,18 @@ pub fn sys_window_poll(window_id: WindowId, events_ptr: *mut WindowEvent, max: u
 pub fn sys_window_list(buffer_ptr: *mut u8, max: u64) -> u64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
+
+    // `max` is the caller's claim about how many entries its buffer holds.
+    // Refuse one that no user buffer could satisfy, rather than trusting it
+    // because the window list happened to be shorter. Checked before the
+    // registry lock so the error path does not run under it.
+    if !buffer_ptr.is_null() && max != 0 {
+        let declared_bytes = (max as usize).checked_mul(size_of::<WindowListEntry>());
+        if !declared_bytes.is_some_and(|bytes| access_ok(buffer_ptr as u64, bytes)) {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
+        }
+    }
 
     // Snapshot under the lock, copy to userspace outside it. `try_copy_to_user`
     // can demand-fault, and a demand fault can park on a page fill; parking

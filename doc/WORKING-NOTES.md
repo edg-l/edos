@@ -3993,3 +3993,60 @@ argument, they fall into three classes and only the third is open work:
   rejected. `open(path, u64::MAX)` is the same shape one level up — every flag
   bit set, `O_CREAT` included, is taken at face value. That is the next thing to
   fix, and it is the defect class the fuzzer's header paragraph names.
+
+---
+
+## FIXED: a declared length was never checked against the address space (2026-08-12)
+
+The third class above is one defect with one fix. A length or maximum is the
+caller's *claim* about a buffer it owns, and the kernel was only ever checking
+the bytes it actually wrote — `try_copy_to_user` calls `access_ok` on the copy,
+so a short answer into a huge declared buffer succeeds and the absurd size is
+never contradicted. The claim itself has to be checked:
+
+- `sys_getcwd` (`syscalls/io.rs`) and `sys_netinfo` (`syscalls/mod.rs`) call
+  `access_ok(buf, len)` on the declared length before comparing it against what
+  they have to say.
+- `sys_window_list` (`syscalls/window.rs`) multiplies `max` by
+  `size_of::<WindowListEntry>()` with `checked_mul` and checks that. It runs
+  *before* the registry lock is taken, so the error return does not have to
+  reach for the thread-info lock underneath the window registry (rank 280).
+  The `max == 0` count query keeps its early return.
+
+Two more had a validation the caller could skip by asking for nothing:
+
+- `sys_getrandom` returned 0 for `count == 0` before looking at `flags`, so
+  `getrandom(buf, 0, u64::MAX)` reported that flags this kernel does not
+  implement were honoured. Validate, then short-circuit — the same ordering the
+  zero-length transfer fix above landed on.
+- `sys_futex_wake` (`syscalls/sync.rs`) never dereferences the word, it keys
+  `FUTEX_REGISTRY` by the address, so nothing else would ever catch a kernel-half
+  pointer the way `sys_futex_wait`'s `try_read_user` does. It now calls
+  `access_ok` itself, before the `count == 0` return.
+
+`open` is the same shape one level up, and the fix is to refuse rather than
+ignore: `OPEN_FLAGS_SUPPORTED` is `0x3 | O_CREAT | O_TRUNC | O_APPEND`, which is
+every flag this kernel implements, and anything outside it is `EINVAL`. So is
+access mode 3, which removes the `_ => ReadWrite` fallthrough. This diverges from
+Linux, where `open` ignores unknown bits and only `openat2` rejects them, and the
+divergence is deliberate: dropping `O_EXCL` or `O_DIRECTORY` silently returns a
+descriptor whose semantics are not the ones that were asked for. It is safe here
+because userspace has exactly one source of open flags — `edos_rt`'s `OpenFlags`
+(`READ_ONLY`/`WRITE_ONLY`/`READ_WRITE`/`CREATE`/`APPEND`/`TRUNCATE`), which std's
+`OpenOptions` builds from, plus `edos-sh`'s `RedirMode::open_flags`. Both stay
+inside the mask. Adding a flag to the kernel means adding its bit here too, or
+every caller of it gets `EINVAL`.
+
+Verified in the guest: `syscallfuzz -n 4 -u 0` PASS with the "poisoned yet
+returned" list 11 → 6, `iotest /var` 20/20 (which is the real test of the open
+mask, since it opens through std, `openat`, `O_CREAT`, `O_TRUNC` and `O_APPEND`),
+and a desktop that composites — `edos-wm`, `edos-taskbar` and `edos-terminal` all
+open device nodes and fonts on the way up.
+
+The six rows that survive are the first two classes, and they are correct as they
+stand: `isatty` has no failure return, and `list_dir`, `list_mounts`,
+`list_partitions` and `clock_gettime` answer a question that a poison pointer
+alongside a zero maximum does not make invalid. `futex_wake` stays on the list
+with a *different* case than before — a valid address and a poison count, where
+waking 1001 waiters on a word nobody waits on is 0 by definition. A row's
+arguments are worth reading before assuming it is the same finding as last run.
