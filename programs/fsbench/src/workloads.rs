@@ -54,9 +54,16 @@ fn mmap_path(dir: &str) -> String {
 /// Position-dependent and tag-dependent, so a block landing at the wrong
 /// offset, a stale block from a previous run, and a block of zeros that was
 /// never written all fail the check. A constant fill catches none of those.
+///
+/// The mixer is splitmix64's finalizer, and the full avalanche is the point:
+/// one multiply by an odd constant followed by a bit slice makes the byte
+/// depend only on the low bits of `pos`, so the pattern repeats at a power of
+/// two and a read misdirected by exactly that period passes verification.
 pub fn byte_at(tag: u64, pos: u64) -> u8 {
-    let x = pos.wrapping_mul(2654435761) ^ (tag.wrapping_add(1).wrapping_mul(40503));
-    (x >> 13) as u8
+    let mut x = pos.wrapping_add(tag.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (x ^ (x >> 31)) as u8
 }
 
 fn pattern_buf(tag: u64, offset: u64, len: usize) -> Vec<u8> {

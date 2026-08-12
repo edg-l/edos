@@ -4301,30 +4301,74 @@ than in one run. `extent_holes` is 0 for the pass, so nothing was planned as a
 hole below EOF. That is the mapped-block-holding-no-file-data shape, and it is
 per whole 4 KiB block.
 
-**And the host scan now contradicts the guest, which is the next thing to
-settle.** The scan grew a missing-blocks report — a block the guest reads as
-zeros but whose pattern is on the disk was written and read back from the wrong
-place; one that is nowhere in the image was never written:
+**REFUTED: "3584 logical blocks were never written" was the pattern repeating,
+not the disk.** The scan's missing-blocks report said this:
 
 ```
 7508 pattern blocks in the image, 7508 byte-perfect, 0 damaged
 3584 of 4096 logical blocks have no copy anywhere in the image
 ```
 
-The 512 blocks that *are* present are exactly logical 3584..4095, the file's
-last 2 MiB, in one contiguous range. Blocks 0..3583 are absent at **every**
-512-byte alignment, not just at 4096 (re-scanned with a 512-byte step: same 512
-blocks, so this is not the scan's block alignment). Yet the same boot read
-blocks 0..319 back with a correct pattern before failing at 320, on a cold boot,
-and `ra_read` only opens and reads — it never writes the file. Both statements
-cannot hold for one disk.
+and the 512 blocks it did find were exactly logical 3584..4095, which is the
+giveaway. `byte_at` was `(pos.wrapping_mul(2654435761) ^ tag_term) >> 13`, and a
+multiply by an odd constant followed by a **bit slice** keeps only the low bits
+of `pos`: the byte comes from bits 13..20, so anything above bit 20 of `pos * C`
+is discarded, and `pos` and `pos + 2^21` give the same byte. **The pattern's
+period is 2 MiB.** Over a 16 MiB file that is 512 distinct 4 KiB blocks repeated
+eight times, so the scanner's signature index — `{signature: logical_block}` —
+kept only the last block of each class, 3584..4095, and reported the 3584 it had
+overwritten as missing.
 
-So the scan's unstated premise is what to check first: **that the guest's `/var`
-is the image being scanned.** The boot log records `root=UUID=8765...` and
-registers `/dev/sda`, `/dev/sdb` and `/dev/ram0`, but does not name which
-partition won root, so nothing yet proves the reads and the scan looked at the
-same device. Next: print the winning device in the mount line (or read it from
-the guest), and only then re-run the scan. Until that is settled, do not treat
-"3584 blocks were never written" as a write-path finding — it is exactly the
-shape of the traps this file already records, where a confident number was taken
-from the wrong device.
+```python
+# 4096 blocks of a 16 MiB file, old byte_at
+len({bytes(byte_at(7, lb*4096 + i) for i in range(16)) for lb in range(4096)})  # 512
+bytes(byte_at(7, i) for i in range(4096)) == bytes(byte_at(7, (1<<21) + i) for i in range(4096))  # True
+```
+
+Nothing about the device was wrong, and the root-device premise this section
+previously called unproven holds: the mount line already names the winner
+(`Root partition: UUID=8765… on device 0`, `main.rs::select_root_partition`,
+device 0 is `sata-disk.img`).
+
+The instrument cost more than a wrong count. **A read misdirected by a multiple
+of 2 MiB verified as correct** — on a 16 MiB file, seven of every eight
+wrong-block reads passed — which is precisely the failure mode this file is
+chasing on a fragmented file, where consecutive extents can land 2 MiB apart.
+`byte_at` is now splitmix64's finalizer (full avalanche, no period below 2^64)
+in both `programs/fsbench/src/workloads.rs` and
+`scripts/fsbench-pattern-scan.py`; the two must change together or the scanner
+stops recognising the image. The scanner now refuses to run when its index holds
+fewer signatures than the file has blocks, so a pattern that repeats is a loud
+error rather than a missing-blocks report.
+
+Everything measured with the old pattern keeps only its **zeros** finding: a
+block of zeros is not the pattern at any offset, so the aligned-zeros shape above
+stands. Every "this block holds the right data" statement taken before this fix
+is worth 1/8 of what it claimed, including the "7508/7672 byte-perfect, 0
+damaged" scans.
+
+**The repro survives the fixed pattern, and so does the disagreement.** Fresh
+`sata-disk.img`, `fsbench fragprep /var`, reboot, `fsbench ra /var`:
+
+```
+VERIFY FAIL  byte 3670016 of the file is 0x00, want 0x77; the chunk differs in
+             32637 of 65536 bytes, 32637 of them zero, from byte 3670016 to
+             byte 3727359 of the file
+```
+
+Again solid zeros (32637 ≈ 32768 − 32768/256, a 32 KiB run), again 4 KiB-aligned,
+this time at block 896 inside a 14-block window, with `extent_holes` 0 and 248
+`extent_reads` / 673 `extent_runs`. The host scan of that same disk:
+
+```
+7696 pattern blocks in the image, 7696 byte-perfect, 0 damaged
+13 of 4096 logical blocks have no copy anywhere in the image
+```
+
+so the missing count collapsed from 3584 to 13, and none of the 13 is block 896.
+The zeros the guest reads are therefore **not** absent from the disk. One caveat
+before reading more into that: `frag_prepare` writes the decoy file with the same
+`RA_TAG`, so a present block may be the decoy's copy rather than the readahead
+file's, and per-block presence cannot yet be attributed to a file. Give the decoy
+its own tag before treating "block 896 is on the disk" as a statement about the
+readahead file.
