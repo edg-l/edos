@@ -4,6 +4,7 @@
 //! a session lives here rather than in the kernel. Each service gets a
 //! supervisor thread that spawns it, waits for it, and restarts it.
 
+use std::fs::File;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,14 @@ struct Service {
     /// which makes "what a session is" init's decision rather than a race
     /// between whichever program claims it first.
     shell: bool,
+    /// Device nodes that must exist before the service is worth spawning.
+    ///
+    /// Drivers register their `/dev` entries from kthreads, so a node appears
+    /// some time after userspace starts rather than before it. A service that
+    /// opens one during startup otherwise races the driver and dies, and a
+    /// service that treats the open as optional comes up permanently without
+    /// that device. Waiting here keeps both out of every service.
+    requires: &'static [&'static str],
 }
 
 const SERVICES: &[Service] = &[
@@ -32,16 +41,19 @@ const SERVICES: &[Service] = &[
         path: "/bin/edos-wm",
         essential: true,
         shell: true,
+        requires: &["/dev/mouse", "/dev/kbd"],
     },
     Service {
         path: "/bin/edos-taskbar",
         essential: false,
         shell: true,
+        requires: &[],
     },
     Service {
         path: "/bin/edos-terminal",
         essential: false,
         shell: false,
+        requires: &[],
     },
 ];
 
@@ -61,9 +73,52 @@ const MAX_RAPID_FAILURES: u32 = 5;
 /// then picks up.
 const DEFAULT_TZ: &str = "+02:00";
 
+/// How long to wait for a service's devices before giving up and spawning it
+/// anyway. Sized to clear the longest driver initialization on the boot path:
+/// the network driver waits up to 5 s for a DHCP lease, and an input driver
+/// whose kthread lands behind it registers only once that wait is over.
+const DEVICE_WAIT: Duration = Duration::from_secs(15);
+
+/// Poll interval while waiting for a device node to appear. There is no
+/// notification for "a device was registered", so this is a poll.
+const DEVICE_POLL: Duration = Duration::from_millis(50);
+
+/// Wait until every path opens. Returns the ones that never appeared, so the
+/// caller can decide whether to start the service without them.
+fn wait_for_devices(paths: &'static [&'static str]) -> Vec<&'static str> {
+    let mut missing: Vec<&'static str> = paths
+        .iter()
+        .copied()
+        .filter(|p| File::open(p).is_err())
+        .collect();
+    if missing.is_empty() {
+        return missing;
+    }
+
+    println!("init: waiting for {missing:?}");
+    let deadline = Instant::now() + DEVICE_WAIT;
+    while Instant::now() < deadline {
+        thread::sleep(DEVICE_POLL);
+        missing.retain(|p| File::open(p).is_err());
+        if missing.is_empty() {
+            break;
+        }
+    }
+    missing
+}
+
 fn supervise(service: &'static Service) {
     let name = service.path.rsplit('/').next().unwrap_or(service.path);
     let mut failures: u32 = 0;
+
+    // Once, before the first spawn: a restart later on cannot lose this race,
+    // since the drivers registered long before.
+    let missing = wait_for_devices(service.requires);
+    if !missing.is_empty() {
+        eprintln!(
+            "init: {name}: {missing:?} did not appear within {DEVICE_WAIT:?}; starting it anyway"
+        );
+    }
 
     loop {
         let started = Instant::now();
