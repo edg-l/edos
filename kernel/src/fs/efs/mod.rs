@@ -276,10 +276,12 @@ impl EfsDriver {
         let jsb_version = jsb.version;
         let jsb_crc32 = jsb.crc32;
         let jsb_block_count = jsb.block_count;
-        let jsb_head_seq = jsb.head_seq;
+        // The superblock's head is deliberately not read here. It is written
+        // only from `advance_tail`, so it lags every transaction committed
+        // since the last checkpoint; the tail anchors the scan and replay
+        // reports where the live region actually ended.
         let jsb_tail_seq = jsb.tail_seq;
         let jsb_tail_block = jsb.tail_block;
-        let jsb_head_block = jsb.head_block;
 
         if jsb_magic != JOURNAL_MAGIC {
             log!("efs: journal superblock has bad magic {:#x}", jsb_magic);
@@ -312,16 +314,17 @@ impl EfsDriver {
             j_first_block,
             jsb_block_count,
             starting_lba,
-            jsb_head_seq,
             jsb_tail_seq,
             jsb_tail_block,
-            jsb_head_block,
         )?;
 
-        // After replay, reset the JSB: tail = head (all applied).
-        let post_replay_head_seq = jsb_head_seq;
-        let post_replay_tail_seq = jsb_head_seq;
-        let post_replay_head_block = jsb_head_block;
+        // Restart the journal where replay found the live region to end, not
+        // where the superblock's head claimed it was. That head is written
+        // only from `advance_tail`, so after a crash it names a position older
+        // than what replay just applied: restarting there would reissue
+        // sequence numbers already on disk and overwrite live ring blocks.
+        let post_replay_seq = replay_result.next_seq;
+        let post_replay_block = replay_result.next_block;
 
         if replay_result.txs_applied > 0 {
             let updated_jsb = JournalSuperblock {
@@ -329,10 +332,10 @@ impl EfsDriver {
                 version: 1,
                 block_count: jsb_block_count,
                 block_size: 4096,
-                tail_seq: post_replay_tail_seq,
-                head_seq: post_replay_head_seq,
-                tail_block: post_replay_head_block,
-                head_block: post_replay_head_block,
+                tail_seq: post_replay_seq,
+                head_seq: post_replay_seq,
+                tail_block: post_replay_block,
+                head_block: post_replay_block,
                 crc32: 0,
                 reserved: [0u8; 12],
             };
@@ -359,9 +362,9 @@ impl EfsDriver {
             starting_lba,
             j_first_block,
             jsb_block_count,
-            post_replay_head_seq,
-            post_replay_tail_seq,
-            post_replay_head_block,
+            post_replay_seq,
+            post_replay_seq,
+            post_replay_block,
         );
 
         // Register the journal with the block page cache so writeback can

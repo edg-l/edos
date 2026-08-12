@@ -86,11 +86,22 @@ fn block_flush(device_id: u64) -> Result<(), AhciError> {
 const BLOCK_SIZE: usize = 4096;
 const SECTORS_PER_BLOCK: u16 = 8;
 
-/// Result of replay: how many transactions were applied. The ring cursors are
-/// not reported back — the journal superblock carries `head_block`, and that is
-/// what the caller resets `tail_block` to once replay has applied everything.
+/// Result of replay: how many transactions were applied, and where the live
+/// region ended.
+///
+/// The end cursor is reported because the superblock's head cannot supply it.
+/// That head is written only when the tail advances, so after a crash it names
+/// a position older than the transactions replay just applied. Restarting the
+/// journal there would hand out sequence numbers that are already on disk and
+/// write over ring blocks still holding live data.
 pub struct ReplayResult {
     pub txs_applied: u64,
+    /// Sequence number the next transaction should take: one past the last
+    /// transaction applied, or `tail_seq` when nothing was.
+    pub next_seq: u64,
+    /// Ring cursor just past the last applied transaction, or `tail_block`
+    /// when nothing was applied.
+    pub next_block: u64,
 }
 
 /// Replay committed journal transactions to their home FS locations.
@@ -99,29 +110,32 @@ pub struct ReplayResult {
 /// `first_block`: absolute EFS block number of the journal region start.
 /// `block_count`: total journal blocks (including the JSB at block 0).
 /// `partition_start_lba`: starting LBA of the EFS partition (for fs_block → LBA).
-/// `head_seq`, `tail_seq`: from the validated JournalSuperblock.
+/// `tail_seq`, `tail_block`: from the validated JournalSuperblock.
 ///
-/// Returns the number of transactions replayed and ring blocks consumed.
-/// On a clean journal (head == tail), returns 0 immediately.
+/// The scan is bounded by sequence continuity, not by a persisted head: the
+/// journal superblock's `head_seq`/`head_block` are written only when the
+/// tail advances (`Journal::advance_tail`), so they can lag arbitrarily far
+/// behind transactions that committed since the last checkpoint. Trusting
+/// them as a scan bound is what silently dropped committed-but-uncheckpointed
+/// work on recovery. Sequence numbers are global and never reused, so walking
+/// forward from the tail and stopping at the first break in the sequence
+/// finds exactly the live region regardless of what the superblock recorded.
+///
+/// Returns the number of transactions replayed. Every mount scans; on a
+/// genuinely clean journal the block at `tail_block` fails the continuity
+/// check immediately and this costs one block read.
 pub fn replay(
     device_id: u64,
     first_block: u64,
     block_count: u32,
     partition_start_lba: u64,
-    head_seq: u64,
     tail_seq: u64,
     tail_block: u64,
-    head_block: u64,
 ) -> Result<ReplayResult, AhciError> {
-    if head_seq == tail_seq {
-        log!("efs journal: clean, no replay needed");
-        return Ok(ReplayResult { txs_applied: 0 });
-    }
-
     log!(
-        "efs journal: replay start tail_seq={} head_seq={}",
+        "efs journal: replay scan start tail_seq={} tail_block={}",
         tail_seq,
-        head_seq
+        tail_block
     );
 
     let ring_size = block_count as u64 - 1; // block 0 = JSB
@@ -151,28 +165,29 @@ pub fn replay(
     let mut committed_txs: Vec<CommittedTx> = Vec::new();
     let mut ring_pos: u64 = tail_block;
     let mut total_ring_blocks: u64 = 0;
+    let mut expected_seq: u64 = tail_seq;
+    // Advanced only past a transaction that was fully accepted. `ring_pos`
+    // cannot serve: a transaction rejected at its commit block has already
+    // moved it past that transaction's descriptor and data.
+    let mut live_end_pos: u64 = tail_block;
 
-    // Blocks the writer actually produced, tail to head, wrapping. Anything at
-    // or past the head is space the ring has not reached yet or has already
-    // reused, and on a wrapped ring that is a *older* transaction that still
-    // parses: descriptor, data and commit blocks all intact, with a lower seq.
-    // Replaying it rolls metadata backwards. Stopping when parsing fails is not
-    // enough, because it does not fail there.
-    let live_blocks = {
-        let head = head_block % ring_size;
-        let tail = tail_block % ring_size;
-        if head == tail {
-            // `head_seq != tail_seq` got us here, so equal cursors mean the ring
-            // is exactly full rather than empty.
-            ring_size
-        } else {
-            (head + ring_size - tail) % ring_size
-        }
-    };
-
+    // Sequence numbers are global and never reused, so a transaction whose
+    // descriptor carries anything other than `expected_seq` is either the
+    // stale far side of a wrapped ring (an older transaction that still
+    // parses cleanly, with a lower seq — replaying it would roll metadata
+    // backwards) or genuinely not there. Either way the live region ends
+    // here. This replaces bounding the scan by the persisted head, which
+    // lags behind whatever committed since the last checkpoint.
+    //
+    // The block count is capped at `ring_size` regardless: a ring cannot
+    // hold more live transactions than it has blocks, so hitting this bound
+    // without a continuity break means something is corrupt.
     loop {
-        if ring_pos >= tail_block + live_blocks {
-            // Reached the head: everything the writer committed has been read.
+        if ring_pos >= tail_block + ring_size {
+            log!(
+                "efs journal: replay scan hit the ring-size bound at seq={} without a continuity break, stopping",
+                expected_seq
+            );
             break;
         }
 
@@ -186,6 +201,13 @@ pub fn replay(
 
         if hdr.kind != JournalBlockKind::Descriptor as u8 {
             // Expected a descriptor at the start of a tx. Stop.
+            break;
+        }
+
+        if hdr.seq != expected_seq {
+            // Continuity broken: either the ring's stale far side (a lower
+            // seq left over from before the last wrap) or the true end of
+            // the live region.
             break;
         }
 
@@ -280,6 +302,8 @@ pub fn replay(
         ring_pos += 1; // past commit block
         let tx_blocks = 1 + n_data + if has_revoke { 1 } else { 0 } + 1;
         total_ring_blocks += tx_blocks;
+        expected_seq += 1;
+        live_end_pos = ring_pos;
 
         committed_txs.push(CommittedTx {
             seq: desc_seq,
@@ -289,9 +313,12 @@ pub fn replay(
     }
 
     if committed_txs.is_empty() {
-        log!("efs journal: no committed transactions to replay");
-        // Still reset JSB tail = head so next mount is clean.
-        return Ok(ReplayResult { txs_applied: 0 });
+        log!("efs journal: scanned, nothing to replay");
+        return Ok(ReplayResult {
+            txs_applied: 0,
+            next_seq: tail_seq,
+            next_block: tail_block,
+        });
     }
 
     // ---- Pass 2: apply committed txs ----------------------------------------
@@ -377,6 +404,8 @@ pub fn replay(
 
     Ok(ReplayResult {
         txs_applied: applied,
+        next_seq: expected_seq,
+        next_block: live_end_pos,
     })
 }
 

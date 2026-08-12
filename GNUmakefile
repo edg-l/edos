@@ -165,6 +165,14 @@ run-recovery: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.im
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features fault-inject"
 	scripts/edos-vm start --extra-disk journal-test.img
 
+# Unattended version of the doc/journal-recovery-test.md procedure: pause
+# checkpointing, fsync a workload, cut power, remount, and fail if replay
+# did not bring it back. Needs the fault-inject build for /dev/journal-ctl.
+.PHONY: recovery-check
+recovery-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img journal-test.img
+	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features fault-inject"
+	scripts/recovery-check
+
 .PHONY: run-trace
 run-trace: programs limine/limine ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 	$(MAKE) -C kernel CARGO_FLAGS="--features trace"

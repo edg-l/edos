@@ -76,9 +76,18 @@ queued now rather than one round trip each. Full writeup in
 
 **The part worth keeping is how to test recovery at all.** `fs-regression`
 passing across a reboot proves nothing here, because a clean unmount has nothing
-to replay, and no unaided workload leaves committed, un-checkpointed
-transactions behind either: writeback checkpoints promptly, so every power cut
-mid-workload gave `clean, no replay needed`.
+to replay.
+
+Every power cut mid-workload used to give `clean, no replay needed`, which was
+read as writeback checkpointing promptly enough that nothing was left to
+replay. That reading was wrong, and it hid a data-loss bug: the journal
+superblock was only written from `advance_tail`, so it reported clean whenever
+the system was quiescent, and every transaction committed after that point was
+invisible to recovery. `clean, no replay needed` was an assertion about the
+superblock, not about the ring. Post-mortem in
+`doc/bugs/2026-08-12-journal-recovery-never-saw-committed-work.md`; replay now
+bounds its scan by sequence continuity instead of by the persisted head, and
+`make recovery-check` is the regression.
 
 Both halves of that are now arranged deliberately rather than waited for:
 `/dev/journal-ctl` (kernel feature `fault-inject`) pauses checkpointing so

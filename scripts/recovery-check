@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Journal recovery regression: does an unclean shutdown lose fsync'd work?
+
+Pauses checkpointing (`/dev/journal-ctl`, kernel feature `fault-inject`), fsyncs
+a small workload so it becomes durable in the journal ring without ever
+reaching its home blocks, cuts power, and checks that the files are still
+there after the next mount replays the ring. See doc/journal-recovery-test.md
+for the manual procedure this automates, and
+doc/bugs/2026-08-12-journal-recovery-never-saw-committed-work.md for why the
+pause is what makes the window reachable at all: writeback otherwise
+checkpoints promptly enough that an arbitrary power cut finds nothing to
+replay either way.
+
+Guest output only reaches the host through /dev/klog (see fstest's own
+comment on this): typed shell commands render into the GUI terminal, which
+the serial log never sees, so every checkpoint this script needs is written
+there explicitly.
+
+    make recovery-check     # builds the fault-inject ISO first
+
+Exits 0 when every fsync'd file survives the cut, 1 otherwise.
+"""
+
+import os
+import re
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from vmdrive import REPO, VM, BOOT_SECONDS, serial_mark, serial_tail, type_line, vm, wait_for  # noqa: E402
+
+EXTRA_DISK = os.path.join(REPO, "journal-test.img")
+# device 2: block device 0 is the boot root (bus ide.1), device 1 is the
+# ISO on ide.2 -- an ATAPI drive the partition scan skips but which still
+# claims a device_id slot ("Skipping ATAPI device 1" in the boot log) -- and
+# device 2 is this script's extra disk on ide.3. Verified against a real
+# boot log's "devfs: /dev/sdN -> block device N" lines; a run that also
+# attaches a USB disk would shift this, which is why this script never does.
+MOUNT_CMD = "mount 2 0 /mnt efs"
+FILES = ["rec_a", "rec_b", "rec_c"]
+
+
+def boot_with_extra_disk():
+    """Boot with journal-test.img as a second SATA drive, focus the terminal."""
+    vm("start", "--extra-disk", EXTRA_DISK)
+    time.sleep(BOOT_SECONDS)
+    vm("click", "400", "300")
+    time.sleep(1)
+
+
+def mount_scratch(mark):
+    """Mount the JTEST partition, failing loudly rather than silently running
+    the workload against whatever else /mnt happens to hold."""
+    type_line(
+        f"{MOUNT_CMD} && echo RECOVERY_MOUNT_OK > /dev/klog "
+        "|| echo RECOVERY_MOUNT_FAIL > /dev/klog",
+        settle=1,
+    )
+    out = wait_for(mark, "RECOVERY_MOUNT_", 20)
+    if out is None or "RECOVERY_MOUNT_OK" not in out:
+        print(serial_tail(mark)[-2000:])
+        vm("stop")
+        sys.exit("recovery-check: scratch partition did not mount")
+
+
+def main():
+    iso = os.path.join(REPO, "edos-x86_64.iso")
+    if not os.path.exists(iso):
+        sys.exit("missing edos-x86_64.iso; run `make recovery-check` rather than "
+                  "this script directly, so the fault-inject build happens first")
+    if not os.path.exists(EXTRA_DISK):
+        sys.exit("missing journal-test.img; run `make journal-test.img` first")
+
+    subprocess.run([VM, "stop"], capture_output=True)
+
+    print("[1/3] committing fsync'd work with checkpointing paused...")
+    boot_with_extra_disk()
+    mark = serial_mark()
+    mount_scratch(mark)
+
+    type_line("echo pause > /dev/journal-ctl", settle=1)
+    out = wait_for(mark, "checkpointing pause", 10)
+    if out is None:
+        print(serial_tail(mark)[-2000:])
+        vm("stop")
+        sys.exit("recovery-check: /dev/journal-ctl did not accept pause; "
+                 "is the ISO built with --features fault-inject?")
+
+    type_line("touch " + " ".join(f"/mnt/{f}" for f in FILES), settle=1)
+    type_line("sync", settle=2)
+
+    # The precondition the whole test depends on: transactions committed to
+    # the ring but not yet checkpointed to their home blocks. If sync
+    # converged anyway, checkpointing was not actually paused and nothing
+    # below says anything about recovery.
+    type_line("cat /proc/journal_stats > /dev/klog", settle=1)
+    out = wait_for(mark, "pending:", 10)
+    pending = 0
+    if out:
+        m = re.search(r"pending: (\d+)", out)
+        if m:
+            pending = int(m.group(1))
+    if pending == 0:
+        print(serial_tail(mark)[-2000:])
+        vm("stop")
+        sys.exit("recovery-check: nothing committed-but-uncheckpointed after sync; "
+                 "the test's own setup failed, not a verdict on recovery")
+    print(f"    {pending} block(s) committed and pending checkpoint, as intended")
+
+    print("[2/3] cutting power...")
+    vm("stop")
+
+    print("[3/3] rebooting and checking replay...")
+    boot_with_extra_disk()
+    mark2 = serial_mark()
+    mount_scratch(mark2)
+    replay_out = serial_tail(mark2)
+
+    # `test -f`, not `ls`: readdir on an EFS mounted below / hits an unrelated
+    # bug (empty and non-empty directories alike fail with "other error"),
+    # which is not what this test is checking. `stat`-like existence checks
+    # sidestep it and are exactly what matters here anyway.
+    check = "; ".join(
+        f"test -f /mnt/{f} && echo REC_OK_{f} > /dev/klog || echo REC_MISSING_{f} > /dev/klog"
+        for f in FILES
+    )
+    type_line(check, settle=1)
+    out = wait_for(mark2, f"REC_OK_{FILES[-1]}", 10) or wait_for(mark2, f"REC_MISSING_{FILES[-1]}", 10)
+    out = out or serial_tail(mark2)
+    vm("stop")
+
+    missing = [f for f in FILES if f"REC_OK_{f}" not in out]
+    if missing:
+        print(replay_out[-2000:])
+        print(out[-2000:])
+        print(f"recovery-check: FAILED, lost {missing} after an unclean power cut")
+        return 1
+
+    verdict = next(
+        (line.strip() for line in replay_out.splitlines()
+         if "efs journal:" in line and
+         ("replayed" in line or "scanned" in line or "clean" in line)),
+        "(no replay verdict line seen)",
+    )
+    print(f"recovery-check: OK, {FILES} survived ({verdict})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
