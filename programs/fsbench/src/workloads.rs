@@ -921,6 +921,12 @@ const FRAG_NAME: &str = "fsbench.frag";
 /// than thousands.
 const FRAG_STEP: u64 = 256 << 10;
 
+/// Pattern tag for the decoy file, distinct from [`RA_TAG`] so a block found in
+/// a disk image can be attributed to one file or the other. With one tag for
+/// both, every logical block has two copies on the disk and "block N is
+/// present" says nothing about which file it belongs to.
+const FRAG_TAG: u64 = 5;
+
 /// Write the readahead file the same size as [`ra_prepare`] does, but
 /// interleaved with a second file so its blocks are scattered.
 ///
@@ -943,7 +949,7 @@ pub fn frag_prepare(dir: &str, bytes: u64) -> Result<(String, u64, u64), String>
             .map_err(|e| format!("write {path} at {offset}: {e}"))?;
         file.sync_all().map_err(|e| format!("fsync {path}: {e}"))?;
         other
-            .write_all(&pattern_buf(RA_TAG, offset, len))
+            .write_all(&pattern_buf(FRAG_TAG, offset, len))
             .map_err(|e| format!("write {decoy} at {offset}: {e}"))?;
         other
             .sync_all()

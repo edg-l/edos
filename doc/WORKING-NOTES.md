@@ -4237,12 +4237,14 @@ windows become 5, and 243 windows are declined and billed to the reader inside
 its own `read`. That is where the 287 -> 132 MiB/s went, not into the extra
 commands.
 
-## An interleaved-append file reads zeros somewhere, and the size of "somewhere" was an artifact
+## Interleaved appends drop whole blocks on the write path (and two instruments said otherwise first)
 
 **Open.** Repro: `fsbench fragprep /var`, reboot, `fsbench ra /var` — the pass
 reports `VERIFY FAIL byte <n> of the file is 0x00, want <p>`. The contiguous arm
 (`raprep`) verifies clean in the same build, so it takes the interleaved
-append + `fsync` pattern to produce it.
+append + `fsync` pattern to produce it. The bug is in the write path; the two
+sections below are the record of two instruments that each said otherwise, and
+the reading that survives is the last one.
 
 **Ruled out: it is not a sub-block write, and the "one 512-byte sector" reading
 of the two failing offsets was the instrument, not the bug.** `ra_check_edges`
@@ -4366,9 +4368,56 @@ this time at block 896 inside a 14-block window, with `extent_holes` 0 and 248
 ```
 
 so the missing count collapsed from 3584 to 13, and none of the 13 is block 896.
-The zeros the guest reads are therefore **not** absent from the disk. One caveat
-before reading more into that: `frag_prepare` writes the decoy file with the same
-`RA_TAG`, so a present block may be the decoy's copy rather than the readahead
-file's, and per-block presence cannot yet be attributed to a file. Give the decoy
-its own tag before treating "block 896 is on the disk" as a statement about the
-readahead file.
+That reading did not survive the next check, because both files were still
+sharing one tag: a "present" block could be the decoy's copy of that offset
+rather than the readahead file's.
+
+**REFUTED, and it is the write path after all: the zeros are missing from the
+disk.** `frag_prepare` now writes the decoy with `FRAG_TAG` (5) instead of
+`RA_TAG` (7), so every block found in an image belongs to exactly one file.
+Fresh `sata-disk.img`, `fsbench fragprep /var`, reboot, `fsbench ra /var`:
+
+```
+VERIFY FAIL  byte 3801088 of the file is 0x00, want 0xd0; the chunk differs in
+             20398 of 65536 bytes, 20398 of them zero, from byte 3801088 to
+             byte 3858431 of the file
+```
+
+and the host scan of that disk, per tag:
+
+```
+tag 7 (fsbench.ra)    3807 pattern blocks, 3807 byte-perfect, 0 damaged
+                      289 of 4096 logical blocks have no copy anywhere
+                      0 of 4096 logical blocks have more than one copy
+tag 5 (fsbench.frag)  3918 pattern blocks, 3918 byte-perfect, 0 damaged
+                      178 of 4096 logical blocks have no copy anywhere
+                      0 of 4096 logical blocks have more than one copy
+```
+
+Block 928 — the first byte the reader saw as zero, `3801088 / 4096` — is one of
+the 289. So `fragprep` loses **467 of 8192 blocks (1.9 MiB of 32 MiB) on the
+write path**; the reader is reporting the disk correctly, and every earlier
+"the damage is not on the disk" statement was the decoy's copy standing in for
+the missing block.
+
+Two properties of the loss narrow it further:
+
+- **Nothing is misdirected and nothing is partial.** No block has a second copy
+  anywhere in the image, and no copy differs in a single byte. The writes were
+  dropped whole, not sent to the wrong address and not torn.
+- **The missing blocks come in stride-4 runs**, seven or eight of them together:
+  705, 709, …, 733, then 897, 901, …, 953. One 4 KiB block missing out of every
+  16 KiB, over a span of ~128 KiB, then a stretch with nothing missing.
+  `efs_stats.blocks_allocated` is +8194 for the run, so allocation covered every
+  block; it is the data write that did not happen.
+
+**The contiguous arm is the control, and it is clean.** Fresh `sata-disk.img`,
+`fsbench raprep /var`, host scan of the same image: `4096 pattern blocks, 4096
+byte-perfect, 0 damaged / 0 of 4096 have no copy / 0 have more than one copy`.
+So the scanner reports a whole file when a whole file is there — the 289 missing
+blocks are not an artifact of it — and what produces the loss is the interleaved
+append + `fsync` pattern, not the writing of 16 MiB.
+
+`fsbench fragprep` also prints `sys_sync: journal still pending after 8 rounds`,
+the pre-existing warning listed under known failures — worth checking whether it
+is the same dropped writeback rather than an unrelated timeout.

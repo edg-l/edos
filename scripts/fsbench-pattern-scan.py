@@ -14,9 +14,10 @@ the raw file is sparse):
     qemu-img convert -O raw sata-disk.img ~/.cache/tmp/sata.raw
     scripts/fsbench-pattern-scan.py ~/.cache/tmp/sata.raw --tag 7 --size 16M
 
-Blocks a previous run left behind are still recognised, and `fragprep` fills
-its decoy file with the same pattern, so the count is normally a small multiple
-of the file's block count rather than exactly one. What matters is the two lists it prints: a partially written
+Each mode's file has its own tag: the readahead file is 7, and `fragprep`'s
+decoy file is 5, so a block found in the image belongs to exactly one of them.
+Blocks a previous run left behind are still recognised, so on a disk that is not
+freshly formatted the count can exceed the file's block count. What matters is the two lists it prints: a partially written
 block appears in the mismatch list with the exact range of bytes that differ,
 and a logical block with no copy anywhere in the image appears in the missing
 list. The second one is what separates a lost write from a misdirected read:
@@ -58,7 +59,7 @@ def parse_size(text: str) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("image", help="raw disk image")
-    ap.add_argument("--tag", type=int, default=7, help="fsbench pattern tag (ra/fragprep use 7)")
+    ap.add_argument("--tag", type=int, default=7, help="fsbench pattern tag (the ra file is 7, fragprep's decoy is 5)")
     ap.add_argument("--size", default="16M", help="size of the pattern file")
     ap.add_argument("--limit", type=int, default=20, help="mismatching blocks to print")
     args = ap.parse_args()
@@ -107,6 +108,14 @@ def main() -> None:
         print(f"{len(missing)} of {blocks} logical blocks have no copy anywhere in the image")
         for lb in missing[: args.limit]:
             print(f"  logical block {lb} (file offset {lb * BLOCK}) is nowhere in the image")
+        # On a freshly formatted disk one logical block should appear exactly
+        # once. A second copy means its bytes were also written somewhere they
+        # do not belong, which is what separates a write that was dropped from
+        # one that landed at the wrong address.
+        dup = [lb for lb in range(blocks) if copies[lb] > 1]
+        print(f"{len(dup)} of {blocks} logical blocks have more than one copy in the image")
+        for lb in dup[: args.limit]:
+            print(f"  logical block {lb} (file offset {lb * BLOCK}) has {copies[lb]} copies")
 
 
 if __name__ == "__main__":
