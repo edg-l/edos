@@ -101,6 +101,33 @@ none of it yet.
 Coalescing cannot help here — one page is one command — so this is
 per-operation work, not another run-length fix.
 
+### What a commit costs, measured: the flush barrier is now the biggest third
+
+`/proc/journal_stats` counts commits, the ring blocks and device commands they
+took, and the microseconds spent in each of the three device steps a commit
+makes: the queued ring batch, the cache-flush barrier that orders it, and the
+FUA commit block. `fsbench` samples it like the other counter files, and the
+three `*_per_*` lines are boot-wide averages rather than totals, so a run's own
+average comes from dividing the totals.
+
+A fresh-disk `fsbench write -n 32 /var`, read from a clean boot:
+
+```
+commits: 95          ring_blocks: 31392    data_blocks: 31200
+commands: 312        checkpoints: 5        empty_commits: 0
+ring_us: 115811      flush_us: 218290      commit_us: 107023
+```
+
+330 ring blocks per commit in 3.3 commands: the batch is being coalesced about
+as well as the 248-entry PRDT allows, which is what the `RingWrites` change was
+for. What it leaves is a commit costing 4.6 ms, of which the batch is 1.2 ms,
+the commit block 1.1 ms, and **the flush barrier 2.3 ms — half the total, for
+one command that carries no data.** Two commits in a row pay it twice even
+though one barrier would order both, so the next thing worth doing on this path
+is coalescing commits rather than shortening the ones there are: seal on a
+timer, or let a second `force_commit_and_wait` join a barrier already in
+flight rather than starting its own.
+
 ## 1b. Pipelined readahead: the instrument, and the baseline it reads
 
 The pipelined-readahead idea is to fire the *next* window's I/O when the reader

@@ -15,6 +15,7 @@ const SOURCES: &[&str] = &[
     "/proc/inflight_stats",
     "/proc/evict_stats",
     "/proc/efs_stats",
+    "/proc/journal_stats",
     "/proc/readahead_stats",
 ];
 
@@ -24,6 +25,11 @@ const LEVELS: &[&str] = &[
     "block_cache.dirty_pages",
     "inflight_stats.current",
     "ahci_stats.timeout_ms",
+    // Boot-wide averages rather than totals: their final value is meaningful,
+    // their difference is not. Divide the totals above them for a run's own.
+    "journal_stats.us_per_commit",
+    "journal_stats.blocks_per_commit",
+    "journal_stats.blocks_per_command",
 ];
 
 pub struct Counters {

@@ -307,6 +307,50 @@ impl Procfs {
         )
     }
 
+    fn render_journal_stats() -> String {
+        use crate::fs::journal::{
+            JOURNAL_CHECKPOINTS, JOURNAL_COMMANDS, JOURNAL_COMMIT_US, JOURNAL_COMMITS,
+            JOURNAL_DATA_BLOCKS, JOURNAL_EMPTY_COMMITS, JOURNAL_FLUSH_US, JOURNAL_RING_BLOCKS,
+            JOURNAL_RING_US,
+        };
+        let commits = JOURNAL_COMMITS.load(Ordering::Relaxed);
+        let ring_blocks = JOURNAL_RING_BLOCKS.load(Ordering::Relaxed);
+        let commands = JOURNAL_COMMANDS.load(Ordering::Relaxed);
+        let ring_us = JOURNAL_RING_US.load(Ordering::Relaxed);
+        let flush_us = JOURNAL_FLUSH_US.load(Ordering::Relaxed);
+        let commit_us = JOURNAL_COMMIT_US.load(Ordering::Relaxed);
+        // Averages are the point of the file: a commit's cost is what the
+        // fsync-per-write row of fsbench pays, and blocks per command is how
+        // much of the batch the drive sees at once.
+        let per = |total: u64| if commits == 0 { 0 } else { total / commits };
+        format!(
+            concat!(
+                "commits: {}\nempty_commits: {}\ncheckpoints: {}\n",
+                "ring_blocks: {}\ndata_blocks: {}\ncommands: {}\n",
+                "ring_us: {}\nflush_us: {}\ncommit_us: {}\n",
+                "us_per_commit: {}\nblocks_per_commit: {}\nblocks_per_command: {}\n"
+            ),
+            commits,
+            JOURNAL_EMPTY_COMMITS.load(Ordering::Relaxed),
+            JOURNAL_CHECKPOINTS.load(Ordering::Relaxed),
+            ring_blocks,
+            JOURNAL_DATA_BLOCKS.load(Ordering::Relaxed),
+            commands,
+            ring_us,
+            flush_us,
+            commit_us,
+            per(ring_us + flush_us + commit_us),
+            per(ring_blocks),
+            // The commit block is its own FUA command and is not part of the
+            // batch, so it comes off both sides of this ratio.
+            if commands == 0 {
+                0
+            } else {
+                ring_blocks.saturating_sub(commits) / commands
+            },
+        )
+    }
+
     fn render_inflight_stats() -> String {
         use crate::fs::page_fill::{
             INFLIGHT_CANCELS, INFLIGHT_CURRENT, INFLIGHT_INSTALLS, INFLIGHT_JOINS, INFLIGHT_RETRIES,
@@ -1218,6 +1262,7 @@ const GLOBAL_FILES: &[(&str, fn() -> String)] = &[
     ("block_cache", Procfs::render_block_cache),
     ("evict_stats", Procfs::render_evict_stats),
     ("efs_stats", Procfs::render_efs_stats),
+    ("journal_stats", Procfs::render_journal_stats),
     ("readahead_stats", Procfs::render_readahead_stats),
     ("lock_order_stats", Procfs::render_lock_order_stats),
     ("inflight_stats", Procfs::render_inflight_stats),

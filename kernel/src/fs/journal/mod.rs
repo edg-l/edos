@@ -65,6 +65,9 @@ struct RingWrites {
     device_id: u64,
     inflight: VecDeque<Arc<BlockIoHandle>>,
     failure: Option<AhciError>,
+    /// Commands issued, counted so `/proc/journal_stats` can show how many
+    /// ring blocks one command carries.
+    commands: u64,
 }
 
 impl RingWrites {
@@ -77,6 +80,7 @@ impl RingWrites {
             device_id,
             inflight: VecDeque::new(),
             failure: None,
+            commands: 0,
         }
     }
 
@@ -94,6 +98,7 @@ impl RingWrites {
         }
         match submit_block_write(self.device_id, lba, sectors, buf) {
             Ok(handle) => {
+                self.commands += 1;
                 self.inflight.push_back(handle);
                 self.failure.is_none()
             }
@@ -147,6 +152,38 @@ use super::block_page_cache::CachedBlockPage;
 pub mod committer;
 pub mod replay;
 pub mod tx;
+
+// ---- Commit counters ---------------------------------------------------------
+
+// Reported by `/proc/journal_stats`. A commit is three separately timed steps
+// against the drive -- the queued ring batch, the cache-flush barrier that
+// orders it, and the FUA commit block -- and only the first of them scales
+// with the size of the transaction, so they are counted apart. `commands`
+// against `ring_blocks` is what shows whether the batch is being coalesced.
+
+/// Transactions written to the ring.
+pub static JOURNAL_COMMITS: AtomicU64 = AtomicU64::new(0);
+/// Sealed transactions that carried nothing and only bumped the sequence.
+pub static JOURNAL_EMPTY_COMMITS: AtomicU64 = AtomicU64::new(0);
+/// Ring blocks written: descriptor + data + revoke + commit.
+pub static JOURNAL_RING_BLOCKS: AtomicU64 = AtomicU64::new(0);
+/// Metadata blocks carried, i.e. ring blocks less the per-transaction overhead.
+pub static JOURNAL_DATA_BLOCKS: AtomicU64 = AtomicU64::new(0);
+/// Device commands the ring batches took, excluding the FUA commit block.
+pub static JOURNAL_COMMANDS: AtomicU64 = AtomicU64::new(0);
+/// Microseconds spent issuing and draining the ring batch.
+pub static JOURNAL_RING_US: AtomicU64 = AtomicU64::new(0);
+/// Microseconds spent in the ordering flush between the batch and the commit.
+pub static JOURNAL_FLUSH_US: AtomicU64 = AtomicU64::new(0);
+/// Microseconds spent writing commit blocks with FUA.
+pub static JOURNAL_COMMIT_US: AtomicU64 = AtomicU64::new(0);
+/// Checkpoint passes a commit had to run because the ring was full.
+pub static JOURNAL_CHECKPOINTS: AtomicU64 = AtomicU64::new(0);
+
+/// Whole microseconds between `t0` and now.
+fn us_since(t0: crate::timer::Instant) -> u64 {
+    crate::timer::Instant::now().duration_since(t0).as_micros() as u64
+}
 
 // ---- Constants ---------------------------------------------------------------
 
@@ -813,6 +850,7 @@ impl Journal {
                 let mut s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
                 self.set_committed_seq(&mut s, tx.seq);
                 drop(s);
+                JOURNAL_EMPTY_COMMITS.fetch_add(1, Ordering::Relaxed);
                 self.commit_wq.wake_all();
                 continue;
             }
@@ -879,6 +917,7 @@ impl Journal {
                 if attempt + 1 == CHECKPOINT_ATTEMPTS {
                     break;
                 }
+                JOURNAL_CHECKPOINTS.fetch_add(1, Ordering::Relaxed);
                 self.checkpoint_and_advance()?;
             }
 
@@ -906,6 +945,7 @@ impl Journal {
             // Descriptor, data and revoke blocks all go out before the barrier
             // below, so they are queued together and drained as a batch.
             let mut q = RingWrites::new(self.device_id);
+            let t_ring = crate::timer::Instant::now();
 
             let desc_block = self.build_descriptor_block(tx.seq, tx.tx_id, &entries);
             self.submit_journal_block(ring_pos % ring_size, &desc_block, &mut q);
@@ -931,19 +971,34 @@ impl Journal {
             }
 
             // Every command is waited on here, before the barrier that orders
-            // the whole batch ahead of the commit block.
-            q.drain()?;
+            // the whole batch ahead of the commit block. The counters are
+            // published before the error is propagated, so a failed commit
+            // still shows the work it did.
+            let drained = q.drain();
+            JOURNAL_COMMANDS.fetch_add(q.commands, Ordering::Relaxed);
+            JOURNAL_RING_US.fetch_add(us_since(t_ring), Ordering::Relaxed);
+            drained?;
 
             // Ordering barrier: flush drive write cache before commit block.
-            block_flush(self.device_id)?;
+            let t_flush = crate::timer::Instant::now();
+            let flushed = block_flush(self.device_id);
+            JOURNAL_FLUSH_US.fetch_add(us_since(t_flush), Ordering::Relaxed);
+            flushed?;
 
             // Compute CRC over all payload bytes (escaped copies).
             let payload_crc = commit_block_checksum(&payload_bytes);
 
             // Write commit block with FUA.
             let commit_block = self.build_commit_block(tx.seq, tx.tx_id, payload_crc);
-            self.write_journal_block_fua(ring_pos % ring_size, &commit_block)?;
+            let t_commit = crate::timer::Instant::now();
+            let written = self.write_journal_block_fua(ring_pos % ring_size, &commit_block);
+            JOURNAL_COMMIT_US.fetch_add(us_since(t_commit), Ordering::Relaxed);
+            written?;
             ring_pos += 1;
+
+            JOURNAL_COMMITS.fetch_add(1, Ordering::Relaxed);
+            JOURNAL_RING_BLOCKS.fetch_add(needed, Ordering::Relaxed);
+            JOURNAL_DATA_BLOCKS.fetch_add(n_data, Ordering::Relaxed);
 
             // Success: advance head_block cursor and committed_seq.
             {

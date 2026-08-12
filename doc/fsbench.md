@@ -128,9 +128,16 @@ names the first bad offset, how many bytes are wrong, and whether the tail is
 zeros.
 
 The run also prints the delta of every counter in `/proc/block_cache`,
-`/proc/ahci_stats`, `/proc/inflight_stats` and `/proc/evict_stats`. That is what
-turns a number into a diagnosis: a "cold" read reporting no cache misses never
-touched the disk.
+`/proc/ahci_stats`, `/proc/inflight_stats`, `/proc/evict_stats`,
+`/proc/efs_stats`, `/proc/journal_stats` and `/proc/readahead_stats`. That is
+what turns a number into a diagnosis: a "cold" read reporting no cache misses
+never touched the disk, and a durable-write row is explained by the commit
+counts and per-step microseconds next to it.
+
+A few of those counters are a current level or a boot-wide average, not a
+running total, so the report shows their final value rather than a difference:
+`block_cache.dirty_pages`, `inflight_stats.current`, `ahci_stats.timeout_ms`
+and the three `journal_stats.*_per_*` lines.
 
 ## Findings, 2026-08-09
 
