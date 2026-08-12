@@ -27,6 +27,59 @@ use crate::{
 
 pub use crate::net::socket::SockAddrIn;
 
+/// Leave the datagram at the head of the receive queue.
+const MSG_PEEK: u64 = 0x2;
+/// Report the datagram's real length rather than how much of it was copied.
+const MSG_TRUNC: u64 = 0x20;
+/// Fail with EAGAIN rather than blocking, for this call only.
+const MSG_DONTWAIT: u64 = 0x40;
+
+const RECV_FLAGS: u64 = MSG_PEEK | MSG_TRUNC | MSG_DONTWAIT;
+
+/// Copy a socket address out under value-result semantics: `addr_len_ptr` carries
+/// the caller's capacity in and the address's real length out, and at most that
+/// many bytes are written (POSIX.1-2024, `recvfrom`/`accept`/`getsockname`).
+///
+/// A caller with room for less than a whole `sockaddr_in` gets a truncated
+/// address and the untruncated length, which is how it learns it was truncated.
+/// Returns false once the caller's errno is set.
+fn write_sockaddr_out(addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32, addr: SocketAddr) -> bool {
+    if addr_ptr.is_null() {
+        return true;
+    }
+    let full = core::mem::size_of::<SockAddrIn>();
+    let capacity = if addr_len_ptr.is_null() {
+        full
+    } else {
+        match unsafe { try_read_user(addr_len_ptr) } {
+            Some(capacity) => capacity as usize,
+            None => {
+                current_thread_info().lock().errno = Errno::EFAULT;
+                return false;
+            }
+        }
+    };
+
+    let sockaddr = SockAddrIn {
+        family: AF_INET as u16,
+        port: addr.port.to_be(),
+        addr: addr.ip,
+        zero: [0u8; 8],
+    };
+    let bytes =
+        unsafe { core::slice::from_raw_parts(&sockaddr as *const SockAddrIn as *const u8, full) };
+    let copied = capacity.min(full);
+    if copied > 0 && !unsafe { try_copy_to_user(addr_ptr as *mut u8, bytes.as_ptr(), copied) } {
+        current_thread_info().lock().errno = Errno::EFAULT;
+        return false;
+    }
+    if !addr_len_ptr.is_null() && !unsafe { try_write_user(addr_len_ptr, full as u32) } {
+        current_thread_info().lock().errno = Errno::EFAULT;
+        return false;
+    }
+    true
+}
+
 pub fn sys_socket(domain: u64, sock_type: u64, _protocol: u64) -> u64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
@@ -271,7 +324,7 @@ pub fn sys_sendto(
     fd: u64,
     buf_ptr: *const u8,
     len: u64,
-    _flags: u64,
+    flags: u64,
     addr_ptr: *const SockAddrIn,
     addr_len: u64,
 ) -> u64 {
@@ -280,6 +333,13 @@ pub fn sys_sendto(
 
     if buf_ptr.is_null() {
         info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    // A send never blocks here, so MSG_DONTWAIT is already the behaviour; every
+    // other flag is refused rather than ignored.
+    if flags & !MSG_DONTWAIT != 0 {
+        info.lock().errno = Errno::EINVAL;
         return !0u64;
     }
 
@@ -387,7 +447,7 @@ pub fn sys_recvfrom(
     fd: u64,
     buf_ptr: *mut u8,
     len: u64,
-    _flags: u64,
+    flags: u64,
     addr_ptr: *mut SockAddrIn,
     addr_len_ptr: *mut u32,
 ) -> u64 {
@@ -396,6 +456,13 @@ pub fn sys_recvfrom(
 
     if buf_ptr.is_null() {
         info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    // A flag we do not implement is refused rather than ignored: silently
+    // dropping MSG_PEEK would consume the datagram the caller asked to leave.
+    if flags & !RECV_FLAGS != 0 {
+        info.lock().errno = Errno::EINVAL;
         return !0u64;
     }
 
@@ -433,6 +500,10 @@ pub fn sys_recvfrom(
         if ready() {
             break;
         }
+        if flags & MSG_DONTWAIT != 0 {
+            info.lock().errno = Errno::EAGAIN;
+            return !0u64;
+        }
         // SO_RCVTIMEO, so a datagram that never arrives costs the caller its
         // timeout rather than the thread. The remaining time comes off the
         // deadline each round, since a spurious wake must not restart it.
@@ -457,7 +528,14 @@ pub fn sys_recvfrom(
         if s.closed && s.rx_queue.is_empty() {
             return 0;
         }
-        match s.rx_queue.pop_front() {
+        // MSG_PEEK leaves the datagram queued, so the copy below works on a
+        // clone and the next receive sees the same entry.
+        let entry = if flags & MSG_PEEK != 0 {
+            s.rx_queue.front().cloned()
+        } else {
+            s.rx_queue.pop_front()
+        };
+        match entry {
             Some(entry) => entry,
             None => {
                 return 0;
@@ -471,44 +549,17 @@ pub fn sys_recvfrom(
         return !0u64;
     }
 
-    // Write source address if requested
-    if !addr_ptr.is_null() {
-        let sockaddr = SockAddrIn {
-            family: AF_INET as u16,
-            port: src.port.to_be(),
-            addr: src.ip,
-            zero: [0u8; 8],
-        };
-        let sockaddr_bytes = unsafe {
-            core::slice::from_raw_parts(
-                &sockaddr as *const SockAddrIn as *const u8,
-                core::mem::size_of::<SockAddrIn>(),
-            )
-        };
-        if !unsafe {
-            try_copy_to_user(
-                addr_ptr as *mut u8,
-                sockaddr_bytes.as_ptr(),
-                sockaddr_bytes.len(),
-            )
-        } {
-            info.lock().errno = Errno::EFAULT;
-            return !0u64;
-        }
-        if !addr_len_ptr.is_null() {
-            if !unsafe {
-                crate::util::uaccess::try_write_user(
-                    addr_len_ptr,
-                    core::mem::size_of::<SockAddrIn>() as u32,
-                )
-            } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
-            }
-        }
+    if !write_sockaddr_out(addr_ptr, addr_len_ptr, src) {
+        return !0u64;
     }
 
-    bytes_to_copy as u64
+    // MSG_TRUNC reports what the datagram held rather than what fitted, which
+    // is the only way a caller learns the tail it did not get was discarded.
+    if flags & MSG_TRUNC != 0 {
+        data.len() as u64
+    } else {
+        bytes_to_copy as u64
+    }
 }
 
 pub fn sys_listen(fd: u64, backlog: u32) -> u64 {
@@ -637,37 +688,10 @@ pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) ->
     // Write remote address to caller if requested
     if !addr_ptr.is_null() {
         let remote_addr = ranked_lock!(RANK_SOCKET, "sys_accept", new_sock_arc).remote_addr;
-        if let Some(remote) = remote_addr {
-            let sockaddr = SockAddrIn {
-                family: AF_INET as u16,
-                port: remote.port.to_be(),
-                addr: remote.ip,
-                zero: [0u8; 8],
-            };
-            let sockaddr_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &sockaddr as *const SockAddrIn as *const u8,
-                    core::mem::size_of::<SockAddrIn>(),
-                )
-            };
-            if !unsafe {
-                try_copy_to_user(
-                    addr_ptr as *mut u8,
-                    sockaddr_bytes.as_ptr(),
-                    sockaddr_bytes.len(),
-                )
-            } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
-            }
-            if !addr_len_ptr.is_null() {
-                if !unsafe {
-                    try_write_user(addr_len_ptr, core::mem::size_of::<SockAddrIn>() as u32)
-                } {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
-                }
-            }
+        if let Some(remote) = remote_addr
+            && !write_sockaddr_out(addr_ptr, addr_len_ptr, remote)
+        {
+            return !0u64;
         }
     }
 
@@ -947,6 +971,11 @@ pub fn sys_getpeername(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u3
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
+    if addr_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
     let fd_table = info.lock().fd_table.clone();
     let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
         Some(FileDescriptor::Socket(s)) => s,
@@ -959,23 +988,8 @@ pub fn sys_getpeername(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u3
     let remote = ranked_lock!(RANK_SOCKET, "sys_getpeername", sock_arc).remote_addr;
     match remote {
         Some(addr) => {
-            let sockaddr = SockAddrIn {
-                family: AF_INET as u16,
-                port: addr.port.to_be(),
-                addr: addr.ip,
-                zero: [0u8; 8],
-            };
-            if !unsafe { try_write_user(addr_ptr, sockaddr) } {
-                info.lock().errno = Errno::EFAULT;
+            if !write_sockaddr_out(addr_ptr, addr_len_ptr, addr) {
                 return !0u64;
-            }
-            if !addr_len_ptr.is_null() {
-                if !unsafe {
-                    try_write_user(addr_len_ptr, core::mem::size_of::<SockAddrIn>() as u32)
-                } {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
-                }
             }
             0
         }
@@ -990,6 +1004,11 @@ pub fn sys_getsockname(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u3
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
+    if addr_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
     let fd_table = info.lock().fd_table.clone();
     let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
         Some(FileDescriptor::Socket(s)) => s,
@@ -1000,51 +1019,15 @@ pub fn sys_getsockname(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u3
     };
 
     let local = ranked_lock!(RANK_SOCKET, "sys_getsockname", sock_arc).local_addr;
-    match local {
-        Some(addr) => {
-            let sockaddr = SockAddrIn {
-                family: AF_INET as u16,
-                port: addr.port.to_be(),
-                addr: addr.ip,
-                zero: [0u8; 8],
-            };
-            if !unsafe { try_write_user(addr_ptr, sockaddr) } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
-            }
-            if !addr_len_ptr.is_null() {
-                if !unsafe {
-                    try_write_user(addr_len_ptr, core::mem::size_of::<SockAddrIn>() as u32)
-                } {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
-                }
-            }
-            0
-        }
-        None => {
-            // Unbound socket: return zeroed address
-            let sockaddr = SockAddrIn {
-                family: AF_INET as u16,
-                port: 0,
-                addr: [0; 4],
-                zero: [0u8; 8],
-            };
-            if !unsafe { try_write_user(addr_ptr, sockaddr) } {
-                info.lock().errno = Errno::EFAULT;
-                return !0u64;
-            }
-            if !addr_len_ptr.is_null() {
-                if !unsafe {
-                    try_write_user(addr_len_ptr, core::mem::size_of::<SockAddrIn>() as u32)
-                } {
-                    info.lock().errno = Errno::EFAULT;
-                    return !0u64;
-                }
-            }
-            0
-        }
+    // An unbound socket answers with the wildcard address rather than an error.
+    let addr = local.unwrap_or(SocketAddr {
+        ip: [0; 4],
+        port: 0,
+    });
+    if !write_sockaddr_out(addr_ptr, addr_len_ptr, addr) {
+        return !0u64;
     }
+    0
 }
 
 /// Write the resolver address into a caller-supplied `[u8; 4]`.

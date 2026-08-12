@@ -152,6 +152,46 @@ pub fn sendto(fd: u64, data: &[u8], addr: Option<&SockAddrIn>) -> Result<usize, 
     }
 }
 
+/// Leave the datagram queued.
+pub const MSG_PEEK: u64 = 0x2;
+/// Report the datagram's real length rather than how much of it was copied.
+pub const MSG_TRUNC: u64 = 0x20;
+/// Fail with EAGAIN rather than blocking.
+pub const MSG_DONTWAIT: u64 = 0x40;
+
+/// `recvfrom` with flags and an explicit address capacity.
+///
+/// `addr` carries the caller's capacity in and the source address's real length
+/// out, so a capacity below `size_of::<SockAddrIn>()` truncates the address and
+/// still reports how long it was.
+pub fn recvfrom_flags(
+    fd: u64,
+    buf: &mut [u8],
+    flags: u64,
+    addr: Option<(&mut SockAddrIn, &mut u32)>,
+) -> Result<usize, ()> {
+    let (addr_ptr, addr_len_ptr) = match addr {
+        Some((a, len)) => (a as *mut SockAddrIn as u64, len as *mut u32 as u64),
+        None => (0, 0),
+    };
+    let ret = unsafe {
+        sys::syscall6(
+            sys::SYS_RECVFROM,
+            fd,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            flags,
+            addr_ptr,
+            addr_len_ptr,
+        )
+    };
+    if ret == u64::MAX {
+        Err(())
+    } else {
+        Ok(ret as usize)
+    }
+}
+
 pub fn recvfrom(fd: u64, buf: &mut [u8]) -> Result<usize, ()> {
     let ret = unsafe {
         sys::syscall6(

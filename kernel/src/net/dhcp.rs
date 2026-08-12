@@ -1,9 +1,13 @@
 use alloc::{vec, vec::Vec};
+use core::sync::atomic::{AtomicU16, Ordering};
 use core::time::Duration;
 
 use crate::{drivers::e1000e::E1000e, log, timer::Instant};
 
-use super::{checksum::internet_checksum, ethernet};
+use super::{ethernet, ipv4};
+
+/// Identification for the IPv4 headers this client builds itself.
+static IP_ID: AtomicU16 = AtomicU16::new(1);
 
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
@@ -167,26 +171,18 @@ fn wrap_udp_broadcast(src_mac: [u8; 6], dhcp_payload: &[u8]) -> Vec<u8> {
     udp.extend_from_slice(&0u16.to_be_bytes()); // checksum 0 = disabled (valid for IPv4 UDP)
     udp.extend_from_slice(dhcp_payload);
 
-    // Build IPv4 header
-    let ip_total = (20 + udp.len()) as u16;
-    let mut ip = Vec::with_capacity(ip_total as usize);
-    ip.push(0x45); // version=4, ihl=5 (20 bytes)
-    ip.push(0x00); // DSCP/ECN
-    ip.extend_from_slice(&ip_total.to_be_bytes());
-    ip.extend_from_slice(&0u16.to_be_bytes()); // identification
-    ip.extend_from_slice(&0u16.to_be_bytes()); // flags + fragment offset
-    ip.push(64); // TTL
-    ip.push(17); // protocol = UDP
-    ip.extend_from_slice(&0u16.to_be_bytes()); // checksum placeholder
-    ip.extend_from_slice(&[0, 0, 0, 0]); // src: 0.0.0.0
-    ip.extend_from_slice(&[255, 255, 255, 255]); // dst: limited broadcast
-
-    // Compute IP header checksum over the first 20 bytes
-    let cksum = internet_checksum(&ip[..20]);
-    ip[10] = (cksum >> 8) as u8;
-    ip[11] = (cksum & 0xFF) as u8;
-
-    ip.extend_from_slice(&udp);
+    // DHCP runs before the stack has an address, so it cannot draw an
+    // identification from the stack's counter; its own is enough for the two or
+    // three packets a lease takes, and reassembly keys on it (RFC 791 §3.1).
+    let id = IP_ID.fetch_add(1, Ordering::Relaxed);
+    let ip = ipv4::build(
+        [0, 0, 0, 0],
+        [255, 255, 255, 255],
+        ipv4::IpProtocol::Udp,
+        64,
+        id,
+        &udp,
+    );
 
     // Wrap in Ethernet frame with broadcast destination
     ethernet::build_frame(ethernet::BROADCAST, src_mac, ethernet::EtherType::Ipv4, &ip)

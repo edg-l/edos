@@ -324,7 +324,7 @@ does not have to invent them.
 | | value | how |
 |---|---|---|
 | syscalls | 111 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 111 — a mismatch is the bug |
-| userspace programs | 103 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
+| userspace programs | 104 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 20/20 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
@@ -4050,3 +4050,37 @@ alongside a zero maximum does not make invalid. `futex_wake` stays on the list
 with a *different* case than before — a valid address and a poison count, where
 waking 1001 waiters on a word nobody waits on is 0 by definition. A row's
 arguments are worth reading before assuming it is the same finding as last run.
+
+## The socket address length was an output, not a value-result (2026-08-12)
+
+`recvfrom`, `accept`, `getsockname` and `getpeername` each wrote a whole
+`sockaddr_in` into the caller's buffer and then stored 16 into `addr_len`,
+without ever reading what the caller had put there. A caller with room for less
+than 16 bytes got the rest of its stack overwritten, and nothing told it the
+address had been truncated. POSIX makes that argument value-result: capacity in,
+real length out, copy bounded by the capacity.
+
+All five sites now go through one `write_sockaddr_out` in
+`kernel/src/syscalls/net.rs`. Nothing in the tree was passing a short capacity —
+`edos_rt` and the std fork both initialise it to `size_of::<SockAddrIn>()` —
+which is why this never showed as a crash, and also why the fix is safe: reading
+the field would have broken any caller that left it uninitialised, and there is
+none. Check that before extending the same shape to another call.
+
+The receive flags were the same defect one layer up: `sys_recvfrom` took `flags`
+as `_flags`, so `MSG_PEEK` consumed the datagram the caller asked to leave
+queued. `MSG_PEEK`, `MSG_TRUNC` and `MSG_DONTWAIT` are implemented, and every
+other bit is refused with EINVAL rather than ignored. `sys_sendto` accepts only
+`MSG_DONTWAIT`, which is already its behaviour since a send here never blocks.
+
+`programs/socktest` is the regression: it sends one real DNS query, then peeks
+it three times, checks `MSG_TRUNC` reports the datagram rather than the buffer,
+passes an 8-byte address capacity and checks the tail of its `sockaddr` is
+untouched while the reported length is still 16, and finally consumes the
+datagram the peeks left. It needs a reachable DNS server (QEMU user networking
+answers on 10.0.2.3:53, the default) and is 6/6 in the guest.
+
+DHCP also stopped hand-rolling its IPv4 header, which had been shipping `id=0`
+since the identification field was fixed everywhere else. It cannot draw from
+the stack's counter because it runs before the stack has an address, so it keeps
+its own `AtomicU16`; the header is otherwise `ipv4::build`'s, which sets DF.
