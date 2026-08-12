@@ -364,6 +364,38 @@ that survives `kill -9`.
 
 ---
 
+## A pipe holds 64 KiB now, and the shell had to change in the same commit
+
+FIXED. `Pipe::write` never blocked and the `ByteRing` just grew, so a writer
+that outran its reader bought its speed with kernel heap and the reader had no
+way to slow it down. Not theoretical: it is what made `sshd` lose 6 MB of a
+10 MB transfer. `cat` pushed all ten megabytes into the kernel and exited long
+before the server had forwarded a tenth of them, so the server reached its
+teardown with most of the file still buffered.
+
+`PIPE_CAPACITY` is 64 KiB, Linux's default. A write that does not fit parks on
+a new `writer_wq` until a read frees room or the last reader leaves, and the
+wait is killable — a full pipe whose reader never reads is a condition only the
+peer can end, which is the same class as `accept`. Two POSIX details: a write
+of at most `PIPE_BUF` (4096) waits for room for all of it, so two writers never
+interleave one small message; and a reader disappearing mid-write returns what
+was already transferred rather than `EPIPE`.
+
+**The shell half is not optional, and that was verified rather than assumed.**
+`edos-sh` fed a heredoc into a pipe *before* starting the command that reads it,
+in both `main.rs` and `script.rs`. Bounded, that is a deadlock against itself as
+soon as the heredoc exceeds the capacity: nothing is draining the pipe, and the
+shell is the thing that would. Both sites now feed from a thread that owns the
+write end and closes it when done. Reverting only that half and re-running a
+110 KB heredoc hangs the shell forever, which is what makes the coupling a fact
+rather than an argument.
+
+Checked in the guest: `yes | head -3` still terminates (the `SIGPIPE` path is
+unchanged), `seq 1 200000 | wc -l` moves ~1.3 MB across a 64 KiB pipe and
+reports 200000, and a 20000-line heredoc runs to completion.
+
+---
+
 ## `make recovery-check` passed exactly once per scratch image
 
 FIXED. The check reported "nothing committed-but-uncheckpointed after sync; the

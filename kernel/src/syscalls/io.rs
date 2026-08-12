@@ -316,12 +316,49 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 return !0u64;
             }
             let probe = sched_prof::record(Stage::PipeCopyIn, probe);
-            let (written, notif) = {
-                let mut pipe = ranked_lock!(RANK_PIPE, "sys_write::pipe", pipe);
-                pipe.write(data)
+
+            // The pipe is bounded, so a writer with more than fits waits for a
+            // reader to take some rather than growing the kernel heap. Loop
+            // until it has all gone in, which is what a blocking write means:
+            // a short write here would be a partial write userspace never
+            // asked for.
+            let writer_wq = ranked_lock!(RANK_PIPE, "sys_write::pipe_wq", pipe)
+                .writer_wq
+                .clone();
+            let mut sent = 0usize;
+            let written = loop {
+                let (written, notif) = {
+                    let mut guard = ranked_lock!(RANK_PIPE, "sys_write::pipe", pipe);
+                    guard.write(&data[sent..])
+                };
+                notif.flush();
+
+                let Some(n) = written else {
+                    // The last reader went away. Bytes already accepted still
+                    // count: POSIX has a write report what it transferred, and
+                    // only a write that moved nothing at all is EPIPE.
+                    break if sent > 0 { Some(sent) } else { None };
+                };
+                sent += n;
+                if sent == data.len() {
+                    break Some(sent);
+                }
+
+                // Room for what is left, or a reader going away so the write
+                // can fail instead. Killable: a full pipe whose reader never
+                // reads is a wait only the peer can end, and without this the
+                // writer could not be killed while it waited.
+                let remaining = data.len() - sent;
+                let ready = || {
+                    pipe.try_lock()
+                        .is_none_or(|guard| guard.write_ready(remaining))
+                };
+                if writer_wq.wait_until_killable(ready) == WaitOutcome::Killed {
+                    info.lock().errno = Errno::EINTR;
+                    return !0u64;
+                }
             };
             let probe = sched_prof::record(Stage::PipeWrite, probe);
-            notif.flush();
             sched_prof::record(Stage::PipeFlush, probe);
             match written {
                 Some(written) => written as u64,

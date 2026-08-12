@@ -387,6 +387,37 @@ fn run_builtin_redirected(cmd: &str, args: &[String], fds: [u64; 3]) -> command:
     result
 }
 
+/// Feed `content` into a fresh pipe from a thread, and return the read end.
+///
+/// The write has to happen while the command is running, not before it starts.
+/// A pipe holds a bounded amount and a writer blocks once it is full, so a
+/// heredoc larger than that capacity would otherwise deadlock the shell
+/// against itself: nothing is reading the pipe yet, and the shell is the thing
+/// that would.
+///
+/// The thread owns the write end and closes it when done, which is what gives
+/// the command its end of input.
+pub fn heredoc_pipe(content: &str) -> Option<u64> {
+    let (read_fd, write_fd) = edos_lib::process::pipe()?;
+    let bytes = if content.is_empty() {
+        Vec::new()
+    } else {
+        format!("{content}\n").into_bytes()
+    };
+    std::thread::spawn(move || {
+        let mut sent = 0;
+        while sent < bytes.len() {
+            let n = edos_lib::process::write(write_fd, &bytes[sent..]);
+            if n <= 0 {
+                break; // the reader went away; it will not miss what is left
+            }
+            sent += n as usize;
+        }
+        edos_lib::process::close(write_fd);
+    });
+    Some(read_fd)
+}
+
 /// Run a single command segment with a caller-supplied stdin fd.
 ///
 /// The caller is responsible for closing `stdin_fd` after this returns.
@@ -1066,12 +1097,7 @@ fn main() {
                 command::expand_variables(&content)
             };
 
-            if let Some((read_fd, write_fd)) = edos_lib::process::pipe() {
-                if !expanded.is_empty() {
-                    let bytes = format!("{}\n", expanded).into_bytes();
-                    edos_lib::process::write(write_fd, &bytes);
-                }
-                edos_lib::process::close(write_fd);
+            if let Some(read_fd) = heredoc_pipe(&expanded) {
                 let result = run_segment_with_stdin(&cleaned_line, read_fd);
                 edos_lib::process::close(read_fd);
                 match result {

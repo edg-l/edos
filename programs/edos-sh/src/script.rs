@@ -457,20 +457,11 @@ fn execute_block(block: &Block) -> FlowControl {
                 command::expand_variables(content)
             };
 
-            let (read_fd, write_fd) = match edos_lib::process::pipe() {
-                Some(fds) => fds,
-                None => {
-                    eprintln!("sh: pipe failed for heredoc");
-                    return FlowControl::Normal(1);
-                }
+            // Fed from a thread while the command runs: see `heredoc_pipe`.
+            let Some(read_fd) = crate::heredoc_pipe(&expanded_content) else {
+                eprintln!("sh: pipe failed for heredoc");
+                return FlowControl::Normal(1);
             };
-
-            // Write content followed by a trailing newline into the write end.
-            if !expanded_content.is_empty() {
-                let bytes = format!("{}\n", expanded_content).into_bytes();
-                edos_lib::process::write(write_fd, &bytes);
-            }
-            edos_lib::process::close(write_fd);
 
             // Run the command with the read end as its stdin.
             let code = match crate::run_segment_with_stdin(line, read_fd) {

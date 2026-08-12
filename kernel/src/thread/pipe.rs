@@ -60,6 +60,23 @@ pub enum StandardStream {
     Stderr,
 }
 
+/// How much a pipe will hold before a writer has to wait.
+///
+/// Without a bound the ring simply grows, so a writer that outruns its reader
+/// buys its speed with kernel heap and the reader gets no signal to slow it
+/// down. `ssh host 'cat 10MB'` is the shape: `cat` finished and exited having
+/// pushed all ten megabytes into the kernel, long before the server had
+/// forwarded a tenth of them.
+///
+/// 64 KiB is Linux's default. It is far above `PIPE_BUF`, so the atomicity
+/// guarantee below never costs a wait in practice.
+pub const PIPE_CAPACITY: usize = 64 * 1024;
+
+/// The largest write POSIX requires to be atomic: a write of at most this many
+/// bytes either goes in whole or waits, so two writers to one pipe never
+/// interleave a single small message. Larger writes may be split.
+pub const PIPE_BUF: usize = 4096;
+
 #[allow(unused)]
 #[derive(Debug)]
 pub struct Pipe {
@@ -71,6 +88,9 @@ pub struct Pipe {
     next_poll_key: PollKey,
     /// Wakes threads blocked in sys_read waiting for data or EOF.
     pub reader_wq: Arc<WaitQueue>,
+    /// Wakes threads blocked in sys_write waiting for room, or for the last
+    /// reader to go away so the write can fail instead.
+    pub writer_wq: Arc<WaitQueue>,
 }
 
 #[allow(unused)]
@@ -84,7 +104,26 @@ impl Pipe {
             pollers: Vec::new(),
             next_poll_key: 1,
             reader_wq: Arc::new(WaitQueue::new()),
+            writer_wq: Arc::new(WaitQueue::new()),
         }
+    }
+
+    /// Room left before a writer has to wait.
+    pub fn space(&self) -> usize {
+        PIPE_CAPACITY.saturating_sub(self.buffer.len())
+    }
+
+    /// Whether a write of `len` can proceed at all right now.
+    ///
+    /// A write up to `PIPE_BUF` waits for room for all of it, because POSIX
+    /// requires it to be atomic. A larger one proceeds as soon as there is any
+    /// room and takes what fits.
+    pub fn write_ready(&self, len: usize) -> bool {
+        if self.readers == 0 {
+            return true; // not room, but the write is about to fail
+        }
+        let want = len.min(PIPE_BUF).max(1);
+        self.space() >= want
     }
 
     pub fn close_writer(&mut self) -> PipeNotifications {
@@ -106,13 +145,21 @@ impl Pipe {
     /// into it grows the kernel heap for output no one will ever take. The
     /// caller turns `None` into EPIPE and a `SIGPIPE`, which is what makes
     /// `yes | head -1` terminate instead of running until memory runs out.
+    /// Takes as much as there is room for, so a caller that has more than the
+    /// pipe can hold writes it across several calls, waiting between them.
     pub fn write(&mut self, data: &[u8]) -> (Option<usize>, PipeNotifications) {
         if self.readers == 0 {
             return (None, self.notify_pollers());
         }
-        self.buffer.push(data);
-        let written = data.len();
-        (Some(written), self.notify_pollers())
+        let room = self.space();
+        if room == 0 {
+            // Nothing moved, so nothing to tell anyone: the caller waits on
+            // `writer_wq` and a reader wakes it when it frees room.
+            return (Some(0), PipeNotifications::EMPTY);
+        }
+        let take = data.len().min(room);
+        self.buffer.push(&data[..take]);
+        (Some(take), self.notify_pollers())
     }
 
     /// Take up to `out.len()` bytes, reporting how many and what to notify.
@@ -130,6 +177,8 @@ impl Pipe {
         if taken == 0 {
             return (0, PipeNotifications::EMPTY);
         }
+        // A read is what frees room, so it is the only thing that can end a
+        // writer's wait.
         (taken, self.notify_pollers())
     }
 
@@ -152,7 +201,8 @@ impl Pipe {
             state.readable = true;
         }
 
-        if self.readers > 0 && !self.closed {
+        // Writable means a write would not block, which a full pipe is not.
+        if self.readers > 0 && !self.closed && self.space() > 0 {
             state.writable = true;
         }
 
@@ -192,11 +242,21 @@ impl Pipe {
         } else {
             None
         };
+        // A writer waits for room or for the last reader to leave; both are
+        // visible here, and `wake_all` because room enough for one may be room
+        // enough for several.
+        let wake_writer = (state.writable || self.readers == 0) && self.writer_wq.has_waiters();
+        let writer_wq = if wake_writer {
+            Some(self.writer_wq.clone())
+        } else {
+            None
+        };
         if self.pollers.is_empty() {
             return PipeNotifications {
                 entries: Vec::new(),
                 state,
                 reader_wq,
+                writer_wq,
             };
         }
         let entries: Vec<PollRef> = self
@@ -208,6 +268,7 @@ impl Pipe {
             entries,
             state,
             reader_wq,
+            writer_wq,
         }
     }
 }
@@ -217,6 +278,7 @@ pub struct PipeNotifications {
     entries: Vec<PollRef>,
     state: PollState,
     reader_wq: Option<Arc<WaitQueue>>,
+    writer_wq: Option<Arc<WaitQueue>>,
 }
 
 impl PipeNotifications {
@@ -226,6 +288,7 @@ impl PipeNotifications {
         entries: Vec::new(),
         state: PollState::none(),
         reader_wq: None,
+        writer_wq: None,
     };
 
     /// Send notifications. Call this after dropping the pipe lock.
@@ -235,6 +298,9 @@ impl PipeNotifications {
         }
         if let Some(wq) = &self.reader_wq {
             wq.wake_one();
+        }
+        if let Some(wq) = &self.writer_wq {
+            wq.wake_all();
         }
     }
 }
