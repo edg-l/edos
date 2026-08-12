@@ -122,11 +122,36 @@ ring_us: 115811      flush_us: 218290      commit_us: 107023
 as well as the 248-entry PRDT allows, which is what the `RingWrites` change was
 for. What it leaves is a commit costing 4.6 ms, of which the batch is 1.2 ms,
 the commit block 1.1 ms, and **the flush barrier 2.3 ms — half the total, for
-one command that carries no data.** Two commits in a row pay it twice even
-though one barrier would order both, so the next thing worth doing on this path
-is coalescing commits rather than shortening the ones there are: seal on a
-timer, or let a second `force_commit_and_wait` join a barrier already in
-flight rather than starting its own.
+one command that carries no data.**
+
+### Batching the sealed queue behind one barrier does not pay (measured, refuted)
+
+The obvious reading of the numbers above is that two commits in a row pay two
+barriers where one would order both, so `seal_and_commit` should prepare the
+whole sealed queue, wait for it, issue one barrier, and then write every commit
+block. That was built and measured: descriptor/data/revoke blocks of up to eight
+transactions queued into one `RingWrites`, one `block_flush`, then the commit
+blocks queued together with `WriteFlags::FUA` (safe, because replay stops at the
+first transaction with no commit block, so a crash part-way through a batch
+leaves a committed prefix — §14).
+
+On the same `fsbench write -n 32 /var` from a fresh disk it reported **97
+commits sharing 84 barriers**: 13 batches of two in the whole run, and nothing
+larger. The sealed queue almost always holds exactly one transaction, because
+the committer is woken by `kick_committer` the moment one is sealed and commits
+it before another can be. There is nothing queued to coalesce.
+
+So the barrier can only be shared by *delaying* a commit that is ready — sealing
+on a timer, or letting a second `force_commit_and_wait` join a barrier already
+in flight — and that trades fsync latency for barrier count, which is a policy
+choice rather than a free win. Batching what happens to be queued is not.
+
+Two things the attempt did establish, worth keeping if it is ever revisited:
+queueing the FUA commit blocks together halved `commit_us` (107 ms → 57 ms
+across a run), and timing must start *after* the ring-space reservation loop:
+`checkpoint_and_advance` runs inside it and writes dirty pages home, so a
+`t_ring` taken before it charges a checkpoint's whole flush to `ring_us` and
+inflated it 116 ms → 599 ms in that measurement.
 
 ## 1b. Pipelined readahead: the instrument, and the baseline it reads
 
@@ -528,9 +553,14 @@ line.
 
 ## What has been tried and did not work
 
-Five experiments cost a build-and-boot each and are recorded so they are not
+Six experiments cost a build-and-boot each and are recorded so they are not
 repeated. All of them came from reasoning that sounded right and was refuted by
 measurement.
+
+- **Batching the sealed transaction queue behind one flush barrier.** 97 commits
+  shared 84 barriers, because the sealed queue almost never holds more than one
+  transaction; see section 1 for the mechanism and for the two things the attempt
+  did establish.
 
 - **Boosting block-I/O completion wakes to `WakePriority::Interrupt`.** The
   premise was that a waiter released by a device completion has already paid

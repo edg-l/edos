@@ -74,13 +74,25 @@ gate that matters for a journal change), and `fsbench write -n 32 /var` on a
 freshly formatted disk reports `verify: all patterns match`, `ncq_max_inflight
 +6`, `write 4KiB + fsync each` 52.0 ops/s at 2.6 ms p50.
 
-What was **not** measured: whether commit latency actually fell. `ncq_max_inflight`
-is a global maximum and writeback alone already drives it to +3..+9, so it cannot
-attribute depth to the journal, and there is no per-commit counter to read. The
-honest claim from this change is structural — two fewer dependent round trips per
-commit — not a throughput number. A `/proc` line counting commits, blocks written
-and time in `seal_and_commit` is what would settle it, and is worth adding before
-anything else in the journal is tuned.
+`ncq_max_inflight` could not settle whether commit latency fell — it is a global
+maximum and writeback alone drives it to +3..+9, so it cannot attribute depth to
+the journal. `/proc/journal_stats` was added for that, and it says a commit costs
+4.6 ms: ring batch 1.2 ms, flush barrier 2.3 ms, FUA commit block 1.1 ms, with
+330 ring blocks per commit in 3.3 commands. The batching worked; the barrier is
+now the largest third.
+
+### Sharing that barrier between commits: measured and refuted
+
+Coalescing whole transactions behind one barrier looked like the obvious next
+step and does not pay: the sealed queue almost never holds more than one
+transaction, because `kick_committer` wakes the committer as soon as one is
+sealed. A build that prepared up to eight of them behind a single `block_flush`
+reported **97 commits sharing 84 barriers** on `fsbench write -n 32 /var`. Full
+numbers and the two useful findings that fell out of it (FUA commit blocks are
+worth queueing; `t_ring` must start after the reservation loop, or a checkpoint's
+flush is charged to `ring_us`) are in `doc/STORAGE-ROADMAP.md` section 1. The
+barrier can only be shared by delaying a commit that is ready, which trades
+fsync latency for barrier count.
 
 ---
 
