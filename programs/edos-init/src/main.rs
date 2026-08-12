@@ -3,82 +3,25 @@
 //! The kernel spawns exactly this, and everything about which programs make up
 //! a session lives here rather than in the kernel. Each service gets a
 //! supervisor thread that spawns it, waits for it, and restarts it.
+//!
+//! Which services exist comes from two places: the desktop session is compiled
+//! in, so a filesystem with nothing on it still boots to a usable machine, and
+//! `/etc/services/*.conf` adds to it. Runtime control arrives on a FIFO and is
+//! reported back through a status file; see [`control`].
 
 use std::fs::File;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use edos_lib::process;
 use edos_lib::process::grant_shell;
 
-struct Service {
-    /// Binary to run.
-    path: &'static str,
-    /// Whether the session is usable without it. A non-essential service that
-    /// exhausts its restarts is left dead; an essential one is a louder problem
-    /// but is still not worth rebooting the machine over.
-    essential: bool,
-    /// Whether this service manages other processes' windows, and so needs the
-    /// privilege to move, resize, frame, minimize and focus them.
-    ///
-    /// Granted per spawn, since the privilege is per pid and dies with the
-    /// process. Init holds it because the kernel starts init and nothing else,
-    /// which makes "what a session is" init's decision rather than a race
-    /// between whichever program claims it first.
-    shell: bool,
-    /// Device nodes that must exist before the service is worth spawning.
-    ///
-    /// Drivers register their `/dev` entries from kthreads, so a node appears
-    /// some time after userspace starts rather than before it. A service that
-    /// opens one during startup otherwise races the driver and dies, and a
-    /// service that treats the open as optional comes up permanently without
-    /// that device. Waiting here keeps both out of every service.
-    requires: &'static [&'static str],
-    /// A file whose absence means the service is not configured, and so is not
-    /// started at all.
-    ///
-    /// Distinct from `requires`, which waits and then starts the service
-    /// anyway: this is a decision, not a race. A network service with no
-    /// credentials configured would only exit and be restarted until its
-    /// failure budget ran out, logging on every boot of a system whose owner
-    /// never asked for it.
-    enabled_by: Option<&'static str>,
-}
+mod control;
+mod service;
 
-const SERVICES: &[Service] = &[
-    Service {
-        path: "/bin/edos-wm",
-        essential: true,
-        shell: true,
-        requires: &["/dev/mouse", "/dev/kbd"],
-        enabled_by: None,
-    },
-    Service {
-        path: "/bin/edos-taskbar",
-        essential: false,
-        shell: true,
-        requires: &[],
-        enabled_by: None,
-    },
-    Service {
-        path: "/bin/edos-terminal",
-        essential: false,
-        shell: false,
-        requires: &[],
-        enabled_by: None,
-    },
-    Service {
-        path: "/bin/sshd",
-        essential: false,
-        shell: false,
-        requires: &[],
-        enabled_by: Some(SSHD_CONFIG),
-    },
-];
-
-/// Configuration that turns the SSH server on. It holds the only credential
-/// the server has, so a system without one has no business listening.
-const SSHD_CONFIG: &str = "/etc/sshd.conf";
+use control::{Control, RunState};
+use service::Service;
 
 /// A service that dies faster than this is treated as failing to start rather
 /// than as having run and exited.
@@ -108,11 +51,11 @@ const DEVICE_POLL: Duration = Duration::from_millis(50);
 
 /// Wait until every path opens. Returns the ones that never appeared, so the
 /// caller can decide whether to start the service without them.
-fn wait_for_devices(paths: &'static [&'static str]) -> Vec<&'static str> {
-    let mut missing: Vec<&'static str> = paths
+fn wait_for_devices(paths: &[String]) -> Vec<String> {
+    let mut missing: Vec<String> = paths
         .iter()
-        .copied()
         .filter(|p| File::open(p).is_err())
+        .cloned()
         .collect();
     if missing.is_empty() {
         return missing;
@@ -130,56 +73,103 @@ fn wait_for_devices(paths: &'static [&'static str]) -> Vec<&'static str> {
     missing
 }
 
-fn supervise(service: &'static Service) {
-    let name = service.path.rsplit('/').next().unwrap_or(service.path);
-    let mut failures: u32 = 0;
+fn supervise(service: Arc<Service>, control: Arc<Control>) {
+    let name = service.name.as_str();
 
-    if let Some(config) = service.enabled_by
-        && File::open(config).is_err()
-    {
+    if !service.enabled() {
+        let config = service.enabled_by.as_deref().unwrap_or("");
         println!("init: {name} not started: no {config}");
+        // Failed rather than stopped: it is down because it is not configured,
+        // which `svc start` cannot fix and should not silently paper over.
+        control.update(name, |e| {
+            e.want_up = false;
+            e.state = RunState::Failed;
+        });
         return;
     }
 
     // Once, before the first spawn: a restart later on cannot lose this race,
     // since the drivers registered long before.
-    let missing = wait_for_devices(service.requires);
+    let missing = wait_for_devices(&service.requires);
     if !missing.is_empty() {
         eprintln!(
             "init: {name}: {missing:?} did not appear within {DEVICE_WAIT:?}; starting it anyway"
         );
     }
 
+    let args: Vec<&str> = service.args.iter().map(String::as_str).collect();
+
     loop {
+        // Park until the service is wanted up. A stopped service costs nothing
+        // here: nothing wakes this thread until `svc start` does.
+        control.wait_until(name, |e| e.want_up);
+
         let started = Instant::now();
-        let pid = process::spawn_with_env(service.path, &[], 0, 1, 2);
+        let pid = process::spawn_with_env(&service.command, &args, 0, 1, 2);
         if pid == u64::MAX {
-            failures += 1;
+            control.update(name, |e| {
+                e.failures += 1;
+                e.pid = 0;
+                e.state = RunState::Backoff;
+            });
+            let failures = control.with(name, |e| e.failures).unwrap_or(0);
             eprintln!("init: {name}: spawn failed (attempt {failures})");
         } else {
-            if service.shell {
-                if let Err(e) = grant_shell(pid) {
-                    eprintln!("init: {name}: could not grant shell privilege: {e}");
-                }
+            if service.shell
+                && let Err(e) = grant_shell(pid)
+            {
+                eprintln!("init: {name}: could not grant shell privilege: {e}");
             }
+            control.update(name, |e| {
+                e.pid = pid;
+                e.state = RunState::Running;
+            });
             println!("init: {name} started, pid {pid}");
+
             let code = process::waitpid(pid);
             let ran_for = started.elapsed();
+            let wanted_up = control
+                .update(name, |e| {
+                    e.pid = 0;
+                    e.want_up
+                })
+                .unwrap_or(true);
+
+            if !wanted_up {
+                // It exited because it was told to. Not a failure, and not
+                // something to back off from.
+                println!("init: {name} stopped");
+                control.update(name, |e| {
+                    e.state = RunState::Stopped;
+                    e.failures = 0;
+                });
+                continue;
+            }
 
             if ran_for >= HEALTHY_RUNTIME {
                 // It came up, did its job, and exited. Restart it promptly:
                 // this is the ordinary case for a terminal the user closed.
                 println!("init: {name} exited with {code} after {ran_for:?}, restarting");
-                failures = 0;
+                control.update(name, |e| {
+                    e.failures = 0;
+                    e.state = RunState::Backoff;
+                });
                 continue;
             }
 
-            failures += 1;
+            let failures = control
+                .update(name, |e| {
+                    e.failures += 1;
+                    e.state = RunState::Backoff;
+                    e.failures
+                })
+                .unwrap_or(0);
             eprintln!(
                 "init: {name} exited with {code} after only {ran_for:?} (failure {failures})"
             );
         }
 
+        let failures = control.with(name, |e| e.failures).unwrap_or(0);
         if failures >= MAX_RAPID_FAILURES {
             let kind = if service.essential {
                 "essential service"
@@ -188,21 +178,42 @@ fn supervise(service: &'static Service) {
             };
             eprintln!(
                 "init: giving up on {kind} {name} after {failures} rapid failures; \
-                 fix it and restart it by hand"
+                 start it again with `svc start {name}`"
             );
-            return;
+            // Down, but reachable: `svc start` clears the failure count and
+            // wakes the wait at the top of the loop, which is what makes this
+            // recoverable without a reboot.
+            control.update(name, |e| {
+                e.want_up = false;
+                e.state = RunState::Failed;
+            });
+            continue;
         }
 
-        let idx = (failures as usize - 1).min(BACKOFF_MS.len() - 1);
-        thread::sleep(Duration::from_millis(BACKOFF_MS[idx]));
+        // Backoff, cut short if someone asks for a start in the meantime: a
+        // restart command during a five-second wait should not have to serve
+        // out the wait it is overriding.
+        let idx = (failures.max(1) as usize - 1).min(BACKOFF_MS.len() - 1);
+        let generation = control.with(name, |e| e.generation).unwrap_or(0);
+        let deadline = Instant::now() + Duration::from_millis(BACKOFF_MS[idx]);
+        while Instant::now() < deadline {
+            let moved = control
+                .with(name, |e| e.generation != generation || !e.want_up)
+                .unwrap_or(true);
+            if moved {
+                break;
+            }
+            thread::sleep(DEVICE_POLL);
+        }
     }
 }
 
 fn main() {
+    let services = service::load();
     println!(
         "init: pid {}, starting {} services",
         process::getpid(),
-        SERVICES.len()
+        services.len()
     );
 
     // The session's clock offset from UTC. The kernel keeps time in UTC and
@@ -211,16 +222,30 @@ fn main() {
     // the panel clock and anything the shell runs.
     unsafe { std::env::set_var("TZ", DEFAULT_TZ) };
 
+    let names: Vec<String> = services.iter().map(|s| s.name.clone()).collect();
+    let control = Control::new(&names);
+    control::prepare();
+    control.publish_now();
+
     // One supervisor thread per service, because waitpid names a single child
     // and each service restarts on its own schedule.
     let mut supervisors = Vec::new();
-    for service in SERVICES {
-        supervisors.push(thread::spawn(move || supervise(service)));
+    for service in services {
+        let control = control.clone();
+        supervisors.push(thread::spawn(move || supervise(service, control)));
     }
+
+    // The control channel outlives every service: a system whose services have
+    // all failed is exactly when being able to start one matters.
+    let controller = {
+        let control = control.clone();
+        thread::spawn(move || control::serve(control))
+    };
 
     for handle in supervisors {
         let _ = handle.join();
     }
+    let _ = controller.join();
 
     // Every service has given up. Stay alive anyway: init is where orphans are
     // reparented, and exiting would leave them with no collector at all.

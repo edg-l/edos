@@ -76,6 +76,7 @@ sections, and wrapping them would recurse into the preemption counter.
 | 204 | `Mailbox.queue` | `BlockingMutex<VecDeque>` | `thread/mailbox.rs` |
 | 206 | `ResponseInner.value` | `BlockingMutex<Option<R>>` | `thread/mailbox.rs` |
 | 210 | `TTY_BUFFER` | `BlockingMutex<VecDeque<u8>>` | `drivers/tty.rs` |
+| 215 | `FIFO_REGISTRY` | `PreemptSpinlock<BTreeMap<FifoKey, Arc<Fifo>>>` | `fs/fifo.rs` |
 | 220 | `Pipe` (per-pipe) | `Arc<BlockingMutex<Pipe>>` | `thread/pipe.rs` |
 | 230 | `Pty` (per-pty) | `Arc<BlockingMutex<Pty>>` | `thread/pty.rs` |
 | 240 | `NET_STACK` | `PreemptSpinlock<NetStack>` | `net/stack.rs` |
@@ -248,7 +249,7 @@ spacing is because the driver band below and the console band above leave no
 with interrupts disabled from the xHCI dispatcher, and the macros have no
 try_lock form.
 
-**210, `TTY_BUFFER`. 220, `Pipe`. 230, `Pty`.** IPC and console endpoints, and
+**210, `TTY_BUFFER`. 215, `FIFO_REGISTRY`. 220, `Pipe`. 230, `Pty`.** IPC and console endpoints, and
 the only ranks reached from the syscall read/write path rather than from the FS
 ladder. Two constraints fix where they sit. They must be **above 30**, because
 `/dev/tty0` is a devfs device and devfs has no `PageCacheOps`, so a write to it
@@ -256,7 +257,13 @@ runs `TtyDevice::write` under `inode.lock` from `vfs::write_from_user`'s
 non-page-cache branch. They must be **below 900**, because appending to any of
 these buffers allocates and a heap expansion reaches the frame allocator.
 
-Nothing ranked is acquired while one of them is held: the bodies do buffer
+`FIFO_REGISTRY` is the one pair in this band that is genuinely co-held, and in
+that order: `fifo::incarnation` holds the registry while it takes a `Pipe` to
+ask whether that named pipe still has an end open. Never the other way round --
+nothing holding a pipe looks a FIFO up -- which is what the 5-unit gap below 220
+records. The console band below it leaves no 10-unit room.
+
+Nothing else ranked is acquired while one of them is held: the bodies do buffer
 manipulation and, for the pty, line-discipline work. That is what makes them
 safe to place anywhere in that window, and it is the property to re-check before
 adding anything to those critical sections.

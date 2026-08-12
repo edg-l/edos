@@ -365,6 +365,34 @@ const AT_REMOVEDIR: u64 = 0x200;
 ///
 /// No `mode` argument: EDOS carries no permission bits, so one would be a
 /// value nothing could observe.
+/// mkfifoat(dirfd, path, path_len) -> 0, or -1 on error
+///
+/// Create a named pipe. Nothing opens it here: the buffer its ends meet in
+/// comes into being when the first `open` arrives, so this only puts the name
+/// and its type into the filesystem.
+pub fn sys_mkfifoat(dirfd: i64, path_ptr: *const u8, path_len: usize) -> i64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    let path = match read_user_path_at(dirfd, path_ptr, path_len) {
+        Ok(path) => path,
+        Err(errno) => {
+            info.lock().errno = errno;
+            return -1;
+        }
+    };
+
+    interrupts::enable();
+
+    match crate::fs::api::create_fifo(&path) {
+        Ok(_) => 0,
+        Err(err) => {
+            info.lock().errno = Errno::from(err);
+            -1
+        }
+    }
+}
+
 pub fn sys_mkdirat(dirfd: i64, path_ptr: *const u8, path_len: usize) -> i64 {
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
@@ -587,6 +615,7 @@ fn file_to_fstat_entry(file: &crate::fs::File) -> FstatEntry {
         crate::fs::FileKind::Directory => 1,
         crate::fs::FileKind::Symlink => 2,
         crate::fs::FileKind::Special => 3,
+        crate::fs::FileKind::Fifo => 4,
     };
 
     FstatEntry {
@@ -639,7 +668,9 @@ pub fn sys_fstat(fd: u64, fstat_buf: *mut FstatEntry) -> i64 {
                 kind: 3, // Special file
             }
         }
-        FileDescriptor::PipeRead(_) | FileDescriptor::PipeWrite(_) => {
+        FileDescriptor::PipeRead(_)
+        | FileDescriptor::PipeWrite(_)
+        | FileDescriptor::PipeReadWrite(_) => {
             FstatEntry {
                 size: 0,
                 created: 0,

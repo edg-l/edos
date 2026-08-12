@@ -114,6 +114,12 @@ pub const RANK_MAILBOX_RESPONSE: u16 = 206;
 // below the deep leaves because appending to any of these buffers allocates.
 // Nothing ranked is acquired while one of them is held.
 pub const RANK_TTY_BUFFER: u16 = 210;
+// The named-pipe registry, which maps an inode to the `Pipe` its two ends meet
+// in. Held across the pipe lock below it while an `open` registers itself, and
+// never the other way round: nothing holding a pipe looks a FIFO up. 5-unit
+// spacing because the console band below and the pipe itself leave no 10-unit
+// gap.
+pub const RANK_FIFO_REGISTRY: u16 = 215;
 pub const RANK_PIPE: u16 = 220;
 pub const RANK_PTY: u16 = 230;
 // Networking. The order is fixed by the receive path: `handle_udp`/`handle_tcp`

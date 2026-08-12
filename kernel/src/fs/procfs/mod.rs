@@ -1218,6 +1218,9 @@ fn describe_descriptor(descriptor: &FileDescriptor) -> (&'static str, &'static s
         },
         FileDescriptor::PipeRead(pipe) => ("pipe", "r", 0, format!("pipe:[{:x}]", identity(pipe))),
         FileDescriptor::PipeWrite(pipe) => ("pipe", "w", 0, format!("pipe:[{:x}]", identity(pipe))),
+        FileDescriptor::PipeReadWrite(pipe) => {
+            ("pipe", "rw", 0, format!("pipe:[{:x}]", identity(pipe)))
+        }
         FileDescriptor::PtyMaster(pty) => ("pty", "rw", 0, format!("ptmx:[{:x}]", identity(pty))),
         FileDescriptor::PtySlave(pty) => ("pty", "rw", 0, format!("pts:[{:x}]", identity(pty))),
         FileDescriptor::FsFile(file) => {

@@ -21,6 +21,34 @@ pub enum PtySlaveRead {
     WouldBlock,
 }
 
+/// How much program output a PTY will hold before the writing program has to
+/// wait for the terminal to catch up.
+///
+/// Without a bound the ring simply grows, so a program that outruns the
+/// terminal drawing for it buys its speed with kernel heap: `yes` against a
+/// terminal that has stopped reading is the shape, and so is an `sshd` whose
+/// client stopped reading. The master side here is a program rather than the
+/// kernel, so a blocked slave writer means the session stalls until that
+/// program reads, which is what backpressure on a terminal means.
+///
+/// Matches [`PIPE_CAPACITY`](crate::thread::pipe::PIPE_CAPACITY): the two
+/// carry the same kind of traffic and there is no reason for a terminal to
+/// buffer more of it than a pipe.
+pub const PTY_OUTPUT_CAPACITY: usize = 64 * 1024;
+
+/// Room a slave write needs before it can make progress at all. `ONLCR` turns
+/// one newline into two stored bytes, so anything less than two cannot be
+/// guaranteed to move a single byte.
+const PTY_OUTPUT_MIN_WRITE: usize = 2;
+
+/// How much unread keyboard input a PTY will hold, POSIX `MAX_INPUT`.
+///
+/// The input side is bounded by discarding rather than by waiting, because
+/// there is nothing to push back on: the bytes come from a keyboard or from a
+/// network peer, and a terminal that cannot take them drops them. Linux's
+/// `N_TTY` uses the same figure for the same reason.
+const PTY_INPUT_CAPACITY: usize = 4096;
+
 pub const PTY_IOCTL_SET_RAW: u64 = 0x5001;
 /// Record the character grid the terminal draws, packed `(rows << 16) | cols`.
 /// Set by the terminal on resize, read by full-screen programs.
@@ -75,24 +103,58 @@ impl LineDiscipline {
         }
     }
 
-    /// Append `data` to `out`, expanding newlines when `opost` is on.
+    /// Append as much of `data` to `out` as `room` bytes of storage allow,
+    /// expanding newlines when `opost` is on. Returns how many bytes of `data`
+    /// were consumed.
+    ///
+    /// The bound is on what is stored, not on what was accepted, because
+    /// `ONLCR` makes those different numbers: a caller handing over one
+    /// newline asks for two bytes of room.
     ///
     /// The scan costs a pass over the bytes only when there is a newline to
     /// find; output with none is pushed as it stands.
-    fn write_output(&self, data: &[u8], out: &mut ByteRing) {
+    fn write_output(&self, data: &[u8], out: &mut ByteRing, room: usize) -> usize {
         if !self.opost || !data.contains(&b'\n') {
-            out.push(data);
-            return;
+            let take = data.len().min(room);
+            out.push(&data[..take]);
+            return take;
+        }
+        // Walk the input counting what each byte costs to store, and stop at
+        // the last one that fits whole. Splitting a translated newline would
+        // put a carriage return on the wire with its newline still to come.
+        let mut cost = 0usize;
+        let mut end = data.len();
+        for (i, &byte) in data.iter().enumerate() {
+            let byte_cost = if byte == b'\n' { 2 } else { 1 };
+            if cost + byte_cost > room {
+                end = i;
+                break;
+            }
+            cost += byte_cost;
         }
         let mut start = 0;
-        for (i, &byte) in data.iter().enumerate() {
+        for (i, &byte) in data[..end].iter().enumerate() {
             if byte == b'\n' {
                 out.push(&data[start..i]);
                 out.push(b"\r\n");
                 start = i + 1;
             }
         }
-        out.push(&data[start..]);
+        out.push(&data[start..end]);
+        end
+    }
+
+    /// Echo `bytes` back to the master, or drop them if the output ring is
+    /// full.
+    ///
+    /// Echo is a courtesy copy of what the user typed, so queueing it past the
+    /// capacity would be the same unbounded growth the capacity exists to
+    /// prevent, and there is nobody to apply backpressure to: the master is
+    /// the one that supplied the keystroke.
+    fn echo(output_buf: &mut ByteRing, bytes: &[u8]) {
+        if PTY_OUTPUT_CAPACITY.saturating_sub(output_buf.len()) >= bytes.len() {
+            output_buf.push(bytes);
+        }
     }
 
     fn process_input(
@@ -106,7 +168,7 @@ impl LineDiscipline {
         if byte == 0x03 {
             self.line_buf.clear();
             if self.echo {
-                output_buf.push(b"^C\n");
+                Self::echo(output_buf, b"^C\n");
             }
             return LineAction::Interrupt;
         }
@@ -114,15 +176,22 @@ impl LineDiscipline {
         if byte == 0x1a {
             self.line_buf.clear();
             if self.echo {
-                output_buf.push(b"^Z\n");
+                Self::echo(output_buf, b"^Z\n");
             }
             return LineAction::Suspend;
+        }
+
+        // Overflow is discarded once the queue is full, as POSIX has it. The
+        // characters that end a runaway program are exempt above and here, or
+        // a queue filled by that program's own input would be unrecoverable.
+        if byte != 0x04 && input_buf.len() + self.line_buf.len() >= PTY_INPUT_CAPACITY {
+            return LineAction::None;
         }
 
         if !self.canonical {
             input_buf.push_byte(byte);
             if self.echo {
-                output_buf.push_byte(byte);
+                Self::echo(output_buf, &[byte]);
             }
             return LineAction::None;
         }
@@ -136,9 +205,9 @@ impl LineDiscipline {
                 self.line_buf.clear();
                 if self.echo {
                     if self.opost {
-                        output_buf.push(b"\r\n");
+                        Self::echo(output_buf, b"\r\n");
                     } else {
-                        output_buf.push_byte(b'\n');
+                        Self::echo(output_buf, b"\n");
                     }
                 }
                 LineAction::None
@@ -148,7 +217,7 @@ impl LineDiscipline {
                 if !self.line_buf.is_empty() {
                     self.line_buf.pop();
                     if self.echo {
-                        output_buf.push(b"\x08 \x08");
+                        Self::echo(output_buf, b"\x08 \x08");
                     }
                 }
                 LineAction::None
@@ -168,7 +237,7 @@ impl LineDiscipline {
             b'\t' => {
                 self.line_buf.push(byte);
                 if self.echo {
-                    output_buf.push_byte(byte);
+                    Self::echo(output_buf, &[byte]);
                 }
                 LineAction::None
             }
@@ -176,7 +245,7 @@ impl LineDiscipline {
             0x1B => {
                 self.line_buf.push(byte);
                 if self.echo {
-                    output_buf.push_byte(byte);
+                    Self::echo(output_buf, &[byte]);
                 }
                 LineAction::None
             }
@@ -184,7 +253,7 @@ impl LineDiscipline {
             byte if byte >= 0x20 => {
                 self.line_buf.push(byte);
                 if self.echo {
-                    output_buf.push_byte(byte);
+                    Self::echo(output_buf, &[byte]);
                 }
                 LineAction::None
             }
@@ -211,6 +280,10 @@ pub struct Pty {
     input_wq: Arc<WaitQueue>,
     /// Wakes master readers when output_buf gets data or slave closes.
     output_wq: Arc<WaitQueue>,
+    /// Wakes slave writers blocked on a full output ring, either because the
+    /// master read some of it or because the master went away and the write
+    /// can fail instead.
+    slave_write_wq: Arc<WaitQueue>,
     pollers: Vec<(PollKey, PtySide, PollRef)>,
     next_poll_key: PollKey,
     line_disc: LineDiscipline,
@@ -240,6 +313,7 @@ impl Pty {
             closed_slave: false,
             input_wq: Arc::new(WaitQueue::new()),
             output_wq: Arc::new(WaitQueue::new()),
+            slave_write_wq: Arc::new(WaitQueue::new()),
             pollers: Vec::new(),
             next_poll_key: 1,
             line_disc: LineDiscipline::new(),
@@ -292,6 +366,24 @@ impl Pty {
         self.input_wq.clone()
     }
 
+    /// Clone the slave-writer WaitQueue Arc so `sys_write` can wait outside the
+    /// lock, as it does for a full pipe.
+    pub fn slave_write_wq(&self) -> Arc<WaitQueue> {
+        self.slave_write_wq.clone()
+    }
+
+    /// Room left in the output ring before a slave writer has to wait.
+    pub fn output_space(&self) -> usize {
+        PTY_OUTPUT_CAPACITY.saturating_sub(self.output_buf.len())
+    }
+
+    /// Whether a slave write can make progress right now.
+    pub fn slave_write_ready(&self) -> bool {
+        // Not room, but the write is about to fail, and a writer waiting for a
+        // master that has gone would wait forever.
+        self.closed_master || self.output_space() >= PTY_OUTPUT_MIN_WRITE
+    }
+
     /// Master writes keyboard input into input_buf (slave reads this).
     ///
     /// `data` is already in kernel memory: the caller copies it out of user
@@ -342,17 +434,35 @@ impl Pty {
         (taken, self.notify_pollers())
     }
 
-    /// Slave writes program output into output_buf (master reads this).
-    pub fn slave_write(&mut self, data: &[u8]) -> (usize, PtyNotifications) {
+    /// Slave writes program output into output_buf (master reads this), or
+    /// reports that the terminal is gone.
+    ///
+    /// Takes as much as there is room for, so a caller with more than the
+    /// terminal can hold writes it across several calls, waiting between them.
+    /// `None` means the last master closed: POSIX makes that `EIO` rather than
+    /// a write that succeeds into a buffer nothing will ever drain.
+    ///
+    /// Reports what it consumed of `data`, not what went into the ring: the
+    /// carriage returns are the driver's, and a writer told it had written
+    /// more than it asked would loop trying to make up the difference.
+    pub fn slave_write(&mut self, data: &[u8]) -> (Option<usize>, PtyNotifications) {
+        if self.closed_master {
+            return (None, PtyNotifications::EMPTY);
+        }
         if data.is_empty() {
-            return (0, PtyNotifications::EMPTY);
+            return (Some(0), PtyNotifications::EMPTY);
         }
 
-        // Reports what the caller gave, not what went into the ring: the
-        // carriage returns are the driver's, and a writer told it had written
-        // more than it asked would loop trying to make up the difference.
-        self.line_disc.write_output(data, &mut self.output_buf);
-        (data.len(), self.notify_pollers())
+        let room = self.output_space();
+        let taken = self
+            .line_disc
+            .write_output(data, &mut self.output_buf, room);
+        if taken == 0 {
+            // Nothing moved, so nothing to tell anyone: the caller waits on
+            // `slave_write_wq` and a master read wakes it when it frees room.
+            return (Some(0), PtyNotifications::EMPTY);
+        }
+        (Some(taken), self.notify_pollers())
     }
 
     /// Slave reads keyboard input from input_buf (master wrote this).
@@ -415,7 +525,9 @@ impl Pty {
             state.readable = true;
         }
 
-        if self.masters > 0 && !self.closed_master {
+        // Writable means a write would not block, which a full output ring is
+        // not.
+        if self.masters > 0 && !self.closed_master && self.output_space() >= PTY_OUTPUT_MIN_WRITE {
             state.writable = true;
         }
 
@@ -455,6 +567,16 @@ impl Pty {
         } else {
             None
         };
+        // A slave writer waits for room or for the last master to leave; both
+        // are visible here, and `wake_all` because room enough for one may be
+        // room enough for several.
+        let wake_slave_writer =
+            (slave_state.writable || self.closed_master) && self.slave_write_wq.has_waiters();
+        let slave_write_wq = if wake_slave_writer {
+            Some(self.slave_write_wq.clone())
+        } else {
+            None
+        };
 
         if self.pollers.is_empty() {
             return PtyNotifications {
@@ -463,6 +585,7 @@ impl Pty {
                 slave_state,
                 input_wq,
                 output_wq,
+                slave_write_wq,
                 signal_pgid: None,
             };
         }
@@ -479,6 +602,7 @@ impl Pty {
             slave_state,
             input_wq,
             output_wq,
+            slave_write_wq,
             signal_pgid: None,
         }
     }
@@ -491,6 +615,7 @@ pub struct PtyNotifications {
     slave_state: PollState,
     input_wq: Option<Arc<WaitQueue>>,
     output_wq: Option<Arc<WaitQueue>>,
+    slave_write_wq: Option<Arc<WaitQueue>>,
     /// If set, signal this process group after releasing the PTY lock.
     pub signal_pgid: Option<(u64, u32)>,
 }
@@ -502,6 +627,7 @@ impl PtyNotifications {
         slave_state: PollState::none(),
         input_wq: None,
         output_wq: None,
+        slave_write_wq: None,
         signal_pgid: None,
     };
 
@@ -519,6 +645,9 @@ impl PtyNotifications {
         }
         if let Some(wq) = &self.output_wq {
             wq.wake_one();
+        }
+        if let Some(wq) = &self.slave_write_wq {
+            wq.wake_all();
         }
         if let Some((pgid, signum)) = self.signal_pgid {
             crate::thread::thread::signal_process_group(pgid, signum);

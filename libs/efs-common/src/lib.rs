@@ -89,6 +89,13 @@ pub const S_IFDIR: u16 = 0x4000;
 /// `mode` file type: symbolic link.
 pub const S_IFLNK: u16 = 0xA000;
 
+/// `mode` file type: named pipe (FIFO).
+///
+/// A FIFO holds no data on disk: the name is the whole of it, and the buffer
+/// the two ends meet in lives in the kernel for as long as one of them has it
+/// open. The inode therefore always has size 0 and no extents.
+pub const S_IFIFO: u16 = 0x1000;
+
 // ---- Permission bits ----
 
 /// Owner read/write/execute permission bits.
@@ -110,6 +117,9 @@ pub const FT_REG_FILE: u8 = 1;
 
 /// Directory entry file type: directory.
 pub const FT_DIR: u8 = 2;
+
+/// Directory entry file type: named pipe (FIFO).
+pub const FT_FIFO: u8 = 5;
 
 /// Directory entry file type: symbolic link.
 pub const FT_SYMLINK: u8 = 7;

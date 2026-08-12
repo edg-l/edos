@@ -1,6 +1,6 @@
 use crate::{
-    FT_DIR, FT_REG_FILE, FT_SYMLINK, FT_UNKNOWN, INODE_FLAG_INLINE_DATA, S_IFDIR, S_IFLNK, S_IFMT,
-    S_IFREG,
+    FT_DIR, FT_FIFO, FT_REG_FILE, FT_SYMLINK, FT_UNKNOWN, INODE_FLAG_INLINE_DATA, S_IFDIR, S_IFIFO,
+    S_IFLNK, S_IFMT, S_IFREG,
 };
 
 /// Size of the `data_area` inside an inode, in bytes.
@@ -73,6 +73,11 @@ impl EfsInode {
         self.mode & S_IFMT == S_IFLNK
     }
 
+    /// Returns `true` if this inode represents a named pipe (FIFO).
+    pub fn is_fifo(&self) -> bool {
+        self.mode & S_IFMT == S_IFIFO
+    }
+
     /// Returns `true` if file data is stored inline in `data_area`.
     pub fn is_inline_data(&self) -> bool {
         self.flags & INODE_FLAG_INLINE_DATA != 0
@@ -95,6 +100,8 @@ impl EfsInode {
             FT_DIR
         } else if self.is_symlink() {
             FT_SYMLINK
+        } else if self.is_fifo() {
+            FT_FIFO
         } else {
             FT_UNKNOWN
         }

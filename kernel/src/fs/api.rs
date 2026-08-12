@@ -235,6 +235,14 @@ pub fn read_link(path: &Path) -> Result<String, Error> {
     })
 }
 
+/// Create a named pipe at `path`. The kernel-side buffer is not made here: it
+/// comes into being when the first end opens.
+pub fn create_fifo(path: &Path) -> Result<(), Error> {
+    on_path(path, Resolver::Mount, LinkMode::NoFollow, |op, _| {
+        vfs::create_fifo(op)
+    })
+}
+
 pub fn create_dir(path: &Path) -> Result<(), Error> {
     on_path(path, Resolver::Mount, LinkMode::NoFollow, |op, _| {
         vfs::create_dir(op)

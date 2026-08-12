@@ -21,6 +21,14 @@ pub enum FileDescriptor {
     PipeRead(Arc<BlockingMutex<Pipe>>),
     #[allow(unused)]
     PipeWrite(Arc<BlockingMutex<Pipe>>),
+    /// Both ends of one pipe on a single descriptor.
+    ///
+    /// Only a named pipe opened `O_RDWR` produces this. It is what lets a
+    /// program hold a control channel open across writers coming and going:
+    /// its own write end keeps the pipe from ever reaching end of file, so a
+    /// reader waiting on it parks instead of spinning on a hangup nobody will
+    /// clear.
+    PipeReadWrite(Arc<BlockingMutex<Pipe>>),
     // Filesystem-backed file descriptor with maintained offset
     FsFile(FsFile),
     PtyMaster(Arc<BlockingMutex<Pty>>),
@@ -38,6 +46,11 @@ impl FileDescriptor {
             }
             FileDescriptor::PipeWrite(pipe) => {
                 ranked_lock!(RANK_PIPE, "fd::inc_refcount", pipe).writers += 1;
+            }
+            FileDescriptor::PipeReadWrite(pipe) => {
+                let mut guard = ranked_lock!(RANK_PIPE, "fd::inc_refcount", pipe);
+                guard.readers += 1;
+                guard.writers += 1;
             }
             FileDescriptor::PtyMaster(pty) => {
                 ranked_lock!(RANK_PTY, "fd::inc_refcount", pty).masters += 1;
@@ -108,6 +121,20 @@ impl Pipe {
         }
     }
 
+    /// A named pipe's buffer, which starts with neither end open.
+    ///
+    /// The difference from [`Pipe::new`] is the whole difference between the
+    /// two kinds: an anonymous pipe is created by the call that hands out both
+    /// descriptors, while a FIFO exists as a name first and gains its ends as
+    /// programs open it.
+    pub fn new_fifo() -> Self {
+        Self {
+            readers: 0,
+            writers: 0,
+            ..Self::new()
+        }
+    }
+
     /// Room left before a writer has to wait.
     pub fn space(&self) -> usize {
         PIPE_CAPACITY.saturating_sub(self.buffer.len())
@@ -127,16 +154,28 @@ impl Pipe {
     }
 
     pub fn close_writer(&mut self) -> PipeNotifications {
+        self.close_writer_silent();
+        self.notify_ends()
+    }
+
+    pub fn close_reader(&mut self) -> PipeNotifications {
+        self.close_reader_silent();
+        self.notify_ends()
+    }
+
+    /// Drop one writer without building notifications, for a caller closing
+    /// both ends of one pipe that ends with a single [`Pipe::notify_ends`].
+    pub fn close_writer_silent(&mut self) {
         self.writers = self.writers.saturating_sub(1);
         if self.writers == 0 {
             self.closed = true;
         }
-        self.notify_pollers()
     }
 
-    pub fn close_reader(&mut self) -> PipeNotifications {
+    /// Drop one reader without building notifications; see
+    /// [`Pipe::close_writer_silent`].
+    pub fn close_reader_silent(&mut self) {
         self.readers = self.readers.saturating_sub(1);
-        self.notify_pollers()
     }
 
     /// Append to the pipe, or report that nobody is left to read it.
@@ -149,7 +188,7 @@ impl Pipe {
     /// pipe can hold writes it across several calls, waiting between them.
     pub fn write(&mut self, data: &[u8]) -> (Option<usize>, PipeNotifications) {
         if self.readers == 0 {
-            return (None, self.notify_pollers());
+            return (None, self.notify_ends());
         }
         let room = self.space();
         if room == 0 {
@@ -159,7 +198,7 @@ impl Pipe {
         }
         let take = data.len().min(room);
         self.buffer.push(&data[..take]);
-        (Some(take), self.notify_pollers())
+        (Some(take), self.notify_ends())
     }
 
     /// Take up to `out.len()` bytes, reporting how many and what to notify.
@@ -179,7 +218,7 @@ impl Pipe {
         }
         // A read is what frees room, so it is the only thing that can end a
         // writer's wait.
-        (taken, self.notify_pollers())
+        (taken, self.notify_ends())
     }
 
     /// A read would return end of file: nothing buffered and no writer left.
@@ -228,10 +267,12 @@ impl Pipe {
         self.pollers.retain(|(stored, _)| *stored != key);
     }
 
-    /// Snapshot poller entries + state. Callers must pass the result to
-    /// `Pipe::flush_notifications` AFTER dropping the pipe lock to avoid
-    /// holding BlockingMutex while wake_thread spins (priority inversion).
-    fn notify_pollers(&mut self) -> PipeNotifications {
+    /// Snapshot what every end of the pipe should be told: poll entries, and
+    /// the wait queues whose predicate the change may have satisfied.
+    ///
+    /// Callers must flush the result AFTER dropping the pipe lock, to avoid
+    /// holding a BlockingMutex while wake_thread spins (priority inversion).
+    pub fn notify_ends(&mut self) -> PipeNotifications {
         let state = self.poll_state();
         // `has_waiters` is read with the pipe lock held and the bytes already
         // in the ring, so a reader that enrols after this point re-checks its
@@ -409,6 +450,15 @@ pub fn close_descriptor(descriptor: FileDescriptor, owner_pid: u64) {
         }
         FileDescriptor::PipeWrite(pipe) => {
             let notif = ranked_lock!(RANK_PIPE, "pipe::close_writer", pipe).close_writer();
+            notif.flush();
+        }
+        FileDescriptor::PipeReadWrite(pipe) => {
+            let notif = {
+                let mut guard = ranked_lock!(RANK_PIPE, "pipe::close_both", pipe);
+                guard.close_reader_silent();
+                guard.close_writer_silent();
+                guard.notify_ends()
+            };
             notif.flush();
         }
         FileDescriptor::PtySlave(pty) => {

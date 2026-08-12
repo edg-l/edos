@@ -17,7 +17,7 @@ use crate::{
 
 use super::{
     Error, File, FileAttrs, FileKind, FileSystem, LinkEscape, LinkMode, MmapRegion, MountInfo,
-    StatFs, dentry, handle::Pollable, icache, inode::VfsInode, page_fill, path::Path,
+    StatFs, dentry, fifo, handle::Pollable, icache, inode::VfsInode, page_fill, path::Path,
     readahead::ReadaheadState,
 };
 use x86_64::{
@@ -1079,6 +1079,21 @@ pub fn read_link(op: &VfsOp) -> Result<String, Error> {
     op.fs.read_link(&op.relative)
 }
 
+pub fn create_fifo(op: &VfsOp) -> Result<(), Error> {
+    let parent_inode = resolve_parent_inode(op);
+    let _guard = parent_inode
+        .as_ref()
+        .map(|i| i.lock.write_ranked(RANK_INODE, "inode.lock"));
+    if name_taken(op) {
+        return Err(Error::AlreadyExists);
+    }
+    let result = op.fs.create_fifo(&op.relative);
+    if result.is_ok() {
+        dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
+    }
+    result
+}
+
 pub fn create_dir(op: &VfsOp) -> Result<(), Error> {
     let parent_inode = resolve_parent_inode(op);
     let _guard = parent_inode
@@ -1120,9 +1135,20 @@ pub fn remove_file(op: &VfsOp) -> Result<(), Error> {
     // `op.inode` was resolved by following symbolic links, so on a link it is
     // the target's inode. Unlinking the link must not orphan the target.
     let is_symlink = op.fs.read_link(&op.relative).is_ok();
+    // Read before the removal, while the name still resolves: a named pipe's
+    // buffer is keyed by inode, and an inode number the filesystem reuses later
+    // must not inherit it.
+    let fifo_key = (!is_symlink)
+        .then(|| op.fs.file_info_nofollow(&op.relative).ok())
+        .flatten()
+        .filter(|info| info.kind == FileKind::Fifo)
+        .and_then(|_| op.inode.as_ref().map(|i| (op.mount_id, i.ino)));
     let result = op.fs.remove_file(&op.relative);
     if result.is_ok() {
         dentry::dentry_cache().invalidate(op.mount_id, &op.relative);
+        if let Some(key) = fifo_key {
+            fifo::forget(key);
+        }
         if let Some(inode) = op.inode.as_ref().filter(|i| i.ino != 0 && !is_symlink) {
             inode.mark_orphan();
         }
@@ -1181,6 +1207,16 @@ pub fn rename(old_op: &VfsOp, new_op: &VfsOp) -> Result<(), Error> {
         dc.invalidate_children(old_op.mount_id, &old_op.relative);
         dc.invalidate(old_op.mount_id, &old_op.relative);
         dc.invalidate(new_op.mount_id, &new_op.relative);
+        // A rename that replaced a file unlinked it, so the same orphan rule
+        // `remove_file` follows applies: anything still holding it reads and
+        // writes through its inode until the last reference goes.
+        if let Some(replaced) = new_op
+            .inode
+            .as_ref()
+            .filter(|i| i.ino != 0 && !old_op.inode.as_ref().is_some_and(|o| o.ino == i.ino))
+        {
+            replaced.mark_orphan();
+        }
     }
     result
 }

@@ -10,10 +10,10 @@ use alloc::vec::Vec;
 
 use efs_common::{
     DIR_ENTRY_HEADER_SIZE, EFS_ROOT_INO, EXTENT_MAGIC, EfsBlockGroupDesc, EfsDirEntryHeader,
-    EfsExtent, EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, FT_REG_FILE, FT_SYMLINK,
+    EfsExtent, EfsExtentHeader, EfsInode, EfsSuperblock, FT_DIR, FT_FIFO, FT_REG_FILE, FT_SYMLINK,
     INCOMPAT_JOURNAL, INODE_DATA_AREA_SIZE, INODE_FLAG_INLINE_DATA, JOURNAL_MAGIC,
-    JournalSuperblock, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG, checksum_inode, checksum_superblock,
-    dir_entry_min_size, journal_sb_checksum,
+    JournalSuperblock, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, checksum_inode,
+    checksum_superblock, dir_entry_min_size, journal_sb_checksum,
 };
 
 mod extents;
@@ -1955,6 +1955,8 @@ fn inode_to_file(name: String, inode: &EfsInode) -> File {
         FileKind::File
     } else if inode.mode & S_IFMT == S_IFLNK {
         FileKind::Symlink
+    } else if inode.mode & S_IFMT == S_IFIFO {
+        FileKind::Fifo
     } else {
         FileKind::Special
     };
@@ -2058,6 +2060,32 @@ impl FileSystem for EfsDriver {
 
         let mut tx = self.journal.begin_tx();
         match self.create_file_inner(parent_ino, &name, &mut tx) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                tx.abort();
+                Err(e)
+            }
+        }
+    }
+
+    fn create_fifo(&self, path: &Path) -> Result<(), Error> {
+        let path = path.normalize();
+        let name = path
+            .last_component()
+            .ok_or(Error::InvalidArgument)?
+            .to_string();
+        let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
+
+        let parent_ino = self.resolve_path(&parent)?;
+        if self.read_inode(parent_ino)?.mode & S_IFMT != S_IFDIR {
+            return Err(Error::NotADir);
+        }
+        if self.lookup_in_dir(parent_ino, &name)?.is_some() {
+            return Err(Error::AlreadyExists);
+        }
+
+        let mut tx = self.journal.begin_tx();
+        match self.create_fifo_inner(parent_ino, &name, &mut tx) {
             Ok(v) => Ok(v),
             Err(e) => {
                 tx.abort();
@@ -2197,7 +2225,7 @@ impl FileSystem for EfsDriver {
         // Unlinking a symbolic link removes the link, never its target.
         let (file_ino, file_inode) = self.resolve_path_inode_nofollow(&path)?;
 
-        if !matches!(file_inode.mode & S_IFMT, S_IFREG | S_IFLNK) {
+        if !matches!(file_inode.mode & S_IFMT, S_IFREG | S_IFLNK | S_IFIFO) {
             return Err(Error::NotAFile);
         }
 
@@ -2438,6 +2466,21 @@ impl EfsDriver {
         let inode = new_inode(S_IFREG | 0o644, INODE_FLAG_INLINE_DATA);
         self.write_inode(new_ino, &inode, tx)?;
         self.add_dir_entry(parent_ino, name, new_ino, FT_REG_FILE, tx)?;
+        Ok(())
+    }
+
+    fn create_fifo_inner(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<(), Error> {
+        let new_ino = self.alloc_inode(tx)?;
+        // Size 0 and no extents, ever: a FIFO's bytes live in the kernel for as
+        // long as an end is open and are never written down.
+        let inode = new_inode(S_IFIFO | 0o644, INODE_FLAG_INLINE_DATA);
+        self.write_inode(new_ino, &inode, tx)?;
+        self.add_dir_entry(parent_ino, name, new_ino, FT_FIFO, tx)?;
         Ok(())
     }
 
@@ -2969,6 +3012,22 @@ impl EfsDriver {
         tx: &mut TxHandle<'_>,
     ) -> Result<(), Error> {
         let file_type = target_inode.file_type_for_dir_entry();
+
+        // POSIX has rename replace the destination. Without this the directory
+        // ends up with two entries of one name, and every later lookup finds
+        // whichever was written first -- so the rename appears to do nothing at
+        // all, for good.
+        if let Some((victim_ino, _)) = self.lookup_in_dir(new_parent_ino, new_name)?
+            && victim_ino != target_ino
+        {
+            let victim = self.read_inode(victim_ino)?;
+            if victim.mode & S_IFMT == S_IFDIR {
+                // Replacing a directory is a different operation with its own
+                // emptiness rules; reported as EISDIR rather than done wrong.
+                return Err(Error::NotAFile);
+            }
+            self.remove_file_inner(new_parent_ino, victim_ino, &victim, new_name, tx)?;
+        }
 
         self.remove_dir_entry(old_parent_ino, old_name, tx)?;
         self.add_dir_entry(new_parent_ino, new_name, target_ino, file_type, tx)?;

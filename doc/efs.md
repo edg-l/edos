@@ -271,6 +271,13 @@ The upper 4 bits of `mode` (bits 15:12) encode the file type:
 | `0x8` | `0x8000` | `S_IFREG` | Regular file |
 | `0x4` | `0x4000` | `S_IFDIR` | Directory |
 | `0xA` | `0xA000` | `S_IFLNK` | Symbolic link |
+| `0x1` | `0x1000` | `S_IFIFO` | Named pipe (FIFO) |
+
+A FIFO holds no data on disk. The name is the whole of what is stored: `size` is
+always 0 and there are no extents, because the buffer its two ends meet in lives
+in the kernel for as long as one of them has it open and goes with the last
+close. A driver that finds a FIFO inode with a non-zero size should treat the
+size as the corruption, not the type.
 
 The lower 12 bits of `mode` are standard Unix permission bits (setuid, setgid, sticky, rwxrwxrwx).
 
@@ -464,9 +471,10 @@ Records are always 4-byte aligned. The `name` field may be followed by 0 to 3 by
 | 0 | `FT_UNKNOWN` | Unknown file type |
 | 1 | `FT_REG_FILE` | Regular file |
 | 2 | `FT_DIR` | Directory |
+| 5 | `FT_FIFO` | Named pipe (FIFO) |
 | 7 | `FT_SYMLINK` | Symbolic link |
 
-Values 3-6 and 8-255 are reserved. Drivers must write the correct value when creating entries and must not reject entries with unknown `file_type` values during reads (treat as `FT_UNKNOWN`).
+Values 3-4, 6 and 8-255 are reserved. Drivers must write the correct value when creating entries and must not reject entries with unknown `file_type` values during reads (treat as `FT_UNKNOWN`).
 
 ### 7.4 Directory Traversal
 
@@ -1058,6 +1066,7 @@ EFS_INLINE_EXTENTS_MAX = 13          // (176 - 12) / 12
 S_IFREG = 0x8000
 S_IFDIR = 0x4000
 S_IFLNK = 0xA000
+S_IFIFO = 0x1000
 S_IFMT  = 0xF000                     // mask for extracting file type
 
 // Inode flags
@@ -1068,6 +1077,7 @@ INODE_FLAG_IMMUTABLE   = 0x00000002
 FT_UNKNOWN  = 0
 FT_REG_FILE = 1
 FT_DIR      = 2
+FT_FIFO     = 5
 FT_SYMLINK  = 7
 
 // Feature flags

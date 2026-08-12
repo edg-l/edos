@@ -1,16 +1,16 @@
 # Userspace Roadmap
 
-107 programs and 2 libraries, all in the `programs/` cargo workspace.
+109 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
 | Area | Programs |
 |---|---|
-| Init | `edos-init` (the only process the kernel starts; supervises the GUI session and `sshd`) |
+| Init | `edos-init` (the only process the kernel starts; supervises the GUI session and `sshd`, from compiled-in defaults plus `/etc/services/*.conf`), `svc` (start, stop and inspect them at runtime) |
 | GUI | `edos-wm` (compositor, decorations, desktop menu), `edos-terminal`, `edos-taskbar` (panel + applications menu), `edos-procview`, `wintest` |
 | Shell | `edos-sh` |
 | Editor | `edos-vi` |
-| Files | `ls`, `cat`, `cp`, `mv`, `rm`, `ln`, `mkdir`, `rmdir`, `touch`, `stat`, `find`, `du`, `diff`, `dd` |
+| Files | `ls`, `cat`, `cp`, `mv`, `rm`, `ln`, `mkdir`, `rmdir`, `mkfifo`, `touch`, `stat`, `find`, `du`, `diff`, `dd` |
 | Text | `grep`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `tee`, `hexdump`, `xargs`, `less`, `sed` |
 | Archives | `tar` (ustar create, list and extract) |
 | Checksums | `sha256sum` |

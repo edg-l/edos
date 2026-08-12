@@ -39,14 +39,37 @@ pub fn isatty(fd: u64) -> bool {
     unsafe { sys::syscall1(sys::SYS_ISATTY, fd) == 1 }
 }
 
+/// Open for reading only.
+pub const O_RDONLY: u64 = 0x0;
+/// Open for writing only.
+pub const O_WRONLY: u64 = 0x1;
+/// Open for both reading and writing. On a named pipe this is the way to hold
+/// a control channel open across writers coming and going: the caller's own
+/// write end keeps the pipe from ever reaching end of file.
+pub const O_RDWR: u64 = 0x2;
+/// Create the file if it does not exist.
+pub const O_CREAT: u64 = 0x40;
+/// Truncate a regular file to zero length.
+pub const O_TRUNC: u64 = 0x200;
+/// Every write goes to the end of the file.
+pub const O_APPEND: u64 = 0x400;
+/// Do not wait for a peer when opening a named pipe. Only a FIFO accepts it;
+/// anywhere else the kernel refuses the open rather than ignoring the flag.
+pub const O_NONBLOCK: u64 = 0x800;
+
 /// Open a file. Returns a file descriptor on success, or negative on error.
-/// Flags: 0x40 = O_CREAT, 0x400 = O_APPEND.
 ///
 /// Through [`openat`] with [`AT_FDCWD`]: the kernel no longer has a bare
 /// `open` entry point taking a NUL-terminated path, only the pointer+length
 /// form `openat` accepts.
 pub fn open(path: &str, flags: u64) -> i64 {
     openat(AT_FDCWD, path, flags)
+}
+
+/// The error code the last failing syscall set, for the wrappers here that
+/// report failure as a negative return rather than as a `Result`.
+pub fn last_errno() -> edos_rt::sys::Errno {
+    edos_rt::sys::errno()
 }
 
 /// Close a file descriptor. Returns 0 on success, or negative on error.
@@ -60,7 +83,7 @@ pub fn close(fd: u64) -> i64 {
 #[derive(Clone, Copy)]
 pub struct DirEntry {
     pub name_len: u32,
-    /// 0=file, 1=directory, 2=symlink, 3=special, 4=device.
+    /// 0=file, 1=directory, 2=symlink, 3=special, 4=fifo.
     pub file_type: u8,
     pub size: u64,
     /// readonly=1, hidden=2, system=4, archive=8.
@@ -386,6 +409,28 @@ pub fn mkdirat(dirfd: i64, path: &str) -> i64 {
     }
 }
 
+/// Create a named pipe at `path`, relative to the directory descriptor
+/// `dirfd`. Returns 0, or -1 on error.
+///
+/// The pipe is not opened here and holds nothing until it is: a FIFO's buffer
+/// exists only while one of its ends is open, and opening one end waits for the
+/// other unless `O_NONBLOCK` is given.
+pub fn mkfifoat(dirfd: i64, path: &str) -> i64 {
+    unsafe {
+        sys::syscall3(
+            sys::SYS_MKFIFOAT,
+            dirfd as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+        ) as i64
+    }
+}
+
+/// [`mkfifoat`] against the current working directory.
+pub fn mkfifo(path: &str) -> i64 {
+    mkfifoat(AT_FDCWD, path)
+}
+
 /// `flags` bit making [`unlinkat`] remove an empty directory instead of a file.
 pub const AT_REMOVEDIR: u64 = 0x200;
 
@@ -407,6 +452,12 @@ pub fn unlinkat(dirfd: i64, path: &str, flags: u64) -> i64 {
 /// Returns bytes read, 0 for no data available, or negative for error/EOF.
 pub fn sys_read(fd: u64, buf: &mut [u8]) -> isize {
     unsafe { sys::syscall3(sys::SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) as isize }
+}
+
+/// Write to a file descriptor using a raw syscall.
+/// Returns bytes written, or negative for error.
+pub fn sys_write(fd: u64, buf: &[u8]) -> isize {
+    unsafe { sys::syscall3(sys::SYS_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64) as isize }
 }
 
 /// Read at an explicit offset without moving the descriptor's own offset.

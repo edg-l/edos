@@ -294,6 +294,34 @@ impl FileSystem for Memfs {
         }
     }
 
+    fn create_fifo(&self, path: &Path) -> Result<(), Error> {
+        let path = path.normalize();
+        let Some(parent) = path.parent() else {
+            return Err(Error::InvalidArgument);
+        };
+
+        let mut inner = self.inner.write();
+        let Some(parent_node_id) = inner.find_node(&parent)? else {
+            return Err(Error::FileNotFound);
+        };
+        if inner.get_node(parent_node_id)?.file.kind != FileKind::Directory {
+            return Err(Error::NotADir);
+        }
+        if inner.find_node_nofollow(&path)?.is_some() {
+            return Err(Error::AlreadyExists);
+        }
+
+        let current_id = inner.next_id;
+        let next_id = current_id.checked_add(1).ok_or(Error::IoError)?;
+        // No `content` and no size: the name is the whole of what is stored.
+        let node = Node::new(current_id, path.filename(), FileKind::Fifo);
+
+        inner.get_node_mut(parent_node_id)?.childs.push(node.id);
+        inner.next_id = next_id;
+        inner.nodes.insert(node.id, node);
+        Ok(())
+    }
+
     fn create_dir(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let Some(parent) = path.parent() else {
@@ -412,7 +440,10 @@ impl FileSystem for Memfs {
                     idx = Some(i);
 
                     // Unlinking a symbolic link removes the link, never its target.
-                    if !matches!(child.file.kind, FileKind::File | FileKind::Symlink) {
+                    if !matches!(
+                        child.file.kind,
+                        FileKind::File | FileKind::Symlink | FileKind::Fifo
+                    ) {
                         return Err(Error::NotAFile);
                     }
                     break;
@@ -581,6 +612,34 @@ impl FileSystem for Memfs {
             }
             found.ok_or(Error::FileNotFound)?
         };
+
+        // POSIX has rename replace the destination. Without this the directory
+        // holds two children of one name and every later lookup finds whichever
+        // was added first, so the rename appears never to have happened.
+        //
+        // Detached, not deleted, exactly as `remove_file` does it: an fd still
+        // open on the replaced file goes on reading through its inode.
+        let victim = {
+            let parent = inner.get_node(new_parent_id)?;
+            let mut found = None;
+            for &child_id in &parent.childs {
+                let child = inner.get_node(child_id)?;
+                if child.file.name == new_name && child_id != node_id {
+                    if child.file.kind == FileKind::Directory {
+                        return Err(Error::NotAFile);
+                    }
+                    found = Some(child_id);
+                    break;
+                }
+            }
+            found
+        };
+        if let Some(victim) = victim {
+            inner
+                .get_node_mut(new_parent_id)?
+                .childs
+                .retain(|&id| id != victim);
+        }
 
         // Remove from old parent
         {

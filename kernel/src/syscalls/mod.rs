@@ -35,9 +35,9 @@ use crate::{
     syscalls::{
         fs::{
             FstatEntry, UserTimespec, sys_access, sys_faccessat, sys_fstat, sys_fstatat,
-            sys_list_mounts, sys_list_partitions, sys_mkdir, sys_mkdirat, sys_mount, sys_readlink,
-            sys_readlinkat, sys_renameat, sys_rmdir, sys_rmdir_all, sys_stat, sys_symlink,
-            sys_symlinkat, sys_truncate, sys_unlink, sys_unlinkat, sys_utimensat,
+            sys_list_mounts, sys_list_partitions, sys_mkdir, sys_mkdirat, sys_mkfifoat, sys_mount,
+            sys_readlink, sys_readlinkat, sys_renameat, sys_rmdir, sys_rmdir_all, sys_stat,
+            sys_symlink, sys_symlinkat, sys_truncate, sys_unlink, sys_unlinkat, sys_utimensat,
         },
         io::{
             SelectFd, sys_chdir, sys_close, sys_getcwd, sys_getrandom, sys_list_dir, sys_poll,
@@ -106,6 +106,15 @@ fn close_fd_refcount(desc: FileDescriptor) {
             ranked_lock!(RANK_PIPE, "fd::drop_writer", pipe)
                 .close_writer()
                 .flush();
+        }
+        FileDescriptor::PipeReadWrite(pipe) => {
+            let notif = {
+                let mut guard = ranked_lock!(RANK_PIPE, "fd::drop_both", pipe);
+                guard.close_reader_silent();
+                guard.close_writer_silent();
+                guard.notify_ends()
+            };
+            notif.flush();
         }
         FileDescriptor::PtyMaster(pty) => {
             ranked_lock!(RANK_PTY, "fd::drop_master", pty)
@@ -317,6 +326,7 @@ const SYS_TRUNCATE: u64 = 76; // resize a file named by path
 const SYS_UTIMENSAT: u64 = 280; // stamp a file's access and modification times
 const SYS_OPENAT: u64 = 257; // open relative to a directory descriptor
 const SYS_MKDIRAT: u64 = 258; // create a directory relative to a directory descriptor
+const SYS_MKFIFOAT: u64 = 283; // create a named pipe relative to a directory descriptor
 const SYS_FSTATAT: u64 = 262; // stat relative to a directory descriptor
 const SYS_UNLINKAT: u64 = 263; // remove a file or directory relative to one
 const SYS_RENAMEAT: u64 = 264; // rename between two directory descriptors
@@ -623,6 +633,12 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
             let path_ptr = ctx.rsi as *const u8;
             let path_len = ctx.rdx as usize;
             ctx.rax = sys_mkdirat(dirfd, path_ptr, path_len) as u64;
+        }
+        SYS_MKFIFOAT => {
+            let dirfd = ctx.rdi as i64;
+            let path_ptr = ctx.rsi as *const u8;
+            let path_len = ctx.rdx as usize;
+            ctx.rax = sys_mkfifoat(dirfd, path_ptr, path_len) as u64;
         }
         SYS_UNLINKAT => {
             let dirfd = ctx.rdi as i64;
@@ -1296,6 +1312,9 @@ pub enum Errno {
     EBUSY,
     /// Too many symbolic links were traversed resolving one path.
     ELOOP,
+    /// No such device or address: a named pipe opened for writing with
+    /// `O_NONBLOCK` and no reader on the other side.
+    ENXIO,
     /// Placeholder for unknown or unmapped kernel error codes.
     UNKNOWN,
 }
@@ -1328,6 +1347,7 @@ pub const ALL_ERRNOS: &[Errno] = &[
     Errno::ESPIPE,
     Errno::EBUSY,
     Errno::ELOOP,
+    Errno::ENXIO,
     Errno::UNKNOWN,
 ];
 
@@ -1359,6 +1379,7 @@ impl Errno {
             Errno::ESPIPE => "ESPIPE",
             Errno::EBUSY => "EBUSY",
             Errno::ELOOP => "ELOOP",
+            Errno::ENXIO => "ENXIO",
             Errno::UNKNOWN => "UNKNOWN",
         }
     }

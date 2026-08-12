@@ -10,7 +10,7 @@ use crate::debug::lock_order::{RANK_PIPE, RANK_PTY};
 use crate::fs::block_page_cache::BlockPageCache;
 use crate::fs::handle::{PollKey, PollRef, PollSet, Pollable, StaticPoll};
 use crate::fs::vfs;
-use crate::fs::{Error as FsError, FileKind, PollState, api as fs_api, path::Path};
+use crate::fs::{Error as FsError, FileKind, PollState, api as fs_api, fifo, path::Path};
 use crate::net::socket::{PollableSocket, Socket};
 use crate::thread::pipe::{Pipe, PollablePipe};
 use crate::thread::poll::PollWaiter;
@@ -210,6 +210,7 @@ fn file_kind_to_u8(kind: FileKind) -> u8 {
         FileKind::Directory => 1,
         FileKind::Symlink => 2,
         FileKind::Special => 3,
+        FileKind::Fifo => 4,
     }
 }
 
@@ -303,7 +304,7 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 !0u64
             }
         },
-        Some(FileDescriptor::PipeWrite(pipe)) => {
+        Some(FileDescriptor::PipeWrite(pipe) | FileDescriptor::PipeReadWrite(pipe)) => {
             // Copy out of user space before taking the pipe lock: a user copy can
             // demand fault and park, and a thread killed while parked never runs
             // the guard's Drop, which would leave the pipe locked for good.
@@ -398,12 +399,51 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
                 info.lock().errno = Errno::EFAULT;
                 return !0u64;
             };
-            let (written, notif) = {
-                let mut guard = ranked_lock!(RANK_PTY, "sys_write::pty_slave", pty);
-                guard.slave_write(&data)
+
+            // The output ring is bounded, so a program with more than the
+            // terminal can hold waits for the terminal to read rather than
+            // growing the kernel heap. Loop until it has all gone in, as the
+            // pipe path does: a short write here would be a partial write
+            // userspace never asked for.
+            let write_wq = ranked_lock!(RANK_PTY, "sys_write::pty_slave_wq", pty).slave_write_wq();
+            let mut sent = 0usize;
+            let written = loop {
+                let (written, notif) = {
+                    let mut guard = ranked_lock!(RANK_PTY, "sys_write::pty_slave", pty);
+                    guard.slave_write(&data[sent..])
+                };
+                notif.flush();
+
+                let Some(n) = written else {
+                    // The last master went away. Bytes already accepted still
+                    // count, and only a write that moved nothing at all is an
+                    // error, exactly as for a pipe with no reader.
+                    break if sent > 0 { Some(sent) } else { None };
+                };
+                sent += n;
+                if sent == data.len() {
+                    break Some(sent);
+                }
+
+                // Killable: a full terminal whose master never reads is a wait
+                // only that program can end, and without this the writer could
+                // not be killed while it waited.
+                let ready = || pty.try_lock().is_none_or(|guard| guard.slave_write_ready());
+                if write_wq.wait_until_killable(ready) == WaitOutcome::Killed {
+                    info.lock().errno = Errno::EINTR;
+                    return !0u64;
+                }
             };
-            notif.flush();
-            written as u64
+            match written {
+                Some(written) => written as u64,
+                None => {
+                    // POSIX: writing to a terminal whose master side is gone is
+                    // EIO. No SIGPIPE — that belongs to pipes and sockets, and
+                    // a terminal hangup is not a broken pipe.
+                    info.lock().errno = Errno::EIO;
+                    !0u64
+                }
+            }
         }
         Some(FileDescriptor::FsFile(file)) => {
             const MAX_WRITE_SIZE: usize = 1024 * 1024; // 1 MiB
@@ -560,6 +600,16 @@ pub fn sys_close(fd: u64) -> i32 {
             notif.flush();
             0
         }
+        Some(FileDescriptor::PipeReadWrite(pipe)) => {
+            let notif = {
+                let mut guard = pipe.lock();
+                guard.close_reader_silent();
+                guard.close_writer_silent();
+                guard.notify_ends()
+            };
+            notif.flush();
+            0
+        }
         Some(FileDescriptor::PtyMaster(pty)) => {
             let notif = ranked_lock!(RANK_PTY, "sys_close::pty_master", pty).close_master();
             notif.flush();
@@ -661,7 +711,7 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 -1
             }
         },
-        Some(FileDescriptor::PipeRead(pipe)) => {
+        Some(FileDescriptor::PipeRead(pipe) | FileDescriptor::PipeReadWrite(pipe)) => {
             let mut inline = [0u8; STREAM_STACK_BUF];
             let mut heap = Vec::new();
             let data = stage_buffer(&mut inline, &mut heap, count);
@@ -1061,9 +1111,13 @@ pub fn sys_openat(dirfd: i64, path_ptr: *const u8, path_len: usize, flags: u64) 
     open_resolved(&info, path, flags)
 }
 
+/// Open without waiting for a peer. Only meaningful on a named pipe, where
+/// opening is a rendezvous; see [`crate::fs::fifo`].
+const O_NONBLOCK: u64 = 0x800;
+
 /// Every `open` flag this kernel implements: the access mode plus O_CREAT,
-/// O_TRUNC and O_APPEND.
-const OPEN_FLAGS_SUPPORTED: u64 = 0x3 | 0x40 | 0x200 | 0x400;
+/// O_TRUNC, O_APPEND and O_NONBLOCK.
+const OPEN_FLAGS_SUPPORTED: u64 = 0x3 | 0x40 | 0x200 | 0x400 | O_NONBLOCK;
 
 /// Open an already-resolved absolute path.
 fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64) -> i64 {
@@ -1089,13 +1143,19 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
         2 => OpenMode::ReadWrite,
         _ => unreachable!(),
     };
+    let nonblock = (flags & O_NONBLOCK) != 0;
     interrupts::enable();
     // Everything cached on the descriptor has to name the file the fd refers
     // to, which is not `path` when a symbolic link on it crossed a mount.
     let mut path = path;
+    // What was found, which decides whether this open is an ordinary one or a
+    // rendezvous on a named pipe. A path that had to be created is a regular
+    // file: `O_CREAT` has no way to ask for anything else.
+    let mut kind = FileKind::File;
     match fs_api::file_info_resolved(&path) {
         Ok((existing, resolved)) => {
             path = resolved;
+            kind = existing.kind;
             // POSIX: O_TRUNC has no effect on anything but a regular file, so
             // `> /dev/klog` must not fail on a filesystem with no truncate.
             if truncate && existing.kind == FileKind::File {
@@ -1129,12 +1189,41 @@ fn open_resolved(info: &Arc<IrqSpinlock<UserThreadInfo>>, path: Path, flags: u64
         }
     }
 
+    // O_NONBLOCK says what an open should do when there is no peer yet, which
+    // is a question only a named pipe has. Refused elsewhere rather than
+    // ignored, like every other flag this kernel does not implement: a
+    // descriptor whose semantics are not the ones asked for is worse than an
+    // error.
+    if nonblock && kind != FileKind::Fifo {
+        info.lock().errno = Errno::EINVAL;
+        return -1;
+    }
+
     // Resolve VFS operation at open time. Cache fs, relative, mount_id, and
     // inode so subsequent read/write syscalls skip the mount-registry scan.
     let (cached_op, inode) = match vfs::resolve(&path) {
         Some(op) => (Some(op.fs_info()), op.inode),
         None => (None, None),
     };
+
+    if kind == FileKind::Fifo {
+        // Keyed by inode, so the two ends find each other through the name
+        // rather than through the path each of them spelled.
+        let Some(ino) = inode.as_ref().map(|i| i.ino) else {
+            info.lock().errno = Errno::EIO;
+            return -1;
+        };
+        let mount_id = cached_op.as_ref().map(|c| c.mount_id).unwrap_or(0);
+        // This blocks for the peer unless O_NONBLOCK, so it runs with no lock
+        // held and with `info` unborrowed.
+        return match fifo::open((mount_id, ino), open_mode, nonblock) {
+            Ok(desc) => info.lock().fd_table.lock().allocate_fd(desc) as i64,
+            Err(errno) => {
+                info.lock().errno = errno;
+                -1
+            }
+        };
+    }
 
     let desc = FileDescriptor::FsFile(FsFile {
         path,
@@ -1458,7 +1547,11 @@ pub fn sys_poll(fds_ptr: *mut SelectFd, count: usize, timeout_ms: u64) -> i64 {
                     }
                 }
             }
-            Some(FileDescriptor::PipeRead(pipe) | FileDescriptor::PipeWrite(pipe)) => {
+            Some(
+                FileDescriptor::PipeRead(pipe)
+                | FileDescriptor::PipeWrite(pipe)
+                | FileDescriptor::PipeReadWrite(pipe),
+            ) => {
                 register!(
                     PollablePipe::new(pipe.clone()),
                     PollTarget::Pipe(pipe.clone())

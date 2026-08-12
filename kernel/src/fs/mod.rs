@@ -37,6 +37,7 @@ pub mod devfs;
 pub mod efs;
 pub mod evict;
 pub mod fat32;
+pub mod fifo;
 pub mod gpt;
 pub mod handle;
 pub mod icache;
@@ -327,6 +328,15 @@ pub trait FileSystem {
     fn write_bytes(&self, path: &Path, offset: usize, data: &[u8]) -> Result<u64, Error>;
     fn create_file(&self, path: &Path) -> Result<(), Error>;
     fn create_dir(&self, path: &Path) -> Result<(), Error>;
+
+    /// Create a named pipe at `path`.
+    ///
+    /// The filesystem stores the name and its type and nothing else: a FIFO
+    /// has no contents to hold, since the buffer its two ends meet in lives in
+    /// [`crate::fs::fifo`] for as long as one of them has it open.
+    fn create_fifo(&self, _path: &Path) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
     fn remove_dir(&self, path: &Path) -> Result<(), Error>;
     fn remove_file(&self, path: &Path) -> Result<(), Error>;
     fn flush(&self) -> Result<(), Error>;
@@ -436,6 +446,9 @@ pub enum FileKind {
     Directory,
     Symlink,
     Special,
+    /// A named pipe. The name is all that lives in the filesystem; the buffer
+    /// its two ends meet in lives in the kernel, keyed by inode.
+    Fifo,
 }
 
 #[derive(Debug, Clone, Copy)]

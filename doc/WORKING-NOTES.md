@@ -8,11 +8,12 @@ session.
 
 ## Where the tree stands at the end of 2026-08-12
 
-**Released as v0.3.0** at `2a4c334`, tagged and pushed, with `edos-x86_64.iso`
-and `SHA256SUMS` attached. The release exists mainly because v0.2.0 loses file
-data on fragmented writes, so anything on that ISO should be replaced. The site
-was rebuilt and deployed for it; the counts it carries are the ones in the
-"Counts, remeasured" section below.
+**Released as v0.4.0** at `4ce2eea`, tagged and pushed, with `edos-x86_64.iso`
+and `SHA256SUMS` attached; `sshd` is what it is named for. v0.3.0 before it is
+annotated as data-losing, as is v0.2.0, which loses file data on fragmented
+writes -- anything on either ISO should be replaced. The site was rebuilt and
+deployed for v0.4.0; the counts it carries are the ones in the "Counts,
+remeasured" section below, which have since moved again and are marked there.
 
 The version is set in exactly one place now, `kernel/Cargo.toml`. Four strings
 carried it before and none matched the released tag, so a running system
@@ -429,6 +430,80 @@ rather than an argument.
 Checked in the guest: `yes | head -3` still terminates (the `SIGPIPE` path is
 unchanged), `seq 1 200000 | wc -l` moves ~1.3 MB across a 64 KiB pipe and
 reports 200000, and a 20000-line heredoc runs to completion.
+
+---
+
+## A terminal holds 64 KiB now, which is the same defect one layer over
+
+FIXED. `Pty::slave_write` pushed into a `ByteRing` that just grew, exactly as
+the pipe did before the change above; the two share the ring, and only the pipe
+half had been bounded. A program writing to a terminal faster than the terminal
+drained grew the kernel heap without limit. `yes` against a wedged
+`edos-terminal`, or an `sshd` whose client stopped reading, is the shape.
+
+`PTY_OUTPUT_CAPACITY` is 64 KiB, matching `PIPE_CAPACITY` because the two carry
+the same traffic. Same four pieces as the pipe: a capacity, a `slave_write_wq`,
+a killable wait in `sys_write`, and poll's writable bit following the space.
+
+**The bound is on what is stored, not on what was accepted**, and that is the
+one thing the pipe fix did not have to think about. `ONLCR` turns one newline
+into two stored bytes, so a caller handing over one newline is asking for two
+bytes of room; `write_output` now takes a `room` argument, walks the input
+counting what each byte costs, and stops at the last one that fits whole.
+Splitting a translated newline would put a carriage return on the wire with its
+line feed still to come.
+
+Two asymmetries with the pipe, both deliberate:
+
+- **The input side is bounded by discarding, not by waiting.** `PTY_INPUT_CAPACITY`
+  is 4096, POSIX `MAX_INPUT` and Linux's `N_TTY` figure. There is nothing to
+  push back on -- the bytes come from a keyboard or a network peer -- so a
+  terminal that cannot take them drops them. Ctrl-C, Ctrl-Z and Ctrl-D are
+  exempt, or a queue filled by a runaway program's own input would be
+  unrecoverable. Echo is dropped rather than queued for the same reason.
+- **A write to a slave whose last master closed is `EIO`, not `SIGPIPE`.** That
+  is POSIX, and it is also what stops the wait being unbounded: a writer parked
+  on a terminal nobody will ever read from would never wake.
+
+Verified rather than argued: `iotest` test 21 fills a pty whose master nobody
+reads and asserts it stops at a bound, that `poll` stops reporting it writable,
+and that a single master read makes it writable again. Setting
+`PTY_OUTPUT_CAPACITY` to `usize::MAX` and rerunning gives `FAIL test 21: the
+terminal took 1048576 bytes with nobody reading` -- the gate has been watched
+go red against the defect it exists for.
+
+---
+
+## Named pipes, and the rename bug that finding a use for them exposed
+
+FIXED, and the second half is the more interesting one.
+
+`mkfifo` exists (`SYS_MKFIFOAT`, 283). A FIFO is the `Pipe` that already existed
+plus a name: EFS and memfs store the name and a type, and `kernel/src/fs/fifo.rs`
+holds the buffer, keyed by `(mount_id, ino)` so the two ends meet through the
+name rather than through the path each of them spelled. EFS needed no format
+change beyond two constants — the `mode` field already had room for `S_IFIFO`,
+and dirents for `FT_FIFO` (5, as in ext2). The rendezvous in `open` is the part
+with real semantics and is documented at the top of that module.
+
+`O_RDWR` on a FIFO returns a new `FileDescriptor::PipeReadWrite`. That is not a
+convenience: it is what lets `edos-init` hold its control channel open across
+writers coming and going, since its own write end means the pipe never reaches
+end of file and its read never spins on a hangup nothing will clear.
+
+**`rename` over an existing name did nothing, permanently, on both filesystems.**
+Found by using it: init writes its status file whole to `.new` and renames it
+over, and the status file never changed after the first write. `rename_inner`
+called `add_dir_entry` without removing an entry of that name, so the directory
+ended up with two, and every later lookup found whichever was written first.
+memfs had the identical bug in its `childs` list. Both now unlink the
+destination first — reporting `EISDIR` when it is a directory, since replacing
+one has its own emptiness rules — and `vfs::rename` marks the replaced inode
+orphan, which is the same rule `remove_file` already followed.
+
+The lesson is the ordinary one and worth restating: the bug had been there the
+whole time and no test caught it, because nothing in the tree renamed onto a
+name that was already taken.
 
 ---
 
@@ -969,11 +1044,11 @@ does not have to invent them.
 
 | | value | how |
 |---|---|---|
-| syscalls | 110 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 110 — a mismatch is the bug |
-| userspace programs | 107 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
-| programs listed in `doc/USERSPACE-ROADMAP.md` | 109 rows = 107 + the 2 libraries | diff the table against the workspace, below |
+| syscalls | 111 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 111 — a mismatch is the bug |
+| userspace programs | 109 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
+| programs listed in `doc/USERSPACE-ROADMAP.md` | 111 rows = 109 + the 2 libraries | diff the table against the workspace, below |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
-| `iotest /var` | 20/20 | the syscall regression suite, run in the guest |
+| `iotest /var` | 22/22 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 A matching count is not a matching inventory. `doc/USERSPACE-ROADMAP.md`'s "What
@@ -996,11 +1071,11 @@ project site at `/usr/src/edos-web`:
   96 programs, in a table row and in a page description; the workspace builds
   105.
 
-`src/content/docs/architecture.md` said "There are 110 syscalls" when the kernel
-had 111; removing the plain `open` entry point (`SYS_OPEN`, superseded by
-`SYS_OPENAT` with `AT_FDCWD`) brought the kernel back down to 110, so that page
-is accurate again by coincidence rather than by an edit. Re-check it before
-relying on that.
+`src/content/docs/architecture.md` says "There are 110 syscalls"; `SYS_MKFIFOAT`
+took the kernel to 111, so that page is behind again. It was briefly accurate by
+coincidence rather than by an edit -- removing the plain `open` entry point
+(`SYS_OPEN`, superseded by `SYS_OPENAT` with `AT_FDCWD`) had brought the count
+back down to match it. Re-check it rather than trusting either number.
 
 Fixing any of them means a commit and an `npm run build` in that checkout, which
 is a separate repo and not something to do unattended.

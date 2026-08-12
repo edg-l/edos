@@ -1595,6 +1595,165 @@ fn test20(dir: &str) {
     );
 }
 
+/// Whether `fd` would accept a write right now, asked without writing.
+fn writable(fd: u64) -> bool {
+    let mut fds = [edos_lib::io::SelectFd {
+        fd,
+        interests: edos_lib::io::PollState {
+            writable: true,
+            ..Default::default()
+        },
+        result: Default::default(),
+    }];
+    edos_lib::io::poll(&mut fds, 0);
+    fds[0].result.writable
+}
+
+/// A terminal holds a bounded amount of output, and says so.
+///
+/// Without the bound a program that outruns the terminal drawing for it grows
+/// the kernel heap without limit, which is what this used to do: the ring was
+/// the same `ByteRing` a pipe used before pipes were bounded. The observable is
+/// `poll`, because it is the one that cannot hang the test: a blocking write
+/// into a full terminal is exactly the thing being checked for, so asking
+/// whether the write *would* block is the only safe way to ask.
+fn test21() {
+    let Some((master, slave)) = process::openpty() else {
+        fail(21, "openpty failed");
+    };
+
+    // Nothing ever reads `master`, so every byte written here stays in the
+    // kernel. 1 MiB is far past any defensible capacity for a terminal.
+    const CAP: usize = 1024 * 1024;
+    const CHUNK: usize = 4096;
+    let chunk = [b'x'; CHUNK];
+    let mut accepted = 0usize;
+    while accepted < CAP {
+        if !writable(slave) {
+            break;
+        }
+        let n = process::write(slave, &chunk);
+        if n <= 0 {
+            fail(21, &format!("write to the slave returned {}", n));
+        }
+        accepted += n as usize;
+    }
+
+    if accepted >= CAP {
+        fail(
+            21,
+            &format!("the terminal took {} bytes with nobody reading", accepted),
+        );
+    }
+    if writable(slave) {
+        fail(21, "a full terminal still reports itself writable");
+    }
+
+    // Draining the master must give the room back, or a writer parked on this
+    // would never wake: the bound has to be a wait, not a wall.
+    let mut sink = [0u8; CHUNK];
+    let drained = edos_lib::io::sys_read(master, &mut sink);
+    if drained <= 0 {
+        fail(21, &format!("read from the master returned {}", drained));
+    }
+    if !writable(slave) {
+        fail(21, "a drained terminal still reports itself full");
+    }
+
+    close(master);
+    close(slave);
+    pass(
+        21,
+        &format!("a terminal bounds its output at {} bytes", accepted),
+    );
+}
+
+/// A named pipe is a rendezvous: opening one end waits for the other, and what
+/// one end writes the other reads.
+///
+/// The point of the test is the pair of programs with no common parent, which
+/// is what a FIFO buys over an anonymous pipe. A thread stands in for the
+/// second program: it opens by name, which is the part that has to work.
+fn test22(dir: &str) {
+    let path = format!("{}/iotest_t22.fifo", dir);
+    let _ = fs::remove_file(&path);
+    if edos_lib::io::mkfifo(&path) < 0 {
+        fail(22, &format!("mkfifo: {:?}", edos_lib::io::last_errno()));
+    }
+
+    // It is a FIFO to `stat`, not a regular file: a kind reported wrong is how
+    // a shell ends up truncating one instead of opening it.
+    let info = stat(&path).unwrap_or_else(|| fail(22, "stat on the fifo failed"));
+    if info.kind != 4 {
+        fail(
+            22,
+            &format!("stat reports kind {}, want 4 (fifo)", info.kind),
+        );
+    }
+
+    const MESSAGE: &[u8] = b"through the name\n";
+    let writer_path = path.clone();
+    let writer = thread::spawn(move || {
+        // Blocks here until the reader below opens its end.
+        let fd = open(&writer_path, edos_lib::io::O_WRONLY);
+        if fd < 0 {
+            return -1i64;
+        }
+        let n = process::write(fd as u64, MESSAGE);
+        close(fd as u64);
+        n as i64
+    });
+
+    let fd = open(&path, edos_lib::io::O_RDONLY);
+    if fd < 0 {
+        fail(
+            22,
+            &format!("open for reading: {:?}", edos_lib::io::last_errno()),
+        );
+    }
+    let mut buf = [0u8; 64];
+    let n = edos_lib::io::sys_read(fd as u64, &mut buf);
+    if n <= 0 {
+        fail(22, &format!("read from the fifo returned {}", n));
+    }
+    if &buf[..n as usize] != MESSAGE {
+        fail(
+            22,
+            &format!("read {:?}, want {:?}", &buf[..n as usize], MESSAGE),
+        );
+    }
+
+    // With the writer gone the read reports end of file rather than waiting,
+    // which is what tells a reader the transfer is over.
+    let eof = edos_lib::io::sys_read(fd as u64, &mut buf);
+    if eof != 0 {
+        fail(
+            22,
+            &format!("after the writer closed, read returned {}", eof),
+        );
+    }
+    close(fd as u64);
+
+    let written = writer.join().unwrap_or(-1);
+    if written != MESSAGE.len() as i64 {
+        fail(22, &format!("the writer reported {} bytes", written));
+    }
+
+    // Opening a FIFO for writing with nobody reading is ENXIO, not a wait: it
+    // is what lets a control client fail instead of hanging on a dead server.
+    let refused = open(&path, edos_lib::io::O_WRONLY | edos_lib::io::O_NONBLOCK);
+    if refused >= 0 {
+        close(refused as u64);
+        fail(
+            22,
+            "a non-blocking write-only open succeeded with no reader",
+        );
+    }
+
+    let _ = fs::remove_file(&path);
+    pass(22, "a named pipe rendezvous carried a message end to end");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -1620,6 +1779,8 @@ fn main() {
     test18(dir);
     test19(dir);
     test20(dir);
+    test21();
+    test22(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }
