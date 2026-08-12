@@ -1528,6 +1528,73 @@ fn test19(dir: &str) {
     );
 }
 
+// -----------------------------------------------------------------------
+// Test 20: a zero-length transfer still answers for its descriptor
+// -----------------------------------------------------------------------
+fn test20(dir: &str) {
+    // Userspace probes a descriptor with a transfer of no bytes, so a call
+    // that answers 0 without looking at the fd reports a success it never had.
+    const CLOSED: u64 = 9999;
+    let empty: [u8; 0] = [];
+    let mut empty_out: [u8; 0] = [];
+
+    let cases: [(&str, isize); 6] = [
+        ("read", edos_lib::io::sys_read(CLOSED, &mut empty_out)),
+        ("write", process::write(CLOSED, &empty)),
+        ("pread", pread(CLOSED, &mut empty_out, 0)),
+        ("pwrite", pwrite(CLOSED, &empty, 0)),
+        ("readv", edos_lib::io::readv(CLOSED, &mut [])),
+        ("writev", edos_lib::io::writev(CLOSED, &[])),
+    ];
+    for (name, ret) in cases {
+        if ret >= 0 {
+            fail(
+                20,
+                &format!(
+                    "{}(closed fd, 0 bytes) returned {}, want failure",
+                    name, ret
+                ),
+            );
+        }
+    }
+
+    // The same calls on a descriptor that is open still transfer nothing and
+    // report success, so the check above cannot be satisfied by failing them all.
+    let path = format!("{}/iotest_t20.dat", dir);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .unwrap_or_else(|e| fail(20, &format!("create: {}", e)));
+    let fd = file.as_raw_fd() as u64;
+
+    let cases: [(&str, isize); 6] = [
+        ("read", edos_lib::io::sys_read(fd, &mut empty_out)),
+        ("write", process::write(fd, &empty)),
+        ("pread", pread(fd, &mut empty_out, 0)),
+        ("pwrite", pwrite(fd, &empty, 0)),
+        ("readv", edos_lib::io::readv(fd, &mut [])),
+        ("writev", edos_lib::io::writev(fd, &[])),
+    ];
+    for (name, ret) in cases {
+        if ret != 0 {
+            fail(
+                20,
+                &format!("{}(open fd, 0 bytes) returned {}, want 0", name, ret),
+            );
+        }
+    }
+
+    drop(file);
+    let _ = fs::remove_file(&path);
+    pass(
+        20,
+        "a zero-length transfer reports EBADF on a closed descriptor",
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp");
@@ -1552,6 +1619,7 @@ fn main() {
     test17(dir);
     test18(dir);
     test19(dir);
+    test20(dir);
     println!("iotest: all tests passed [{}]", dir);
     std::process::exit(0);
 }

@@ -28,6 +28,7 @@ use crate::{
     syscalls::{Errno, MAX_PATH_LEN, PathBuf, copy_user_path},
     thread::{
         UserThreadInfo,
+        fd::FileDescriptorTable,
         irqlock::IrqSpinlock,
         mutex::BlockingMutex,
         pipe::{FileDescriptor, FsFile, OpenMode, StandardStream},
@@ -53,6 +54,19 @@ fn copy_in(user_ptr: *const u8, count: usize) -> Option<Vec<u8>> {
         return None;
     }
     Some(buf)
+}
+
+/// Whether `fd` names an open descriptor.
+///
+/// A transfer of no bytes still has to answer for the descriptor: userspace
+/// uses `read(fd, _, 0)` and `write(fd, _, 0)` as a cheap validity probe, so
+/// answering 0 for a descriptor that was never open reports a success the call
+/// could not have had. Interrupts go back on first for the reason given in
+/// [`sys_read`]: the table is a `BlockingMutex` shared between the threads of
+/// one process.
+fn fd_is_open(fd_table: &Arc<BlockingMutex<FileDescriptorTable>>, fd: u64) -> bool {
+    interrupts::enable();
+    fd_table.lock().get_fd(fd).is_some()
 }
 
 /// How much of a pipe or PTY transfer rides on the kernel stack rather than
@@ -258,6 +272,10 @@ pub fn sys_write(fd: u64, buffer_ptr: *const u8, count: usize) -> u64 {
     };
 
     if count == 0 {
+        if !fd_is_open(&fd_table, fd) {
+            info.lock().errno = Errno::EBADF;
+            return !0u64;
+        }
         return 0;
     }
     if buffer_ptr.is_null() {
@@ -565,6 +583,10 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
     };
 
     if count == 0 {
+        if !fd_is_open(&fd_table, fd) {
+            info.lock().errno = Errno::EBADF;
+            return -1;
+        }
         return 0;
     }
 
@@ -1665,15 +1687,6 @@ pub fn sys_pread(fd: u64, buffer_ptr: *mut u8, count: usize, offset: u64) -> i64
         guard.fd_table.clone()
     };
 
-    if count == 0 {
-        return 0;
-    }
-
-    if buffer_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
-    }
-
     // See sys_read: the fd table is a BlockingMutex and several threads share
     // one table, so interrupts have to be back on before it is acquired.
     interrupts::enable();
@@ -1686,6 +1699,17 @@ pub fn sys_pread(fd: u64, buffer_ptr: *mut u8, count: usize, offset: u64) -> i64
         };
         return -1;
     };
+
+    // A transfer of no bytes answers only once the descriptor has been
+    // resolved; see `fd_is_open`.
+    if count == 0 {
+        return 0;
+    }
+
+    if buffer_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
 
     let offset = offset as usize;
 
@@ -1745,15 +1769,6 @@ pub fn sys_pwrite(fd: u64, buffer_ptr: *const u8, count: usize, offset: u64) -> 
         guard.fd_table.clone()
     };
 
-    if count == 0 {
-        return 0;
-    }
-
-    if buffer_ptr.is_null() {
-        info.lock().errno = Errno::EFAULT;
-        return -1;
-    }
-
     // See sys_read: the fd table is a BlockingMutex and several threads share
     // one table, so interrupts have to be back on before it is acquired.
     interrupts::enable();
@@ -1766,6 +1781,17 @@ pub fn sys_pwrite(fd: u64, buffer_ptr: *const u8, count: usize, offset: u64) -> 
         };
         return -1;
     };
+
+    // A transfer of no bytes answers only once the descriptor has been
+    // resolved; see `fd_is_open`.
+    if count == 0 {
+        return 0;
+    }
+
+    if buffer_ptr.is_null() {
+        info.lock().errno = Errno::EFAULT;
+        return -1;
+    }
 
     const MAX_WRITE_SIZE: usize = 1024 * 1024; // 1 MiB
     let capped_count = count.min(MAX_WRITE_SIZE);
@@ -1840,7 +1866,18 @@ fn copy_in_iovecs(iov_ptr: *const IoVec, iovcnt: usize) -> Result<Vec<IoVec>, Er
 /// same descriptor.
 pub fn sys_readv(fd: u64, iov_ptr: *const IoVec, iovcnt: usize) -> i64 {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
+    let fd_table = {
+        let mut guard = info.lock();
+        guard.errno = Errno::Clear;
+        guard.fd_table.clone()
+    };
+
+    // An empty vector, or one whose buffers are all empty, never reaches
+    // `sys_read`, so the descriptor is validated here instead.
+    if !fd_is_open(&fd_table, fd) {
+        info.lock().errno = Errno::EBADF;
+        return -1;
+    }
 
     if iovcnt == 0 {
         return 0;
@@ -1883,7 +1920,17 @@ pub fn sys_readv(fd: u64, iov_ptr: *const IoVec, iovcnt: usize) -> i64 {
 /// boundary.
 pub fn sys_writev(fd: u64, iov_ptr: *const IoVec, iovcnt: usize) -> i64 {
     let info = current_thread_info();
-    info.lock().errno = Errno::Clear;
+    let fd_table = {
+        let mut guard = info.lock();
+        guard.errno = Errno::Clear;
+        guard.fd_table.clone()
+    };
+
+    // See `sys_readv`: an all-empty vector never reaches `sys_write`.
+    if !fd_is_open(&fd_table, fd) {
+        info.lock().errno = Errno::EBADF;
+        return -1;
+    }
 
     if iovcnt == 0 {
         return 0;

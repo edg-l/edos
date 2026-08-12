@@ -283,11 +283,6 @@ pub fn sys_sendto(
         return !0u64;
     }
 
-    let count = len as usize;
-    if count == 0 {
-        return 0;
-    }
-
     let fd_table = info.lock().fd_table.clone();
     let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
         Some(FileDescriptor::Socket(s)) => s,
@@ -296,6 +291,13 @@ pub fn sys_sendto(
             return !0u64;
         }
     };
+
+    // A transfer of no bytes answers only once the descriptor is known to be a
+    // socket, so that a closed one still reports EBADF.
+    let count = len as usize;
+    if count == 0 {
+        return 0;
+    }
 
     // Determine destination address
     let dst = if !addr_ptr.is_null() && addr_len >= core::mem::size_of::<SockAddrIn>() as u64 {
@@ -397,11 +399,6 @@ pub fn sys_recvfrom(
         return !0u64;
     }
 
-    let count = len as usize;
-    if count == 0 {
-        return 0;
-    }
-
     let fd_table = info.lock().fd_table.clone();
     let sock_arc = match fd_table.lock().get_fd(fd).cloned() {
         Some(FileDescriptor::Socket(s)) => s,
@@ -410,6 +407,13 @@ pub fn sys_recvfrom(
             return !0u64;
         }
     };
+
+    // A transfer of no bytes answers only once the descriptor is known to be a
+    // socket, so that a closed one still reports EBADF.
+    let count = len as usize;
+    if count == 0 {
+        return 0;
+    }
 
     // `wait_until` returns on any wake, not only when the condition holds: a
     // wake token left by an earlier wait aborts the park. Loop on the real

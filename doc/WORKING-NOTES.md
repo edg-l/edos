@@ -326,7 +326,7 @@ does not have to invent them.
 | syscalls | 111 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 111 — a mismatch is the bug |
 | userspace programs | 103 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
-| `iotest /var` | 19/19 | the syscall regression suite, run in the guest |
+| `iotest /var` | 20/20 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 The `unwrap` figure includes 11 in `thread/sched_test.rs`, which is test code and
@@ -2344,7 +2344,7 @@ feature. `key ctrl+d` is correct, as the script's own help says.
 `doc/AUDIT.md` §3 listed eight missing interfaces; all eight now exist and the
 table is down to `setuid`, which is rejected there. 111 syscalls, each with an
 `edos_lib` wrapper and a case in `programs/iotest` — **`iotest /var` is the
-regression suite for the whole set, and it runs 19/19.**
+regression suite for the whole set, and it runs 20/20.**
 
 The syscalls are not the interesting part. Writing them found five bugs that
 predate them, every one a silent data corruption:
@@ -3913,3 +3913,43 @@ either: the std rlib changes without its version string moving, so nothing in
 
 Verified in the guest after that loop: the same `pmap -x` on `/bin/sleep`
 reports `rw-p anon`, and every region in the list renders a correct triple.
+
+---
+
+## FIXED: a zero-length transfer never looked at its descriptor (2026-08-12)
+
+`syscallfuzz` listed 23 calls under "returned rather than failed" — a call that
+answered success for a poison argument. Most of that list is the fuzzer being
+honest about its own inputs: one in four pointer arguments is a *valid* scratch
+buffer, so `getrandom`, `clock_gettime`, `netinfo`, `getdns` and friends
+genuinely succeed, and `window_list` with `max == 0` returns the window count by
+design. Those are not defects and the entries can be read past.
+
+Six of them were one real defect with one shape. `read`, `write`, `pread`,
+`pwrite`, `sendto` and `recvfrom` all opened with
+
+```rust
+if count == 0 { return 0; }
+```
+
+*before* resolving the descriptor, and `readv`/`writev` returned 0 for
+`iovcnt == 0` without ever reaching `sys_read`. So `read(9999, p, 0)` on a
+descriptor that was never open reported success. That matters because a
+zero-length transfer is exactly how userspace probes an fd cheaply; answering 0
+tells the caller a closed descriptor is live. Linux resolves the fd first
+(`fdget` before `import_iovec`) and returns `EBADF`.
+
+The fix is to validate first and short-circuit second, at each site:
+`pread`/`pwrite`/`sendto`/`recvfrom` already resolve the descriptor and map its
+error, so the `count == 0` return moved below that block and reuses it;
+`read`/`write`/`readv`/`writev` go through `fd_is_open` in `syscalls/io.rs`.
+`readv`/`writev` check unconditionally rather than only for `iovcnt == 0`, since
+a vector whose buffers are all empty reaches no underlying call either.
+
+Note that the null-pointer check has to stay *after* the length check:
+`read(fd, NULL, 0)` is 0, not `EFAULT`.
+
+`programs/iotest` test 20 covers it in both directions — the six calls fail on a
+closed descriptor and still return 0 on an open one, so the test cannot be
+satisfied by rejecting everything. After the fix the fuzzer's list is 17, all of
+them the legitimate kind above.
