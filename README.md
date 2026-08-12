@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  A hobby operating system for x86_64, written from scratch in Rust.<br>
+  A hobby operating system for x86_64, written in Rust.<br>
   SMP preemptive kernel, its own filesystem, a TCP/IP stack, USB, and a
   graphical window manager, with userspace programs built against a real
   Rust <code>std</code>.
@@ -26,9 +26,8 @@
 ## What it does
 
 EDOS boots on UEFI, brings up every core on the machine, and drops you into a
-compositing desktop with a terminal. Everything below the shell prompt is
-original code: the scheduler, the page cache, the filesystem, the network
-stack, the USB stack, and the window system.
+compositing desktop with a terminal. It brings its own scheduler, page cache,
+filesystem, network stack, USB stack and window system.
 
 | | |
 |---|---|
