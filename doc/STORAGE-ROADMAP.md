@@ -67,8 +67,13 @@ buffer held until its own handle completes. `fsbench write -n 32 /var` used to
 report `ahci_stats.ncq_max_inflight +1` for a whole suite; it now reports +3 to
 +9. And the journal committer queues a transaction's descriptor, data and revoke
 blocks together through `RingWrites`, draining them at the barrier that already
-had to precede the commit block. Reads outside the readahead path, and
-everything metadata outside the journal, still do not.
+had to precede the commit block. Block-page-cache writeback batches too, since
+2026-08-12: `flush_dirty_once` collects dirty pages that pass its filters and
+`write_batch` submits up to 8 of them before reaping any. Its cap is not the
+device but `LOCK_RANK_DEPTH` — a batch holds one `page.write_lock` per
+outstanding write. Reads outside the readahead path, and the mount-time paths
+(`fs/journal/replay.rs` home blocks, `fs/fat32/`, `fs/gpt.rs`, `fs/mbr.rs`),
+still do not.
 
 So a 4 KiB read is a dependent round trip, not a queued one, and the 100 us is
 what a round trip costs: syscall, cache lookup, frame allocation, submit, park,

@@ -34,15 +34,16 @@ use x86_64::structures::paging::{FrameAllocator, PhysFrame};
 
 use crate::{
     debug::lock_order::{
-        RANK_BPC_JOURNALS, RANK_BPC_SHARD, RANK_JOURNAL_TRACKER, RANK_PAGE_WRITE_LOCK,
+        LOCK_RANK_DEPTH, RANK_BPC_JOURNALS, RANK_BPC_SHARD, RANK_JOURNAL_TRACKER,
+        RANK_PAGE_WRITE_LOCK,
     },
     drivers::{
         ahci::AhciError,
-        block_io::{self, BlockBuffer, WriteFlags},
+        block_io::{self, BlockBuffer, BlockIoHandle, WriteFlags},
     },
     log,
     memory::{frame_allocator::frame_allocator, get_virt_addr_from_phys_offset},
-    ranked_lock,
+    ranked_lock, ranked_lock_same,
     thread::{mutex::BlockingMutex, waitqueue::WaitQueue},
 };
 
@@ -397,6 +398,46 @@ fn write_frames(device_id: u64, first_page: u64, data: &[u8]) -> Result<(), Ahci
     )?;
     h.wait()?;
     Ok(())
+}
+
+/// A dirty page that passed the writeback filters and is waiting to be
+/// written as part of a batch.
+struct PendingFlush {
+    page: Arc<CachedBlockPage>,
+    /// The journal sequence this page was enrolled at, if any, so the
+    /// checkpoint can be reported once the write lands.
+    journal_seq: Option<u64>,
+}
+
+/// Writes a single writeback batch keeps outstanding at once.
+///
+/// Bounded by the rank stack rather than by the device: a batch holds one
+/// `page.write_lock` per outstanding write, and the lock-order tracker records
+/// at most `LOCK_RANK_DEPTH` (16) live guards per thread. Half of that leaves
+/// room for whatever the caller already holds.
+const MAX_INFLIGHT_PAGES: usize = LOCK_RANK_DEPTH / 2;
+
+/// Issue a single-page write and return its handle without waiting, so the
+/// caller can keep further commands outstanding behind it. The frame is the
+/// DMA source, so it must not be written to until the handle completes.
+fn submit_write_frame(
+    device_id: u64,
+    page_block_idx: u64,
+    frame: PhysFrame,
+) -> Result<Arc<BlockIoHandle>, AhciError> {
+    let lba = page_block_idx * SECTORS_PER_PAGE as u64;
+    let buf = frame_slice(frame);
+    let dev = block_io::lookup(device_id).ok_or(AhciError::InvalidDevice)?;
+    dev.submit_write(
+        lba,
+        SECTORS_PER_PAGE as u32,
+        BlockBuffer::Slice {
+            ptr: buf.as_mut_ptr(),
+            len: PAGE_SIZE,
+        },
+        WriteFlags::NONE,
+    )
+    .map_err(Into::into)
 }
 
 /// Issue a single-page write via the block-io trait.
@@ -1085,12 +1126,14 @@ impl BlockPageCache {
     pub fn flush_dirty_once(&self, force: bool) -> Result<u64, AhciError> {
         let mut bytes_written: u64 = 0;
 
-        for (si, shard_lock) in self.shards.iter().enumerate() {
+        for shard_lock in self.shards.iter() {
             // Snapshot the dirty set without holding the lock during I/O.
             let keys_snapshot: Vec<Key> = {
                 let shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", shard_lock);
                 shard.dirty.iter().copied().collect()
             };
+
+            let mut batch: Vec<PendingFlush> = Vec::new();
 
             for key in keys_snapshot {
                 // Re-fetch the page under the lock (it may have been evicted).
@@ -1144,44 +1187,106 @@ impl BlockPageCache {
                     continue;
                 }
 
-                // Acquire write_lock to serialize against concurrent writers.
-                let _wg =
-                    ranked_lock!(RANK_PAGE_WRITE_LOCK, "BPC.page.write_lock", page.write_lock);
-                if !page.is_dirty() {
-                    continue;
+                batch.push(PendingFlush {
+                    page,
+                    journal_seq: journal_seq_for_page,
+                });
+                if batch.len() >= MAX_INFLIGHT_PAGES {
+                    bytes_written += self.write_batch(shard_lock, &mut batch)?;
                 }
-
-                write_frame(page.key.0, page.key.1, page.frame)?;
-                page.clear_dirty();
-                bytes_written += PAGE_SIZE as u64;
-                drop(_wg);
-
-                // Notify the journal that this block has been checkpointed.
-                // Lock order: BPC.journals (120) -> Journal.checkpoint_tracker (130) inside
-                // note_checkpointed.
-                if let Some(enrolled_seq) = journal_seq_for_page {
-                    let journals = ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals);
-                    if let Some(j) = journals.get(&key.0) {
-                        j.note_checkpointed(key.0, key.1, enrolled_seq);
-                    }
-                }
-
-                // Only remove from dirty set if the page was not re-dirtied
-                // by a concurrent writer between clear_dirty and this check.
-                {
-                    let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", shard_lock);
-                    if !page.is_dirty() {
-                        if shard.dirty.remove(&key) {
-                            self.stats.dirty_pages.fetch_sub(1, Ordering::Relaxed);
-                        }
-                    }
-                }
-
-                let _ = si; // suppress lint
             }
+
+            bytes_written += self.write_batch(shard_lock, &mut batch)?;
         }
 
         Ok(bytes_written)
+    }
+
+    /// Write one batch of dirty pages with their commands outstanding together,
+    /// rather than one device round trip per page, then do each page's
+    /// checkpoint bookkeeping once its own command has completed. Drains
+    /// `batch`.
+    ///
+    /// `page.write_lock` is one lock class, so a batch holding several of them
+    /// at once orders them by key. Each is held until the DMA reading that
+    /// frame is done, which is what excludes a concurrent writer from tearing
+    /// the copy the device is reading.
+    fn write_batch(
+        &self,
+        shard_lock: &BlockingMutex<ShardInner>,
+        batch: &mut Vec<PendingFlush>,
+    ) -> Result<u64, AhciError> {
+        batch.sort_unstable_by_key(|p| p.page.key);
+
+        let mut inflight = Vec::new();
+        let mut failure: Option<AhciError> = None;
+
+        for (i, pending) in batch.iter().enumerate() {
+            let page = &pending.page;
+            let guard =
+                ranked_lock_same!(RANK_PAGE_WRITE_LOCK, "BPC.page.write_lock", page.write_lock);
+            if !page.is_dirty() {
+                continue;
+            }
+            match submit_write_frame(page.key.0, page.key.1, page.frame) {
+                Ok(handle) => inflight.push((i, guard, handle)),
+                Err(e) => {
+                    failure.get_or_insert(e);
+                    break;
+                }
+            }
+        }
+
+        // Every command is waited on before its guard is released, on the
+        // failure path too: a command that reported an error may still have
+        // DMA in flight against the frame it was reading. The bookkeeping
+        // below takes ranks under 140, so it cannot start until the last guard
+        // of the batch is gone, not merely the one it belongs to.
+        let mut bytes_written: u64 = 0;
+        let mut written: Vec<usize> = Vec::new();
+        for (i, guard, handle) in inflight {
+            match handle.wait() {
+                Ok(()) => {
+                    batch[i].page.clear_dirty();
+                    bytes_written += PAGE_SIZE as u64;
+                    written.push(i);
+                }
+                Err(e) => {
+                    failure.get_or_insert(e.into());
+                }
+            }
+            drop(guard);
+        }
+
+        for i in written {
+            let pending = &batch[i];
+            let key = pending.page.key;
+
+            // Notify the journal that this block has been checkpointed.
+            // Lock order: BPC.journals (120) -> Journal.checkpoint_tracker (130) inside
+            // note_checkpointed.
+            if let Some(enrolled_seq) = pending.journal_seq {
+                let journals = ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals);
+                if let Some(j) = journals.get(&key.0) {
+                    j.note_checkpointed(key.0, key.1, enrolled_seq);
+                }
+            }
+
+            // Only remove from dirty set if the page was not re-dirtied
+            // by a concurrent writer between clear_dirty and this check.
+            {
+                let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", shard_lock);
+                if !pending.page.is_dirty() && shard.dirty.remove(&key) {
+                    self.stats.dirty_pages.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        batch.clear();
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(bytes_written),
+        }
     }
 
     /// Wait until the writeback thread has completed at least request `req`.

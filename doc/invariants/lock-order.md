@@ -199,7 +199,11 @@ the block-cache subsystem.
 direction. See [Journal tracker and state](#journal-tracker-and-state).
 
 **140, `CachedBlockPage.write_lock`.** Serializes partial writers on one page.
-True leaf.
+True leaf. Writeback holds one per outstanding write while a batch of dirty
+pages is in flight, so it is also a same-class multi-acquire: `write_batch` in
+`fs/block_page_cache.rs` sorts its batch by `(device_id, page_block_idx)` and
+takes the guards through `ranked_lock_same!` in that order. Its batch cap comes
+from `LOCK_RANK_DEPTH`, since each outstanding write costs a rank-stack slot.
 
 **160, `EfsDriver.mutable`.** Taken by EFS callbacks under `inode.lock` (30), and
 under `bitmap_mutex` (32) on alloc and free paths. A true leaf while held: every site releases

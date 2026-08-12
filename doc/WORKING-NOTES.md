@@ -6,6 +6,38 @@ session.
 
 ---
 
+## A batch of same-class guards is bounded by the rank stack, not by the device
+
+Block-page-cache writeback (`flush_dirty_once`) wrote one dirty page per device
+round trip. It now collects the pages that pass its filters and hands them to
+`write_batch`, which submits them together and reaps afterwards.
+
+Two things the lock discipline forces, both of which cost a boot to learn:
+
+- **The batch cap is `LOCK_RANK_DEPTH / 2`, not a device queue depth.** Each
+  outstanding write holds that page's `write_lock` until its DMA is done, and
+  the lock-order tracker records at most `LOCK_RANK_DEPTH` (16) live guards per
+  thread — a 16-deep batch fills the stack exactly and the next `ranked_lock!`
+  panics with `lock_order stack overflow`.
+- **Per-page bookkeeping cannot interleave with the reaping.** The first
+  attempt dropped each page's guard right after its own `wait()` and then took
+  `BPC.journals` (120) to report the checkpoint. That panics on the first boot:
+  the *other* guards of the batch are still live, so the rank stack still has a
+  140 entry. The bookkeeping runs in a second pass, after the last guard of the
+  batch is gone.
+
+`page.write_lock` is one lock class, so a batch holding several is a same-class
+multi-acquire: `write_batch` sorts by `(device_id, page_block_idx)` and takes
+them through `ranked_lock_same!` in that order.
+
+Verified in the guest: desktop boots with no panic, `fsbench write -n 32 /var`
+completes in 1.3 s reporting `ncq_max_inflight +7`, and `iotest /var` is 20/20.
+The depth figure is not attributable to this change alone — EFS bulk flush and
+the journal committer also queue — so treat it as "no regression, batching
+still reached", not as a measurement of writeback depth on its own.
+
+---
+
 ## Writeback queues now, so the drive is no longer asked one command at a time
 
 `doc/STORAGE-ROADMAP.md` section 1 says every I/O path but `read_pages` is
