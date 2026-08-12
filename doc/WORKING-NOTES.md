@@ -97,6 +97,63 @@ instead of the 4095 blocks a default journal takes. `make run-recovery` boots
 both together. The procedure, and the host-side superblock rewind that predates
 it with its two off-by-one traps, are in `doc/journal-recovery-test.md`.
 
+### Orphan inodes after a power cut are the missing orphan list, not an ordering bug
+
+The suspicion was that `EfsDriver::write_block` breaks write-ahead ordering: it
+calls `write_page` to put the block at its home location and *then* enrols it in
+the transaction. It does not. `write_page` leaves the page dirty in the cache, and
+`flush_dirty_once` skips any page whose `checkpoint_tracker` entry names a
+sequence above `committed_seq`, so enrolled implies held-until-commit.
+
+There is a hole, and it is cache pressure rather than logic: a shard with no
+evictable victim hands back a *detached* page, which is invisible to writeback and
+therefore written straight to the device ahead of the commit.
+`read_page_for_write` already drains and retries to avoid that, and the hole
+**measured zero**: a full `fsbench all /var` reports `detached_fallbacks: 0`, with
+1.3M hits, 52 misses and no evictions at all, because 64 shards of 256 pages never
+fill against that working set. Reachable in code, unreached in practice.
+
+The actual answer was in the same counter dump, one line down:
+`efs_stats.orphans_marked +503`. `vfs::remove_file` implements Linux unlink
+semantics — detach the dentry, free the inode only when the last `Arc<VfsInode>`
+drops — so between those two points the disk *deliberately* holds an allocated
+inode that nothing names, and the only record of that intent is the in-memory
+orphan mark. **EFS has no on-disk orphan list.** ext3/4 close the window with
+`s_last_orphan` and a mount-time walk; EFS has the semantics without the list, so
+every unclean shutdown inside the window strands inodes that only
+`efs-fsck --repair` reclaims. Written up in `doc/efs.md` §8.
+
+The width of that window was already measured and written down, in
+`doc/STORAGE-ROADMAP.md`'s note on reading `/proc/efs_stats`: fsbench prints its
+counter deltas *before* closing its descriptors, so `orphans_dropped` reads **0
+mid-run and 513 afterwards**. Those 513 inodes are unlinked-and-still-open for the
+length of the run, which is to say a power cut anywhere in it strands all of them.
+`orphans_marked - orphans_dropped` is therefore the exact count a crash would
+leave behind, and ~52 after an iotest crash is the same thing on a smaller
+workload. That subtraction is also the regression test for an orphan list when one
+is built: unlink while open, cut power, mount, assert the mount reclaimed them and
+`efs-fsck` reports none.
+
+Two real defects turned up on the way and are fixed:
+
+- **`write_page` was the only write path that bypassed `read_page_for_write`.**
+  `write_partial_page` and the byte-range writer both acquire through it and so
+  inherit the drain-and-retry; `write_page` — the one path carrying journalled
+  metadata — did its own inline get-or-create and would take a detached page on
+  the first try. It now acquires through `read_page_for_write` with
+  `Fill::Overwrite`, which also skips a pointless fill of a page about to be
+  overwritten entirely.
+- **`write_block` enrolled a page it had not written.** It wrote through
+  `write_page` and then called `read_page` for the *same key* to get something to
+  enrol. Those are not always the same page: on the detached path the lookup reads
+  the block back off the platter and enrols that, so the journal records the bytes
+  on disk rather than the bytes being written. `write_page` returns its guard now
+  and `write_block` enrols exactly the page it filled.
+
+`/proc/block_cache` gained `journalled_write_through`: detached pages written to a
+home location on a device that has a journal, i.e. actual ordering violations,
+counted rather than assumed rare. Read it before blaming ordering for anything.
+
 ### efs-fsck had all three bugs too, because replay was written twice
 
 The kernel's fixes did not reach the checker: `tools/efs-fsck/src/replay.rs` was

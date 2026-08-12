@@ -254,6 +254,7 @@ pub struct StatsSnapshot {
     pub misses: u64,
     pub evictions: u64,
     pub detached_fallbacks: u64,
+    pub journalled_write_through: u64,
     pub dirty_pages: u64,
     pub writeback_runs: u64,
     pub writeback_bytes: u64,
@@ -267,6 +268,9 @@ pub(super) struct Stats {
     pub misses: AtomicU64,
     pub evictions: AtomicU64,
     pub detached_fallbacks: AtomicU64,
+    /// Detached pages written to their home location on a device that has a
+    /// journal, i.e. write-ahead ordering violations. See `publish_write`.
+    pub journalled_write_through: AtomicU64,
     pub dirty_pages: AtomicU64,
     pub writeback_runs: AtomicU64,
     pub writeback_bytes: AtomicU64,
@@ -280,6 +284,7 @@ impl Stats {
             misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             detached_fallbacks: AtomicU64::new(0),
+            journalled_write_through: AtomicU64::new(0),
             dirty_pages: AtomicU64::new(0),
             writeback_runs: AtomicU64::new(0),
             writeback_bytes: AtomicU64::new(0),
@@ -293,6 +298,7 @@ impl Stats {
             misses: self.misses.load(Ordering::Relaxed),
             evictions: self.evictions.load(Ordering::Relaxed),
             detached_fallbacks: self.detached_fallbacks.load(Ordering::Relaxed),
+            journalled_write_through: self.journalled_write_through.load(Ordering::Relaxed),
             dirty_pages: self.dirty_pages.load(Ordering::Relaxed),
             writeback_runs: self.writeback_runs.load(Ordering::Relaxed),
             writeback_bytes: self.writeback_bytes.load(Ordering::Relaxed),
@@ -861,6 +867,13 @@ impl BlockPageCache {
         Ok(guards.into_iter().map(|g| g.unwrap()).collect())
     }
 
+    /// Whether `device_id` has a journal registered, i.e. whether a write to a
+    /// home location on it has to wait for a commit.
+    fn device_is_journalled(&self, device_id: u64) -> bool {
+        let journals = ranked_lock!(RANK_BPC_JOURNALS, "BPC.journals", self.journals);
+        journals.contains_key(&device_id)
+    }
+
     /// Tell the device's journal that `key` has reached its home location.
     ///
     /// Every path that writes an enrolled block out must call this. A block
@@ -878,9 +891,18 @@ impl BlockPageCache {
 
     /// Record a freshly written page.
     ///
-    /// A cached page is marked dirty and left to writeback. A detached page is
-    /// invisible to writeback, so its bytes go to the device now; dropping it
+    /// A cached page is marked dirty and left to writeback, which for a
+    /// journalled device holds it until its transaction commits. A detached page
+    /// is invisible to writeback, so its bytes go to the device now; dropping it
     /// otherwise loses the write silently.
+    ///
+    /// On a journalled device that immediate write is a write-ahead ordering
+    /// violation: the block reaches its home location before the transaction that
+    /// dirtied it has committed, so a crash in that window leaves metadata on
+    /// disk that no committed transaction accounts for and replay cannot undo.
+    /// `read_page_for_write` drains and retries to keep callers out of here, and
+    /// `journalled_write_through` counts the times that failed, so the violation
+    /// is a number in `/proc/block_cache` rather than something to assume about.
     fn publish_write(
         &self,
         key: Key,
@@ -888,6 +910,22 @@ impl BlockPageCache {
         cached: bool,
     ) -> Result<(), AhciError> {
         if !cached {
+            if self.device_is_journalled(key.0) {
+                let n = self
+                    .stats
+                    .journalled_write_through
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
+                if n == 1 || n.is_multiple_of(1000) {
+                    log!(
+                        "block_page_cache: journalled write-through #{} for key ({}, {}) -- \
+                         home block written before its transaction committed",
+                        n,
+                        key.0,
+                        key.1
+                    );
+                }
+            }
             write_frame(key.0, key.1, page.frame)?;
             self.note_checkpointed(key);
             return Ok(());
@@ -905,43 +943,34 @@ impl BlockPageCache {
         Ok(())
     }
 
-    /// Write a full page. Write-back: marks the page dirty for the background
-    /// writeback thread to flush to disk asynchronously.
+    /// Write a full page and return the pinned page it went into.
+    ///
+    /// Write-back: the page is marked dirty and the background writeback thread
+    /// flushes it, which for a journalled device is gated on the enrolling
+    /// transaction having committed. The guard is returned so a caller that has
+    /// to enrol the page can enrol *this* page rather than looking the key up
+    /// again: a second lookup can hand back a different page for the same
+    /// block, and on the detached path it reads the block back off the disk.
+    ///
+    /// Acquisition goes through [`read_page_for_write`], so the ordering the
+    /// journal guarantees survives cache pressure. `Fill::Overwrite` skips the
+    /// fill: every byte of the page is about to be replaced.
+    ///
+    /// [`read_page_for_write`]: Self::read_page_for_write
     pub fn write_page(
         &self,
         device_id: u64,
         page_block_idx: u64,
         data: &[u8; PAGE_SIZE],
-    ) -> Result<(), AhciError> {
+    ) -> Result<BlockPageGuard, AhciError> {
         assert!(
             Self::initialized(),
             "BlockPageCache::write_page called before init()"
         );
 
         let key = (device_id, page_block_idx);
-        let si = shard_index(key);
-
-        // Get or create the cached page.
-        let (guard, cached) = {
-            let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
-            if let Some(page) = shard.lru.get(&key) {
-                (BlockPageGuard::new(Arc::clone(page)), true)
-            } else {
-                drop(shard);
-                // Allocate fresh frame (no read needed -- full overwrite).
-                let frame = frame_allocator()
-                    .allocate_frame()
-                    .ok_or(AhciError::IoError)?;
-                let new_page = Arc::new(CachedBlockPage::new(key, frame));
-                let mut to_drop: Vec<Arc<CachedBlockPage>> = Vec::with_capacity(2);
-                let (resolved, cached) = {
-                    let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
-                    self.insert_or_resolve_race(&mut shard, key, new_page, &mut to_drop)
-                };
-                drop(to_drop);
-                (BlockPageGuard::new(resolved), cached)
-            }
-        };
+        let (guard, cached) =
+            self.read_page_for_write(device_id, page_block_idx, Fill::Overwrite)?;
 
         // Copy data into the frame and mark dirty (write-back).
         {
@@ -958,7 +987,8 @@ impl BlockPageCache {
             }
         }
 
-        self.publish_write(key, &guard, cached)
+        self.publish_write(key, &guard, cached)?;
+        Ok(guard)
     }
 
     /// Read-modify-write: update a sub-sector range within a page then mark dirty.

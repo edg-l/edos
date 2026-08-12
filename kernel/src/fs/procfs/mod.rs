@@ -436,6 +436,7 @@ impl Procfs {
         if !BlockPageCache::initialized() {
             return concat!(
                 "hits: 0\nmisses: 0\nevictions: 0\ndetached_fallbacks: 0\n",
+                "journalled_write_through: 0\n",
                 "dirty_pages: 0\nwriteback_runs: 0\nwriteback_bytes: 0\n",
                 "sync_calls: 0\nflush_requested: 0\nflush_completed: 0\n"
             )
@@ -445,6 +446,7 @@ impl Procfs {
         format!(
             concat!(
                 "hits: {}\nmisses: {}\nevictions: {}\ndetached_fallbacks: {}\n",
+                "journalled_write_through: {}\n",
                 "dirty_pages: {}\nwriteback_runs: {}\nwriteback_bytes: {}\n",
                 "sync_calls: {}\nflush_requested: {}\nflush_completed: {}\n"
             ),
@@ -452,6 +454,7 @@ impl Procfs {
             s.misses,
             s.evictions,
             s.detached_fallbacks,
+            s.journalled_write_through,
             s.dirty_pages,
             s.writeback_runs,
             s.writeback_bytes,

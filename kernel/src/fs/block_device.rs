@@ -33,8 +33,13 @@ impl BlockDevice {
         BlockPageCache::global().read_pages(self.device_id, start_page, count)
     }
 
-    /// Write a full 4 KiB page (write-through).
-    pub fn write_page(&self, page_block_idx: u64, data: &[u8; PAGE_SIZE]) -> Result<(), AhciError> {
+    /// Write a full 4 KiB page, returning the pinned page it went into so a
+    /// journalled caller can enrol the page it just wrote.
+    pub fn write_page(
+        &self,
+        page_block_idx: u64,
+        data: &[u8; PAGE_SIZE],
+    ) -> Result<BlockPageGuard, AhciError> {
         BlockPageCache::global().write_page(self.device_id, page_block_idx, data)
     }
 

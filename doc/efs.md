@@ -528,6 +528,25 @@ name reaches it. Removing the directory entry and freeing the inode therefore
 happen in one transaction. An allocated `S_IFLNK` inode with no directory entry is
 a leak, and `efs-fsck` reports it as an orphan.
 
+**There is no on-disk orphan list, and that is why a power cut leaves orphan
+inodes.** `vfs::remove_file` implements Linux's unlink semantics: the driver
+detaches the directory entry and must not free the inode, and the inode is freed
+by `FileSystem::evict_inode` when the last `Arc<VfsInode>` drops. Between those
+two points the on-disk state is *deliberately* an allocated inode that no
+directory entry names, and the only record that it is pending deletion is the
+in-memory orphan mark (`/proc/evict_stats`, `orphans_marked`). Nothing on disk
+says so, so an unclean shutdown in that window strands the inode and its blocks
+permanently; `efs-fsck` reports `orphan inode N` and `--repair` reclaims it.
+
+ext3/4 close the same window with an on-disk orphan chain (`s_last_orphan` in the
+superblock, walked at mount to finish the deletions). EFS has the semantics
+without the list. Until it has one, orphan inodes after a power cut are expected
+output, not evidence of a journal or ordering defect.
+
+`orphans_marked - orphans_dropped` in `/proc/efs_stats` is the number a crash
+would strand at that instant. It is not small: a `fsbench all /var` run holds its
+descriptors to the end, so the gap is **513** for the length of the run.
+
 ---
 
 ## 9. Checksums
@@ -883,6 +902,34 @@ Idempotent: crash during replay re-replays on next boot.
 - Partial transactions (no commit block) are discarded on replay.
 - Freed blocks are revoke-protected against stale replay.
 - File data is NOT crash-safe (data=writeback mode).
+
+### What enforces write-ahead ordering
+
+The rule the name "write-ahead" states: **a metadata block must not reach its
+home location before the transaction that dirtied it has committed.** Nothing in
+the on-disk format enforces it; one code path does.
+
+`EfsDriver::write_block` writes every metadata block through
+`BlockPageCache::write_page`, which leaves the page dirty in the cache. The
+writeback thread is what moves a dirty page to its home location, and it skips
+any page whose `checkpoint_tracker` entry names a sequence above
+`committed_seq` (`flush_dirty_once`). So the gate is: enrolled ⟹ writeback
+holds it ⟹ ordering preserved.
+
+The gate has one hole, and it is a cache-pressure hole rather than a logic one.
+When a shard is full and its LRU candidate is pinned or dirty, the cache hands
+back a *detached* page: one that is not in the LRU, therefore invisible to
+writeback, therefore written straight to the device by `publish_write` — ahead of
+the commit. `read_page_for_write` drains and retries before accepting that, and
+`/proc/block_cache`'s `journalled_write_through` counts the times it had to
+accept it anyway.
+
+That counter is what to read before blaming ordering for anything. A full
+`fsbench all /var` run reports `detached_fallbacks: 0` — the cache is 64 shards
+of 256 pages and the workload never fills one — so the hole is reachable in code
+and not on any workload measured so far. In particular it is **not** where the
+`orphan inode` reports after a power cut come from; see §8's note on unlink
+semantics and the orphan-list gap.
 
 ---
 

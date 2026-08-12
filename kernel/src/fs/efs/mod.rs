@@ -411,17 +411,21 @@ impl EfsDriver {
         Ok(guard.as_slice().to_vec())
     }
 
+    /// Write one metadata block and enrol it in `tx`.
+    ///
+    /// The page the write went into is what gets enrolled. Looking the key up
+    /// again instead would enrol whatever page a second lookup returns, which is
+    /// not always the page just written: under cache pressure the write can land
+    /// on a detached page, and the lookup then reads the block back off the disk
+    /// and enrols *that*, so the journal records the bytes on the platter rather
+    /// than the bytes being written.
     fn write_block(&self, block: u64, data: &[u8], tx: &mut TxHandle<'_>) -> Result<(), Error> {
         let lba = self.block_to_lba(block);
         let page_idx = lba / 8;
         let mut buf = [0u8; 4096];
         let n = data.len().min(4096);
         buf[..n].copy_from_slice(&data[..n]);
-        self.device.write_page(page_idx, &buf)?;
-        // Enroll the freshly written page in the transaction.
-        let guard = BlockPageCache::global()
-            .read_page(self.device.device_id, page_idx)
-            .map_err(|_| Error::IoError)?;
+        let guard = self.device.write_page(page_idx, &buf)?;
         tx.enroll_block(self.device.device_id, page_idx, guard.page_arc());
         Ok(())
     }
