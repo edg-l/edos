@@ -57,9 +57,10 @@ impl ReadaheadState {
 // ---------------------------------------------------------------------------
 
 // A readahead window past the caller's requested range takes exactly one of
-// three paths in `vfs::page_cache_read_core`, and throughput, stall counts and
-// `ncq_inflight` cannot tell them apart: only the first is asynchronous, and
-// the other two are a bulk fill billed to the reader inside its own `read`.
+// four paths in `vfs::page_cache_read_core`, and throughput, stall counts and
+// `ncq_inflight` cannot tell them apart: only the async one is a prefetch the
+// reader does not wait for, two are a bulk fill billed to the reader inside its
+// own `read`, and the fourth is the window an earlier one already covers.
 // Exposed as `/proc/readahead_stats` and reported by `fsbench ra`.
 
 /// Windows the driver accepted for asynchronous prefetch.
@@ -67,10 +68,12 @@ pub static RA_ASYNC_WINDOWS: AtomicU64 = AtomicU64::new(0);
 /// Pages in those windows.
 pub static RA_ASYNC_PAGES: AtomicU64 = AtomicU64::new(0);
 /// Of those, windows whose `PageFillHandle` could not be installed because a
-/// page in the range was already in flight. The block I/O is submitted before
-/// the install is attempted, so such a window still reads from the device and
-/// then discards the result: the pages never reach the cache, and the next read
-/// finds the same range uncached and submits it again.
+/// page in the range went in flight between the narrowing and the install. The
+/// block I/O is submitted before the install is attempted, so such a window
+/// still reads from the device and then discards the result: the pages never
+/// reach the cache, and the next read finds the same range uncached and submits
+/// it again. Narrowing keeps this to the genuine race; it stayed as a counter
+/// because a rise means the pre-submit check has stopped covering the overlap.
 pub static RA_ASYNC_DROPPED_WINDOWS: AtomicU64 = AtomicU64::new(0);
 /// Pages in those windows — device reads whose result nothing keeps.
 pub static RA_ASYNC_DROPPED_PAGES: AtomicU64 = AtomicU64::new(0);
@@ -83,6 +86,17 @@ pub static RA_SYNC_PAGES: AtomicU64 = AtomicU64::new(0);
 pub static RA_ERR_WINDOWS: AtomicU64 = AtomicU64::new(0);
 /// Pages in those windows.
 pub static RA_ERR_PAGES: AtomicU64 = AtomicU64::new(0);
+/// Windows skipped before any submit because every page was already in flight
+/// from an earlier window. No device read, no fallback fill: the pages are
+/// already on their way.
+pub static RA_SKIPPED_WINDOWS: AtomicU64 = AtomicU64::new(0);
+/// Pages in those windows.
+pub static RA_SKIPPED_PAGES: AtomicU64 = AtomicU64::new(0);
+/// Windows narrowed to their in-flight-free tail before submitting.
+pub static RA_TRIMMED_WINDOWS: AtomicU64 = AtomicU64::new(0);
+/// Pages dropped from the front of those windows — reads the device never had
+/// to serve twice.
+pub static RA_TRIMMED_PAGES: AtomicU64 = AtomicU64::new(0);
 
 /// Record a window the driver accepted for asynchronous prefetch, and whether
 /// its fill handle was installed or the submitted read will be discarded.
@@ -93,6 +107,25 @@ pub fn count_async_window(pages: u64, installed: bool) {
     if !installed {
         RA_ASYNC_DROPPED_WINDOWS.fetch_add(1, Ordering::Relaxed);
         RA_ASYNC_DROPPED_PAGES.fetch_add(pages, Ordering::Relaxed);
+    }
+}
+
+/// Record a window the overlap check consumed entirely: every page is already
+/// being filled by a window this reader issued earlier.
+#[inline]
+pub fn count_skipped_window(pages: u64) {
+    RA_SKIPPED_WINDOWS.fetch_add(1, Ordering::Relaxed);
+    RA_SKIPPED_PAGES.fetch_add(pages, Ordering::Relaxed);
+}
+
+/// Record `pages` trimmed from the front of a window that still had a tail to
+/// prefetch. A no-op for an untouched window, so the window count means what it
+/// says.
+#[inline]
+pub fn count_trimmed_pages(pages: u64) {
+    if pages > 0 {
+        RA_TRIMMED_WINDOWS.fetch_add(1, Ordering::Relaxed);
+        RA_TRIMMED_PAGES.fetch_add(pages, Ordering::Relaxed);
     }
 }
 

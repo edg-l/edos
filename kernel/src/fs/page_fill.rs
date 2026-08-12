@@ -406,15 +406,53 @@ fn finalize_prefetch(inode: &Arc<VfsInode>, handle: &Arc<PageFillHandle>) {
 // issue_prefetch_bulk
 // ---------------------------------------------------------------------------
 
+/// Trim a prefetch window to the pages no fill already covers.
+///
+/// Consecutive readahead windows overlap heavily: a read advances by its own
+/// length while the window reaches up to `RA_MAX_PAGES` beyond it, so most of a
+/// new window is still being filled by the previous one. Such a page is in
+/// neither the page map nor readable, so a caller looking only at the map sees
+/// it as uncached and would include it.
+///
+/// Returns the first page of the window's in-flight-free tail, or `None` when
+/// the window's last page is itself in flight and nothing is left to prefetch.
+/// The tail starts after the *last* busy page rather than at the first gap, so
+/// the result stays one contiguous range for one command.
+///
+/// Advisory only: `issue_prefetch_bulk` re-checks under the same lock when it
+/// installs, because `in_flight` cannot be held across the submit in between —
+/// it is `RANK_IN_FLIGHT` and submitting takes driver locks above it.
+pub fn narrow_prefetch_window(
+    inode: &Arc<VfsInode>,
+    start_page: u64,
+    end_page: u64,
+) -> Option<u64> {
+    let inflight = inode
+        .pages
+        .in_flight
+        .lock_ranked(RANK_IN_FLIGHT, "InodePages.in_flight (prefetch-narrow)");
+    match inflight
+        .range(start_page..=end_page)
+        .next_back()
+        .map(|(&idx, _)| idx)
+    {
+        Some(idx) if idx >= end_page => None,
+        Some(idx) => Some(idx + 1),
+        None => Some(start_page),
+    }
+}
+
 /// Install a prefetch `PageFillHandle` covering `[start_page, start_page +
 /// page_count)` in `inode.pages.in_flight`. The caller has already submitted
 /// the block I/O and passes the resulting `block_handle` + `buffer`.
 ///
-/// Returns `true` if the handle was installed. Returns `false` if any page
-/// in the range was already in flight (we bail rather than narrow); in that
-/// case the caller may choose to drop the buffer (and `block_handle`), or
-/// just let them complete and discard. Either way the `Shared` buffer Arc
-/// held by the AHCI op keeps the DMA target alive for the remaining I/O.
+/// Returns `true` if the handle was installed. Returns `false` if any page in
+/// the range was already in flight, which loses the submitted read: the pages
+/// never reach the cache and the buffer is discarded. Callers narrow with
+/// `narrow_prefetch_window` before submitting, so this is the backstop for a
+/// window that another thread started filling in between, not the common case.
+/// Either way the `Shared` buffer Arc held by the AHCI op keeps the DMA target
+/// alive for the remaining I/O.
 pub fn issue_prefetch_bulk(
     inode: &Arc<VfsInode>,
     start_page: u64,

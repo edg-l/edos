@@ -259,19 +259,23 @@ impl Procfs {
         )
     }
 
-    /// Which of the three paths each readahead window past the caller's request
-    /// took. Only `async_windows` is asynchronous; the other two are a bulk fill
-    /// the reader pays for inside its own `read`, so a pass dominated by them
-    /// says nothing about whether prefetch trails the reader.
+    /// Which of the four paths each readahead window past the caller's request
+    /// took. Only `async_windows` is asynchronous; two are a bulk fill the
+    /// reader pays for inside its own `read`, so a pass dominated by them says
+    /// nothing about whether prefetch trails the reader; `skipped_windows` is
+    /// the window an earlier one already covers.
     fn render_readahead_stats() -> String {
         use crate::fs::readahead::{
             RA_ASYNC_DROPPED_PAGES, RA_ASYNC_DROPPED_WINDOWS, RA_ASYNC_PAGES, RA_ASYNC_WINDOWS,
-            RA_ERR_PAGES, RA_ERR_WINDOWS, RA_SYNC_PAGES, RA_SYNC_WINDOWS,
+            RA_ERR_PAGES, RA_ERR_WINDOWS, RA_SKIPPED_PAGES, RA_SKIPPED_WINDOWS, RA_SYNC_PAGES,
+            RA_SYNC_WINDOWS, RA_TRIMMED_PAGES, RA_TRIMMED_WINDOWS,
         };
         format!(
             "async_windows: {}\nasync_pages: {}\n\
              async_dropped_windows: {}\nasync_dropped_pages: {}\n\
-             sync_windows: {}\nsync_pages: {}\nerr_windows: {}\nerr_pages: {}\n",
+             sync_windows: {}\nsync_pages: {}\nerr_windows: {}\nerr_pages: {}\n\
+             skipped_windows: {}\nskipped_pages: {}\n\
+             trimmed_windows: {}\ntrimmed_pages: {}\n",
             RA_ASYNC_WINDOWS.load(Ordering::Relaxed),
             RA_ASYNC_PAGES.load(Ordering::Relaxed),
             RA_ASYNC_DROPPED_WINDOWS.load(Ordering::Relaxed),
@@ -280,6 +284,10 @@ impl Procfs {
             RA_SYNC_PAGES.load(Ordering::Relaxed),
             RA_ERR_WINDOWS.load(Ordering::Relaxed),
             RA_ERR_PAGES.load(Ordering::Relaxed),
+            RA_SKIPPED_WINDOWS.load(Ordering::Relaxed),
+            RA_SKIPPED_PAGES.load(Ordering::Relaxed),
+            RA_TRIMMED_WINDOWS.load(Ordering::Relaxed),
+            RA_TRIMMED_PAGES.load(Ordering::Relaxed),
         )
     }
 

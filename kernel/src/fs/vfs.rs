@@ -410,7 +410,7 @@ fn page_cache_read_core(
 
     use super::readahead::{
         RA_INIT_PAGES, RA_MAX_PAGES, RA_NO_PREV, RA_WHOLE_FILE_MAX_PAGES, count_async_window,
-        count_sync_window,
+        count_skipped_window, count_sync_window, count_trimmed_pages,
     };
 
     let start_page = offset / 4096;
@@ -509,8 +509,23 @@ fn page_cache_read_core(
 
         // Async-prefetch portion past the user's request.
         if range_end > end_page {
-            let pf_start = end_page + 1;
+            let window_start = end_page + 1;
             let pf_end = range_end;
+            // `uncached_ranges` is built from the page map alone, and a page an
+            // earlier window is still filling is in neither the map nor the
+            // window's way — so most of this window is typically already in
+            // flight. Trim to the free tail before submitting anything: the
+            // block I/O goes to the device before the handle install can refuse
+            // a colliding range, so a window submitted whole is read and thrown
+            // away.
+            let Some(pf_start) =
+                page_fill::narrow_prefetch_window(inode, window_start as u64, pf_end as u64)
+            else {
+                count_skipped_window((pf_end - end_page) as u64);
+                continue;
+            };
+            let pf_start = pf_start as usize;
+            count_trimmed_pages((pf_start - window_start) as u64);
             let pf_offset = pf_start * 4096;
             let pf_count = (pf_end - pf_start + 1) * 4096;
             let pf_pages = (pf_end - pf_start + 1) as u64;

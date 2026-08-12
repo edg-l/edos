@@ -457,6 +457,10 @@ fn ra_report(out: &mut Out, r: &workloads::RaReport) -> u32 {
         "  windows sync fallback   {} declined ({} pages), {} failed ({} pages)",
         r.ra_sync_windows, r.ra_sync_pages, r.ra_err_windows, r.ra_err_pages,
     ));
+    out.line(&format!(
+        "  windows overlapping     {} skipped ({} pages), {} trimmed ({} pages not re-read)",
+        r.ra_skipped_windows, r.ra_skipped_pages, r.ra_trimmed_windows, r.ra_trimmed_pages,
+    ));
     match &r.mismatch {
         Some(problem) => {
             out.line(&format!("  VERIFY FAIL             {problem}"));

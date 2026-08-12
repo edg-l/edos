@@ -844,7 +844,7 @@ fn ra_path(dir: &str) -> String {
 }
 
 /// The readahead branch counters, in the order [`RaReport`] records them.
-fn ra_branches() -> [u64; 8] {
+fn ra_branches() -> [u64; 12] {
     gauges(
         "/proc/readahead_stats",
         [
@@ -856,6 +856,10 @@ fn ra_branches() -> [u64; 8] {
             "sync_pages",
             "err_windows",
             "err_pages",
+            "skipped_windows",
+            "skipped_pages",
+            "trimmed_windows",
+            "trimmed_pages",
         ],
     )
 }
@@ -928,6 +932,13 @@ pub struct RaReport {
     pub ra_sync_pages: u64,
     pub ra_err_windows: u64,
     pub ra_err_pages: u64,
+    /// Windows an earlier window already covered end to end, dropped before any
+    /// submit, and pages trimmed from the front of the windows that still had a
+    /// tail left to prefetch. Both are device reads that no longer happen.
+    pub ra_skipped_windows: u64,
+    pub ra_skipped_pages: u64,
+    pub ra_trimmed_windows: u64,
+    pub ra_trimmed_pages: u64,
     /// First edge check that did not match, if any.
     pub mismatch: Option<String>,
 }
@@ -1035,6 +1046,10 @@ pub fn ra_read(dir: &str) -> Result<RaReport, String> {
         ra_sync_pages: ra_after[5].saturating_sub(ra_before[5]),
         ra_err_windows: ra_after[6].saturating_sub(ra_before[6]),
         ra_err_pages: ra_after[7].saturating_sub(ra_before[7]),
+        ra_skipped_windows: ra_after[8].saturating_sub(ra_before[8]),
+        ra_skipped_pages: ra_after[9].saturating_sub(ra_before[9]),
+        ra_trimmed_windows: ra_after[10].saturating_sub(ra_before[10]),
+        ra_trimmed_pages: ra_after[11].saturating_sub(ra_before[11]),
         mismatch,
     })
 }

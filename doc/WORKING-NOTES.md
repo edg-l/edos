@@ -6,6 +6,37 @@ session.
 
 ---
 
+## Readahead submitted I/O it was about to refuse, and the host hid the cost
+
+`page_cache_read_core` (`fs/vfs.rs`) built its readahead window from the inode
+page map alone. A page an earlier window is still filling is in neither the map
+nor the reader's way, so it looked uncached and went into the new window — and
+since a 64 KiB call advances the reader 16 pages while the window reaches 128
+past it, consecutive windows overlapped by ~112 of 128 pages. The submit ran
+first and `issue_prefetch_bulk` refused the colliding range second, so the AHCI
+read completed into a buffer nobody kept: 185 of 245 windows on a 16 MiB pass,
+23680 pages, ~92 MiB read from the device and thrown away, with the same range
+re-submitted on the next call.
+
+The fix is `page_fill::narrow_prefetch_window`: take `in_flight` once, trim the
+window to the tail past its last busy page, skip it when nothing is left, and
+only then submit. The lock cannot be held across the submit (`RANK_IN_FLIGHT`,
+and submitting takes driver locks above it), so the install re-checks — that
+check stays as the race backstop, and `async_dropped_windows` stays as its
+alarm. `/proc/readahead_stats` gained `skipped_*` and `trimmed_*`.
+
+**The trap worth keeping: this made the benchmark 15% slower, and that is not a
+verdict on the fix.** Discarded is 0 and 26480 pages are no longer re-read, but
+p50 per call went 174 us → 307 us and the pass 72.1 → 84.7 ms, because a window
+that now survives is a window the triggering `read` waits for in full — ~112
+pages instead of its own 16. `sata-disk.img` is a qcow2 file sitting in the
+host's page cache, so the 92 MiB of waste was served from host RAM at almost no
+cost while the longer single wait was paid in full. Any storage measurement here
+that trades read *volume* for read *latency* will read backwards for the same
+reason. The full before/after table is in `doc/STORAGE-ROADMAP.md` section 1b.
+
+---
+
 ## `make test` used to pass without running
 
 If a guest was already up — `make run-headless`, or anything else holding

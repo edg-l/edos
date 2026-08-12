@@ -191,6 +191,53 @@ submit path takes driver locks, so the lock must be dropped before
 `submit_prefetch_pages` — which is why the narrowed range has to be computed
 first and the install re-checked after, not held across the submit.
 
+### Step 1 landed: the 92 MiB is gone, and it cost 15% of the throughput
+
+`page_fill::narrow_prefetch_window` now trims a window to the tail past its last
+in-flight page before anything is submitted, and skips it outright when the whole
+range is already being filled. `issue_prefetch_bulk` keeps its collision check as
+the race backstop. Two counters were added beside the branch counters,
+`skipped_*` and `trimmed_*`, so the trim is visible rather than inferred.
+
+Same cold pass, 16 MiB in 256 calls of 64 KiB, 4 vCPUs, before and after:
+
+| | before | after |
+|---|---|---|
+| read path | 222 MiB/s, 72.1 ms | **189 MiB/s, 84.7 ms** |
+| per call | p50 174 us, p99 868 us, max 1.9 ms | **p50 307 us**, p99 1.2 ms, max 1.5 ms |
+| stalls | 11 of 256 over 696 us | **2 of 256** over 1.2 ms |
+| windows async | 245 (30480 pages), 185 discarded (23680) | 240 (4048 pages), **0 discarded** |
+| windows overlapping | — | 13 skipped (784 pages), 240 trimmed (**26480 pages not re-read**) |
+| `ncq_inflight` between calls | non-zero on 2 of 256 | non-zero on 0 of 256 |
+
+The prefetch now reads the file **once**: 4048 async pages plus 576 declined
+pages is 18 MiB for a 16 MiB file, against 110 MiB before. The stall count fell
+from 11 to 2 because a window that survives really does serve the calls behind
+it — `inflight_stats.joins` is 240, one per window, where the reader used to find
+its pages uncached and refill them.
+
+**And the pass got 15% slower.** The mechanism is not subtle, and it is the same
+trailing prefetch section 1b named: the window is still submitted from inside a
+`read`, so the call that triggers it waits for the *whole* window rather than for
+its own 16 pages. Before, the surviving handle was the exception, so most calls
+waited on a 16-page bulk fill; now most calls join a ~112-page one. Per call that
+is 174 us → 307 us; in total it is 12 ms of extra summed wait to save 92 MiB of
+device reads.
+
+**Which way that trade goes depends on the host, and here the host is lying to
+us.** `sata-disk.img` is a qcow2 file in the host's page cache, so the 92 MiB of
+discarded reads were served from host RAM at nearly no cost while the longer
+single wait was paid in full. On a real device, where 6x the read volume is 6x
+the time, the same change reads as a straight win. Do not quote the 15% as a
+verdict on the fix; quote it as the cost of the trailing prefetch.
+
+So this is now the justification for pipelining that section 1b could not
+produce. The 92 MiB was masking it: with the waste removed, the remaining cost is
+exactly "the reader waits for a window it should not have had to wait for", and
+firing the next window when the reader touches the last page of the current one
+is what removes it. The target is unchanged — `ncq_inflight` non-zero across most
+samples, `ncq_max_inflight` above the boot's 2, p50 back under 174 us.
+
 ### The three paths, and why the counter had to come first
 
 Reading `page_cache_read_core` (`fs/vfs.rs`) against that baseline, a readahead

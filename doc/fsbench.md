@@ -85,15 +85,18 @@ Throughput does not answer the question, so four other numbers are printed.
 was actually asynchronous, and cannot tell one that was not from one that
 trailed.
 
-- **windows async / sync fallback** — which of its three paths each readahead
-  window past the caller's request took, from `/proc/readahead_stats`. A window
-  the driver declines, or whose submit fails, becomes a bulk fill billed to the
-  reader inside its own `read`. Of the async ones, **discarded** counts those
+- **windows async / sync fallback / overlapping** — which of its four paths each
+  readahead window past the caller's request took, from `/proc/readahead_stats`.
+  A window the driver declines, or whose submit fails, becomes a bulk fill billed
+  to the reader inside its own `read`. **skipped** and **trimmed** are the
+  overlap check: consecutive windows overlap heavily, so most of a window is
+  already in flight from the previous one, and those pages are dropped from it
+  before anything is submitted. Of the async ones, **discarded** counts those
   whose fill handle lost the `in_flight` check *after* their block I/O was
   already submitted: those pages are read from the device and thrown away, and
-  the next call finds the range uncached and reads it again. A large discarded
-  count is the thing to fix before anything else, and it costs real device
-  bandwidth — see `doc/STORAGE-ROADMAP.md` section 1b.
+  the next call finds the range uncached and reads it again. Narrowing keeps
+  discarded at 0, so any rise means the pre-submit check has stopped covering
+  the overlap — see `doc/STORAGE-ROADMAP.md` section 1b.
 - **stalls** — calls slower than 4x the median, which is a call that waited on
   I/O nobody had started. A prefetch pulling ahead of the reader drives this
   towards zero; one that trails stalls about once per window.
