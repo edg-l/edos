@@ -89,31 +89,78 @@ replays and then fails `ls /mnt`. `efs-fsck` on the image says:
 `562949953438189 - 2^49 = 16877 = 0o40755`, which is `S_IFDIR | 0755`: the
 bytes parsed as a directory entry's inode number are an inode's **mode field**.
 
-That first reads as a home-block address error, but pass 2's addressing was
-checked and is correct — `lba = partition_start_lba + fs_block *
-SECTORS_PER_BLOCK`, the same convention the ring read uses. The likelier
-mechanism is a **rollback**, and it follows from how far the scan got:
+Two hypotheses were raised and both were refuted by experiment; the record is
+kept because each was plausible and re-deriving them wastes a session.
 
-Replay applied transaction 1 and stopped at the continuity break. But
-checkpointing had been running normally during the workload, so later
-transactions had already reached their home blocks before the crash. Writing
-transaction 1's version of a block over a home location that had already
-advanced to transaction 2's version moves that block *backwards*. The result on
-disk is a mix of old and new metadata, which is exactly what a directory block
-holding plausible-looking garbage looks like.
+**Refuted: a home-block address error in pass 2.** Its addressing is correct,
+`lba = partition_start_lba + fs_block * SECTORS_PER_BLOCK`, the same convention
+the ring read uses.
 
-If that is right, the invariant being violated is: replaying transaction N is
-only safe when every committed transaction after N is replayed too, because
-checkpointing is in-order — if transaction 2's blocks reached home, transaction
-1's did as well. A scan that stops early therefore cannot simply apply what it
-found. Either the earlier transactions must be skipped when the persisted tail
-is known to lag, or the scan must establish that it reached the true end of the
-committed region before applying anything.
+**Refuted: replay dragging blocks backwards.** The theory was that
+checkpointing had already advanced home blocks past the transaction replay
+re-applied. Snapshotting the disk after the crash but *before* any mount kills
+it. At that point `efs-fsck` reports:
 
-Confirm before fixing: instrument which home blocks pass 2 writes, and compare
-against the block that `efs-fsck` reports as corrupt. If that block's pre-replay
-content was *newer* than what replay wrote, the rollback hypothesis holds and
-the addressing is a red herring.
+```
+[ERROR][dir-tree] orphan inode 2..11 (reachable link count 0)
+(no block-bitmap errors at all)
+```
+
+The root directory is intact and ten inodes are orphaned: the inode table
+reached disk, the directory entries naming those inodes did not. That is the
+ordinary half-finished state the journal exists to repair, and nothing has
+moved *forward* past the transaction being replayed. Running replay over it
+then produces the corrupt root entry and 54 bitmap leaks.
+
+**So replay damages a repairable filesystem, and the defect is in what it
+writes rather than in when it writes it.** It wrote inode-table content into
+the root directory's home block, which means the pairing between a descriptor's
+list of block addresses and the data blocks following it is misaligned: entry
+*i* named the directory block while `data_blocks[i]` held inode-table content.
+
+### Partly addressed: the superblock now publishes on commit
+
+`seal_and_commit` writes the journal superblock once a transaction's ring
+blocks are down, rather than leaving that to `advance_tail`. Before, a whole
+workload could run without the superblock being written at all: it kept the
+values `efs-mkfs` wrote while the ring wrapped underneath it, so nothing on
+disk described the ring's real extent. `efs-fsck` on a crashed image now
+reports `journal is dirty ... tail_seq=1 head_seq=2` where it previously saw a
+clean journal and said nothing.
+
+The write was already FUA, so this costs one extra barrier per commit. That is
+a real cost on a path where barrier count already dominates fsync latency
+(`doc/STORAGE-ROADMAP.md` §1), and it is worth revisiting once the remaining
+defect is understood; correctness first.
+
+**It does not fix the corruption.** A crash-and-recover cycle still ends with
+`dir inode 1: entry '' points to out-of-range inode` and leaked bitmap bits.
+Three hypotheses have now been refuted by experiment (wrong home-block
+addresses, replay dragging blocks backwards, and transaction granularity — the
+EFS write paths already open one transaction per VFS operation and
+`create_file_inner` enrols the inode, the inode table and the parent directory
+entry in it). Do not re-derive them.
+
+What is known and not yet explained: replay applies transaction 1 faithfully,
+block 519 ends up byte-identical to the journal's copy of it and is a valid
+directory block containing `.`, `..` and the iotest filenames, and yet the root
+inode comes back unreachable. The next question is therefore not what replay
+writes but **which block the root inode's extent points at after replay** — if
+inode 1's extent does not name 519, `efs-fsck` is reading a different, stale
+block and everything else follows. Dump inode 1 out of the replayed inode-table
+block and compare its extent against 519 before touching any code.
+
+Next step, on the host, against a pre-replay snapshot: parse the ring's
+descriptor block, list its `fs_block` entries in order, and compare each
+against the content of the data block replay would pair with it. Candidates for
+where the misalignment enters, in order of suspicion: whether the writer places
+the revoke block where the reader expects it, whether a descriptor's entry
+count can exceed the data blocks actually written, and whether an escaped block
+consumes a ring slot the reader does not account for. `doc/efs.md` §14 is the
+format authority.
+
+The snapshot-before-mount technique is what made this legible, and it is worth
+reusing: an unclean image is evidence, and mounting it destroys the evidence.
 
 Until that is fixed, recovery preserves committed work and lands some of it in
 the wrong place. Both states are bad; neither is a release.

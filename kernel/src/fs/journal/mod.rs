@@ -1058,6 +1058,17 @@ impl Journal {
                 self.set_committed_seq(&mut s, tx.seq);
                 s.committed_pending.push_back((tx.seq, needed));
             }
+
+            // Publish the cursors before the next commit can reuse ring space.
+            //
+            // Recovery starts at the tail the superblock records. Leaving that
+            // write to `advance_tail` alone lets the ring wrap several times
+            // under a superblock still naming a long-retired transaction, and
+            // replay then re-applies that ancient transaction over metadata
+            // that has since moved on, rolling it backwards. The superblock
+            // write is FUA, so the record on disk never lags the ring.
+            self.write_journal_sb()?;
+
             self.commit_wq.wake_all();
         }
 
