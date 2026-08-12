@@ -635,6 +635,23 @@ impl Journal {
         !s.sealed.is_empty() || !s.committed_pending.is_empty()
     }
 
+    /// Sealed transactions, committed-but-not-retired transactions, and blocks
+    /// the checkpoint tracker is still waiting on. What [`Self::needs_checkpoint`]
+    /// answers from, as numbers, so `sync` failing to converge can be read
+    /// rather than inferred: a run that ends with `pending` stuck at a non-zero
+    /// value while `tracked` is 0 means transactions are committed and fully
+    /// checkpointed but never retired.
+    pub fn depths(&self) -> (usize, usize, usize) {
+        let tracked = ranked_lock!(
+            RANK_JOURNAL_TRACKER,
+            "Journal.checkpoint_tracker",
+            self.checkpoint_tracker
+        )
+        .len();
+        let s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
+        (s.sealed.len(), s.committed_pending.len(), tracked)
+    }
+
     /// [`has_pending_work`] for a wait-queue predicate, which runs with
     /// interrupts disabled and so must never block on `state`.
     ///
@@ -665,6 +682,17 @@ impl Journal {
     pub fn advance_tail(&self) -> Result<(), AhciError> {
         self.prune_checkpointed();
 
+        // The oldest sequence that still has a block waiting to reach its home
+        // location. Everything below it is fully checkpointed and retirable.
+        //
+        // An empty tracker means *nothing* is waiting, so the bound is one past
+        // the highest committed sequence rather than that sequence itself.
+        // Using `committed` leaves the newest committed transaction pinned
+        // forever, since the loop below retires strictly below the bound: it
+        // stays in `committed_pending`, `needs_checkpoint` never goes false, and
+        // `sync` spends all `SYNC_MAX_ROUNDS` rounds and then reports the
+        // journal still pending. The next mount replays a transaction whose
+        // blocks are already at home.
         let min_journaled_seq = {
             // Hoist committed_seq() read before taking checkpoint_tracker to avoid
             // a tracker -> state lock-order inversion (see doc/invariants/lock-order.md,
@@ -675,7 +703,11 @@ impl Journal {
                 "Journal.checkpoint_tracker",
                 self.checkpoint_tracker
             );
-            tracker.values().copied().min().unwrap_or(committed)
+            tracker
+                .values()
+                .copied()
+                .min()
+                .unwrap_or(committed.saturating_add(1))
         };
 
         let mut changed = false;

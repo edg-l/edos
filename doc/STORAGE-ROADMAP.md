@@ -126,6 +126,12 @@ FUA commit block. `fsbench` samples it like the other counter files, and the
 three `*_per_*` lines are boot-wide averages rather than totals, so a run's own
 average comes from dividing the totals.
 
+It also reports `sealed`, `pending` and `tracked`, the queue depths
+`needs_checkpoint` answers from, summed over every mounted journal. `pending`
+stuck at a non-zero value while `tracked` is 0 means transactions are committed
+and fully checkpointed but never retired, which is what made `sync` run to its
+round cap on every call before `advance_tail`'s retire bound was fixed.
+
 A fresh-disk `fsbench write -n 32 /var`, read from a clean boot:
 
 ```

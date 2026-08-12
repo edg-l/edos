@@ -33,9 +33,12 @@ and leaves `target/`'s copy whole. Do not replace that with a plain `strip`.
 a guest binary's debug info: `addr2line` is pointed at `target/`, `strace` names
 calls from the kernel's own table, and there is no debugger in the guest.
 
-What is left is mostly the live root, sized at 1.4x the filesystem tree it
-carries (43 MB for 26 MB of files), so the next lever on image size is that
-multiplier or compressing the module, not the binaries.
+What is left is mostly the live root, and the lever on it has changed. The
+`live-root.img` recipe in `GNUmakefile` takes 1.4x the tree and then raises that
+to a 64 MiB floor, and stripping put the tree at 25 MiB, so 1.4x is 35 MiB and
+**the floor is now what sets the size**, not the multiplier. Lowering it is the
+next lever, bounded by how much a live session needs to be able to write, since
+the live root is the whole writable filesystem until someone installs.
 
 Every gate is green and re-run at this commit: `make -C kernel check` and
 `cargo check --features sched-test` are warning-free, both `cargo fmt --check`
@@ -52,6 +55,56 @@ copy could land on the home block after the direct data write. A host scan of a
 missing). The mechanism, and the four diagnoses that were refuted on the way to
 it, are further down this file — read those before re-opening anything about
 fragmented-file reads.
+
+---
+
+## The newest committed transaction was never retired, so `sync` never converged
+
+`sys_sync` loops commit, flush, `advance_tail` to a fixed point, up to
+`SYNC_MAX_ROUNDS` (8), and warned `journal still pending after 8 rounds` when it
+gave up. It gave up on **every call**, and the reason was an off-by-one in what
+`advance_tail` is allowed to retire.
+
+`min_journaled_seq` is the oldest sequence that still has a block waiting to
+reach its home location, taken as the minimum of `checkpoint_tracker`. The retire
+loop pops while `seq < min_journaled_seq`. When the tracker is *empty*, nothing
+is waiting and every committed transaction is retirable, but the fallback was
+`unwrap_or(committed)`, which makes the bound the newest committed sequence
+itself. That transaction therefore never popped: `committed_pending` kept one
+entry forever, `needs_checkpoint()` stayed true, and `sync` burned all eight
+rounds. The fallback is `committed.saturating_add(1)`.
+
+Two costs, both paid on every `sync`: eight flush passes where one would do, and
+a mount that replays a transaction whose blocks are already at home.
+
+`/proc/journal_stats` gained `sealed`, `pending` and `tracked` so this is readable
+rather than inferred. It is the shape to look for: `pending` stuck non-zero while
+`tracked` is 0 means transactions are committed and fully checkpointed but not
+retired. After a plain `sync`, before and after the fix:
+
+```
+sealed: 0   pending: 1   tracked: 0      <- pinned
+sealed: 0   pending: 0   tracked: 0      <- fixed
+```
+
+Verified with `make storage-check`: `fs-regression` OK on EFS and FAT32 across a
+reboot, `fsbench-run /var` OK, and zero occurrences of the warning in a run that
+produced it reliably before.
+
+### The 275-second `fsbench all /var` hang, and why it is probably gone
+
+That warning was the suspect behind the recorded hang, and the two turn out to be
+different bugs. The hang did not reproduce here (`fsbench all /var` completed in
+16.2 s), and the mechanism that fits it is the missing barrier described in the
+next section: `force_commit_and_wait` waits on `commit_wq`, whose producer stores
+`committed_seq_pub` with a plain `Release` store and then wakes. That is a third
+instance of the barrier-free has-waiters pattern, and because the wait carries a
+30 s timeout a lost wake costs 30 s rather than hanging outright. Eight rounds of
+that is 240 s, against the 275 s of silence in the report.
+
+Treat it as explained but not proven: the report predates the has-waiters check
+entirely, so a lost wake cannot be the *original* cause. Something with the same
+shape and the same 30 s timeout is the place to look if it returns.
 
 ---
 
