@@ -18,9 +18,6 @@ pub const MS_ASYNC: u32 = 0x1;
 pub const MS_SYNC: u32 = 0x2;
 pub const MS_INVALIDATE: u32 = 0x4;
 
-// SYS_MSYNC is 34, not present in edos_lib::sys yet
-const SYS_MSYNC: u64 = 34;
-
 /// Map memory into the address space.
 ///
 /// For anonymous mappings pass `fd = -1` and `file_offset = 0`.
@@ -60,5 +57,5 @@ pub fn munmap(addr: *mut u8, length: u64) -> i32 {
 /// `addr` must point to a page-aligned address within a file-backed mapping of
 /// at least `length` bytes.
 pub unsafe fn msync(addr: *mut u8, length: u64, flags: u32) -> i32 {
-    unsafe { sys::syscall3(SYS_MSYNC, addr as u64, length, flags as u64) as i32 }
+    unsafe { sys::syscall3(sys::SYS_MSYNC, addr as u64, length, flags as u64) as i32 }
 }
