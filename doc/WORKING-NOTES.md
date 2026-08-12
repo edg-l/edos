@@ -4237,37 +4237,51 @@ windows become 5, and 243 windows are declined and billed to the reader inside
 its own `read`. That is where the 287 -> 132 MiB/s went, not into the extra
 commands.
 
-## An interleaved-append file loses one 512-byte sector of a block
+## An interleaved-append file reads zeros somewhere, and the size of "somewhere" was an artifact
 
 **Open.** Repro: `fsbench fragprep /var`, reboot, `fsbench ra /var` — the pass
 reports `VERIFY FAIL byte <n> of the file is 0x00, want <p>`. The contiguous arm
 (`raprep`) verifies clean in the same build, so it takes the interleaved
 append + `fsync` pattern to produce it.
 
-What the offset says. One run failed at 1113600, which is block 271 of the file
-(`271 x 4096 + 3584`) and **sector 2175 exactly** — the last of that block's
-eight sectors. The block's first 3584 bytes are the right pattern bytes and its
-last 512 are zeros, so this is a partial-block write, not a lost block. An
-earlier run failed at 786432, a step boundary; the two disagree, so the offset
-is a property of the layout the allocator happened to produce, not of a fixed
-boundary.
+**Ruled out: it is not a sub-block write, and the "one 512-byte sector" reading
+of the two failing offsets was the instrument, not the bug.** `ra_check_edges`
+compares only the **first and last 512 bytes of each 64 KiB call**, so a failing
+offset says where the check looked. Both observed failures sit exactly on one of
+those edges: 786432 is the head edge of call 12, and 1113600 is `1048576 +
+65024`, the head of the tail edge of call 16. Nothing ever compared the 3584
+bytes before it, so "the block's first 3584 bytes are right and its last 512 are
+zeros" was never measured; neither was the `dd bs=512 skip=2175 count=1` probe,
+which sampled the same 512 bytes and nothing else. `ra_check_edges` now walks the
+whole chunk once an edge has failed and reports how many bytes differ and between
+which file offsets, so the next failure states its own extent.
 
-It is the write path, and these are the three things that say so:
+**Ruled out: the damage is not on the disk.** `scripts/fsbench-pattern-scan.py`
+recognises any block of an fsbench pattern file inside a raw image from its first
+16 bytes and compares all 4096, which answers the question without the guest's
+read path in the way:
 
-- `/proc/efs_stats`'s `extent_holes` counts runs `read_via_extents` planned as a
-  hole below EOF. It stays 0 across the failing pass, so the block is mapped and
-  the read asked the device for all eight of its sectors — the planner is not
-  reading zeros out of an unmapped range.
-- The same byte fails on **two successive cold boots** of the same disk, so the
-  zeros are stable state rather than a race in the read.
-- A single `dd if=/var/fsbench.ra of=/tmp/x.bin bs=512 skip=2175 count=1` on a
-  third cold boot — one 4 KiB fill, no sequential pass, no prefetch window —
-  hexdumps 512 zero bytes. Whatever wrote the block wrote seven sectors.
+```bash
+qemu-img convert -O raw sata-disk.img ~/.cache/tmp/sata.raw
+scripts/fsbench-pattern-scan.py ~/.cache/tmp/sata.raw --tag 7 --size 16M
+# 7672 pattern blocks in the image, 7672 byte-perfect, 0 damaged
+```
 
-So the next step is the write side: find what submits a **sub-block** write for
-a page whose whole 4096 bytes are dirty, or what lets a second writeback of the
-same page land after the first with only part of it valid. `EfsDriver::flush_page`
-/ `flush_pages_bulk` and the `fsync` path that runs concurrently with them are
-where to look; the seam that produced nine earlier write-path data-loss bugs was
-a direct write bypassing one of the two caches, which is also the only shape in
-this filesystem that can write at sector rather than block granularity.
+That is the `fragprep` disk from the run that failed, and **no block anywhere on
+it is partially written**: not one of the 7672 differs in a single byte. So
+whatever the reader saw, there is no half-written block for it to have read.
+
+What that leaves, and it is a different bug from the one written down before:
+
+- The extent map names a **physical block that holds no file data** — a block
+  `ensure_block_for_logical` zeroed and nothing later filled, or a mapping that
+  points somewhere else entirely. `extent_holes` stays 0, so the range is
+  mapped; being mapped says nothing about what is in it.
+- Or the read plans the **wrong physical block** for part of a run, so the bytes
+  come from a block that is not the file's. A whole-chunk report distinguishes
+  these two immediately: a mapped-but-empty block reads as an aligned run of
+  zeros, a mis-planned run reads as another file's pattern.
+
+Redo the repro on the fixed instrument before touching either. The failing
+offset will now come with the range it covers, and the host scan says whether
+anything reached the disk.

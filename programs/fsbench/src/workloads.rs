@@ -1133,6 +1133,12 @@ pub fn ra_read(dir: &str) -> Result<RaReport, String> {
 /// exactly the thing the instrument is trying to observe. The edges still catch
 /// a block landing at the wrong offset, a stale block from another test, and a
 /// page of zeros that was never filled.
+///
+/// The two edges are the only bytes this looks at, so a failing offset says
+/// where the check was, not where the damage ends. [`ra_damage_extent`] walks
+/// the whole chunk once a mismatch is in hand, and the message carries its
+/// bounds — reading the edge offset as the extent of the loss is how one bad
+/// block gets mistaken for one bad sector.
 fn ra_check_edges(data: &[u8], offset: u64) -> Option<String> {
     const EDGE: usize = 512;
     let tail = data.len().saturating_sub(EDGE);
@@ -1142,12 +1148,35 @@ fn ra_check_edges(data: &[u8], offset: u64) -> Option<String> {
             let want = byte_at(RA_TAG, offset + i as u64);
             if data[i] != want {
                 return Some(format!(
-                    "byte {} of the file is {:#04x}, want {want:#04x}",
+                    "byte {} of the file is {:#04x}, want {want:#04x}; {}",
                     offset + i as u64,
-                    data[i]
+                    data[i],
+                    ra_damage_extent(data, offset)
                 ));
             }
         }
     }
     None
+}
+
+/// Describe every byte of a chunk that does not match the pattern.
+///
+/// Only runs once, after an edge check has already failed, so the cost of
+/// generating the pattern for the whole chunk does not touch the timings.
+fn ra_damage_extent(data: &[u8], offset: u64) -> String {
+    let bad: Vec<usize> = (0..data.len())
+        .filter(|&i| data[i] != byte_at(RA_TAG, offset + i as u64))
+        .collect();
+    let (Some(&first), Some(&last)) = (bad.first(), bad.last()) else {
+        return "no byte of the chunk differs".to_string();
+    };
+    let zeros = bad.iter().filter(|&&i| data[i] == 0).count();
+    format!(
+        "the chunk differs in {} of {} bytes, {} of them zero, from byte {} to byte {} of the file",
+        bad.len(),
+        data.len(),
+        zeros,
+        offset + first as u64,
+        offset + last as u64
+    )
 }
