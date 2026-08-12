@@ -55,8 +55,8 @@ is the one remaining number that would still matter on real hardware.
 The reason is structural, not a slow submit path. **Almost every I/O path in the
 kernel is submit-then-wait.** `block_read` / `block_write` / `block_write_fua`
 in `fs/efs/mod.rs`, `read_frame` / `write_frame` / `write_frames` in
-`fs/block_page_cache.rs`, and the equivalents in `fs/journal/`, `fs/fat32/`,
-`fs/gpt.rs` and `fs/mbr.rs` all call `submit_*` and immediately park on the
+`fs/block_page_cache.rs`, and the equivalents in `fs/journal/replay.rs`,
+`fs/fat32/`, `fs/gpt.rs` and `fs/mbr.rs` all call `submit_*` and immediately park on the
 handle.
 
 Three paths do not. `BlockPageCache::read_pages` → `submit_read_batch` coalesces
@@ -78,11 +78,12 @@ is longer than the 992 KiB one command carries, goes out as one queue of up to
 trip per run. The mount-time paths (`fs/journal/replay.rs` home blocks,
 `fs/fat32/`, `fs/gpt.rs`, `fs/mbr.rs`) still do not.
 
-That read change does not move `fsbench ra`: its window is 128 pages, one run of
-a contiguous file, and its 248 async windows all take the single-submit prefetch
-path (`windows sync fallback: 0 declined`). What it changes is the fallback — a
-fragmented file, and any single read larger than one command — which no bench
-currently generates. Measuring it wants a workload that fragments a file first.
+That read change does not move `fsbench ra` on a contiguous file: its window is
+128 pages, one run, and every async window takes the single-submit prefetch
+path. What it changes is the fallback — a fragmented file, and any single read
+larger than one command. `fsbench fragprep` builds the fragmented case, and
+`fsbench ra` on it went from 5 async windows and 243 sync fallbacks to 248 async
+and 0 declined once prefetch learned to plan multi-extent windows.
 
 So a 4 KiB read is a dependent round trip, not a queued one, and the 100 us is
 what a round trip costs: syscall, cache lookup, frame allocation, submit, park,
@@ -102,15 +103,16 @@ The fix that matters is giving readahead and writeback a path that keeps
 commands outstanding, so depth 32 is reachable at all. Until something asks for
 depth, per-command micro-optimisation has nothing to bite on: see the two
 completion-side cuts in the refuted list below, both of which were neutral.
-Writeback now asks; what is left is the read side outside readahead, and the
-journal, whose commits are the other bulk writer.
+Writeback asks, and so does the journal committer; what is left is the read side
+outside readahead and the mount-time paths.
 
 Readahead has half of that path now (section 1b): a window is submitted before
-the reader parks, so a command is outstanding while the reader waits. Depth
-still never exceeds 1, because the reader joins that same window's handle rather
-than issuing one of its own, and a 512 KiB window is a single command. Reaching
-depth means several windows in flight at once, or splitting one — writeback has
-none of it yet.
+the reader parks, so a command is outstanding while the reader waits. On a
+contiguous file depth still never exceeds 1, because the reader joins that same
+window's handle rather than issuing one of its own, and a 512 KiB window of one
+extent is a single command; a window spanning several extents is now one command
+per run. Reaching depth on the contiguous case means several windows in flight
+at once, or splitting one.
 
 Coalescing cannot help here — one page is one command — so this is
 per-operation work, not another run-length fix.
