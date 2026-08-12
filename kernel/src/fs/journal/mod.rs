@@ -150,6 +150,8 @@ fn block_flush(device_id: u64) -> Result<(), AhciError> {
 use super::block_page_cache::CachedBlockPage;
 
 pub mod committer;
+#[cfg(feature = "fault-inject")]
+pub mod faultinject;
 pub mod replay;
 pub mod tx;
 
@@ -650,6 +652,23 @@ impl Journal {
         .len();
         let s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
         (s.sealed.len(), s.committed_pending.len(), tracked)
+    }
+
+    /// Ring cursors: `(head_seq, tail_seq, head_block, tail_block, ring_size)`.
+    ///
+    /// Whether the live region wraps is the one property a recovery test has to
+    /// establish before an unclean cut is worth taking, and it cannot be
+    /// inferred from the depths: a wrapped ring is `head_block % ring_size <
+    /// tail_block % ring_size`, which needs the cursors themselves.
+    pub fn cursors(&self) -> (u64, u64, u64, u64, u64) {
+        let s = ranked_lock!(RANK_JOURNAL_STATE, "Journal.state", self.state);
+        (
+            s.head_seq,
+            s.tail_seq,
+            s.head_block,
+            s.tail_block,
+            self.block_count as u64 - 1,
+        )
     }
 
     /// [`has_pending_work`] for a wait-queue predicate, which runs with

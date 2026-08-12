@@ -1166,6 +1166,17 @@ impl BlockPageCache {
                     }
                 };
 
+                // Recovery testing holds committed transactions in the ring so
+                // that an unclean cut has something to replay. Nothing else
+                // keeps a journalled block off its home location once its
+                // transaction is committed.
+                #[cfg(feature = "fault-inject")]
+                if journal_seq_for_page.is_some()
+                    && crate::fs::journal::faultinject::checkpoint_paused()
+                {
+                    continue;
+                }
+
                 if let Some(enrolled_seq) = journal_seq_for_page {
                     let committed = {
                         let journals =

@@ -15,4 +15,5 @@ fresh.img
 __pycache__/
 run_log.txt
 usb-test.img
+journal-test.img
 /logs/

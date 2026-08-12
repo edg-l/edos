@@ -174,6 +174,11 @@ def cmd_start(args):
         usb_disk = (args.usb_disk if os.path.isabs(args.usb_disk)
                     else os.path.join(REPO, args.usb_disk))
         required.append((usb_disk, f"make {os.path.basename(usb_disk)}"))
+    extra_disk = None
+    if args.extra_disk:
+        extra_disk = (args.extra_disk if os.path.isabs(args.extra_disk)
+                      else os.path.join(REPO, args.extra_disk))
+        required.append((extra_disk, f"make {os.path.basename(extra_disk)}"))
     for path, target in required:
         if not os.path.exists(path):
             raise SystemExit(f"missing {os.path.basename(path)}; run `{target}` first")
@@ -263,6 +268,17 @@ def cmd_start(args):
     if args.pcap:
         pcap = args.pcap if os.path.isabs(args.pcap) else os.path.join(REPO, args.pcap)
         qemu += ["-object", f"filter-dump,id=dump0,netdev=net0,file={pcap}"]
+
+    # A second SATA drive on its own bus. The guest does not boot from it, so a
+    # test can format, mount and cut power on it without touching the root.
+    if extra_disk:
+        qemu += [
+            "-drive", f"id=sata1,if=none,format={_disk_format(extra_disk)},file={extra_disk},aio=io_uring",
+            # ide.3 with an explicit unit: each q35 AHCI port is a bus of one
+            # unit, ide.1 holds the root disk and `-cdrom` takes ide.2, and
+            # without `unit=0` QEMU tries to place this on unit 1 and refuses.
+            "-device", "ide-hd,drive=sata1,bus=ide.3,unit=0",
+        ]
 
     # Hangs off the same qemu-xhci as the keyboard and mouse, so the guest
     # reaches it through its own xHCI driver rather than a second controller.
@@ -742,6 +758,10 @@ def main():
     s.add_argument("--usb-disk", nargs="?", const="usb-test.img", default=None,
                    metavar="IMAGE",
                    help="attach IMAGE (default usb-test.img) as a USB mass-storage device")
+    s.add_argument("--extra-disk", nargs="?", const="journal-test.img", default=None,
+                   metavar="IMAGE",
+                   help="attach IMAGE (default journal-test.img) as a second SATA drive, "
+                        "for filesystems the guest mounts rather than boots from")
     s.add_argument("--no-cdrom", action="store_true",
                    help="boot without the ISO, e.g. to test an installed disk")
     s.add_argument("--ssh-fwd", type=int, default=2323,

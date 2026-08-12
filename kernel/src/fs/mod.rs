@@ -58,6 +58,8 @@ pub use page_fill::PageFillHandle;
 pub use devfs::{DevFsDevice, DevFsError, DevFsHandle as DevFs, register_device_str};
 
 pub fn init() {
+    #[cfg(feature = "fault-inject")]
+    journal::faultinject::init();
     queue_spawn_kthread_named("fs", fs_main_thread as *const () as u64);
 }
 

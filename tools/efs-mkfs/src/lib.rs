@@ -41,7 +41,11 @@ Options:
   --populate <DIR>               Recursively copy files from DIR into the root
   --partition-offset <BYTES>     Byte offset of EFS partition within the image (default: 0)
   --label <NAME>                 Volume label (max 63 chars)
-  --journal-size-mib <N>         Journal size in MiB (default: 16, min: 4)
+  --journal-size-mib <N>         Journal size in MiB (default: 16, min: 1). Sizes
+                                 below 4 exist for recovery testing: a small ring
+                                 wraps in seconds instead of needing hours of
+                                 metadata churn. One transaction may enroll at
+                                 most a quarter of the ring.
   --help                         Show this help
 "
     );
@@ -132,8 +136,8 @@ fn parse_args() -> Args {
                     eprintln!("invalid journal size: {val}");
                     process::exit(1);
                 });
-                if n < 4 {
-                    eprintln!("--journal-size-mib must be at least 4");
+                if n < 1 {
+                    eprintln!("--journal-size-mib must be at least 1");
                     process::exit(1);
                 }
                 journal_size_mib = n;

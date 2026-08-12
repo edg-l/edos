@@ -141,6 +141,30 @@ run-storage: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME)
 usb-test.img:
 	qemu-img create -f raw usb-test.img 16M
 
+# A scratch EFS whose journal ring is deliberately tiny, so a metadata workload
+# wraps it in seconds rather than in the hours the default 16 MiB would take.
+# Wrapping is the precondition for testing replay's wrapped-region handling,
+# which no ordinary boot ever reaches: a normal boot uses about 50 ring blocks.
+# Its partition GUID differs from $(PARTITION_UUID) on purpose: root selection
+# matches the cmdline GUID across every enumerated partition, so a copy of the
+# root's GUID on a second attached disk would make which disk boots a race.
+JOURNAL_TEST_UUID := 5a5a5a5a-0000-4000-8000-00000000ed05
+journal-test.img: tools/efs-mkfs/src/*.rs libs/efs-common/src/*.rs
+	rm -f journal-test.img
+	qemu-img create -f raw journal-test.img 64M >/dev/null
+	sgdisk journal-test.img -n 1:2048 -t 1:0700 -c 1:"JTEST" --partition-guid=1:$(JOURNAL_TEST_UUID)
+	cargo build --release --manifest-path tools/efs-mkfs/Cargo.toml
+	tools/efs-mkfs/target/release/efs-mkfs --partition-offset 1048576 --journal-size-mib 1 \
+		--label JTEST journal-test.img
+
+# Boots with `/dev/journal-ctl` available and the small-ring scratch disk
+# attached as a second SATA drive. See doc/journal-recovery-test.md for the
+# procedure; the disk is not the root, so cutting power on it is safe.
+.PHONY: run-recovery
+run-recovery: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img journal-test.img
+	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features fault-inject"
+	scripts/edos-vm start --extra-disk journal-test.img
+
 .PHONY: run-trace
 run-trace: programs limine/limine ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img
 	$(MAKE) -C kernel CARGO_FLAGS="--features trace"

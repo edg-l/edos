@@ -345,7 +345,7 @@ impl Procfs {
                 (s + js, p + jp, tr + jt)
             },
         );
-        format!(
+        let mut out = format!(
             concat!(
                 "commits: {}\nempty_commits: {}\ncheckpoints: {}\n",
                 "ring_blocks: {}\ndata_blocks: {}\ncommands: {}\n",
@@ -374,7 +374,31 @@ impl Procfs {
             sealed,
             pending,
             tracked,
-        )
+        );
+
+        // One row per mounted journal, since the cursors are per-ring and
+        // summing them would be meaningless. `wrapped` is the property a
+        // recovery test waits for before taking an unclean cut.
+        for j in BlockPageCache::global().all_journals().iter() {
+            let (head_seq, tail_seq, head_block, tail_block, ring_size) = j.cursors();
+            // A journal with no ring cannot be mounted, but this is a debug
+            // file and must not be the thing that panics if one ever is.
+            let modulus = ring_size.max(1);
+            let _ = writeln!(
+                out,
+                "journal dev {}: head_seq {} tail_seq {} head_block {} tail_block {} \
+                 ring_size {} used {} wrapped {}",
+                j.device_id,
+                head_seq,
+                tail_seq,
+                head_block,
+                tail_block,
+                ring_size,
+                head_block.wrapping_sub(tail_block),
+                (head_block % modulus) < (tail_block % modulus),
+            );
+        }
+        out
     }
 
     fn render_inflight_stats() -> String {
