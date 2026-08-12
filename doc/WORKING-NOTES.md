@@ -97,6 +97,38 @@ instead of the 4095 blocks a default journal takes. `make run-recovery` boots
 both together. The procedure, and the host-side superblock rewind that predates
 it with its two off-by-one traps, are in `doc/journal-recovery-test.md`.
 
+### efs-fsck had all three bugs too, because replay was written twice
+
+The kernel's fixes did not reach the checker: `tools/efs-fsck/src/replay.rs` was
+a hand-port of the same algorithm, so every kernel fix needed porting by hand and
+none had been. It bounded dirtiness by `tail_seq != head_seq`, walked past
+sequence breaks into the stale far side of a wrapped ring, and added the
+partition offset to home blocks that already carried it — the last being 6c0a96e
+verbatim, in the tool that is supposed to be the canonical recovery path, where
+`--repair` would have scattered replayed metadata `--partition-offset` bytes up
+the disk. It also retired the ring to the persisted head, so a checked image
+still asked the kernel to replay what fsck had just applied.
+
+The fix is structural: the ring walk is `libs/efs-common/src/journal_scan.rs`
+now, called by both, with only block I/O left on either side. The ring *writers*
+moved with it (`journal_build.rs`), which is what lets the fsck tests plant a
+real committed transaction using the same code the kernel writes one with.
+
+Two rules fell out of this and are in `doc/efs.md` §14:
+
+- **The head cursors are advisory.** `head_seq` names the open transaction, so a
+  healthy journal sits a sequence ahead of its tail; a crash between a commit and
+  the superblock write leaves them equal with committed work in the ring. Nothing
+  may decide dirtiness from them or bound a scan by them.
+- **`DescriptorEntry::fs_block` is device-absolute.** Ring blocks are
+  partition-relative and need the offset added; home blocks already carry it.
+  Three bugs have now come from those two domains both being `u64`.
+
+Each of the four is covered by a test in `tools/efs-fsck/tests/integration.rs`
+that was **watched to fail** with the defect reintroduced. The old journal tests
+asserted the wrong rule — they used a JSB with an advanced head over an empty
+ring and expected "journal is dirty" — so they were replaced rather than kept.
+
 ---
 
 ## The newest committed transaction was never retired, so `sync` never converged
@@ -3316,10 +3348,13 @@ slot.
   `rust-toolchain.toml` says plain `nightly`, `kernel/` pins
   `nightly-2026-03-06`, and the `x86_64` crate does not build on current
   nightly. Use `make -C kernel check`.
-- **`efs-fsck` aborts before its dir-tree pass on a dirty journal**, so a "0
-  findings" line from a power-cut image proves nothing. Type `shutdown` in the
-  guest rather than `edos-vm stop`: it syncs every filesystem and the resulting
-  image checks clean with no `--repair` replay.
+- **`efs-fsck` findings from a power-cut image are not trustworthy until the
+  journal is replayed.** The later phases check home blocks the ring may still
+  hold newer copies of, so orphan inodes and bitmap mismatches can be artifacts
+  rather than damage. The dirty-journal finding says so; run `--repair` (which
+  replays first) and re-check, or type `shutdown` in the guest rather than
+  `edos-vm stop`, which syncs every filesystem and leaves an image that checks
+  clean with no replay.
 - **Nothing on screen is addressed by pixel any more.** Windows go by title
   (`edos-vm windows`, `edos-vm focus <title>`) from `/proc/windows`; the panel's
   controls go by name (`edos-vm panel`, `edos-vm press <name>`, `edos-vm launch

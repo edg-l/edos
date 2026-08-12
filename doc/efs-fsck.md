@@ -98,13 +98,34 @@ Each finding is tagged with a severity and a category. Severity levels:
 Checks the Journal Superblock (JSB) at `journal_first_block`, then the
 transaction ring.
 
+Whether the journal holds outstanding work is decided by **walking the ring**,
+not by comparing the JSB's cursors. `head_seq`/`head_block` are advisory (see
+`doc/efs.md` §14): `head_seq` names the open transaction, which is never
+committed, so a healthy journal usually sits a sequence ahead of its tail, and a
+crash between a commit and the superblock write leaves them equal with committed
+work still in the ring. The walk itself is `efs_common::scan_committed`, the same
+code the kernel runs at mount time, so the checker's verdict and the kernel's
+recovery cannot drift apart.
+
 | Finding | Severity | Fixable | What fsck does |
 |---------|----------|---------|----------------|
-| `journal is dirty` (tail_seq != head_seq) | ERROR | yes | With `--repair`: replays committed transactions to home locations, resets JSB (`tail = head`). Without `--repair`: reports and exits 4. |
+| `journal is dirty` (the ring holds committed transactions) | ERROR | yes | With `--repair`: replays them to their home locations, then sets all four JSB cursors to one past the last transaction applied. Without `--repair`: reports the count and sequence range, and exits 4. |
+| `journal ring scan failed` (I/O error mid-walk) | ERROR | no | Reports; the phases below then run against home blocks the journal may still hold newer copies of. |
 | JSB magic/version mismatch | ERROR | no | Refuses replay; suggests `--force` to skip. |
 | JSB CRC mismatch | ERROR | no | Same as above. |
 | JSB `block_size` != FS block_size | ERROR | no | Refuses replay. |
+| JSB `head_seq` < `tail_seq` | ERROR | no | Refuses replay. The head may lag the ring, but never the tail. |
 | Commit block CRC mismatch mid-ring | INFO | no | Stops replay at that point; treats subsequent ring content as uncommitted. This is normal for a torn write. |
+| Descriptor with an out-of-sequence seq | — | — | Ends the walk silently: this is the ordinary end of the live region, and beyond it lies the stale far side of a wrapped ring. |
+
+A dirty journal reported without `--repair` makes the phases below unreliable,
+and the finding says so: those transactions hold metadata whose home blocks are
+still stale, so orphan inodes and bitmap mismatches downstream may be artifacts
+of the un-replayed journal rather than real damage. Replay first, then re-check.
+
+`--partition-offset` must be a whole number of blocks for replay, and `--repair`
+refuses otherwise: journal home blocks are device-absolute, and a partition that
+does not start on a block boundary cannot be addressed in that domain.
 
 ### Superblock (`superblock`)
 
@@ -172,7 +193,8 @@ transaction ring.
 
 ### Will fix (with appropriate confirmation)
 
-- Journal replay: uncommitted transactions written to home locations; JSB reset.
+- Journal replay: committed transactions written to home locations; JSB cursors
+  advanced past them.
 - Leaked block bitmap bits: clear the bit, increment BGD free count.
 - Leaked inode bitmap bits: clear the bit, increment BGD free count.
 - BGD checksum mismatches and free-count sum discrepancies.
@@ -234,10 +256,8 @@ confirm the filesystem is clean.
   images (hundreds of GiB) this may exceed available RAM; there is no streaming
   mode in v1.
 - **Cluster size != block size**: not supported by mkfs or fsck in v1.
-- **Partial journal-commit testing**: fsck can detect a corrupt JSB checksum but
-  cannot test mid-ring commit corruption without a kernel-generated image
-  containing real transactions (the test `partial_tx_discarded` is `#[ignore]`
-  for this reason).
+- **Data-block recovery**: the journal carries metadata only (`data=writeback`),
+  so a torn file write is not something replay or `--repair` can undo.
 
 ---
 
@@ -249,5 +269,7 @@ confirm the filesystem is clean.
   this checker.
 - `libs/efs-common/`: shared on-disk struct definitions used by both mkfs and
   fsck.
-- `kernel/src/fs/journal/`: kernel-side journal implementation, replay logic
-  is ported to `tools/efs-fsck/src/replay.rs`.
+- `libs/efs-common/src/journal_scan.rs`: the ring walk, shared verbatim with the
+  kernel. `tools/efs-fsck/src/replay.rs` supplies the file-backed I/O around it,
+  `kernel/src/fs/journal/replay.rs` the AHCI-backed I/O.
+- `kernel/src/fs/journal/`: kernel-side journal implementation.

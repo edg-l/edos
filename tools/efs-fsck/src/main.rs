@@ -94,15 +94,11 @@ fn main() {
                     });
                 }
             }
-            Ok((jsb, jsb_report)) => {
+            Ok(jsb_report) => {
                 let jsb_has_errors = jsb_report.has_errors();
                 for f in jsb_report.findings {
                     journal_report.push(f);
                 }
-
-                // Copy packed fields to locals before use.
-                let tail_seq = jsb.tail_seq;
-                let head_seq = jsb.head_seq;
 
                 if jsb_has_errors {
                     journal_report.push(Finding {
@@ -112,44 +108,72 @@ fn main() {
                         fixable: false,
                         context: None,
                     });
-                } else if tail_seq != head_seq
-                    && replay::scan_committed(&mut disk, &sb)
-                        .map(|(txs, _)| !txs.is_empty())
-                        .unwrap_or(true)
-                {
-                    if args.repair {
-                        match replay::replay(&mut disk, &sb) {
-                            Ok(result) => {
-                                journal_replayed = 1;
-                                journal_report.push(Finding {
-                                    severity: Severity::Info,
-                                    category: Category::Journal,
-                                    message: format!(
-                                        "replayed {} transaction(s), wrote {} block(s)",
-                                        result.tx_count, result.blocks_written
-                                    ),
-                                    fixable: false,
-                                    context: None,
-                                });
-                            }
-                            Err(e) => {
+                } else {
+                    // Whether the journal is dirty is decided by walking the
+                    // ring, exactly as the kernel decides it at mount time. The
+                    // superblock's head cannot answer it: see replay::scan.
+                    match replay::scan(&mut disk, &sb) {
+                        Err(e) => {
+                            journal_report.push(Finding {
+                                severity: Severity::Error,
+                                category: Category::Journal,
+                                message: format!("journal ring scan failed: {e}"),
+                                fixable: false,
+                                context: Some(
+                                    "the journal may hold committed metadata that the \
+                                     phases below will therefore report as corruption"
+                                        .to_string(),
+                                ),
+                            });
+                        }
+                        Ok(scan) if scan.is_dirty() => {
+                            if args.repair {
+                                match replay::replay(&mut disk, &sb, &scan) {
+                                    Ok(result) => {
+                                        journal_replayed = 1;
+                                        journal_report.push(Finding {
+                                            severity: Severity::Info,
+                                            category: Category::Journal,
+                                            message: format!(
+                                                "replayed {} transaction(s), wrote {} block(s)",
+                                                result.tx_count, result.blocks_written
+                                            ),
+                                            fixable: false,
+                                            context: None,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        journal_report.push(Finding {
+                                            severity: Severity::Error,
+                                            category: Category::Journal,
+                                            message: format!("journal replay failed: {e}"),
+                                            fixable: false,
+                                            context: None,
+                                        });
+                                    }
+                                }
+                            } else {
+                                let first = scan.txs.first().map_or(0, |tx| tx.seq);
+                                let last = scan.txs.last().map_or(0, |tx| tx.seq);
                                 journal_report.push(Finding {
                                     severity: Severity::Error,
                                     category: Category::Journal,
-                                    message: format!("journal replay failed: {e}"),
-                                    fixable: false,
-                                    context: None,
+                                    message: "journal is dirty; run with --repair to replay"
+                                        .to_string(),
+                                    fixable: true,
+                                    context: Some(format!(
+                                        "{} committed transaction(s), seq {first}..={last}, {} \
+                                         ring block(s). Those transactions hold metadata whose \
+                                         home blocks are still stale, so findings below may be \
+                                         artifacts of the un-replayed journal rather than real \
+                                         damage",
+                                        scan.txs.len(),
+                                        scan.ring_blocks
+                                    )),
                                 });
                             }
                         }
-                    } else {
-                        journal_report.push(Finding {
-                            severity: Severity::Error,
-                            category: Category::Journal,
-                            message: "journal is dirty; run with --repair to replay".to_string(),
-                            fixable: true,
-                            context: Some(format!("tail_seq={tail_seq} head_seq={head_seq}")),
-                        });
+                        Ok(_) => {}
                     }
                 }
             }

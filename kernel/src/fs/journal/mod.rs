@@ -17,8 +17,9 @@ use alloc::{
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use efs_common::{
-    DESC_FLAG_ESCAPED, DescriptorEntry, JOURNAL_BLOCK_MAGIC, JOURNAL_MAGIC, JournalBlockHeader,
-    JournalBlockKind, JournalSuperblock, RevokeEntry, commit_block_checksum, journal_sb_checksum,
+    DESC_FLAG_ESCAPED, DescriptorEntry, JOURNAL_BLOCK_MAGIC, JOURNAL_MAGIC, JournalSuperblock,
+    RevokeEntry, build_commit_block, build_descriptor_block, build_revoke_block,
+    commit_block_checksum, journal_sb_checksum,
 };
 
 use crate::{
@@ -330,80 +331,6 @@ impl Journal {
         let ring_size = self.block_count as u64 - 1;
         let ring_idx = (journal_block_idx % ring_size) + 1;
         self.partition_start_lba + (self.first_block + ring_idx) * SECTORS_PER_BLOCK as u64
-    }
-
-    // ---- Block builder helpers ----------------------------------------------
-
-    /// Build a 4096-byte descriptor block for `seq`/`tx_id` listing `entries`.
-    /// Layout: [JournalBlockHeader (24B)] [entry_count: u32 (4B)] [DescriptorEntry * N]
-    pub fn build_descriptor_block(
-        &self,
-        seq: u64,
-        tx_id: u64,
-        entries: &[DescriptorEntry],
-    ) -> Vec<u8> {
-        let mut buf = vec![0u8; BLOCK_SIZE];
-        let hdr = JournalBlockHeader {
-            magic: JOURNAL_BLOCK_MAGIC,
-            kind: JournalBlockKind::Descriptor as u8,
-            _pad: [0u8; 3],
-            seq,
-            tx_id,
-        };
-        write_struct(&mut buf, 0, &hdr);
-        let header_size = core::mem::size_of::<JournalBlockHeader>();
-        // Store entry count after header so replay doesn't rely on zero-termination.
-        buf[header_size..header_size + 4].copy_from_slice(&(entries.len() as u32).to_le_bytes());
-        let entries_offset = header_size + 4;
-        let entry_size = core::mem::size_of::<DescriptorEntry>();
-        for (i, entry) in entries.iter().enumerate() {
-            let off = entries_offset + i * entry_size;
-            if off + entry_size > BLOCK_SIZE {
-                break;
-            }
-            write_struct(&mut buf, off, entry);
-        }
-        buf
-    }
-
-    /// Build a 4096-byte revoke block for `seq`/`tx_id` listing `entries`.
-    pub fn build_revoke_block(&self, seq: u64, tx_id: u64, entries: &[RevokeEntry]) -> Vec<u8> {
-        let mut buf = vec![0u8; BLOCK_SIZE];
-        let hdr = JournalBlockHeader {
-            magic: JOURNAL_BLOCK_MAGIC,
-            kind: JournalBlockKind::Revoke as u8,
-            _pad: [0u8; 3],
-            seq,
-            tx_id,
-        };
-        write_struct(&mut buf, 0, &hdr);
-        let entry_size = core::mem::size_of::<RevokeEntry>();
-        let header_size = core::mem::size_of::<JournalBlockHeader>();
-        for (i, entry) in entries.iter().enumerate() {
-            let off = header_size + i * entry_size;
-            if off + entry_size > BLOCK_SIZE {
-                break;
-            }
-            write_struct(&mut buf, off, entry);
-        }
-        buf
-    }
-
-    /// Build a 4096-byte commit block for `seq`/`tx_id` with `payload_crc`.
-    pub fn build_commit_block(&self, seq: u64, tx_id: u64, payload_crc: u32) -> Vec<u8> {
-        let mut buf = vec![0u8; BLOCK_SIZE];
-        let hdr = JournalBlockHeader {
-            magic: JOURNAL_BLOCK_MAGIC,
-            kind: JournalBlockKind::Commit as u8,
-            _pad: [0u8; 3],
-            seq,
-            tx_id,
-        };
-        write_struct(&mut buf, 0, &hdr);
-        // Store the payload CRC immediately after the header.
-        let off = core::mem::size_of::<JournalBlockHeader>();
-        buf[off..off + 4].copy_from_slice(&payload_crc.to_le_bytes());
-        buf
     }
 
     // ---- Block I/O ----------------------------------------------------------
@@ -998,7 +925,7 @@ impl Journal {
             let mut q = RingWrites::new(self.device_id);
             let t_ring = crate::timer::Instant::now();
 
-            let desc_block = self.build_descriptor_block(tx.seq, tx.tx_id, &entries);
+            let desc_block = build_descriptor_block(BLOCK_SIZE, tx.seq, tx.tx_id, &entries);
             self.submit_journal_block(ring_pos % ring_size, &desc_block, &mut q);
             ring_pos += 1;
 
@@ -1015,7 +942,7 @@ impl Journal {
             // Held out here rather than inside the branch: the buffer is the
             // DMA source and must outlive the drain below.
             let revoke_block = (!revoke_entries.is_empty())
-                .then(|| self.build_revoke_block(tx.seq, tx.tx_id, &revoke_entries));
+                .then(|| build_revoke_block(BLOCK_SIZE, tx.seq, tx.tx_id, &revoke_entries));
             if let Some(block) = &revoke_block {
                 self.submit_journal_block(ring_pos % ring_size, block, &mut q);
                 ring_pos += 1;
@@ -1040,7 +967,7 @@ impl Journal {
             let payload_crc = commit_block_checksum(&payload_bytes);
 
             // Write commit block with FUA.
-            let commit_block = self.build_commit_block(tx.seq, tx.tx_id, payload_crc);
+            let commit_block = build_commit_block(BLOCK_SIZE, tx.seq, tx.tx_id, payload_crc);
             let t_commit = crate::timer::Instant::now();
             let written = self.write_journal_block_fua(ring_pos % ring_size, &commit_block);
             JOURNAL_COMMIT_US.fetch_add(us_since(t_commit), Ordering::Relaxed);
@@ -1095,44 +1022,4 @@ fn write_struct<T>(buf: &mut [u8], offset: usize, val: &T) {
     let size = core::mem::size_of::<T>();
     let bytes = unsafe { core::slice::from_raw_parts(val as *const T as *const u8, size) };
     buf[offset..offset + size].copy_from_slice(bytes);
-}
-
-// ---- Unit tests --------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Verify that build_descriptor_block produces a block with the correct
-    /// header fields at offset 0.
-    #[test]
-    fn descriptor_block_header_fields() {
-        let journal = Journal::new(0, 2048, 100, 256, 1, 1);
-        let entries = [
-            DescriptorEntry { fs_block: 42 },
-            DescriptorEntry { fs_block: 99 },
-        ];
-        let block = journal.build_descriptor_block(7, 7, &entries);
-
-        assert_eq!(block.len(), BLOCK_SIZE);
-
-        // Read the magic from the first 4 bytes.
-        let magic = u32::from_le_bytes(block[0..4].try_into().unwrap());
-        assert_eq!(magic, JOURNAL_BLOCK_MAGIC);
-
-        // Kind byte at offset 4.
-        assert_eq!(block[4], JournalBlockKind::Descriptor as u8);
-
-        // seq at offset 8 (after magic(4) + kind(1) + pad(3)).
-        let seq = u64::from_le_bytes(block[8..16].try_into().unwrap());
-        assert_eq!(seq, 7);
-
-        // tx_id at offset 16.
-        let tx_id = u64::from_le_bytes(block[16..24].try_into().unwrap());
-        assert_eq!(tx_id, 7);
-
-        // First DescriptorEntry fs_block at offset 24.
-        let fs_block = u64::from_le_bytes(block[24..32].try_into().unwrap());
-        assert_eq!(fs_block, 42);
-    }
 }

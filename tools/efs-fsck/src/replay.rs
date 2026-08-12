@@ -1,22 +1,21 @@
-/// Journal replay for efs-fsck.
-///
-/// Ports the kernel's two-pass algorithm to operate on a `Disk` (std::fs::File
-/// backed) rather than raw AHCI. The algorithm is intentionally identical:
-///
-/// Pass 1: scan the ring from `tail_block`; collect committed transactions and
-///         build the revoke set.
-/// Pass 2: apply data blocks to their home FS locations, respecting revokes and
-///         `DESC_FLAG_ESCAPED` un-escaping.
-///
-/// After pass 2 the JSB is rewritten with `tail == head` so the next invocation
-/// is provably a no-op.
-use std::collections::BTreeMap;
+//! Journal replay for efs-fsck.
+//!
+//! The ring walk itself is `efs_common::scan_committed`, the same code the
+//! kernel runs at mount time; only reading and writing blocks differs. Sharing
+//! it is what keeps the checker's verdict and the kernel's recovery from
+//! drifting apart, which they did: the checker used to bound the walk by the
+//! journal superblock's advisory head and to add the partition offset to home
+//! blocks that already carried it.
+//!
+//! Pass 2 applies each committed transaction's data blocks to their home
+//! locations, respecting revokes and un-escaping, then rewrites the JSB from
+//! the cursors the scan reported so a second invocation is a provable no-op.
+
 use std::io;
 
 use efs_common::{
-    DESC_FLAG_ESCAPED, EfsSuperblock, JOURNAL_BLOCK_MAGIC, JournalBlockKind, JournalSuperblock,
-    commit_block_checksum, journal_sb_checksum, parse_descriptor_entries, parse_header,
-    parse_revoke_entries,
+    EfsSuperblock, JournalScan, JournalSuperblock, journal_sb_checksum, replay_write,
+    scan_committed,
 };
 
 use crate::disk::Disk;
@@ -27,221 +26,86 @@ pub struct ReplayResult {
     pub blocks_written: u32,
 }
 
-pub struct CommittedTx {
-    seq: u64,
-    entries: Vec<efs_common::DescriptorEntry>,
-    data_blocks: Vec<Vec<u8>>,
-}
-
-/// Read a journal ring block by its ring-internal index.
-///
-/// `first_block` is the absolute FS block of the journal region (block 0 = JSB).
-/// `ring_size` is `block_count - 1` (excludes the JSB).
-/// `ring_idx` is the raw (unwrapped) index from `tail_block` onwards.
-fn read_ring_block(
-    disk: &mut Disk,
-    first_block: u64,
-    ring_size: u64,
-    ring_idx: u64,
-) -> io::Result<Vec<u8>> {
-    let wrapped = (ring_idx % ring_size) + 1; // +1 skips JSB at offset 0
-    disk.read_block(first_block + wrapped)
-}
-
-/// Replay committed journal transactions onto their home FS locations.
-///
-/// Reads the on-disk `JournalSuperblock` at `sb.journal_first_block` to get
-/// `head_seq`/`tail_seq`/`tail_block`, then runs two-pass replay, fsyncs,
-/// and resets the JSB tail to equal head.
-///
-/// Returns a `ReplayResult` describing what was done. If the journal is already
-/// clean (`tail_seq == head_seq`), returns immediately with zero counts.
 /// Walk the ring from the recorded tail and collect every transaction that is
 /// fully committed, together with the revoke set that applies to them.
 ///
-/// This is what decides whether a journal has work outstanding. `tail_seq !=
-/// head_seq` does not: `head_seq` names the open transaction, which is never
-/// committed, so a perfectly clean journal normally sits one apart. Only a
-/// committed transaction found here needs replaying.
-pub fn scan_committed(
-    disk: &mut Disk,
-    sb: &EfsSuperblock,
-) -> io::Result<(Vec<CommittedTx>, BTreeMap<u64, u64>)> {
+/// This is what decides whether a journal has work outstanding;
+/// `JournalScan::is_dirty` reads the answer off it. `tail_seq != head_seq` does
+/// not decide it, in either direction: `head_seq` names the open transaction,
+/// which is never committed, so a clean journal normally sits one apart, and a
+/// crash between a commit and the superblock write leaves the two equal with a
+/// committed transaction still in the ring.
+pub fn scan(disk: &mut Disk, sb: &EfsSuperblock) -> io::Result<JournalScan> {
     let first_block = sb.journal_first_block;
     let block_size = sb.block_size() as usize;
 
-    // Read the JSB once at the start; capture head values for the post-replay reset.
     let jsb: JournalSuperblock = disk.read_struct_at(first_block, 0)?;
-
-    let head_seq = jsb.head_seq;
     let tail_seq = jsb.tail_seq;
     let tail_block = jsb.tail_block;
+    let ring_size = (jsb.block_count as u64).saturating_sub(1);
 
-    if head_seq == tail_seq {
-        return Ok((Vec::new(), BTreeMap::new()));
-    }
-
-    let ring_size = jsb.block_count as u64 - 1; // excludes JSB at ring index 0
-
-    // ---- Pass 1: scan ring, collect committed txs and build revoke set --------
-
-    let mut revoke_set: BTreeMap<u64, u64> = BTreeMap::new(); // fs_block → max_revoke_seq
-    let mut committed_txs: Vec<CommittedTx> = Vec::new();
-    let mut ring_pos: u64 = tail_block;
-
-    loop {
-        if ring_pos >= tail_block + ring_size {
-            // Don't scan more than one full ring from the starting position.
-            break;
-        }
-
-        let block = read_ring_block(disk, first_block, ring_size, ring_pos)?;
-        let hdr = parse_header(&block);
-
-        let Some(hdr) = hdr else {
-            // Not a valid journal block — end of committed data.
-            break;
-        };
-
-        if hdr.kind != JournalBlockKind::Descriptor as u8 {
-            // Expected a descriptor at the start of a tx. Stop.
-            break;
-        }
-
-        let desc_seq = hdr.seq;
-        let desc_tx_id = hdr.tx_id;
-
-        let entries = parse_descriptor_entries(&block, block_size);
-        let n_data = entries.len() as u64;
-        ring_pos += 1; // past descriptor
-
-        // Read data blocks.
-        let mut data_blocks: Vec<Vec<u8>> = Vec::with_capacity(n_data as usize);
-        for _ in 0..n_data {
-            let db = read_ring_block(disk, first_block, ring_size, ring_pos)?;
-            data_blocks.push(db);
-            ring_pos += 1;
-        }
-
-        // Check for optional revoke block.
-        let next_block = read_ring_block(disk, first_block, ring_size, ring_pos)?;
-        let next_hdr = parse_header(&next_block);
-
-        let mut has_revoke = false;
-        if let Some(ref nh) = next_hdr {
-            if nh.kind == JournalBlockKind::Revoke as u8 && nh.seq == desc_seq {
-                let revokes = parse_revoke_entries(&next_block, block_size);
-                for r in &revokes {
-                    let existing = revoke_set.entry(r.fs_block).or_insert(0);
-                    if r.seq > *existing {
-                        *existing = r.seq;
-                    }
-                }
-                has_revoke = true;
-                ring_pos += 1;
-            }
-        }
-
-        // Now expect a commit block.
-        let commit_block = if has_revoke {
-            read_ring_block(disk, first_block, ring_size, ring_pos)?
-        } else {
-            next_block
-        };
-        let commit_hdr = parse_header(&commit_block);
-
-        let is_committed = match commit_hdr {
-            Some(ch) => {
-                ch.kind == JournalBlockKind::Commit as u8
-                    && ch.seq == desc_seq
-                    && ch.tx_id == desc_tx_id
-            }
-            None => false,
-        };
-
-        if !is_committed {
-            // Partial tx — no commit block. Discard and stop.
-            break;
-        }
-
-        // Verify commit CRC.
-        let commit_crc = {
-            let off = core::mem::size_of::<efs_common::JournalBlockHeader>();
-            u32::from_le_bytes([
-                commit_block[off],
-                commit_block[off + 1],
-                commit_block[off + 2],
-                commit_block[off + 3],
-            ])
-        };
-        let mut payload: Vec<u8> = Vec::with_capacity(n_data as usize * block_size);
-        for db in &data_blocks {
-            payload.extend_from_slice(db);
-        }
-        let expected_crc = commit_block_checksum(&payload);
-        if commit_crc != expected_crc {
-            break;
-        }
-
-        ring_pos += 1; // past commit block
-
-        committed_txs.push(CommittedTx {
-            seq: desc_seq,
-            entries,
-            data_blocks,
-        });
-    }
-
-    Ok((committed_txs, revoke_set))
+    scan_committed(
+        tail_seq,
+        tail_block,
+        ring_size,
+        block_size,
+        |region_block: u64| disk.read_block(first_block + region_block),
+    )
 }
 
-pub fn replay(disk: &mut Disk, sb: &EfsSuperblock) -> io::Result<ReplayResult> {
+/// Apply a scan's committed transactions to their home locations and retire
+/// them from the ring.
+pub fn replay(disk: &mut Disk, sb: &EfsSuperblock, scan: &JournalScan) -> io::Result<ReplayResult> {
     let first_block = sb.journal_first_block;
-    let jsb: JournalSuperblock = disk.read_struct_at(first_block, 0)?;
-    let head_seq = jsb.head_seq;
-    let head_block = jsb.head_block;
-    let (committed_txs, revoke_set) = scan_committed(disk, sb)?;
+    let block_size = sb.block_size() as u64;
 
-    // ---- Pass 2: apply committed txs to home FS locations ---------------------
+    // Home blocks are device-absolute, so a partition that does not start on a
+    // block boundary cannot be addressed in that domain at all: the kernel's
+    // own `block_to_lba(block) / sectors_per_block` truncates. Refusing is the
+    // only honest answer, since replaying at a truncated offset would scatter
+    // metadata over file data.
+    if !disk.partition_offset.is_multiple_of(block_size) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "partition offset {} is not a multiple of the block size {}; \
+                 journal home blocks cannot be addressed",
+                disk.partition_offset, block_size
+            ),
+        ));
+    }
 
     let mut blocks_written: u32 = 0;
 
-    for tx in &committed_txs {
-        for (i, entry) in tx.entries.iter().enumerate() {
-            let fs_block = entry.fs_block;
-
-            if let Some(&revoke_seq) = revoke_set.get(&fs_block) {
-                if revoke_seq >= tx.seq {
-                    continue;
-                }
-            }
-
-            let mut data = tx.data_blocks[i].clone();
-
-            if entry.flags & DESC_FLAG_ESCAPED != 0 {
-                data[..4].copy_from_slice(&JOURNAL_BLOCK_MAGIC.to_le_bytes());
-            }
-
-            disk.write_block(fs_block, &data)?;
+    for tx in &scan.txs {
+        for i in 0..tx.entries.len() {
+            let Some((fs_block, data)) = replay_write(tx, i, &scan.revokes) else {
+                continue;
+            };
+            disk.write_device_block(fs_block, &data)?;
             blocks_written += 1;
         }
     }
 
-    // Flush all replayed writes.
     disk.fsync()?;
 
-    // ---- Reset JSB: tail = head so next invocation is a no-op ----------------
-
+    // Retire the replayed region: both cursors move to where the scan found the
+    // live region to end. Writing the superblock's own head back here would
+    // reinstate a cursor that is stale by design, leaving the kernel to replay
+    // the same transactions again on the next mount.
+    let jsb: JournalSuperblock = disk.read_struct_at(first_block, 0)?;
     let mut new_jsb = jsb;
-    new_jsb.tail_seq = head_seq;
-    new_jsb.tail_block = head_block;
+    new_jsb.tail_seq = scan.next_seq;
+    new_jsb.head_seq = scan.next_seq;
+    new_jsb.tail_block = scan.next_block;
+    new_jsb.head_block = scan.next_block;
     new_jsb.crc32 = journal_sb_checksum(&new_jsb);
 
     disk.write_struct_at(first_block, 0, &new_jsb)?;
     disk.fsync()?;
 
     Ok(ReplayResult {
-        tx_count: committed_txs.len() as u32,
+        tx_count: scan.txs.len() as u32,
         blocks_written,
     })
 }

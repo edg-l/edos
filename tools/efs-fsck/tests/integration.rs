@@ -13,12 +13,10 @@
 mod common;
 
 use common::{
-    TempImage, build_fixture_clean, corrupt_block_bitmap_bit, corrupt_link_count, dirty_jsb,
-    force_dirty_journal, fsck_bin, mkfs_bin, read_jsb_seqs, read_jsb_seqs_full,
-    read_sb_journal_info, run_fsck, scribble_journal_commit,
+    JsbCursors, TxSpec, build_fixture_clean, corrupt_block_bitmap_bit, corrupt_link_count,
+    force_dirty_journal, plant_journal_txs, read_bytes_at, read_jsb, run_fsck,
+    scribble_journal_commit,
 };
-
-use std::process::Command;
 
 // ---- Task 6.2: clean image exits 0 -----------------------------------------
 
@@ -148,170 +146,315 @@ fn bad_link_count_repaired() {
     );
 }
 
-// ---- Task 6.5: partial transaction discarded --------------------------------
+// ---- Journal: what decides that a ring holds work ---------------------------
+//
+// The image efs-mkfs produces has tail_seq == head_seq == 1 and an empty ring,
+// and its journal starts at block 7168 of 8192. Home blocks in these tests go
+// to the block just below the journal: free space, whose contents no fsck phase
+// reads, so a planted block cannot turn into an unrelated finding.
 
-/// Verify fsck handles a corrupted JSB checksum gracefully.
+/// Block a planted transaction carries, and the fill byte identifying it.
+const HOME_BLOCK: u64 = 7167;
+const LIVE_FILL: u8 = 0xA5;
+const STALE_FILL: u8 = 0x5A;
+const BLOCK_SIZE: usize = 4096;
+
+/// A committed transaction in the ring is replayed even when the superblock's
+/// head never got the news.
 ///
-/// Testing true mid-ring commit corruption (a partially-written commit block
-/// inside the journal ring) requires a kernel-generated image that actually
-/// wrote transactions.  efs-mkfs produces a clean image with no transactions,
-/// so there is no commit block to corrupt.  This test is therefore marked
-/// `#[ignore]`; it can be enabled once a test fixture with real kernel
-/// transactions is available.
+/// This is the window between a commit block reaching the platter and the
+/// journal superblock being written: the cursors say tail == head, and the ring
+/// holds durable work anyway. Deciding dirtiness from those cursors made fsck
+/// call this image clean and then check it against home blocks the journal was
+/// still holding the current contents of.
 #[test]
-#[ignore = "requires kernel-generated image with real journal transactions; \
-            scribble_journal_commit only corrupts the JSB checksum, not a \
-            mid-ring commit block"]
-fn partial_tx_discarded() {
-    let img = build_fixture_clean("efs_fsck_test_partial_tx.img");
+fn committed_tx_is_found_when_the_head_never_reached_the_superblock() {
+    let img = build_fixture_clean("efs_fsck_test_journal_committed_tx.img");
+    let before = read_jsb(&img.path, 0).expect("read_jsb failed");
 
-    scribble_journal_commit(&img.path, 0).expect("scribble_journal_commit failed");
-
-    // fsck should detect the invalid JSB and report an error.
-    let (code, stdout, stderr) = run_fsck(&img.path, &[]);
-    assert_eq!(
-        code, 4,
-        "expected exit 4 for corrupted JSB; got {code}\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(
-        stdout.contains("journal") || stderr.contains("journal"),
-        "expected journal-related message; stdout: {stdout}\nstderr: {stderr}"
-    );
-}
-
-// ---- Task 6.6: dirty journal ------------------------------------------------
-
-/// A dirty journal (tail_seq != head_seq, no real txs) without --repair must
-/// emit an Error and exit 4.
-#[test]
-fn dirty_journal_without_repair() {
-    let img = build_fixture_clean("efs_fsck_test_dirty_journal_ro.img");
-
-    force_dirty_journal(&img.path, 0).expect("force_dirty_journal failed");
+    plant_journal_txs(
+        &img.path,
+        0,
+        before.tail_block,
+        &[TxSpec::one_block(
+            before.tail_seq,
+            HOME_BLOCK,
+            LIVE_FILL,
+            BLOCK_SIZE,
+        )],
+        true,
+        JsbCursors {
+            tail_seq: before.tail_seq,
+            tail_block: before.tail_block,
+            head_seq: before.tail_seq,
+            head_block: before.tail_block,
+        },
+    )
+    .expect("plant_journal_txs failed");
 
     let (code, stdout, stderr) = run_fsck(&img.path, &[]);
     assert_eq!(
         code, 4,
-        "expected exit 4 for dirty journal in read-only mode; got {code}\nstdout: {stdout}\nstderr: {stderr}"
+        "expected exit 4 for a ring holding a committed tx; got {code}\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
         stdout.contains("journal is dirty"),
         "expected 'journal is dirty' in stdout; got:\n{stdout}"
     );
-}
-
-/// A dirty journal with --repair --yes must exit 1 (ErrorsFixed); a second run
-/// must exit 0 (journal clean).
-#[test]
-fn dirty_journal_with_repair() {
-    let img = build_fixture_clean("efs_fsck_test_dirty_journal_repair.img");
-
-    force_dirty_journal(&img.path, 0).expect("force_dirty_journal failed");
-
-    let (tail_before, head_before) = read_jsb_seqs(&img.path, 0).expect("read_jsb_seqs failed");
-    assert_ne!(
-        tail_before, head_before,
-        "journal should be dirty after patching"
-    );
 
     let (code, stdout, stderr) = run_fsck(&img.path, &["--repair", "--yes"]);
     assert_eq!(
         code, 1,
-        "expected exit 1 (errors fixed) after journal --repair; got {code}\nstdout: {stdout}\nstderr: {stderr}"
+        "expected exit 1 (errors fixed) after replaying; got {code}\nstdout: {stdout}\nstderr: {stderr}"
     );
 
-    // Second run: must be clean (journal was actually replayed).
-    let (code2, stdout2, stderr2) = run_fsck(&img.path, &[]);
+    let home = read_bytes_at(&img.path, HOME_BLOCK * BLOCK_SIZE as u64, BLOCK_SIZE)
+        .expect("read home block");
+    assert!(
+        home.iter().all(|&b| b == LIVE_FILL),
+        "replay did not write the journalled block to its home location"
+    );
+
+    // Both cursors come from the ring walk, not from the head that was stale.
+    let after = read_jsb(&img.path, 0).expect("read_jsb failed");
     assert_eq!(
-        code2, 0,
-        "expected exit 0 on second run after journal repair; got {code2}\nstdout: {stdout2}\nstderr: {stderr2}"
+        after.tail_seq,
+        before.tail_seq + 1,
+        "tail_seq must be one past the replayed tx"
+    );
+    assert_eq!(after.head_seq, after.tail_seq, "cursors must agree");
+    assert_eq!(
+        after.tail_block,
+        before.tail_block + 3,
+        "descriptor + data + commit is three ring blocks"
+    );
+    assert_eq!(after.head_block, after.tail_block, "cursors must agree");
+
+    let (code, stdout, stderr) = run_fsck(&img.path, &[]);
+    assert_eq!(
+        code, 0,
+        "a replayed journal must be clean on the next run; got {code}\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        !stdout2.contains("journal is dirty"),
-        "second run should not report dirty journal; got:\n{stdout2}"
+        !stdout.contains("journal is dirty"),
+        "second run should not report a dirty journal; got:\n{stdout}"
     );
 }
 
-// ---- Existing test (preserved) ---------------------------------------------
-
-/// Verify that running fsck --repair on a dirty-journal image resets the JSB,
-/// and that a second run sees a clean journal (tail_seq == head_seq).
+/// An advanced head over an empty ring is not a dirty journal.
+///
+/// `head_seq` names the open transaction, which is never committed, so a
+/// healthy journal routinely sits a sequence ahead of its tail. Treating that
+/// as damage reported a clean filesystem as broken and, under `--repair`,
+/// counted a no-op replay as a fix.
 #[test]
-fn test_journal_replay_idempotent() {
-    let mkfs = mkfs_bin();
-    let fsck = fsck_bin();
-    if !mkfs.exists() {
-        eprintln!("SKIP: efs-mkfs not found at {}", mkfs.display());
-        return;
-    }
-    if !fsck.exists() {
-        eprintln!("SKIP: efs-fsck not found at {}", fsck.display());
-        return;
-    }
+fn advanced_head_over_an_empty_ring_is_clean() {
+    let img = build_fixture_clean("efs_fsck_test_journal_advisory_head.img");
 
-    // Use TempImage so the file is cleaned up even on panic.
-    let img = TempImage::new("efs_fsck_test_replay_idempotent.img");
-    // Remove stale file.
-    let _ = std::fs::remove_file(&img.path);
-
-    // Create a fresh image.
-    let status = Command::new(&mkfs)
-        .args(["--size", "32M", "--journal-size-mib", "4"])
-        .arg(&img.path)
-        .status()
-        .expect("failed to run efs-mkfs");
-    assert!(status.success(), "efs-mkfs failed: {status}");
-
-    let (journal_first_block, block_size) = read_sb_journal_info(&img.path);
-
-    // Dirty the journal so tail_seq != head_seq.
-    dirty_jsb(&img.path, journal_first_block, block_size);
-
-    let (tail_before, head_before, _, _) =
-        read_jsb_seqs_full(&img.path, journal_first_block, block_size);
+    force_dirty_journal(&img.path, 0).expect("force_dirty_journal failed");
+    let cursors = read_jsb(&img.path, 0).expect("read_jsb failed");
     assert_ne!(
-        tail_before, head_before,
-        "journal should be dirty after patching"
+        cursors.tail_seq, cursors.head_seq,
+        "the fixture should leave head ahead of tail"
     );
 
-    // First run: --repair should replay and reset the JSB.
-    let status = Command::new(&fsck)
-        .args(["--repair", "--verbose"])
-        .arg(&img.path)
-        .status()
-        .expect("failed to run efs-fsck (first pass)");
-    assert!(
-        status.code().unwrap_or(99) < 2,
-        "efs-fsck --repair exited with error code: {status}"
-    );
-
-    // After repair the JSB must have tail == head on both seq and block cursors.
-    let (tail_seq, head_seq, tail_block, head_block) =
-        read_jsb_seqs_full(&img.path, journal_first_block, block_size);
+    let (code, stdout, stderr) = run_fsck(&img.path, &[]);
     assert_eq!(
-        tail_seq, head_seq,
-        "after --repair tail_seq must equal head_seq"
+        code, 0,
+        "an empty ring is clean whatever the head says; got {code}\nstdout: {stdout}\nstderr: {stderr}"
     );
-    assert_eq!(
-        tail_block, head_block,
-        "after --repair tail_block must equal head_block"
-    );
-
-    // Second run (read-only): must be clean and exit 0.
-    let output = Command::new(&fsck)
-        .args(["--verbose"])
-        .arg(&img.path)
-        .output()
-        .expect("failed to run efs-fsck (second pass)");
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         !stdout.contains("journal is dirty"),
-        "second run should not report dirty journal; got: {stdout}"
+        "expected no dirty-journal finding; got:\n{stdout}"
+    );
+}
+
+/// A wrapped ring's stale far side must not be replayed.
+///
+/// The block after the live region can hold an older transaction that still
+/// parses perfectly. Applying it rolls metadata back to what it was before the
+/// ring wrapped, which is why the walk stops at the first break in sequence
+/// continuity rather than at the first block that fails to parse.
+#[test]
+fn stale_far_side_of_a_wrapped_ring_is_not_replayed() {
+    let img = build_fixture_clean("efs_fsck_test_journal_wrapped.img");
+    let stale_home = HOME_BLOCK - 1;
+
+    // A tail well above the fixture's own sequence numbers, so the stale
+    // transaction's lower one is unambiguously behind the live region.
+    plant_journal_txs(
+        &img.path,
+        0,
+        0,
+        &[
+            TxSpec::one_block(100, HOME_BLOCK, LIVE_FILL, BLOCK_SIZE),
+            TxSpec::one_block(97, stale_home, STALE_FILL, BLOCK_SIZE),
+        ],
+        true,
+        JsbCursors {
+            tail_seq: 100,
+            tail_block: 0,
+            head_seq: 100,
+            head_block: 0,
+        },
+    )
+    .expect("plant_journal_txs failed");
+
+    // --verbose so the Info finding naming the replayed count is printed.
+    let (code, stdout, stderr) = run_fsck(&img.path, &["--repair", "--yes", "--verbose"]);
+    assert!(
+        code < 2,
+        "replay should have succeeded; got {code}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let live = read_bytes_at(&img.path, HOME_BLOCK * BLOCK_SIZE as u64, BLOCK_SIZE)
+        .expect("read live home block");
+    assert!(
+        live.iter().all(|&b| b == LIVE_FILL),
+        "the live transaction should have been replayed"
+    );
+
+    let stale = read_bytes_at(&img.path, stale_home * BLOCK_SIZE as u64, BLOCK_SIZE)
+        .expect("read stale home block");
+    assert!(
+        stale.iter().all(|&b| b != STALE_FILL),
+        "the stale transaction beyond the sequence break was replayed"
+    );
+    assert!(
+        stdout.contains("replayed 1 transaction"),
+        "expected exactly one transaction replayed; got:\n{stdout}"
+    );
+}
+
+/// A transaction with no commit block is in flight, not durable, and is
+/// discarded along with everything the walk would otherwise reach past it.
+#[test]
+fn partial_tx_is_discarded() {
+    let img = build_fixture_clean("efs_fsck_test_journal_partial_tx.img");
+    let before = read_jsb(&img.path, 0).expect("read_jsb failed");
+
+    plant_journal_txs(
+        &img.path,
+        0,
+        before.tail_block,
+        &[TxSpec::one_block(
+            before.tail_seq,
+            HOME_BLOCK,
+            LIVE_FILL,
+            BLOCK_SIZE,
+        )],
+        false, // no commit block: the power went mid-transaction
+        JsbCursors {
+            tail_seq: before.tail_seq,
+            tail_block: before.tail_block,
+            head_seq: before.tail_seq + 1,
+            head_block: before.tail_block + 2,
+        },
+    )
+    .expect("plant_journal_txs failed");
+
+    let (code, stdout, stderr) = run_fsck(&img.path, &["--repair", "--yes"]);
+    assert_eq!(
+        code, 0,
+        "an uncommitted tx is nothing to fix; got {code}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let home = read_bytes_at(&img.path, HOME_BLOCK * BLOCK_SIZE as u64, BLOCK_SIZE)
+        .expect("read home block");
+    assert!(
+        home.iter().all(|&b| b != LIVE_FILL),
+        "an uncommitted transaction was replayed"
+    );
+}
+
+/// Home blocks land at their device-absolute location when the filesystem sits
+/// at a partition offset.
+///
+/// A descriptor entry's `fs_block` already includes the partition's starting
+/// LBA, so adding the offset again puts every replayed block
+/// `partition_offset / block_size` blocks too high — the kernel had exactly
+/// this bug, and it turned a repairable filesystem into one whose root
+/// directory could not be read. Every other fixture here sits at offset 0,
+/// where the two addressing domains coincide and the mistake is invisible.
+#[test]
+fn home_blocks_land_at_their_absolute_location_under_a_partition_offset() {
+    const PREFIX: u64 = 1024 * 1024;
+    let base = build_fixture_clean("efs_fsck_test_journal_offset_base.img");
+    let img = common::with_partition_prefix(&base.path, "efs_fsck_test_journal_offset.img", PREFIX)
+        .expect("with_partition_prefix failed");
+
+    let before = read_jsb(&img.path, PREFIX).expect("read_jsb failed");
+    let prefix_blocks = PREFIX / BLOCK_SIZE as u64;
+    // What the kernel would record for partition-relative block HOME_BLOCK.
+    let absolute = prefix_blocks + HOME_BLOCK;
+
+    plant_journal_txs(
+        &img.path,
+        PREFIX,
+        before.tail_block,
+        &[TxSpec::one_block(
+            before.tail_seq,
+            absolute,
+            LIVE_FILL,
+            BLOCK_SIZE,
+        )],
+        true,
+        JsbCursors {
+            tail_seq: before.tail_seq,
+            tail_block: before.tail_block,
+            head_seq: before.tail_seq,
+            head_block: before.tail_block,
+        },
+    )
+    .expect("plant_journal_txs failed");
+
+    let offset_arg = PREFIX.to_string();
+    let (code, stdout, stderr) = run_fsck(
+        &img.path,
+        &["--repair", "--yes", "--partition-offset", &offset_arg],
     );
     assert_eq!(
-        output.status.code(),
-        Some(0),
-        "second run must exit 0 (clean); got: {:?}\nstdout: {stdout}",
-        output.status.code(),
+        code, 1,
+        "expected exit 1 (errors fixed) after replaying; got {code}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let landed = read_bytes_at(&img.path, absolute * BLOCK_SIZE as u64, BLOCK_SIZE)
+        .expect("read home block");
+    assert!(
+        landed.iter().all(|&b| b == LIVE_FILL),
+        "replay did not write the home block at its device-absolute location"
+    );
+
+    // Where the double-counted offset would have put it.
+    let wrong = read_bytes_at(&img.path, PREFIX + absolute * BLOCK_SIZE as u64, BLOCK_SIZE)
+        .expect("read the doubly-offset location");
+    assert!(
+        wrong.iter().all(|&b| b != LIVE_FILL),
+        "replay added the partition offset to a block number that already carried it"
+    );
+}
+
+/// A JSB whose checksum does not match is reported rather than replayed, and
+/// `--force` downgrades that to a warning so the rest of the check can run.
+#[test]
+fn corrupt_jsb_checksum_is_reported() {
+    let img = build_fixture_clean("efs_fsck_test_journal_bad_jsb.img");
+
+    scribble_journal_commit(&img.path, 0).expect("scribble_journal_commit failed");
+
+    let (code, stdout, stderr) = run_fsck(&img.path, &[]);
+    assert_eq!(
+        code, 4,
+        "expected exit 4 for a corrupt JSB; got {code}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("journal superblock invalid"),
+        "expected the JSB to be named as invalid; got:\n{stdout}"
+    );
+
+    let (code, stdout, _) = run_fsck(&img.path, &["--force"]);
+    assert_eq!(
+        code, 0,
+        "--force should skip journal replay and finish the check; got {code}\nstdout: {stdout}"
     );
 }

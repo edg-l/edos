@@ -10,6 +10,11 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use efs_common::{
+    DESC_FLAG_ESCAPED, DescriptorEntry, JOURNAL_BLOCK_MAGIC, RevokeEntry, build_commit_block,
+    build_descriptor_block, build_revoke_block, commit_block_checksum,
+};
+
 // ---------------------------------------------------------------------------
 // Binary locators
 // ---------------------------------------------------------------------------
@@ -109,7 +114,10 @@ pub fn run_fsck(image: &Path, args: &[&str]) -> (i32, String, String) {
 }
 
 // ---------------------------------------------------------------------------
-// On-disk layout helpers (partition_offset == 0 for all test fixtures)
+// On-disk layout helpers. Every one takes the filesystem's byte offset within
+// the image: most fixtures sit at 0, but a partition offset is exactly what the
+// journal's two block-numbering domains differ by, so a fixture that tests them
+// has to be able to place the filesystem elsewhere.
 // ---------------------------------------------------------------------------
 
 /// Superblock field offsets (within block 1).
@@ -173,17 +181,21 @@ pub struct SbInfo {
     pub journal_first_block: u64,
 }
 
-/// Read the fields we need from the primary superblock (at block 1).
-pub fn read_sb_info(path: &Path) -> io::Result<SbInfo> {
+/// Read the fields we need from the primary superblock of a filesystem that
+/// starts `partition_offset` bytes into the image.
+pub fn read_sb_info_at(path: &Path, partition_offset: u64) -> io::Result<SbInfo> {
     let mut f = File::open(path)?;
     // Block 1 starts at offset = block_size; but we don't know block_size yet.
     // Block size is at block 1 offset SB_BLOCK_SIZE_LOG2_OFF; block 1 is at
     // 4096 for the default mkfs (4 KiB blocks). We read with the assumption
     // of 4096-byte blocks to get block_size_log2, then re-read if different.
     let default_block: u64 = 4096;
-    let bsl = read_u32_at(&mut f, default_block + SB_BLOCK_SIZE_LOG2_OFF)?;
+    let bsl = read_u32_at(
+        &mut f,
+        partition_offset + default_block + SB_BLOCK_SIZE_LOG2_OFF,
+    )?;
     let block_size = 1u32 << bsl;
-    let sb_base = block_size as u64;
+    let sb_base = partition_offset + block_size as u64;
 
     let blocks_per_group = read_u32_at(&mut f, sb_base + SB_BLOCKS_PER_GROUP_OFF)?;
     let inodes_per_group = read_u32_at(&mut f, sb_base + SB_INODES_PER_GROUP_OFF)?;
@@ -242,7 +254,7 @@ pub fn corrupt_block_bitmap_bit(
     partition_offset: u64,
     absolute_block: u64,
 ) -> io::Result<()> {
-    let sb = read_sb_info(image)?;
+    let sb = read_sb_info_at(image, partition_offset)?;
     let block_size = sb.block_size;
     let blocks_per_group = sb.blocks_per_group as u64;
 
@@ -299,7 +311,7 @@ pub fn corrupt_link_count(
     const LINK_COUNT_OFF: usize = 6;
     const CHECKSUM_OFF: usize = 76;
 
-    let sb = read_sb_info(image)?;
+    let sb = read_sb_info_at(image, partition_offset)?;
     let block_size = sb.block_size;
     let inodes_per_group = sb.inodes_per_group as u64;
     let inode_size = sb.inode_size as u64;
@@ -352,14 +364,17 @@ pub fn corrupt_link_count(
 ///   tail_seq(8) head_seq(8) tail_block(8) head_block(8)
 ///   crc32(4) reserved(12)
 const JSB_SIZE: usize = 64;
-const HEAD_SEQ_OFF: usize = 4 + 4 + 4 + 4 + 8; // 24
-const CRC_OFF: usize = 48;
+const TAIL_SEQ_OFF: usize = 4 + 4 + 4 + 4; // 16
+const HEAD_SEQ_OFF: usize = TAIL_SEQ_OFF + 8; // 24
+const TAIL_BLOCK_OFF: usize = HEAD_SEQ_OFF + 8; // 32
+const HEAD_BLOCK_OFF: usize = TAIL_BLOCK_OFF + 8; // 40
+const CRC_OFF: usize = HEAD_BLOCK_OFF + 8; // 48
 
 /// Make the journal appear dirty by advancing head_seq past tail_seq.
 /// No real transactions are written; this simulates a clean-ish dirty state
 /// where the journal ring contains no valid commit blocks.
 pub fn force_dirty_journal(image: &Path, partition_offset: u64) -> io::Result<()> {
-    let sb = read_sb_info(image)?;
+    let sb = read_sb_info_at(image, partition_offset)?;
     let jsb_offset = partition_offset + sb.journal_first_block * sb.block_size as u64;
 
     let mut f = OpenOptions::new().read(true).write(true).open(image)?;
@@ -383,6 +398,181 @@ pub fn force_dirty_journal(image: &Path, partition_offset: u64) -> io::Result<()
 }
 
 // ---------------------------------------------------------------------------
+// Fixture builder: plant real journal transactions
+// ---------------------------------------------------------------------------
+
+/// One transaction to write into a journal ring, described the way the kernel's
+/// committer describes it.
+pub struct TxSpec {
+    /// Sequence number for the descriptor and commit headers.
+    pub seq: u64,
+    /// `(device-absolute home block, contents)` pairs. Device-absolute means
+    /// the partition's offset is already included, which is what the kernel
+    /// records; see `DescriptorEntry::fs_block`.
+    pub blocks: Vec<(u64, Vec<u8>)>,
+    /// `(device-absolute block, seq)` revokes carried by this transaction.
+    pub revokes: Vec<(u64, u64)>,
+}
+
+impl TxSpec {
+    /// A transaction carrying one home block filled with `fill`.
+    pub fn one_block(seq: u64, home_block: u64, fill: u8, block_size: usize) -> Self {
+        TxSpec {
+            seq,
+            blocks: vec![(home_block, vec![fill; block_size])],
+            revokes: Vec::new(),
+        }
+    }
+}
+
+/// Cursors to leave in the journal superblock after planting.
+pub struct JsbCursors {
+    pub tail_seq: u64,
+    pub tail_block: u64,
+    pub head_seq: u64,
+    pub head_block: u64,
+}
+
+/// Write `txs` into the journal ring starting at ring index `start_index`, then
+/// set the journal superblock's cursors to `cursors`.
+///
+/// Ring blocks are built with `efs-common`'s builders, the same code the kernel
+/// writes the ring with, so a test that passes says the checker agrees with the
+/// real on-disk format rather than with this file's idea of it.
+///
+/// `commit` controls whether each transaction gets its commit block. Planting
+/// one without it is how a torn, in-flight transaction is reproduced.
+///
+/// Returns the ring index just past the last block written.
+pub fn plant_journal_txs(
+    image: &Path,
+    partition_offset: u64,
+    start_index: u64,
+    txs: &[TxSpec],
+    commit: bool,
+    cursors: JsbCursors,
+) -> io::Result<u64> {
+    let sb = read_sb_info_at(image, partition_offset)?;
+    let block_size = sb.block_size as usize;
+    let jsb_offset = partition_offset + sb.journal_first_block * block_size as u64;
+
+    let mut f = OpenOptions::new().read(true).write(true).open(image)?;
+    let ring_size = read_u32_at(&mut f, jsb_offset + 8)? as u64 - 1;
+
+    let mut ring_index = start_index;
+    let put = |f: &mut File, index: u64, block: &[u8]| -> io::Result<()> {
+        let region_block = sb.journal_first_block + (index % ring_size) + 1;
+        f.seek(SeekFrom::Start(
+            partition_offset + region_block * block_size as u64,
+        ))?;
+        f.write_all(block)
+    };
+
+    for tx in txs {
+        let mut entries = Vec::with_capacity(tx.blocks.len());
+        let mut payload = Vec::with_capacity(tx.blocks.len() * block_size);
+        for (home_block, data) in &tx.blocks {
+            // Escaping, as the committer does it: a data block whose first word
+            // would be mistaken for a journal header is zeroed there and flagged.
+            let mut copy = data.clone();
+            let first_word = u32::from_le_bytes(copy[..4].try_into().unwrap());
+            let escaped = first_word == JOURNAL_BLOCK_MAGIC;
+            if escaped {
+                copy[..4].fill(0);
+            }
+            entries.push(DescriptorEntry {
+                fs_block: *home_block,
+                flags: if escaped { DESC_FLAG_ESCAPED } else { 0 },
+                _reserved: 0,
+            });
+            payload.extend_from_slice(&copy);
+        }
+
+        put(
+            &mut f,
+            ring_index,
+            &build_descriptor_block(block_size, tx.seq, tx.seq, &entries),
+        )?;
+        ring_index += 1;
+
+        for chunk in payload.chunks(block_size) {
+            put(&mut f, ring_index, chunk)?;
+            ring_index += 1;
+        }
+
+        if !tx.revokes.is_empty() {
+            let revokes: Vec<RevokeEntry> = tx
+                .revokes
+                .iter()
+                .map(|&(fs_block, seq)| RevokeEntry { fs_block, seq })
+                .collect();
+            put(
+                &mut f,
+                ring_index,
+                &build_revoke_block(block_size, tx.seq, tx.seq, &revokes),
+            )?;
+            ring_index += 1;
+        }
+
+        if commit {
+            let crc = commit_block_checksum(&payload);
+            put(
+                &mut f,
+                ring_index,
+                &build_commit_block(block_size, tx.seq, tx.seq, crc),
+            )?;
+            ring_index += 1;
+        }
+    }
+
+    // Patch the four cursors and re-checksum the JSB.
+    f.seek(SeekFrom::Start(jsb_offset))?;
+    let mut jsb = [0u8; JSB_SIZE];
+    f.read_exact(&mut jsb)?;
+    jsb[TAIL_SEQ_OFF..TAIL_SEQ_OFF + 8].copy_from_slice(&cursors.tail_seq.to_le_bytes());
+    jsb[HEAD_SEQ_OFF..HEAD_SEQ_OFF + 8].copy_from_slice(&cursors.head_seq.to_le_bytes());
+    jsb[TAIL_BLOCK_OFF..TAIL_BLOCK_OFF + 8].copy_from_slice(&cursors.tail_block.to_le_bytes());
+    jsb[HEAD_BLOCK_OFF..HEAD_BLOCK_OFF + 8].copy_from_slice(&cursors.head_block.to_le_bytes());
+    jsb[CRC_OFF..CRC_OFF + 4].copy_from_slice(&0u32.to_le_bytes());
+    let crc = crc32_of(&jsb);
+    jsb[CRC_OFF..CRC_OFF + 4].copy_from_slice(&crc.to_le_bytes());
+    f.seek(SeekFrom::Start(jsb_offset))?;
+    f.write_all(&jsb)?;
+    f.sync_all()?;
+
+    Ok(ring_index)
+}
+
+/// Copy `image` into a new one preceded by `prefix_bytes` of zeros, so the
+/// filesystem sits at a partition offset the way it does on a real GPT disk.
+///
+/// A partition offset of 0 hides any confusion between the device-absolute and
+/// partition-relative block domains, because the two coincide there.
+pub fn with_partition_prefix(image: &Path, name: &str, prefix_bytes: u64) -> io::Result<TempImage> {
+    let out = TempImage::new(name);
+    let _ = std::fs::remove_file(&out.path);
+    let body = std::fs::read(image)?;
+    let mut f = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&out.path)?;
+    f.write_all(&vec![0u8; prefix_bytes as usize])?;
+    f.write_all(&body)?;
+    f.sync_all()?;
+    Ok(out)
+}
+
+/// Read one block of the image at a byte offset.
+pub fn read_bytes_at(image: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+    let mut f = File::open(image)?;
+    f.seek(SeekFrom::Start(offset))?;
+    let mut buf = vec![0u8; len];
+    f.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+// ---------------------------------------------------------------------------
 // Mutator: scribble_journal_commit
 // ---------------------------------------------------------------------------
 
@@ -396,7 +586,7 @@ pub fn force_dirty_journal(image: &Path, partition_offset: u64) -> io::Result<()
 /// mid-ring commit corruption requires a kernel-generated image; see that test
 /// for the rationale.
 pub fn scribble_journal_commit(image: &Path, partition_offset: u64) -> io::Result<()> {
-    let sb = read_sb_info(image)?;
+    let sb = read_sb_info_at(image, partition_offset)?;
     let jsb_offset = partition_offset + sb.journal_first_block * sb.block_size as u64;
 
     let mut f = OpenOptions::new().read(true).write(true).open(image)?;
@@ -416,20 +606,32 @@ pub fn scribble_journal_commit(image: &Path, partition_offset: u64) -> io::Resul
 // JSB seq reader (used by tests to verify repair)
 // ---------------------------------------------------------------------------
 
-/// Read (tail_seq, head_seq) from the on-disk JSB.
-pub fn read_jsb_seqs(image: &Path, partition_offset: u64) -> io::Result<(u64, u64)> {
-    let sb = read_sb_info(image)?;
+/// The journal superblock's four ring cursors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JsbState {
+    pub tail_seq: u64,
+    pub head_seq: u64,
+    pub tail_block: u64,
+    pub head_block: u64,
+}
+
+/// Read the ring cursors from the on-disk JSB.
+pub fn read_jsb(image: &Path, partition_offset: u64) -> io::Result<JsbState> {
+    let sb = read_sb_info_at(image, partition_offset)?;
     let jsb_offset = partition_offset + sb.journal_first_block * sb.block_size as u64;
-    const TAIL_SEQ_OFF: usize = 16;
 
     let mut f = File::open(image)?;
     f.seek(SeekFrom::Start(jsb_offset))?;
     let mut buf = [0u8; JSB_SIZE];
     f.read_exact(&mut buf)?;
 
-    let tail_seq = u64::from_le_bytes(buf[TAIL_SEQ_OFF..TAIL_SEQ_OFF + 8].try_into().unwrap());
-    let head_seq = u64::from_le_bytes(buf[HEAD_SEQ_OFF..HEAD_SEQ_OFF + 8].try_into().unwrap());
-    Ok((tail_seq, head_seq))
+    let at = |off: usize| u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+    Ok(JsbState {
+        tail_seq: at(TAIL_SEQ_OFF),
+        head_seq: at(HEAD_SEQ_OFF),
+        tail_block: at(TAIL_BLOCK_OFF),
+        head_block: at(HEAD_BLOCK_OFF),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -450,73 +652,4 @@ pub fn crc32_of(data: &[u8]) -> u32 {
         }
     }
     !crc
-}
-
-// ---------------------------------------------------------------------------
-// read_sb_journal_info (kept for backward-compat with existing integration.rs)
-// ---------------------------------------------------------------------------
-
-/// Read (journal_first_block, block_size) from the primary superblock.
-///
-/// Kept for compatibility with existing tests that call this directly.
-pub fn read_sb_journal_info(path: &Path) -> (u64, u32) {
-    let sb = read_sb_info(path).expect("read_sb_info failed");
-    (sb.journal_first_block, sb.block_size)
-}
-
-/// Dirty the JSB: bump head_seq and recompute CRC.  Kept for compat.
-pub fn dirty_jsb(path: &Path, journal_first_block: u64, block_size: u32) {
-    force_dirty_journal_raw(path, 0, journal_first_block, block_size)
-        .expect("force_dirty_journal_raw failed");
-}
-
-fn force_dirty_journal_raw(
-    path: &Path,
-    _partition_offset: u64,
-    journal_first_block: u64,
-    block_size: u32,
-) -> io::Result<()> {
-    let jsb_offset = journal_first_block * block_size as u64;
-    let mut f = OpenOptions::new().read(true).write(true).open(path)?;
-    f.seek(SeekFrom::Start(jsb_offset))?;
-    let mut buf = [0u8; JSB_SIZE];
-    f.read_exact(&mut buf)?;
-
-    let head_seq = u64::from_le_bytes(buf[HEAD_SEQ_OFF..HEAD_SEQ_OFF + 8].try_into().unwrap());
-    buf[HEAD_SEQ_OFF..HEAD_SEQ_OFF + 8].copy_from_slice(&(head_seq + 1).to_le_bytes());
-
-    buf[CRC_OFF..CRC_OFF + 4].copy_from_slice(&0u32.to_le_bytes());
-    let crc = crc32_of(&buf);
-    buf[CRC_OFF..CRC_OFF + 4].copy_from_slice(&crc.to_le_bytes());
-
-    f.seek(SeekFrom::Start(jsb_offset))?;
-    f.write_all(&buf)?;
-    f.sync_all()?;
-    Ok(())
-}
-
-/// Read (tail_seq, head_seq, tail_block, head_block) from the on-disk JSB.
-/// Kept for compatibility with existing tests.
-pub fn read_jsb_seqs_full(
-    path: &Path,
-    journal_first_block: u64,
-    block_size: u32,
-) -> (u64, u64, u64, u64) {
-    let jsb_offset = journal_first_block * block_size as u64;
-    const TAIL_SEQ_OFF: usize = 16;
-    const TAIL_BLOCK_OFF: usize = 32;
-    const HEAD_BLOCK_OFF: usize = 40;
-
-    let mut f = File::open(path).expect("open image");
-    f.seek(SeekFrom::Start(jsb_offset)).unwrap();
-    let mut buf = [0u8; 64];
-    f.read_exact(&mut buf).unwrap();
-
-    let tail_seq = u64::from_le_bytes(buf[TAIL_SEQ_OFF..TAIL_SEQ_OFF + 8].try_into().unwrap());
-    let head_seq = u64::from_le_bytes(buf[HEAD_SEQ_OFF..HEAD_SEQ_OFF + 8].try_into().unwrap());
-    let tail_block =
-        u64::from_le_bytes(buf[TAIL_BLOCK_OFF..TAIL_BLOCK_OFF + 8].try_into().unwrap());
-    let head_block =
-        u64::from_le_bytes(buf[HEAD_BLOCK_OFF..HEAD_BLOCK_OFF + 8].try_into().unwrap());
-    (tail_seq, head_seq, tail_block, head_block)
 }

@@ -85,6 +85,25 @@ impl Disk {
 
     pub fn write_block(&mut self, block_num: u64, data: &[u8]) -> io::Result<()> {
         let offset = self.block_byte_offset(block_num);
+        self.write_padded_block_at(offset, data)
+    }
+
+    /// Write a block addressed from the start of the *device* rather than the
+    /// partition.
+    ///
+    /// Journal descriptor entries carry device-absolute block numbers (see
+    /// [`efs_common::DescriptorEntry::fs_block`]): the kernel derives one from
+    /// `block_to_lba(block) / sectors_per_block`, which already includes the
+    /// partition's starting LBA. Replay must therefore not add
+    /// `partition_offset` a second time, or every home block lands
+    /// `partition_offset` bytes too high. Every other block number the checker
+    /// handles is partition-relative and belongs in [`Self::write_block`].
+    pub fn write_device_block(&mut self, device_block: u64, data: &[u8]) -> io::Result<()> {
+        let offset = device_block * self.block_size as u64;
+        self.write_padded_block_at(offset, data)
+    }
+
+    fn write_padded_block_at(&mut self, offset: u64, data: &[u8]) -> io::Result<()> {
         let pad = self.block_size as usize - data.len();
         let file = self.writer()?;
         file.seek(SeekFrom::Start(offset))?;

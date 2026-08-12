@@ -788,10 +788,10 @@ refuses to mount images without it.
 | 4      | 4    | version       | Must be 1                                |
 | 8      | 4    | block_count   | Total journal blocks                     |
 | 12     | 4    | block_size    | Must match FS block size (4096)          |
-| 16     | 8    | tail_seq      | Oldest live transaction seq              |
-| 24     | 8    | head_seq      | Next transaction seq                     |
+| 16     | 8    | tail_seq      | Oldest live transaction seq. Authoritative: replay starts here |
+| 24     | 8    | head_seq      | Next transaction seq. Advisory, see below |
 | 32     | 8    | tail_block    | Ring offset of oldest live data          |
-| 40     | 8    | head_block    | Ring offset of next write position       |
+| 40     | 8    | head_block    | Ring offset of next write position. Advisory, see below |
 | 48     | 4    | crc32         | CRC32 of struct with this field zeroed   |
 | 52     | 12   | reserved      | Must be zero                             |
 
@@ -842,14 +842,39 @@ Written with FUA for durability.
    enrolled seq.
 7. After checkpoint (home-location flush), advance_tail reclaims ring.
 
+### The head cursors are advisory
+
+`head_seq` and `head_block` record where the ring stood when the superblock was
+last written: after a commit, and after `advance_tail` retires a checkpointed
+transaction. A crash in either window leaves them naming a position older than
+what the ring holds, and `head_seq` names the *open* transaction, which is never
+committed, so a healthy journal routinely sits a sequence ahead of its tail.
+
+Nothing may therefore decide from them whether the journal holds outstanding
+work, or use them to bound a replay scan. Both readers — the kernel at mount
+time and `efs-fsck` — walk the ring instead, and a reader that trusted the head
+was the cause of two data-loss bugs: see
+`doc/bugs/2026-08-12-journal-recovery-never-saw-committed-work.md`.
+
 ### Mount-time replay
 
-Two-pass scan from tail_block:
-- Pass 1: collect committed txs and revoke set (fs_block -> max_revoke_seq)
+Two passes from tail_block, implemented once in
+`libs/efs-common/src/journal_scan.rs` and shared by the kernel and efs-fsck:
+- Pass 1: walk forward from `tail_seq`/`tail_block`, collecting committed txs
+  and the revoke set (fs_block -> max_revoke_seq). The walk stops at the first
+  descriptor whose seq is not the expected one. Sequence numbers are global and
+  never reused, so that break is exactly the end of the live region: a
+  lower-numbered descriptor beyond it is the stale far side of a wrapped ring,
+  and applying it would roll metadata backwards.
 - Pass 2: apply data blocks to home locations, skipping revoked blocks
-  (revoke_seq >= tx_seq). Un-escape DESC_FLAG_ESCAPED blocks.
+  (revoke_seq >= tx_seq). Un-escape DESC_FLAG_ESCAPED blocks. `fs_block` is
+  device-absolute and already includes the partition's starting LBA, so a
+  replayer converts it with block size alone.
 
-After replay: flush_cache, write updated JSB (tail=head) with FUA.
+After replay: flush_cache, write the JSB with FUA, with both seq cursors set to
+one past the last transaction applied and both block cursors to the ring
+position just past it. Restarting the journal on the persisted head instead
+would reissue sequence numbers already on disk.
 Idempotent: crash during replay re-replays on next boot.
 
 ### Crash safety guarantees

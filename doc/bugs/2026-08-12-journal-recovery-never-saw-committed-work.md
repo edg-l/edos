@@ -128,5 +128,23 @@ passing test until someone has watched it go red against a kernel with the scan
 fix reverted. A regression test for a bug this quiet is worth nothing if it
 passes either way.
 
-The wrapped-ring case is also still untested against the fix: both wrapped runs
-recorded during the investigation predate it.
+The wrapped-ring case is also still untested against the fix *in the guest*:
+both wrapped runs recorded during the investigation predate it. It is covered on
+the host, though — see below.
+
+## The same three bugs were in efs-fsck
+
+The checker carried a hand-ported copy of the replay algorithm, so none of the
+fixes above had reached it: it bounded dirtiness by `tail_seq != head_seq`, it
+walked past a sequence break into a wrapped ring's stale far side, and its pass 2
+added the partition offset to home blocks that already carried it. It also
+retired the ring to the persisted head, leaving a checked image asking the kernel
+to replay what fsck had just applied.
+
+The scan is now `libs/efs-common/src/journal_scan.rs`, called by the kernel and
+by the checker, with only block I/O on either side; the ring block *writers* moved
+to `journal_build.rs` alongside it. `tools/efs-fsck/tests/integration.rs` covers
+all four defects, including the wrapped ring and a filesystem at a 1 MiB
+partition offset, by planting real committed transactions with the same builders
+the kernel commits with. Each test was watched to fail with its defect
+reintroduced before being kept.

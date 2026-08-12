@@ -5,12 +5,19 @@ use efs_common::{EfsSuperblock, JOURNAL_MAGIC, JournalSuperblock, journal_sb_che
 use crate::disk::Disk;
 use crate::report::{Category, Finding, Report, Severity};
 
-/// Load and validate the `JournalSuperblock` from the journal's first block.
+/// Validate the `JournalSuperblock` in the journal's first block.
 ///
-/// Returns the parsed JSB and a report of any issues found.
-/// CRC mismatch or bad magic return `Err` — these are unrecoverable without
-/// `--force` and the caller must decide how to proceed.
-pub fn load_jsb(disk: &mut Disk, sb: &EfsSuperblock) -> io::Result<(JournalSuperblock, Report)> {
+/// Returns a report of any issues found. CRC mismatch or bad magic return
+/// `Err` — these are unrecoverable without `--force` and the caller must decide
+/// how to proceed.
+///
+/// What is checked here is the JSB's internal consistency and its agreement
+/// with the filesystem superblock. Whether the journal holds outstanding work
+/// is not a superblock question: `head_seq`/`head_block` are advisory, written
+/// after a commit and after the tail advances, so a crash in either window
+/// leaves them behind what the ring holds. Only a ring walk answers that; see
+/// `replay::scan`.
+pub fn load_jsb(disk: &mut Disk, sb: &EfsSuperblock) -> io::Result<Report> {
     let journal_first_block = sb.journal_first_block;
     let jsb: JournalSuperblock = disk.read_struct_at(journal_first_block, 0)?;
     let mut report = Report::new();
@@ -94,7 +101,8 @@ pub fn load_jsb(disk: &mut Disk, sb: &EfsSuperblock) -> io::Result<(JournalSuper
         });
     }
 
-    // head_seq must be >= tail_seq.
+    // head_seq lagging the ring is expected; head_seq *below* the tail is not,
+    // since the tail only ever advances to sequences the head has passed.
     if head_seq < tail_seq {
         report.push(Finding {
             severity: Severity::Error,
@@ -107,5 +115,5 @@ pub fn load_jsb(disk: &mut Disk, sb: &EfsSuperblock) -> io::Result<(JournalSuper
         });
     }
 
-    Ok((jsb, report))
+    Ok(report)
 }

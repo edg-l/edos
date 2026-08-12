@@ -39,9 +39,15 @@ Two things had to be right for that loop to terminate at all:
 
 `efs-fsck` called a journal dirty when `tail_seq != head_seq`. That is not a
 dirtiness test: `head_seq` names the *open* transaction, so a perfectly clean
-journal normally sits one apart. The checker now scans the ring and reports
-dirty only when it finds a committed transaction to replay, sharing that scan
-with replay itself.
+journal normally sits one apart. The checker gained a ring scan and reported
+dirty only when that scan found a committed transaction to replay.
+
+That fix was half applied and stayed that way until 2026-08-12: the ring scan
+ran **behind** the old `tail_seq != head_seq` test rather than in place of it, so
+a head that had not caught up still suppressed the scan entirely, and a crash
+between a commit and the superblock write hid committed work from the checker.
+The head test is gone now, and the scan itself is shared with the kernel rather
+than reimplemented; see `doc/efs.md` §14 and `doc/WORKING-NOTES.md`.
 
 That fix is what turned this from a suspected false positive into a
 demonstrated bug — the first instinct was to disbelieve the checker, and the

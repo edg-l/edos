@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 pub mod block_group;
 pub mod crc32;
@@ -6,7 +6,9 @@ pub mod dir_entry;
 pub mod extent;
 pub mod inode;
 pub mod journal;
+pub mod journal_build;
 pub mod journal_parse;
+pub mod journal_scan;
 pub mod superblock;
 
 // Re-export all public types for convenience.
@@ -22,7 +24,9 @@ pub use journal::{
     DESC_FLAG_ESCAPED, DescriptorEntry, JOURNAL_BLOCK_MAGIC, JOURNAL_MAGIC, JournalBlockHeader,
     JournalBlockKind, JournalSuperblock, RevokeEntry, commit_block_checksum, journal_sb_checksum,
 };
+pub use journal_build::{build_commit_block, build_descriptor_block, build_revoke_block};
 pub use journal_parse::{parse_descriptor_entries, parse_header, parse_revoke_entries};
+pub use journal_scan::{JournalScan, ScanStop, ScannedTx, replay_write, scan_committed};
 pub use superblock::{EfsSuperblock, has_superblock_backup};
 
 // ---- Magic and version ----

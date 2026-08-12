@@ -1,20 +1,20 @@
 // Journal replay: mount-time recovery.
 //
-// Two-pass scan of the journal ring:
-//   Pass 1: build revoke set — for each REVOKE block, record (fs_block, max_revoke_seq).
-//   Pass 2: apply committed transactions — for each DESCRIPTOR+COMMIT pair,
-//           write data blocks to their home FS locations unless revoked.
+// Two passes over the journal ring:
+//   Pass 1: walk the ring from the tail, collecting committed transactions and
+//           the revokes that veto individual blocks. This is
+//           `efs_common::scan_committed`, shared with efs-fsck so the checker
+//           and the kernel cannot disagree about where the live region ends.
+//   Pass 2: write each committed transaction's data blocks to their home FS
+//           locations, skipping revoked ones.
 //
-// After replay, flush all writes, then reset the JSB (tail = head).
-// Replay is idempotent: a crash during replay re-replays the same txs
-// on next mount because the JSB tail is not advanced until the end.
+// After replay, flush all writes, then reset the JSB from the cursors the scan
+// reported. Replay is idempotent: a crash during replay re-replays the same
+// transactions on next mount, because the JSB tail is not advanced until the end.
 
-use alloc::{collections::BTreeMap, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 
-use efs_common::{
-    DESC_FLAG_ESCAPED, JOURNAL_BLOCK_MAGIC, JournalBlockHeader, JournalBlockKind,
-    commit_block_checksum, parse_descriptor_entries, parse_header, parse_revoke_entries,
-};
+use efs_common::{ScanStop, replay_write, scan_committed};
 
 use crate::{
     drivers::{
@@ -89,11 +89,11 @@ const SECTORS_PER_BLOCK: u16 = 8;
 /// Result of replay: how many transactions were applied, and where the live
 /// region ended.
 ///
-/// The end cursor is reported because the superblock's head cannot supply it.
-/// That head is written only when the tail advances, so after a crash it names
-/// a position older than the transactions replay just applied. Restarting the
-/// journal there would hand out sequence numbers that are already on disk and
-/// write over ring blocks still holding live data.
+/// The end cursor is reported because the superblock's head cannot supply it:
+/// it is advisory, and after a crash it can name a position older than the
+/// transactions replay just applied. Restarting the journal there would hand out
+/// sequence numbers that are already on disk and write over ring blocks still
+/// holding live data.
 pub struct ReplayResult {
     pub txs_applied: u64,
     /// Sequence number the next transaction should take: one past the last
@@ -112,14 +112,8 @@ pub struct ReplayResult {
 /// `partition_start_lba`: starting LBA of the EFS partition (for fs_block → LBA).
 /// `tail_seq`, `tail_block`: from the validated JournalSuperblock.
 ///
-/// The scan is bounded by sequence continuity, not by a persisted head: the
-/// journal superblock's `head_seq`/`head_block` are written only when the
-/// tail advances (`Journal::advance_tail`), so they can lag arbitrarily far
-/// behind transactions that committed since the last checkpoint. Trusting
-/// them as a scan bound is what silently dropped committed-but-uncheckpointed
-/// work on recovery. Sequence numbers are global and never reused, so walking
-/// forward from the tail and stopping at the first break in the sequence
-/// finds exactly the live region regardless of what the superblock recorded.
+/// The scan is bounded by sequence continuity, not by a persisted head; see
+/// [`efs_common::journal_scan`] for why, and for the rule efs-fsck shares.
 ///
 /// Returns the number of transactions replayed. Every mount scans; on a
 /// genuinely clean journal the block at `tail_block` fails the continuity
@@ -138,181 +132,56 @@ pub fn replay(
         tail_block
     );
 
-    let ring_size = block_count as u64 - 1; // block 0 = JSB
-
-    // Read one journal ring block by its ring-internal index.
+    // ---- Pass 1: collect committed transactions and their revokes -----------
     //
     // `first_block` is an EFS block number, which is partition-relative, so the
-    // partition's starting LBA has to be added exactly as the home-block write
-    // below does. Without it the ring is read `partition_start_lba` sectors too
-    // low, off the front of the partition: every header fails to parse, replay
-    // reports no committed transactions, and an unclean mount silently discards
-    // the metadata the journal was holding for it.
-    let read_ring_block = |ring_idx: u64| -> Result<Vec<u8>, AhciError> {
-        let wrapped = (ring_idx % ring_size) + 1;
-        let lba = partition_start_lba + (first_block + wrapped) * SECTORS_PER_BLOCK as u64;
-        let mut buf = vec![0u8; BLOCK_SIZE];
-        block_read(device_id, lba, SECTORS_PER_BLOCK, &mut buf)?;
-        Ok(buf)
-    };
+    // partition's starting LBA has to be added. Without it the ring is read
+    // `partition_start_lba` sectors too low, off the front of the partition:
+    // every header fails to parse, replay reports no committed transactions,
+    // and an unclean mount silently discards the metadata the journal was
+    // holding for it. The home-block write in pass 2 is the other addressing
+    // domain and must not add it.
+    let scan = scan_committed(
+        tail_seq,
+        tail_block,
+        block_count as u64 - 1, // block 0 of the region is the JSB
+        BLOCK_SIZE,
+        |region_block: u64| -> Result<Vec<u8>, AhciError> {
+            let lba = partition_start_lba + (first_block + region_block) * SECTORS_PER_BLOCK as u64;
+            let mut buf = vec![0u8; BLOCK_SIZE];
+            block_read(device_id, lba, SECTORS_PER_BLOCK, &mut buf)?;
+            Ok(buf)
+        },
+    )?;
 
-    // ---- Pass 1: scan for committed txs and build revoke set ----------------
-    // We scan the ring sequentially, parsing descriptor→data→revoke→commit
-    // groups. A tx is committed iff we find a COMMIT block with matching seq.
-    // We also collect revoke entries.
-
-    let mut revoke_set: BTreeMap<u64, u64> = BTreeMap::new(); // fs_block → max_revoke_seq
-    let mut committed_txs: Vec<CommittedTx> = Vec::new();
-    let mut ring_pos: u64 = tail_block;
-    let mut total_ring_blocks: u64 = 0;
-    let mut expected_seq: u64 = tail_seq;
-    // Advanced only past a transaction that was fully accepted. `ring_pos`
-    // cannot serve: a transaction rejected at its commit block has already
-    // moved it past that transaction's descriptor and data.
-    let mut live_end_pos: u64 = tail_block;
-
-    // Sequence numbers are global and never reused, so a transaction whose
-    // descriptor carries anything other than `expected_seq` is either the
-    // stale far side of a wrapped ring (an older transaction that still
-    // parses cleanly, with a lower seq — replaying it would roll metadata
-    // backwards) or genuinely not there. Either way the live region ends
-    // here. This replaces bounding the scan by the persisted head, which
-    // lags behind whatever committed since the last checkpoint.
-    //
-    // The block count is capped at `ring_size` regardless: a ring cannot
-    // hold more live transactions than it has blocks, so hitting this bound
-    // without a continuity break means something is corrupt.
-    loop {
-        if ring_pos >= tail_block + ring_size {
-            log!(
-                "efs journal: replay scan hit the ring-size bound at seq={} without a continuity break, stopping",
-                expected_seq
-            );
-            break;
-        }
-
-        let block = read_ring_block(ring_pos)?;
-        let hdr = parse_header(&block);
-
-        let Some(hdr) = hdr else {
-            // Not a valid journal block — end of committed data.
-            break;
-        };
-
-        if hdr.kind != JournalBlockKind::Descriptor as u8 {
-            // Expected a descriptor at the start of a tx. Stop.
-            break;
-        }
-
-        if hdr.seq != expected_seq {
-            // Continuity broken: either the ring's stale far side (a lower
-            // seq left over from before the last wrap) or the true end of
-            // the live region.
-            break;
-        }
-
-        let desc_seq = hdr.seq;
-        let desc_tx_id = hdr.tx_id;
-
-        // Parse descriptor entries to know how many data blocks follow.
-        let entries = parse_descriptor_entries(&block, BLOCK_SIZE);
-        let n_data = entries.len() as u64;
-        ring_pos += 1; // past descriptor
-
-        // Read data blocks.
-        let mut data_blocks: Vec<Vec<u8>> = Vec::with_capacity(n_data as usize);
-        for _ in 0..n_data {
-            let db = read_ring_block(ring_pos)?;
-            data_blocks.push(db);
-            ring_pos += 1;
-        }
-
-        // Check for optional revoke block.
-        let next_block = read_ring_block(ring_pos)?;
-        let next_hdr = parse_header(&next_block);
-
-        let mut has_revoke = false;
-        if let Some(nh) = &next_hdr {
-            if nh.kind == JournalBlockKind::Revoke as u8 && nh.seq == desc_seq {
-                // Parse revoke entries.
-                let revokes = parse_revoke_entries(&next_block, BLOCK_SIZE);
-                for r in &revokes {
-                    let existing = revoke_set.entry(r.fs_block).or_insert(0);
-                    if r.seq > *existing {
-                        *existing = r.seq;
-                    }
-                }
-                has_revoke = true;
-                ring_pos += 1;
-            }
-        }
-
-        // Now expect a commit block.
-        let commit_block = if has_revoke {
-            read_ring_block(ring_pos)?
-        } else {
-            // next_block might be the commit block.
-            next_block
-        };
-        let commit_hdr = parse_header(&commit_block);
-
-        let is_committed = match commit_hdr {
-            Some(ch) => {
-                ch.kind == JournalBlockKind::Commit as u8
-                    && ch.seq == desc_seq
-                    && ch.tx_id == desc_tx_id
-            }
-            None => false,
-        };
-
-        if !is_committed {
-            // Partial tx — no commit block. Discard and stop.
-            log!(
-                "efs journal: partial tx seq={} (no commit block), stopping replay scan",
-                desc_seq
-            );
-            break;
-        }
-
-        // Verify commit CRC.
-        let commit_crc = {
-            let off = core::mem::size_of::<JournalBlockHeader>();
-            u32::from_le_bytes([
-                commit_block[off],
-                commit_block[off + 1],
-                commit_block[off + 2],
-                commit_block[off + 3],
-            ])
-        };
-        let mut payload: Vec<u8> = Vec::with_capacity(n_data as usize * BLOCK_SIZE);
-        for db in &data_blocks {
-            payload.extend_from_slice(db);
-        }
-        let expected_crc = commit_block_checksum(&payload);
-        if commit_crc != expected_crc {
-            log!(
-                "efs journal: tx seq={} commit CRC mismatch (got {:#x}, expected {:#x}), stopping",
-                desc_seq,
-                commit_crc,
-                expected_crc
-            );
-            break;
-        }
-
-        ring_pos += 1; // past commit block
-        let tx_blocks = 1 + n_data + if has_revoke { 1 } else { 0 } + 1;
-        total_ring_blocks += tx_blocks;
-        expected_seq += 1;
-        live_end_pos = ring_pos;
-
-        committed_txs.push(CommittedTx {
-            seq: desc_seq,
-            entries,
-            data_blocks,
-        });
+    match scan.stop {
+        ScanStop::PartialTx { seq } => log!(
+            "efs journal: partial tx seq={} (no commit block), stopping replay scan",
+            seq
+        ),
+        ScanStop::CommitCrcMismatch {
+            seq,
+            found,
+            expected,
+        } => log!(
+            "efs journal: tx seq={} commit CRC mismatch (got {:#x}, expected {:#x}), stopping",
+            seq,
+            found,
+            expected
+        ),
+        ScanStop::RingBound { expected } => log!(
+            "efs journal: replay scan hit the ring-size bound at seq={} without a continuity break, stopping",
+            expected
+        ),
+        ScanStop::DegenerateRing => log!("efs journal: block_count is 0; the ring holds nothing"),
+        // A sequence break, a non-journal block or a non-descriptor is the
+        // ordinary end of the live region and says nothing worth logging.
+        ScanStop::SequenceBreak { .. }
+        | ScanStop::NotJournalBlock
+        | ScanStop::NotDescriptor { .. } => {}
     }
 
-    if committed_txs.is_empty() {
+    if scan.txs.is_empty() {
         log!("efs journal: scanned, nothing to replay");
         return Ok(ReplayResult {
             txs_applied: 0,
@@ -339,23 +208,13 @@ pub fn replay(
         alloc::collections::VecDeque::new();
     let mut failure: Option<AhciError> = None;
 
-    'outer: for tx in &committed_txs {
-        for (i, entry) in tx.entries.iter().enumerate() {
-            let fs_block = entry.fs_block;
-
-            // Check revoke set: skip if this block was revoked at a seq >= this tx's seq.
-            if let Some(&revoke_seq) = revoke_set.get(&fs_block) {
-                if revoke_seq >= tx.seq {
-                    continue;
-                }
-            }
-
-            let mut data = tx.data_blocks[i].clone();
-
-            // Un-escape if the descriptor entry was marked ESCAPED.
-            if entry.flags & DESC_FLAG_ESCAPED != 0 {
-                data[..4].copy_from_slice(&JOURNAL_BLOCK_MAGIC.to_le_bytes());
-            }
+    'outer: for tx in &scan.txs {
+        for i in 0..tx.entries.len() {
+            // Yields nothing for a block a later transaction revoked, and
+            // un-escapes one whose descriptor entry is marked ESCAPED.
+            let Some((fs_block, data)) = replay_write(tx, i, &scan.revokes) else {
+                continue;
+            };
 
             while inflight.len() >= MAX_INFLIGHT_REPLAY {
                 let Some(done) = inflight.pop_front() else {
@@ -410,20 +269,12 @@ pub fn replay(
     log!(
         "efs journal: replayed {} transactions ({} ring blocks)",
         applied,
-        total_ring_blocks
+        scan.ring_blocks
     );
 
     Ok(ReplayResult {
         txs_applied: applied,
-        next_seq: expected_seq,
-        next_block: live_end_pos,
+        next_seq: scan.next_seq,
+        next_block: scan.next_block,
     })
-}
-
-// ---- Internal helpers -------------------------------------------------------
-
-struct CommittedTx {
-    seq: u64,
-    entries: Vec<efs_common::DescriptorEntry>,
-    data_blocks: Vec<Vec<u8>>,
 }
