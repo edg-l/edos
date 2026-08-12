@@ -4543,3 +4543,29 @@ append + `fsync` pattern, not the writing of 16 MiB.
 `fsbench fragprep` also prints `sys_sync: journal still pending after 8 rounds`,
 the pre-existing warning listed under known failures — worth checking whether it
 is the same dropped writeback rather than an unrelated timeout.
+
+## Batch block allocation, exercised in the guest (2026-08-12)
+
+`EfsDriver` asks the allocator for a whole writeback batch at once and prefers a
+contiguous free run. The correctness question that raises is whether a run
+handed out in one request is fully accounted for when only part of it is
+consumed, so the closing evidence is a write-path run on a **freshly built**
+`sata-disk.img`, not a green suite:
+
+```
+iotest /var                    20/20     (test 16 logs `efs: read hole at
+                                          logical block 1` — that is its own
+                                          sparse-file case, not a lost block)
+fsbench write -n 32 /var       total 1.1 s, verify: all patterns match
+                               efs_stats.blocks_allocated +30792, orphans_marked +65
+                               journal commits 67 / ring_blocks 456 / commands 134
+                               ahci_stats.ncq_max_inflight +2
+fsbench write -n 8  /var       total 0.2 s, verify: all patterns match
+                               blocks_allocated +6418, blocks_freed +9512
+```
+
+Reading `verify: all patterns match` off the screen needs a redirect: the
+`KERNEL COUNTERS` block is longer than the terminal, so the verify line has
+already scrolled away by the time the run ends. `fsbench write -n 8 /var >
+/var/w.txt` then `grep verify /var/w.txt` — write the file to `/var`, since
+memfs `/tmp` reads past EOF and pads the last page with zeros.
