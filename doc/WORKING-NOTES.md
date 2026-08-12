@@ -515,9 +515,23 @@ does not have to invent them.
 |---|---|---|
 | syscalls | 111 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 111 — a mismatch is the bug |
 | userspace programs | 105 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
+| programs listed in `doc/USERSPACE-ROADMAP.md` | 107 rows = 105 + the 2 libraries | diff the table against the workspace, below |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 20/20 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+
+A matching count is not a matching inventory. `doc/USERSPACE-ROADMAP.md`'s "What
+exists" table drifted six programs behind the workspace (`nproc`, `pollbench`,
+`socktest`, `stdtest`, `switchbench`, `syscallfuzz`) while its header count was
+also wrong in the other direction, so the two errors hid each other. Diff the
+two sets rather than comparing totals:
+
+```bash
+cd /home/edgar/dev/edos-v2
+sed -n '/members = \[/,/\]/p' programs/Cargo.toml | grep -oE '"[^"]+"' | tr -d '"' | sort > /tmp/members.txt
+sed -n '/^| Area/,/^$/p' doc/USERSPACE-ROADMAP.md | grep -oE '`[a-z0-9_-]+`' | tr -d '`' | sort -u > /tmp/tabled.txt
+comm -3 /tmp/members.txt /tmp/tabled.txt   # empty is correct
+```
 
 One number outside this repo is stale against the table above: the project site
 says "There are 110 syscalls" in

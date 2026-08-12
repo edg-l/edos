@@ -41,8 +41,9 @@ surface at all.
 |---|---|
 | in-EDOS `fsck` | `efs-fsck` is host-side only, so the guest cannot check its own filesystem. This is the difference between an OS that can be repaired and one that has to be re-imaged |
 
-`syscallfuzz` shipped and found a kernel panic on its first run; the finding is
-in [`WORKING-NOTES.md`](WORKING-NOTES.md) under the open `ioctl` wedge.
+`syscallfuzz` shipped and found two kernel panics, both since fixed: an `ioctl`
+that wedged its own CPU and a `#GP` on a non-canonical user pointer. The
+post-mortems are in [`WORKING-NOTES.md`](WORKING-NOTES.md).
 
 ### Blocked, and on what
 
