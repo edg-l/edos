@@ -544,7 +544,19 @@ impl EfsDriver {
                     bulk_blocks
                 }
                 // A hole reads as zeros, which `result` already holds.
-                BlockRun::Hole { blocks } => blocks.unwrap_or(blocks_needed).min(blocks_needed),
+                BlockRun::Hole { blocks } => {
+                    let seen = EFS_EXTENT_HOLES.fetch_add(1, Ordering::Relaxed);
+                    if seen < EXTENT_HOLE_LOG_LIMIT {
+                        log!(
+                            "efs: read hole at logical block {} (byte {}) of a {}-byte file, {} extents mapped",
+                            logical_block,
+                            cur_byte,
+                            inode.size,
+                            extents.as_slice().len()
+                        );
+                    }
+                    blocks.unwrap_or(blocks_needed).min(blocks_needed)
+                }
             };
 
             let run_bytes = run_blocks as usize * block_size - offset_in_block;
@@ -1122,6 +1134,16 @@ pub static EFS_ALLOC_FAILED: AtomicU64 = AtomicU64::new(0);
 pub static EFS_EXTENT_READS: AtomicU64 = AtomicU64::new(0);
 pub static EFS_EXTENT_RUNS: AtomicU64 = AtomicU64::new(0);
 pub static EFS_EXTENT_BATCHES: AtomicU64 = AtomicU64::new(0);
+
+/// Runs a file read planned as a hole below EOF: an unmapped logical block
+/// inside the file's own size, which reads back as zeros. A sparse file reads
+/// this way legitimately, so the counter is a signal rather than an error, but
+/// nothing in this system writes sparse files today: a non-zero count on a file
+/// written front to back means the extent map lost a block the data went to.
+/// The first few are logged with the block that was missing.
+pub static EFS_EXTENT_HOLES: AtomicU64 = AtomicU64::new(0);
+/// Holes reported to the log, so a fragmented read does not flood it.
+const EXTENT_HOLE_LOG_LIMIT: u64 = 8;
 
 impl EfsDriver {
     /// Allocate a free block and return its absolute block number.

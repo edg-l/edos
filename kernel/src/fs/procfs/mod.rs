@@ -293,13 +293,15 @@ impl Procfs {
 
     fn render_efs_stats() -> String {
         use crate::fs::efs::{EFS_ALLOC_FAILED, EFS_BLOCKS_ALLOCATED, EFS_BLOCKS_FREED};
-        use crate::fs::efs::{EFS_EXTENT_BATCHES, EFS_EXTENT_READS, EFS_EXTENT_RUNS};
+        use crate::fs::efs::{
+            EFS_EXTENT_BATCHES, EFS_EXTENT_HOLES, EFS_EXTENT_READS, EFS_EXTENT_RUNS,
+        };
         use crate::fs::inode::{ORPHANS_DROPPED, ORPHANS_MARKED};
         use crate::fs::journal::tx::TX_ABORTS;
         format!(
             "blocks_allocated: {}\nblocks_freed: {}\nalloc_failed: {}\ntx_aborts: {}\n\
              orphans_marked: {}\norphans_dropped: {}\n\
-             extent_reads: {}\nextent_runs: {}\nextent_batches: {}\n",
+             extent_reads: {}\nextent_runs: {}\nextent_batches: {}\nextent_holes: {}\n",
             EFS_BLOCKS_ALLOCATED.load(Ordering::Relaxed),
             EFS_BLOCKS_FREED.load(Ordering::Relaxed),
             EFS_ALLOC_FAILED.load(Ordering::Relaxed),
@@ -309,6 +311,7 @@ impl Procfs {
             EFS_EXTENT_READS.load(Ordering::Relaxed),
             EFS_EXTENT_RUNS.load(Ordering::Relaxed),
             EFS_EXTENT_BATCHES.load(Ordering::Relaxed),
+            EFS_EXTENT_HOLES.load(Ordering::Relaxed),
         )
     }
 

@@ -4237,12 +4237,37 @@ windows become 5, and 243 windows are declined and billed to the reader inside
 its own `read`. That is where the 287 -> 132 MiB/s went, not into the extra
 commands.
 
-**Open, found by the first run of this instrument:** the fragmented file reads
-back a hole. `fsbench ra /var` reports `byte 786432 of the file is 0x00, want
-0x47` — 786432 is exactly 3 x 256 KiB, a step boundary — and a warm re-read in
-the same boot reports the same byte, so the zeros are in the page cache and not
-a one-off in the cold path. Not yet split between the write path (the block was
-never allocated or never flushed) and the read path (a run planned past the
-extent it belongs to). Repro: `fsbench fragprep /var`, reboot, `fsbench ra /var`.
-The contiguous arm verifies clean in the same build, so it is specific to a file
-whose extents alternate with another file's.
+## An interleaved-append file loses one 512-byte sector of a block
+
+**Open.** Repro: `fsbench fragprep /var`, reboot, `fsbench ra /var` — the pass
+reports `VERIFY FAIL byte <n> of the file is 0x00, want <p>`. The contiguous arm
+(`raprep`) verifies clean in the same build, so it takes the interleaved
+append + `fsync` pattern to produce it.
+
+What the offset says. One run failed at 1113600, which is block 271 of the file
+(`271 x 4096 + 3584`) and **sector 2175 exactly** — the last of that block's
+eight sectors. The block's first 3584 bytes are the right pattern bytes and its
+last 512 are zeros, so this is a partial-block write, not a lost block. An
+earlier run failed at 786432, a step boundary; the two disagree, so the offset
+is a property of the layout the allocator happened to produce, not of a fixed
+boundary.
+
+It is the write path, and these are the three things that say so:
+
+- `/proc/efs_stats`'s `extent_holes` counts runs `read_via_extents` planned as a
+  hole below EOF. It stays 0 across the failing pass, so the block is mapped and
+  the read asked the device for all eight of its sectors — the planner is not
+  reading zeros out of an unmapped range.
+- The same byte fails on **two successive cold boots** of the same disk, so the
+  zeros are stable state rather than a race in the read.
+- A single `dd if=/var/fsbench.ra of=/tmp/x.bin bs=512 skip=2175 count=1` on a
+  third cold boot — one 4 KiB fill, no sequential pass, no prefetch window —
+  hexdumps 512 zero bytes. Whatever wrote the block wrote seven sectors.
+
+So the next step is the write side: find what submits a **sub-block** write for
+a page whose whole 4096 bytes are dirty, or what lets a second writeback of the
+same page land after the first with only part of it valid. `EfsDriver::flush_page`
+/ `flush_pages_bulk` and the `fsync` path that runs concurrently with them are
+where to look; the seam that produced nine earlier write-path data-loss bugs was
+a direct write bypassing one of the two caches, which is also the only shape in
+this filesystem that can write at sector rather than block granularity.
