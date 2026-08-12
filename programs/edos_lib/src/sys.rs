@@ -82,6 +82,9 @@ pub const SYS_MOUNT: u64 = 202;
 pub const SYS_LIST_PARTITIONS: u64 = 203;
 pub const SYS_LIST_MOUNTS: u64 = 208;
 pub const SYS_STATFS: u64 = 254;
+/// Reads the reason the calling thread's last failing syscall gave, which the
+/// kernel keeps beside the thread rather than returning in place of the result.
+pub const SYS_ERRNO: u64 = 0x400;
 
 pub const AF_INET: u32 = 2;
 pub const SOCK_STREAM: u32 = 1;

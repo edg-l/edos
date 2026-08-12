@@ -562,6 +562,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "syscallfuzz"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+]
+
+[[package]]
 name = "tail"
 version = "0.1.0"
 

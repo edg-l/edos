@@ -39,8 +39,10 @@ surface at all.
 
 | Program | The gap |
 |---|---|
-| syscall fuzzer | Newly possible: `/proc/syscalls` names every call and says which arguments are pointers, lengths and strings, so a fuzzer can generate structurally plausible calls without a hand-written table. Nothing tests the `uaccess` surface as a surface; this drives every dispatch arm with unmapped pointers, absurd lengths and misaligned structs, and `strace` names the call that killed it |
 | in-EDOS `fsck` | `efs-fsck` is host-side only, so the guest cannot check its own filesystem. This is the difference between an OS that can be repaired and one that has to be re-imaged |
+
+`syscallfuzz` shipped and found a kernel panic on its first run; the finding is
+in [`WORKING-NOTES.md`](WORKING-NOTES.md) under the open `ioctl` wedge.
 
 ### Blocked, and on what
 

@@ -6,6 +6,57 @@ session.
 
 ---
 
+## OPEN: one `ioctl` wedges a CPU, and the TLB shootdown watchdog panics the kernel
+
+`syscallfuzz` found this on its first run. It is userspace-reachable, it is
+deterministic, and it takes the whole machine down:
+
+```
+syscallfuzz -n 8 -v -u 0 -o ioctl
+  ioctl  fxpnx
+    case  0 [ffffffffffffff9c, 80000000, 436a41, 1001, ffffffff] ->
+```
+
+That is `ioctl(fd = -100, request = 0x80000000, arg = <a valid page + 1>,
+arg_len = 4097, flags = 0xffffffff)`, and it never returns. Reproduced twice,
+same case index both times, since the generator is seeded `seed ^ nr`.
+
+What it does to the system, from `run_log.txt` of the first run:
+
+```
+[21.579] <cpu-0:/bin/syscallfuzz:u:27> Unmap partial error (kernel-managed VMAs in range)
+[21.793] <cpu-2:/bin/edos-wm:u:25> tlb_shootdown: re-sending IPI to CPUs 0x1
+[22.154] KERNEL PANIC: tlb_shootdown: CPUs 0x1 never acknowledged a flush of
+         50 page(s) at VirtAddr(0x283f000) across 3 attempts
+```
+
+CPU 0 stops taking interrupts entirely, so the next unrelated `munmap` anywhere
+in the system panics at `memory/tlb.rs:133`. The watchdog is doing its job; the
+bug is whatever holds CPU 0.
+
+Ruled out already:
+
+- **The fd is not the mechanism by itself.** `-100` is `AT_FDCWD`, but
+  `FdTable::get_fd` (`thread/fd.rs:65`) is a plain map lookup with no special
+  case, so an absent key returns `None` and `sys_ioctl` answers `EBADF` before
+  it touches anything. Something must nevertheless be reached, because the call
+  does not return.
+- **Not the errno read after it.** `SYS_ERRNO` runs after every failing case and
+  had already answered for `close`, `fsync` and `isatty` in the same run.
+
+Where to look first: `sys_ioctl` (`kernel/src/syscalls/ioctl/mod.rs:17`) calls
+`interrupts::enable()` on both arms of the `FsFile` branch (lines 71 and 98)
+before dispatching to the device or the FS mailbox. A syscall that manipulates
+the interrupt flag by hand is the shape of a CPU that ends up running with
+interrupts off and never gets them back, which is exactly the symptom. Read what
+state the entry path expects the flag to be in, rather than assuming those two
+calls are redundant.
+
+Next step is a `--only ioctl` run under `strace`, or a `run-gdb` boot with a
+breakpoint on `sys_ioctl`, to find out which arm the call actually enters.
+
+---
+
 ## Readahead now submits before it fills, and "device idle" stopped meaning idle
 
 `page_cache_read_core` (`fs/vfs.rs`) filled the reader's own pages first and
