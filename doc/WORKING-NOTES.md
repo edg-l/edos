@@ -45,15 +45,14 @@ fragmented-file reads.
 
 ## A `SeqCst` load is not a barrier, and that is where a has-waiters check goes wrong
 
-`WaitQueue::wake_one`/`wake_all` skip the whole wake path when the enrolled-waiter
-count reads zero. The count is exact — it is written to `inner.len()` under
-`inner` — but reading it correctly is not about the count at all, it is about
-what the producer published just before.
+`WaitQueue::wake_one`/`wake_all` skip the wake path when the enrolled-waiter count
+reads zero. The count itself is exact, written to `inner.len()` under `inner`. The
+problem is what the producer published just before reading it.
 
-The check replaced an `inner.lock()`, and that lock was doing invisible work: on
-x86 its `lock cmpxchg` is a full barrier, so a producer's publication could never
+The check replaced an `inner.lock()`, and that lock was doing invisible work: its
+`lock cmpxchg` is a full barrier on x86, so a producer's publication could never
 sit in the store buffer while the queue was inspected. A bare atomic read has no
-such barrier, and **`Ordering::SeqCst` does not supply one on a load**. The
+such barrier, and **`Ordering::SeqCst` does not supply one on a load**; the
 barrier rides on `SeqCst` stores. Checked against real codegen:
 
 ```asm
@@ -62,13 +61,13 @@ producer:                       waiter_publish:
   movq  (%rsi), %rax ; load       movzbl (%rdx), %eax  ; predicate
 ```
 
-That is the store-buffer litmus with a fence on one side only, which permits both
-sides to read stale: the producer sees no waiters and skips the wake, the waiter
-sees no data and parks. The park is indefinite.
+One side fenced and the other not is the store-buffer litmus, and it lets both
+read stale: the producer sees no waiters and skips the wake, the waiter sees no
+data and parks forever.
 
-Most producers were saved by accident rather than by design — a pipe holds the
-same mutex the waiter's predicate re-takes, and `BlockIoHandle::complete`
-publishes with a `compare_exchange`, which is `lock`-prefixed. Two were not:
+Most producers were safe by accident. A pipe holds the same mutex the waiter's
+predicate re-takes, and `BlockIoHandle::complete` publishes with a
+`compare_exchange`, which is `lock`-prefixed. Two were not:
 
 - `PageFillHandle::finish_success`/`finish_failed` (`fs/page_fill.rs`) store the
   terminal state `Release` and then wake. A lost wake parks a reader forever on a
@@ -77,17 +76,17 @@ publishes with a `compare_exchange`, which is `lock`-prefixed. Two were not:
   `sync_done_wq` (`fs/writeback.rs`). Its waiter, `wait_for_flush`, is a single
   un-looped `wait_until`, so a lost wake hangs `sync()`/`fsync()`.
 
-The fence belongs in `has_waiters`, not at the two producers. Taking the lock used
-to supply it for free, so every caller in the tree was written without one, and a
-rule that each new producer must remember a barrier is a rule that will be missed.
-Linux draws the same line: `wq_has_sleeper()` is `smp_mb()` plus
-`waitqueue_active()`, and its documentation exists because this is a recurring
-bug. LLVM lowers the `SeqCst` fence to `lock orl $0, (%rsp)`, not `mfence`, so it
-costs less than the `cli`/`sti` plus `lock cmpxchg` plus `Arc` churn it replaces —
-the pipe-echo and blocking-round-trip wins the check was added for survive it.
+The fence belongs in `has_waiters`, not at those two. Taking the lock used to
+supply it for free, so every caller in the tree was written without one, and a
+rule that each new producer must remember a barrier will be missed. Linux draws
+the same line: `wq_has_sleeper()` is `smp_mb()` plus `waitqueue_active()`, and its
+documentation exists because this keeps recurring. LLVM lowers the `SeqCst` fence
+to `lock orl $0, (%rsp)` rather than `mfence`, so it costs less than the
+`cli`/`sti` plus `lock cmpxchg` plus `Arc` churn it replaces, and the pipe-echo
+and blocking-round-trip wins survive it.
 
-The tell, if this ever recurs elsewhere: a producer whose publication is a plain
-or `Release` store with no read-modify-write and no lock between it and a wake.
+The tell, if this recurs elsewhere: a producer whose publication is a plain or
+`Release` store with no read-modify-write and no lock between it and a wake.
 
 ---
 

@@ -146,21 +146,18 @@ impl WaitQueue {
     /// lock. A producer calls this before doing anything that only a waiter
     /// would care about.
     ///
-    /// The fence is what makes the answer safe to act on, and it cannot be
-    /// dropped for a plain `SeqCst` load: on x86 a `SeqCst` load is a bare
-    /// `mov` — the barrier rides on `SeqCst` *stores* — so the store buffer may
-    /// still hold the producer's publication when the count is read. A waiter
-    /// enrols under `inner`, whose `lock cmpxchg` and the `xchg` of
-    /// [`WaitQueue::publish`] both fence it, then re-checks its predicate; a
-    /// producer that publishes with a plain or `Release` store and no fence of
-    /// its own completes the store-buffer litmus with only one side ordered,
-    /// and both may read stale. That is a lost wakeup, and a park here is
-    /// indefinite.
+    /// The fence is load-bearing and a plain `SeqCst` load will not do: on x86
+    /// that lowers to a bare `mov`, since the barrier rides on `SeqCst` stores.
+    /// Without it the store buffer may still hold the producer's publication
+    /// when the count is read, while the waiter side is already fenced by
+    /// `inner.lock()` and [`WaitQueue::publish`]. One side ordered and the other
+    /// not is the store-buffer litmus: both can read stale, the producer skips
+    /// the wake, and the park here never ends.
     ///
-    /// Fencing here rather than at each producer is deliberate: taking
-    /// `inner.lock()` used to supply the barrier for free, so every existing
-    /// caller was written without one. Linux draws the same line — see
-    /// `wq_has_sleeper()`, which is `smp_mb()` plus `waitqueue_active()`.
+    /// It belongs here rather than at each producer, because `inner.lock()` used
+    /// to supply the barrier for free and every caller was written without one.
+    /// Linux draws the same line with `wq_has_sleeper()`, which is `smp_mb()`
+    /// plus `waitqueue_active()`.
     pub fn has_waiters(&self) -> bool {
         fence(Ordering::SeqCst);
         self.waiters.load(Ordering::SeqCst) != 0
