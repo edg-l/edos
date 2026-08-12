@@ -325,6 +325,95 @@ The tell, if this recurs elsewhere: a producer whose publication is a plain or
 
 ---
 
+## A process parked in `accept` could not be killed, not even by `SIGKILL`
+
+FIXED. `kill` marks the target and wakes it, but the death itself happens at
+the syscall return boundary, where the thread provably holds nothing. A wait
+loop of the shape
+
+```rust
+loop { if ready() { break } wq.wait_until(ready) }
+```
+
+never reaches that boundary when `ready` is something only a peer supplies: the
+wake fires, the predicate is still false, and the thread parks again. A server
+listening on a port nobody connects to was therefore unkillable, and the
+terminal that started it was stuck for good.
+
+`WaitQueue::wait_until_killable` ends the park on the killed flag as well as
+the predicate and reports `WaitOutcome::Killed`; the caller returns `EINTR` and
+dies on the way out. It is opt-in, because abandoning a wait is only safe where
+the caller can abandon what it was waiting for — a page fill or a journal
+commit cannot, and those keep parking. In use at `accept`, socket read (TCP and
+UDP), pipe read and pty-slave read; the last of those had an open-coded version
+of the same check that this replaced.
+
+A pending *stop* is deliberately not handled: `SIGTSTP` on a blocked call
+should suspend and then resume the call, which needs restart semantics this
+kernel does not have. So Ctrl+Z on a blocked `accept` still does nothing until
+the call returns.
+
+Two syscalls needed it, and the second was found by a program rather than by
+reading: `sys_waitpid` parks on `thread_park_while` directly rather than on a
+`WaitQueue`, so it got the same check inline. A shell waiting on a job is the
+ordinary case — `sshd` hanging up on a session could not kill `sh -c 'sleep
+3600'` until this was fixed, because the shell was parked in `waitpid`.
+
+The tell, if this recurs: a syscall that parks on a peer's action and a process
+that survives `kill -9`.
+
+---
+
+## `make recovery-check` passed exactly once per scratch image
+
+FIXED. The check reported "nothing committed-but-uncheckpointed after sync; the
+test's own setup failed" on every run after the first, on unchanged code. It was
+the harness, not the kernel: `journal-test.img` was an ordinary make
+prerequisite, so it was rebuilt only when `efs-mkfs` or `efs-common` changed —
+never during a run — while the check itself creates `/mnt/rec_a`, `rec_b` and
+`rec_c` in it and then cuts power. On the second run those files already exist,
+`touch` only restamps them, nothing is left uncheckpointed, and the precondition
+the whole test rests on cannot hold.
+
+`recovery-check` and `orphan-check` now both depend on a phony
+`fresh-journal-test-img` that reformats it first. Verified by running
+`recovery-check` twice in a row, which is the case that never held before.
+
+Worth keeping in mind generally: a test that mutates a fixture it does not
+recreate is green once and then reports on the fixture rather than on the code.
+The bisect that found it was cheap and worth doing rather than reasoning about —
+`git stash -u`, run the check on untouched trunk, watch it fail identically.
+
+---
+
+## A spawned child does not inherit its process group, and `fork` does
+
+OPEN. `Thread::pgid` starts at 0, which `Thread::pgid()` reads as "leads its
+own group". `fork` copies the parent's (`syscalls/mod.rs`, both fork paths),
+but `do_spawn` leaves the 0, so every spawned process leads a group of one.
+
+Measured in the guest: `sh -c "sleep 300"` runs as pid 38 pgid 38, and its
+`sleep` as pid 39 pgid **39** rather than 38. Columns are tid, parent, pgid in
+`/proc/processes`.
+
+The consequence is that a signal aimed at a process group reaches only what was
+placed there by hand. `sshd` hangs up on a disconnected session by signalling
+its group, and the shell dies while the command it started does not.
+
+The obvious fix — have `do_spawn` store the spawner's `pgid()` the way fork
+does — was written, built and tested here, and **did not move the observable**,
+so it was reverted rather than shipped on the strength of the argument. One
+case is explained and is deliberate: a child whose stdin is a pty slave is
+overridden to lead a new group a few lines later, since that is what makes it
+the terminal's foreground job. The pipe case is not explained, and finding what
+else sets the group is where this picks up.
+
+Worth fixing beyond the orphan: job control depends on it. `edos-sh` gets
+correct behaviour today only because it calls `setpgid` on each pipeline stage
+after spawning it, which is a race a shell should not have to run.
+
+---
+
 ## A prefetch window is a set of runs, not one extent
 
 A readahead window whose pages spanned more than one extent used to be declined

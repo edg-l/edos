@@ -165,11 +165,24 @@ run-recovery: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.im
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features fault-inject"
 	scripts/edos-vm start --extra-disk journal-test.img
 
+# Both checks below cut power on the scratch disk mid-write and leave their
+# files behind, so each one starts from a freshly formatted image rather than
+# from whatever the last run left. Without this `recovery-check` passes exactly
+# once per image and then reports its own setup as failed forever after: its
+# files already exist, so `touch` only restamps them, no metadata transaction
+# is left uncheckpointed, and the precondition it asserts cannot hold. Making
+# the image an ordinary prerequisite is what hid that -- it is only rebuilt
+# when efs-mkfs changes, which is never during a run of these.
+.PHONY: fresh-journal-test-img
+fresh-journal-test-img:
+	rm -f journal-test.img
+	$(MAKE) journal-test.img
+
 # Unattended version of the doc/journal-recovery-test.md procedure: pause
 # checkpointing, fsync a workload, cut power, remount, and fail if replay
 # did not bring it back. Needs the fault-inject build for /dev/journal-ctl.
 .PHONY: recovery-check
-recovery-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img journal-test.img
+recovery-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img fresh-journal-test-img
 	$(MAKE) $(IMAGE_NAME).iso CARGO_FLAGS="--features fault-inject"
 	scripts/recovery-check
 
@@ -177,7 +190,7 @@ recovery-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.
 # finish the deletions the crash interrupted. The orphan chain's regression;
 # see doc/efs.md section 14.
 .PHONY: orphan-check
-orphan-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img journal-test.img efs-fsck
+orphan-check: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd sata-disk.img fresh-journal-test-img efs-fsck
 	$(MAKE) $(IMAGE_NAME).iso
 	scripts/orphan-check
 

@@ -82,8 +82,9 @@ mod window;
 use self::ioctl::sys_ioctl;
 use self::sync::{sys_futex_wait, sys_futex_wake};
 use crate::thread::scheduler::{
-    current_thread, current_thread_id, current_thread_info, current_thread_weak, exit_if_killed,
-    stop_if_signalled, thread_exit, thread_park_while, thread_sleep, thread_yield,
+    current_thread, current_thread_id, current_thread_info, current_thread_killed,
+    current_thread_weak, exit_if_killed, stop_if_signalled, thread_exit, thread_park_while,
+    thread_sleep, thread_yield,
 };
 
 /// Set the caller's errno and return the `-1` every failing syscall reports.
@@ -1449,12 +1450,26 @@ fn sys_waitpid(pid: u64, flags: u64, status_ptr: *mut i32) -> u64 {
     // Park until the target has exited, or — for an untraced wait — stopped.
     // thread_park_while may return spuriously (stale wake token, etc.), so
     // loop on the real condition.
-    while !EXITED_THREADS.has_exited(target) && !has_stopped() {
+    //
+    // A kill also ends it, for the reason `WaitQueue::wait_until_killable`
+    // documents: a child that never exits is a condition this thread cannot
+    // bring about, so without the check a killed parent parks here forever and
+    // survives even `SIGKILL`. A shell waiting on a job is the ordinary case.
+    while !EXITED_THREADS.has_exited(target) && !has_stopped() && !current_thread_killed() {
         EXITED_THREADS.register_waiter(target, current_weak.clone());
-        thread_park_while(|| !EXITED_THREADS.has_exited(target) && !has_stopped());
+        thread_park_while(|| {
+            !EXITED_THREADS.has_exited(target) && !has_stopped() && !current_thread_killed()
+        });
     }
 
     EXITED_THREADS.unregister_waiter(target);
+
+    if current_thread_killed() {
+        // The value never reaches userspace: this thread dies at the syscall
+        // return boundary, which is the whole point of getting back to it.
+        info.lock().errno = Errno::EINTR;
+        return !0u64;
+    }
 
     if !EXITED_THREADS.has_exited(target) {
         if !status_ptr.is_null() && !unsafe { try_write_user(status_ptr, STATUS_STOPPED) } {

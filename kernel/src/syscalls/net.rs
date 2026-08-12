@@ -663,7 +663,13 @@ pub fn sys_accept(fd: u64, addr_ptr: *mut SockAddrIn, addr_len_ptr: *mut u32) ->
         if ready() {
             break;
         }
-        rx_wq.wait_until(ready);
+        // Killable: a listener with no client coming is waiting on something
+        // no amount of local progress supplies, so this is where a killed
+        // server has to be let go of.
+        if rx_wq.wait_until_killable(ready) == WaitOutcome::Killed {
+            info.lock().errno = Errno::EINTR;
+            return !0u64;
+        }
     }
 
     let new_sock_arc = {

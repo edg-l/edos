@@ -1,7 +1,7 @@
 //! Script execution: file-based shell script parsing and control flow.
 
 use crate::command;
-use crate::run_chain;
+use crate::{SegmentResult, run_chain};
 
 // ---------------------------------------------------------------------------
 // Block AST
@@ -355,10 +355,10 @@ fn execute_block(block: &Block) -> FlowControl {
                 return FlowControl::Return(code);
             }
 
-            let code = run_chain(line);
-            if code == -1 {
-                return FlowControl::Exit(0);
-            }
+            let code = match run_chain(line) {
+                SegmentResult::Done(code) => code,
+                SegmentResult::Exit(code) => return FlowControl::Exit(code),
+            };
             command::set_last_exit_code(code);
 
             if code != 0 && command::exit_on_error() {
@@ -374,10 +374,10 @@ fn execute_block(block: &Block) -> FlowControl {
             elifs,
             else_body,
         } => {
-            let cond_code = run_chain(condition);
-            if cond_code == -1 {
-                return FlowControl::Exit(0);
-            }
+            let cond_code = match run_chain(condition) {
+                SegmentResult::Done(code) => code,
+                SegmentResult::Exit(code) => return FlowControl::Exit(code),
+            };
 
             if cond_code == 0 {
                 // Condition true: execute body
@@ -385,10 +385,10 @@ fn execute_block(block: &Block) -> FlowControl {
             } else {
                 // Try elif branches
                 for (elif_cond, elif_body) in elifs {
-                    let ec = run_chain(elif_cond);
-                    if ec == -1 {
-                        return FlowControl::Exit(0);
-                    }
+                    let ec = match run_chain(elif_cond) {
+                        SegmentResult::Done(code) => code,
+                        SegmentResult::Exit(code) => return FlowControl::Exit(code),
+                    };
                     if ec == 0 {
                         return execute_blocks(elif_body);
                     }
@@ -405,10 +405,10 @@ fn execute_block(block: &Block) -> FlowControl {
         Block::While { condition, body } => {
             let mut last_code = 0i32;
             loop {
-                let cond_code = run_chain(condition);
-                if cond_code == -1 {
-                    return FlowControl::Exit(0);
-                }
+                let cond_code = match run_chain(condition) {
+                    SegmentResult::Done(code) => code,
+                    SegmentResult::Exit(code) => return FlowControl::Exit(code),
+                };
                 if cond_code != 0 {
                     // Condition false: exit loop
                     break;
@@ -473,7 +473,13 @@ fn execute_block(block: &Block) -> FlowControl {
             edos_lib::process::close(write_fd);
 
             // Run the command with the read end as its stdin.
-            let code = crate::run_segment_with_stdin(line, read_fd);
+            let code = match crate::run_segment_with_stdin(line, read_fd) {
+                SegmentResult::Done(code) => code,
+                SegmentResult::Exit(code) => {
+                    edos_lib::process::close(read_fd);
+                    return FlowControl::Exit(code);
+                }
+            };
             edos_lib::process::close(read_fd);
 
             command::set_last_exit_code(code);

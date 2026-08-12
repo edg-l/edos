@@ -841,14 +841,22 @@ pub enum ExecResult {
     Success(i32),
     /// Command failed with the given exit code (non-zero), or was not found (127).
     Failed(i32),
-    /// Shell should exit.
-    Exit,
+    /// Shell should exit with the given code.
+    Exit(i32),
 }
 
 /// Execute a command.
 pub fn execute_command(command: &str, args: &[String]) -> ExecResult {
     match command {
-        "exit" => return ExecResult::Exit,
+        "exit" => {
+            // POSIX: `exit [n]` exits with n, and with the last command's
+            // status when n is absent.
+            let code = match args.first() {
+                Some(n) => n.parse().unwrap_or(2),
+                None => last_exit_code(),
+            };
+            return ExecResult::Exit(code);
+        }
         "help" => {
             builtins::cmd_help();
             return ExecResult::Success(0);

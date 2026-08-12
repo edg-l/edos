@@ -44,8 +44,8 @@ fn reclaim_terminal() {
 pub enum SegmentResult {
     /// Command ran with the given exit code (0 = success, non-zero = failure).
     Done(i32),
-    /// Shell should exit.
-    Exit,
+    /// Shell should exit with the given code.
+    Exit(i32),
 }
 
 /// A segment parsed, expanded and with its redirections opened, ready to run
@@ -170,7 +170,7 @@ pub fn run_segment(segment: &str) -> SegmentResult {
             match exec_result {
                 command::ExecResult::Success(code) => SegmentResult::Done(code),
                 command::ExecResult::Failed(code) => SegmentResult::Done(code),
-                command::ExecResult::Exit => SegmentResult::Exit,
+                command::ExecResult::Exit(code) => SegmentResult::Exit(code),
             }
         }
         Prepared::External { stages, opened } => {
@@ -245,7 +245,7 @@ fn run_background(segment: &str) -> i32 {
                 let code = match result {
                     command::ExecResult::Success(code) => code,
                     command::ExecResult::Failed(code) => code,
-                    command::ExecResult::Exit => 0,
+                    command::ExecResult::Exit(code) => code,
                 };
                 std::process::exit(code);
             }
@@ -392,11 +392,11 @@ fn run_builtin_redirected(cmd: &str, args: &[String], fds: [u64; 3]) -> command:
 /// The caller is responsible for closing `stdin_fd` after this returns.
 /// This is used by heredoc execution so the pipe read end can be passed in
 /// as the command's standard input.
-pub fn run_segment_with_stdin(segment: &str, stdin_fd: u64) -> i32 {
+pub fn run_segment_with_stdin(segment: &str, stdin_fd: u64) -> SegmentResult {
     let expanded = command::expand_variables(segment);
     let args = command::parse_command(&expanded);
     if args.is_empty() {
-        return 0;
+        return SegmentResult::Done(0);
     }
     let (first, rest) = args.split_first().unwrap();
     let cmd = &first.0;
@@ -404,7 +404,7 @@ pub fn run_segment_with_stdin(segment: &str, stdin_fd: u64) -> i32 {
     let rest = glob::expand_words(&rest);
 
     let Some(open) = command::open_redirects(&redirects) else {
-        return 1;
+        return SegmentResult::Done(1);
     };
     // The heredoc pipe is this command's standard input unless it redirects
     // its own.
@@ -413,7 +413,10 @@ pub fn run_segment_with_stdin(segment: &str, stdin_fd: u64) -> i32 {
     let code = if command::is_builtin(cmd) || crate::script::is_function(cmd) {
         match run_builtin_redirected(cmd, &rest, fds) {
             command::ExecResult::Success(c) | command::ExecResult::Failed(c) => c,
-            command::ExecResult::Exit => -1,
+            command::ExecResult::Exit(code) => {
+                open.close();
+                return SegmentResult::Exit(code);
+            }
         }
     } else {
         edos_lib::io::pty_set_canonical(0);
@@ -430,7 +433,7 @@ pub fn run_segment_with_stdin(segment: &str, stdin_fd: u64) -> i32 {
     };
 
     open.close();
-    code
+    SegmentResult::Done(code)
 }
 
 /// Check if a segment is a subshell expression `(...)` and return the inner content.
@@ -461,19 +464,19 @@ fn extract_subshell(s: &str) -> Option<&str> {
 
 /// Run a full command chain (handles `&&`, `||`, `;`, `&` operators, and subshells).
 ///
-/// Returns the exit code of the last command executed, or -1 if the shell
-/// should exit (e.g. the `exit` builtin was called).
-pub fn run_chain(input: &str) -> i32 {
+/// Returns the exit code of the last command executed, or `Exit` carrying the
+/// status the `exit` builtin asked for.
+pub fn run_chain(input: &str) -> SegmentResult {
     // Strip comments before processing
     let input = command::strip_comment(input).to_string();
     let trimmed_input = input.trim();
     if trimmed_input.is_empty() {
-        return 0;
+        return SegmentResult::Done(0);
     }
 
     let chain = command::split_chain(&input);
     if chain.is_empty() {
-        return 0;
+        return SegmentResult::Done(0);
     }
 
     let mut prev_op: Option<command::ChainOp> = None;
@@ -499,8 +502,12 @@ pub fn run_chain(input: &str) -> i32 {
         if let Some(inner) = extract_subshell(segment) {
             let pid = edos_lib::process::fork();
             if pid == 0 {
-                let code = run_chain(inner);
-                std::process::exit(if code < 0 { 1 } else { code });
+                // A subshell is a process, so `exit` in it ends the subshell
+                // with that status rather than the shell that forked it.
+                let code = match run_chain(inner) {
+                    SegmentResult::Done(code) | SegmentResult::Exit(code) => code,
+                };
+                std::process::exit(code);
             } else if pid > 0 {
                 if background {
                     let job_id = JOB_LIST.lock().unwrap().add(
@@ -535,15 +542,15 @@ pub fn run_chain(input: &str) -> i32 {
                 last_exit = code;
                 command::set_last_exit_code(code);
             }
-            SegmentResult::Exit => {
-                return -1;
+            SegmentResult::Exit(code) => {
+                return SegmentResult::Exit(code);
             }
         }
 
         prev_op = *next_op;
     }
 
-    last_exit
+    SegmentResult::Done(last_exit)
 }
 
 /// Total length in bytes of the UTF-8 sequence `lead` starts, or `None` when
@@ -895,8 +902,10 @@ fn main() {
                 let mut params = vec!["sh".to_string()];
                 params.extend_from_slice(&argv[idx + 1..]);
                 command::set_script_args(&params);
-                let code = run_chain(&cmd);
-                std::process::exit(if code == -1 { 0 } else { code });
+                let code = match run_chain(&cmd) {
+                    SegmentResult::Done(code) | SegmentResult::Exit(code) => code,
+                };
+                std::process::exit(code);
             }
             _ => {
                 // Unknown flag: stop flag parsing and treat rest as script path
@@ -1063,16 +1072,18 @@ fn main() {
                     edos_lib::process::write(write_fd, &bytes);
                 }
                 edos_lib::process::close(write_fd);
-                let code = run_segment_with_stdin(&cleaned_line, read_fd);
+                let result = run_segment_with_stdin(&cleaned_line, read_fd);
                 edos_lib::process::close(read_fd);
-                command::set_last_exit_code(code);
+                match result {
+                    SegmentResult::Done(code) => command::set_last_exit_code(code),
+                    SegmentResult::Exit(code) => std::process::exit(code),
+                }
             }
             continue;
         }
 
-        let result = run_chain(&input);
-        if result == -1 {
-            break;
+        if let SegmentResult::Exit(code) = run_chain(&input) {
+            std::process::exit(code);
         }
     }
 }

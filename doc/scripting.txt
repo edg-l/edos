@@ -200,7 +200,7 @@ Builtin Commands
   history                   Show command history
   test EXPR / [ EXPR ]      Evaluate expression
   set -e / set +e           Toggle exit-on-error
-  exit                      Exit the shell
+  exit [n]                  Exit the shell with status n (default: $?)
   clear                     Clear the terminal
   help                      Show help
 

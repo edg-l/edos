@@ -111,6 +111,8 @@ pub fn sys_futex_wait(addr: *const u32, expected: u32, timeout_ns: u64) -> u64 {
             }
         },
         WaitOutcome::TimedOut => 2,
+        // `wait_until_timeout` is not killable, so it never reports this.
+        WaitOutcome::Killed => unreachable!("futex wait is not killable"),
     };
 
     cleanup_if_empty(&key, &queue);

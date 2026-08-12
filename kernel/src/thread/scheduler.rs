@@ -1178,6 +1178,25 @@ pub fn current_thread() -> Option<Arc<Thread>> {
     without_interrupts(|| get_percpu_data().current_thread())
 }
 
+/// Whether the thread running on *this* CPU has been marked for termination.
+///
+/// The flag is set by the signal that killed it; the death itself waits for
+/// the syscall return boundary, where the thread provably holds nothing. Every
+/// wait that blocks indefinitely on something only a peer can supply has to
+/// consult this, or the thread never reaches that boundary and the process
+/// cannot be killed at all — see `WaitQueue::wait_until_killable`.
+///
+/// Reads the per-CPU slot in place rather than through `current_thread`, which
+/// hands back an `Arc`: this runs on every predicate evaluation of such a
+/// wait, and the refcount pair buys nothing.
+pub fn current_thread_killed() -> bool {
+    without_interrupts(|| {
+        get_percpu_data()
+            .with_current_thread(|t| t.killed.load(Ordering::Acquire))
+            .unwrap_or(false)
+    })
+}
+
 /// `ThreadId` of the thread running on *this* CPU. See `current_thread`.
 pub fn current_thread_id() -> Option<ThreadId> {
     without_interrupts(|| get_percpu_data().with_current_thread(|t| t.id))

@@ -5,7 +5,9 @@ use heapless::Deque;
 use spin::Mutex;
 use x86_64::instructions::interrupts::{self, without_interrupts};
 
-use crate::thread::scheduler::{current_thread_weak, thread_park_while, thread_sleep};
+use crate::thread::scheduler::{
+    current_thread_killed, current_thread_weak, thread_park_while, thread_sleep,
+};
 use crate::thread::{
     scheduler::{WakePriority, sched},
     thread::Thread,
@@ -26,6 +28,9 @@ pub enum WaitOutcome {
     Parked,
     /// Thread slept until the timeout elapsed without the condition becoming ready.
     TimedOut,
+    /// The waiting thread was killed. Only [`WaitQueue::wait_until_killable`]
+    /// reports this; every other wait ignores the flag and parks on.
+    Killed,
 }
 
 #[derive(Debug)]
@@ -57,21 +62,36 @@ impl WaitQueue {
     /// atomics, or probe a lock with `try_lock` and bias the unavailable case
     /// towards "ready" so the caller re-checks under the real lock.
     pub fn wait_until<F: Fn() -> bool>(&self, ready: F) -> WaitOutcome {
-        self.wait_internal(ready, None, true)
+        self.wait_internal(ready, None, false)
     }
 
-    /// Wait without the entry evaluation of `ready`, for a caller that has
-    /// just established the condition is false under the real lock.
+    /// Wait until `ready`, or until the waiting thread is killed.
     ///
-    /// Only the pre-enrolment check is skipped. The enrol-then-re-check that
-    /// closes the lost-wakeup window still runs, so a wake landing between
-    /// the caller's lock release and the enrolment is still seen.
+    /// A syscall that blocks indefinitely on something only a peer can supply
+    /// must use this. `kill` marks the thread and wakes it, but the death
+    /// itself happens at the syscall return boundary, so a wait that re-parks
+    /// on a predicate the peer will never satisfy never reaches that boundary
+    /// and the process cannot be killed at all — not even by `SIGKILL`. A
+    /// server parked in `accept` with no client coming is the case that found
+    /// this.
+    ///
+    /// The caller returns as soon as this reports [`WaitOutcome::Killed`];
+    /// what it returns does not matter, since the thread dies before the value
+    /// reaches userspace.
+    ///
+    /// This is opt-in because aborting a wait is only safe where the caller
+    /// can abandon what it was waiting for. A page fill or a journal commit
+    /// cannot, and those keep parking.
+    ///
+    /// A pending *stop* is deliberately not handled here: `SIGTSTP` on a
+    /// blocked call should suspend and then resume the call, which needs
+    /// restart semantics this kernel does not have.
     ///
     /// `ready` carries the same non-blocking requirement as [`wait_until`].
     ///
     /// [`wait_until`]: WaitQueue::wait_until
-    pub fn wait_until_unready<F: Fn() -> bool>(&self, ready: F) -> WaitOutcome {
-        self.wait_internal(ready, None, false)
+    pub fn wait_until_killable<F: Fn() -> bool>(&self, ready: F) -> WaitOutcome {
+        self.wait_internal(ready, None, true)
     }
 
     /// Put the current thread to sleep until woken or the timeout elapses.
@@ -84,7 +104,7 @@ impl WaitQueue {
         ready: F,
         timeout: Option<Duration>,
     ) -> WaitOutcome {
-        self.wait_internal(ready, timeout, true)
+        self.wait_internal(ready, timeout, false)
     }
 
     /// Wake one live thread from the queue.
@@ -194,10 +214,13 @@ impl WaitQueue {
         &self,
         ready: F,
         timeout: Option<Duration>,
-        precheck: bool,
+        killable: bool,
     ) -> WaitOutcome {
-        if precheck && ready() {
+        if ready() {
             return WaitOutcome::Ready;
+        }
+        if killable && current_thread_killed() {
+            return WaitOutcome::Killed;
         }
 
         #[derive(Copy, Clone)]
@@ -250,7 +273,7 @@ impl WaitQueue {
         if let Some(chosen) = action {
             match chosen {
                 SleepAction::Park => {
-                    thread_park_while(|| !ready());
+                    thread_park_while(|| !ready() && !(killable && current_thread_killed()));
                 }
                 SleepAction::Sleep(dt) => {
                     let deadline = Instant::now() + dt;
@@ -292,6 +315,10 @@ impl WaitQueue {
             q.retain(|w| !Weak::ptr_eq(w, &my_handle));
             self.publish(&q);
         });
+
+        if killable && current_thread_killed() {
+            return WaitOutcome::Killed;
+        }
 
         let Some(action) = action else {
             return WaitOutcome::Ready;

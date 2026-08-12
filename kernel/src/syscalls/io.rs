@@ -18,9 +18,9 @@ use crate::thread::preempt::PreemptSpinlock;
 use crate::thread::pty::{PollablePtyMaster, PollablePtySlave, PtySlaveRead};
 use crate::thread::sched_prof::{self, Stage};
 use crate::thread::scheduler::{
-    current_thread, current_thread_info, current_thread_weak, thread_exit, thread_park_while,
-    thread_sleep,
+    current_thread_info, current_thread_weak, thread_park_while, thread_sleep,
 };
+use crate::thread::waitqueue::WaitOutcome;
 use crate::util::uaccess::{access_ok, try_copy_from_user, try_copy_to_user, try_write_user};
 use crate::{
     drivers::{keyboard::KEY_EVENT_BROADCAST, random, tty},
@@ -667,9 +667,12 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                         .reader_wq
                         .clone()
                 });
-                // The drain above already established the pipe is not readable,
-                // so the wait skips its entry evaluation of the same predicate.
-                wq.wait_until_unready(|| pipe.try_lock().is_none_or(|guard| guard.readable()));
+                if wq.wait_until_killable(|| pipe.try_lock().is_none_or(|guard| guard.readable()))
+                    == WaitOutcome::Killed
+                {
+                    info.lock().errno = Errno::EINTR;
+                    break -1;
+                }
             }
         }
         Some(FileDescriptor::PipeWrite(_)) => {
@@ -706,16 +709,6 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
             // Clone the input_wq Arc before entering the loop (avoids holding lock while blocking).
             let input_wq = ranked_lock!(RANK_PTY, "sys_read::pty_wq", pty).input_wq();
             loop {
-                // If this thread has been killed (e.g. Ctrl+C), force-exit
-                // immediately. We can't rely on userspace to handle EINTR
-                // because Rust std's read_to_string retries EINTR in a loop.
-                let is_killed = current_thread().map_or(false, |t| {
-                    t.killed.load(core::sync::atomic::Ordering::Acquire)
-                });
-                if is_killed {
-                    thread_exit(130); // 128 + SIGINT(2)
-                }
-
                 let (result, hangup, notif) = {
                     let mut guard = ranked_lock!(RANK_PTY, "sys_read::pty_slave", pty);
                     let (r, n) = guard.slave_read(data);
@@ -739,14 +732,17 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                 if hangup {
                     break 0;
                 }
-                input_wq.wait_until(|| {
-                    let killed = current_thread()
-                        .is_some_and(|t| t.killed.load(core::sync::atomic::Ordering::Acquire));
-                    killed
-                        || pty
-                            .try_lock()
-                            .is_none_or(|guard| !guard.input_buf.is_empty() || guard.closed_master)
-                });
+                // Ctrl+C on a terminal read is the ordinary case for this:
+                // the thread is killed and nothing else will ever make the
+                // predicate true.
+                if input_wq.wait_until_killable(|| {
+                    pty.try_lock()
+                        .is_none_or(|guard| !guard.input_buf.is_empty() || guard.closed_master)
+                }) == WaitOutcome::Killed
+                {
+                    info.lock().errno = Errno::EINTR;
+                    break -1;
+                }
             }
         }
         Some(FileDescriptor::FsFile(file)) => {
@@ -838,7 +834,10 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     if ready() {
                         break conn.lock();
                     }
-                    rx_wq.wait_until(ready);
+                    if rx_wq.wait_until_killable(ready) == WaitOutcome::Killed {
+                        info.lock().errno = Errno::EINTR;
+                        return -1;
+                    }
                 };
 
                 if c.rx_buffer.is_empty() {
@@ -865,7 +864,10 @@ pub fn sys_read(fd: u64, buffer_ptr: *mut u8, count: usize) -> i64 {
                     if ready() {
                         break;
                     }
-                    rx_wq.wait_until(ready);
+                    if rx_wq.wait_until_killable(ready) == WaitOutcome::Killed {
+                        info.lock().errno = Errno::EINTR;
+                        return -1;
+                    }
                 }
                 let data_opt = {
                     let mut s = sock.lock();

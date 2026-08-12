@@ -17,6 +17,17 @@ both:
   under test. `journal-test.img` has a 256-block ring instead of the default
   4095, so a metadata workload wraps it in seconds. A normal boot uses about 50
   ring blocks, which is why this never happens by accident.
+- **A scratch image the run has not already been through.** `make
+  recovery-check` and `make orphan-check` reformat it before every run, and
+  that is load-bearing rather than tidiness: both cut power mid-write and leave
+  their files behind, and `recovery-check` creates `/mnt/rec_a`, `rec_b` and
+  `rec_c`. On a second run those already exist, so `touch` only restamps them,
+  no metadata transaction is left uncheckpointed, and the check correctly
+  reports that its own setup failed rather than passing on nothing. It behaved
+  exactly that way for a while: green the first time after `journal-test.img`
+  was built, and red on every run after, on unchanged code. Driving the VM by
+  hand per the procedure below has the same trap — reformat between attempts,
+  or use file names the last attempt did not.
 
 ## Procedure
 
