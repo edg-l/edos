@@ -4569,3 +4569,46 @@ Reading `verify: all patterns match` off the screen needs a redirect: the
 already scrolled away by the time the run ends. `fsbench write -n 8 /var >
 /var/w.txt` then `grep verify /var/w.txt` — write the file to `/var`, since
 memfs `/tmp` reads past EOF and pads the last page with zeros.
+
+## Goal allocation: where the next block wants to land (2026-08-12)
+
+Batch allocation (`ensure_blocks_for_logical_batch`) asks for the whole batch in
+one request, so one writeback round lands as one extent. It does nothing for the
+*next* round: `alloc_blocks` searched every group from group 0, so batch N+1
+started at the first free bit on the device rather than where batch N ended, and
+a file appended in 8-block batches collected one extent per batch however much
+free space followed it.
+
+`alloc_blocks` now takes a **goal**, the physical block the caller wants the run
+to start at, and tries it before any scan:
+
+- `ExtentMap::goal_for(logical_block)` is where the extent immediately preceding
+  that logical block ends, plus any logical gap, so a sparse region still leaves
+  the file linear on the device.
+- An exact hit at the goal is taken *however short the run is*, since even a
+  single block continues the previous extent rather than opening a new one.
+- A taken goal falls back to first fit, but starting at the goal's own group and
+  wrapping, so the file stays near itself instead of restarting at group 0.
+- Metadata blocks need no special case: their bits are always set, so a goal that
+  lands on one finds a zero-length run and falls through.
+
+Both data-block sites pass a goal (the single-block `ensure_block_for_logical`
+and the batch path); extent-tree nodes and the inline-conversion block still
+allocate goal-free. Inside the batch loop, a request the allocator can only
+answer in pieces continues from `pool.last() + 1` on each further round.
+
+Evidence, freshly built `sata-disk.img`, cold boot:
+
+```
+fsbench write -n 32 /var    total 1.2 s  (1.1 s at 67fa350 — within noise;
+                                          this changes placement, not the
+                                          per-batch command count)
+                            efs_stats.blocks_allocated +30792, orphans_marked +65
+                            journal commits 68 / ring_blocks 459 / commands 136
+iotest /var                 20/20
+```
+
+`fsbench ra /var` **needs `fsbench raprep /var` and a reboot first**; on a fresh
+disk it exits `entity not found` and reports one test failed. The extent-count
+win is only visible on that path (`/proc/efs_stats` `runs / reads`), so the
+number for interleaved appends is still unmeasured — see the todo.

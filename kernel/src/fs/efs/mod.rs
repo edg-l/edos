@@ -1034,8 +1034,12 @@ impl EfsDriver {
             return Ok(phys);
         }
 
-        // Allocate a new block.
-        let phys_block = self.alloc_block(tx)?;
+        // Allocate a new block, next to the file's own last extent when it can.
+        let phys_block = self
+            .alloc_blocks(1, extents.goal_for(logical_block), tx)?
+            .first()
+            .copied()
+            .ok_or(Error::IoError)?;
         if new == NewBlock::Zeroed {
             let block_size = self.block_size() as usize;
             self.write_block(phys_block, &vec![0u8; block_size], tx)?;
@@ -1113,9 +1117,19 @@ impl EfsDriver {
             .iter()
             .filter(|&&lb| extents.lookup(lb).is_none())
             .count();
+        // The goal is where the file's last extent ends, taken from the first
+        // block the batch has to allocate.
+        let goal = logical_blocks
+            .iter()
+            .find(|&&lb| extents.lookup(lb).is_none())
+            .and_then(|&lb| extents.goal_for(lb));
         let mut pool: Vec<u64> = Vec::with_capacity(need);
         while pool.len() < need {
-            let run = self.alloc_blocks(need - pool.len(), tx)?;
+            // Each further round continues where the last run ended, so a
+            // request the allocator could only answer in pieces still comes
+            // back as few extents as the free space allows.
+            let goal = pool.last().map(|b| b + 1).or(goal);
+            let run = self.alloc_blocks(need - pool.len(), goal, tx)?;
             debug_assert!(!run.is_empty());
             pool.extend(run);
         }
@@ -1193,7 +1207,7 @@ const EXTENT_HOLE_LOG_LIMIT: u64 = 8;
 impl EfsDriver {
     /// Allocate a free block and return its absolute block number.
     fn alloc_block(&self, tx: &mut TxHandle<'_>) -> Result<u64, Error> {
-        self.alloc_blocks(1, tx)?
+        self.alloc_blocks(1, None, tx)?
             .first()
             .copied()
             .ok_or(Error::IoError)
@@ -1202,13 +1216,27 @@ impl EfsDriver {
     /// Allocate up to `want` blocks, preferring a single physically contiguous
     /// run, and return them in ascending order.
     ///
+    /// `goal` is the physical block the caller would like the run to start at —
+    /// for file data, where the file's last extent ends. A run starting exactly
+    /// there extends that extent instead of opening a new one, which is what
+    /// keeps a file appended in several batches down to one extent; a file
+    /// written in 8-block batches otherwise collects one extent per batch no
+    /// matter how much contiguous space follows it. When the goal block is
+    /// taken, the search falls back to first fit, starting at the goal's own
+    /// group so the file at least stays near itself.
+    ///
     /// Never returns more than `want` blocks and never returns none: a caller
     /// that needs more calls again, and a request that finds nothing free is an
     /// error. Asking for the whole run at once is what keeps an appending file
     /// in one extent once free space is fragmented, since taking the first free
     /// bit per block fills every small hole before reaching a run that could
     /// have held the file.
-    fn alloc_blocks(&self, want: usize, tx: &mut TxHandle<'_>) -> Result<Vec<u64>, Error> {
+    fn alloc_blocks(
+        &self,
+        want: usize,
+        goal: Option<u64>,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<Vec<u64>, Error> {
         debug_assert!(want > 0);
         let block_size = self.block_size() as usize;
 
@@ -1218,65 +1246,105 @@ impl EfsDriver {
             let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
             (m.superblock.blocks_per_group as usize, m.bgd_table.len())
         };
+        let bits_to_check = blocks_per_group.min(block_size * 8);
 
-        for g in 0..group_count {
-            // Snapshot per-group state without holding `mutable` across BPC I/O.
-            let (free_count, bitmap_block) = {
-                let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
-                (
-                    m.bgd_table[g].free_blocks_count,
-                    m.bgd_table[g].block_bitmap_block,
-                )
-            };
+        // Snapshot per-group state without holding `mutable` across BPC I/O.
+        let group_state = |g: usize| {
+            let m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
+            (
+                m.bgd_table[g].free_blocks_count,
+                m.bgd_table[g].block_bitmap_block,
+            )
+        };
+
+        let goal_group = goal
+            .map(|b| (b / blocks_per_group as u64) as usize)
+            .filter(|&g| g < group_count);
+
+        // The goal itself, when it is still free: take the run that starts
+        // exactly there, however short, since even one block continues the
+        // file's last extent.
+        if let (Some(g), Some(goal_block)) = (goal_group, goal) {
+            let (free_count, bitmap_block) = group_state(g);
+            let bit = (goal_block % blocks_per_group as u64) as usize;
+            if free_count > 0 && bit < bits_to_check {
+                let bitmap = self.read_block(bitmap_block)?;
+                let want_here = want.min(free_count as usize);
+                let len = free_run_at(&bitmap, bits_to_check, want_here, bit);
+                if len > 0 {
+                    return self.claim_run(g, bitmap_block, bitmap, bit, len, tx);
+                }
+            }
+        }
+
+        // First fit, starting at the goal's group so a file that could not
+        // extend its last extent still lands beside it rather than in the
+        // first group with a free bit anywhere on the device.
+        let first = goal_group.unwrap_or(0);
+        for i in 0..group_count {
+            let g = (first + i) % group_count;
+            let (free_count, bitmap_block) = group_state(g);
             if free_count == 0 {
                 continue;
             }
-            let mut bitmap = self.read_block(bitmap_block)?;
+            let bitmap = self.read_block(bitmap_block)?;
 
-            let bits_to_check = blocks_per_group.min(block_size * 8);
             let want_here = want.min(free_count as usize);
             if let Some((bit, len)) = find_free_run(&bitmap, bits_to_check, want_here) {
-                for b in bit..bit + len {
-                    set_bit(&mut bitmap, b);
-                }
-
-                let abs_block = {
-                    let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
-                    m.bgd_table[g].free_blocks_count -= len as u64;
-                    m.superblock.free_blocks -= len as u64;
-                    g as u64 * blocks_per_group as u64 + bit as u64
-                };
-
-                // Write bitmap (enrolled by write_block).
-                self.write_block(bitmap_block, &bitmap, tx)?;
-
-                // Enroll BGD page (block 2 contains the BGD table; compute the
-                // page holding group g's descriptor).
-                let bgd_page_idx = {
-                    let bgds_per_block = block_size / BGD_SIZE;
-                    let bgd_block = 2u64 + (g / bgds_per_block) as u64;
-                    self.block_to_lba(bgd_block) / 8
-                };
-                if let Ok(guard) =
-                    BlockPageCache::global().read_page(self.device.device_id, bgd_page_idx)
-                {
-                    tx.enroll_block(self.device.device_id, bgd_page_idx, guard.page_arc());
-                }
-
-                // Enroll superblock page (block 1).
-                let sb_page_idx = self.block_to_lba(1) / 8;
-                if let Ok(guard) =
-                    BlockPageCache::global().read_page(self.device.device_id, sb_page_idx)
-                {
-                    tx.enroll_block(self.device.device_id, sb_page_idx, guard.page_arc());
-                }
-
-                EFS_BLOCKS_ALLOCATED.fetch_add(len as u64, Ordering::Relaxed);
-                return Ok((0..len as u64).map(|i| abs_block + i).collect());
+                return self.claim_run(g, bitmap_block, bitmap, bit, len, tx);
             }
         }
         EFS_ALLOC_FAILED.fetch_add(1, Ordering::Relaxed);
         Err(Error::IoError)
+    }
+
+    /// Mark `len` blocks from `bit` of group `g` used, and enroll every metadata
+    /// page the claim dirtied in `tx`. `bitmap` is the group's bitmap block as
+    /// read; it is written back with the run set.
+    fn claim_run(
+        &self,
+        g: usize,
+        bitmap_block: u64,
+        mut bitmap: Vec<u8>,
+        bit: usize,
+        len: usize,
+        tx: &mut TxHandle<'_>,
+    ) -> Result<Vec<u64>, Error> {
+        let block_size = self.block_size() as usize;
+        for b in bit..bit + len {
+            set_bit(&mut bitmap, b);
+        }
+
+        let abs_block = {
+            let mut m = ranked_lock!(RANK_EFS_MUTABLE, "EfsDriver.mutable", self.mutable);
+            let blocks_per_group = m.superblock.blocks_per_group as u64;
+            m.bgd_table[g].free_blocks_count -= len as u64;
+            m.superblock.free_blocks -= len as u64;
+            g as u64 * blocks_per_group + bit as u64
+        };
+
+        // Write bitmap (enrolled by write_block).
+        self.write_block(bitmap_block, &bitmap, tx)?;
+
+        // Enroll BGD page (block 2 contains the BGD table; compute the
+        // page holding group g's descriptor).
+        let bgd_page_idx = {
+            let bgds_per_block = block_size / BGD_SIZE;
+            let bgd_block = 2u64 + (g / bgds_per_block) as u64;
+            self.block_to_lba(bgd_block) / 8
+        };
+        if let Ok(guard) = BlockPageCache::global().read_page(self.device.device_id, bgd_page_idx) {
+            tx.enroll_block(self.device.device_id, bgd_page_idx, guard.page_arc());
+        }
+
+        // Enroll superblock page (block 1).
+        let sb_page_idx = self.block_to_lba(1) / 8;
+        if let Ok(guard) = BlockPageCache::global().read_page(self.device.device_id, sb_page_idx) {
+            tx.enroll_block(self.device.device_id, sb_page_idx, guard.page_arc());
+        }
+
+        EFS_BLOCKS_ALLOCATED.fetch_add(len as u64, Ordering::Relaxed);
+        Ok((0..len as u64).map(|i| abs_block + i).collect())
     }
 
     /// Free a block (by absolute block number).
@@ -1809,6 +1877,16 @@ fn find_free_run(bitmap: &[u8], max_bits: usize, want: usize) -> Option<(usize, 
         bit += 1;
     }
     best
+}
+
+/// Length of the free run starting exactly at `start`, capped at `want`.
+/// Zero when `start` itself is taken.
+fn free_run_at(bitmap: &[u8], max_bits: usize, want: usize, start: usize) -> usize {
+    let mut bit = start;
+    while bit < max_bits && bit - start < want && bitmap[bit / 8] & (1 << (bit % 8)) == 0 {
+        bit += 1;
+    }
+    bit - start
 }
 
 fn set_bit(bitmap: &mut [u8], bit: usize) {

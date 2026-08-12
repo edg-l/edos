@@ -110,6 +110,24 @@ impl ExtentMap {
         }
     }
 
+    /// Physical block that would continue the file at `logical_block`: the one
+    /// just past the extent immediately preceding it, offset by any logical gap
+    /// so a sparse region still lands the file linearly on the device.
+    ///
+    /// This is the allocator's goal for an append. Without it a file appended in
+    /// several batches gets one extent per batch, because each batch starts its
+    /// search at the first free bit of the first group with space rather than
+    /// where the file left off.
+    pub fn goal_for(&self, logical_block: u32) -> Option<u64> {
+        let pos = self
+            .extents
+            .partition_point(|e| e.logical_block <= logical_block);
+        let prev = self.extents.get(pos.checked_sub(1)?)?;
+        let end_logical = prev.logical_block + prev.length as u32;
+        let ahead = logical_block.checked_sub(end_logical)? as u64;
+        Some(prev.physical_start() + prev.length as u64 + ahead)
+    }
+
     /// Record `logical_block -> phys_block`, extending an adjacent extent when
     /// the pair is contiguous in both spaces and inserting a new one
     /// otherwise. Insertion keeps the list sorted.
