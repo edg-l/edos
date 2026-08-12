@@ -3951,5 +3951,45 @@ Note that the null-pointer check has to stay *after* the length check:
 
 `programs/iotest` test 20 covers it in both directions — the six calls fail on a
 closed descriptor and still return 0 on an open one, so the test cannot be
-satisfied by rejecting everything. After the fix the fuzzer's list is 17, all of
-them the legitimate kind above.
+satisfied by rejecting everything. After the fix the fuzzer's list was 17, all of
+them the legitimate kind above — since the report learned to tell a poisoned case
+from a plausible one (next section) it is 11.
+
+---
+
+## The fuzzer's "returned" list only counts poisoned cases (2026-08-12)
+
+The list above needed a paragraph of prose to explain which of its rows were
+findings, which is a report doing its reader's job badly. The reason is that not
+every generated argument is poison, deliberately: one pointer in four is the
+valid 4096-byte scratch buffer, and the length and integer sets lead with 0 and
+1. Without those the kernel's own argument checks short-circuit every case and
+the code past them is never reached — but a case built entirely from them asks
+the syscall a question it *should* answer, so a success there is not evidence of
+anything.
+
+`arg_for` now returns the value together with whether it was poison, the scalar
+sets carry a `plausible` prefix length (`Values` in
+`programs/syscallfuzz/src/main.rs`), and a case is only reported when at least
+one of its arguments was poison. Cases that succeeded with none are tallied as
+`benign` on the call's row and in the summary, so coverage stays visible rather
+than being silently dropped. Each report line now carries the arguments the call
+was actually given, which is what makes a row readable without re-running it.
+This also subsumes the old "a call with no arguments cannot be sent a bad one"
+special case: `sched_yield` and `errno` simply report `benign=4`.
+
+At `-n 4 -u 0`: 300 calls, `benign=37`, and 11 rows survive. Reading them by
+argument, they fall into three classes and only the third is open work:
+
+- **No failure return at all.** `isatty(0x1_0000_0000)` answers 0 because
+  `sys_isatty` maps every descriptor that is not a stream or a PTY slave to 0.
+- **A count query.** `list_dir`, `list_mounts`, `list_partitions` and
+  `window_list` with `max == 0` return how many entries there are without
+  touching the buffer, so a poison pointer alongside it is never dereferenced.
+- **A length or maximum that is never bounded.** `getcwd(scratch+1, u64::MAX)`,
+  `window_list(scratch, i64::MAX)`, `netinfo(scratch+1, i64::MAX)` and
+  `getrandom(scratch, 0, u64::MAX)` all succeed: the write happens to fit, so
+  nothing overruns *here*, but the absurd size was accepted rather than
+  rejected. `open(path, u64::MAX)` is the same shape one level up — every flag
+  bit set, `O_CREAT` included, is taken at face value. That is the next thing to
+  fix, and it is the defect class the fuzzer's header paragraph names.

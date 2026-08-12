@@ -15,10 +15,18 @@
 //! There is no table here to drift out of step with the kernel's: a syscall
 //! added to `kernel/src/syscalls/table.rs` is fuzzed the next time this runs.
 //!
-//! A correct kernel answers every case with a failure, so the report is a
-//! tally of which failure. The interesting rows are the calls that *succeeded*
-//! on garbage, and the last line printed before a hang or a panic names the
-//! call that caused it.
+//! A correct kernel answers every *poisoned* case with a failure, so the report
+//! is a tally of which failure. The interesting rows are the calls that
+//! *succeeded* on garbage, and the last line printed before a hang or a panic
+//! names the call that caused it.
+//!
+//! Not every generated case is poisoned. A pointer argument is sometimes the
+//! valid scratch buffer and a length is sometimes 0 or 1, on purpose: without
+//! them the kernel's own checks are short-circuited by an obviously bad address
+//! and the code past them is never reached. Those cases are counted as `benign`
+//! and cannot be findings, because the syscall was asked a question it should
+//! answer. Only a case with at least one poisoned argument is reported as
+//! having returned rather than failed.
 //!
 //! Cases are deterministic: the generator is seeded with `seed ^ nr`, so
 //! `--only <name>` reproduces exactly the cases that name got in the full run.
@@ -121,22 +129,48 @@ const POISON_PTRS: &[u64] = &[
     u64::MAX,
 ];
 
+/// A set of scalar arguments, ordered so that the values a correct caller could
+/// have sent come first. Anything past `plausible` is poison, and only a case
+/// built from at least one poison argument can be a finding.
+struct Values {
+    all: &'static [u64],
+    plausible: usize,
+}
+
 /// Descriptors that are never open here. 0, 1 and 2 are deliberately absent:
-/// closing or redirecting them would take the report with them.
-const POISON_FDS: &[u64] = &[u64::MAX, (-100i64) as u64, 9999, 0x7fff_ffff, 0x1_0000_0000];
+/// closing or redirecting them would take the report with them. None of these
+/// is plausible, which is the point of the set.
+const POISON_FDS: Values = Values {
+    all: &[u64::MAX, (-100i64) as u64, 9999, 0x7fff_ffff, 0x1_0000_0000],
+    plausible: 0,
+};
 
-const POISON_INTS: &[u64] = &[
-    0,
-    1,
-    (-1i64) as u64,
-    (i32::MIN as i64) as u64,
-    i64::MIN as u64,
-    i64::MAX as u64,
-];
+/// 0 and 1 name the caller's own group, pid 1, the first index — a correct
+/// program sends them constantly.
+const POISON_INTS: Values = Values {
+    all: &[
+        0,
+        1,
+        (-1i64) as u64,
+        (i32::MIN as i64) as u64,
+        i64::MIN as u64,
+        i64::MAX as u64,
+    ],
+    plausible: 2,
+};
 
-const POISON_HEX: &[u64] = &[0, 0o777, 0xffff_ffff, 0x8000_0000, u64::MAX];
+/// Flag and mode words: no flags, and a mode `mkdir` is given every day.
+const POISON_HEX: Values = Values {
+    all: &[0, 0o777, 0xffff_ffff, 0x8000_0000, u64::MAX],
+    plausible: 2,
+};
 
-const POISON_LENS: &[u64] = &[0, 1, 4097, 0xffff_ffff, i64::MAX as u64, u64::MAX];
+/// A zero or one-byte transfer fits the scratch buffer; 4097 is one past its
+/// end on purpose.
+const POISON_LENS: Values = Values {
+    all: &[0, 1, 4097, 0xffff_ffff, i64::MAX as u64, u64::MAX],
+    plausible: 2,
+};
 
 /// A path that does not exist. `open` with every flag bit set includes
 /// `O_CREAT`, so this is a name the fuzzer is willing to have created; it is
@@ -158,6 +192,15 @@ impl Rng {
 
     fn pick(&mut self, xs: &[u64]) -> u64 {
         xs[(self.next() % xs.len() as u64) as usize]
+    }
+
+    /// Pick from a set, saying whether the value picked was poison.
+    fn pick_from(&mut self, set: &Values) -> Arg {
+        let index = (self.next() % set.all.len() as u64) as usize;
+        Arg {
+            value: set.all[index],
+            poison: index >= set.plausible,
+        }
     }
 
     fn below(&mut self, n: u64) -> u64 {
@@ -187,23 +230,46 @@ impl Valid {
     }
 }
 
+/// One generated argument, and whether it is something a correct caller would
+/// never have sent.
+struct Arg {
+    value: u64,
+    poison: bool,
+}
+
+impl Arg {
+    fn poison(value: u64) -> Self {
+        Self {
+            value,
+            poison: true,
+        }
+    }
+
+    fn plausible(value: u64) -> Self {
+        Self {
+            value,
+            poison: false,
+        }
+    }
+}
+
 /// One argument, generated for its declared kind.
-fn arg_for(kind: ArgKind, rng: &mut Rng, valid: &mut Valid) -> u64 {
+fn arg_for(kind: ArgKind, rng: &mut Rng, valid: &mut Valid) -> Arg {
     match kind {
-        ArgKind::Fd => rng.pick(POISON_FDS),
-        ArgKind::Int => rng.pick(POISON_INTS),
-        ArgKind::Hex => rng.pick(POISON_HEX),
-        ArgKind::Len => rng.pick(POISON_LENS),
+        ArgKind::Fd => rng.pick_from(&POISON_FDS),
+        ArgKind::Int => rng.pick_from(&POISON_INTS),
+        ArgKind::Hex => rng.pick_from(&POISON_HEX),
+        ArgKind::Len => rng.pick_from(&POISON_LENS),
         ArgKind::Str => match rng.below(4) {
-            0 => valid.path.as_ptr() as u64,
-            1 => valid.unterminated.as_ptr() as u64,
-            _ => rng.pick(POISON_PTRS),
+            0 => Arg::plausible(valid.path.as_ptr() as u64),
+            1 => Arg::poison(valid.unterminated.as_ptr() as u64),
+            _ => Arg::poison(rng.pick(POISON_PTRS)),
         },
         ArgKind::Ptr | ArgKind::Buf | ArgKind::Out | ArgKind::StrLen => match rng.below(4) {
-            0 => valid.scratch.as_mut_ptr() as u64,
+            0 => Arg::plausible(valid.scratch.as_mut_ptr() as u64),
             // Deliberately off by one, so a struct argument arrives misaligned.
-            1 => valid.scratch.as_mut_ptr() as u64 + 1,
-            _ => rng.pick(POISON_PTRS),
+            1 => Arg::poison(valid.scratch.as_mut_ptr() as u64 + 1),
+            _ => Arg::poison(rng.pick(POISON_PTRS)),
         },
     }
 }
@@ -235,8 +301,13 @@ struct Tally {
     calls: u64,
     /// Errno value to how many calls answered with it.
     errnos: Vec<(u32, u64)>,
-    /// Cases that returned something other than a failure, by case index.
+    /// Poisoned cases that returned something other than a failure, by case
+    /// index.
     returned: Vec<usize>,
+    /// Cases that succeeded with no poisoned argument at all. They are the
+    /// point of generating plausible values — they reach the code past the
+    /// kernel's argument checks — and succeeding is what they should do.
+    benign: u64,
 }
 
 impl Tally {
@@ -257,6 +328,9 @@ impl Tally {
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("errno{value}"));
             let _ = write!(out, " {name}x{count}");
+        }
+        if self.benign > 0 {
+            let _ = write!(out, " benign={}", self.benign);
         }
         if !self.returned.is_empty() {
             let _ = write!(out, " returned={}", self.returned.len());
@@ -399,36 +473,44 @@ fn main() {
         let mut rng = Rng(opts.seed ^ nr ^ 0x9e37_79b9_7f4a_7c15);
         let mut tally = Tally::default();
         let mut args = vec![0u64; info.args.len()];
+        let mut first_returned = String::new();
         for case in 0..opts.cases {
+            // A call with no arguments cannot be sent a bad one, so whatever it
+            // answers is the correct answer rather than a finding.
+            let mut poisoned = false;
             for (slot, kind) in args.iter_mut().zip(&info.args) {
-                *slot = arg_for(*kind, &mut rng, &mut valid);
+                let arg = arg_for(*kind, &mut rng, &mut valid);
+                *slot = arg.value;
+                poisoned |= arg.poison;
             }
             if opts.verbose {
                 // Before the call, not after: a case that never returns is
                 // exactly the one worth naming.
-                print!("    case {case:3} {args:x?} -> ");
+                let mark = if poisoned { "" } else { " benign" };
+                print!("    case {case:3}{mark} {args:x?} -> ");
                 let _ = io::stdout().flush();
             }
             let ret = invoke(nr, &args);
             tally.calls += 1;
             if ret == FAILED {
                 tally.record_errno(errno());
-            } else {
+            } else if poisoned {
+                if tally.returned.is_empty() {
+                    first_returned = format!("{args:x?}");
+                }
                 tally.returned.push(case);
+            } else {
+                tally.benign += 1;
             }
             if opts.verbose {
                 println!("{ret:#x}");
             }
         }
 
-        // A call with no arguments cannot be sent a bad one, so its success is
-        // the correct answer rather than a finding. For the rest, note that a
-        // case returned: the poison sets contain in-range values on purpose
-        // (0, 1, a page), so this is a row to read rather than a verdict.
-        if !tally.returned.is_empty() && !info.args.is_empty() {
+        if !tally.returned.is_empty() {
             returned.push(format!(
-                "{} returned on case {}; reproduce with --seed {} --only {}",
-                info.name, tally.returned[0], opts.seed, info.name
+                "{} answered {} on case {}; reproduce with --seed {} --only {}",
+                info.name, first_returned, tally.returned[0], opts.seed, info.name
             ));
         }
         if opts.verbose {
@@ -441,6 +523,7 @@ fn main() {
                 total.record_errno(*value);
             }
         }
+        total.benign += tally.benign;
         fuzzed += 1;
     }
 
@@ -491,7 +574,10 @@ fn main() {
         }
     }
     if !returned.is_empty() {
-        println!("returned rather than failed, {} call(s):", returned.len());
+        println!(
+            "poisoned yet returned rather than failed, {} call(s):",
+            returned.len()
+        );
         for line in &returned {
             println!("  {line}");
         }
