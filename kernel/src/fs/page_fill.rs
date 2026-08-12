@@ -797,7 +797,10 @@ pub fn get_or_fill_async_sync(
 /// bulk publish is aborted. The caller parks on the FIRST such handle, then
 /// retries the bulk install from the top. This is simpler than narrowing the
 /// bulk range; it is safe because after parking the conflicting page will be
-/// cached (success) or absent (retry naturally).
+/// cached (success) or absent (retry naturally). The retry re-reads the page
+/// map first, so a join that populated the whole range returns without issuing
+/// any I/O — the range a readahead window prefetched is exactly the range the
+/// read behind it asks for, so this is the common case, not the corner.
 ///
 /// # owned_ops push failure
 ///
@@ -829,6 +832,18 @@ pub fn get_or_fill_bulk_async_sync(
     );
 
     'outer: loop {
+        // Nothing to fill when the whole range is already cached. This is both
+        // the entry fast path and the re-check after a join: the conflicting
+        // handle publishes its pages before it wakes us, so without this the
+        // retry would install a fresh handle over pages that are now present
+        // and read the identical range from the device a second time.
+        {
+            let pages = ranked_lock!(RANK_PAGES, "InodePages.pages (bulk)", inode.pages.pages);
+            if (start_page..(start_page + page_count)).all(|idx| pages.contains_key(&idx)) {
+                return Ok(());
+            }
+        }
+
         // --- Install phase ---
         // Build ONE handle covering the entire range.
         let handle = PageFillHandle::new(Arc::downgrade(inode), start_page, page_count);

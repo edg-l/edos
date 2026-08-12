@@ -35,6 +35,47 @@ cost while the longer single wait was paid in full. Any storage measurement here
 that trades read *volume* for read *latency* will read backwards for the same
 reason. The full before/after table is in `doc/STORAGE-ROADMAP.md` section 1b.
 
+The 15% turned out not to be the trailing prefetch after all — see the next
+section. It was a second defect the waste had been hiding.
+
+---
+
+## A bulk fill that joined an in-flight range then read it again anyway
+
+`get_or_fill_bulk_async_sync` (`fs/page_fill.rs`) installs one handle over the
+whole range and, if **any** page in it is already in flight, aborts the install,
+parks on the conflicting handle and `continue`s the outer loop. The retry went
+straight back to the install phase. Nothing re-read the page map — so a join that
+had just finalized the prefetch and published every page in the range still went
+on to install a fresh handle, allocate the frames again, and issue a device read
+for pages that were sitting in the cache.
+
+The single-page `get_or_fill_async_sync` has had that re-check since it was
+written (both after the park and as an entry fast path); the bulk twin never got
+one, and its doc comment argued the retry was safe — which it was, only not free.
+
+It stayed invisible while readahead was discarding its windows: with no surviving
+handle there was no conflict, no join, and no retry. Narrowing made the handles
+survive, every 64 KiB call started colliding with the prefetch that had been
+issued for exactly its range, and the pass paid a second full read of the file.
+That, not "the reader waits for the whole window", is where iteration 16's 15%
+went. `inflight_stats.retries` is the tell: 240 retries on a 256-call pass, one
+per join.
+
+Fix: re-check the page map at the top of the `'outer` loop and return when the
+whole range is present. Cold 16 MiB pass, `fsbench ra /var`:
+
+| | before narrowing | narrowed | + this fix |
+|---|---|---|---|
+| read path | 222 MiB/s, 72.1 ms | 189 MiB/s, 84.7 ms | **260 MiB/s, 61.6 ms** |
+| per call p50 | 174 us | 307 us | **210 us** |
+| stalls | 11 of 256 | 2 of 256 | **1 of 256** |
+| device pages read | 30480 (110 MiB) | 4624 (18 MiB) | 4624 (18 MiB) |
+
+So the file is still read exactly once and the pass is now faster than it ever
+was with the waste in it. `ncq_inflight` is still non-zero on 0 of 256 samples:
+the prefetch is not pipelined, and that item is still open.
+
 ---
 
 ## `make test` used to pass without running

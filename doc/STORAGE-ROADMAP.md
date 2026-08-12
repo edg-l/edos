@@ -238,6 +238,41 @@ firing the next window when the reader touches the last page of the current one
 is what removes it. The target is unchanged — `ncq_inflight` non-zero across most
 samples, `ncq_max_inflight` above the boot's 2, p50 back under 174 us.
 
+### The 15% was not the trailing prefetch: the bulk fill re-read what it joined
+
+The paragraph above named the wrong mechanism, and the counter that says so was
+already on the report. `inflight_stats.retries` was 240 on a 256-call pass.
+
+`get_or_fill_bulk_async_sync` (`fs/page_fill.rs`) aborts its install when any
+page of the range is already in flight, parks on the conflicting handle, and
+retries from the top of the loop — and the retry did not look at the page map.
+So the reader joined the prefetch handle covering exactly its 16 pages, finalized
+it (which publishes every page), woke, and then installed a fresh handle over
+those now-cached pages and issued a device read for them. A second full read of
+the file, once per call. The single-page `get_or_fill_async_sync` re-checks the
+map both on entry and after its park; the bulk twin never did.
+
+Narrowing is what exposed it: while the windows were being discarded there was no
+surviving handle to collide with, so there was no join, no retry and no second
+read. The fix is the missing re-check at the top of the `'outer` loop.
+
+Same cold pass, all three states:
+
+| | before narrowing | narrowed | + bulk re-check |
+|---|---|---|---|
+| read path | 222 MiB/s, 72.1 ms | 189 MiB/s, 84.7 ms | **260 MiB/s, 61.6 ms** |
+| per call | p50 174 us, p99 868 us | p50 307 us, p99 1.2 ms | **p50 210 us, p99 509 us** |
+| stalls | 11 of 256 over 696 us | 2 of 256 over 1.2 ms | **1 of 256 over 840 us** |
+| device pages read | 30480 (110 MiB) | 4624 (18 MiB) | 4624 (18 MiB) |
+| `inflight_stats.retries` | — | 240 | 240, none doing I/O |
+
+The pass is now faster than it was with 92 MiB of waste in it, and it reads the
+file once. **Pipelining is still unbuilt and still justified**: `ncq_inflight` is
+non-zero on 0 of 256 samples and `ncq_max_inflight` did not move off the boot's
+value, so nothing is ever outstanding except the one command the reader is
+waiting on. p50 210 us against a memcpy's single-digit microseconds is what that
+costs. The target for the pipelined version is unchanged.
+
 ### The three paths, and why the counter had to come first
 
 Reading `page_cache_read_core` (`fs/vfs.rs`) against that baseline, a readahead
