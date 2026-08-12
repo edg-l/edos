@@ -6,10 +6,10 @@ session.
 
 ---
 
-## OPEN: one `ioctl` wedges a CPU, and the TLB shootdown watchdog panics the kernel
+## FIXED: one `ioctl` wedged a CPU, because a match scrutinee held its guard
 
-`syscallfuzz` found this on its first run. It is userspace-reachable, it is
-deterministic, and it takes the whole machine down:
+`syscallfuzz` found this on its first run. It was userspace-reachable, it was
+deterministic, and it took the whole machine down:
 
 ```
 syscallfuzz -n 8 -v -u 0 -o ioctl
@@ -34,26 +34,52 @@ CPU 0 stops taking interrupts entirely, so the next unrelated `munmap` anywhere
 in the system panics at `memory/tlb.rs:133`. The watchdog is doing its job; the
 bug is whatever holds CPU 0.
 
-Ruled out already:
+The mechanism was one line, and it is a Rust rule rather than anything about
+ioctl:
 
-- **The fd is not the mechanism by itself.** `-100` is `AT_FDCWD`, but
-  `FdTable::get_fd` (`thread/fd.rs:65`) is a plain map lookup with no special
-  case, so an absent key returns `None` and `sys_ioctl` answers `EBADF` before
-  it touches anything. Something must nevertheless be reached, because the call
-  does not return.
-- **Not the errno read after it.** `SYS_ERRNO` runs after every failing case and
-  had already answered for `close`, `fsync` and `isatty` in the same run.
+```rust
+let descriptor = match info.lock().fd_table.lock().get_fd(fd).cloned() {
+    Some(desc) => desc,
+    None => {
+        info.lock().errno = Errno::EBADF;   // <-- deadlock
+        return -1;
+    }
+};
+```
 
-Where to look first: `sys_ioctl` (`kernel/src/syscalls/ioctl/mod.rs:17`) calls
-`interrupts::enable()` on both arms of the `FsFile` branch (lines 71 and 98)
-before dispatching to the device or the FS mailbox. A syscall that manipulates
-the interrupt flag by hand is the shape of a CPU that ends up running with
-interrupts off and never gets them back, which is exactly the symptom. Read what
-state the entry path expects the flag to be in, rather than assuming those two
-calls are redundant.
+**Temporaries created in a `match` scrutinee live until the end of the whole
+`match`**, so both guards are still held while an arm runs. `info` is an
+`Arc<IrqSpinlock<UserThreadInfo>>`, so the `None` arm re-locks a spin lock this
+CPU already holds, with interrupts disabled, and never leaves. The fd only has
+to be one that is not open — `-100` was incidental. Any process could take the
+machine down with `ioctl(-1, ...)`.
 
-Next step is a `--only ioctl` run under `strace`, or a `run-gdb` boot with a
-breakpoint on `sys_ioctl`, to find out which arm the call actually enters.
+That also explains the shape of the panic: an `IrqSpinlock` spin never re-enables
+interrupts, so CPU 0 stopped acknowledging IPIs, and the next unrelated `munmap`
+on any other CPU tripped the TLB shootdown watchdog. The watchdog was the
+messenger.
+
+The fix binds the lookup to a `let` first, which drops both guards at the end of
+that statement. `if let` is not affected: edition 2024 (which this kernel uses)
+drops `if let` scrutinee temporaries before the body, and only `match` still
+extends them.
+
+Ruled out on the way, and worth not re-checking:
+
+- **`FdTable::get_fd` has no special case for `-100`/`AT_FDCWD`**
+  (`thread/fd.rs:65` is a plain map lookup), which is exactly why the deadlock
+  is in the failure arm rather than in any device path.
+- **Not the two `interrupts::enable()` calls in the `FsFile` branch**
+  (`syscalls/ioctl/mod.rs`). They are redundant — `syscall_handler` already
+  enables interrupts at `syscalls/mod.rs:1813` — but unreachable for a bad fd.
+
+Left standing, and not a deadlock today: every other fd-table syscall
+(`net.rs`, `memory.rs:326`, `mod.rs:1721`, `fs.rs:120`) clones the fd-table
+`Arc` first and then sets `errno` from a match arm, so it holds `fd_table` while
+taking `info`. That is the opposite order from the statement-level
+`info.lock().fd_table.lock()` uses in `io.rs`, `fs.rs:611` and `thread.rs:1180`.
+Nothing co-holds them the other way now that ioctl is fixed, but two threads
+sharing an fd table is what would make it matter.
 
 ---
 

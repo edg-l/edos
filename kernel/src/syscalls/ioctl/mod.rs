@@ -18,7 +18,14 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64, arg_len: usize, flags: u64) ->
     let info = current_thread_info();
     info.lock().errno = Errno::Clear;
 
-    let descriptor = match info.lock().fd_table.lock().get_fd(fd).cloned() {
+    // Bind the lookup to a `let` before matching on it: temporaries in a match
+    // scrutinee live until the end of the match, so matching on
+    // `info.lock()...` directly would hold the thread-info IrqSpinlock while an
+    // arm re-locks it, wedging the CPU with interrupts off.
+    let fd_table = info.lock().fd_table.clone();
+    let looked_up = fd_table.lock().get_fd(fd).cloned();
+
+    let descriptor = match looked_up {
         Some(desc) => desc,
         None => {
             info.lock().errno = Errno::EBADF;
