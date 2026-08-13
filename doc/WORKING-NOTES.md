@@ -1036,7 +1036,7 @@ above `update-manifest` in `GNUmakefile`). So the fix is not to rebuild it
 automatically. `scripts/edos-vm start` now compares its mtime against
 `filesystem/.manifest` and warns, naming `make sata-disk.img`.
 
-## Counts, remeasured 2026-08-12
+## Counts, remeasured 2026-08-13
 
 Every number a doc states about the size of the tree, taken rather than carried
 forward. Remeasure before quoting one; the commands are here so the next reader
@@ -1044,9 +1044,9 @@ does not have to invent them.
 
 | | value | how |
 |---|---|---|
-| syscalls | 111 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 111 — a mismatch is the bug |
-| userspace programs | 109 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
-| programs listed in `doc/USERSPACE-ROADMAP.md` | 111 rows = 109 + the 2 libraries | diff the table against the workspace, below |
+| syscalls | 113 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 113 — a mismatch is the bug |
+| userspace programs | 110 | `members` in `programs/Cargo.toml`, less `edos_lib` and `edos_render` |
+| programs listed in `doc/USERSPACE-ROADMAP.md` | 112 rows = 110 + the 2 libraries | diff the table against the workspace, below |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 205 | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |

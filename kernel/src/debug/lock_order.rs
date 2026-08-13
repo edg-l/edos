@@ -140,6 +140,11 @@ pub const RANK_TCP_CONN: u16 = 270;
 pub const RANK_WINDOW_SHELL: u16 = 275;
 pub const RANK_WINDOW_REGISTRY: u16 = 280;
 pub const RANK_WINDOW_EVENTS: u16 = 290;
+// The clipboard is a leaf of the window band: its two syscalls hold nothing
+// else when they take it, and it reaches nothing. Its rank exists to give the
+// tracker a total order and to make a guard visible to
+// `assert_no_guards_held`, not because anything co-holds it.
+pub const RANK_CLIPBOARD: u16 = 295;
 pub const RANK_MOUSE_BUTTONS: u16 = 300;
 // Device-node state behind devfs, reached from `DevFsDevice` callbacks under
 // `inode.lock` (30) and from the driver kthreads that feed them. Above the

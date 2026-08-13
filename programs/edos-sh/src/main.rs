@@ -12,6 +12,7 @@ mod spawn;
 use std::io::Write;
 use std::sync::Mutex;
 
+use edos_lib::config;
 use edos_lib::io::{poll_stdin, sys_read};
 
 /// Global background job list.
@@ -1014,8 +1015,9 @@ fn main() {
     let _ = stdout.flush();
 
     let mut history: Vec<String> = Vec::new();
-    // Load history from file
-    if let Ok(content) = std::fs::read_to_string("/tmp/.sh_history") {
+    // Load history from file. On the root filesystem rather than in /tmp,
+    // which is memfs: history that dies with the boot is not history.
+    if let Ok(content) = std::fs::read_to_string(config::SH_HISTORY) {
         for line in content.lines() {
             if !line.is_empty() {
                 history.push(line.to_string());
@@ -1058,7 +1060,7 @@ fn main() {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/tmp/.sh_history")
+                .open(config::SH_HISTORY)
             {
                 let _ = writeln!(f, "{}", trimmed);
             }

@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-109 programs and 2 libraries, all in the `programs/` cargo workspace.
+110 programs and 2 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -15,7 +15,7 @@
 | Archives | `tar` (ustar create, list and extract) |
 | Checksums | `sha256sum` |
 | Inspection | `file` |
-| System | `ps`, `pstree`, `pmap`, `top`, `lsof`, `free`, `uname`, `nproc`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `printenv`, `id`, `whoami`, `shutdown`, `strace`, `date`, `watch` |
+| System | `ps`, `pstree`, `pmap`, `top`, `lsof`, `free`, `uname`, `nproc`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `printenv`, `id`, `whoami`, `shutdown`, `strace`, `date`, `watch`, `keymap` |
 | Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
 | Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `nc`, `sntp`, `httpd`, `netstat`, `sshd` |
 | Audio | `play` |
@@ -206,55 +206,97 @@ is ranked by what a person who is not the author runs into after booting the
 ISO, in the order they run into it, because that is now the binding constraint
 on whether EDOS is usable rather than demonstrable.
 
+Items 1 to 3 are done; 4 and 5 are open. The one part deliberately left is the
+runtime theme, and section 3 says why.
+
 Kernel gaps found on the way get fixed on the way. That is not a change of
 policy; it is how every earlier phase went, and the fixes are the reason those
 programs paid for themselves. The difference is only which end the work is
 picked from.
 
-### 1. Keyboard layout, selectable at runtime
+### 1. Keyboard layout, selectable at runtime. Done
 
-`edos_lib::keymap` is one compile-time Spanish ISO table. Everybody who is not
-the author boots into a machine where `/`, `-`, `|`, `@` and the quotes are in
-the wrong places, and reads that as a broken system rather than as one layout.
-It is hit before any other feature, and it is misattributed worse than any
+`edos_lib::keymap` was one compile-time Spanish ISO table, so everybody who is
+not the author booted into a machine where `/`, `-`, `|`, `@` and the quotes
+were in the wrong places, and read that as a broken system rather than as one
+layout. It was hit before any other feature and misattributed worse than any
 other defect here.
 
-Wants a second and third table (US, UK), a `/etc/keymap` the session reads at
-start, and a boot cmdline override for the case where the file itself cannot be
-edited. `scripts/edos-vm` encodes the same assumption from the other side, so
-`doc/vm-control.md` moves with this.
+A layout is now a table of physical keys, and three of them ship: `us` (the
+default), `uk` and `es`. Keycodes name positions rather than characters, which
+is why the same constant is a backslash on US and a c-cedilla on Spanish; the
+26 letters are shared and a layout overrides one only to hang an AltGr level on
+it, as Spanish does for the euro sign. Ctrl+letter is derived from what the key
+produces on the layout in force rather than from its position, so a layout that
+moves a letter moves its control code with it.
 
-### 2. A clipboard the whole session shares
+Resolution order, once per process: `keymap=NAME` on the kernel command line,
+then `/etc/keymap`, then the built-in default. The boot parameter outranks the
+file deliberately, since a layout can be wrong enough that the file carrying it
+cannot be typed; the kernel gained `/proc/cmdline` for userspace to read it.
+`keymap` reports what is in force and where it came from, and records a choice.
+A program resolves its layout at start, so a change reaches programs started
+after it: live switching would mean the layout being kernel state that every
+program re-reads.
 
-Copy and paste exist terminal to terminal only, and only because both ends read
-the file `/tmp/clipboard`
-(`programs/edos_render/src/widgets/terminal.rs`, `copy_selection` and
-`paste_clipboard`). No other program participates; `widgets::text_input` has no
-clipboard code at all, and neither does `edos-vi`.
+`scripts/edos-vm` encoded the same assumption from the other side and now
+assumes the default, which makes its tables very nearly the identity mapping,
+since QMP names keys by US position. `doc/vm-control.md` moved with it.
 
-This is the most frequently performed interaction on any desktop and the first
-thing that breaks once two windows are open. `GUI_PLAN.md` sketched
-`sys_clipboard_get`/`sys_clipboard_set` and neither was ever implemented; a
-kernel-owned buffer is the right shape, since the alternative is every program
-agreeing on a path in a filesystem that is not guaranteed to be mounted. Wire
-`edos_render::widgets` once and the terminal, the text input and every future
-widget get it together.
+### 2. A clipboard the whole session shares. Done
 
-Middle-click paste and an X-style primary selection are the cheap follow-on:
-`programs/edos-terminal/src/main.rs` gates on `event.code == 0`, so no
-non-left button reaches anything today.
+Copy and paste existed terminal to terminal only, and only because both ends
+read the file `/tmp/clipboard`. Nothing else participated.
 
-### 3. Configuration that survives a reboot
+The kernel owns the buffers now (`kernel/src/window/clipboard.rs`, syscalls 284
+and 285), which is what `GUI_PLAN.md` sketched and nobody had implemented. A
+file was the wrong shape for something meant to outlive the program that filled
+it: `/tmp` is a mount that need not be there.
 
-Nothing a user changes is theirs the next morning. The wallpaper cycles and is
-not recorded, the theme and the timezone are set by whoever spawned the
-session, and shell history is written to `/tmp/.sh_history`, which is memfs, so
-it dies with the boot.
+There are two buffers, as X established. The clipboard is filled by an explicit
+copy; the primary selection is filled merely by finishing a selection and
+pasted with the middle button, so selecting somewhere does not destroy what was
+deliberately copied. Content is bytes, handed back exactly as it arrived.
 
-The work is small and it is what separates a system from a demo: a real `/etc`
-that programs read and write, history moved onto the persistent root, and the
-wallpaper choice, layout and theme stored where the session start reads them.
-`edos-install` should carry that directory onto the installed disk.
+Who participates: the terminal (Ctrl+Shift+C and V, middle-click paste, and
+publishing every finished drag or double-click word to the primary buffer);
+`widgets::text_input`, through three defaulted `Widget` methods that the
+container binds to Ctrl+C, X and V, so a future widget gets cut, copy and paste
+without knowing the clipboard exists; and `vi`, whose `yy`, `dd`, `p` and `P`
+go through the same buffer, which is what lets a line yanked in the editor
+paste into another window.
+
+Fixed on the way: the container bound focus cycling to scancode 15, which is
+Scroll Lock, not Tab.
+
+### 3. Configuration that survives a reboot. Done, except the theme
+
+Nothing a user changed was theirs the next morning: the wallpaper cycled
+unrecorded, and shell history went to `/tmp/.sh_history`, which is memfs, so it
+died with the boot.
+
+`edos_lib::config` is the mechanism, and it is deliberately smaller than an ini
+parser: one setting per file, one value in it, `#` comments allowed above.
+That is what the shell can already write with `echo` and read with `cat` when
+the graphical program owning a setting will not start. `/etc/keymap` and
+`/etc/wallpaper` are the two settings; history moved to `/root/.sh_history`.
+
+A wallpaper is recorded by name rather than by index, `lit:N` for a generated
+ground and the path for an image, so the choice survives a file being added to
+or removed from `/share/wallpapers`, and can be set by hand. One that no longer
+exists falls back to the first generated ground rather than leaving the desktop
+bare.
+
+`edos-install` needed no change: it already copies everything but `dev`, `proc`,
+`tmp`, `mnt` and `sys`, so moving these out of `/tmp` is exactly what makes them
+reach the installed disk. The live session still forgets, since its root is a
+ramdisk, which is the right split.
+
+**Still open: the theme.** `Theme::DEFAULT` is a `const`, read in `const`
+contexts by about 120 sites across 16 files, so making it selectable is a
+const-to-runtime refactor of every colour in the GUI, and it buys nothing until
+a second theme exists, which is 60-odd colours that have to be designed rather
+than derived. Two separate pieces of work; neither is persistence.
 
 ### 4. A desktop that is not a terminal launcher
 

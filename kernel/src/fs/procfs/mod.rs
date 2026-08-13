@@ -165,6 +165,15 @@ impl Procfs {
         alloc::format!("EDOS {} x86_64\n", env!("CARGO_PKG_VERSION"))
     }
 
+    /// The command line the bootloader handed over, verbatim.
+    ///
+    /// Userspace reads it for settings that must outrank anything on disk,
+    /// which is how a machine is recovered when the file that would carry the
+    /// setting cannot be edited.
+    fn render_cmdline() -> String {
+        alloc::format!("{}\n", crate::boot::boot_info().cmdline)
+    }
+
     fn render_cpuinfo() -> String {
         use raw_cpuid::CpuId;
 
@@ -1319,6 +1328,7 @@ const GLOBAL_FILES: &[(&str, fn() -> String)] = &[
         Procfs::render_process_table(&Procfs::collect_snapshots())
     }),
     ("version", Procfs::render_version),
+    ("cmdline", Procfs::render_cmdline),
     ("meminfo", Procfs::render_meminfo),
     ("cpuinfo", Procfs::render_cpuinfo),
     ("block_cache", Procfs::render_block_cache),

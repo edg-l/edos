@@ -5,9 +5,9 @@ use crate::ranked_write;
 use alloc::string::String;
 
 use crate::{
-    util::uaccess::{access_ok, try_copy_to_user, try_read_user},
+    util::uaccess::{access_ok, try_copy_from_user, try_copy_to_user, try_read_user},
     window::{
-        WindowEvent,
+        WindowEvent, clipboard,
         input::{get_or_create_event_queue, poll_events, remove_event_queue, send_event},
         registry::{Frame, ReadSite, WINDOW_REGISTRY, WindowId, property, read_tracked},
         shell,
@@ -614,4 +614,81 @@ pub fn sys_window_damage(window_id: WindowId) -> u64 {
     }
     w.damaged = true;
     0
+}
+
+/// Replace the contents of a clipboard buffer.
+///
+/// Arguments:
+/// - rdi: which buffer (0 clipboard, 1 primary selection)
+/// - rsi: pointer to the bytes
+/// - rdx: how many bytes
+///
+/// Returns: 0 on success, !0 on error (sets errno).
+pub fn sys_clipboard_set(which: u64, buffer_ptr: *const u8, len: usize) -> u64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if !clipboard::is_valid(which) {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    }
+    if len > clipboard::MAX_LEN {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    }
+
+    // An empty set clears the buffer, and takes no user pointer with it.
+    let mut bytes = alloc::vec![0u8; len];
+    if len != 0 {
+        if buffer_ptr.is_null() || !access_ok(buffer_ptr as u64, len) {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
+        }
+        // Copied before the lock is taken: a copy from a user pointer can
+        // demand-fault, and parking on a page fill under a spin lock leaves
+        // every other CPU spinning on it for the duration of the I/O.
+        if !unsafe { try_copy_from_user(bytes.as_mut_ptr(), buffer_ptr, len) } {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
+        }
+    }
+
+    clipboard::set(which, bytes);
+    0
+}
+
+/// Read a clipboard buffer.
+///
+/// Arguments:
+/// - rdi: which buffer (0 clipboard, 1 primary selection)
+/// - rsi: pointer to the destination, or null to ask only for the length
+/// - rdx: how many bytes the destination holds
+///
+/// Returns: the full length of the buffer, which may exceed what was copied,
+/// so a caller can size its destination with a null first call. !0 on error.
+pub fn sys_clipboard_get(which: u64, buffer_ptr: *mut u8, len: usize) -> u64 {
+    let info = current_thread_info();
+    info.lock().errno = Errno::Clear;
+
+    if !clipboard::is_valid(which) {
+        info.lock().errno = Errno::EINVAL;
+        return !0u64;
+    }
+    if !buffer_ptr.is_null() && len != 0 && !access_ok(buffer_ptr as u64, len) {
+        info.lock().errno = Errno::EFAULT;
+        return !0u64;
+    }
+
+    let bytes = clipboard::get(which);
+    let copy_len = bytes.len().min(len);
+    if !buffer_ptr.is_null() && copy_len != 0 {
+        // Outside the clipboard lock, which `clipboard::get` has already
+        // released, for the reason `sys_window_list` copies outside the
+        // registry lock.
+        if !unsafe { try_copy_to_user(buffer_ptr, bytes.as_ptr(), copy_len) } {
+            info.lock().errno = Errno::EFAULT;
+            return !0u64;
+        }
+    }
+    bytes.len() as u64
 }

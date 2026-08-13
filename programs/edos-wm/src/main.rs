@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use std::collections::HashMap;
 
+use edos_lib::config;
 use edos_lib::io::klog_dump;
 use edos_render::graphics::Screen;
 use edos_render::window::{
@@ -614,7 +615,12 @@ fn main() {
     // Pre-compute the desktop ground (avoids 1080 lerp+fill calls per frame,
     // and a wallpaper is rescaled once rather than per frame).
     let backgrounds = compositor::available_backgrounds();
-    let mut background = 0usize;
+    // The recorded choice, if it still names a background that exists. A
+    // wallpaper that has been deleted falls back to the first generated ground
+    // rather than leaving the desktop bare.
+    let mut background = config::read(config::WALLPAPER)
+        .and_then(|name| compositor::background_index(&backgrounds, &name))
+        .unwrap_or(0);
     let mut desktop_cache =
         compositor::build_desktop_cache(screen.width(), screen.height(), &backgrounds[background]);
     let mut desktop_menu = desktop_menu::DesktopMenu::default();
@@ -702,6 +708,15 @@ fn main() {
                     screen.width(),
                     screen.height(),
                     &backgrounds[background],
+                );
+                // Recorded as it changes, so the desktop comes back the way it
+                // was left. A read-only or absent root costs the persistence,
+                // not the change the user just made.
+                let _ = config::write(
+                    config::WALLPAPER,
+                    &compositor::background_name(&backgrounds[background]),
+                    "Desktop background: a path to a BMP, or lit:N for a generated ground.\n\
+                     Right-click the desktop and pick Change background to cycle.",
                 );
                 dirty.full_screen = true;
             }

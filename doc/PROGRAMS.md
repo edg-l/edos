@@ -14,10 +14,10 @@ this file when they ship.
 
 This file ranks by what a program would prove; it is not the build order. That
 lives in Phase 5 of [`USERSPACE-ROADMAP.md`](USERSPACE-ROADMAP.md), ranked by
-what someone else's first hour with the ISO runs into. The two agree on the
-file manager and disagree on the settings panel, which Phase 5 splits: runtime
-keyboard layout is item 1 there on its own, ahead of the panel that would
-eventually house it.
+what someone else's first hour with the ISO runs into. The two agreed on the
+file manager, which is still the first entry here, and disagreed on the
+settings panel, which Phase 5 split: runtime keyboard layout went first on its
+own and has shipped as `keymap`, ahead of the panel that would house it.
 
 ## The one to write first
 
@@ -35,7 +35,7 @@ surface at all.
 | System monitor with sparklines | The *rate* gap: every procfs counter is cumulative, so plotting forces differencing. Would pull on `/proc/ahci_stats`, `/proc/block_cache` and per-CPU load |
 | Paint | Damage rectangles and shm compositing harder than anything else: small, frequent, scattered dirty rects, the opposite of the window-drag case already measured in `WORKING-NOTES.md` |
 | Minesweeper | Right-click. Nothing in the system uses a non-left mouse button, so that path is entirely untested |
-| Settings panel | Would force the keymap out of `edos_lib::keymap`'s hardcoded Spanish ISO layout into something selectable at runtime |
+| Settings panel | A graphical home for the settings that exist but have only a CLI and a file: the keyboard layout `keymap` writes, the wallpaper the desktop menu cycles. Would also be the first thing to want a runtime theme, which is still a `const` |
 | Music player | HDA plus timing under a GUI. `play` proves the codec works; a seek bar proves the DMA ring survives being poked at |
 | Disk-usage treemap | Deep recursion through the page cache, and genuinely useful on a 5G development root |
 | Calendar popup | Small and concrete: `Action::Clock => {}` in `programs/edos-taskbar/src/main.rs` means the panel clock hovers, is clickable, and does nothing |

@@ -3,6 +3,7 @@
 use std::env;
 use std::io::{BufWriter, Write, stdout};
 
+use edos_lib::clipboard::{self, Buffer};
 use edos_lib::io::{poll_stdin, pty_set_canonical, pty_set_raw, sys_read};
 
 // --- Constants and types ---
@@ -280,6 +281,51 @@ impl Editor {
 
     // --- Normal mode ---
 
+    /// Put `line` on the system clipboard with the newline a line yank implies,
+    /// so what is yanked here pastes as a line anywhere else.
+    fn set_clipboard(&mut self, line: &str) {
+        let mut text = String::with_capacity(line.len() + 1);
+        text.push_str(line);
+        text.push('\n');
+        if clipboard::set(Buffer::Clipboard, &text).is_err() {
+            self.status_msg = "clipboard unavailable".to_string();
+        }
+    }
+
+    /// `yy`: copy the current line.
+    fn yank_line(&mut self) {
+        let line = self.lines[self.cy].clone();
+        self.set_clipboard(&line);
+        self.status_msg = "1 line yanked".to_string();
+    }
+
+    /// `p` and `P`: insert the clipboard as whole lines below or above the
+    /// cursor. There are no registers here, so the clipboard is the one place
+    /// a yank can have come from, which is also what makes a yank in this
+    /// editor pasteable in another window.
+    fn put_clipboard(&mut self, below: bool) {
+        let text = clipboard::get(Buffer::Clipboard);
+        if text.is_empty() {
+            self.status_msg = "clipboard is empty".to_string();
+            return;
+        }
+
+        // A trailing newline is the line terminator, not an extra blank line.
+        let body = text.strip_suffix('\n').unwrap_or(&text);
+        let at = if below { self.cy + 1 } else { self.cy };
+        for (offset, line) in body.split('\n').enumerate() {
+            let row = at + offset;
+            self.lines.insert(row, line.replace('\r', ""));
+            self.undo_stack.push(UndoAction::InsertLine { row });
+        }
+
+        let count = body.split('\n').count();
+        self.cy = at;
+        self.cx = 0;
+        self.modified = true;
+        self.status_msg = format!("{count} line{} put", if count == 1 { "" } else { "s" });
+    }
+
     fn handle_normal_key(&mut self, key: Key) {
         self.status_msg.clear();
         let old_pending = self.pending;
@@ -400,10 +446,25 @@ impl Editor {
                     });
                 }
             }
+            // yy: yank line to the clipboard
+            Key::Char(b'y') => {
+                if old_pending == Some(b'y') {
+                    self.yank_line();
+                } else {
+                    self.pending = Some(b'y');
+                    return;
+                }
+            }
+            // p, P: put the clipboard below or above the current line
+            Key::Char(b'p') => self.put_clipboard(true),
+            Key::Char(b'P') => self.put_clipboard(false),
             // dd: delete line
             Key::Char(b'd') => {
                 if old_pending == Some(b'd') {
                     let content = self.lines[self.cy].clone();
+                    // A delete is a cut, so it fills the clipboard the way
+                    // a yank does.
+                    self.set_clipboard(&content);
                     self.undo_stack.push(UndoAction::DeleteLine {
                         row: self.cy,
                         content,

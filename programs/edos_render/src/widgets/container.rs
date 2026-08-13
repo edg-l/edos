@@ -2,7 +2,10 @@
 
 use super::{Widget, WidgetEvent, WidgetId};
 use crate::window::{WindowEvent, WindowEventType};
-use edos_lib::keymap::{Modifiers, map_keycode, update_modifiers};
+use edos_lib::{
+    clipboard::{self, Buffer},
+    keymap::{Modifiers, keycode, map_keycode, update_modifiers},
+};
 
 /// Container that manages widgets and routes events.
 pub struct WidgetContainer {
@@ -140,9 +143,17 @@ impl WidgetContainer {
                     return results;
                 }
 
-                // Tab key cycles focus
-                if scancode == 15 {
-                    // Tab
+                // Cut, copy and paste, before the key is decoded: with Ctrl
+                // held these are control characters, and a control character
+                // is exactly what `on_char` is not given.
+                if self.mods.ctrl
+                    && let Some(evt) = self.clipboard_shortcut(scancode)
+                {
+                    results.extend(evt);
+                    return results;
+                }
+
+                if scancode == keycode::TAB {
                     self.focus_next();
                 } else if let Some(focused_id) = self.focused {
                     if let Some(w) = self.widgets.iter_mut().find(|w| w.id() == focused_id) {
@@ -179,6 +190,44 @@ impl WidgetContainer {
         }
 
         results
+    }
+
+    /// Run the cut, copy or paste bound to `scancode`, if it is one of them.
+    ///
+    /// Returns None when the key is not a clipboard shortcut, so the caller can
+    /// tell "not mine" from "mine, and it changed nothing".
+    fn clipboard_shortcut(&mut self, scancode: u32) -> Option<Vec<(WidgetId, WidgetEvent)>> {
+        let focused_id = self.focused?;
+        let widget = self
+            .widgets
+            .iter_mut()
+            .find(|widget| widget.id() == focused_id)?;
+
+        let event = match scancode {
+            keycode::C => {
+                if let Some(text) = widget.clipboard_copy() {
+                    let _ = clipboard::set(Buffer::Clipboard, &text);
+                }
+                None
+            }
+            keycode::X => {
+                if let Some(text) = widget.clipboard_copy() {
+                    let _ = clipboard::set(Buffer::Clipboard, &text);
+                }
+                widget.clipboard_cut()
+            }
+            keycode::V => {
+                let text = clipboard::get(Buffer::Clipboard);
+                if text.is_empty() {
+                    None
+                } else {
+                    widget.clipboard_paste(&text)
+                }
+            }
+            _ => return None,
+        };
+
+        Some(event.into_iter().map(|evt| (focused_id, evt)).collect())
     }
 
     /// Move focus to the next focusable widget.
@@ -355,5 +404,20 @@ impl Widget for WidgetWrapper {
 
     fn set_enabled(&mut self, enabled: bool) {
         self.inner.set_enabled(enabled);
+    }
+
+    // Forwarded like the rest: a defaulted trait method left off this wrapper
+    // takes the default silently, so the wrapped widget loses the capability
+    // with nothing to show for it at compile time.
+    fn clipboard_copy(&self) -> Option<String> {
+        self.inner.clipboard_copy()
+    }
+
+    fn clipboard_cut(&mut self) -> Option<WidgetEvent> {
+        self.inner.clipboard_cut()
+    }
+
+    fn clipboard_paste(&mut self, text: &str) -> Option<WidgetEvent> {
+        self.inner.clipboard_paste(text)
     }
 }

@@ -1,3 +1,5 @@
+pub mod clipboard;
+pub mod config;
 pub mod io;
 pub mod keymap;
 pub mod mem;

@@ -1543,6 +1543,11 @@ fn draw(window: &mut Window) {
 
 ### 6.1 Clipboard Support
 
+Shipped, with one change from the sketch below: there are two buffers rather
+than one, so a selection does not overwrite a deliberate copy, and both calls
+take which buffer they mean as their first argument. See
+`kernel/src/window/clipboard.rs` and Phase 5 of `doc/USERSPACE-ROADMAP.md`.
+
 ```rust
 // Kernel clipboard buffer
 static CLIPBOARD: RwLock<Vec<u8>> = RwLock::new(Vec::new());

@@ -33,26 +33,25 @@ PIDFILE = os.path.join(RUNDIR, "qemu.pid")
 GEOMETRY = os.path.join(RUNDIR, "geometry")
 SERIAL_LOG = os.path.join(REPO, "run_log.txt")
 
-# The guest decodes scancodes with a hard-coded Spanish 105-key ISO layout
-# (programs/edos_lib/src/keymap.rs), so a character maps to whichever physical
-# key carries it on that layout, not on US. Verified against a running guest.
+# QMP qcode names are US physical positions, and the guest defaults to the US
+# layout (programs/edos_lib/src/keymap.rs), so this is very nearly the identity
+# mapping. A guest booted with `keymap=es` or carrying /etc/keymap decodes the
+# same scancodes differently, and `type` will produce the wrong characters
+# there; pass `keymap=us` on the kernel command line to drive such a machine.
 PLAIN = {
-    "-": "slash", "'": "minus", ".": "dot", ",": "comma",
-    "<": "less", "`": "bracket_left", "+": "bracket_right",
+    "-": "minus", "=": "equal", "[": "bracket_left", "]": "bracket_right",
+    "\\": "backslash", ";": "semicolon", "'": "apostrophe",
+    ",": "comma", ".": "dot", "/": "slash", "`": "grave_accent",
     " ": "spc", "\t": "tab", "\n": "ret",
 }
 SHIFT = {
-    "/": "7", "?": "minus", ":": "dot", ";": "comma", ">": "less",
-    "_": "slash",
-    "^": "bracket_left", "*": "bracket_right",
-    "!": "1", '"': "2", "$": "4", "%": "5", "&": "6",
-    "(": "8", ")": "9", "=": "0",
+    "_": "minus", "+": "equal", "{": "bracket_left", "}": "bracket_right",
+    "|": "backslash", ":": "semicolon", '"': "apostrophe",
+    "<": "comma", ">": "dot", "?": "slash", "~": "grave_accent",
+    "!": "1", "@": "2", "#": "3", "$": "4", "%": "5",
+    "^": "6", "&": "7", "*": "8", "(": "9", ")": "0",
 }
-ALTGR = {
-    "|": "1", "@": "2", "#": "3", "~": "4", "\\": "grave_accent",
-    "[": "bracket_left", "]": "bracket_right", "{": "apostrophe",
-    "}": "backslash",
-}
+ALTGR = {}
 
 def keystroke(ch):
     """Return the QMP key list that produces `ch`, or None if unmapped."""

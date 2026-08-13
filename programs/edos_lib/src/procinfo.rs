@@ -164,6 +164,19 @@ pub fn read_details(pid: u64) -> io::Result<Details> {
     })
 }
 
+/// The value of `key=` on the kernel command line, as `/proc/cmdline` reports
+/// it, or None if the parameter is absent or carries no value.
+///
+/// This is the setting that outranks anything on disk, so it is what a machine
+/// whose configuration files cannot be edited is recovered with.
+pub fn boot_param(key: &str) -> Option<String> {
+    let cmdline = fs::read_to_string("/proc/cmdline").ok()?;
+    cmdline
+        .split_ascii_whitespace()
+        .find_map(|param| param.strip_prefix(key)?.strip_prefix('='))
+        .map(str::to_string)
+}
+
 /// The value of `key` in a `Key: value` block.
 ///
 /// The key must be followed by the colon, so `CPU` does not answer with the

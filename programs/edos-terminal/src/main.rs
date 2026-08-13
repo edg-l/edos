@@ -112,12 +112,20 @@ fn main() {
                         terminal.on_key(event.code, false);
                     }
                     Some(WindowEventType::MouseButton) => {
-                        if event.code == 0 {
-                            terminal.on_mouse_button(
-                                event.x as i32,
-                                event.y as i32,
-                                event.data != 0,
-                            );
+                        // Bit order is the boot protocol's: 0 left, 1 right,
+                        // 2 middle. Left drives selection, middle pastes the
+                        // primary selection on release, so a click that lands
+                        // on the wrong window does not paste into it.
+                        match event.code {
+                            0 => {
+                                terminal.on_mouse_button(
+                                    event.x as i32,
+                                    event.y as i32,
+                                    event.data != 0,
+                                );
+                            }
+                            2 if event.data == 0 => terminal.paste_primary(),
+                            _ => {}
                         }
                     }
                     Some(WindowEventType::MouseMove) => {

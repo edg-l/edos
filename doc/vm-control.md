@@ -170,24 +170,21 @@ host audio sink, which is what exercises `/dev/dsp`. `-audiodev pipewire`, as
 Two properties of the guest shape everything that drives it. They are not
 script bugs, and anything else driving the VM will hit both.
 
-### The keyboard layout is Spanish ISO
+### The keyboard layout is whatever the guest resolved
 
-`programs/edos_lib/src/keymap.rs` hard-codes a Spanish 105-key ISO layout. QEMU
-delivers scancodes, so a character arrives as whatever the guest's layout says
-that physical key means:
+QEMU delivers scancodes, so a character arrives as whatever the guest's layout
+says that physical key means. The layout is a runtime setting
+(`programs/edos_lib/src/keymap.rs`): `keymap=NAME` on the kernel command line,
+then `/etc/keymap`, then the built-in default, which is US.
 
-| Character | Key to send | Character | Key to send |
-|---|---|---|---|
-| `/` | `shift+7` | `-` | `slash` |
-| `?` | `shift+minus` | `'` | `minus` |
-| `:` | `shift+dot` | `;` | `comma` |
-| `\|` | `altgr+1` | `@` | `altgr+2` |
-| `\` | `altgr+grave_accent` | `~` | `altgr+4` |
-| `[` `]` | `altgr+bracket_left/right` | `{` `}` | `altgr+apostrophe/backslash` |
-
-Sending the US key for `/` types `-`, which turns `ls /bin` into `ls -bin`. The
-full table lives in `scripts/edos-vm`; change the guest layout and that table
-must change with it.
+A guest on the default layout needs no translation, because QMP names its keys
+by US position, and that is what the table in `scripts/edos-vm` now assumes. A
+guest carrying `/etc/keymap` with something else in it, an installed machine
+somebody configured, decodes the same scancodes differently, and `type` will
+produce the wrong characters there: on the Spanish layout the US key for `/`
+types `-`, which turns `ls /bin` into `ls -bin`. Boot such a machine with
+`keymap=us` on the command line to drive it, since the boot parameter outranks
+the file.
 
 ### The pointer is absolute, and the guest works that out for itself
 
@@ -350,7 +347,7 @@ on through the log.
 | Symptom | Cause |
 |---|---|
 | Typing does nothing | no window focused; click into one first |
-| Wrong characters typed | layout mismatch, see the Spanish ISO table |
+| Wrong characters typed | layout mismatch; boot with `keymap=us` |
 | Pointer stops short of the target | a relative `--pointer mouse` guest, steps sent faster than it polls |
 | Clicks do nothing at all | the guest bound no pointer; check `xhci: pointer on interface` in the log |
 | Blank or frozen screenshot | guest panicked; check `run_log.txt` |

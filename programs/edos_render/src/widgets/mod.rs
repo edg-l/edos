@@ -111,6 +111,27 @@ pub trait Widget {
 
     /// Enable or disable the widget.
     fn set_enabled(&mut self, _enabled: bool) {}
+
+    /// What a copy takes from this widget, or None if it holds nothing to copy.
+    ///
+    /// The container is what binds the keys and what talks to the clipboard, so
+    /// a widget only has to say what its content is; a widget that implements
+    /// these three gets copy, cut and paste without knowing the clipboard
+    /// exists.
+    fn clipboard_copy(&self) -> Option<String> {
+        None
+    }
+
+    /// Remove what [`Widget::clipboard_copy`] would have taken. Cut is a copy
+    /// followed by this.
+    fn clipboard_cut(&mut self) -> Option<WidgetEvent> {
+        None
+    }
+
+    /// Insert pasted text at the cursor.
+    fn clipboard_paste(&mut self, _text: &str) -> Option<WidgetEvent> {
+        None
+    }
 }
 
 /// Color constants for widget rendering. Values are read from `Theme::DEFAULT`.

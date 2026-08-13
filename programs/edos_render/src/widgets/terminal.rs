@@ -2,6 +2,8 @@
 
 use std::collections::VecDeque;
 
+use edos_lib::clipboard::{self, Buffer};
+
 use super::{
     Rect, Widget, WidgetEvent, WidgetId, char_width, draw_rect, draw_text_styled, text_height,
 };
@@ -795,18 +797,59 @@ impl Terminal {
         }
     }
 
-    /// Copy the current selection to the clipboard file /tmp/clipboard.
+    /// Copy the current selection to the clipboard.
     pub fn copy_selection(&self) {
         if let Some(text) = self.get_selected_text() {
-            let _ = std::fs::write("/tmp/clipboard", text);
+            let _ = clipboard::set(Buffer::Clipboard, &text);
         }
     }
 
-    /// Paste from the clipboard file /tmp/clipboard into the input buffer.
-    pub fn paste_clipboard(&mut self) {
-        if let Ok(text) = std::fs::read_to_string("/tmp/clipboard") {
-            self.input_buffer.extend(text.chars());
+    /// Publish the current selection as the primary selection, which is what a
+    /// middle click pastes. Called when a selection is finished rather than
+    /// when one is asked for, since selecting *is* the act that fills it.
+    fn publish_selection(&self) {
+        if let Some(text) = self.get_selected_text() {
+            let _ = clipboard::set(Buffer::Primary, &text);
         }
+    }
+
+    /// Paste a clipboard buffer into the input buffer, as though it had been
+    /// typed: a newline in the text submits the line, because that is what the
+    /// Return key puts in this same buffer. A carriage return is folded into
+    /// one, so text copied from a CRLF source does not submit twice.
+    pub fn paste(&mut self, buffer: Buffer) {
+        let text = clipboard::get(buffer);
+        let mut prev_cr = false;
+        for ch in text.chars() {
+            match ch {
+                '\r' => {
+                    self.input_buffer.push('\n');
+                    prev_cr = true;
+                }
+                '\n' => {
+                    if !prev_cr {
+                        self.input_buffer.push('\n');
+                    }
+                    prev_cr = false;
+                }
+                _ => {
+                    self.input_buffer.push(ch);
+                    prev_cr = false;
+                }
+            }
+        }
+    }
+
+    /// Paste the clipboard into the input buffer.
+    pub fn paste_clipboard(&mut self) {
+        self.paste(Buffer::Clipboard);
+    }
+
+    /// Paste the primary selection, which is what the middle button does
+    /// everywhere else. Not part of [`Widget`], because the trait's mouse
+    /// handler carries no button and the owner is what knows which one it saw.
+    pub fn paste_primary(&mut self) {
+        self.paste(Buffer::Primary);
     }
 
     /// Update cursor blink state (call periodically).
@@ -969,13 +1012,19 @@ impl Widget for Terminal {
                 self.selection_start = Some((cell.0, start_col));
                 self.selection_end = Some((cell.0, end_col));
                 self.selecting = false;
+                self.publish_selection();
             } else {
                 self.selection_start = Some(cell);
                 self.selection_end = Some(cell);
                 self.selecting = true;
             }
         } else {
-            self.selecting = false;
+            // A drag that has just ended is a finished selection, so this is
+            // where the primary buffer is filled.
+            if self.selecting {
+                self.selecting = false;
+                self.publish_selection();
+            }
         }
         None
     }

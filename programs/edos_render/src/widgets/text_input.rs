@@ -351,6 +351,40 @@ impl Widget for TextInput {
         }
     }
 
+    /// The whole field. There is no selection here, so a copy takes everything
+    /// the field holds rather than nothing.
+    fn clipboard_copy(&self) -> Option<String> {
+        if !self.enabled || self.text.is_empty() {
+            return None;
+        }
+        Some(self.text.clone())
+    }
+
+    fn clipboard_cut(&mut self) -> Option<WidgetEvent> {
+        if !self.enabled || self.text.is_empty() {
+            return None;
+        }
+        self.text.clear();
+        self.cursor_pos = 0;
+        self.reset_cursor_blink();
+        Some(WidgetEvent::TextChanged(self.text.clone()))
+    }
+
+    fn clipboard_paste(&mut self, text: &str) -> Option<WidgetEvent> {
+        if !self.enabled {
+            return None;
+        }
+        // A field is one line, so a newline in the pasted text ends it rather
+        // than putting a character the field cannot draw into the middle of it.
+        for ch in text.chars().take_while(|ch| *ch != '\n' && *ch != '\r') {
+            if !ch.is_control() {
+                self.insert_char(ch);
+            }
+        }
+        self.reset_cursor_blink();
+        Some(WidgetEvent::TextChanged(self.text.clone()))
+    }
+
     fn focusable(&self) -> bool {
         // A disabled control is skipped by Tab: focusing something that cannot
         // act is a dead end the user has to Tab out of again.

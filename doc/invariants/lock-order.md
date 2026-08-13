@@ -86,6 +86,7 @@ sections, and wrapping them would recurse into the preemption counter.
 | 275 | `SHELL_PIDS` | `PreemptRwLock<Vec<u64>>` | `window/shell.rs` |
 | 280 | `WINDOW_REGISTRY` | `PreemptRwLock<WindowRegistry>` | `window/registry.rs` |
 | 290 | `WINDOW_EVENTS` | `PreemptRwLock<BTreeMap>` | `window/input.rs` |
+| 295 | `BUFFERS` (clipboard) | `PreemptSpinlock<Buffers>` | `window/clipboard.rs` |
 | 300 | `LAST_MOUSE_BUTTONS` | `PreemptSpinlock<u8>` | `window/input.rs` |
 | 310 | `Broadcaster.subs` | `PreemptRwLock<BTreeMap>` | `thread/broadcast.rs` |
 | 320 | device poller lists | `BlockingMutex<Vec>` | `drivers/{mouse,keyboard}/mod.rs`, `drivers/tty.rs` |
@@ -318,6 +319,14 @@ relative to it. `LAST_MOUSE_BUTTONS` is taken under the registry read in
 `handle_mouse_event` and explicitly dropped before anything else, so it is never
 co-held with `WINDOW_EVENTS`; its rank exists only to give the tracker a total
 order.
+
+**295, the clipboard.** A leaf of the same band, and the strictest case of the
+same pattern: `sys_clipboard_get` and `sys_clipboard_set` hold nothing when they
+take it and reach nothing under it. Both copy to and from user memory outside
+the guard, since `try_copy_to_user` can demand-fault and a demand fault can park
+on a page fill, which is the rule the window list already follows for the same
+reason. Its rank buys guard visibility in `assert_no_guards_held` rather than
+deadlock freedom.
 
 No inversions were found here, unlike the FS and networking sweeps. The two
 sites that look like violations are already correct on purpose:

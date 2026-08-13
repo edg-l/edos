@@ -191,6 +191,27 @@ pub fn available_backgrounds() -> Vec<Background> {
     all
 }
 
+/// How a background is recorded in `/etc/wallpaper`: a generated ground as
+/// `lit:N`, an image as its path.
+///
+/// The path rather than an index, so the recorded choice survives a wallpaper
+/// being added to or removed from [`WALLPAPER_DIR`], and so the file can be
+/// set by hand with `echo`.
+pub fn background_name(background: &Background) -> String {
+    match background {
+        Background::Lit(variant) => format!("lit:{variant}"),
+        Background::Wallpaper(path) => path.display().to_string(),
+    }
+}
+
+/// Which of `backgrounds` the recorded `name` selects, or None if it names one
+/// that is no longer there.
+pub fn background_index(backgrounds: &[Background], name: &str) -> Option<usize> {
+    backgrounds
+        .iter()
+        .position(|background| background_name(background) == name)
+}
+
 /// Render `background` at screen size, falling back to the first lit ground if
 /// the image cannot be read.
 pub fn build_desktop_cache(width: usize, height: usize, background: &Background) -> Vec<u32> {

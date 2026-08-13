@@ -386,6 +386,9 @@ const SYS_WINDOW_DAMAGE: u64 = 232;
 /// Appoint another process as part of the shell. Init only; see
 /// `kernel/src/window/shell.rs`.
 const SYS_WINDOW_GRANT_SHELL: u64 = 234;
+/// Read and write the session clipboard; see `kernel/src/window/clipboard.rs`.
+const SYS_CLIPBOARD_GET: u64 = 284;
+const SYS_CLIPBOARD_SET: u64 = 285;
 /// Return from a signal handler; see `syscalls/sigframe.rs`.
 const SYS_SIGRETURN: u64 = 239;
 /// Place a process in a process group.
@@ -917,6 +920,14 @@ extern "C" fn syscall_handler(ctx: *mut SyscallContext) {
         }
         SYS_WINDOW_GRANT_SHELL => {
             ctx.rax = window::sys_window_grant_shell(ctx.rdi);
+        }
+        SYS_CLIPBOARD_GET => {
+            let buffer_ptr = ctx.rsi as *mut u8;
+            ctx.rax = window::sys_clipboard_get(ctx.rdi, buffer_ptr, ctx.rdx as usize);
+        }
+        SYS_CLIPBOARD_SET => {
+            let buffer_ptr = ctx.rsi as *const u8;
+            ctx.rax = window::sys_clipboard_set(ctx.rdi, buffer_ptr, ctx.rdx as usize);
         }
         SYS_CLOCK_GETTIME => {
             let buf_ptr = ctx.rdi as *mut u8;

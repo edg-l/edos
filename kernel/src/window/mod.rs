@@ -5,6 +5,7 @@
 use crate::debug::lock_order::RANK_WINDOW_REGISTRY;
 use crate::ranked_write;
 
+pub mod clipboard;
 pub mod input;
 pub mod registry;
 pub mod shell;
