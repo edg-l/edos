@@ -7,13 +7,15 @@
 //! exactly.
 
 use edos_render::font::Weight;
+use edos_render::icons;
 use edos_render::metrics::{CONTROL_HEIGHT, space};
 use edos_render::text::{self, Style, Surface};
 use edos_render::theme::Theme;
-use edos_render::widgets::{Rect, char_width, draw_rect};
+use edos_render::widgets::{Rect, char_width, draw_rect, text_width};
 
 use crate::buffer::Buffer;
 use crate::syntax::{self, TokenKind};
+use crate::tree::Tree;
 
 /// Width of the sidebar tree.
 pub const SIDEBAR_W: u32 = space(56);
@@ -26,12 +28,9 @@ pub const STATUS_H: u32 = space(6);
 /// Height of the prompt bar: a field with the shell's standard breathing room
 /// around it.
 pub const PROMPT_H: u32 = CONTROL_HEIGHT + space(2) * 2;
-/// Row height shared by every list in the shell: the tree and the tabs. Read
-/// once the sidebar draws rows rather than just its panel.
-#[allow(dead_code)]
+/// Row height shared by every list in the shell: the tree and the tabs.
 pub const ROW_H: u32 = CONTROL_HEIGHT;
-/// Indent per tree level. Read once the sidebar has a tree.
-#[allow(dead_code)]
+/// Indent per tree level.
 pub const TREE_INDENT: u32 = space(3);
 /// Width of the change ribbon, between the gutter and the text.
 pub const RIBBON_W: u32 = 2;
@@ -40,6 +39,12 @@ pub const RIBBON_W: u32 = 2;
 pub const SIDEBAR_MIN_WIDTH: u32 = 640;
 /// Margin from a panel's edge to its contents.
 pub const PAD: u32 = space(3);
+/// Widest a tab's label draws before it is elided; past this the tab stops
+/// growing rather than crowding out the others.
+const TAB_MAX_W: u32 = space(48);
+/// Width of the close cell at a tab's right edge, where the dirty dot or the
+/// × sits.
+const TAB_CLOSE_W: u32 = space(6);
 /// What stands in for the part of a name that did not fit.
 const ELLIPSIS: &str = "…";
 
@@ -169,6 +174,67 @@ pub fn col_at(layout: &Layout, scroll_col: usize, x: i32) -> usize {
     scroll_col + (rel / char_width()) as usize
 }
 
+/// Height of the sidebar's header — the root directory's name — that the
+/// tree's rows start clear of.
+fn sidebar_header_h() -> u32 {
+    PAD + text::line_height(sans_strong(0)) + PAD
+}
+
+/// Pixel rectangle of the `index`th tree row in a sidebar scrolled to
+/// `scroll`. The same arithmetic `tree_row_at` reads a point back against, so
+/// a click and the row under it come from one description — the reason
+/// `edos-files`' rows and its inline rename field land on each other exactly.
+pub fn tree_row_rect(sidebar: Rect, index: usize, scroll: usize) -> Rect {
+    let offset = (index.saturating_sub(scroll)) as u32 * ROW_H;
+    Rect::new(
+        sidebar.x,
+        sidebar.y + sidebar_header_h() as i32 + offset as i32,
+        sidebar.width,
+        ROW_H,
+    )
+}
+
+/// Which tree row a point falls in, given the first row on screen.
+pub fn tree_row_at(sidebar: Rect, scroll: usize, y: i32) -> Option<usize> {
+    let top = sidebar.y + sidebar_header_h() as i32;
+    if y < top || y >= sidebar.y + sidebar.height as i32 {
+        return None;
+    }
+    Some(scroll + ((y - top) as u32 / ROW_H) as usize)
+}
+
+/// How many tree rows fit in the sidebar at once, for clamping the scroll.
+pub fn tree_rows_visible(sidebar: Rect) -> usize {
+    (sidebar.height.saturating_sub(sidebar_header_h()) / ROW_H) as usize
+}
+
+/// Pixel rectangle of each tab in the strip, left to right. A label widens
+/// its tab up to `TAB_MAX_W`; past that it is elided at draw time rather than
+/// growing the tab further. The same rectangles `draw_tabs` fills.
+pub fn tab_rects(tabs: Rect, labels: &[String]) -> Vec<Rect> {
+    let mut x = tabs.x;
+    labels
+        .iter()
+        .map(|label| {
+            let label_w = text_width(label).min(TAB_MAX_W);
+            let width = label_w + PAD * 2 + TAB_CLOSE_W;
+            let rect = Rect::new(x, tabs.y, width, tabs.height);
+            x += width as i32;
+            rect
+        })
+        .collect()
+}
+
+/// The close cell at a tab's right edge, where the dirty dot or the × sits.
+pub fn tab_close_rect(tab: Rect) -> Rect {
+    Rect::new(
+        tab.x + tab.width as i32 - TAB_CLOSE_W as i32,
+        tab.y,
+        TAB_CLOSE_W,
+        tab.height,
+    )
+}
+
 // --- Text styles -------------------------------------------------------------
 //
 // The type rule: monospaced inside the pane, proportional everywhere else.
@@ -191,6 +257,11 @@ fn sans_small(color: u32) -> Style {
 
 fn mono(color: u32) -> Style {
     Style::mono(color)
+}
+
+/// The dirty dot or the × in a tab's close cell.
+fn close_glyph(color: u32) -> Style {
+    sans_small(color)
 }
 
 // --- Canvas ------------------------------------------------------------------
@@ -219,6 +290,10 @@ impl Canvas<'_> {
 
     pub fn hline(&mut self, x: i32, y: i32, width: u32, color: u32) {
         self.fill(Rect::new(x, y, width, 1), color);
+    }
+
+    pub fn icon(&mut self, x: i32, y: i32, mask: &icons::Mask, color: u32) {
+        icons::draw(self.buf, self.width, self.height, x, y, mask, color);
     }
 
     /// Draw a line of text with its top edge at `y`, and report its width.
@@ -266,9 +341,20 @@ pub fn elide(string: &str, available: u32, style: Style) -> String {
 
 // --- Panels ------------------------------------------------------------------
 
-/// Draw the tab strip. A single active tab in this phase; Phase 5 replaces
-/// this with one tab per open buffer.
-pub fn draw_tabs(canvas: &mut Canvas, rect: Rect, label: &str) {
+/// Draw the tab strip: one tab per open buffer, the active one filled with a
+/// `focus_ring` hairline on top. Each tab's close cell carries the
+/// `editor_change` dot while its buffer is dirty, or an elided `×` — bright
+/// while hovered, dim otherwise — so the control is always reachable even on
+/// a tab that never stops being dirty.
+pub fn draw_tabs(
+    canvas: &mut Canvas,
+    rect: Rect,
+    labels: &[String],
+    dirty: &[bool],
+    active: usize,
+    hovered: Option<usize>,
+    hovered_close: bool,
+) {
     let theme = &Theme::DEFAULT;
     canvas.fill(rect, theme.taskbar_bg_top.raw());
     canvas.hline(
@@ -278,22 +364,60 @@ pub fn draw_tabs(canvas: &mut Canvas, rect: Rect, label: &str) {
         theme.input_border.raw(),
     );
 
-    let style = sans(theme.text_primary.raw());
-    let available = rect.width.saturating_sub(PAD * 2);
-    let text = elide(label, available, style);
-    let tab_w = (text::width(&text, style) + PAD * 2).min(rect.width);
-    let tab = Rect::new(rect.x, rect.y, tab_w, rect.height);
-    canvas.fill(tab, theme.background.raw());
-    canvas.fill(
-        Rect::new(tab.x, tab.y, tab.width, 2),
-        theme.focus_ring.raw(),
-    );
-    canvas.text_in(tab.x + PAD as i32, tab, &text, style);
+    let rects = tab_rects(rect, labels);
+    for (index, (label, tab)) in labels.iter().zip(&rects).enumerate() {
+        let is_active = index == active;
+        let is_hovered = hovered == Some(index);
+        if is_active {
+            canvas.fill(*tab, theme.background.raw());
+            canvas.fill(
+                Rect::new(tab.x, tab.y, tab.width, 2),
+                theme.focus_ring.raw(),
+            );
+        } else if is_hovered {
+            canvas.fill(*tab, theme.button_hover.raw());
+        }
+
+        let text_style = sans(if is_active {
+            theme.text_primary.raw()
+        } else {
+            theme.label_text.raw()
+        });
+        let available = tab.width.saturating_sub(PAD * 2 + TAB_CLOSE_W);
+        let text = elide(label, available, text_style);
+        canvas.text_in(tab.x + PAD as i32, *tab, &text, text_style);
+
+        let close = tab_close_rect(*tab);
+        let close_hovered = is_hovered && hovered_close;
+        let (glyph, ink) = if close_hovered {
+            ("×", theme.text_primary.raw())
+        } else if dirty[index] {
+            ("\u{2022}", theme.editor_change.raw())
+        } else {
+            ("×", theme.text_placeholder.raw())
+        };
+        let glyph_style = close_glyph(ink);
+        let glyph_w = text::width(glyph, glyph_style) as i32;
+        canvas.text_in(
+            close.x + (close.width as i32 - glyph_w) / 2,
+            close,
+            glyph,
+            glyph_style,
+        );
+    }
 }
 
-/// Draw the sidebar: the panel and the root's name. Phase 5 adds the tree
-/// inside it.
-pub fn draw_sidebar(canvas: &mut Canvas, rect: Rect, root_name: &str) {
+/// Draw the sidebar: the panel, the root's name, and one row per node
+/// currently visible in `tree`. `open_path`, when it names a row, gets the
+/// `list_selected` fill the way a listing marks the selected row.
+pub fn draw_sidebar(
+    canvas: &mut Canvas,
+    rect: Rect,
+    root_name: &str,
+    tree: &Tree,
+    hovered: Option<usize>,
+    open_path: Option<&str>,
+) {
     let theme = &Theme::DEFAULT;
     canvas.fill(rect, theme.input_bg.raw());
     canvas.fill(
@@ -301,9 +425,59 @@ pub fn draw_sidebar(canvas: &mut Canvas, rect: Rect, root_name: &str) {
         theme.input_border.raw(),
     );
 
-    let style = sans_strong(theme.text_primary.raw());
-    let name = elide(root_name, rect.width.saturating_sub(PAD * 2), style);
-    canvas.text(rect.x + PAD as i32, rect.y + PAD as i32, &name, style);
+    let header_style = sans_strong(theme.text_primary.raw());
+    let name = elide(root_name, rect.width.saturating_sub(PAD * 2), header_style);
+    canvas.text(
+        rect.x + PAD as i32,
+        rect.y + PAD as i32,
+        &name,
+        header_style,
+    );
+
+    for (index, node) in tree.rows.iter().enumerate().skip(tree.scroll) {
+        let row = tree_row_rect(rect, index, tree.scroll);
+        if row.y + row.height as i32 > rect.y + rect.height as i32 {
+            break;
+        }
+
+        if open_path == Some(node.path.as_str()) {
+            canvas.fill(row, theme.list_selected.raw());
+            canvas.fill(
+                Rect::new(row.x, row.y, 2, row.height),
+                theme.focus_ring.raw(),
+            );
+        } else if hovered == Some(index) {
+            canvas.fill(row, theme.button_hover.raw());
+        }
+
+        let glyph_x = row.x + PAD as i32 + (node.depth as u32 * TREE_INDENT) as i32;
+        let glyph_y = row.y + (row.height as i32 - icons::SIZE as i32) / 2;
+        let ink = if node.is_dir {
+            theme.entry_dir
+        } else {
+            theme.text_primary
+        };
+        // `icons::MINIMIZE` and `icons::CHEVRON_RIGHT` are already a
+        // down-pointing and a right-pointing chevron; the shell's Sans face
+        // carries no triangle glyph to draw the expand/collapse marker as
+        // text, so the tree draws it as the icon it already is.
+        if node.is_dir {
+            let chevron = if node.expanded {
+                &icons::MINIMIZE
+            } else {
+                &icons::CHEVRON_RIGHT
+            };
+            canvas.icon(glyph_x, glyph_y, chevron, ink.raw());
+        } else {
+            canvas.icon(glyph_x, glyph_y, &icons::DOCUMENT, ink.raw());
+        }
+
+        let name_x = glyph_x + icons::SIZE as i32 + space(2) as i32;
+        let style = sans(ink.raw());
+        let room = (rect.x + rect.width as i32 - PAD as i32 - name_x).max(0) as u32;
+        let name = elide(&node.name, room, style);
+        canvas.text_in(name_x, row, &name, style);
+    }
 }
 
 /// Draw the editor pane: background, current-line highlight, gutter, text,

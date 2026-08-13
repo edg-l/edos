@@ -1,13 +1,14 @@
 //! edos-edit: the graphical text editor.
 //!
 //! A window with a file tree, tabs, and one editor pane, in the shape a
-//! person who uses VS Code already knows. This phase is the read-only
-//! viewer: it opens a file, draws it on the character grid, and moves the
-//! caret. Editing, selection, syntax, the tree, tabs and the prompt bar are
-//! later phases.
+//! person who uses VS Code already knows: click a file in the tree, type into
+//! it, Ctrl+S. Selection, undo/redo, save and syntax colouring all work
+//! through the same document the tab strip switches between. The find bar,
+//! go-to-line and the open prompt are not implemented yet.
 
 mod buffer;
 mod syntax;
+mod tree;
 mod view;
 
 use std::time::Duration;
@@ -42,9 +43,19 @@ fn is_movement_key(code: u32) -> bool {
     )
 }
 
+/// What the pointer is over, recomputed on every `MouseMove`.
+#[derive(Default, Clone, Copy)]
+struct Hover {
+    tree: Option<usize>,
+    tab: Option<usize>,
+    /// Whether the pointer sits inside `tab`'s close cell specifically.
+    tab_close: bool,
+}
+
 struct App {
     window: Window,
-    buffer: Buffer,
+    buffers: Vec<Buffer>,
+    active: usize,
     layout: view::Layout,
     mods: Modifiers,
     sidebar_open: bool,
@@ -54,31 +65,58 @@ struct App {
     /// What the last save, undo or redo reported, shown in the status strip
     /// until the next edit. `true` marks a failure.
     status: Option<(String, bool)>,
+    tree: tree::Tree,
+    hover: Hover,
+    /// The buffer index a Ctrl+W or a tab's close click already refused once
+    /// because it carried unsaved changes. A second press on the same tab
+    /// closes it; switching tabs or closing anything else clears this.
+    close_confirm: Option<usize>,
 }
 
 impl App {
     fn new(window: Window, buffer: Buffer) -> Self {
         let layout =
             view::Layout::new(window.width, window.height, true, false, buffer.lines.len());
+        let tree = tree::Tree::new(&root_dir(&buffer));
         let mut app = Self {
             window,
-            buffer,
+            buffers: vec![buffer],
+            active: 0,
             layout,
             mods: Modifiers::default(),
             sidebar_open: true,
             dragging: false,
             status: None,
+            tree,
+            hover: Hover::default(),
+            close_confirm: None,
         };
-        app.buffer.clamp_cursor();
+        app.buffer_mut().clamp_cursor();
         app.update_title();
         app
     }
 
-    /// The window title: the buffer's name, with a trailing dot when it
-    /// carries changes the disk does not have.
+    fn buffer(&self) -> &Buffer {
+        &self.buffers[self.active]
+    }
+
+    fn buffer_mut(&mut self) -> &mut Buffer {
+        &mut self.buffers[self.active]
+    }
+
+    /// The name every open buffer is shown by in the tab strip, in order.
+    fn tab_labels(&self) -> Vec<String> {
+        self.buffers
+            .iter()
+            .map(|buffer| buffer_name(buffer).to_string())
+            .collect()
+    }
+
+    /// The window title: the active buffer's name, with a trailing dot when
+    /// it carries changes the disk does not have.
     fn update_title(&mut self) {
-        let name = buffer_name(&self.buffer);
-        let title = if self.buffer.dirty {
+        let name = buffer_name(self.buffer());
+        let title = if self.buffer().dirty {
             format!("{name} \u{2022}")
         } else {
             name.to_string()
@@ -89,41 +127,41 @@ impl App {
     // --- Cursor movement ------------------------------------------------
 
     fn move_cursor_col(&mut self, delta: i32) {
-        let mut pos = self.buffer.cursor;
+        let mut pos = self.buffer().cursor;
         if delta < 0 {
             if pos.col > 0 {
                 pos.col -= 1;
             } else if pos.line > 0 {
                 pos.line -= 1;
-                pos.col = self.buffer.line_chars(pos.line);
+                pos.col = self.buffer().line_chars(pos.line);
             }
         } else if delta > 0 {
-            let len = self.buffer.line_chars(pos.line);
+            let len = self.buffer().line_chars(pos.line);
             if pos.col < len {
                 pos.col += 1;
-            } else if pos.line + 1 < self.buffer.lines.len() {
+            } else if pos.line + 1 < self.buffer().lines.len() {
                 pos.line += 1;
                 pos.col = 0;
             }
         }
-        self.buffer.cursor = pos;
-        self.buffer.break_coalesce();
+        self.buffer_mut().cursor = pos;
+        self.buffer_mut().break_coalesce();
         self.scroll_into_view();
     }
 
     fn move_cursor_line(&mut self, delta: i32) {
-        let last = self.buffer.lines.len() as i32 - 1;
-        let line = (self.buffer.cursor.line as i32 + delta).clamp(0, last.max(0)) as usize;
-        self.buffer.cursor.line = line;
-        self.buffer.clamp_cursor();
-        self.buffer.break_coalesce();
+        let last = self.buffer().lines.len() as i32 - 1;
+        let line = (self.buffer().cursor.line as i32 + delta).clamp(0, last.max(0)) as usize;
+        self.buffer_mut().cursor.line = line;
+        self.buffer_mut().clamp_cursor();
+        self.buffer_mut().break_coalesce();
         self.scroll_into_view();
     }
 
     fn set_cursor(&mut self, pos: Position) {
-        self.buffer.cursor = pos;
-        self.buffer.clamp_cursor();
-        self.buffer.break_coalesce();
+        self.buffer_mut().cursor = pos;
+        self.buffer_mut().clamp_cursor();
+        self.buffer_mut().break_coalesce();
         self.scroll_into_view();
     }
 
@@ -136,24 +174,24 @@ impl App {
     /// is `"\n"`, which always starts a fresh entry.
     fn insert_str(&mut self, text: &str) {
         self.status = None;
-        if let Some(end) = self.buffer.replace_selection(text) {
-            self.buffer.cursor = end;
+        if let Some(end) = self.buffer_mut().replace_selection(text) {
+            self.buffer_mut().cursor = end;
             self.scroll_into_view();
             self.update_title();
             return;
         }
-        let cursor_before = self.buffer.cursor;
-        let end = self.buffer.insert_text(cursor_before, text);
-        self.buffer.push_edit(
+        let cursor_before = self.buffer().cursor;
+        let end = self.buffer_mut().insert_text(cursor_before, text);
+        self.buffer_mut().push_edit(
             Edit::Insert {
                 at: cursor_before,
                 text: text.to_string(),
             },
             cursor_before,
         );
-        self.buffer.cursor = end;
+        self.buffer_mut().cursor = end;
         if text == "\n" {
-            self.buffer.break_coalesce();
+            self.buffer_mut().break_coalesce();
         }
         self.scroll_into_view();
         self.update_title();
@@ -163,12 +201,12 @@ impl App {
     /// line at column 0. Deletes the selection instead when there is one.
     fn backspace(&mut self) {
         self.status = None;
-        if self.buffer.delete_selection() {
+        if self.buffer_mut().delete_selection() {
             self.scroll_into_view();
             self.update_title();
             return;
         }
-        let cursor = self.buffer.cursor;
+        let cursor = self.buffer().cursor;
         let from = if cursor.col > 0 {
             Position {
                 line: cursor.line,
@@ -177,21 +215,21 @@ impl App {
         } else if cursor.line > 0 {
             Position {
                 line: cursor.line - 1,
-                col: self.buffer.line_chars(cursor.line - 1),
+                col: self.buffer().line_chars(cursor.line - 1),
             }
         } else {
             return;
         };
-        let removed = self.buffer.delete_range(from, cursor);
-        self.buffer.push_edit(
+        let removed = self.buffer_mut().delete_range(from, cursor);
+        self.buffer_mut().push_edit(
             Edit::Delete {
                 at: from,
                 text: removed,
             },
             cursor,
         );
-        self.buffer.cursor = from;
-        self.buffer.break_coalesce();
+        self.buffer_mut().cursor = from;
+        self.buffer_mut().break_coalesce();
         self.scroll_into_view();
         self.update_title();
     }
@@ -200,14 +238,14 @@ impl App {
     /// its end. Deletes the selection instead when there is one.
     fn delete_forward(&mut self) {
         self.status = None;
-        if self.buffer.delete_selection() {
+        if self.buffer_mut().delete_selection() {
             self.scroll_into_view();
             self.update_title();
             return;
         }
-        let cursor = self.buffer.cursor;
-        let last_line = self.buffer.lines.len() - 1;
-        let to = if cursor.col < self.buffer.line_chars(cursor.line) {
+        let cursor = self.buffer().cursor;
+        let last_line = self.buffer().lines.len() - 1;
+        let to = if cursor.col < self.buffer().line_chars(cursor.line) {
             Position {
                 line: cursor.line,
                 col: cursor.col + 1,
@@ -220,21 +258,21 @@ impl App {
         } else {
             return;
         };
-        let removed = self.buffer.delete_range(cursor, to);
-        self.buffer.push_edit(
+        let removed = self.buffer_mut().delete_range(cursor, to);
+        self.buffer_mut().push_edit(
             Edit::Delete {
                 at: cursor,
                 text: removed,
             },
             cursor,
         );
-        self.buffer.break_coalesce();
+        self.buffer_mut().break_coalesce();
         self.scroll_into_view();
         self.update_title();
     }
 
     fn save(&mut self) {
-        self.status = Some(match self.buffer.save() {
+        self.status = Some(match self.buffer_mut().save() {
             Ok(()) => ("Saved.".to_string(), false),
             Err(err) => (err, true),
         });
@@ -242,13 +280,13 @@ impl App {
     }
 
     fn undo(&mut self) {
-        self.buffer.undo();
+        self.buffer_mut().undo();
         self.scroll_into_view();
         self.update_title();
     }
 
     fn redo(&mut self) {
-        self.buffer.redo();
+        self.buffer_mut().redo();
         self.scroll_into_view();
         self.update_title();
     }
@@ -257,26 +295,26 @@ impl App {
 
     /// Select the whole document.
     fn select_all(&mut self) {
-        self.buffer.anchor = Some(Position::default());
-        let last = self.buffer.lines.len() - 1;
-        let col = self.buffer.line_chars(last);
+        self.buffer_mut().anchor = Some(Position::default());
+        let last = self.buffer().lines.len() - 1;
+        let col = self.buffer().line_chars(last);
         self.set_cursor(Position { line: last, col });
     }
 
     fn copy(&mut self) {
-        if let Some(text) = self.buffer.selected_text() {
+        if let Some(text) = self.buffer().selected_text() {
             let _ = clipboard::set(clipboard::Buffer::Clipboard, &text);
         }
     }
 
     /// Copy the selection to the clipboard, then delete it as one log entry.
     fn cut(&mut self) {
-        let Some(text) = self.buffer.selected_text() else {
+        let Some(text) = self.buffer().selected_text() else {
             return;
         };
         let _ = clipboard::set(clipboard::Buffer::Clipboard, &text);
         self.status = None;
-        self.buffer.delete_selection();
+        self.buffer_mut().delete_selection();
         self.scroll_into_view();
         self.update_title();
     }
@@ -291,30 +329,125 @@ impl App {
         }
     }
 
-    /// Replace the document with an empty, unsaved one.
+    // --- Tabs -------------------------------------------------------------
+
+    /// Open a fresh, unsaved buffer in a new tab and switch to it.
     fn new_buffer(&mut self) {
-        self.buffer = Buffer::empty();
-        self.buffer.clamp_cursor();
+        self.buffers.push(Buffer::empty());
+        self.active = self.buffers.len() - 1;
+        self.close_confirm = None;
         self.status = None;
+        self.buffer_mut().clamp_cursor();
         self.update_title();
+    }
+
+    /// Switch to `path`'s tab, opening it fresh only when it is not already
+    /// open — clicking the same file in the tree twice does not duplicate
+    /// its tab.
+    fn open_path(&mut self, path: &str) {
+        if let Some(index) = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.path.as_deref() == Some(path))
+        {
+            self.active = index;
+            self.close_confirm = None;
+            self.status = None;
+            self.update_title();
+            return;
+        }
+        match Buffer::open(path) {
+            Ok(buffer) => {
+                self.buffers.push(buffer);
+                self.active = self.buffers.len() - 1;
+                self.status = None;
+            }
+            Err(err) => self.status = Some((err, true)),
+        }
+        self.buffer_mut().clamp_cursor();
+        self.update_title();
+    }
+
+    fn next_tab(&mut self) {
+        if self.buffers.len() > 1 {
+            self.active = (self.active + 1) % self.buffers.len();
+            self.close_confirm = None;
+            self.update_title();
+        }
+    }
+
+    /// What Ctrl+W closes: the active tab, under the same refuse-once rule
+    /// every tab's close cell follows.
+    fn close_active(&mut self) {
+        self.request_close(self.active);
+    }
+
+    /// Close the tab at `index`, refusing once with a status message when it
+    /// carries unsaved changes; a second call for the same index — a second
+    /// Ctrl+W, or a second click on the tab's own close cell — closes it.
+    /// The last tab never actually closes — it is replaced with a fresh
+    /// empty one, the same as Ctrl+N.
+    fn request_close(&mut self, index: usize) {
+        let Some(buffer) = self.buffers.get(index) else {
+            return;
+        };
+        if buffer.dirty && self.close_confirm != Some(index) {
+            self.close_confirm = Some(index);
+            self.status = Some((
+                "Unsaved changes \u{2014} press Ctrl+W again to close without saving.".to_string(),
+                true,
+            ));
+            return;
+        }
+
+        self.close_confirm = None;
+        self.buffers.remove(index);
+        if self.buffers.is_empty() {
+            self.buffers.push(Buffer::empty());
+        }
+        if self.active >= self.buffers.len() {
+            self.active = self.buffers.len() - 1;
+        } else if index < self.active {
+            self.active -= 1;
+        }
+        self.status = None;
+        self.buffer_mut().clamp_cursor();
+        self.update_title();
+    }
+
+    fn toggle_sidebar(&mut self) {
+        self.sidebar_open = !self.sidebar_open;
     }
 
     /// Keep the cursor inside the visible rows and columns, exactly as
     /// `edos-files` keeps the selected row inside the listing.
     fn scroll_into_view(&mut self) {
         let rows = self.layout.rows_visible.max(1);
-        if self.buffer.cursor.line < self.buffer.scroll_line {
-            self.buffer.scroll_line = self.buffer.cursor.line;
-        } else if self.buffer.cursor.line >= self.buffer.scroll_line + rows {
-            self.buffer.scroll_line = self.buffer.cursor.line + 1 - rows;
+        let cursor_line = self.buffer().cursor.line;
+        if cursor_line < self.buffer().scroll_line {
+            self.buffer_mut().scroll_line = cursor_line;
+        } else if cursor_line >= self.buffer().scroll_line + rows {
+            self.buffer_mut().scroll_line = cursor_line + 1 - rows;
         }
 
         let cols = self.layout.cols_visible.max(1);
-        if self.buffer.cursor.col < self.buffer.scroll_col {
-            self.buffer.scroll_col = self.buffer.cursor.col;
-        } else if self.buffer.cursor.col >= self.buffer.scroll_col + cols {
-            self.buffer.scroll_col = self.buffer.cursor.col + 1 - cols;
+        let cursor_col = self.buffer().cursor.col;
+        if cursor_col < self.buffer().scroll_col {
+            self.buffer_mut().scroll_col = cursor_col;
+        } else if cursor_col >= self.buffer().scroll_col + cols {
+            self.buffer_mut().scroll_col = cursor_col + 1 - cols;
         }
+    }
+
+    /// Keep the tree's scroll inside what it actually holds, after the
+    /// window resizes or a directory collapses out from under it.
+    fn clamp_tree_scroll(&mut self) {
+        let Some(rect) = self.layout.sidebar else {
+            return;
+        };
+        let visible = view::tree_rows_visible(rect).max(1);
+        let max = self.tree.rows.len().saturating_sub(visible);
+        self.tree.scroll = self.tree.scroll.min(max);
     }
 
     // --- Events -----------------------------------------------------------
@@ -326,10 +459,13 @@ impl App {
             Some(WindowEventType::Resize) => {
                 let (width, height) = (event.x as u32, event.y as u32);
                 let _ = self.window.resize(width, height);
+                self.clamp_tree_scroll();
             }
             Some(WindowEventType::MouseButton) => self.on_mouse_button(event),
             Some(WindowEventType::MouseMove) => self.on_mouse_move(event.x, event.y),
-            Some(WindowEventType::MouseScroll) => self.on_scroll(event.data as i32),
+            Some(WindowEventType::MouseScroll) => {
+                self.on_scroll(event.x, event.y, event.data as i32)
+            }
             Some(WindowEventType::KeyPress) => {
                 // A modifier key changes state and produces no character of
                 // its own, so it is handled and consumed here rather than
@@ -352,10 +488,10 @@ impl App {
     /// the last line in the buffer, the same clamping `line_at`/`col_at`'s
     /// callers already did before this helper existed.
     fn pane_position(&self, x: i32, y: i32) -> Option<Position> {
-        let line = view::line_at(&self.layout, self.buffer.scroll_line, y)?;
-        let line = line.min(self.buffer.lines.len().saturating_sub(1));
-        let col =
-            view::col_at(&self.layout, self.buffer.scroll_col, x).min(self.buffer.line_chars(line));
+        let buffer = self.buffer();
+        let line = view::line_at(&self.layout, buffer.scroll_line, y)?;
+        let line = line.min(buffer.lines.len().saturating_sub(1));
+        let col = view::col_at(&self.layout, buffer.scroll_col, x).min(buffer.line_chars(line));
         Some(Position { line, col })
     }
 
@@ -368,39 +504,112 @@ impl App {
         if event.code != 0 {
             return;
         }
-        if !self.layout.pane.contains(event.x, event.y) {
+        let (x, y) = (event.x, event.y);
+
+        if let Some(rect) = self.layout.sidebar
+            && rect.contains(x, y)
+        {
+            if let Some(index) = view::tree_row_at(rect, self.tree.scroll, y)
+                && index < self.tree.rows.len()
+            {
+                if self.tree.rows[index].is_dir {
+                    self.tree.toggle(index);
+                    self.clamp_tree_scroll();
+                } else {
+                    let path = self.tree.rows[index].path.clone();
+                    self.open_path(&path);
+                }
+            }
             return;
         }
-        let Some(pos) = self.pane_position(event.x, event.y) else {
-            return;
-        };
-        self.buffer.anchor = Some(pos);
-        self.set_cursor(pos);
-        self.dragging = true;
-    }
 
-    /// Extend the selection to the pointer while the button is held over the
-    /// pane. Does nothing once released.
-    fn on_mouse_move(&mut self, x: i32, y: i32) {
-        if !self.dragging {
+        if self.layout.tabs.contains(x, y) {
+            let labels = self.tab_labels();
+            let rects = view::tab_rects(self.layout.tabs, &labels);
+            if let Some(index) = rects.iter().position(|rect| rect.contains(x, y)) {
+                if view::tab_close_rect(rects[index]).contains(x, y) {
+                    self.request_close(index);
+                } else if self.active != index {
+                    self.active = index;
+                    self.close_confirm = None;
+                    self.status = None;
+                    self.update_title();
+                }
+            }
+            return;
+        }
+
+        if !self.layout.pane.contains(x, y) {
             return;
         }
         let Some(pos) = self.pane_position(x, y) else {
             return;
         };
+        self.buffer_mut().anchor = Some(pos);
         self.set_cursor(pos);
+        self.dragging = true;
     }
 
-    fn on_scroll(&mut self, delta: i32) {
+    /// Extend the selection to the pointer while the button is held over the
+    /// pane; otherwise recompute what the pointer is hovering, for the tree's
+    /// highlight and the tab strip's close cells.
+    fn on_mouse_move(&mut self, x: i32, y: i32) {
+        if self.dragging {
+            if let Some(pos) = self.pane_position(x, y) {
+                self.set_cursor(pos);
+            }
+            return;
+        }
+
+        let tree_hover = self.layout.sidebar.and_then(|rect| {
+            if !rect.contains(x, y) {
+                return None;
+            }
+            view::tree_row_at(rect, self.tree.scroll, y)
+                .filter(|index| *index < self.tree.rows.len())
+        });
+
+        let mut hover = Hover {
+            tree: tree_hover,
+            tab: None,
+            tab_close: false,
+        };
+        if self.layout.tabs.contains(x, y) {
+            let labels = self.tab_labels();
+            let rects = view::tab_rects(self.layout.tabs, &labels);
+            if let Some(index) = rects.iter().position(|rect| rect.contains(x, y)) {
+                hover.tab = Some(index);
+                hover.tab_close = view::tab_close_rect(rects[index]).contains(x, y);
+            }
+        }
+        self.hover = hover;
+    }
+
+    /// The pane scrolls by line when the pointer sits over it; the sidebar
+    /// scrolls its tree instead when the pointer sits there.
+    fn on_scroll(&mut self, x: i32, y: i32, delta: i32) {
+        if let Some(rect) = self.layout.sidebar
+            && rect.contains(x, y)
+        {
+            if delta > 0 {
+                self.tree.scroll = self.tree.scroll.saturating_sub(SCROLL_STEP);
+            } else if delta < 0 {
+                self.tree.scroll += SCROLL_STEP;
+                self.clamp_tree_scroll();
+            }
+            return;
+        }
+
         if delta > 0 {
-            self.buffer.scroll_line = self.buffer.scroll_line.saturating_sub(SCROLL_STEP);
+            self.buffer_mut().scroll_line = self.buffer().scroll_line.saturating_sub(SCROLL_STEP);
         } else if delta < 0 {
             let max = self
-                .buffer
+                .buffer()
                 .lines
                 .len()
                 .saturating_sub(self.layout.rows_visible.max(1));
-            self.buffer.scroll_line = (self.buffer.scroll_line + SCROLL_STEP).min(max);
+            let next = (self.buffer().scroll_line + SCROLL_STEP).min(max);
+            self.buffer_mut().scroll_line = next;
         }
     }
 
@@ -411,9 +620,10 @@ impl App {
         // fixed — and otherwise ends it, the same way a plain click does.
         if is_movement_key(code) {
             if self.mods.shift {
-                self.buffer.anchor.get_or_insert(self.buffer.cursor);
+                let cursor = self.buffer().cursor;
+                self.buffer_mut().anchor.get_or_insert(cursor);
             } else {
-                self.buffer.clear_selection();
+                self.buffer_mut().clear_selection();
             }
         }
 
@@ -427,17 +637,17 @@ impl App {
             keycode::PAGE_DOWN => self.move_cursor_line(rows),
             keycode::HOME if self.mods.ctrl => self.set_cursor(Position::default()),
             keycode::END if self.mods.ctrl => {
-                let last = self.buffer.lines.len() - 1;
-                let col = self.buffer.line_chars(last);
+                let last = self.buffer().lines.len() - 1;
+                let col = self.buffer().line_chars(last);
                 self.set_cursor(Position { line: last, col });
             }
             keycode::HOME => {
-                let line = self.buffer.cursor.line;
+                let line = self.buffer().cursor.line;
                 self.set_cursor(Position { line, col: 0 });
             }
             keycode::END => {
-                let line = self.buffer.cursor.line;
-                let col = self.buffer.line_chars(line);
+                let line = self.buffer().cursor.line;
+                let col = self.buffer().line_chars(line);
                 self.set_cursor(Position { line, col });
             }
             keycode::A if self.mods.ctrl => self.select_all(),
@@ -448,11 +658,14 @@ impl App {
             keycode::Z if self.mods.ctrl => self.undo(),
             keycode::Y if self.mods.ctrl => self.redo(),
             keycode::N if self.mods.ctrl => self.new_buffer(),
+            keycode::B if self.mods.ctrl => self.toggle_sidebar(),
+            keycode::W if self.mods.ctrl => self.close_active(),
+            keycode::TAB if self.mods.ctrl => self.next_tab(),
             keycode::RETURN | keycode::NUMPAD_ENTER if !self.mods.ctrl => self.insert_str("\n"),
             keycode::BACKSPACE if !self.mods.ctrl => self.backspace(),
             keycode::DELETE if !self.mods.ctrl => self.delete_forward(),
             keycode::TAB if !self.mods.ctrl => {
-                let indent = self.buffer.lang.indent.text();
+                let indent = self.buffer().lang.indent.text();
                 self.insert_str(&indent);
             }
             _ if !self.mods.ctrl => {
@@ -473,25 +686,33 @@ impl App {
         // and the prompt all change during ordinary use, and a `Layout` built
         // only on resize puts clicks on the wrong character the moment any of
         // them do.
+        let active = self.active;
         let (width, height) = (self.window.width, self.window.height);
         self.layout = view::Layout::new(
             width,
             height,
             self.sidebar_open,
             false,
-            self.buffer.lines.len(),
+            self.buffers[active].lines.len(),
         );
 
-        let name = buffer_name(&self.buffer).to_string();
-        let root = root_label(&self.buffer);
-        let language = self.buffer.lang.name;
-        let indent_label = self.buffer.lang.indent.label();
-        let encoding = if self.buffer.repaired {
+        let labels = self.tab_labels();
+        let dirty: Vec<bool> = self.buffers.iter().map(|buffer| buffer.dirty).collect();
+        let root_name = root_display_name(&self.tree.root);
+        let active_path = self.buffers[active].path.clone();
+        let name = labels[active].clone();
+        let language = self.buffers[active].lang.name;
+        let indent_label = self.buffers[active].lang.indent.label();
+        let encoding = if self.buffers[active].repaired {
             "UTF-8 (repaired)"
         } else {
             "UTF-8"
         };
-        let volume = volume_label(self.buffer.path.as_deref());
+        let volume = volume_label(active_path.as_deref());
+        let hover_tree = self.hover.tree;
+        let hover_tab = self.hover.tab;
+        let hover_tab_close = self.hover.tab_close;
+        let note = self.status.clone();
 
         let Some(buf) = self.window.buffer_mut() else {
             return;
@@ -502,13 +723,27 @@ impl App {
             edos_render::theme::Theme::DEFAULT.background.raw(),
         );
 
-        view::draw_tabs(&mut canvas, self.layout.tabs, &name);
+        view::draw_tabs(
+            &mut canvas,
+            self.layout.tabs,
+            &labels,
+            &dirty,
+            active,
+            hover_tab,
+            hover_tab_close,
+        );
         if let Some(rect) = self.layout.sidebar {
-            view::draw_sidebar(&mut canvas, rect, &root);
+            view::draw_sidebar(
+                &mut canvas,
+                rect,
+                &root_name,
+                &self.tree,
+                hover_tree,
+                active_path.as_deref(),
+            );
         }
-        view::draw_pane(&mut canvas, &self.layout, &mut self.buffer);
-        let note = self
-            .status
+        view::draw_pane(&mut canvas, &self.layout, &mut self.buffers[active]);
+        let note_ref = note
             .as_ref()
             .map(|(message, warning)| (message.as_str(), *warning));
         view::draw_status(
@@ -516,12 +751,12 @@ impl App {
             &self.layout,
             &name,
             language,
-            self.buffer.cursor.line + 1,
-            self.buffer.cursor.col + 1,
+            self.buffers[active].cursor.line + 1,
+            self.buffers[active].cursor.col + 1,
             &indent_label,
             encoding,
             &volume,
-            note,
+            note_ref,
         );
 
         self.window.swap_buffers();
@@ -537,19 +772,25 @@ fn buffer_name(buffer: &Buffer) -> &str {
     }
 }
 
-/// The name of the directory the sidebar is rooted at: the open file's
-/// directory, or the working directory for an unsaved buffer.
-fn root_label(buffer: &Buffer) -> String {
-    let dir = match &buffer.path {
+/// The directory a fresh sidebar tree is rooted at: the opening file's own
+/// directory, or the working directory for a buffer with no path yet. Read
+/// once, at startup — the tree stays rooted there regardless of which tab is
+/// later made active, the way a project explorer does.
+fn root_dir(buffer: &Buffer) -> String {
+    match &buffer.path {
         Some(path) => match path.rsplit_once('/') {
             Some(("", _)) => "/".to_string(),
             Some((dir, _)) => dir.to_string(),
             None => ".".to_string(),
         },
         None => std::env::current_dir()
-            .map(|p| p.display().to_string())
+            .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "/".to_string()),
-    };
+    }
+}
+
+/// What the sidebar calls a root directory: its own last path component.
+fn root_display_name(dir: &str) -> String {
     match dir.rsplit('/').next() {
         Some("") | None => "/".to_string(),
         Some(name) => name.to_string(),
