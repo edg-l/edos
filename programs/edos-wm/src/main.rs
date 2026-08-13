@@ -526,6 +526,7 @@ fn main() {
     // is what a viewer perceives; the phases below only explain a bad one.
     let mut previous_frame_start: Option<Instant> = None;
     let mut previous_cursor = (0i32, 0i32);
+    let mut previously_hovered_close: Option<u64> = None;
     let mut uploaded_shape = cursor.shape();
 
     // Window list buffer
@@ -807,6 +808,35 @@ fn main() {
                 decorations::hit_test(w, cursor.x, cursor.y) == decorations::HitRegion::CloseButton
             })
             .map(|w| w.id);
+
+        // The close button paints a red field under the pointer, which is a
+        // change to the window's decorations that the client knows nothing
+        // about and that no other test here catches: it is not a repaint, a
+        // focus change or a move. Without this the button was only redrawn
+        // where some *other* dirty region happened to overlap it -- in
+        // practice the moving cursor's own rectangle -- so it came out in
+        // ragged patches of old and new colour.
+        if hovered_close_window != previously_hovered_close {
+            for id in [hovered_close_window, previously_hovered_close]
+                .into_iter()
+                .flatten()
+            {
+                let Some(w) = windows.iter().find(|w| w.id == id) else {
+                    continue;
+                };
+                // The title bar only: the rest of the window is unchanged.
+                let bar = DirtyRect::new(
+                    w.x,
+                    w.y,
+                    decorations::effective_width_raw(w.flags, w.width) as u32,
+                    decorations::TITLE_HEIGHT as u32,
+                );
+                if let Some(r) = bar.clipped(screen_w, screen_h) {
+                    dirty.mark_dirty(r);
+                }
+            }
+            previously_hovered_close = hovered_close_window;
+        }
 
         // Update cursor shape
         cursor.set_shape(determine_cursor_shape(
