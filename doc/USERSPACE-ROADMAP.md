@@ -198,6 +198,114 @@ Complete. Everything listed here shipped; see the Done section above.
 
 Complete. Everything listed here shipped; see the Done section above.
 
+## Phase 5: what someone else's first hour hits
+
+The active roadmap. Phases 1 to 4 were ranked by the kernel path each program
+would exercise, which is what a system needs while it is being built. This one
+is ranked by what a person who is not the author runs into after booting the
+ISO, in the order they run into it, because that is now the binding constraint
+on whether EDOS is usable rather than demonstrable.
+
+Kernel gaps found on the way get fixed on the way. That is not a change of
+policy; it is how every earlier phase went, and the fixes are the reason those
+programs paid for themselves. The difference is only which end the work is
+picked from.
+
+### 1. Keyboard layout, selectable at runtime
+
+`edos_lib::keymap` is one compile-time Spanish ISO table. Everybody who is not
+the author boots into a machine where `/`, `-`, `|`, `@` and the quotes are in
+the wrong places, and reads that as a broken system rather than as one layout.
+It is hit before any other feature, and it is misattributed worse than any
+other defect here.
+
+Wants a second and third table (US, UK), a `/etc/keymap` the session reads at
+start, and a boot cmdline override for the case where the file itself cannot be
+edited. `scripts/edos-vm` encodes the same assumption from the other side, so
+`doc/vm-control.md` moves with this.
+
+### 2. A clipboard the whole session shares
+
+Copy and paste exist terminal to terminal only, and only because both ends read
+the file `/tmp/clipboard`
+(`programs/edos_render/src/widgets/terminal.rs`, `copy_selection` and
+`paste_clipboard`). No other program participates; `widgets::text_input` has no
+clipboard code at all, and neither does `edos-vi`.
+
+This is the most frequently performed interaction on any desktop and the first
+thing that breaks once two windows are open. `GUI_PLAN.md` sketched
+`sys_clipboard_get`/`sys_clipboard_set` and neither was ever implemented; a
+kernel-owned buffer is the right shape, since the alternative is every program
+agreeing on a path in a filesystem that is not guaranteed to be mounted. Wire
+`edos_render::widgets` once and the terminal, the text input and every future
+widget get it together.
+
+Middle-click paste and an X-style primary selection are the cheap follow-on:
+`programs/edos-terminal/src/main.rs` gates on `event.code == 0`, so no
+non-left button reaches anything today.
+
+### 3. Configuration that survives a reboot
+
+Nothing a user changes is theirs the next morning. The wallpaper cycles and is
+not recorded, the theme and the timezone are set by whoever spawned the
+session, and shell history is written to `/tmp/.sh_history`, which is memfs, so
+it dies with the boot.
+
+The work is small and it is what separates a system from a demo: a real `/etc`
+that programs read and write, history moved onto the persistent root, and the
+wallpaper choice, layout and theme stored where the session start reads them.
+`edos-install` should carry that directory onto the installed disk.
+
+### 4. A desktop that is not a terminal launcher
+
+The window system is genuinely a desktop: edge and corner resize, maximize and
+minimize, Alt+Tab, scrollback, drag selection with double-click word snapping.
+What it can start is Terminal, Widget demo, Change background, Shut down. So
+everything real still happens through a PTY, and the GUI is a way to get to one.
+
+A file manager is the single program that changes that, and it is already the
+first entry in [`PROGRAMS.md`](PROGRAMS.md) on the independent ground that it
+lands on the least covered part of the VFS. A graphical editor is second:
+`widgets::text_input` exists and its only consumer is the `wintest` demo.
+
+### 5. A way to get software onto the machine
+
+The ceiling rather than an inconvenience, and the reason it is fifth is that
+nothing above it can be worked around, while this one can be lived with until
+somebody wants to install something.
+
+No compiler and no package manager is the expected shape for a hobby OS. What
+is not expected is that both ways around that are shut: `wget` and `http`
+refuse `https://` outright for want of TLS, and there is no inflate anywhere in
+the tree, so `tar` reads uncompressed archives only. Between them that rules out
+essentially everything published on the internet.
+
+The machinery for running a foreign binary is already there. `sys_access`
+grants `X_OK` unconditionally, since the kernel carries no permission bits, so
+a prebuilt binary that arrives, untars and runs needs no new kernel surface at
+all. Only the transport is missing, and it splits cleanly:
+
+- `gunzip`, decompress-only inflate (RFC 1951) plus the gzip container
+  (RFC 1952). A few hundred lines, no dependency, and it makes every `.tar.gz`
+  usable over plain HTTP the day it lands. Do this one first.
+- TLS, which is the larger half. `sshd` established that the RustCrypto stack
+  builds unmodified for `x86_64-unknown-edos` with `default-features = false`,
+  so this is the second consumer of work already done rather than new ground.
+  The constraint recorded there applies unchanged: the kernel sets `CR4.OSFXSR`
+  and never `OSXSAVE`, so the crates pick their SSE2 backends, and enabling
+  `OSXSAVE` without moving the context switch to `XSAVE` would corrupt crypto
+  state silently.
+
+### Not on this list, and why
+
+Multi-user. Every process is uid 0, there is no `setuid`, no permission bits
+and no user database, and on a personal machine nobody misses any of it. The
+part that is a real property of the shipped ISO is narrower: `sshd` puts that
+uid-0 shell on the network behind a password stored in cleartext in
+`/etc/sshd.conf`. The fix is public-key authentication, which is already the
+first item of the sshd hardening list in [`sshd.md`](sshd.md), not a
+users-and-groups project standing in front of it.
+
 ## `edos_render` is the shared surface
 
 Every graphical program links it, so a change here reaches the compositor, the

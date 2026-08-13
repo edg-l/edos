@@ -12,6 +12,13 @@ What already exists is inventoried in [`USERSPACE-ROADMAP.md`](USERSPACE-ROADMAP
 this file is what is missing and why it would be worth having. Entries leave
 this file when they ship.
 
+This file ranks by what a program would prove; it is not the build order. That
+lives in Phase 5 of [`USERSPACE-ROADMAP.md`](USERSPACE-ROADMAP.md), ranked by
+what someone else's first hour with the ISO runs into. The two agree on the
+file manager and disagree on the settings panel, which Phase 5 splits: runtime
+keyboard layout is item 1 there on its own, ahead of the panel that would
+eventually house it.
+
 ## The one to write first
 
 **A file manager.** The obvious hole in the desktop, and it lands on the parts
