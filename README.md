@@ -37,7 +37,7 @@ filesystem, network stack, USB stack and window system.
 | **Graphics** | virtio-gpu driver, userspace compositor, window decorations, shared-memory buffers, hardware cursor |
 | **USB** | xHCI with HID keyboard and mouse, and mass storage |
 | **Audio** | Intel HDA with a `/dev/dsp` node |
-| **Userspace** | 116 programs against a forked Rust `std`, including a shell with job control, globbing and scripting, a graphical editor with syntax colouring, a vi-like editor, a pager, `sed`, and the usual coreutils and network tools |
+| **Userspace** | 117 programs against a forked Rust `std`, including a shell with job control, globbing and scripting, a graphical editor with syntax colouring, a vi-like editor, a pager, `sed`, and the usual coreutils and network tools |
 
 The kernel mounts the root filesystem and starts exactly one process,
 `bin/edos-init`. That supervises the window manager, taskbar and terminal —

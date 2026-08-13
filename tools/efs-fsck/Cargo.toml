@@ -3,6 +3,10 @@ name = "efs-fsck"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "efs_fsck"
+path = "src/lib.rs"
+
 [[bin]]
 name = "efs-fsck"
 path = "src/main.rs"

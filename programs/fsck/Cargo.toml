@@ -1,0 +1,8 @@
+[package]
+name = "fsck"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+efs-fsck = { path = "../../tools/efs-fsck" }
+edos_lib = { path = "../edos_lib" }

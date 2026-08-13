@@ -6,6 +6,39 @@ session.
 
 ---
 
+## `/bin/fsck` is the host checker, not a second one
+
+`tools/efs-fsck` is a library plus a six-line binary, and `programs/fsck` links
+that library for the guest. The shape is the one `efs-mkfs` already uses
+(`tools/efs-mkfs` is `efs-mkfs-core`, and `programs/efs-mkfs/src/main.rs` is
+nine lines over it), and it is the reason a verdict cannot drift: the guest's
+`fsck -v` on an image prints the host's output byte for byte, including the
+group census and the dir-tree line.
+
+Three things worth knowing before touching either half:
+
+- The checker uses `std::fs`, `std::io::stdin`, `HashMap` and `std::process`,
+  all of which the forked std already provides, so nothing had to be made
+  `no_std` for this. Only `libs/efs-common` under it ever needed that.
+- `exit_code` and `report` are `pub mod` on the library because the wrapper
+  exits with `FsckExitCode::OperationalError`, and `FsckExitCode` implements
+  `From<&Report>`.
+- The guest binary is `fsck`, so `usage()` takes the program name from
+  `argv[0]`'s file name rather than printing `efs-fsck` at a `/bin/fsck` prompt.
+
+**The trap when verifying it in a guest**: the USB mass-storage disk is
+`/dev/sdc`, not `/dev/usb0` and not `/dev/sdb`. `sda` is the SATA root, `sdb` is
+the boot ISO and answers `superblock read failed: bad magic`, and `/dev/usb0` is
+not a block node at all — it fails to open with `other error`, which reads like
+a bug in the tool and is not one.
+
+A mounted device is refused through `BLOCK_IOCTL_IS_MOUNTED` rather than
+checked. That is not caution about the root specifically: any mounted device has
+a kernel writing under the checker, and a report read from underneath one says
+nothing.
+
+---
+
 ## TCP over loopback had never once worked, and non-blocking connect found it
 
 `sys_connect` honours `O_NONBLOCK` now: it returns `EINPROGRESS` as soon as the
@@ -1239,9 +1272,9 @@ does not have to invent them.
 | | value | how |
 |---|---|---|
 | syscalls | 116 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 116 — a mismatch is the bug |
-| userspace programs | 116 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
+| userspace programs | 117 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | not re-diffed since the workspace grew | diff the table against the workspace, below |
-| binaries in `filesystem/bin` | 116 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
+| binaries in `filesystem/bin` | 117 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
 | Rust | 101,538 code lines across 435 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out |
 | kernel Rust | 50,215 code lines | `tokei -t=Rust kernel/src` |
 | commits | 1,299 | `git rev-list --count HEAD` |

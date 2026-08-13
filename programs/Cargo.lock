@@ -524,6 +524,13 @@ name = "efs-common"
 version = "0.1.0"
 
 [[package]]
+name = "efs-fsck"
+version = "0.1.0"
+dependencies = [
+ "efs-common",
+]
+
+[[package]]
 name = "efs-mkfs"
 version = "0.1.0"
 dependencies = [
@@ -682,6 +689,14 @@ name = "fsbench"
 version = "0.1.0"
 dependencies = [
  "edos_lib",
+]
+
+[[package]]
+name = "fsck"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+ "efs-fsck",
 ]
 
 [[package]]

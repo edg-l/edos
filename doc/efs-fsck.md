@@ -5,6 +5,11 @@ filesystem image or raw block device. It is the v1 checker: journal replay,
 inode scan, bitmap rebuild and leak reclamation, directory-tree reachability,
 and superblock/BGD cross-check.
 
+The checker is a library (`tools/efs-fsck/src/lib.rs`), and the host binary is
+a six-line `main` over it. `/bin/fsck` inside EDOS links the same library, so
+the two cannot reach different verdicts on the same image; see "In-EDOS fsck"
+below.
+
 See also: `doc/efs.md` for the on-disk format specification.
 
 ---
@@ -263,6 +268,37 @@ confirm the filesystem is clean.
 - **Cluster size != block size**: not supported by mkfs or fsck in v1.
 - **Data-block recovery**: the journal carries metadata only (`data=writeback`),
   so a torn file write is not something replay or `--repair` can undo.
+
+---
+
+## In-EDOS fsck (`/bin/fsck`)
+
+`programs/fsck` is the same checker running in the guest, for **unmounted
+secondary** devices: a USB stick, a second SATA disk, an attached image. It
+takes the options above and returns the exit codes above, because it is a
+thirty-line wrapper over the library rather than a second implementation.
+
+What it adds is one guest-side refusal. Before checking anything it opens the
+path and asks `BLOCK_IOCTL_IS_MOUNTED` (`kernel/src/fs/devfs/block.rs`); a
+mounted device exits `OperationalError` with `is mounted; unmount it before
+checking it`. A path that is not a block device answers with an error, and the
+check proceeds — an image file under `/var` is checkable.
+
+The live root cannot be checked from inside the system it is running, and
+nothing here pretends otherwise: that needs an initramfs, which EDOS has none
+of. The kernel replays the journal itself at mount time, which is what covers
+the boot case; host `efs-fsck` against the powered-off disk is the recovery
+path.
+
+Two things about finding the device in a guest:
+
+- Under `make run-storage` (or `scripts/edos-vm start --usb-disk`) the USB
+  mass-storage disk enumerates as **`/dev/sdc`**, behind `/dev/sda` (the SATA
+  root) and `/dev/sdb` (the boot ISO, which answers `bad magic`). `/dev/usb0` is
+  not a block node and fails to open.
+- The device nodes are whole disks at offset 0. An image written by `efs-mkfs`
+  straight onto the device needs no `--partition-offset`; one inside a partition
+  table does.
 
 ---
 

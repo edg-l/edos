@@ -15,8 +15,16 @@ pub struct Args {
 }
 
 fn usage() -> ! {
+    let program = std::env::args()
+        .next()
+        .and_then(|p| {
+            PathBuf::from(p)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "efs-fsck".to_string());
     eprintln!(
-        "Usage: efs-fsck [OPTIONS] <IMAGE>
+        "Usage: {program} [OPTIONS] <IMAGE>
 
 Arguments:
   <IMAGE>  EFS filesystem image or block device path

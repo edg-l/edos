@@ -1,6 +1,6 @@
 # Userspace Roadmap
 
-116 programs and 3 libraries, all in the `programs/` cargo workspace.
+117 programs and 3 libraries, all in the `programs/` cargo workspace.
 
 ## What exists
 
@@ -16,7 +16,7 @@
 | Checksums | `sha256sum` |
 | Inspection | `file` |
 | System | `ps`, `pstree`, `pmap`, `top`, `lsof`, `free`, `uname`, `nproc`, `dmesg`, `df`, `mount`, `kill`, `sync`, `env`, `printenv`, `id`, `whoami`, `shutdown`, `strace`, `date`, `watch`, `keymap` |
-| Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
+| Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format), `fsck` (in-guest EFS check of an unmounted device) |
 | Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `nc`, `sntp`, `httpd`, `netstat`, `sshd` |
 | Packages | `grab` (the package manager, lib + CLI), `edos-grab` (its GUI) |
 | Audio | `play` |
