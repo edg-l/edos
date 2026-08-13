@@ -750,8 +750,8 @@ impl BlockPageCache {
             .fetch_add(miss_indices.len() as u64, Ordering::Relaxed);
 
         // Allocate frames for all misses.
-        let mut frames: Vec<Option<PhysFrame>> = vec![None; miss_indices.len()];
-        for (fi, &mi) in miss_indices.iter().enumerate() {
+        let mut frames: Vec<PhysFrame> = Vec::with_capacity(miss_indices.len());
+        for _ in 0..miss_indices.len() {
             match frame_allocator().allocate_frame() {
                 Some(f) => {
                     debug_assert_eq!(
@@ -759,17 +759,16 @@ impl BlockPageCache {
                         0,
                         "frame_allocator returned unaligned frame"
                     );
-                    frames[fi] = Some(f);
+                    frames.push(f);
                 }
                 None => {
                     // Free already-allocated frames and bail.
-                    for prev in frames[..fi].iter().flatten() {
+                    for prev in &frames {
                         unsafe { frame_allocator().deallocate_frame(*prev) };
                     }
                     return Err(AhciError::IoError);
                 }
             }
-            let _ = mi; // suppress lint
         }
 
         // Hand off to the trait's submit_read_batch. AHCI overrides this with
@@ -778,7 +777,7 @@ impl BlockPageCache {
         let dev = match block_io::lookup(device_id) {
             Some(d) => d,
             None => {
-                for f in frames.iter().flatten() {
+                for f in &frames {
                     unsafe { frame_allocator().deallocate_frame(*f) };
                 }
                 return Err(AhciError::InvalidDevice);
@@ -824,7 +823,7 @@ impl BlockPageCache {
         let handles = match dev.submit_read_batch(reqs) {
             Ok(h) => h,
             Err(e) => {
-                for f in frames.iter().flatten() {
+                for f in &frames {
                     unsafe { frame_allocator().deallocate_frame(*f) };
                 }
                 return Err(e.into());
@@ -837,7 +836,7 @@ impl BlockPageCache {
             }
         }
         if let Some(e) = batch_err {
-            for f in frames.iter().flatten() {
+            for f in &frames {
                 unsafe { frame_allocator().deallocate_frame(*f) };
             }
             return Err(e);
@@ -845,7 +844,7 @@ impl BlockPageCache {
 
         for (&(first, len), buf) in runs.iter().zip(staging.iter()) {
             for i in 0..len {
-                let dest = frame_slice(frames[first + i].unwrap());
+                let dest = frame_slice(frames[first + i]);
                 dest.copy_from_slice(&buf[i * PAGE_SIZE..(i + 1) * PAGE_SIZE]);
             }
         }
@@ -855,7 +854,7 @@ impl BlockPageCache {
         for (fi, &mi) in miss_indices.iter().enumerate() {
             let key = (device_id, start_page + mi as u64);
             let si = shard_index(key);
-            let new_page = Arc::new(CachedBlockPage::new(key, frames[fi].unwrap()));
+            let new_page = Arc::new(CachedBlockPage::new(key, frames[fi]));
             let (resolved, _cached) = {
                 let mut shard = ranked_lock!(RANK_BPC_SHARD, "BPC.shard", self.shards[si]);
                 self.insert_or_resolve_race(&mut shard, key, new_page, &mut to_drop)
