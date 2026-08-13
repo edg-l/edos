@@ -1299,7 +1299,7 @@ does not have to invent them.
 | commits | 1,299 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
-| `unwrap()`/`expect()` in `kernel/src` | 202, of which 11 are in `thread/sched_test.rs` | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+| `unwrap()`/`expect()` in `kernel/src` | 191, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 A matching count is not a matching inventory. `doc/USERSPACE-ROADMAP.md`'s "What
 exists" table drifted six programs behind the workspace (`nproc`, `pollbench`,
@@ -1345,12 +1345,29 @@ The places to check, because a count lives in more than one of them:
 `npm run build` in that checkout IS the deploy -- nginx serves `dist/` directly,
 so the build publishes before any commit does. Commit and push the source too.
 
-The `unwrap` figure includes 11 in `thread/sched_test.rs`, which is test code and
-not worth converting. By file, the ones that would move the number are
-`drivers/usb/xhci/mod.rs` (19), `fs/efs/mod.rs` (8), `drivers/usb/hid/report.rs`
-(8), `drivers/ahci/port.rs` (8) and `acpi/mod.rs` (7). Twelve of the xhci ones
-are `Option` fields that `init()` fills, so removing them means folding `init()`
-into `find_and_init()` rather than rewriting call sites.
+The `unwrap` figure includes 19 in test code that is not worth converting: 11 in
+`thread/sched_test.rs` and all 8 in `drivers/usb/hid/report.rs`, whose unwraps
+are in its own descriptor-parsing tests and not on any driver path. By file, the
+ones that would move the number are `drivers/usb/xhci/mod.rs` (19),
+`drivers/ahci/port.rs` (8) and `acpi/mod.rs` (7). Twelve of the xhci ones are
+`Option` fields that `init()` fills, so removing them means folding `init()` into
+`find_and_init()` rather than rewriting call sites.
+
+Two of those three are worth less than the count suggests, which is worth knowing
+before spending an iteration on them. Every one of the ahci eight is a `OnceCell`
+filled at port construction (`weak_self`, `command_tables`, `slot_pools`) and
+read from a `&self` method that cannot be reached before it; converting them
+means giving every caller an error it can only panic on. `acpi/mod.rs` is the
+same shape plus three boot-time table lookups where the machine genuinely cannot
+continue — a firmware with no MADT does not boot this kernel, and an `expect`
+that says so is the honest form.
+
+`fs/efs/mod.rs` came off that list by deduplication rather than by conversion:
+eight of its nine were the same
+`path.parent().unwrap_or_else(|| Path::parse("/").unwrap())` line, which is now
+`Path::parent_or_root()` beside `Path::root()` in `fs/path.rs`. The ninth was
+`chunks_exact(8)` plus `try_into().unwrap()`, which `slice::as_chunks::<8>()`
+does with no fallible step at all.
 
 ## Naming a uid without a passwd database
 

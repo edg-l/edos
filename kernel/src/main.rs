@@ -409,7 +409,7 @@ pub fn mount_system_fs() -> ! {
 
     let part_idx = select_root_partition(&partitions, cmdline.root.as_deref());
 
-    let root = Path::parse("/").unwrap();
+    let root = Path::root();
     if let Some(part) = part_idx.map(|i| &partitions[i]) {
         log!("Partition name {:?}", part.name);
 

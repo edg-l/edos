@@ -66,11 +66,17 @@ impl Path {
         }
     }
 
+    /// The root path, `/`.
+    pub fn root() -> Path {
+        Path {
+            components: Vec::new(),
+        }
+    }
+
     pub fn filename(&self) -> String {
-        if self.is_root() {
-            String::new()
-        } else {
-            self.components.last().unwrap().clone()
+        match self.components.last() {
+            Some(name) if !self.is_root() => name.clone(),
+            _ => String::new(),
         }
     }
 
@@ -126,6 +132,11 @@ impl Path {
         } else {
             None
         }
+    }
+
+    /// The parent of this path, or the root for a path that has none.
+    pub fn parent_or_root(&self) -> Path {
+        self.parent().unwrap_or_else(Path::root)
     }
 
     pub fn is_direct_parent(&self, other: &Path) -> bool {

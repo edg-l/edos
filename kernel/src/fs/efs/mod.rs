@@ -1860,10 +1860,9 @@ fn find_prev_entry_len(data: &[u8], end_offset: usize, block_size: usize) -> usi
 
 fn find_free_bit(bitmap: &[u8], max_bits: usize) -> Option<usize> {
     // Scan 8 bytes (64 bits) at a time for speed.
-    let chunks = bitmap.chunks_exact(8);
-    let remainder = chunks.remainder();
-    for (chunk_idx, chunk) in chunks.enumerate() {
-        let val = u64::from_le_bytes(chunk.try_into().unwrap());
+    let (chunks, remainder) = bitmap.as_chunks::<8>();
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        let val = u64::from_le_bytes(*chunk);
         if val == u64::MAX {
             continue;
         }
@@ -2050,7 +2049,7 @@ impl FileSystem for EfsDriver {
     fn create_file(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let name = path.last_component().ok_or(Error::IoError)?.to_string();
-        let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
+        let parent = path.parent_or_root();
 
         let parent_ino = self.resolve_path(&parent)?;
         let parent_inode = self.read_inode(parent_ino)?;
@@ -2074,7 +2073,7 @@ impl FileSystem for EfsDriver {
             .last_component()
             .ok_or(Error::InvalidArgument)?
             .to_string();
-        let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
+        let parent = path.parent_or_root();
 
         let parent_ino = self.resolve_path(&parent)?;
         if self.read_inode(parent_ino)?.mode & S_IFMT != S_IFDIR {
@@ -2198,7 +2197,7 @@ impl FileSystem for EfsDriver {
     fn create_dir(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let name = path.last_component().ok_or(Error::IoError)?.to_string();
-        let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
+        let parent = path.parent_or_root();
 
         let parent_ino = self.resolve_path(&parent)?;
         let parent_inode = self.read_inode(parent_ino)?;
@@ -2219,7 +2218,7 @@ impl FileSystem for EfsDriver {
     fn remove_file(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let name = path.last_component().ok_or(Error::IoError)?.to_string();
-        let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
+        let parent = path.parent_or_root();
 
         let parent_ino = self.resolve_path(&parent)?;
         // Unlinking a symbolic link removes the link, never its target.
@@ -2242,7 +2241,7 @@ impl FileSystem for EfsDriver {
     fn remove_dir(&self, path: &Path) -> Result<(), Error> {
         let path = path.normalize();
         let name = path.last_component().ok_or(Error::IoError)?.to_string();
-        let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
+        let parent = path.parent_or_root();
 
         let parent_ino = self.resolve_path(&parent)?;
         // Unfollowed, so a symbolic link naming a directory is rejected as not
@@ -2282,7 +2281,7 @@ impl FileSystem for EfsDriver {
             .last_component()
             .ok_or(Error::InvalidArgument)?
             .to_string();
-        let parent = path.parent().unwrap_or_else(|| Path::parse("/").unwrap());
+        let parent = path.parent_or_root();
 
         let parent_ino = self.resolve_path(&parent)?;
         if self.read_inode(parent_ino)?.mode & S_IFMT != S_IFDIR {
@@ -2404,12 +2403,8 @@ impl FileSystem for EfsDriver {
         let old_name = old_path.last_component().ok_or(Error::IoError)?.to_string();
         let new_name = new_path.last_component().ok_or(Error::IoError)?.to_string();
 
-        let old_parent_path = old_path
-            .parent()
-            .unwrap_or_else(|| Path::parse("/").unwrap());
-        let new_parent_path = new_path
-            .parent()
-            .unwrap_or_else(|| Path::parse("/").unwrap());
+        let old_parent_path = old_path.parent_or_root();
+        let new_parent_path = new_path.parent_or_root();
 
         let old_parent_ino = self.resolve_path(&old_parent_path)?;
         let new_parent_ino = self.resolve_path(&new_parent_path)?;
