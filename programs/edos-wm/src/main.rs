@@ -828,20 +828,12 @@ fn main() {
 
         if has_work {
             let composite_start = Instant::now();
-            compositor::composite(
-                &mut screen,
-                windows,
-                &cursor,
-                focused_window_id,
-                &mut shm_cache,
-                hovered_close_window,
-                hw_cursor,
-                &desktop_cache,
-            );
-            // Painted after compositing, so its rectangle has to be sent even
-            // when nothing else on the frame moved.
+            shm_cache.retain_active(windows);
+
+            // The menu is painted over the top, so its rectangle joins the
+            // dirty set before anything is drawn: compositing is now clipped to
+            // that set, and a region nobody declared is a region nobody draws.
             if let Some((ox, oy)) = desktop_menu.origin() {
-                desktop_menu.draw(&mut screen);
                 dirty.mark_dirty(dirty::DirtyRect::new(
                     ox,
                     oy,
@@ -849,6 +841,36 @@ fn main() {
                     desktop_menu::height() as u32,
                 ));
             }
+
+            // Compositing runs once per dirty region rather than once over the
+            // screen. This is what makes a one-line change cost one line of
+            // drawing instead of a megapixel of desktop and every window on top
+            // of it.
+            let whole = dirty::DirtyRect::new(0, 0, screen.width() as u32, screen.height() as u32);
+            let (coalesced, count) = dirty.coalesced();
+            let passes: &[dirty::DirtyRect] = if dirty.full_screen {
+                std::slice::from_ref(&whole)
+            } else {
+                &coalesced[..count]
+            };
+
+            for region in passes {
+                screen.set_clip(Some((region.x, region.y, region.w, region.h)));
+                compositor::composite(
+                    &mut screen,
+                    windows,
+                    &cursor,
+                    focused_window_id,
+                    &mut shm_cache,
+                    hovered_close_window,
+                    hw_cursor,
+                    &desktop_cache,
+                );
+                if desktop_menu.origin().is_some() {
+                    desktop_menu.draw(&mut screen);
+                }
+            }
+            screen.set_clip(None);
             composite_us = composite_start.elapsed().as_micros() as u64;
 
             let flip_start = Instant::now();

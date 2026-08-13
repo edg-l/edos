@@ -105,13 +105,27 @@ impl ShmCache {
         }
     }
 
+    /// Drop mappings for windows that are gone.
+    ///
+    /// Once a frame, not once a region: compositing runs per dirty rectangle
+    /// and unmapping between two of them would drop a buffer the next
+    /// rectangle still has to read.
+    pub fn retain_active(&mut self, windows: &[WindowListEntry]) {
+        let active: Vec<u64> = windows
+            .iter()
+            .filter(|w| w.on_screen() && w.buffer_shm_id != 0)
+            .map(|w| w.buffer_shm_id)
+            .collect();
+        self.cleanup(&active);
+    }
+
     /// Remove mappings for shm_ids that are no longer in use.
     ///
     /// A cached SHM is only removed if it is absent from BOTH the current
     /// and previous frame's active sets.  This prevents the compositor from
     /// unmapping/remapping the "back buffer" of double-buffered windows
     /// every frame (the visible `buffer_shm_id` alternates between two ids).
-    pub fn cleanup(&mut self, active_shm_ids: &[u64]) {
+    fn cleanup(&mut self, active_shm_ids: &[u64]) {
         let stale: Vec<u64> = self
             .mappings
             .keys()
@@ -290,31 +304,26 @@ pub fn composite(
     hw_cursor: bool,
     desktop_cache: &[u32],
 ) {
-    // Blit the cached desktop background.
+    // Blit the cached desktop background, over the clip only: this is a
+    // megapixel copy, and doing it whole for a region the size of a text row is
+    // most of what compositing a small change used to cost.
     let screen_w = screen.width();
-    let screen_h = screen.height();
+    let (cx0, cy0, cx1, cy1) = screen.clip_bounds();
     if let Some((pixels, stride)) = screen.pixels_mut() {
-        let w = screen_w.min(stride);
-        let h = screen_h;
-        for row in 0..h {
-            let src_start = row * w;
-            let dst_start = row * stride;
-            if src_start + w <= desktop_cache.len() {
-                pixels[dst_start..dst_start + w]
-                    .copy_from_slice(&desktop_cache[src_start..src_start + w]);
+        let x1 = cx1.min(stride).min(screen_w);
+        for row in cy0..cy1 {
+            if cx0 >= x1 {
+                break;
+            }
+            let src_start = row * screen_w + cx0;
+            let dst_start = row * stride + cx0;
+            let span = x1 - cx0;
+            if src_start + span <= desktop_cache.len() {
+                pixels[dst_start..dst_start + span]
+                    .copy_from_slice(&desktop_cache[src_start..src_start + span]);
             }
         }
     }
-
-    // Collect active shm_ids for cache cleanup
-    let active_shm_ids: Vec<u64> = windows
-        .iter()
-        .filter(|w| w.on_screen() && w.buffer_shm_id != 0)
-        .map(|w| w.buffer_shm_id)
-        .collect();
-
-    // Clean up stale mappings (windows that were destroyed)
-    shm_cache.cleanup(&active_shm_ids);
 
     // Draw windows back-to-front (already sorted by z_order from kernel)
     for (_i, window) in windows.iter().enumerate() {
@@ -567,10 +576,11 @@ fn draw_window_direct(
                 if abs_x + rw <= 0 || abs_y + rh <= 0 || abs_x >= screen_w || abs_y >= screen_h {
                     return;
                 }
-                let x0 = abs_x.max(0) as u64;
-                let y0 = abs_y.max(0) as u64;
-                let x1 = ((abs_x + rw) as u64).min(screen_w as u64);
-                let y1 = ((abs_y + rh) as u64).min(screen_h as u64);
+                let (cx0, cy0, cx1, cy1) = screen.clip_bounds();
+                let x0 = (abs_x.max(0) as u64).max(cx0 as u64);
+                let y0 = (abs_y.max(0) as u64).max(cy0 as u64);
+                let x1 = ((abs_x + rw) as u64).min(screen_w as u64).min(cx1 as u64);
+                let y1 = ((abs_y + rh) as u64).min(screen_h as u64).min(cy1 as u64);
                 if let Some((pixels, stride)) = screen.pixels_mut() {
                     let inv = 255 - alpha;
                     for py in y0..y1 {

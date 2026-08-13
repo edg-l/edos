@@ -291,11 +291,7 @@ pub fn draw_text_styled(
     text: &str,
     style: crate::text::Style,
 ) {
-    let mut surface = crate::text::Surface {
-        pixels: buffer,
-        width: buffer_width,
-        height: buffer_height,
-    };
+    let mut surface = crate::text::Surface::new(buffer, buffer_width, buffer_height);
     crate::text::draw(&mut surface, x, y, text, style);
 }
 

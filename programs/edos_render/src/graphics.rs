@@ -978,11 +978,7 @@ impl Texture {
     /// character grid stays where it is.
     pub fn draw_styled_text(&mut self, x: i32, y: i32, text: &str, style: crate::text::Style) {
         let (width, height) = (self.width as u32, self.height as u32);
-        let mut surface = crate::text::Surface {
-            pixels: &mut self.pixels,
-            width,
-            height,
-        };
+        let mut surface = crate::text::Surface::new(&mut self.pixels, width, height);
         crate::text::draw(&mut surface, x, y, text, style);
     }
 
@@ -1480,6 +1476,8 @@ pub struct Screen {
     vram: Option<VramMapping>,
     /// Row stride in u32 units. Equals width for Vec-backed, pitch/4 for VRAM-backed.
     pitch_pixels: usize,
+    /// Drawing is confined to this rectangle, in screen pixels, when set.
+    clip: Option<(usize, usize, usize, usize)>,
 }
 
 impl Screen {
@@ -1497,6 +1495,7 @@ impl Screen {
             region_scratch: Vec::new(),
             vram: Some(mapping),
             pitch_pixels,
+            clip: None,
         })
     }
 
@@ -1521,6 +1520,7 @@ impl Screen {
                     region_scratch: Vec::new(),
                     vram: None,
                     pitch_pixels,
+                    clip: None,
                 })
             }
         }
@@ -1539,6 +1539,33 @@ impl Screen {
     /// Get screen info
     pub fn info(&self) -> &ScreenInfo {
         &self.info
+    }
+
+    /// Confine every subsequent draw to `rect`, or to the whole screen with
+    /// `None`.
+    ///
+    /// This is what lets a compositor redraw one region instead of the screen:
+    /// the drawing code stays the same and simply writes nothing outside the
+    /// rectangle. A clip left set is a screen that stops updating, so it
+    /// belongs in a narrow scope.
+    pub fn set_clip(&mut self, rect: Option<(i32, i32, u32, u32)>) {
+        self.clip = rect.map(|(x, y, w, h)| {
+            let x0 = x.max(0) as usize;
+            let y0 = y.max(0) as usize;
+            let x1 = ((x as i64 + w as i64).max(0) as usize).min(self.info.width);
+            let y1 = ((y as i64 + h as i64).max(0) as usize).min(self.info.height);
+            (x0.min(x1), y0.min(y1), x1, y1)
+        });
+    }
+
+    /// The bounds drawing is confined to, already intersected with the screen,
+    /// as `(x0, y0, x1, y1)` with the far edges exclusive.
+    ///
+    /// Anything writing through [`Screen::pixels_mut`] has to apply this
+    /// itself; the primitives on `Screen` already do.
+    pub fn clip_bounds(&self) -> (usize, usize, usize, usize) {
+        self.clip
+            .unwrap_or((0, 0, self.info.width, self.info.height))
     }
 
     /// Ensure the back buffer is initialized (only used in non-VRAM mode).
@@ -1578,14 +1605,12 @@ impl Screen {
     ) -> Result<()> {
         self.ensure_back_buffer()?;
         let height = self.info.height as u32;
+        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
         let Some((pixels, stride)) = self.pixels_mut() else {
             return Ok(());
         };
-        let mut surface = crate::text::Surface {
-            pixels,
-            width: stride as u32,
-            height,
-        };
+        let mut surface = crate::text::Surface::new(pixels, stride as u32, height);
+        surface.clip = Some((cx0 as i32, cy0 as i32, cx1 as i32, cy1 as i32));
         crate::text::draw(&mut surface, x, y, text, style);
         Ok(())
     }
@@ -1601,17 +1626,20 @@ impl Screen {
     ) -> Result<()> {
         self.ensure_back_buffer()?;
 
-        let screen_w = self.info.width as u64;
-        let screen_h = self.info.height as u64;
+        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
 
         if let Some((pixels, stride)) = self.pixels_mut() {
-            let end_x = (x + width).min(screen_w) as usize;
-            let end_y = (y + height).min(screen_h) as usize;
-            let x = x as usize;
+            let x0 = (x as usize).max(cx0);
+            let y0 = (y as usize).max(cy0);
+            let x1 = ((x + width) as usize).min(cx1);
+            let y1 = ((y + height) as usize).min(cy1);
+            if x1 <= x0 || y1 <= y0 {
+                return Ok(());
+            }
             let raw = color.raw();
-            for py in y as usize..end_y {
-                let row_start = py * stride + x;
-                pixels[row_start..row_start + (end_x - x)].fill(raw);
+            for py in y0..y1 {
+                let row_start = py * stride + x0;
+                pixels[row_start..row_start + (x1 - x0)].fill(raw);
             }
             self.dirty = true;
         }
@@ -1784,8 +1812,7 @@ impl Screen {
     pub fn draw_texture_transparent(&mut self, texture: &Texture, x: u64, y: u64) -> Result<()> {
         self.ensure_back_buffer()?;
 
-        let screen_width = self.info.width as u64;
-        let screen_height = self.info.height as u64;
+        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
 
         if let Some((dst_pixels, stride)) = self.pixels_mut() {
             for src_y in 0..texture.height {
@@ -1793,7 +1820,11 @@ impl Screen {
                     let dst_x = x + src_x;
                     let dst_y = y + src_y;
 
-                    if dst_x >= screen_width || dst_y >= screen_height {
+                    if (dst_x as usize) < cx0
+                        || (dst_x as usize) >= cx1
+                        || (dst_y as usize) < cy0
+                        || (dst_y as usize) >= cy1
+                    {
                         continue;
                     }
 
@@ -1902,6 +1933,11 @@ impl Screen {
             return Err(GraphicsError::OutOfBounds);
         }
 
+        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
+        if (x as usize) < cx0 || (x as usize) >= cx1 || (y as usize) < cy0 || (y as usize) >= cy1 {
+            return Ok(());
+        }
+
         if let Some((pixels, stride)) = self.pixels_mut() {
             pixels[(y as usize) * stride + (x as usize)] = color.raw();
             self.dirty = true;
@@ -1994,6 +2030,22 @@ impl Screen {
 
         let actual_w = copy_w.min(src_width - src_x).min(screen_width - dst_x);
         let actual_h = copy_h.min(src_height - src_y).min(screen_height - dst_y);
+
+        // Trim to the clip, moving the source origin by as much as the
+        // destination moved so the pixels stay aligned with where they land.
+        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
+        let skip_x = (cx0 as u64).saturating_sub(dst_x);
+        let skip_y = (cy0 as u64).saturating_sub(dst_y);
+        if skip_x >= actual_w || skip_y >= actual_h {
+            return Ok(());
+        }
+        let (src_x, src_y) = (src_x + skip_x, src_y + skip_y);
+        let (dst_x, dst_y) = (dst_x + skip_x, dst_y + skip_y);
+        let actual_w = (actual_w - skip_x).min((cx1 as u64).saturating_sub(dst_x));
+        let actual_h = (actual_h - skip_y).min((cy1 as u64).saturating_sub(dst_y));
+        if actual_w == 0 || actual_h == 0 {
+            return Ok(());
+        }
 
         if let Some((dst_pixels, stride)) = self.pixels_mut() {
             for row in 0..actual_h {

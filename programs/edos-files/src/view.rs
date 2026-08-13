@@ -317,11 +317,7 @@ impl Canvas<'_> {
 
     /// Draw a line of text with its top edge at `y`, and report its width.
     pub fn text(&mut self, x: i32, y: i32, string: &str, style: Style) -> u32 {
-        let mut surface = Surface {
-            pixels: self.buf,
-            width: self.width,
-            height: self.height,
-        };
+        let mut surface = Surface::new(self.buf, self.width, self.height);
         text::draw(&mut surface, x, y, string, style);
         text::width(string, style)
     }
