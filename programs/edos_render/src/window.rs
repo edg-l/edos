@@ -515,12 +515,37 @@ impl Window {
         Some(unsafe { std::slice::from_raw_parts(ptr, (self.width * self.height) as usize) })
     }
 
+    /// Which of the two buffers `buffer_mut` currently hands out.
+    ///
+    /// A client that repaints only what changed needs this: the back buffer
+    /// holds the frame from *two* frames ago, so what it has to redraw depends
+    /// on which one it is about to draw into.
+    pub fn back_index(&self) -> usize {
+        self.back_index
+    }
+
     /// Swap back and front buffers: makes the current back buffer visible to
     /// the compositor, then flips so the old front is now the back.
     pub fn swap_buffers(&mut self) {
         let back_shm_id = self.buffers[self.back_index].0;
         let _ = window_set(self.id, property::BUFFER_SHM, back_shm_id);
         let _ = window_damage(self.id);
+        self.back_index = 1 - self.back_index;
+    }
+
+    /// Swap buffers, reporting only `rect` as changed.
+    ///
+    /// Coordinates are relative to the window's own content, the same ones the
+    /// client draws in. Reporting less than actually changed leaves stale
+    /// pixels on screen, so a caller that is unsure wants [`swap_buffers`].
+    pub fn swap_buffers_damaged(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        let back_shm_id = self.buffers[self.back_index].0;
+        let _ = window_set(self.id, property::BUFFER_SHM, back_shm_id);
+        let x0 = x.max(0) as u32;
+        let y0 = y.max(0) as u32;
+        let w = (w as i32 + x.min(0)).max(0) as u32;
+        let h = (h as i32 + y.min(0)).max(0) as u32;
+        let _ = window_damage_rect(self.id, x0, y0, w, h);
         self.back_index = 1 - self.back_index;
     }
 

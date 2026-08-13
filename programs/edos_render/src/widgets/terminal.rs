@@ -59,6 +59,43 @@ struct Cell {
     bg: u32,
 }
 
+/// A cell as it will actually be rasterised, with selection folded into the
+/// background. Comparing these is what decides whether a row is drawn again.
+///
+/// Selection lives outside the cell grid, so a comparison against [`Cell`]
+/// would call a row unchanged while its highlight came and went.
+#[derive(Clone, Copy, PartialEq)]
+struct RenderCell {
+    ch: char,
+    fg: u32,
+    bg: u32,
+}
+
+/// Where the cursor block is and whether it is being drawn at all.
+#[derive(Clone, Copy, PartialEq, Default)]
+struct CursorMark {
+    row: usize,
+    col: usize,
+    drawn: bool,
+}
+
+/// What one of the window's shm buffers already shows.
+///
+/// The window alternates two buffers, so the one about to be drawn holds the
+/// frame from *two* frames ago rather than the one on screen. Each therefore
+/// needs its own record: comparing against the buffer's own last contents is
+/// what makes a partial repaint correct whichever buffer is current, instead of
+/// correct on alternate frames.
+#[derive(Default)]
+struct Painted {
+    rows: Vec<Vec<RenderCell>>,
+    cursor: CursorMark,
+    /// Widget size when this record was made. A resize hands the window two
+    /// fresh buffers and moves the grid inside them, so the padding around it
+    /// has to be laid down again rather than compared row by row.
+    size: (u32, u32),
+}
+
 impl Default for Cell {
     fn default() -> Self {
         Self {
@@ -128,6 +165,12 @@ pub struct Terminal {
     esc_state: EscState,
     esc_buf: [u8; 32],
     esc_len: usize,
+
+    /// What each of the window's two shm buffers already shows.
+    painted: [Painted; 2],
+    /// The viewport as it would be rasterised now, reused across frames so a
+    /// repaint allocates nothing.
+    current: Vec<Vec<RenderCell>>,
 }
 
 impl Terminal {
@@ -176,6 +219,8 @@ impl Terminal {
             esc_state: EscState::Normal,
             esc_buf: [0; 32],
             esc_len: 0,
+            painted: [Painted::default(), Painted::default()],
+            current: Vec::new(),
         }
     }
 
@@ -675,31 +720,36 @@ impl Terminal {
         }
     }
 
-    /// Returns true if the given cell is part of the current selection.
-    fn is_cell_selected(&self, abs_line: usize, col: usize) -> bool {
-        let Some(((start_line, start_col), (end_line, end_col))) = self.selection_range() else {
-            return false;
-        };
+    /// The inclusive column span selected on `abs_line`, or None.
+    ///
+    /// Per line rather than per cell: the range is the same for every cell in
+    /// a row, and recomputing it a thousand times a frame cost more than
+    /// rasterising the glyphs did.
+    fn selected_cols(
+        &self,
+        selection: Option<((usize, usize), (usize, usize))>,
+        abs_line: usize,
+    ) -> Option<(usize, usize)> {
+        let ((start_line, start_col), (end_line, end_col)) = selection?;
 
         // Empty selection (click without drag)
         if start_line == end_line && start_col == end_col {
-            return false;
+            return None;
         }
 
         if abs_line < start_line || abs_line > end_line {
-            return false;
+            return None;
         }
 
-        if start_line == end_line {
-            // Single-line selection: inclusive on both ends
-            col >= start_col && col <= end_col
+        Some(if start_line == end_line {
+            (start_col, end_col)
         } else if abs_line == start_line {
-            col >= start_col
+            (start_col, usize::MAX)
         } else if abs_line == end_line {
-            col <= end_col
+            (0, end_col)
         } else {
-            true
-        }
+            (0, usize::MAX)
+        })
     }
 
     /// Find the word boundaries around the given cell. Returns (start_col, end_col) inclusive.
@@ -879,6 +929,303 @@ impl Terminal {
         }
         false
     }
+
+    /// The absolute line index shown at the top of the viewport.
+    fn viewport_top(&self) -> usize {
+        let total_lines = self.history.len() + self.buffer.len();
+        total_lines
+            .saturating_sub(self.scroll_offset)
+            .saturating_sub(self.rows)
+    }
+
+    /// Fill `out` with one display row as it will be rasterised.
+    fn render_row_into(&self, display_row: usize, out: &mut Vec<RenderCell>) {
+        out.clear();
+        let line_idx = self.viewport_top() + display_row;
+        let history_len = self.history.len();
+        let row = if line_idx < history_len {
+            self.history.get(line_idx)
+        } else {
+            self.buffer.get(line_idx - history_len)
+        };
+        let Some(row) = row else {
+            return;
+        };
+        out.reserve(row.len());
+        let selected = self.selected_cols(self.selection_range(), line_idx);
+        for (col, cell) in row.iter().enumerate() {
+            let bg = match selected {
+                Some((first, last)) if col >= first && col <= last => terminal_colors::SELECTION,
+                _ => cell.bg,
+            };
+            out.push(RenderCell {
+                ch: cell.ch,
+                fg: cell.fg,
+                bg,
+            });
+        }
+    }
+
+    /// Rasterise one display row, over its own ground so a partial repaint
+    /// erases whatever the row held before.
+    fn draw_row(
+        &self,
+        buffer: &mut [u32],
+        buffer_width: u32,
+        buffer_height: u32,
+        display_row: usize,
+        cells: &[RenderCell],
+    ) {
+        let char_w = char_width() as i32;
+        let char_h = text_height() as i32;
+        let (origin_x, origin_y) = self.content_origin();
+        let row_y = origin_y + (display_row as i32) * char_h;
+
+        draw_rect(
+            buffer,
+            buffer_width,
+            buffer_height,
+            self.x,
+            row_y,
+            self.width,
+            char_h as u32,
+            self.bg_color,
+        );
+
+        for (col, cell) in cells.iter().enumerate() {
+            let cell_x = origin_x + (col as i32) * char_w;
+            if cell.bg != self.bg_color {
+                draw_rect(
+                    buffer,
+                    buffer_width,
+                    buffer_height,
+                    cell_x,
+                    row_y,
+                    char_w as u32,
+                    char_h as u32,
+                    cell.bg,
+                );
+            }
+            if cell.ch != ' ' {
+                // Mono, always: this is a character grid, and a proportional
+                // face would put every cell's glyph at a different offset
+                // inside its cell.
+                draw_text_styled(
+                    buffer,
+                    buffer_width,
+                    buffer_height,
+                    cell_x,
+                    row_y,
+                    &cell.ch.to_string(),
+                    Style::mono(cell.fg),
+                );
+            }
+        }
+    }
+
+    /// Fill the bands above and below the character grid.
+    ///
+    /// Every row lays down its own ground, so a full repaint covers the grid
+    /// between them; filling the whole widget as well would write those pixels
+    /// twice, and at a screen a frame that is the largest single cost here.
+    fn fill_padding(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
+        let (_, origin_y) = self.content_origin();
+        let grid_bottom = origin_y + (self.rows as i32) * (text_height() as i32);
+        let widget_bottom = self.y + self.height as i32;
+
+        for (y, height) in [
+            (self.y, origin_y - self.y),
+            (grid_bottom, widget_bottom - grid_bottom),
+        ] {
+            if height > 0 {
+                draw_rect(
+                    buffer,
+                    buffer_width,
+                    buffer_height,
+                    self.x,
+                    y,
+                    self.width,
+                    height as u32,
+                    self.bg_color,
+                );
+            }
+        }
+    }
+
+    /// Note what a buffer now holds. The rows it held become next frame's
+    /// scratch, so neither the record nor the comparison allocates again.
+    fn record(&mut self, slot: usize, rows: &mut Vec<Vec<RenderCell>>, cursor: CursorMark) {
+        std::mem::swap(&mut self.painted[slot].rows, rows);
+        self.painted[slot].cursor = cursor;
+        self.painted[slot].size = (self.width, self.height);
+    }
+
+    /// Where the cursor block is, and whether this frame draws it.
+    fn cursor_mark(&self) -> CursorMark {
+        CursorMark {
+            row: self.cursor_row,
+            col: self.cursor_col,
+            drawn: self.scroll_offset == 0
+                && self.focused
+                && self.cursor_enabled
+                && self.cursor_visible,
+        }
+    }
+
+    /// Draw the cursor block and the character under it.
+    fn draw_cursor_block(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
+        if !self.cursor_mark().drawn {
+            return;
+        }
+        let char_w = char_width() as i32;
+        let char_h = text_height() as i32;
+        let (origin_x, origin_y) = self.content_origin();
+        let cursor_x = origin_x + (self.cursor_col as i32) * char_w;
+        let cursor_y = origin_y + (self.cursor_row as i32) * char_h;
+
+        draw_rect(
+            buffer,
+            buffer_width,
+            buffer_height,
+            cursor_x,
+            cursor_y,
+            char_w as u32,
+            char_h as u32,
+            terminal_colors::CURSOR,
+        );
+
+        if self.cursor_row < self.rows && self.cursor_col < self.cols {
+            let ch = self.buffer[self.cursor_row][self.cursor_col].ch;
+            if ch != ' ' {
+                draw_text_styled(
+                    buffer,
+                    buffer_width,
+                    buffer_height,
+                    cursor_x,
+                    cursor_y,
+                    &ch.to_string(),
+                    Style::mono(self.bg_color),
+                );
+            }
+        }
+    }
+
+    /// Draw only the rows that differ from what this buffer already shows.
+    ///
+    /// `slot` names which of the window's two shm buffers `buffer` is; see
+    /// [`Painted`] for why each needs its own record.
+    ///
+    /// Returns the rectangle that changed, in the same coordinates as
+    /// [`Widget::bounds`], or `None` when the buffer already shows the current
+    /// picture. That rectangle is what the owner reports as damage, and it is
+    /// what stops a one-character change costing a whole-window transfer.
+    pub fn draw_changed(
+        &mut self,
+        slot: usize,
+        buffer: &mut [u32],
+        buffer_width: u32,
+        buffer_height: u32,
+    ) -> Option<Rect> {
+        let slot = slot & 1;
+        let char_h = text_height() as i32;
+        let (_, origin_y) = self.content_origin();
+
+        let mut current = std::mem::take(&mut self.current);
+        current.resize(self.rows, Vec::new());
+        for display_row in 0..self.rows {
+            let mut row = std::mem::take(&mut current[display_row]);
+            self.render_row_into(display_row, &mut row);
+            current[display_row] = row;
+        }
+        let cursor = self.cursor_mark();
+
+        // Two different questions, and answering only the first is what makes a
+        // partial repaint wrong on alternate frames.
+        //
+        // What has to be *drawn* is what this buffer does not already hold, and
+        // it holds the frame from two frames ago. What has to be *reported* is
+        // what the buffer currently on screen does not hold, since that is the
+        // picture a viewer is looking at. A cursor blink makes the difference
+        // plain: two toggles later this buffer is already correct and needs no
+        // drawing, while the screen still shows the opposite phase and needs
+        // the swap.
+        let stale = |record: &Painted, size: (u32, u32), rows: usize| {
+            record.rows.len() != rows || record.size != size
+        };
+        let size = (self.width, self.height);
+        let redraw_all = stale(&self.painted[slot], size, self.rows);
+        let report_all = stale(&self.painted[slot ^ 1], size, self.rows);
+
+        let mut first = usize::MAX;
+        let mut last = 0usize;
+
+        if redraw_all {
+            self.fill_padding(buffer, buffer_width, buffer_height);
+            for display_row in 0..self.rows {
+                self.draw_row(
+                    buffer,
+                    buffer_width,
+                    buffer_height,
+                    display_row,
+                    &current[display_row],
+                );
+            }
+        }
+
+        let differs = |record: &Painted, display_row: usize| {
+            let moved_cursor = cursor != record.cursor
+                && (cursor.row == display_row || record.cursor.row == display_row);
+            moved_cursor || current[display_row] != record.rows[display_row]
+        };
+
+        for display_row in 0..self.rows {
+            if !redraw_all && differs(&self.painted[slot], display_row) {
+                self.draw_row(
+                    buffer,
+                    buffer_width,
+                    buffer_height,
+                    display_row,
+                    &current[display_row],
+                );
+            }
+            if report_all || differs(&self.painted[slot ^ 1], display_row) {
+                first = first.min(display_row);
+                last = last.max(display_row);
+            }
+        }
+
+        if redraw_all {
+            self.draw_cursor_block(buffer, buffer_width, buffer_height);
+        }
+
+        if first == usize::MAX {
+            // This buffer may have been brought up to date even though the
+            // screen already shows the right picture; record that and present
+            // nothing.
+            self.record(slot, &mut current, cursor);
+            self.current = current;
+            return None;
+        }
+
+        if !redraw_all {
+            self.draw_cursor_block(buffer, buffer_width, buffer_height);
+        }
+
+        self.record(slot, &mut current, cursor);
+        self.current = current;
+
+        if report_all {
+            return Some(Rect::new(self.x, self.y, self.width, self.height));
+        }
+        let top = origin_y + (first as i32) * char_h;
+        let bottom = origin_y + ((last + 1) as i32) * char_h;
+        Some(Rect::new(
+            self.x,
+            top,
+            self.width,
+            (bottom - top).max(0) as u32,
+        ))
+    }
 }
 
 impl Widget for Terminal {
@@ -896,117 +1243,15 @@ impl Widget for Terminal {
     }
 
     fn draw(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32) {
-        // Draw background
-        draw_rect(
-            buffer,
-            buffer_width,
-            buffer_height,
-            self.x,
-            self.y,
-            self.width,
-            self.height,
-            self.bg_color,
-        );
+        self.fill_padding(buffer, buffer_width, buffer_height);
 
-        let char_w = char_width() as i32;
-        let char_h = text_height() as i32;
-        let (origin_x, origin_y) = self.content_origin();
-
-        // Draw each row of cells, accounting for scroll offset into history
-        let history_len = self.history.len();
-        let total_lines = history_len + self.buffer.len();
-        let viewport_bottom = total_lines.saturating_sub(self.scroll_offset);
-        let viewport_top = viewport_bottom.saturating_sub(self.rows);
-
+        let mut row = Vec::new();
         for display_row in 0..self.rows {
-            let line_idx = viewport_top + display_row;
-            let row_y = origin_y + (display_row as i32) * char_h;
-
-            let row_data: Option<&Vec<Cell>> = if line_idx < history_len {
-                self.history.get(line_idx)
-            } else {
-                self.buffer.get(line_idx - history_len)
-            };
-
-            if let Some(row) = row_data {
-                for (col_idx, cell) in row.iter().enumerate() {
-                    let cell_x = origin_x + (col_idx as i32) * char_w;
-                    let selected = self.is_cell_selected(line_idx, col_idx);
-
-                    // Draw cell background: selection color takes priority
-                    let bg = if selected {
-                        terminal_colors::SELECTION
-                    } else {
-                        cell.bg
-                    };
-
-                    if bg != self.bg_color || selected {
-                        draw_rect(
-                            buffer,
-                            buffer_width,
-                            buffer_height,
-                            cell_x,
-                            row_y,
-                            char_w as u32,
-                            char_h as u32,
-                            bg,
-                        );
-                    }
-
-                    // Draw character if not a space
-                    if cell.ch != ' ' {
-                        let ch_str = cell.ch.to_string();
-                        // Mono, always: this is a character grid, and a
-                        // proportional face would put every cell's glyph at a
-                        // different offset inside its cell.
-                        draw_text_styled(
-                            buffer,
-                            buffer_width,
-                            buffer_height,
-                            cell_x,
-                            row_y,
-                            &ch_str,
-                            Style::mono(cell.fg),
-                        );
-                    }
-                }
-            }
+            self.render_row_into(display_row, &mut row);
+            self.draw_row(buffer, buffer_width, buffer_height, display_row, &row);
         }
 
-        // Draw cursor if focused, not hidden by DECTCEM, visible in this blink
-        // phase, and not scrolled back
-        if self.scroll_offset == 0 && self.focused && self.cursor_enabled && self.cursor_visible {
-            let cursor_x = origin_x + (self.cursor_col as i32) * char_w;
-            let cursor_y = origin_y + (self.cursor_row as i32) * char_h;
-
-            draw_rect(
-                buffer,
-                buffer_width,
-                buffer_height,
-                cursor_x,
-                cursor_y,
-                char_w as u32,
-                char_h as u32,
-                terminal_colors::CURSOR,
-            );
-
-            // Draw the character under cursor in inverted color if there is one
-            if self.cursor_row < self.rows && self.cursor_col < self.cols {
-                let ch = self.buffer[self.cursor_row][self.cursor_col].ch;
-                if ch != ' ' {
-                    let ch_str = ch.to_string();
-                    draw_text_styled(
-                        buffer,
-                        buffer_width,
-                        buffer_height,
-                        cursor_x,
-                        cursor_y,
-                        &ch_str,
-                        Style::mono(self.bg_color),
-                    );
-                }
-            }
-        }
+        self.draw_cursor_block(buffer, buffer_width, buffer_height);
     }
 
     fn on_mouse_move(&mut self, x: i32, y: i32) {

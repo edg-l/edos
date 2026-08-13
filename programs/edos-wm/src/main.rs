@@ -9,7 +9,8 @@ use edos_lib::io::klog_dump;
 use edos_render::graphics::Screen;
 use edos_render::window::{
     WINDOW_LIST_CONSUME_DAMAGE, WindowEvent, WindowEventType, WindowListEntry, flags, focused_id,
-    property, set_frame, window_list_flags, window_minimize, window_send_event, window_set,
+    property, set_frame, window_list, window_list_flags, window_minimize, window_send_event,
+    window_set,
 };
 
 /// Height of the panel, which a maximized window must not cover.
@@ -581,8 +582,12 @@ fn main() {
             screen.move_cursor(mx.max(0) as u32, my.max(0) as u32);
         }
 
-        // Get current window list from kernel
-        let window_count = match window_list_flags(&mut entries, WINDOW_LIST_CONSUME_DAMAGE) {
+        // Get current window list from kernel. This read is for routing input
+        // and publishing frames, so it must NOT consume damage: consuming here
+        // empties the accumulated box before the fetch below, which is the one
+        // that decides what to redraw, and every client is then reported as
+        // having repainted all of itself.
+        let window_count = match window_list(&mut entries) {
             Ok(count) => count.min(MAX_WINDOWS),
             Err(_) => 0,
         };
@@ -699,24 +704,34 @@ fn main() {
                 // A focus change repaints the title-bar accent, so it is dirty
                 // even when nothing else about the window moved.
                 let focus_changed = prev.is_some_and(|s| s.focused != w.focused);
+                // A window that moved or resized has to be drawn where it is
+                // now. Only the ground it left behind is covered below, and a
+                // move does not touch the damage counter, so without this a
+                // dragged window is transferred one frame behind its own edge.
+                let moved = prev.is_some_and(|s| {
+                    s.x != w.x || s.y != w.y || s.width != w.width || s.height != w.height
+                });
                 // A repaint is a change in the window's damage counter since
                 // the frame this compositor last drew. The counter is never
                 // cleared by the kernel, so the panel polling the same window
                 // list cannot consume the signal first and leave the window
                 // looking unchanged.
                 let repainted = prev.is_none_or(|s| s.damage_seq != w.damage_seq);
-                if repainted || focus_changed {
+                if repainted || focus_changed || moved {
                     let s = PrevWindowState::from_entry(w);
                     // A client that reported the region it drew gets that
-                    // region transferred; one that reported nothing, or whose
-                    // frame decoration changed, gets the whole window.
+                    // region transferred. Anything that changes the window as a
+                    // whole -- its first frame, its decorations, where it sits
+                    // -- gets all of it, because the client's box describes its
+                    // content and nothing else.
                     let whole = s.dirty_rect();
-                    let region = if repainted
+                    let reported_region = repainted
                         && !focus_changed
+                        && !moved
+                        && prev.is_some()
                         && w.damage_w != 0
-                        && w.damage_h != 0
-                        && w.damage_w < w.width
-                    {
+                        && w.damage_h != 0;
+                    let region = if reported_region {
                         let (fx, fy) = decorations::content_origin(w);
                         DirtyRect::new(
                             w.x + fx + w.damage_x as i32,

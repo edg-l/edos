@@ -32,13 +32,12 @@ fn main() {
     let mut terminal = Terminal::with_size(1, 0, 0, TERMINAL_WIDTH, TERMINAL_HEIGHT);
     terminal.set_focused(true);
 
-    // Pre-render before showing window to avoid black frame
-    window.fill(edos_render::widgets::terminal::terminal_colors::BACKGROUND);
+    // Pre-render before showing window to avoid black frame. `show` publishes
+    // this buffer itself, so nothing is swapped here.
     {
-        let w = window.width;
-        let h = window.height;
+        let (w, h, slot) = (window.width, window.height, window.back_index());
         if let Some(buf) = window.buffer_mut() {
-            terminal.draw(buf, w, h);
+            terminal.draw_changed(slot, buf, w, h);
         }
     }
 
@@ -201,20 +200,23 @@ fn main() {
         // repaint on its own.
         let blinked = terminal.tick();
 
-        // Repainting an unchanged terminal is not free: `swap_buffers` reports
-        // damage, and the compositor answers by transferring the whole window.
-        // Doing that 62 times a second to show an identical picture is what
-        // saturated the display link.
+        // Repainting an unchanged terminal is not free: swapping reports
+        // damage, and the compositor answers by transferring the window. Doing
+        // that 62 times a second to show an identical picture is what saturated
+        // the display link.
+        //
+        // The events above only say a repaint is *worth attempting*;
+        // `draw_changed` is what decides whether anything actually differs, and
+        // hands back the rectangle that does. A key that inserts one character
+        // therefore costs one row of pixels rather than the whole window.
         if content_changed || !input_chars.is_empty() || output_len > 0 || blinked {
-            window.fill(edos_render::widgets::terminal::terminal_colors::BACKGROUND);
-
-            let w = window.width;
-            let h = window.height;
-            if let Some(buf) = window.buffer_mut() {
-                terminal.draw(buf, w, h);
+            let (w, h, slot) = (window.width, window.height, window.back_index());
+            let changed = window
+                .buffer_mut()
+                .and_then(|buf| terminal.draw_changed(slot, buf, w, h));
+            if let Some(rect) = changed {
+                window.swap_buffers_damaged(rect.x, rect.y, rect.width, rect.height);
             }
-
-            window.swap_buffers();
         }
         std::thread::sleep(Duration::from_millis(16));
     }

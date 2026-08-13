@@ -1759,6 +1759,14 @@ name = "tee"
 version = "0.1.0"
 
 [[package]]
+name = "termbench"
+version = "0.1.0"
+dependencies = [
+ "edos_lib",
+ "edos_render",
+]
+
+[[package]]
 name = "threadtest"
 version = "0.1.0"
 

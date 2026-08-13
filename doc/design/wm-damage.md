@@ -9,12 +9,17 @@ is `on`).
 
 A still desktop with one terminal, nobody touching the machine:
 
-| | before | damage fix | + regions, terminal on change |
-| --- | --- | --- | --- |
-| to the display | 263 MB/s | 82 MB/s | **6.6 MB/s** |
-| frames doing work | 77 of 77 | 66 of 77 | **22 of 77** |
-| composite p50 | 1354 us | 1322 us | **0 us** |
-| interval p50 / p95 | 13018 / 13024 us | 13018 / 13022 us | 13011 / 13014 us |
+| | before | damage fix | + regions, terminal on change | + per-row damage |
+| --- | --- | --- | --- | --- |
+| to the display | 263 MB/s | 82 MB/s | 6.6 MB/s | **4.1 MB/s** |
+| frames doing work | 77 of 77 | 66 of 77 | **22 of 77** | 22 of 77 |
+| composite p50 | 1354 us | 1322 us | **0 us** | 0 us |
+| interval p50 / p95 | 13018 / 13024 us | 13018 / 13022 us | 13011 / 13014 us | 13011 / 13026 us |
+
+The last column is the terminal reporting the rows it changed rather than all
+of itself. Its share of the idle traffic went from about 2.6 MB/s to 0.09 MB/s,
+which is the cursor blink costing one 640x17 row twice a second instead of the
+whole 646x518 window. What is left is almost entirely the panel.
 
 The median frame now does no work at all. What remains at idle is the panel
 redrawing itself 20 times a second whatever is on it (~4 MB/s) and the
@@ -114,12 +119,11 @@ every frame.
    bounded by damage today. This is what would move composite p95, which is
    still 1.37 ms.
 3. Terminal and panel tracking their own damage and skipping unchanged frames.
-   **Half done.** The terminal skips a repaint unless an event, input, output
-   or the blink says otherwise, and that is most of the win above. Two pieces
-   left: the panel needs the same test over a signature of what it draws
-   (clock text, task list, hover, menu open), and neither client yet reports a
-   *region* — the terminal should damage the rows it changed rather than all
-   of itself, which is what makes typing cost a line.
+   **Terminal done, panel open.** `Terminal::draw_changed` compares the
+   viewport against what the buffer being drawn already holds, repaints only
+   the rows that differ, and returns the rectangle to report as damage. The
+   panel still needs the same test over a signature of what it draws (clock
+   text, task list, hover, menu open).
 4. Frame callbacks, and clients converted from timers to callbacks. **Open.**
    `SYS_WINDOW_POLL` cannot block, so this needs a per-window waitqueue woken
    by event delivery and by the compositor after it presents.
@@ -139,6 +143,21 @@ KiB/s, 2 moves composite p50, 4 moves both plus idle CPU.
   across two frames or each buffer will only receive the rects sent while it
   was the back one.
 - **Damage is not the only reason to repaint.** Focus changes repaint the title
-  bar accent, and a window that moves exposes background where it was; both are
-  tracked by the compositor from the previous frame's geometry rather than by
-  the client.
+  bar accent, and a window that moves exposes background where it was and has
+  to be drawn where it now is; all of these are tracked by the compositor from
+  the previous frame's geometry rather than by the client. A client's damage box
+  describes its content only, so anything that changes the window as a whole
+  takes the whole rectangle instead.
+- **Reading the window list consumes damage, so read it once.** The compositor
+  polls the list twice a frame — once to route input, once to decide what to
+  redraw — and passing `WINDOW_LIST_CONSUME_DAMAGE` to the first emptied the
+  accumulated box before the second could read it. Every client then looked
+  like it had repainted all of itself, which made region damage unobservable
+  rather than merely unused.
+- **The buffer being drawn is not the buffer on screen.** With two buffers, what
+  a client has to *redraw* is what the back buffer does not already hold (two
+  frames old), while what it has to *report* is what the front buffer does not
+  hold. `Terminal` keeps a record per buffer for exactly this: comparing against
+  only one of them makes a partial repaint correct on alternate frames, and
+  leaves a blinking cursor stuck because the buffer being drawn is already right
+  while the screen is not.
