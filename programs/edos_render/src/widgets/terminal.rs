@@ -1425,6 +1425,16 @@ impl Widget for Terminal {
             return None;
         }
 
+        // Alt marks a chord as the window manager's. The manager claims the
+        // ones it acts on and those never arrive, but an unclaimed Alt chord
+        // still does, and neither this widget nor the program running in it
+        // bound one: sending its bare character would type `f` into the shell
+        // for Alt+F. `altgr` is a separate flag and still selects the third
+        // character on a layout.
+        if self.modifiers.alt {
+            return None;
+        }
+
         // Ctrl+Shift+C/V: copy/paste -- intercept before map_keycode turns them into control chars.
         if self.modifiers.ctrl && self.modifiers.shift {
             match scancode {

@@ -12,7 +12,7 @@ mod view;
 use std::fs;
 use std::time::{Duration, Instant};
 
-use edos_lib::keymap::keycode;
+use edos_lib::keymap::{Modifiers, keycode, update_modifiers};
 use edos_lib::mounts::Mount;
 use edos_lib::process::spawn;
 use edos_render::image::{Image, decode_bmp};
@@ -104,6 +104,7 @@ struct App {
     preview: Option<Preview>,
     last_click: Option<(usize, Instant)>,
     dragging_scroll: bool,
+    mods: Modifiers,
 }
 
 impl App {
@@ -129,6 +130,7 @@ impl App {
             preview: None,
             last_click: None,
             dragging_scroll: false,
+            mods: Modifiers::default(),
         };
         app.reload();
         app
@@ -481,6 +483,12 @@ impl App {
                     return false;
                 }
             }
+            // A modifier changes state and produces nothing of its own, but
+            // the release still has to reach the rename field below, whose
+            // own tracking would otherwise see every press and no release.
+            Some(WindowEventType::KeyRelease) => {
+                update_modifiers(&mut self.mods, event.code, false);
+            }
             _ => {}
         }
 
@@ -615,6 +623,18 @@ impl App {
     /// Returns false when the window should close.
     fn on_key(&mut self, event: &WindowEvent) -> bool {
         let code = event.code;
+
+        if update_modifiers(&mut self.mods, code, true) {
+            return true;
+        }
+
+        // Alt marks a chord as the window manager's. The manager claims the
+        // ones it acts on, and those never arrive here, but an unclaimed one
+        // still does, and it is not a binding this program made: Alt+N is not
+        // a request for a new folder.
+        if self.mods.alt {
+            return true;
+        }
 
         if code == keycode::ESCAPE {
             if self.rename.is_some() {

@@ -236,6 +236,11 @@ fn main() {
                         if update_modifiers(&mut mods, event.code, true) {
                             continue;
                         }
+                        // Alt marks a chord as the window manager's, so `q`
+                        // held with Alt is not this program's quit key.
+                        if mods.alt {
+                            continue;
+                        }
                         match map_keycode(event.code, &mods) {
                             Some('q') => return,
                             Some('f') => mode = Mode::Fit,

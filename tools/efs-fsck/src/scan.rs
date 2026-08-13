@@ -122,14 +122,20 @@ fn verify_inode(
     // rebuilt bitmap so we don't double-count the same blocks as "leaked".
     if inode.link_count == 0 {
         // On the orphan chain this is the expected state, not damage: the inode
-        // lost its last name and its deletion has not finished. The DirTree phase
-        // reports it as pending and `--repair` completes it.
+        // lost its last name and its deletion has not finished.
+        //
+        // Neither case is an Error here, and that is deliberate: this phase sees
+        // only the stored link count, while the DirTree phase also knows how many
+        // directory entries actually name the inode. DirTree is therefore the one
+        // that adjudicates, and it raises the fixable Error. Reporting one here
+        // too would count the same inode twice against `initial_errors`, so a
+        // repair that fixed everything would still exit ErrorsRemain.
         let pending = chain.set.contains(&ino);
         report.push(Finding {
             severity: if pending {
                 Severity::Info
             } else {
-                Severity::Error
+                Severity::Warning
             },
             category: Category::Inode,
             message: if pending {

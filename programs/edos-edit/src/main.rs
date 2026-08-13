@@ -317,10 +317,15 @@ impl App {
     }
 
     fn save(&mut self) {
-        self.status = Some(match self.buffer_mut().save() {
+        let saved = self.buffer_mut().save();
+        let ok = saved.is_ok();
+        self.status = Some(match saved {
             Ok(()) => ("Saved.".to_string(), false),
             Err(err) => (err, true),
         });
+        if ok {
+            self.refresh_tree();
+        }
         self.update_title();
     }
 
@@ -493,6 +498,15 @@ impl App {
         let visible = view::tree_rows_visible(rect).max(1);
         let max = self.tree.rows.len().saturating_sub(visible);
         self.tree.scroll = self.tree.scroll.min(max);
+    }
+
+    /// Re-read the sidebar. F5 asks for this, and so does the window regaining
+    /// focus, which is what covers a file another program wrote while this one
+    /// was in the background. Saving to a new path refreshes for the same
+    /// reason: the editor's own write is a change the tree cannot see either.
+    fn refresh_tree(&mut self) {
+        self.tree.refresh();
+        self.clamp_tree_scroll();
     }
 
     // --- Prompt bar ---------------------------------------------------------
@@ -712,6 +726,7 @@ impl App {
                 self.dismiss_prompt();
                 self.clamp_tree_scroll();
             }
+            Some(WindowEventType::FocusGained) => self.refresh_tree(),
             Some(WindowEventType::MouseButton) => self.on_mouse_button(event),
             Some(WindowEventType::MouseMove) => self.on_mouse_move(event.x, event.y),
             Some(WindowEventType::MouseScroll) => {
@@ -881,11 +896,10 @@ impl App {
     }
 
     fn on_key(&mut self, code: u32) {
-        // Alt belongs to the window manager. Its shortcuts reach the focused
-        // program as well as the manager, because the kernel routes every key
-        // to the focused window and nothing can claim one first, so a chord
-        // held with Alt is one this program did not bind: Ctrl+Alt+W is the
-        // registry dump, not a request to close a tab.
+        // Alt marks a chord as the window manager's. The manager claims the
+        // ones it acts on, and those never arrive here, but an Alt chord it
+        // does not claim still does — and it is not one this program bound
+        // either: Ctrl+Alt+W is a registry dump, not a request to close a tab.
         if self.mods.alt {
             return;
         }
@@ -937,6 +951,7 @@ impl App {
                 let col = self.buffer().line_chars(line);
                 self.set_cursor(Position { line, col });
             }
+            keycode::F5 => self.refresh_tree(),
             keycode::A if self.mods.ctrl => self.select_all(),
             keycode::C if self.mods.ctrl => self.copy(),
             keycode::X if self.mods.ctrl => self.cut(),

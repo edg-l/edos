@@ -5,6 +5,9 @@
 //! read until [`Tree::toggle`] expands a directory, which is what keeps
 //! opening a tree over a large directory instant regardless of how deep it
 //! goes.
+//!
+//! Nothing re-reads a directory on its own. [`Tree::refresh`] is the only way
+//! a file created after a folder was expanded becomes visible.
 
 use std::fs;
 
@@ -62,6 +65,33 @@ impl Tree {
             self.rows.splice(index + 1..index + 1, children);
         }
         self.rows[index].expanded = !expanded;
+    }
+
+    /// Re-read every directory currently on screen, keeping the same folders
+    /// open. Nothing tells a program that a file appeared — the kernel has no
+    /// change notification — so the sidebar is only ever as fresh as the last
+    /// time something asked it to look, and a file written after the tree was
+    /// built is invisible until then.
+    pub fn refresh(&mut self) {
+        let open: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|node| node.is_dir && node.expanded)
+            .map(|node| node.path.clone())
+            .collect();
+
+        self.rows = list_dir(&self.root, 0);
+
+        // `toggle` splices a directory's children in directly after it, so
+        // walking forward re-expands nested folders as it reaches them: a
+        // child's own row is visited on a later step of this same pass.
+        let mut index = 0;
+        while index < self.rows.len() {
+            if self.rows[index].is_dir && open.contains(&self.rows[index].path) {
+                self.toggle(index);
+            }
+            index += 1;
+        }
     }
 }
 

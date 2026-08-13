@@ -546,11 +546,18 @@ fn unnamed_inode_off_the_chain_still_needs_the_prompt() {
         "a declined prompt must leave the orphan in place; got {code}\nstdout: {stdout}\nstderr: {stderr}"
     );
 
-    // --yes accepts it, and then the image is clean.
-    let (_, stdout, stderr) = run_fsck(&img.path, &["--repair", "--yes"]);
+    // --yes accepts it, and the repair run itself reports the leak as fixed.
+    // One unnamed inode must raise exactly one Error, or `remaining` never
+    // reaches zero and a repair that freed everything still exits 4.
+    let (code, stdout, stderr) = run_fsck(&img.path, &["--repair", "--yes"]);
     assert!(
         stdout.contains("auto-accepting deletion of 1 orphan inode(s)"),
         "expected --yes to accept the deletion; got:\n{stdout}\nstderr: {stderr}"
+    );
+    assert_eq!(
+        code, 1,
+        "the repair run must report ErrorsFixed, not leave one for a second run; \
+         got {code}\nstdout: {stdout}\nstderr: {stderr}"
     );
     let (code, stdout, stderr) = run_fsck(&img.path, &["--verbose"]);
     assert_eq!(

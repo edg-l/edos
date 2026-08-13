@@ -5352,3 +5352,79 @@ contiguous run, so the appended file is one extent per read and the heavier
 ext4-style delayed allocation or per-inode reservation window has nothing left
 to win. The counter to watch for a regression is `efs_stats.extent_runs` rising
 above `extent_reads` on this sequence.
+
+---
+
+## Three user-visible defects, and two traps in verifying them (2026-08-14)
+
+### The sidebar only ever knew what it read once
+
+`edos-edit`'s tree read the root at open and each directory the first time it
+was expanded, and nothing ever re-read either. A file created afterwards was
+invisible until the program was reopened, including one the editor itself wrote
+with Ctrl+S on a new path.
+
+`Tree::refresh` re-reads the root and re-expands every folder that was open.
+The walk is forward over the rebuilt rows: `toggle` splices a directory's
+children in directly after it, so a nested folder's own row is reached later in
+the same pass and re-expands there. Three things ask for it -- F5, `FocusGained`
+(a file another program wrote while this one was in the background), and a
+successful save.
+
+There is no watch mechanism because the kernel has no change notification, so
+the sidebar is only ever as fresh as the last time something asked it to look.
+That is stated in the module doc rather than left for the next reader to
+rediscover.
+
+### Alt guards, the last three programs
+
+`6b5171d` gave `edos-edit` and `WidgetContainer` the rule that a binding does
+not fire while Alt is held. `edos-files`, `imgview` and the terminal widget bind
+keys too and were never audited:
+
+- `edos-files` tracked no modifiers at all, so Alt+N made a folder. It now
+  carries a `Modifiers` and a `KeyRelease` arm; without the arm Alt would latch
+  on forever, since `handle` had no release path.
+- `imgview` binds bare `q`/`f`/`1`, so Alt+Q quit it.
+- `widgets::terminal` fed the chord's bare character to the pty, so Alt+F typed
+  `f` into the shell. `altgr` is a separate flag and still selects the third
+  character on a layout.
+
+The kernel grab (`1a5ae7f`) does not make this redundant: the window manager
+withholds only the chords it *claims*, and every other Alt chord still arrives.
+The comment in `edos-edit` that said nothing could claim one first predates that
+commit and is corrected.
+
+### efs-fsck counted one orphan twice
+
+One unnamed inode produced two Error findings -- `inode N: allocated but
+link_count == 0 (orphan)` from `scan.rs` and `orphan inode N` from `dirtree.rs`
+-- so `remaining = initial_errors - repair_succeeded` never reached zero and a
+`--repair --yes` that freed the leak still exited 4. Only a second run came back
+clean.
+
+The scan finding is now a Warning. That phase sees only the stored link count;
+DirTree also knows how many directory entries actually name the inode, so
+DirTree is the phase that adjudicates and raises the fixable Error. The
+integration test asserts on the repair run's own exit code (1, ErrorsFixed)
+rather than on a second run, and was watched go red -- exit 4 -- against the old
+severity.
+
+### Trap: `cargo test` in tools/efs-fsck does not test what you just edited
+
+`tests/common/mod.rs::fsck_bin` runs
+`tools/efs-fsck/target/release/efs-fsck`, which is what `make efs-fsck` builds.
+A `cargo test` (debug) rebuilds the test binary and nothing else, so a source
+change is invisible until `make efs-fsck` is re-run. A revert-and-watch-it-fail
+check against a stale release binary silently proves nothing: it passes both
+ways.
+
+### Trap: a `shipped = false` program is moved out of `filesystem/bin`
+
+`programs/Makefile` moves every unshipped binary (currently `edos-edit`) from
+`filesystem/bin` into `pkgstage/bin` after each build, because that is what
+makes it packaged rather than imaged. Staging one into the guest for a test has
+to happen **after** the last program build and **before** `efs-mkfs` runs;
+`make edos-x86_64.iso` and `make sata-disk.img` both re-enter `make programs`
+and undo an earlier copy. Copying `pkgstage/bin/<name>` in and then running the
+`sata-disk.img` recipe's four commands by hand is the way that works.

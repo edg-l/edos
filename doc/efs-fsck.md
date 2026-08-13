@@ -165,7 +165,7 @@ does not start on a block boundary cannot be addressed in that domain.
 | Finding | Severity | Fixable | What fsck does |
 |---------|----------|---------|----------------|
 | Inode CRC mismatch | WARN | no | Reports only. |
-| `link_count == 0` but inode bitmap says allocated | ERROR | no | Reports only; treated as structural corruption. |
+| `link_count == 0` but inode bitmap says allocated | WARN | no | Reports only. This phase sees the stored count alone; the DirTree phase also knows how many entries name the inode, so it is the one that raises the Error and repairs it. An Error here too would count the same inode twice and leave `--repair` exiting 4 after fixing everything. |
 | Inline-data inode `size > INODE_DATA_AREA_SIZE` | ERROR | no | Reports only. |
 | Extent header magic mismatch | ERROR | no | Reports only. |
 | Extent `depth > 1` | ERROR | no | Reports only (v1 supports depth 0 and 1). |
