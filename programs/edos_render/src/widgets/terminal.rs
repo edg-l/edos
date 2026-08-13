@@ -94,6 +94,41 @@ struct Painted {
     /// fresh buffers and moves the grid inside them, so the padding around it
     /// has to be laid down again rather than compared row by row.
     size: (u32, u32),
+    /// Where the viewport sat when this record was made, so the distance the
+    /// picture has travelled since is a subtraction.
+    top_line: i64,
+}
+
+impl Painted {
+    /// Account for the buffer's pixels having been moved `shift` rows up
+    /// (positive) or down (negative).
+    ///
+    /// The rows that scrolled in from outside hold whatever the move dragged
+    /// along, so they are emptied: an empty row matches no real row, which is
+    /// what makes the comparison that follows rasterise exactly them. That is
+    /// also the safety net -- if `shift` were ever wrong, every row it does not
+    /// account for simply compares unequal and is drawn again.
+    fn shift_rows(&mut self, shift: i32) {
+        let rows = self.rows.len();
+        if rows == 0 {
+            return;
+        }
+        let exposed: &mut [Vec<RenderCell>] = if shift > 0 {
+            let n = (shift as usize).min(rows);
+            self.rows.rotate_left(n);
+            &mut self.rows[rows - n..]
+        } else {
+            let n = ((-shift) as usize).min(rows);
+            self.rows.rotate_right(n);
+            &mut self.rows[..n]
+        };
+        for row in exposed {
+            row.clear();
+        }
+        // The cursor block moved with the pixels under it.
+        self.cursor.row =
+            (self.cursor.row as i64 - shift as i64).clamp(0, rows as i64 - 1) as usize;
+    }
 }
 
 impl Default for Cell {
@@ -166,6 +201,11 @@ pub struct Terminal {
     esc_buf: [u8; 32],
     esc_len: usize,
 
+    /// Lines that have left the top of the buffer into history. Counted rather
+    /// than derived from `history.len()`, which stops growing once the history
+    /// is full and would then report a scroll as standing still.
+    scrolled: u64,
+
     /// What each of the window's two shm buffers already shows.
     painted: [Painted; 2],
     /// The viewport as it would be rasterised now, reused across frames so a
@@ -219,6 +259,7 @@ impl Terminal {
             esc_state: EscState::Normal,
             esc_buf: [0; 32],
             esc_len: 0,
+            scrolled: 0,
             painted: [Painted::default(), Painted::default()],
             current: Vec::new(),
         }
@@ -598,6 +639,7 @@ impl Terminal {
     /// Scroll the buffer up by one line.
     fn scroll_up(&mut self) {
         if let Some(line) = self.buffer.pop_front() {
+            self.scrolled += 1;
             // Move top line to history
             if self.history.len() >= self.max_history {
                 self.history.pop_front();
@@ -1052,12 +1094,77 @@ impl Terminal {
         }
     }
 
+    /// How far the viewport has travelled down the output stream, in lines.
+    ///
+    /// Output moves it forward and scrollback moves it back, so the difference
+    /// between two of these is exactly how many rows the picture shifted.
+    fn top_line(&self) -> i64 {
+        self.scrolled as i64 - self.scroll_offset as i64
+    }
+
+    /// Move the grid's pixels `shift` rows up (positive) or down (negative).
+    ///
+    /// Scrolling a terminal changes every row, and rasterising them all is the
+    /// expensive way to say that row `r` now shows what row `r + shift` already
+    /// showed. Those pixels are in the buffer; moving them costs one memmove
+    /// and leaves only the newly exposed rows to draw.
+    fn scroll_pixels(&self, buffer: &mut [u32], buffer_width: u32, buffer_height: u32, shift: i32) {
+        let char_h = text_height() as i32;
+        let (_, origin_y) = self.content_origin();
+        let stride = buffer_width as usize;
+
+        // The band a row's ground covers, so what moves is exactly what
+        // `draw_row` would have painted.
+        let left = self.x.max(0) as usize;
+        let right = ((self.x + self.width as i32).max(0) as usize).min(stride);
+        if right <= left {
+            return;
+        }
+        let span = right - left;
+
+        let distance = shift.unsigned_abs() as i32 * char_h;
+        let top = origin_y.max(0);
+        let bottom = (origin_y + self.rows as i32 * char_h).min(buffer_height as i32);
+        if bottom - top <= distance {
+            return;
+        }
+
+        let mut move_row = |y: i32| {
+            let src_y = if shift > 0 {
+                y + distance
+            } else {
+                y - distance
+            };
+            if src_y < 0 || src_y >= buffer_height as i32 {
+                return;
+            }
+            let src = src_y as usize * stride + left;
+            let dst = y as usize * stride + left;
+            if src + span <= buffer.len() && dst + span <= buffer.len() {
+                buffer.copy_within(src..src + span, dst);
+            }
+        };
+
+        // Up means each destination reads from below it, so writing top-down
+        // never overwrites a source still to be read; down is the mirror.
+        if shift > 0 {
+            for y in top..bottom - distance {
+                move_row(y);
+            }
+        } else {
+            for y in (top + distance..bottom).rev() {
+                move_row(y);
+            }
+        }
+    }
+
     /// Note what a buffer now holds. The rows it held become next frame's
     /// scratch, so neither the record nor the comparison allocates again.
     fn record(&mut self, slot: usize, rows: &mut Vec<Vec<RenderCell>>, cursor: CursorMark) {
         std::mem::swap(&mut self.painted[slot].rows, rows);
         self.painted[slot].cursor = cursor;
         self.painted[slot].size = (self.width, self.height);
+        self.painted[slot].top_line = self.top_line();
     }
 
     /// Where the cursor block is, and whether this frame draws it.
@@ -1155,6 +1262,17 @@ impl Terminal {
         let size = (self.width, self.height);
         let redraw_all = stale(&self.painted[slot], size, self.rows);
         let report_all = stale(&self.painted[slot ^ 1], size, self.rows);
+
+        // A scroll moves rows the buffer already holds. Move the pixels and
+        // shift the record with them, and the comparison below is left with
+        // only the rows that scrolled in.
+        if !redraw_all {
+            let shift = self.top_line() - self.painted[slot].top_line;
+            if shift != 0 && shift.unsigned_abs() < self.rows as u64 {
+                self.scroll_pixels(buffer, buffer_width, buffer_height, shift as i32);
+                self.painted[slot].shift_rows(shift as i32);
+            }
+        }
 
         let mut first = usize::MAX;
         let mut last = 0usize;

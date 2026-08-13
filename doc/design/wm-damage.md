@@ -119,17 +119,39 @@ every frame.
    bounded by damage today. This is what would move composite p95, which is
    still 1.37 ms.
 3. Terminal and panel tracking their own damage and skipping unchanged frames.
-   **Terminal done, panel open.** `Terminal::draw_changed` compares the
-   viewport against what the buffer being drawn already holds, repaints only
-   the rows that differ, and returns the rectangle to report as damage. The
-   panel still needs the same test over a signature of what it draws (clock
-   text, task list, hover, menu open).
+   **Done.** `Terminal::draw_changed` compares the viewport against what the
+   buffer being drawn already holds, repaints only the rows that differ, and
+   returns the rectangle to report as damage. The panel does the same over the
+   controls it draws.
 4. Frame callbacks, and clients converted from timers to callbacks. **Open.**
    `SYS_WINDOW_POLL` cannot block, so this needs a per-window waitqueue woken
    by event delivery and by the compositor after it presents.
 
 Each stage is measurable on its own with the telemetry above: 1 and 3 move
 KiB/s, 2 moves composite p50, 4 moves both plus idle CPU.
+
+## What the terminal costs, measured
+
+`programs/termbench` times the widget with no window and no compositor, so the
+number is the client's own work. A 640x480 terminal, 69x27 cells:
+
+| | full redraw | incremental |
+| --- | --- | --- |
+| nothing changed | 310 us | **5 us** |
+| one character typed | 544 us | **23 us** |
+| one line scrolled in | 538 us | **159 us** |
+| every cell a glyph | 595 us | — |
+
+Against a 13 ms frame, rasterising was never the bottleneck: the ceiling is
+0.6 ms, and half of even that is filling the background rather than drawing
+glyphs. That is why the win here came from *not* drawing rather than from
+drawing faster.
+
+A scroll is the one case where every row genuinely changes. It costs one
+memmove of the rows the buffer already holds plus the rasterising of the rows
+that scrolled in, which is where 538 us becomes 159 us. It saves client CPU
+and nothing else: every pixel on screen really is different, so the transfer
+is the same size either way.
 
 ## Traps
 
@@ -154,6 +176,13 @@ KiB/s, 2 moves composite p50, 4 moves both plus idle CPU.
   accumulated box before the second could read it. Every client then looked
   like it had repainted all of itself, which made region damage unobservable
   rather than merely unused.
+- **Moving pixels needs to know which buffer they are.** A scroll shifts rows
+  the buffer already holds, which is only true of the buffer that holds them:
+  with two buffers alternating, a memmove inside the one about to be drawn
+  shifts a frame two old. `Terminal` moves the pixels and shifts that buffer's
+  record by the same amount, so the row comparison that follows rasterises
+  exactly the rows that scrolled in — and, if the shift were ever wrong, every
+  row it fails to account for compares unequal and is drawn again.
 - **The buffer being drawn is not the buffer on screen.** With two buffers, what
   a client has to *redraw* is what the back buffer does not already hold (two
   frames old), while what it has to *report* is what the front buffer does not
