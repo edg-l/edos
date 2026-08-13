@@ -155,13 +155,10 @@ pub extern "C" fn ahci_driver_main() -> ! {
 
     let mut detected_devices: Vec<DetectedDevice> = Vec::new();
 
-    // Arc-wrap all ports first so weak_self is set before any command submission.
     let mut port_arcs: Vec<(Arc<AhciPort>, PciAddress, usize, bool, u8)> = Vec::new();
     for controller in &mut controllers {
         for port_idx in 0..controller.ports.len() {
-            if let Some(port) = controller.ports[port_idx].take() {
-                let arc = Arc::new(port);
-                arc.set_weak_self(Arc::downgrade(&arc));
+            if let Some(arc) = controller.ports[port_idx].take() {
                 port_arcs.push((
                     arc,
                     controller.pci_device.address,
@@ -173,7 +170,7 @@ pub extern "C" fn ahci_driver_main() -> ! {
         }
     }
 
-    // Now identify devices and initialize I/O pools via Arc (weak_self is set).
+    // Identify devices and initialize I/O pools.
     let mut id = 0;
     let mut direct_ports: Vec<Arc<AhciPort>> = Vec::with_capacity(port_arcs.len());
     for (arc, pci_address, port_idx, supports_ncq_hba, num_command_slots) in port_arcs {

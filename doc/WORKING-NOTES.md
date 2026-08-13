@@ -1397,12 +1397,12 @@ does not have to invent them.
 | userspace programs | 117 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 117 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
-| Rust | 101,969 code lines across 437 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 50,386 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,316 | `git rev-list --count HEAD` |
+| Rust | 101,930 code lines across 437 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 50,347 code lines | `tokei -t=Rust kernel/src` |
+| commits | 1,317 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
-| `unwrap()`/`expect()` in `kernel/src` | 176, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
+| `unwrap()`/`expect()` in `kernel/src` | 171, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
 
 The leading dot in that last grep is the whole measurement. Dropping it counts
 every `#[expect(...)]` attribute as well — 15 in `fs/fat32/structures.rs` alone,
@@ -1457,19 +1457,41 @@ so the build publishes before any commit does. Commit and push the source too.
 The `unwrap` figure includes 19 in test code that is not worth converting: 11 in
 `thread/sched_test.rs` and all 8 in `drivers/usb/hid/report.rs`, whose unwraps
 are in its own descriptor-parsing tests and not on any driver path. By file, the
-ones that would move the number are `drivers/usb/xhci/mod.rs` (19),
-`drivers/ahci/port.rs` (8) and `acpi/mod.rs` (7). Twelve of the xhci ones are
-`Option` fields that `init()` fills, so removing them means folding `init()` into
-`find_and_init()` rather than rewriting call sites.
+ones that would move the number are `drivers/usb/xhci/mod.rs` (19) and
+`acpi/mod.rs` (7). Twelve of the xhci ones are `Option` fields that `init()`
+fills, so removing them means folding `init()` into `find_and_init()` rather than
+rewriting call sites. `acpi/mod.rs` is `OnceCell`-shaped plus three boot-time
+table lookups where the machine genuinely cannot continue — a firmware with no
+MADT does not boot this kernel, and an `expect` that says so is the honest form.
 
-Two of those three are worth less than the count suggests, which is worth knowing
-before spending an iteration on them. Every one of the ahci eight is a `OnceCell`
-filled at port construction (`weak_self`, `command_tables`, `slot_pools`) and
-read from a `&self` method that cannot be reached before it; converting them
-means giving every caller an error it can only panic on. `acpi/mod.rs` is the
-same shape plus three boot-time table lookups where the machine genuinely cannot
-continue — a firmware with no MADT does not boot this kernel, and an `expect`
-that says so is the honest form.
+### An `expect` can be a two-phase constructor wearing a disguise
+
+`drivers/ahci/port.rs` was on that list with eight, five of them on `weak_self`.
+Reading them as "a `OnceCell` filled at construction and read from a `&self` that
+cannot precede it" was accurate and led to the wrong conclusion, that converting
+them buys the caller an error it can only panic on. The `expect` was not the
+defect; it was the report of one. `AhciPort` was built in three phases —
+`AhciPort::new`, then `set_weak_self` from `ahci/mod.rs`, then `set_device_type`
+from `controller.rs` after the signature read — and every phase left a field the
+type system said was there and the value said was not.
+
+`Arc::new_cyclic` removes the first: `AhciPort::new` returns `Arc<Self>` and
+`weak_self` is a plain `Weak<AhciPort>` set inside the closure, so there is no
+window in which it is unset and nothing to call. All fallible work (`stop_port`,
+the three `dma().allocate()`) happens before the struct literal, which is what
+lets a `Result` wrap a `new_cyclic` whose closure cannot fail.
+
+`set_device_type` existed because the port's signature register only reads back
+once FRE/ST are set, so the caller learned the device type after `new` returned.
+That read now lives at the end of `new`, where the port has just been started,
+and a signature naming neither ATA nor ATAPI is `AhciError::InvalidDevice`
+instead of a port that is silently dropped by the caller. `AhciController.ports`
+is `Vec<Option<Arc<AhciPort>>>` and the direct layer takes them as they are.
+
+Left behind and correctly so: `command_tables` and `slot_pools` really are
+two-phase, because the slot count is only known after IDENTIFY, and `self_arc()`
+keeps one `expect` for an upgrade that cannot fail while the caller holds the
+`&self` it was reached through.
 
 `fs/efs/mod.rs` came off that list by deduplication rather than by conversion:
 eight of its nine were the same

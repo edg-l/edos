@@ -28,8 +28,8 @@ use crate::{
                 CMD_HEADER_ATAPI, CMD_HEADER_WRITE, CommandHeader, CommandTable,
                 DeviceIdentifyInfo, HbaFis, HbaPort, INQUIRY_ALLOCATION_LEN, MAX_PRDT_ENTRIES,
                 MIN_INQUIRY_BYTES, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE, PORT_CMD_ST,
-                PORT_IS_TFES, PrdtEntry, READ_CAPACITY_10_LEN, ScsiInquiry, ScsiRead10,
-                ScsiReadCapacity10,
+                PORT_IS_TFES, PrdtEntry, READ_CAPACITY_10_LEN, SATA_SIG_ATA, SATA_SIG_ATAPI,
+                ScsiInquiry, ScsiRead10, ScsiReadCapacity10,
             },
         },
         dma::{DmaBuffer, DmaRegion, dma},
@@ -181,7 +181,7 @@ pub struct AhciPort {
     // Weak self-reference for cancel path: `AhciSlotOp::cancel` upgrades this
     // to call `release_orphaned_slot`. Set immediately after `Arc::new(port)`
     // in `ahci/mod.rs`; must not be called before that.
-    weak_self: Once<Weak<AhciPort>>,
+    weak_self: Weak<AhciPort>,
 
     // NCQ / non-NCQ mode exclusion (only meaningful when ncq_enabled).
     //   > 0 : count of in-flight NCQ (FPDMA) commands
@@ -219,11 +219,10 @@ unsafe impl Sync for AhciPort {}
 // ---------------------------------------------------------------------------
 
 impl AhciPort {
-    pub fn new(
-        port_idx: usize,
-        port_regs: *mut HbaPort,
-        device_type: DeviceType,
-    ) -> Result<Self, AhciError> {
+    /// Program CLB/FB, start the port, and classify the attached device from
+    /// its signature register, which only reads back once FRE/ST are set.
+    /// A signature naming neither ATA nor ATAPI is `InvalidDevice`.
+    pub fn new(port_idx: usize, port_regs: *mut HbaPort) -> Result<Arc<Self>, AhciError> {
         log!("Initializing AHCI port {}", port_idx);
 
         Self::stop_port(port_regs)?;
@@ -270,6 +269,30 @@ impl AhciPort {
             ptr::write_volatile(&raw mut (*port_regs).ie, ie);
         }
 
+        // The signature register is only meaningful after the port is started,
+        // and a freshly started port can report 0xffffffff for a few ms.
+        let mut signature = unsafe { ptr::read_volatile(&raw const (*port_regs).sig) };
+        let mut attempts = 0;
+        while signature == 0xffffffff && attempts < 5 {
+            thread_sleep(Duration::from_millis(5));
+            signature = unsafe { ptr::read_volatile(&raw const (*port_regs).sig) };
+            attempts += 1;
+        }
+        let device_type = match signature {
+            SATA_SIG_ATA => {
+                log!("Found SATA drive on port {}", port_idx);
+                DeviceType::Ata
+            }
+            SATA_SIG_ATAPI => {
+                log!("Found ATAPI device on port {}", port_idx);
+                DeviceType::Atapi
+            }
+            sig => {
+                log!("Port {} has unsupported signature: {:#x}", port_idx, sig);
+                return Err(AhciError::InvalidDevice);
+            }
+        };
+
         // Pre-allocate command table for slot 0 (needed for IDENTIFY during init).
         // Allocate outside `call_once` so we can propagate failure via `?`.
         let command_tables: [Once<DmaRegion<CommandTable>>; AHCI_CMD_SLOTS] =
@@ -279,7 +302,7 @@ impl AhciPort {
 
         log!("Port {} initialized successfully", port_idx);
 
-        Ok(Self {
+        Ok(Arc::new_cyclic(|weak_self| Self {
             port_idx,
             port_regs,
             device_type,
@@ -296,20 +319,20 @@ impl AhciPort {
             mmio_lock: spin::Mutex::new(()),
             slot_waiters: [const { spin::Mutex::new(None) }; AHCI_CMD_SLOTS],
             ncq_waiters: [const { spin::Mutex::new(None) }; AHCI_CMD_SLOTS],
-            weak_self: Once::new(),
+            weak_self: weak_self.clone(),
             mode: AtomicI32::new(0),
             mode_waitq: WaitQueue::new(),
             slot_waitq: WaitQueue::new(),
             restarting: AtomicBool::new(false),
             reset_generation: AtomicU32::new(0),
             legacy_lock: BlockingMutex::new(()),
-        })
+        }))
     }
 
     /// Post-identify initialization: allocate per-slot DMA pools and command tables.
     ///
     /// `ncq_depth`: effective NCQ queue depth (min of HBA and device). 0 if no NCQ.
-    /// Must be called exactly once, after `set_weak_self`.
+    /// Must be called exactly once.
     pub fn init_io_pools(&self, ncq_depth: u8, supports_fua: bool) -> Result<(), AhciError> {
         let use_ncq = ncq_depth > 0 && self.device_type == DeviceType::Ata;
         self.ncq_depth
@@ -517,33 +540,19 @@ impl AhciPort {
         Ok(())
     }
 
-    pub fn set_device_type(&mut self, device_type: DeviceType) {
-        self.device_type = device_type;
-    }
-
     /// Publish the capacity IDENTIFY reported, so raw access through `/dev`
     /// can bounds-check against it.
     pub fn set_sector_count(&self, sectors: u64) {
         self.sector_count.store(sectors, Ordering::Release);
     }
 
-    /// Store the weak self-reference. Called immediately after `Arc::new(port)`
-    /// in `ahci/mod.rs` before the port enters `DIRECT_PORTS`.
-    pub fn set_weak_self(&self, weak: Weak<AhciPort>) {
-        self.weak_self.call_once(|| weak);
-    }
-
     /// Upgrade `weak_self` to a strong `Arc<AhciPort>`.
     ///
     /// # Panics
-    /// - If called before `set_weak_self`.
-    /// - If the port has been dropped (should not happen when called from
-    ///   within a method on `&self`).
-    #[allow(dead_code)]
+    /// If the port has been dropped, which cannot happen while the caller holds
+    /// the `&self` this was reached through.
     pub fn self_arc(&self) -> Arc<AhciPort> {
         self.weak_self
-            .get()
-            .expect("AhciPort::self_arc called before set_weak_self")
             .upgrade()
             .expect("AhciPort dropped while self_arc() caller held &self")
     }
@@ -698,11 +707,7 @@ impl AhciPort {
     ) -> Result<R, AhciError> {
         let slot = self.allocate_slot().ok_or(AhciError::PortNotReady)?;
 
-        let port_weak = self
-            .weak_self
-            .get()
-            .cloned()
-            .expect("AhciPort::set_weak_self must be called before any command submission");
+        let port_weak = self.weak_self.clone();
         let waiter = current_thread_weak().unwrap_or_default();
         let op = Arc::new(AhciSlotOp::new(port_weak, slot, waiter));
         **ranked_lock!(
@@ -1152,11 +1157,7 @@ impl AhciPort {
         start_gen: u32,
     ) -> (usize, Arc<AhciNcqOp>) {
         let slot = self.allocate_slot_blocking();
-        let weak_port = self
-            .weak_self
-            .get()
-            .cloned()
-            .expect("AhciPort::set_weak_self not called before submit");
+        let weak_port = self.weak_self.clone();
         let submitter = current_thread_weak().unwrap_or_default();
         let op = Arc::new(AhciNcqOp::new(
             weak_port, slot, submitter, start_gen, handle, buffer, completion,
@@ -1908,7 +1909,7 @@ impl AhciPort {
         }
     }
 
-    /// Issue IDENTIFY DEVICE. Called during init after `set_weak_self`.
+    /// Issue IDENTIFY DEVICE. Called during init, before the I/O pools exist.
     pub fn identify_device(&self) -> Result<DeviceIdentifyInfo, AhciError> {
         match self.device_type {
             DeviceType::Ata => self.execute_ata_identify(),
@@ -2175,12 +2176,7 @@ impl AsyncBlockDevice for AhciPort {
 
         // NCQ-enabled ATA: real async submit.
         if self.device_type == DeviceType::Ata && self.ncq_enabled() {
-            let arc_self = self
-                .weak_self
-                .get()
-                .and_then(|w| w.upgrade())
-                .expect("AhciPort::set_weak_self not called");
-            return arc_self.submit_ncq_read(lba, sectors_u16, buffer);
+            return self.self_arc().submit_ncq_read(lba, sectors_u16, buffer);
         }
 
         // Legacy ATA / ATAPI: sync internally, pre-completed handle.
@@ -2220,12 +2216,9 @@ impl AsyncBlockDevice for AhciPort {
             && self.ncq_enabled()
             && (!needs_fua || self.supports_fua())
         {
-            let arc_self = self
-                .weak_self
-                .get()
-                .and_then(|w| w.upgrade())
-                .expect("AhciPort::set_weak_self not called");
-            return arc_self.submit_ncq_write(lba, sectors_u16, buffer, needs_fua);
+            return self
+                .self_arc()
+                .submit_ncq_write(lba, sectors_u16, buffer, needs_fua);
         }
 
         // Fallback: sync write + (optional flush) for durability.

@@ -1,6 +1,6 @@
 use core::ptr;
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use x86_64::{
     PhysAddr,
     structures::paging::{PageTableFlags, mapper::TranslateResult},
@@ -11,11 +11,11 @@ use crate::{
     apic::init::configure_device_interrupt,
     drivers::{
         ahci::{
-            AhciError, DeviceType,
+            AhciError,
             port::AhciPort,
             structures::{
                 GHC_AE, GHC_IE, HbaMemory, HbaPort, PORT_CMD_CR, PORT_CMD_POD, PORT_CMD_ST,
-                PORT_CMD_SUD, SATA_SIG_ATA, SATA_SIG_ATAPI,
+                PORT_CMD_SUD,
             },
         },
         msi,
@@ -29,8 +29,8 @@ use crate::{
 
 pub struct AhciController {
     pub hba: *mut HbaMemory,
-    /// Ports owned until they are moved into Arc<AhciPort> by the direct layer.
-    pub ports: Vec<Option<AhciPort>>,
+    /// Discovered ports, taken by the direct layer once it registers them.
+    pub ports: Vec<Option<Arc<AhciPort>>>,
     pub pci_device: PciDevice,
     pub supports_ncq: bool,
     pub num_command_slots: u8, // 1-32
@@ -243,41 +243,9 @@ impl AhciController {
                 // Basic init only (power/spin-up); AhciPort::new will start FRE/ST once
                 self.initialize_port(port_ptr, i)?;
 
-                // Initialize AHCI port (program CLB/FB, enable FRE/ST)
-                match AhciPort::new(i, port_ptr, DeviceType::Ata) {
-                    Ok(port) => {
-                        // Read signature with a short bounded wait after start
-                        let mut signature =
-                            unsafe { ptr::read_volatile(&raw const (*port_ptr).sig) };
-                        if signature == 0xffffffff {
-                            let mut attempts = 0;
-                            while signature == 0xffffffff && attempts < 5 {
-                                thread_sleep(core::time::Duration::from_millis(5));
-                                signature =
-                                    unsafe { ptr::read_volatile(&raw const (*port_ptr).sig) };
-                                attempts += 1;
-                            }
-                        }
-
-                        match signature {
-                            SATA_SIG_ATA => {
-                                log!("Found SATA drive on port {}", i);
-                                let mut port = port;
-                                port.set_device_type(DeviceType::Ata);
-                                self.ports[i] = Some(port);
-                            }
-                            SATA_SIG_ATAPI => {
-                                log!("Found ATAPI device on port {}", i);
-                                let mut port = port;
-                                port.set_device_type(DeviceType::Atapi);
-                                self.ports[i] = Some(port);
-                            }
-                            sig => {
-                                log!("Port {} has unsupported/invalid signature: {:#x}", i, sig);
-                                // Unsupported signature; do not keep the port
-                            }
-                        }
-                    }
+                // Initialize AHCI port (program CLB/FB, enable FRE/ST, classify)
+                match AhciPort::new(i, port_ptr) {
+                    Ok(port) => self.ports[i] = Some(port),
                     Err(e) => {
                         log!("Failed to initialize port {}: {:?}", i, e);
                     }
