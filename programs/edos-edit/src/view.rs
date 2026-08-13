@@ -13,7 +13,7 @@ use edos_render::text::{self, Style, Surface};
 use edos_render::theme::Theme;
 use edos_render::widgets::{Rect, char_width, draw_rect, text_width};
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, Position};
 use crate::syntax::{self, TokenKind};
 use crate::tree::Tree;
 
@@ -47,6 +47,10 @@ const TAB_MAX_W: u32 = space(48);
 const TAB_CLOSE_W: u32 = space(6);
 /// What stands in for the part of a name that did not fit.
 const ELLIPSIS: &str = "…";
+/// Reserved width from the prompt field's right edge to the bar's own edge,
+/// for the report — enough for "Not a line number", the longest string the
+/// bar prints.
+const PROMPT_REPORT_W: u32 = space(48);
 
 /// Number of decimal digits in `n`, with 0 counting as one digit.
 fn digits(n: usize) -> u32 {
@@ -73,7 +77,6 @@ pub struct Layout {
     /// Left edge of the first text column.
     pub text_x: i32,
     /// Set only while the find/go-to-line/open prompt is showing.
-    #[allow(dead_code)]
     pub prompt: Option<Rect>,
     pub status: Rect,
     pub rows_visible: usize,
@@ -172,6 +175,20 @@ pub fn line_at(layout: &Layout, scroll_line: usize, y: i32) -> Option<usize> {
 pub fn col_at(layout: &Layout, scroll_col: usize, x: i32) -> usize {
     let rel = (x - layout.text_x).max(0) as u32;
     scroll_col + (rel / char_width()) as usize
+}
+
+/// Where the prompt bar's field sits: after its label, leaving room on the
+/// right for the report. The field is constructed with this rectangle once,
+/// when the prompt opens, and draws itself from then on — there is only one
+/// field at a time, so unlike the tree and the tabs this geometry has no
+/// separate hit-testing copy to stay in step with.
+pub fn prompt_field_rect(rect: Rect, label: &str) -> Rect {
+    let label_w = text_width(label);
+    let field_x = rect.x + PAD as i32 * 2 + label_w as i32;
+    let field_y = rect.y + (rect.height as i32 - CONTROL_HEIGHT as i32) / 2;
+    let field_w = (rect.width as i32 - (field_x - rect.x) - PROMPT_REPORT_W as i32 - PAD as i32)
+        .max(0) as u32;
+    Rect::new(field_x, field_y, field_w, CONTROL_HEIGHT)
 }
 
 /// Height of the sidebar's header — the root directory's name — that the
@@ -486,7 +503,13 @@ pub fn draw_sidebar(
 /// in this file instead of the face's true fractional advance. Each cell's
 /// colour comes from the token covering it; only the colour, never the
 /// geometry, moves.
-pub fn draw_pane(canvas: &mut Canvas, layout: &Layout, buffer: &mut Buffer) {
+pub fn draw_pane(
+    canvas: &mut Canvas,
+    layout: &Layout,
+    buffer: &mut Buffer,
+    find_matches: &[(Position, usize)],
+    find_current: Option<usize>,
+) {
     let theme = &Theme::DEFAULT;
     canvas.fill(layout.pane, theme.background.raw());
 
@@ -584,6 +607,34 @@ pub fn draw_pane(canvas: &mut Canvas, layout: &Layout, buffer: &mut Buffer) {
             }
         }
 
+        // Find matches on this line, clipped to the visible columns: every
+        // one gets `editor_selection`, and the one the field has walked to
+        // gets `focus_ring` instead, so it reads apart from the rest.
+        for (index, &(pos, match_len)) in find_matches.iter().enumerate() {
+            if pos.line != line_index {
+                continue;
+            }
+            let start_col = pos.col.max(buffer.scroll_col);
+            let end_col = (pos.col + match_len).min(buffer.scroll_col + visible_cols);
+            if end_col <= start_col {
+                continue;
+            }
+            let rect = cell_rect(
+                layout,
+                buffer.scroll_line,
+                buffer.scroll_col,
+                line_index,
+                start_col,
+            );
+            let width = (end_col - start_col) as u32 * char_width();
+            let color = if Some(index) == find_current {
+                theme.focus_ring.raw()
+            } else {
+                theme.editor_selection.raw()
+            };
+            canvas.fill(Rect::new(rect.x, rect.y, width, layout.line_h), color);
+        }
+
         for (col, ch) in line
             .text
             .chars()
@@ -673,5 +724,28 @@ pub fn draw_status(
         layout.status,
         volume,
         sans_small(theme.text_placeholder.raw()),
+    );
+}
+
+/// Draw the shared prompt bar: the fill, the leading label (`Find` / `Line` /
+/// `Open`) and the right-aligned report. The field between them is a real
+/// `TextInput` and draws itself, through `WidgetContainer::draw_all`. Read
+/// as a count rather than an error even when it names a failure — the bar
+/// has no warning colour of its own — so it draws in `label_text`.
+pub fn draw_prompt(canvas: &mut Canvas, rect: Rect, label: &str, report: &str) {
+    let theme = &Theme::DEFAULT;
+    canvas.fill(rect, theme.input_bg.raw());
+    canvas.hline(rect.x, rect.y, rect.width, theme.input_border.raw());
+    canvas.text_in(
+        rect.x + PAD as i32,
+        rect,
+        label,
+        sans_strong(theme.text_primary.raw()),
+    );
+    canvas.text_right(
+        rect.x + rect.width as i32 - PAD as i32,
+        rect,
+        report,
+        sans_small(theme.label_text.raw()),
     );
 }

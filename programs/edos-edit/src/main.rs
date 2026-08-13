@@ -2,9 +2,9 @@
 //!
 //! A window with a file tree, tabs, and one editor pane, in the shape a
 //! person who uses VS Code already knows: click a file in the tree, type into
-//! it, Ctrl+S. Selection, undo/redo, save and syntax colouring all work
-//! through the same document the tab strip switches between. The find bar,
-//! go-to-line and the open prompt are not implemented yet.
+//! it, Ctrl+S. Selection, undo/redo, save, syntax colouring, find, go-to-line
+//! and the open prompt all work through the same document the tab strip
+//! switches between.
 
 mod buffer;
 mod syntax;
@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use edos_lib::clipboard;
 use edos_lib::keymap::{Modifiers, keycode, map_keycode, update_modifiers};
+use edos_render::widgets::{TextInput, WidgetContainer, WidgetEvent, WidgetId};
 use edos_render::window::{Window, WindowEvent, WindowEventType};
 
 use buffer::{Buffer, Edit, Position};
@@ -52,6 +53,33 @@ struct Hover {
     tab_close: bool,
 }
 
+/// What the shared prompt bar at the pane's foot is doing. Only one at a
+/// time — opening one replaces whatever was already open.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PromptKind {
+    Find,
+    GoTo,
+    Open,
+}
+
+/// The label the prompt bar shows for `kind`.
+fn prompt_label(kind: PromptKind) -> &'static str {
+    match kind {
+        PromptKind::Find => "Find",
+        PromptKind::GoTo => "Line",
+        PromptKind::Open => "Open",
+    }
+}
+
+/// The prompt bar's live state: a real `TextInput` in a `WidgetContainer`,
+/// built and fed exactly the way `edos-files::Rename` builds its inline
+/// field.
+struct PromptState {
+    kind: PromptKind,
+    widgets: WidgetContainer,
+    field: WidgetId,
+}
+
 struct App {
     window: Window,
     buffers: Vec<Buffer>,
@@ -71,6 +99,19 @@ struct App {
     /// because it carried unsaved changes. A second press on the same tab
     /// closes it; switching tabs or closing anything else clears this.
     close_confirm: Option<usize>,
+    /// The find/go-to-line/open prompt, while one is open.
+    prompt: Option<PromptState>,
+    /// What Go To Line or Open has to report after a failed `Submit` — "Not a
+    /// line number", or an `io::Error`'s message. Find's own report is
+    /// computed live from `find_matches` instead, since it changes on every
+    /// keystroke rather than only on submission.
+    prompt_message: String,
+    /// Every literal, case-insensitive match of the find field's text across
+    /// the whole buffer, recomputed on every keystroke.
+    find_matches: Vec<(Position, usize)>,
+    /// Index into `find_matches` of the one Enter or Shift+Enter last walked
+    /// to.
+    find_current: Option<usize>,
 }
 
 impl App {
@@ -90,6 +131,10 @@ impl App {
             tree,
             hover: Hover::default(),
             close_confirm: None,
+            prompt: None,
+            prompt_message: String::new(),
+            find_matches: Vec::new(),
+            find_current: None,
         };
         app.buffer_mut().clamp_cursor();
         app.update_title();
@@ -450,15 +495,221 @@ impl App {
         self.tree.scroll = self.tree.scroll.min(max);
     }
 
+    // --- Prompt bar ---------------------------------------------------------
+
+    /// Open the shared prompt bar as `kind`, seeded the way each one wants —
+    /// Find with the current selection, Open with the active buffer's own
+    /// directory, Go To with nothing — and replacing whatever prompt was
+    /// already open. Built the way `edos-files::begin_rename` builds its
+    /// inline field: a fresh `WidgetContainer` holding one focused
+    /// `TextInput`, positioned from the layout the prompt bar itself is
+    /// about to occupy.
+    fn open_prompt(&mut self, kind: PromptKind) {
+        let (width, height) = (self.window.width, self.window.height);
+        let layout = view::Layout::new(
+            width,
+            height,
+            self.sidebar_open,
+            true,
+            self.buffer().lines.len(),
+        );
+        let Some(rect) = layout.prompt else {
+            return;
+        };
+        let field_rect = view::prompt_field_rect(rect, prompt_label(kind));
+        let seed = match kind {
+            PromptKind::Find => self.buffer().selected_text().unwrap_or_default(),
+            PromptKind::GoTo => String::new(),
+            PromptKind::Open => root_dir(self.buffer()),
+        };
+
+        let mut field = TextInput::new(0, field_rect.x, field_rect.y, field_rect.width);
+        field.set_text(&seed);
+        let mut widgets = WidgetContainer::new();
+        let field = widgets.add(field);
+        widgets.set_focus(field);
+
+        self.status = None;
+        self.prompt_message = String::new();
+        self.prompt = Some(PromptState {
+            kind,
+            widgets,
+            field,
+        });
+        if kind == PromptKind::Find {
+            self.recompute_find(&seed);
+        }
+    }
+
+    /// Close the prompt bar, if one is open, and drop the find highlight
+    /// that goes with it.
+    fn dismiss_prompt(&mut self) {
+        if self.prompt.take().is_some() {
+            self.find_matches.clear();
+            self.find_current = None;
+            self.prompt_message.clear();
+        }
+    }
+
+    /// What the prompt bar's report region says, on the right of the field.
+    fn prompt_report(&self) -> String {
+        let Some(prompt) = &self.prompt else {
+            return String::new();
+        };
+        match prompt.kind {
+            PromptKind::Find => {
+                if self.find_matches.is_empty() {
+                    "No matches".to_string()
+                } else {
+                    format!(
+                        "{} of {}",
+                        self.find_current.map_or(0, |i| i + 1),
+                        self.find_matches.len()
+                    )
+                }
+            }
+            PromptKind::GoTo | PromptKind::Open => self.prompt_message.clone(),
+        }
+    }
+
+    /// Feed one window event to the prompt's field, after the shortcuts in
+    /// `on_key` have had no chance to also act on it — the same order
+    /// `edos-files::feed_rename` follows.
+    fn feed_prompt(&mut self, event: &WindowEvent) {
+        let Some(prompt) = self.prompt.as_mut() else {
+            return;
+        };
+        let mut result = None;
+        for (id, widget_event) in prompt.widgets.handle_event(event) {
+            if id == prompt.field {
+                result = Some(widget_event);
+            }
+        }
+        match result {
+            Some(WidgetEvent::TextChanged(text)) => self.on_prompt_text_changed(text),
+            Some(WidgetEvent::Submit(text)) => self.on_prompt_submit(text),
+            _ => {}
+        }
+    }
+
+    fn on_prompt_text_changed(&mut self, text: String) {
+        self.prompt_message.clear();
+        let kind = self.prompt.as_ref().map(|prompt| prompt.kind);
+        if kind == Some(PromptKind::Find) {
+            self.recompute_find(&text);
+        }
+    }
+
+    fn on_prompt_submit(&mut self, text: String) {
+        let Some(kind) = self.prompt.as_ref().map(|prompt| prompt.kind) else {
+            return;
+        };
+        match kind {
+            PromptKind::Find => self.find_step(!self.mods.shift),
+            PromptKind::GoTo => self.submit_goto(&text),
+            PromptKind::Open => self.submit_open(&text),
+        }
+    }
+
+    /// Recompute every literal, case-insensitive match of `query` across the
+    /// whole buffer, and make the first one current. Case folding is ASCII
+    /// only, so it never changes a match's length against the original text.
+    fn recompute_find(&mut self, query: &str) {
+        let mut matches = Vec::new();
+        if !query.is_empty() {
+            let needle: Vec<char> = query.chars().map(|c| c.to_ascii_lowercase()).collect();
+            for (line_index, line) in self.buffer().lines.iter().enumerate() {
+                let haystack: Vec<char> =
+                    line.text.chars().map(|c| c.to_ascii_lowercase()).collect();
+                if haystack.len() < needle.len() {
+                    continue;
+                }
+                for start in 0..=(haystack.len() - needle.len()) {
+                    if haystack[start..start + needle.len()] == needle[..] {
+                        matches.push((
+                            Position {
+                                line: line_index,
+                                col: start,
+                            },
+                            needle.len(),
+                        ));
+                    }
+                }
+            }
+        }
+        self.find_current = (!matches.is_empty()).then_some(0);
+        self.find_matches = matches;
+    }
+
+    /// Step to the next (`forward`) or previous match, wrapping at either
+    /// end, scroll it into view, and select it.
+    fn find_step(&mut self, forward: bool) {
+        if self.find_matches.is_empty() {
+            return;
+        }
+        let len = self.find_matches.len();
+        let next = match self.find_current {
+            Some(i) if forward => (i + 1) % len,
+            Some(i) => (i + len - 1) % len,
+            None => 0,
+        };
+        self.find_current = Some(next);
+        let (pos, match_len) = self.find_matches[next];
+        self.buffer_mut().anchor = Some(pos);
+        self.set_cursor(Position {
+            line: pos.line,
+            col: pos.col + match_len,
+        });
+    }
+
+    /// Go to the line `text` names, 1-based and clamped to the buffer, or
+    /// report that it does not name one.
+    fn submit_goto(&mut self, text: &str) {
+        match text.trim().parse::<usize>() {
+            Ok(n) if n >= 1 => {
+                let last = self.buffer().lines.len().saturating_sub(1);
+                let line = (n - 1).min(last);
+                // Clears whatever a prior find left selected — Go To Line
+                // moves the caret, it does not extend a selection.
+                self.buffer_mut().clear_selection();
+                self.set_cursor(Position { line, col: 0 });
+                self.dismiss_prompt();
+            }
+            _ => self.prompt_message = "Not a line number".to_string(),
+        }
+    }
+
+    /// Open `text` as a path, through the same `open_path` a tree click
+    /// uses, and mirror its failure into the prompt bar rather than only the
+    /// status strip.
+    fn submit_open(&mut self, text: &str) {
+        let path = text.trim();
+        if path.is_empty() {
+            return;
+        }
+        self.open_path(path);
+        match &self.status {
+            Some((message, true)) => self.prompt_message = message.clone(),
+            _ => self.dismiss_prompt(),
+        }
+    }
+
     // --- Events -----------------------------------------------------------
 
     /// Returns false when the window should close.
     fn handle(&mut self, event: &WindowEvent) -> bool {
+        // Whether the prompt was already open when this event arrived. A key
+        // that opens it — Ctrl+F, Ctrl+G, Ctrl+O — must not also be typed
+        // into the field it just opened, so this is captured before `on_key`
+        // runs rather than read from `self.prompt` afterward.
+        let was_prompting = self.prompt.is_some();
+
         match event.event_type() {
             Some(WindowEventType::CloseRequested) => return false,
             Some(WindowEventType::Resize) => {
                 let (width, height) = (event.x as u32, event.y as u32);
                 let _ = self.window.resize(width, height);
+                self.dismiss_prompt();
                 self.clamp_tree_scroll();
             }
             Some(WindowEventType::MouseButton) => self.on_mouse_button(event),
@@ -468,17 +719,33 @@ impl App {
             }
             Some(WindowEventType::KeyPress) => {
                 // A modifier key changes state and produces no character of
-                // its own, so it is handled and consumed here rather than
-                // falling through to the movement dispatch below.
-                if update_modifiers(&mut self.mods, event.code, true) {
-                    return true;
+                // its own, so `on_key` is skipped for it — but the event
+                // still has to reach the prompt bar below, exactly as its own
+                // `KeyRelease` does. Returning early here instead would leave
+                // the prompt's own modifier tracking permanently stuck: it
+                // would see every Ctrl release but never the matching press,
+                // so `WidgetContainer`'s Ctrl+C/X/V would never fire while a
+                // prompt is open.
+                if !update_modifiers(&mut self.mods, event.code, true) {
+                    self.on_key(event.code);
                 }
-                self.on_key(event.code);
             }
             Some(WindowEventType::KeyRelease) => {
                 update_modifiers(&mut self.mods, event.code, false);
             }
             _ => {}
+        }
+
+        // The prompt's field is the only thing that wants raw keys and
+        // characters, and it wants them after the shortcuts above have had
+        // their say — never before, or the field would starve; never on the
+        // same keystroke that opened it, or that keystroke would land in it
+        // twice.
+        if was_prompting
+            && self.prompt.is_some()
+            && !matches!(event.event_type(), Some(WindowEventType::MouseMove))
+        {
+            self.feed_prompt(event);
         }
         true
     }
@@ -614,6 +881,18 @@ impl App {
     }
 
     fn on_key(&mut self, code: u32) {
+        if code == keycode::ESCAPE {
+            self.dismiss_prompt();
+            return;
+        }
+        if self.prompt.is_some() {
+            // Every other key belongs to the field. `handle` feeds it the
+            // raw event once this returns, which is what keeps this arm from
+            // starving it: returning early here only skips the document
+            // shortcuts below, not the field.
+            return;
+        }
+
         // A movement key extends the selection when Shift is held — setting
         // the anchor to wherever the cursor already sits, the first time,
         // rather than on every key so a run of Shift+Right keeps the start
@@ -661,6 +940,9 @@ impl App {
             keycode::B if self.mods.ctrl => self.toggle_sidebar(),
             keycode::W if self.mods.ctrl => self.close_active(),
             keycode::TAB if self.mods.ctrl => self.next_tab(),
+            keycode::F if self.mods.ctrl => self.open_prompt(PromptKind::Find),
+            keycode::G if self.mods.ctrl => self.open_prompt(PromptKind::GoTo),
+            keycode::O if self.mods.ctrl => self.open_prompt(PromptKind::Open),
             keycode::RETURN | keycode::NUMPAD_ENTER if !self.mods.ctrl => self.insert_str("\n"),
             keycode::BACKSPACE if !self.mods.ctrl => self.backspace(),
             keycode::DELETE if !self.mods.ctrl => self.delete_forward(),
@@ -692,7 +974,7 @@ impl App {
             width,
             height,
             self.sidebar_open,
-            false,
+            self.prompt.is_some(),
             self.buffers[active].lines.len(),
         );
 
@@ -713,6 +995,8 @@ impl App {
         let hover_tab = self.hover.tab;
         let hover_tab_close = self.hover.tab_close;
         let note = self.status.clone();
+        let prompt_bar_label = self.prompt.as_ref().map(|prompt| prompt_label(prompt.kind));
+        let prompt_report = self.prompt_report();
 
         let Some(buf) = self.window.buffer_mut() else {
             return;
@@ -742,7 +1026,13 @@ impl App {
                 active_path.as_deref(),
             );
         }
-        view::draw_pane(&mut canvas, &self.layout, &mut self.buffers[active]);
+        view::draw_pane(
+            &mut canvas,
+            &self.layout,
+            &mut self.buffers[active],
+            &self.find_matches,
+            self.find_current,
+        );
         let note_ref = note
             .as_ref()
             .map(|(message, warning)| (message.as_str(), *warning));
@@ -758,6 +1048,13 @@ impl App {
             &volume,
             note_ref,
         );
+        if let Some(rect) = self.layout.prompt {
+            let label = prompt_bar_label.unwrap_or("");
+            view::draw_prompt(&mut canvas, rect, label, &prompt_report);
+        }
+        if let Some(prompt) = &self.prompt {
+            prompt.widgets.draw_all(canvas.buf, width, height);
+        }
 
         self.window.swap_buffers();
     }
