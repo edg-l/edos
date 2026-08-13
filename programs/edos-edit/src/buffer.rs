@@ -8,11 +8,17 @@
 
 use std::fs;
 
+use crate::syntax::{self, Lang, Token};
+
 /// One line of text, without its terminator.
 pub struct Line {
     pub text: String,
     /// Differs from what was read off the disk.
     pub changed: bool,
+    /// Tokens, once anyone has asked. Cleared when the line is edited.
+    pub tokens: Option<Vec<Token>>,
+    /// Whether this line begins inside a block comment.
+    pub opens_in_block: bool,
 }
 
 /// A place in the document, in characters rather than bytes. `text_input`
@@ -71,6 +77,9 @@ pub struct Buffer {
     /// last entry instead of becoming its own, so a run of typing undoes as
     /// one word rather than one letter at a time.
     coalescing: bool,
+    /// The language this buffer's tokens and Tab key are read against, from
+    /// `syntax::for_path` on the path it opened with.
+    pub lang: &'static Lang,
 }
 
 /// One reversible change to the document. Insert and Delete are each other's
@@ -127,11 +136,13 @@ fn end_position(at: Position, text: &str) -> Position {
 impl Buffer {
     /// An empty, unsaved buffer.
     pub fn empty() -> Self {
-        Self {
+        let mut buffer = Self {
             path: None,
             lines: vec![Line {
                 text: String::new(),
                 changed: false,
+                tokens: None,
+                opens_in_block: false,
             }],
             cursor: Position::default(),
             anchor: None,
@@ -145,7 +156,10 @@ impl Buffer {
             log_at: 0,
             saved_log_at: 0,
             coalescing: false,
-        }
+            lang: syntax::for_path(""),
+        };
+        buffer.retokenize_from(0);
+        buffer
     }
 
     /// Read `path` in. Files are decoded as UTF-8 with lossy replacement
@@ -181,17 +195,21 @@ impl Buffer {
             vec![Line {
                 text: String::new(),
                 changed: false,
+                tokens: None,
+                opens_in_block: false,
             }]
         } else {
             body.split('\n')
                 .map(|text| Line {
                     text: text.to_string(),
                     changed: false,
+                    tokens: None,
+                    opens_in_block: false,
                 })
                 .collect()
         };
 
-        Ok(Self {
+        let mut buffer = Self {
             path: Some(path.to_string()),
             lines,
             cursor: Position::default(),
@@ -206,7 +224,10 @@ impl Buffer {
             log_at: 0,
             saved_log_at: 0,
             coalescing: false,
-        })
+            lang: syntax::for_path(path),
+        };
+        buffer.retokenize_from(0);
+        Ok(buffer)
     }
 
     /// Number of characters on line `index`, or 0 past the end of the buffer.
@@ -311,6 +332,8 @@ impl Buffer {
                     part.to_string()
                 },
                 changed: true,
+                tokens: None,
+                opens_in_block: false,
             })
             .collect();
         new_lines[last].text.push_str(&after);
@@ -318,6 +341,7 @@ impl Buffer {
         let end = end_position(at, text);
         self.lines.splice(at.line..=at.line, new_lines);
         self.dirty = true;
+        self.retokenize_from(at.line);
         end
     }
 
@@ -351,10 +375,62 @@ impl Buffer {
             [Line {
                 text: format!("{before}{after}"),
                 changed: true,
+                tokens: None,
+                opens_in_block: false,
             }],
         );
         self.dirty = true;
+        self.retokenize_from(from.line);
         removed
+    }
+
+    // --- Syntax -----------------------------------------------------------
+
+    /// Recompute line `index`'s tokens, then walk forward updating whether
+    /// each following line begins inside a block comment and dropping its
+    /// cached tokens, stopping as soon as a line's carried state already
+    /// matches what tokenizing produces — nothing past that point could have
+    /// changed under it. Typing `/*` at the top of a file walks to the end;
+    /// an edit that never crosses a comment boundary stops after one line.
+    pub fn retokenize_from(&mut self, index: usize) {
+        let lang = self.lang;
+        let mut i = index;
+        loop {
+            let Some(line) = self.lines.get(i) else {
+                break;
+            };
+            let (tokens, ends_in_block) = syntax::tokenize(&line.text, line.opens_in_block, lang);
+            if i == index {
+                self.lines[i].tokens = Some(tokens);
+            } else {
+                self.lines[i].tokens = None;
+            }
+            let next = i + 1;
+            match self.lines.get(next) {
+                Some(next_line) if next_line.opens_in_block != ends_in_block => {
+                    self.lines[next].opens_in_block = ends_in_block;
+                    i = next;
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Line `index`'s tokens, computed and cached the first time anything
+    /// asks. The cache is correct as soon as it is filled: every edit runs
+    /// `retokenize_from`, which keeps `opens_in_block` right even on the
+    /// lines it only invalidates rather than recomputing.
+    pub fn tokens_for(&mut self, index: usize) -> &[Token] {
+        if self.lines[index].tokens.is_none() {
+            let lang = self.lang;
+            let (tokens, _) = syntax::tokenize(
+                &self.lines[index].text,
+                self.lines[index].opens_in_block,
+                lang,
+            );
+            self.lines[index].tokens = Some(tokens);
+        }
+        self.lines[index].tokens.as_ref().unwrap()
     }
 
     /// Delete the current selection as one `Edit::Delete` covering the whole

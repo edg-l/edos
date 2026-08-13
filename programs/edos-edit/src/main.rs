@@ -7,6 +7,7 @@
 //! later phases.
 
 mod buffer;
+mod syntax;
 mod view;
 
 use std::time::Duration;
@@ -23,10 +24,6 @@ const WIN_H: u32 = 680;
 
 /// Rows moved per notch of the wheel.
 const SCROLL_STEP: usize = 3;
-
-/// What Tab inserts. The spec's language table replaces this with the open
-/// file's own indent.
-const TAB_INDENT: &str = "    ";
 
 /// Keys that move the cursor without editing, and so extend or clear a
 /// selection depending on whether Shift is held — as opposed to a shortcut
@@ -454,7 +451,10 @@ impl App {
             keycode::RETURN | keycode::NUMPAD_ENTER if !self.mods.ctrl => self.insert_str("\n"),
             keycode::BACKSPACE if !self.mods.ctrl => self.backspace(),
             keycode::DELETE if !self.mods.ctrl => self.delete_forward(),
-            keycode::TAB if !self.mods.ctrl => self.insert_str(TAB_INDENT),
+            keycode::TAB if !self.mods.ctrl => {
+                let indent = self.buffer.lang.indent.text();
+                self.insert_str(&indent);
+            }
             _ if !self.mods.ctrl => {
                 if let Some(ch) = map_keycode(code, &self.mods)
                     && !ch.is_control()
@@ -484,6 +484,8 @@ impl App {
 
         let name = buffer_name(&self.buffer).to_string();
         let root = root_label(&self.buffer);
+        let language = self.buffer.lang.name;
+        let indent_label = self.buffer.lang.indent.label();
         let encoding = if self.buffer.repaired {
             "UTF-8 (repaired)"
         } else {
@@ -504,7 +506,7 @@ impl App {
         if let Some(rect) = self.layout.sidebar {
             view::draw_sidebar(&mut canvas, rect, &root);
         }
-        view::draw_pane(&mut canvas, &self.layout, &self.buffer);
+        view::draw_pane(&mut canvas, &self.layout, &mut self.buffer);
         let note = self
             .status
             .as_ref()
@@ -513,10 +515,10 @@ impl App {
             &mut canvas,
             &self.layout,
             &name,
-            "Plain text",
+            language,
             self.buffer.cursor.line + 1,
             self.buffer.cursor.col + 1,
-            "4 spaces",
+            &indent_label,
             encoding,
             &volume,
             note,

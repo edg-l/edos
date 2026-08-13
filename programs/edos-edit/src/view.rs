@@ -13,6 +13,7 @@ use edos_render::theme::Theme;
 use edos_render::widgets::{Rect, char_width, draw_rect};
 
 use crate::buffer::Buffer;
+use crate::syntax::{self, TokenKind};
 
 /// Width of the sidebar tree.
 pub const SIDEBAR_W: u32 = space(56);
@@ -305,23 +306,28 @@ pub fn draw_sidebar(canvas: &mut Canvas, rect: Rect, root_name: &str) {
     canvas.text(rect.x + PAD as i32, rect.y + PAD as i32, &name, style);
 }
 
-/// Draw the editor pane: background, current-line highlight, gutter, text and
-/// caret. One `text::draw` per non-space character, at `text_x + col *
-/// char_width()`, so the pen advance matches every rectangle in this file
-/// instead of the face's true fractional advance.
-pub fn draw_pane(canvas: &mut Canvas, layout: &Layout, buffer: &Buffer) {
+/// Draw the editor pane: background, current-line highlight, gutter, text,
+/// indent guides and caret. One `text::draw` per non-space character, at
+/// `text_x + col * char_width()`, so the pen advance matches every rectangle
+/// in this file instead of the face's true fractional advance. Each cell's
+/// colour comes from the token covering it; only the colour, never the
+/// geometry, moves.
+pub fn draw_pane(canvas: &mut Canvas, layout: &Layout, buffer: &mut Buffer) {
     let theme = &Theme::DEFAULT;
     canvas.fill(layout.pane, theme.background.raw());
 
     let visible_rows = layout.rows_visible.max(1);
     let visible_cols = layout.cols_visible.max(1);
     let selection = buffer.selection_range();
+    let guide_step = syntax::indent_guide_step(buffer.lang);
 
     for row in 0..visible_rows {
         let line_index = buffer.scroll_line + row;
-        let Some(line) = buffer.lines.get(line_index) else {
+        if line_index >= buffer.lines.len() {
             break;
-        };
+        }
+        let tokens = buffer.tokens_for(line_index).to_vec();
+        let line = &buffer.lines[line_index];
         let y = layout.pane.y + (row as u32 * layout.line_h) as i32;
         let current = line_index == buffer.cursor.line;
 
@@ -338,6 +344,23 @@ pub fn draw_pane(canvas: &mut Canvas, layout: &Layout, buffer: &Buffer) {
                 Rect::new(layout.ribbon_x, y, RIBBON_W, layout.line_h),
                 theme.editor_change.raw(),
             );
+        }
+
+        // Indent guides: one hairline per whole step of the line's own
+        // leading whitespace, ending right where its text begins.
+        if guide_step > 0 {
+            let lead = line.text.chars().take_while(|c| c.is_whitespace()).count();
+            for level in 1..=(lead / guide_step) {
+                let col = level * guide_step;
+                if col < buffer.scroll_col || col >= buffer.scroll_col + visible_cols {
+                    continue;
+                }
+                let x = layout.text_x + ((col - buffer.scroll_col) as u32 * char_width()) as i32;
+                canvas.fill(
+                    Rect::new(x, y, 1, layout.line_h),
+                    theme.editor_indent_guide.raw(),
+                );
+            }
         }
 
         // Line number, right-aligned in the gutter, one character at a time
@@ -394,9 +417,13 @@ pub fn draw_pane(canvas: &mut Canvas, layout: &Layout, buffer: &Buffer) {
             .skip(buffer.scroll_col)
             .take(visible_cols)
         {
-            if ch == ' ' {
+            if ch.is_whitespace() {
                 continue;
             }
+            let kind = tokens
+                .iter()
+                .find(|t| col >= t.start && col < t.start + t.len)
+                .map_or(TokenKind::Text, |t| t.kind);
             let rect = cell_rect(
                 layout,
                 buffer.scroll_line,
@@ -404,12 +431,7 @@ pub fn draw_pane(canvas: &mut Canvas, layout: &Layout, buffer: &Buffer) {
                 line_index,
                 col,
             );
-            canvas.text(
-                rect.x,
-                rect.y,
-                &ch.to_string(),
-                mono(theme.text_primary.raw()),
-            );
+            canvas.text(rect.x, rect.y, &ch.to_string(), mono(syntax::color(kind)));
         }
     }
 
