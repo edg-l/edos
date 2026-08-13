@@ -32,10 +32,10 @@ impl ArpPacket {
             hlen: data[4],
             plen: data[5],
             oper: u16::from_be_bytes([data[6], data[7]]),
-            sha: <[u8; 6]>::try_from(&data[8..14]).unwrap(),
-            spa: <[u8; 4]>::try_from(&data[14..18]).unwrap(),
-            tha: <[u8; 6]>::try_from(&data[18..24]).unwrap(),
-            tpa: <[u8; 4]>::try_from(&data[24..28]).unwrap(),
+            sha: data[8..14].try_into().ok()?,
+            spa: data[14..18].try_into().ok()?,
+            tha: data[18..24].try_into().ok()?,
+            tpa: data[24..28].try_into().ok()?,
         })
     }
 
