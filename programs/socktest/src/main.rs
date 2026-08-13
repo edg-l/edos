@@ -233,6 +233,57 @@ fn connect_cases(passed: &mut u32, failed: &mut u32) {
     net::close(listener);
 }
 
+/// A datagram to 127.0.0.1 and back.
+///
+/// The stack rewrites the source of a loopback packet to 127.0.0.1, so a
+/// checksum computed from the interface address covers an address that never
+/// appeared on the datagram and the receiver discards it. Needs no network.
+fn udp_loopback_case(passed: &mut u32, failed: &mut u32) {
+    const PORT: u16 = 7879;
+
+    let Ok(fd) = net::create_udp_socket() else {
+        check(passed, failed, "udp socket", false, "socket failed".into());
+        return;
+    };
+    if net::bind(fd, &SockAddrIn::new([0, 0, 0, 0], PORT)).is_err() {
+        check(passed, failed, "udp bind", false, format!("port {PORT}"));
+        net::close(fd);
+        return;
+    }
+
+    let payload = b"loopback datagram";
+    let sent = net::sendto(fd, payload, Some(&SockAddrIn::new([127, 0, 0, 1], PORT)));
+
+    // Loopback delivers inside the sending syscall, so the datagram is already
+    // queued; MSG_DONTWAIT keeps a lost one from hanging the test.
+    let mut buf = [0u8; 128];
+    let mut addr = SockAddrIn::new([0; 4], 0);
+    let mut addr_len = SOCKADDR_LEN;
+    let got = net::recvfrom_flags(
+        fd,
+        &mut buf,
+        MSG_DONTWAIT,
+        Some((&mut addr, &mut addr_len)),
+    );
+
+    check(
+        passed,
+        failed,
+        "udp loopback round trip",
+        sent == Ok(payload.len()) && got == Ok(payload.len()) && &buf[..payload.len()] == payload,
+        format!("sent {sent:?}, received {got:?}"),
+    );
+    check(
+        passed,
+        failed,
+        "udp loopback source",
+        addr.addr == [127, 0, 0, 1] && u16::from_be(addr.port) == PORT,
+        format!("from {:?}:{}", addr.addr, u16::from_be(addr.port)),
+    );
+
+    net::close(fd);
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let server = args
@@ -341,6 +392,7 @@ fn main() {
     net::close(fd);
 
     connect_cases(&mut passed, &mut failed);
+    udp_loopback_case(&mut passed, &mut failed);
 
     println!("{passed} passed, {failed} failed");
     if failed > 0 {

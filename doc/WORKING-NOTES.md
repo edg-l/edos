@@ -113,8 +113,7 @@ dropped anything addressed elsewhere.
 
 Nothing had ever connected to `127.0.0.1` in this system, which is why a
 loopback path that could not complete a handshake sat there looking implemented.
-UDP over loopback is untested for the same reason and probably has the same
-checksum problem, since `sys_sendto` builds its datagram from `local_ip` too.
+UDP carried the same defect and is dealt with in the next section.
 
 **The errno list is ABI, so a new code goes on the end.** `SYS_ERRNO` returns the
 `Errno` discriminant, and `edos_rt`'s copy of the enum maps anything past its own
@@ -126,11 +125,47 @@ runtime predates compares raw numbers from `edos_lib::io::last_errno_raw()`
 against `/proc/syscalls`, which publishes the kernel's own name-to-number table;
 `socktest` does exactly that rather than hardcoding 27.
 
-`programs/socktest` covers the whole contract over loopback -- 14 checks, all
+`programs/socktest` covers the whole contract over loopback -- 16 checks, all
 green in a headless guest -- plus one case against an address nothing answers,
 which is the only way to observe `EINPROGRESS` itself: loopback delivers inside
 the sending syscall, so a connect there has already succeeded or been refused by
 the time it returns, and reporting that is correct.
+
+---
+
+## UDP carried the same loopback defect, and nothing could see it
+
+`send_udp` checksummed its datagram from `stack.local_ip` while `send_ip_inner`
+rewrote a loopback packet's source to `127.0.0.1`, exactly as TCP had. The reason
+this was invisible where TCP's was fatal: `tcp::parse` takes the two addresses
+and verifies the pseudo-header checksum, and `udp::parse` **took neither and
+verified nothing**. Every UDP datagram this system ever sent to `127.0.0.1` went
+out with a checksum over an address that never appeared on it, and was accepted
+anyway, on this stack and nowhere else.
+
+Three things changed, and the middle one is what makes the other two provable:
+
+- **One rule for the source address.** `NetStack::source_ip_for(dst)` is now the
+  only place that decides it, called by `send_ip_inner`, `send_udp` and
+  `sys_connect`. The rule was previously written out three times and had already
+  drifted twice; a fourth transport must not copy it again.
+- **`udp::parse` verifies.** It takes the source and destination the IP layer
+  carried the datagram under and checks the pseudo-header checksum, mirroring
+  `tcp::parse`. RFC 768 makes the checksum optional over IPv4 and reserves a
+  transmitted zero for "sender computed none", so only a non-zero field is
+  checked. It checksums `data[..length]` rather than the whole payload, because a
+  frame padded to the Ethernet minimum carries trailing bytes the sender never
+  covered.
+- **`udp::build` sends a computed zero as `0xFFFF`**, per RFC 768, since a
+  transmitted zero has that other meaning. Rare, and it would have read as "no
+  checksum" to any conformant peer.
+
+Verified in a headless guest both ways: 16/16 with the fix, and reverting only
+the `source_ip_for` call in `send_udp` puts the new case red
+(`sent Ok(17), received Err(())`) while the other 14 stay green. The DNS half of
+`socktest` answers from 10.0.2.3 across both runs, which is the check that
+matters for the new verification -- a receive-side checksum test that is wrong
+drops real traffic, and this one does not.
 
 ---
 
@@ -1362,9 +1397,9 @@ does not have to invent them.
 | userspace programs | 117 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
 | programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 117 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
-| Rust | 101,925 code lines across 437 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 50,381 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,315 | `git rev-list --count HEAD` |
+| Rust | 101,969 code lines across 437 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 50,386 code lines | `tokei -t=Rust kernel/src` |
+| commits | 1,316 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 176, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |

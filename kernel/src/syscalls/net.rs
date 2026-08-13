@@ -272,16 +272,11 @@ pub fn sys_connect(fd: u64, addr_ptr: *const SockAddrIn, addr_len: u64) -> u64 {
             }
         };
 
-        // A loopback destination comes back to this host with 127.0.0.1 as its
-        // source, since that is the address the stack builds the packet from.
         // The connection has to be keyed and its checksums computed from the
-        // same address, or the reply matches no connection and the SYN it
-        // answers carries a checksum over an address that never appeared.
-        let local_ip = if ip[0] == 127 {
-            ip
-        } else {
-            ranked_lock!(RANK_NET_STACK, "sys_connect", net_stack()).local_ip
-        };
+        // address the stack will actually build the packet from, or the reply
+        // matches no connection and the SYN it answers carries a checksum over
+        // an address that never appeared.
+        let local_ip = ranked_lock!(RANK_NET_STACK, "sys_connect", net_stack()).source_ip_for(ip);
         let remote_sa = SocketAddr { ip, port };
         let local_sa = SocketAddr {
             ip: local_ip,

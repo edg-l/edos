@@ -146,7 +146,7 @@ impl NetStack {
     }
 
     fn handle_udp(&mut self, ip_hdr: &ipv4::Ipv4Header, data: &[u8]) {
-        let Some((udp_hdr, payload)) = udp::parse(data) else {
+        let Some((udp_hdr, payload)) = udp::parse(data, ip_hdr.src_addr, ip_hdr.dst_addr) else {
             return;
         };
 
@@ -416,6 +416,20 @@ impl NetStack {
         result
     }
 
+    /// The source address the IP layer will put on a packet to `dst_ip`.
+    ///
+    /// A loopback destination is answered from 127.0.0.1, not from the
+    /// interface address. Transport checksums cover a pseudo-header built from
+    /// this address, and TCP keys its connections by it, so every caller that
+    /// needs a source has to derive it the same way the IP layer does.
+    pub fn source_ip_for(&self, dst_ip: [u8; 4]) -> [u8; 4] {
+        if dst_ip[0] == 127 {
+            dst_ip
+        } else {
+            self.local_ip
+        }
+    }
+
     fn send_ip_inner(
         &mut self,
         dst_ip: [u8; 4],
@@ -424,11 +438,7 @@ impl NetStack {
     ) -> Result<(), &'static str> {
         // Loopback: queue for deferred processing instead of recursing.
         if dst_ip[0] == 127 || dst_ip == self.local_ip {
-            let src_ip = if dst_ip[0] == 127 {
-                dst_ip
-            } else {
-                self.local_ip
-            };
+            let src_ip = self.source_ip_for(dst_ip);
             let id = self.next_ip_id();
             let ip_pkt = ipv4::build(src_ip, dst_ip, protocol, 64, id, payload);
             let frame = ethernet::build_frame([0; 6], [0; 6], ethernet::EtherType::Ipv4, &ip_pkt);
@@ -537,7 +547,7 @@ impl NetStack {
         dst_port: u16,
         data: &[u8],
     ) -> Result<(), &'static str> {
-        let udp_pkt = udp::build(src_port, dst_port, self.local_ip, dst_ip, data);
+        let udp_pkt = udp::build(src_port, dst_port, self.source_ip_for(dst_ip), dst_ip, data);
         self.send_ip(dst_ip, ipv4::IpProtocol::Udp, &udp_pkt)
     }
 
