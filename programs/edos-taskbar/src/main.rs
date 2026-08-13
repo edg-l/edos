@@ -101,39 +101,129 @@ fn fit_label(text: &str, max_width: u32) -> String {
     out
 }
 
-/// Draw a button's fill, its icon and its label, left-aligned inside it.
-#[allow(clippy::too_many_arguments)]
-fn draw_button(
-    buf: &mut [u32],
-    w: u32,
-    h: u32,
-    hit: &Hit,
-    icon: &icons::Mask,
-    label: &str,
+/// One control as it will be drawn.
+///
+/// Deciding what to repaint means comparing this against what a buffer already
+/// holds, so everything that changes the picture has to be in here: a field
+/// left out is a change that never reaches the screen.
+#[derive(Clone, PartialEq)]
+struct Control {
+    x: i32,
+    width: u32,
+    icon: icons::Mask,
+    label: String,
     fill: Option<u32>,
     ink: u32,
-) {
+    /// The focused task's underline.
+    accent: bool,
+}
+
+impl Control {
+    /// The panel is one row of buttons, so a control's rectangle is its
+    /// horizontal span at the shared button height.
+    fn spans(&self) -> (i32, i32) {
+        (self.x, self.x + self.width as i32)
+    }
+}
+
+/// Draw a button's fill, its icon and its label, centred inside it.
+fn draw_button(buf: &mut [u32], w: u32, h: u32, control: &Control) {
     let y = panel::button_y();
-    if let Some(fill) = fill {
-        draw_rect(buf, w, h, hit.x, y, hit.width, panel::BUTTON_HEIGHT, fill);
+    if let Some(fill) = control.fill {
+        draw_rect(
+            buf,
+            w,
+            h,
+            control.x,
+            y,
+            control.width,
+            panel::BUTTON_HEIGHT,
+            fill,
+        );
     }
 
     // Icon and label are one group, centred together, so a button with a short
     // label does not leave its icon stranded against the left padding.
-    let content_w = if label.is_empty() {
+    let content_w = if control.label.is_empty() {
         icons::SIZE as u32
     } else {
-        icons::SIZE as u32 + panel::ICON_GAP + text_width(label)
+        icons::SIZE as u32 + panel::ICON_GAP + text_width(&control.label)
     };
-    let start = hit.x + (hit.width as i32 - content_w as i32) / 2;
+    let start = control.x + (control.width as i32 - content_w as i32) / 2;
 
     let icon_y = y + (panel::BUTTON_HEIGHT as i32 - icons::SIZE as i32) / 2;
-    icons::draw(buf, w, h, start, icon_y, icon, ink);
+    icons::draw(buf, w, h, start, icon_y, &control.icon, control.ink);
 
-    if !label.is_empty() {
+    if !control.label.is_empty() {
         let text_y = y + (panel::BUTTON_HEIGHT as i32 - text_height() as i32) / 2;
         let text_x = start + icons::SIZE as i32 + panel::ICON_GAP as i32;
-        draw_text(buf, w, h, text_x, text_y, label, ink);
+        draw_text(buf, w, h, text_x, text_y, &control.label, control.ink);
+    }
+
+    if control.accent {
+        draw_rect(
+            buf,
+            w,
+            h,
+            control.x,
+            y + panel::BUTTON_HEIGHT as i32 - panel::ACCENT_HEIGHT as i32,
+            control.width,
+            panel::ACCENT_HEIGHT,
+            Theme::DEFAULT.taskbar_button_accent.raw(),
+        );
+    }
+}
+
+/// What one of the panel's shm buffers already shows.
+type PanelState = (Vec<Control>, u32, u32);
+
+/// The horizontal span covering every control that differs between `previous`
+/// and `current`, or None when the difference is not describable as a span and
+/// the whole panel has to be reported.
+///
+/// Both the old and the new rectangle of a differing control are included: a
+/// label that shrank leaves pixels behind that are only inside the old one.
+fn changed_span(previous: Option<&PanelState>, current: &PanelState) -> Option<(i32, i32)> {
+    let previous = previous?;
+    // A different size or a different set of controls moves everything after
+    // the change, so there is no span worth computing.
+    if previous.1 != current.1 || previous.2 != current.2 {
+        return None;
+    }
+    if previous.0.len() != current.0.len() {
+        return None;
+    }
+
+    let mut span: Option<(i32, i32)> = None;
+    for (was, now) in previous.0.iter().zip(&current.0) {
+        if was == now {
+            continue;
+        }
+        for (left, right) in [was.spans(), now.spans()] {
+            span = Some(match span {
+                Some((l, r)) => (l.min(left), r.max(right)),
+                None => (left, right),
+            });
+        }
+    }
+    span
+}
+
+/// Lay the panel's ground: the gradient and the hairline along its top edge.
+fn draw_ground(buf: &mut [u32], w: u32, h: u32) {
+    draw_gradient_v(
+        buf,
+        w,
+        h,
+        0,
+        0,
+        w,
+        h,
+        Theme::DEFAULT.taskbar_bg_top,
+        Theme::DEFAULT.taskbar_bg_bottom,
+    );
+    for x in 0..w {
+        buf[x as usize] = Theme::DEFAULT.taskbar_separator.raw();
     }
 }
 
@@ -178,6 +268,7 @@ fn main() {
     let mut menu = menu::Menu::new();
     let mut popups = status::StatusPopups::new();
     let mut published: Vec<String> = Vec::new();
+    let mut painted: [Option<PanelState>; 2] = [None, None];
 
     loop {
         let window_count = match window_list(&mut entries) {
@@ -299,43 +390,28 @@ fn main() {
         menu.tick(windows);
         popups.tick(windows);
 
-        let w = window.width;
-        let h = window.height;
-        if let Some(buf) = window.buffer_mut() {
-            draw_gradient_v(
-                buf,
-                w,
-                h,
-                0,
-                0,
-                w,
-                h,
-                Theme::DEFAULT.taskbar_bg_top,
-                Theme::DEFAULT.taskbar_bg_bottom,
-            );
-            for x in 0..w {
-                buf[x as usize] = Theme::DEFAULT.taskbar_separator.raw();
-            }
-
-            let hover_fill = Theme::DEFAULT.taskbar_button_normal.raw();
-            for hit in &hits {
+        let hover_fill = Theme::DEFAULT.taskbar_button_normal.raw();
+        let controls: Vec<Control> = hits
+            .iter()
+            .filter_map(|hit| {
                 let is_hovered = hovered == Some(hit.action);
-                match hit.action {
+                let (icon, label, fill, ink, accent) = match hit.action {
                     Action::Launcher => {
                         let ink = if menu.is_open() {
                             Theme::DEFAULT.taskbar_button_accent
                         } else {
                             Theme::DEFAULT.taskbar_text_active
                         };
-                        let fill = (is_hovered || menu.is_open()).then_some(hover_fill);
-                        draw_button(buf, w, h, hit, &icons::APPS, "", fill, ink.raw());
+                        (
+                            icons::APPS,
+                            String::new(),
+                            (is_hovered || menu.is_open()).then_some(hover_fill),
+                            ink,
+                            false,
+                        )
                     }
                     Action::Task(id) => {
-                        let Some((entry, label)) =
-                            labelled.iter().find(|(entry, _)| entry.id == id)
-                        else {
-                            continue;
-                        };
+                        let (entry, label) = labelled.iter().find(|(entry, _)| entry.id == id)?;
                         let is_focused = focused == Some(id);
                         let ink = if is_focused {
                             Theme::DEFAULT.taskbar_text_active
@@ -351,55 +427,90 @@ fn main() {
                         } else {
                             None
                         };
-                        draw_button(buf, w, h, hit, &icons::TERMINAL, label, fill, ink.raw());
-
-                        if is_focused {
-                            draw_rect(
-                                buf,
-                                w,
-                                h,
-                                hit.x,
-                                panel::button_y() + panel::BUTTON_HEIGHT as i32
-                                    - panel::ACCENT_HEIGHT as i32,
-                                hit.width,
-                                panel::ACCENT_HEIGHT,
-                                Theme::DEFAULT.taskbar_button_accent.raw(),
-                            );
-                        }
+                        (icons::TERMINAL, label.clone(), fill, ink, is_focused)
                     }
                     Action::Volume | Action::Network => {
                         let (icon, kind) = if hit.action == Action::Volume {
-                            (&icons::VOLUME, status::Kind::Volume)
+                            (icons::VOLUME, status::Kind::Volume)
                         } else {
-                            (&icons::NETWORK, status::Kind::Network)
+                            (icons::NETWORK, status::Kind::Network)
                         };
                         let is_open = popups.open_kind() == Some(kind);
-                        let fill = (is_hovered || is_open).then_some(hover_fill);
                         let ink = if is_open {
                             Theme::DEFAULT.taskbar_button_accent
                         } else {
                             Theme::DEFAULT.taskbar_text
                         };
-                        draw_button(buf, w, h, hit, icon, "", fill, ink.raw());
+                        (
+                            icon,
+                            String::new(),
+                            (is_hovered || is_open).then_some(hover_fill),
+                            ink,
+                            false,
+                        )
                     }
-                    Action::Clock => {
-                        let fill = is_hovered.then_some(hover_fill);
-                        draw_button(
-                            buf,
-                            w,
-                            h,
-                            hit,
-                            &icons::CLOCK,
-                            &clock,
-                            fill,
-                            Theme::DEFAULT.taskbar_clock_text.raw(),
-                        );
-                    }
+                    Action::Clock => (
+                        icons::CLOCK,
+                        clock.clone(),
+                        is_hovered.then_some(hover_fill),
+                        Theme::DEFAULT.taskbar_clock_text,
+                        false,
+                    ),
+                };
+                Some(Control {
+                    x: hit.x,
+                    width: hit.width,
+                    icon,
+                    label,
+                    fill,
+                    ink: ink.raw(),
+                    accent,
+                })
+            })
+            .collect();
+
+        // Redrawing an unchanged panel is not free: swapping reports damage and
+        // the compositor answers by transferring the whole 1280-pixel strip. At
+        // twenty frames a second that was the largest single source of idle
+        // display traffic on the machine.
+        //
+        // The two buffers are compared separately for the same reason the
+        // terminal does it: the one being drawn holds the frame from two frames
+        // ago, while the one on screen is what a viewer is looking at.
+        let (w, h) = (window.width, window.height);
+        let slot = window.back_index();
+        let state = (controls, w, h);
+        let redraw = painted[slot].as_ref() != Some(&state);
+        let present = painted[slot ^ 1].as_ref() != Some(&state);
+
+        if redraw {
+            if let Some(buf) = window.buffer_mut() {
+                draw_ground(buf, w, h);
+                for control in &state.0 {
+                    draw_button(buf, w, h, control);
                 }
             }
         }
 
-        window.swap_buffers();
+        // The controls that differ from what the *screen* shows, as one
+        // horizontal span: the panel is a single row, so the union of the
+        // changed buttons is a tight rectangle rather than a bounding box
+        // reaching across unrelated corners.
+        let span = changed_span(painted[slot ^ 1].as_ref(), &state);
+        if redraw || present {
+            painted[slot] = Some(state);
+        }
+        if present {
+            match span {
+                Some((left, right)) => window.swap_buffers_damaged(
+                    left,
+                    panel::button_y(),
+                    (right - left).max(0) as u32,
+                    panel::BUTTON_HEIGHT,
+                ),
+                None => window.swap_buffers(),
+            }
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
