@@ -1330,6 +1330,26 @@ auxv, negative-errno returns, and `mprotect`; then a **static** newlib port,
 which needs no dynamic linker at all; `PT_INTERP` last, because it buys image
 size and `dlopen` and nothing in the tree wants either.
 
+## A gate that runs nothing still exits 0
+
+The `sched-test` build is checked with cargo, not with make, and there is no
+`make` target that takes a feature. `make -C kernel check --features sched-test`
+does **not** pass the flag through: make rejects `--features` as its own unknown
+option, prints its usage to stdout and exits **0**, so the check never runs and a
+`&&`-chained gate run carries straight past it — including past everything
+chained after it, which also silently never runs. Invoke it the way the kernel
+makefile invokes the plain check:
+
+```bash
+cd kernel && RUSTFLAGS="-C relocation-model=static -C force-frame-pointers=yes" \
+  cargo check --target x86_64-unknown-none --features sched-test
+```
+
+The general shape: a gate chain is only evidence if each command's *own* output
+says it ran. Grep the saved log for the thing that proves the work happened
+(`Checking edos-kernel`, `ALL 51 TESTS PASSED`) rather than reading the exit
+status of the chain.
+
 ## Counts, remeasured 2026-08-14
 
 Every number a doc states about the size of the tree, taken rather than carried
@@ -1340,11 +1360,11 @@ does not have to invent them.
 |---|---|---|
 | syscalls | 116 | `grep -c 'const SYS_' kernel/src/syscalls/mod.rs`, and the dispatch arms and `table.rs` entries agree at 116 — a mismatch is the bug |
 | userspace programs | 117 | `members` in `programs/Cargo.toml` that carry a binary; the other three (`edos_lib`, `edos_render`, `edos_http`) are libraries |
-| programs listed in `doc/USERSPACE-ROADMAP.md` | not re-diffed since the workspace grew | diff the table against the workspace, below |
+| programs listed in `doc/USERSPACE-ROADMAP.md` | set-diffed against the workspace and identical but for `gunzip` | diff the table against the workspace, below |
 | binaries in `filesystem/bin` | 117 | `ls filesystem/bin \| wc -l`. Equal to the program count by coincidence, not by construction: `edos-edit` is packaged and absent, `gunzip` is a second binary of the `gzip` crate and present |
-| Rust | 101,904 code lines across 437 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
-| kernel Rust | 50,360 code lines | `tokei -t=Rust kernel/src` |
-| commits | 1,311 | `git rev-list --count HEAD` |
+| Rust | 101,925 code lines across 437 files | `tokei -t=Rust` at the repo root; it honours `.gitignore`, so `target/` is already out. Read the `Rust` row, not `(Total)`: the row below it counts Rust fenced in doc comments as Markdown |
+| kernel Rust | 50,381 code lines | `tokei -t=Rust kernel/src` |
+| commits | 1,315 | `git rev-list --count HEAD` |
 | in-kernel test suite | 51 | `make test AUDIODEV=none` |
 | `iotest /var` | 23/23 | the syscall regression suite, run in the guest |
 | `unwrap()`/`expect()` in `kernel/src` | 176, of which 11 are in `thread/sched_test.rs` and 8 in `drivers/usb/hid/report.rs`'s own tests | `grep -rIno --include='*.rs' -e '\.unwrap()' -e '\.expect(' kernel/src \| wc -l` |
