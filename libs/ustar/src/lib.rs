@@ -1,3 +1,9 @@
+//! The POSIX ustar header block.
+//!
+//! Shared by `tar`, which reads and writes archives, and `grab`, which unpacks
+//! packages. One decoder, so a package that `tar` can read is a package `grab`
+//! can install and the two can never disagree about what an archive says.
+
 //! The ustar header block (POSIX.1-1988), 512 bytes, all fields ASCII.
 
 pub const BLOCK: usize = 512;

@@ -1,15 +1,13 @@
 //! tar - create, list and extract ustar archives
 
-mod header;
-
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-use header::{BLOCK, Decoded, Entry, Kind};
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::UNIX_EPOCH;
+use ustar::{self as header, BLOCK, Decoded, Entry, Kind};
 
 const USAGE: &str = "usage: tar -c|-t|-x [-vz] [-f archive] [-C dir] [path...]";
 

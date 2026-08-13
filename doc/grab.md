@@ -241,6 +241,22 @@ Two rules, both enforced by `grab` rather than by trust in the archive:
   that exists and is not recorded in some installed package's file list. This is
   what makes the shipped and packaged namespaces disjoint mechanically, so a
   package cannot replace `/bin/sh` by being named carefully.
+- **No symlinks in a package.** A link is the straightforward way to make a
+  later entry in the same archive land outside the tree the path rules are
+  guarding, so an archive containing one is refused rather than resolved.
+
+The archive is treated as hostile input even though it was signed: a signature
+says who published something, not that what they published is sane. Everything
+is unpacked into a staging directory under `/var/cache/grab` first, and nothing
+moves into place until the whole archive has been read and every destination has
+been cleared. The move itself is a rename, which is atomic, so a running program
+is never observed half-replaced — and staging under `/var` is what keeps the
+rename inside one filesystem.
+
+The archive's mode bits are read and deliberately not applied. This system has
+no permission bits and no chmod-shaped syscall, and `sys_access` grants `X_OK`
+unconditionally, so an installed binary is runnable regardless; honouring the
+bit would mean `fs::set_permissions`, which reports Unsupported here.
 
 Installed state, all of it plain text:
 
@@ -411,7 +427,22 @@ Each step is independently useful and independently committable.
    The format lives in `libs/grab-index`, shared by the publisher and the
    client so the bytes that get signed and the bytes that get parsed cannot
    drift apart.
-4. **`grab` CLI.**
+4. **`grab` CLI. Done.** Verified in the guest, end to end and adversarially:
+   `grab list` fetches the index over TLS and checks its signature against the
+   compiled-in key; `grab install edos-edit` fetches, verifies the SHA-256,
+   installs, and **the editor then launches** though it was never on the image;
+   `grab remove` takes back exactly what it recorded.
+   Four deliberately hostile packages were each refused with the right reason —
+   one replacing `/bin/ls`, one with a `..` component, one writing `etc/`, one
+   with an absolute path — with `/bin/ls` verified unchanged afterwards and
+   `/etc/owned` never created. A tampered published index was refused with "the
+   signature does not match the repository key", and the client fell back to
+   its cached, still-valid copy rather than accepting it.
+
+   The `tar` crate cannot be used here: it pulls `filetime`, which needs
+   `std::os::unix` and `libc`. The ustar header decoder moved from `tar`'s
+   source into `libs/ustar` and is now shared, so an archive `tar` can read is
+   one `grab` can install.
 5. **`edos-grab` GUI.**
 6. **`edos-edit` leaves the image and becomes the first package**, plus the
    `/software/` page on the website.

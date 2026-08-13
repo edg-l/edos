@@ -1,0 +1,22 @@
+[package]
+name = "grab"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "grab"
+path = "src/lib.rs"
+
+[[bin]]
+name = "grab"
+path = "src/bin_grab.rs"
+
+[dependencies]
+edos_lib = { path = "../edos_lib" }
+edos_http = { path = "../edos_http" }
+grab-index = { path = "../../libs/grab-index" }
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
+sha2 = { version = "0.10", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+ustar = { path = "../../libs/ustar" }
