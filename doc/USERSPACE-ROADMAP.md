@@ -19,7 +19,7 @@
 | Install | `edos-install` (installs the live system to a disk), `efs-mkfs` (in-guest EFS format) |
 | Network | `ping`, `dns`, `http`, `wget`, `dnsprobe`, `tcpecho`, `nc`, `sntp`, `httpd`, `netstat`, `sshd` |
 | Audio | `play` |
-| Images | `imgview` (BMP viewer) |
+| Images | `imgview` (BMP and SVG viewer) |
 | Games | `snake` |
 | Misc | `echo`, `write`, `seq`, `yes`, `sleep`, `true`, `false`, `basename`, `dirname`, `cal`, `hello` |
 | Stress tests | `alloctest`, `forktest`, `mmaptest`, `evicttest`, `lockordertest`, `inflighttest`, `threadtest`, `iotest`, `tcptest`, `exectest`, `killtest`, `vectest`, `sigtest`, `fstest`, `socktest`, `stdtest`, `syscallfuzz`, `orphantest` |
@@ -124,15 +124,32 @@ online totals. Two totals rather than one because they differ when an
 application processor fails to start, and the answer anything sizing a thread
 pool wants is the online count. That is the default; `--all` asks for detected.
 
-**`imgview`** (Phase 4). A BMP viewer: one window, one image, either scaled to
-the window or shown at one image pixel per screen pixel and cropped. It decodes
-with the same `edos_render::image` the compositor uses for a wallpaper, which is
-what made it small; the part that is not shared is the policy a *viewer* needs
-and a ground does not. A wallpaper covers and crops, because a desktop must have
-no bare edges; a viewer fits and letterboxes, because the whole picture is the
-point, and it does not enlarge past 100%, because magnifying by default hides
-what the file actually contains. Those two live side by side over one bilinear
-resampler.
+**`imgview`** (Phase 4, SVG added in Phase 5). An image viewer: one window, one
+picture, either scaled to the window or shown at one image pixel per screen
+pixel and cropped. It decodes with the same `edos_render::image` the compositor
+uses for a wallpaper, which is what made it small; the part that is not shared
+is the policy a *viewer* needs and a ground does not. A wallpaper covers and
+crops, because a desktop must have no bare edges; a viewer fits and letterboxes,
+because the whole picture is the point. Those two live side by side over one
+bilinear resampler.
+
+It reads **SVG** as well, through `resvg`, and the two kinds of source are not
+the same thing in different clothes. A raster is resampled, so the viewer
+refuses to magnify one past 100%: enlarging hides what the file actually
+contains behind a blur. A vector is re-rendered at whatever size the window is,
+so there is no blur to hide behind and filling the window is the right default;
+the project mark, 22x18 in `/share/icons/edos.svg`, is sharp at 3905% on a
+maximized window. The renderer is behind an `svg` feature on `edos_render`
+rather than always on, because it is 1.4 MB of code and every graphical program
+in the tree links that crate. `edos-files` opens `.svg` through the viewer for
+the same reason it does not draw one in its own details pane.
+
+Two limits worth knowing. Text elements are dropped: rendering them means
+shaping them, which pulls `fontdb` and `rustybuzz` and a libc this target has
+not got, so `usvg` is built without its `text` feature and skips those nodes
+while converting. And an SVG is the first image here with real transparency,
+while the shell's buffers hold opaque words, so `Svg::render` takes the
+background to composite over rather than leaving uncovered pixels black.
 
 **`watch`**. A command re-run on a timer with its output painted over the
 previous frame, and `-d` reverse-videoing the columns that changed since the
@@ -345,9 +362,9 @@ somebody wants to install something.
 
 No compiler and no package manager is the expected shape for a hobby OS. What
 is not expected is that both ways around that are shut: `wget` and `http`
-refuse `https://` outright for want of TLS, and there is no inflate anywhere in
-the tree, so `tar` reads uncompressed archives only. Between them that rules out
-essentially everything published on the internet.
+refuse `https://` outright for want of TLS, and nothing exposes inflate, so
+`tar` reads uncompressed archives only. Between them that rules out essentially
+everything published on the internet.
 
 The machinery for running a foreign binary is already there. `sys_access`
 grants `X_OK` unconditionally, since the kernel carries no permission bits, so
@@ -357,6 +374,12 @@ all. Only the transport is missing, and it splits cleanly:
 - `gunzip`, decompress-only inflate (RFC 1951) plus the gzip container
   (RFC 1952). A few hundred lines, no dependency, and it makes every `.tar.gz`
   usable over plain HTTP the day it lands. Do this one first.
+
+  Cheaper than it was: `flate2` on its `miniz_oxide` backend already builds and
+  links for this target, since `resvg` pulls both in for the PNG images an SVG
+  can embed, and `imgview` ships them today. So "write an inflate" is now a
+  choice between a few hundred lines of our own and a dependency that is
+  already proven on the target, rather than the only option.
 - TLS, which is the larger half. `sshd` established that the RustCrypto stack
   builds unmodified for `x86_64-unknown-edos` with `default-features = false`,
   so this is the second consumer of work already done rather than new ground.

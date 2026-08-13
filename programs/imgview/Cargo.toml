@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-edos_render = { path = "../edos_render" }
+edos_render = { path = "../edos_render", features = ["svg"] }
 edos_lib = { path = "../edos_lib" }

@@ -62,8 +62,19 @@ impl Entry {
         }
     }
 
-    /// Whether this is an image the picture viewer can open.
-    pub fn is_image(&self) -> bool {
+    /// Whether the picture viewer can open this.
+    pub fn opens_in_viewer(&self) -> bool {
+        extension(&self.name)
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("bmp") || ext.eq_ignore_ascii_case("svg"))
+    }
+
+    /// Whether the details pane can draw this itself.
+    ///
+    /// Narrower than [`Entry::opens_in_viewer`] on purpose: a vector document
+    /// needs resvg to become pixels, and a megabyte of renderer linked into the
+    /// file manager to fill a 232-pixel panel is not a trade worth making. The
+    /// viewer has it; a double-click gets there.
+    pub fn has_thumbnail(&self) -> bool {
         extension(&self.name).is_some_and(|ext| ext.eq_ignore_ascii_case("bmp"))
     }
 }

@@ -3,8 +3,18 @@ name = "edos_render"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+# Vector images, through resvg. Behind a feature because it is a megabyte of
+# code that only a program showing an SVG has any use for, and every graphical
+# program in the tree links this crate.
+svg = ["dep:resvg"]
+
 [dependencies]
 edos_lib = { path = "../edos_lib" }
+# default-features = false drops usvg's `text` feature, which pulls fontdb and
+# memmap2 and wants a libc this target has not got.
+resvg = { version = "0.45", default-features = false, optional = true }
 fontdue = { version = "0.9.4", default-features = false, features = ["hashbrown"] }
 # The default unicode range is Basic Latin alone, so every accented character
 # rasterizes to nothing and reads on screen as a space. A Spanish ISO keyboard

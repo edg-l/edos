@@ -266,7 +266,7 @@ impl App {
             self.navigate(path);
             return;
         }
-        if entry.is_image() {
+        if entry.opens_in_viewer() {
             if spawn(IMAGE_VIEWER, &[&path], 0, 1, 2) == u64::MAX {
                 self.note = Note::Warning(format!("Couldn't start {IMAGE_VIEWER}."));
             }
@@ -283,7 +283,7 @@ impl App {
     fn refresh_preview(&mut self) {
         let wanted = self
             .selected_entry()
-            .filter(|entry| entry.is_image())
+            .filter(|entry| entry.has_thumbnail())
             .filter(|entry| entry.size.is_some_and(|size| size <= PREVIEW_LIMIT))
             .map(|entry| model::join(&self.cwd, &entry.name));
 

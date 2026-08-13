@@ -20,6 +20,11 @@ pub enum ImageError {
     Malformed,
     /// A BMP this decoder does not read: compressed, paletted, or 1/4/8/16 bpp.
     Unsupported,
+    /// The SVG parser rejected the document, carrying what it said. A vector
+    /// document fails in ways a caller can act on -- an unclosed tag at a named
+    /// position -- so the message is worth more than the fact of failure.
+    #[cfg(feature = "svg")]
+    Svg(String),
 }
 
 /// Offset of the pixel-data pointer in `BITMAPFILEHEADER`.
@@ -214,6 +219,123 @@ impl Image {
             }
         }
         out
+    }
+}
+
+/// Whether these bytes look like an SVG document.
+///
+/// Sniffed rather than taken from the extension, because the extension is a
+/// claim and the bytes are the file. XML may open with a declaration, a doctype
+/// or a comment before the root element, so this looks for the root within the
+/// first few hundred bytes rather than at offset zero.
+pub fn looks_like_svg(bytes: &[u8]) -> bool {
+    const WINDOW: usize = 512;
+    bytes[..bytes.len().min(WINDOW)]
+        .windows(4)
+        .any(|w| w.eq_ignore_ascii_case(b"<svg"))
+}
+
+/// A parsed vector document, kept in its parsed form so it can be drawn again
+/// at any size.
+///
+/// That is the whole difference from [`Image`]: a raster is resampled and loses
+/// something every time, while this is re-rendered and does not, so a viewer
+/// holds the tree rather than a bitmap of it.
+///
+/// Text elements are not drawn. Rendering them means shaping them, which pulls
+/// `fontdb` and `rustybuzz` and a libc this target has not got; usvg without its
+/// `text` feature drops those nodes while converting, so a document that mixes
+/// text and shapes still renders its shapes.
+#[cfg(feature = "svg")]
+pub struct Svg {
+    tree: resvg::usvg::Tree,
+}
+
+#[cfg(feature = "svg")]
+impl Svg {
+    /// Parse an SVG document.
+    pub fn parse(bytes: &[u8]) -> Result<Self, ImageError> {
+        let options = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_data(bytes, &options)
+            .map_err(|err| ImageError::Svg(err.to_string()))?;
+        Ok(Self { tree })
+    }
+
+    /// The size the document asks to be drawn at, rounded up to whole pixels.
+    pub fn intrinsic_size(&self) -> (u32, u32) {
+        let size = self.tree.size();
+        (
+            (size.width().ceil() as u32).max(1),
+            (size.height().ceil() as u32).max(1),
+        )
+    }
+
+    /// The largest size that fits inside `width` x `height` with the aspect
+    /// ratio kept.
+    ///
+    /// Unlike [`Image::fit_size`] this *does* enlarge. Refusing to magnify a
+    /// raster protects the viewer from a blur that hides the pixels it was
+    /// handed; there is no such blur here, and a vector drawing pinned to its
+    /// nominal size in the corner of a window would be withholding detail it
+    /// can produce for free.
+    pub fn fit_size(&self, width: u32, height: u32) -> (u32, u32) {
+        let (own_w, own_h) = self.intrinsic_size();
+        let by_width = (own_h as u64 * width as u64 / own_w as u64).max(1);
+        if by_width <= height as u64 {
+            (width.max(1), by_width as u32)
+        } else {
+            let by_height = (own_w as u64 * height as u64 / own_h as u64).max(1);
+            (by_height as u32, height.max(1))
+        }
+    }
+
+    /// Draw the document into a new image of exactly `width` x `height`, over
+    /// `background`.
+    ///
+    /// Pass a size from [`Svg::fit_size`] unless a stretch is what you want:
+    /// the two axes are scaled independently.
+    ///
+    /// The background is a parameter because an SVG is the first image here
+    /// with real transparency, and the shell's buffers hold opaque words. Left
+    /// to composite against nothing, every uncovered pixel would come out
+    /// black, and a drawing with a transparent ground would arrive as a black
+    /// rectangle on whatever surface it was placed.
+    pub fn render(&self, width: u32, height: u32, background: Color) -> Result<Image, ImageError> {
+        let mut pixmap =
+            resvg::tiny_skia::Pixmap::new(width.max(1), height.max(1)).ok_or_else(|| {
+                ImageError::Svg(format!("{width}x{height} is too large to rasterize"))
+            })?;
+        let (own_w, own_h) = self.intrinsic_size();
+        let transform = resvg::tiny_skia::Transform::from_scale(
+            width as f32 / own_w as f32,
+            height as f32 / own_h as f32,
+        );
+        resvg::render(&self.tree, transform, &mut pixmap.as_mut());
+
+        // tiny-skia works in premultiplied RGBA, which is already the form
+        // `src over dst` wants: the source channel is added whole and the
+        // background is scaled by what the source left uncovered.
+        let pixels = pixmap
+            .pixels()
+            .iter()
+            .map(|px| {
+                let clear = 255 - px.alpha() as u32;
+                let over = |src: u8, dst: u8| {
+                    (src as u32 + (dst as u32 * clear + 127) / 255).min(255) as u8
+                };
+                Color::from_rgb(
+                    over(px.red(), background.red()),
+                    over(px.green(), background.green()),
+                    over(px.blue(), background.blue()),
+                )
+                .raw()
+            })
+            .collect();
+        Ok(Image {
+            width: pixmap.width(),
+            height: pixmap.height(),
+            pixels,
+        })
     }
 }
 
